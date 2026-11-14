@@ -4143,3 +4143,41 @@ fn a_session_that_ends_loses_its_tab_before_the_list_returns() {
     let _ = app.update(ended(&app, "first"));
     assert_eq!(app.selected.as_deref(), Some("demo"));
 }
+
+#[test]
+fn acp_controls_distinguish_loading_restoring_empty_and_failed() {
+    let mut app = streamed();
+    let view = app.views.get_mut("demo").unwrap();
+    view.status = sill_client::lane::Status::Live;
+    view.conversation.session.as_mut().unwrap().controls = None;
+    simulator(&app, (1200.0, 860.0)).find("Loading controls…").unwrap();
+    let controls = SessionControls { status: "restoring".into(), error: None,
+        current_mode: Some("saved".into()), modes: vec![ControlChoice { value: "saved".into(), title: "Saved selection".into() }], options: vec![] };
+    app.views.get_mut("demo").unwrap().conversation.session.as_mut().unwrap().controls = Some(controls);
+    {
+        let mut ui = simulator(&app, (1200.0, 860.0));
+        ui.find("Refreshing controls…").unwrap();
+        ui.find("Saved selection").unwrap();
+        ui.click("Saved selection").unwrap();
+        assert!(!ui.into_messages().any(|message| matches!(message, Message::SetMode(_) | Message::SetOption(..))));
+    }
+    app.views.get_mut("demo").unwrap().conversation.session.as_mut().unwrap().controls.as_mut().unwrap().status = "ready".into();
+    app.views.get_mut("demo").unwrap().status = sill_client::lane::Status::Reconnecting("offline".into());
+    {
+        let mut ui = simulator(&app, (1200.0, 860.0));
+        ui.find("Refreshing controls…").unwrap();
+        ui.click("Saved selection").unwrap();
+        assert!(!ui.into_messages().any(|message| matches!(message, Message::SetMode(_))));
+    }
+    app.views.get_mut("demo").unwrap().status = sill_client::lane::Status::Live;
+    let controls = app.views.get_mut("demo").unwrap().conversation.session.as_mut().unwrap().controls.as_mut().unwrap();
+    controls.status = "ready".into(); controls.current_mode = None; controls.modes.clear();
+    {
+        let mut ui = simulator(&app, (1200.0, 860.0));
+        assert!(ui.find("Loading controls…").is_err());
+        assert!(ui.find("Refreshing controls…").is_err());
+    }
+    let controls = app.views.get_mut("demo").unwrap().conversation.session.as_mut().unwrap().controls.as_mut().unwrap();
+    controls.status = "failed".into(); controls.error = Some("Agent did not confirm effort".into());
+    simulator(&app, (1200.0, 860.0)).find("Settings warning").unwrap();
+}

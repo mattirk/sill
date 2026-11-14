@@ -564,7 +564,7 @@ async fn drive(
                     }
                     Err(e) => {
                         let _ = events
-                            .send(Event::Other(format!("set option failed: {e}")))
+                            .send(Event::ControlFailed(format!("set option failed: {e}")))
                             .await;
                     }
                 }

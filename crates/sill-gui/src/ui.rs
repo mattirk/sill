@@ -2197,9 +2197,30 @@ fn controls(view: &SessionView) -> Vec<Element<'_, Message>> {
         .as_ref()
         .and_then(|s| s.controls.as_ref())
     else {
-        return vec![];
+        return vec![text("Loading controls…").size(CONTROL_TEXT).color(P.fg_dim).into()];
     };
+    let refreshing = controls.status == "loading" || controls.status == "restoring"
+        || matches!(view.status, Status::Connecting | Status::Reconnecting(_) | Status::Loading);
     let mut out = vec![];
+    if refreshing {
+        // Plain labels have no pointer or keyboard handlers while the schema is stale.
+        if let Some(mode) = controls.current_mode.as_ref().and_then(|id| controls.modes.iter().find(|m| &m.value == id)) {
+            out.push(control_label(&mode.title));
+        }
+        for option in &controls.options {
+            if option.category == "mode" && !controls.modes.is_empty() { continue; }
+            let label = match &option.value {
+                sill_proto::sfp::ControlValue::Id { value } => option.choices.iter().find(|c| &c.value == value).map(|c| c.title.clone()).unwrap_or_else(|| value.clone()),
+                sill_proto::sfp::ControlValue::Boolean { value } => if *value { "On" } else { "Off" }.into(),
+            };
+            out.push(control_label(&label));
+        }
+        out.push(text("Refreshing controls…").size(CONTROL_TEXT).color(P.fg_dim).into());
+        return out;
+    }
+    if let Some(error) = &controls.error {
+        out.push(bar_tip(container(text("Settings warning").size(CONTROL_TEXT).color(P.warning)), error.clone()));
+    }
     if !controls.modes.is_empty() {
         let picks: Vec<Pick> = controls
             .modes
@@ -2213,7 +2234,9 @@ fn controls(view: &SessionView) -> Vec<Element<'_, Message>> {
         let selected = controls
             .current_mode
             .as_ref()
-            .and_then(|current| picks.iter().find(|p| &p.value == current).cloned());
+            .map(|current| picks.iter().find(|p| &p.value == current).cloned().unwrap_or_else(|| Pick {
+                value: current.clone(), title: current.clone(), boolean: None,
+            }));
         out.push(control(picks, selected, Message::SetMode));
     }
     for option in &controls.options {
@@ -2248,7 +2271,9 @@ fn controls(view: &SessionView) -> Vec<Element<'_, Message>> {
                         boolean: None,
                     })
                     .collect();
-                let selected = picks.iter().find(|p| &p.value == value).cloned();
+                let selected = Some(picks.iter().find(|p| &p.value == value).cloned().unwrap_or_else(|| Pick {
+                    value: value.clone(), title: if value.is_empty() { option.title.clone() } else { value.clone() }, boolean: None,
+                }));
                 (picks, selected)
             }
         };
@@ -2392,12 +2417,21 @@ const CARET_ROOM: f32 = 19.0;
 /// Room on each side of a choice in an agent control's menu.
 const MENU_SIDE: f32 = 14.0;
 
+/// Same footprint as a dropdown, with no input handlers while its schema is stale or empty.
+fn control_label(label: &str) -> Element<'static, Message> {
+    container(text(label.to_owned()).size(CONTROL_TEXT).color(P.fg_dim))
+        .padding(Padding { top: CONTROL_PAD_Y, bottom: CONTROL_PAD_Y, left: 6.0, right: CARET_ROOM })
+        .width(text_width(label, CONTROL_TEXT) + 6.0 + CARET_ROOM)
+        .into()
+}
+
 fn control<'a>(
     picks: Vec<Pick>,
     selected: Option<Pick>,
     on_select: impl Fn(Pick) -> Message + 'a,
 ) -> Element<'a, Message> {
-    let label = selected.as_ref().map_or("", |p| p.title.as_str());
+    let label = selected.as_ref().map_or("Select…", |p| p.title.as_str());
+    if picks.is_empty() { return control_label(label); }
     // a little under 80 % of the body text; room at the right for the caret
     let width = text_width(label, CONTROL_TEXT) + 6.0 + CARET_ROOM;
     let on_select = std::rc::Rc::new(on_select);

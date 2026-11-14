@@ -326,6 +326,7 @@ impl AdapterState {
                     api_key: method.api_key.clone(),
                 }).collect() });
             }
+            relay::Event::ControlFailed(_) => {}
             relay::Event::Controls(controls) => { next.controls = Some(session_controls(controls)); }
             relay::Event::Usage { used, size } => { next.usage = Some(sfp::Usage { used: used.to_string(), size: size.to_string() }); }
         }
@@ -407,6 +408,7 @@ fn form_field(field: &acp::FormField) -> sfp::FormField {
 pub(crate) fn session_controls(controls: &acp::Controls) -> sfp::SessionControls {
     let choice = |(value, title): &(String, String)| sfp::ControlChoice { value: value.clone(), title: title.clone() };
     sfp::SessionControls {
+        status: "ready".into(), error: None,
         current_mode: controls.modes.as_ref().map(|(current, _)| current.clone()),
         modes: controls.modes.as_ref().map(|(_, modes)| modes.iter().map(choice).collect()).unwrap_or_default(),
         options: controls.options.iter().map(|option| {

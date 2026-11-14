@@ -63,8 +63,14 @@ pub struct ControlOption {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionControls {
+    /// loading, restoring, ready, or failed. Values remain the last confirmed snapshot while restoring.
+    #[serde(default = "controls_ready")]
+    pub status: String,
+    #[serde(default)]
+    pub error: Option<String>,
     pub current_mode: Option<String>, pub modes: Vec<ControlChoice>, pub options: Vec<ControlOption>,
 }
+fn controls_ready() -> String { "ready".into() }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Authentication { pub message: String, pub methods: Vec<AuthMethod> }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

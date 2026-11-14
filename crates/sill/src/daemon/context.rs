@@ -15,6 +15,14 @@ pub(super) struct Context {
     /// Changing model rebuilds its available options. Restore the other choices only after the
     /// agent confirms the model, using the newly offered values.
     reconcile_model: Option<String>,
+    #[serde(default)]
+    pending_controls: Option<AgentSettings>,
+    #[serde(default)]
+    issued_controls: std::collections::BTreeSet<String>,
+    #[serde(default)]
+    controls_deadline: Option<u64>,
+    #[serde(default)]
+    pub controls_error: Option<String>,
 }
 
 pub(super) struct PreparedPrompt {
@@ -73,50 +81,119 @@ impl Context {
             self.sent_standing = None;
         }
         self.reconcile_model = None;
+        self.pending_controls = None;
+        self.issued_controls.clear();
+        self.controls_deadline = None;
+        self.controls_error = None;
     }
 
     pub fn restoring(&self) -> bool {
-        self.reconcile_model.is_some()
+        self.pending_controls.is_some()
     }
 
-    /// Record that a person selected a model. The subsequent Controls event must reapply their
-    /// remembered mode/effort against that model, just as reconnect restoration does.
-    pub fn chosen(&mut self, controls: Option<&Controls>, command: &acp::Command) {
-        if let acp::Command::SetConfig(id, ConfigValue::Id(value)) = command
-            && controls.is_some_and(|c| c.options.iter().any(|o| o.id == *id && o.category == "model"))
-        {
-            self.reconcile_model = Some(value.clone());
+    fn begin_controls(&mut self, settings: AgentSettings) {
+        self.pending_controls = Some(settings);
+        self.issued_controls.clear();
+        self.controls_error = None;
+        self.controls_deadline = Some(control_now() + 20_000);
+    }
+
+    pub fn expire_controls(&mut self, now: u64) -> bool {
+        if !self.restoring() || !self.controls_deadline.is_some_and(|deadline| now >= deadline) {
+            return false;
         }
+        let pending = self.pending_controls.take().unwrap();
+        let mut names: Vec<_> = pending.config.keys().cloned().collect();
+        if pending.mode.is_some() { names.push("mode".into()); }
+        self.controls_error = Some(format!("Agent did not confirm settings: {}. Showing reported values.", names.join(", ")));
+        self.reconcile_model = None;
+        self.controls_deadline = None;
+        true
     }
 
-    /// `initial` is true for Ready, false for later Controls events. Only a matching model
-    /// acknowledgement triggers the second restoration pass, avoiding echoes for ordinary updates.
+    pub fn fail_controls(&mut self, reason: &str) {
+        self.pending_controls = None;
+        self.reconcile_model = None;
+        self.controls_deadline = None;
+        self.controls_error = Some(format!("{reason}. Showing reported values."));
+    }
+
+    /// Keep user selections pending until the agent reports them. Model changes also reconcile
+    /// the remaining saved choices against the new model's option schema.
+    pub fn chosen(&mut self, controls: Option<&Controls>, command: &acp::Command) {
+        let mut settings = AgentSettings::default();
+        match command {
+            acp::Command::SetMode(mode) => settings.mode = Some(mode.clone()),
+            acp::Command::SetConfig(id, value) => {
+                let value = match value { ConfigValue::Id(v) => v.clone(), ConfigValue::Bool(v) => v.to_string() };
+                settings.config.insert(id.clone(), value.clone());
+                if controls.is_some_and(|c| c.options.iter().any(|o| o.id == *id && o.category == "model")) {
+                    self.reconcile_model = Some(value);
+                }
+            }
+            _ => return,
+        }
+        self.begin_controls(settings);
+        self.issued_controls.insert(match command { acp::Command::SetMode(_) => "mode".into(), acp::Command::SetConfig(id, _) => format!("config:{id}"), _ => unreachable!() });
+    }
+
     pub fn restore(&mut self, controls: &Controls, remembered: &AgentSettings, initial: bool) -> Vec<acp::Command> {
-        if !initial {
-            let Some(model) = self.reconcile_model.as_ref() else { return Vec::new() };
-            if !controls.options.iter().any(|o| o.category == "model" && matches!(&o.kind, ConfigKind::Select(current, _) if current == model)) {
+        if initial { self.begin_controls(remembered.clone()); }
+        if !self.restoring() { return Vec::new(); }
+        if let Some(model) = &self.reconcile_model {
+            if !controls.options.iter().any(|o| o.category == "model" && option_current(o) == *model) {
                 return Vec::new();
             }
             self.reconcile_model = None;
+            self.issued_controls.clear();
+            // The selected model is now confirmed. Restore dependent choices only now.
+            self.pending_controls = Some(remembered.clone());
         }
-        // Model first, and wait for its response before selecting values from its option set.
-        let models: Vec<_> = controls.options.iter().filter(|o| o.category == "model").filter_map(|o| wanted(o, remembered)).collect();
-        if !models.is_empty() {
-            if let Some(acp::Command::SetConfig(_, ConfigValue::Id(value))) = models.last() {
-                self.reconcile_model = Some(value.clone());
-            }
-            return models;
-        }
+        let pending = self.pending_controls.as_mut().unwrap();
         let mut commands = Vec::new();
-        if let (Some(mode), Some((current, modes))) = (&remembered.mode, &controls.modes)
-            && mode != current
-            && modes.iter().any(|(id, _)| id == mode)
-        {
-            commands.push(acp::Command::SetMode(mode.clone()));
+        let mut unsupported = Vec::new();
+        // Models first. Do not validate effort against the old model's choices.
+        let model_ids: Vec<_> = controls.options.iter().filter(|o| o.category == "model").map(|o| o.id.clone()).collect();
+        for id in &model_ids {
+            let Some(want) = pending.config.get(id).cloned() else { continue };
+            let option = controls.options.iter().find(|o| o.id == *id).unwrap();
+            if option_current(option) == want { pending.config.remove(id); continue; }
+            if let Some(command) = wanted(option, pending) {
+                if self.issued_controls.insert(format!("config:{id}")) { commands.push(command); }
+                self.reconcile_model = Some(want);
+                return commands;
+            }
+            unsupported.push(id.clone()); pending.config.remove(id);
         }
-        commands.extend(controls.options.iter().filter(|o| o.category != "model").filter_map(|o| wanted(o, remembered)));
+        if let (Some(want), Some((current, values))) = (&pending.mode, &controls.modes) {
+            if want == current { pending.mode = None; }
+            else if !values.iter().any(|(id, _)| id == want) { unsupported.push("mode".into()); pending.mode = None; }
+            else if self.issued_controls.insert("mode".into()) { commands.push(acp::Command::SetMode(want.clone())); }
+        }
+        for option in &controls.options {
+            let Some(want) = pending.config.get(&option.id) else { continue };
+            if option_current(option) == *want { pending.config.remove(&option.id); }
+            else if let Some(command) = wanted(option, pending) {
+                if self.issued_controls.insert(format!("config:{}", option.id)) { commands.push(command); }
+            } else { unsupported.push(option.id.clone()); pending.config.remove(&option.id); }
+        }
+        if !unsupported.is_empty() {
+            self.controls_error = Some(format!("Saved settings unavailable: {}. Showing reported values.", unsupported.join(", ")));
+        }
+        if pending.mode.is_none() && pending.config.is_empty() {
+            self.pending_controls = None; self.controls_deadline = None;
+        }
         commands
     }
+
+}
+
+pub(super) fn control_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+}
+
+fn option_current(option: &ConfigOption) -> String {
+    match &option.kind { ConfigKind::Select(value, _) => value.clone(), ConfigKind::Boolean(value) => value.to_string() }
 }
 
 fn wanted(option: &ConfigOption, remembered: &AgentSettings) -> Option<acp::Command> {
@@ -221,10 +298,76 @@ mod tests {
         assert!(matches!(&first[0], acp::Command::SetConfig(id, ConfigValue::Id(v)) if id == "model" && v == "large"));
         assert!(context.restore(&controls("small", "low"), &settings, false).is_empty());
         let after = context.restore(&controls("large", "low"), &settings, false);
+        assert!(context.restoring());
         assert_eq!(after.len(), 2);
         assert!(matches!(&after[0], acp::Command::SetMode(mode) if mode == "auto"));
         assert!(matches!(&after[1], acp::Command::SetConfig(id, ConfigValue::Id(v)) if id == "effort" && v == "high"));
         assert!(context.restore(&controls("large", "low"), &settings, false).is_empty());
+    }
+
+    #[test]
+    fn restoration_tracks_all_acknowledgements_and_late_options_without_resending() {
+        let settings = AgentSettings { mode: Some("auto".into()), config: [("effort".into(), "high".into())].into() };
+        let mut context = Context::default();
+        let mut offered = controls("large", "low");
+        offered.options.retain(|o| o.id != "effort");
+        assert_eq!(context.restore(&offered, &settings, true).len(), 1);
+        assert!(context.restoring());
+        offered.modes.as_mut().unwrap().0 = "auto".into();
+        assert!(context.restore(&offered, &settings, false).is_empty());
+        assert!(context.restoring(), "missing option definitions must not finish restoration");
+        let mut offered = controls("large", "low");
+        offered.modes.as_mut().unwrap().0 = "auto".into();
+        assert_eq!(context.restore(&offered, &settings, false).len(), 1);
+        assert!(context.restore(&offered, &settings, false).is_empty(), "never resend on unrelated updates");
+        offered.options[1].kind = ConfigKind::Select("high".into(), vec![]);
+        assert!(context.restore(&offered, &settings, false).is_empty());
+        assert!(!context.restoring());
+    }
+
+    #[test]
+    fn late_model_schema_reapplies_dependent_settings_after_model_confirmation() {
+        let mut context = Context::default();
+        let settings = AgentSettings { mode: None, config: [("model".into(), "large".into()), ("effort".into(), "high".into())].into() };
+        let mut late = controls("small", "low"); late.options.remove(0);
+        assert_eq!(context.restore(&late, &settings, true).len(), 1);
+        // The model schema arrives after effort was already sent. Changing model resets effort.
+        assert_eq!(context.restore(&controls("small", "high"), &settings, false).len(), 1);
+        let commands = context.restore(&controls("large", "low"), &settings, false);
+        assert!(matches!(&commands[..], [acp::Command::SetConfig(id, _)] if id == "effort"));
+        context.restore(&controls("large", "high"), &settings, false);
+        assert!(!context.restoring());
+    }
+
+    #[test]
+    fn unsupported_choices_and_missing_acknowledgements_finish_with_an_error() {
+        let mut context = Context::default();
+        let settings = AgentSettings { mode: None, config: [("effort".into(), "impossible".into())].into() };
+        assert!(context.restore(&controls("large", "low"), &settings, true).is_empty());
+        assert!(!context.restoring());
+        assert!(context.controls_error.as_ref().unwrap().contains("effort"));
+        let settings = AgentSettings { mode: Some("auto".into()), config: [("missing".into(), "yes".into())].into() };
+        context.restore(&controls("large", "low"), &settings, true);
+        assert!(!context.expire_controls(0));
+        assert!(context.expire_controls(u64::MAX));
+        assert!(!context.restoring());
+        assert!(context.controls_error.as_ref().unwrap().contains("missing"));
+        assert!(context.controls_error.as_ref().unwrap().contains("mode"));
+        assert!(!context.expire_controls(u64::MAX));
+    }
+
+    #[test]
+    fn user_choice_waits_for_confirmation_and_survives_serialization() {
+        let mut context = Context::default();
+        let command = acp::Command::SetConfig("effort".into(), ConfigValue::Id("high".into()));
+        context.chosen(Some(&controls("large", "low")), &command);
+        let mut context: Context = serde_json::from_value(serde_json::to_value(&context).unwrap()).unwrap();
+        assert!(context.restoring());
+        let settings = AgentSettings { mode: None, config: [("effort".into(), "high".into())].into() };
+        assert!(context.restore(&controls("large", "low"), &settings, false).is_empty());
+        assert!(context.restoring());
+        context.restore(&controls("large", "high"), &settings, false);
+        assert!(!context.restoring());
     }
 
     #[test]

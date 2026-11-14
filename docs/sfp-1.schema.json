@@ -5328,6 +5328,13 @@
             "null"
           ]
         },
+        "error": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "modes": {
           "items": {
             "$ref": "#/$defs/ControlChoice"
@@ -5339,6 +5346,11 @@
             "$ref": "#/$defs/ControlOption"
           },
           "type": "array"
+        },
+        "status": {
+          "default": "ready",
+          "description": "loading, restoring, ready, or failed. Values remain the last confirmed snapshot while restoring.",
+          "type": "string"
         }
       },
       "required": [

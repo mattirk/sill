@@ -118,6 +118,9 @@ impl<'a> Journal<'a> {
             session.turn_id=None; session.question_ids.clear(); session.background=None;
             // The replacement agent announces its own commands; the old ones may not exist there.
             session.commands.clear();
+            // Retain the old controls only as stale presentation until the replacement agent
+            // confirms its own schema and restored selections.
+            if let Some(controls) = &mut session.controls { controls.status = "loading".into(); controls.error = None; }
             let mut events=vec![Event::SessionUpdated { session }];
             let records=self.active_records(session_id)?;
             let mut interrupted=false;
@@ -756,6 +759,21 @@ mod tests {
         assert_eq!(code(j.replay(&f.id,&Cursor {session_id:"other".into(),seq:"0".into()},10).unwrap_err()),"invalid_cursor");
         assert!(j.replay(&f.id,&j.cursor(&f.id).unwrap(),10).unwrap().is_empty());
     }
+    #[test]
+    fn replacement_marks_retained_controls_as_stale_in_the_generation_event() {
+        let f = Fixture::new(); let j = f.journal();
+        let mut session = j.session(&f.id).unwrap();
+        session.controls = Some(sill_proto::sfp::SessionControls { status: "ready".into(), error: None,
+            current_mode: Some("old".into()), modes: vec![], options: vec![] });
+        j.append(&f.id, None, &[Event::SessionUpdated { session }]).unwrap();
+        let events = j.replace_generation(&f.id, "g2").unwrap();
+        let Event::SessionUpdated { session } = &events[0].event else { panic!("generation update") };
+        assert_eq!(session.agent_generation_id, "g2");
+        let controls = session.controls.as_ref().unwrap();
+        assert_eq!(controls.status, "loading");
+        assert_eq!(controls.current_mode.as_deref(), Some("old"));
+    }
+
     #[test]
     fn agent_replacement_holds_unsent_work_and_never_resends_uncertain_work() {
         let f=Fixture::new();let j=f.journal();

@@ -4,6 +4,22 @@ use sill_core::sfp::{Journal, Source};
 use sill_proto::{sfp as p, rpc::Error};
 
 impl Runner {
+    /// Publish pending state without changing the last confirmed controls. On timeout show the
+    /// latest reported values, even if restoration never succeeded.
+    pub(super) fn sfp_controls_state(&self, store: &Store, st: &State) -> Result<Vec<p::StoredEvent>> {
+        let journal = Journal::new(store)?;
+        let mut session = journal.ensure(&self.id, &st.generation_id)?;
+        let before = session.clone();
+        if !st.context.restoring() && st.context.controls_error.is_some() {
+            session.controls = st.controls.as_ref().map(super::super::sfp_adapter::session_controls);
+        }
+        if let Some(controls) = &mut session.controls {
+            controls.status = if st.context.restoring() { "restoring" } else if st.context.controls_error.is_some() { "failed" } else if st.ready.is_none() { "loading" } else { "ready" }.into();
+            controls.error = st.context.controls_error.clone();
+        }
+        if before == session { return Ok(vec![]); }
+        journal.append(&self.id, None, &[p::Event::SessionUpdated { session }])
+    }
     pub(in crate::daemon) fn sfp_control(&self, hub:&Hub, control:p::Control)->Result<()> {
         if matches!(control,p::Control::RetrySession) {
             self.command(hub,wire::Command::RetrySession)?;
@@ -89,6 +105,10 @@ impl Runner {
         let mut seeded=session.clone();
         if seeded.controls.is_none() && let Some(c)=&st.controls { seeded.controls=Some(super::super::sfp_adapter::session_controls(c)); }
         if !seeded.capabilities.contains_key("images") && let Some(images)=st.images { seeded.capabilities.insert("images".into(),images); }
+        if let Some(controls) = &mut seeded.controls {
+            controls.status = if st.context.restoring() { "restoring" } else if st.ready.is_none() { "loading" } else if st.context.controls_error.is_some() { "failed" } else { "ready" }.into();
+            controls.error = st.context.controls_error.clone();
+        }
         // the runner's summary turn is the truth: a daemon that stopped mid-change says it right
         seeded.summarizing=Self::summarizing_wire(st);
         if seeded!=session { events.extend(journal.append(&self.id,None,&[p::Event::SessionUpdated{session:seeded}])?); }
@@ -134,6 +154,18 @@ impl Runner {
         if st.replaying && matches!(event,relay::Event::Text(_)|relay::Event::Thought(_)|relay::Event::UserText(_)|relay::Event::ToolCall{..}|relay::Event::ToolCallUpdate{..}|relay::Event::SubagentText{..}|relay::Event::Image{..}) {
             out.extend(journal.append(&self.id,source,&[])?); return Ok(out);
         }
+        if matches!(event, relay::Event::Ended(_)) && st.context.restoring() {
+            st.context.expire_controls(u64::MAX);
+        }
+        match event {
+            relay::Event::Ready { resumed, controls, .. } | relay::Event::V2Ready { resumed, controls, .. } => {
+                st.context.ready(*resumed);
+                self.restore(store, st, controls, true)?;
+            }
+            relay::Event::Controls(controls) => { self.restore(store, st, controls, false)?; }
+            relay::Event::ControlFailed(reason) => { st.context.fail_controls(reason); }
+            _ => {}
+        }
         let question=match event { relay::Event::Resolved{request}=>st.adapter.question_id(*request).map(|id|journal.question(&self.id,id)).transpose()?, _=>None };
         let authenticated=matches!(event,relay::Event::Other(text) if text=="_sill_authenticated");
         let mut events=if authenticated {
@@ -142,6 +174,25 @@ impl Runner {
             if next.question_ids.is_empty() && next.turn_id.is_none() {next.activity="idle".into();}
             vec![p::Event::SessionUpdated{session:next}]
         } else {st.adapter.project(&session,event,question.as_ref())};
+        if matches!(event, relay::Event::ControlFailed(_)) {
+            let mut next = session.clone();
+            next.controls = st.controls.as_ref().map(super::super::sfp_adapter::session_controls);
+            events.push(p::Event::SessionUpdated { session: next });
+        }
+        for projected in &mut events {
+            if let p::Event::SessionUpdated { session: next } = projected {
+                if matches!(event, relay::Event::Ended(_)) && st.context.controls_error.is_some() {
+                    next.controls = st.controls.as_ref().map(super::super::sfp_adapter::session_controls);
+                }
+                if st.context.restoring() {
+                    next.controls = session.controls.clone().or_else(|| Some(super::super::sfp_adapter::session_controls(&Controls::default())));
+                }
+                if let Some(controls) = &mut next.controls {
+                    controls.status = if st.context.restoring() { "restoring" } else if st.context.controls_error.is_some() { "failed" } else if st.ready.is_none() && !matches!(event, relay::Event::Ready {..} | relay::Event::V2Ready {..}) { "loading" } else { "ready" }.into();
+                    controls.error = st.context.controls_error.clone();
+                }
+            }
+        }
         // Agent image bytes commit with the events that reference them, in this transaction.
         let refused=super::super::uploads::keep_agent_media(store,&self.id,st.adapter.take_media())?;
         super::super::sfp_adapter::mark_omitted(&mut events,&refused);
@@ -399,6 +450,43 @@ mod tests {
     use serde_json::json;
     use std::io::{BufRead,BufReader,Write};
     use std::os::unix::net::UnixListener;
+    #[test]
+    fn restoration_publishes_confirmed_snapshot_until_final_acknowledgement() {
+        let f = Fixture::new();
+        let j = Journal::new(&f.store).unwrap();
+        let mut st = f.runner.st.lock().unwrap();
+        let selected = acp::Controls { modes: Some(("auto".into(), vec![("auto".into(), "Auto".into()), ("ask".into(), "Ask".into())])), options: vec![] };
+        let mut session = j.session(&f.runner.id).unwrap();
+        session.controls = Some(super::super::super::sfp_adapter::session_controls(&selected));
+        j.append(&f.runner.id, None, &[p::Event::SessionUpdated { session }]).unwrap();
+        f.store.set_session_settings(&f.runner.id, &sill_core::store::AgentSettings { mode: Some("auto".into()), config: Default::default() }).unwrap();
+        let mut defaults = selected.clone(); defaults.modes.as_mut().unwrap().0 = "ask".into();
+        f.runner.sfp_project(&f.store, &mut st, &relay::Event::Ready { session_id: "agent".into(), resumed: true, controls: defaults.clone() }, 1).unwrap();
+        let c = j.session(&f.runner.id).unwrap().controls.unwrap();
+        assert_eq!(c.current_mode.as_deref(), Some("auto"));
+        assert_eq!(c.status, "restoring");
+        assert!(st.context.restoring());
+        f.runner.sfp_project(&f.store, &mut st, &relay::Event::Controls(selected), 2).unwrap();
+        let c = j.session(&f.runner.id).unwrap().controls.unwrap();
+        assert_eq!(c.current_mode.as_deref(), Some("auto"));
+        assert_eq!(c.status, "ready");
+        assert!(!st.context.restoring());
+        st.controls = Some(defaults.clone());
+        st.context.chosen(Some(&defaults), &acp::Command::SetMode("auto".into()));
+        assert!(st.context.expire_controls(u64::MAX));
+        f.runner.sfp_controls_state(&f.store, &st).unwrap();
+        let c = j.session(&f.runner.id).unwrap().controls.unwrap();
+        assert_eq!(c.status, "failed");
+        assert_eq!(c.current_mode.as_deref(), Some("ask"), "failure shows the agent's actual values");
+        assert!(c.error.unwrap().contains("mode"));
+        st.context.chosen(Some(&defaults), &acp::Command::SetMode("auto".into()));
+        f.runner.sfp_project(&f.store, &mut st, &relay::Event::ControlFailed("mode rejected".into()), 3).unwrap();
+        let c = j.session(&f.runner.id).unwrap().controls.unwrap();
+        assert_eq!(c.status, "failed");
+        assert!(c.error.unwrap().contains("mode rejected"));
+        assert!(!st.context.restoring(), "explicit rejection must not wait for the timeout");
+    }
+
     #[test]
     fn image_budget_covers_inline_uploaded_and_mixed_submissions() {
         let root = std::env::temp_dir().join(format!("sill-image-budget-{}", sill_core::sfp::new_id()));

@@ -142,7 +142,27 @@ impl Runner {
             eprintln!("sill daemon: recovering SFP state {}: {e:#}",self.id);
         }
         self.resume_summary_cap(&hub);
-        while let Ok(delivery) = events.recv() {
+        loop {
+            let delivery = match events.recv_timeout(std::time::Duration::from_secs(1)) {
+                Ok(delivery) => delivery,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if !self.st.lock().unwrap().context.restoring() { continue; }
+                    if let Err(error) = hub.with_store(|store| {
+                        let mut st = self.st.lock().unwrap();
+                        if !st.ended && !st.retired && st.context.expire_controls(context::control_now()) {
+                            let tx = store.conn().unchecked_transaction()?;
+                            let events = self.sfp_controls_state(store, &st)?;
+                            self.save(store, &st)?;
+                            tx.commit()?;
+                            hub.sfp_publish(&self.id, &events);
+                            self.sfp_dispatch(store, &hub, &mut st)?;
+                        }
+                        Ok(())
+                    }) { eprintln!("sill daemon: controls timeout: {error:#}"); }
+                    continue;
+                }
+            };
             let seq = delivery.seq;
             let end = matches!(delivery.event, relay::Event::Ended(_));
             let mut stopped = false;
@@ -158,6 +178,7 @@ impl Runner {
                     tx.commit()?;
                     return Ok(None);
                 }
+                let controls_expired = st.context.expire_controls(context::control_now());
                 // a login the person already gave an API key for is answered with it, no card;
                 // once per request — refused, the card shows with the agent's reason
                 let saved_key = if st.key_tried { None } else { self.saved_key_for(store, &hub, &delivery.event) };
@@ -172,6 +193,7 @@ impl Runner {
                 stopped = matches!(delivery.event, relay::Event::Stopped(_))
                     || matches!(&delivery.event,relay::Event::V2Update{..}) && public_events.iter().any(|event|matches!(&event.event,sill_proto::sfp::Event::TurnUpdated{turn} if turn.outcome!="pending"));
                 let done = self.handle_locked(store, &mut st, delivery.event.clone(), false)?;
+                if controls_expired { public_events.extend(self.sfp_controls_state(store, &st)?); }
                 // a stopped summary is still the session's until the hub has applied it
                 if let Some(done) = &done { st.completed = Some(done.clone()); }
                 // the summary turn started or changed, or its agent went: the session says so
@@ -214,8 +236,6 @@ impl Runner {
         match &ev {
             relay::Event::Ready { session_id, resumed, controls } | relay::Event::V2Ready { session_id, resumed, controls } => {
                 store.set_acp_session_id(&id, session_id)?;
-                st.context.ready(*resumed);
-                self.restore(store, st, controls, true)?;
                 st.ready = Some((session_id.clone(), *resumed));
                 st.controls = Some(controls.clone());
                 st.replaying = *resumed;
@@ -225,7 +245,7 @@ impl Runner {
                 if matches!(&ev,relay::Event::V2Ready{resumed:true,..}) { st.busy=true; }
             }
             relay::Event::Capabilities { images } => st.images = Some(*images),
-            relay::Event::Controls(c) => { self.restore(store, st, c, false)?; st.controls = Some(c.clone()); },
+            relay::Event::Controls(c) => { st.controls = Some(c.clone()); },
             relay::Event::Usage { used, size } => st.usage = Some((*used, *size)),
             // the loop drops a prompt that arrives while it waits for a login (no Stopped follows),
             // so the session is not busy any more — the prompt after the login must not be refused
@@ -531,6 +551,8 @@ impl Runner {
         hub.with_store(|store| {
             let mut st = self.st.lock().unwrap();
             self.commit_command(store, &hub.home, &mut st, cmd)?;
+            let events = self.sfp_controls_state(store, &st)?;
+            hub.sfp_publish(&self.id, &events);
             // Once committed, a transport failure keeps the outbox and busy state for recovery.
             // It must never roll back a command the worker may already have accepted.
             self.drain(store, &mut st)?;
@@ -555,6 +577,9 @@ impl Runner {
                 prepared = Some(p);
                 st.busy = true;
                 st.adapter.prompt_purpose(None);
+            }
+            if st.context.restoring() && matches!(cmd, relay::Command::SetMode(_) | relay::Command::SetConfig(..)) {
+                bail!("the agent is still confirming settings; wait for the controls to refresh");
             }
             let remembered = cmd.clone().into_acp();
             let controls = st.controls.clone();

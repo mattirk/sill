@@ -70,6 +70,8 @@ pub(crate) enum Event {
     Ready { session_id: String, resumed: bool, controls: acp::Controls },
     Capabilities { images: bool },
     Controls(acp::Controls),
+    /// A settings request was rejected by the agent.
+    ControlFailed(String),
     TurnStarted,
     UserText(String),
     Text(String),
@@ -172,6 +174,7 @@ fn event_from_acp(event: acp::Event, request: u64) -> (Event, Option<Reply>) {
         A::Ready { session_id, resumed, controls } => Event::Ready { session_id, resumed, controls },
         A::Capabilities { images } => Event::Capabilities { images },
         A::Controls(c) => Event::Controls(c),
+        A::ControlFailed(reason) => Event::ControlFailed(reason),
         A::TurnStarted => Event::TurnStarted,
         A::UserText(t) => Event::UserText(t),
         A::Text(t) => Event::Text(t),
