@@ -32,6 +32,9 @@ const EDGE: f32 = 5.0;
 /// A pasted image's thumbnail in the conversation: this share of the conversation's width.
 const THUMBNAIL_SHARE: f32 = 0.3;
 
+/// The height of a session tab's hover boxes: its glyph, title and close button alike.
+const TAB_HOVER: f32 = 28.0;
+
 /// How far above the window's bottom the shield's dropdown sits: over the composer's bar.
 const SHIELD_DROPDOWN_LIFT: f32 = 58.0;
 
@@ -560,7 +563,7 @@ impl App {
             .clip(true),
             right(fade).height(Fill),
         ];
-        // the glyph's and the close button's hover as tall as the title's: the tab's height
+        // the glyph's, the title's and the close button's hover boxes one height, `TAB_HOVER`
         // (the person, 2026-11-13)
         let agent = keys::press(
             button(
@@ -572,7 +575,7 @@ impl App {
                 ))
                 .center_y(Fill),
             )
-            .height(Fill)
+            .height(TAB_HOVER)
             .padding([0, 4])
             .style(style::quiet),
             Message::Details(crate::details::Event::Open(tab.id.clone())),
@@ -617,7 +620,7 @@ impl App {
                 .style(style::quiet),
                 Message::Choose(tab.id.clone()),
             );
-            stack![container(title).padding([4, 0]), hit].into()
+            stack![container(title).center_y(Fill), hit].height(TAB_HOVER).into()
         };
         let mut label = row![agent, label].align_y(Alignment::Center);
         if let Some(mark) = mark {
@@ -637,7 +640,7 @@ impl App {
                         .center_y(Fill),
                     )
                     .width(TAB_CLOSE)
-                    .height(Fill)
+                    .height(TAB_HOVER)
                     .padding([0, 6])
                     .style(style::quiet),
                     Message::CloseTab(tab.id.clone()),

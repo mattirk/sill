@@ -754,7 +754,7 @@ fn render_tab_hover() {
     app.selected = Some("gray-blade".into());
     let _ = std::fs::remove_file(dir().join("tabs-hover-tiny-skia.png"));
     let mut ui = iced_test::Simulator::with_size(settings(), (720.0, 80.0), app.view());
-    ui.point_at((260.0, 18.0));
+    ui.point_at((110.0, 18.0));
     let snapshot = ui.snapshot(&crate::style::theme()).unwrap();
     assert!(snapshot.matches_image(dir().join("tabs-hover")).unwrap());
 }
@@ -944,7 +944,7 @@ fn render_permissions_basic() {
 fn render_herring_hovered() {
     let (app, _) = App::new(true, None);
     let mut ui = iced_test::Simulator::with_size(settings(), (720.0, 120.0), app.view());
-    ui.point_at((58.0, 18.0));
+    ui.point_at((110.0, 18.0));
     let snapshot = ui.snapshot(&crate::style::theme()).unwrap();
     std::fs::create_dir_all(dir()).unwrap();
     let _ = std::fs::remove_file(dir().join("herring-hovered-wgpu.png"));
