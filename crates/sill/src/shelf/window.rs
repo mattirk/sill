@@ -1401,7 +1401,7 @@ impl Shelf {
             self.pages.remove(&v.root);
             self.pane_host.remove(&v.pane);
         }
-        self.tabs.remove(id);
+        self.drop_tab(id);
         self.set_status("the session ends: its summary is written in the background");
     }
 
@@ -1440,7 +1440,7 @@ impl Shelf {
                 eprintln!("{} view {id} closed, {} other reference(s) left", super::trace_ts(), Rc::strong_count(&v) - 1);
             }
         }
-        self.tabs.remove(id);
+        self.drop_tab(id);
         self.sync_pane();
         if self.tabs.selected().is_none() {
             self.set_status("");
@@ -1449,6 +1449,25 @@ impl Shelf {
         self.busy.borrow_mut().remove(id);
         super::tray::set_busy(!self.busy.borrow().is_empty());
         self.quit_if_done();
+    }
+
+    /// The tab goes; the drawer stops showing the gone session's work: it follows the tab that
+    /// takes the selection (its pinned folder, or Files), or goes back to Files when none is left.
+    fn drop_tab(&self, id: &str) {
+        let was_selected = self.tabs.selected().as_deref() == Some(id);
+        self.tabs.remove(id);
+        if !was_selected {
+            return;
+        }
+        match self.tabs.selected() {
+            Some(next) => self.tree.follow_session(&next),
+            None => {
+                *self.tree.pin_target.borrow_mut() = None;
+                if self.tree.root.is_visible() && self.tree.scope().is_some() {
+                    self.tree.set_scope(None);
+                }
+            }
+        }
     }
 
     fn fill_plus_menu(self: &Rc<Self>, menu: &gtk::Box, pop: &gtk::Popover) {
