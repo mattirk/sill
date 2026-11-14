@@ -1984,8 +1984,8 @@ fn tab_reaches_every_control_in_reading_order_and_enter_presses_it() {
             .unwrap_or_else(|| panic!("{what} not reached: {names:?}"))
     };
     assert_eq!(names[0], "ToggleChanges", "{names:?}");
-    assert_eq!(names[1], "choose demo", "{names:?}");
-    assert_eq!(names[2], "Menu(Toggle)", "{names:?}");
+    assert_eq!(names[1], "Details(Open(\"demo\"))", "{names:?}");
+    assert_eq!(names[2], "choose demo", "{names:?}");
     let order = [
         at("files Toggle("),
         at("ToggleTool(\"tool\")"),
@@ -2006,9 +2006,9 @@ fn tab_reaches_every_control_in_reading_order_and_enter_presses_it() {
 fn space_presses_and_arrows_step_a_dropdown() {
     use iced::keyboard::key::Named;
     let mut app = streamed();
-    let spaced = at_each_stop(&mut app, (720.0, 860.0), 2, Named::Space);
+    let spaced = at_each_stop(&mut app, (720.0, 860.0), 3, Named::Space);
     assert!(
-        matches!(&spaced[1], Some(Message::Choose(id)) if id == "demo"),
+        matches!(&spaced[2], Some(Message::Choose(id)) if id == "demo"),
         "{spaced:?}"
     );
     let stepped = at_each_stop(&mut app, (720.0, 860.0), 40, Named::ArrowDown);
@@ -3283,4 +3283,41 @@ fn new_tabs_append_and_refreshes_preserve_existing_positions() {
         ["newer", "newest", "older"],
         "reopened tabs append too"
     );
+}
+
+
+#[test]
+fn double_clicking_a_tab_title_starts_name_editing_without_dragging_window() {
+    let (app, _) = App::new(true, None);
+    let mut ui = simulator(&app, (720.0, 860.0));
+    ui.click("witty-willow").unwrap();
+    ui.click("witty-willow").unwrap();
+    let messages: Vec<_> = ui.into_messages().collect();
+    assert!(messages.iter().any(|m| matches!(m, Message::Name(crate::names::Event::Begin(id)) if id == "demo")), "{messages:?}");
+    assert!(!messages.iter().any(|m| matches!(m, Message::DragWindow)), "{messages:?}");
+}
+
+
+#[test]
+fn renaming_edits_the_session_name_and_summary_title_stays_independent() {
+    use crate::names::Event;
+    let (mut app, _) = App::new(true, None);
+    let mut record = session_record("demo", "A descriptive summary title", false, false);
+    record.name = Some("velvet-comet".into());
+    app.all_sessions.push(record);
+    let _ = app.name_event(Event::Begin("demo".into()));
+    let editor = app.name_editor.as_ref().unwrap();
+    assert_eq!(editor.text, "velvet-comet");
+    let token = editor.token.clone();
+    let _ = app.name_event(Event::Input("my-session".into()));
+    let _ = app.name_event(Event::Done(token, "demo".into(), "my-session".into(), Ok(())));
+    assert!(app.name_editor.is_none());
+    assert_eq!(app.all_sessions[0].name.as_deref(), Some("my-session"));
+    assert_eq!(app.all_sessions[0].title, "A descriptive summary title");
+    assert_eq!(app.session_name("demo", "fallback"), "my-session");
+    let _ = app.name_event(Event::Begin("demo".into()));
+    let _ = app.name_event(Event::Input("not saved".into()));
+    let _ = app.update(Message::Escape);
+    assert!(app.name_editor.is_none());
+    assert_eq!(app.session_name("demo", "fallback"), "my-session");
 }

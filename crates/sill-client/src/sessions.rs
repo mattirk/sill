@@ -83,9 +83,19 @@ pub fn reopenable<'a>(all: &'a [Session], open: &[String]) -> Vec<&'a Session> {
         .collect()
 }
 
+/// Label outside session tabs: prefer the descriptive title once one has been supplied.
+/// Until then, use the current session name rather than its old generated placeholder.
+pub fn display_title(session: &Session) -> &str {
+    if !session.title_kind.is_empty() && !session.title.trim().is_empty() {
+        &session.title
+    } else {
+        session.name.as_deref().unwrap_or(&session.title)
+    }
+}
+
 /// `session` matches a typed filter: every word in its title or summary, ignoring case.
 pub fn matches(session: &Session, filter: &str) -> bool {
-    let haystack = format!("{} {}", session.title, session.summary).to_lowercase();
+    let haystack = format!("{} {} {}", session.name.as_deref().unwrap_or(""), session.title, session.summary).to_lowercase();
     filter
         .split_whitespace()
         .all(|word| haystack.contains(&word.to_lowercase()))
@@ -140,6 +150,24 @@ mod tests {
             "settings": {}, "follows": null, "compacted": "0"
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn labels_prefer_summary_titles_and_fall_back_to_current_names() {
+        let mut s = session("old", false, false);
+        s.name = Some("human name".into());
+        assert_eq!(display_title(&s), "human name");
+        s.title = "A descriptive summary title".into();
+        s.title_kind = "agent".into();
+        assert_eq!(display_title(&s), "A descriptive summary title");
+        s.name = Some("renamed again".into());
+        assert_eq!(display_title(&s), "A descriptive summary title");
+        s.title.clear();
+        assert_eq!(display_title(&s), "renamed again");
+        s.name = None;
+        s.title = "Legacy title".into();
+        s.title_kind.clear();
+        assert_eq!(display_title(&s), "Legacy title");
     }
 
     #[test]

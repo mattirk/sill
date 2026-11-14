@@ -1,5 +1,6 @@
 mod agents_ui;
 mod changes_ui;
+mod details;
 mod control;
 mod demo;
 mod desktop;
@@ -12,6 +13,7 @@ mod keys;
 mod layout;
 mod login_ui;
 mod media;
+mod names;
 mod menu;
 mod network;
 #[cfg(test)]
@@ -222,6 +224,8 @@ pub enum Message {
     /// The outcome of a request the person made in a session.
     Done(String, Act, Outcome),
     Choose(String),
+    Details(details::Event),
+    Name(names::Event),
     Refresh,
     Copy(String),
     /// Copy the open file (read when pressed, not per frame).
@@ -583,6 +587,9 @@ pub struct App {
     pub menu: Option<menu::Menu>,
     /// The Changes page, while shown in place of the conversation.
     pub changes: Option<changes_ui::ChangesPage>,
+    name_editor: Option<names::Editor>,
+    details: Option<details::Page>,
+    details_drafts: BTreeMap<String, String>,
     pub settings_page: Option<settings_ui::SettingsPage>,
     pub agents_page: agents_ui::AgentsPage,
     /// The herring's page last shown: what it opens next.
@@ -683,6 +690,9 @@ impl App {
             views: BTreeMap::new(),
             menu: None,
             changes: None,
+            name_editor: None,
+            details: None,
+            details_drafts: BTreeMap::new(),
             settings_page: None,
             agents_page: agents_ui::AgentsPage::default(),
             last_page: Page::Changes,
@@ -1111,7 +1121,7 @@ impl App {
                     .map(|_| Message::Procs(processes::Event::Poll)),
             );
         }
-        if !self.demo && !self.backend_shown() && self.current().is_some() {
+        if !self.demo && !self.backend_shown() && self.details.is_none() && self.current().is_some() {
             subscriptions.push(
                 iced::time::every(Duration::from_secs(2))
                     .with("session-files")
@@ -1265,8 +1275,11 @@ impl App {
             Message::Listed(result) => return self.listed(result),
             Message::Done(session, act, outcome) => return self.done(session, act, outcome),
             Message::Choose(id) => return self.choose(id),
+            Message::Details(event) => return self.details_event(event),
+            Message::Name(event) => return self.name_event(event),
             Message::Refresh => {
                 let mut tasks = vec![self.list(), self.read_daemon_settings()];
+                if let Some(p) = self.details.as_ref().filter(|p| !p.pending) { tasks.push(self.details_load(p.id.clone())); }
                 if self
                     .changes
                     .as_ref()
@@ -2337,10 +2350,13 @@ impl App {
     /// Escape goes between the session and the backend, as the shelf's sessions ⇄ backend; an
     /// open menu or file closes first, and the session's shell keeps Escape for itself.
     fn escape(&mut self) -> Task<Message> {
+        if self.name_editor.take().is_some() { return Task::none(); }
         // a popup goes first
         if self.menu.take().is_some() {
             return Task::none();
         }
+        self.stash_details();
+        if self.details.take().is_some() { return self.restore_scroll(); }
         // the backend's page: back to the session
         if self.changes.take().is_some()
             | self.settings_page.take().is_some()
@@ -2451,6 +2467,7 @@ impl App {
             })
             .collect();
         if finished {
+            if self.details.as_ref().is_some_and(|p| p.id == session) { tasks.push(self.details_load(session.clone())); }
             tasks.push(self.files_refresh(&session));
         }
         tasks.push(self.load_media(&session));
@@ -2576,10 +2593,15 @@ impl App {
     }
 
     fn choose(&mut self, id: String) -> Task<Message> {
+        let details_open = self.details.is_some();
+        self.stash_details();
+        self.details = None;
         if !self.tabs.iter().any(|t| t.id == id) {
             return Task::none();
         }
-        let again = self.selected.as_deref() == Some(id.as_str()) && self.changes.is_none();
+        let again = self.selected.as_deref() == Some(id.as_str())
+            && self.changes.is_none()
+            && !details_open;
         self.changes = None;
         self.settings_page = None;
         self.agents_page.shown = false;

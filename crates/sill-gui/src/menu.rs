@@ -298,7 +298,7 @@ impl App {
                         .style(style::icon(P.fg)),
                     column![
                         container(
-                            text(crate::ui::one_line(&session.title, 34))
+                            text(crate::ui::one_line(sessions::display_title(session), 34))
                                 .size(style::TEXT)
                                 .wrapping(text::Wrapping::None),
                         )
@@ -383,7 +383,7 @@ fn tip<'a>(value: String) -> Element<'a, Message> {
 }
 
 /// A Unix time as the shelf dates sessions: year-month-day, in UTC.
-fn date(seconds: i64) -> String {
+pub(crate) fn date(seconds: i64) -> String {
     let days = seconds.div_euclid(86_400);
     // civil from days (Howard Hinnant's algorithm)
     let z = days + 719_468;

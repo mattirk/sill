@@ -46,14 +46,18 @@ impl App {
             let Some(view) = self.current() else {
                 return self.empty();
             };
-            let body = match self.file_view(view) {
-                Some(reader) => reader,
-                None => column![self.feed(view), self.composer(view)]
-                    .height(Fill)
-                    .into(),
+            let body = if let Some(details) = &self.details {
+                self.details_view(details)
+            } else {
+                match self.file_view(view) {
+                    Some(reader) => reader,
+                    None => column![self.feed(view), self.composer(view)]
+                        .height(Fill)
+                        .into(),
+                }
             };
             // a file open takes the chips' row too, as in the shelf
-            let chips: Element<'_, Message> = if view.files.reader.is_some() {
+            let chips: Element<'_, Message> = if self.details.is_some() || view.files.reader.is_some() {
                 space().height(0).into()
             } else {
                 self.file_chips(view)
@@ -343,18 +347,38 @@ impl App {
             .as_ref()
             .is_some_and(|a| a.activity == Activity::Working);
         let mut label = row![
-            icons::tab_agent(&tab.agent, if working { P.accent } else { color }, working),
-            text(&tab.title).size(style::TEXT).color(color),
+
+            text(self.session_name(&tab.id, &tab.title)).size(style::TEXT).color(color),
         ]
         .spacing(8)
         .align_y(Alignment::Center);
         if let Some(mark) = attention.as_ref().and_then(mark) {
             label = label.push(mark);
         }
-        let label = keys::press(
-            button(label).padding([4, 12]).style(style::quiet),
-            Message::Choose(tab.id.clone()),
+        let agent = keys::press(
+            button(icons::tab_agent(&tab.agent, if working { P.accent } else { color }, working))
+                .padding([4, 4]).style(style::quiet),
+            Message::Details(crate::details::Event::Open(tab.id.clone())),
         );
+        let label: Element<'a, Message> = if let Some(editor) = self.name_editor.as_ref().filter(|e| e.id == tab.id) {
+            let input = iced::widget::text_input("Session name", &editor.text)
+                .id("session-name")
+                .on_input_maybe((!editor.pending).then_some(|s| Message::Name(crate::names::Event::Input(s))))
+                .on_submit_maybe((!editor.pending).then_some(Message::Name(crate::names::Event::Save)))
+                .size(style::TEXT)
+                .width((editor.text.chars().count() as f32 * 8.0 + 24.0).clamp(120.0, 320.0));
+            let input: Element<'a, Message> = input.into();
+            if let Some(error) = &editor.error {
+                tooltip(row![input, text("!").color(P.error)].spacing(4), text(error).size(style::SMALL), tooltip::Position::Bottom).into()
+            } else { input }
+        } else {
+            keys::press(
+                button(mouse_area(label).on_press(Message::Choose(tab.id.clone())).on_double_click(Message::Name(crate::names::Event::Begin(tab.id.clone()))))
+                    .padding([4, 12]).style(style::quiet),
+                Message::Choose(tab.id.clone()),
+            )
+        };
+        let label: Element<'a, Message> = row![agent, label].align_y(Alignment::Center).into();
         // the selected tab's ×: closing ends the session (a ghost's asks once: it deletes it)
         let label: Element<'a, Message> = if active && !self.demo {
             let armed = self.armed_close.as_deref() == Some(tab.id.as_str());
@@ -388,7 +412,7 @@ impl App {
             .align_y(Alignment::Center)
             .into()
         } else {
-            label
+            row![label].align_y(Alignment::Center).into()
         };
         let underline = rule::horizontal(2).style(style::rule_style(if active {
             P.accent
