@@ -2604,6 +2604,31 @@ fn sending_restores_keyboard_focus_to_the_prompt() {
     );
 }
 
+/// Rebuilding the session after a backend page must put the keyboard in its prompt.
+#[test]
+fn returning_from_backend_restores_keyboard_focus_to_the_prompt() {
+    use crate::Page;
+    for page in [Page::Changes, Page::Settings, Page::Agents] {
+        for back in [Message::Escape, Message::ToggleChanges] {
+            let (mut app, _) = App::new(true, None);
+            let mut live = Live::new((720.0, 860.0));
+            live.frame(&app, |_| {});
+            live.apply(&mut app, Message::ShowPage(page));
+            live.frame(&app, |_| {});
+            live.apply(&mut app, back);
+            assert!(!app.backend_shown());
+            type_text(&mut app, "next prompt");
+            let messages = live.frame(&app, |ui| {
+                ui.send(vec![key(iced::keyboard::key::Named::Enter)])
+            });
+            assert!(
+                messages.iter().any(|m| matches!(m, Message::Send)),
+                "returning from {page:?}: {messages:?}"
+            );
+        }
+    }
+}
+
 /// Crossing the timer and its gap towards + must not collapse the timer and move the button.
 #[test]
 fn the_timer_stays_open_when_moving_towards_the_plus_button() {

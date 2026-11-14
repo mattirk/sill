@@ -1093,9 +1093,12 @@ impl App {
             return Task::none();
         }
         let before = self.backend_shown();
-        let task = self.apply(message);
+        let mut task = self.apply(message);
         if before != self.backend_shown() {
             self.herring_flick = Some(Instant::now());
+            if before {
+                task = task.chain(self.focus_prompt());
+            }
         }
         // the tray moves while any session's agent works
         let busy = self.views.values().any(|v| v.conversation.busy());
