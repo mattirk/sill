@@ -791,7 +791,7 @@ fn bundled_faces_resolve_at_normal_and_bold_weights() {
     }
 }
 
-/// Enter sends from the focused composer; Shift+Enter is the editor's own new line.
+/// Enter sends from the focused composer; Shift+Enter is a new line, which continues a list.
 #[test]
 fn enter_sends_and_shift_enter_is_a_new_line() {
     use iced::keyboard::{Key, Modifiers, key};
@@ -810,7 +810,7 @@ fn enter_sends_and_shift_enter_is_a_new_line() {
     ));
     assert!(matches!(
         crate::ui::enter_sends(press(Modifiers::SHIFT)),
-        Some(Binding::Enter)
+        Some(Binding::Custom(Message::PromptNewline))
     ));
 }
 
@@ -2274,7 +2274,11 @@ fn session_shortcuts_work_from_the_prompt() {
         crate::ui::enter_sends(typed(named(Named::PageUp), Modifiers::empty())),
         Some(Binding::Custom(Message::Page(false)))
     ));
-    assert!(crate::ui::enter_sends(typed(named(Named::Tab), Modifiers::empty())).is_none());
+    // Tab is the prompt's: it indents in a list and moves the keyboard on anywhere else
+    assert!(matches!(
+        crate::ui::enter_sends(typed(named(Named::Tab), Modifiers::empty())),
+        Some(Binding::Custom(Message::PromptIndent(false)))
+    ));
 }
 
 /// Ctrl+comma/period walk the tabs, round the ends.
@@ -3843,6 +3847,49 @@ fn prompt_undo_and_redo_shortcuts() {
         assert!(matches!(crate::ui::reading_keys(press),
             Some(Binding::Custom(Message::Files(crate::files::Action::History(value)))) if value == redo));
     }
+}
+
+#[test]
+fn prompt_list_keys() {
+    use iced::keyboard::{Key, Modifiers, key};
+    use iced::widget::text_editor::{Binding, KeyPress, Status};
+    let press = |named, modifiers, focused| KeyPress {
+        key: Key::Named(named),
+        modified_key: Key::Named(named),
+        physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+        modifiers,
+        text: None,
+        status: if focused { Status::Focused { is_hovered: false } } else { Status::Active },
+    };
+    let (plain, shift) = (Modifiers::empty(), Modifiers::SHIFT);
+    use key::Named::{Enter, Tab};
+    assert!(matches!(crate::ui::enter_sends(press(Enter, plain, true)),
+        Some(Binding::Custom(Message::Send))));
+    assert!(matches!(crate::ui::enter_sends(press(Enter, shift, true)),
+        Some(Binding::Custom(Message::PromptNewline))));
+    assert!(matches!(crate::ui::enter_sends(press(Tab, plain, true)),
+        Some(Binding::Custom(Message::PromptIndent(false)))));
+    assert!(matches!(crate::ui::enter_sends(press(Tab, shift, true)),
+        Some(Binding::Custom(Message::PromptIndent(true)))));
+    // an unfocused prompt and Ctrl+Tab leave Tab to the window
+    assert!(crate::ui::enter_sends(press(Tab, plain, false)).is_none());
+    assert!(crate::ui::enter_sends(press(Tab, Modifiers::COMMAND, true)).is_none());
+    // on a plain line Tab changes nothing in the draft; in a list it indents, undone in one step
+    let (mut app, _) = App::new(true, None);
+    for (draft, indented) in [("plain", "plain"), ("- item", "  - item")] {
+        let view = app.current_mut().unwrap();
+        view.draft = crate::editor::Editor::with_text(draft);
+        let _ = app.update(Message::PromptIndent(false));
+        assert_eq!(app.current().unwrap().draft.text(), indented);
+        let _ = app.update(Message::PromptNewline);
+        assert_ne!(app.current().unwrap().draft.text(), indented);
+        let _ = app.update(Message::PromptHistory(false));
+        assert_eq!(app.current().unwrap().draft.text(), indented);
+    }
+    // where Enter does not send, it is the list's line break
+    assert!(matches!(crate::ui::list_keys(&press(Enter, plain, true), false),
+        Some(crate::ui::ListKey::Newline)));
+    assert!(crate::ui::list_keys(&press(Enter, shift, true), false).is_none());
 }
 
 /// The window's geometry through the app (`geometry.rs`): Sill's own placement is not taken for

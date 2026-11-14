@@ -1978,7 +1978,8 @@ impl App {
             .size(style::TEXT)
             .height(Shrink)
             .max_height(220)
-            .style(style::prompt);
+            .style(style::prompt)
+            .highlight_with::<crate::lists::Marks>(crate::lists::colours(), crate::lists::format);
         let editor = if view.annotation.is_none() {
             editor.on_action(Message::Prompt).key_binding(enter_sends)
         } else {
@@ -2768,6 +2769,30 @@ fn history_shortcut(key_press: &text_editor::KeyPress) -> Option<bool> {
     None
 }
 
+/// A key that edits a Markdown list (`lists.rs`).
+pub(crate) enum ListKey {
+    Newline,
+    /// Tab, or Shift+Tab (true).
+    Indent(bool),
+}
+
+/// The list keys of a focused prose editor. Where Enter sends (`shifted`), the line break is
+/// Shift+Enter.
+pub(crate) fn list_keys(key_press: &text_editor::KeyPress, shifted: bool) -> Option<ListKey> {
+    let modifiers = key_press.modifiers;
+    if !matches!(key_press.status, text_editor::Status::Focused { .. })
+        || modifiers.command()
+        || modifiers.alt()
+    {
+        return None;
+    }
+    match key_press.key {
+        Key::Named(Named::Enter) if modifiers.shift() == shifted => Some(ListKey::Newline),
+        Key::Named(Named::Tab) => Some(ListKey::Indent(modifiers.shift())),
+        _ => None,
+    }
+}
+
 /// Enter sends; Shift+Enter is a new line; everything else is the editor's own.
 pub(crate) fn enter_sends(
     key_press: text_editor::KeyPress,
@@ -2786,6 +2811,15 @@ pub(crate) fn enter_sends(
     // the window's shortcuts work from the prompt, and PageUp/PageDown page the conversation
     if let Some(message) = keys::from_text(&key_press.key, key_press.modifiers, true) {
         return Some(text_editor::Binding::Custom(message));
+    }
+    match list_keys(&key_press, true) {
+        Some(ListKey::Newline) => {
+            return Some(text_editor::Binding::Custom(Message::PromptNewline));
+        }
+        Some(ListKey::Indent(outdent)) => {
+            return Some(text_editor::Binding::Custom(Message::PromptIndent(outdent)));
+        }
+        None => {}
     }
     if matches!(key_press.key, Key::Named(Named::Enter))
         && !key_press.modifiers.shift()

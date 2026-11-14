@@ -134,6 +134,17 @@ impl Editor {
         }
         self.break_group();
     }
+    /// A change made directly to the content, as one undo step. Passes on what `change` returns.
+    pub fn edit<T>(&mut self, change: impl FnOnce(&mut Content) -> T) -> T {
+        let before = self.snapshot();
+        let result = change(&mut self.content);
+        if self.content.text() != before.text {
+            Self::push(&mut self.undo, before);
+            self.redo.clear();
+        }
+        self.break_group();
+        result
+    }
     pub fn history(&mut self, redo: bool) {
         self.break_group();
         let snapshot = if redo {
@@ -172,6 +183,31 @@ mod tests {
         prompt.history(true);
         assert_eq!(prompt.text(), branched);
         assert_eq!(Editor::new().undo.len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::*;
+    use iced::widget::text_editor::Motion;
+    #[test]
+    fn a_list_edit_is_one_undo_step() {
+        let mut prompt = Editor::with_text("- one\n- ");
+        prompt.perform(Action::Move(Motion::DocumentEnd));
+        prompt.edit(crate::lists::newline);
+        assert_eq!(prompt.text(), "- one\n");
+        prompt.history(false);
+        assert_eq!(prompt.text(), "- one\n- ");
+        assert!(prompt.edit(|content| crate::lists::indent(content, false)));
+        assert_eq!(prompt.text(), "- one\n  - ");
+        prompt.history(false);
+        assert_eq!(prompt.text(), "- one\n- ");
+        // nothing changed, nothing to undo
+        assert!(prompt.edit(|content| crate::lists::indent(content, true)));
+        prompt.history(false);
+        assert_eq!(prompt.text(), "- one\n- ");
+        prompt.history(true);
+        assert_eq!(prompt.text(), "- one\n  - ");
     }
 }
 

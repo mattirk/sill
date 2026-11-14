@@ -25,6 +25,7 @@ mod hotkey;
 mod icons;
 mod keys;
 mod layout;
+mod lists;
 mod login_ui;
 #[cfg(target_os = "macos")]
 mod local_vm;
@@ -328,6 +329,10 @@ pub enum Message {
     Latest,
     Prompt(text_editor::Action),
     PromptHistory(bool),
+    /// Shift+Enter in the prompt: a line break that continues a list.
+    PromptNewline,
+    /// Tab (false) or Shift+Tab in the prompt: indentation in a list, focus elsewhere.
+    PromptIndent(bool),
     Send,
     Stop,
     Answer {
@@ -1700,6 +1705,19 @@ impl App {
                     if view.annotation.is_none() { view.draft.history(redo); }
                 }
             }
+            Message::PromptNewline => {
+                if let Some(view) = self.current_mut().filter(|view| view.annotation.is_none()) {
+                    view.draft.edit(lists::newline);
+                }
+            }
+            Message::PromptIndent(outdent) => {
+                let indented = self.current_mut().is_some_and(|view| {
+                    view.annotation.is_none() && view.draft.edit(|draft| lists::indent(draft, outdent))
+                });
+                if !indented {
+                    return keys::step(!outdent);
+                }
+            }
             Message::Send => return self.send(),
             Message::Stop => return self.stop(),
             Message::Answer {
@@ -2558,6 +2576,17 @@ impl App {
                     page.edited = true;
                 }
                 page.instructions.perform(action);
+            }
+            Event::InstructionsNewline => {
+                page.edited = true;
+                lists::newline(&mut page.instructions);
+            }
+            Event::InstructionsIndent(outdent) => {
+                let before = page.instructions.text();
+                if !lists::indent(&mut page.instructions, outdent) {
+                    return keys::step(!outdent);
+                }
+                page.edited |= page.instructions.text() != before;
             }
             Event::SaveInstructions => {
                 if page.instructions_saving.is_some() {

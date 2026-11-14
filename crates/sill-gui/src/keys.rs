@@ -559,7 +559,8 @@ pub fn navigation(event: keyboard::Event) -> Option<Message> {
 
 /// Prompt paging; configured window shortcuts are handled by the root wrapper.
 /// Ctrl+Shift+Left/Right stays with the editor for selecting by words.
-/// Tab, Shift+Tab and Escape need nothing: an editor lets them through.
+/// Escape needs nothing: an editor lets it through. So does Tab, except in the prompt and the
+/// instructions, which indent a list item with it and step the focus themselves otherwise.
 pub fn from_text(key: &Key, modifiers: Modifiers, paging: bool) -> Option<Message> {
     match key.as_ref() {
         Key::Named(Named::PageUp) if paging && !modifiers.command() => Some(Message::Page(false)),

@@ -140,6 +140,8 @@ pub enum Event {
     ApplyShortcuts,
     ResetShortcuts,
     Instructions(text_editor::Action),
+    InstructionsNewline,
+    InstructionsIndent(bool),
     SaveInstructions,
     InstructionsSaved(String, sill_client::actions::Outcome),
     PinPath(String),
@@ -747,6 +749,19 @@ impl App {
             // ---- Instructions
             let editor = text_editor(&page.instructions)
                 .on_action(|a| event(Event::Instructions(a)))
+                .key_binding(|press| {
+                    crate::ui::list_keys(&press, false)
+                        .map(|key| {
+                            text_editor::Binding::Custom(event(match key {
+                                crate::ui::ListKey::Newline => Event::InstructionsNewline,
+                                crate::ui::ListKey::Indent(outdent) => {
+                                    Event::InstructionsIndent(outdent)
+                                }
+                            }))
+                        })
+                        .or_else(|| text_editor::Binding::from_key_press(press))
+                })
+                .highlight_with::<crate::lists::Marks>(crate::lists::colours(), crate::lists::format)
                 .height(Shrink)
                 .min_height(120)
                 .padding(10)
