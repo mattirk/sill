@@ -10,6 +10,7 @@ pub mod acp;
 pub mod agents;
 pub mod changes;
 pub mod config;
+pub mod history;
 pub mod instructions;
 pub mod jail;
 pub mod keep;

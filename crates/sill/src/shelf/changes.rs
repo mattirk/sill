@@ -18,6 +18,7 @@ use gtk4 as gtk;
 use gtk::glib;
 use sill_core::ledger::{FileType, Kind};
 use sill_core::store::Store;
+use sill_core::history::{Event, Filter, Kind as HKind};
 use sill_core::wire::{ChangeRow, ChangesList, DiffOf, Done, LiveRepo, SessionChanges};
 use sourceview5::prelude::*;
 
@@ -30,6 +31,11 @@ pub struct ChangesPage {
     summary: gtk::Label,
     message: gtk::Label,
     rows: RefCell<Vec<Row>>, // what each list row index shows
+    /// History (SPEC §3.6): what sessions did to the host over time, shown instead of the list.
+    history: gtk::ListBox,
+    hrows: RefCell<Vec<Option<Event>>>,
+    filter: gtk::SearchEntry,
+    lists: gtk::Stack,
 }
 
 /// What a list row stands for: decides the diff the daemon is asked for when it is selected.
@@ -77,7 +83,23 @@ impl ChangesPage {
         let refresh = super::icons::glyph_button("sill-refresh");
         refresh.add_css_class("flat");
         refresh.set_tooltip_text(Some("Rescan"));
+        // Pending (the overlays now) | History (SPEC §3.6: what was kept, undone, reverted)
+        let pending_b = gtk::ToggleButton::with_label("Pending");
+        let history_b = gtk::ToggleButton::with_label("History");
+        history_b.set_group(Some(&pending_b));
+        pending_b.set_active(true);
+        for b in [&pending_b, &history_b] {
+            b.add_css_class("flat");
+            b.add_css_class("sill-change-btn");
+        }
+        history_b.set_tooltip_text(Some("What sessions did to this machine over time: kept, undone, reverted, auto-reverted, and the commits made in pinned folders"));
+        let filter = gtk::SearchEntry::new();
+        filter.set_placeholder_text(Some("path, e.g. ~/.config"));
+        filter.set_visible(false);
         bar.append(&summary);
+        bar.append(&filter);
+        bar.append(&pending_b);
+        bar.append(&history_b);
         bar.append(&refresh);
         root.append(&bar);
         let message = gtk::Label::new(None);
@@ -109,14 +131,47 @@ impl ChangesPage {
         let diff_scroll = gtk::ScrolledWindow::builder().vexpand(true).child(&diff_view).build();
         diff_scroll.add_css_class("sill-diff-frame");
 
+        let history = gtk::ListBox::new();
+        history.add_css_class("sill-changes");
+        history.set_selection_mode(gtk::SelectionMode::Single);
+        let history_scroll = gtk::ScrolledWindow::builder().vexpand(true).child(&history).build();
+        let lists = gtk::Stack::new();
+        lists.add_named(&list_scroll, Some("pending"));
+        lists.add_named(&history_scroll, Some("history"));
+
         let paned = gtk::Paned::new(gtk::Orientation::Vertical);
-        paned.set_start_child(Some(&list_scroll));
+        paned.set_start_child(Some(&lists));
         paned.set_end_child(Some(&diff_scroll));
         paned.set_position(420);
         paned.set_vexpand(true);
         root.append(&paned);
 
-        let page = Rc::new(Self { root, list, diff, summary, message, rows: RefCell::new(Vec::new()) });
+        let page = Rc::new(Self { root, list, diff, summary, message, rows: RefCell::new(Vec::new()), history, hrows: RefCell::new(Vec::new()), filter, lists });
+        {
+            let p = page.clone();
+            history_b.connect_toggled(move |b| {
+                let on = b.is_active();
+                p.lists.set_visible_child_name(if on { "history" } else { "pending" });
+                p.filter.set_visible(on);
+                p.diff.set_text("");
+                p.refresh();
+            });
+        }
+        {
+            let p = page.clone();
+            page.filter.connect_search_changed(move |_| p.refresh());
+        }
+        {
+            let p = page.clone();
+            page.history.connect_row_selected(move |_, row| {
+                let Some(row) = row else { return };
+                let Some(Some(e)) = p.hrows.borrow().get(row.index() as usize).cloned() else {
+                    p.diff.set_text("");
+                    return;
+                };
+                p.show_event(&e);
+            });
+        }
         if let Some(dir) = theme::write_source_schemes() {
             sourceview5::StyleSchemeManager::default().append_search_path(&dir.to_string_lossy());
         }
@@ -164,6 +219,9 @@ impl ChangesPage {
     }
 
     pub fn refresh(self: &Rc<Self>) {
+        if self.lists.visible_child_name().as_deref() == Some("history") {
+            return self.refresh_history();
+        }
         let p = self.clone();
         ask::<ChangesList>(sill_proto::method::CHANGES_LIST, sill_proto::Empty::default(), move |r| match r {
             Ok(list) => p.populate(list.live, list.sessions),
@@ -176,6 +234,96 @@ impl ChangesPage {
     pub fn refresh_if_shown(self: &Rc<Self>) {
         if self.root.is_mapped() {
             self.refresh();
+        }
+    }
+
+    /// The history (SPEC §3.6), newest first, a header per day; the filter box narrows by path.
+    fn refresh_history(self: &Rc<Self>) {
+        let text = self.filter.text().trim().to_string();
+        let home = session::home().unwrap_or_default();
+        let path = (!text.is_empty()).then(|| match text.strip_prefix('~') {
+            Some(rest) => home.join(rest.trim_start_matches('/')),
+            None => PathBuf::from(&text),
+        });
+        let f = Filter { path, limit: 1000, ..Default::default() };
+        let p = self.clone();
+        ask::<Vec<Event>>(sill_proto::method::CHANGES_HISTORY, f, move |r| match r {
+            Ok(rows) => p.populate_history(rows),
+            Err(e) => p.message.set_text(&format!("history: {e:#}")),
+        });
+    }
+
+    fn populate_history(&self, rows: Vec<Event>) {
+        while let Some(child) = self.history.first_child() {
+            self.history.remove(&child);
+        }
+        self.hrows.borrow_mut().clear();
+        self.diff.set_text("");
+        let home = session::home().unwrap_or_default();
+        self.summary.set_text(&match rows.len() {
+            0 => "nothing in the history yet".to_string(),
+            n => format!("{n} event(s)"),
+        });
+        let mut day = String::new();
+        for e in rows {
+            let d = sill_memory::date(e.ts);
+            if d != day {
+                let h = self.header_row(&d, None, &[], vec![]);
+                self.history.append(&h);
+                self.hrows.borrow_mut().push(None);
+                day = d;
+            }
+            let (letter, class) = match e.kind {
+                HKind::Kept => ("K", "success"),
+                HKind::Undone => ("U", "accent"),
+                HKind::Reverted | HKind::AutoReverted => ("R", "error"),
+                HKind::Pinned => ("P", "accent"),
+                HKind::Deleted => ("×", "error"),
+                HKind::Folded => ("…", "dim-label"),
+            };
+            let what = match e.kind {
+                HKind::AutoReverted => format!("{} path(s) under {}", e.count, short_path(&e.path)),
+                HKind::Pinned => format!("{} · {} commit(s), {} file(s)", short_path(&e.path), e.commits.unwrap_or(0), e.files.unwrap_or(0)),
+                HKind::Deleted => "the session was deleted".to_string(),
+                HKind::Folded => format!("{} under {}", e.what, short_path(&e.path)),
+                _ => short_path(&e.path),
+            };
+            let who = if e.ghost { format!("{} · a ghost", e.agent) } else if e.session_title.is_empty() { e.agent.clone() } else { format!("{} · {}", e.agent, e.session_title) };
+            let time = sill_memory::datetime(e.ts);
+            let note = format!("{} · {who} · {}", e.kind.id(), time.get(11..).unwrap_or(&time));
+            let row = self.change_row(letter, class, &what, Some(note), vec![]);
+            row.set_tooltip_text(Some(sill_memory::history::line(&e, &home).trim_end()));
+            self.history.append(&row);
+            self.hrows.borrow_mut().push(Some(e));
+        }
+    }
+
+    /// A history row selected: the keep's diff while its session (and so its undo payload) lives,
+    /// otherwise what the row knows — the paths of a sweep, a range's heads, the hashes.
+    fn show_event(self: &Rc<Self>, e: &Event) {
+        let home = session::home().unwrap_or_default();
+        let mut text = sill_memory::history::line(e, &home);
+        for p in &e.paths {
+            text.push_str(&format!("  {}\n", short_path(p)));
+        }
+        if let (Some(a), Some(b)) = (&e.head_start, &e.head_end) {
+            text.push_str(&format!("\n  git log {a}..{b}\n"));
+        }
+        for (label, h) in [("written", &e.hash_new), ("replaced", &e.hash_old)] {
+            if let Some(h) = h {
+                text.push_str(&format!("  {label}: sha256 {h}\n"));
+            }
+        }
+        self.diff.set_text(&text);
+        if let (HKind::Kept, Some(session), Some(id)) = (e.kind, &e.session_id, &e.kept_id) {
+            let p = self.clone();
+            let of = DiffOf::Kept { session: session.clone(), id: id.clone() };
+            ask::<sill_proto::Text>(sill_proto::method::CHANGES_DIFF, of, move |r| {
+                // the payload went with its session: the description stays
+                if let Ok(t) = r {
+                    p.diff.set_text(&format!("{text}\n{}", t.text));
+                }
+            });
         }
     }
 

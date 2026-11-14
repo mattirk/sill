@@ -165,6 +165,24 @@ enum ChangesCmd {
     Keep { session: String, paths: Vec<PathBuf> },
     /// Put the host's version back in the session
     Revert { session: String, paths: Vec<PathBuf> },
+    /// What sessions did to this machine over time: kept, undone, reverted, auto-reverted, the
+    /// commits in pinned repositories (SPEC §3.6)
+    History {
+        /// only this long back: 7d, 12h, 2w
+        #[arg(long)]
+        since: Option<String>,
+        /// only on this path or below it
+        #[arg(long)]
+        path: Option<PathBuf>,
+        #[arg(long)]
+        agent: Option<String>,
+        /// kept | undone | reverted | auto-reverted | pinned | deleted | folded
+        #[arg(long)]
+        kind: Option<String>,
+        /// one session (id, its first characters, or its title)
+        #[arg(long)]
+        session: Option<String>,
+    },
     /// Undo keeps: the given keep ids, or every undoable keep of the session
     Undo {
         session: String,
@@ -1060,6 +1078,34 @@ fn changes_cmd(cmd: ChangesCmd) -> Result<()> {
             report(c.call(m::CHANGES_KEEP, sill_proto::ChangesKeep { session: session(&key)?, items })?)
         }
         ChangesCmd::Revert { session: key, paths } => report(c.call(m::CHANGES_REVERT, sill_proto::ChangesPaths { session: session(&key)?, paths: abs(paths)? })?),
+        ChangesCmd::History { since, path, agent, kind, session: key } => {
+            let since = match since {
+                Some(v) => Some(sill_core::store::now() - sill_memory::parse_age(&v).context("--since expects 7d, 12h, 2w …")?),
+                None => None,
+            };
+            let kind = match kind {
+                Some(k) => Some(sill_core::history::Kind::parse(&k).with_context(|| format!("no kind {k}"))?),
+                None => None,
+            };
+            let path = match path {
+                Some(p) => Some(abs(vec![p])?.remove(0)),
+                None => None,
+            };
+            let session = match key {
+                Some(k) => Some(session(&k)?),
+                None => None,
+            };
+            let f = sill_core::history::Filter { since, path, agent, kind, session, limit: 0 };
+            let rows: Vec<sill_core::history::Event> = c.call(m::CHANGES_HISTORY, f)?;
+            if rows.is_empty() {
+                println!("nothing in the history");
+            }
+            let home = home()?;
+            for e in rows {
+                print!("{}", sill_memory::history::line(&e, &home));
+            }
+            Ok(())
+        }
         ChangesCmd::Undo { session: key, ids, force } => report(c.call(m::CHANGES_UNDO, sill_proto::ChangesUndo { session: session(&key)?, ids, force })?),
     }
 }

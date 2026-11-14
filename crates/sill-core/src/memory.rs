@@ -197,6 +197,8 @@ pub fn compact_all(store: &Store, now: i64, remove_state: &dyn Fn(&str)) -> Resu
         let empty = store.count_kind(&s.id, "user").unwrap_or(0) == 0;
         if empty || (delete > 0 && age > delete) {
             remove_state(&s.id);
+            // what it did to the host folds into one line (SPEC §3.6 decision 4)
+            sill_memory::history::fold(store.conn(), &s.id, now)?;
             store.delete(&s.id)?;
             done.deleted += 1;
             continue;

@@ -77,6 +77,8 @@ pub mod method {
     pub const CHANGES_UNDO: &str = "_sill/changes.undo";
     /// A pinned repository's path back to HEAD; params [`GitRevert`], answers [`Text`].
     pub const CHANGES_GIT_REVERT: &str = "_sill/changes.git_revert";
+    /// The ledger across time (SPEC §3.6): params a `sill_core::history::Filter`, answers its events.
+    pub const CHANGES_HISTORY: &str = "_sill/changes.history";
     pub const MEMORY_LIST: &str = "_sill/memory.list";
     pub const MEMORY_SHOW: &str = "_sill/memory.show";
     pub const MEMORY_SEARCH: &str = "_sill/memory.search";

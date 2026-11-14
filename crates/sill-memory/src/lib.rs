@@ -22,6 +22,8 @@ pub const SNAPSHOT_FILE: &str = "memory.db";
 /// The searchable text — one row per session title, summary, note and prompt of the person — and
 /// its FTS5 index (external content: the index stores no second copy). `kind` is `title`,
 /// `summary`, `note` or `prompt`; `ref` tells rows of one kind apart (an entry's seq, a note's ts).
+pub mod history;
+
 pub const TEXT_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS memory_text (
     id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, kind TEXT NOT NULL, ref INTEGER NOT NULL DEFAULT 0, text TEXT NOT NULL);
@@ -105,6 +107,7 @@ pub fn write_snapshot(src: &Path, dir: &Path, kept: &[(String, PathBuf, String)]
              CREATE TABLE kept (session_id TEXT NOT NULL, path TEXT NOT NULL, what TEXT NOT NULL);",
         )?;
         snap.execute_batch(TEXT_SCHEMA)?;
+        snap.execute_batch(history::SCHEMA)?;
         snap.execute("ATTACH DATABASE ?1 AS src", params![format!("file:{}?mode=ro", src.display())]).or_else(|_| snap.execute("ATTACH DATABASE ?1 AS src", params![src.to_string_lossy()]))?;
         let tx = snap.unchecked_transaction()?;
         tx.execute_batch(
@@ -114,6 +117,11 @@ pub fn write_snapshot(src: &Path, dir: &Path, kept: &[(String, PathBuf, String)]
              INSERT INTO entries SELECT session_id, seq, ts, kind, text FROM src.entries WHERE kind IN ('user', 'agent', 'tool');
              INSERT INTO memory_text (session_id, kind, ref, text) SELECT session_id, kind, ref, text FROM src.memory_text;",
         )?;
+        // the ledger across time (SPEC §3.6), when the store has one
+        let has_history: bool = tx.query_row("SELECT count(*) FROM src.sqlite_master WHERE name = 'history'", [], |r| r.get::<_, i64>(0))? > 0;
+        if has_history {
+            tx.execute_batch("INSERT INTO history SELECT * FROM src.history")?;
+        }
         // ghost sessions (docs/memory.md §3) are nobody's memory, not even while they run
         let has_ghost = tx.prepare("PRAGMA src.table_info(sessions)")?.query_map([], |r| r.get::<_, String>(1))?.filter_map(|r| r.ok()).any(|c| c == "ghost");
         if has_ghost {
@@ -754,10 +762,13 @@ pub fn hit_lines(h: &Hit, home: &Path) -> String {
 pub const USAGE: &str = "usage: sill-memory search WORDS… [--folder PATH] [--agent NAME] [--since 30d]
        sill-memory show ID
        sill-memory transcript ID [--grep WORDS]
+       sill-memory history [--path PATH] [--since 7d] [--agent NAME] [--kind kept|undone|reverted|auto-reverted|pinned]
 
 Sessions on this machine as sill remembers them: when, where, with which agent, a summary written
 when each ended. ID is a session id (or its first characters) or its exact title. Search matches
-titles, summaries, notes and the person's prompts; `transcript --grep` reads the agents' text too.";
+titles, summaries, notes and the person's prompts; `transcript --grep` reads the agents' text too.
+`history` lists what sessions did to this machine's files — kept to the host, undone, reverted —
+and the commits made in pinned repositories, newest first.";
 
 /// `sill-memory …` over an open memory database: the output, or an error worth exit status 1.
 pub fn cli(args: &[String], conn: &Connection, home: &Path, now: i64, kept: impl Fn(&str) -> Vec<(PathBuf, String)>) -> Result<String> {
@@ -811,6 +822,26 @@ pub fn cli(args: &[String], conn: &Connection, home: &Path, now: i64, kept: impl
             let grep = flag(&mut args, "--grep")?;
             let s = session(&args)?;
             transcript(conn, &s, grep.as_deref())
+        }
+        "history" => {
+            let since = match flag(&mut args, "--since")? {
+                Some(v) => Some(now - parse_age(&v).context("--since expects 30d, 12h, 2w …")?),
+                None => None,
+            };
+            let path = flag(&mut args, "--path")?.map(|p| match p.strip_prefix("~") {
+                Some(rest) => home.join(rest.trim_start_matches('/')),
+                None => PathBuf::from(p),
+            });
+            let kind = match flag(&mut args, "--kind")? {
+                Some(k) => Some(history::Kind::parse(&k).with_context(|| format!("no kind {k}"))?),
+                None => None,
+            };
+            let f = history::Filter { since, path, agent: flag(&mut args, "--agent")?, kind, limit: 200, ..Default::default() };
+            let rows = history::query(conn, &f)?;
+            if rows.is_empty() {
+                return Ok("nothing in the history\n".into());
+            }
+            Ok(rows.iter().map(|e| history::line(e, home)).collect())
         }
         "" | "help" | "--help" | "-h" => Ok(format!("{USAGE}\n")),
         other => bail!("unknown command {other}\n{USAGE}"),

@@ -299,6 +299,10 @@ impl Hub {
                 // what the person would want to look at: build output is not asked about
                 to_value(Count { n: changes.iter().filter(|c| !c.ignored).count() })
             }
+            method::CHANGES_HISTORY => {
+                let f: sill_core::history::Filter = args(params)?;
+                to_value(self.changes_history(f).map_err(|e| Error::failed(format!("{e:#}")))?)
+            }
             method::CHANGES_LIST => to_value(self.changes_list().map_err(|e| Error::failed(format!("{e:#}")))?),
             method::CHANGES_DIFF => {
                 let of: sill_core::wire::DiffOf = args(params)?;
@@ -597,6 +601,17 @@ impl Hub {
             bail!("not a session id");
         }
         let ghost = self.is_ghost(id);
+        // the history (SPEC §3.6): the pinned repositories' range and the deletion itself, before
+        // the row goes; a ghost leaves neither
+        if !ghost && let Some(s) = self.with_store(|st| st.sessions()).ok().and_then(|v| v.into_iter().find(|s| s.id == id)) {
+            let e = sill_core::history::event(&s, sill_core::history::Kind::Deleted, std::path::Path::new(""));
+            if let Err(err) = self.with_store(|st| {
+                sill_core::history::close_pins(st, &s)?;
+                sill_core::history::record(st, &e)
+            }) {
+                eprintln!("sill daemon: history: {err:#}");
+            }
+        }
         self.retire_runner(id);
         self.ending.lock().unwrap().remove(id);
         if let Err(e) = sill_core::session::stop(id) {
@@ -882,6 +897,12 @@ impl Hub {
         if delete {
             self.with_store(|s| s.end_only(id)).ok();
         }
+        if !delete && let Some(s) = self.with_store(|st| st.sessions()).ok().and_then(|v| v.into_iter().find(|s| s.id == id)) {
+            // the pinned repositories' commits in this open period (SPEC §3.6 decision 2)
+            if let Err(err) = self.with_store(|st| sill_core::history::close_pins(st, &s)) {
+                eprintln!("sill daemon: history: {err:#}");
+            }
+        }
         if !delete && let Some((ctx, answer)) = ctx {
             self.with_store(|s| match answer {
                 _ if !ctx.memory || ctx.keep_old => s.end_only(id),
@@ -954,6 +975,10 @@ impl Hub {
             ghost: s.ghost,
         };
         let started = sill_core::session::ensure_started(&opts, &self.home, &self.exe).context("starting the jail")?;
+        // the pinned repositories' HEAD when this open period began (kept across restarts)
+        if let Err(e) = self.with_store(|st| sill_core::history::note_pin_starts(st, &s)) {
+            eprintln!("sill daemon: session {id}: noting the pins' HEAD: {e:#}");
+        }
         let fresh = started.child.is_some();
         if let Some(child) = started.child {
             self.supervise(id, child);

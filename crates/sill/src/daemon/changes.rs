@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
+use sill_core::history::Kind as H;
 use sill_core::keep::{self, KeepOptions};
 use sill_core::ledger::{Change, FileType, Kind};
 use sill_core::store::Session;
@@ -80,7 +81,20 @@ impl Hub {
             };
             let opts = KeepOptions { undo: Some(dir.clone()), expected_hash: hash, ..Default::default() };
             match keep::keep(c, &opts) {
-                Ok(what) => d.done.push((path, what.to_string())),
+                Ok(what) => {
+                    // the history (SPEC §3.6): what was written, what was there, the journal's id
+                    let rec = keep::list(&dir).into_iter().rev().find(|k| k.path == path);
+                    self.history(session, H::Kept, &path, |e| {
+                        e.what = what.to_string();
+                        if let Some(r) = &rec {
+                            e.kept_id = Some(r.id.clone());
+                            e.hash_new = r.hash.clone();
+                            let prior = keep::prior_path(&dir, r);
+                            e.hash_old = prior.is_file().then(|| keep::sha256_file(&prior).ok()).flatten();
+                        }
+                    });
+                    d.done.push((path, what.to_string()))
+                }
                 Err(e) => d.failed.push((path, format!("{e:#}"))),
             }
         }
@@ -94,6 +108,9 @@ impl Hub {
         paths.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
         let found: Vec<Change> = paths.iter().filter_map(|p| changes.iter().find(|c| &c.path == p).cloned()).collect();
         let mut d = revert(session, &found);
+        for (p, _) in &d.done {
+            self.history(session, H::Reverted, p, |_| {});
+        }
         for p in paths.into_iter().filter(|p| !found.iter().any(|c| &c.path == p)) {
             d.failed.push((p, "no longer a change of this session".into()));
         }
@@ -109,7 +126,13 @@ impl Hub {
         let mut d = Done::default();
         for k in pick {
             match keep::undo(&dir, &k, force) {
-                Ok(what) => d.done.push((k.path.clone(), what.to_string())),
+                Ok(what) => {
+                    self.history(session, H::Undone, &k.path, |e| {
+                        e.what = what.to_string();
+                        e.kept_id = Some(k.id.clone());
+                    });
+                    d.done.push((k.path.clone(), what.to_string()))
+                }
                 Err(e) => d.failed.push((k.path.clone(), format!("{e:#}"))),
             }
         }
@@ -154,6 +177,16 @@ impl Hub {
             }
             due.sort_by_key(|c| std::cmp::Reverse(c.path.components().count()));
             let d = revert(&s.id, &due);
+            // one row per sweep and session (SPEC §3.6 decision 3), the paths behind it
+            if !d.done.is_empty() {
+                let paths: Vec<PathBuf> = d.done.iter().map(|(p, _)| p.clone()).collect();
+                let mut e = sill_core::history::event(&s, H::AutoReverted, &sill_memory::history::common_prefix(&paths));
+                e.count = paths.len() as i64;
+                e.paths = paths;
+                if let Err(err) = self.with_store(|st| sill_core::history::record(st, &e)) {
+                    eprintln!("sill daemon: history: {err:#}");
+                }
+            }
             eprintln!("sill daemon: session {}: auto-reverted {} path(s) outside git{}", s.id, d.done.len(), if d.failed.is_empty() { String::new() } else { format!(", {} failed", d.failed.len()) });
         }
     }
@@ -208,6 +241,24 @@ impl Hub {
                 r.notify(&sill_core::wire::Event::Note(msg));
             }
         });
+    }
+
+    /// One history row by session `id` (anonymous for a ghost, none for a ghost's revert — a ghost
+    /// leaves only what the person kept, SPEC §3.6 decision 1).
+    fn history(&self, id: &str, kind: H, path: &Path, fill: impl FnOnce(&mut sill_core::history::Event)) {
+        let Some(s) = self.with_store(|st| st.sessions()).ok().and_then(|v| v.into_iter().find(|s| s.id == id)) else { return };
+        if s.ghost && kind != H::Kept {
+            return;
+        }
+        let mut e = sill_core::history::event(&s, kind, path);
+        fill(&mut e);
+        if let Err(err) = self.with_store(|st| sill_core::history::record(st, &e)) {
+            eprintln!("sill daemon: history: {err:#}");
+        }
+    }
+
+    pub(super) fn changes_history(&self, f: sill_core::history::Filter) -> Result<Vec<sill_core::history::Event>> {
+        self.with_store(|st| sill_memory::history::query(st.conn(), &f))
     }
 
     fn scan_one(&self, session: &str) -> Result<Vec<Change>> {

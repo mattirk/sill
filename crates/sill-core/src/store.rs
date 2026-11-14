@@ -152,6 +152,12 @@ impl Store {
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN ghost INTEGER NOT NULL DEFAULT 0", []);
         conn.execute_batch("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")?;
         sill_memory::install(&conn).context("memory index")?;
+        // the ledger across time (SPEC §3.6) and the pinned repositories' HEAD at a session's start
+        sill_memory::history::install(&conn).context("history")?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS pin_heads (session_id TEXT NOT NULL, repo TEXT NOT NULL, head TEXT NOT NULL, ts INTEGER NOT NULL,
+                 PRIMARY KEY (session_id, repo))",
+        )?;
         Ok(Self { conn })
     }
 
@@ -385,6 +391,8 @@ impl Store {
         self.conn.execute("DELETE FROM memories WHERE session_id = ?1", params![id])?;
         self.conn.execute("DELETE FROM entries WHERE session_id = ?1", params![id])?;
         self.conn.execute("DELETE FROM session_pins WHERE session_id = ?1", params![id])?;
+        self.conn.execute("DELETE FROM pin_heads WHERE session_id = ?1", params![id])?;
+        // its history rows stay (SPEC §3.6): what it did to the host outlives it
         self.conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
         Ok(())
     }
