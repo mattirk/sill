@@ -2009,7 +2009,7 @@ impl SessionView {
         let _ = self.store.set_memory_scope(&self.id(), scope);
         self.session.borrow_mut().memory_scope = scope.to_string();
         let resolved = sill_core::memory::Scope::resolve(scope, !self.store.pins(&self.id()).unwrap_or_default().is_empty());
-        self.conv.add_note(&format!("memory: {}; the agent is told with the next prompt", resolved.id()));
+        self.conv.add_note(&format!("recall: {}; told with the next prompt", resolved.label()));
     }
 
     /// The session's policy, from the session menu; the jail is rebuilt with it.

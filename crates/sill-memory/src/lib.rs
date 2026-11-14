@@ -362,6 +362,15 @@ impl Scope {
             Scope::Off => "off",
         }
     }
+
+    /// The session menu's word for it: which sessions are quoted to the agent at start.
+    pub fn label(self) -> &'static str {
+        match self {
+            Scope::Here => "this folder",
+            Scope::Everywhere => "all folders",
+            Scope::Off => "none",
+        }
+    }
 }
 
 /// The ended sessions to recall for session `me` with `pins`, at most `n`: `first` (the session a
@@ -398,7 +407,7 @@ const RECALL_CHARS: usize = 1500;
 /// The recall block for the standing instructions; `kept_count` says how many files a session kept.
 /// Empty when there is nothing to say and the snapshot is not there to search either.
 pub fn recall_block(picked: &[&SessionInfo], scope: Scope, searchable: bool, home: &Path, kept_count: impl Fn(&str) -> usize) -> String {
-    let tools = "`sill-memory search WORDS [--folder PATH] [--since 30d]` finds more, `sill-memory show ID` prints a whole summary, `sill-memory transcript ID [--grep WORDS]` the conversation";
+    let tools = "`sill-memory search WORDS` searches all sessions, `sill-memory show ID` a whole summary, `sill-memory transcript ID [--grep WORDS]` the conversation";
     if picked.is_empty() {
         return if searchable { format!("[Earlier sessions on this machine are remembered by sill (not your own memory): {tools}.]") } else { String::new() };
     }

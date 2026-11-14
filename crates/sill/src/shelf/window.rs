@@ -1038,14 +1038,19 @@ impl Shelf {
         }
         grid.attach(&key("Desktop"), 0, 3, 1, 1);
         grid.attach(&desk, 1, 3, 1, 1);
-        // memory scope (docs/memory.md §2.3): which earlier sessions the agent is told about
-        let scopes = ["", "here", "everywhere", "off"];
+        // recall scope (docs/memory.md §2.3): which earlier sessions the agent is told about at
+        // start. Three choices; the one the pins would pick is marked (default), and choosing it
+        // stores "" so the session keeps following its pins
+        use sill_core::memory::Scope;
+        let all = [Scope::Here, Scope::Everywhere, Scope::Off];
         let pinned = !self.store.pins(id).unwrap_or_default().is_empty();
-        let scope_default = format!("default ({})", sill_core::memory::Scope::resolve("", pinned).id());
-        let mem = gtk::DropDown::from_strings(&[scope_default.as_str(), "here", "everywhere", "off"]);
-        mem.set_selected(scopes.iter().position(|c| *c == s.memory_scope).unwrap_or(0) as u32);
+        let default = Scope::resolve("", pinned);
+        let labels: Vec<String> = all.iter().map(|sc| if *sc == default { format!("{} (default)", sc.label()) } else { sc.label().to_string() }).collect();
+        let mem = gtk::DropDown::from_strings(&labels.iter().map(String::as_str).collect::<Vec<_>>());
+        let current = Scope::resolve(&s.memory_scope, pinned);
+        mem.set_selected(all.iter().position(|sc| *sc == current).unwrap_or(0) as u32);
         if sill_core::config::load().memory() {
-            mem.set_tooltip_text(Some("Earlier sessions the agent is told about when it starts. here: the last ones in the pinned folders, their parents and children, nearest first. everywhere: the last ones on this machine. off: none. The default is here with pins, everywhere without. Either way the agent can search all of memory with sill-memory."));
+            mem.set_tooltip_text(Some("Earlier sessions quoted to the agent when it starts. It can always search all sessions with sill-memory."));
         } else {
             mem.set_sensitive(false);
             mem.set_tooltip_text(Some("Memory is off (Settings)"));
@@ -1054,7 +1059,8 @@ impl Shelf {
             let shelf = self.clone();
             let sid = id.to_string();
             mem.connect_selected_notify(move |d| {
-                let Some(scope) = scopes.get(d.selected() as usize) else { return };
+                let Some(sc) = all.get(d.selected() as usize) else { return };
+                let scope = if *sc == default { "" } else { sc.id() };
                 let view = shelf.views.borrow().get(&sid).cloned();
                 match view {
                     Some(v) => v.set_memory_scope(scope),
@@ -1064,7 +1070,7 @@ impl Shelf {
                 }
             });
         }
-        grid.attach(&key("Memory"), 0, 4, 1, 1);
+        grid.attach(&key("Recall"), 0, 4, 1, 1);
         grid.attach(&mem, 1, 4, 1, 1);
         // where the jail runs (SPEC §4.7 launcher modes), copyable
         let unit = sill_core::session::unit_name(id);

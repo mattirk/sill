@@ -137,10 +137,11 @@ design; this is what you see.
   that (close the tab mid-checkpoint and the checkpoint becomes the final summary).
 - **Recall.** The next session in a folder gets a `[Memory — earlier sessions in these folders …]`
   block in its standing instructions: the last three ended sessions, each with date, duration, agent,
-  folders, kept files, commits and the summary. The session menu's **Memory** picks the scope:
-  *here* (the same folder, its parents and children, nearest first — the default with pins),
-  *everywhere* (the last three anywhere — the default without pins, so a no-pin session is the one
-  that sees all of memory), or *off*. Scope decides what is pushed, never what can be searched.
+  folders, kept files, commits and the summary. The session menu's **Recall** picks the scope:
+  *this folder* (the same folder, its parents and children, nearest first — the default with pins),
+  *all folders* (the last three anywhere — the default without pins, so a no-pin session is the one
+  that sees all of memory), or *none*. Scope decides what is pushed, never what can be searched —
+  the block tells the agent that search covers all sessions.
   `memory_recall` in `sill.toml` changes the count.
 - **Search from anywhere.** On the host, `sill memory list | show <id|title> | search <words> |
   transcript <id> [--grep WORDS] | recall <id> | refresh`. Inside the jail the agent has
