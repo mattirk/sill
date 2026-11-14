@@ -207,6 +207,29 @@ pub fn builtin() -> Vec<Agent> {
             memory_paths: vec![],
         },
         Agent {
+            // Mistral Vibe 3.1.1 as the person's login left it on 2026-11-13; registry entry
+            // `mistral-vibe`, a binary install, so the command comes from the install
+            id: "mistral-vibe".into(),
+            name: "Mistral Vibe".into(),
+            enabled: true,
+            command: vec!["vibe-acp".into()],
+            env: Default::default(),
+            supports_load: true,
+            experimental_acp_v2: false,
+            // console.mistral.ai for the sign-in, api.mistral.ai for the models
+            domains: vec!["*.mistral.ai".into()],
+            sandbox_off_env: Default::default(),
+            home_paths: Some(vec![HomePath::directory("~/.vibe")]),
+            // the API key the sign-in exchanges for; Vibe writes it here where it has no keyring
+            login_files: vec![".vibe/.env".into()],
+            // "Sign in through Mistral AI Studio" opens a browser itself and waits for it
+            host_login: vec!["browser-auth".into()],
+            home_env: None,
+            home_env_parent: false,
+            icon: None, // the registry's icon, by id
+            memory_paths: vec![],
+        },
+        Agent {
             id: "gemini".into(),
             name: "Gemini CLI".into(),
             enabled: true,

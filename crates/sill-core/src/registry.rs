@@ -212,7 +212,7 @@ fn platform_key() -> &'static str {
 
 /// Registry ids known to work inside sill's jail end to end (install, login, a prompt). Everything
 /// else is still installable but hidden by default on the Agents page until someone tests it.
-pub const TESTED: &[&str] = &["claude-acp", "codex-acp", "antigravity-acp", "kimi-code"];
+pub const TESTED: &[&str] = &["claude-acp", "codex-acp", "antigravity-acp", "kimi-code", "mistral-vibe"];
 
 pub fn is_tested(id: &str) -> bool {
     TESTED.contains(&id)
@@ -221,8 +221,12 @@ pub fn is_tested(id: &str) -> bool {
 /// The built-in sill agent an entry is the package of, if any: it keeps the built-in's jail
 /// settings (home paths, login, domains) and only takes the command.
 pub fn builtin_for(entry: &Entry) -> Option<&'static str> {
+    // binary distributions: no package name to match
     if entry.id == "antigravity-acp" {
-        return Some("antigravity-acp"); // a binary distribution: no package name to match
+        return Some("antigravity-acp");
+    }
+    if entry.id == "mistral-vibe" {
+        return Some("mistral-vibe");
     }
     let pkg = entry.package_name().unwrap_or_default();
     match pkg.as_str() {
@@ -1245,6 +1249,18 @@ fn npm_lockfile(spec: &str) -> Result<(serde_json::Value, serde_json::Value)> {
 #[cfg(test)]
 mod snapshot_tests {
     use super::*;
+
+    #[test]
+    fn mistral_vibe_registry_uses_the_tested_builtin_defaults() {
+        let entry: Entry = serde_json::from_value(serde_json::json!({"id": "mistral-vibe", "name": "Mistral Vibe", "version": "3.1.1"})).unwrap();
+        assert!(is_tested(&entry.id));
+        assert_eq!(builtin_for(&entry), Some("mistral-vibe"));
+        let agent = agents::builtin().into_iter().find(|a| a.id == "mistral-vibe").unwrap();
+        agent.validate().unwrap();
+        assert_eq!(agent.home_paths.unwrap()[0].path, "~/.vibe");
+        assert_eq!(agent.login_files, [".vibe/.env"]);
+        assert_eq!(agent.host_login, ["browser-auth"]);
+    }
 
     #[test]
     fn kimi_code_registry_uses_the_tested_builtin_defaults() {
