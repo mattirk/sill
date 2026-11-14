@@ -1866,13 +1866,17 @@ impl App {
                     let mode = self.layout.after(action);
                     return self.set_mode(mode);
                 }
-                layout::Action::DragStart => self.layout.dragging = true,
+                layout::Action::DragStart => {
+                    self.layout.dragging = true;
+                    self.layout.drag_from = Some(self.layout.drawer_width());
+                }
                 layout::Action::DragTo(x) => {
                     if self.layout.dragging {
                         self.layout.drag_to(x, self.drawer.shown, self.width);
                     }
                 }
                 layout::Action::DragEnd => {
+                    self.layout.drag_from = None;
                     if std::mem::take(&mut self.layout.dragging) {
                         self.save_settings();
                     }

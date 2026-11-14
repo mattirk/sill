@@ -1320,6 +1320,52 @@ fn the_menu_switches_between_the_three_modes() {
 /// A long conversation builds only the rows near the view; the rest are gaps of their measured
 /// height, so the conversation is as tall either way and a far row appears when scrolled to.
 #[test]
+fn dragging_the_drawer_keeps_a_long_conversation_s_far_rows_as_gaps() {
+    use crate::layout::Action;
+    use iced_test::selector::Candidate;
+    let built = |ui: &mut Frame<'_, '_>, needle: &'static str| -> bool {
+        ui.select(move |candidate| match candidate {
+            Candidate::Text { content, .. } if content.contains(needle) => Some(()),
+            Candidate::Custom { state, .. } => state
+                .downcast_ref::<crate::selection::Selectable>()
+                .filter(|t| t.text().contains(needle))
+                .map(|_| ()),
+            _ => None,
+        })
+        .is_some()
+    };
+    let mut app = crate::perf::long(400);
+    // the drawer beside the conversation, in a window narrower than the measure: the drawer's
+    // width decides the rows'
+    app.layout.mode = crate::layout::Mode::Drawer;
+    app.drawer.shown = true;
+    app.width = 900.0;
+    let mut live = Live::new((900.0, 600.0));
+    live.frame(&app, |_| {});
+    {
+        let view = app.views.get_mut("demo").unwrap();
+        view.viewport = 520.0;
+        view.follow_tail = true;
+    }
+    let mut first = true;
+    live.frame(&app, |ui| first = built(ui, "pattern-1' crates"));
+    assert!(!first, "settled: the first rows are gaps");
+    // the edge dragged: the far rows stay gaps at every move
+    let _ = app.update(Message::Layout(Action::DragStart));
+    for x in [690.0, 680.0, 670.0] {
+        let _ = app.update(Message::Layout(Action::DragTo(x)));
+        live.frame(&app, |ui| first = built(ui, "pattern-1' crates"));
+        assert!(!first, "dragging to {x}: the first rows stay gaps");
+    }
+    // released: every row is measured once at the new width, then the far ones are gaps again
+    let _ = app.update(Message::Layout(Action::DragEnd));
+    live.frame(&app, |ui| first = built(ui, "pattern-1' crates"));
+    assert!(first, "released: measured anew");
+    live.frame(&app, |ui| first = built(ui, "pattern-1' crates"));
+    assert!(!first, "then gaps again");
+}
+
+#[test]
 fn a_long_conversation_builds_only_what_is_near_the_view() {
     use iced_test::selector::Candidate;
     let built = |ui: &mut Frame<'_, '_>, needle: &'static str| -> bool {

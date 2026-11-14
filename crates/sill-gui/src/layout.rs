@@ -72,6 +72,10 @@ pub struct Layout {
     pub drawer: Option<f32>,
     /// The drawer's edge is being dragged.
     pub dragging: bool,
+    /// The drawer's width when the drag began: what the conversation's rows stay laid out
+    /// against until the release, so a long conversation is not measured anew at every pointer
+    /// move (`App::feed`).
+    pub drag_from: Option<f32>,
 }
 
 impl Default for Layout {
@@ -81,6 +85,7 @@ impl Default for Layout {
             before_full: Mode::Drawer,
             drawer: None,
             dragging: false,
+            drag_from: None,
         }
     }
 }
@@ -135,6 +140,26 @@ impl Layout {
         (self.mode != Mode::Full).then_some(MEASURE)
     }
 
+    /// The width the conversation's rows are laid out at in a window `total` wide, with the
+    /// drawer `shown`: what their measured heights hold for. Beside the drawer, the room left;
+    /// within the reading measure where there is one. While the drawer's edge is dragged, the
+    /// width from before the drag: the rows in view are built and reflow anyway, the rest keep
+    /// their heights until the release, when every row is measured once at the new width.
+    pub fn row_width(&self, shown: bool, total: f32) -> f32 {
+        let drawer = match self.drawer(shown, total) {
+            Drawer::Beside(_) => Some(self.drag_from.unwrap_or_else(|| self.wanted())),
+            _ => None,
+        };
+        let room = match drawer {
+            Some(width) => total - width - HANDLE,
+            None => total,
+        };
+        match self.measure() {
+            Some(measure) => room.min(measure),
+            None => room,
+        }
+    }
+
     /// Where Ctrl+Shift+D and Ctrl+Shift+E lead from the current mode.
     pub fn after(&self, action: Action) -> Mode {
         match (action, self.mode) {
@@ -178,6 +203,34 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_rows_width_follows_the_drawer_only_where_it_narrows_them_and_not_while_dragged() {
+        let mut layout = Layout {
+            mode: Mode::Drawer,
+            ..Layout::default()
+        };
+        // wider than the measure: the drawer takes nothing from the rows
+        assert_eq!(layout.row_width(true, 1400.0), MEASURE);
+        layout.drawer = Some(300.0);
+        assert_eq!(layout.row_width(true, 1400.0), MEASURE);
+        // narrower: the room beside the drawer
+        assert_eq!(layout.row_width(true, 900.0), 900.0 - 300.0 - HANDLE);
+        assert_eq!(layout.row_width(false, 900.0), 800.0);
+        // dragged: the width from before the drag until the release
+        layout.drag_from = Some(300.0);
+        layout.drag_to(400.0, true, 900.0);
+        assert_ne!(layout.drawer, Some(300.0));
+        assert_eq!(layout.row_width(true, 900.0), 900.0 - 300.0 - HANDLE);
+        layout.drag_from = None;
+        assert_eq!(
+            layout.row_width(true, 900.0),
+            900.0 - layout.drawer_width() - HANDLE
+        );
+        // Full mode: no measure, the whole window
+        layout.mode = Mode::Full;
+        assert_eq!(layout.row_width(true, 1400.0), 1400.0);
+    }
 
     #[test]
     fn the_drawer_is_beside_in_drawer_mode_and_a_look_over_the_conversation_elsewhere() {

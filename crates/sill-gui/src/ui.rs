@@ -649,18 +649,15 @@ impl App {
                 .height(Fill)
                 .into();
         }
-        // the layout every row height depends on: the window's width, the drawer beside the
-        // conversation, the reading measure
-        let drawer = match self.layout.drawer(self.drawer.shown, self.width) {
-            Drawer::Beside(width) => width,
-            _ => 0.0,
-        };
+        // the layout every row height depends on: the width the rows get, from the window's,
+        // the drawer beside the conversation and the reading measure. Only that: dragging the
+        // drawer in a window wider than the measure changes no row, and while it is dragged the
+        // width is the one from before the drag, so a long conversation is measured anew once,
+        // at the release, not at every pointer move.
         let layout_key = rows::signature(
-            (
-                self.width.to_bits(),
-                drawer.to_bits(),
-                self.layout.measure().map(f32::to_bits),
-            ),
+            self.layout
+                .row_width(self.drawer.shown, self.width)
+                .to_bits(),
             0,
         );
         let items = conversation.visible_items();
