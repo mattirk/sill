@@ -342,6 +342,19 @@ fn install_npm(dir: &Path, d: &PackageDist, log: &mut dyn FnMut(String)) -> Resu
         .arg(&d.package)
         .current_dir(dir);
     run_logged(&mut cmd, log).context("npm install")?;
+    // npm treats a failed fetch of an optional dependency as no error and says nothing at
+    // --loglevel=error; the platform packages that carry an agent's native binary are optional
+    // (`@anthropic-ai/claude-agent-sdk-linux-x64`, ~50 MB), so one dropped download leaves an
+    // install that starts fine and fails at the first session. Verify, retry once, then refuse.
+    let mut missing = missing_platform_optionals(dir)?;
+    if !missing.is_empty() {
+        log(format!("optional platform package(s) not installed: {}; retrying", missing.join(", ")));
+        run_logged(&mut cmd, log).context("npm install (retry)")?;
+        missing = missing_platform_optionals(dir)?;
+    }
+    if !missing.is_empty() {
+        bail!("platform package(s) missing after npm install: {}", missing.join(", "));
+    }
     let name = strip_version(&d.package);
     let pkg_json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("node_modules").join(&name).join("package.json")).context("package.json")?)?;
@@ -364,6 +377,65 @@ fn install_npm(dir: &Path, d: &PackageDist, log: &mut dyn FnMut(String)) -> Resu
     let mut command = vec![bin.display().to_string()];
     command.extend(d.args.iter().cloned());
     Ok((command, d.env.clone()))
+}
+
+/// Optional dependencies for this platform, declared by any installed package but absent from the
+/// tree. Platform packages are recognised by name (`…-linux-x64`, `…-linux-x64-gnu`; the musl
+/// variants are left alone), which is how the SDKs that ship native binaries name them.
+fn missing_platform_optionals(dir: &Path) -> Result<Vec<String>> {
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        other => other,
+    };
+    let tag = format!("{}-{arch}", std::env::consts::OS);
+    let root = dir.join("node_modules");
+    let mut declared = Vec::new();
+    let mut pending = vec![(root.clone(), 0usize)];
+    while let Some((nm, depth)) = pending.pop() {
+        let Ok(rd) = std::fs::read_dir(&nm) else { continue };
+        let mut pkgs = Vec::new();
+        for e in rd.flatten() {
+            let p = e.path();
+            let fname = e.file_name();
+            let fname = fname.to_string_lossy();
+            if fname.starts_with('@') {
+                if let Ok(scoped) = std::fs::read_dir(&p) {
+                    pkgs.extend(scoped.flatten().map(|e| e.path()));
+                }
+            } else if !fname.starts_with('.') {
+                pkgs.push(p);
+            }
+        }
+        for pkg in pkgs {
+            let Ok(text) = std::fs::read_to_string(pkg.join("package.json")) else { continue };
+            let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+            if let Some(opt) = json.get("optionalDependencies").and_then(|v| v.as_object()) {
+                for name in opt.keys() {
+                    if (name.ends_with(&tag) || name.ends_with(&format!("{tag}-gnu"))) && !name.contains("musl") {
+                        declared.push((name.clone(), pkg.clone()));
+                    }
+                }
+            }
+            if depth < 4 {
+                pending.push((pkg.join("node_modules"), depth + 1));
+            }
+        }
+    }
+    let mut missing: Vec<String> = declared
+        .into_iter()
+        .filter(|(name, pkg)| {
+            // resolved the way node does: every node_modules directory from the dependant upwards
+            !pkg.ancestors()
+                .take_while(|a| a.starts_with(&root))
+                .filter(|a| a.file_name().is_some_and(|f| f == "node_modules"))
+                .any(|nm| nm.join(name).join("package.json").is_file())
+        })
+        .map(|(name, _)| name)
+        .collect();
+    missing.sort();
+    missing.dedup();
+    Ok(missing)
 }
 
 fn install_uv(dir: &Path, d: &PackageDist, log: &mut dyn FnMut(String)) -> Result<(Vec<String>, BTreeMap<String, String>)> {
@@ -482,4 +554,37 @@ fn probe_load_session(command: &[String], env: &BTreeMap<String, String>, home: 
     let _ = child.kill();
     let _ = child.wait();
     result
+}
+
+#[cfg(test)]
+mod platform_optional_tests {
+    use super::missing_platform_optionals;
+    use std::fs;
+
+    #[test]
+    fn missing_platform_optional_is_reported_and_resolved_up_the_tree() {
+        let t = tempdir();
+        let sdk = t.join("node_modules/@acme/sdk");
+        fs::create_dir_all(&sdk).unwrap();
+        let tag = format!("{}-{}", std::env::consts::OS, match std::env::consts::ARCH { "x86_64" => "x64", "aarch64" => "arm64", o => o });
+        fs::write(
+            sdk.join("package.json"),
+            format!(r#"{{"name":"@acme/sdk","optionalDependencies":{{"@acme/sdk-{tag}":"1","@acme/sdk-{tag}-musl":"1","@acme/sdk-darwin-arm64":"1"}}}}"#),
+        )
+        .unwrap();
+        assert_eq!(missing_platform_optionals(&t).unwrap(), vec![format!("@acme/sdk-{tag}")]);
+        // hoisted next to the dependant's parent node_modules: found
+        let native = t.join(format!("node_modules/@acme/sdk-{tag}"));
+        fs::create_dir_all(&native).unwrap();
+        fs::write(native.join("package.json"), "{}").unwrap();
+        assert!(missing_platform_optionals(&t).unwrap().is_empty());
+        fs::remove_dir_all(&t).unwrap();
+    }
+
+    fn tempdir() -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("sill-opt-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
 }
