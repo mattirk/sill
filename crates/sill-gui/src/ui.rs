@@ -24,11 +24,10 @@ use sill_client::supervision::{Activity, Attention, Level, clock};
 use sill_proto::sfp::{Answer, Item, Question, Tool};
 
 use crate::style::{self, P, alpha};
+use crate::layout::{self, Drawer};
 use crate::{App, Message, Pick, SessionView, Tab, icons, keys, selection, viewer};
 
 const MONO_FONT: Font = Font::with_name(crate::fonts::MONO_FAMILY);
-/// Below this width the drawer takes the content area instead of sitting beside it.
-pub const NARROW: f32 = 600.0;
 
 impl App {
     pub(crate) fn view(&self) -> Element<'_, Message> {
@@ -60,32 +59,46 @@ impl App {
             let main = column![self.file_chips(view), body]
                 .width(Fill)
                 .height(Fill);
-            let narrow = size.width < NARROW;
-            // the conversation keeps one place in the widget tree whether the drawer is beside it
-            // or not: moving it would give its scrollable fresh state (back at the top) and drop
-            // a selection in it
-            let page: Element<'_, Message> = if self.workspace.shown && narrow {
-                self.file_drawer(view).map(|message| match message {
+            let placement = self.layout.drawer(self.workspace.shown, size.width);
+            let over = matches!(placement, Drawer::Over(_));
+            // the conversation keeps one place in the widget tree wherever the drawer is: moving
+            // it would give its scrollable fresh state (back at the top) and drop a selection
+            let mut beside = row![main].height(Fill);
+            if let Drawer::Beside(width) = placement {
+                beside = beside
+                    .push(self.drawer_grip())
+                    .push(container(self.file_drawer(view)).width(width));
+            }
+            let mut page = stack![beside];
+            if let Drawer::Over(width) = placement {
+                // over the conversation: a file opened from it takes the conversation's place,
+                // and a press on the uncovered strip puts the drawer away
+                let drawer = self.file_drawer(view).map(|message| match message {
                     Message::Workspace(crate::workspace::Action::Open { path, repo }) => {
                         Message::Workspace(crate::workspace::Action::OpenAndHide { path, repo })
                     }
                     message => message,
-                })
-            } else {
-                let mut page = row![main].height(Fill);
-                if self.workspace.shown {
-                    page = page
-                        .push(rule::vertical(1).style(style::rule_style(P.border)))
-                        .push(
-                            container(self.file_drawer(view))
-                                .width((size.width * 0.28).clamp(205.0, 320.0)),
-                        );
-                }
-                page.into()
-            };
+                });
+                page = page.push(row![
+                    mouse_area(
+                        container(space())
+                            .width(Fill)
+                            .height(Fill)
+                            .style(style::fill(alpha(Color::BLACK, 0.25)))
+                    )
+                    .on_press(Message::Workspace(
+                        crate::workspace::Action::ToggleDrawer
+                    )),
+                    self.drawer_grip(),
+                    container(drawer)
+                        .width(width)
+                        .height(Fill)
+                        .style(style::fill(P.bg)),
+                ]);
+            }
             // the conversation is out of sight: its state, question and Stop stay in reach
-            let mut screen = column![page].height(Fill);
-            if covered || (self.workspace.shown && narrow) {
+            let mut screen = column![page.height(Fill)].height(Fill);
+            if covered || over {
                 screen = screen.push(self.strip(view));
             }
             screen.into()
@@ -95,6 +108,24 @@ impl App {
             Some(menu) => iced::widget::stack![window, self.session_menu(menu)].into(),
             None => window.into(),
         }
+    }
+
+    /// The drawer's edge: a line to drag, wider than it looks.
+    fn drawer_grip(&self) -> Element<'_, Message> {
+        let line = if self.layout.dragging {
+            P.accent
+        } else {
+            P.border
+        };
+        mouse_area(
+            container(rule::vertical(1).style(style::rule_style(line)))
+                .center_x(layout::HANDLE)
+                .height(Fill)
+                .style(style::fill(P.bg)),
+        )
+        .interaction(iced::mouse::Interaction::ResizingHorizontally)
+        .on_press(Message::Layout(layout::Action::DragStart))
+        .into()
     }
 
     /// No session selected: why, and what to do.
@@ -210,9 +241,37 @@ impl App {
                     ),
                     self.activity(),
                     select,
+                    tooltip(
+                        keys::press(
+                            button(
+                                svg(if self.layout.full {
+                                    icons::collapse()
+                                } else {
+                                    icons::expand()
+                                })
+                                .width(14)
+                                .height(14)
+                                .style(style::icon(alpha(P.fg, 0.75))),
+                            )
+                            .padding([4, 6])
+                            .style(style::quiet),
+                            Message::Layout(layout::Action::ToggleFull),
+                        ),
+                        container(
+                            text(if self.layout.full {
+                                "Back to the drawer and the reading width (Ctrl+Shift+E, Escape)"
+                            } else {
+                                "Full conversation: the whole width, drawer away (Ctrl+Shift+E)"
+                            })
+                            .size(style::TINY),
+                        )
+                        .padding([3, 8])
+                        .style(style::fill(P.surface)),
+                        tooltip::Position::Bottom,
+                    ),
                     keys::press(
                         button(
-                            text(if self.workspace.shown {
+                            text(if self.workspace.shown && !self.layout.full {
                                 "›"
                             } else {
                                 "Files ‹"
@@ -550,6 +609,10 @@ impl App {
         if let Some(failed) = &view.failed {
             feed = feed.push(note(failed, P.error));
         }
+        let feed: Element<'a, Message> = match self.layout.measure() {
+            Some(measure) => container(feed.max_width(measure)).center_x(Fill).into(),
+            None => feed.into(),
+        };
         let scroll = scrollable(feed)
             .id("conversation")
             .height(Fill)

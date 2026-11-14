@@ -189,7 +189,12 @@ impl App {
                 Task::none()
             }
             Action::ToggleDrawer => {
-                self.workspace.shown = !self.workspace.shown;
+                // in full conversation the drawer's toggle brings the drawer back
+                if std::mem::take(&mut self.layout.full) {
+                    self.workspace.shown = true;
+                } else {
+                    self.workspace.shown = !self.workspace.shown;
+                }
                 let Some(id) = self.selected.clone() else {
                     return Task::none();
                 };

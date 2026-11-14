@@ -1142,6 +1142,62 @@ fn narrow_drawer_opens_files_in_the_full_content_area() {
     assert!(demo_view(&app).files.reader.is_some());
 }
 
+/// In a window too narrow for both, the drawer opens over the conversation, which keeps its place
+/// underneath.
+#[test]
+fn a_drawer_over_the_conversation_keeps_its_place() {
+    let mut app = streamed();
+    let _ = app.update(Message::DemoTick);
+    let mut live = Live::new((520.0, 400.0));
+    live.apply(&mut app, Message::Latest);
+    let mut before = None;
+    live.frame(&app, |ui| before = scrolled(ui, "conversation"));
+    app.width = 520.0;
+    live.apply(
+        &mut app,
+        Message::Workspace(crate::workspace::Action::ToggleDrawer),
+    );
+    assert!(app.narrow(), "520 px does not fit the drawer beside");
+    let mut after = None;
+    live.frame(&app, |ui| after = scrolled(ui, "conversation"));
+    let (before, after) = (before.unwrap(), after.unwrap());
+    assert!(before > 100.0, "the conversation is longer than the window");
+    // the status strip under the drawer shortens the view; at the tail, it stays at the tail
+    assert!(after >= before - 1.0, "back towards the top: {before} → {after}");
+    assert!(app.current().unwrap().follow_tail);
+}
+
+/// Full conversation (Ctrl+Shift+E) puts the drawer away and keeps whether it was open; Escape
+/// leaves it before anything else, and the drawer's toggle leaves it with the drawer shown.
+#[test]
+fn full_conversation_puts_the_drawer_away_until_left() {
+    use crate::layout::{Action, Drawer};
+    use crate::workspace::Action as Files;
+    let (mut app, _) = App::new(true, None);
+    let _ = app.update(Message::Workspace(Files::ToggleDrawer));
+    let ctrl_shift_e = crate::keys::shortcut(iced::keyboard::Event::KeyPressed {
+        key: iced::keyboard::Key::Character("E".into()),
+        modified_key: iced::keyboard::Key::Character("E".into()),
+        physical_key: iced::keyboard::key::Physical::Unidentified(
+            iced::keyboard::key::NativeCode::Unidentified,
+        ),
+        location: iced::keyboard::Location::Standard,
+        modifiers: iced::keyboard::Modifiers::CTRL | iced::keyboard::Modifiers::SHIFT,
+        text: None,
+        repeat: false,
+    });
+    assert!(matches!(ctrl_shift_e, Some(Message::Layout(Action::ToggleFull))));
+    let _ = app.update(ctrl_shift_e.unwrap());
+    assert!(app.layout.full && app.workspace.shown);
+    assert_eq!(app.layout.drawer(true, 1200.0), Drawer::Hidden);
+    let _ = app.update(Message::Escape);
+    assert!(!app.layout.full && app.workspace.shown, "Escape leaves full first");
+    let _ = app.update(Message::Workspace(Files::ToggleDrawer));
+    let _ = app.update(Message::Layout(Action::ToggleFull));
+    let _ = app.update(Message::Workspace(Files::ToggleDrawer));
+    assert!(!app.layout.full && app.workspace.shown);
+}
+
 // --- selection ----------------------------------------------------------------------------------
 
 /// What a selection test drives: the Simulator (one view, built once) or a [`Live`] frame (the
@@ -1599,7 +1655,8 @@ fn scrolling_up_from_the_tail_keeps_the_place() {
 fn opening_the_drawer_keeps_the_conversation_s_place() {
     let mut app = streamed();
     let _ = app.update(Message::DemoTick);
-    let mut live = Live::new((1000.0, 400.0));
+    // wide enough that the prose keeps its measure beside the drawer: nothing rewraps
+    let mut live = Live::new((1300.0, 400.0));
     live.apply(&mut app, Message::Latest);
     let mut before = None;
     live.frame(&app, |ui| before = scrolled(ui, "conversation"));
@@ -1753,7 +1810,8 @@ fn tab_reaches_every_control_in_reading_order_and_enter_presses_it() {
     assert_eq!(names[1], "choose demo", "{names:?}");
     assert_eq!(names[2], "Menu(Toggle)", "{names:?}");
     assert_eq!(names[3], "ToggleText", "{names:?}");
-    assert!(names[4].starts_with("files ToggleDrawer"), "{names:?}");
+    assert_eq!(names[4], "Layout(ToggleFull)", "{names:?}");
+    assert!(names[5].starts_with("files ToggleDrawer"), "{names:?}");
     let order = [
         at("files Toggle("),
         at("ToggleTool(\"tool\")"),

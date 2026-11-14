@@ -446,7 +446,9 @@ pub fn window_shortcut(key: &Key, modifiers: Modifiers) -> bool {
     let (ctrl, shift) = (modifiers.command(), modifiers.shift());
     match key.as_ref() {
         Key::Named(Named::ArrowLeft | Named::ArrowRight) => ctrl && shift,
-        Key::Character(c) if c.eq_ignore_ascii_case("f") => ctrl && shift,
+        Key::Character(c) if c.eq_ignore_ascii_case("f") || c.eq_ignore_ascii_case("e") => {
+            ctrl && shift
+        }
         Key::Character(c) if c.eq_ignore_ascii_case("t") => ctrl && !shift,
         _ => false,
     }
@@ -464,6 +466,9 @@ pub fn shortcut(event: keyboard::Event) -> Option<Message> {
         Key::Named(Named::ArrowRight) if ctrl && shift => Message::StepTab(1),
         Key::Character(c) if ctrl && shift && c.eq_ignore_ascii_case("f") => {
             Message::Workspace(crate::workspace::Action::ToggleDrawer)
+        }
+        Key::Character(c) if ctrl && shift && c.eq_ignore_ascii_case("e") => {
+            Message::Layout(crate::layout::Action::ToggleFull)
         }
         Key::Character(c) if ctrl && !shift && c.eq_ignore_ascii_case("t") => {
             Message::ToggleTerminal

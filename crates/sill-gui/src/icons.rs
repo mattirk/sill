@@ -15,6 +15,9 @@ const AGENT: &str = "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 2a8 8 0 1 1 0 16
 const GHOST: &str = "M12 2.5a7 7 0 0 0-7 7V21l2.4-1.8 2.3 1.8 2.3-1.8 2.3 1.8 2.3-1.8L19 21V9.5a7 7 0 0 0-7-7zM9.5 8a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3zm5 0a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3z";
 /// A plus, for the new-session menu.
 const PLUS: &str = "M11 4h2v7h7v2h-7v7h-2v-7H4v-2h7z";
+/// Full conversation: four corners pointing out, and back: pointing in.
+const EXPAND: &str = "M4 4h6v2H6v4H4zM14 4h6v6h-2V6h-4zM4 14h2v4h4v2H4zM18 14h2v6h-6v-2h4z";
+const COLLAPSE: &str = "M8 4h2v6H4V8h4zM14 4h2v4h4v2h-6zM4 14h6v6H8v-4H4zM14 14h6v2h-4v4h-2z";
 /// The send arrow and the stop square, on the shelf's 24-unit grid.
 const SEND: &str = "M5 4.5 20 12 5 19.5 7.5 12Z";
 const STOP: &str = "M6 6H18V18H6Z";
@@ -40,6 +43,8 @@ macro_rules! icon {
 icon!(herring, HERRING);
 icon!(ghost, GHOST);
 icon!(plus, PLUS);
+icon!(expand, EXPAND);
+icon!(collapse, COLLAPSE);
 icon!(send, SEND);
 icon!(stop, STOP);
 icon!(claude, CLAUDE);

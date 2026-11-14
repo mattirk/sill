@@ -4,6 +4,7 @@ mod fonts;
 mod forms;
 mod icons;
 mod keys;
+mod layout;
 mod menu;
 #[cfg(test)]
 mod perf;
@@ -188,6 +189,8 @@ pub enum Message {
     Workspace(workspace::Action),
     /// The window's new width.
     Resized(f32),
+    /// Full conversation, and the drawer's edge dragged.
+    Layout(layout::Action),
     /// Tab (true) or Shift+Tab: the keyboard moves to the next or previous control.
     Focus(bool),
     /// Ctrl+Shift+Right (1) or Left (-1): the next or previous session.
@@ -416,6 +419,7 @@ pub struct App {
     demo_step: usize,
     /// The window's width, for the narrow layout's choices.
     pub width: f32,
+    pub layout: layout::Layout,
     /// A selection is being dragged in the conversation: following the tail would pull the text
     /// from under the pointer, so new text does not scroll it until the drag ends.
     pub selecting: bool,
@@ -474,6 +478,7 @@ impl App {
             now: Instant::now(),
             demo_step: 0,
             width: 720.0,
+            layout: layout::Layout::default(),
             selecting: false,
         };
         if demo {
@@ -530,12 +535,16 @@ impl App {
         subscriptions.push(iced::keyboard::listen().filter_map(keys::shortcut));
         subscriptions
             .push(iced::window::resize_events().map(|(_, size)| Message::Resized(size.width)));
+        subscriptions.push(self.layout.subscription());
         Subscription::batch(subscriptions)
     }
 
-    /// Below this the drawer takes the content area instead of sitting beside it.
+    /// The drawer is over the conversation rather than beside it.
     pub fn narrow(&self) -> bool {
-        self.width < ui::NARROW
+        matches!(
+            self.layout.drawer(self.workspace.shown, self.width),
+            layout::Drawer::Over(_)
+        )
     }
 
     pub fn current(&self) -> Option<&SessionView> {
@@ -839,6 +848,19 @@ impl App {
             }
             Message::Workspace(action) => return self.workspace_action(action),
             Message::Resized(width) => self.width = width,
+            Message::Layout(action) => match action {
+                layout::Action::ToggleFull => {
+                    self.layout.full = !self.layout.full;
+                    return self.restore_scroll();
+                }
+                layout::Action::DragStart => self.layout.dragging = true,
+                layout::Action::DragTo(x) => {
+                    if self.layout.dragging {
+                        self.layout.drag_to(x, self.workspace.shown, self.width);
+                    }
+                }
+                layout::Action::DragEnd => self.layout.dragging = false,
+            },
             Message::Focus(forward) => return keys::step(forward),
             Message::StepTab(delta) => {
                 let Some(at) = self
@@ -1264,6 +1286,11 @@ impl App {
             return Task::none();
         }
         if self.changes.take().is_some() {
+            return self.restore_scroll();
+        }
+        // full conversation is left first, as in the shelf
+        if self.layout.full {
+            self.layout.full = false;
             return self.restore_scroll();
         }
         self.armed_close = None;
