@@ -756,6 +756,21 @@ mod tests {
     }
 
     #[test]
+    fn no_host_login_is_shared_into_jails_and_the_hosts_codex_login_stays_masked() {
+        let registry: std::collections::BTreeMap<String, crate::agents::Agent> = crate::agents::builtin().into_iter().map(|a| (a.id.clone(), a)).collect();
+        assert!(registry.values().filter(|a| ["claude", "codex"].contains(&a.id.as_str())).all(|a| a.shared_files.is_empty()));
+        let home = std::env::temp_dir().join(format!("sill-shared-login-{}", std::process::id()));
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::write(home.join(".codex/auth.json"), "host login").unwrap();
+        // the host's own Codex home (with its login) is hidden from every other agent's jail
+        assert!(other_agents_paths(&registry, Some("claude"), &home).contains(&home.join(".codex")));
+        // and Codex's own jail binds its sill-owned home there, never the host file over it
+        let codex = &registry["codex"];
+        assert!(!codex.shared_files.iter().any(|p| crate::paths::expand_home(p, &home) == home.join(".codex/auth.json")));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn ids_at_the_sinks() {
         assert!(valid_id(&crate::store::new_id()));
         assert!(valid_id("a1b2c3d4") && valid_id("old-style_id"));

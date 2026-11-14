@@ -139,7 +139,9 @@ pub fn builtin() -> Vec<Agent> {
             state_dirs: vec!["~/.codex".into()],
             home_paths: vec!["~/.codex".into()],
             seed_files: vec![],
-            shared_files: vec!["~/.codex/auth.json".into()],
+            // no host login is shared into jails: Codex in sill logs in on its own (the host-side
+            // login lands in the sill-owned home through `CODEX_HOME`)
+            shared_files: vec![],
             host_login: vec!["chat-gpt".into(), "chatgpt".into()],
             home_env: Some("CODEX_HOME".into()),
             home_env_parent: false,
