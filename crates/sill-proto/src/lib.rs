@@ -1,8 +1,6 @@
-//! The daemon protocol (docs/daemon.md §3.3): what a frontend and `sill daemon` say to each other.
-//! JSON-RPC 2.0, one message per line, over the unix socket at [`socket_path`]; sill's methods are
-//! ACP extension methods — `_sill/<group>.<name>` — so the same connection can carry ACP's own
-//! `session/*` traffic once the conversation moves into the daemon (M1). This crate knows nothing
-//! of jails or GTK: a frontend links it and nothing else of sill.
+//! Sill Frontend Protocol control messages, schemas and blocking client.
+//! Public conversation records live in `sfp`; `initialize` selects the development identity.
+//! Remaining same-build host APIs use the explicitly negotiated internal namespace.
 
 use std::path::PathBuf;
 
@@ -10,98 +8,99 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 pub mod client;
+pub mod initialize;
 pub mod rpc;
 pub mod schema;
 pub mod wire;
+pub mod sfp;
 pub mod transport;
 
 pub use client::Client;
 
-/// Bumped when a method or a type changes shape (docs/protocol.md has the changelog); the daemon
-/// reports its own in [`DaemonStatus`], and a client of another number restarts it.
+/// Historical internal status diagnostic. Control compatibility uses initialize::PROTOCOL_ID.
 pub const PROTOCOL: u32 = 6;
 
 /// Method names. Groups follow the table in docs/daemon.md §3.3.
 pub mod method {
-    pub const SESSION_REPLAY: &str = "_sill/session.replay";
-    pub const FRONTEND_REQUEST: &str = "_sill/frontend.request";
+    pub const SESSION_REPLAY: &str = "_sill/internal/session.replay";
+    pub const FRONTEND_REQUEST: &str = "_sill/internal/frontend.request";
     pub const DAEMON_SCHEMA: &str = "_sill/daemon.schema";
-    pub const DAEMON_STATUS: &str = "_sill/daemon.status";
-    pub const DAEMON_SHUTDOWN: &str = "_sill/daemon.shutdown";
-    pub const SESSIONS_LIST: &str = "_sill/sessions.list";
-    pub const SESSIONS_GET: &str = "_sill/sessions.get";
+    pub const DAEMON_STATUS: &str = "_sill/internal/daemon.status";
+    pub const DAEMON_SHUTDOWN: &str = "_sill/internal/daemon.shutdown";
+    pub const SESSIONS_LIST: &str = "_sill/internal/sessions.list";
+    pub const SESSIONS_GET: &str = "_sill/internal/sessions.get";
     /// Start a stored session's jail (or find it running): `Key` → `Started`.
-    pub const SESSIONS_START: &str = "_sill/sessions.start";
+    pub const SESSIONS_START: &str = "_sill/internal/sessions.start";
     /// Stop a session's jail: `Key` → `{}`.
-    pub const SESSIONS_STOP: &str = "_sill/sessions.stop";
+    pub const SESSIONS_STOP: &str = "_sill/internal/sessions.stop";
     /// The tail of a session's log: `LogRequest` → `Text`.
-    pub const SESSIONS_LOG: &str = "_sill/sessions.log";
+    pub const SESSIONS_LOG: &str = "_sill/internal/sessions.log";
     /// Start the session's jail and agent if needed and subscribe this connection to its
     /// conversation: `Attach` → `{}`; `SESSION_EVENT` notifications follow, the session's current
     /// state first (docs/daemon.md §3.3).
-    pub const SESSIONS_ATTACH: &str = "_sill/sessions.attach";
+    pub const SESSIONS_ATTACH: &str = "_sill/internal/sessions.attach";
     /// Unsubscribe: `Key` → `{}`. The agent stays the daemon's.
-    pub const SESSIONS_DETACH: &str = "_sill/sessions.detach";
+    pub const SESSIONS_DETACH: &str = "_sill/internal/sessions.detach";
     /// A command to a running session (prompt, cancel, mode, option, login): `SessionCommand` → `{}`.
-    pub const SESSIONS_COMMAND: &str = "_sill/sessions.command";
+    pub const SESSIONS_COMMAND: &str = "_sill/internal/sessions.command";
     /// The answer to an agent's question (permission, form): `SessionAnswer` → `{}`.
-    pub const SESSIONS_ANSWER: &str = "_sill/sessions.answer";
+    pub const SESSIONS_ANSWER: &str = "_sill/internal/sessions.answer";
     /// Notification, daemon → attached frontends: `SessionEvent`.
-    pub const SESSION_EVENT: &str = "_sill/session.event";
+    pub const SESSION_EVENT: &str = "_sill/internal/session.event";
     /// End a session as closing its tab would (docs/memory.md §2.2): the summary turn when the
     /// agent can be asked, the row written or deleted, the jail stopped. Params [`End`].
-    pub const SESSIONS_END: &str = "_sill/sessions.end";
+    pub const SESSIONS_END: &str = "_sill/internal/sessions.end";
     /// How many unkept writes a session has outside its pins (not counting build output); answers
     /// [`Count`]. The shelf asks before a ghost's tab closes (docs/memory.md §3.3).
-    pub const SESSIONS_CHANGES: &str = "_sill/sessions.changes";
+    pub const SESSIONS_CHANGES: &str = "_sill/internal/sessions.changes";
     /// *Summarize now*: the summary turn without the end; the answer comes as a `Summarized` event.
-    pub const SESSIONS_CHECKPOINT: &str = "_sill/sessions.checkpoint";
+    pub const SESSIONS_CHECKPOINT: &str = "_sill/internal/sessions.checkpoint";
     /// The writes that were the shelf's (M1c): `sill.db` has one writer, the daemon.
-    pub const SESSIONS_NEW: &str = "_sill/sessions.new";
+    pub const SESSIONS_NEW: &str = "_sill/internal/sessions.new";
     /// One field of a session's row; params [`SessionSet`].
-    pub const SESSIONS_SET: &str = "_sill/sessions.set";
+    pub const SESSIONS_SET: &str = "_sill/internal/sessions.set";
     /// Stop the jail, remove the session's state and its row.
-    pub const SESSIONS_DELETE: &str = "_sill/sessions.delete";
-    pub const SESSIONS_PIN: &str = "_sill/sessions.pin";
-    pub const SESSIONS_UNPIN: &str = "_sill/sessions.unpin";
+    pub const SESSIONS_DELETE: &str = "_sill/internal/sessions.delete";
+    pub const SESSIONS_PIN: &str = "_sill/internal/sessions.pin";
+    pub const SESSIONS_UNPIN: &str = "_sill/internal/sessions.unpin";
     /// The global pins (docs/pins.md): bound in every non-ghost jail, a chip only when pinned in
     /// the session too. `pins.list` answers `Vec<PathBuf>`; `pins.add` and `pins.remove` take a
     /// [`GlobalPin`] (added paths are canonical, refused inside another global pin or sill's state).
-    pub const PINS_LIST: &str = "_sill/pins.list";
-    pub const PINS_ADD: &str = "_sill/pins.add";
-    pub const PINS_REMOVE: &str = "_sill/pins.remove";
-    pub const MEMORY_NOTE_ADD: &str = "_sill/memory.note_add";
-    pub const MEMORY_NOTE_REMOVE: &str = "_sill/memory.note_remove";
+    pub const PINS_LIST: &str = "_sill/internal/pins.list";
+    pub const PINS_ADD: &str = "_sill/internal/pins.add";
+    pub const PINS_REMOVE: &str = "_sill/internal/pins.remove";
+    pub const MEMORY_NOTE_ADD: &str = "_sill/internal/memory.note_add";
+    pub const MEMORY_NOTE_REMOVE: &str = "_sill/internal/memory.note_remove";
     /// Compaction and retention now (docs/memory.md §2.4); answers [`Compacted`].
-    pub const MEMORY_COMPACT: &str = "_sill/memory.compact";
+    pub const MEMORY_COMPACT: &str = "_sill/internal/memory.compact";
     /// Delete every ended session; answers [`Count`].
-    pub const MEMORY_FORGET: &str = "_sill/memory.forget";
+    pub const MEMORY_FORGET: &str = "_sill/internal/memory.forget";
     /// An agent type's default settings; params [`AgentSettingsSet`].
-    pub const AGENTS_SET_SETTINGS: &str = "_sill/agents.set_settings";
+    pub const AGENTS_SET_SETTINGS: &str = "_sill/internal/agents.set_settings";
     /// The Changes page (docs/daemon.md §7 M2): answers a [`wire::ChangesList`].
-    pub const CHANGES_LIST: &str = "_sill/changes.list";
+    pub const CHANGES_LIST: &str = "_sill/internal/changes.list";
     /// Params a [`wire::DiffOf`]; answers [`Text`].
-    pub const CHANGES_DIFF: &str = "_sill/changes.diff";
+    pub const CHANGES_DIFF: &str = "_sill/internal/changes.diff";
     /// Params [`ChangesKeep`]; this and the next two answer a [`wire::Done`].
-    pub const CHANGES_KEEP: &str = "_sill/changes.keep";
+    pub const CHANGES_KEEP: &str = "_sill/internal/changes.keep";
     /// Params [`ChangesPaths`].
-    pub const CHANGES_REVERT: &str = "_sill/changes.revert";
+    pub const CHANGES_REVERT: &str = "_sill/internal/changes.revert";
     /// Params [`ChangesUndo`].
-    pub const CHANGES_UNDO: &str = "_sill/changes.undo";
+    pub const CHANGES_UNDO: &str = "_sill/internal/changes.undo";
     /// A pinned repository's path back to HEAD; params [`GitRevert`], answers [`Text`].
-    pub const CHANGES_GIT_REVERT: &str = "_sill/changes.git_revert";
+    pub const CHANGES_GIT_REVERT: &str = "_sill/internal/changes.git_revert";
     /// Notification, no params: the overlays changed (a sweep, a keep, a turn, a deletion) —
     /// whatever shows them rescans.
-    pub const CHANGES_CHANGED: &str = "_sill/changes.changed";
+    pub const CHANGES_CHANGED: &str = "_sill/internal/changes.changed";
     /// A session's jail layout for showing files as the agent sees them; answers [`JailView`].
-    pub const SESSIONS_JAIL_VIEW: &str = "_sill/sessions.jail_view";
+    pub const SESSIONS_JAIL_VIEW: &str = "_sill/internal/sessions.jail_view";
     /// The ledger across time (SPEC §3.6): params a `sill_core::history::Filter`, answers its events.
-    pub const CHANGES_HISTORY: &str = "_sill/changes.history";
-    pub const MEMORY_LIST: &str = "_sill/memory.list";
-    pub const MEMORY_SHOW: &str = "_sill/memory.show";
-    pub const MEMORY_SEARCH: &str = "_sill/memory.search";
-    pub const MEMORY_TRANSCRIPT: &str = "_sill/memory.transcript";
-    pub const SETTINGS_GET: &str = "_sill/settings.get";
+    pub const CHANGES_HISTORY: &str = "_sill/internal/changes.history";
+    pub const MEMORY_LIST: &str = "_sill/internal/memory.list";
+    pub const MEMORY_SHOW: &str = "_sill/internal/memory.show";
+    pub const MEMORY_SEARCH: &str = "_sill/internal/memory.search";
+    pub const MEMORY_TRANSCRIPT: &str = "_sill/internal/memory.transcript";
+    pub const SETTINGS_GET: &str = "_sill/internal/settings.get";
 }
 
 /// `$XDG_RUNTIME_DIR/sill/daemon.sock` — the directory is the one the shim sockets live in (0700,

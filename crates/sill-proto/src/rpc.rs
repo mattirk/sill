@@ -59,6 +59,9 @@ impl Error {
     pub fn new(code: i64, message: impl Into<String>) -> Self {
         Error { code, message: message.into(), data: None }
     }
+    pub fn domain(code: &str, message: impl Into<String>) -> Self {
+        Self { code: Self::FAILED, message: message.into(), data: Some(serde_json::json!({"code": code})) }
+    }
     pub fn method_not_found(method: &str) -> Self {
         Self::new(Self::METHOD_NOT_FOUND, format!("unknown method {method}"))
     }

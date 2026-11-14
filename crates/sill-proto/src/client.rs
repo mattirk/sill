@@ -2,7 +2,7 @@
 //! handed out on a channel. What the CLI uses; the shelf wraps the same thing in a GLib channel.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError, channel, sync_channel};
@@ -35,7 +35,6 @@ pub struct Client {
     writer: SyncSender<Outbound>,
     interrupt: Arc<dyn Fn() + Send + Sync>,
     closed: Arc<AtomicBool>,
-    methods: Option<std::collections::HashSet<String>>,
     next_id: AtomicU64,
     pending: Pending,
     /// `(method, params)` of every notification the daemon sent.
@@ -54,7 +53,9 @@ impl Client {
     pub fn connect_local() -> Result<Client> {
         let path = crate::socket_path()?;
         let stream = UnixStream::connect(&path).with_context(|| format!("sill daemon at {}", path.display()))?;
-        Self::over(stream)
+        let client = Self::over(stream)?;
+        client.initialize()?;
+        Ok(client)
     }
 
     /// Connect, starting the daemon when nothing answers: the systemd socket starts it by itself
@@ -70,33 +71,17 @@ impl Client {
 
     /// Local-only entry point used by the stdio bridge on the box.
     pub fn connect_local_or_start() -> Result<Client> {
-        match Self::connect_local() {
-            Ok(c) => match c.protocol()? {
-                p if p == crate::PROTOCOL => return Ok(c),
-                p => {
-                    // an older (or newer) binary's daemon, left running across an upgrade: it is
-                    // asked to leave and comes back as this binary — the socket unit starts the
-                    // installed one on the next connection, else it is started below
-                    eprintln!("sill: the daemon speaks protocol {p}, this binary {}: restarting it", crate::PROTOCOL);
-                    let _ = c.call_within::<Value>(crate::method::DAEMON_SHUTDOWN, crate::Empty::default(), QUICK_TIMEOUT);
-                    drop(c);
-                    let deadline = Instant::now() + Duration::from_secs(5);
-                    while Instant::now() < deadline {
-                        std::thread::sleep(Duration::from_millis(100));
-                        match Self::connect_local() {
-                            Ok(c) if c.protocol().ok() == Some(crate::PROTOCOL) => return Ok(c),
-                            Ok(_) => continue, // the old one is still leaving
-                            Err(_) => break,   // gone: start one
-                        }
-                    }
-                }
-            },
+        let path = crate::socket_path()?;
+        match UnixStream::connect(&path) {
+            Ok(stream) => {
+                let client = Self::over(stream)?;
+                // Reaching a daemon never authorizes replacing it, even when its handshake fails.
+                client.initialize()?;
+                return Ok(client);
+            }
             Err(e) => {
-                if std::env::var_os("SILL_NO_DAEMON_START").is_some() {
-                    return Err(e);
-                }
-                // a jail has its own tmpfs /run and no host socket: a daemon started here would
-                // die at once on the hidden sill.db and leave a dead socket behind
+                if !matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused)
+                    || std::env::var_os("SILL_NO_DAEMON_START").is_some() { return Err(e.into()); }
                 if std::env::var_os("SILL_SESSION").is_some() {
                     bail!("no sill daemon is reachable from inside a session");
                 }
@@ -177,10 +162,20 @@ impl Client {
         }
     }
 
-    /// The protocol the daemon on this connection speaks (`daemon.status`).
-    fn protocol(&self) -> Result<u32> {
-        let s: crate::DaemonStatus = self.call_within(crate::method::DAEMON_STATUS, crate::Empty::default(), QUICK_TIMEOUT)?;
-        Ok(s.protocol)
+    /// Initialize a raw control connection. `connect*` and `ssh` do this automatically.
+    pub fn initialize(&self) -> Result<crate::initialize::Initialized> {
+        let result: crate::initialize::Initialized = self.call_within(
+            crate::initialize::METHOD,
+            crate::initialize::Initialize {
+                protocols: vec![crate::initialize::PROTOCOL_ID.into()],
+                client: crate::initialize::Peer { name: "sill".into(), version: env!("CARGO_PKG_VERSION").into() },
+                capabilities: std::collections::BTreeMap::from([(crate::initialize::INTERNAL_CAPABILITY.into(), 1)]),
+            }, QUICK_TIMEOUT,
+        ).context("SFP initialization failed; explicitly update/restart an incompatible daemon")?;
+        if result.protocol != crate::initialize::PROTOCOL_ID {
+            bail!("daemon selected unsupported protocol {}; explicitly update/restart it", result.protocol);
+        }
+        Ok(result)
     }
 
     /// The connection is gone (the daemon left or restarted): the caller connects again.
@@ -188,6 +183,7 @@ impl Client {
         e.to_string().contains("closed the connection") || e.to_string().contains("went away") || e.to_string().contains("writing to the daemon")
     }
 
+    /// Raw duplex transport; call `initialize` before sending control requests.
     pub fn over(stream: UnixStream) -> Result<Client> {
         let reader = stream.try_clone()?;
         let close = stream.try_clone()?;
@@ -206,8 +202,8 @@ impl Client {
         let c2 = closed.clone();
         let i2 = interrupt.clone();
         std::thread::Builder::new().name("sill-proto-reader".into()).spawn(move || {
-            for line in BufReader::new(reader).lines() {
-                let Ok(line) = line else { break };
+            let mut reader = BufReader::new(reader);
+            while let Ok(Some(line)) = crate::initialize::read_frame(&mut reader, crate::initialize::MAX_MESSAGE_BYTES) {
                 let Ok(msg) = serde_json::from_str::<Incoming>(&line) else { continue };
                 match (msg.id, msg.method) {
                     (Some(id), None) => {
@@ -242,7 +238,7 @@ impl Client {
             i3();
             fail_pending(&p3, "writing to the daemon: connection closed");
         })?;
-        Ok(Client { writer: wtx, interrupt, closed, methods: None, next_id: AtomicU64::new(1), pending, notifications: Mutex::new(nrx) })
+        Ok(Client { writer: wtx, interrupt, closed, next_id: AtomicU64::new(1), pending, notifications: Mutex::new(nrx) })
     }
 
     /// Connect over the system SSH client. It owns authentication, host verification, proxies
@@ -254,31 +250,11 @@ impl Client {
         let writer = child.stdin.take().context("ssh stdin")?;
         let child = Arc::new(Mutex::new(child));
         let stop = child.clone();
-        let mut client = Self::over_io(reader, writer, move || {
+        let client = Self::over_io(reader, writer, move || {
             if let Ok(mut c) = stop.lock() { let _ = c.kill(); let _ = c.wait(); }
         })?;
-        client.negotiate_remote()?;
+        client.initialize()?;
         Ok(client)
-    }
-
-    fn negotiate_remote(&mut self) -> Result<()> {
-        let protocol = self.protocol()?;
-        if protocol == crate::PROTOCOL { return Ok(()); }
-        let schema: Value = self.call_within(crate::method::DAEMON_SCHEMA, crate::Empty::default(), QUICK_TIMEOUT)
-            .with_context(|| format!("box speaks protocol {protocol}, this client {}; the box needs a daemon with schema negotiation (update sill on the box)", crate::PROTOCOL))?;
-        let remote = schema["methods"].as_array().context("the box returned no protocol method table")?;
-        let local = crate::schema::document();
-        let methods = local["methods"].as_array().unwrap().iter().filter(|m| {
-            // Opaque payloads cannot be compared structurally across protocol revisions.
-            if m["name"] == crate::method::FRONTEND_REQUEST || m["name"] == crate::method::CHANGES_HISTORY || m["name"] == crate::method::SETTINGS_GET { return false; }
-            remote.iter().find(|r| r["name"] == m["name"]).is_some_and(|r| {
-                r["kind"] == m["kind"]
-                    && schema_matches(&m["params"], &r["params"], &local, &schema, &mut std::collections::HashSet::new())
-                    && schema_matches(&m["result"], &r["result"], &local, &schema, &mut std::collections::HashSet::new())
-            })
-        }).filter_map(|m| m["name"].as_str().map(str::to_string)).collect();
-        self.methods = Some(methods);
-        Ok(())
     }
 
     /// One request, its answer — within `CALL_TIMEOUT`: an attach waits for a jail to start and an
@@ -293,13 +269,11 @@ impl Client {
     pub fn call_within<T: DeserializeOwned>(&self, method: &str, params: impl Serialize, timeout: Duration) -> Result<T> {
         let deadline = Instant::now() + timeout;
         if self.closed.load(Ordering::Acquire) { bail!("the daemon closed the connection"); }
-        if self.methods.as_ref().is_some_and(|m| !m.contains(method)) {
-            bail!("the box does not support a compatible {method}; update sill on the box");
-        }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let req = Request::new(Some(id), method, serde_json::to_value(params)?);
         let mut line = serde_json::to_vec(&req)?;
         line.push(b'\n');
+        if line.len() > crate::initialize::MAX_MESSAGE_BYTES { bail!("request exceeds max_message_bytes"); }
         let (tx, rx) = channel();
         self.pending.lock().unwrap().insert(id, tx);
         let mut out = Outbound { line, deadline };
@@ -318,7 +292,7 @@ impl Client {
             }
         }
         let v = match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(v) => v.map_err(|e| anyhow::anyhow!("{method}: {e}"))?,
+            Ok(v) => v.map_err(anyhow::Error::new).with_context(|| format!("{method}"))?,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => bail!("the daemon went away"),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return self.timed_out(id, method, timeout),
         };
@@ -376,29 +350,10 @@ fn fail_pending(pending: &Pending, message: &str) {
     }
 }
 
-/// Compare the reachable schema, resolving references rather than assuming equal type names
-/// imply equal shapes. New methods on either side are harmless; changed method shapes are
-/// unavailable until both binaries agree. Recursive wire types are compared once per pair.
-fn schema_matches(local: &Value, remote: &Value, local_doc: &Value, remote_doc: &Value, seen: &mut std::collections::HashSet<(String, String)>) -> bool {
-    if let (Some(l), Some(r)) = (local.get("$ref").and_then(Value::as_str), remote.get("$ref").and_then(Value::as_str)) {
-        if !seen.insert((l.to_string(), r.to_string())) { return true; }
-        let (Some(l), Some(r)) = (local_doc.pointer(l.trim_start_matches('#')), remote_doc.pointer(r.trim_start_matches('#'))) else { return false };
-        return schema_matches(l, r, local_doc, remote_doc, seen);
-    }
-    match (local, remote) {
-        (Value::Object(l), Value::Object(r)) => {
-            let meaningful = |key: &str| !matches!(key, "description" | "title" | "examples" | "$comment");
-            l.keys().filter(|k| meaningful(k)).count() == r.keys().filter(|k| meaningful(k)).count()
-                && l.iter().filter(|(k, _)| meaningful(k)).all(|(k, v)| r.get(k).is_some_and(|rv| schema_matches(v, rv, local_doc, remote_doc, seen)))
-        }
-        (Value::Array(l), Value::Array(r)) => l.len() == r.len() && l.iter().zip(r).all(|(l, r)| schema_matches(l, r, local_doc, remote_doc, seen)),
-        _ => local == remote,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::BufRead;
 
     #[test]
     fn deadline_includes_a_blocked_large_write() {
@@ -444,40 +399,24 @@ mod tests {
     }
 
     #[test]
-    fn schema_negotiation_ignores_added_methods_and_rejects_changed_shapes() {
-        let local = crate::schema::document();
-        let mut remote = local.clone();
-        remote["protocol"] = serde_json::json!(crate::PROTOCOL + 1);
-        remote["methods"].as_array_mut().unwrap().push(serde_json::json!({"name":"_sill/new.method","kind":"request","params":{},"result":{}}));
-        let session = &local["$defs"]["Session"];
-        assert!(schema_matches(session, &remote["$defs"]["Session"], &local, &remote, &mut Default::default()));
-        remote["$defs"]["Session"]["type"] = serde_json::json!("number");
-        assert!(!schema_matches(session, &remote["$defs"]["Session"], &local, &remote, &mut Default::default()));
-    }
-
-    #[test]
-    fn mismatch_negotiation_never_asks_the_daemon_to_shutdown() {
+    fn incompatible_initialization_sends_no_shutdown_or_other_request() {
         let (socket, server) = UnixStream::pair().unwrap();
         let mut output = server.try_clone().unwrap();
         let worker = std::thread::spawn(move || {
             let mut input = BufReader::new(server);
-            for expected in [crate::method::DAEMON_STATUS, crate::method::DAEMON_SCHEMA, crate::method::SESSIONS_LIST] {
-                let mut line = String::new();
-                input.read_line(&mut line).unwrap();
-                let req: Value = serde_json::from_str(&line).unwrap();
-                assert_eq!(req["method"], expected);
-                let result = match expected {
-                    crate::method::DAEMON_STATUS => serde_json::json!({"version":"test","protocol":crate::PROTOCOL+1,"pid":1,"started":0,"mode":"test","launcher":"test","limits":false,"journal":false,"socket":"remote","sessions":0,"running":0}),
-                    crate::method::DAEMON_SCHEMA => crate::schema::document(),
-                    _ => serde_json::json!([]),
-                };
-                writeln!(output, "{}", serde_json::json!({"jsonrpc":"2.0","id":req["id"],"result":result})).unwrap();
-            }
+            let mut line = String::new();
+            input.read_line(&mut line).unwrap();
+            let req: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(req["method"], crate::initialize::METHOD);
+            let error = Error::domain("incompatible", "unsupported protocol");
+            writeln!(output, "{}", serde_json::json!({"jsonrpc":"2.0","id":req["id"],"error":error})).unwrap();
+            line.clear();
+            assert_eq!(input.read_line(&mut line).unwrap(), 0);
         });
-        let mut client = Client::over(socket).unwrap();
-        client.negotiate_remote().unwrap();
-        assert_eq!(client.call::<Value>(crate::method::SESSIONS_LIST, crate::Empty::default()).unwrap(), serde_json::json!([]));
+        let client = Client::over(socket).unwrap();
+        let error = client.initialize().unwrap_err();
+        assert_eq!(error.downcast_ref::<Error>().unwrap().data.as_ref().unwrap()["code"], "incompatible");
+        drop(client);
         worker.join().unwrap();
     }
-
 }

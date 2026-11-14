@@ -44,6 +44,19 @@ const fn notification<P: JsonSchema>(name: &'static str, doc: &'static str) -> M
 
 /// Every method the daemon answers and every notification it sends, in the order of docs/protocol.md.
 pub const METHODS: &[Method] = &[
+    req::<crate::sfp::UploadCreate, crate::sfp::UploadCreated>("_sill/uploads.create", "Create an immutable session upload with an idempotency key."),
+    req_empty::<crate::sfp::SessionControl>("_sill/sessions.control", "Change adapter controls; do not blindly retry an uncertain login or retry-session action."),
+    req::<crate::sfp::CancelTurn, Value>("_sill/sessions.cancel", "Request cancellation of one identified active turn."),
+    req::<crate::initialize::Initialize, crate::initialize::Initialized>(crate::initialize::METHOD, "Initialize an SFP control connection."),
+    req::<crate::sfp::Attach, crate::sfp::Attached>("_sill/sessions.attach", "Subscribe with a durable cursor or immutable paginated snapshot."),
+    req::<crate::sfp::SnapshotRequest, crate::sfp::SnapshotPage>("_sill/sessions.snapshot", "Read a connection-bound immutable snapshot page."),
+    req_empty::<crate::sfp::Detach>("_sill/sessions.detach", "Detach this subscription without cancelling work."),
+    req::<crate::sfp::Submit, crate::sfp::Submission>("_sill/sessions.submit", "Durably accept an idempotent submission; queue during work."),
+    req::<crate::sfp::SubmissionKey, crate::sfp::Submission>("_sill/submissions.get", "Recover the outcome of a submission."),
+    req::<crate::sfp::SubmissionKey, crate::sfp::Submission>("_sill/submissions.cancel", "Cancel a knowingly unsent queued submission."),
+    req::<crate::sfp::SubmissionKey, crate::sfp::Submission>("_sill/submissions.resume", "Resume a held queued submission, retaining acceptance order."),
+    req::<crate::sfp::AnswerQuestion, crate::sfp::Question>("_sill/questions.answer", "Record the first valid answer with a durable idempotency key."),
+    notification::<crate::sfp::SessionEvent>("_sill/session.event", "A committed ordered session event."),
     notification::<Value>(method::SESSION_REPLAY, "Atomic stored transcript tail before attach live state; core transcript entries are opaque in this schema."),
     req::<Value, Value>(method::FRONTEND_REQUEST, "Host data operations for the rendering frontend; sill_core::frontend::Request is typed in Rust, opaque in this schema."),
     req::<crate::Empty, Value>(method::DAEMON_SCHEMA, "The daemon protocol schema and method capabilities, for remote negotiation."),
@@ -102,6 +115,8 @@ pub fn document() -> Value {
                 "name": m.name,
                 "kind": match m.kind { Kind::Request => "request", Kind::Notification => "notification" },
                 "doc": m.doc,
+                "x-sill-internal": m.name.starts_with("_sill/internal/"),
+                "capabilities": if m.name.starts_with("_sill/internal/") { json!({"sill.internal":1}) } else { json!({}) },
                 "params": m.params.map(|f| f(&mut g).to_value()),
                 "result": m.result.map(|f| f(&mut g).to_value()).unwrap_or(json!({"type": "object", "additionalProperties": false})),
             })
@@ -111,7 +126,8 @@ pub fn document() -> Value {
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "sill daemon protocol",
-        "protocol": crate::PROTOCOL,
+        "protocol": crate::initialize::PROTOCOL_ID,
+        "limits": crate::initialize::Limits::default(),
         "transport": "JSON-RPC 2.0, one message per line, over the unix socket at $XDG_RUNTIME_DIR/sill/daemon.sock (docs/protocol.md)",
         "methods": methods,
         "$defs": defs,
@@ -130,14 +146,14 @@ mod tests {
         names.dedup();
         assert_eq!(n, names.len(), "a method twice");
         let doc = document();
-        assert_eq!(doc["protocol"], json!(crate::PROTOCOL));
+        assert_eq!(doc["protocol"], json!(crate::initialize::PROTOCOL_ID));
         assert_eq!(doc["methods"].as_array().unwrap().len(), METHODS.len());
         let defs = doc["$defs"].as_object().unwrap();
         for t in ["Event", "Command", "Answer", "Session", "DaemonStatus", "ChangesList", "StopReason"] {
             assert!(defs.contains_key(t), "{t} missing from $defs");
         }
         // a frontend reads the method table: the attach params say what to send
-        let attach = doc["methods"].as_array().unwrap().iter().find(|m| m["name"] == method::SESSIONS_ATTACH).unwrap();
+        let attach = doc["methods"].as_array().unwrap().iter().find(|m| m["name"] == "_sill/sessions.attach").unwrap();
         assert!(attach["params"]["$ref"].as_str().unwrap().ends_with("/Attach"), "{attach}");
     }
 
@@ -147,6 +163,6 @@ mod tests {
         let doc = include_str!("../../../docs/protocol.md");
         let missing: Vec<&str> = METHODS.iter().map(|m| m.name).filter(|n| !doc.contains(&format!("`{n}`"))).collect();
         assert!(missing.is_empty(), "not in docs/protocol.md: {missing:?}");
-        assert!(doc.contains(&format!("protocol **{}**", crate::PROTOCOL)), "docs/protocol.md names another protocol number");
+        assert!(doc.contains(crate::initialize::PROTOCOL_ID));
     }
 }
