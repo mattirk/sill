@@ -289,7 +289,7 @@ fn node<'a>(
 }
 
 /// The Diff view: per pinned repository a dim header — its
-/// folder and branch, and `N files · +a −d ?u` — then a row per changed file: git's letter (`N`
+/// folder and branch (a workspace: only `workspace`, at the right end), and `N files · +a −d ?u` — then a row per changed file: git's letter (`N`
 /// for new), the file's name (its path below the repository in the tooltip) and its lines added
 /// and removed, or `—` without counts.
 fn diff_list<'a>(mut body: Column<'a, Message>, state: &'a State, workspaces: &crate::workspaces::State) -> Column<'a, Message> {
@@ -312,37 +312,43 @@ fn diff_list<'a>(mut body: Column<'a, Message>, state: &'a State, workspaces: &c
         };
         any = true;
         let section = |value: String| text(value).size(style::TINY).color(style::alpha(P.fg, 0.5));
-        // a workspace says so in the accent, as its row in the tree does; its generated branch
-        // name says nothing. The folder's name gives way first, so the word shows whole.
-        let folder = section(name(base).to_string()).wrapping(text::Wrapping::None);
-        let header = if workspaces.workspace_of(&root.path).is_some() {
+        let totals = "Same totals as the pin chip: +tracked insertions −tracked deletions against HEAD, \
+                      ?untracked files";
+        // a workspace says only that, in the accent at the row's right end, as its row in the
+        // tree does: its folder is the tree's to name and its generated branch says nothing.
+        let header: Element<'a, Message> = if workspaces.workspace_of(&root.path).is_some() {
             row![
-                container(folder).width(Fill).clip(true),
+                container(section(summary_label(repo)).wrapping(text::Wrapping::None))
+                    .width(Fill)
+                    .clip(true),
                 text("workspace")
                     .size(style::TINY)
                     .font(Font::with_name(crate::fonts::MONO_FAMILY))
                     .color(style::alpha(P.accent, 0.9))
                     .wrapping(text::Wrapping::None),
             ]
+            .spacing(6)
+            .width(Fill)
+            .into()
         } else {
             let head = if repo.head.is_empty() { String::new() } else { format!("  git {}", repo.head) };
             row![
                 container(section(format!("{}{head}", name(base))).wrapping(text::Wrapping::None))
                     .width(Fill)
-                    .clip(true)
+                    .clip(true),
+                section(summary_label(repo)).wrapping(text::Wrapping::None),
             ]
+            .spacing(6)
+            .into()
         };
         body = body.push(tip(
-            container(header.push(section(summary_label(repo)).wrapping(text::Wrapping::None)).spacing(6))
-            .padding(Padding {
+            container(header).width(Fill).padding(Padding {
                 top: 8.0,
                 bottom: 2.0,
                 left: 4.0,
                 right: 10.0,
             }),
-            "Same totals as the pin chip: +tracked insertions −tracked deletions against HEAD, \
-             ?untracked files"
-                .into(),
+            format!("{}\n{totals}", base.display),
         ));
         // a workspace starts from HEAD: what is only in the person's checkout is not listed here
         if let Some(apart) = workspaces.checkout_only(&root.path) {
