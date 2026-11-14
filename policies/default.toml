@@ -1,16 +1,17 @@
 # sill policy "default" (SPEC §4.2): the whole machine visible, every write recorded in the session's
 # overlay, secrets hidden, network only to the agent's own endpoints. Copy to ~/.config/sill/policies/
-# under another name to make variants; `audit` and `open` presets live next to this file.
+# under another name to make variants.
 
 name = "default"
 description = "Whole machine overlaid, secrets masked, network allow-list"
 
 [network]
 mode = "allow"            # none | all | allow
+# Tooling only. The model provider's own hosts are not here: each agent brings them as its registry
+# `domains` (api.anthropic.com for Claude Code, api.openai.com for Codex, ...), merged in at launch, so
+# a Codex session cannot reach Anthropic and vice versa. Anything else the agent tries is refused and
+# shown with an Allow button; a click records a grant for that session only.
 allow = [
-  "api.anthropic.com", "*.anthropic.com", "claude.ai", "*.claude.ai",   # Claude Code
-  "claude.com", "*.claude.com",                                         # its login and token renewal
-  "statsig.anthropic.com", "*.sentry.io",
   "registry.npmjs.org", "*.npmjs.org",                                  # ACP adapters via npx
   "github.com", "*.github.com", "*.githubusercontent.com",
   "crates.io", "static.crates.io", "index.crates.io",
@@ -21,14 +22,9 @@ allow_local = []          # host-local addresses are refused in every mode unles
 # A pattern grants one port: 443 for CONNECT (TLS) and 80 for plain HTTP; "host:8443" names another,
 # "host:*" any. e.g. allow_local = ["localhost:8080", "server.lan:*"]
 
-# Refused hosts sill never asks about: telemetry / crash reporting (still blocked, just quietly).
-# Leave this out to get the built-in list; set it to [] to be asked about everything.
-quiet = [
-  "*.datadoghq.com", "*.datadoghq.eu", "*.sentry.io", "sentry.io", "*.ingest.sentry.io", "*.statsig.com",
-  "*.segment.io", "*.segment.com", "*.mixpanel.com", "*.posthog.com", "*.amplitude.com", "*.bugsnag.com",
-  "*.launchdarkly.com", "*.google-analytics.com", "*.googletagmanager.com", "*.newrelic.com", "*.nr-data.net",
-  "*.honeycomb.io", "*.rollbar.com", "*.intercom.io",
-]
+# Refused hosts sill never asks about: telemetry / crash reporting (Sentry, Statsig, Datadog, Segment,
+# PostHog, ...; the list is in policy.rs `quiet_default`). Still blocked, just quietly. Set
+# `quiet = []` to be asked about everything, or list your own hosts to replace the built-in list.
 
 [paths]
 # Unrecorded host writes — one reason each (SPEC §4.2 "direct"). Agent state is NOT here: each agent gets

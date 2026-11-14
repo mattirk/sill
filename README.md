@@ -20,8 +20,11 @@ Three ideas carry the whole thing:
 
 - **The jail.** Every session runs in its own bubblewrap sandbox. The agent sees the whole machine and
   can write anywhere, but unpinned writes land in an *overlay* on the state filesystem — the host is
-  untouched until you say so. The network goes through sill's proxy with an allow-list; a refused host
-  shows up as an *Allow* button in the conversation. The agent's own login and config files
+  untouched until you say so. The network goes through sill's proxy with an allow-list in three layers:
+  the policy's tooling hosts (npm, GitHub, crates.io, PyPI, Debian), the agent's own provider hosts from
+  its registry entry (`api.anthropic.com` for Claude Code, `api.openai.com` for Codex), and per-session
+  grants — a refused host shows up as an *Allow* button in the conversation. Telemetry hosts are
+  refused without asking. The agent's own login and config files
   (`~/.claude`, `~/.codex`, …) are sill-owned copies; your host's are never seen by an agent.
 - **Pins.** A pinned folder is bound live into the jail: what the agent writes there is on the host at
   once, commits included, and you review with `git` as usual. Pins are the session's workspace and are
