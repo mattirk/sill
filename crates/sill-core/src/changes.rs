@@ -170,6 +170,45 @@ pub fn git_diff(repo: &Path, rel: &Path) -> String {
     }
 }
 
+/// The lines of a tracked file that differ from HEAD, as 1-based `[start, end)` ranges in the
+/// working-tree file (`git diff -U0`; a pure deletion has no lines to mark and is left out).
+/// `None` for an untracked file (everything is new) or when git can't say.
+pub fn git_changed_lines(repo: &Path, rel: &Path) -> Option<Vec<(usize, usize)>> {
+    let tracked = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["ls-files", "--error-unmatch", "--"])
+        .arg(rel)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !tracked {
+        return None;
+    }
+    let out = std::process::Command::new("git").arg("-C").arg(repo).args(["diff", "-U0", "HEAD", "--"]).arg(rel).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(parse_hunk_ranges(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// `@@ -a[,b] +c[,d] @@` → `(c, c + d)` for every hunk with lines on the new side.
+fn parse_hunk_ranges(diff: &str) -> Vec<(usize, usize)> {
+    let mut v = Vec::new();
+    for line in diff.lines().filter(|l| l.starts_with("@@")) {
+        let Some(plus) = line.split_whitespace().find(|w| w.starts_with('+')) else { continue };
+        let mut it = plus[1..].split(',');
+        let start: usize = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let count: usize = it.next().map(|s| s.parse().unwrap_or(0)).unwrap_or(1);
+        if start > 0 && count > 0 {
+            v.push((start, start + count));
+        }
+    }
+    v
+}
+
 /// Revert a file in a live repo to HEAD (or delete it when untracked).
 pub fn git_revert(repo: &Path, rel: &Path) -> Result<&'static str> {
     let tracked = std::process::Command::new("git").arg("-C").arg(repo).args(["ls-files", "--error-unmatch", "--"]).arg(rel)
@@ -222,6 +261,13 @@ pub fn home() -> Result<PathBuf> {
 mod tests {
     use super::*;
     use crate::ledger::{FileType, Kind};
+
+    #[test]
+    fn hunk_ranges_from_a_diff() {
+        let diff = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -3 +3 @@\n-old\n+new\n@@ -5,0 +6,2 @@\n+a\n+b\n@@ -9,2 +11,0 @@\n-gone\n-gone\n";
+        assert_eq!(parse_hunk_ranges(diff), vec![(3, 4), (6, 8)]); // the pure deletion has no lines to mark
+        assert!(parse_hunk_ranges("").is_empty());
+    }
 
     /// Thousands of matches overflow the pipe to git; the call must still return.
     #[test]

@@ -379,7 +379,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
                         return glib::Propagation::Stop;
                     }
                     gdk::Key::T | gdk::Key::t => {
-                        s.open_host_terminal();
+                        s.open_host_terminal(false);
                         return glib::Propagation::Stop;
                     }
                     _ => {}
@@ -558,16 +558,26 @@ impl Shelf {
         self.viewer.focus();
     }
 
-    /// A terminal on the host (Ctrl+Shift+T, the shell button's right-click), in the folder the
-    /// person is looking at: the tree's selection, else the session's first pinned folder, else home.
-    /// A host process by design — outside the jail, nothing it does is recorded.
-    fn open_host_terminal(&self) {
+    /// A shell on the host (Ctrl+Shift+T, the shell button's right-click), in the folder the person
+    /// is looking at: the tree's selection, else the session's first pinned folder, else home. In the
+    /// selected session's bottom slot — the same pane as the jail shell, marked as host — or, with
+    /// `window`, the configured terminal in a window of its own. A host process by design — outside
+    /// the jail, nothing it does is recorded.
+    fn open_host_terminal(&self, window: bool) {
         let tree = if self.tree.root.is_visible() { self.tree.selected_dir() } else { None };
         let pinned = || self.tabs.selected().and_then(|id| self.store.pins(&id).ok()).and_then(|pins| pins.into_iter().find(|p| p.is_dir()));
         let cwd = tree
             .or_else(pinned)
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("/"));
+        if !window {
+            if let Some(id) = self.tabs.selected()
+                && let Some(v) = self.views.borrow().get(&id)
+            {
+                v.toggle_host_shell(Some(cwd));
+            }
+            return;
+        }
         let Some(cmd) = sill_core::config::load().host_terminal() else {
             self.set_status("no terminal found on the host: set one under Settings → Host terminal");
             return;
@@ -996,7 +1006,7 @@ impl Shelf {
             let shelf = self.clone();
             *view.on_open_file.borrow_mut() = Some(Box::new(move |p, full| shelf.open_file(p, full)));
             let shelf = self.clone();
-            *view.on_host_terminal.borrow_mut() = Some(Box::new(move || shelf.open_host_terminal()));
+            *view.on_host_terminal.borrow_mut() = Some(Box::new(move |window| shelf.open_host_terminal(window)));
         }
         {
             // the top-bar status mirrors the selected view's status

@@ -959,6 +959,10 @@ button.sill-md-image:hover { opacity: 0.85; }
 .sill-mark-failed { color: @error_color; }
 .sill-tool-body { font-family: monospace; font-size: 85%; padding: 4px 10px 6px 28px; color: alpha(@view_fg_color, 0.8); }
 .sill-tool-diff { margin: 0 10px 6px 28px; font-size: 85%; }
+/* the viewer's Markdown preview: a code block or image that differs from git HEAD */
+.sill-md-changed { border-left: 3px solid @success_color; }
+/* the host shell pane: the same terminal, under a warning-coloured caption and rule */
+.sill-host-caption { font-size: 85%; color: @warning_color; padding: 3px 10px; border-top: 2px solid alpha(@warning_color, 0.8); }
 .sill-tool-rows { margin-left: 10px; border-left: 1px solid alpha(@view_fg_color, 0.12); }
 .sill-tool-rows .sill-tool { border-left: none; }
 .sill-permission { background: alpha(@warning_bg_color, 0.10); border-radius: 0; padding: 8px 10px;

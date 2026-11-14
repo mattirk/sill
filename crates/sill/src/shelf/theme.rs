@@ -284,6 +284,8 @@ pub struct TagColors {
     pub dim: Option<String>,
     /// Hairlines (rules, table header underline).
     pub rule: String,
+    /// Paragraph background of a block that differs from git HEAD (the viewer's Markdown preview).
+    pub changed: String,
 }
 
 pub fn tag_colors() -> TagColors {
@@ -293,5 +295,12 @@ pub fn tag_colors() -> TagColors {
         link: t.link.to_string(),
         dim: if t.fg_dim.is_empty() { None } else { Some(t.fg_dim.to_string()) },
         rule: if t.border.is_empty() { "rgba(128,128,128,0.4)".to_string() } else { t.border.to_string() },
+        changed: with_alpha(t.success, 0.18).unwrap_or_else(|| "rgba(46,194,126,0.18)".to_string()),
     }
+}
+
+/// `#rrggbb` at an alpha, as CSS `rgba(...)`; `None` for anything else (Adwaita's empty slots).
+fn with_alpha(hex: &str, alpha: f32) -> Option<String> {
+    let c = gtk4::gdk::RGBA::parse(hex).ok()?;
+    Some(format!("rgba({},{},{},{alpha})", (c.red() * 255.0).round() as u8, (c.green() * 255.0).round() as u8, (c.blue() * 255.0).round() as u8))
 }

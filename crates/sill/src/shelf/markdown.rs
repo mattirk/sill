@@ -157,6 +157,8 @@ pub fn install_tags(buffer: &gtk::TextBuffer) {
         t.set_underline(gtk::pango::Underline::Single);
         t.set_foreground(Some(&colors.link));
     }
+    // a block that differs from git HEAD (the viewer's preview, `render_marked`)
+    tag("changed").set_paragraph_background(Some(&colors.changed));
     {
         // a hairline: a one-space paragraph in a 1 pt font with the border colour as its background
         // (spacing around it comes from the neighbours: pixels above/below would be painted too)
@@ -373,7 +375,7 @@ impl<'a> Out<'a> {
         }
     }
 
-    fn code(&mut self, lang: &str, code: &str) {
+    fn code(&mut self, lang: &str, code: &str) -> sourceview5::View {
         self.close_text();
         let view = match self.reuse(sourceview5::View::static_type()).and_then(|w| w.downcast::<sourceview5::View>().ok()) {
             Some(v) => v,
@@ -384,13 +386,21 @@ impl<'a> Out<'a> {
             }
         };
         fill_code_view(&view, lang, code);
+        view
+    }
+
+    /// The prose view and its end, to mark a block from here on (`mark_changed`).
+    fn block_mark(&mut self) -> (gtk::TextView, i32) {
+        let tv = self.text();
+        let off = tv.buffer().end_iter().offset();
+        (tv, off)
     }
 
     /// An image segment: the picture as wide as the column (smaller ones at their own size), aspect
     /// kept; a click opens it large. The size is set outright from the message's width — GtkPicture's
     /// own measure asks for the file's pixel size and lets a parent shrink it to nearly nothing —
     /// and `relayout` renders again when the width changes.
-    fn image(&mut self, path: &Path, alt: &str) {
+    fn image(&mut self, path: &Path, alt: &str) -> gtk::Button {
         self.close_text();
         let b = match self.reuse(gtk::Button::static_type()).and_then(|w| w.downcast::<gtk::Button>().ok()) {
             Some(b) => b,
@@ -414,7 +424,7 @@ impl<'a> Out<'a> {
             }
         };
         let name = path.to_string_lossy();
-        let Some(pic) = b.child().and_downcast::<gtk::Picture>() else { return };
+        let Some(pic) = b.child().and_downcast::<gtk::Picture>() else { return b };
         if b.widget_name().as_str() != name.as_ref() {
             b.set_widget_name(&name);
             pic.set_filename(Some(path));
@@ -440,6 +450,7 @@ impl<'a> Out<'a> {
         } else {
             pic.set_size_request(-1, -1);
         }
+        b
     }
 
     fn finish(mut self) {
@@ -536,13 +547,43 @@ fn measure(tv: &gtk::TextView, text: &str, bold: bool) -> i32 {
 /// Render `markdown` into the message box `msg` (a vertical box in the conversation column; it must
 /// be in the window already, so measuring uses the right font). `class` is the message kind.
 pub fn render(msg: &gtk::Box, class: &str, markdown: &str) {
+    render_marked(msg, class, markdown, &[]);
+}
+
+/// Mark a prose block as changed: the `changed` tag (a paragraph background) from `start` to the end.
+fn mark_changed(mark: Option<(gtk::TextView, i32)>) {
+    if let Some((tv, start)) = mark {
+        let b = tv.buffer();
+        b.apply_tag_by_name("changed", &b.iter_at_offset(start), &b.end_iter());
+    }
+}
+
+/// `render`, with the source lines in `changed` (1-based `[start, end)` ranges, e.g. what differs
+/// from git HEAD) marked on the blocks they touch: prose gets the `changed` paragraph background,
+/// code blocks and images the `sill-md-changed` class.
+pub fn render_marked(msg: &gtk::Box, class: &str, markdown: &str, changed: &[(usize, usize)]) {
     let mut out = Out::new(msg, class);
     let mut table_width: Option<i32> = None;
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_TASKLISTS);
-    let parser = Parser::new_ext(markdown, opts);
+    let parser = Parser::new_ext(markdown, opts).into_offset_iter();
+
+    // byte offset → 1-based line, for the block ranges the parser reports
+    let line_starts: Vec<usize> = std::iter::once(0).chain(markdown.match_indices('\n').map(|(i, _)| i + 1)).collect();
+    let line_of = |off: usize| line_starts.partition_point(|&s| s <= off);
+    let touched = |r: &std::ops::Range<usize>| -> bool {
+        if changed.is_empty() {
+            return false;
+        }
+        let (a, b) = (line_of(r.start), line_of(r.end.saturating_sub(1).max(r.start)));
+        changed.iter().any(|&(s, e)| a < e && b >= s)
+    };
+    // open blocks that are changed: the prose view and where they started, applied at their end
+    let mut block_marks: Vec<Option<(gtk::TextView, i32)>> = Vec::new();
+    let mut code_changed = false;
+    let mut image_changed = false;
 
     let mut tags: Vec<String> = Vec::new();
     let mut list_stack: Vec<Option<u64>> = Vec::new(); // None = bullet, Some(n) = next number
@@ -556,16 +597,18 @@ pub fn render(msg: &gtk::Box, class: &str, markdown: &str) {
     let mut item_marker: Option<(i32, i32)> = None; // the last list marker's offsets, replaced by a task box
     let mut image: Option<(String, String)> = None; // (source, alt text so far)
 
-    for ev in parser {
+    for (ev, range) in parser {
         match ev {
             Event::Start(tag) => match tag {
                 Tag::Paragraph => {
                     if list_stack.is_empty() {
                         out.block_start(&mut need_newline);
                     }
+                    block_marks.push(touched(&range).then(|| out.block_mark()));
                 }
                 Tag::Heading { level, .. } => {
                     out.block_start(&mut need_newline);
+                    block_marks.push(touched(&range).then(|| out.block_mark()));
                     tags.push(
                         match level {
                             HeadingLevel::H1 => "h1",
@@ -578,10 +621,12 @@ pub fn render(msg: &gtk::Box, class: &str, markdown: &str) {
                 }
                 Tag::BlockQuote(_) => {
                     out.block_start(&mut need_newline);
+                    block_marks.push(touched(&range).then(|| out.block_mark()));
                     tags.push("quote".into());
                 }
                 Tag::CodeBlock(kind) => {
                     out.block_start(&mut need_newline);
+                    code_changed = touched(&range);
                     let lang = match kind {
                         CodeBlockKind::Fenced(l) => l.to_string(),
                         CodeBlockKind::Indented => String::new(),
@@ -598,6 +643,7 @@ pub fn render(msg: &gtk::Box, class: &str, markdown: &str) {
                     if !out.at_line_start() {
                         out.insert("\n", &[]);
                     }
+                    block_marks.push(touched(&range).then(|| out.block_mark()));
                     let depth = list_stack.len().saturating_sub(1).min(3);
                     let (marker, tag) = match list_stack.last_mut() {
                         Some(Some(n)) => {
@@ -616,9 +662,13 @@ pub fn render(msg: &gtk::Box, class: &str, markdown: &str) {
                 Tag::Strong => tags.push("bold".into()),
                 Tag::Strikethrough => tags.push("strike".into()),
                 Tag::Link { .. } => tags.push("link".into()),
-                Tag::Image { dest_url, .. } => image = Some((dest_url.to_string(), String::new())),
+                Tag::Image { dest_url, .. } => {
+                    image = Some((dest_url.to_string(), String::new()));
+                    image_changed = touched(&range);
+                }
                 Tag::Table(aligns) => {
                     out.block_start(&mut need_newline);
+                    block_marks.push(touched(&range).then(|| out.block_mark()));
                     table = Some((aligns, Vec::new()));
                 }
                 Tag::TableHead | Tag::TableRow => {
@@ -642,18 +692,22 @@ pub fn render(msg: &gtk::Box, class: &str, markdown: &str) {
                     if list_stack.is_empty() {
                         need_newline = true;
                     }
+                    mark_changed(block_marks.pop().flatten());
                 }
                 TagEnd::Heading(_) => {
                     tags.pop();
                     out.insert("\n", &[]);
+                    mark_changed(block_marks.pop().flatten());
                 }
                 TagEnd::BlockQuote(_) => {
                     tags.pop();
                     need_newline = true;
+                    mark_changed(block_marks.pop().flatten());
                 }
                 TagEnd::CodeBlock => {
                     if let Some((lang, text)) = code.take() {
-                        out.code(&lang, &text);
+                        let view = out.code(&lang, &text);
+                        if code_changed { view.add_css_class("sill-md-changed") } else { view.remove_css_class("sill-md-changed") }
                     }
                     need_newline = true;
                 }
@@ -668,6 +722,7 @@ pub fn render(msg: &gtk::Box, class: &str, markdown: &str) {
                     if !out.at_line_start() {
                         out.insert("\n", &[]);
                     }
+                    mark_changed(block_marks.pop().flatten());
                 }
                 TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link => {
                     tags.pop();
@@ -678,7 +733,8 @@ pub fn render(msg: &gtk::Box, class: &str, markdown: &str) {
                         let local = if remote { None } else { out.ctx.as_ref().and_then(|c| (c.resolve)(&src)) };
                         match local {
                             Some(p) if viewer::is_image(&p) => {
-                                out.image(&p, &alt);
+                                let b = out.image(&p, &alt);
+                                if image_changed { b.add_css_class("sill-md-changed") } else { b.remove_css_class("sill-md-changed") }
                                 table_width.get_or_insert(msg.width()); // sized for this width: relayout follows
                             }
                             // remote images aren't fetched (the shelf is outside the proxy): a link

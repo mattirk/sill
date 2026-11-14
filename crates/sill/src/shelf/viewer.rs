@@ -432,7 +432,21 @@ impl Viewer {
             }),
         );
         let text = self.text.text(&self.text.start_iter(), &self.text.end_iter(), true);
-        markdown::render(&self.md, "sill-agent", &text);
+        // in a repository, the blocks that differ from HEAD are tinted (git's view, SPEC §3.1)
+        let mut ranges: Vec<(usize, usize)> = Vec::new();
+        if let Some(repo) = changes::repo_root(path)
+            && let Ok(rel) = path.strip_prefix(&repo)
+        {
+            match changes::git_changed_lines(&repo, rel) {
+                Some(r) if !r.is_empty() => {
+                    self.say(&format!("{} hunk(s) differ from HEAD: tinted", r.len()));
+                    ranges = r;
+                }
+                Some(_) => {}
+                None => self.say("untracked in git: everything here is new"),
+            }
+        }
+        markdown::render_marked(&self.md, "sill-agent", &text, &ranges);
     }
 
     fn show(&self, path: &Path) {

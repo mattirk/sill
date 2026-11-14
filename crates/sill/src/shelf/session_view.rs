@@ -36,6 +36,11 @@ pub struct SessionView {
     term_scroll: gtk::ScrolledWindow,
     /// The shell's pty is opened on first use and kept while hidden.
     shell_open: std::cell::Cell<bool>,
+    /// The person's shell on the host (Ctrl+Shift+T): the same pane, under a warning-coloured
+    /// caption — a host process, outside the jail, unrecorded.
+    host_term: vte4::Terminal,
+    host_scroll: gtk::ScrolledWindow,
+    host_open: std::cell::Cell<bool>,
     /// The terminal is running a login; when it closes the session is opened again.
     login_pending: Rc<std::cell::Cell<bool>>,
     /// `Ready` arrived on the current connection.
@@ -82,8 +87,9 @@ pub struct SessionView {
     pub on_open_file: RefCell<Option<Box<dyn Fn(&std::path::Path, bool)>>>,
     /// Shell toggle in the controls row (M3 wires the terminal pane to it).
     pub on_shell: RefCell<Option<Box<dyn Fn(bool)>>>,
-    /// The shell button's right-click "terminal on the host": the window opens it (Ctrl+Shift+T).
-    pub on_host_terminal: RefCell<Option<Box<dyn Fn()>>>,
+    /// The shell button's right-click "terminal on the host": the window opens it (Ctrl+Shift+T) —
+    /// the pane here, or (`true`) a separate window with the configured terminal.
+    pub on_host_terminal: RefCell<Option<Box<dyn Fn(bool)>>>,
     /// Pins that were live when the jail started; changed pins need a session restart.
     live_pins: RefCell<Vec<std::path::PathBuf>>,
     /// Watches on pinned repos' `.git` (commits, index) so the chip numbers follow host activity too.
@@ -306,6 +312,15 @@ impl SessionView {
         term_overlay.set_child(Some(&term_scroll));
         term_overlay.add_overlay(&toast);
         bottom.add_named(&term_overlay, Some("shell"));
+        // the host shell: the same kind of pane, marked as host above it
+        let (host_term, host_scroll) = Self::host_terminal_pane();
+        let host_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let host_caption = gtk::Label::new(Some("host · outside the jail · nothing here is recorded"));
+        host_caption.add_css_class("sill-host-caption");
+        host_caption.set_xalign(0.0);
+        host_box.append(&host_caption);
+        host_box.append(&host_scroll);
+        bottom.add_named(&host_box, Some("host"));
         bottom.set_visible_child_name("prompt");
 
         let prompt_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -347,6 +362,9 @@ impl SessionView {
             terminal: terminal.clone(),
             term_scroll: term_scroll.clone(),
             shell_open: std::cell::Cell::new(false),
+            host_term: host_term.clone(),
+            host_scroll: host_scroll.clone(),
+            host_open: std::cell::Cell::new(false),
             login_pending: login_pending.clone(),
             ready: std::cell::Cell::new(false),
             mode_noted: std::cell::Cell::new(false),
@@ -487,6 +505,10 @@ impl SessionView {
             let v = view.clone();
             terminal.connect_eof(move |_| v.shell_closed());
         }
+        {
+            let v = view.clone();
+            host_term.connect_child_exited(move |_, _| v.host_shell_closed());
+        }
         view.connect(false);
         view
     }
@@ -494,27 +516,155 @@ impl SessionView {
     /// Terminal colours from the theme palette: fg/bg plus the 16 ANSI slots mapped onto the theme's
     /// semantic colours (red=error, green=success, yellow=warning, blue=accent, cyan=link …).
     fn apply_terminal_theme(&self, t: &theme::Theme) {
-        self.terminal.set_font_scale(theme::text_scale());
-        if t.bg.is_empty() {
-            self.terminal.set_default_colors();
-            return; // Adwaita: VTE's defaults follow the GTK theme
+        for term in [&self.terminal, &self.host_term] {
+            term.set_font_scale(theme::text_scale());
+            if t.bg.is_empty() {
+                term.set_default_colors();
+                continue; // Adwaita: VTE's defaults follow the GTK theme
+            }
+            let parse = |c: &str| gtk::gdk::RGBA::parse(c).ok();
+            let (Some(fg), Some(bg)) = (parse(t.fg), parse(t.bg)) else { continue };
+            let slots = [
+                t.surface, t.error, t.success, t.warning, t.accent, t.accent, t.link, t.fg, // normal 0–7
+                t.fg_dim, t.error, t.success, t.warning, t.accent, t.accent, t.link, t.fg, // bright 8–15
+            ];
+            let palette: Vec<gtk::gdk::RGBA> = slots.iter().filter_map(|c| parse(c)).collect();
+            if palette.len() == 16 {
+                let refs: Vec<&gtk::gdk::RGBA> = palette.iter().collect();
+                term.set_colors(Some(&fg), Some(&bg), &refs);
+            } else {
+                term.set_colors(Some(&fg), Some(&bg), &[]);
+            }
+            if let Some(cursor) = parse(t.accent) {
+                term.set_color_cursor(Some(&cursor));
+            }
         }
-        let parse = |c: &str| gtk::gdk::RGBA::parse(c).ok();
-        let (Some(fg), Some(bg)) = (parse(t.fg), parse(t.bg)) else { return };
-        let slots = [
-            t.surface, t.error, t.success, t.warning, t.accent, t.accent, t.link, t.fg, // normal 0–7
-            t.fg_dim, t.error, t.success, t.warning, t.accent, t.accent, t.link, t.fg, // bright 8–15
-        ];
-        let palette: Vec<gtk::gdk::RGBA> = slots.iter().filter_map(|c| parse(c)).collect();
-        if palette.len() == 16 {
-            let refs: Vec<&gtk::gdk::RGBA> = palette.iter().collect();
-            self.terminal.set_colors(Some(&fg), Some(&bg), &refs);
-        } else {
-            self.terminal.set_colors(Some(&fg), Some(&bg), &[]);
+    }
+
+    /// The host shell's terminal and its scrolled window: the jail pane's settings (font, scrollback,
+    /// links open with Ctrl+click, Ctrl+Shift+C/V copy and paste).
+    fn host_terminal_pane() -> (vte4::Terminal, gtk::ScrolledWindow) {
+        let term = vte4::Terminal::new();
+        term.set_size_request(-1, 200);
+        term.set_scrollback_lines(10_000);
+        term.set_font(Some(&gtk::pango::FontDescription::from_string("monospace 10")));
+        term.set_font_scale(theme::text_scale());
+        term.set_scroll_on_output(false);
+        term.set_scroll_on_keystroke(true);
+        term.add_css_class("sill-terminal");
+        if let Ok(re) = vte4::Regex::for_match(r#"https?://[^\s'"<>)\]]+"#, 0x400) {
+            let tag = term.match_add_regex(&re, 0);
+            term.match_set_cursor_name(tag, "pointer");
         }
-        if let Some(cursor) = parse(t.accent) {
-            self.terminal.set_color_cursor(Some(&cursor));
+        {
+            let click = gtk::GestureClick::new();
+            click.set_button(1);
+            click.set_propagation_phase(gtk::PropagationPhase::Capture);
+            let t = term.clone();
+            click.connect_pressed(move |g, _, x, y| {
+                if !g.current_event_state().contains(gdk::ModifierType::CONTROL_MASK) {
+                    return;
+                }
+                if let (Some(url), _) = t.check_match_at(x, y) {
+                    gtk::UriLauncher::new(&url).launch(None::<&gtk::Window>, None::<&gtk::gio::Cancellable>, |_| {});
+                    g.set_state(gtk::EventSequenceState::Claimed);
+                }
+            });
+            term.add_controller(click);
         }
+        {
+            let keys = gtk::EventControllerKey::new();
+            keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+            let t = term.clone();
+            keys.connect_key_pressed(move |_, key, _, state| {
+                let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
+                let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
+                let k = key.to_lower();
+                if ctrl && shift && k == gdk::Key::v {
+                    t.paste_clipboard();
+                    return glib::Propagation::Stop;
+                }
+                if ctrl && shift && k == gdk::Key::c {
+                    t.copy_clipboard_format(vte4::Format::Text);
+                    return glib::Propagation::Stop;
+                }
+                glib::Propagation::Proceed
+            });
+            term.add_controller(keys);
+        }
+        let scroll = gtk::ScrolledWindow::builder()
+            .child(&term)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::External)
+            .min_content_height(300)
+            .build();
+        (term, scroll)
+    }
+
+    /// Ctrl+Shift+T: the host shell pane, or back to the prompt when it is shown.
+    pub fn toggle_host_shell(self: &Rc<Self>, cwd: Option<std::path::PathBuf>) {
+        let on = self.bottom.visible_child_name().as_deref() != Some("host");
+        self.show_host_shell(on, cwd);
+    }
+
+    /// The host shell in the bottom slot: a login shell on the host, started on first use in `cwd`
+    /// (else the session's first pinned folder, else home) and kept while hidden. A host process by
+    /// design — outside the jail, nothing it does is recorded; the pane says so above the terminal
+    /// and the shell button turns the warning colour while it shows.
+    pub fn show_host_shell(self: &Rc<Self>, on: bool, cwd: Option<std::path::PathBuf>) {
+        if let Some(b) = self.shell_btn.borrow().as_ref() {
+            let t = theme::current();
+            let fg = super::icons::fg_for(b, &t);
+            let color = if on { gtk::gdk::RGBA::parse(t.warning).unwrap_or(fg) } else { fg };
+            b.set_child(Some(&super::icons::scalable("sill-terminal", color)));
+        }
+        if !on {
+            if self.bottom.visible_child_name().as_deref() == Some("host") {
+                self.bottom.set_visible_child_name("prompt");
+                self.prompt.grab_focus();
+            }
+            return;
+        }
+        if !self.host_open.get() {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+            let dir = cwd
+                .or_else(|| self.store.pins(&self.id()).unwrap_or_default().into_iter().find(|p| p.is_dir()))
+                .or_else(|| session::home().ok())
+                .unwrap_or_else(|| std::path::PathBuf::from("/"));
+            let v = self.clone();
+            self.host_term.spawn_async(
+                vte4::PtyFlags::DEFAULT,
+                Some(&dir.to_string_lossy()),
+                &[&shell, "-l"],
+                &["TERM=xterm-256color", "COLORTERM=truecolor"],
+                glib::SpawnFlags::DEFAULT,
+                || {},
+                -1,
+                None::<&gtk::gio::Cancellable>,
+                move |res| {
+                    if let Err(e) = res {
+                        v.conv.add_note(&format!("host shell: {e}"));
+                        v.host_open.set(false);
+                        v.show_host_shell(false, None);
+                    }
+                },
+            );
+            self.host_open.set(true);
+        }
+        let h = self.root.height();
+        if h > 0 {
+            self.host_scroll.set_min_content_height(h / 3);
+        }
+        self.bottom.set_visible_child_name("host");
+        self.host_term.grab_focus();
+    }
+
+    /// The host shell exited: forget it and show the prompt again.
+    fn host_shell_closed(self: &Rc<Self>) {
+        self.host_open.set(false);
+        self.host_term.set_pty(None);
+        self.host_term.reset(true, true);
+        self.show_host_shell(false, None);
     }
 
     /// Switch the bottom slot between prompt and shell; open the shell's pty on first use.
@@ -564,31 +714,52 @@ impl SessionView {
     /// terminals that are installed; `host_terminal` in `sill.toml`, free-form under Settings).
     fn fill_terminal_menu(self: &Rc<Self>, pop: &gtk::Popover) {
         let mbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        let open = gtk::Button::with_label("Terminal on the host here    Ctrl+Shift+T");
-        open.add_css_class("flat");
-        open.add_css_class("sill-menu-item");
-        if let Some(l) = open.child().and_then(|c| c.downcast::<gtk::Label>().ok()) {
-            l.set_xalign(0.0);
-        }
-        open.set_tooltip_text(Some("A host process, outside the jail: nothing it does is recorded"));
+        let item = |label: &str| {
+            let b = gtk::Button::with_label(label);
+            b.add_css_class("flat");
+            b.add_css_class("sill-menu-item");
+            if let Some(l) = b.child().and_then(|c| c.downcast::<gtk::Label>().ok()) {
+                l.set_xalign(0.0);
+            }
+            b
+        };
+        let open = item("Host shell here    Ctrl+Shift+T");
+        open.set_tooltip_text(Some("The host's shell in this pane — a host process, outside the jail: nothing it does is recorded"));
         {
             let v = self.clone();
             let p = pop.clone();
             open.connect_clicked(move |_| {
                 p.popdown();
                 if let Some(cb) = v.on_host_terminal.borrow().as_ref() {
-                    cb();
+                    cb(false);
                 }
             });
         }
         mbox.append(&open);
         let cfg = sill_core::config::load();
         let current = cfg.host_terminal();
+        let window = item("Host terminal in a window");
+        window.set_sensitive(current.is_some());
+        window.set_tooltip_text(Some(&match &current {
+            Some(c) => format!("Runs: {c}"),
+            None => "No terminal found on the host; set one under Settings → Host terminal".to_string(),
+        }));
+        {
+            let v = self.clone();
+            let p = pop.clone();
+            window.connect_clicked(move |_| {
+                p.popdown();
+                if let Some(cb) = v.on_host_terminal.borrow().as_ref() {
+                    cb(true);
+                }
+            });
+        }
+        mbox.append(&window);
         let installed = sill_core::config::installed_terminals();
         // a hand-written command line (Settings) that isn't one of the known ones
         let custom = cfg.host_terminal.as_deref().map(str::trim).is_some_and(|t| !t.is_empty() && !installed.iter().any(|(_, c)| *c == t));
         if !installed.is_empty() || custom {
-            let head = gtk::Label::new(Some("which terminal"));
+            let head = gtk::Label::new(Some("which terminal, in a window"));
             head.add_css_class("dim-label");
             head.set_xalign(0.0);
             head.set_margin_start(10);
