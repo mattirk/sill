@@ -164,6 +164,9 @@ pub struct FolderTree {
     scope: RefCell<Option<PathBuf>>,
     store: Rc<Store>,
     badges: Rc<RefCell<BTreeMap<PathBuf, Badge>>>,
+    /// Each repository's main language (badge mark, tooltip), read with the badges when older than
+    /// a minute.
+    langs: Rc<RefCell<BTreeMap<PathBuf, (String, String, std::time::Instant)>>>,
     /// Every session's pending changes: the badges here, and the viewer shows a pending path's diff.
     pub changes: Rc<RefCell<Vec<Change>>>,
     pinned: Rc<RefCell<Vec<PathBuf>>>,
@@ -216,6 +219,7 @@ impl FolderTree {
         root.append(&bar);
 
         let badges: Rc<RefCell<BTreeMap<PathBuf, Badge>>> = Rc::new(RefCell::new(BTreeMap::new()));
+        let langs: Rc<RefCell<BTreeMap<PathBuf, (String, String, std::time::Instant)>>> = Rc::new(RefCell::new(BTreeMap::new()));
         let pinned: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
         let elsewhere: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
         let roots = gio::ListStore::new::<gtk::StringObject>();
@@ -280,6 +284,7 @@ impl FolderTree {
         let bound: Rc<RefCell<Vec<gtk::ListItem>>> = Rc::new(RefCell::new(Vec::new()));
         let decorate: Rc<dyn Fn(&gtk::ListItem)> = {
             let badges = badges.clone();
+            let langs = langs.clone();
             let pinned = pinned.clone();
             let elsewhere = elsewhere.clone();
             Rc::new(move |item: &gtk::ListItem| {
@@ -345,12 +350,17 @@ impl FolderTree {
                     name.add_css_class("sill-pinned");
                 }
                 let is_repo = is_dir && path.join(".git").exists();
+                // a repository root: `git`, then its main language (what most of the tracked code is)
+                let lang = if is_repo { langs.borrow().get(&path).map(|(mark, about, _)| (mark.clone(), about.clone())) } else { None };
                 let mut parts: Vec<String> = Vec::new();
                 if !badge_text.is_empty() {
                     parts.push(badge_text);
                 }
                 if is_repo {
                     parts.push("git".into());
+                }
+                if let Some((mark, _)) = &lang {
+                    parts.push(mark.clone());
                 }
                 let is_elsewhere = !is_pinned && elsewhere.borrow().contains(&path);
                 if is_pinned {
@@ -359,14 +369,20 @@ impl FolderTree {
                     parts.push("⌖ other".into());
                 }
                 badge.set_text(&parts.join(" "));
-                badge.set_tooltip_text(match (is_repo, is_pinned, is_elsewhere) {
-                    (true, true, _) => Some("git repository · pinned to the current session"),
-                    (true, false, true) => Some("git repository · pinned by another session, not this one"),
-                    (true, false, false) => Some("git repository"),
-                    (false, true, _) => Some("pinned to the current session"),
-                    (false, false, true) => Some("pinned by another session, not this one"),
-                    _ => None,
-                });
+                let mut tip: Vec<String> = Vec::new();
+                if is_repo {
+                    tip.push("git repository".into());
+                }
+                if let Some((_, about)) = lang {
+                    tip.push(about);
+                }
+                if is_pinned {
+                    tip.push("pinned to the current session".into());
+                } else if is_elsewhere {
+                    tip.push("pinned by another session, not this one".into());
+                }
+                let tip = tip.join(" · ");
+                badge.set_tooltip_text((!tip.is_empty()).then_some(tip.as_str()));
                 // folders: a live mount (the jail is rebuilt); files: a chip that opens the file
                 pin.set_child(Some(&super::icons::scalable(
                     if is_pinned { "sill-minus" } else { "sill-plus" },
@@ -420,6 +436,7 @@ impl FolderTree {
             scope: RefCell::new(None),
             store,
             badges,
+            langs,
             changes: Rc::new(RefCell::new(Vec::new())),
             pinned,
             elsewhere,
@@ -690,6 +707,40 @@ impl FolderTree {
             (self.decorate)(&item);
         }
         self.view.queue_draw();
+        // each repository's main language, off the main thread (git ls-files), when a minute old
+        let stale: Vec<PathBuf> = {
+            let langs = self.langs.borrow();
+            repos.iter().filter(|r| langs.get(*r).is_none_or(|(_, _, at)| at.elapsed().as_secs() >= 60)).cloned().collect()
+        };
+        if !stale.is_empty() {
+            let (tx, rx) = async_channel::bounded::<Vec<(PathBuf, Option<changes::Language>)>>(1);
+            std::thread::spawn(move || {
+                let found: Vec<(PathBuf, Option<changes::Language>)> = stale.into_iter().map(|r| (r.clone(), changes::repo_language(&r))).collect();
+                let _ = tx.send_blocking(found);
+            });
+            let t = self.clone();
+            glib::spawn_future_local(async move {
+                let Ok(found) = rx.recv().await else { return };
+                let now = std::time::Instant::now();
+                {
+                    let mut langs = t.langs.borrow_mut();
+                    for (repo, l) in found {
+                        match l {
+                            Some(l) => {
+                                let about = format!("{}: {}% of the tracked code by size", l.name, l.percent);
+                                langs.insert(repo, (l.mark.to_string(), about, now));
+                            }
+                            None => {
+                                langs.remove(&repo);
+                            }
+                        }
+                    }
+                }
+                for item in t.bound.borrow().clone() {
+                    (t.decorate)(&item);
+                }
+            });
+        }
         // follow the disk: the listed directories, and each repository's .git (commits, checkouts)
         let mut watch: Vec<PathBuf> = self.listed.borrow().keys().cloned().collect();
         for r in &repos {

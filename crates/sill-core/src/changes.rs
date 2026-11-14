@@ -170,6 +170,99 @@ pub fn git_diff(repo: &Path, rel: &Path) -> String {
     }
 }
 
+/// Programming languages by file extension: (extension, name, the short mark a badge shows).
+const LANGUAGES: &[(&str, &str, &str)] = &[
+    ("rs", "Rust", "Rs"),
+    ("py", "Python", "Py"),
+    ("js", "JavaScript", "JS"),
+    ("jsx", "JavaScript", "JS"),
+    ("mjs", "JavaScript", "JS"),
+    ("ts", "TypeScript", "TS"),
+    ("tsx", "TypeScript", "TS"),
+    ("go", "Go", "Go"),
+    ("c", "C", "C"),
+    ("h", "C", "C"),
+    ("cpp", "C++", "C++"),
+    ("cc", "C++", "C++"),
+    ("cxx", "C++", "C++"),
+    ("hpp", "C++", "C++"),
+    ("java", "Java", "Java"),
+    ("kt", "Kotlin", "Kt"),
+    ("kts", "Kotlin", "Kt"),
+    ("rb", "Ruby", "Rb"),
+    ("sh", "Shell", "Sh"),
+    ("bash", "Shell", "Sh"),
+    ("zsh", "Shell", "Sh"),
+    ("swift", "Swift", "Sw"),
+    ("cs", "C#", "C#"),
+    ("php", "PHP", "PHP"),
+    ("lua", "Lua", "Lua"),
+    ("dart", "Dart", "Dart"),
+    ("ex", "Elixir", "Ex"),
+    ("exs", "Elixir", "Ex"),
+    ("erl", "Erlang", "Erl"),
+    ("hs", "Haskell", "Hs"),
+    ("scala", "Scala", "Sc"),
+    ("zig", "Zig", "Zig"),
+    ("nim", "Nim", "Nim"),
+    ("ml", "OCaml", "ML"),
+    ("clj", "Clojure", "Clj"),
+    ("r", "R", "R"),
+    ("jl", "Julia", "Jl"),
+    ("m", "Objective-C", "ObjC"),
+    ("vue", "Vue", "Vue"),
+    ("svelte", "Svelte", "Sv"),
+    ("html", "HTML", "HTML"),
+    ("css", "CSS", "CSS"),
+    ("scss", "CSS", "CSS"),
+    ("sql", "SQL", "SQL"),
+    ("pl", "Perl", "Pl"),
+    ("cu", "CUDA", "CU"),
+    ("glsl", "GLSL", "GL"),
+    ("wgsl", "WGSL", "WG"),
+];
+
+/// A repository's main language and its share of the tracked code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Language {
+    pub name: &'static str,
+    pub mark: &'static str,
+    pub percent: u8,
+}
+
+/// The language most of a repository is written in, by the size of its tracked files per extension
+/// (`git ls-files` with the index's object sizes: nothing is read, ignored and untracked files
+/// don't count). `None` without any code, or with a git too old for `--format`.
+pub fn repo_language(repo: &Path) -> Option<Language> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["ls-files", "-z", "--format=%(objectsize)%x09%(path)"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let mut by_name: BTreeMap<&'static str, u64> = BTreeMap::new();
+    for entry in out.stdout.split(|b| *b == 0).filter(|e| !e.is_empty()) {
+        let entry = String::from_utf8_lossy(entry);
+        let Some((size, path)) = entry.split_once('\t') else { continue };
+        let Ok(size) = size.trim().parse::<u64>() else { continue };
+        let Some(ext) = Path::new(path).extension().and_then(|e| e.to_str()) else { continue };
+        let ext = ext.to_ascii_lowercase();
+        if let Some((_, name, _)) = LANGUAGES.iter().find(|(e, _, _)| *e == ext) {
+            *by_name.entry(name).or_default() += size;
+        }
+    }
+    let total: u64 = by_name.values().sum();
+    let (name, size) = by_name.into_iter().max_by_key(|(_, s)| *s)?;
+    if total == 0 {
+        return None;
+    }
+    let mark = LANGUAGES.iter().find(|(_, n, _)| *n == name)?.2;
+    Some(Language { name, mark, percent: (size * 100 / total) as u8 })
+}
+
 /// The lines of a tracked file that differ from HEAD, as 1-based `[start, end)` ranges in the
 /// working-tree file (`git diff -U0`; a pure deletion has no lines to mark and is left out).
 /// `None` for an untracked file (everything is new) or when git can't say.
@@ -261,6 +354,27 @@ pub fn home() -> Result<PathBuf> {
 mod tests {
     use super::*;
     use crate::ledger::{FileType, Kind};
+
+    /// The language is the one with most tracked bytes; docs and config don't count.
+    #[test]
+    fn repo_language_by_tracked_size() {
+        let dir = std::env::temp_dir().join(format!("sill-lang-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&dir).args(args).status().map(|s| s.success()).unwrap_or(false);
+        if !git(&["init", "-q"]) {
+            eprintln!("no git: skipped");
+            return;
+        }
+        std::fs::write(dir.join("a.rs"), "x".repeat(900)).unwrap();
+        std::fs::write(dir.join("b.py"), "y".repeat(100)).unwrap();
+        std::fs::write(dir.join("README.md"), "z".repeat(5000)).unwrap();
+        std::fs::write(dir.join("untracked.go"), "g".repeat(9000)).unwrap();
+        assert!(git(&["add", "a.rs", "b.py", "README.md"]));
+        let l = repo_language(&dir).expect("a language");
+        assert_eq!((l.name, l.mark, l.percent), ("Rust", "Rs", 90));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn hunk_ranges_from_a_diff() {
