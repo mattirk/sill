@@ -10,6 +10,7 @@
 //! `config::update`, and applied live if it can be.
 
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use gtk4 as gtk;
 use gtk::gdk;
@@ -34,7 +35,7 @@ pub const CSS: &str = r#"
 .sill-settings-info { font-size: 0.9em; }
 "#;
 
-pub fn build() -> gtk::Widget {
+pub fn build(timer_auto: Rc<std::cell::Cell<bool>>) -> gtk::Widget {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 18);
     root.add_css_class("sill-settings");
     root.set_margin_start(16);
@@ -166,6 +167,17 @@ pub fn build() -> gtk::Widget {
 
     // ---- Sessions: pins, desktop, auto-revert, host terminal
     let (sec, card) = section("Sessions");
+
+    let timer = switch(timer_auto.get());
+    timer.connect_state_set(move |_, on| {
+        if super::remote::config::update(|c| c.timer_auto = Some(on)).is_ok() {
+            timer_auto.set(on);
+        } else {
+            return glib::Propagation::Stop;
+        }
+        glib::Propagation::Proceed
+    });
+    row(&card, "Timer autoshow", Some("Show the timer while the agent works; hover to show it anytime"), &timer);
 
     // remember pins: a new session starts with the latest pins (SPEC §3.2 Pins)
     let pins = switch(super::remote::config::load().remember_pins());

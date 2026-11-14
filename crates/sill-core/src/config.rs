@@ -19,6 +19,8 @@ pub struct Config {
     pub hotkey: Option<String>,
     /// Backend page the "sill" button opens: `changes` (default), `files`, `agents`, `settings`.
     pub default_page: Option<String>,
+    /// Show the session timer automatically while the agent works. Unset = off.
+    pub timer_auto: Option<bool>,
     /// Zoom: a factor on the shelf's normal text size (1.0 = Normal, the default). The shelf's
     /// normal size is [`TEXT_SCALE_BASE`] × the desktop font — GTK scales that font for HiDPI first,
     /// so a factor means the same on a 1× and a 2× display. The Settings page offers

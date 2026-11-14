@@ -2182,6 +2182,8 @@ impl SessionView {
         self.agent_md.borrow_mut().clear();
     }
 
+    pub fn timer_working(&self) -> bool { self.active_time.get().1.is_some() }
+
     pub fn active_seconds(&self) -> u64 {
         let (total, since) = self.active_time.get();
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)

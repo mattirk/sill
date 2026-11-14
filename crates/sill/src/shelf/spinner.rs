@@ -23,7 +23,7 @@ const SIZE: i32 = 15;
 const LINE: f64 = 2.0;
 /// Length of the arc, radians; one turn per `TURN_US`.
 const ARC: f64 = 1.3 * PI / 2.0;
-const TURN_US: f64 = 1_000_000.0;
+const TURN_US: i64 = 1_000_000;
 
 impl Spinner {
     pub fn new() -> Rc<Self> {
@@ -37,6 +37,9 @@ impl Spinner {
         {
             let now = now.clone();
             area.set_draw_func(move |w, cr, width, height| {
+                if width.min(height) <= 2 * LINE as i32 { return; }
+                cr.rectangle(0.0, 0.0, width as f64, height as f64);
+                cr.clip();
                 let c = w.color();
                 let (r, g, b) = (c.red() as f64, c.green() as f64, c.blue() as f64);
                 let radius = (width.min(height) as f64) / 2.0 - LINE;
@@ -46,7 +49,9 @@ impl Spinner {
                 cr.set_source_rgba(r, g, b, 0.18);
                 cr.arc(cx, cy, radius, 0.0, 2.0 * PI);
                 let _ = cr.stroke();
-                let start = (now.get() as f64 / TURN_US) * 2.0 * PI;
+                // Frame time is system uptime, not time since this animation began. Reduce it
+                // before converting to an angle so Cairo always receives a single rotation.
+                let start = (now.get().rem_euclid(TURN_US) as f64 / TURN_US as f64) * 2.0 * PI;
                 cr.set_source_rgba(r, g, b, 0.95);
                 cr.arc(cx, cy, radius, start, start + ARC);
                 let _ = cr.stroke();

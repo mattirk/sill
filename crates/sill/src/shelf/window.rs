@@ -45,6 +45,9 @@ pub struct Shelf {
     /// status text is its tooltip.
     status: gtk::Stack,
     session_timer: gtk::Label,
+    timer_reveal: gtk::Revealer,
+    timer_auto: Rc<std::cell::Cell<bool>>,
+    timer_hovered: std::cell::Cell<bool>,
     status_text: RefCell<String>,
     spinner: Rc<super::spinner::Spinner>,
     herring: Rc<super::herring::Herring>,
@@ -172,6 +175,8 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     let pages = gtk::Stack::new();
     pages.set_vexpand(true);
 
+    let top_actions = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    bar.append(&top_actions);
     let plus = gtk::MenuButton::new();
     plus.set_child(Some(&super::icons::glyph_image("sill-plus")));
     plus.add_css_class("flat");
@@ -182,12 +187,12 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     let plus_menu = gtk::Box::new(gtk::Orientation::Vertical, 0);
     plus_pop.set_child(Some(&plus_menu));
     plus.set_popover(Some(&plus_pop));
-    bar.append(&plus);
+    top_actions.append(&plus);
 
     let files_btn = super::icons::glyph_button("sill-files");
     files_btn.add_css_class("flat");
     files_btn.set_tooltip_text(Some("Files"));
-    bar.append(&files_btn);
+    top_actions.append(&files_btn);
 
     let spinner = super::spinner::Spinner::new(); // not GtkSpinner: see spinner.rs
     let idle = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -201,9 +206,15 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     status.add_named(&spinner.area, Some("busy"));
     status.set_valign(gtk::Align::Center);
     status.add_css_class("sill-status-slot");
+    // Equal slots keep the three icon centers evenly spaced despite theme button padding.
+    let action_widths = gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal);
+    action_widths.add_widget(&plus);
+    action_widths.add_widget(&files_btn);
+    action_widths.add_widget(&status);
     let session_timer = gtk::Label::new(None);
     session_timer.add_css_class("dim-label");
     session_timer.add_css_class("monospace");
+    session_timer.set_margin_end(6);
     session_timer.set_tooltip_text(Some("Time the agent has worked (excludes idle time and waiting for input)"));
     session_timer.set_visible(false);
     // The right edge stays anchored at the indicator while the timer slides out to its left.
@@ -211,18 +222,11 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     timer_reveal.set_transition_type(gtk::RevealerTransitionType::SlideLeft);
     timer_reveal.set_transition_duration(180);
     timer_reveal.set_child(Some(&session_timer));
-    let hover = gtk::EventControllerMotion::new();
-    let reveal = timer_reveal.downgrade();
-    hover.connect_enter(move |_, _, _| {
-        if let Some(reveal) = reveal.upgrade() { reveal.set_reveal_child(true); }
-    });
-    let reveal = timer_reveal.downgrade();
-    hover.connect_leave(move |_| {
-        if let Some(reveal) = reveal.upgrade() { reveal.set_reveal_child(false); }
-    });
-    status.add_controller(hover);
-    bar.append(&timer_reveal);
-    bar.append(&status);
+    // One action-group child: a collapsed revealer must not leave another gap.
+    let activity = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    activity.append(&timer_reveal);
+    activity.append(&status);
+    top_actions.append(&activity);
 
     // --- pages
     let stack = gtk::Stack::new();
@@ -236,8 +240,9 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     let tree = FolderTree::new(store.clone());
     let viewer = Viewer::new(tree.changes.clone());
     let agents_page = AgentsPage::new();
+    let timer_auto = Rc::new(std::cell::Cell::new(super::remote::config::load().timer_auto.unwrap_or(false)));
     let settings_page = gtk::ScrolledWindow::builder()
-        .child(&settings::build())
+        .child(&settings::build(timer_auto.clone()))
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vexpand(true)
         .build();
@@ -295,6 +300,9 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
         pages: pages.clone(),
         status: status.clone(),
         session_timer,
+        timer_reveal,
+        timer_auto,
+        timer_hovered: std::cell::Cell::new(false),
         status_text: RefCell::new(String::new()),
         spinner: spinner.clone(),
         herring: herring.clone(),
@@ -327,6 +335,24 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
                 s.lifecycle(&id, ev);
             }
         });
+    }
+    {
+        let hover = gtk::EventControllerMotion::new();
+        let weak = Rc::downgrade(&shelf);
+        hover.connect_enter(move |_, _, _| {
+            if let Some(s) = weak.upgrade() {
+                s.timer_hovered.set(true);
+                s.sync_session_timer();
+            }
+        });
+        let weak = Rc::downgrade(&shelf);
+        hover.connect_leave(move |_| {
+            if let Some(s) = weak.upgrade() {
+                s.timer_hovered.set(false);
+                s.sync_session_timer();
+            }
+        });
+        status.add_controller(hover);
     }
     {
         let weak = Rc::downgrade(&shelf);
@@ -1261,6 +1287,8 @@ impl Shelf {
         let view = selected.as_ref().filter(|_| self.stack.visible_child_name().as_deref() == Some("sessions"))
             .and_then(|id| views.get(id));
         self.session_timer.set_visible(view.is_some());
+        self.timer_reveal.set_reveal_child(view.is_some_and(|v|
+            self.timer_hovered.get() || (self.timer_auto.get() && v.timer_working())));
         if let Some(view) = view {
             let elapsed = view.active_seconds();
             let text = if elapsed < 3600 {
