@@ -226,6 +226,28 @@ impl App {
         {
             card = card.push(summary(s));
         }
+        let local = matches!(sill_proto::transport::selected(), Ok(None));
+        let autostart_control = crate::settings_ui::switch_styled(
+            page.autostart.as_ref().copied().unwrap_or(false),
+            P.accent,
+            20.0,
+            (local && !self.demo && !page.autostart_busy && page.autostart.is_ok())
+                .then_some(|enabled| Message::Settings(SettingsEvent::Autostart(enabled))),
+        );
+        card = card.push(
+            row![text("Daemon autostart").size(style::TEXT).width(Fill), autostart_control]
+                .spacing(16)
+                .align_y(Alignment::Center),
+        ).push(text(if !local {
+            "Autostart is a local account setting. Change it on the remote box."
+        } else if page.autostart_busy {
+            "Updating autostart…"
+        } else {
+            "Start at login and when opening Sill. Turning off may stop the daemon; sessions keep running. Restart daemon starts it manually."
+        }).size(style::SMALL).color(P.fg_dim));
+        if local && let Err(why) = &page.autostart {
+            card = card.push(text(why.clone()).size(style::SMALL).color(P.error));
+        }
         let expanded = !page.collapsed.contains("Daemon technical details");
         card = card.push(rule::horizontal(1).style(style::rule_style(P.border)));
         card = card.push(crate::keys::press(
@@ -347,7 +369,15 @@ fn readable_started(started: &str) -> String {
     }
 }
 
+pub(crate) fn set_autostart(enabled: bool) -> Result<(), String> {
+    daemon_command(&["daemon", "autostart", if enabled { "on" } else { "off" }])
+}
+
 fn restart() -> Result<(), String> {
+    daemon_command(&["daemon", "restart"])
+}
+
+fn daemon_command(args: &[&str]) -> Result<(), String> {
     use std::process::{Command, Stdio};
     let sibling = std::env::current_exe()
         .ok()
@@ -355,12 +385,12 @@ fn restart() -> Result<(), String> {
         .filter(|p| p.is_file());
     let binary = sibling.unwrap_or_else(|| "sill".into());
     let mut child = Command::new(binary)
-        .args(["daemon", "restart"])
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Could not start daemon restart: {e}"))?;
+        .map_err(|e| format!("Could not start sill command: {e}"))?;
     let stderr = child.stderr.take().expect("piped restart stderr");
     let (sent, received) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -380,7 +410,7 @@ fn restart() -> Result<(), String> {
                         .recv_timeout(std::time::Duration::from_millis(100))
                         .unwrap_or_default();
                     Err(format!(
-                        "Daemon restart failed ({status}): {}",
+                        "Sill command failed ({status}): {}",
                         detail.trim()
                     ))
                 };
@@ -396,7 +426,7 @@ fn restart() -> Result<(), String> {
             let _ = child.kill();
             let _ = child.wait();
             return Err(
-                "Restart timed out; its outcome is unknown. Check status before retrying.".into(),
+                "Command timed out; its outcome is unknown. Check status before retrying.".into(),
             );
         }
         std::thread::sleep(std::time::Duration::from_millis(100));

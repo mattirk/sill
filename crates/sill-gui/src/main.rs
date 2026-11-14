@@ -2203,6 +2203,9 @@ impl App {
         let token = page.token.clone();
         let load = sill_client::request_id("settings-load");
         page.load_token = load.clone();
+        if !page.autostart_busy {
+            page.autostart = sill_proto::autostart_enabled().map_err(|e| e.to_string());
+        }
         let Some(actions) = self.actions.clone() else {
             // the demo: the defaults, as a daemon that was never configured has them
             let snapshot = sill_client::settings::Snapshot {
@@ -2264,6 +2267,29 @@ impl App {
             return Task::none();
         };
         match event {
+            Event::Autostart(enabled) => {
+                if page.autostart_busy || self.demo
+                    || !matches!(sill_proto::transport::selected(), Ok(None))
+                {
+                    return Task::none();
+                }
+                page.autostart_busy = true;
+                page.said = None;
+                let token = page.token.clone();
+                return blocking(
+                    move || crate::daemon_ui::set_autostart(enabled),
+                    move |result| Message::SettingsReply(token, Event::AutostartDone(result)),
+                );
+            }
+            Event::AutostartDone(result) => {
+                page.autostart_busy = false;
+                page.autostart = sill_proto::autostart_enabled().map_err(|e| e.to_string());
+                page.said = Some(match result {
+                    Ok(()) => "Daemon autostart preference updated.".into(),
+                    Err(why) => format!("Autostart change failed: {why}"),
+                });
+                return self.daemon_event(daemon_ui::Event::Check);
+            }
             Event::ToggleSection(title) => {
                 if !page.collapsed.remove(title) {
                     page.collapsed.insert(title);

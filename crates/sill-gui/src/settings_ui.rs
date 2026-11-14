@@ -29,6 +29,8 @@ const SHELF_SHARES: &[(f32, &str)] = &[
 ];
 
 pub struct SettingsPage {
+    pub autostart: Result<bool, String>,
+    pub autostart_busy: bool,
     pub token: String,
     pub load_token: String,
     pub policies: crate::policies::State,
@@ -53,6 +55,8 @@ pub struct SettingsPage {
 impl Default for SettingsPage {
     fn default() -> Self {
         Self {
+            autostart: sill_proto::autostart_enabled().map_err(|e| e.to_string()),
+            autostart_busy: false,
             token: sill_client::request_id("settings-page"),
             load_token: String::new(),
             policies: crate::policies::State::default(),
@@ -73,6 +77,8 @@ impl Default for SettingsPage {
 
 #[derive(Debug, Clone)]
 pub enum Event {
+    Autostart(bool),
+    AutostartDone(Result<(), String>),
     Policy(crate::policies::Event),
     ToggleSection(&'static str),
     Loaded(String, Box<Result<Snapshot, String>>),
@@ -334,7 +340,12 @@ impl App {
             .into(),
             Some(Ok(snapshot)) => self.settings_sections(page, snapshot),
         };
-        let page_column = column![section(page, "Daemon", self.daemon_rows(page)), body].max_width(MEASURE).padding(Padding {
+        let mut page_column = column![section(page, "Daemon", self.daemon_rows(page))];
+        if let Some(said) = &page.said {
+            page_column = page_column
+                .push(container(text(said).size(style::SMALL).color(P.fg_dim)).padding([10, 4]));
+        }
+        let page_column = page_column.push(body).max_width(MEASURE).padding(Padding {
             top: 4.0,
             bottom: 28.0,
             left: 16.0,
@@ -356,10 +367,6 @@ impl App {
         let s = &snapshot.settings;
         let change = |c: SettingChange| event(Event::Change(c));
         let mut page_column = Column::new();
-        if let Some(said) = &page.said {
-            page_column = page_column
-                .push(container(text(said).size(style::SMALL).color(P.fg_dim)).padding([10, 4]));
-        }
 
         // ---- Appearance
         let theme = settings::THEMES
