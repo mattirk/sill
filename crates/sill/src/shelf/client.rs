@@ -30,13 +30,34 @@ fn subs() -> &'static Subs {
     SUBS.get_or_init(Default::default)
 }
 
-/// Where a session's lifecycle events go (`SessionEnded`, `Summarized`, `Note`): they are the
-/// window's, not a view's — the view may be gone or never attached — so one channel for all.
-type Lifecycle = Mutex<Option<async_channel::Sender<(String, sill_core::wire::Event)>>>;
-static LIFECYCLE: OnceLock<Lifecycle> = OnceLock::new();
+/// What the window, not a view, handles: a session's lifecycle events (`SessionEnded`,
+/// `Summarized`, `Note` — the view may be gone or never attached) and a question another frontend
+/// answered, named by the tool call its dialog belongs to.
+pub enum Lifecycle {
+    Event(sill_core::wire::Event),
+    Resolved { tool_call_id: String },
+}
 
-pub fn set_lifecycle(tx: async_channel::Sender<(String, sill_core::wire::Event)>) {
+type LifecycleTx = Mutex<Option<async_channel::Sender<(String, Lifecycle)>>>;
+static LIFECYCLE: OnceLock<LifecycleTx> = OnceLock::new();
+
+pub fn set_lifecycle(tx: async_channel::Sender<(String, Lifecycle)>) {
     *LIFECYCLE.get_or_init(Default::default).lock().unwrap() = Some(tx);
+}
+
+fn lifecycle(key: String, l: Lifecycle) {
+    if let Some(tx) = LIFECYCLE.get().and_then(|l| l.lock().unwrap().clone()) {
+        let _ = tx.send_blocking((key, l));
+    }
+}
+
+/// Open permission requests by (session, request number) → the tool call whose dialog shows them,
+/// so a `Resolved` from another frontend finds the dialog to close.
+type Open = Mutex<HashMap<(String, u64), String>>;
+static OPEN: OnceLock<Open> = OnceLock::new();
+
+fn open() -> &'static Open {
+    OPEN.get_or_init(Default::default)
 }
 
 /// A connection's identity in `SUBS` (its address: the `Arc` lives as long as it is in use).
@@ -232,10 +253,20 @@ fn dispatch(c: Arc<Client>) {
         let Ok(n) = serde_json::from_value::<sill_proto::SessionEvent>(params) else { continue };
         let Ok(wire) = serde_json::from_value::<sill_core::wire::Event>(n.event) else { continue };
         if matches!(wire, sill_core::wire::Event::SessionEnded { .. } | sill_core::wire::Event::Summarized { .. } | sill_core::wire::Event::Note(_)) {
-            if let Some(tx) = LIFECYCLE.get().and_then(|l| l.lock().unwrap().clone()) {
-                let _ = tx.send_blocking((n.key, wire));
-            }
+            lifecycle(n.key, Lifecycle::Event(wire));
             continue;
+        }
+        match &wire {
+            sill_core::wire::Event::PermissionRequest { request, tool_call_id, .. } => {
+                open().lock().unwrap().insert((n.key.clone(), *request), tool_call_id.clone());
+            }
+            sill_core::wire::Event::Resolved { request } => {
+                if let Some(tool_call_id) = open().lock().unwrap().remove(&(n.key.clone(), *request)) {
+                    lifecycle(n.key, Lifecycle::Resolved { tool_call_id });
+                }
+                continue;
+            }
+            _ => {}
         }
         let Some(tx) = subs().lock().unwrap().get(&n.key).filter(|(_, t)| *t == me).map(|(tx, _)| tx.clone()) else { continue };
         let key = n.key.clone();
@@ -254,6 +285,7 @@ fn dispatch(c: Arc<Client>) {
         }
     }
     forget(&c);
+    open().lock().unwrap().clear();
     let gone: Vec<async_channel::Sender<Event>> = {
         let mut s = subs().lock().unwrap();
         let ids: Vec<String> = s.iter().filter(|(_, (_, t))| *t == me).map(|(k, _)| k.clone()).collect();

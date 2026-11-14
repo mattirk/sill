@@ -184,7 +184,9 @@ impl Event {
                 let (tx, rx) = futures::channel::oneshot::channel::<Option<String>>();
                 let (atx, arx) = futures::channel::oneshot::channel::<Answer>();
                 std::thread::spawn(move || {
-                    let a = futures::executor::block_on(rx).unwrap_or(None);
+                    // the view dropped its dialog unanswered (tab closed, question resolved by
+                    // another frontend): no answer — the daemon keeps the question for the next attach
+                    let Ok(a) = futures::executor::block_on(rx) else { return };
                     let _ = atx.send(Answer::Permission(a));
                 });
                 answer(request, arx);
@@ -195,7 +197,7 @@ impl Event {
                 let (tx, rx) = futures::channel::oneshot::channel::<Option<BTreeMap<String, serde_json::Value>>>();
                 let (atx, arx) = futures::channel::oneshot::channel::<Answer>();
                 std::thread::spawn(move || {
-                    let a = futures::executor::block_on(rx).unwrap_or(None);
+                    let Ok(a) = futures::executor::block_on(rx) else { return };
                     let _ = atx.send(Answer::Form(a));
                 });
                 answer(request, arx);

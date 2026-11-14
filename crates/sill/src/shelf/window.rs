@@ -277,7 +277,7 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     {
         // the daemon's lifecycle events (a session's end, a checkpoint's answer, a note) come on
         // one channel for the window to route
-        let (tx, rx) = async_channel::unbounded::<(String, sill_core::wire::Event)>();
+        let (tx, rx) = async_channel::unbounded::<(String, super::client::Lifecycle)>();
         super::client::set_lifecycle(tx);
         let weak = Rc::downgrade(&shelf);
         glib::spawn_future_local(async move {
@@ -1356,8 +1356,17 @@ impl Shelf {
 
     /// A session's lifecycle event from the daemon (`client::set_lifecycle`): the end, a
     /// checkpoint's answer, a note for the conversation.
-    fn lifecycle(self: &Rc<Self>, id: &str, ev: sill_core::wire::Event) {
+    fn lifecycle(self: &Rc<Self>, id: &str, ev: super::client::Lifecycle) {
         use sill_core::wire::Event as W;
+        let ev = match ev {
+            super::client::Lifecycle::Event(e) => e,
+            super::client::Lifecycle::Resolved { tool_call_id } => {
+                if let Some(v) = self.views.borrow().get(id).cloned() {
+                    v.conv.resolve_permission(&tool_call_id);
+                }
+                return;
+            }
+        };
         match ev {
             W::SessionEnded { deleted, reason } => {
                 if reason == "idle" && let Some(v) = self.views.borrow().get(id) {

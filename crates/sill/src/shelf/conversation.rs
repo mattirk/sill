@@ -64,6 +64,9 @@ pub struct Conversation {
     column: gtk::Box,
     /// The agent message being streamed, with its accumulated markdown.
     current: RefCell<Option<(gtk::Box, String)>>,
+    /// Permission blocks not yet answered, by tool call: the buttons, the label, the reply.
+    #[allow(clippy::type_complexity)]
+    open_permissions: Rc<RefCell<HashMap<String, (gtk::FlowBox, gtk::Label, Rc<RefCell<Option<oneshot::Sender<Option<String>>>>>)>>>,
     current_thought: RefCell<Option<(gtk::Box, String)>>,
     /// Image context for every message (paths as the agent sees them; a click opens the viewer).
     md_ctx: RefCell<Option<Rc<markdown::Ctx>>>,
@@ -123,6 +126,7 @@ impl Conversation {
             root,
             column,
             current: RefCell::new(None),
+            open_permissions: Rc::new(RefCell::new(HashMap::new())),
             current_thought: RefCell::new(None),
             md_ctx: RefCell::new(None),
             render_due: [std::cell::Cell::new(false), std::cell::Cell::new(false)],
@@ -799,7 +803,7 @@ impl Conversation {
         }
     }
 
-    pub fn add_permission(&self, title: &str, options: Vec<PermissionOption>, reply: oneshot::Sender<Option<String>>) {
+    pub fn add_permission(&self, tool_call_id: &str, title: &str, options: Vec<PermissionOption>, reply: oneshot::Sender<Option<String>>) {
         self.finish_current();
         let frame = gtk::Box::new(gtk::Orientation::Vertical, 6);
         frame.add_css_class("sill-permission");
@@ -823,18 +827,31 @@ impl Conversation {
             let label2 = label.clone();
             let id = opt.id.clone();
             let name = opt.name.clone();
+            let open = self.open_permissions.clone();
+            let call = tool_call_id.to_string();
             b.connect_clicked(move |_| {
                 if let Some(tx) = reply.borrow_mut().take() {
                     let _ = tx.send(Some(id.clone()));
                     buttons2.set_sensitive(false);
                     label2.set_text(&format!("{} → {name}", label2.text()));
+                    open.borrow_mut().remove(&call);
                 }
             });
             buttons.append(&b);
         }
         frame.append(&buttons);
+        self.open_permissions.borrow_mut().insert(tool_call_id.to_string(), (buttons, label, reply));
         self.place(&frame);
         self.request_follow();
+    }
+
+    /// Another frontend answered the question (docs/daemon.md §3.3, `Resolved`): the block closes
+    /// without an answer from here — the reply is dropped, which sends nothing.
+    pub fn resolve_permission(&self, tool_call_id: &str) {
+        let Some((buttons, label, reply)) = self.open_permissions.borrow_mut().remove(tool_call_id) else { return };
+        reply.borrow_mut().take();
+        buttons.set_sensitive(false);
+        label.set_text(&format!("{} → answered elsewhere", label.text()));
     }
 
     /// A question from sill with a few actions (same look as a permission request). Each button
@@ -1059,9 +1076,9 @@ impl Conversation {
             Event::ToolCallUpdate { id, status, title, detail, diff } => {
                 self.update_tool_call_full(&id, status.as_deref(), title.as_deref(), detail.as_deref(), diff.as_deref())
             }
-            Event::PermissionRequest { title, options, reply, .. } => {
+            Event::PermissionRequest { tool_call_id, title, options, reply } => {
                 self.status.set_text("waiting for your answer");
-                self.add_permission(&title, options, reply)
+                self.add_permission(&tool_call_id, &title, options, reply)
             }
             Event::Elicitation { message, fields, reply } => {
                 self.status.set_text("waiting for your answer");
