@@ -21,6 +21,9 @@ use super::remote_store::Store;
 
 use super::{session, theme};
 
+const DIFF_TIP: &str = "Show what differs from HEAD (git diff --stat) in the shown folder's repository, else in this session's pinned ones";
+const TREE_TIP: &str = "Back to the file tree";
+
 /// Folders below this depth are opened when a scoped tree is shown (0 = the pinned folder itself).
 const OPEN_DEPTH: u32 = 1;
 /// Opening stops once this many rows are shown (a huge folder must not stall the shelf).
@@ -232,10 +235,10 @@ pub struct FolderTree {
     query: RefCell<String>,
     /// Each search bumps this; a walk that finishes for an older query is dropped.
     search_seq: std::cell::Cell<u32>,
-    /// Back to the global tree while scoped to one folder.
-    all: gtk::Button,
-    /// Shows `git diff --stat` of the repositories in view instead of the tree.
-    diff: gtk::ToggleButton,
+    /// Switches between the tree and `git diff --stat` of the repositories in view; its glyph is
+    /// the view it switches to.
+    switch: gtk::Button,
+    diff_mode: std::cell::Cell<bool>,
     panes: gtk::Stack,
     stat: Rc<super::diffstat::DiffStat>,
     view: gtk::ListView,
@@ -260,7 +263,7 @@ pub struct FolderTree {
     hint: gtk::Label,
     /// Session that receives pins (the selected tab), set by the window.
     pub pin_target: RefCell<Option<String>>,
-    /// Set by the first `set_scope` (a chip, "all", or the homing below): until then the drawer is
+    /// Set by the first `set_scope` (a chip, the Files button widening it, or the homing below): until then the drawer is
     /// at its default, and the first refresh that finds the selected session's pinned folder scopes
     /// to it — the drawer opens on the work, not on the global view with that folder collapsed.
     homed: std::cell::Cell<bool>,
@@ -293,22 +296,16 @@ impl FolderTree {
         search.set_hexpand(true);
         search.add_css_class("sill-tree-search");
         super::icons::adopt_search_entry(&search);
-        let all = gtk::Button::with_label("all");
-        all.add_css_class("flat");
-        all.add_css_class("sill-viewer-btn");
-        all.set_tooltip_text(Some("Show everything: home, pinned folders, touched repositories"));
-        all.set_visible(false);
-        let diff = gtk::ToggleButton::with_label("diff");
-        diff.add_css_class("flat");
-        diff.add_css_class("sill-viewer-btn");
-        diff.set_tooltip_text(Some("git diff --stat of the pinned repository (the shown folder's, else this session's pinned ones)"));
+        let switch = super::icons::glyph_button("sill-git-compare");
+        switch.add_css_class("flat");
+        switch.add_css_class("sill-viewer-btn");
+        switch.set_tooltip_text(Some(DIFF_TIP));
         let close = super::icons::glyph_button("sill-x");
         close.add_css_class("flat");
         close.add_css_class("sill-viewer-btn");
         close.set_tooltip_text(Some("Close the tree (Ctrl+Shift+F)"));
         bar.append(&search);
-        bar.append(&all);
-        bar.append(&diff);
+        bar.append(&switch);
         bar.append(&close);
         root.append(&bar);
 
@@ -617,8 +614,8 @@ impl FolderTree {
             search: search.clone(),
             query: RefCell::new(String::new()),
             search_seq: std::cell::Cell::new(0),
-            all: all.clone(),
-            diff: diff.clone(),
+            switch: switch.clone(),
+            diff_mode: std::cell::Cell::new(false),
             panes,
             stat,
             view,
@@ -685,17 +682,9 @@ impl FolderTree {
         }
         {
             let weak = Rc::downgrade(&t);
-            diff.connect_toggled(move |b| {
+            switch.connect_clicked(move |_| {
                 if let Some(t) = weak.upgrade() {
-                    t.set_diff_mode(b.is_active());
-                }
-            });
-        }
-        {
-            let weak = Rc::downgrade(&t);
-            all.connect_clicked(move |_| {
-                if let Some(t) = weak.upgrade() {
-                    t.set_scope(None);
+                    t.set_diff_mode(!t.diff_mode.get());
                 }
             });
         }
@@ -724,7 +713,10 @@ impl FolderTree {
         self.query.borrow_mut().clear();
         self.stat.set_filter("");
         self.say("");
+        self.diff_mode.set(on);
         self.panes.set_visible_child_name(if on { "diff" } else { "tree" });
+        self.switch.set_child(Some(&super::icons::glyph_image(if on { "sill-list-tree" } else { "sill-git-compare" })));
+        self.switch.set_tooltip_text(Some(if on { TREE_TIP } else { DIFF_TIP }));
         if on {
             self.hint.set_visible(false);
             self.refresh_stat(true);
@@ -752,7 +744,7 @@ impl FolderTree {
     }
 
     fn refresh_stat(self: &Rc<Self>, force: bool) {
-        if self.diff.is_active() {
+        if self.diff_mode.get() {
             let repos = self.stat_repos();
             self.stat.refresh(repos, force);
         }
@@ -775,7 +767,6 @@ impl FolderTree {
     pub fn set_scope(self: &Rc<Self>, path: Option<PathBuf>) {
         // a new scope ends a search: the box is cleared, which refreshes by itself when it held text
         self.search.set_text("");
-        self.all.set_visible(path.is_some());
         *self.scope.borrow_mut() = path;
         self.homed.set(true);
         self.refresh();
@@ -787,7 +778,7 @@ impl FolderTree {
     /// text puts the tree back.
     fn search(self: &Rc<Self>, text: &str) {
         let q = text.trim().to_lowercase();
-        if self.diff.is_active() {
+        if self.diff_mode.get() {
             self.stat.set_filter(&q);
             return;
         }
@@ -1010,7 +1001,7 @@ impl FolderTree {
         }
         roots.dedup();
         // the global view with nothing but home: say how to get a folder into it
-        self.hint.set_visible(!self.diff.is_active() && scope.is_none() && roots.is_empty() && global.is_empty() && touched.is_empty());
+        self.hint.set_visible(!self.diff_mode.get() && scope.is_none() && roots.is_empty() && global.is_empty() && touched.is_empty());
         // the rows to show: the scoped folder alone, or the global view's groups under their
         // captions (a group that is empty has no caption)
         let text = |p: &PathBuf| p.to_string_lossy().into_owned();
