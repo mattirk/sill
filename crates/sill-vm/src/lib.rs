@@ -33,6 +33,11 @@ pub fn share_tag(slot: usize) -> String {
 /// The guest's SSH on vsock (systemd's ssh generator binds it when the VM has a vsock device).
 pub const SSH_PORT: u32 = 22;
 
+/// The memory of this computer, in bytes (macOS), for choosing the VM's share of it.
+pub fn host_memory_bytes() -> Option<u64> {
+    requirements::memory_bytes()
+}
+
 /// What a VM is made of.
 #[derive(Debug, Clone)]
 pub struct Config {

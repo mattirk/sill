@@ -20,6 +20,7 @@ use crate::{App, Message, keys};
 const MEASURE: f32 = 680.0;
 /// The last section: the running-time chart, folded until asked for.
 const RUNNING_TIME: &str = "Agent running time";
+const VIRTUAL_MACHINE: &str = "Virtual machine";
 
 /// Shelf mode's width, a share of the main display (sill-gui's own setting).
 const SHELF_SHARES: &[(f32, &str)] = &[
@@ -149,7 +150,7 @@ fn choice<'a>(
         .into()
 }
 
-fn dropdown(_: &Theme, status: pick_list::Status) -> pick_list::Style {
+pub(crate) fn dropdown(_: &Theme, status: pick_list::Status) -> pick_list::Style {
     let hovered = matches!(
         status,
         pick_list::Status::Hovered | pick_list::Status::Opened { .. }
@@ -287,7 +288,7 @@ fn titles<'a>(title: &'a str, sub: Option<&'a str>) -> Element<'a, Message> {
 }
 
 /// A row: titles on the left, the control on the right.
-fn setting<'a>(
+pub(crate) fn setting<'a>(
     title: &'a str,
     sub: Option<&'a str>,
     control: impl Into<Element<'a, Message>>,
@@ -302,7 +303,7 @@ fn setting<'a>(
 }
 
 /// A wide row: titles over the control.
-fn wide<'a>(
+pub(crate) fn wide<'a>(
     title: &'a str,
     sub: Option<&'a str>,
     control: impl Into<Element<'a, Message>>,
@@ -313,7 +314,7 @@ fn wide<'a>(
 }
 
 /// A path as the page shows it: the home directory as `~`.
-fn home_relative(path: &str) -> String {
+pub(crate) fn home_relative(path: &str) -> String {
     match std::env::var("HOME") {
         Ok(home) if !home.is_empty() && path.starts_with(&format!("{home}/")) => {
             format!("~{}", &path[home.len()..])
@@ -344,6 +345,10 @@ impl App {
             Some(Ok(snapshot)) => self.settings_sections(page, snapshot),
         };
         let mut page_column = column![section(page, "Daemon", self.daemon_rows(page))];
+        // the Mac window's own VM: apart from the daemon's settings, which come from inside it
+        if self.vm_shown() {
+            page_column = page_column.push(section(page, VIRTUAL_MACHINE, self.vm_rows()));
+        }
         if let Some(said) = &page.said {
             page_column = page_column
                 .push(container(text(said).size(style::SMALL).color(P.fg_dim)).padding([10, 4]));

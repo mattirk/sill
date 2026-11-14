@@ -55,6 +55,7 @@ mod tray;
 mod ui;
 mod usage;
 mod viewer;
+mod vm_ui;
 mod workspaces;
 mod workspaces_ui;
 mod files;
@@ -418,6 +419,8 @@ pub enum Message {
     /// The herring's pages: one shown in the conversation's place.
     ShowPage(Page),
     Settings(settings_ui::Event),
+    /// The Settings page's Virtual machine section (`vm_ui.rs`).
+    Vm(vm_ui::Event),
     /// A reply belongs to the Settings page that issued it, even across navigation.
     SettingsReply(String, settings_ui::Event),
     Agents(agents_ui::Event),
@@ -689,6 +692,8 @@ pub struct App {
     desktop_serial: u64,
     pub demo: bool,
     daemon: daemon_ui::State,
+    /// The Mac window's own VM as Settings shows it (`vm_ui.rs`).
+    vm: vm_ui::State,
     /// The box's shared SSH connection: sign-in state and SSH's questions (`box_ui`).
     box_link: box_ui::State,
     connect: Option<Connector>,
@@ -844,6 +849,7 @@ impl App {
         let (drawer, file_task) = files::Drawer::new(connect.clone());
         let mut app = Self {
             daemon: daemon_ui::State::default(),
+            vm: vm_ui::State::default(),
             box_link: box_ui::State::default(),
             network: network::State::default(),
             process_serial: 0,
@@ -1357,6 +1363,12 @@ impl App {
         // The spinner and timer reveal animate between these samples.
         if self.current().is_some_and(|v| v.conversation.busy()) {
             subscriptions.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick));
+        }
+        // the VM on its way somewhere while Settings shows it
+        if self.vm_ticking() {
+            subscriptions.push(
+                iced::time::every(Duration::from_secs(1)).map(|_| Message::Vm(vm_ui::Event::Tick)),
+            );
         }
         if !self.demo {
             subscriptions
@@ -2077,6 +2089,7 @@ impl App {
                 }
             }
             Message::Settings(event) => return self.settings_event(event),
+            Message::Vm(event) => return self.vm_event(event),
             Message::SettingsReply(token, event) => {
                 if self
                     .settings_page
@@ -2278,7 +2291,7 @@ impl App {
             Page::Settings => {
                 self.changes = None;
                 self.settings_page = Some(settings_ui::SettingsPage::default());
-                self.settings_load()
+                Task::batch([self.settings_load(), self.vm_event(vm_ui::Event::Read)])
             }
         }
     }

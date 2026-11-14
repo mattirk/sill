@@ -343,7 +343,7 @@ impl App {
     }
 }
 
-fn detail_row(label: &'static str, value: String) -> Element<'static, Message> {
+pub(crate) fn detail_row(label: &'static str, value: String) -> Element<'static, Message> {
     use crate::style::{self, P};
     use iced::{Alignment, FillPortion};
     row![
