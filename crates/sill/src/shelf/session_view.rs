@@ -190,6 +190,18 @@ impl SessionView {
             .margin_bottom(0)
             .build();
         prompt_scroll.add_css_class("sill-prompt-box");
+        // the text view lays its lines out lazily, after the scrolled window has already measured
+        // it, so a wrap that adds a line left the box a line short until the next relayout and
+        // the new line clipped; the validated height lands in the vadjustment's upper, so a change
+        // there asks for a fresh measure in the same frame
+        {
+            let sw = prompt_scroll.downgrade();
+            prompt.vadjustment().unwrap().connect_upper_notify(move |_| {
+                if let Some(sw) = sw.upgrade() {
+                    sw.queue_resize();
+                }
+            });
+        }
 
         // no Box spacing: gaps are CSS margins in em, like every size in the row
         let controls_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);

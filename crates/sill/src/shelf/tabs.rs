@@ -224,7 +224,7 @@ impl TabStrip {
         }
     }
 
-    /// Mark a tab as busy (its agent is in a turn): the title pulses in the accent colour.
+    /// Mark a tab as busy (its agent is in a turn): the agent glyph pulses, the title does not.
     pub fn set_busy(&self, id: &str, busy: bool) {
         if let Some(t) = self.tabs.borrow().iter().find(|t| t.id == id) {
             if busy {
@@ -279,11 +279,10 @@ pub const CSS: &str = r#"
 .sill-tab { padding: 4px 6px 4px 10px; margin-right: 1px; background: alpha(@view_fg_color, 0.04);
             border-bottom: 2px solid transparent; }
 .sill-tab.selected { background: alpha(@view_fg_color, 0.09); border-bottom: 2px solid alpha(@accent_bg_color, 0.9); }
-@keyframes sill-pulse { from { opacity: 1; } 50% { opacity: 0.45; } to { opacity: 1; } }
-.sill-tab.busy label { color: @accent_color; animation: sill-pulse 1.6s ease-in-out infinite; }
 .sill-tab label { padding: 0; }
-/* the agent of this tab is working: its name in the accent colour, selected or not */
-.sill-tab.busy label { color: @accent_color; }
+/* the agent of this tab is working: only its glyph pulses; the title stays as it is */
+@keyframes sill-glyph-pulse { 50% { transform: scale(0.8); } }
+.sill-tab.busy .sill-tab-icon { animation: sill-glyph-pulse 2.2s ease-in-out infinite; }
 .sill-tab-entry, .sill-tab-entry:focus { border: none; box-shadow: none; outline: none; background: transparent;
                                          padding: 0; margin: 0; min-height: 0; border-radius: 0; }
 .sill-tab-entry text { background: transparent; }

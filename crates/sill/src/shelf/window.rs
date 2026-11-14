@@ -892,20 +892,27 @@ impl Shelf {
     }
 
     /// The small agent glyph for a tab, in the strip's current text colour — in the warning colour
-    /// while the session's jail has the desktop (X11 / D-Bus), SPEC §4.11 #4.
-    fn tab_icon(&self, agent: &str, desktop: bool) -> gtk::Image {
+    /// while the session's jail has the desktop (X11 / D-Bus), in the accent colour while the
+    /// agent is in a turn (the glyph pulses then), SPEC §4.11 #4.
+    fn tab_icon(&self, agent: &str, desktop: bool, busy: bool) -> gtk::Image {
         let home = session::home().unwrap_or_default();
         let registry = agents::load(&home);
         let t = theme::current();
         let fg = super::icons::fg_for(&self.tabs.root, &t);
-        let color = if desktop { gtk::gdk::RGBA::parse(t.warning).unwrap_or(fg) } else { fg };
+        let color = if desktop {
+            gtk::gdk::RGBA::parse(t.warning).unwrap_or(fg)
+        } else if busy {
+            gtk::gdk::RGBA::parse(t.accent).unwrap_or(fg)
+        } else {
+            fg
+        };
         super::icons::image(registry.get(agent), color, 12)
     }
 
     /// A tab's glyph colour and tooltip follow the session's effective desktop access.
     fn refresh_tab(&self, s: &Session) {
         let (x11, dbus) = effective_desktop(s);
-        self.tabs.set_icon(&s.id, &self.tab_icon(&s.agent, x11 || dbus));
+        self.tabs.set_icon(&s.id, &self.tab_icon(&s.agent, x11 || dbus, self.busy.borrow().contains(&s.id)));
         let tip = match (x11, dbus) {
             (true, true) => "X11 + D-Bus: the agent can see and drive the desktop and reach the session bus",
             (true, false) => "X11: the agent can run GUI programs — and, as any X11 client, read keys and drive every window",
@@ -1212,6 +1219,11 @@ impl Shelf {
                     shelf.busy.borrow_mut().insert(id.to_string());
                 } else {
                     shelf.busy.borrow_mut().remove(id);
+                }
+                // the glyph takes the accent colour for the turn: redrawn from the session as it
+                // is now, so a desktop grant changed since the tab opened still wins
+                if let Some(sess) = shelf.store.sessions().unwrap_or_default().into_iter().find(|x| x.id == id) {
+                    shelf.refresh_tab(&sess);
                 }
                 shelf.sync_spinner();
                 super::tray::set_busy(!shelf.busy.borrow().is_empty());
