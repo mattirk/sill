@@ -30,6 +30,7 @@ const SHELF_SHARES: &[(f32, &str)] = &[
 ];
 
 pub struct SettingsPage {
+    pub policies: crate::policies::State,
     pub collapsed: std::collections::BTreeSet<&'static str>,
     pub shortcuts: Option<crate::shortcuts::Bindings>,
     /// What the daemon said; `None` while it is read.
@@ -50,7 +51,8 @@ pub struct SettingsPage {
 impl Default for SettingsPage {
     fn default() -> Self {
         Self {
-            collapsed: std::collections::BTreeSet::from(["Keyboard shortcuts"]),
+            policies: crate::policies::State::default(),
+            collapsed: std::collections::BTreeSet::from(["Keyboard shortcuts", "Policies"]),
             shortcuts: None,
             snapshot: None,
             instructions: text_editor::Content::new(),
@@ -66,6 +68,7 @@ impl Default for SettingsPage {
 
 #[derive(Debug, Clone)]
 pub enum Event {
+    Policy(crate::policies::Event),
     ToggleSection(&'static str),
     Loaded(Box<Result<Snapshot, String>>),
     Change(SettingChange),
@@ -175,7 +178,7 @@ fn switch<'a>(on: bool, set: impl Fn(bool) -> Message + 'a) -> Element<'a, Messa
         .into()
 }
 
-fn quiet_button<'a>(label: &'a str, message: Option<Message>) -> Element<'a, Message> {
+pub(crate) fn quiet_button<'a>(label: &'a str, message: Option<Message>) -> Element<'a, Message> {
     keys::press_maybe(
         button(text(label).size(style::TEXT))
             .padding([6, 14])
@@ -649,6 +652,19 @@ impl App {
                 .spacing(8),
             )],
         ));
+
+        page_column = page_column.push(section(
+            page,
+            "Policies",
+            vec![wide("", None, page.policies.view())],
+        ));
+        if !page.policies.status.is_empty() {
+            page_column = page_column.push(
+                text(&page.policies.status)
+                    .size(style::SMALL)
+                    .color(P.fg_dim),
+            );
+        }
 
         // ---- Memory
         let recall = s.memory_recall.unwrap_or(settings::RECALL_DEFAULT);

@@ -15,6 +15,7 @@ mod menu;
 mod network;
 #[cfg(test)]
 mod perf;
+mod policies;
 mod rows;
 mod selection;
 mod settings;
@@ -1834,6 +1835,9 @@ impl App {
     fn settings_event(&mut self, event: settings_ui::Event) -> Task<Message> {
         use settings_ui::Event;
         use sill_client::settings;
+        if let Event::Policy(event) = event {
+            return self.policy_event(event);
+        }
         let Some(page) = &mut self.settings_page else {
             return Task::none();
         };
@@ -1842,7 +1846,15 @@ impl App {
                 if !page.collapsed.remove(title) {
                     page.collapsed.insert(title);
                 }
+                if title == "Policies"
+                    && !page.collapsed.contains(title)
+                    && !page.policies.loaded
+                    && !page.policies.busy
+                {
+                    return self.policy_event(policies::Event::Refresh);
+                }
             }
+            Event::Policy(_) => unreachable!(),
             Event::Loaded(loaded) => {
                 let loaded = *loaded;
                 if let Ok(snapshot) = &loaded {

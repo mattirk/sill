@@ -3045,3 +3045,25 @@ fn configured_shortcuts_intercept_inputs_and_release_old_bindings() {
     assert!(!messages.iter().any(|m| matches!(m, Message::CloseCurrent)));
     assert!(crate::keys::from_text(&Key::Character("t".into()), Modifiers::CTRL, true).is_none());
 }
+
+#[test]
+fn policy_errors_remain_visible_with_the_group_collapsed() {
+    let (mut app, _) = App::new(true, None);
+    let mut page = crate::settings_ui::SettingsPage::default();
+    page.snapshot = Some(Ok(sill_client::settings::Snapshot::default()));
+    page.policies.status = "Policy validation failed: invalid TOML".into();
+    let view = app.settings_view(&page);
+    let mut ui =
+        iced_test::Simulator::with_size(crate::snapshots::settings(), (720.0, 5000.0), view);
+    ui.find("Policies").unwrap();
+    ui.find("Policy validation failed: invalid TOML").unwrap();
+    assert!(ui.find("Import policy").is_err());
+    drop(ui);
+    page.collapsed.remove("Policies");
+    app.settings_page = Some(page);
+    let view = app.settings_view(app.settings_page.as_ref().unwrap());
+    let mut ui =
+        iced_test::Simulator::with_size(crate::snapshots::settings(), (720.0, 5000.0), view);
+    ui.find("Import policy").unwrap();
+    ui.find("Check").unwrap();
+}
