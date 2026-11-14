@@ -507,14 +507,14 @@ impl App {
             ),
             0,
         );
-        let questions: Vec<&Question> = conversation.questions.values().collect();
         let items = conversation.visible_items();
+        // each question under its tool's item, or the item it was asked after
+        let places = conversation.question_places();
         let below = |item: &Item| -> Vec<&'a Question> {
-            questions
-                .iter()
-                .copied()
-                .filter(|q| q.tool_item_id.as_deref() == Some(item.item_id.as_str()))
-                .collect()
+            places
+                .get(item.item_id.as_str())
+                .cloned()
+                .unwrap_or_default()
         };
         // the last item of a turn that was stopped or failed: say so under it
         let turn_end = |index: usize, item: &Item| -> Option<String> {
@@ -632,13 +632,12 @@ impl App {
             }
         }
         // questions below items left out are placed by their item; the rest go at the end
-        for item in &items {
-            for question in below(item) {
-                placed.insert(question.question_id.as_str());
-            }
+        for question in places.values().flatten() {
+            placed.insert(question.question_id.as_str());
         }
-        for question in questions
-            .iter()
+        for question in conversation
+            .questions
+            .values()
             .filter(|q| !placed.contains(q.question_id.as_str()))
         {
             feed = feed.push(
@@ -920,9 +919,20 @@ impl App {
         }
         let mut queued = Column::new().spacing(4);
         let mut has_queued = false;
-        for submission in view.conversation.submissions.values().filter(|s| {
-            s.delivery == "queued" && s.insertion == "pending" && s.outcome == "pending" && !s.held
-        }) {
+        // in the order the daemon sends them: as accepted
+        let mut waiting: Vec<_> = view
+            .conversation
+            .submissions
+            .values()
+            .filter(|s| {
+                s.delivery == "queued"
+                    && s.insertion == "pending"
+                    && s.outcome == "pending"
+                    && !s.held
+            })
+            .collect();
+        waiting.sort_by_key(|s| s.accepted_seq.parse::<u64>().unwrap_or(u64::MAX));
+        for submission in waiting {
             has_queued = true;
             queued = queued.push(
                 row![
@@ -934,6 +944,26 @@ impl App {
                     )
                     .width(Fill)
                     .clip(true),
+                    tooltip(
+                        keys::press(
+                            button(
+                                svg(icons::send())
+                                    .width(11)
+                                    .height(11)
+                                    .style(style::icon(alpha(P.fg, 0.6))),
+                            )
+                            .padding([3, 6])
+                            .style(style::quiet),
+                            Message::SendNow(submission.submission_id.clone())
+                        ),
+                        container(
+                            text("Send now: stops the agent's turn and sends this first")
+                                .size(style::TINY),
+                        )
+                        .padding([3, 8])
+                        .style(style::fill(P.surface)),
+                        tooltip::Position::Top,
+                    ),
                     keys::press(
                         button(icons::glyph("x", 12.0, alpha(P.fg, 0.6)))
                             .padding([2, 6])

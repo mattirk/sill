@@ -242,6 +242,10 @@ impl Hub {
                 let a:SubmissionKey = args(params)?;
                 self.runner_for_sfp(&a.session_id)?.sfp_queue_action(self,&a,method.ends_with("resume")).map(|s|json!(s)).map_err(failure)
             })(),
+            "_sill/submissions.send_now" => (|| {
+                let a:SubmissionKey = args(params)?;
+                self.runner_for_sfp(&a.session_id)?.sfp_send_now(self,&a).map(|s|json!(s)).map_err(failure)
+            })(),
             "_sill/questions.answer" => (|| {
                 // the answer is open in the schema (questions carry it in results); the request is strict
                 if let Some(answer) = params.get("answer") { sill_proto::rpc::strict::<sill_proto::sfp::Answer>(answer.clone())?; }

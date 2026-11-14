@@ -187,6 +187,7 @@ pub enum Act {
     Stop,
     Answer(String),
     Unqueue,
+    SendNow,
     Control,
 }
 
@@ -225,6 +226,8 @@ pub enum Message {
         option_id: String,
     },
     Unqueue(String),
+    /// A queued prompt goes now: the agent's turn stops and it is sent first.
+    SendNow(String),
     ToggleTool(String),
     ToggleAnswered(String),
     SetMode(Pick),
@@ -1149,6 +1152,22 @@ impl App {
                     Act::Unqueue,
                     "_sill/submissions.cancel",
                     json!(params),
+                );
+            }
+            Message::SendNow(submission_id) => {
+                let (Some(view), Some(actions)) = (self.current(), self.actions.clone()) else {
+                    return Task::none();
+                };
+                let session = view.id.clone();
+                let params = json!(SubmissionKey {
+                    session_id: session.clone(),
+                    submission_id,
+                });
+                return blocking(
+                    move || {
+                        actions.call_needing("sill.send_now", "_sill/submissions.send_now", params)
+                    },
+                    move |outcome| Message::Done(session, Act::SendNow, outcome),
                 );
             }
             Message::ToggleTool(id) => {
@@ -2310,6 +2329,7 @@ impl App {
                         Act::Stop => "Stopping the turn",
                         Act::Answer(_) => "Answering the question",
                         Act::Unqueue => "Removing the queued prompt",
+                        Act::SendNow => "Sending the queued prompt now",
                         Act::Control => "Changing the agent's setting",
                         Act::Send(_) | Act::Check(_) => unreachable!(),
                     };

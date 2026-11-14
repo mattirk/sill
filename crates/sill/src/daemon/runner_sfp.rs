@@ -235,9 +235,8 @@ impl Runner {
         if !dispatch_ready(st) { return Ok(()); }
         let journal=Journal::new(store)?;
         let records=journal.active_records(&self.id)?;
-        let mut queued:Vec<_>=records.into_iter().filter_map(|r|match r {p::Record::Submission{submission} if submission.delivery=="queued" && submission.outcome=="pending"=>Some(submission),_=>None}).collect();
-        queued.sort_by_key(|s|s.accepted_seq.parse::<u64>().unwrap_or(u64::MAX));
-        let Some(submission)=queued.into_iter().next() else { return Ok(()); };
+        let queued:Vec<_>=records.into_iter().filter_map(|r|match r {p::Record::Submission{submission} if submission.delivery=="queued" && submission.outcome=="pending"=>Some(submission),_=>None}).collect();
+        let Some(submission)=next_queued(queued,st.send_next.take()) else { return Ok(()); };
         if submission.held { return Ok(()); }
         let events=self.sfp_commit_submission(store,&hub.home,st,submission)?;
         hub.sfp_publish(&self.id,&events);
@@ -254,7 +253,7 @@ impl Runner {
             Self::queue(st,relay::Command::Prompt{text:prepared.text.clone(),attachments});
             st.context.commit(prepared); st.busy=true; st.active_submission=Some(submission.submission_id.clone());
             submission.delivery="direct".into();
-            let events=journal.append(&self.id,None,&[p::Event::SubmissionUpdated{submission:submission.clone()}])?;
+            let events=journal.dispatched(&submission)?;
             self.save(store,st)?;tx.commit()?;Ok(events)
         })();
         match result {Ok(events)=>Ok(events),Err(e)=>{*st=before;Err(e)}}
@@ -265,6 +264,25 @@ impl Runner {
             let (_,events)=if resume {journal.resume(key)?}else{journal.cancel(key)?};
             hub.sfp_publish(&self.id,&events);
             if let Err(e)=self.sfp_dispatch(store,hub,&mut st){eprintln!("sill daemon: queued dispatch: {e:#}");}
+            journal.submission(&self.id,&key.submission_id)
+        })
+    }
+    /// Send a queued prompt now (`sill.send_now`): resumed if held, first in the queue, and the
+    /// turn in progress stopped so it goes as soon as the agent has stopped.
+    pub(in crate::daemon) fn sfp_send_now(&self,hub:&Hub,key:&p::SubmissionKey)->Result<p::Submission> {
+        hub.with_store(|store| {
+            let mut st=self.st.lock().unwrap();self.sfp_initialize_locked(store,hub,&st)?;let journal=Journal::new(store)?;
+            let s=journal.submission(&key.session_id,&key.submission_id)?;
+            if s.delivery!="queued" || s.insertion!="pending" || s.outcome!="pending" {
+                return Err(Error::domain("invalid_state","submission is not an unsent queued intent").into());
+            }
+            let (_,events)=journal.resume(key)?;
+            hub.sfp_publish(&self.id,&events);
+            st.send_next=Some(key.submission_id.clone());self.save(store,&st)?;
+            if st.busy {
+                self.commit_command(store,&hub.home,&mut st,wire::Command::Cancel)?;
+                self.drain(store,&mut st)?;
+            } else if let Err(e)=self.sfp_dispatch(store,hub,&mut st) {eprintln!("sill daemon: send now: {e:#}");}
             journal.submission(&self.id,&key.submission_id)
         })
     }
@@ -348,6 +366,13 @@ fn attachments(store:&Store,session_id:&str,input:&[p::Attachment],images:bool)-
     }).collect()
 }
 
+/// The queued submission to send next: the one the person asked to send now, else the oldest.
+fn next_queued(mut queued:Vec<p::Submission>,send_now:Option<String>)->Option<p::Submission> {
+    queued.sort_by_key(|s|s.accepted_seq.parse::<u64>().unwrap_or(u64::MAX));
+    let at=send_now.and_then(|id|queued.iter().position(|s|s.submission_id==id)).unwrap_or(0);
+    (at<queued.len()).then(||queued.swap_remove(at))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,6 +445,18 @@ mod tests {
     impl Drop for Fixture {fn drop(&mut self){let _=std::fs::remove_dir_all(&self.dir);}}
 
     #[test]
+    fn send_now_goes_before_older_queued_prompts() {
+        let f=Fixture::new();let j=Journal::new(&f.store).unwrap();
+        let mut ids=vec![];
+        for id in ["first","second","third"] {let mut input=f.input();input.submission_id=id.into();ids.push(j.accept(&input,"queued").unwrap().0);}
+        let pick=|send_now:Option<&str>|super::next_queued(ids.clone(),send_now.map(str::to_owned)).map(|s|s.submission_id);
+        assert_eq!(pick(None).as_deref(),Some("first"),"the oldest by default");
+        assert_eq!(pick(Some("third")).as_deref(),Some("third"));
+        assert_eq!(pick(Some("gone")).as_deref(),Some("first"),"a sent-now prompt removed meanwhile changes nothing");
+        assert!(super::next_queued(vec![],Some("third".into())).is_none());
+    }
+
+    #[test]
     fn dispatch_commit_keeps_exact_payload_and_identity_after_reopen() {
         let f=Fixture::new();let j=Journal::new(&f.store).unwrap();
         let (accepted,_)=j.accept(&f.input(),"queued").unwrap();
@@ -453,7 +490,7 @@ mod tests {
         assert!(f.runner.sfp_commit_submission(&f.store,&f.dir,&mut st,accepted).is_err());
         assert_eq!(serde_json::to_value(&*st).unwrap(),before);
         assert_eq!(j.submission(&f.runner.id,"submission").unwrap().delivery,"queued");
-        assert_eq!(j.snapshot(&f.runner.id).unwrap().1.iter().filter(|r|matches!(r,p::Record::Item{..})).count(),1,"accepted user item survives dispatch failure");
+        assert_eq!(j.snapshot(&f.runner.id).unwrap().1.iter().filter(|r|matches!(r,p::Record::Item{..})).count(),0,"no user item until a dispatch commits: the failed one made none");
         assert!(f.received.try_recv().is_err());
     }
 

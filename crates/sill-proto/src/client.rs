@@ -39,6 +39,8 @@ pub struct Client {
     pending: Pending,
     /// `(method, params)` of every notification the daemon sent.
     pub notifications: Mutex<Receiver<(String, Value)>>,
+    /// The capabilities the daemon answered at initialization: what this connection may use.
+    capabilities: Mutex<std::collections::BTreeMap<String, u32>>,
 }
 
 impl Client {
@@ -169,13 +171,20 @@ impl Client {
             crate::initialize::Initialize {
                 protocols: vec![crate::initialize::PROTOCOL_ID.into()],
                 client: crate::initialize::Peer { name: "sill".into(), version: env!("CARGO_PKG_VERSION").into() },
-                capabilities: Default::default(),
+                // this build implements every capability it knows of
+                capabilities: crate::initialize::CAPABILITIES.iter().map(|c| (c.name.to_string(), c.version)).collect(),
             }, QUICK_TIMEOUT,
         ).context("SFP initialization failed; explicitly update/restart an incompatible daemon")?;
         if result.protocol != crate::initialize::PROTOCOL_ID {
             bail!("daemon selected unsupported protocol {}; explicitly update/restart it", result.protocol);
         }
+        *self.capabilities.lock().unwrap() = result.capabilities.clone();
         Ok(result)
+    }
+
+    /// The daemon answered `name` at initialization: its methods may be called on this connection.
+    pub fn has_capability(&self, name: &str) -> bool {
+        self.capabilities.lock().unwrap().get(name).is_some_and(|v| *v > 0)
     }
 
     /// This connection can still carry a request. False once the daemon closed it, a write failed
@@ -244,7 +253,7 @@ impl Client {
             i3();
             fail_pending(&p3, "writing to the daemon: connection closed");
         })?;
-        Ok(Client { writer: wtx, interrupt, closed, next_id: AtomicU64::new(1), pending, notifications: Mutex::new(nrx) })
+        Ok(Client { writer: wtx, interrupt, closed, next_id: AtomicU64::new(1), pending, notifications: Mutex::new(nrx), capabilities: Mutex::default() })
     }
 
     /// Connect over the system SSH client. It owns authentication, host verification, proxies

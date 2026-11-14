@@ -66,6 +66,12 @@ The implemented public conversation surface is `_sill/sessions.attach`,
 `_sill/submissions.get`, `_sill/submissions.cancel`, `_sill/submissions.resume`,
 `_sill/questions.answer`, `_sill/sessions.control`, `_sill/sessions.cancel`,
 `_sill/uploads.create`, `_sill/uploads.get` and `_sill/session.event`, plus `_sill/daemon.schema`.
+`_sill/submissions.send_now` needs the capability `sill.send_now: 1` (the first one, 2026-11-05):
+the queued submission goes next, before older queued ones, resumed if it was held, and the active
+turn is cancelled so it goes as soon as the agent has stopped. A prompt's user item is created when
+it is dispatched, not when it is accepted: a queued prompt appears where the agent receives it (an
+item made at acceptance by an older daemon is removed and made again there, reason
+`moved_to_dispatch`).
 The schema command exports the concrete records and method shapes. Counters are decimal strings;
 records/events use named objects and `type` tags. `scripts/sfp_client.py` is an independent Python
 consumer and schema validator (install `scripts/requirements-sfp.txt`).

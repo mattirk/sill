@@ -55,6 +55,8 @@ struct State {
     generation_id: String,
     adapter: super::sfp_adapter::AdapterState,
     active_submission: Option<String>,
+    /// A queued prompt the person asked to send now: it goes before the older ones in the queue.
+    send_next: Option<String>,
     /// A login request was answered with a saved API key: if the agent asks again, the card shows
     /// (with its reason) instead of the same key going again. Cleared when the agent is logged in.
     key_tried: bool,

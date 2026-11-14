@@ -419,14 +419,32 @@ impl<'a> Journal<'a> {
                 acceptance:"accepted".into(), delivery:delivery.into(), held:false, hold_reason:None,
                 insertion:"pending".into(), outcome:"pending".into(), reason:None,
             };
-            let item=Item {item_id:new_id(),created_seq:String::new(),turn_id:None,submission_id:Some(input.submission_id.clone()),
-                agent_generation_id:submission.agent_generation_id.clone(),kind:"user".into(),content:vec![Content::text(&input.text)],tool:None};
-            let events = self.append(&input.session_id,None,&[Event::SubmissionUpdated { submission },Event::ItemCreated {item}])?;
+            // the prompt's conversation item comes when it is sent (`dispatched`): a queued prompt
+            // belongs where the agent reads it, not where it was typed
+            let events = self.append(&input.session_id,None,&[Event::SubmissionUpdated { submission }])?;
             self.store.conn().execute("INSERT INTO sfp_submission_inputs VALUES (?1,?2,?3)",params![input.session_id,input.submission_id,fingerprint])?;
             self.store.append(&input.session_id,"user",&input.text,"")?;
             self.store.touch(&input.session_id)?;
             Ok((self.submission(&input.session_id,&input.submission_id)?,events))
         })
+    }
+
+    /// `submission` goes to the agent now: its delivery as given, and its prompt as a user item
+    /// at this point of the conversation. An item made at acceptance (before items came with
+    /// dispatch) is moved here: removed and made again.
+    pub fn dispatched(&self, submission: &Submission) -> Result<Vec<StoredEvent>> {
+        let session_id = &submission.session_id;
+        let mut events = vec![Event::SubmissionUpdated { submission: submission.clone() }];
+        let mut stmt = self.store.conn().prepare("SELECT id FROM sfp_records WHERE session_id=?1 AND kind='item' AND removed=0
+            AND json_extract(json,'$.item.submission_id')=?2")?;
+        let earlier: Vec<String> = stmt.query_map(params![session_id,submission.submission_id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        for item_id in earlier {
+            events.push(Event::ItemRemoved { item_id, reason: Reason { code:"moved_to_dispatch".into(), message:"The prompt moved to where it was sent".into() } });
+        }
+        events.push(Event::ItemCreated { item: Item { item_id:new_id(), created_seq:String::new(), turn_id:None,
+            submission_id:Some(submission.submission_id.clone()), agent_generation_id:submission.agent_generation_id.clone(),
+            kind:"user".into(), content:vec![Content::text(&submission.text)], tool:None } });
+        self.append(session_id,None,&events)
     }
 
     pub fn cancel(&self, key: &SubmissionKey) -> Result<(Submission,Vec<StoredEvent>)> {
@@ -701,10 +719,31 @@ mod tests {
         assert_eq!(code(err),"not_found"); assert_eq!(j.cursor(&f.id).unwrap().seq,"1");
         assert_eq!(j.item(&f.id,"i").unwrap().content[0].text.as_deref(),Some("hello"));
     }
+    /// A queued prompt shows where the agent receives it: its item is made at dispatch, after what
+    /// came meanwhile; one made at acceptance (an older daemon) moves there.
+    #[test]
+    fn a_prompt_item_is_made_where_it_is_dispatched() {
+        let f=Fixture::new(); let j=f.journal();
+        let (queued,events)=j.accept(&f.submit("q"),"queued").unwrap();
+        assert!(!events.iter().any(|e|matches!(e.event,Event::ItemCreated{..})));
+        j.append(&f.id,None,&[Event::ItemCreated{item:item("meanwhile")}]).unwrap();
+        // the older daemon's item, made at acceptance
+        let mut old=item("old"); old.kind="user".into(); old.submission_id=Some("q".into());
+        j.append(&f.id,None,&[Event::ItemCreated{item:old}]).unwrap();
+        let mut sent=queued; sent.delivery="direct".into();
+        let events=j.dispatched(&sent).unwrap();
+        assert!(events.iter().any(|e|matches!(&e.event,Event::ItemRemoved{item_id,..} if item_id=="old")));
+        let (_,records)=j.snapshot(&f.id).unwrap();
+        let items:Vec<&Item>=records.iter().filter_map(|r|match r {Record::Item{item}=>Some(item),_=>None}).collect();
+        assert_eq!(items.len(),2,"the old item is gone");
+        assert_eq!(items[0].item_id,"meanwhile");
+        assert_eq!((items[1].kind.as_str(),items[1].submission_id.as_deref()),("user",Some("q")));
+        assert_eq!(j.submission(&f.id,"q").unwrap().delivery,"direct");
+    }
     #[test]
     fn acceptance_is_durable_deduplicated_and_conflicting_input_is_rejected() {
         let f=Fixture::new(); let j=f.journal(); let input=f.submit("sub");
-        let (first,events)=j.accept(&input,"queued").unwrap(); assert_eq!(events.len(),2);
+        let (first,events)=j.accept(&input,"queued").unwrap(); assert_eq!(events.len(),1,"the item comes at dispatch");
         let reopened=Store::open(&f.dir.join("s.db")).unwrap(); let j=Journal::new(&reopened).unwrap();
         let (retry,events)=j.accept(&input,"direct").unwrap(); assert_eq!(first,retry); assert!(events.is_empty());
         let mut different=input.clone(); different.text.push('!');

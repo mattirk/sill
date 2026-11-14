@@ -6076,7 +6076,13 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "capabilities": {
-    "offered": [],
+    "offered": [
+      {
+        "doc": "_sill/submissions.send_now: a queued submission goes next, the active turn stopped.",
+        "name": "sill.send_now",
+        "version": 1
+      }
+    ],
     "rules": "Names are namespace.feature (lowercase ASCII, digits, '_'); versions are cumulative from 1; the daemon answers min(offered, supported) and omits unknown ones. A missing capability disables that feature only; it is never a protocol mismatch."
   },
   "errors": {
@@ -7338,6 +7344,20 @@
       "doc": "Resume a held queued submission, retaining acceptance order.",
       "kind": "request",
       "name": "_sill/submissions.resume",
+      "params": {
+        "$ref": "#/$defs/SubmissionKey"
+      },
+      "result": {
+        "$ref": "#/$defs/Submission"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.send_now": 1
+      },
+      "doc": "Send a queued submission next, stopping the active turn.",
+      "kind": "request",
+      "name": "_sill/submissions.send_now",
       "params": {
         "$ref": "#/$defs/SubmissionKey"
       },

@@ -17,7 +17,9 @@ pub struct Capability { pub name: &'static str, pub version: u32, pub doc: &'sta
 
 /// Every capability this daemon offers. The baseline sfp/1 contract needs none of them; later
 /// compatible additions arrive here (docs/protocol.md, Compatibility and errors).
-pub const CAPABILITIES: &[Capability] = &[];
+pub const CAPABILITIES: &[Capability] = &[
+    Capability { name: "sill.send_now", version: 1, doc: "_sill/submissions.send_now: a queued submission goes next, the active turn stopped." },
+];
 
 /// Whether `name` is a well-formed capability name.
 pub fn valid_capability_name(name: &str) -> bool {

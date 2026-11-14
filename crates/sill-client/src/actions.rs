@@ -112,6 +112,21 @@ impl Actions {
         }
     }
 
+    /// One mutation, once, by a method the daemon offers under `capability`: refused here, unsent,
+    /// when this daemon did not answer it (an older daemon).
+    pub fn call_needing(&self, capability: &str, method: &str, params: Value) -> Outcome {
+        match self.client() {
+            Ok(client) if !client.has_capability(capability) => Outcome::Refused {
+                code: Some("needs_capability".into()),
+                message: format!(
+                    "the daemon is older than this window and cannot do that ({capability}); update and restart it"
+                ),
+            },
+            Ok(_) => self.call(method, params),
+            Err(e) => Outcome::NotSent(format!("{e:#}")),
+        }
+    }
+
     /// A read: safe to repeat, so a connection that turns out closed is replaced once.
     pub fn read<T: DeserializeOwned>(&self, method: &str, params: Value) -> anyhow::Result<T> {
         let client = self.client()?;

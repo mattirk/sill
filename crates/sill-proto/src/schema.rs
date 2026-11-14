@@ -25,19 +25,27 @@ pub struct Method {
     params: Option<fn(&mut SchemaGenerator) -> Schema>,
     /// The result type's schema; None for a notification or an empty `{}` answer.
     result: Option<fn(&mut SchemaGenerator) -> Schema>,
+    /// The capability (and its version) a client must have been answered to call it: every
+    /// method added after the freeze has one.
+    capability: Option<(&'static str, u32)>,
 }
 
 const fn req<P: JsonSchema, R: JsonSchema>(name: &'static str, doc: &'static str) -> Method {
-    Method { name, kind: Kind::Request, doc, params: Some(|g| g.subschema_for::<P>()), result: Some(|g| g.subschema_for::<R>()) }
+    Method { name, kind: Kind::Request, doc, params: Some(|g| g.subschema_for::<P>()), result: Some(|g| g.subschema_for::<R>()), capability: None }
+}
+
+/// A request a client may call only when the daemon answered `capability` at `version` or later.
+const fn req_needing<P: JsonSchema, R: JsonSchema>(name: &'static str, capability: &'static str, version: u32, doc: &'static str) -> Method {
+    Method { capability: Some((capability, version)), ..req::<P, R>(name, doc) }
 }
 
 /// A request answered with `{}`.
 const fn req_empty<P: JsonSchema>(name: &'static str, doc: &'static str) -> Method {
-    Method { name, kind: Kind::Request, doc, params: Some(|g| g.subschema_for::<P>()), result: None }
+    Method { name, kind: Kind::Request, doc, params: Some(|g| g.subschema_for::<P>()), result: None, capability: None }
 }
 
 const fn notification<P: JsonSchema>(name: &'static str, doc: &'static str) -> Method {
-    Method { name, kind: Kind::Notification, doc, params: Some(|g| g.subschema_for::<P>()), result: None }
+    Method { name, kind: Kind::Notification, doc, params: Some(|g| g.subschema_for::<P>()), result: None, capability: None }
 }
 
 /// Every method the daemon answers and every notification it sends, in the order of docs/protocol.md.
@@ -146,6 +154,7 @@ pub const METHODS: &[Method] = &[
     req::<crate::sfp::SubmissionKey, crate::sfp::Submission>("_sill/submissions.get", "Recover the outcome of a submission."),
     req::<crate::sfp::SubmissionKey, crate::sfp::Submission>("_sill/submissions.cancel", "Cancel a knowingly unsent queued submission."),
     req::<crate::sfp::SubmissionKey, crate::sfp::Submission>("_sill/submissions.resume", "Resume a held queued submission, retaining acceptance order."),
+    req_needing::<crate::sfp::SubmissionKey, crate::sfp::Submission>("_sill/submissions.send_now", "sill.send_now", 1, "Send a queued submission next, stopping the active turn."),
     req::<crate::sfp::AnswerQuestion, crate::sfp::Question>("_sill/questions.answer", "Record the first valid answer with a durable idempotency key."),
     notification::<crate::sfp::SessionEvent>("_sill/session.event", "A committed ordered session event."),
     req::<crate::Empty, Value>(method::DAEMON_SCHEMA, "The Sill Frontend Protocol schema and method capabilities, for remote negotiation."),
@@ -164,7 +173,7 @@ pub fn document() -> Value {
                 "name": m.name,
                 "kind": match m.kind { Kind::Request => "request", Kind::Notification => "notification" },
                 "doc": m.doc,
-                "capabilities": {},
+                "capabilities": m.capability.map_or(json!({}), |(name, version)| json!({name: version})),
                 "params": m.params.map(|f| f(&mut g).to_value()),
                 // an empty answer is `{}` today; like every result it may gain fields (clients ignore
                 // unknown fields in what the daemon sends)
@@ -319,8 +328,11 @@ mod tests {
             assert!(doc["errors"]["codes"].as_array().unwrap().contains(&json!(code)), "{code} not a listed code");
             assert_eq!(details[code]["required"], json!(required), "{code}");
         }
+        // a method's capability is one the daemon offers, at a version it has
         let offered = doc["capabilities"]["offered"].as_array().unwrap();
-        assert!(offered.is_empty());
+        for m in METHODS.iter().filter_map(|m| m.capability) {
+            assert!(offered.iter().any(|c| c["name"] == m.0 && c["version"].as_u64() >= Some(m.1 as u64)), "{m:?}");
+        }
         assert!(METHODS.iter().all(|m| !m.name.starts_with("_sill/internal/")));
         // a limit error's data reads back as typed details
         let e = crate::rpc::Error::limit(crate::rpc::LimitScope::Result, Some(4), "too big");

@@ -505,6 +505,50 @@ fn actions_send_the_protocol_requests() {
     assert!(demo_view(&app).failed.is_none());
 }
 
+/// Send now asks the daemon to send a queued prompt next (it stops the turn itself), only of a
+/// daemon that answered `sill.send_now`; an older one is told apart without a request.
+#[test]
+fn send_now_needs_the_capability() {
+    let (older, _quiet) = daemon();
+    let mut app = live_app(vec![older]);
+    let task = app.update(Message::SendNow("s1".into()));
+    settle_task(&mut app, task);
+    let failed = demo_view(&app).failed.clone().expect("refused here");
+    assert!(failed.contains("sill.send_now"), "{failed}");
+
+    let (client, mut daemon) = daemon();
+    let initializing = std::thread::spawn(move || {
+        client.initialize().unwrap();
+        client
+    });
+    let request = daemon.expect("_sill/initialize");
+    assert_eq!(
+        request["params"]["capabilities"]["sill.send_now"], 1,
+        "offered"
+    );
+    let answer = sill_proto::initialize::Initialized {
+        protocol: sill_proto::initialize::PROTOCOL_ID.into(),
+        daemon: sill_proto::initialize::Peer {
+            name: "sill".into(),
+            version: "test".into(),
+        },
+        capabilities: [("sill.send_now".to_string(), 1)].into(),
+        limits: Default::default(),
+    };
+    daemon.reply(&request, serde_json::to_value(answer).unwrap());
+    let client = initializing.join().unwrap();
+    let mut app = live_app(vec![client]);
+    let task = app.update(Message::SendNow("s1".into()));
+    let request = daemon.expect("_sill/submissions.send_now");
+    assert_eq!(
+        request["params"],
+        json!({"session_id":"demo", "submission_id":"s1"})
+    );
+    daemon.reply(&request, json!({}));
+    settle_task(&mut app, task);
+    assert!(demo_view(&app).failed.is_none());
+}
+
 /// Stop removes prompts still queued first, as the shelf does, then stops the turn.
 #[test]
 fn stop_removes_queued_prompts_before_stopping() {

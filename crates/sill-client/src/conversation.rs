@@ -2,7 +2,7 @@
 //! No store, overlay or daemon type is read: `_sill/sessions.snapshot` and `_sill/session.event`
 //! are the only source. Each applied event says what it changed, so a frontend redraws that item
 //! instead of scanning the whole history.
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::{Context, Result, bail, ensure};
 use sill_proto::{Client, sfp::*};
@@ -31,6 +31,10 @@ pub struct Conversation {
     /// Item identities in conversation order: creation sequence, then identity.
     order: BTreeSet<(u64, String)>,
     pub questions: BTreeMap<String, Question>,
+    /// Where each question was asked, as a place in `order`: a question shows under the last item
+    /// shown at or before it (a question carries no position of its own). From a snapshot, after
+    /// the item listed before it (records come in creation order); live, at its event.
+    asked_at: HashMap<String, (u64, String)>,
     pub submissions: BTreeMap<String, Submission>,
     /// Turn outcomes, for the note a stopped or failed turn ends with.
     pub turns: BTreeMap<String, Turn>,
@@ -129,6 +133,10 @@ impl Conversation {
             }
             Record::Item { item } => self.insert_item(item),
             Record::Question { question } => {
+                if let Some(last) = self.order.last() {
+                    self.asked_at
+                        .insert(question.question_id.clone(), last.clone());
+                }
                 self.questions
                     .insert(question.question_id.clone(), question);
             }
@@ -244,6 +252,9 @@ impl Conversation {
             }
             Event::QuestionUpdated { question } => {
                 let id = question.question_id.clone();
+                self.asked_at
+                    .entry(id.clone())
+                    .or_insert((seq, String::new()));
                 self.questions.insert(id.clone(), question);
                 Change::Question(id)
             }
@@ -279,6 +290,35 @@ impl Conversation {
             .filter_map(|(_, id)| self.items.get(id))
             .filter(|item| !self.queued(item))
             .collect()
+    }
+
+    /// Which shown item each question goes under, in the order they were asked: its tool's item
+    /// when that is shown, else the last item shown where it was asked. Questions with neither (asked
+    /// before anything was shown) are not here; a frontend puts them at the end.
+    pub fn question_places(&self) -> HashMap<&str, Vec<&Question>> {
+        let shown = self.visible_items();
+        let ids: HashSet<&str> = shown.iter().map(|i| i.item_id.as_str()).collect();
+        let positions: Vec<(u64, String)> = shown.iter().map(|i| position(i)).collect();
+        let mut asked: Vec<(&Question, Option<&(u64, String)>)> = self
+            .questions
+            .values()
+            .map(|q| (q, self.asked_at.get(&q.question_id)))
+            .collect();
+        asked.sort_by_key(|(_, at)| *at);
+        let mut places: HashMap<&str, Vec<&Question>> = HashMap::new();
+        for (question, at) in asked {
+            let place = match question.tool_item_id.as_deref() {
+                Some(tool) if ids.contains(tool) => Some(tool),
+                _ => at.and_then(|at| {
+                    let before = positions.partition_point(|p| p <= at);
+                    before.checked_sub(1).map(|i| shown[i].item_id.as_str())
+                }),
+            };
+            if let Some(item) = place {
+                places.entry(item).or_default().push(question);
+            }
+        }
+        places
     }
 
     /// The note a turn ends with, when it did not complete: stopped by the person, or failed.
@@ -478,6 +518,58 @@ mod tests {
         assert!(view.accept(gap).is_err());
         assert_eq!(view.seq, 3);
         assert_eq!(item_text(view.item("b").unwrap()), "second!");
+    }
+
+    fn question(id: &str) -> Question {
+        serde_json::from_value(json!({
+            "question_id": id, "agent_generation_id": "g", "kind": "form", "title": "Input?",
+            "tool_item_id": null, "options": [], "fields": [], "state": "open",
+            "answer_id": null, "answer": null, "delivery": null, "reason": null
+        }))
+        .unwrap()
+    }
+
+    /// A question without a tool stays where it was asked, under the item before it, as the
+    /// conversation goes on below it: from a snapshot and live.
+    #[test]
+    fn a_question_stays_where_it_was_asked() {
+        let mut view = Conversation::new("s", "sub", 2);
+        view.install(Record::Item {
+            item: item("a", 1, "user", "first"),
+        })
+        .unwrap();
+        view.install(Record::Question {
+            question: question("from-snapshot"),
+        })
+        .unwrap();
+        view.install(Record::Item {
+            item: item("b", 2, "agent", "second"),
+        })
+        .unwrap();
+        view.accept(event(
+            &view,
+            Event::QuestionUpdated {
+                question: question("live"),
+            },
+        ))
+        .unwrap();
+        view.accept(event(
+            &view,
+            Event::ItemCreated {
+                item: item("c", 4, "agent", "third"),
+            },
+        ))
+        .unwrap();
+        let places = view.question_places();
+        let ids = |item: &str| -> Vec<&str> {
+            places
+                .get(item)
+                .map(|q| q.iter().map(|q| q.question_id.as_str()).collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(ids("a"), ["from-snapshot"]);
+        assert_eq!(ids("b"), ["live"]);
+        assert!(ids("c").is_empty(), "not pulled to the end");
     }
 
     #[test]
