@@ -4105,3 +4105,41 @@ fn the_only_session_stays_selected_when_it_summarizes() {
     let _ = app.update(summary_update(&app, "only", Some("checkpoint")));
     assert_eq!(app.selected.as_deref(), Some("only"));
 }
+
+#[test]
+fn a_session_that_ends_loses_its_tab_before_the_list_returns() {
+    let (mut app, _) = App::new(true, None);
+    add_session(&mut app, "first");
+    add_session(&mut app, "second");
+    let _ = app.choose("first".into());
+    let _ = app.choose("second".into());
+    let _ = app.update(summary_update(&app, "second", Some("end")));
+    assert_eq!(app.selected.as_deref(), Some("first"));
+    assert!(simulator(&app, (720.0, 200.0)).find("second-title").is_err(), "folded while summarizing");
+    // the daemon's end: lifecycle ended and summarizing null in one update, no list yet
+    let ended = |app: &App, id: &str| {
+        let view = &app.views[id];
+        let mut session = view.conversation.session.clone().unwrap();
+        session.summarizing = None;
+        session.lifecycle = "ended".into();
+        session.activity = "idle".into();
+        let event = SessionEvent {
+            session_id: id.into(),
+            subscription_id: view.conversation.subscription_id.clone(),
+            seq: (view.conversation.seq + 1).to_string(),
+            event: Event::SessionUpdated { session },
+        };
+        Message::Lane(id.into(), view.lane_epoch, sill_client::lane::Update::Event(Box::new(event)))
+    };
+    let _ = app.update(ended(&app, "second"));
+    assert!(!app.tabs.iter().any(|t| t.id == "second"), "the tab went with the end");
+    assert!(!app.views.contains_key("second"));
+    assert!(!app.tab_history.iter().any(|id| id == "second"));
+    assert!(simulator(&app, (720.0, 200.0)).find("second-title").is_err());
+    assert_eq!(app.selected.as_deref(), Some("first"));
+    // the selected session ending: the person lands on the tab visited before it
+    let _ = app.choose("demo".into());
+    let _ = app.choose("first".into());
+    let _ = app.update(ended(&app, "first"));
+    assert_eq!(app.selected.as_deref(), Some("demo"));
+}

@@ -2890,6 +2890,7 @@ impl App {
         }
         let connection_lost = matches!(&update, lane::Update::Connecting { error: Some(_), .. });
         let was_busy = view.conversation.busy();
+        let was_ended = view.ended();
         // a session already known to be summarizing, or not known at all (its first snapshot):
         // either way, no step into a summary to follow
         let was_summarizing = view.conversation.session.is_none() || view.summarizing();
@@ -2933,6 +2934,7 @@ impl App {
         }
         let finished = was_busy && !view.conversation.busy();
         let began_summary = !was_summarizing && view.summarizing();
+        let ended_now = !was_ended && view.ended();
         let snap = grew && selected && view.follow_tail && view.conversation_shown() && !selecting;
         let mut tasks: Vec<Task<Message>> = checks
             .into_iter()
@@ -2970,6 +2972,10 @@ impl App {
         }
         if snap {
             tasks.push(operation::snap_to_end("conversation"));
+        }
+        // last: the view goes with the tab
+        if ended_now {
+            tasks.push(self.close_ended(&session));
         }
         Task::batch(tasks)
     }
@@ -3056,12 +3062,7 @@ impl App {
         let drafts: Vec<_> = self
             .tabs
             .iter()
-            .filter(|tab| {
-                self.views
-                    .get(&tab.id)
-                    .and_then(|v| v.reader.as_ref())
-                    .is_some_and(|r| r.dirty || r.saving.is_some())
-            })
+            .filter(|tab| self.unsaved_source(&tab.id))
             .cloned()
             .collect();
         self.tabs = sessions
@@ -3084,10 +3085,7 @@ impl App {
                 .then_with(|| created.get(a.id.as_str()).cmp(&created.get(b.id.as_str())))
                 .then_with(|| a.id.cmp(&b.id))
         });
-        // a session that ended or went: its view goes, and with it its lane and terminal
-        let open: BTreeSet<&str> = self.tabs.iter().map(|t| t.id.as_str()).collect();
-        self.views.retain(|id, _| open.contains(id.as_str()));
-        self.tab_history.retain(|id| open.contains(id.as_str()));
+        self.prune_closed();
         // A stopped jail has no live processes or exposed ports, even while its tab (or an
         // externally ended session's unsaved source) remains open. Invalidate in-flight polls.
         for (id, view) in &mut self.views {
@@ -3097,13 +3095,6 @@ impl App {
             {
                 view.processes.read(vec![], None);
             }
-        }
-        if self
-            .selected
-            .as_ref()
-            .is_some_and(|s| !open.contains(s.as_str()))
-        {
-            self.selected = None;
         }
         // watch every running session for supervision; watching never starts one
         let watch: Vec<String> = self
@@ -3144,15 +3135,60 @@ impl App {
             let choose = self.choose(id);
             tasks.push(choose.chain(self.focus_prompt()));
         }
-        if self.selected.is_none()
-            && let Some(id) = self.tab_history.last().cloned().or_else(|| {
-                self.tabs.iter().find(|t| t.running).map(|t| t.id.clone())
-            })
-        {
-            tasks.push(self.choose(id));
-        }
+        tasks.push(self.reselect());
         tasks.push(icons);
         Task::batch(tasks)
+    }
+
+    /// The session holds source edits not yet saved: its tab stays when it ends.
+    fn unsaved_source(&self, id: &str) -> bool {
+        self.views
+            .get(id)
+            .and_then(|v| v.reader.as_ref())
+            .is_some_and(|r| r.dirty || r.saving.is_some())
+    }
+
+    /// After `tabs` lost a session that ended or went: its view goes, and with it its lane and
+    /// terminal; it leaves the visiting order, and the selection when it was the one selected.
+    fn prune_closed(&mut self) {
+        let open: BTreeSet<&str> = self.tabs.iter().map(|t| t.id.as_str()).collect();
+        self.views.retain(|id, _| open.contains(id.as_str()));
+        self.tab_history.retain(|id| open.contains(id.as_str()));
+        if self
+            .selected
+            .as_ref()
+            .is_some_and(|s| !open.contains(s.as_str()))
+        {
+            self.selected = None;
+        }
+    }
+
+    /// With nothing selected: the tab visited last, else the first running one.
+    fn reselect(&mut self) -> Task<Message> {
+        if self.selected.is_some() {
+            return Task::none();
+        }
+        let next = self
+            .tab_history
+            .last()
+            .cloned()
+            .or_else(|| self.tabs.iter().find(|t| t.running).map(|t| t.id.clone()));
+        match next {
+            Some(id) => self.choose(id),
+            None => Task::none(),
+        }
+    }
+
+    /// The session's lane said it ended: its tab closes now, as `listed` would close it once the
+    /// list it asks for returned — until then the tab would stand there, unfolded after a closing
+    /// summary. Unsaved source edits keep the tab, as in `listed`.
+    fn close_ended(&mut self, id: &str) -> Task<Message> {
+        if self.unsaved_source(id) {
+            return Task::none();
+        }
+        self.tabs.retain(|t| t.id != id);
+        self.prune_closed();
+        self.reselect()
     }
 
     /// The tabs in the order the bar shows them: summarizing sessions first, folded to their
