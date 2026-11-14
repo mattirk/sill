@@ -3,7 +3,8 @@
 **Direction agreed 2026-11-03:** the public frontend contract is named **Sill Frontend Protocol
 (SFP)**. SFP v1 is a design target, not an implemented or frozen public release. Sections 1–5
 describe the existing development protocol; [section 6](#6-sfp-v1-design-direction-2026-11-03)
-records the work needed before declaring SFP v1 stable. ACP is the separate agent-facing protocol.
+records the work needed before declaring SFP v1 stable. [Section 7](#7-sfp1-draft1-proposed-contract)
+is the first concrete draft, not an implemented API. ACP is the separate agent-facing protocol.
 
 Status: protocol **6**, frozen 2026-11-02 (docs/daemon.md M4–M6). From here every change
 to a method or a type's shape is a line in the changelog below and a bump of
@@ -188,7 +189,7 @@ protocol is separately versioned and remains internal.
 
 The current wire version is 6 and earlier development versions include 1. SFP v1 therefore needs
 an unambiguous protocol identity and negotiation scheme; simply resetting `PROTOCOL` to 1 would
-collide with the old meaning. Exact handshake fields remain to be specified. The transition is a
+collide with the old meaning. Section 7 proposes the identity and handshake. The transition is a
 coordinated upgrade of clients and daemon, with no protocol 6 compatibility layer. A naming change
 alone does not change the existing `_sill/` method namespace.
 
@@ -240,8 +241,8 @@ Design SFP for the following semantics now, while retaining ACP v1 support:
 
 1. Specify every operation, result, event and error in language-independent schemas, including
    today's opaque `frontend.request`, stored transcript and changes-history payloads. Document
-   path ownership (box versus frontend), binary data, limits and pagination. Choose whether to
-   retain a typed dispatcher or expose separate methods as an implementation design step.
+   path ownership (box versus frontend), binary data, limits and pagination. Section 7 proposes
+   separate public methods in place of the opaque dispatcher.
 2. Specify the conversation and recovery semantics above, including concurrent frontends,
    question resolution and retry rules for mutating operations beyond prompts.
 3. Specify byte-stream framing, token ownership/expiry, backpressure, end-of-stream, cancellation,
@@ -259,12 +260,24 @@ Design SFP for the following semantics now, while retaining ACP v1 support:
    conversation lifecycle and replay against actual v2 behavior. Keep draft v2 support opt-in
    and retain ACP v1 support; the v2 adapter is a freeze prerequisite, not deferred until after
    SFP v1 stabilizes.
+7. Bound transport input and resource use: define and enforce maximum JSON message sizes,
+   idle-handshake deadlines, connection limits and pending-stream limits. Bound stream-expiry
+   bookkeeping as well; a thread per pending token must not allow unbounded resource growth.
+   Verify rejection and cleanup when limits or deadlines are reached, alongside the existing
+   bounded outbound queues.
+8. Specify the transport trust contract. Unix-socket peer credentials and SSH authenticate the
+   user account; authenticated frontends currently receive the daemon's full authority, including
+   host operations. Feature negotiation is not authorization. Keep the daemon socket and its
+   descriptors inaccessible to agent jails, whose processes may share the person's uid, and
+   regression-check that isolation. Any future TCP, browser or restricted-client transport must
+   define its authentication and authorization boundary before exposure; do not assume that
+   changing to HTTP or adding encryption supplies that boundary.
 
 ### Product decisions (answered 2026-11-03)
 
 The person answered these interactively. They govern the SFP v1 work; they do not describe
-changes already implemented in development protocol 6. The technical details above still need
-a concrete specification.
+changes already implemented in development protocol 6. Section 7 drafts the technical details;
+its open choices do not reopen these decisions.
 
 | Decision | Chosen behavior |
 |---|---|
@@ -272,3 +285,392 @@ a concrete specification.
 | Incompatible daemon | Explain the mismatch and require explicit action before replacement or restart, locally and remotely. |
 | ACP v2 implementation timing | Validate SFP with an experimental ACP v2 adapter before freezing v1; keep draft support opt-in and retain ACP v1. |
 | Prompt submitted during work | Steer active work when supported; otherwise queue the prompt. |
+
+## 7. sfp/1-draft.1 proposed contract
+
+**Status: first design draft, 2026-11-03; not implemented.** The requirements in this section
+describe the proposed target, not development protocol 6. They incorporate the second-opinion
+review into the contract. Section 6's four product decisions remain settled. The open choices at
+the end must be resolved before freezing; method names and shapes below may change during drafts.
+This is a semantics draft, not yet the complete machine-readable schema or method inventory.
+
+### 7.1 Ownership and migration
+
+SFP is Sill's own JSON-RPC protocol. It retains the `_sill/` method namespace but does not carry
+ACP `session/*` methods or require an ACP library in a frontend. The daemon adapts agent behavior
+into SFP and owns transcript construction, prompt context, questions, policy and persistence.
+Agent-reported file changes and terminal output are display data, not authority to execute host
+operations. The same contract applies over the local socket and SSH/stdio.
+
+Before changing SFP wire shapes, separate the relay's private command/event types from public
+frontend types. Convert at the main daemon boundary. Private types may normalize ACP, but must
+not depend on SFP serialization or expose SDK types publicly. A change confined to SFP must not
+require a relay protocol bump. This does not promise that genuinely incompatible relay changes
+can preserve a running agent; the initial split's deployment needs its own migration check.
+
+Upgrade protocol 6 clients and daemon together; do not implement a legacy compatibility layer.
+Detecting incompatibility never authorizes replacing or restarting a local or remote daemon.
+Explain the mismatch and wait for an explicit user action. Build IDs are diagnostic, not protocol
+compatibility tests. A failed handshake must not start a second daemon beside an existing one.
+
+### 7.2 Initialization and compatibility
+
+Control messages are UTF-8 JSON-RPC 2.0 objects, one per line. Request IDs correlate replies;
+they are not submission IDs or replay cursors. Replies may arrive out of request order. Clients
+must dispatch by ID, and must not infer execution order from the order of replies. No JSON-RPC
+batches in this draft. Session state changes are ordered by session event sequence instead.
+
+The first control request is `_sill/initialize`. Example request and result:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"_sill/initialize","params":{"protocols":["sfp/1-draft.1"],"client":{"name":"example-client","version":"0.1"},"capabilities":{}}}
+{"jsonrpc":"2.0","id":1,"result":{"protocol":"sfp/1-draft.1","daemon":{"version":"example"},"capabilities":{},"limits":{"max_message_bytes":8388608,"max_inline_bytes":1048576,"snapshot_ttl_seconds":60}}}
+```
+
+The daemon selects the first offered protocol it supports. No overlap returns `incompatible`
+with its supported identities and leaves the connection uninitialized; only another initialize
+attempt or closing the connection is valid. Other methods before success return
+`not_initialized`. Reinitializing a successful connection returns `invalid_state`.
+Identities are exact strings: `sfp/1-draft.N` during development and `sfp/1` at freeze.
+
+Capabilities are named, versioned optional features. Unknown offers are ignored; the result
+contains only mutually supported optional features. Empty capabilities provide the complete
+baseline conversation contract. Required new state semantics need a negotiated feature or a
+new protocol identity. Agent abilities, such as steering, are separately reported in session
+state and may change when the agent changes; handshake capabilities describe SFP support.
+
+The example limits are illustrative, not chosen defaults. Limits apply to encoded message bytes
+(including the newline) and decoded inline bytes respectively. A fixed pre-initialize message
+ceiling and the mandatory limit inventory remain freeze work. `_sill/daemon.schema` must describe
+the selected protocol's methods, notifications, errors, limits and capability requirements; it
+must not expose protocol 6 shapes under an SFP identity.
+
+### 7.3 Identities, state and event ordering
+
+All public IDs are opaque strings. Mutations use full `session_id` values, never ambiguous titles
+or prefixes. Session IDs are never reused. Item, turn, question and agent-generation IDs are
+daemon-assigned and stable for their lifetime; client submission and answer IDs are described
+below. A frontend must not interpret ACP IDs or transient request numbers as public identities.
+
+A cursor is `{session_id, seq}`. `seq` is a canonical unsigned decimal string, starting at `"0"`
+for the initial state, with no leading zeros. Strings avoid loss in JavaScript's number type.
+Each committed session event advances it by one. There is no ordering across sessions. A daemon
+restart or agent replacement does not reset it. A deleted session cannot be resumed as a new
+session with the same identity. Restoring an older database without cursor continuity must
+invalidate old session identities rather than reuse sequences for different events.
+
+The public sequence is separate from relay sequence numbers and transcript row numbers. A relay
+sequence is worker-local; a transcript row can mutate. Persist each state change, its public
+event and its source-event deduplication mapping atomically before publication or relay ACK.
+Source identities must include their relay/agent generation so reused source numbers cannot
+alias earlier events. Re-delivery of an already committed source event does not mint a new
+public event or append text twice. Snapshot state must be recoverable at the published cursor.
+These are observable durability guarantees, not a requirement to use a particular database layout.
+
+Session state comprises:
+
+| Object | Required meaning |
+|---|---|
+| Session | Lifecycle, current `agent_generation_id`, agent capabilities and activity. |
+| Item | `item_id`, `created_seq`, nullable `turn_id`, nullable `submission_id`, originating generation, kind and content. |
+| Turn | `turn_id`, generation and activity/outcome when a meaningful turn grouping exists. |
+| Submission | Client input identity, daemon acceptance, delivery, insertion and outcome. |
+| Question | Independent `question_id`, generation, kind, title, optional description/subject/tool reference, state and answer delivery. |
+
+Items cover user/agent messages, thoughts, tool calls, terminal display and daemon notes. Item
+order is `created_seq`; updates do not move an item. `turn_id` may be null for unsolicited or
+background work. A steering submission need not start a new turn. Content blocks have stable
+`block_id`s within their item and tagged content types. Exact content variants, tool fields and
+form schemas are open schema work; the lifecycle and patch rules below apply to all of them.
+
+The single notification envelope is `_sill/session.event`:
+
+```json
+{"jsonrpc":"2.0","method":"_sill/session.event","params":{"session_id":"s1","subscription_id":"sub1","seq":"43","event":{"type":"item.text_appended","item_id":"i1","block_id":"b1","text":" world"}}}
+```
+
+Baseline event families and application rules:
+
+| Event | Effect |
+|---|---|
+| `item.created {item}` | Insert a new complete item with a previously unused ID. |
+| `item.patched {item_id, set}` | Replace the named mutable fields; omitted fields stay unchanged. |
+| `item.text_appended {item_id, block_id, text}` | Append exactly this string to an existing text/thought block. |
+| `item.removed {item_id, reason}` | Remove an item from the current view; never reuse its ID. |
+| `session.updated {session}` | Replace the complete current session state, including activity/capabilities. |
+| `turn.updated {turn}` | Insert or replace the complete turn record. |
+| `submission.updated {submission}` | Insert or replace the complete submission record. |
+| `question.updated {question}` | Insert or replace the complete question record, including terminal resolutions. |
+
+`set` uses an allowlisted schema for the item kind, not arbitrary JSON paths. IDs, kind and
+creation sequence are immutable. Null clears only a nullable field; null is otherwise invalid.
+Arrays/objects in `set` replace the entire field, not a recursive merge. Replacing `content`
+replaces the block list; retained blocks keep their IDs and removed block IDs are not reused.
+Appending and replacing text are distinct operations. Each event applies atomically. A missing
+patch target or invalid transition is a synchronization failure: stop applying and obtain a
+fresh snapshot instead of fabricating an item. No public event may expose only half a state change
+that violates these rules; related updates needing atomicity must share one event shape before freeze.
+
+Clients ignore duplicate events at or below their last applied sequence, detect a gap above the
+next expected sequence, and reattach to recover. Every subscriber receives the same sequenced
+state events; capability-specific presentation must not introduce sequence gaps. Unknown fields
+are ignored and unknown display content is preserved as an opaque block/placeholder. Unknown
+enum strings are retained but never treated as a known successful or authorized state. Unknown
+state-changing event types are a compatibility error, not silently skipped. An optional extension
+may be ignored only when its negotiated contract explicitly declares it nonessential to state
+reconstruction. Unknown authorization meanings never grant permission.
+
+### 7.4 Attach, snapshots and retention
+
+`_sill/sessions.attach {session_id, since?}` subscribes this connection. `since` is the last cursor
+the client fully applied **and whose state it still holds**, not the last event it merely received.
+Omitting it asks for a snapshot. The response precedes all notifications for the new subscription
+and chooses one of these shapes (shown as notation, not literal JSON):
+
+```text
+{subscription_id, mode: "replay", after: Cursor, through: Cursor}
+{subscription_id, mode: "snapshot", snapshot: {token, at: Cursor, expires_at}}
+```
+
+For replay, establish a boundary N atomically with subscription, replay every event after `since`
+through N, then continue with N+1 onward. `through` identifies N. A cursor equal to N is valid
+and has no replay tail. A foreign or future cursor returns `invalid_cursor`; a valid cursor older
+than retained events selects snapshot mode. The daemon may also choose snapshot mode to bound
+replay cost. The client must implement both modes.
+
+For snapshot mode, capture immutable state at N and subscribe to events after N at the same
+boundary. `_sill/sessions.snapshot {token, page?}` returns `{at, records, next_page}`; null
+`next_page` ends the snapshot. Records are tagged session/item/turn/submission/question objects.
+Every page belongs to the same snapshot and can be retried using the same page token. Tokens are
+opaque, connection/subscription-bound and expire at the advertised time; expired reads return
+`snapshot_expired`. Page size and token/resource limits are part of the schema work.
+
+The client buffers live events after N while reading pages, then atomically replaces its session
+view, sets its cursor to N and applies the buffered tail in order. Never mix old local history
+with a replacement snapshot. The snapshot includes all retained items, current session/turn state,
+open questions, answered questions with pending/unknown delivery and pending/uncertain submissions.
+Historical terminal record pagination must not omit state needed for recovery. Every item that
+may still receive a patch must be present, along with records needed to interpret its references;
+retention cannot discard an item and later emit a patch against it. The precise history-retention
+policy remains open.
+
+Both ends bound queues. If the daemon cannot preserve ordered delivery, it closes the connection;
+if a client cannot buffer the snapshot tail, it abandons that synchronization and reattaches.
+Neither silently drops state events. A slow client may repeatedly need a new snapshot; flow-control
+tuning must be validated before freeze. There is no promise to retain every token delta forever.
+Compaction may discard old events only while leaving a consistent snapshot and the separate
+deduplication records required below.
+
+There is one active subscription per session per connection. Reattach replaces it and invalidates
+its snapshot tokens. `subscription_id` distinguishes old queued notifications; ignore those once
+the replacement attach response arrives. `_sill/sessions.detach {session_id, subscription_id}`
+invalidates that subscription only. Detach or connection loss does not cancel work or questions.
+The draft retires protocol 6's separate opaque `session.replay` transcript format.
+
+### 7.5 Submission acceptance, steering and recovery
+
+`_sill/sessions.submit {session_id, submission_id, text, attachments}` returns the durable
+submission record. `_sill/submissions.get {session_id, submission_id}` retrieves its current state.
+The daemon constructs transcript items and agent context; no client-written `entry` is accepted.
+Attachments reference immutable uploaded objects (or bounded inline content), never an implicit
+path on the frontend machine. Their exact schema remains open.
+
+Deduplicate by `(session_id, submission_id)`. A retry with the same semantic client input returns
+the existing record; reuse with different text, attachment content or other input returns
+`id_conflict`. Transport IDs and daemon-added context do not participate in input identity.
+Attachment identity must not depend on an expiring download URL. Retain input fingerprints and
+deduplication records or tombstones for the session lifetime, independently of event retention.
+Such tombstones retain enough input identity and outcome to serve the promised retry and status
+results; retaining just the ID is insufficient. The same rule applies to answer deduplication.
+Session deletion makes subsequent mutations fail; it never recreates a session or a submission.
+
+Validation failures before recording acceptance return an RPC error and perform no delivery.
+Once accepted, commit the submission and its update event before returning success. An accepted
+record has independent fields:
+
+| Field | Values and interpretation |
+|---|---|
+| `acceptance` | `accepted`: Sill has durable responsibility for the submission, not proof of agent receipt. |
+| `delivery` | `queued`, `direct`, `steering`: current placement or delivery mode; queued records also expose `held` and a nullable `hold_reason`. |
+| `insertion` | `pending`, `confirmed`, `rejected`, `unknown`: knowledge of insertion into the agent conversation. |
+| `outcome` | `pending`, `completed`, `cancelled`, `failed`, `unknown`: known processing outcome, separately from insertion. |
+
+Include structured reasons for rejection, failure or uncertainty. A later agent rejection is a
+submission update, not a retroactive RPC failure. `confirmed` requires adapter evidence; an
+adapter must document what establishes it. Do not synthesize confirmation from echoed text.
+Completion need not be inferable per submission when several submissions steer one activity;
+an adapter must preserve that uncertainty rather than assign the turn's success to every prompt.
+
+When idle, dispatch directly. During active work, steer if the current adapter/agent advertises
+that ability; otherwise queue in daemon-acceptance order. Reevaluate support before dispatch.
+Serialize the dispatch decision with activity changes so an attach-time capability read cannot
+cause a race. Before dispatch, persist the exact prepared agent payload and command identity.
+Recovery of the same attempt uses that payload, not newly composed context.
+
+A lost submit reply is recovered by querying or resending **the same** submission ID and input.
+If `get` returns `not_found`, resubmitting that same ID remains safe even if the original request
+is still in flight. A new ID is a new intent. This guarantees daemon-side deduplication, not
+exactly-once agent execution. If relay/agent loss leaves an attempt possibly delivered without
+proof, mark the uncertain fields `unknown`; do not automatically send it again. Replaying text
+or its absence is not proof. A knowingly unsent queued submission can remain queued, but on agent
+replacement it is held until an explicit resume action chooses delivery to the replacement.
+The resume/cancel controls for held submissions are an open method-design item.
+
+### 7.6 Activity, cancellation and agent replacement
+
+Expose foreground activity as `idle`, `working`, `waiting` or `unknown`, with applicable turn and
+question references. Report background work separately; unknown background state is not an empty
+list. Foreground idle alone does not authorize cleanup or establish that processes have exited.
+Adapter loss yields unknown activity until reconciliation, not a fabricated successful finish.
+
+Cancellation is an explicit request with a defined target: a queued submission, a turn/foreground
+activity, or a managed process. It acknowledges that cancellation was recorded/requested, not
+that the agent or process has stopped. Confirmed outcomes arrive in the relevant state updates.
+Unsupported scopes return `unsupported`; adapters must not silently broaden a cancel request.
+Exact cancel methods, idempotency keys and races with completion must be specified before freeze.
+
+`agent_generation_id` changes when the underlying conversation/worker is replaced without
+continuity; a main-daemon restart adopting the same conversation preserves it. The generation
+change is sequenced through `session.updated`, before new-generation items/questions arrive.
+Keep earlier SFP item identities and session sequence; never relabel old items with a new
+generation. Reconciliation may reuse an existing item only with a durable identity mapping, not
+because text matches. Record a visible discontinuity and reconcile old active turns/submissions
+to their known or unknown outcomes. Cancel obsolete questions explicitly. How ACP v1 reload and
+ACP v2 replay establish continuity must be exercised by their adapters before freeze.
+
+### 7.7 Questions and competing answers
+
+Permissions and forms are independent question objects. Their tool reference may be null.
+`question_id` is never reused, even if an agent reuses its request number. States are `open`,
+`answered` and `cancelled`; terminal records retain a reason and, where applicable, the winning
+answer ID and delivery state (`pending`, `confirmed`, `unknown`). With no frontend attached an
+open question waits, unless daemon policy answers it. There is no frontend-disconnect timeout.
+Policy answers follow the same state/event rules as human answers.
+
+`_sill/questions.answer {session_id, question_id, answer_id, answer}` validates the answer and
+atomically claims an open question. Persist the winner and delivery intent before returning the
+question record. Only the first valid answer wins. Deduplicate answer IDs within the session for
+its lifetime: identical retries return the recorded decision/current delivery state, conflicting
+reuse returns `id_conflict`. Answer input identity includes both `question_id` and answer content;
+reusing an answer ID for another question conflicts even when the answer content is identical.
+Another answer to a terminal question returns `stale_answer` with
+its resolution. Publish `question.updated` so every observer dismisses or updates its dialog.
+
+Recording the decision does not claim that the agent received it. A lost delivery reply must not
+reopen the question; recovery retries delivery only when the relay can deduplicate it. Otherwise
+report unknown delivery. Questions from a lost generation are cancelled or retain their recorded
+answer with unknown delivery; neither can authorize a new generation's action. Unknown permission
+kinds/options cannot be interpreted as allow. A client that cannot safely render a question leaves
+it pending or uses an explicitly defined cancellation answer, never a guessed default.
+
+### 7.8 Schema conventions, errors and host operations
+
+Publish JSON Schema draft 2020-12 for every public request, result, notification and error-data
+shape. Use named objects instead of positional tuples, and tagged objects with a `type` field
+instead of Rust's externally tagged enums. Open string enums preserve unfamiliar values; fields
+with authorization or state-machine meaning must also document safe unknown-value handling.
+Use decimal strings for counters that can exceed JavaScript's safe integer range, and UTC RFC 3339
+strings for timestamps. The examples above do not replace those schemas.
+
+JSON-RPC parse/invalid-request/method-not-found/invalid-params errors retain their standard numeric
+codes. Proposed domain errors use numeric code `-32000` and
+`data: {code: <stable string>, details?: <typed object>}`. Human `message` text is diagnostic;
+clients branch on `data.code`, not English text. Initial domain codes:
+
+| Code | Meaning |
+|---|---|
+| `incompatible`, `not_initialized` | Handshake failure or initialization required. |
+| `not_found`, `gone` | No known resource, or a known resource/token has been removed. |
+| `invalid_state`, `unsupported`, `busy` | Operation cannot run in this state, lacks support, or hits a temporary resource conflict. |
+| `id_conflict`, `stale_answer` | Idempotency-key conflict or an already resolved question. |
+| `invalid_cursor`, `snapshot_expired` | Invalid resume position or expired snapshot lease. |
+| `limit_exceeded`, `permission_denied` | Advertised bound exceeded or daemon policy refused the operation. |
+
+Method schemas must define error details and whether failure establishes that no side effect
+occurred. A timeout/connection loss establishes no such thing. Unknown error codes display the
+message and do not trigger automatic mutation retries. Active work is not itself a `busy` error
+for submission: steering/queuing is the settled behavior.
+
+Replace `frontend.request` with individually specified methods grouped under `files.*`,
+`uploads.*`, `procs.*`, `registry.*`, `agents.*`, `settings.*`, `policy.*` and `streams.*`, alongside
+the existing session, pin, changes and memory groups. Public shapes must not serialize core
+configuration/store structs by accident. Inventory every existing suboperation and classify it
+as public, replaced, or explicitly internal. Do not exclude file/image access solely because
+the shelf uses it; independent clients need equivalent capabilities. Pure presentation helpers
+may remain outside the public contract, clearly marked `x-sill-internal` in schema metadata.
+
+Paths identify locations on the selected daemon box, never the frontend host by implication.
+Operations must distinguish host paths from a session's merged filesystem paths. The exact
+representation is open: choose lossless bytes with a display string, or explicitly constrain
+operations to UTF-8 and return a typed error for unrepresentable paths. Never silently replace
+invalid bytes. Binary JSON values use base64 with decoded-size limits; larger uploads use a
+specified stream/chunk contract. JSON arrays of byte numbers are not the public representation.
+
+Every list/history operation needs bounded pagination and documented consistency. Every mutation
+needs retry semantics: either an idempotency key and retained outcome, a naturally idempotent
+operation with explicit preconditions, or an explicit prohibition on blind retry after uncertainty.
+Keep/Revert and other host mutations retain their filesystem/precondition checks; a retry token
+does not override a changed file. Final method schemas, limits and mutation recovery tables are
+required before freeze, not supplied by this first draft.
+
+### 7.9 Streams
+
+Keep separate control and byte-stream connections, including over SSH. File descriptors never
+cross SFP. A stream-open result must identify the stream independently of its short-lived,
+single-use connection token. The token is bound to the authenticated owner, operation and target;
+its lifetime and whether the issuing control connection must remain open must be specified.
+Opening a second connection must not accidentally start another daemon.
+
+Before freezing, specify the prelude and success/error framing, token consumption on failed opens,
+maximum buffering/backpressure, EOF/half-close, cancellation, disconnect behavior and teardown
+for each of PTY, port, login, install and upload streams. PTY resize targets the stream ID rather
+than a consumed token; process exit status is distinguishable from transport loss. Stream
+reconnection must explicitly say whether it resumes, opens a new stream or is unsupported.
+An agent's terminal display item is not an interactive PTY capability. Raw stream bytes are not
+durable session events; any durable status/result is reported through its owning operation.
+The existing protocol 6 mechanism in §1 is implementation evidence, not a completed SFP contract.
+
+### 7.10 Implementation order and freeze evidence
+
+1. Review this model and resolve the foundational open schemas; separate relay types before
+   changing public wire shapes. Assess the initial relay migration explicitly.
+2. Implement initialization, the durable session event model, snapshot/replay, submissions and
+   questions as one working slice. Preserve ACP v1 behavior behind the adapter.
+3. Build a small Python or TypeScript client from exported schemas immediately, then expand it
+   alongside the implementation. It imports no `sill-core` types and reads no store files.
+4. Complete the public method inventory, errors, limits and stream contract; migrate shelf and
+   CLI to the same public semantics. Mark historical frontend-as-ACP descriptions as superseded.
+5. Exercise an experimental, opt-in ACP v2 adapter against real v2 behavior, retaining ACP v1.
+   Resolve findings in SFP, then remove the draft suffix only after the conformance suite passes.
+
+Required conformance scenarios include:
+
+- Daemon crash after state/event commit but before publication or reply; replay does not duplicate
+  items, appended text, accepted submissions or answers.
+- Retained, expired, future and foreign cursors; a paginated snapshot while live writes continue;
+  slow-reader disconnect and replacement subscriptions with old notifications queued.
+- Duplicate submission IDs with identical and different input; dispatch followed by lost agent
+  state; queued versus steering delivery; no automatic resend of uncertain work.
+- Two frontends racing different answers; retry of the winning answer; no observers attached;
+  agent replacement reusing source request/item numbers.
+- Unknown fields/content/enums, an unknown required state event, and an unknown authorization
+  meaning; no silent state corruption or permission grant.
+- Socket and SSH behavior, protocol mismatch without automatic restart, stream token expiry,
+  transport loss versus process exit, and resource cleanup after stream teardown.
+
+### 7.11 Open choices for the next revision
+
+These are design work, not reasons to reopen §6's product decisions:
+
+- Exact baseline item/content, session/activity, tool, form and attachment schemas; which related
+  transitions require a single atomic event; explicit evidence rules for adapter confirmations.
+- History retention and paging of terminal records; snapshot/event/message limits and expiry;
+  flow control sufficient for a snapshot to catch up under sustained output.
+- Held-submission resume, targeted cancellation and other mutation methods, including key scope,
+  retention and uncertain-outcome recovery outside submissions/questions.
+- Lossless path encoding versus a documented UTF-8 restriction, upload framing, and the complete
+  stream lifecycle/token-ownership rules.
+- Capability names/versions and required error-detail schemas; full classification of today's
+  `frontend.request` helpers and independent-client language/generator choice.
+- Migration of existing stored transcripts to stable IDs, including limits on continuity claims
+  when an old transcript lacks source identities. Do not deduplicate by text to fill those gaps.
