@@ -666,11 +666,33 @@ impl App {
             }
             conversation.turn_end(turn_id).map(|end| end.to_string())
         };
+        // the feed's rows: an item, or a run of tool calls shown as one block (`tool_runs`); a call
+        // with a question under it keeps its own row, so the question stays under its call
+        let entries =
+            crate::tool_runs::entries(&items, |item| places.contains_key(item.item_id.as_str()));
         // what each row's height depends on, so a measured height is used only while it holds
-        let signatures: Vec<u64> = items
+        let signatures: Vec<u64> = entries
             .iter()
-            .enumerate()
-            .map(|(index, item)| {
+            .map(|entry| {
+                let index = entry.end - 1;
+                if entry.len() > 1 {
+                    let calls: Vec<_> = items[entry.clone()]
+                        .iter()
+                        .map(|item| {
+                            let tool = item.tool.as_ref().map(|t| {
+                                (&t.title, &t.kind, &t.status, t.detail.len(), t.diff.len())
+                            });
+                            (
+                                &item.item_id,
+                                tool,
+                                view.open_tools.contains(&item.item_id),
+                                view.open_groups.contains(&item.item_id),
+                            )
+                        })
+                        .collect();
+                    return rows::signature((calls, turn_end(index, items[index])), layout_key);
+                }
+                let item = items[index];
                 let source = view.rendered.get(&item.item_id).map(|r| r.source.as_str());
                 let tool = item.tool.as_ref().map(|t| {
                     (
@@ -712,12 +734,12 @@ impl App {
             .collect();
         let known: Vec<Option<f32>> = {
             let heights = view.heights.borrow();
-            items
+            entries
                 .iter()
                 .zip(&signatures)
-                .map(|(item, signature)| {
+                .map(|(entry, signature)| {
                     heights
-                        .get(&item.item_id)
+                        .get(&items[entry.start].item_id)
                         .filter(|(s, _)| s == signature)
                         .map(|(_, h)| *h)
                 })
@@ -750,16 +772,22 @@ impl App {
         for slot in slots {
             match slot {
                 rows::Slot::Gap { first, height } => {
-                    let gap_key = format!("gap {}", items[first].item_id);
+                    let gap_key = format!("gap {}", items[entries[first].start].item_id);
                     feed = feed.push(rows::key(&gap_key), space().height(height));
                 }
                 rows::Slot::Row(index) => {
-                    let item = items[index];
-                    let mut row = Column::new().spacing(SPACING).push(self.item(view, item));
-                    for question in below(item) {
-                        row = row.push(self.question(view, question));
+                    let entry = entries[index].clone();
+                    let (item, last) = (items[entry.start], entry.end - 1);
+                    let mut row = Column::new().spacing(SPACING);
+                    if entry.len() > 1 {
+                        row = row.push(self.tool_run(view, items[entry].to_vec()));
+                    } else {
+                        row = row.push(self.item(view, item));
+                        for question in below(item) {
+                            row = row.push(self.question(view, question));
+                        }
                     }
-                    if let Some(end) = turn_end(index, item) {
+                    if let Some(end) = turn_end(last, items[last]) {
                         row = row.push(
                             container(
                                 selection::text(format!("· {end}"))
@@ -1004,13 +1032,23 @@ impl App {
         item: &'a Item,
         tool: &'a Tool,
     ) -> Element<'a, Message> {
+        ruled(
+            2.0,
+            alpha(P.fg, 0.18),
+            self.tool_call(view, item, tool).width(Fill),
+        )
+    }
+
+    /// A tool call's line and, opened, its output; the rule beside it is its row's or its run's.
+    fn tool_call<'a>(
+        &'a self,
+        view: &'a SessionView,
+        item: &'a Item,
+        tool: &'a Tool,
+    ) -> Column<'a, Message> {
         let line = button(
             row![
-                text(kind_glyph(&tool.kind))
-                    .font(MONO_FONT)
-                    .size(style::SMALL)
-                    .color(alpha(P.fg, 0.6))
-                    .width(16),
+                kind_mark(&tool.kind),
                 container(
                     text(one_line(&tool.title, 140))
                         .size(style::SMALL)
@@ -1027,41 +1065,115 @@ impl App {
         .width(Fill)
         .style(style::row_button);
         let line = keys::press(line, Message::ToggleTool(item.item_id.clone()));
-        let mut body = Column::new().push(line);
+        let body = Column::new().push(line);
         if view.open_tools.contains(&item.item_id) {
-            if !tool.detail.trim().is_empty() {
-                body = body.push(
+            tool_output(body, tool)
+        } else {
+            body
+        }
+    }
+
+    /// A run of tool calls (`tool_runs`) as one ruled block: a line for each group of calls that
+    /// ran the same thing — kind glyph, how many, the name, the latest call's arguments, the
+    /// group's status — in columns. A group of one is its call and opens to its output; a larger
+    /// group opens to its calls, indented under the name, each opening to its own output.
+    fn tool_run<'a>(&'a self, view: &'a SessionView, run: Vec<&'a Item>) -> Element<'a, Message> {
+        let groups = crate::tool_runs::groups(&run);
+        let count_width = groups
+            .iter()
+            .filter(|g| g.members.len() > 1)
+            .map(|g| text_width(&g.members.len().to_string(), style::SMALL))
+            .fold(0.0_f32, f32::max);
+        let names: Vec<String> = groups.iter().map(|g| one_line(&g.name, 24)).collect();
+        let name_width = names
+            .iter()
+            .map(|name| text_width(name, style::SMALL))
+            .fold(0.0_f32, f32::max);
+        let quiet = alpha(P.fg, 0.45);
+        let mut block = Column::new();
+        for (group, name) in groups.iter().zip(names) {
+            let (first, first_tool) = group.members[0];
+            let single = group.members.len() == 1;
+            let open = if single {
+                view.open_tools.contains(&first.item_id)
+            } else {
+                view.open_groups.contains(&first.item_id)
+            };
+            let mut cells = row![kind_mark(group.kind)]
+                .spacing(6)
+                .align_y(Alignment::Center);
+            if count_width > 0.0 {
+                let count = if single {
+                    String::new()
+                } else {
+                    group.members.len().to_string()
+                };
+                cells = cells.push(
+                    text(count)
+                        .size(style::SMALL)
+                        .color(quiet)
+                        .width(count_width)
+                        .align_x(iced::alignment::Horizontal::Right),
+                );
+            }
+            // the latest call's arguments; a group opened to its calls shows them there instead
+            let latest = if open && !single {
+                String::new()
+            } else {
+                one_line(&group.latest(), 140)
+            };
+            cells = cells
+                .push(
+                    text(name)
+                        .size(style::SMALL)
+                        .width(name_width)
+                        .wrapping(text::Wrapping::None),
+                )
+                .push(
                     container(
-                        selection::text(tool.detail.trim_end())
-                            .font(MONO_FONT)
-                            .size(style::MONO)
-                            .style(style::selectable(alpha(P.fg, 0.8))),
+                        text(latest)
+                            .size(style::SMALL)
+                            .color(quiet)
+                            .wrapping(text::Wrapping::None),
                     )
-                    .padding(Padding {
-                        top: 4.0,
-                        right: 10.0,
-                        bottom: 6.0,
-                        left: 28.0,
-                    }),
-                );
-            }
-            if !tool.diff.trim().is_empty() {
-                body = body.push(diff(&tool.diff));
-            }
-            if tool.detail.trim().is_empty() && tool.diff.trim().is_empty() {
-                body = body.push(
-                    container(text("No output.").size(style::TINY).color(P.fg_dim)).padding(
+                    .width(Fill)
+                    .clip(true),
+                )
+                .push(status_mark(group.status()));
+            let toggle = if single {
+                Message::ToggleTool(first.item_id.clone())
+            } else {
+                Message::ToggleGroup(first.item_id.clone())
+            };
+            block = block.push(keys::press(
+                button(cells)
+                    .padding([3, 6])
+                    .width(Fill)
+                    .style(style::row_button),
+                toggle,
+            ));
+            if open && single {
+                block = tool_output(block, first_tool);
+            } else if open {
+                // each call's glyph under the group's name
+                let indent = KIND_MARK
+                    + 6.0
+                    + if count_width > 0.0 {
+                        count_width + 6.0
+                    } else {
+                        0.0
+                    };
+                for (item, tool) in &group.members {
+                    block = block.push(container(self.tool_call(view, item, tool)).padding(
                         Padding {
-                            top: 2.0,
-                            right: 10.0,
-                            bottom: 4.0,
-                            left: 28.0,
+                            left: indent,
+                            ..Padding::ZERO
                         },
-                    ),
-                );
+                    ));
+                }
             }
         }
-        ruled(2.0, alpha(P.fg, 0.18), body.width(Fill))
+        ruled(2.0, alpha(P.fg, 0.18), block.width(Fill))
     }
 
     /// A question: open, the card with the agent's options as buttons; answered, one line with
@@ -2392,6 +2504,52 @@ fn diff(diff: &str) -> Element<'_, Message> {
 }
 
 /// The glyph for an ACP tool kind.
+/// The width of a tool line's kind glyph.
+const KIND_MARK: f32 = 16.0;
+
+fn kind_mark<'a>(kind: &str) -> Element<'a, Message> {
+    text(kind_glyph(kind))
+        .font(MONO_FONT)
+        .size(style::SMALL)
+        .color(alpha(P.fg, 0.6))
+        .width(KIND_MARK)
+        .into()
+}
+
+/// An opened tool call's output and diff under its line, or that it had none.
+fn tool_output<'a>(mut body: Column<'a, Message>, tool: &'a Tool) -> Column<'a, Message> {
+    if !tool.detail.trim().is_empty() {
+        body = body.push(
+            container(
+                selection::text(tool.detail.trim_end())
+                    .font(MONO_FONT)
+                    .size(style::MONO)
+                    .style(style::selectable(alpha(P.fg, 0.8))),
+            )
+            .padding(Padding {
+                top: 4.0,
+                right: 10.0,
+                bottom: 6.0,
+                left: 28.0,
+            }),
+        );
+    }
+    if !tool.diff.trim().is_empty() {
+        body = body.push(diff(&tool.diff));
+    }
+    if tool.detail.trim().is_empty() && tool.diff.trim().is_empty() {
+        body = body.push(
+            container(text("No output.").size(style::TINY).color(P.fg_dim)).padding(Padding {
+                top: 2.0,
+                right: 10.0,
+                bottom: 4.0,
+                left: 28.0,
+            }),
+        );
+    }
+    body
+}
+
 fn kind_glyph(kind: &str) -> &'static str {
     match kind.to_ascii_lowercase().as_str() {
         "read" => "›",

@@ -583,3 +583,99 @@ fn render_workspaces() {
     let _ = app.update(Message::Files(crate::files::Action::DiffMode(true)));
     render_size(&app, "workspaces-3-checkout-only", (1000.0, 500.0));
 }
+
+/// A run of shell calls between the demo's first call and its answer, grouped by program
+/// (`tool_runs`): folded, with one group opened, and with a call in that group opened too.
+#[test]
+#[ignore = "writes tool-run PNGs for review"]
+fn render_tool_runs() {
+    use crate::Message;
+    use sill_proto::sfp::{Item, Tool};
+    let (mut app, _) = App::new(true, None);
+    for _ in 0..demo::CHUNKS.len() {
+        let _ = app.update(Message::DemoTick);
+    }
+    let calls = [
+        (
+            "sed -n 960,1257p crates/sill-core/src/workspace/records.rs",
+            "completed",
+        ),
+        ("cat crates/sill/src/daemon/workspaces.rs", "completed"),
+        (
+            "grep -n \"workspaces\\|thread::spawn\\|fn handle\" crates/sill/src/daemon/hub.rs",
+            "completed",
+        ),
+        (
+            "grep -rn \"dispatch(\" crates/sill/src/daemon/*.rs | head",
+            "completed",
+        ),
+        (
+            "sed -n 925,1000p crates/sill/src/daemon/hub.rs && sed -n 1225,1330p crates/sill/src/daemon/hub.rs",
+            "completed",
+        ),
+        (
+            "grep -n \"workspace\\|borrowed\" -i crates/sill-core/src/jail.rs | head -80",
+            "completed",
+        ),
+        (
+            "cd /home/demo/project && sed -n 540,640p crates/sill-core/src/jail.rs",
+            "completed",
+        ),
+        (
+            "grep -n \"pub fn\\|pub(crate) fn\" crates/sill-core/src/changes.rs",
+            "failed",
+        ),
+        ("cat crates/sill-core/src/workspace/carry.rs", "completed"),
+        ("git for-each-ref | head -20; git remote -v", "completed"),
+        (
+            "sed -n 1,150p crates/sill-core/src/workspace/records_tests.rs",
+            "completed",
+        ),
+        (
+            "grep -rn \"interrupted\" --include=*.rs crates/sill-core/src/workspace",
+            "completed",
+        ),
+        (
+            "sed -n 120,182p crates/sill-gui/src/workspaces_ui.rs",
+            "completed",
+        ),
+        (
+            "grep -rn \"o.state\\|\\.state ==\" crates/sill-gui/src/*.rs",
+            "completed",
+        ),
+        (
+            "sed -n 20,80p crates/sill-gui/src/workspaces_ui.rs",
+            "in_progress",
+        ),
+    ];
+    let view = app.views.get_mut("demo").unwrap();
+    let template = view.conversation.item("tool").unwrap().clone();
+    for (n, (title, status)) in calls.iter().enumerate() {
+        let item = Item {
+            item_id: format!("tool-{n:02}"),
+            tool: Some(Tool {
+                title: (*title).into(),
+                status: (*status).into(),
+                detail: format!("{title}\n(output)"),
+                ..template.tool.clone().unwrap()
+            }),
+            ..template.clone()
+        };
+        view.conversation.insert_item(item);
+    }
+    let read = Item {
+        item_id: "tool-99".into(),
+        tool: Some(Tool {
+            title: "Read file '/home/demo/project/docs/parallel-coding.md'".into(),
+            kind: "read".into(),
+            ..template.tool.clone().unwrap()
+        }),
+        ..template.clone()
+    };
+    view.conversation.insert_item(read);
+    render(&app, "12-tool-run");
+    let _ = app.update(Message::ToggleGroup("tool-02".into()));
+    render(&app, "13-tool-run-open");
+    let _ = app.update(Message::ToggleTool("tool-05".into()));
+    render(&app, "14-tool-run-call-open");
+}

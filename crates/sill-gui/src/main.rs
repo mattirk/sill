@@ -44,6 +44,7 @@ mod syntax;
 mod terminal;
 #[cfg(test)]
 mod tests;
+mod tool_runs;
 mod tray;
 mod ui;
 mod viewer;
@@ -299,6 +300,8 @@ pub enum Message {
     /// The login card of a session (`login_ui`).
     Login(String, login_ui::Event),
     ToggleTool(String),
+    /// A group of tool calls in a run (`tool_runs`), by its first call's item.
+    ToggleGroup(String),
     ToggleAnswered(String),
     SetMode(Pick),
     SetOption(String, Pick),
@@ -432,6 +435,8 @@ pub struct SessionView {
     /// A request the person made that did not take effect; shown until the next one.
     pub failed: Option<String>,
     pub open_tools: BTreeSet<String>,
+    /// Groups of tool calls shown call by call, by their first call's item.
+    pub open_groups: BTreeSet<String>,
     pub open_answers: BTreeSet<String>,
     /// Answers on their way, so a second press does not send another.
     pub answering: BTreeSet<String>,
@@ -500,6 +505,7 @@ impl SessionView {
             outbox: Outbox::default(),
             failed: None,
             open_tools: BTreeSet::new(),
+            open_groups: BTreeSet::new(),
             open_answers: BTreeSet::new(),
             answering: BTreeSet::new(),
             follow_tail: true,
@@ -1605,6 +1611,11 @@ impl App {
             Message::ToggleTool(id) => {
                 if let Some(view) = self.current_mut() {
                     toggle(&mut view.open_tools, id);
+                }
+            }
+            Message::ToggleGroup(id) => {
+                if let Some(view) = self.current_mut() {
+                    toggle(&mut view.open_groups, id);
                 }
             }
             Message::ToggleAnswered(id) => {
