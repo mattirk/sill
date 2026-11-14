@@ -285,12 +285,17 @@ its open choices do not reopen these decisions.
 | Incompatible daemon | Explain the mismatch and require explicit action before replacement or restart, locally and remotely. |
 | ACP v2 implementation timing | Validate SFP with an experimental ACP v2 adapter before freezing v1; keep draft support opt-in and retain ACP v1. |
 | Prompt submitted during work | Steer active work when supported; otherwise queue the prompt. |
+| Linux filenames | Support lossless path bytes plus display text, including filenames that are not valid UTF-8. |
+| Queued prompt controls | Cancel individual queued prompts and explicitly resume held prompts; preserve queue order. No editing or reordering in v1. |
+| Interactive terminal disconnect | Keep the terminal alive within its session or explicit lifetime and allow reattachment to the same terminal. |
+| Terminal output recovery | Replay bounded recent output on reattachment and explicitly report gaps; do not retain an unlimited terminal byte log. |
+| Independent validation client | Build the first independent client in Python using exported schemas. |
 
 ## 7. sfp/1-draft.1 proposed contract
 
 **Status: first design draft, 2026-11-03; not implemented.** The requirements in this section
 describe the proposed target, not development protocol 6. They incorporate the second-opinion
-review into the contract. Section 6's four product decisions remain settled. The open choices at
+review into the contract. Section 6's product decisions remain settled. The open choices at
 the end must be resolved before freezing; method names and shapes below may change during drafts.
 This is a semantics draft, not yet the complete machine-readable schema or method inventory.
 
@@ -514,7 +519,10 @@ exactly-once agent execution. If relay/agent loss leaves an attempt possibly del
 proof, mark the uncertain fields `unknown`; do not automatically send it again. Replaying text
 or its absence is not proof. A knowingly unsent queued submission can remain queued, but on agent
 replacement it is held until an explicit resume action chooses delivery to the replacement.
-The resume/cancel controls for held submissions are an open method-design item.
+SFP v1 exposes cancellation of individual queued submissions and explicit resume of held
+submissions, preserving daemon-acceptance order. It does not expose queued-input editing or
+reordering. Resume does not authorize resending an attempt whose insertion is unknown. Exact
+method shapes, idempotency and dispatch/cancel races remain schema work.
 
 ### 7.6 Activity, cancellation and agent replacement
 
@@ -600,10 +608,11 @@ the shelf uses it; independent clients need equivalent capabilities. Pure presen
 may remain outside the public contract, clearly marked `x-sill-internal` in schema metadata.
 
 Paths identify locations on the selected daemon box, never the frontend host by implication.
-Operations must distinguish host paths from a session's merged filesystem paths. The exact
-representation is open: choose lossless bytes with a display string, or explicitly constrain
-operations to UTF-8 and return a typed error for unrepresentable paths. Never silently replace
-invalid bytes. Binary JSON values use base64 with decoded-size limits; larger uploads use a
+Operations must distinguish host paths from a session's merged filesystem paths. Paths carry
+lossless bytes plus display text, including for Linux filenames that are not valid UTF-8. Exact
+bytes identify the path; display text is presentation only and must never be round-tripped as
+its identity. Final field shapes remain schema work. Never silently replace invalid bytes in
+an operational path. Binary JSON values use base64 with decoded-size limits; larger uploads use a
 specified stream/chunk contract. JSON arrays of byte numbers are not the public representation.
 
 Every list/history operation needs bounded pagination and documented consistency. Every mutation
@@ -626,6 +635,14 @@ maximum buffering/backpressure, EOF/half-close, cancellation, disconnect behavio
 for each of PTY, port, login, install and upload streams. PTY resize targets the stream ID rather
 than a consumed token; process exit status is distinguishable from transport loss. Stream
 reconnection must explicitly say whether it resumes, opens a new stream or is unsupported.
+Interactive terminals survive frontend/control or byte-stream disconnection within their session
+or explicit lifetime. A frontend can reattach to the same terminal; a disconnect alone neither
+ends it nor creates a replacement shell. Reattachment replays a bounded buffer of recent output
+and explicitly reports any gap when earlier bytes are unavailable. This is not an unlimited
+terminal byte log. Buffer limits, byte offsets, replay/live handoff, terminal lifetime/cleanup
+and concurrent attachment rules remain technical specification work. This terminal policy does
+not imply that port, login, install or upload streams support resumption.
+
 An agent's terminal display item is not an interactive PTY capability. Raw stream bytes are not
 durable session events; any durable status/result is reported through its owning operation.
 The existing protocol 6 mechanism in §1 is implementation evidence, not a completed SFP contract.
@@ -636,7 +653,7 @@ The existing protocol 6 mechanism in §1 is implementation evidence, not a compl
    changing public wire shapes. Assess the initial relay migration explicitly.
 2. Implement initialization, the durable session event model, snapshot/replay, submissions and
    questions as one working slice. Preserve ACP v1 behavior behind the adapter.
-3. Build a small Python or TypeScript client from exported schemas immediately, then expand it
+3. Build a small Python client from exported schemas immediately, then expand it
    alongside the implementation. It imports no `sill-core` types and reads no store files.
 4. Complete the public method inventory, errors, limits and stream contract; migrate shelf and
    CLI to the same public semantics. Mark historical frontend-as-ACP descriptions as superseded.
@@ -655,6 +672,10 @@ Required conformance scenarios include:
   agent replacement reusing source request/item numbers.
 - Unknown fields/content/enums, an unknown required state event, and an unknown authorization
   meaning; no silent state corruption or permission grant.
+- Lossless non-UTF-8 path round-trips, including operations using exact bytes rather than display text.
+- Queued cancellation and held-submission resume racing dispatch; preserved acceptance order.
+- Terminal reattachment to the same shell, bounded output replay and explicit gaps; ordered
+  replay/live handoff and cleanup at the terminal's defined lifetime boundary.
 - Socket and SSH behavior, protocol mismatch without automatic restart, stream token expiry,
   transport loss versus process exit, and resource cleanup after stream teardown.
 
@@ -666,11 +687,11 @@ These are design work, not reasons to reopen §6's product decisions:
   transitions require a single atomic event; explicit evidence rules for adapter confirmations.
 - History retention and paging of terminal records; snapshot/event/message limits and expiry;
   flow control sufficient for a snapshot to catch up under sustained output.
-- Held-submission resume, targeted cancellation and other mutation methods, including key scope,
+- Exact held-submission resume, targeted cancellation and other mutation methods, including key scope,
   retention and uncertain-outcome recovery outside submissions/questions.
-- Lossless path encoding versus a documented UTF-8 restriction, upload framing, and the complete
-  stream lifecycle/token-ownership rules.
+- Exact lossless path field shapes, upload framing and stream lifecycle/token-ownership rules;
+  terminal replay bounds/offsets, replay/live handoff, lifetime/cleanup and concurrent attachments.
 - Capability names/versions and required error-detail schemas; full classification of today's
-  `frontend.request` helpers and independent-client language/generator choice.
+  `frontend.request` helpers and schema tooling for the independent Python client.
 - Migration of existing stored transcripts to stable IDs, including limits on continuity claims
   when an old transcript lacks source identities. Do not deduplicate by text to fill those gaps.
