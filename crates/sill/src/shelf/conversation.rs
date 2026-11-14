@@ -225,9 +225,13 @@ impl Conversation {
         let title_l = gtk::Label::new(Some(title));
         title_l.set_xalign(0.0);
         title_l.set_wrap(true);
+        title_l.set_wrap_mode(gtk::pango::WrapMode::WordChar); // long paths/commands break anywhere
+        title_l.set_max_width_chars(40); // natural width stays small; hexpand fills what's available
         title_l.set_hexpand(true);
         let status_l = gtk::Label::new(Some(status));
         status_l.add_css_class("dim-label");
+        status_l.set_halign(gtk::Align::End);
+        status_l.set_margin_end(4);
         row.append(&icon);
         row.append(&title_l);
         row.append(&status_l);
