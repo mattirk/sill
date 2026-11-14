@@ -1312,7 +1312,8 @@ impl Shelf {
     /// memory off only `ended_at` is set, the summary stays empty. Closed again while the agent
     /// writes, the tab goes and the summary finishes out of sight (`background_view`); closed
     /// during *Summarize now*, that checkpoint becomes the end's summary the same way. The
-    /// summary's first line names the session (title.rs) unless the person named it.
+    /// summary's first line names the session (title.rs) unless the person named it. A session
+    /// without a single prompt is deleted instead: there is nothing to remember.
     fn close_session(self: &Rc<Self>, id: &str) {
         let view = self.views.borrow().get(id).cloned();
         if view.as_ref().is_some_and(|v| v.summary_pending() && !v.checkpoint_pending()) {
@@ -1333,7 +1334,20 @@ impl Shelf {
         let sid = id.to_string();
         let memory = sill_core::config::load().memory();
         let keep_old = !view.agent_saw_session() && !stored.summary.is_empty();
+        let unprompted = facts.prompts == 0;
         let finish = move |answer: Option<String>| {
+            // nothing was asked: nothing to remember (docs/memory.md §2.1), the row would only
+            // crowd every search and recall with "0 prompts"
+            if unprompted {
+                shelf.close_view(&sid);
+                let shelf = shelf.clone();
+                stop_then(&sid.clone(), move || {
+                    let _ = sill_core::session::remove_state(session::uid(), &sid);
+                    let _ = shelf.store.delete(&sid);
+                    refresh_memory();
+                });
+                return;
+            }
             let agent = answer.map(|a| a.trim().to_string()).filter(|a| !a.is_empty());
             let _ = match agent {
                 _ if !memory || keep_old => shelf.store.end_only(&sid),
@@ -1359,7 +1373,7 @@ impl Shelf {
             return;
         }
         let said_anything = self.store.count_kind(id, "agent").unwrap_or(0) > 0;
-        if memory && !keep_old && said_anything && view.agent_saw_session() && view.agent_idle() {
+        if !unprompted && memory && !keep_old && said_anything && view.agent_saw_session() && view.agent_idle() {
             self.set_status("the session ends: its summary is being written");
             view.ask_summary(&prompt, Box::new(finish));
         } else {

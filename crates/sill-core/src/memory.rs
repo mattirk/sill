@@ -183,8 +183,10 @@ pub struct Compaction {
 
 /// Compaction and retention over the ended sessions, by the settings, as of `now`: level 1 after
 /// `compact_after`, level 2 after `keep_full_transcripts`, deletion after `delete_after` (each
-/// step off at 0). Open sessions (no `ended_at`) are never touched. `remove_state` takes a deleted
-/// session's state on the host (the kept journal, its agent home) — the caller knows the uid.
+/// step off at 0); an ended session without a prompt goes at once (nothing happened in it — the
+/// shelf deletes one as it closes, this catches those ended by an older shelf). Open sessions (no
+/// `ended_at`) are never touched. `remove_state` takes a deleted session's state on the host (the
+/// kept journal, its agent home) — the caller knows the uid.
 pub fn compact_all(store: &Store, now: i64, remove_state: &dyn Fn(&str)) -> Result<Compaction> {
     let cfg = crate::config::load();
     let (after1, after2, delete) = (cfg.compact_after(), cfg.keep_full_transcripts(), cfg.delete_after());
@@ -192,7 +194,8 @@ pub fn compact_all(store: &Store, now: i64, remove_state: &dyn Fn(&str)) -> Resu
     for s in store.sessions()? {
         let Some(ended) = s.ended_at else { continue };
         let age = now - ended;
-        if delete > 0 && age > delete {
+        let empty = store.count_kind(&s.id, "user").unwrap_or(0) == 0;
+        if empty || (delete > 0 && age > delete) {
             remove_state(&s.id);
             store.delete(&s.id)?;
             done.deleted += 1;
@@ -283,6 +286,14 @@ mod compaction_tests {
         let done = compact_all(&store, ended + 400 * 86_400, &|id| removed.borrow_mut().push(id.to_string())).unwrap();
         assert_eq!(done.deleted, 0, "delete_after is off by default");
         assert_eq!(store.entries(&open.id).unwrap().len(), 1);
+        // an ended session nobody prompted is deleted whatever the settings; its state too
+        let idle = store.create("claude", "default").unwrap();
+        store.end(&idle.id, "Session with claude.\n0 prompts, 0 tool calls.", "auto").unwrap();
+        let done = compact_all(&store, ended, &|id| removed.borrow_mut().push(id.to_string())).unwrap();
+        assert_eq!(done.deleted, 1);
+        assert_eq!(*removed.borrow(), vec![idle.id.clone()]);
+        assert!(store.sessions().unwrap().iter().all(|x| x.id != idle.id));
+        assert_eq!(store.sessions().unwrap().len(), 2, "the prompted and the open session stay");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
