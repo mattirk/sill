@@ -76,11 +76,20 @@ done
 address=$(cat "$work/address")
 echo "Guest at $address"
 guest() {
-    ssh -q -i "$work/key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-        -o ConnectTimeout=10 "sill@$address" "$@"
+    # never a password prompt: until cloud-init has put the key in place, a login just fails
+    ssh -q -i "$work/key" -o BatchMode=yes -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 "sill@$address" "$@"
 }
 
 echo 'Waiting for the first boot (packages)'
+# SSH answers before cloud-init has made the account; OpenSSH holds failed logins against
+# the source for a while, so try at a gentle pace
+tries=0
+until guest true 2>/dev/null; do
+    tries=$((tries + 1))
+    [ $tries -lt 60 ] || { echo 'The guest never let the build in.' >&2; exit 1; }
+    sleep 10
+done
 guest 'cloud-init status --wait >/dev/null; cloud-init status --long | grep -E "^(status|errors)"'
 echo 'Setting up the data disks'
 git archive --format=tar HEAD packaging/mac/guest | guest 'rm -rf guest && mkdir guest && tar -x -C guest'
