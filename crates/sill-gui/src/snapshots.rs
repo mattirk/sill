@@ -682,3 +682,51 @@ fn render_tool_runs() {
     let _ = app.update(Message::ToggleTool("tool-05".into()));
     render(&app, "14-tool-run-call-open");
 }
+
+#[test]
+#[ignore = "writes tab-bar PNGs for review"]
+fn render_tabs() {
+    let names = [
+        "gray-blade", "humble-bell", "quiet-river", "a-much-longer-session-name", "ox",
+        "silver-fox", "tidy-lamp", "brave-owl", "calm-sea", "dusty-road", "eager-elk", "fuzzy-moss",
+    ];
+    for count in [1, 2, 4, 6, 8, 9, 10, 12] {
+        let (mut app, _) = App::new(true, None);
+        app.demo = false;
+        let agent = app.tabs[0].agent.clone();
+        app.tabs = names[..count]
+            .iter()
+            .map(|n| crate::Tab {
+                id: n.to_string(),
+                title: n.to_string(),
+                agent: agent.clone(),
+                running: true,
+            })
+            .collect();
+        app.selected = Some(names[count.min(2) - 1].to_string());
+        render_size(&app, &format!("tabs-{count}"), (720.0, 80.0));
+    }
+}
+
+#[test]
+#[ignore = "writes a hovered-tab PNG for review"]
+fn render_tab_hover() {
+    let (mut app, _) = App::new(true, None);
+    app.demo = false;
+    let agent = app.tabs[0].agent.clone();
+    app.tabs = ["gray-blade", "a-much-longer-session-name", "ox", "silver-fox"]
+        .iter()
+        .map(|n| crate::Tab {
+            id: n.to_string(),
+            title: n.to_string(),
+            agent: agent.clone(),
+            running: true,
+        })
+        .collect();
+    app.selected = Some("gray-blade".into());
+    let _ = std::fs::remove_file(dir().join("tabs-hover-tiny-skia.png"));
+    let mut ui = iced_test::Simulator::with_size(settings(), (720.0, 80.0), app.view());
+    ui.point_at((260.0, 18.0));
+    let snapshot = ui.snapshot(&crate::style::theme()).unwrap();
+    assert!(snapshot.matches_image(dir().join("tabs-hover")).unwrap());
+}

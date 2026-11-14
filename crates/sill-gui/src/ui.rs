@@ -295,10 +295,18 @@ impl App {
                     tabs = tabs.push(self.page_tab(page, glyph, title));
                 }
             } else {
+                // Each tab may be as wide as its share of the bar. The selected one keeps room
+                // for its close button; the others then share what is left.
                 let count = self.tabs.len().max(1) as f32;
-                let width = ((size.width - 2.0 * (count - 1.0)) / count)
-                    .clamp(64.0, 220.0);
+                let room = size.width - 2.0 * (count - 1.0);
+                let mut share = room / count;
+                if share < TAB_CLOSE_FROM && count > 1.0 && self.selected.is_some() {
+                    share = (room - TAB_CLOSE_FROM) / (count - 1.0);
+                }
+                let share = share.clamp(TAB_MIN, TAB_MAX);
                 for tab in &self.tabs {
+                    let active = self.selected.as_deref() == Some(tab.id.as_str());
+                    let width = if active { share.max(TAB_CLOSE_FROM) } else { share };
                     tabs = tabs.push(self.tab(tab, width));
                 }
             }
@@ -425,22 +433,45 @@ impl App {
         let working = attention
             .as_ref()
             .is_some_and(|a| a.activity == Activity::Working);
-        let compact = width < 110.0;
-        let title = self.session_name(&tab.id, &tab.title);
-        // Reserve room for the glyph, padding and controls before shortening the title.
-        let budget = ((width - if compact { 34.0 } else { 80.0 }) / 10.0)
-            .floor().max(2.0) as usize;
-        let short_title: String = title.chars().take(budget).collect();
-        let mut label = row![
-            text(short_title)
-                .size(style::TEXT)
-                .color(color),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center);
-        if let Some(mark) = attention.as_ref().filter(|_| !compact).and_then(mark) {
-            label = label.push(mark);
-        }
+        // A tab is as wide as its content, up to `width`: the agent glyph, the title, the mark
+        // and the close button, which follows the title. What must give way is the title, cut
+        // with a fade; under [`TAB_CLOSE_FROM`] an unselected tab drops its close button too
+        // (the selected one is never narrower than that, see `top_bar`).
+        let closable = !self.demo && (active || width >= TAB_CLOSE_FROM);
+        let mark = attention.as_ref().and_then(mark);
+        // the room left for the title and its paddings, by the widths of the fixed parts
+        let title_max = (width
+            - TAB_AGENT
+            - if closable { TAB_CLOSE } else { 0.0 }
+            - if mark.is_some() { TAB_MARK } else { 0.0 })
+        .max(TITLE_LEFT + TITLE_FADE);
+        // The text runs on into the right padding when it is too long, and fades out there into
+        // the bar's colour, as a browser's tab does.
+        let fade = container(space().width(TITLE_FADE).height(Fill)).style(|_| container::Style {
+            background: Some(
+                iced::gradient::Linear::new(Radians(std::f32::consts::FRAC_PI_2))
+                    .add_stop(0.0, Color { a: 0.0, ..P.bg })
+                    .add_stop(1.0, P.bg)
+                    .into(),
+            ),
+            ..container::Style::default()
+        });
+        let title = stack![
+            container(
+                text(self.session_name(&tab.id, &tab.title))
+                    .size(style::TEXT)
+                    .color(color)
+                    .wrapping(text::Wrapping::None),
+            )
+            .padding(Padding {
+                left: TITLE_LEFT,
+                right: TITLE_FADE,
+                ..Padding::ZERO
+            })
+            .max_width(title_max)
+            .clip(true),
+            right(fade).height(Fill),
+        ];
         let agent = keys::press(
             button(icons::tab_agent(
                 &tab.agent,
@@ -464,7 +495,8 @@ impl App {
                     (!editor.pending).then_some(Message::Name(crate::names::Event::Save)),
                 )
                 .size(style::TEXT)
-                .width((width - 30.0).max(24.0));
+                // the tab at its full width while its name is edited
+                .width((title_max - if editor.error.is_some() { 14.0 } else { 0.0 }).max(24.0));
             let input: Element<'a, Message> = input.into();
             if let Some(error) = &editor.error {
                 tooltip(
@@ -477,58 +509,55 @@ impl App {
                 input
             }
         } else {
-            keys::press(
+            // The button lies over the title rather than round it, so its hover tint covers the
+            // fade too and the fade does not show as a band.
+            let hit = keys::press(
                 button(
-                    mouse_area(label)
+                    mouse_area(space().width(Fill).height(Fill))
                         .on_press(Message::Choose(tab.id.clone()))
                         .on_double_click(Message::Name(crate::names::Event::Begin(tab.id.clone()))),
                 )
-                // narrow: the agent glyph and the close button bring padding of their own
-                // (the person, 2026-11-09)
-                .padding([4, 6])
+                .width(Fill)
+                .height(Fill)
+                .padding(0)
                 .style(style::quiet),
                 Message::Choose(tab.id.clone()),
-            )
+            );
+            stack![container(title).padding([4, 0]), hit].into()
         };
-        let label: Element<'a, Message> = row![agent, label].align_y(Alignment::Center).into();
-        // Show the close button on every tab, including inactive tabs.
+        let mut label = row![agent, label].align_y(Alignment::Center);
+        if let Some(mark) = mark {
+            label = label.push(container(mark).center_x(TAB_MARK));
+        }
         // Closing ends the session (a ghost asks once: it deletes it).
-        // The 12px glyph plus its 6px padding on each side.
-        const CLOSE_WIDTH: f32 = 24.0;
-        let label: Element<'a, Message> = if !self.demo && !compact {
+        if closable {
             let armed = self.armed_close.as_deref() == Some(tab.id.as_str());
-            row![
-                label,
+            label = label.push(
                 container(keys::press(
                     button(icons::glyph(
                         "x",
                         12.0,
                         if armed { P.error } else { alpha(P.fg, 0.55) },
                     ))
-                    .width(CLOSE_WIDTH)
+                    .width(TAB_CLOSE)
                     .padding([4, 6])
                     .style(style::quiet),
                     Message::CloseTab(tab.id.clone()),
                 ))
                 .id("close-tab"),
-            ]
-            .align_y(Alignment::Center)
-            .into()
-        } else {
-            row![label]
-                .align_y(Alignment::Center)
-                .into()
-        };
+            );
+        }
         let underline = rule::horizontal(2).style(style::rule_style(if active {
             P.accent
         } else {
             Color::TRANSPARENT
         }));
+        // the underline as wide as the content: a column takes its widest child's width
         let tab_body = column![
             container(label).height(Fill).align_y(Alignment::Center),
             underline
         ]
-        .width(width)
+        .width(Shrink)
         .height(Fill);
         match attention.filter(|a| a.level() >= Level::Problem) {
             Some(attention) => tooltip(
@@ -1687,6 +1716,22 @@ fn placeholder(view: &SessionView) -> &'static str {
         _ => "",
     }
 }
+
+/// The widest and the narrowest a session tab gets; narrower than that, the bar scrolls.
+const TAB_MAX: f32 = 220.0;
+const TAB_MIN: f32 = 64.0;
+/// A tab's agent glyph (13 px) in its button's padding.
+const TAB_AGENT: f32 = 21.0;
+/// A tab's close button: the 12 px glyph and 6 px each side.
+const TAB_CLOSE: f32 = 24.0;
+/// The room a tab's mark takes after the title.
+const TAB_MARK: f32 = 12.0;
+/// Before a tab's title, and after it, where a title too long fades out.
+const TITLE_LEFT: f32 = 6.0;
+const TITLE_FADE: f32 = 10.0;
+/// The width from which a tab has a close button: with it, the glyph and the paddings there is
+/// still room for the title's first two or three letters.
+const TAB_CLOSE_FROM: f32 = TAB_AGENT + TITLE_LEFT + 24.0 + TITLE_FADE + TAB_CLOSE;
 
 /// A tab's mark for its session's state, if it has one to show.
 fn mark<'a>(attention: &Attention) -> Option<Element<'a, Message>> {
