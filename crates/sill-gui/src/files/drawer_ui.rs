@@ -1,6 +1,6 @@
 //! The file drawer: its toolbar, the tree of pinned folders and the Changes list.
 use iced::widget::{
-    Column, button, column, container, row, rule, scrollable, space, text, text_input,
+    Column, button, column, container, responsive, row, rule, scrollable, space, text, text_input,
 };
 use iced::{Alignment, Element, Fill, Font, Padding, Shrink};
 use sill_proto::sessions::HostPath;
@@ -64,7 +64,10 @@ impl App {
                     global_heading = true;
                 }
                 let dir = root.metadata.as_ref().is_some_and(|m| m.directory);
-                body = body.push(node(state, hovered, &root.path, dir, 0, !root.global));
+                body = body.push(node(
+                    state, hovered, &root.path, dir, 0, !root.global,
+                    view.workspaces.workspace_of(&root.path).is_some(),
+                ));
                 if let Some(error) = &root.error {
                     body = body.push(text(error).size(style::TINY).color(P.error));
                 }
@@ -75,7 +78,7 @@ impl App {
             body = body.push(rule::horizontal(1).style(style::rule_style(P.border)));
             if let Some(home) = &state.home {
                 body = body.push(caption("Browse"));
-                body = body.push(node(state, hovered, home, true, 0, state.pinned(home)));
+                body = body.push(node(state, hovered, home, true, 0, state.pinned(home), false));
                 if state.expanded.contains(key(home)) {
                     body = children(body, state, hovered, home, 1);
                 }
@@ -137,8 +140,8 @@ fn caption(value: &str) -> Element<'_, Message> {
 }
 
 /// One tree row: indent guides, the kind's glyph (in the
-/// accent when pinned), the name coloured by what git says of it, a repository root's `git
-/// <branch>` at the end, and the pin button while the pointer is over the row.
+/// accent when pinned), the name coloured by what git says of it, a repository root's branch
+/// (or `workspace`) at the end, and the pin button while the pointer is over the row.
 fn node<'a>(
     state: &'a State,
     hovered: Option<&str>,
@@ -146,6 +149,7 @@ fn node<'a>(
     directory: bool,
     depth: usize,
     pinned: bool,
+    workspace: bool,
 ) -> Element<'a, Message> {
     let expanded = state.expanded.contains(key(path));
     let active = state
@@ -184,24 +188,46 @@ fn node<'a>(
         .size(style::TEXT)
         .color(color)
         .wrapping(text::Wrapping::None),
-        space().width(Fill),
     ]
     .spacing(7)
     .align_y(Alignment::Center);
     let row_key = key(path);
     let show_pin = !pinned && hovered == Some(row_key);
-    // a repository root: `git <branch>` ends the row
+    let mut hover = path.display.clone();
+    // A workspace needs no generated ID here; ordinary branches fit the remaining width.
     if depth == 0
         && let Some(repo) = state.repo_of(path)
         && !repo.head.is_empty()
     {
-        label = label.push(
-            text(format!("git {}", repo.head))
+        hover.push_str(&format!("\ngit {}", repo.head));
+        let head = &repo.head;
+        label = label.push(responsive(move |size| {
+            let value = if workspace {
+                "workspace".to_string()
+            } else {
+                format!("git {head}")
+            };
+            let mono = Font::with_name(crate::fonts::MONO_FAMILY);
+            let mut limit = value.chars().count();
+            let mut shown = value.clone();
+            while limit > 0 && crate::ui::text_width_in_font(&shown, style::TINY, mono) > size.width {
+                limit -= 1;
+                shown = if limit == 0 {
+                    String::new()
+                } else {
+                    short(&value, limit)
+                };
+            }
+            container(text(shown)
                 .size(style::TINY)
-                .font(iced::Font::with_name(crate::fonts::MONO_FAMILY))
+                .font(mono)
                 .color(style::alpha(P.accent, 0.9))
-                .wrapping(text::Wrapping::None),
-        );
+                .wrapping(text::Wrapping::None))
+                .align_right(Fill)
+                .into()
+        }).height(Shrink));
+    } else {
+        label = label.push(space().width(Fill));
     }
     let button = keys::press(
         button(label)
@@ -253,7 +279,7 @@ fn node<'a>(
     }))
     .on_enter(msg(Action::Hover(row_key.to_string())))
     .on_exit(msg(Action::Unhover(row_key.to_string())));
-    tip(line, path.display.clone())
+    tip(line, hover)
 }
 
 /// The Diff view: per pinned repository a dim header — its
@@ -467,6 +493,7 @@ fn children<'a>(
                 entry.metadata.directory,
                 depth,
                 state.pinned(&entry.path),
+                false,
             ));
             if entry.metadata.directory && state.expanded.contains(key(&entry.path)) {
                 body = children(body, state, hovered, &entry.path, depth + 1);

@@ -2145,7 +2145,7 @@ pub(crate) fn text_width(content: &str, size: f32) -> f32 {
     text_width_in_font(content, size, Font::with_name(crate::fonts::SANS_FAMILY))
 }
 
-fn text_width_in_font(content: &str, size: f32, font: Font) -> f32 {
+pub(crate) fn text_width_in_font(content: &str, size: f32, font: Font) -> f32 {
     use iced::advanced::text::Paragraph as _;
     let paragraph = iced::advanced::graphics::text::Paragraph::with_text(iced::advanced::Text {
         content,
