@@ -2440,7 +2440,10 @@ impl App {
                 page.category = category;
                 page.armed_delete = false;
                 self.settings.settings_category = category;
-                crate::settings::save(&self.settings);
+                // only the person's own window writes their file: never the demo or a test
+                if self.persist {
+                    crate::settings::save(&self.settings);
+                }
                 return operation::scroll_to(
                     "settings",
                     scrollable::AbsoluteOffset {

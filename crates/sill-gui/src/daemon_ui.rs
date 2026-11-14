@@ -62,7 +62,10 @@ impl App {
                     page.category = crate::settings_ui::Category::System;
                     page.collapsed.remove("Daemon");
                     self.settings.settings_category = page.category;
-                    crate::settings::save(&self.settings);
+                    // only the person's own window writes their file: never the demo or a test
+                    if self.persist {
+                        crate::settings::save(&self.settings);
+                    }
                 }
                 Task::batch([
                     task,
