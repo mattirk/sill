@@ -1,5 +1,6 @@
 //! Per-session change list on the host (SPEC §4.4): rebuild the session's jail plan to know its
-//! layers, scan the ledger, group by repository, and auto-keep what the policy allows at turn end.
+//! layers, scan the ledger, group by repository. Nothing reaches the host without a keep: pinned
+//! folders are bound live and never appear here (SPEC §4.4, decision 18).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -7,17 +8,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::jail::{self, JailSpec};
-use crate::keep::{KeepOptions, keep};
 use crate::ledger::{self, Change, ScanOptions};
-use crate::paths::expand_pattern;
 use crate::policy::Policy;
-
-/// Paths inside `.git` that are never auto-kept: a planted hook or filter would run on the host
-/// (SPEC §4.4). They stay in the ledger for manual keep.
-pub fn never_auto_keep(path: &Path) -> bool {
-    let s = path.to_string_lossy();
-    s.contains("/.git/hooks/") || s.ends_with("/.git/config") || s.contains("/.git/info/")
-}
 
 /// The jail plan of a session as the launcher built it (same inputs: policy, state dir, host mounts).
 pub fn session_plan(
@@ -132,35 +124,6 @@ pub fn repo_root(path: &Path) -> Option<PathBuf> {
         }
         p = p.parent()?;
     }
-}
-
-/// Keep every change under one of the policy's `auto_keep` roots that is safe to keep without review.
-/// Returns (kept, skipped-with-reason).
-pub fn auto_keep(policy: &Policy, home: &Path, changes: &[Change]) -> (Vec<PathBuf>, Vec<(PathBuf, String)>) {
-    let roots: Vec<PathBuf> = policy.paths.auto_keep.iter().flat_map(|p| expand_pattern(p, home)).collect();
-    let mut kept = Vec::new();
-    let mut skipped = Vec::new();
-    for c in changes {
-        if !roots.iter().any(|r| c.path.starts_with(r)) {
-            continue;
-        }
-        if c.ignored {
-            continue;
-        }
-        if c.conflict {
-            skipped.push((c.path.clone(), "conflict: changed on the host too".into()));
-            continue;
-        }
-        if never_auto_keep(&c.path) {
-            skipped.push((c.path.clone(), "git config/hooks: manual keep only".into()));
-            continue;
-        }
-        match keep(c, &KeepOptions::default()) {
-            Ok(_) => kept.push(c.path.clone()),
-            Err(e) => skipped.push((c.path.clone(), format!("{e:#}"))),
-        }
-    }
-    (kept, skipped)
 }
 
 /// `git status --porcelain` of a repo: (relative path, one-letter status `M`/`A`/`D`/`R`/`?`).

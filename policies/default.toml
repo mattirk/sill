@@ -45,9 +45,8 @@ ro = []
 hidden_mounts = ["/boot", "/boot/efi"]
 # Folders pinned to a session are bound live (host = jail): edits and commits made in the jail are host
 # edits and commits at once; review = git for repositories. Everything else is overlaid and reviewed in
-# Changes. Overlaid roots to keep automatically at the end of each turn (none by default):
-auto_keep = []
-# Recorded, but neither hashed per turn nor auto-kept:
+# Changes; nothing is kept without a click.
+# Recorded, but not hashed per turn:
 # Inside git repositories the repo's own .gitignore decides what is build output; these patterns cover
 # the rest (home-level tool caches and the like).
 ledger_ignore = ["target/", "node_modules/", "__pycache__/", ".venv/", "build/", ".cargo/registry/", ".cargo/.global-cache", ".cargo/.package-cache", ".rustup/"]

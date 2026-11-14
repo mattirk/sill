@@ -3,9 +3,9 @@
 A shelf for AI agents on your own Linux machine: an ACP client, a jail the host controls, and a ledger
 of every change the agent makes. See [SPEC.md](SPEC.md) for the design; this file is the practical side.
 
-Status: **M2** (2026-10-28). Sessions with tabs, persistence and resume; the action-button dropdown with
-the global Changes page (keep / revert / conflicts), the Files page, Settings; auto-keep of repo changes at
-turn end.
+Status: **M2** (2026-10-28). Sessions with tabs, persistence and resume; folder pins per session (live,
+host = jail); the `sill ▾` dropdown with the global Changes page (keep / revert / conflicts), the Files page,
+Settings. Next: M3 — a terminal inside the session's jail, policies UI, more agents.
 
 ## Layout
 
@@ -13,7 +13,7 @@ turn end.
 |---|---|
 | `crates/sill-core` | library: policies, mount table, jail builder (bwrap argv), ledger, keep, shim client, ACP client, proxy |
 | `crates/sill-shim` | the supervisor that runs inside the jail: agent stdio relay, control channel, revert, proxy forwarder |
-| `crates/sill` | the `sill` command (the GTK shelf will live here too) |
+| `crates/sill` | the `sill` command and the GTK shelf (`crates/sill/src/shelf/`) |
 | `policies/default.toml` | the built-in policy, also installed to `/etc/sill/policies/` |
 | `packaging/systemd/` | state-filesystem units (`/var/lib/sill.img` → `/var/lib/sill`) |
 
@@ -27,9 +27,9 @@ cargo build
 cargo test
 ```
 
-GTK is not needed until M1 (`libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev libgtksourceview-5-dev`).
+The shelf needs `libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev libgtksourceview-5-dev`.
 
-## Try it (M0)
+## The jail from the command line
 
 Until the state filesystem is mounted, point `--state-dir` at a directory that is not inside an overlaid
 tree and pass `--unsafe-state` (`/tmp` works for experiments; it's tmpfs, so copy-ups cost RAM).
@@ -55,7 +55,7 @@ $S dev stop
 Logs: `$XDG_RUNTIME_DIR/sill/dev/{jail,proxy}.log` (the proxy log lists every allow/deny).
 `--net` shares the host network instead of using the proxy (testing only).
 
-## The shelf (M1–M2)
+## The shelf
 
 ```bash
 systemctl --user enable --now sill-shelf   # once: the shelf as a user service, hidden, with the session
@@ -69,12 +69,18 @@ sill restart --dev                         # run the build in target/ instead of
   adds more) or reopens a stored one. Each session has its own jail (`sill-<id>.service`, upper trees under
   `/var/lib/sill/<uid>/sessions/<id>`), its own conversation stored in `~/.local/state/sill/sill.db`, and
   resumes with history (`session/load`) when reopened. Closing a tab stops its jail; the session stays.
-- The **`sill ▾`** button switches pages: *Sessions*, *Changes* (every session's pending changes, grouped
-  by session and repo: diff, Keep, Revert, Keep all; conflicts marked `!`), *Files* (tree of touched repos
-  with badges), *Settings*. Escape goes back, then hides.
-- After each turn, changes under the policy's `auto_keep` roots are kept automatically (never
-  `.git/config`, `.git/hooks`, conflicts or ignored build output); the rest waits in Changes.
-- Enter sends, Shift+Enter newline. Permissions are answered with the buttons in the conversation. Per-user setup (done): `~/.config/autostart/sill.desktop`, Cinnamon shortcut
+- **Pins** are the session's workspace. A pinned folder is bound live into the jail: what the agent
+  writes there is on the host at once, commits included, and review is `git` as usual. The chips above the
+  prompt show each pin with its +/−/untracked counts; the pins are also named in every prompt as the place
+  to work. Everything *unpinned* is overlaid: the agent sees the whole machine and can write anywhere, but
+  the writes land in the session's upper tree and wait in Changes. Nothing is kept automatically.
+- The **`sill ▾`** button switches pages: *Sessions*, *Changes* (every session's pending overlay changes,
+  grouped by session and repo: diff, Keep, Revert, Keep all; conflicts — edited on the host meanwhile —
+  marked `!` and left out of Keep all), *Files* (tree of touched repos with badges), *Settings*. Escape
+  goes back, then hides.
+- Enter sends, Shift+Enter newline. Permissions are answered with the buttons in the conversation.
+
+Per-user setup (done): `~/.config/autostart/sill.desktop`, Cinnamon shortcut
 `custom0` = `/usr/local/bin/sill toggle`. Binaries are installed system-wide by
 `studio-debian-system/sound/config/install.sh` from `target/release/` (build with `cargo build --release`
 first).
@@ -104,10 +110,11 @@ Each agent runs completely inside sill: its own paths (`~/.claude` and `~/.claud
 per-session directories on the state filesystem, never on the host. Delete
 `~/.local/state/sill/agents/<id>` to make the agent log in again.
 
-## Known limits (M0)
+## Known limits
 
 - Files not owned by your uid:gid can't be modified in the jail (overlayfs copy-up can't chown to an
-  unmapped id; SPEC §4.10 #16). Group-shared trees: `direct` or `ro` in the policy for now.
-- The parked agent process costs ~1.6 % of a core; stop it when idle (`dev stop`) until idle-stop exists.
+  unmapped id; SPEC §4.10 #16). Group-shared trees: `direct` or `ro` in the policy for now, or pin them.
+- The parked agent process costs ~1.6 % of a core; close the tab when idle until idle-stop exists.
 - HTTP CONNECT proxy only (no SOCKS5); programs that ignore `HTTPS_PROXY` have no network, by design.
-- No sessions list/resume, files pane or changes view in the shelf yet (M2); no focus keeper (M3).
+- Codex and Gemini are in the agent registry but untested.
+- No terminal in the jail, no policies UI, no focus keeper yet (M3).

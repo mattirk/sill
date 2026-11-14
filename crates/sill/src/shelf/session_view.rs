@@ -1,5 +1,5 @@
 //! One session tab: conversation + bottom area (prompt now; prompt/shell switcher in M3). Owns the
-//! driver, persists the transcript, runs auto-keep at turn end.
+//! driver, persists the transcript, counts pending changes at turn end.
 
 use std::collections::HashMap;
 use std::cell::RefCell;
@@ -610,7 +610,7 @@ impl SessionView {
         self.conv.handle(ev);
     }
 
-    /// Auto-keep repo changes (SPEC §4.4) and tell the window to refresh the ledger pages.
+    /// Count the session's pending changes (SPEC §4.4) and tell the window to refresh the ledger pages.
     fn after_turn(self: &Rc<Self>, id: &str) {
         let s = self.session.borrow().clone();
         let store2 = Store::open_default().ok();
@@ -628,19 +628,8 @@ impl SessionView {
                 };
                 let plan = sill_core::changes::session_plan(policy.clone(), state_dir, &home, uid, &user, binds)?;
                 let changes = sill_core::changes::scan(&policy, &plan, None)?;
-                let (kept, skipped) = sill_core::changes::auto_keep(&policy, &home, &changes);
-                let pending = changes.iter().filter(|c| !c.ignored).count().saturating_sub(kept.len());
-                let mut msg = String::new();
-                if !kept.is_empty() {
-                    msg.push_str(&format!("kept {} file(s) in repo roots", kept.len()));
-                }
-                if !skipped.is_empty() {
-                    msg.push_str(&format!("{}{} not auto-kept", if msg.is_empty() { "" } else { "; " }, skipped.len()));
-                }
-                if pending > 0 {
-                    msg.push_str(&format!("{}{} change(s) pending in Changes", if msg.is_empty() { "" } else { "; " }, pending));
-                }
-                Ok(msg)
+                let pending = changes.iter().filter(|c| !c.ignored).count();
+                Ok(if pending > 0 { format!("{pending} change(s) pending in Changes") } else { String::new() })
             })();
             let _ = tx.send_blocking(msg.unwrap_or_else(|e| format!("ledger: {e:#}")));
         });
