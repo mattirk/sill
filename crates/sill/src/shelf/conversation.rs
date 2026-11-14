@@ -1508,7 +1508,12 @@ button.sill-md-image:hover { opacity: 0.85; }
 .sill-viewer { background: @window_bg_color; }
 .sill-viewer-bar { padding: 3px 6px 3px 12px; border-bottom: 1px solid alpha(@view_fg_color, 0.12); }
 .sill-viewer-btn { padding: 2px 8px; min-height: 0; min-width: 0; font-size: 90%; }
-.sill-viewer-btn.sill-drawer-switch { padding-right: 3px; }
+.sill-viewer-bar.sill-drawer-bar { padding-left: 4px; padding-right: 4px; }
+.sill-drawer-bar > .sill-tree-search { padding-left: 0; }
+.sill-drawer-bar > .sill-tree-search > image:first-child { margin-left: 0; }
+.sill-drawer-controls > button { padding: 4px; min-width: 1em; min-height: 1em; }
+.sill-drawer-controls > button > image { -gtk-icon-size: 1em; }
+.sill-drawer-controls > button.sill-global-files > image { -gtk-icon-size: 0.95em; }
 /* a session's page in the viewer (docs/memory.md §2.5): summary, notes, the facts */
 .sill-page { padding: 10px 16px 16px 16px; }
 .sill-page-title { font-size: 120%; font-weight: bold; }

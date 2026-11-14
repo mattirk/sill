@@ -465,7 +465,7 @@ pub fn build(timer_auto: Rc<std::cell::Cell<bool>>) -> gtk::Widget {
         ("Agents".into(), "the Agents page: install from the ACP registry, the gear edits command, environment, domains (~/.config/sill/agents/*.toml)".into()),
         ("Sessions".into(), format!("{home}/.local/state/sill/sill.db; jails under /var/lib/sill/<uid>/sessions/")),
         ("Daemon".into(), "sill daemon status — sessions are its children in scopes sill-<id>.scope under sill.slice (systemctl --user list-units 'sill-*.scope'); logs: journalctl --user -t sill-<id>, or $XDG_RUNTIME_DIR/sill/<id>/jail.log without journald".into()),
-        ("Keys".into(), "hotkey show/hide · Escape sessions ⇄ backend · Enter send · Shift+Enter newline · Ctrl+T shell · Ctrl+Shift+H host shell · Ctrl+Shift+T / W new / close tab · Ctrl+Shift+F tree · F2 or double-click rename".into()),
+        ("Keys".into(), "hotkey show/hide · Escape sessions ⇄ backend · Enter send · Shift+Enter newline · Ctrl+T shell · Ctrl+Shift+H host shell · Ctrl+Shift+T / W new / close tab · Ctrl+Shift+F drawer · F2 or double-click rename".into()),
     ];
     let card = gtk::Box::new(gtk::Orientation::Vertical, 0);
     card.add_css_class("sill-settings-card");

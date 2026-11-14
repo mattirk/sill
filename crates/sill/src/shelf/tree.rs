@@ -258,6 +258,9 @@ pub struct FolderTree {
     /// the view it switches to.
     switch: gtk::Button,
     diff_mode: std::cell::Cell<bool>,
+    rendered_scope: RefCell<Option<Option<PathBuf>>>,
+    global_return: RefCell<Option<(Option<PathBuf>, bool)>>,
+    files: gtk::Button,
     /// "Drawer follows changes": the followed repository's state when the view was last set by it
     /// (status and totals); a different one switches the view again.
     follow_seen: RefCell<Option<String>>,
@@ -314,10 +317,16 @@ impl FolderTree {
         root.add_css_class("sill-tree-panel");
         let bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         bar.add_css_class("sill-viewer-bar");
+        bar.add_css_class("sill-drawer-bar");
         let search = gtk::SearchEntry::new();
         search.set_hexpand(true);
         search.add_css_class("sill-tree-search");
         super::icons::adopt_search_entry(&search);
+        let files = super::icons::glyph_button("sill-files");
+        files.add_css_class("flat");
+        files.add_css_class("sill-viewer-btn");
+        files.add_css_class("sill-global-files");
+        files.set_tooltip_text(Some("Global files / return to tree or diff"));
         let switch = super::icons::glyph_button("sill-git-compare");
         switch.add_css_class("flat");
         switch.add_css_class("sill-viewer-btn");
@@ -325,11 +334,16 @@ impl FolderTree {
         let close = super::icons::glyph_button("sill-x");
         close.add_css_class("flat");
         close.add_css_class("sill-viewer-btn");
-        close.set_tooltip_text(Some("Close the tree (Ctrl+Shift+F)"));
+        close.set_tooltip_text(Some("Close drawer (Ctrl+Shift+F)"));
         bar.append(&search);
-        // the view switch sits close to the cross: the two are the drawer's own controls
-        switch.add_css_class("sill-drawer-switch");
-        let ends = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        // Equal button slots and symmetric padding keep all three glyphs centered.
+        let ends = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+        ends.set_homogeneous(true);
+        ends.add_css_class("sill-drawer-controls");
+        for button in [&files, &switch, &close] {
+            button.set_valign(gtk::Align::Center);
+        }
+        ends.append(&files);
         ends.append(&switch);
         ends.append(&close);
         bar.append(&ends);
@@ -642,6 +656,9 @@ impl FolderTree {
             search_seq: std::cell::Cell::new(0),
             switch: switch.clone(),
             diff_mode: std::cell::Cell::new(false),
+            rendered_scope: RefCell::new(None),
+            global_return: RefCell::new(None),
+            files: files.clone(),
             follow_seen: RefCell::new(None),
             panes,
             stat,
@@ -711,11 +728,36 @@ impl FolderTree {
             let weak = Rc::downgrade(&t);
             switch.connect_clicked(move |_| {
                 if let Some(t) = weak.upgrade() {
+                    t.leave_global();
                     t.set_diff_mode(!t.diff_mode.get());
                 }
             });
         }
+        {
+            let weak = Rc::downgrade(&t);
+            files.connect_clicked(move |_| {
+                if let Some(t) = weak.upgrade() {
+                    if t.global_return.borrow().is_some() {
+                        t.leave_global();
+                    } else {
+                        *t.global_return.borrow_mut() = Some((t.scope(), t.diff_mode.get()));
+                        t.files.add_css_class("suggested-action");
+                        t.set_scope_inner(None);
+                        t.set_diff_mode(false);
+                    }
+                }
+            });
+        }
         t
+    }
+
+    fn leave_global(self: &Rc<Self>) {
+        let previous = self.global_return.borrow_mut().take();
+        if let Some((scope, diff)) = previous {
+            self.files.remove_css_class("suggested-action");
+            self.set_scope_inner(scope);
+            self.set_diff_mode(diff);
+        }
     }
 
     /// The directory of the selected row (a file's parent): where "a terminal here" opens.
@@ -741,7 +783,12 @@ impl FolderTree {
         self.stat.set_filter("");
         self.say("");
         self.diff_mode.set(on);
-        self.panes.set_visible_child_name(if on { "diff" } else { "tree" });
+        // Keep the previous pane until the new scope's rows have been built.
+        if on {
+            self.panes.set_visible_child_name("diff");
+        } else if self.rendered_scope.borrow().as_ref() == Some(&self.scope()) {
+            self.panes.set_visible_child_name("tree");
+        }
         self.switch.set_child(Some(&super::icons::glyph_image(if on { "sill-list-tree" } else { "sill-git-compare" })));
         self.switch.set_tooltip_text(Some(if on { TREE_TIP } else { DIFF_TIP }));
         if on {
@@ -781,6 +828,7 @@ impl FolderTree {
     /// or everything when it has none — a fresh agent starts at Files, a resumed one at its work.
     /// Nothing happens while the drawer is closed; opening it later decides for itself.
     pub fn follow_session(self: &Rc<Self>, id: &str) {
+        self.leave_global();
         if !self.root.is_visible() {
             return;
         }
@@ -792,6 +840,11 @@ impl FolderTree {
 
     /// Limit the tree to one folder (from a pin chip), or show everything again.
     pub fn set_scope(self: &Rc<Self>, path: Option<PathBuf>) {
+        self.leave_global();
+        self.set_scope_inner(path);
+    }
+
+    fn set_scope_inner(self: &Rc<Self>, path: Option<PathBuf>) {
         // a new scope ends a search: the box is cleared, which refreshes by itself when it held text
         self.search.set_text("");
         *self.scope.borrow_mut() = path;
@@ -879,6 +932,7 @@ impl FolderTree {
     /// seen, the view follows it — diff while it has changes, tree when clean. A switch by hand
     /// holds until the next change; with the setting off (`None`), the next time on starts afresh.
     fn follow(self: &Rc<Self>, followed: Option<Followed>) {
+        if self.global_return.borrow().is_some() { return; }
         let Some(Followed { state, dirty }) = followed else {
             *self.follow_seen.borrow_mut() = None;
             return;
@@ -947,6 +1001,8 @@ impl FolderTree {
         type Statuses = Vec<(PathBuf, Vec<(PathBuf, String)>)>;
         let (tx, rx) = async_channel::bounded::<(Vec<(String, Change)>, BTreeMap<PathBuf, String>, Statuses, Option<Followed>)>(1);
         drop(sessions);
+        let scan_scope = scope.clone();
+        let scan_target = target.clone();
         std::thread::spawn(move || {
             // every session's overlay changes, as the daemon scans them (docs/daemon.md §7 M2)
             let mut pairs: Vec<(String, Change)> = Vec::new();
@@ -987,8 +1043,12 @@ impl FolderTree {
         let t = self.clone();
         glib::spawn_future_local(async move {
             if let Ok((all, owners, statuses, followed)) = rx.recv().await {
-                t.apply(all, owners, statuses);
-                t.follow(followed);
+                if t.scope() == scan_scope && *t.pin_target.borrow() == scan_target {
+                    t.apply(all, owners, statuses);
+                    t.follow(followed);
+                } else {
+                    t.again.set(true);
+                }
             }
             t.scanning.set(false);
             if t.again.replace(false) {
@@ -1110,6 +1170,10 @@ impl FolderTree {
         // every row on screen shows its badge as it is now
         for item in self.bound.borrow().clone() {
             (self.decorate)(&item);
+        }
+        *self.rendered_scope.borrow_mut() = Some(scope.clone());
+        if !self.diff_mode.get() {
+            self.panes.set_visible_child_name("tree");
         }
         self.refresh_stat(false);
         self.view.queue_draw();

@@ -41,8 +41,7 @@ pub struct Shelf {
     syncing: std::cell::Cell<bool>,
     tabs: Rc<TabStrip>,
     pages: gtk::Stack,
-    /// Top-bar indicator: a quiet square while idle, a spinner while the selected agent works; the
-    /// status text is its tooltip.
+    /// Top-bar status: idle square or activity spinner, with elapsed time sliding out to its left.
     status: gtk::Stack,
     session_timer: gtk::Label,
     timer_reveal: gtk::Revealer,
@@ -146,7 +145,7 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     // --- top bar: action button, tabs, "+", status
     let bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     bar.set_margin_start(8);
-    bar.set_margin_end(12);
+    bar.set_margin_end(4);
     bar.set_margin_top(6);
     bar.set_margin_bottom(2);
 
@@ -190,16 +189,7 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     let plus_menu = gtk::Box::new(gtk::Orientation::Vertical, 0);
     plus_pop.set_child(Some(&plus_menu));
     plus.set_popover(Some(&plus_pop));
-    // the timer slides out left of "+", so the buttons stay put; one action-group child, so a
-    // collapsed revealer leaves no extra gap
-    let lead = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    top_actions.append(&lead);
-    lead.append(&plus);
-
-    let files_btn = super::icons::glyph_button("sill-files");
-    files_btn.add_css_class("flat");
-    files_btn.set_tooltip_text(Some("Files"));
-    top_actions.append(&files_btn);
+    top_actions.append(&plus);
 
     let spinner = super::spinner::Spinner::new(); // not GtkSpinner: see spinner.rs
     let idle = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -213,23 +203,21 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     status.add_named(&spinner.area, Some("busy"));
     status.set_valign(gtk::Align::Center);
     status.add_css_class("sill-status-slot");
-    // Equal slots keep the three icon centers evenly spaced despite theme button padding.
-    let action_widths = gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal);
-    action_widths.add_widget(&plus);
-    action_widths.add_widget(&files_btn);
-    action_widths.add_widget(&status);
-    let session_timer = gtk::Label::new(None);
+    let session_timer = gtk::Label::new(Some("00:00"));
     session_timer.add_css_class("dim-label");
     session_timer.add_css_class("monospace");
+    session_timer.set_width_chars(5);
     session_timer.set_margin_end(6);
     session_timer.set_tooltip_text(Some("Time the agent has worked (excludes idle time and waiting for input)"));
-    session_timer.set_visible(false);
     let timer_reveal = gtk::Revealer::new();
     timer_reveal.set_transition_type(gtk::RevealerTransitionType::SlideLeft);
     timer_reveal.set_transition_duration(180);
     timer_reveal.set_child(Some(&session_timer));
-    lead.prepend(&timer_reveal);
-    top_actions.append(&status);
+    let status_bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    status_bar.set_halign(gtk::Align::End);
+    status_bar.set_margin_end(6);
+    status_bar.append(&timer_reveal);
+    status_bar.append(&status);
 
     // --- pages
     let stack = gtk::Stack::new();
@@ -273,6 +261,15 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     // a paned, not a box: the separator (invisible, see the stylesheet) is the drawer's drag handle.
     // The main pane's width is the invariant (resize end, not start): the split is set to the main
     // pane's width and the drawer gets whatever the window's new width leaves once it arrives.
+    let drawer_handle = super::icons::glyph_button("sill-chevron-right");
+    drawer_handle.add_css_class("flat");
+    drawer_handle.set_opacity(0.5);
+    drawer_handle.add_css_class("sill-viewer-btn");
+    drawer_handle.set_tooltip_text(Some("Open drawer (Ctrl+Shift+F)"));
+    drawer_handle.set_halign(gtk::Align::End);
+    drawer_handle.set_valign(gtk::Align::Start);
+    drawer_handle.set_visible(false);
+    main.add_overlay(&drawer_handle);
     let body = gtk::Paned::new(gtk::Orientation::Horizontal);
     body.set_start_child(Some(&main));
     body.set_end_child(Some(&tree.root));
@@ -286,7 +283,23 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     pane_host.set_vhomogeneous(false);
     pane_host.set_visible(false);
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    column.append(&bar);
+    let header = gtk::Paned::new(gtk::Orientation::Horizontal);
+    header.set_start_child(Some(&bar));
+    header.set_end_child(Some(&status_bar));
+    header.set_resize_start_child(false);
+    header.set_shrink_start_child(false);
+    header.set_resize_end_child(true);
+    body.bind_property("position", &header, "position").sync_create().build();
+    {
+        let header = header.clone();
+        let body = body.clone();
+        tree.root.connect_visible_notify(move |tree| {
+            header.set_position(if tree.is_visible() { body.position() } else { i32::MAX });
+        });
+    }
+    tree.root.bind_property("visible", &drawer_handle, "visible")
+        .invert_boolean().sync_create().build();
+    column.append(&header);
     column.append(&body);
     column.append(&pane_host);
     window.set_child(Some(&column));
@@ -392,18 +405,8 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     }
 
     {
-        // Files: the global tree beside the main pane. Showing a pinned folder, it widens to
-        // everything; showing everything, it closes (Ctrl+Shift+F closes either way)
         let s = shelf.clone();
-        files_btn.connect_clicked(move |_| {
-            if !s.tree.root.is_visible() {
-                s.toggle_tree(None);
-            } else if s.tree.scope().is_some() {
-                s.tree.set_scope(None);
-            } else {
-                s.close_tree();
-            }
-        });
+        drawer_handle.connect_clicked(move |_| s.toggle_drawer());
     }
     {
         let s = shelf.clone();
@@ -536,13 +539,7 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
                         return glib::Propagation::Stop;
                     }
                     gdk::Key::F | gdk::Key::f => {
-                        // the session's first pinned folder, scoped (as its chip does); else everything
-                        if s.tree.root.is_visible() {
-                            s.close_tree()
-                        } else {
-                            let pinned = s.tabs.selected().and_then(|id| s.store.pins(&id).ok()).and_then(|pins| pins.into_iter().find(|p| super::remote::is_dir(p)));
-                            s.toggle_tree(pinned)
-                        }
+                        s.toggle_drawer();
                         return glib::Propagation::Stop;
                     }
                     gdk::Key::E | gdk::Key::e => {
@@ -851,6 +848,20 @@ impl Shelf {
         let cur = self.tabs.selected().and_then(|id| ids.iter().position(|i| *i == id)).unwrap_or(0) as i32;
         let n = ids.len() as i32;
         self.tabs.select(&ids[(cur + delta).rem_euclid(n) as usize]);
+    }
+
+    fn toggle_drawer(&self) {
+        if self.tree.root.is_visible() {
+            self.close_tree();
+        } else {
+            self.set_expanded(false);
+            self.tree.root.set_visible(true);
+            let w: gtk::Window = self.window.clone().upcast();
+            if let Some(area) = self.placement(&w) {
+                self.split(area.width as i32 / x11::scale_of(&w));
+            }
+            self.place();
+        }
     }
 
     fn close_tree(&self) {
