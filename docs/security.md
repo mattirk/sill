@@ -1,5 +1,18 @@
 # Security audit — 2026-11-01
 
+> **About this document.** A dated audit log, not a description of the current design. It records
+> an audit of 2026-11-01 and the notes added until 2026-11-10, in the words of those days.
+>
+> - In the findings table the **Status** column is the authority. Where another section calls a
+>   finding open and the table says fixed, the table is right.
+> - `file:line` references are to the code of the audit date; much of it has moved since. The GTK
+>   window that several findings name ("the shelf") was replaced by `sill-gui`, and the findings
+>   about that window (S17 among them) have not been audited again against the new one.
+> - "SPEC §…" and other documents named here are design notes that are not part of this repository.
+> - The comparison with other tools is from their documentation as read on 2026-11-02 and may be
+>   out of date.
+> - Sill has had no independent audit.
+
 Third pass after SPEC §4.10 and §4.11 (both 2026-10-28). Four code reviews in parallel (jail escape
 surface; network egress and agent installs; host-side consumers of agent data; root install and host
 command execution), each verifying the earlier claims against the current code, plus a live probe
@@ -192,22 +205,29 @@ Memory and transcripts are read-only snapshots inside the jail.
 
 **Where sill is behind, or open.**
 
-- **One fence** (S18). bwrap is the only boundary — no seccomp filter, no Landlock, no systemd
-  hardening on the units. Codex layers Landlock under bwrap. A bwrap or kernel bug is a full escape.
+- **One fence** (S18). When this was written bwrap was the only boundary — no seccomp filter, no
+  Landlock, no systemd hardening on the units. Since then (S18 in the table) a seccomp deny-list
+  goes under bwrap on x86_64; on other architectures there is still no filter, and no Landlock
+  anywhere. Codex layers Landlock under bwrap. Without a second fence a bwrap or kernel bug is a
+  full escape.
 - **Linux-only is by design, not a gap to close in the jail code**: on macOS and Windows sill will
   run a Linux VM (real virtualization) with sill-linux inside it, so the jail stays one
   implementation and the VM is the second fence there. Zed's "run unsandboxed with a warning"
   fallback is not wanted: a session whose jail cannot be built must not start (as today).
 - **Exfiltration through the default allow-list** (S20): github.com and npm are allowed by design.
   Same for everyone; worth saying in the install docs.
-- **Open findings**: S12 (autostart bakes `current_exe` from a checkout), S13 (unsigned registry
-  index), S15 (user journal readable in the jail), S17 (VTE link click-through, host-side image
-  decoding), S19 (`nosuid,nodev` on the state fstab line), S10's remainder (agent not paused
-  during Keep).
+- **Open findings** when this was written: S12 (autostart bakes `current_exe` from a checkout),
+  S13 (unsigned registry index), S15 (user journal readable in the jail), S17 (VTE link
+  click-through, host-side image decoding), S19 (`nosuid,nodev` on the state fstab line), S10's
+  remainder (agent not paused during Keep). Fixed since, as the table says: S12, S13, S15 and S19's
+  fstab line. Still open: S17, S19's image mode, S10's remainder, and what the table leaves open
+  under S9, S14 and S18.
 - **Desktop access:** raw host X11 / D-Bus grants were removed on 2026-11-06; managed
   Weston/private Xwayland is planned, with no desktop backend available yet.
 
-**Order proposed.**
+**Order proposed.** As proposed on 2026-11-02. Done since, as the table says: the seccomp filter
+of item 1; S15, S19's fstab line and S12 of item 2; and S13 of item 3, by a compiled-in snapshot of
+the registry instead of a signed index.
 
 1. **A second fence in the jail (S18)**: a seccomp BPF filter passed to bwrap with `--seccomp <fd>`,
    the container-standard deny list (`mount`, `umount2`, `pivot_root`, `ptrace` of other pids,
