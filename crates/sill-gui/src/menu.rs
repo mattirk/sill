@@ -408,7 +408,7 @@ impl App {
                     .style(style::quiet),
                     event(Event::NewHere(session.session_id.clone())),
                 ),
-                tip("New here: a new session with the same agent, policy and pins, told this one's summary first".into()),
+                tip("New here: a new session with the same agent and policy, told this one's summary first".into()),
                 tooltip::Position::Left,
             ));
         }

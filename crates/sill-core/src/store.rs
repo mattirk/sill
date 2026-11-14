@@ -579,7 +579,7 @@ impl Store {
         Ok(())
     }
 
-    /// The user's global pins (docs/pins.md): bound in every non-ghost jail, never a chip.
+    /// Saved shortcuts (legacy storage name); never jail mounts.
     pub fn global_pins(&self) -> Result<Vec<PathBuf>> {
         let mut st = self.conn.prepare("SELECT path FROM global_pins ORDER BY path")?;
         let rows = st.query_map([], |r| read_sql_path(r, 0))?;
@@ -596,17 +596,9 @@ impl Store {
         Ok(())
     }
 
-    /// What a session's jail binds: its own pins, then the global ones it does not already hold (a
-    /// session pin inside a global folder adds nothing, the global folder covers it). The session's
-    /// own pins alone are its focus (chips, instructions, memory scope).
+    /// Only explicit session pins affect jail mounts. Shortcuts are navigation only.
     pub fn jail_pins(&self, session_id: &str) -> Result<Vec<PathBuf>> {
-        let mut out = self.pins(session_id)?;
-        for g in self.global_pins()? {
-            if !out.contains(&g) {
-                out.push(g);
-            }
-        }
-        Ok(out)
+        self.pins(session_id)
     }
 
     /// A workspace session's repositories for its jail (§12): each open clone at its repository's
@@ -795,7 +787,7 @@ mod tests {
     }
 
     #[test]
-    fn global_pins_join_a_sessions_jail_but_not_its_focus() {
+    fn shortcuts_never_join_a_sessions_jail() {
         let dir = std::env::temp_dir().join(format!("sill-store-gpins-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let store = Store::open(&dir.join("s.db")).unwrap();
@@ -804,7 +796,7 @@ mod tests {
         store.global_pin(g).unwrap(); // once
         store.pin("s1", own).unwrap();
         assert_eq!(store.pins("s1").unwrap(), vec![own.to_path_buf()]);
-        assert_eq!(store.jail_pins("s1").unwrap(), vec![own.to_path_buf(), g.to_path_buf()]);
+        assert_eq!(store.jail_pins("s1").unwrap(), vec![own.to_path_buf()]);
         // pinned in the session too: once in the jail list, in the session's place
         store.pin("s1", g).unwrap();
         assert_eq!(store.jail_pins("s1").unwrap(), vec![g.to_path_buf(), own.to_path_buf()]);

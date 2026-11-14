@@ -43,7 +43,7 @@ impl Context {
             Ok(Some(notice)) => facts + &notice,
             _ => facts,
         };
-        // Global pins are mounts, not the session's focus or recall scope (docs/pins.md).
+        // Only session pins define focus and recall scope; shortcuts are navigation.
         let pins = store.pins(id)?;
         let memory = if session.ghost && !cfg.ghost_memory() {
             String::new()

@@ -590,13 +590,6 @@ impl App {
                     }),
                 ),
                 setting(
-                    "Remember pins",
-                    Some("A new session starts with the latest session's pins"),
-                    switch(s.remember_pins.unwrap_or(false), move |v| {
-                        change(SettingChange::RememberPins { value: Some(v) })
-                    }),
-                ),
-                setting(
                     "Automatic workspaces",
                     Some("New sessions work in their own copy of each pinned repository; you Apply their work. The button beside the ghost in + makes a live session"),
                     switch(s.automatic_workspaces.unwrap_or(false), move |v| {
@@ -604,9 +597,9 @@ impl App {
                     }),
                 ),
                 wide(
-                    "Global pins",
+                    "Shortcuts",
                     Some(
-                        "Folders and files every new session may work in; a chip and the agent's focus only when pinned in the session too",
+                        "Saved folders and files for navigation. Use the pin button to add one to a session.",
                     ),
                     pins,
                 ),

@@ -166,7 +166,6 @@ pub fn restart(hidden: bool, dev: bool, detached: bool, jails: bool) -> Result<(
         let pins: Vec<PathBuf> = sessions
             .iter()
             .flat_map(|s| store.pins(&s.id).unwrap_or_default())
-            .chain(store.global_pins().unwrap_or_default())
             .collect();
         if let Some(p) = sill_core::session::inside_any(&exe, &pins) {
             eprintln!("warning: {} is inside the pinned folder {} — the agent can write there", exe.display(), p.display());

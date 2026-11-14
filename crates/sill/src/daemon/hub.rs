@@ -19,8 +19,7 @@ use sill_proto::{DaemonStatus, Ending, Started, method};
 use super::Conn;
 
 /// A session row to create: `_sill/sessions.create`'s input with its pins as paths. `pins` are
-/// copied as given; with `remember_pins` and none given, the pins of the latest session that had
-/// any (Settings → Remember pins).
+/// copied only when explicitly supplied.
 pub(crate) struct NewSession {
     pub agent: String,
     pub policy: String,
@@ -28,7 +27,6 @@ pub(crate) struct NewSession {
     pub memory_scope: String,
     /// The ended session this one follows (*New here*).
     pub follows: String,
-    pub remember_pins: bool,
     /// A ghost session (docs/memory.md §3): no pins (refused when given), no memory written, the
     /// row and every trace deleted at its end.
     pub ghost: bool,
@@ -630,9 +628,6 @@ impl Hub {
         let s = store.create_with(&n.agent, &n.policy, n.ghost)?;
         let pins = if n.ghost {
             vec![]
-        } else if n.pins.is_empty() && n.remember_pins {
-            // the pins of the latest session that had any (the sessions come newest first)
-            store.sessions()?.into_iter().filter(|x| x.id != s.id).find_map(|x| store.pins(&x.id).ok().filter(|p| !p.is_empty())).unwrap_or_default()
         } else {
             n.pins
         };
@@ -1234,7 +1229,7 @@ impl Hub {
         let (s, pins, workspace) = {
             let store = self.store.lock().unwrap();
             let Some(s) = store.sessions()?.into_iter().find(|x| x.id == id) else { bail!("no session {id}") };
-            let pins = store.jail_pins(id)?; // the global pins too (docs/pins.md)
+            let pins = store.jail_pins(id)?; // explicit session pins only
             let workspace = store.workspace_mask(id)?;
             (s, pins, workspace)
         };

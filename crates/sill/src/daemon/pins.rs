@@ -28,26 +28,18 @@ impl Hub {
                     let a: api::GlobalPin = args(params)?;
                     let path = pin_path(&a.path)?.canonicalize().map_err(|e| Error::domain(if e.kind() == std::io::ErrorKind::NotFound { "not_found" } else { "permission_denied" }, e.to_string()))?;
                     if !path.is_dir() && !path.is_file() { return Err(Error::invalid_params("pin must be a file or directory").into()); }
-                    if path.starts_with(self.home.join(".local/state/sill")) || path == self.home {
-                        return Err(Error::domain("permission_denied", "sill state and the home itself cannot be pinned").into());
-                    }
                     self.with_store(|store| {
                         let held = store.global_pins()?;
                         if held.contains(&path) { return Ok(()); }
-                        if held.iter().any(|p| path.starts_with(p) || p.starts_with(&path)) {
-                            return Err(Error::domain("invalid_state", "global pins must not overlap").into());
-                        }
-                        if held.len() >= 128 { return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Capacity, Some(128), "at most 128 global pins").into()); }
+                        if held.len() >= 128 { return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Capacity, Some(128), "at most 128 shortcuts").into()); }
                         store.global_pin(&path)
                     })?;
-                    self.pins_changed(None);
                     Ok(json!(api::Pinned { path: HostPath::from_path(&path) }))
                 }
                 "_sill/pins.remove" => {
                     let a: api::GlobalPin = args(params)?;
                     let path = pin_path(&a.path)?;
                     self.with_store(|store| store.global_unpin(&path))?;
-                    self.pins_changed(None);
                     Ok(json!({}))
                 }
                 "_sill/sessions.pin" | "_sill/sessions.unpin" => {

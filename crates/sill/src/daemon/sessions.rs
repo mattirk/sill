@@ -108,7 +108,6 @@ pub(super) fn create(store: &Store, mut a: api::Create) -> Result<api::SessionKe
             pins,
             memory_scope: a.memory_scope,
             follows: a.follows,
-            remember_pins: a.remember_pins,
             ghost: a.ghost,
         },
     )?;

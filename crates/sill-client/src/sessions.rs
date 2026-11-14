@@ -9,15 +9,14 @@ use sill_proto::sessions::{Change, Create, End, Session, SessionKey, Update};
 /// One request: the method and its parameters.
 pub type Request = (&'static str, Value);
 
-/// A new session of `agent` with the default policy. `remember_pins` (Settings → Remember pins)
-/// asks the daemon to start it with the latest session's pins; a ghost never takes them.
+/// A new session with no inherited pins. The legacy remember argument is ignored.
 /// `workspaces` chooses live or workspace (docs/parallel-coding.md §12); None follows Settings.
-pub fn create(agent: &str, ghost: bool, remember_pins: bool, workspaces: Option<bool>) -> Request {
+pub fn create(agent: &str, ghost: bool, _remember_pins: bool, workspaces: Option<bool>) -> Request {
     let create = Create {
         create_id: crate::request_id("create"),
         agent: agent.into(),
         policy: "default".into(),
-        remember_pins: remember_pins && !ghost,
+        remember_pins: false,
         ghost,
         workspaces: workspaces.filter(|_| !ghost),
         ..Create::default()
@@ -25,14 +24,14 @@ pub fn create(agent: &str, ghost: bool, remember_pins: bool, workspaces: Option<
     ("_sill/sessions.create", json!(create))
 }
 
-/// *New here*: a new session with an ended one's agent, policy, pins and memory scope,
+/// *New here*: a new session with an ended one's agent, policy and memory scope,
 /// told that one's summary first.
 pub fn new_here(from: &Session) -> Request {
     let create = Create {
         create_id: crate::request_id("create"),
         agent: from.agent.clone(),
         policy: from.policy.clone(),
-        pins: from.pins.clone(),
+        pins: vec![],
         memory_scope: from.memory_scope.clone(),
         follows: from.session_id.clone(),
         remember_pins: false,
@@ -191,7 +190,7 @@ mod tests {
                 create.policy.as_str(),
                 create.pins.len()
             ),
-            ("old", "strict", 1)
+            ("old", "strict", 0)
         );
         assert_eq!(
             reopen("s").1,

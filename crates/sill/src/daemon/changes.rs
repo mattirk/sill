@@ -278,7 +278,6 @@ impl Hub {
             for s in st.sessions()?.into_iter().filter(|s| s.ended_at.is_none()) {
                 out.extend(st.pins(&s.id)?.into_iter().filter(|p| p.join(".git").exists()));
             }
-            out.extend(st.global_pins()?.into_iter().filter(|p| p.join(".git").exists()));
             out.extend(sill_core::workspace::records::all_clones(st.conn())?);
             Ok(out)
         })

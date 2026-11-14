@@ -161,8 +161,8 @@ enum Cmd {
         #[command(subcommand)]
         cmd: RegistryCmd,
     },
-    /// The global pins (docs/pins.md): bound in every new session's jail, a chip only when pinned
-    /// in the session too
+    /// Saved navigation shortcuts (docs/pins.md); never grant session access
+    #[command(name = "shortcut", alias = "pin")]
     Pin {
         #[command(subcommand)]
         cmd: Option<PinCmd>,
@@ -273,7 +273,7 @@ enum BoxCmd {
 
 #[derive(Subcommand)]
 enum PinCmd {
-    /// List the global pins
+    /// List the shortcuts
     List,
     /// Add a folder or file (refused inside another global pin, or inside sill's own state)
     Add { path: PathBuf },
@@ -1638,7 +1638,7 @@ fn pin_cmd(cmd: PinCmd) -> Result<()> {
         PinCmd::Remove { path } => {
             let path = pin_cli_path(&path)?;
             let _: serde_json::Value = c.call("_sill/pins.remove", api::GlobalPin { path: HostPath::from_path(&path) })?;
-            println!("{} removed from the global pins", path.display());
+            println!("{} removed from the shortcuts", path.display());
         }
     }
     Ok(())

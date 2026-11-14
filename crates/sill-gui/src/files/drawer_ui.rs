@@ -60,7 +60,7 @@ impl App {
             let mut global_heading = false;
             for root in &state.roots {
                 if root.global && !global_heading {
-                    body = body.push(caption("Global pins · use + to focus this session here"));
+                    body = body.push(caption("Shortcuts · use + to pin to this session"));
                     global_heading = true;
                 }
                 let dir = root.metadata.as_ref().is_some_and(|m| m.directory);
