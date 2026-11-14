@@ -666,7 +666,7 @@ fn detail<H: Host>(h: &H, r: Row) -> Result<Settled> {
     let workspace = h.db(|c| record(c, &r))?;
     let Some(m) = l else { return Ok(Settled::Record(workspace)) };
     let (revision, needs_rebase) = revision_now(&r)?;
-    Ok(Settled::Full(api::Detail { workspace, revision, summary: summary(&r, &m)?, needs_rebase }))
+    Ok(Settled::Full(api::Detail { workspace, revision, summary: summary(&r, &m)?, needs_rebase, checkout_only: m.checkout_only.len() as u32 }))
 }
 
 fn changed<H: Host>(h: &H, r: Option<&Row>, operation: Option<&str>, discarded: Option<api::Discarded>) -> Result<api::Changed> {
@@ -1043,9 +1043,29 @@ pub fn session_notice(conn: &Connection, session: &str) -> Result<Option<String>
         return Ok(None);
     }
     let repos = rows.iter().map(|r| format!("{} (branch {})", r.source.display(), r.branch)).collect::<Vec<_>>().join(", ");
-    Ok(Some(format!(
+    let mut notice = format!(
         "\n[This session works in workspaces: {repos} — each is your own copy of the repository at its usual path; the person's checkout is elsewhere and changes only when they apply your work. Commit or leave changes uncommitted as suits the work; the person applies both, or discards them. Do not push.]"
-    )))
+    );
+    // the person's uncommitted work is not in the copy (§5): said, so the agent does not look
+    // for code that is only in their checkout. A look that fails says nothing.
+    for r in rows.iter().filter(|r| r.state == "open") {
+        let Ok(Some(m)) = look(r) else { continue };
+        if m.checkout_only.is_empty() {
+            continue;
+        }
+        const NAMED: usize = 8;
+        let n = m.checkout_only.len();
+        let mut names = m.checkout_only.iter().take(NAMED).cloned().collect::<Vec<_>>().join(", ");
+        if n > NAMED {
+            names.push_str(&format!(" and {} more", n - NAMED));
+        }
+        notice.push_str(&format!(
+            "\n[The person's checkout of {} has {n} uncommitted file{} of their own that your copy does not have ({names}): your copy started from their last commit. If they refer to work you cannot find, it may be there — say so rather than guess.]",
+            r.source.display(),
+            if n == 1 { "" } else { "s" },
+        ));
+    }
+    Ok(Some(notice))
 }
 
 /// The end of retention: discarded work past its time goes, with its anchor.

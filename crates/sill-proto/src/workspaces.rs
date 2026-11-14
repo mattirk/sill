@@ -147,6 +147,11 @@ pub struct Detail {
     pub summary: Summary,
     /// The checkout moved past what the workspace started from: Apply rebases first (prepare).
     pub needs_rebase: bool,
+    /// The person's own uncommitted files in the checkout that the workspace does not have: a
+    /// workspace starts from HEAD (docs/parallel-coding.md §5). The agent's applied work is not
+    /// counted.
+    #[serde(default)]
+    pub checkout_only: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

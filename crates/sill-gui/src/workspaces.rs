@@ -30,6 +30,14 @@ impl State {
         self.loaded.as_ref()?.view.workspaces.iter().find(|w| w.source.bytes_base64 == path.bytes_base64)
     }
 
+    /// What to say when the person's checkout of a pinned repository holds uncommitted work of
+    /// their own that this session's workspace does not have (docs/parallel-coding.md §5).
+    pub fn checkout_only(&self, path: &sill_proto::sessions::HostPath) -> Option<String> {
+        let d = self.loaded.as_ref()?.details.iter().find(|d| d.workspace.source.bytes_base64 == path.bytes_base64)?;
+        let n = d.checkout_only;
+        (n > 0).then(|| format!("{n} uncommitted file{} in your checkout {} not in this workspace", if n == 1 { "" } else { "s" }, if n == 1 { "is" } else { "are" }))
+    }
+
     /// A pinned repository the session keeps live although it works in workspaces, and why.
     pub fn live_reason(&self, path: &sill_proto::sessions::HostPath) -> Option<&api::LiveRepository> {
         self.loaded.as_ref()?.view.live.iter().find(|l| l.source.bytes_base64 == path.bytes_base64)

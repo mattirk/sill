@@ -471,3 +471,46 @@ fn the_session_view_and_the_list_carry_each_workspaces_detail() {
     assert!(view.details.is_empty());
     assert!(get(&f.host, &w.workspace_id).is_err());
 }
+
+/// A workspace starts from HEAD (§5): the person's own uncommitted work in the checkout is not in
+/// it, and that is said — counted in the detail, named to the agent. The agent's applied work,
+/// dirty in the checkout too, is not the person's.
+#[test]
+fn the_persons_uncommitted_work_is_counted_as_not_in_the_workspace() {
+    let f = fixture("checkout-only");
+    let w = session(&f, "s1");
+    let clone = clone_of(&w);
+    let only = |f: &Fixture| get(&f.host, &w.workspace_id).unwrap().checkout_only;
+    let notice = |f: &Fixture| f.host.db(|c| session_notice(c, "s1")).unwrap().unwrap();
+    assert_eq!(only(&f), 0);
+    assert!(!notice(&f).contains("uncommitted file"), "{}", notice(&f));
+    // the person's edit, a staged one and a new file
+    write(&f.source.join("f1.txt"), "the person's\n");
+    write(&f.source.join("f2.txt"), "the person's, staged\n");
+    git(&f.source, &["add", "f2.txt"]);
+    write(&f.source.join("mine.txt"), "new\n");
+    assert_eq!(only(&f), 3);
+    let said = notice(&f);
+    assert!(said.contains("3 uncommitted files") && said.contains("f1.txt, f2.txt, mine.txt"), "{said}");
+    assert_eq!(get(&f.host, &w.workspace_id).unwrap().summary.files, 0, "nothing of it is the agent's to apply");
+    // the same content in the workspace is not missing from it
+    write(&clone.join("mine.txt"), "new\n");
+    assert_eq!(only(&f), 2);
+    // committed or reverted: gone
+    git(&f.source, &["checkout", "-q", "HEAD", "--", "f1.txt", "f2.txt"]);
+    std::fs::remove_file(f.source.join("mine.txt")).unwrap();
+    std::fs::remove_file(clone.join("mine.txt")).unwrap();
+    assert_eq!(only(&f), 0);
+    // the agent's applied work is dirty in the checkout and not the person's, also once the
+    // agent has gone on from it
+    write(&clone.join("f1.txt"), "agent\n");
+    apply(&f.host, &apply_req("a1", &w, &rev(&f, &w))).unwrap();
+    assert_eq!(read(&f.source.join("f1.txt")), "agent\n");
+    assert_eq!(only(&f), 0);
+    write(&clone.join("f1.txt"), "agent, later\n");
+    assert_eq!(only(&f), 0);
+    assert!(!notice(&f).contains("uncommitted file"));
+    // the person's edit on top of it is theirs
+    write(&f.source.join("f1.txt"), "agent, and the person\n");
+    assert_eq!(only(&f), 1);
+}

@@ -1506,6 +1506,13 @@
     },
     "Detail": {
       "properties": {
+        "checkout_only": {
+          "default": 0,
+          "description": "The person's own uncommitted files in the checkout that the workspace does not have: a\nworkspace starts from HEAD (docs/parallel-coding.md §5). The agent's applied work is not\ncounted.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
         "needs_rebase": {
           "description": "The checkout moved past what the workspace started from: Apply rebases first (prepare).",
           "type": "boolean"

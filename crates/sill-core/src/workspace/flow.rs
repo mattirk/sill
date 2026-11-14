@@ -252,6 +252,10 @@ pub struct Mirror {
     pub now: String,
     /// Whether the workspace differs from the person's side at all: anything to apply.
     pub changed: bool,
+    /// The person's own uncommitted work the workspace does not have (§5: a workspace starts from
+    /// HEAD): paths dirty in the checkout whose content there is neither the workspace's nor the
+    /// agent's earlier Apply. Sorted.
+    pub checkout_only: Vec<String>,
 }
 
 pub fn mirror(source: &Path, clone: &Path, workspace_branch: &str) -> Result<Mirror> {
@@ -272,27 +276,33 @@ pub fn mirror(source: &Path, clone: &Path, workspace_branch: &str) -> Result<Mir
     // the agent's paths: changed since upstream…
     let mut paths: Vec<String> = diff_tree(&ws, &upstream, &now)?.into_iter().filter(|e| e.mode != "160000").map(|e| e.path).collect();
     // …or dirty in the checkout, unstaged, holding what the agent's earlier Apply wrote there
+    let dirty = dirty(&src)?;
+    let dirty_paths: Vec<String> = dirty.iter().map(|(_, _, p)| p.clone()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
     let unstaged: Vec<String> =
-        dirty(&src)?.into_iter().filter(|(x, _, p)| (*x == ' ' || *x == '?') && !paths.contains(p)).map(|(_, _, p)| p).collect();
-    let mut host: BTreeMap<String, Have> =
-        worktree_entries(&ws, source, &paths.iter().chain(&unstaged).cloned().collect::<Vec<_>>())?.into_iter().collect();
-    let was = tree_entries(&ws, &applied, &unstaged)?;
+        dirty.into_iter().filter(|(x, _, p)| (*x == ' ' || *x == '?') && !paths.contains(p)).map(|(_, _, p)| p).collect();
+    // every dirty path of the checkout is read, in the one batch: the agent's are told from the
+    // person's own below
+    let read: Vec<String> = paths.iter().chain(dirty_paths.iter().filter(|p| !paths.contains(p))).cloned().collect();
+    let mut host: BTreeMap<String, Have> = worktree_entries(&ws, source, &read)?.into_iter().collect();
+    let was = tree_entries(&ws, &applied, &dirty_paths)?;
+    let here = tree_entries(&ws, &now, &read)?;
+    let checkout_only: Vec<String> =
+        dirty_paths.into_iter().filter(|p| !same_blob(host.get(p), here.get(p)) && !same_blob(host.get(p), was.get(p))).collect();
     for p in unstaged {
         if same_blob(host.get(&p), was.get(&p)) {
             paths.push(p);
         }
     }
     // what the checkout has on them, where that differs from the workspace
-    let ours = tree_entries(&ws, &now, &paths)?;
     let entries: Vec<(String, Have)> = paths
         .into_iter()
         .filter_map(|p| {
             let theirs = host.remove(&p).flatten();
-            (theirs.as_ref() != ours.get(&p)).then_some((p, theirs))
+            (theirs.as_ref() != here.get(&p)).then_some((p, theirs))
         })
         .collect();
     let tree = build_tree(&ws, &now, &entries)?;
-    Ok(Mirror { changed: tree != now, tree, upstream, now })
+    Ok(Mirror { changed: tree != now, tree, upstream, now, checkout_only })
 }
 
 /// Whether a working tree's entry holds the blob a tree has at the path: the same content, or

@@ -573,4 +573,13 @@ fn render_workspaces() {
     view.workspaces.diff = Some(("ws-1".into(), Ok("diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,2 +1,3 @@\n fn main() {\n-    old();\n+    new();\n+    more();\n }\n".into())));
     view.workspaces.armed = Some("ws-1".into());
     render(&app, "workspaces-2-diff");
+    // the person's checkout holds uncommitted work the workspace does not have: the chip's dot,
+    // the drawer's line
+    let view = app.views.get_mut("demo").unwrap();
+    view.workspaces.diff = None;
+    view.workspaces.armed = None;
+    view.workspaces.loaded.as_mut().unwrap().details[0].checkout_only = 11;
+    let _ = app.update(Message::Layout(crate::layout::Action::Mode(crate::layout::Mode::Drawer)));
+    let _ = app.update(Message::Files(crate::files::Action::DiffMode(true)));
+    render_size(&app, "workspaces-3-checkout-only", (1000.0, 500.0));
 }

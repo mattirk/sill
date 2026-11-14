@@ -55,7 +55,7 @@ impl App {
             );
         }
         if state.diff_mode {
-            body = diff_list(body, state);
+            body = diff_list(body, state, &view.workspaces);
         } else {
             let mut global_heading = false;
             for root in &state.roots {
@@ -286,7 +286,7 @@ fn node<'a>(
 /// folder and branch, and `N files · +a −d ?u` — then a row per changed file: git's letter (`N`
 /// for new), the file's name (its path below the repository in the tooltip) and its lines added
 /// and removed, or `—` without counts.
-fn diff_list<'a>(mut body: Column<'a, Message>, state: &'a State) -> Column<'a, Message> {
+fn diff_list<'a>(mut body: Column<'a, Message>, state: &'a State, workspaces: &crate::workspaces::State) -> Column<'a, Message> {
     let mut any = false;
     for root in state.roots.iter().filter(|r| !r.global) {
         if !root.metadata.as_ref().is_some_and(|m| m.directory) {
@@ -333,6 +333,10 @@ fn diff_list<'a>(mut body: Column<'a, Message>, state: &'a State) -> Column<'a, 
              ?untracked files"
                 .into(),
         ));
+        // a workspace starts from HEAD: what is only in the person's checkout is not listed here
+        if let Some(apart) = workspaces.checkout_only(&root.path) {
+            body = body.push(note(&apart, style::alpha(P.fg, 0.5)));
+        }
         if repo.entries.is_empty() {
             body = body.push(note("Nothing differs from HEAD.", P.fg_dim));
         }

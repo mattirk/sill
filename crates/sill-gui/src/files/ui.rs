@@ -81,6 +81,15 @@ impl App {
             ]
             .spacing(6)
             .align_y(Alignment::Center);
+            // the person's uncommitted work is not in the workspace: a quiet dot, said in the tip
+            let apart = view.workspaces.checkout_only(&root.path);
+            if apart.is_some() {
+                label = label.push(text("•").size(style::SMALL).color(style::alpha(P.warning, 0.7)));
+            }
+            let said = match (said, apart) {
+                (Some(said), Some(apart)) => Some(format!("{said}\n{apart}.")),
+                (said, apart) => said.or(apart),
+            };
             // Tracked line totals against HEAD, plus untracked files separately.
             if let Some(repo) = state.repo_of(&root.path) {
                 if let Some((added, removed)) = &repo.lines {
