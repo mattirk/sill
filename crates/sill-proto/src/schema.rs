@@ -54,6 +54,7 @@ pub const METHODS: &[Method] = &[
     req_empty::<crate::sessions::SessionKey>("_sill/sessions.checkpoint", "Request a summary. Do not blindly retry after connection loss."),
     req::<crate::host::PortOpen, crate::host::HostStream>("_sill/streams.port", "Connect to a TCP port in a running session jail; close the byte stream to close the connection. Do not blindly retry."),
     req::<crate::host::AgentLogin, crate::host::HostStream>("_sill/agents.login", "Start host login with tagged progress. Disconnect does not cancel; do not blindly retry."),
+    req::<crate::host::AgentLogout, crate::host::LoggedOut>("_sill/agents.logout", "Remove an agent's login from sill after stopping its running sessions; the host's own login is untouched. `unsupported` when sill does not know where the agent keeps it."),
     req::<crate::host::RegistryInstall, crate::host::HostStream>("_sill/registry.install", "Install a daemon registry entry with tagged progress. Disconnect does not cancel; do not blindly retry."),
     req::<crate::host::RegistryList, crate::host::RegistryPage>("_sill/registry.list", "List the daemon's registry in bounded live pages, including install selectors and trust source."),
     req::<crate::terminals::Open, crate::terminals::Terminal>("_sill/terminals.open", "Open a daemon-owned terminal in a session's jail or on the daemon host. Do not blindly retry after connection loss: list first."),

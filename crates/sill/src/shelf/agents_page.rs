@@ -393,6 +393,9 @@ impl AgentsPage {
             if let Some(b) = self.forget_button(e) {
                 state_box.append(&b);
             }
+            if let Some(b) = self.logout_button(e) {
+                state_box.append(&b);
+            }
         }
         match state {
             State::Managed(version, trust) => {
@@ -501,6 +504,71 @@ impl AgentsPage {
             };
             p.logs.borrow_mut().insert(e2.id.clone(), vec![msg]);
             p.refresh_row(&e2, &home);
+        });
+        Some(b)
+    }
+
+    /// "Log out": sill's login for the agent removed, its running sessions stopped first (a
+    /// running agent holds its login and may write it back). Only when sill knows where the agent
+    /// keeps its login and there is one; the person's own login on this computer is never touched.
+    fn logout_button(self: &Rc<Self>, e: &Entry) -> Option<gtk::Button> {
+        let home = session::home().ok()?;
+        let id = registry::builtin_for(e).map(str::to_string).unwrap_or_else(|| e.id.clone());
+        let agent = super::remote::agents::load(&home).remove(&id)?;
+        let own = sill_core::session::agent_home(&home, &agent.id);
+        let files: Vec<PathBuf> = agent.login_files.iter().filter_map(|p| p.strip_prefix("~/")).map(|rel| own.join(rel)).filter(|p| super::remote::exists(p)).collect();
+        if files.is_empty() {
+            return None;
+        }
+        let b = gtk::Button::with_label("Log out");
+        b.add_css_class("flat");
+        b.add_css_class("sill-agent-link");
+        b.set_tooltip_text(Some(&format!(
+            "Log {} out of sill: its running sessions stop (their conversations stay), then its login ({}) goes. Your own login on this computer is untouched.",
+            agent.name,
+            files.iter().map(|f| f.display().to_string()).collect::<Vec<_>>().join(", ")
+        )));
+        let p = self.clone();
+        let e2 = e.clone();
+        let (agent_id, name) = (agent.id.clone(), agent.name.clone());
+        b.connect_clicked(move |b| {
+            // the first click says what happens, the second does it
+            let key = format!("logout:{agent_id}");
+            if p.confirm.borrow().as_deref() != Some(key.as_str()) {
+                *p.confirm.borrow_mut() = Some(key);
+                b.set_label("Confirm log out");
+                let msg = format!("Log {name} out of sill? Its running sessions stop first; their conversations stay. Click again to confirm.");
+                p.logs.borrow_mut().insert(e2.id.clone(), vec![msg.clone()]);
+                if let Some(r) = p.rows.borrow().get(&e2.id) {
+                    r.log.set_text(&msg);
+                    r.log.set_visible(true);
+                }
+                return;
+            }
+            p.confirm.borrow_mut().take();
+            b.set_sensitive(false);
+            let (p, e2, agent_id, name, home) = (p.clone(), e2.clone(), agent_id.clone(), name.clone(), home.clone());
+            glib::spawn_future_local(async move {
+                let done = gtk::gio::spawn_blocking(move || {
+                    super::client::call::<sill_proto::host::LoggedOut>("_sill/agents.logout", sill_proto::host::AgentLogout { agent_id }).map_err(|e| format!("{e:#}"))
+                })
+                .await;
+                let msg = match done {
+                    Ok(Ok(out)) => {
+                        let stopped = match out.stopped.len() {
+                            0 => String::new(),
+                            1 => ", 1 running session stopped".into(),
+                            n => format!(", {n} running sessions stopped"),
+                        };
+                        format!("logged {name} out of sill: {} login file{} removed{stopped}", out.removed, if out.removed == 1 { "" } else { "s" })
+                    }
+                    Ok(Err(err)) => format!("log out failed: {err}"),
+                    Err(_) => "log out failed".into(),
+                };
+                p.logs.borrow_mut().insert(e2.id.clone(), vec![msg]);
+                super::remote::invalidate();
+                p.refresh_row(&e2, &home);
+            });
         });
         Some(b)
     }

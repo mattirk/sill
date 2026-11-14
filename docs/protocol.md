@@ -168,6 +168,7 @@ Public host streams are implemented (2026-11-03):
 |---|---|---|
 | `_sill/streams.port` | `{session_id, port}` | `{token}` |
 | `_sill/agents.login` | `{agent_id, method_id}` | `{token}` |
+| `_sill/agents.logout` | `{agent_id}` | `{removed, stopped}` (no stream) |
 | `_sill/registry.install` | `{entry_id, version, source, allow_unreviewed?}` | `{token}` |
 | `_sill/registry.list` | `{after?, limit?}` | `{entries, next}` |
 
@@ -180,6 +181,13 @@ registry, retaining its reviewed lockfile/distribution. This selector is not a c
 live index entry. Missing selectors return `not_found`; unknown sources or malformed identifiers
 return invalid-params; unreviewed entries require `allow_unreviewed: true` (`permission_denied`
 otherwise), and an unavailable platform returns `unsupported`, all before starting a job.
+
+`_sill/agents.logout` removes an agent's login from sill: first it stops the agent's running
+sessions (a running agent holds its login and may write a refreshed one back; the conversations
+stay and start again when used), then it deletes the agent's `login_files` from its sill-owned
+home and from the copies in this daemon's ghost sessions. `removed` counts the files, `stopped`
+names the sessions. The host's own login is never touched. An agent whose definition names no
+login files (registry installs) returns `unsupported`; an unknown agent returns `not_found`.
 
 Registry listing uses exclusive entry-ID keyset pagination with 1–128 entries (default 64),
 at most one newer version per entry and a 4 MiB entry payload budget per page. Pages reflect

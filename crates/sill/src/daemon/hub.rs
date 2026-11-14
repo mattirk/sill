@@ -310,8 +310,7 @@ impl Hub {
             }
             method::SESSIONS_STOP => {
                 let k: Key = args(params)?;
-                self.retire_runner(&k.key);
-                sill_core::session::stop(&k.key).map_err(|e| Error::failed(format!("{e:#}")))?;
+                self.stop_session(&k.key).map_err(|e| Error::failed(format!("{e:#}")))?;
                 Ok(json!({}))
             }
             method::SESSIONS_NEW => {
@@ -1017,6 +1016,42 @@ impl Hub {
     }
 
     /// The session's conversation is over as far as the daemon is concerned: no more events out.
+    /// Stop a session's jail and its agent; the conversation stays and starts again when used.
+    pub(super) fn stop_session(&self, id: &str) -> Result<()> {
+        self.retire_runner(id);
+        sill_core::session::stop(id)
+    }
+
+    /// Stop each running session of `agent` as `sessions.stop` does; their ids.
+    pub(super) fn stop_sessions_of(&self, agent: &str) -> Vec<String> {
+        let rows = self.store.lock().unwrap().sessions().unwrap_or_default();
+        let running: Vec<String> = self.runners.lock().unwrap().iter().filter(|(_, r)| r.alive()).map(|(id, _)| id.clone()).collect();
+        let mut stopped = Vec::new();
+        for id in running {
+            if !rows.iter().any(|s| s.id == id && s.agent == agent) {
+                continue;
+            }
+            match self.stop_session(&id) {
+                Ok(()) => stopped.push(id),
+                Err(e) => eprintln!("sill daemon: stopping session {id}: {e:#}"),
+            }
+        }
+        stopped
+    }
+
+    /// The copies of `agent`'s home in this daemon's ghost sessions (a ghost's agent starts from a
+    /// copy of the sill-owned home, its login included).
+    pub(super) fn ghost_homes_of(&self, agent: &str) -> Vec<std::path::PathBuf> {
+        let uid = rustix::process::getuid().as_raw();
+        let rows = self.store.lock().unwrap().sessions().unwrap_or_default();
+        rows.into_iter()
+            .filter(|s| s.agent == agent)
+            .filter_map(|s| sill_core::session::state_dir(uid, &s.id).ok())
+            .map(|dir| sill_core::session::ghost_agent_home(&dir, agent))
+            .filter(|p| p.is_dir())
+            .collect()
+    }
+
     fn retire_runner(&self, id: &str) {
         let runner = self.runners.lock().unwrap().remove(id);
         if let Some(runner) = runner {

@@ -118,8 +118,10 @@ fn serve(stream: UnixStream, script: Script, credential: PathBuf, observed: mpsc
             Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
             Err(error) => json!({"jsonrpc": "2.0", "id": id, "error": error}),
         };
-        if !send(&mut writer, response) { return; }
+        if !send(&mut writer, response) { break; }
     }
+    // the agent's connection is gone: its process holds nothing any more
+    let _ = observed.send("closed".into());
 }
 
 // --- a real daemon and relay around it -------------------------------------------------------------
@@ -433,6 +435,32 @@ fn an_agent_that_hangs_at_open_gets_the_login_card_after_the_timeout() {
     frontend.login_card_closes(&fixture);
     frontend.submit("PROMPT-ONE");
     frontend.answer(&fixture, "PROMPT-ONE");
+}
+
+// --- log out ---------------------------------------------------------------------------------------
+
+/// Log out: the agent's running sessions stop first (a running agent holds its login and may write
+/// it back), then its login leaves its sill home. Again: nothing left; an unknown agent is refused.
+#[test]
+fn logging_an_agent_out_stops_its_sessions_then_removes_its_login() {
+    let fixture = Fixture::new(script(Ask::AtPrompt, json!([terminal_method()])));
+    let mut frontend = Frontend::attach(&fixture);
+    frontend.wait_for(&fixture, "the session opening", |e| matches!(e, Event::Ready { .. }));
+    let login = fixture.dir.join("state/sill/agents/claude/.claude/.credentials.json");
+    std::fs::create_dir_all(login.parent().unwrap()).unwrap();
+    std::fs::write(&login, "sill's login").unwrap();
+    let settings = login.with_file_name("settings.json");
+    std::fs::write(&settings, "{}").unwrap();
+    let out: Value = frontend.client.call("_sill/agents.logout", json!({"agent_id": "claude"})).unwrap();
+    assert_eq!(out["stopped"], json!([fixture.session]), "{out}");
+    assert_eq!(out["removed"], 1, "{out}");
+    assert!(!login.exists(), "the login is gone");
+    assert!(settings.exists(), "only the login goes");
+    fixture.expect("closed");
+    let again: Value = frontend.client.call("_sill/agents.logout", json!({"agent_id": "claude"})).unwrap();
+    assert_eq!((again["removed"].clone(), again["stopped"].clone()), (json!(0), json!([])), "{again}");
+    let unknown = frontend.client.call::<Value>("_sill/agents.logout", json!({"agent_id": "nobody"}));
+    assert!(unknown.is_err_and(|e| format!("{e:#}").contains("agent not found")));
 }
 
 // --- host-side logins: the real `sill login` against a scripted adapter --------------------------

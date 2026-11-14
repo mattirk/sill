@@ -19,6 +19,20 @@ pub struct AgentLogin {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct AgentLogout {
+    pub agent_id: String,
+}
+/// A log out: the agent's running sessions stopped first (a running agent holds its login and may
+/// write it back), then its login files removed from its sill home and its ghost sessions' copies.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct LoggedOut {
+    /// Login files removed.
+    pub removed: u32,
+    /// Sessions stopped; their conversations stay and start again when used.
+    pub stopped: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RegistryInstall {
     pub entry_id: String,
     pub version: String,
