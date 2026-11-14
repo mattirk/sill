@@ -400,11 +400,7 @@ impl App {
             }
             perms.restart_required = restart_required;
         }
-        let later = if restart_required {
-            " It applies when the session restarts."
-        } else {
-            ""
-        };
+        let later = if restart_required { "; applies after a restart" } else { "" };
         let (said, failed) = match outcome.problem() {
             Some(problem) => (problem.to_string(), true),
             None => (
@@ -415,24 +411,16 @@ impl App {
                             .find(|(c, _, _)| c == capability)
                             .map_or(capability.as_str(), |(_, name, _)| name);
                         match enabled {
-                            Some(true) => format!("{name} on for this session.{later}"),
-                            Some(false) => format!("{name} off for this session.{later}"),
-                            None => format!("{name} follows the policy again.{later}"),
+                            Some(true) => format!("{name} on{later}."),
+                            Some(false) => format!("{name} off{later}."),
+                            None => format!("{name} follows the policy{later}."),
                         }
                     }
-                    Change::Restore => format!(
-                        "Defaults restored: added permissions and approved hosts removed; the policy and pins stay.{later}"
-                    ),
-                    Change::SaveHost(host) => {
-                        format!("{host} saved for {agent}'s future sessions.")
-                    }
-                    Change::AutoAllow(true) => {
-                        "Auto-allow on: Sill answers the agent's requests \"allow once\".".into()
-                    }
-                    Change::AutoAllow(false) => {
-                        "Auto-allow off: the agent's requests wait for you.".into()
-                    }
-                    Change::Restart => "The session started again with its new permissions.".into(),
+                    Change::Restore => format!("Defaults restored{later}."),
+                    Change::SaveHost(host) => format!("{host} saved for new {agent} sessions."),
+                    Change::AutoAllow(true) => "Auto-allow on.".into(),
+                    Change::AutoAllow(false) => "Auto-allow off.".into(),
+                    Change::Restart => "Restarted with the new permissions.".into(),
                 },
                 false,
             ),
@@ -533,23 +521,42 @@ fn small<'a>(label: &'a str, message: Option<Message>) -> Element<'a, Message> {
     )
 }
 
-fn group<'a>(title: &'a str) -> Element<'a, Message> {
-    text(title.to_uppercase())
-        .size(style::TINY)
-        .color(alpha(P.fg, 0.55))
+/// Fixed slots, so nothing moves when a state changes: the switch and Restart now are always
+/// there (or a gap their size).
+const SWITCH_SLOT: f32 = 40.0;
+const RESTART_SLOT: f32 = 92.0;
+
+/// An on/off switch in a fixed slot: the warning colour when on (expanded access), dimmed when it
+/// cannot be changed.
+fn switch<'a>(on: bool, set: Option<impl Fn(bool) -> Message + 'a>) -> Element<'a, Message> {
+    container(crate::settings_ui::switch_styled(on, P.warning, 16.0, set))
+        .width(SWITCH_SLOT)
         .into()
 }
 
-fn hint<'a>(said: impl text::IntoFragment<'a>) -> Element<'a, Message> {
-    text(said).size(style::TINY).color(P.fg_dim).into()
+/// `content` with its explanation in a tooltip: the panel shows names and states only.
+fn tip<'a>(content: impl Into<Element<'a, Message>>, said: String) -> Element<'a, Message> {
+    tooltip(
+        content,
+        container(text(said).size(style::SMALL))
+            .padding([4, 8])
+            .max_width(380)
+            .style(style::fill(P.code_bg)),
+        tooltip::Position::Top,
+    )
+    .into()
 }
 
-/// One capability: its name and meaning, its state for the next build (and when the running
-/// jail differs, that it applies after a restart), why it cannot be on, and the choice.
+/// A row's name, explained on hover.
+fn name<'a>(name: &'a str, said: String) -> Element<'a, Message> {
+    tip(text(name).size(style::SMALL).width(140), said)
+}
+
+/// One capability on one line: name (meaning and reason on hover), state, and the choice.
 fn capability_row<'a>(
     id: &'a str,
     capability: &'a str,
-    name: &'a str,
+    label: &'a str,
     meaning: &'a str,
     views: &'a Views,
     running: bool,
@@ -558,37 +565,27 @@ fn capability_row<'a>(
     let Some(s) = state(&views.preview, capability) else {
         return space().height(0).into();
     };
+    // the switch says on or off; the text only what it cannot
     let mut status = if !s.allowed {
-        "Forbidden".to_string()
+        "Forbidden"
     } else if s.effective {
-        format!(
-            "On · {}",
-            if s.source == "session" {
-                "this session"
-            } else {
-                "policy"
-            }
-        )
+        ""
     } else if !s.available {
-        if s.default_enabled || s.requested == Some(true) {
-            "Requested · unavailable".to_string()
-        } else {
-            "Unavailable".to_string()
-        }
+        "Unavailable"
     } else if s.blocked {
-        "Blocked".to_string()
+        "Blocked"
     } else {
-        "Off".to_string()
-    };
+        ""
+    }
+    .to_string();
     if running
         && let Some(launch) = views.launch.as_ref().and_then(|l| state(l, capability))
         && launch.effective != s.effective
     {
-        status.push_str(if s.effective {
-            " · after restart"
-        } else {
-            " · until restart"
-        });
+        if !status.is_empty() {
+            status.push_str(" · ");
+        }
+        status.push_str("needs restart");
     }
     let color = if s.effective {
         P.warning
@@ -597,40 +594,33 @@ fn capability_row<'a>(
     } else {
         P.fg
     };
-    let mut actions = row![].spacing(4).align_y(Alignment::Center);
-    if can_change && s.allowed && s.available {
-        let (label, enabled) = if s.effective {
-            ("Turn off", Some(false))
+    let mut said = meaning.to_string();
+    if s.effective {
+        said.push_str(if s.source == "session" {
+            " On by this session's choice."
         } else {
-            ("Turn on", Some(true))
-        };
-        actions = actions.push(small(
-            label,
-            Some(Message::Perms(Event::Set(id.into(), capability.into(), enabled))),
-        ));
+            " On by the policy."
+        });
+    } else if !s.allowed || !s.available || s.blocked {
+        said.push_str(&format!(" {}.", capitalised(&s.reason)));
     }
-    if can_change && s.requested.is_some() {
-        actions = actions.push(small(
-            "Policy default",
-            Some(Message::Perms(Event::Set(id.into(), capability.into(), None))),
-        ));
-    }
-    let mut block = Column::new().spacing(1).push(
-        row![
-            text(name).size(style::SMALL).width(150),
-            text(status).size(style::SMALL).color(color).width(Fill),
-            actions,
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center),
-    );
-    let why = if !s.allowed || !s.available || s.blocked {
-        format!("{meaning} {}.", capitalised(&s.reason))
-    } else {
-        meaning.to_string()
-    };
-    block = block.push(hint(why));
-    block.into()
+    let changeable = can_change && s.allowed && s.available;
+    let set = changeable.then(|| {
+        let (id, capability) = (id.to_string(), capability.to_string());
+        move |on: bool| Message::Perms(Event::Set(id.clone(), capability.clone(), Some(on)))
+    });
+    row![
+        name(label, said),
+        switch(s.effective, set),
+        text(status)
+            .size(style::SMALL)
+            .color(color)
+            .wrapping(text::Wrapping::None)
+            .width(Fill),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center)
+    .into()
 }
 
 /// A named policy as it is; a policy file by its name, without the directories.
@@ -651,7 +641,14 @@ fn capitalised(reason: &str) -> String {
         .to_string()
 }
 
-/// The panel over the composer, when open.
+/// A capability that cannot be had and nobody asks for: folded into one quiet line.
+fn idle(views: &Views, capability: &str) -> bool {
+    state(&views.preview, capability).is_none_or(|s| {
+        !s.available && !s.effective && !s.default_enabled && s.requested.is_none()
+    })
+}
+
+/// The panel over the composer, when open: one line per thing, explanations on hover.
 pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>) -> Element<'a, Message> {
     let perms = &view.permissions;
     if !perms.open || session.is_none() {
@@ -669,153 +666,152 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>) -> Element
             .iter()
             .any(|c| state(&v.preview, c).is_some_and(|s| s.effective))
     });
-    let mode = match (desktop, expanded.is_empty()) {
-        (true, _) => "Desktop development",
-        (false, true) => "Default",
-        (false, false) => "Default · expanded access",
+    let mode = match (ghost, desktop, expanded.is_empty()) {
+        (true, _, _) => "Ghost · Default only",
+        (_, true, _) => "Desktop development",
+        (_, false, true) => "Default",
+        (_, false, false) => "Default · expanded access",
     };
-    let mut content = Column::new().spacing(8);
+    let mut about = match &perms.views {
+        Some(views) => format!("Policy {}.", policy_name(&views.preview.name)),
+        None => String::new(),
+    };
+    if ghost {
+        about.push_str(" A ghost session supports Default only: choices and saved defaults are refused.");
+    }
+    let mut content = Column::new().spacing(6);
     content = content.push(
         row![
-            text("Permissions").size(style::SMALL).font(iced::Font {
-                weight: iced::font::Weight::Bold,
-                ..iced::Font::with_name(crate::fonts::SANS_FAMILY)
-            }),
+            tip(
+                text("Permissions").size(style::SMALL).font(iced::Font {
+                    weight: iced::font::Weight::Bold,
+                    ..iced::Font::with_name(crate::fonts::SANS_FAMILY)
+                }),
+                about.trim().to_string(),
+            ),
             text(mode)
                 .size(style::TINY)
                 .color(if expanded.is_empty() { P.fg_dim } else { P.warning })
                 .width(Fill),
-            small("Close", Some(Message::Perms(Event::Toggle(id.into())))),
+            tip(
+                keys::press(
+                    button(icons::glyph("x", 12.0, alpha(P.fg, 0.55)))
+                        .padding([4, 6])
+                        .style(style::quiet),
+                    Message::Perms(Event::Toggle(id.into())),
+                ),
+                "Close".into(),
+            ),
         ]
         .spacing(10)
         .align_y(Alignment::Center),
     );
-    if ghost {
-        content = content.push(hint(
-            "Ghost session: Default only. Permission choices and saved defaults are refused.",
-        ));
-    }
 
-    // Tool approvals: Sill's answer to the agent's own requests, never jail access
-    content = content.push(group("Tool approvals"));
+    // a tool approval, not jail access: said on hover
     content = content.push(
-        column![
-            row![
-                text("Auto-allow requests").size(style::SMALL).width(150),
-                text(if session.auto_allow { "On" } else { "Off" })
-                    .size(style::SMALL)
-                    .color(if session.auto_allow { P.warning } else { P.fg })
-                    .width(Fill),
-                small(
-                    if session.auto_allow { "Turn off" } else { "Turn on" },
-                    (!perms.busy).then(|| {
-                        Message::Perms(Event::AutoAllow(id.into(), !session.auto_allow))
-                    }),
-                ),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-            hint("Sill answers the agent's permission requests \"allow once\"; each is still listed. Jail access does not change."),
+        row![
+            name(
+                "Auto-allow",
+                "Tool approvals: Sill answers the agent's permission requests \"allow once\"; each is still listed. Jail access does not change.".into(),
+            ),
+            switch(
+                session.auto_allow,
+                (!perms.busy).then(|| {
+                    let id = id.to_string();
+                    move |on: bool| Message::Perms(Event::AutoAllow(id.clone(), on))
+                }),
+            ),
+            space().width(Fill),
         ]
-        .spacing(1),
+        .spacing(8)
+        .align_y(Alignment::Center),
     );
 
     match &perms.views {
         None => {
-            content = content.push(hint(match &perms.error {
+            content = content.push(text(match &perms.error {
                 Some(error) => format!("Permissions could not be read: {error}"),
                 None => "Reading permissions…".into(),
-            }));
+            }).size(style::TINY).color(P.fg_dim));
         }
         Some(views) => {
-            content = content.push(
-                row![
-                    group("Jail access"),
-                    space().width(Fill),
-                    hint(format!("policy {}", policy_name(&views.preview.name))),
-                ]
-                .align_y(Alignment::Center),
-            );
             for diagnostic in &views.preview.diagnostics {
                 content = content.push(text(diagnostic).size(style::TINY).color(P.error));
             }
-            for (capability, name, meaning) in ROWS {
+            let mut folded = vec![];
+            for (capability, label, meaning) in ROWS {
+                if *capability != "public_web" && idle(views, capability) {
+                    folded.push(*label);
+                    continue;
+                }
                 content = content.push(capability_row(
-                    id, capability, name, meaning, views, running, can_change,
+                    id, capability, label, meaning, views, running, can_change,
                 ));
                 if *capability == "public_web" {
                     content = content.push(hosts(id, views, perms, can_change));
                 }
             }
-            content = content.push(group("Host actions"));
-            content = content.push(
-                column![
-                    row![
-                        text("Host control").size(style::SMALL).width(150),
-                        text("Not available").size(style::SMALL).color(P.fg_dim).width(Fill),
-                    ]
-                    .spacing(8),
-                    hint("Real desktop and host processes, outside the jail. Needs an explicit activation that is not implemented yet; a policy or a choice here never turns it on."),
-                ]
-                .spacing(1),
-            );
-            let restorable = views
-                .preview
-                .permissions
-                .iter()
-                .any(|p| p.requested.is_some())
-                || !views.preview.session_hosts.is_empty();
-            let develop = tooltip(
-                small("Apply development permissions", None),
-                container(
-                    text("Desktop development needs the test desktop and private D-Bus backends (managed Weston); not implemented yet.")
-                        .size(style::SMALL),
-                )
-                .padding([4, 8])
-                .max_width(360)
-                .style(style::fill(P.code_bg)),
-                tooltip::Position::Top,
-            );
-            content = content.push(
-                row![
-                    small(
-                        "Restore defaults",
-                        (can_change && restorable).then(|| Message::Perms(Event::Restore(id.into()))),
-                    ),
-                    develop,
-                ]
-                .spacing(8),
-            );
+            folded.push("Host control");
+            content = content.push(tip(
+                text(format!("{}: not available yet", folded.join(", ")))
+                    .size(style::TINY)
+                    .color(P.fg_dim),
+                "Desktop development (test desktop, private D-Bus, GPU) needs the managed Weston backend. Host control, for the real desktop and host processes outside the jail, needs an explicit activation. Neither is implemented; a policy or a choice never turns them on.".into(),
+            ));
         }
     }
-    if perms.restart_pending(running) || session.policy_changed {
-        let said = if view.conversation.busy() {
-            "The running jail was built with other permissions; they apply when the session restarts. Restarting stops the agent's current turn."
-        } else {
-            "The running jail was built with other permissions; they apply when the session restarts."
-        };
-        content = content.push(
-            row![
+    let restorable = perms.views.as_ref().is_some_and(|views| {
+        views.preview.permissions.iter().any(|p| p.requested.is_some())
+            || !views.preview.session_hosts.is_empty()
+    });
+    let pending = perms.restart_pending(running) || session.policy_changed;
+    // one line for the last change's note, else the restart that is waiting
+    let (said, color): (String, _) = match &perms.notice {
+        Some((_, note, true)) => (note.clone(), P.error),
+        Some((_, note, false)) => (note.clone(), alpha(P.fg, 0.7)),
+        None if pending => ("Applies after a restart".into(), P.warning),
+        None => (String::new(), P.fg_dim),
+    };
+    let restart: Element<'a, Message> = if pending {
+        let mut why = "The running jail was built with other permissions; a restart applies them.".to_string();
+        if view.conversation.busy() {
+            why.push_str(" Restarting stops the agent's current turn.");
+        }
+        tip(
+            keys::press_maybe(
+                button(text("Restart now").size(style::TINY))
+                    .width(RESTART_SLOT)
+                    .padding([2, 8])
+                    .style(style::quiet),
+                (!perms.busy).then(|| Message::Perms(Event::Restart(id.into()))),
+            ),
+            why,
+        )
+    } else {
+        space().width(RESTART_SLOT).into()
+    };
+    content = content.push(
+        row![
+            tip(
+                small(
+                    "Restore defaults",
+                    (can_change && restorable).then(|| Message::Perms(Event::Restore(id.into()))),
+                ),
+                "Removes this session's added permissions and approved hosts. The policy and pins stay.".into(),
+            ),
+            container(
                 text(said)
                     .size(style::TINY)
-                    .color(P.warning)
-                    .width(Fill),
-                small(
-                    "Restart now",
-                    (!perms.busy).then(|| Message::Perms(Event::Restart(id.into()))),
-                ),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-        );
-    }
-    if let Some((_, note, failed)) = &perms.notice {
-        content = content.push(text(note).size(style::TINY).color(if *failed {
-            P.error
-        } else {
-            alpha(P.fg, 0.7)
-        }));
-    }
+                    .color(color)
+                    .wrapping(text::Wrapping::None),
+            )
+            .width(Fill)
+            .clip(true),
+            restart,
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    );
     column![
         container(content)
             .padding([8, 12])
@@ -827,54 +823,37 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>) -> Element
     .into()
 }
 
-/// The hosts approved for this session: applied or blocked (and why), each with Save for future
-/// sessions, which names the agent whose defaults it changes.
+/// The hosts approved for this session, one line each (none: no line). Blocked ones say why on
+/// hover; Save names the agent whose defaults it changes.
 fn hosts<'a>(id: &'a str, views: &'a Views, perms: &'a Perms, can_change: bool) -> Element<'a, Message> {
     let agent = perms.agent_name.as_deref().unwrap_or("this agent");
     let mut list = Column::new().spacing(2);
-    if views.preview.session_hosts.is_empty() {
-        list = list.push(hint(
-            "Hosts you Allow when the proxy refuses them are approved for this session only.",
-        ));
-    }
     for grant in &views.preview.session_hosts {
-        let mut line = row![
-            text(&grant.host)
-                .size(style::SMALL)
-                .color(if grant.applied { P.warning } else { P.fg_dim })
-                .width(Fill),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center);
-        if !grant.applied {
-            line = line.push(hint("blocked"));
-        }
+        let host: Element<'a, Message> = if grant.applied {
+            text(&grant.host).size(style::SMALL).color(P.warning).into()
+        } else {
+            tip(
+                text(format!("{} · blocked", grant.host)).size(style::SMALL).color(P.fg_dim),
+                capitalised(&grant.reason) + ". It stays approved and applies again when that goes.",
+            )
+        };
+        let mut line = row![container(host).width(Fill)].spacing(8).align_y(Alignment::Center);
         if can_change {
-            line = line.push(tooltip(
-                small(
-                    "Save for future sessions",
-                    Some(Message::Perms(Event::SaveHost(id.into(), grant.host.clone()))),
+            line = line.push(tip(
+                small("Save", Some(Message::Perms(Event::SaveHost(id.into(), grant.host.clone())))),
+                format!(
+                    "Save for future sessions: adds {} to {agent}'s network defaults, so every new {agent} session may reach it. Existing sessions do not change.",
+                    grant.host
                 ),
-                container(
-                    text(format!(
-                        "Adds {} to {agent}'s network defaults: every new {agent} session may reach it. Existing sessions do not change.",
-                        grant.host
-                    ))
-                    .size(style::SMALL),
-                )
-                .padding([4, 8])
-                .max_width(360)
-                .style(style::fill(P.code_bg)),
-                tooltip::Position::Top,
             ));
         }
         list = list.push(line);
-        if !grant.applied && !grant.reason.is_empty() {
-            list = list.push(hint(capitalised(&grant.reason) + "."));
-        }
+    }
+    if views.preview.session_hosts.is_empty() {
+        list = list.push(text("None").size(style::SMALL).color(P.fg_dim));
     }
     row![
-        text("Approved hosts").size(style::SMALL).width(150),
+        name("Approved hosts", "Hosts you allowed when the proxy refused them: this session only.".into()),
         container(list).width(Fill),
     ]
     .spacing(8)
@@ -954,12 +933,13 @@ mod tests {
         let mut ui = simulator(&app, (720.0, 860.0));
         ui.find("Jailed · expanded access · 1 approved host · permission changes apply after a restart").unwrap();
         ui.find("Default · expanded access").unwrap();
-        ui.find("On · this session · after restart").unwrap();
+        ui.find("needs restart").unwrap();
         ui.find("Restart now").unwrap();
-        ui.find("blocked.example").unwrap();
-        ui.find("Offline: no network.").unwrap();
+        ui.find("Applies after a restart").unwrap();
+        ui.find("blocked.example · blocked").unwrap();
         ui.find("Requested · unavailable").is_err().then_some(()).unwrap();
-        ui.find("Not available").unwrap();
+        ui.find("Test desktop, Private D-Bus, GPU rendering, Host control: not available yet").unwrap();
+        assert!(ui.find("TOOL APPROVALS").is_err(), "no group headings");
     }
 
     /// A choice goes to the daemon only over a connection that negotiated the capability; its
@@ -999,7 +979,7 @@ mod tests {
         fake.join().unwrap();
         let perms = &app.views["demo"].permissions;
         let (_, said, failed) = perms.notice.clone().unwrap();
-        assert!(!failed && said == "Public web access on for this session. It applies when the session restarts.", "{said}");
+        assert!(!failed && said == "Public web access on; applies after a restart.", "{said}");
         assert!(!perms.busy);
     }
 
@@ -1053,7 +1033,7 @@ mod tests {
         let seen = fake.join().unwrap();
         assert_eq!(seen.len(), 3, "{seen:?}");
         let (_, said, failed) = app.views["demo"].permissions.notice.clone().unwrap();
-        assert!(!failed && said.starts_with("Auto-allow on"), "{said}");
+        assert!(!failed && said == "Auto-allow on.", "{said}");
     }
 
     /// A change waiting for a restart shows over the composer even with nothing expanded yet:
@@ -1086,8 +1066,7 @@ mod tests {
             agent_name: None,
         }).unwrap());
         let mut ui = simulator(&app, (720.0, 860.0));
-        ui.find("Ghost session: Default only. Permission choices and saved defaults are refused.").unwrap();
-        assert!(ui.find("Turn on").is_ok(), "auto-allow stays the session's own setting");
-        assert!(ui.find("Policy default").is_err());
+        ui.find("Ghost · Default only").unwrap();
+        assert!(ui.find("Restore defaults").is_ok());
     }
 }

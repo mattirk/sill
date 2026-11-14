@@ -156,25 +156,36 @@ fn dropdown(_: &Theme, status: pick_list::Status) -> pick_list::Style {
 }
 
 fn switch<'a>(on: bool, set: impl Fn(bool) -> Message + 'a) -> Element<'a, Message> {
+    switch_styled(on, P.accent, 20.0, Some(set))
+}
+
+/// The Settings switch: `color` when on, dimmed when it cannot be changed (no `set`).
+pub(crate) fn switch_styled<'a>(
+    on: bool,
+    color: Color,
+    size: f32,
+    set: Option<impl Fn(bool) -> Message + 'a>,
+) -> Element<'a, Message> {
     toggler(on)
-        .on_toggle(set)
-        .size(20)
-        .style(|_: &Theme, status| {
-            let (on, hovered) = match status {
-                toggler::Status::Active { is_toggled } => (is_toggled, false),
-                toggler::Status::Hovered { is_toggled } => (is_toggled, true),
-                toggler::Status::Disabled { is_toggled } => (is_toggled, false),
+        .on_toggle_maybe(set)
+        .size(size)
+        .style(move |_: &Theme, status| {
+            let (on, hovered, disabled) = match status {
+                toggler::Status::Active { is_toggled } => (is_toggled, false, false),
+                toggler::Status::Hovered { is_toggled } => (is_toggled, true, false),
+                toggler::Status::Disabled { is_toggled } => (is_toggled, false, true),
             };
+            let dim = if disabled { 0.45 } else { 1.0 };
             toggler::Style {
                 background: if on {
-                    P.accent
+                    alpha(color, dim)
                 } else {
-                    alpha(P.fg, if hovered { 0.2 } else { 0.14 })
+                    alpha(P.fg, if hovered { 0.2 } else { 0.14 * dim })
                 }
                 .into(),
                 background_border_width: 0.0,
                 background_border_color: Color::TRANSPARENT,
-                foreground: if on { P.bg } else { alpha(P.fg, 0.8) }.into(),
+                foreground: if on { P.bg } else { alpha(P.fg, 0.8 * dim) }.into(),
                 foreground_border_width: 0.0,
                 foreground_border_color: Color::TRANSPARENT,
                 text_color: None,
