@@ -47,6 +47,7 @@ struct Options {
 }
 
 fn main() -> iced::Result {
+    prefer_low_power_gpu();
     let options = Options::parse();
     fonts::install();
     iced::application(
@@ -62,6 +63,17 @@ fn main() -> iced::Result {
     // no title bar, like the shelf: the top bar's empty space moves the window, Ctrl+Q quits
     .decorations(false)
     .run()
+}
+
+/// The shelf stays open all day: draw on the integrated GPU and never wake a discrete one, unless
+/// the person asks otherwise (`WGPU_POWER_PREF=high`). iced 0.14 asks wgpu for the
+/// high-performance adapter, and this variable is the only way to change that.
+fn prefer_low_power_gpu() {
+    if std::env::var_os("WGPU_POWER_PREF").is_none() {
+        // SAFETY: the first thing main does, before any thread exists that could read the
+        // environment.
+        unsafe { std::env::set_var("WGPU_POWER_PREF", "low") };
+    }
 }
 
 /// A session shown as a tab: every one that has not ended.

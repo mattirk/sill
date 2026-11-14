@@ -8,6 +8,10 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
+# The GPU renderer by default (the person's decision, 2026-11-04: the software renderer scrolled at
+# five times GTK's CPU). iced falls back to software where no GPU can be used;
+# `--no-default-features` builds the software renderer only.
+default = ["gpu"]
 gpu = ["iced/wgpu"]
 
 [dependencies]
