@@ -223,7 +223,7 @@ Public session administration is now implemented too (2026-11-03):
 |---|---|---|
 | `_sill/sessions.list` | `{after?, limit?}` | `{sessions, next}` |
 | `_sill/sessions.get` | `{session_id}` | public session metadata |
-| `_sill/sessions.create` | `{create_id, agent, policy, pins?, desktop?, memory_scope?, follows?, remember_pins?, ghost?}` | `{session_id}` |
+| `_sill/sessions.create` | `{create_id, agent, policy, pins?, memory_scope?, follows?, remember_pins?, ghost?}` | `{session_id}` |
 | `_sill/sessions.update` | `{session_id, change}` | `{}` |
 | `_sill/sessions.start` | `{session_id}` | `{session_id, fresh}` |
 | `_sill/sessions.stop` | `{session_id}` | `{}` |
@@ -528,7 +528,7 @@ named request/result records. They do not make the development identity a stable
 | `_sill/files.read`, `_sill/files.write` | Base64 regular-file data; reads use decimal byte offsets and chunks up to 1 MiB; writes atomically replace up to 1 MiB. Reads refuse symlinks. |
 | `_sill/settings.get`, `_sill/settings.patch` | Explicit settings record and tagged changes; unknown change kinds rejected; at most 64 changes and 1 MiB input. |
 | `_sill/settings.instructions.get`, `_sill/settings.instructions.set` | Global instruction text, at most 1 MiB input. |
-| `_sill/policy.list`, `_sill/policy.get` | Policy names and TOML policy document with desktop flags. |
+| `_sill/policy.list`, `_sill/policy.get` | Policy names and the TOML policy document. |
 | `_sill/procs.list`, `_sill/procs.tail`, `_sill/procs.stop`, `_sill/procs.dismiss` | Session managed processes; bounded live pages, tail up to 10,000 lines; stop requests termination, not proof of exit. |
 | `_sill/pins.list`, `_sill/pins.add`, `_sill/pins.remove`, `_sill/sessions.pin`, `_sill/sessions.unpin` | Global or exact-session pins; live byte-order keyset pages, 1–128 entries; global add canonicalizes. |
 | `_sill/agents.list`, `_sill/agents.get`, `_sill/agents.save`, `_sill/agents.remove`, `_sill/agents.available` | Explicit configured-agent definitions, ID keyset pages (1–128); save/remove user overrides; availability resolves the configured command on the daemon. |

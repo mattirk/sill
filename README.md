@@ -9,10 +9,12 @@ in the same folder starts informed.
 See [SPEC.md](SPEC.md) for the design and [docs/](docs/) for memory, security and design notes; this file
 is the practical side. The [roadmap](ROADMAP.md) links ideas, proposed features, current work and history.
 
-Status (2026-11-07): M0–M2 done and in daily use — sessions, pins, Changes, the file tree, a shell inside
-the jail, managed processes, the ACP agent registry, standing instructions, tray icon, and memory
-(remember, recall, search). The window is **sill-gui** (Iced, [docs/sill-gui.md](docs/sill-gui.md)) — the only
-frontend since 2026-11-07, when the GTK shelf was removed. Direction and open work: the [roadmap](ROADMAP.md).
+Status (2026-11-08): M0–M2 done and in daily use — sessions, pins, Changes, the file tree, a shell inside
+the jail, managed processes, the ACP agent registry, standing instructions, tray icon, memory
+(remember, recall, search), ghost sessions, permission modes (test desktop, private D-Bus, Host control),
+policies that travel with a repository, and the foundations of remote use. The window is **sill-gui**
+(Iced, [docs/sill-gui.md](docs/sill-gui.md)) — the only frontend since 2026-11-07, when the GTK shelf was
+removed. Direction and open work: the [roadmap](ROADMAP.md).
 
 ## How it works
 
@@ -22,10 +24,11 @@ Three ideas carry the whole thing:
   can write anywhere, but unpinned writes land in an *overlay* on the state filesystem — the host is
   untouched until you say so. The network goes through sill's proxy with an allow-list in three layers:
   the policy's tooling hosts (npm, GitHub, crates.io, PyPI, Debian), the agent's own provider hosts from
-  its registry entry (`api.anthropic.com` for Claude Code, `api.openai.com` for Codex), and per-session
-  grants — a refused host shows up as an *Allow* button in the conversation. Telemetry hosts are
-  refused without asking. The agent's own login and config files
-  (`~/.claude`, `~/.codex`, …) are sill-owned copies; your host's are never seen by an agent.
+  its definition (`api.anthropic.com` for Claude Code, `api.openai.com` for Codex; `domains` in the
+  built-in definitions or the agent's TOML), and per-session grants — a refused host shows up as an
+  *Allow* button in the conversation. Telemetry hosts are refused without asking. The agent's own login
+  and config files (`~/.claude`, `~/.codex`, …) are sill-owned directories the agent's definition
+  declares; your host's are never seen by an agent.
 - **Pins.** A pinned folder is bound live into the jail: what the agent writes there is on the host at
   once, commits included, and you review with `git` as usual. Pins are the session's workspace and are
   named in every prompt as the place to work. Settings → *Remember pins* starts every new session with
@@ -56,11 +59,11 @@ sill toggle                    # or the hotkey once you've set it (Settings → 
 
 Then, in sill-gui: `+` → pick an agent → it asks you to log in the first time (buttons in the
 conversation; Claude Code's login runs in a terminal pane inside the jail). Pin the folder you want to
-work in (the folder button opens the file tree; `+` on a row pins it). Type. Enter sends,
-Shift+Enter is a newline.
+work in (the folder button opens the file tree; the pin button on a row, or the native folder picker,
+pins it). Type. Enter sends, Shift+Enter is a newline.
 
 When you're done, close the tab (Ctrl+W): the agent writes its summary, the jail stops, the
-session stays in the Reopen list with its summary under its name.
+session stays in the Reopen list (its summary on hover).
 
 Other `sill init` forms: `--dry-run` (the plan only), `--prefix /opt/sill`, `--state-dir /mnt/fast/sill`
 (an own partition instead of the 32 GB image).
@@ -68,37 +71,50 @@ Other `sill init` forms: `--dry-run` (the plan only), `--prefix /opt/sill`, `--s
 ## Using sill-gui
 
 **The herring** (top left; *sill* is Swedish for herring) flips between the sessions and the backend
-pages — *Changes*, *Files*, *Agents*, *Settings* (Settings → Default page picks which opens first).
+pages — *Agents*, *Changes*, *Settings* (Settings → Default page picks which opens first).
 Escape does the same flip; the fish flicks its tail on both.
 
-**Sessions** are tabs. `+` picks the agent (Claude Code, Codex, Gemini, anything installed from the Agents
-page) or reopens a stored one. Each session has its own jail, its own conversation in
-`~/.local/state/sill/sill.db`, and resumes with history when reopened. Closing a tab stops its jail; the
-session stays. The tab's glyph (or a right-click) opens the **session menu**: name, policy, memory scope,
-and where the jail runs; a policy change rebuilds the jail. The row under the prompt holds only what the next turn uses: mode,
-model, context usage, auto-allow (the lock: open = sill answers "allow once" for you), running processes.
+**Sessions** are tabs. `+` picks the agent (Claude Code, Codex, Gemini, Antigravity, Kimi Code, anything
+set up from the Agents page) — or its ghost — or reopens a stored one. Each session has its own jail, its
+own conversation in `~/.local/state/sill/sill.db`, and resumes with history when reopened. Closing a
+tab stops its jail; the session stays. The tab's glyph opens **Session details** (facts, summary,
+notes); double-click the title to rename. The row under the prompt holds what the next turn uses:
+`+` for attachments, the terminal, then the context ring and the agent's controls (mode, model,
+reasoning), running processes, the **shield** (the session's Permissions panel: auto-allow — sill
+answers "allow once" for you — jail access, approved hosts, Host control; right-click for the
+shortcuts) and Send.
 
 **Pins** show as chips above the prompt with their git +/−/untracked counts; a chip opens the file tree
 scoped to that folder. Files can be pinned too.
 
 **Changes** (herring → Changes) is every session's pending overlay writes, grouped by session and repo:
-diff, Keep, Revert, Keep all, `!` for conflicts. Keep checks that the file is still what you reviewed
-and that the host copy hasn't changed since; Keep all takes plain adds and edits only — deletions, type
-changes and symlinks take a click each. Nothing is kept automatically.
+diff, Keep, Revert, Keep all, `!` for conflicts; plus the pinned repositories' own pending changes, and
+each session's keeps with Undo. Keep checks that the file is still what you reviewed and that the host
+copy hasn't changed since; Keep all takes plain adds and edits only — deletions, type changes and
+symlinks take a click each. Nothing is kept automatically.
 
-**Files** is a tree of pinned folders, repositories with changes, and home — git branch on a repo root,
-badges for what sessions changed, a search box for names and path fragments. A file opens in the viewer
-over the session: read, or *Edit* and Ctrl+S. The tree is a drawer with a dragged width (Ctrl+Shift+D
-switches between the Shelf and Drawer layouts, Ctrl+Shift+F into the Full layout and back).
+**The file tree** is a drawer beside the conversation: pinned folders, global pins, repositories with
+changes, and home — git branch on a repo root, badges for what sessions changed, an absolute-path box.
+A file opens in the viewer over the session: read (Markdown rendered, links followed), or *Edit* and
+Ctrl+S. The drawer has a dragged width (Ctrl+Shift+D switches between the Shelf and Drawer layouts,
+Ctrl+Shift+F into the Full layout and back).
 
 **Shell**: the terminal icon (or Ctrl+Shift+T) swaps the prompt for a terminal running *inside the session's
 jail* — same mounts, pins and proxy the agent has, so `git status`, builds and tests show the agent's
 view. It starts in the first pinned folder, keeps running while hidden, dies with the session.
-Ctrl+Shift+H is a shell on the host instead, marked `host · outside the jail`.
+Right-click the icon (or Ctrl+Shift+H) for a shell on the host instead, marked `host · outside the jail`.
 
 **Permissions and questions.** Permission requests are answered with buttons in the conversation. When
 the agent asks you something with choices (Claude's "ask user question", an MCP elicitation) it appears
 as a form: pick, or type your own under "Other", and Submit.
+
+**Permission modes** ([docs/permission-modes.md](docs/permission-modes.md)). Every session starts
+*Default*: the jail, no desktop, no bus. The shield's panel widens it per session, never saved as a
+default: **Desktop development** (a Weston test desktop the agent can see and drive, shown live in
+the window, plus a private D-Bus — *Apply development permissions* turns both on and restarts), and
+**Host control**, an explicit, activation-scoped grant of real host operations (display, processes,
+commands) with a red caption while it lasts; revoked by you, by the session ending or by the window
+closing. Policies that travel with a repository (`.sill/policy.toml` fragments) can only tighten.
 
 **Managed processes.** A command the agent needs to keep running after its turn — a dev server, a
 watcher — is started inside the jail with `sill-proc start --name dev [--port 3000] -- npm run dev`
@@ -113,10 +129,17 @@ paths are private or read-only, the network allow-list, tool directories the jai
 memory recall block, then your file. Sent once per agent start and again after an edit, not with every
 prompt.
 
-**Tray icon**: left click shows/hides the window, menu has Show/hide and Quit. Quit ends every open session
-the way closing its tab does — the agents write their summaries first, out of sight — and exits when the
-last one is done. While any agent works, the icon moves (the sill ripples, the fish rides it); it is still
-when all are idle. Settings → Tray icon turns it off.
+**Tray icon**: left click shows/hides the window, menu has Show/hide and *Quit the window* — the daemon
+and its sessions go on; `sill toggle` or the hotkey brings the window back. While any agent works, the
+icon moves (the sill ripples, the fish rides it); it is still when all are idle. Settings → Tray icon
+turns it off.
+
+**Images and files.** Paste an image into the prompt, or attach images and files from `+`; a pasted
+image can be annotated (the pen) before sending. Images the agent produces show inline, with *Copy image*.
+
+**Daemon status.** The activity indicator shows whether the daemon answers; Settings has diagnostics and
+a daemon-only restart. `sill box` connects sill-gui to a daemon on another machine over SSH (foundations;
+not yet exercised end to end).
 
 ## Memory
 
@@ -129,19 +152,19 @@ design; this is what you see.
   with the facts attached (pins, kept paths, repos and their heads). The tab stays while it answers
   (90 s cap; a second close ends at once with what it has). When the agent can't be asked, sill writes a
   mechanical summary from the facts. Either is stored on the session and marked which kind it is.
-- **The Reopen list** (`+`) shows date and the summary's first line under each ended session, with a
-  filter over titles and summaries. Clicking a row resumes the session with its history. *New here*
-  (`+` on the row) starts a fresh session with the same agent, policy, scope and pins,
-  told the old one's summary first.
-- **The session page** (session menu → *Page*, or the page glyph on a Reopen row) shows the facts
-  (agent, when, how long, kept paths, folders), the summary — editable in place, saved as you type
-  and marked *edited by the person* — and your **notes**: one line each, Enter adds, × removes;
-  they are searched and recalled with the summary. *Summarize now* on an open session asks the agent
-  for a checkpoint summary that replaces the text; the one written when the session ends replaces
-  that (close the tab mid-checkpoint and the checkpoint becomes the final summary).
+- **The Reopen list** (`+`) shows each ended session with its date or state and its name, the summary
+  on hover, with a filter over titles and summaries. Clicking a row resumes the session with its
+  history. *New here* (`+` on the row) starts a fresh session with the same agent, policy, scope and
+  pins, told the old one's summary first; the bin deletes (on a second press).
+- **Session details** (the tab's glyph) shows the facts (agent, when, how long, kept paths, folders),
+  the summary — editable in place, saved as you type and marked *edited by the person* — and your
+  **notes**: one line each, Enter adds, × removes; they are searched and recalled with the summary.
+  *Summarize now* on an open session asks the agent for a checkpoint summary that replaces the text;
+  the one written when the session ends replaces that (close the tab mid-checkpoint and the
+  checkpoint becomes the final summary).
 - **Recall.** The next session in a folder gets a `[Memory — earlier sessions in these folders …]`
   block in its standing instructions: the last three ended sessions, each with date, duration, agent,
-  folders, kept files, commits and the summary. The session menu's **Recall** picks the scope:
+  folders, kept files, commits and the summary. Settings → Memory → **Recall** picks the scope:
   *this folder* (the same folder, its parents and children, nearest first — the default with pins),
   *all folders* (the last three anywhere — the default without pins, so a no-pin session is the one
   that sees all of memory), or *none*. Scope decides what is pushed, never what can be searched —
@@ -155,49 +178,66 @@ design; this is what you see.
   `transcript --grep`.
 - **Off switch**: Settings → Memory. With it off nothing is summarised or recalled.
 
-Coming: **ghost sessions** — a per-session flag that leaves nothing behind: writes revert after an
-hour, no pins, a throwaway agent home, transcript and overlay deleted at close, no memory in or out.
+**Ghost sessions** (the ghost button on an agent's row in `+`, or `sill session new --ghost`) leave
+nothing behind: writes revert after an hour, no pins, an isolated agent home with only the declared
+credentials, transcript and overlay deleted at close, nothing written to memory. Settings → Memory →
+*Ghosts see memory* decides whether they read it.
 
 ## Agents
 
 **Agents page** (herring → Agents): the ACP registry (`cdn.agentclientprotocol.com`, cached, refreshed
-when older than six hours) with search, an All / Installed / Not installed filter and one action per
-entry. *Install* puts the package under `~/.local/state/sill/tools/<id>/` (npm with `--ignore-scripts`,
-uv with its own tool dir, or the Linux binary with its checksum verified), probes it once over ACP in a
-throwaway jail, and writes `~/.config/sill/agents/<id>.toml`, so it appears in the `+` menu with its
-icon. The gear on an installed row edits its command, environment (API keys) and proxy domains.
-Third-party agents start with an empty allow-list: when one tries a host the proxy refuses, the
-conversation asks whether to allow that host (or its domain) for the agent, and the session restarts
-with it allowed.
+when older than six hours) with search, filters (All / Installed / Not installed, *Untested*) and one
+action per entry. *Install* puts the package under `~/.local/state/sill/tools/<id>/` (npm with
+`--ignore-scripts`, uv with its own tool dir, or the Linux binary with its checksum verified), probes it
+once over ACP in a throwaway jail, and writes `~/.config/sill/agents/<id>.toml`, so it appears in the
+`+` menu with its icon; *Latest* / *Supported* picks the version. The settings card of an installed
+agent edits its command, environment (API keys), proxy domains and **Directories** — the paths under
+`~` that are its own. Third-party agents start with an empty allow-list: when one tries a host the
+proxy refuses, the conversation asks whether to allow that host (or its domain) for the agent, and the
+running session is granted it live.
 
-**Agents' own files.** Each agent runs completely inside sill: its paths (`~/.claude` and
-`~/.claude.json`, `~/.codex`, `~/.gemini`) are replaced in every jail by a sill-owned copy under
-`~/.local/state/sill/agents/<id>/`, seeded once from the host. Other agents' homes are masked from each
-jail. A new dot-path an agent creates under `~` is adopted into its sill home after the turn. Caches
-(`~/.cache`, `~/.npm`) are per-session directories on the state filesystem, never on the host. Delete
-`~/.local/state/sill/agents/<id>` to make the agent log in again.
+**Agents' own files** ([docs/agent-directories.md](docs/agent-directories.md)). Each agent runs
+completely inside sill: the paths its definition declares (`~/.claude` and `~/.claude.json`, `~/.codex`,
+`~/.gemini`, …) are replaced in every jail by sill-owned directories under
+`~/.local/state/sill/agents/<id>/`; nothing is copied from the host and other agents' homes are masked.
+Claude Code, Codex, Gemini, Antigravity and Kimi Code have built-in definitions; a registry agent
+without one is set up first on its settings card — *Find directories* (a probe), a login that records
+where it wrote, or the Directories editor. Caches (`~/.cache`, `~/.npm`) are per-session directories on
+the state filesystem, never on the host. Delete `~/.local/state/sill/agents/<id>` to make the agent
+log in again.
 
 **Logging in.** When an agent refuses to open a session without a login, the conversation shows one
 button per method. Claude Code logs in in sill-gui's terminal pane inside the jail — its own login,
 separate from the host's Claude Code or Zed. Codex with an API key: put `OPENAI_API_KEY` in its
-environment (the gear) and pick *API Key*; with ChatGPT pick *ChatGPT* (or `sill login codex`) — that
-login runs on this machine because its browser callback can't reach the jail, but with `CODEX_HOME`
-pointing at the jail's copy, so nothing lands on the host. Gemini: see Known limits.
+environment and pick *API Key*; with ChatGPT pick *ChatGPT* (or `sill login codex`) — that login runs
+on this machine because its browser callback can't reach the jail, but with `CODEX_HOME` pointing at
+the jail's copy, so nothing lands on the host. Registry agents log in from their settings card, in a
+terminal pane where the agent needs one (Kimi Code). Gemini: see Known limits.
 
 **Policy changes.** A jail gets its mounts and permission state when it is launched. After editing the
-policy (`/etc/sill/policies/default.toml`, then `~/.config/sill/policies/`), reopen a session's tab: a
-jail older than the policy file is rebuilt. Restarting sill-gui alone does not touch running sessions.
+policy (`/etc/sill/policies/default.toml`, then `~/.config/sill/policies/`) the running session's shield
+says *changes apply after a restart* and offers *Restart now*; Settings → Policies inspects and
+refreshes the installed policies. Restarting sill-gui alone does not touch running sessions.
 
 ## The command line
 
 ```bash
 sill gui [--hidden]                        # start sill-gui (a second start shows the running window)
 sill toggle                                # show / hide sill-gui (bind it to a key)
-sill restart [--dev] [--hidden]            # after an update: the daemon and sill-gui (--dev runs the checkout's target/debug build of both)
+sill restart [--dev] [--hidden] [--jails]  # after an update: the daemon and sill-gui (--dev: the checkout's target/debug build; --jails: the sessions too)
+sill daemon status | restart | stop | schema
+sill session new [--agent A] [--pin P] [--ghost] | list | end <id>
+sill changes list | diff | keep | revert | history | undo
+sill pin list | add <path> | remove <path>  # global pins
 sill memory …                              # see Memory above
-sill policy                                # the policy as sill reads it
+sill policy show | preview | snapshot | check | import | start
+sill permissions show | set | development | restore | save-host
+sill host-control activate | revoke | keep | state
+sill registry … · sill login <agent> · sill box add | list | remove | connect · sill attach
 journalctl --user -u sill-gui -f           # sill-gui's log
 ```
+
+`sill <cmd> --help` has the arguments.
 
 The jail without sill-gui — handy for experiments and scripting. Until the state filesystem is
 mounted, point `--state-dir` at a directory that is not inside an overlaid tree and pass
@@ -265,7 +305,7 @@ running `sill`). Signed sums, `sill.io` and the apt repository come later.
 | `policies/default.toml` | the built-in policy, also installed to `/etc/sill/policies/` |
 | `packaging/systemd/` | state-filesystem units (`/var/lib/sill.img` → `/var/lib/sill`), sill-gui's user service |
 | `packaging/release.sh`, `packaging/deb.sh` | the release tarball + `SHA256SUMS`, the `.deb`; `packaging/sill.desktop`, `packaging/icons/` |
-| `docs/` | `sill-gui.md`, `memory.md`, `security.md`, `design.md`, `tasks.md` |
+| `docs/` | the window (`sill-gui.md`), the daemon and protocol (`daemon.md`, `protocol.md`, `sfp-operations.md`), `permission-modes.md`, `agent-directories.md`, `travelling-policies.md`, `pins.md`, `login.md`, `memory.md`, `security.md`, `design.md`; proposals and history (`proposed-features.md`, `tasks.md`, `crosscheck.md`, `session-overview.md`, `parallel-coding.md`, `work-items.md`, `development-history.md`) |
 
 ## State filesystem
 
@@ -280,19 +320,20 @@ mounted, `sill` uses `/var/lib/sill/<uid>/sessions/<id>` by default. Grow the im
 
 - Files not owned by your uid:gid can't be modified in the jail (overlayfs copy-up can't chown to an
   unmapped id; SPEC §4.10 #16). Group-shared trees: `direct` or `ro` in the policy for now, or pin them.
-- The parked agent process costs ~1.6 % of a core; close the tab when idle until idle-stop exists.
+- A parked agent process costs ~1.6 % of a core; the policy's `agent_idle_minutes` (default 10) stops
+  it and the session resumes it on the next prompt.
 - HTTP CONNECT proxy only (no SOCKS5); programs that ignore `HTTPS_PROXY` have no network, by design.
 - Gemini CLI's "Log in with Google" runs host-side like Codex's ChatGPT login, but Google stopped serving
   personal accounts through Gemini CLI on 2026-06-18. Use a Gemini API key (`GEMINI_API_KEY` in its
-  environment, then *Gemini API key*), or install Antigravity from the Agents page.
-- Sessions end — and are summarised — on a tab close, the idle timeout and the tray's Quit; `sill restart`
-  ends none. A tab closed again while its agent writes the summary disappears at once and
+  environment, then *Gemini API key*), or Antigravity (built in; install it from the Agents page).
+- Sessions end — and are summarised — on a tab close and the idle timeout; `sill restart` and the
+  tray's Quit end none. A tab closed again while its agent writes the summary disappears at once and
   the summary finishes in the background (still capped at 90 s).
 
 ## Look
 
-Sill's look is its own and the same on every machine: its icons are drawn glyphs (the mark too — a
-herring silhouette, `packaging/icons/herring/herring-silhouette.svg`), every theme is sill's own, a
+Sill's look is its own and the same on every machine: its icons are drawn glyphs (the mark too — the
+herring in a jar, `packaging/icons/sill.svg`; the tray's is the herring on its sill), every theme is sill's own, a
 complete palette (nothing follows the desktop's theme, icon theme or dark/light setting; no GTK, no
 libadwaita), and the text is set in two faces embedded in the binary — **Source Sans 3** for everything
 proportional, **Source Code Pro** for terminals, code and the editor (both by Adobe, SIL Open Font
@@ -316,4 +357,5 @@ scale only (Settings, or Ctrl+Plus / Ctrl+- / Ctrl+0). `docs/design.md` says why
 | Enter / Shift+Enter | send / newline |
 | Ctrl+Q | hides the window |
 
-All of these are editable in Settings.
+The session and layout shortcuts are editable in Settings → Shortcuts; the hotkey has its own field;
+Escape, Enter and Ctrl+Q are fixed.

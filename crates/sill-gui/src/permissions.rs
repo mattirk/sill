@@ -9,8 +9,8 @@
 //! launch snapshot. A change goes to the daemon and the panel reads both again; what differs
 //! between them is marked as applying after a restart, with a Restart now. Choices need the
 //! frontend-declared `sill.permission_modes` capability, which this window offers because it
-//! shows this state. Desktop development and Host control have no backend yet: shown, never
-//! offered.
+//! shows this state. Host control is `host_control.rs`; the shield's right-click menu
+//! (`popup.rs`) shortcuts development permissions and Host control.
 use iced::widget::{Column, button, column, container, row, rule, space, text, tooltip};
 use iced::{Alignment, Element, Fill, Task};
 use sill_client::actions::Outcome;
