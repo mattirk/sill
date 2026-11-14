@@ -1,4 +1,8 @@
 mod agents_ui;
+mod annotation;
+mod annotation_state;
+#[cfg(test)]
+mod annotation_tests;
 mod changes_ui;
 mod control;
 mod daemon_ui;
@@ -296,10 +300,13 @@ pub enum Message {
     Geometry(Read, Option<(Vec<geometry::Display>, Option<geometry::Rect>)>),
     /// The window was placed: the displays it was placed with, and where it went.
     Placed(Option<(Vec<geometry::Display>, Option<geometry::Target>)>),
+    /// Placed for a mode change (`switching`): placed again when the mode moved on meanwhile.
+    SwitchPlaced(Option<(Vec<geometry::Display>, Option<geometry::Target>)>),
     /// The window manager moved the window.
     Moved,
     Quit,
     Media(media::Event),
+    Annotation(annotation::Event),
     AttachmentPaths(String, String, Option<Vec<std::path::PathBuf>>),
     /// `>_`: the session's jail shell in place of the prompt, or the prompt again.
     ToggleTerminal,
@@ -394,7 +401,9 @@ pub struct SessionView {
     pub conversation: Conversation,
     pub rendered: BTreeMap<String, Rendered>,
     pub draft: editor::Editor,
-    pub attachments: Vec<sill_proto::sfp::Attachment>,
+    pub attachments: Vec<media::DraftAttachment>,
+    pub annotation: Option<annotation::Editor>,
+    pub pending_attachments: BTreeMap<String, Vec<media::DraftAttachment>>,
     pub attachments_busy: bool,
     pub media_token: String,
     pub media: media::Cache,
@@ -460,6 +469,8 @@ impl SessionView {
             rendered: BTreeMap::new(),
             draft: editor::Editor::new(),
             attachments: vec![],
+            annotation: None,
+            pending_attachments: BTreeMap::new(),
             attachments_busy: false,
             media_token: sill_client::request_id("media-view"),
             media: Default::default(),
@@ -491,7 +502,7 @@ impl SessionView {
 
     /// The conversation is on screen (no file over it).
     pub fn conversation_shown(&self) -> bool {
-        self.files.reader.is_none()
+        self.files.reader.is_none() && self.annotation.is_none()
     }
 
     pub fn attention(&self) -> Attention {
@@ -668,6 +679,10 @@ pub struct App {
     no_x11: bool,
     /// The window is shown (not hidden by the hotkey, `sill toggle` or Close).
     pub visible: bool,
+    /// A change into or out of Shelf mode under way on X11: the window read, then placed for this
+    /// mode. Until it lands another change only sets the mode; the window is placed for that mode
+    /// once this one lands. Two reads in flight at once kept one mode's geometry as the other's.
+    pub switching: Option<layout::Mode>,
     /// The global hotkey's thread (none in the demo and the tests), and how its grab stands.
     hotkey: Option<hotkey::Hotkey>,
     pub hotkey_status: Option<String>,
@@ -786,6 +801,7 @@ impl App {
             xid: None,
             no_x11: false,
             visible: !HIDDEN.load(std::sync::atomic::Ordering::Relaxed),
+            switching: None,
             hotkey: None,
             hotkey_status: None,
             tray: None,
@@ -964,7 +980,7 @@ impl App {
 
     /// The prompt takes the keyboard, where a session's conversation is shown.
     fn focus_prompt(&self) -> Task<Message> {
-        if self.backend_shown() || self.current().is_none_or(|v| v.terminal_shown) {
+        if self.backend_shown() || self.current().is_none_or(|v| v.terminal_shown || v.annotation.is_some()) {
             return Task::none();
         }
         operation::focus("prompt")
@@ -1019,6 +1035,12 @@ impl App {
         blocking(self.placing(), Message::Placed)
     }
 
+    /// Placed for the current mode after a change into or out of Shelf mode (`switching`).
+    fn place_switch(&mut self) -> Task<Message> {
+        self.switching = Some(self.layout.mode);
+        blocking(self.placing(), Message::SwitchPlaced)
+    }
+
     /// The displays and the window as read (`Message::Geometry`): the regular look, or the last
     /// one before the window hides or leaves a mode, when the person's change is kept at once.
     fn geometry_read(
@@ -1061,7 +1083,7 @@ impl App {
                     self.settings.display = Some(main.name.clone());
                 }
                 self.save_settings();
-                self.place()
+                self.place_switch()
             }
         }
     }
@@ -1185,10 +1207,16 @@ impl App {
             // the window read first, so what the person made of it in the old mode is kept; then
             // placed where the new mode has it
             match self.xid {
-                Some(xid) => tasks.push(blocking(
-                    move || desktop::snapshot(xid),
-                    move |read| Message::Geometry(Read::Leave(old), read),
-                )),
+                // a change already under way: the window is still as that one found it, and is
+                // placed for the mode current when it lands (`Read::Leave`, `SwitchPlaced`)
+                Some(_) if self.switching.is_some() => {}
+                Some(xid) => {
+                    self.switching = Some(mode);
+                    tasks.push(blocking(
+                        move || desktop::snapshot(xid),
+                        move |read| Message::Geometry(Read::Leave(old), read),
+                    ));
+                }
                 None => tasks.push(self.place()),
             }
         }
@@ -1367,11 +1395,22 @@ impl App {
             return Task::none();
         }
         let before = self.backend_shown();
+        let prior_session = self.selected.clone();
         let mut task = self.apply(message);
         if before != self.backend_shown() {
             self.herring_flick = Some(Instant::now());
             if before {
                 task = task.chain(self.focus_prompt());
+            }
+        }
+        let hidden = self.backend_shown();
+        for view in self.views.values_mut() {
+            if (hidden || prior_session != self.selected) && let Some(editor) = &mut view.annotation {
+                editor.drawing = false;
+            }
+            if !view.pending_attachments.is_empty() {
+                view.pending_attachments.retain(|id, _| view.outbox.get(id).is_some());
+                view.prune_draft_media();
             }
         }
         // the tray moves while any session's agent works
@@ -1388,6 +1427,7 @@ impl App {
     fn apply(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Media(event) => return self.media_event(event),
+            Message::Annotation(event) => return self.annotation_event(event),
             Message::AttachmentPaths(session, token, paths) => {
                 if self
                     .views
@@ -1478,12 +1518,12 @@ impl App {
             Message::NetworkNoticeExpired(id, serial) => self.network.expire(&id, serial),
             Message::Prompt(action) => {
                 if let Some(view) = self.current_mut() {
-                    view.draft.perform(action);
+                    if view.annotation.is_none() { view.draft.perform(action); }
                 }
             }
             Message::PromptHistory(redo) => {
                 if let Some(view) = self.current_mut() {
-                    view.draft.history(redo);
+                    if view.annotation.is_none() { view.draft.history(redo); }
                 }
             }
             Message::Send => return self.send(),
@@ -1548,6 +1588,7 @@ impl App {
             }
             Message::EditSend(id) => {
                 if let Some(view) = self.current_mut()
+                    && view.annotation.is_none()
                     && let Some(pending) = view.outbox.take(&id)
                 {
                     let mut text = view.draft.text().trim_end().to_string();
@@ -1555,7 +1596,8 @@ impl App {
                         text.push_str("\n\n");
                     }
                     text.push_str(pending.text());
-                    view.attachments.extend(pending.submit.attachments);
+                    let restored = view.pending_attachments.remove(&id).unwrap_or_else(|| pending.submit.attachments.into_iter().map(Into::into).collect());
+                    view.attachments.extend(restored);
                     view.draft = editor::Editor::with_text(&text);
                     return operation::focus("prompt");
                 }
@@ -1620,6 +1662,16 @@ impl App {
                         .placed(displays, target.map(|t| t.rect), Instant::now());
                 }
             }
+            Message::SwitchPlaced(placed) => {
+                if let Some((displays, target)) = placed {
+                    self.geometry
+                        .placed(displays, target.map(|t| t.rect), Instant::now());
+                }
+                // the mode moved on while this was placed: placed again, for where it is now
+                if self.switching.take().is_some_and(|placed_for| placed_for != self.layout.mode) {
+                    return self.place_switch();
+                }
+            }
             Message::Moved => self.geometry.stir(Instant::now()),
             Message::DragWindow => {
                 if self.layout.mode == layout::Mode::Shelf {
@@ -1639,8 +1691,10 @@ impl App {
                 }
                 return self.hide();
             }
-            Message::ToggleTerminal => return self.toggle_shell(false),
-            Message::ToggleHostTerminal => return self.toggle_shell(true),
+            Message::ToggleTerminal | Message::ToggleHostTerminal => {
+                if self.current().is_some_and(|v| v.annotation.is_some()) { return Task::none(); }
+                return self.toggle_shell(matches!(message, Message::ToggleHostTerminal));
+            }
             Message::ReopenTerminal => return self.open_terminal(),
             Message::EndTerminal => {
                 if let Some(pane) = self.current().and_then(|v| v.terminal.as_ref()) {
@@ -2623,6 +2677,9 @@ impl App {
         if self.menu.take().is_some() {
             return Task::none();
         }
+        if !self.backend_shown() && self.current().is_some_and(|v| v.annotation.is_some()) {
+            return self.annotation_event(annotation::Event::Cancel);
+        }
         self.stash_details();
         if self.details.take().is_some() {
             return self.restore_scroll();
@@ -2985,7 +3042,7 @@ impl App {
                         _ => String::new(),
                     };
                     view.draft = editor::Editor::with_text(pending.text());
-                    view.attachments = pending.submit.attachments;
+                    view.attachments = view.pending_attachments.remove(&id).unwrap_or_else(|| pending.submit.attachments.into_iter().map(Into::into).collect());
                     view.failed = Some(format!(
                         "Not sent: {reason}. The prompt is back in the composer."
                     ));
@@ -3035,7 +3092,7 @@ impl App {
             return Task::none();
         };
         let text = view.draft.text().trim_end().to_string();
-        if view.attachments_busy || (text.trim().is_empty() && view.attachments.is_empty()) {
+        if view.annotation.is_some() || view.attachments_busy || (text.trim().is_empty() && view.attachments.is_empty()) {
             return Task::none();
         }
         view.draft = editor::Editor::new();
@@ -3054,11 +3111,13 @@ impl App {
             return operation::snap_to_end("conversation").chain(self.focus_prompt());
         }
         let session = view.id.clone();
+        let attachments = std::mem::take(&mut view.attachments);
         let submit = view.outbox.send_with_attachments(
             &session,
             text,
-            std::mem::take(&mut view.attachments),
+            attachments.iter().map(|a| a.attachment.clone()).collect(),
         );
+        view.pending_attachments.insert(submit.submission_id.clone(), attachments);
         let reopen = view.lane.is_none();
         if reopen {
             self.open_lane(&session, lane::Mode::Open);

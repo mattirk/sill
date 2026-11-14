@@ -63,6 +63,7 @@ const LINES: &[(&str, &str)] = &[
         "m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2",
     ),
     ("x", "M18 6 6 18M0 0m6 6 12 12"),
+    ("pen", "m16 3 5 5M3 21l5-1L21 7a2.12 2.12 0 0 0-5-3L3 17z"),
     // a session's test desktop, shown in the conversation's place (lucide monitor)
     (
         "monitor",

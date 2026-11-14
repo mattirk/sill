@@ -3202,7 +3202,7 @@ fn attachment_only_send_keeps_files_on_refusal() {
         .get_mut("demo")
         .unwrap()
         .attachments
-        .push(attachment.clone());
+        .push(attachment.clone().into());
     let task = app.update(Message::Send);
     let request = daemon.expect("_sill/sessions.submit");
     let submit: Submit = serde_json::from_value(request["params"].clone()).unwrap();
@@ -3220,7 +3220,7 @@ fn attachment_only_send_keeps_files_on_refusal() {
         crate::Act::Send(submit.submission_id),
         sill_client::actions::Outcome::NotSent("offline".into()),
     ));
-    assert_eq!(demo_view(&app).attachments, vec![attachment]);
+    assert_eq!(demo_view(&app).attachments.iter().map(|a| a.attachment.clone()).collect::<Vec<_>>(), vec![attachment]);
 }
 
 #[test]
@@ -3237,7 +3237,7 @@ fn attachment_completion_stays_with_originating_session() {
         "demo".into(),
         Ok(vec![(a.clone(), None)]),
     )));
-    assert_eq!(app.views["demo"].attachments, vec![a]);
+    assert_eq!(app.views["demo"].attachments.iter().map(|a| a.attachment.clone()).collect::<Vec<_>>(), vec![a]);
     assert!(app.views["other"].attachments.is_empty());
 }
 
@@ -3263,7 +3263,7 @@ fn generic_attachment_upload_uses_session_and_preserves_file_bytes() {
     daemon.reply(&request, json!({"upload_id":params.upload_id}));
     settle_task(&mut app, task);
     assert!(
-        matches!(&demo_view(&app).attachments[0], sill_proto::sfp::Attachment::Uploaded { upload_id, .. } if upload_id == &params.upload_id)
+        matches!(&demo_view(&app).attachments[0].attachment, sill_proto::sfp::Attachment::Uploaded { upload_id, .. } if upload_id == &params.upload_id)
     );
     std::fs::remove_file(path).unwrap();
 }
@@ -3701,4 +3701,54 @@ fn the_window_keeps_what_the_person_made_of_it_per_display() {
     assert_eq!(app.settings.displays["eDP-1"].shelf_width, Some(0.3));
     assert_eq!(app.settings.displays["eDP-1"].work_width, None, "no working size");
     assert_eq!(app.shelf_share(), 0.3, "Settings shows the main display's");
+}
+
+/// Ctrl+Shift+D pressed again before the first change's window read landed: one read, one
+/// placement at a time, and the window ends up placed for the mode it is in. Two reads in flight
+/// at once kept the Shelf's geometry as the Drawer's (2026-11-08).
+#[test]
+fn mode_changes_in_flight_are_serialized() {
+    use crate::geometry::{target, Controller, Display, Rect};
+    use crate::layout::{Action, Mode};
+    let display = Display {
+        name: "eDP-1".into(),
+        primary: true,
+        bounds: Rect { x: 0, y: 0, width: 1920, height: 1080 },
+        work: Rect { x: 0, y: 0, width: 1920, height: 1040 },
+    };
+    let displays = vec![display];
+    let (mut app, _) = App::new(true, None);
+    app.geometry = Controller::immediate();
+    app.visible = true;
+    app.xid = Some(1);
+    app.layout.mode = Mode::Drawer;
+    let drawer = target(Mode::Drawer, &app.settings, &displays).unwrap();
+    let _ = app.update(Message::Placed(Some((displays.clone(), Some(drawer.clone())))));
+    // into Shelf mode: the window is read first
+    let _ = app.update(Message::Layout(Action::ToggleShelf));
+    assert_eq!(app.layout.mode, Mode::Shelf);
+    assert_eq!(app.switching, Some(Mode::Shelf));
+    // and back before the read landed: the mode changes, nothing else starts
+    let _ = app.update(Message::Layout(Action::ToggleShelf));
+    assert_eq!(app.layout.mode, Mode::Drawer);
+    assert_eq!(app.switching, Some(Mode::Shelf), "the change under way is the one that lands");
+    // the read lands with the window as the Drawer had it: nothing of it is the Shelf's
+    let read = Some((displays.clone(), Some(drawer.rect)));
+    let _ = app.update(Message::Geometry(crate::Read::Leave(Mode::Drawer), read));
+    assert!(app.settings.displays.is_empty(), "Sill's own placement is not kept");
+    assert_eq!(app.switching, Some(Mode::Drawer), "placed for the mode it is in now");
+    // placed for Drawer, as it is: the change is over
+    let _ = app.update(Message::SwitchPlaced(Some((displays.clone(), Some(drawer.clone())))));
+    assert_eq!(app.switching, None);
+    // placed for a mode it has since left: placed again
+    let _ = app.update(Message::Layout(Action::ToggleShelf));
+    assert_eq!(app.switching, Some(Mode::Shelf));
+    let shelf = target(Mode::Shelf, &app.settings, &displays).unwrap();
+    let _ = app.update(Message::Geometry(crate::Read::Leave(Mode::Drawer), Some((displays.clone(), Some(drawer.rect)))));
+    let _ = app.update(Message::Layout(Action::ToggleShelf));
+    assert_eq!(app.layout.mode, Mode::Drawer);
+    let _ = app.update(Message::SwitchPlaced(Some((displays.clone(), Some(shelf)))));
+    assert_eq!(app.switching, Some(Mode::Drawer), "placed again for Drawer");
+    let _ = app.update(Message::SwitchPlaced(Some((displays, Some(drawer)))));
+    assert_eq!(app.switching, None);
 }

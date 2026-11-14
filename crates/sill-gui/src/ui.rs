@@ -48,7 +48,11 @@ impl App {
             let Some(view) = self.current() else {
                 return self.empty();
             };
-            let body = if let Some(details) = &self.details {
+            let body = if let Some(editor) = &view.annotation {
+                column![crate::annotation::view(editor), self.composer(view)]
+                    .height(Fill)
+                    .into()
+            } else if let Some(details) = &self.details {
                 self.details_view(details)
             } else {
                 match self.file_view(view) {
@@ -206,7 +210,12 @@ impl App {
                         .align_bottom(Fill),
                 );
         }
-        keys::configured_shortcuts(layers, &self.settings.shortcuts)
+        let annotating = !self.backend_shown()
+            && self.current().is_some_and(|view| view.annotation.is_some());
+        keys::annotation_shortcuts(
+            keys::configured_shortcuts(layers, &self.settings.shortcuts),
+            annotating,
+        )
     }
 
     /// The drawer's edge: flush with the conversation, with a wider drag target inside the drawer.
@@ -1161,7 +1170,8 @@ impl App {
         /// What the shell's and the send/stop buttons take with their spacing, and a margin.
         const BUTTONS_ROOM: f32 = 142.0;
         let has_session = !view.conversation.session_id.is_empty() || self.demo;
-        let sendable = !view.attachments_busy
+        let sendable = view.annotation.is_none()
+            && !view.attachments_busy
             && (!view.draft.text().trim().is_empty() || !view.attachments.is_empty());
         let action: Element<'_, Message> = if view.conversation.busy() {
             stop_button()
@@ -1198,11 +1208,11 @@ impl App {
         .style(style::quiet);
         let shell = container(keys::press_maybe(
             shell,
-            has_session.then_some(Message::ToggleTerminal),
+            (has_session && view.annotation.is_none()).then_some(Message::ToggleTerminal),
         ))
         .id("terminal-button");
         let shell = mouse_area(shell);
-        let shell = if has_session {
+        let shell = if has_session && view.annotation.is_none() {
             shell.on_right_press(Message::ToggleHostTerminal)
         } else {
             shell
@@ -1228,7 +1238,7 @@ impl App {
             .width(Shrink);
         // as wide as its controls, up to the room the two buttons leave: past that it scrolls
         let agent_controls = container(agent_controls).max_width((width - BUTTONS_ROOM).max(0.0));
-        let can_attach = has_session && !view.attachments_busy;
+        let can_attach = has_session && !view.attachments_busy && view.annotation.is_none();
         let attach = bar_tip(
             keys::press_maybe(
                 bar_button(icons::glyph(
@@ -1291,13 +1301,37 @@ impl App {
                     .padding([4, 6])
                     .into()
                 };
-                let remove = keys::press(
+                let remove = keys::press_maybe(
                     button(text("×").size(style::SMALL).color(P.fg_dim))
                         .padding([2, 4])
                         .style(style::quiet),
-                    Message::Media(crate::media::Event::Remove(index)),
+                    view.annotation.is_none().then_some(Message::Media(
+                        crate::media::Event::Remove(index),
+                    )),
                 );
-                let chip = row![preview, remove].align_y(Alignment::Center).spacing(1);
+                let controls: Element<'_, Message> = if crate::media::is_image(attachment) {
+                    let available = view.annotation.is_none()
+                        && !view.attachments_busy
+                        && matches!(
+                            view.media.get(&crate::media::key(attachment)),
+                            Some(Some(Ok(_)))
+                        );
+                    let pen = bar_tip(
+                        keys::press_maybe(
+                            button(icons::glyph("pen", 11.0, P.fg_dim))
+                                .padding([2, 4])
+                                .style(style::quiet),
+                            available.then(|| Message::Annotation(
+                                crate::annotation::Event::Open(attachment.id.clone()),
+                            )),
+                        ),
+                        "Annotate image",
+                    );
+                    column![remove, pen].align_x(Alignment::Center).into()
+                } else {
+                    remove
+                };
+                let chip = row![preview, controls].align_y(Alignment::Center).spacing(1);
                 strip = if crate::media::is_image(attachment) {
                     strip.push(chip)
                 } else {
@@ -1407,17 +1441,21 @@ impl App {
         let editor = text_editor(&view.draft)
             .id("prompt")
             .placeholder(placeholder(view))
-            .on_action(Message::Prompt)
-            .key_binding(enter_sends)
             .padding([8, 14])
             .size(style::TEXT)
             .height(Shrink)
             .max_height(220)
             .style(style::prompt);
+        let editor = if view.annotation.is_none() {
+            editor.on_action(Message::Prompt).key_binding(enter_sends)
+        } else {
+            editor
+        };
         // the bar knows its width, so the agent's controls can give way to the buttons
         let bar = responsive(move |size| self.composer_bar(view, size.width)).height(Shrink);
         // the prompt folds away while the terminal is up in its place
-        let terminal = view.terminal.as_ref().filter(|_| view.terminal_shown);
+        let terminal = view.terminal.as_ref()
+            .filter(|_| view.terminal_shown && view.annotation.is_none());
         let input: Element<'_, Message> = match terminal {
             Some(pane) => self.terminal_pane(pane, view.terminal_host),
             None => editor.into(),

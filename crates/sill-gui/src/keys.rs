@@ -92,6 +92,35 @@ pub fn configured_shortcuts<'a>(
     wrapper.into()
 }
 
+/// Annotation shortcuts take precedence over hidden prompt/file editors while the canvas is shown.
+pub fn annotation_shortcuts<'a>(
+    content: impl Into<Element<'a, Message>>,
+    active: bool,
+) -> Element<'a, Message> {
+    // Keep the same wrapper and widget tree when the editor opens and closes.
+    let mut wrapper = focus(content);
+    wrapper.before_children = Some(Rc::new(move |key, modifiers| {
+        active.then(|| annotation_key(key, modifiers)).flatten()
+    }));
+    wrapper.into()
+}
+
+fn annotation_key(key: &Key, modifiers: Modifiers) -> Option<Message> {
+    if !modifiers.command() || modifiers.shift() || modifiers.alt() {
+        return None;
+    }
+    let Key::Character(key) = key.as_ref() else {
+        return None;
+    };
+    if key.eq_ignore_ascii_case("s") {
+        Some(Message::Annotation(crate::annotation::Event::Save))
+    } else if key.eq_ignore_ascii_case("z") {
+        Some(Message::Annotation(crate::annotation::Event::Undo))
+    } else {
+        None
+    }
+}
+
 /// A button the keyboard reaches too: Tab focuses it, Enter or Space presses it.
 pub fn press<'a>(button: Button<'a, Message>, message: Message) -> Element<'a, Message> {
     focus(button.on_press(message.clone()))
@@ -527,5 +556,59 @@ pub fn from_text(key: &Key, modifiers: Modifiers, paging: bool) -> Option<Messag
         Key::Named(Named::PageUp) if paging && !modifiers.command() => Some(Message::Page(false)),
         Key::Named(Named::PageDown) if paging && !modifiers.command() => Some(Message::Page(true)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod annotation_tests {
+    use super::*;
+
+    #[test]
+    fn annotation_keys_override_focused_controls_only_while_editor_is_visible() {
+        for active in [true, false] {
+            let content = iced::widget::text_editor::Content::with_text("draft");
+            let input = iced::widget::text_editor(&content)
+                .id("annotation-shortcut-input")
+                .on_action(Message::Prompt)
+                .key_binding(crate::ui::reading_keys);
+            let view = annotation_shortcuts(input, active);
+            let mut ui = iced_test::Simulator::with_size(
+                crate::snapshots::settings(),
+                (400.0, 100.0),
+                view,
+            );
+            ui.click(Id::new("annotation-shortcut-input")).unwrap();
+            for character in ["s", "z"] {
+                let key = Key::Character(character.into());
+                let _ = ui.simulate(vec![
+                    Event::Keyboard(keyboard::Event::ModifiersChanged(Modifiers::CTRL)),
+                    Event::Keyboard(keyboard::Event::KeyPressed {
+                        key: key.clone(),
+                        modified_key: key,
+                        physical_key: keyboard::key::Physical::Unidentified(
+                            keyboard::key::NativeCode::Unidentified,
+                        ),
+                        location: keyboard::Location::Standard,
+                        modifiers: Modifiers::CTRL,
+                        text: None,
+                        repeat: false,
+                    }),
+                ]);
+            }
+            let messages: Vec<_> = ui.into_messages()
+                .filter(|message| !matches!(message, Message::Prompt(_)))
+                .collect();
+            if active {
+                assert!(matches!(messages.as_slice(), [
+                    Message::Annotation(crate::annotation::Event::Save),
+                    Message::Annotation(crate::annotation::Event::Undo),
+                ]));
+            } else {
+                assert!(messages.iter().any(|m| matches!(m, Message::Workspace(
+                    crate::workspace::Action::SaveFile
+                ))));
+                assert!(!messages.iter().any(|m| matches!(m, Message::Annotation(_))));
+            }
+        }
     }
 }

@@ -15,9 +15,25 @@ const LIMIT: usize = sill_proto::initialize::MAX_INLINE_BYTES;
 #[derive(Debug, Clone)]
 pub struct Picture {
     pub handle: image::Handle,
-    rgba: Arc<Vec<u8>>,
+    pub(crate) rgba: Arc<Vec<u8>>,
     pub(crate) width: u32,
     pub(crate) height: u32,
+}
+/// A local occurrence, separate from the bytes sent to the daemon (duplicates have distinct IDs).
+#[derive(Debug, Clone)]
+pub struct DraftAttachment {
+    pub id: String,
+    pub attachment: Attachment,
+    pub annotation: Option<crate::annotation::Saved>,
+}
+impl From<Attachment> for DraftAttachment {
+    fn from(attachment: Attachment) -> Self {
+        Self { id: sill_client::request_id("draft-image"), attachment, annotation: None }
+    }
+}
+impl std::ops::Deref for DraftAttachment {
+    type Target = Attachment;
+    fn deref(&self) -> &Attachment { &self.attachment }
 }
 pub type Cache = BTreeMap<String, Option<Result<Picture, String>>>;
 #[derive(Debug, Clone)]
@@ -293,7 +309,7 @@ impl App {
                 let Some(view) = self.current_mut() else {
                     return Task::none();
                 };
-                if view.attachments_busy {
+                if view.attachments_busy || view.annotation.is_some() {
                     return Task::none();
                 }
                 view.attachments_busy = true;
@@ -357,6 +373,7 @@ impl App {
             }
             Event::Remove(index) => {
                 if let Some(v) = self.current_mut() {
+                    if v.annotation.is_some() { return Task::none(); }
                     if index < v.attachments.len() {
                         let removed = v.attachments.remove(index);
                         let key = key(&removed);
@@ -380,7 +397,7 @@ impl App {
                         Ok(files) => {
                             let total: usize = view
                                 .attachments
-                                .iter()
+                                .iter().map(|a| &a.attachment)
                                 .chain(files.iter().map(|(a, _)| a))
                                 .map(|a| match a {
                                     Attachment::Inline { data_base64, .. } => {
@@ -394,18 +411,17 @@ impl App {
                                     _ => 0,
                                 })
                                 .sum();
-                            let used: usize = view
-                                .media
-                                .values()
-                                .filter_map(|v| v.as_ref()?.as_ref().ok())
-                                .map(|p| p.rgba.len())
-                                .sum();
+                            let used = view.decoded_media_bytes();
                             let added: usize = files
                                 .iter()
                                 .filter_map(|(_, p)| p.as_ref())
                                 .map(|p| p.rgba.len())
                                 .sum();
+                            let added_keys: std::collections::BTreeSet<_> = files.iter()
+                                .filter(|(_, pic)| pic.is_some()).map(|(a, _)| key(a))
+                                .filter(|key| !view.media.contains_key(key)).collect();
                             if used + added > 128 * 1024 * 1024
+                                || view.media.len() + added_keys.len() > 64
                                 || view.attachments.len() + files.len() > 64
                             {
                                 view.failed = Some(
@@ -421,7 +437,7 @@ impl App {
                                     if let Some(pic) = pic {
                                         view.media.insert(key(&a), Some(Ok(pic)));
                                     }
-                                    view.attachments.push(a);
+                                    view.attachments.push(a.into());
                                 }
                             }
                         }
@@ -450,12 +466,7 @@ impl App {
             },
             Event::Loaded(session, key, result) => {
                 if let Some(view) = self.views.get_mut(&session) {
-                    let used: usize = view
-                        .media
-                        .values()
-                        .filter_map(|v| v.as_ref()?.as_ref().ok())
-                        .map(|p| p.rgba.len())
-                        .sum();
+                    let used = view.decoded_media_bytes();
                     let result = result.and_then(|pic| {
                         if used + pic.rgba.len() > 128 * 1024 * 1024 {
                             Err("Session image cache is full (128 MiB).".into())
@@ -523,13 +534,7 @@ impl App {
         };
         let token = view.media_token.clone();
         let actions = self.actions.clone();
-        let used = self.views.get(&session).map_or(0, |v| {
-            v.media
-                .values()
-                .filter_map(|p| p.as_ref()?.as_ref().ok())
-                .map(|p| p.rgba.len())
-                .sum::<usize>()
-        });
+        let used = view.decoded_media_bytes();
         let budget = (128 * 1024 * 1024usize).saturating_sub(used);
         let dest = session.clone();
         crate::blocking(

@@ -119,26 +119,43 @@ pub fn restart(hidden: bool, dev: bool, detached: bool, jails: bool) -> Result<(
     }
     stop_running_gui();
     let running = if jails {
+        // The operator's own restart puts each jail back in the state it had; the daemon only
+        // lets a frontend that shows permission state operate sessions using Desktop development
+        // or Host control capabilities (admin.rs `frontend_gate`), so this command declares it.
+        sill_proto::client::declare_capability("sill.permission_modes");
         let client = sill_proto::Client::connect_or_start()?;
         let running: Vec<_> = client.list_sessions()?.into_iter()
             .filter(|s| s.running && s.ended_at.is_none()).collect();
         running
     } else { Vec::new() };
     restart_daemon(dev)?;
+    // one jail that cannot be started again does not keep the others, or the window, down
+    let mut failed = Vec::new();
     if !running.is_empty() {
         let client = sill_proto::Client::connect_or_start()?;
         for session in running {
-            client.call::<serde_json::Value>("_sill/sessions.stop", sill_proto::sessions::SessionKey { session_id: session.session_id.clone() })?;
-            client.call::<sill_proto::sessions::Started>("_sill/sessions.start", sill_proto::sessions::SessionKey { session_id: session.session_id.clone() })?;
-            println!("jail {} restarted", session.session_id);
+            let key = sill_proto::sessions::SessionKey { session_id: session.session_id.clone() };
+            let restarted = client.call::<serde_json::Value>("_sill/sessions.stop", &key)
+                .and_then(|_| client.call::<sill_proto::sessions::Started>("_sill/sessions.start", &key));
+            match restarted {
+                Ok(_) => println!("jail {} restarted", session.session_id),
+                Err(e) => {
+                    eprintln!("jail {}: not restarted: {e:#}", session.session_id);
+                    failed.push(session.session_id);
+                }
+            }
         }
     }
+    let jails_done = || -> Result<()> {
+        anyhow::ensure!(failed.is_empty(), "{} jail(s) not restarted: {}", failed.len(), failed.join(", "));
+        Ok(())
+    };
     if unit_known && !dev {
         if !systemctl(&["start", "sill-gui.service"]) {
             bail!("systemctl --user start sill-gui failed");
         }
         println!("sill-gui.service restarted (journalctl --user -u sill-gui)");
-        return Ok(());
+        return jails_done();
     }
     // no service, or --dev: sill-gui on its own, in a session of its own, its output in gui.log
     let exe = gui_exe(dev);
@@ -189,7 +206,7 @@ pub fn restart(hidden: bool, dev: bool, detached: bool, jails: bool) -> Result<(
     }
     cmd.spawn()
         .with_context(|| format!("start {}", exe.display()))?;
-    Ok(())
+    jails_done()
 }
 
 /// Is this process a descendant of sill itself — in a host shell the daemon opened for the window
