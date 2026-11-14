@@ -194,6 +194,8 @@ pub struct FolderTree {
     /// Pinned by some other session than the current one: shown, but the button pins here.
     elsewhere: Rc<RefCell<Vec<PathBuf>>>,
     message: gtk::Label,
+    /// Under the rows when the global view has nothing but home: how to get a folder into it.
+    hint: gtk::Label,
     /// Session that receives pins (the selected tab), set by the window.
     pub pin_target: RefCell<Option<String>>,
     /// Set by the first `set_scope` (a chip, "all", or the homing below): until then the drawer is
@@ -510,6 +512,13 @@ impl FolderTree {
         // so the drawer is exactly the size request the window gives it.
         let scroll = gtk::ScrolledWindow::builder().child(&view).vexpand(true).hscrollbar_policy(gtk::PolicyType::External).build();
         root.append(&scroll);
+        let hint = gtk::Label::new(Some("Nothing pinned to this session — pin a folder with + on its row, or open one from Home."));
+        hint.set_xalign(0.0);
+        hint.set_wrap(true);
+        hint.add_css_class("dim-label");
+        hint.add_css_class("sill-menu-caption");
+        hint.set_visible(false);
+        root.append(&hint);
         let message = gtk::Label::new(None);
         message.set_xalign(0.0);
         message.add_css_class("dim-label");
@@ -534,6 +543,7 @@ impl FolderTree {
             pinned,
             elsewhere,
             message,
+            hint,
             pin_target: RefCell::new(None),
             homed: std::cell::Cell::new(false),
             on_open: RefCell::new(None),
@@ -592,6 +602,19 @@ impl FolderTree {
 
     pub fn scope(&self) -> Option<PathBuf> {
         self.scope.borrow().clone()
+    }
+
+    /// A session just opened in a tab (new, or resumed): the tree shows its first pinned folder,
+    /// or everything when it has none — a fresh agent starts at Files, a resumed one at its work.
+    /// Nothing happens while the drawer is closed; opening it later decides for itself.
+    pub fn follow_session(self: &Rc<Self>, id: &str) {
+        if !self.root.is_visible() {
+            return;
+        }
+        let first = self.store.pins(id).unwrap_or_default().into_iter().find(|p| p.is_dir());
+        if first != self.scope() {
+            self.set_scope(first);
+        }
     }
 
     /// Limit the tree to one folder (from a pin chip), or show everything again.
@@ -784,6 +807,8 @@ impl FolderTree {
             }
         }
         roots.dedup();
+        // the global view with nothing but home: say how to get a folder into it
+        self.hint.set_visible(scope.is_none() && roots.is_empty() && touched.is_empty());
         // the rows to show: the scoped folder alone, or the global view's groups under their
         // captions (a group that is empty has no caption)
         let text = |p: &PathBuf| p.to_string_lossy().into_owned();

@@ -1165,6 +1165,7 @@ impl Shelf {
         }
         self.views.borrow_mut().insert(id.clone(), view);
         self.tabs.select(&id);
+        self.tree.follow_session(&id); // a new agent starts at Files, a resumed one at its pinned folder
         self.sync_status();
     }
 
