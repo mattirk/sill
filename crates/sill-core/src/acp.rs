@@ -430,19 +430,23 @@ async fn drive(
             Update(Result<SessionMessage, agent_client_protocol::Error>),
             Prompt(Result<PromptResponse, agent_client_protocol::Error>),
         }
+        // Updates before commands: a set-mode/set-option request is awaited below without reading
+        // updates, so the notifications the agent sends while handling it (a config snapshot of
+        // that moment) are still queued when it answers. Read them before the next request goes
+        // out, or that older snapshot lands after the newer request's response and undoes it.
         let next = {
             let cmd_fut = Box::pin(commands.recv());
             let upd_fut = Box::pin(session.read_update());
-            let inner = futures::future::select(cmd_fut, upd_fut);
+            let inner = futures::future::select(upd_fut, cmd_fut);
             match pending.as_mut() {
                 Some(p) => match futures::future::select(inner, p).await {
-                    futures::future::Either::Left((futures::future::Either::Left((cmd, _)), _)) => Next::Cmd(cmd.ok()),
-                    futures::future::Either::Left((futures::future::Either::Right((upd, _)), _)) => Next::Update(upd),
+                    futures::future::Either::Left((futures::future::Either::Left((upd, _)), _)) => Next::Update(upd),
+                    futures::future::Either::Left((futures::future::Either::Right((cmd, _)), _)) => Next::Cmd(cmd.ok()),
                     futures::future::Either::Right((r, _)) => Next::Prompt(r),
                 },
                 None => match inner.await {
-                    futures::future::Either::Left((cmd, _)) => Next::Cmd(cmd.ok()),
-                    futures::future::Either::Right((upd, _)) => Next::Update(upd),
+                    futures::future::Either::Left((upd, _)) => Next::Update(upd),
+                    futures::future::Either::Right((cmd, _)) => Next::Cmd(cmd.ok()),
                 },
             }
         };

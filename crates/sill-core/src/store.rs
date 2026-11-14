@@ -17,15 +17,18 @@ pub struct Session {
     /// The agent's own session id (ACP), once known; used for `session/load`.
     pub acp_session_id: Option<String>,
     pub policy: String,
-    /// Answer the agent's permission requests with "allow once" automatically.
+    /// Answer the agent's permission requests with "allow once" automatically (per session, SPEC §3.2).
     pub auto_allow: bool,
-    /// The agent controls as last set by the person: mode id and config option values, re-applied
-    /// whenever the ACP session is (re)started.
+    /// The agent controls as last set in this session, re-applied whenever its ACP session is
+    /// (re)started; a new session starts from its agent type's default (SPEC §3.2).
     pub agent_settings: AgentSettings,
     /// Desktop access override: "" (the global default), "none", "x11", "x11+dbus" (SPEC §4.2).
     pub desktop: String,
 }
 
+/// The agent controls as set by the person (SPEC §3.2): mode id and config option values. Kept twice:
+/// per session (`sessions.agent_settings`, what that session runs with) and per agent type
+/// (`agent_settings`, the default a new session starts from — every change in any session updates it).
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct AgentSettings {
     pub mode: Option<String>,
@@ -88,7 +91,8 @@ impl Store {
              CREATE TABLE IF NOT EXISTS entries (
                  session_id TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL,
                  kind TEXT NOT NULL, text TEXT NOT NULL, extra TEXT NOT NULL DEFAULT '',
-                 PRIMARY KEY (session_id, seq));",
+                 PRIMARY KEY (session_id, seq));
+             CREATE TABLE IF NOT EXISTS agent_settings (agent TEXT PRIMARY KEY, settings TEXT NOT NULL);",
         )?;
         // additive migrations
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN auto_allow INTEGER NOT NULL DEFAULT 0", []);
@@ -101,8 +105,25 @@ impl Store {
         Ok(Self { conn })
     }
 
-    pub fn set_agent_settings(&self, id: &str, s: &AgentSettings) -> Result<()> {
+    pub fn set_session_settings(&self, id: &str, s: &AgentSettings) -> Result<()> {
         self.conn.execute("UPDATE sessions SET agent_settings = ?2 WHERE id = ?1", params![id, serde_json::to_string(s)?])?;
+        Ok(())
+    }
+
+    /// The default controls for an agent type: what a new session starts from (empty until chosen).
+    pub fn agent_settings(&self, agent: &str) -> AgentSettings {
+        self.conn
+            .query_row("SELECT settings FROM agent_settings WHERE agent = ?1", params![agent], |r| r.get::<_, String>(0))
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn set_agent_settings(&self, agent: &str, s: &AgentSettings) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO agent_settings (agent, settings) VALUES (?1, ?2) ON CONFLICT(agent) DO UPDATE SET settings = excluded.settings",
+            params![agent, serde_json::to_string(s)?],
+        )?;
         Ok(())
     }
 
@@ -156,12 +177,12 @@ impl Store {
             acp_session_id: None,
             policy: policy.to_string(),
             auto_allow: false,
-            agent_settings: AgentSettings::default(),
+            agent_settings: self.agent_settings(agent), // the agent type's default
             desktop: String::new(),
         };
         self.conn.execute(
-            "INSERT INTO sessions (id, agent, title, created_at, last_used, acp_session_id, policy) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6)",
-            params![s.id, s.agent, s.title, s.created_at, s.last_used, s.policy],
+            "INSERT INTO sessions (id, agent, title, created_at, last_used, acp_session_id, policy, agent_settings) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7)",
+            params![s.id, s.agent, s.title, s.created_at, s.last_used, s.policy, serde_json::to_string(&s.agent_settings)?],
         )?;
         Ok(s)
     }
@@ -301,6 +322,35 @@ mod tests {
         // an unknown seq is a harmless no-op
         store.update_tool("s1", 99, Some("x"), None, None, None).unwrap();
         assert_eq!(store.entries("s1").unwrap()[0].text, "Read src/main.rs");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agent_defaults_seed_new_sessions_which_then_keep_their_own() {
+        let dir = std::env::temp_dir().join(format!("sill-store-agent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.db");
+        let store = Store::open(&path).unwrap();
+        assert!(store.agent_settings("claude").mode.is_none());
+        let mut s = AgentSettings { mode: Some("auto".into()), ..Default::default() };
+        s.config.insert("model".into(), "sonnet".into());
+        store.set_agent_settings("claude", &s).unwrap();
+        s.config.insert("model".into(), "gpt".into());
+        store.set_agent_settings("codex", &s).unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.agent_settings("claude").mode.as_deref(), Some("auto"));
+        assert_eq!(store.agent_settings("claude").config.get("model").map(String::as_str), Some("sonnet"));
+        assert_eq!(store.agent_settings("codex").config.get("model").map(String::as_str), Some("gpt"));
+        // a new session starts from its agent's default and then keeps its own choices
+        let fresh = store.create("claude", "default").unwrap();
+        assert_eq!(fresh.agent_settings.config.get("model").map(String::as_str), Some("sonnet"));
+        let mut own = fresh.agent_settings.clone();
+        own.config.insert("effort".into(), "high".into());
+        store.set_session_settings(&fresh.id, &own).unwrap();
+        let back = store.sessions().unwrap().into_iter().find(|s| s.id == fresh.id).unwrap();
+        assert_eq!(back.agent_settings.config.get("effort").map(String::as_str), Some("high"));
+        assert!(store.create("gemini", "default").unwrap().agent_settings.config.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

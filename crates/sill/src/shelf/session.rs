@@ -59,7 +59,9 @@ pub fn start(s: &store::Session, store: &store::Store, fresh: bool) -> Result<Dr
         control.spawn(&agent.command, &env, Some(&home))?;
     }
     let stream = shim::agent_stream(&sock)?;
-    let (cmd_tx, cmd_rx) = async_channel::bounded(8);
+    // a control channel: a reconnect re-applies the remembered settings as one command each, and none
+    // of them may be dropped for want of room
+    let (cmd_tx, cmd_rx) = async_channel::unbounded();
     let (ev_tx, ev_rx) = async_channel::unbounded();
     let sopts = SessionOptions {
         cwd: home,

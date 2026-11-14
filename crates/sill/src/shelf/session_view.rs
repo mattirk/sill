@@ -60,6 +60,9 @@ pub struct SessionView {
     controls_row: gtk::Box,
     /// Set while the controls are being rebuilt so their change signals don't echo back.
     rebuilding: std::cell::Cell<bool>,
+    /// The model the person just picked: when the agent reports it as current, the remembered mode
+    /// and options are applied once more (the adapter re-seeds effort and may clamp the mode per model).
+    reconcile_model: RefCell<Option<String>>,
     /// sill's own switch: answer permission requests with "allow once" without asking.
     auto_allow: std::cell::Cell<bool>,
     /// Send button; becomes a stop button while a turn is running.
@@ -346,6 +349,7 @@ impl SessionView {
             pins_row,
             controls_row,
             rebuilding: std::cell::Cell::new(false),
+            reconcile_model: RefCell::new(None),
             auto_allow: std::cell::Cell::new(auto_allow_initial),
             send_btn: RefCell::new(None),
             busy: std::cell::Cell::new(false),
@@ -902,16 +906,82 @@ impl SessionView {
         });
     }
 
-    /// Update and persist the remembered agent settings.
-    fn remember(&self, f: impl FnOnce(&mut sill_core::store::AgentSettings)) {
-        let mut s = self.session.borrow_mut();
-        f(&mut s.agent_settings);
-        let _ = self.store.set_agent_settings(&s.id, &s.agent_settings);
+    /// Remember a control change twice (SPEC §3.2): for this session, which keeps it when reopened,
+    /// and as the default of its agent type, which the next new session starts from.
+    fn remember(&self, f: impl Fn(&mut sill_core::store::AgentSettings)) {
+        let agent = {
+            let mut s = self.session.borrow_mut();
+            f(&mut s.agent_settings);
+            if let Err(e) = self.store.set_session_settings(&s.id, &s.agent_settings) {
+                eprintln!("sill: could not remember session {} settings: {e:#}", s.id);
+            }
+            s.agent.clone()
+        };
+        let mut d = self.store.agent_settings(&agent);
+        f(&mut d);
+        if let Err(e) = self.store.set_agent_settings(&agent, &d) {
+            eprintln!("sill: could not remember {agent} default settings: {e:#}");
+        }
     }
 
     fn command(&self, c: Command) {
-        if let Some(d) = self.driver.borrow().as_ref() {
-            let _ = d.commands.try_send(c);
+        if std::env::var_os("SILL_TRACE").is_some() && matches!(c, Command::SetMode(_) | Command::SetConfig(..)) {
+            eprintln!("{} command {c:?}", super::trace_ts());
+        }
+        if let Some(d) = self.driver.borrow().as_ref()
+            && let Err(e) = d.commands.try_send(c)
+        {
+            eprintln!("sill: command dropped, the session loop is gone: {e}");
+        }
+    }
+
+    /// Bring the agent to the controls this session remembers, where they differ from what it
+    /// reports and are still on offer. Model first: the adapter re-seeds effort and may clamp the
+    /// mode for the model, so mode and the rest are set against the model they will run on.
+    fn apply_remembered(&self, c: &Controls) {
+        let remembered = self.session.borrow().agent_settings.clone();
+        if std::env::var_os("SILL_TRACE").is_some() {
+            let shown: Vec<String> = c
+                .options
+                .iter()
+                .map(|o| match &o.kind {
+                    ConfigKind::Select(cur, _) => format!("{}={cur}", o.id),
+                    ConfigKind::Boolean(b) => format!("{}={b}", o.id),
+                })
+                .collect();
+            eprintln!(
+                "{} apply remembered mode={:?} config={:?} to mode={:?} {}",
+                super::trace_ts(),
+                remembered.mode,
+                remembered.config,
+                c.modes.as_ref().map(|(cur, _)| cur),
+                shown.join(" ")
+            );
+        }
+        let want_option = |opt: &sill_core::acp::ConfigOption| -> Option<Command> {
+            let want = remembered.config.get(&opt.id)?;
+            match &opt.kind {
+                ConfigKind::Select(current, values) if want != current && values.iter().any(|(id, _)| id == want) => {
+                    Some(Command::SetConfig(opt.id.clone(), ConfigValue::Id(want.clone())))
+                }
+                ConfigKind::Boolean(current) if (want == "true") != *current => {
+                    Some(Command::SetConfig(opt.id.clone(), ConfigValue::Bool(want == "true")))
+                }
+                _ => None,
+            }
+        };
+        let (models, others): (Vec<_>, Vec<_>) = c.options.iter().partition(|o| o.category == "model");
+        for cmd in models.into_iter().filter_map(want_option) {
+            self.command(cmd);
+        }
+        if let (Some(mode), Some((current, modes))) = (&remembered.mode, &c.modes)
+            && mode != current
+            && modes.iter().any(|(id, _)| id == mode)
+        {
+            self.command(Command::SetMode(mode.clone()));
+        }
+        for cmd in others.into_iter().filter_map(want_option) {
+            self.command(cmd);
         }
     }
 
@@ -995,7 +1065,17 @@ impl SessionView {
             d.set_selected(current as u32);
             d
         };
+        // a current value the agent reports but does not offer (a resumed out-of-picker model) gets
+        // its own row rather than the first entry's name
+        let with_current = |current: &str, values: &[(String, String)]| -> Vec<(String, String)> {
+            let mut v = values.to_vec();
+            if !v.iter().any(|(id, _)| id == current) {
+                v.push((current.to_string(), current.to_string()));
+            }
+            v
+        };
         if let Some((current, modes)) = &c.modes {
+            let modes = with_current(current, modes);
             let names: Vec<String> = modes.iter().map(|(_, n)| n.clone()).collect();
             let cur = modes.iter().position(|(id, _)| id == current).unwrap_or(0);
             let d = dropdown(&names, cur);
@@ -1020,6 +1100,7 @@ impl SessionView {
             }
             match &opt.kind {
                 ConfigKind::Select(current, values) => {
+                    let values = with_current(current, values);
                     let names: Vec<String> = values.iter().map(|(_, n)| n.clone()).collect();
                     let cur = values.iter().position(|(id, _)| id == current).unwrap_or(0);
                     let d = dropdown(&names, cur);
@@ -1027,15 +1108,19 @@ impl SessionView {
                     let v = self.clone();
                     let ids: Vec<String> = values.iter().map(|(id, _)| id.clone()).collect();
                     let oid = opt.id.clone();
+                    let is_model = opt.category == "model";
                     d.connect_selected_notify(move |d| {
                         if v.rebuilding.get() {
                             return;
                         }
                         if let Some(id) = ids.get(d.selected() as usize) {
                             v.command(Command::SetConfig(oid.clone(), ConfigValue::Id(id.clone())));
+                            if is_model {
+                                *v.reconcile_model.borrow_mut() = Some(id.clone());
+                            }
                             let (o, i) = (oid.clone(), id.clone());
                             v.remember(move |s| {
-                                s.config.insert(o, i);
+                                s.config.insert(o.clone(), i.clone());
                             });
                         }
                     });
@@ -1056,7 +1141,7 @@ impl SessionView {
                             v.command(Command::SetConfig(oid.clone(), ConfigValue::Bool(state)));
                             let o = oid.clone();
                             v.remember(move |s| {
-                                s.config.insert(o, state.to_string());
+                                s.config.insert(o.clone(), state.to_string());
                             });
                         }
                         glib::Propagation::Proceed
@@ -1732,34 +1817,21 @@ impl SessionView {
                 *self.replaying.borrow_mut() = *resumed;
                 self.status.set_text(if *resumed { "resumed" } else { "ready" });
                 self.build_controls(controls);
-                // bring the agent back to the settings the person last chose
-                let remembered = self.session.borrow().agent_settings.clone();
-                if let (Some(mode), Some((current, modes))) = (&remembered.mode, &controls.modes)
-                    && mode != current
-                    && modes.iter().any(|(id, _)| id == mode)
-                {
-                    self.command(Command::SetMode(mode.clone()));
-                }
-                for opt in &controls.options {
-                    let Some(want) = remembered.config.get(&opt.id) else { continue };
-                    match &opt.kind {
-                        ConfigKind::Select(current, values) => {
-                            if want != current && values.iter().any(|(id, _)| id == want) {
-                                self.command(Command::SetConfig(opt.id.clone(), ConfigValue::Id(want.clone())));
-                            }
-                        }
-                        ConfigKind::Boolean(current) => {
-                            let w = want == "true";
-                            if w != *current {
-                                self.command(Command::SetConfig(opt.id.clone(), ConfigValue::Bool(w)));
-                            }
-                        }
-                    }
-                }
+                // bring the agent back to the settings the person last chose in this session
+                self.apply_remembered(controls);
                 return;
             }
             Event::Controls(c) => {
                 self.build_controls(c);
+                // the model the person picked is current now: the adapter rebuilt the options for it
+                // (effort re-seeded, "auto" possibly clamped) — the remembered picks go once more
+                let picked = self.reconcile_model.borrow().clone();
+                if let Some(model) = picked
+                    && c.options.iter().any(|o| o.category == "model" && matches!(&o.kind, ConfigKind::Select(cur, _) if *cur == model))
+                {
+                    *self.reconcile_model.borrow_mut() = None;
+                    self.apply_remembered(c);
+                }
                 return;
             }
             Event::PermissionRequest { .. } if self.auto_allow.get() => {
