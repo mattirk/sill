@@ -236,6 +236,7 @@ sudo apt install bubblewrap libgtk-4-dev libvte-2.91-gtk4-dev libgtksourceview-5
 cargo build --release
 cargo test --workspace
 packaging/deploy.sh            # from source, in a host terminal (Ctrl+Shift+H): build, sudo sill init, restart, verify
+packaging/check.sh             # deploy.sh runs it last: daemon, units, a jail's view, keep/undo, a ghost session → target/host-check/report.txt
 ```
 
 Release channels: the tarball (`sill-<ver>-<arch>.tar.gz` + `SHA256SUMS`, `packaging/release.sh`)

@@ -3,7 +3,8 @@
 # just made. Run it in a host terminal (Ctrl+Shift+H) — not in a session's shell: sudo is refused
 # inside the jail by design (SPEC §4.2).
 #
-#   packaging/deploy.sh             # cargo build --release, sudo sill init, sill restart, verify
+#   packaging/deploy.sh             # cargo build --release, sudo sill init, sill restart, verify,
+#                                   # then packaging/check.sh (report in target/host-check/)
 #   packaging/deploy.sh --no-build  # install and restart what target/release already has
 set -eu
 cd "$(dirname "$0")/.."
@@ -52,3 +53,9 @@ if command -v systemctl >/dev/null 2>&1 && systemctl --user cat sill-shelf.servi
     }
 fi
 echo "deployed: $PREFIX/bin/sill $(sha256sum "$PREFIX/bin/sill" | cut -c1-12) running as pid ${shelves%% *}"
+
+# what a session cannot see from its jail, into target/host-check/report.txt for the agent to read
+PREFIX="$PREFIX" packaging/check.sh || {
+    echo "deploy.sh: deployed, but check.sh found $? failure(s): target/host-check/report.txt" >&2
+    exit 1
+}
