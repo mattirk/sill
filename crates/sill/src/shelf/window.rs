@@ -285,13 +285,16 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     }
 
     {
-        // Files: the global tree beside the main pane; again (or Ctrl+Shift+F) closes it
+        // Files: the global tree beside the main pane. Showing a pinned folder, it widens to
+        // everything; showing everything, it closes (Ctrl+Shift+F closes either way)
         let s = shelf.clone();
         files_btn.connect_clicked(move |_| {
-            if s.tree.root.is_visible() {
-                s.close_tree();
-            } else {
+            if !s.tree.root.is_visible() {
                 s.toggle_tree(None);
+            } else if s.tree.scope().is_some() {
+                s.tree.set_scope(None);
+            } else {
+                s.close_tree();
             }
         });
     }

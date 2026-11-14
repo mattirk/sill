@@ -323,6 +323,8 @@ impl FolderTree {
             let langs = langs.clone();
             let pinned = pinned.clone();
             let elsewhere = elsewhere.clone();
+            let tree_rc = tree_rc.clone();
+            let home = session::home().unwrap_or_default();
             Rc::new(move |item: &gtk::ListItem| {
                 let Some(row) = item.item().and_downcast::<gtk::TreeListRow>() else { return };
                 let Some(expander) = item.child().and_downcast::<gtk::TreeExpander>() else { return };
@@ -356,8 +358,18 @@ impl FolderTree {
                     logo.set_visible(false);
                     return;
                 }
-                name.remove_css_class("sill-tree-section");
                 let Some(path) = path_of(&row) else { return };
+                // the global view's home root is a caption of its own that opens: "Home" in the
+                // caption's style with the folder icon (it opens like one), no pin — a folder among
+                // the pinned ones otherwise
+                let home_caption = row.depth() == 0 && path == home && tree_rc.borrow().as_ref().and_then(|w| w.upgrade()).is_some_and(|t| t.scope.borrow().is_none());
+                if home_caption {
+                    name.add_css_class("sill-tree-section");
+                } else {
+                    name.remove_css_class("sill-tree-section");
+                }
+                icon.set_visible(true);
+                pin.set_visible(!home_caption);
                 let is_dir = path.is_dir();
                 // every row's icon is a sill glyph in the foreground colour (rows are rebound on a
                 // theme change, so they follow it)
@@ -371,8 +383,10 @@ impl FolderTree {
                     name.add_css_class("sill-dim");
                 }
                 // a root shows where it is; everything below just its name
-                let label = if row.depth() == 0 {
-                    path.display().to_string().replacen(&std::env::var("HOME").unwrap_or_default(), "~", 1)
+                let label = if home_caption {
+                    "Home".to_string()
+                } else if row.depth() == 0 {
+                    path.display().to_string().replacen(&*home.to_string_lossy(), "~", 1)
                 } else {
                     fname.clone()
                 };
@@ -711,7 +725,7 @@ impl FolderTree {
         let t = self.clone();
         glib::spawn_future_local(async move {
             if let Ok((all, owners, statuses)) = rx.recv().await {
-                t.apply(all, owners, pins, statuses);
+                t.apply(all, owners, statuses);
             }
             t.scanning.set(false);
             if t.again.replace(false) {
@@ -720,7 +734,7 @@ impl FolderTree {
         });
     }
 
-    fn apply(self: &Rc<Self>, all: Vec<Change>, owners: BTreeMap<PathBuf, String>, pins: Vec<PathBuf>, statuses: Vec<(PathBuf, Vec<(PathBuf, String)>)>) {
+    fn apply(self: &Rc<Self>, all: Vec<Change>, owners: BTreeMap<PathBuf, String>, statuses: Vec<(PathBuf, Vec<(PathBuf, String)>)>) {
         let home = session::home().unwrap_or_default();
         let mut badges: BTreeMap<PathBuf, Badge> = BTreeMap::new();
         // git working-tree status of every repo in view, as the scan thread read it: M/A/D/R from
@@ -743,10 +757,12 @@ impl FolderTree {
                 }
             }
         }
-        // folders only as roots: a pinned file is a chip, not a tree
+        // folders only as roots: a pinned file is a chip, not a tree. Pinned here is the selected
+        // session's own pins (`pinned`, set by refresh); other sessions' pins are scanned for git
+        // status but show only as repositories with changes
         let mut roots: Vec<PathBuf> = match &scope {
             Some(s) => vec![s.clone()],
-            None => pins.into_iter().filter(|p| p.is_dir()).collect(),
+            None => self.pinned.borrow().iter().filter(|p| p.is_dir()).cloned().collect(),
         };
         // the global view's second group: every repository a session changed that isn't pinned here
         let mut touched: Vec<PathBuf> = Vec::new();
@@ -783,8 +799,9 @@ impl FolderTree {
                 };
                 section("Pinned here", &roots);
                 section("Repositories with changes", &touched);
+                // home is its own caption: the row reads "Home" and opens on click (decorate)
                 if !roots.contains(&home) && !touched.contains(&home) {
-                    section("Home", std::slice::from_ref(&home));
+                    w.push(text(&home));
                 }
                 w
             }
