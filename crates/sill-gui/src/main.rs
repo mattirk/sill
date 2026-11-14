@@ -4,6 +4,7 @@ mod control;
 mod daemon_ui;
 mod demo;
 mod desktop;
+mod desktop_view;
 mod details;
 mod editor;
 mod fonts;
@@ -249,6 +250,8 @@ pub enum Message {
     Procs(processes::Event),
     /// The session's Permissions panel (`permissions.rs`).
     Perms(permissions::Event),
+    /// The live view of a session's test desktop (`desktop_view.rs`).
+    Desktop(desktop_view::Event),
     NetworkRead(String, Result<sill_proto::admin::NetworkDenied, String>),
     NetworkAnswer(String, String, bool),
     NetworkDone(String, network::Choice, Outcome),
@@ -422,6 +425,8 @@ pub struct SessionView {
     pub processes: processes::Procs,
     /// Its permission state and panel (`permissions.rs`).
     pub permissions: permissions::Perms,
+    /// Its test desktop's live view (`desktop_view.rs`).
+    pub desktop: desktop_view::View,
 }
 
 impl SessionView {
@@ -475,6 +480,7 @@ impl SessionView {
             forms: BTreeMap::new(),
             processes: processes::Procs::default(),
             permissions: permissions::Perms::default(),
+            desktop: desktop_view::View::default(),
         }
     }
 
@@ -594,6 +600,7 @@ pub struct App {
     /// Numbers the notes on exposed ports, so a later one outlives an earlier one's expiry.
     process_serial: u64,
     permission_serial: u64,
+    desktop_serial: u64,
     pub demo: bool,
     daemon: daemon_ui::State,
     connect: Option<Connector>,
@@ -712,6 +719,7 @@ impl App {
             network: network::State::default(),
             process_serial: 0,
             permission_serial: 0,
+            desktop_serial: 0,
             demo,
             actions: connect.clone().map(Actions::new),
             connect,
@@ -1203,6 +1211,12 @@ impl App {
                     .map(|_| Message::FilesPoll),
             );
         }
+        // the shown test desktop: a new picture about once a second (an unchanged one is not fetched)
+        if !self.demo && self.current().is_some_and(|v| v.desktop.shown) {
+            subscriptions.push(
+                iced::time::every(Duration::from_secs(1)).map(|_| Message::Desktop(desktop_view::Event::Tick)),
+            );
+        }
         // sessions started or ended elsewhere appear and go
         if !self.demo {
             subscriptions
@@ -1428,6 +1442,7 @@ impl App {
             }
             Message::Procs(event) => return self.processes_event(event),
             Message::Perms(event) => return self.permissions_event(event),
+            Message::Desktop(event) => return self.desktop_event(event),
             Message::NetworkRead(id, result) => self.network.read(id, result),
             Message::NetworkAnswer(id, host, allow) => return self.answer_network(id, host, allow),
             Message::NetworkDone(id, choice, outcome) => {

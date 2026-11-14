@@ -1184,7 +1184,8 @@ fn session_permission_choices_restore_defaults_and_frontend_gate() {
     assert_eq!(state(&unchanged["result"], "public_web")["effective"], false, "grants belong to one session");
 
     // Widening is refused where no backend or a limit blocks it; declining always applies.
-    let blocked = set(&mut modes, &web, "test_desktop", json!(true));
+    // (the private bus has no backend; the test desktop's depends on Weston being installed)
+    let blocked = set(&mut modes, &web, "private_bus", json!(true));
     assert_eq!(blocked["error"]["data"]["code"], "permission_denied", "{blocked}");
     assert!(blocked["error"]["message"].as_str().unwrap().contains("backend"), "{blocked}");
     assert_eq!(set(&mut modes, &web, "host_control", json!(true))["error"]["data"]["code"], "permission_denied");

@@ -4,7 +4,9 @@
 Runs a throwaway daemon with its own HOME, runtime and state directories, a stub ACP agent and
 real bubblewrap jails (systemd scopes when the user manager answers). Every check that needs a
 jail runs a shell inside it through a session terminal. Needs internet access for the public-web
-checks (example.com/.org/.net, www.iana.org) and Python jsonschema (scripts/requirements-sfp.txt):
+checks (example.com/.org/.net, www.iana.org), Python jsonschema (scripts/requirements-sfp.txt),
+and for the test desktop Weston, Xwayland, xdotool and ImageMagick (`magick`); it runs headless,
+since the throwaway daemon gets no display:
 
     python scripts/sfp_permissions_host_scenario.py --binary target/local/sill [--keep]
 
@@ -233,6 +235,17 @@ def states(view):
     return {item["capability"]: item for item in view["permissions"]}
 
 
+def read(path):
+    try:
+        return pathlib.Path(path).read_bytes().decode(errors="replace")
+    except OSError:
+        return ""
+
+
+def comm(pid):
+    return read(f"/proc/{pid}/comm").strip()
+
+
 def scope_active(session_id):
     done = subprocess.run(["systemctl", "--user", "is-active", f"sill-{session_id}.scope"],
                           capture_output=True, text=True)
@@ -449,15 +462,16 @@ PY
               json.dumps(ghost_view)[:400])
 
         # -- 10. Desktop development requests and the frontend gate ------------------------------
-        d = create("desktop", env.policy("desktop", permissions='test_desktop = "on"\ngpu = "forbidden"'))
+        # (the private bus has no backend yet: the request without one; the test desktop is 14.)
+        d = create("desktop", env.policy("desktop", permissions='private_bus = "on"\ngpu = "forbidden"'))
         shown = env.cli("permissions", "show", d).stdout
-        info("sill permissions show (desktop request):\n       " + "\n       ".join(shown.splitlines()))
-        line = next((l for l in shown.splitlines() if l.startswith("test_desktop")), "")
-        check("the CLI shows a requested desktop as unavailable, policy default on",
+        info("sill permissions show (private bus request):\n       " + "\n       ".join(shown.splitlines()))
+        line = next((l for l in shown.splitlines() if l.startswith("private_bus")), "")
+        check("the CLI shows a requested private bus as unavailable, policy default on",
               "unavailable" in line and "policy default: on" in line, shown)
         check("the CLI shows a forbidden capability",
               any(l.startswith("gpu") and "policy default: forbidden" in l for l in shown.splitlines()), shown)
-        check("a test-desktop request refuses launch (no backend)", code(c.call, "_sill/sessions.start", {"session_id": d}) is not None)
+        check("a private-bus request refuses launch (no backend)", code(c.call, "_sill/sessions.start", {"session_id": d}) is not None)
         time.sleep(0.5)
         check("…and no jail or scope was created (no fallback)", not scope_active(d) and not get(d)["running"])
         check("a GTK-like client cannot start it", code(gtk.call, "_sill/sessions.start", {"session_id": d}) == "unsupported")
@@ -465,10 +479,10 @@ PY
               code(gtk.call, "_sill/policy.allow_host", {"session_id": d, "host": OTHER}) == "unsupported")
         check("a GTK-like client cannot change choices",
               code(gtk.call, "_sill/permissions.set", {"session_id": a, "capability": "public_web", "enabled": False}) == "unsupported")
-        # a running Default jail whose next build would request a test desktop
+        # a running Default jail whose next build would request a Desktop development capability
         nxt = create("next-desktop", env.policy("next-desktop"))
         start(nxt)
-        env.policy("next-desktop", permissions='test_desktop = "on"')
+        env.policy("next-desktop", permissions='private_bus = "on"')
         submit = {"session_id": nxt, "submission_id": "gate-1", "text": "hello"}
         # while running, the launch decides: the jail is still a Default one until it is rebuilt
         check("GTK-like submit reaches the running Default jail despite an edited policy",
@@ -552,6 +566,159 @@ PY
         gtk.close()
         env.stop_daemon()
         env.environment["PATH"] = path
+        env.start_daemon()
+        c = env.client()
+        gtk = env.client(modes=False, name="gtk-like")
+
+        # -- 14. the test desktop (Weston + Xwayland, headless: this daemon has no display) ------
+        if not shutil.which("weston"):
+            check("Weston is installed for the test desktop checks", False, "install weston")
+            return created
+        desk = create("test-desktop", env.policy("test-desktop", permissions='test_desktop = "on"'))
+        view = states(c.call("_sill/policy.preview", {"session_id": desk}))["test_desktop"]
+        check("the test desktop is available and on for a requesting policy",
+              view["available"] and view["effective"] and "Weston" in view["reason"], json.dumps(view))
+        check("a GTK-like client cannot start a test-desktop session",
+              code(gtk.call, "_sill/sessions.start", {"session_id": desk}) == "unsupported")
+        check("a permission-modes client starts it", start(desk))
+        status, out = sh(c, desk, """
+            echo "env $WAYLAND_DISPLAY $DISPLAY $DBUS_SESSION_BUS_ADDRESS"
+            ls /tmp/.X11-unix
+            [ -S "/run/user/$(id -u)/$WAYLAND_DISPLAY" ] && echo wayland-socket
+            xdotool getdisplaygeometry
+            DISPLAY=:0 xdotool getdisplaygeometry >/dev/null 2>&1 && echo REAL-DISPLAY-REACHED
+            python3 - <<'PY'
+import socket
+s = socket.socket(socket.AF_UNIX)
+try:
+    s.connect("\\0/tmp/.X11-unix/X0"); print("ABSTRACT-X0-REACHED")
+except OSError:
+    pass
+PY
+            [ -e /tmp/.X11-unix/X0 ] && echo HOST-X0-VISIBLE
+            timeout 5 weston-debug -l 2>&1 | grep -v "^Available debug streams" | grep . && echo DEBUG-SCOPES-OFFERED
+            exit 0""")
+        lines = out.splitlines()
+        env_line = next((l for l in lines if l.startswith("env ")), "")
+        display = env_line.split()[2] if len(env_line.split()) > 2 else ""
+        check("the jail gets the desktop's Wayland socket and X11 display, no bus",
+              env_line.startswith("env wayland-0 :") and env_line.endswith("disabled:") and "wayland-socket" in lines, out)
+        check("only the desktop's own X11 socket is in the jail", f"X{display[1:]}" in lines and "X0" not in lines, out)
+        check("X11 programs see the 1280×800 test display", "1280 800" in lines, out)
+        check("the real display stays out of reach (path, abstract socket, DISPLAY=:0)",
+              not any(m in out for m in ("REAL-DISPLAY-REACHED", "ABSTRACT-X0-REACHED", "HOST-X0-VISIBLE")), out)
+        check("the desktop offers no debug scope (no protocol dump of other clients)", "DEBUG-SCOPES-OFFERED" not in out, out)
+        # a Wayland client on the desktop, then a screenshot from inside, copied out to look at
+        status, out = sh(c, desk, """
+            weston-flower >/dev/null 2>&1 &
+            weston-simple-shm >/dev/null 2>&1 &
+            sleep 1.5
+            cd "$(mktemp -d)" && weston-screenshooter >/dev/null 2>&1 && base64 -w0 wayland-screenshot-*.png""", timeout=90)
+        shot = env.root / "test-desktop.png"
+        try:
+            shot.write_bytes(base64.b64decode(out.strip()))
+            info_line = subprocess.run(["magick", "identify", "-format", "%w %h %k", str(shot)],
+                                       capture_output=True, text=True).stdout.split()
+        except Exception as error:  # noqa: BLE001 - reported as the check's detail
+            info_line = [str(error)]
+        check("a screenshot taken inside shows the 1280×800 desktop with its clients",
+              info_line[:2] == ["1280", "800"] and len(info_line) == 3 and int(info_line[2]) > 200,
+              " ".join(info_line))
+        # the daemon's own pictures, for the live view: taken outside the jail, read in chunks
+        frame = c.call("_sill/desktop.capture", {"session_id": desk})
+        png = b""
+        while True:
+            chunk = c.call("_sill/desktop.read", {"session_id": desk, "revision": frame["revision"],
+                                                   "offset": str(len(png)), "length": 65536})
+            png += base64.b64decode(chunk["bytes_base64"])
+            if chunk["eof"]:
+                break
+        check("the daemon takes pictures of the test desktop for the live view",
+              frame["width"] == 1280 and frame["height"] == 800 and frame["scale"] == 1
+              and len(png) == int(frame["size"]) and png[:8] == b"\x89PNG\r\n\x1a\n", json.dumps(frame))
+        check("a replaced picture is refused rather than mixed",
+              code(c.call, "_sill/desktop.read", {"session_id": desk, "revision": "stale", "offset": "0"}) == "conflict")
+        # Weston itself: in this session's scope, headless (always), none of the launcher's display
+        weston = [pid for pid in os.listdir("/proc") if pid.isdigit() and comm(pid) == "weston"
+                  and f"sill-{desk}.scope" in read(f"/proc/{pid}/cgroup")]
+        check("Weston runs in the session's scope", len(weston) == 1, str(weston))
+        if weston:
+            argv = read(f"/proc/{weston[0]}/cmdline").split("\0")
+            environ = dict(kv.split("=", 1) for kv in read(f"/proc/{weston[0]}/environ").split("\0") if "=" in kv)
+            config = next((a.split("=", 1)[1] for a in argv if a.startswith("--config=")), "")
+            check("…headless, its own weston.ini only, software rendering, its own runtime directory",
+                  "--backend=headless" in argv and config.endswith("/desktop/weston.ini") and "--renderer=pixman" in argv
+                  and "--debug-scopes=none" in argv
+                  and environ.get("XDG_RUNTIME_DIR", "").endswith("/desktop") and environ.get("HOME") == environ.get("XDG_RUNTIME_DIR"),
+                  " ".join(argv))
+            check("…and none of the person's display or bus variables",
+                  not any(k in environ for k in ("DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS")),
+                  " ".join(sorted(environ)))
+        x11 = pathlib.Path(f"/tmp/.X11-unix/X{display[1:]}") if display else None
+        c.call("_sill/sessions.stop", {"session_id": desk})
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and (any(pathlib.Path(f"/proc/{p}").exists() for p in weston)
+                                               or (x11 is not None and x11.exists())):
+            time.sleep(0.2)
+        check("stopping the session stops Weston and removes its X11 socket",
+              not any(pathlib.Path(f"/proc/{p}").exists() for p in weston) and x11 is not None and not x11.exists())
+        # as a session choice: a restart builds it in, and out again
+        choice = create("desktop-choice", env.policy("desktop-choice"))
+        start(choice)
+        changed = c.call("_sill/permissions.set", {"session_id": choice, "capability": "test_desktop", "enabled": True})
+        check("turning the test desktop on for a running session needs a restart", changed["restart_required"])
+        has_desktop = lambda sid: sh(c, sid, 'echo "[$WAYLAND_DISPLAY]"')[1] == "[wayland-0]"
+        check("after the restart the session has its desktop", restart(choice) and has_desktop(choice))
+        c.call("_sill/permissions.set", {"session_id": choice, "capability": "test_desktop", "enabled": False})
+        check("turned off, the next build has none", restart(choice) and not has_desktop(choice))
+        ghost_desktop = create("ghost-desktop", env.policy("ghost-desktop", permissions='test_desktop = "on"'), ghost=True)
+        check("a ghost refuses a test desktop",
+              not states(c.call("_sill/policy.preview", {"session_id": ghost_desktop}))["test_desktop"]["allowed"]
+              and code(c.call, "_sill/permissions.set", {"session_id": ghost_desktop, "capability": "test_desktop", "enabled": True}) == "permission_denied")
+        # a Weston that cannot start fails the launch: no jail, never the real display instead
+        c.close()
+        gtk.close()
+        env.stop_daemon()
+        fake = env.root / "fake-weston"
+        fake.mkdir()
+        (fake / "weston").write_text('#!/bin/sh\n[ "$1" = --version ] && { echo "weston 15.0.1"; exit 0; }\necho "weston: fixture refuses" >&2\nexit 1\n')
+        (fake / "weston").chmod(0o755)
+        env.environment["PATH"] = f"{fake}:{path}"
+        env.start_daemon()
+        c = env.client()
+        gtk = env.client(modes=False, name="gtk-like")
+        broken = create("broken-desktop", env.policy("broken-desktop", permissions='test_desktop = "on"'))
+        failure = None
+        try:
+            c.call("_sill/sessions.start", {"session_id": broken})
+        except RpcError as error:
+            failure = str(error)
+        check("a test desktop that cannot start fails the launch, saying why",
+              failure is not None and "test desktop" in failure and "fixture refuses" in failure, failure or "started")
+        info(f"broken Weston: {failure}")
+        check("…with no jail or scope left", not get(broken)["running"] and not scope_active(broken))
+        c.close()
+        gtk.close()
+        env.stop_daemon()
+        env.environment["PATH"] = path
+        # the person's screen scale: a HiDPI picture of a desktop of the same size
+        env.environment["SILL_TEST_DESKTOP_SCALE"] = "2"
+        env.start_daemon()
+        c = env.client()
+        gtk = env.client(modes=False, name="gtk-like")
+        hidpi = create("hidpi-desktop", env.policy("hidpi-desktop", permissions='test_desktop = "on"'))
+        start(hidpi)
+        frame = c.call("_sill/desktop.capture", {"session_id": hidpi})
+        status, out = sh(c, hidpi, "xdotool getdisplaygeometry")
+        check("at scale 2 the desktop renders 2560×1600 for a 1280×800 desktop",
+              (frame["width"], frame["height"], frame["scale"]) == (2560, 1600, 2) and out.strip() == "1280 800",
+              f"{json.dumps(frame)} {out}")
+        check("a session without a test desktop has no pictures",
+              code(c.call, "_sill/desktop.capture", {"session_id": a}) == "not_found")
+        c.close()
+        gtk.close()
+        env.stop_daemon()
+        del env.environment["SILL_TEST_DESKTOP_SCALE"]
         env.start_daemon()
         c = env.client()
         gtk = env.client(modes=False, name="gtk-like")

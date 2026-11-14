@@ -815,7 +815,17 @@ fn main() -> Result<()> {
         }
         Cmd::Jail { cmd } => jail_cmd(cmd),
         Cmd::Dev { cmd } => dev_cmd(cmd),
-        Cmd::Launch { session, jail, shim, agent, child, cgroup_root } => launch(&session, jail, shim, agent.as_deref(), child, cgroup_root),
+        Cmd::Launch { session, jail, shim, agent, child, cgroup_root } => {
+            let result = launch(&session, jail, shim, agent.as_deref(), child, cgroup_root);
+            // why it failed, for the daemon's answer to the start (the journal has the rest)
+            if let Err(e) = &result
+                && child
+                && let Ok(rt) = shim::runtime_dir(&session)
+            {
+                let _ = std::fs::write(rt.join("launch-error"), format!("{e:#}"));
+            }
+            result
+        }
         Cmd::Init(a) => init::run(a),
         Cmd::Shelf { cwd, hidden } => frontend::shelf(cwd, hidden),
         Cmd::Toggle => frontend::toggle(),
@@ -1213,6 +1223,24 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
         }));
         spec.proxy_socket = Some(proxy_sock);
     }
+    // Desktop development's test desktop (docs/permission-modes.md): Weston and its Xwayland in
+    // this scope, outside the jail, their two sockets the only display inside. It stops when this
+    // launcher returns (or dies with it); a desktop that cannot start fails the launch.
+    let _desktop = if spec.policy.permissions.test_desktop == sill_core::permissions::Rule::On {
+        let desktop = sill_core::desktop::Desktop::start(&rt.join("desktop"), sill_core::desktop::scale())
+            .context("starting the test desktop")?;
+        eprintln!(
+            "sill launch: test desktop: Weston pid {}, headless at scale {}, X11 display :{}",
+            desktop.pid(),
+            desktop.scale,
+            desktop.x11_display
+        );
+        spec.binds.extend(desktop.jail_binds(spec.uid));
+        spec.env.extend(desktop.jail_env());
+        Some(desktop)
+    } else {
+        None
+    };
     let seccomp = seccomp_fd(&mut spec)?;
     let plan = spec.plan()?;
     for w in &plan.warnings {

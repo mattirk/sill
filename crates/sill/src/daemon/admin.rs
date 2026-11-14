@@ -267,6 +267,13 @@ fn install_policy(home: &Path, name: &str, text: &str, replace: bool) -> Result<
     let _ = fs::remove_file(temp);
     result
 }
+/// The latest test desktop picture of each session, for `_sill/desktop.read` (one each: a new
+/// capture replaces it).
+fn pictures() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<sill_core::desktop::Picture>>> {
+    static PICTURES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<sill_core::desktop::Picture>>>> =
+        std::sync::OnceLock::new();
+    PICTURES.get_or_init(Default::default)
+}
 fn session_hosts(session_id: &str) -> Result<std::collections::BTreeSet<String>> {
     use std::os::unix::fs::OpenOptionsExt;
     let path = sill_core::shim::runtime_dir(session_id)?.join("session-allowed-hosts");
@@ -396,6 +403,8 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
     if !matches!(
         m,
         "_sill/files.image"
+            | "_sill/desktop.capture"
+            | "_sill/desktop.read"
             | "_sill/policy.denied"
             | "_sill/policy.remember_denied"
             | "_sill/policy.allow_host"
@@ -426,6 +435,57 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
         return None;
     }
     Some((|| match m {
+        "_sill/desktop.capture" => {
+            let a: api::DesktopCapture = args(p)?;
+            session(hub, &a.session_id)?;
+            let dir = sill_core::shim::runtime_dir(&a.session_id)?.join("desktop");
+            if !sill_core::session::is_running(&a.session_id) || !dir.join(sill_core::desktop::WAYLAND_SOCKET).exists() {
+                return Err(domain("not_found", "this session has no test desktop running"));
+            }
+            // one capture at a time: each runs a client of a compositor and writes a picture
+            static CAPTURING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let _one = CAPTURING.lock().unwrap_or_else(|e| e.into_inner());
+            let shot = sill_core::desktop::capture(&dir).map_err(|e| domain("operation_failed", format!("{e:#}")))?;
+            let scale = (shot.width() / sill_core::desktop::WIDTH).max(1);
+            if a.since.as_deref() == Some(shot.revision.as_str()) {
+                // the frontend shows this already: no encoding, nothing to read
+                let (width, height) = (shot.width(), shot.height());
+                return bounded(api::DesktopFrame {
+                    revision: shot.revision, changed: false, width, height, scale, size: "0".into(),
+                });
+            }
+            let picture = shot.picture().map_err(|e| domain("operation_failed", format!("{e:#}")))?;
+            let frame = api::DesktopFrame {
+                revision: picture.revision.clone(),
+                changed: true,
+                width: picture.width,
+                height: picture.height,
+                scale,
+                size: picture.png.len().to_string(),
+            };
+            pictures().lock().unwrap().insert(a.session_id, std::sync::Arc::new(picture));
+            bounded(frame)
+        }
+        "_sill/desktop.read" => {
+            let a: api::DesktopRead = args(p)?;
+            session(hub, &a.session_id)?;
+            let picture = pictures().lock().unwrap().get(&a.session_id).cloned()
+                .filter(|p| p.revision == a.revision)
+                .ok_or_else(|| domain("conflict", "that picture was replaced or is gone; capture again"))?;
+            let offset: usize = a.offset.parse().map_err(|_| invalid("offset must be a decimal u64"))?;
+            let n = a.length.unwrap_or(api::FILE_CHUNK_BYTES as u32) as usize;
+            if n == 0 || n > api::FILE_CHUNK_BYTES {
+                return Err(invalid("length must be 1–1048576"));
+            }
+            let start = offset.min(picture.png.len());
+            let end = start.saturating_add(n).min(picture.png.len());
+            bounded(api::FileBytes {
+                bytes_base64: api::encode_bytes(&picture.png[start..end]),
+                next_offset: end.to_string(),
+                eof: end == picture.png.len(),
+                revision: picture.revision.clone(),
+            })
+        }
         "_sill/files.image" => {
             let a: api::SessionImage = args(p)?;
             session(hub, &a.session_id)?;

@@ -16,8 +16,8 @@ const LIMIT: usize = sill_proto::initialize::MAX_INLINE_BYTES;
 pub struct Picture {
     pub handle: image::Handle,
     rgba: Arc<Vec<u8>>,
-    width: u32,
-    height: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 }
 pub type Cache = BTreeMap<String, Option<Result<Picture, String>>>;
 #[derive(Debug, Clone)]
@@ -50,7 +50,7 @@ fn clipboard<T>(f: impl FnOnce(&mut arboard::Clipboard) -> Result<T, String>) ->
     }
     f(clip.as_mut().unwrap())
 }
-fn decode(bytes: &[u8]) -> Result<Picture, String> {
+pub(crate) fn decode(bytes: &[u8]) -> Result<Picture, String> {
     let (w, h) = ::image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| e.to_string())?

@@ -20,6 +20,7 @@ pub struct Capability { pub name: &'static str, pub version: u32, pub doc: &'sta
 pub const CAPABILITIES: &[Capability] = &[
     Capability { name: "sill.send_now", version: 1, doc: "_sill/submissions.send_now: a queued submission goes next, the active turn stopped." },
     Capability { name: "sill.permission_modes", version: 1, doc: "The frontend shows session permission state: it may change session capability choices and operate sessions using Desktop development or Host control capabilities." },
+    Capability { name: "sill.desktop_view", version: 1, doc: "_sill/desktop.capture and _sill/desktop.read: pictures of a session's test desktop, for a live view." },
 ];
 
 /// Capabilities that state a frontend's own user-facing contract. The shared client offers

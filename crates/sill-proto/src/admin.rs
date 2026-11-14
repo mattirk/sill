@@ -111,6 +111,37 @@ pub struct PermissionsChanged {
     /// The running jail does not have the new state; a restart builds it.
     pub restart_required: bool,
 }
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DesktopCapture {
+    pub session_id: String,
+    /// The revision the frontend shows: when the desktop still looks so, nothing is encoded.
+    #[serde(default)]
+    pub since: Option<String>,
+}
+/// A frame of a session's test desktop, taken by the daemon (`_sill/desktop.capture`). The PNG
+/// itself is read with `_sill/desktop.read` while it is the latest.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DesktopFrame {
+    /// The SHA-256 of the picture's pixels: an unchanged desktop has the same revision.
+    pub revision: String,
+    /// False when `since` named this picture: there is nothing new to read.
+    pub changed: bool,
+    /// The picture's size in pixels; the desktop's own size is this divided by `scale`.
+    pub width: u32,
+    pub height: u32,
+    pub scale: u32,
+    /// The PNG's length in bytes (decimal); 0 when not `changed`.
+    pub size: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DesktopRead {
+    pub session_id: String,
+    pub revision: String,
+    pub offset: String,
+    pub length: Option<u32>,
+}
 /// A host approved for this session alone (Allow), remembered across builds.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionHostGrant {

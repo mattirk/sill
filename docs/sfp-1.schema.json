@@ -1182,6 +1182,96 @@
       ],
       "type": "object"
     },
+    "DesktopCapture": {
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "since": {
+          "default": null,
+          "description": "The revision the frontend shows: when the desktop still looks so, nothing is encoded.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "type": "object"
+    },
+    "DesktopFrame": {
+      "description": "A frame of a session's test desktop, taken by the daemon (`_sill/desktop.capture`). The PNG\nitself is read with `_sill/desktop.read` while it is the latest.",
+      "properties": {
+        "changed": {
+          "description": "False when `since` named this picture: there is nothing new to read.",
+          "type": "boolean"
+        },
+        "height": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "description": "The SHA-256 of the picture's pixels: an unchanged desktop has the same revision.",
+          "type": "string"
+        },
+        "scale": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "size": {
+          "description": "The PNG's length in bytes (decimal); 0 when not `changed`.",
+          "type": "string"
+        },
+        "width": {
+          "description": "The picture's size in pixels; the desktop's own size is this divided by `scale`.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revision",
+        "changed",
+        "width",
+        "height",
+        "scale",
+        "size"
+      ],
+      "type": "object"
+    },
+    "DesktopRead": {
+      "additionalProperties": false,
+      "properties": {
+        "length": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "offset": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "revision",
+        "offset"
+      ],
+      "type": "object"
+    },
     "Detach": {
       "properties": {
         "session_id": {
@@ -6173,6 +6263,11 @@
         "doc": "The frontend shows session permission state: it may change session capability choices and operate sessions using Desktop development or Host control capabilities.",
         "name": "sill.permission_modes",
         "version": 1
+      },
+      {
+        "doc": "_sill/desktop.capture and _sill/desktop.read: pictures of a session's test desktop, for a live view.",
+        "name": "sill.desktop_view",
+        "version": 1
       }
     ],
     "rules": "Names are namespace.feature (lowercase ASCII, digits, '_'); versions are cumulative from 1; the daemon answers min(offered, supported) and omits unknown ones. A missing capability disables that feature only; it is never a protocol mismatch."
@@ -6433,6 +6528,34 @@
       },
       "result": {
         "$ref": "#/$defs/AllowedHost"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.desktop_view": 1
+      },
+      "doc": "Take a picture of the session's test desktop (Desktop development), on the host, outside the jail. A new one is kept for `_sill/desktop.read`; when it is still the `since` revision nothing is encoded and `changed` is false. `not_found` when the session has no test desktop running.",
+      "kind": "request",
+      "name": "_sill/desktop.capture",
+      "params": {
+        "$ref": "#/$defs/DesktopCapture"
+      },
+      "result": {
+        "$ref": "#/$defs/DesktopFrame"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.desktop_view": 1
+      },
+      "doc": "Read the latest test desktop picture (PNG) in chunks of at most 1 MiB; `conflict` when a newer capture replaced that revision.",
+      "kind": "request",
+      "name": "_sill/desktop.read",
+      "params": {
+        "$ref": "#/$defs/DesktopRead"
+      },
+      "result": {
+        "$ref": "#/$defs/FileBytes"
       }
     },
     {

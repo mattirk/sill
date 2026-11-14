@@ -94,7 +94,11 @@ pub fn facts_block(policy: &Policy, home: &Path) -> String {
     if !p.ro.is_empty() {
         lines.push(format!("Read-only: {}.", some(&p.ro, 10)));
     }
-    lines.push("No X11, no D-Bus: nothing graphical, no desktop services (a program that asks for a bus is refused; none is started).".into());
+    if policy.permissions.test_desktop == crate::permissions::Rule::On {
+        lines.push("A test desktop: an isolated Weston desktop, never the person's own; they can watch it in sill. Wayland programs reach it through WAYLAND_DISPLAY, X11 programs through DISPLAY (Xwayland). `xdotool` drives X11 programs (mousemove, click, type, key; keys go to the window under the pointer, so move it there first); Wayland programs take no injected input. `weston-screenshooter` saves a screenshot of it as wayland-screenshot-*.png in the current directory. No D-Bus: no desktop services.".into());
+    } else {
+        lines.push("No X11, no D-Bus: nothing graphical, no desktop services (a program that asks for a bus is refused; none is started).".into());
+    }
     lines.push("The person reads your replies as rendered Markdown: to show an image file, write `![what it shows](/absolute/path.png)` with its path here; a bare path is only text.".into());
     let net = match policy.network.mode {
         NetMode::None => "No network.".to_string(),

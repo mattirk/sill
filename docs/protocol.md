@@ -88,7 +88,9 @@ or left out by the view's limits with a `reason` (offline, or `network.allow_add
 false`); they stay remembered and apply again when the limit goes (2026-11-06, additive). A
 launch snapshot lists those its build consulted; hosts approved later reach the running proxy live.
 Preview is prospective; snapshot effective state describes the recorded launch policy, not a
-live Host control activation. Availability describes the current daemon's backend support.
+live Host control activation. Availability describes the current daemon's backend support:
+`public_web` always, `test_desktop` where the daemon's machine has Weston (at least 10) and
+Xwayland (2026-11-06, no schema change), the others not yet.
 Unavailable capabilities cannot be activated by selecting a policy. Host control never gains
 authority from policy inspection or import.
 
@@ -727,6 +729,25 @@ in its change field. The daemon trims names and accepts 1–80 characters withou
 characters. A name change does not alter `title`; it updates a known summary-signature footer.
 Older sessions without a preserved name return null. The exported schema includes this additive
 extension; clients default absent name fields to null.
+
+### Test desktop pictures (2026-11-06)
+
+Capability `sill.desktop_view` (daemon-offered; every client offers it). A session whose launch has
+the test desktop can be watched from a frontend:
+
+| Method | Request | Result |
+|---|---|---|
+| `_sill/desktop.capture` | `{session_id, since?}` | `{revision, changed, width, height, scale, size}` |
+| `_sill/desktop.read` | `{session_id, revision, offset, length?}` | file bytes record (at most 1 MiB) |
+
+The daemon takes the picture outside the jail, as a Wayland client of the desktop's own socket
+(Weston's capture protocol). `revision` is the SHA-256 of the picture's pixels; when it equals
+`since`, `changed` is false, `size` is 0 and nothing is encoded. Otherwise the picture is kept as
+the session's latest PNG (RGB, `size` bytes) for `desktop.read`, which returns `conflict` once a
+newer capture replaced that revision. `width`/`height` are pixels; the desktop is `width/scale` by
+`height/scale` points. `not_found` when the session has no test desktop running. One capture runs
+at a time; a frontend polls while it shows the view (sill-gui: every second, slowing to every three
+while nothing changes).
 
 ### A failed jail start is an error (2026-11-06)
 

@@ -104,11 +104,12 @@ try:
         denied(session("ceiling", "allow_additional_hosts=false"), "example.com")
         denied(first, "*.example.com")
         # Permission inspection must distinguish an eligible capability from an implemented backend.
-        desktop = session("desktop", "mode='allow'\n[permissions]\ntest_desktop='on'\nhost_control='forbidden'")
+        desktop = session("desktop", "mode='allow'\n[permissions]\nprivate_bus='on'\nhost_control='forbidden'")
         view = client.call("_sill/policy.preview", {"session_id": desktop})
         states = {item["capability"]: item for item in view["permissions"]}
-        assert states["test_desktop"]["allowed"] and states["test_desktop"]["default_enabled"]
-        assert not states["test_desktop"]["effective"] and not states["test_desktop"]["available"]
+        # the private bus has no backend yet (the test desktop's depends on Weston being installed)
+        assert states["private_bus"]["allowed"] and states["private_bus"]["default_enabled"]
+        assert not states["private_bus"]["effective"] and not states["private_bus"]["available"]
         assert not states["host_control"]["allowed"] and not states["host_control"]["effective"]
         try:
             modes.call("_sill/sessions.start", {"session_id": desktop})

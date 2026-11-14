@@ -19,6 +19,8 @@ pub mod launcher;
 pub mod ledger;
 pub mod login;
 pub mod credentials;
+pub mod desktop;
+pub mod desktop_capture;
 pub mod memory;
 pub mod mounts;
 pub mod paths;

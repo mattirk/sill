@@ -51,6 +51,13 @@ impl App {
             } else {
                 match self.file_view(view) {
                     Some(reader) => reader,
+                    // the test desktop in the conversation's place, the composer staying
+                    None if view.desktop.shown => {
+                        let session = self.all_sessions.iter().find(|s| s.session_id == view.id);
+                        column![crate::desktop_view::pane(view, session), self.composer(view)]
+                            .height(Fill)
+                            .into()
+                    }
                     None => column![self.feed(view), self.composer(view)]
                         .height(Fill)
                         .into(),
@@ -1100,7 +1107,7 @@ impl App {
     /// which stay in reach.
     fn composer_bar<'a>(&'a self, view: &'a SessionView, width: f32) -> Element<'a, Message> {
         /// What the shell's and the send/stop buttons take with their spacing, and a margin.
-        const BUTTONS_ROOM: f32 = 116.0;
+        const BUTTONS_ROOM: f32 = 142.0;
         let has_session = !view.conversation.session_id.is_empty() || self.demo;
         let sendable = !view.attachments_busy
             && (!view.draft.text().trim().is_empty() || !view.attachments.is_empty());
@@ -1191,7 +1198,11 @@ impl App {
             .iter()
             .find(|s| s.session_id == view.id && has_session);
         let permissions = crate::permissions::indicator(view, session);
-        row![attach, shell, permissions, space().width(Fill), agent_controls, action]
+        let mut left = row![attach, shell, permissions].spacing(4).align_y(Alignment::Center);
+        if let Some(desktop) = crate::desktop_view::indicator(view, session) {
+            left = left.push(desktop);
+        }
+        row![left, space().width(Fill), agent_controls, action]
             .spacing(4)
             .align_y(Alignment::Center)
             .into()

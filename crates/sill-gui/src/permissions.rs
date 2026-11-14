@@ -36,7 +36,7 @@ const ROWS: &[(&str, &str, &str)] = &[
     (
         "test_desktop",
         "Test desktop",
-        "An isolated desktop for running GUI applications, never the real one.",
+        "An isolated Weston desktop with Xwayland for running GUI applications, never the real one; it shows as a window on your desktop, or runs without one where the daemon has no display. The agent can take screenshots of it.",
     ),
     (
         "private_bus",
@@ -660,11 +660,16 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>) -> Element
     let ghost = session.ghost;
     let can_change = !ghost && !perms.busy;
     let expanded = perms.expanded(running);
-    // Desktop development is the test desktop and private bus; anything else stays Default
+    // Desktop development is the test desktop and private bus; anything else stays Default. Of
+    // the running jail, as the caption: a change shows as needing a restart until then.
     let desktop = perms.views.as_ref().is_some_and(|v| {
+        let current = match (&v.launch, running) {
+            (Some(launch), true) => launch,
+            _ => &v.preview,
+        };
         ["test_desktop", "private_bus"]
             .iter()
-            .any(|c| state(&v.preview, c).is_some_and(|s| s.effective))
+            .any(|c| state(current, c).is_some_and(|s| s.effective))
     });
     let mode = match (ghost, desktop, expanded.is_empty()) {
         (true, _, _) => "Ghost · Default only",
@@ -739,9 +744,13 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>) -> Element
                 content = content.push(text(diagnostic).size(style::TINY).color(P.error));
             }
             let mut folded = vec![];
+            let mut why = vec![];
             for (capability, label, meaning) in ROWS {
                 if *capability != "public_web" && idle(views, capability) {
                     folded.push(*label);
+                    if let Some(s) = state(&views.preview, capability) {
+                        why.push(format!("{label}: {}.", capitalised(&s.reason)));
+                    }
                     continue;
                 }
                 content = content.push(capability_row(
@@ -752,11 +761,13 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>) -> Element
                 }
             }
             folded.push("Host control");
+            why.push("Host control, for the real desktop and host processes outside the jail: needs an explicit activation, not implemented yet. A policy or a choice never turns it on.".into());
             content = content.push(tip(
                 text(format!("{}: not available yet", folded.join(", ")))
                     .size(style::TINY)
-                    .color(P.fg_dim),
-                "Desktop development (test desktop, private D-Bus, GPU) needs the managed Weston backend. Host control, for the real desktop and host processes outside the jail, needs an explicit activation. Neither is implemented; a policy or a choice never turns them on.".into(),
+                    .color(P.fg_dim)
+                    .wrapping(text::Wrapping::None),
+                why.join("\n"),
             ));
         }
     }
@@ -1049,6 +1060,27 @@ mod tests {
         let mut ui = simulator(&app, (720.0, 860.0));
         ui.find("Default · jailed · permission changes apply after a restart").unwrap();
         assert!(ui.find("Jailed · expanded access").is_err(), "the running jail has no public web yet");
+    }
+
+    /// Where the machine has a test desktop it is a row of its own (a switch), not folded with
+    /// what has no backend; on, it makes the session Desktop development.
+    #[test]
+    fn an_available_test_desktop_is_a_row_and_sets_the_mode() {
+        let (mut app, _) = App::new(true, None);
+        app.all_sessions = vec![session_record("demo", "demo", false, false)];
+        let mut preview = view("preview", false, json!([]));
+        preview["permissions"][0] = json!({"capability": "test_desktop", "allowed": true,
+            "default_enabled": false, "requested": true, "blocked": false, "source": "session",
+            "effective": true, "available": true,
+            "reason": "an isolated Weston desktop with Xwayland; the real display stays out of reach"});
+        let preview: PolicyView = serde_json::from_value(preview).unwrap();
+        let perms = &mut app.views.get_mut("demo").unwrap().permissions;
+        perms.open = true;
+        perms.views = Some(Views { launch: Some(preview.clone()), preview, agent_name: None });
+        let mut ui = simulator(&app, (720.0, 860.0));
+        ui.find("Desktop development").unwrap();
+        ui.find("Private D-Bus, GPU rendering, Host control: not available yet").unwrap();
+        ui.find("Jailed · expanded access · Test desktop").unwrap();
     }
 
     /// A ghost's panel offers no choices: the daemon refuses them for ghosts anyway.

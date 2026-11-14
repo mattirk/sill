@@ -27,9 +27,22 @@ pub struct Permissions {
 /// Frontends without permission-mode support cannot operate such a session.
 pub const MODE_CAPABILITIES: [&str; 4] = ["test_desktop", "private_bus", "gpu", "host_control"];
 
-/// Only the public web proxy has an enforcement backend so far.
-fn available(capability: &str) -> bool {
-    capability == "public_web"
+/// Whether this machine can enforce `capability`: the public web proxy always; the test desktop
+/// when a usable Weston with Xwayland is installed (`desktop::probe`); nothing else yet.
+pub fn available(capability: &str) -> bool {
+    match capability {
+        "public_web" => true,
+        "test_desktop" => crate::desktop::probe().available(),
+        _ => false,
+    }
+}
+
+/// Why `capability` has no enforcement backend here.
+fn unavailable_reason(capability: &str) -> String {
+    match capability {
+        "test_desktop" => crate::desktop::probe().missing.clone(),
+        _ => "enforcement backend not implemented".into(),
+    }
 }
 
 /// A remembered session choice and what one resolution made of it. Launch snapshots keep
@@ -108,10 +121,7 @@ impl Permissions {
     pub fn validate_launch(&self, network: &Network) -> Result<()> {
         self.validate(network)?;
         for (name, rule) in self.rules() {
-            ensure!(
-                available(name) || rule != Rule::On,
-                "{name} was requested but its enforcement backend is not implemented"
-            );
+            ensure!(available(name) || rule != Rule::On, "{name} was requested but {}", unavailable_reason(name));
         }
         Ok(())
     }
@@ -132,7 +142,14 @@ impl Permissions {
             return Some("forbidden by policy or session restrictions");
         }
         if !available(capability) {
-            return Some("enforcement backend not implemented");
+            return Some(match capability {
+                "test_desktop" => "no test desktop on this machine (Weston and Xwayland)",
+                _ => "enforcement backend not implemented",
+            });
+        }
+        // the network limits concern the public web only
+        if capability != "public_web" {
+            return None;
         }
         if network.mode == NetMode::None {
             return Some("network disabled by resolved policy");
@@ -179,7 +196,11 @@ impl Permissions {
             .map(|(capability, rule)| {
                 let choice = choices.iter().find(|choice| choice.capability == capability);
                 let available = available(capability);
-                let effective = available && network.mode == NetMode::All;
+                let effective = available
+                    && match capability {
+                        "public_web" => network.mode == NetMode::All,
+                        _ => rule == Rule::On,
+                    };
                 let refusal = self.enable_refusal(capability, network);
                 let allowed = rule != Rule::Forbidden
                     && (!available || effective || refusal.is_none());
@@ -188,10 +209,12 @@ impl Permissions {
                     format!("session choice blocked: {blocked}")
                 } else if rule == Rule::Forbidden {
                     "forbidden by policy or session restrictions".into()
-                } else if available && network.mode == NetMode::None {
+                } else if capability == "public_web" && network.mode == NetMode::None {
                     "network disabled by resolved policy".into()
                 } else if !available {
-                    "enforcement backend not implemented".into()
+                    unavailable_reason(capability)
+                } else if effective && capability == "test_desktop" {
+                    "an isolated Weston desktop with Xwayland; the real display stays out of reach".into()
                 } else if effective {
                     "public web proxy enabled; local destinations remain separately restricted".into()
                 } else if let Some(refusal) = refusal {
@@ -227,11 +250,12 @@ mod tests {
     #[test]
     fn defaults_and_hard_limits_are_distinct() {
         let p = Policy::parse(
-            "name='test'\n[permissions]\ntest_desktop='off'\ngpu='forbidden'\npublic_web='on'",
+            "name='test'\n[permissions]\nprivate_bus='off'\ngpu='forbidden'\npublic_web='on'",
         )
         .unwrap();
         let states = p.permissions.states(&p.network, &[]);
-        assert!(states[0].allowed && !states[0].effective && !states[0].available);
+        // (the private bus has no backend yet; the test desktop's depends on the machine)
+        assert!(states[1].allowed && !states[1].effective && !states[1].available);
         assert!(!states[2].allowed);
         assert!(states[3].effective);
         assert!(p.permissions.validate_launch(&p.network).is_ok());
@@ -251,8 +275,8 @@ mod tests {
 
     #[test]
     fn unsupported_defaults_never_claim_enforcement() {
-        let p = Policy::parse("name='future'\n[permissions]\ntest_desktop='on'").unwrap();
-        let state = &p.permissions.states(&p.network, &[])[0];
+        let p = Policy::parse("name='future'\n[permissions]\nprivate_bus='on'").unwrap();
+        let state = &p.permissions.states(&p.network, &[])[1];
         assert!(state.default_enabled && !state.effective && !state.available);
         assert!(p.permissions.validate_launch(&p.network).is_err());
         assert!(p.permissions.uses_modes());
@@ -275,6 +299,23 @@ mod tests {
         );
     }
 
+    /// The test desktop is not a network grant: offline policies and the additional-hosts ceiling
+    /// do not refuse it, and where this machine has Weston it is effective exactly when on.
+    #[test]
+    fn the_test_desktop_ignores_network_limits() {
+        let p = Policy::parse("name='t'\n[network]\nmode='none'\nallow_additional_hosts=false").unwrap();
+        let refusal = p.permissions.enable_refusal("test_desktop", &p.network);
+        if available("test_desktop") {
+            assert_eq!(refusal, None);
+            let p = Policy::parse("name='t'\n[network]\nmode='none'\n[permissions]\ntest_desktop='on'").unwrap();
+            let state = &p.permissions.states(&p.network, &[])[0];
+            assert!(state.effective && state.available && state.reason.contains("Weston"));
+            assert!(p.permissions.validate_launch(&p.network).is_ok());
+        } else {
+            assert_eq!(refusal, Some("no test desktop on this machine (Weston and Xwayland)"));
+        }
+    }
+
     #[test]
     fn all_mode_policies_report_public_web_as_their_default() {
         let p = Policy::parse("name='open'\n[network]\nmode='all'").unwrap();
@@ -285,25 +326,25 @@ mod tests {
     #[test]
     fn session_choices_widen_only_within_limits_and_always_tighten() {
         let mut p = Policy::parse("name='test'\n[network]\nmode='allow'").unwrap();
-        let applied = p.permissions.apply_session(&mut p.network, &choices(&[("public_web", true), ("test_desktop", true)]));
+        let applied = p.permissions.apply_session(&mut p.network, &choices(&[("public_web", true), ("private_bus", true)]));
         assert_eq!(p.network.mode, NetMode::All);
         assert!(applied.iter().find(|c| c.capability == "public_web").unwrap().blocked.is_none());
-        let desktop = applied.iter().find(|c| c.capability == "test_desktop").unwrap();
-        assert_eq!(desktop.blocked.as_deref(), Some("enforcement backend not implemented"));
+        let bus = applied.iter().find(|c| c.capability == "private_bus").unwrap();
+        assert_eq!(bus.blocked.as_deref(), Some("enforcement backend not implemented"));
         // A blocked desktop choice is reported, never forced into a launch it would refuse.
         assert!(p.permissions.validate_launch(&p.network).is_ok());
         assert!(!p.permissions.uses_modes());
         let states = p.permissions.states(&p.network, &applied);
         assert!(states[3].effective && states[3].source == "session" && states[3].requested == Some(true) && !states[3].default_enabled);
-        assert!(states[0].blocked && states[0].source == "policy" && states[0].reason.contains("backend"));
+        assert!(states[1].blocked && states[1].source == "policy" && states[1].reason.contains("backend"));
 
-        let mut p = Policy::parse("name='test'\n[permissions]\npublic_web='on'\ntest_desktop='on'").unwrap();
-        let applied = p.permissions.apply_session(&mut p.network, &choices(&[("public_web", false), ("test_desktop", false)]));
+        let mut p = Policy::parse("name='test'\n[permissions]\npublic_web='on'\nprivate_bus='on'").unwrap();
+        let applied = p.permissions.apply_session(&mut p.network, &choices(&[("public_web", false), ("private_bus", false)]));
         assert_eq!(p.network.mode, NetMode::Allow);
         assert!(p.permissions.validate_launch(&p.network).is_ok(), "a session may decline a policy default");
         let states = p.permissions.states(&p.network, &applied);
         assert!(!states[3].effective && states[3].default_enabled && states[3].requested == Some(false));
-        assert!(states[0].default_enabled && !p.permissions.uses_modes());
+        assert!(states[1].default_enabled && !p.permissions.uses_modes());
     }
 
     #[test]

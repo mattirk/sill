@@ -20,6 +20,10 @@ futures = "0.3"
 async-channel = "2"
 async-io = "2"
 sha2 = "0.11.1"
+# the test desktop's pictures: a Wayland client of its own compositor, PNG for the live view
+wayland-client = "0.31"
+wayland-scanner = "0.31"
+png = "0.18"
 rusqlite.workspace = true
 sill-memory.workspace = true
 sill-proto.workspace = true

@@ -26,7 +26,11 @@ impl Context {
     pub fn prepare(&self, store: &Store, id: &str, home: &Path, text: &str) -> Result<PreparedPrompt> {
         let Some(session) = store.sessions()?.into_iter().find(|s| s.id == id) else { bail!("no session {id}") };
         let cfg = sill_core::config::load();
-        let facts = sill_core::session::policy_of(&session, home)
+        // what the jail was built with (session choices included), else what the next build uses
+        let launched = sill_core::session::policy_snapshot(id).ok().flatten().map(|launch| launch.policy);
+        let facts = launched
+            .map(Ok)
+            .unwrap_or_else(|| sill_core::session::policy_of(&session, home))
             .map(|policy| {
                 let mut facts = sill_core::instructions::facts_block(&policy, home);
                 if session.ghost {

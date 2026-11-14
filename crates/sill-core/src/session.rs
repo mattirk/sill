@@ -801,7 +801,7 @@ pub fn ensure_started(opts: &StartOptions, home: &Path, exe: &Path) -> Result<St
     let rt = shim::runtime_dir(&opts.session)?;
     std::fs::create_dir_all(&rt)?;
     // stale pid files of a start that failed earlier: whatever they name is gone or not ours
-    for f in ["bwrap.pid", "launch.pid"] {
+    for f in ["bwrap.pid", "launch.pid", "launch-error"] {
         let _ = std::fs::remove_file(rt.join(f));
     }
     // a ghost's log — the proxy's host names included — stays in its runtime dir (RAM) and goes
@@ -854,7 +854,12 @@ pub fn ensure_started(opts: &StartOptions, home: &Path, exe: &Path) -> Result<St
         if let Ok(Some(st)) = child.try_wait() {
             // the launcher reports a jail that failed and exits itself: its own status says little
             let status = if st.success() { String::new() } else { format!(" ({st})") };
-            bail!("the jail could not start{status}; see {}", log_hint(&opts.session));
+            // the launcher's own reason when it failed before the jail ran (a test desktop that
+            // would not start), bounded
+            let reason = std::fs::read_to_string(rt.join("launch-error"))
+                .map(|e| format!(": {}", e.chars().take(600).collect::<String>().trim()))
+                .unwrap_or_default();
+            bail!("the jail could not start{status}{reason}; see {}", log_hint(&opts.session));
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }

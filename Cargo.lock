@@ -4476,6 +4476,7 @@ dependencies = [
  "async-io",
  "futures",
  "glob",
+ "png 0.18.1",
  "rand 0.10.3",
  "rusqlite",
  "rustix 1.1.6",
@@ -4487,6 +4488,8 @@ dependencies = [
  "similar",
  "toml",
  "tracing",
+ "wayland-client",
+ "wayland-scanner",
 ]
 
 [[package]]
