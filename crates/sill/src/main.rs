@@ -445,7 +445,8 @@ fn main() -> Result<()> {
 fn jail_cmd(cmd: JailCmd) -> Result<()> {
     match cmd {
         JailCmd::Plan(a) => {
-            let spec = build_spec(a.jail, a.command)?;
+            let mut spec = build_spec(a.jail, a.command)?;
+            let _seccomp = seccomp_fd(&mut spec)?; // so the plan shows the flag as `run` would pass it
             let plan = spec.plan()?;
             for w in &plan.warnings {
                 eprintln!("warning: {w}");
@@ -528,7 +529,8 @@ fn jail_cmd(cmd: JailCmd) -> Result<()> {
             print_changes(&spec, &plan, all, diff)
         }
         JailCmd::Run(a) => {
-            let spec = build_spec(a.jail, a.command)?;
+            let mut spec = build_spec(a.jail, a.command)?;
+            let _seccomp = seccomp_fd(&mut spec)?; // inherited by the exec below
             let plan = spec.plan()?;
             for w in &plan.warnings {
                 eprintln!("sill: warning: {w}");
@@ -786,6 +788,7 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
         }));
         spec.proxy_socket = Some(proxy_sock);
     }
+    let seccomp = seccomp_fd(&mut spec)?;
     let plan = spec.plan()?;
     for w in &plan.warnings {
         eprintln!("sill launch: warning: {w}");
@@ -822,6 +825,9 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
         attempt += 1;
         let mut cmd = std::process::Command::new(&plan.argv[0]);
         cmd.args(&plan.argv[1..]).stdin(std::process::Stdio::null());
+        if let Some(f) = &seccomp {
+            sill_core::seccomp::rewind(f)?; // bwrap read it to the end last time
+        }
         let cgroup_procs = cgroup_procs.clone();
         // SAFETY: only dup2/fcntl/open/write/getpid between fork and exec.
         unsafe {
@@ -924,6 +930,28 @@ fn home() -> Result<PathBuf> {
     Ok(PathBuf::from(std::env::var("HOME").context("HOME not set")?))
 }
 
+/// The seccomp program for this jail as an inheritable fd, recorded in the spec for `plan()`; kept
+/// alive by the caller until bwrap has started. Never fd 3: the shim's control socket is dup'd there.
+fn seccomp_fd(spec: &mut JailSpec) -> Result<Option<OwnedFd>> {
+    if !spec.policy.jail.seccomp {
+        return Ok(None);
+    }
+    let fd = match sill_core::seccomp::memfd(spec.policy.jail.allow_userns)? {
+        Some(fd) if fd.as_raw_fd() == 3 => {
+            let moved = rustix::io::dup(&fd)?;
+            rustix::io::fcntl_setfd(&moved, rustix::io::FdFlags::empty())?;
+            moved
+        }
+        Some(fd) => fd,
+        None => {
+            eprintln!("sill: warning: no seccomp filter for this architecture");
+            return Ok(None);
+        }
+    };
+    spec.seccomp_fd = Some(fd.as_raw_fd());
+    Ok(Some(fd))
+}
+
 fn build_spec(a: JailArgs, command: Vec<OsString>) -> Result<JailSpec> {
     let home = home()?;
     let uid = rustix::process::getuid().as_raw();
@@ -979,6 +1007,7 @@ fn build_spec(a: JailArgs, command: Vec<OsString>) -> Result<JailSpec> {
         binds,
         masks: vec![],
         memory_dir: None,
+        seccomp_fd: None,
         extra_args,
         command,
     })

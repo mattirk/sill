@@ -70,6 +70,9 @@ pub struct JailSpec {
     /// The memory snapshot's directory (docs/memory.md §2.3), bound read-only at
     /// `sill_memory::JAIL_DIR` for the jail's `sill-memory`; None = no memory in this jail.
     pub memory_dir: Option<PathBuf>,
+    /// An inheritable fd holding the seccomp program (`seccomp::memfd`), given to bwrap as
+    /// `--seccomp <fd>` when the policy's `jail.seccomp` is on (security.md S18); None = no filter.
+    pub seccomp_fd: Option<i32>,
     /// Extra arguments inserted before `--`.
     pub extra_args: Vec<OsString>,
     pub command: Vec<OsString>,
@@ -264,6 +267,9 @@ impl JailSpec {
             push(&mut a, &[&"--unshare-user", &"--disable-userns"]);
         }
         push(&mut a, &[&"--new-session", &"--cap-drop", &"ALL", &"--clearenv"]);
+        if p.jail.seccomp && let Some(fd) = self.seccomp_fd {
+            push(&mut a, &[&"--seccomp", &fd.to_string()]);
+        }
 
         // environment
         let mut env: BTreeMap<String, String> = BTreeMap::new();
@@ -391,6 +397,8 @@ impl JailSpec {
         let own: Vec<PathBuf> = [config_dir.join("sill"), state_base.join("sill/bin"), state_base.join("sill/agents"), state_base.join("sill/login"), state_base.join("sill/memory")]
             .into_iter()
             .chain(["sill.db", "sill.db-wal", "sill.db-shm"].iter().map(|f| state_base.join("sill").join(f)))
+            // the user's journal is readable by ACL: every session's proxy lines and agent stderr (S15)
+            .chain([PathBuf::from("/var/log/journal")])
             .chain(self.masks.iter().cloned())
             .filter(|p| p.exists())
             .collect();
@@ -554,6 +562,7 @@ mod tests {
             binds: vec![],
             masks: vec![],
             memory_dir: None,
+            seccomp_fd: None,
             extra_args: vec![],
             command: vec!["true".into()],
         }
@@ -658,6 +667,18 @@ mod tests {
         assert!(!s.contains("--share-net"));
         assert!(s.contains("--ro-bind /sys /sys"));
         assert!(s.ends_with("--chdir /home/me -- true"));
+    }
+
+    #[test]
+    fn seccomp_flag_follows_policy_and_fd() {
+        let mut s = spec();
+        assert!(!render(&s.plan().unwrap().argv).contains("--seccomp"), "no fd: no flag");
+        s.seccomp_fd = Some(7);
+        let r = render(&s.plan().unwrap().argv);
+        assert!(r.contains("--seccomp 7"), "{r}");
+        assert!(r.find("--seccomp").unwrap() < r.find("--overlay").unwrap_or(usize::MAX), "before the mounts");
+        s.policy.jail.seccomp = false;
+        assert!(!render(&s.plan().unwrap().argv).contains("--seccomp"), "policy off: no flag");
     }
 
     #[test]

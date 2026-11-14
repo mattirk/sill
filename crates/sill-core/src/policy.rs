@@ -156,7 +156,7 @@ impl Default for Limits {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JailOptions {
     /// Let processes in the jail create user namespaces (an agent's own sandbox). Off by default:
@@ -174,6 +174,16 @@ pub struct JailOptions {
     /// Extra environment for every process in the jail.
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,
+    /// The seccomp deny-list (`sill_core::seccomp`) as bwrap's second fence (security.md S18). On by
+    /// default; off only to find out whether it is what breaks a tool.
+    #[serde(default = "default_true")]
+    pub seccomp: bool,
+}
+
+impl Default for JailOptions {
+    fn default() -> Self {
+        Self { allow_userns: false, x11: false, dbus: false, env: Default::default(), seccomp: true }
+    }
 }
 
 impl Policy {

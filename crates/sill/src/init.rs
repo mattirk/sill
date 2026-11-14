@@ -307,7 +307,7 @@ fn state_fs(i: &mut Init, a: &InitArgs, has_systemd: bool) -> Result<()> {
                 i.run("reload units", "systemctl", &["daemon-reload"])?;
                 i.run("enable the mount", "systemctl", &["enable", "--now", "var-lib-sill.mount", "sill-state-perms.service"])?;
             } else {
-                fstab_line(i, &format!("{} {} none bind,nofail 0 0", dir.display(), STATE_FS))?;
+                fstab_line(i, &format!("{} {} none bind,nosuid,nodev,nofail 0 0", dir.display(), STATE_FS))?;
             }
         }
         None => {

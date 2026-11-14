@@ -564,6 +564,8 @@ fn start_unit(opts: &StartOptions, policy: &Policy, exe: &Path) -> Result<()> {
         .arg(format!("--property=MemoryMax={}", policy.limits.memory_max))
         .arg(format!("--property=TasksMax={}", policy.limits.tasks_max))
         .arg("--property=KillMode=control-group")
+        // nothing in a session gains privileges: not the launcher, not bwrap (which sets it anyway)
+        .arg("--property=NoNewPrivileges=yes")
         // a stop must not hang on an interactive shell in the jail (bash ignores SIGTERM): SIGKILL
         // follows after a short grace; the agent itself was already asked to leave by the shim
         .arg("--property=TimeoutStopSec=5")

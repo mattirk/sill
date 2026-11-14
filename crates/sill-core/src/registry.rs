@@ -533,6 +533,10 @@ fn probe_load_session(command: &[String], env: &BTreeMap<String, String>, home: 
     b.args(["--unshare-all", "--disable-userns", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--clearenv"]);
     b.args(["--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/run"]);
     b.arg("--tmpfs").arg(crate::jail::STATE_FS); // other sessions' upper trees
+    let seccomp = crate::seccomp::memfd(false)?; // alive until the spawn
+    if let Some(f) = &seccomp {
+        b.arg("--seccomp").arg(std::os::fd::AsRawFd::as_raw_fd(f).to_string());
+    }
     b.arg("--tmpfs").arg(home);
     b.arg("--ro-bind").arg(&tools).arg(&tools);
     // the runtime the command needs may live under the home (nvm's node, a venv): just those dirs

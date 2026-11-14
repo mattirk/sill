@@ -80,6 +80,9 @@ allow_userns = false
 # Both are off in the shipped default; this box's copy opts in to x11 (SPEC §4.10 #3).
 x11 = false
 dbus = false
+# seccomp deny-list under bwrap (mounts, keyrings, bpf, io_uring, new namespaces …): the second fence.
+# Off only to find out whether it is what breaks a tool.
+seccomp = true
 [jail.env]
 # extra environment for every process in the jail, e.g. TZ = "Europe/Helsinki"
 
