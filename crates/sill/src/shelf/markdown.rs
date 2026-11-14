@@ -257,8 +257,8 @@ fn prose_view(class: &str) -> gtk::TextView {
     tv
 }
 
-/// A code segment: read-only, wrapped at the column, highlighted.
-fn code_view() -> sourceview5::View {
+/// A code segment: read-only, wrapped at the column, highlighted. (Also a tool call's diff.)
+pub fn code_view() -> sourceview5::View {
     let buffer = sourceview5::Buffer::new(None);
     buffer.set_highlight_syntax(true);
     buffer.set_highlight_matching_brackets(false);
@@ -278,7 +278,7 @@ fn code_view() -> sourceview5::View {
 
 /// Fill a code segment: the fence's language, the theme's scheme, the text (left alone when the
 /// same, so a streamed message doesn't redraw finished blocks).
-fn fill_code_view(view: &sourceview5::View, lang: &str, code: &str) {
+pub fn fill_code_view(view: &sourceview5::View, lang: &str, code: &str) {
     ensure_schemes();
     let Ok(buffer) = view.buffer().downcast::<sourceview5::Buffer>() else { return };
     let lm = sourceview5::LanguageManager::default();

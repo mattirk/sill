@@ -119,9 +119,10 @@ pub enum Event {
     Text(String),
     Thought(String),
     /// `detail`: what the call does, for the card's body — input fields, content, output.
+    /// `diff`: a file edit as a unified diff (the call's `Diff` content blocks), shown live.
     /// `parent`: the delegation (Task/Agent call) this call runs under, for a sub-agent's own calls.
-    ToolCall { id: String, title: String, kind: String, status: String, detail: Option<String>, parent: Option<String> },
-    ToolCallUpdate { id: String, status: Option<String>, title: Option<String>, detail: Option<String> },
+    ToolCall { id: String, title: String, kind: String, status: String, detail: Option<String>, diff: Option<String>, parent: Option<String> },
+    ToolCallUpdate { id: String, status: Option<String>, title: Option<String>, detail: Option<String>, diff: Option<String> },
     /// Text a sub-agent produced (shown under its delegation, not as the agent's own words).
     SubagentText { parent: String, text: String },
     /// The agent asks for permission; answer with the chosen option id (None = cancel).
@@ -634,6 +635,7 @@ fn to_event(update: SessionUpdate) -> Event {
                 kind: if delegation { "Delegate".to_string() } else { format!("{:?}", t.kind) },
                 status: format!("{:?}", t.status),
                 detail: tool_detail(t.raw_input.as_ref(), Some(&t.content), t.raw_output.as_ref()),
+                diff: tool_diff(Some(&t.content)),
                 parent: parent_tool_use(t.meta.as_ref()),
             }
         }
@@ -642,6 +644,7 @@ fn to_event(update: SessionUpdate) -> Event {
             status: u.fields.status.map(|s| format!("{s:?}")),
             title: u.fields.title.clone(),
             detail: tool_detail(u.fields.raw_input.as_ref(), u.fields.content.as_deref(), u.fields.raw_output.as_ref()),
+            diff: tool_diff(u.fields.content.as_deref()),
         },
         other => Event::Other(format!("{other:?}").chars().take(120).collect()),
     }
@@ -676,8 +679,33 @@ fn is_delegation(name: Option<&str>, title: &str, input: Option<&serde_json::Val
     t.starts_with("task:") || t.starts_with("task(") || t.starts_with("subagent") || t.starts_with("agent(")
 }
 
+/// A file edit as a unified diff: every `Diff` content block (path, old text → new text; a new file
+/// has no old text), clipped. `None` without one.
+fn tool_diff(content: Option<&[ToolCallContent]>) -> Option<String> {
+    const LIMIT: usize = 40_000;
+    let mut parts: Vec<String> = Vec::new();
+    for c in content.unwrap_or_default() {
+        if let ToolCallContent::Diff(d) = c {
+            let name = d.path.display().to_string();
+            let old = d.old_text.as_deref().unwrap_or("");
+            let from = if d.old_text.is_some() { format!("a/{name}") } else { "/dev/null (new file)".to_string() };
+            parts.push(crate::changes::text_diff(old.as_bytes(), d.new_text.as_bytes(), &from, &format!("b/{name}")));
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let mut joined = parts.join("\n");
+    if joined.chars().count() > LIMIT {
+        joined = joined.chars().take(LIMIT).collect();
+        joined.push_str("\n… (clipped)");
+    }
+    Some(joined)
+}
+
 /// Text for a tool card's body: the input as `key: value` lines (pretty JSON when nested), the
-/// content blocks (text as is, a diff as its path and line counts), the output; each part clipped.
+/// content blocks (text as is), the output; each part clipped. A `Diff` block is left to
+/// [`tool_diff`], and so is the input then (an edit's input is the diff).
 fn tool_detail(input: Option<&serde_json::Value>, content: Option<&[ToolCallContent]>, output: Option<&serde_json::Value>) -> Option<String> {
     const LIMIT: usize = 3000;
     fn clip(s: String) -> String {
@@ -704,17 +732,15 @@ fn tool_detail(input: Option<&serde_json::Value>, content: Option<&[ToolCallCont
         }
     }
     let mut parts: Vec<String> = Vec::new();
-    if let Some(v) = input {
+    let has_diff = content.unwrap_or_default().iter().any(|c| matches!(c, ToolCallContent::Diff(_)));
+    if let Some(v) = input
+        && !has_diff
+    {
         parts.push(clip(json(v)));
     }
     for c in content.unwrap_or_default() {
         match c {
             ToolCallContent::Content(c) => parts.push(clip(text(&c.content))),
-            ToolCallContent::Diff(d) => {
-                let added = d.new_text.lines().count();
-                let removed = d.old_text.as_deref().map(|t| t.lines().count()).unwrap_or(0);
-                parts.push(format!("{} (+{added} −{removed})", d.path.display()));
-            }
             ToolCallContent::Terminal(_) => parts.push("[terminal]".into()),
             _ => {}
         }

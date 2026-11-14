@@ -44,6 +44,10 @@ pub struct Entry {
     pub text: String,
     /// For `tool`: the status; otherwise empty.
     pub extra: String,
+    /// For `tool`: the ACP kind (`Edit`, `Execute`, …), the body text, the edit as a unified diff.
+    pub tool_kind: String,
+    pub detail: String,
+    pub diff: String,
 }
 
 pub struct Store {
@@ -90,6 +94,10 @@ impl Store {
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN auto_allow INTEGER NOT NULL DEFAULT 0", []);
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN agent_settings TEXT NOT NULL DEFAULT '{}'", []);
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN desktop TEXT NOT NULL DEFAULT ''", []);
+        // tool calls keep what they did (2026-10-31): kind, body, the edit's diff
+        let _ = conn.execute("ALTER TABLE entries ADD COLUMN tool_kind TEXT NOT NULL DEFAULT ''", []);
+        let _ = conn.execute("ALTER TABLE entries ADD COLUMN detail TEXT NOT NULL DEFAULT ''", []);
+        let _ = conn.execute("ALTER TABLE entries ADD COLUMN diff TEXT NOT NULL DEFAULT ''", []);
         Ok(Self { conn })
     }
 
@@ -215,13 +223,33 @@ impl Store {
         Ok(seq)
     }
 
-    /// Update a stored `tool` entry's title and/or status (tool-call updates arrive after the call).
-    pub fn update_tool(&self, session_id: &str, seq: i64, title: Option<&str>, status: Option<&str>) -> Result<()> {
+    /// A `tool` entry: title, status, ACP kind, body text and the edit's diff.
+    pub fn append_tool(&self, session_id: &str, title: &str, status: &str, kind: &str, detail: Option<&str>, diff: Option<&str>) -> Result<i64> {
+        let seq = self.append(session_id, "tool", title, status)?;
+        self.conn.execute(
+            "UPDATE entries SET tool_kind = ?3, detail = ?4, diff = ?5 WHERE session_id = ?1 AND seq = ?2",
+            params![session_id, seq, kind, detail.unwrap_or(""), diff.unwrap_or("")],
+        )?;
+        Ok(seq)
+    }
+
+    /// Update a stored `tool` entry (tool-call updates arrive after the call): title and status
+    /// replace, a detail (output) is added under what is there, a diff replaces the diff.
+    pub fn update_tool(&self, session_id: &str, seq: i64, title: Option<&str>, status: Option<&str>, detail: Option<&str>, diff: Option<&str>) -> Result<()> {
         if let Some(t) = title {
             self.conn.execute("UPDATE entries SET text = ?3 WHERE session_id = ?1 AND seq = ?2", params![session_id, seq, t])?;
         }
         if let Some(st) = status {
             self.conn.execute("UPDATE entries SET extra = ?3 WHERE session_id = ?1 AND seq = ?2", params![session_id, seq, st])?;
+        }
+        if let Some(d) = detail.filter(|d| !d.trim().is_empty()) {
+            self.conn.execute(
+                "UPDATE entries SET detail = CASE WHEN detail = '' THEN ?3 ELSE detail || char(10) || char(10) || ?3 END WHERE session_id = ?1 AND seq = ?2",
+                params![session_id, seq, d],
+            )?;
+        }
+        if let Some(d) = diff.filter(|d| !d.trim().is_empty()) {
+            self.conn.execute("UPDATE entries SET diff = ?3 WHERE session_id = ?1 AND seq = ?2", params![session_id, seq, d])?;
         }
         Ok(())
     }
@@ -235,9 +263,18 @@ impl Store {
     }
 
     pub fn entries(&self, session_id: &str) -> Result<Vec<Entry>> {
-        let mut st = self.conn.prepare("SELECT seq, ts, kind, text, extra FROM entries WHERE session_id = ?1 ORDER BY seq")?;
+        let mut st = self.conn.prepare("SELECT seq, ts, kind, text, extra, tool_kind, detail, diff FROM entries WHERE session_id = ?1 ORDER BY seq")?;
         let rows = st.query_map(params![session_id], |r| {
-            Ok(Entry { seq: r.get(0)?, ts: r.get(1)?, kind: r.get(2)?, text: r.get(3)?, extra: r.get(4)? })
+            Ok(Entry {
+                seq: r.get(0)?,
+                ts: r.get(1)?,
+                kind: r.get(2)?,
+                text: r.get(3)?,
+                extra: r.get(4)?,
+                tool_kind: r.get(5)?,
+                detail: r.get(6)?,
+                diff: r.get(7)?,
+            })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
@@ -252,14 +289,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sill-store-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let store = Store::open(&dir.join("s.db")).unwrap();
-        let seq = store.append("s1", "tool", "Read", "Pending").unwrap();
-        store.update_tool("s1", seq, None, Some("InProgress")).unwrap();
-        store.update_tool("s1", seq, Some("Read src/main.rs"), Some("Completed")).unwrap();
+        let seq = store.append_tool("s1", "Read", "Pending", "Read", Some("file_path: src/main.rs"), None).unwrap();
+        store.update_tool("s1", seq, None, Some("InProgress"), None, None).unwrap();
+        store.update_tool("s1", seq, Some("Read src/main.rs"), Some("Completed"), Some("fn main() {}"), Some("--- a\n+++ b\n")).unwrap();
         let e = store.entries("s1").unwrap();
         assert_eq!(e.len(), 1);
         assert_eq!((e[0].text.as_str(), e[0].extra.as_str()), ("Read src/main.rs", "Completed"));
+        assert_eq!(e[0].tool_kind, "Read");
+        assert_eq!(e[0].detail, "file_path: src/main.rs\n\nfn main() {}"); // output under the input
+        assert_eq!(e[0].diff, "--- a\n+++ b\n");
         // an unknown seq is a harmless no-op
-        store.update_tool("s1", 99, Some("x"), None).unwrap();
+        store.update_tool("s1", 99, Some("x"), None, None, None).unwrap();
         assert_eq!(store.entries("s1").unwrap()[0].text, "Read src/main.rs");
         let _ = std::fs::remove_dir_all(&dir);
     }

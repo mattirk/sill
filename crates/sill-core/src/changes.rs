@@ -203,7 +203,8 @@ pub fn undo_diff(host: &Path, prior: &Path) -> String {
     text_diff(&now, &before, &format!("host:{name}"), &format!("undo:{name}"))
 }
 
-fn text_diff(from: &[u8], to: &[u8], from_label: &str, to_label: &str) -> String {
+/// A unified diff of two texts (3 lines of context), or a note for binary content.
+pub fn text_diff(from: &[u8], to: &[u8], from_label: &str, to_label: &str) -> String {
     use similar::TextDiff;
     if from.contains(&0) || to.contains(&0) {
         return format!("binary file ({} → {} bytes)", from.len(), to.len());

@@ -33,6 +33,10 @@ struct ToolRow {
     title: gtk::Label,
     mark: gtk::Label,
     body: gtk::Label,
+    /// A file edit as a unified diff (hidden until there is one), filled live as updates arrive.
+    diff: sourceview5::View,
+    /// A file edit (ACP kind Edit/Delete/Move): folds with edits, never with other steps.
+    edit: bool,
     status: RefCell<String>,
     group: RefCell<Option<Rc<ToolGroup>>>,
     /// A delegation's children: the sub-agent's own calls (rows), its text (said), and the count
@@ -49,12 +53,13 @@ struct Children {
 }
 
 /// Consecutive tool calls folded into one card: a header line (count, latest title, aggregate
-/// mark) that opens the list of rows.
+/// mark) that opens the list of rows. File edits and other steps make separate cards.
 struct ToolGroup {
     header_title: gtk::Label,
     header_mark: gtk::Label,
     rows: gtk::Box,
     ids: RefCell<Vec<String>>,
+    edit: bool,
 }
 
 pub struct Conversation {
@@ -406,6 +411,14 @@ impl Conversation {
         }
     }
 
+    /// A file edit's diff into the row's diff view, shown from then on; nothing without one.
+    fn set_diff(r: &ToolRow, diff: Option<&str>) {
+        if let Some(d) = diff.filter(|d| !d.trim().is_empty()) {
+            markdown::fill_code_view(&r.diff, "diff", d);
+            r.diff.set_visible(true);
+        }
+    }
+
     /// Status mark and CSS class for an ACP tool status (`Debug` name).
     fn status_mark(status: &str) -> (&'static str, &'static str) {
         match status {
@@ -424,10 +437,6 @@ impl Conversation {
             label.remove_css_class(c);
         }
         label.add_css_class(class);
-    }
-
-    pub fn add_tool_call(&self, id: String, title: &str, status: &str) {
-        self.add_tool_call_full(id, title, status, None, None, None);
     }
 
     /// The children slot of a delegation row, made on first use.
@@ -508,9 +517,10 @@ impl Conversation {
         self.request_follow();
     }
 
-    /// One line: glyph, title, status mark; the body (what the call does) opens on click. With a
-    /// `parent` (a sub-agent's own call) the row goes under that delegation instead of the column.
-    pub fn add_tool_call_full(&self, id: String, title: &str, status: &str, kind: Option<&str>, detail: Option<&str>, parent: Option<&str>) {
+    /// One line: glyph, title, status mark; the body (what the call does, and a file edit's diff)
+    /// opens on click. With a `parent` (a sub-agent's own call) the row goes under that delegation
+    /// instead of the column.
+    pub fn add_tool_call_full(&self, id: String, title: &str, status: &str, kind: Option<&str>, detail: Option<&str>, parent: Option<&str>, diff: Option<&str>) {
         self.flush_streams();
         self.current.borrow_mut().take();
         self.current_thought.borrow_mut().take();
@@ -548,28 +558,41 @@ impl Conversation {
         body.set_wrap(true);
         body.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         body.set_selectable(true);
-        let body_rev = gtk::Revealer::builder().child(&body).reveal_child(false).transition_type(gtk::RevealerTransitionType::SlideDown).build();
+        body.set_visible(detail.is_some_and(|d| !d.is_empty()));
+        // a file edit's diff under the text: the code segments' view with the diff language
+        let diff_view = markdown::code_view();
+        diff_view.add_css_class("sill-tool-diff");
+        diff_view.set_visible(false);
+        let body_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        body_box.append(&body);
+        body_box.append(&diff_view);
+        let body_rev = gtk::Revealer::builder().child(&body_box).reveal_child(false).transition_type(gtk::RevealerTransitionType::SlideDown).build();
         card.append(&body_rev);
         {
             let rev = body_rev.clone();
             let b = body.clone();
+            let d = diff_view.clone();
             let click = gtk::GestureClick::new();
             click.connect_released(move |_, _, _, _| {
-                if !b.text().is_empty() {
+                if !b.text().is_empty() || d.is_visible() {
                     rev.set_reveal_child(!rev.reveals_child());
                 }
             });
             row.add_controller(click);
         }
+        let is_edit = matches!(kind, Some("Edit" | "Delete" | "Move"));
         let tr = Rc::new(ToolRow {
             row: card,
             title: title_l,
             mark,
             body,
+            diff: diff_view,
+            edit: is_edit,
             status: RefCell::new(status.to_string()),
             group: RefCell::new(None),
             children: RefCell::new(None),
         });
+        Self::set_diff(&tr, diff);
         // a sub-agent's own call: under its delegation, counted on the line
         let parent_row = parent.and_then(|p| self.tool_rows.borrow().get(p).cloned());
         if let Some(pr) = parent_row {
@@ -584,9 +607,10 @@ impl Conversation {
             self.request_follow();
             return;
         }
-        // consecutive calls fold into one card; a delegation stands alone (its mark must show)
+        // consecutive calls fold into one card — file edits with edits, other steps with steps; a
+        // delegation stands alone (its mark must show)
         let prev = if delegation { None } else { self.last_tool.borrow().clone() };
-        let prev_row = prev.and_then(|pid| self.tool_rows.borrow().get(&pid).cloned()); // borrow ends here
+        let prev_row = prev.and_then(|pid| self.tool_rows.borrow().get(&pid).cloned()).filter(|p| p.edit == is_edit); // borrow ends here
         self.tool_rows.borrow_mut().insert(id.clone(), tr.clone()); // before the header counts it
         match prev_row {
             Some(prev_row) => {
@@ -613,7 +637,7 @@ impl Conversation {
         card.add_css_class("sill-tool-group");
         let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         header.add_css_class("sill-tool-line");
-        let glyph = gtk::Label::new(Some("⚙"));
+        let glyph = gtk::Label::new(Some(if first.edit { "✎" } else { "⚙" }));
         glyph.add_css_class("sill-tool-glyph");
         glyph.set_width_chars(1);
         let header_title = gtk::Label::new(None);
@@ -643,7 +667,7 @@ impl Conversation {
         self.column.remove(&first.row);
         rows.append(&first.row);
         let first_id = self.tool_rows.borrow().iter().find(|(_, r)| Rc::ptr_eq(r, first)).map(|(id, _)| id.clone());
-        let g = Rc::new(ToolGroup { header_title, header_mark, rows, ids: RefCell::new(first_id.into_iter().collect()) });
+        let g = Rc::new(ToolGroup { header_title, header_mark, rows, ids: RefCell::new(first_id.into_iter().collect()), edit: first.edit });
         *first.group.borrow_mut() = Some(g.clone());
         g
     }
@@ -655,7 +679,7 @@ impl Conversation {
         let ids = g.ids.borrow();
         let members: Vec<&Rc<ToolRow>> = ids.iter().filter_map(|id| rows.get(id)).collect();
         let latest = members.last().map(|r| r.title.text().to_string()).unwrap_or_default();
-        g.header_title.set_text(&format!("{} steps · {latest}", members.len()));
+        g.header_title.set_text(&format!("{} {} · {latest}", members.len(), if g.edit { "edits" } else { "steps" }));
         let statuses: Vec<String> = members.iter().map(|r| r.status.borrow().clone()).collect();
         let agg = if statuses.iter().any(|s| s == "InProgress" || s == "Pending") {
             "InProgress"
@@ -667,9 +691,10 @@ impl Conversation {
         Self::set_mark(&g.header_mark, agg);
     }
 
-    pub fn update_tool_call_full(&self, id: &str, status: Option<&str>, title: Option<&str>, detail: Option<&str>) {
+    pub fn update_tool_call_full(&self, id: &str, status: Option<&str>, title: Option<&str>, detail: Option<&str>, diff: Option<&str>) {
         let row = self.tool_rows.borrow().get(id).cloned();
         let Some(r) = row else { return };
+        Self::set_diff(&r, diff); // an edit's diff arrives with the update: live
         if let Some(s) = status {
             *r.status.borrow_mut() = s.to_string();
             Self::set_mark(&r.mark, s);
@@ -683,7 +708,7 @@ impl Conversation {
             r.title.set_text(&t);
             r.title.set_tooltip_text(Some(&t));
         }
-        if let Some(d) = detail {
+        if let Some(d) = detail.filter(|d| !d.trim().is_empty()) {
             // an update's detail (output) is added under what the call already showed
             let cur = r.body.text();
             if cur.is_empty() {
@@ -691,6 +716,7 @@ impl Conversation {
             } else if !cur.ends_with(d) {
                 r.body.set_text(&format!("{cur}\n\n{d}"));
             }
+            r.body.set_visible(true);
         }
         let group = r.group.borrow().clone();
         if let Some(g) = group {
@@ -818,12 +844,12 @@ impl Conversation {
             Event::UserText(t) => self.add_user(&t),
             Event::Text(t) => self.append_markdown(&self.current, "sill-agent", &t),
             Event::Thought(t) => self.append_markdown(&self.current_thought, "sill-thought", &t),
-            Event::ToolCall { id, title, status, kind, detail, parent } => {
-                self.add_tool_call_full(id, &title, &status, Some(&kind), detail.as_deref(), parent.as_deref())
+            Event::ToolCall { id, title, status, kind, detail, diff, parent } => {
+                self.add_tool_call_full(id, &title, &status, Some(&kind), detail.as_deref(), parent.as_deref(), diff.as_deref())
             }
             Event::SubagentText { parent, text } => self.add_subagent_text(&parent, &text),
-            Event::ToolCallUpdate { id, status, title, detail } => {
-                self.update_tool_call_full(&id, status.as_deref(), title.as_deref(), detail.as_deref())
+            Event::ToolCallUpdate { id, status, title, detail, diff } => {
+                self.update_tool_call_full(&id, status.as_deref(), title.as_deref(), detail.as_deref(), diff.as_deref())
             }
             Event::PermissionRequest { title, options, reply, .. } => {
                 self.status.set_text("waiting for your answer");
@@ -932,6 +958,7 @@ button.sill-md-image:hover { opacity: 0.85; }
 .sill-mark-done { opacity: 0.5; }
 .sill-mark-failed { color: @error_color; }
 .sill-tool-body { font-family: monospace; font-size: 85%; padding: 4px 10px 6px 28px; color: alpha(@view_fg_color, 0.8); }
+.sill-tool-diff { margin: 0 10px 6px 28px; font-size: 85%; }
 .sill-tool-rows { margin-left: 10px; border-left: 1px solid alpha(@view_fg_color, 0.12); }
 .sill-tool-rows .sill-tool { border-left: none; }
 .sill-permission { background: alpha(@warning_bg_color, 0.10); border-radius: 0; padding: 8px 10px;

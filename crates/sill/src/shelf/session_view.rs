@@ -405,7 +405,15 @@ impl SessionView {
                     "user" => view.conv.add_user_with(&e.text, &e.extra.lines().filter(|l| !l.is_empty()).map(str::to_string).collect::<Vec<_>>()),
                     "agent" => view.conv.add_agent_block(&e.text),
                     "thought" => view.conv.add_thought_block(&e.text),
-                    "tool" => view.conv.add_tool_call(format!("stored-{}", e.seq), &e.text, &e.extra),
+                    "tool" => view.conv.add_tool_call_full(
+                        format!("stored-{}", e.seq),
+                        &e.text,
+                        &e.extra,
+                        (!e.tool_kind.is_empty()).then_some(e.tool_kind.as_str()),
+                        (!e.detail.is_empty()).then_some(e.detail.as_str()),
+                        None,
+                        (!e.diff.is_empty()).then_some(e.diff.as_str()),
+                    ),
                     _ => view.conv.add_note(&e.text),
                 }
             }
@@ -1584,15 +1592,15 @@ impl SessionView {
             // turn; the shelf already shows what it sent, so outside a replay it is dropped
             Event::UserText(_) => return,
             Event::Text(t) => self.agent_md.borrow_mut().push_str(t),
-            Event::ToolCall { id, title, status, .. } => {
+            Event::ToolCall { id, title, status, kind, detail, diff, .. } => {
                 self.flush_agent();
-                if let Ok(seq) = self.store.append(&self.id(), "tool", title, status) {
+                if let Ok(seq) = self.store.append_tool(&self.id(), title, status, kind, detail.as_deref(), diff.as_deref()) {
                     self.tool_seqs.borrow_mut().insert(id.clone(), seq);
                 }
             }
-            Event::ToolCallUpdate { id, status, title, .. } => {
+            Event::ToolCallUpdate { id, status, title, detail, diff } => {
                 if let Some(seq) = self.tool_seqs.borrow().get(id) {
-                    let _ = self.store.update_tool(&self.id(), *seq, title.as_deref(), status.as_deref());
+                    let _ = self.store.update_tool(&self.id(), *seq, title.as_deref(), status.as_deref(), detail.as_deref(), diff.as_deref());
                 }
             }
             Event::Stopped(_) => {
