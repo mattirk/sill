@@ -186,7 +186,8 @@ impl App {
         ]
         .align_y(Alignment::Center)
         .padding([2, 4]);
-        let mut body = Column::new().spacing(2).width(Fill);
+        // no spacing: rows carry their own, so the indent guides run on unbroken
+        let mut body = Column::new().width(Fill);
         if let Some(error) = &state.error {
             body = body.push(
                 column![
@@ -558,8 +559,8 @@ fn node<'a>(
     let button = keys::press(
         button(label)
             .padding(Padding {
-                top: 2.0,
-                bottom: 2.0,
+                top: 3.0,
+                bottom: 3.0,
                 left: 4.0,
                 right: 6.0,
             })
@@ -581,7 +582,8 @@ fn node<'a>(
                     ..Padding::ZERO
                 })
                 .width(15)
-                .height(24),
+                // the row's whole height, so one row's guide meets the next one's
+                .height(Fill),
         );
     }
     line = line.push(button);
