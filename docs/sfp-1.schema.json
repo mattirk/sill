@@ -1163,6 +1163,323 @@
       ],
       "type": "object"
     },
+    "CrosscheckAgentOptions": {
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "options": {
+          "description": "Empty when no session of this agent has reported its options here yet: it then reviews\nas it starts.",
+          "items": {
+            "$ref": "#/$defs/ControlOption"
+          },
+          "type": "array"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent",
+        "title",
+        "options"
+      ],
+      "type": "object"
+    },
+    "CrosscheckCurrent": {
+      "description": "A workspace's review, when it has one.",
+      "properties": {
+        "run": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CrosscheckRun"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "CrosscheckEmpty": {
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "CrosscheckNotice": {
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace_id",
+        "run_id"
+      ],
+      "type": "object"
+    },
+    "CrosscheckParticipant": {
+      "properties": {
+        "activity": {
+          "default": [],
+          "description": "Its latest steps, one line each, the latest last.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "error": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reviewer": {
+          "$ref": "#/$defs/CrosscheckReviewer"
+        },
+        "session_id": {
+          "default": null,
+          "description": "Its worker session, once made.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "description": "`starting`, `running`, `complete` or `failed`.",
+          "type": "string"
+        },
+        "summary": {
+          "default": "",
+          "description": "Its assessment in at most three sentences.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reviewer",
+        "state"
+      ],
+      "type": "object"
+    },
+    "CrosscheckProblem": {
+      "properties": {
+        "detail": {
+          "default": "",
+          "description": "The Reviewer's explanation: what is expected, what happens, how it knows.",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "line": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "path": {
+          "default": null,
+          "description": "Relative to the repository.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reviewer_index": {
+          "description": "Which of `Run::reviewers` reported it.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "title": {
+          "description": "The problem in one sentence.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "reviewer_index",
+        "title"
+      ],
+      "type": "object"
+    },
+    "CrosscheckReviewer": {
+      "description": "Who reviews: an agent and that agent's own options. Its options are the Reviewer's alone: they\ndo not change what the person's ordinary sessions of that agent start with.",
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "name": {
+          "default": "",
+          "description": "What the person calls it; the agent's id when they gave it no name.",
+          "type": "string"
+        },
+        "options": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Option id → value id for a choice, `true`/`false` for a switch (the ids of\n`SessionControls::options`). An option left out stays as the agent starts with it.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "agent"
+      ],
+      "type": "object"
+    },
+    "CrosscheckReviewers": {
+      "description": "The Reviewers setting and what can be chosen for it.",
+      "properties": {
+        "agents": {
+          "description": "Every agent that can review, with its options as its latest session reported them.",
+          "items": {
+            "$ref": "#/$defs/CrosscheckAgentOptions"
+          },
+          "type": "array"
+        },
+        "reviewers": {
+          "description": "The saved Reviewers, the one a review uses first. Empty: none was chosen, and a review is\ndone by an agent other than the session's own when there is one.",
+          "items": {
+            "$ref": "#/$defs/CrosscheckReviewer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "reviewers",
+        "agents"
+      ],
+      "type": "object"
+    },
+    "CrosscheckRun": {
+      "properties": {
+        "base": {
+          "description": "The commit the review compares against: where the work leaves the person's checkout, so\nthe review covers what an Apply would bring and nothing else.",
+          "type": "string"
+        },
+        "created_at": {
+          "description": "Unix seconds, as a decimal string.",
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "problems": {
+          "description": "What they found, the most important first. Empty on a complete review: no problems found.",
+          "items": {
+            "$ref": "#/$defs/CrosscheckProblem"
+          },
+          "type": "array"
+        },
+        "reviewers": {
+          "description": "Who reviewed. One in this version.",
+          "items": {
+            "$ref": "#/$defs/CrosscheckParticipant"
+          },
+          "type": "array"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "description": "The session whose work it is.",
+          "type": "string"
+        },
+        "stale": {
+          "description": "The workspace's files are no longer the ones reviewed.",
+          "type": "boolean"
+        },
+        "state": {
+          "description": "`capturing`, `reviewing`, `complete` or `failed`. Only `complete` is a review; `failed`\nsays why in `detail`.",
+          "type": "string"
+        },
+        "state_tree": {
+          "description": "The reviewed files as a Git tree, uncommitted work included (`Detail::state_tree`).",
+          "type": "string"
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "workspace_id",
+        "session_id",
+        "state_tree",
+        "base",
+        "state",
+        "detail",
+        "reviewers",
+        "problems",
+        "created_at",
+        "stale"
+      ],
+      "type": "object"
+    },
+    "CrosscheckRunKey": {
+      "additionalProperties": false,
+      "properties": {
+        "run_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id"
+      ],
+      "type": "object"
+    },
+    "CrosscheckSetReviewers": {
+      "additionalProperties": false,
+      "properties": {
+        "reviewers": {
+          "items": {
+            "$ref": "#/$defs/CrosscheckReviewer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "reviewers"
+      ],
+      "type": "object"
+    },
+    "CrosscheckStart": {
+      "additionalProperties": false,
+      "properties": {
+        "operation_id": {
+          "description": "Chosen by the frontend for this press of the button: a repeated start with it answers\nwith the review it started and starts nothing.",
+          "type": "string"
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation_id",
+        "workspace_id"
+      ],
+      "type": "object"
+    },
+    "CrosscheckWorkspaceKey": {
+      "additionalProperties": false,
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace_id"
+      ],
+      "type": "object"
+    },
     "Cursor": {
       "properties": {
         "seq": {
@@ -6667,7 +6984,7 @@
           "type": "array"
         },
         "purpose": {
-          "description": "A prompt a frontend wrote for the person rather than one they typed: `commit` (Apply's\nrequest to commit a workspace). Null or absent for the person's own words; other values\nare refused. Carried to the submission and to the turn it starts.",
+          "description": "A prompt a frontend wrote for the person rather than one they typed: `commit` (Apply's\nrequest to commit a workspace) or `crosscheck` (the request to fix what a Crosscheck\nfound). Null or absent for the person's own words; other values are refused. Carried to the submission and to the turn it starts.",
           "type": [
             "string",
             "null"
@@ -7114,7 +7431,7 @@
           "type": "string"
         },
         "purpose": {
-          "description": "Why sill started the turn when the person did not: `summary` (a summary sill asked the\nagent for), `commit` (a submission whose `purpose` is `commit`); null for the person's own\nturns and the agent's. Frontends fold such a turn to one line.",
+          "description": "Why sill started the turn when the person did not: `summary` (a summary sill asked the\nagent for), or a submission's `purpose` (`commit`, `crosscheck`); null for the person's own\nturns and the agent's. Frontends fold a `summary` or `commit` turn to one line, and of a\n`crosscheck` turn only its prompt.",
           "type": [
             "string",
             "null"
@@ -7416,6 +7733,11 @@
   "capabilities": {
     "offered": [
       {
+        "doc": "_sill/crosscheck.*: a second opinion on a workspace's work from one Reviewer, a saved agent with its options; a submission may carry the purpose `crosscheck`.",
+        "name": "sill.crosscheck",
+        "version": 1
+      },
+      {
         "doc": "_sill/submissions.send_now: a queued submission goes next, the active turn stopped.",
         "name": "sill.send_now",
         "version": 1
@@ -7540,6 +7862,90 @@
     "snapshot_ttl_seconds": 60
   },
   "methods": [
+    {
+      "capabilities": {
+        "sill.crosscheck": 1
+      },
+      "doc": "Read the saved Reviewers and, for every agent that can review, the options its latest session reported.",
+      "kind": "request",
+      "name": "_sill/crosscheck.reviewers",
+      "params": {
+        "$ref": "#/$defs/CrosscheckEmpty"
+      },
+      "result": {
+        "$ref": "#/$defs/CrosscheckReviewers"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.crosscheck": 1
+      },
+      "doc": "Save the Reviewers. Read them after uncertainty before repeating.",
+      "kind": "request",
+      "name": "_sill/crosscheck.set_reviewers",
+      "params": {
+        "$ref": "#/$defs/CrosscheckSetReviewers"
+      },
+      "result": {
+        "$ref": "#/$defs/CrosscheckReviewers"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.crosscheck": 1
+      },
+      "doc": "Read a workspace's review, when it has one, and whether its files are still the ones reviewed.",
+      "kind": "request",
+      "name": "_sill/crosscheck.get",
+      "params": {
+        "$ref": "#/$defs/CrosscheckWorkspaceKey"
+      },
+      "result": {
+        "$ref": "#/$defs/CrosscheckCurrent"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.crosscheck": 1
+      },
+      "doc": "Capture the workspace's work and start a Reviewer on it, replacing the workspace's earlier review. The same operation_id answers with the review it started; never replay uncertain work under a new one.",
+      "kind": "request",
+      "name": "_sill/crosscheck.start",
+      "params": {
+        "$ref": "#/$defs/CrosscheckStart"
+      },
+      "result": {
+        "$ref": "#/$defs/CrosscheckRun"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.crosscheck": 1
+      },
+      "doc": "Remove a review: one under way is cancelled and its Reviewer stopped. A review already gone is not an error.",
+      "kind": "request",
+      "name": "_sill/crosscheck.remove",
+      "params": {
+        "$ref": "#/$defs/CrosscheckRunKey"
+      },
+      "result": {
+        "type": "object"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.crosscheck": 1
+      },
+      "doc": "A workspace's review changed or was removed; read it again. Sent only to connections answered sill.crosscheck.",
+      "kind": "notification",
+      "name": "_sill/crosscheck.changed",
+      "params": {
+        "$ref": "#/$defs/CrosscheckNotice"
+      },
+      "result": {
+        "type": "object"
+      }
+    },
     {
       "capabilities": {},
       "doc": "Release this connection's immutable memory text snapshot early.",

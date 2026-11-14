@@ -60,6 +60,12 @@ const fn notification<P: JsonSchema>(name: &'static str, doc: &'static str) -> M
 
 /// Every method the daemon answers and every notification it sends, in the order of docs/protocol.md.
 pub const METHODS: &[Method] = &[
+    req_needing::<crate::crosscheck::Empty,crate::crosscheck::Reviewers>("_sill/crosscheck.reviewers","sill.crosscheck",1,"Read the saved Reviewers and, for every agent that can review, the options its latest session reported."),
+    req_needing::<crate::crosscheck::SetReviewers,crate::crosscheck::Reviewers>("_sill/crosscheck.set_reviewers","sill.crosscheck",1,"Save the Reviewers. Read them after uncertainty before repeating."),
+    req_needing::<crate::crosscheck::WorkspaceKey,crate::crosscheck::Current>("_sill/crosscheck.get","sill.crosscheck",1,"Read a workspace's review, when it has one, and whether its files are still the ones reviewed."),
+    req_needing::<crate::crosscheck::Start,crate::crosscheck::Run>("_sill/crosscheck.start","sill.crosscheck",1,"Capture the workspace's work and start a Reviewer on it, replacing the workspace's earlier review. The same operation_id answers with the review it started; never replay uncertain work under a new one."),
+    req_empty_needing::<crate::crosscheck::RunKey>("_sill/crosscheck.remove","sill.crosscheck",1,"Remove a review: one under way is cancelled and its Reviewer stopped. A review already gone is not an error."),
+    notification_needing::<crate::crosscheck::Notice>("_sill/crosscheck.changed","sill.crosscheck",1,"A workspace's review changed or was removed; read it again. Sent only to connections answered sill.crosscheck."),
     req_empty::<crate::memory::TextClose>("_sill/memory.text.close", "Release this connection's immutable memory text snapshot early."),
     req_empty::<crate::sessions::SessionKey>("_sill/sessions.delete", "Delete one exact session. Inspect existence after uncertainty; never replay against a replacement identity."),
     req_empty::<crate::sessions::SessionKey>("_sill/sessions.reset", "Explicitly replace a conversation generation. Never blindly retry after uncertainty."),

@@ -34,6 +34,7 @@ pub mod settings;
 pub mod supervision;
 pub mod terminal;
 pub mod workspaces;
+pub mod crosscheck;
 
 use std::sync::Arc;
 

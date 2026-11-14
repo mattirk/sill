@@ -154,8 +154,9 @@ pub struct Turn {
     pub outcome: String,
     pub reason: Option<Reason>,
     /// Why sill started the turn when the person did not: `summary` (a summary sill asked the
-    /// agent for), `commit` (a submission whose `purpose` is `commit`); null for the person's own
-    /// turns and the agent's. Frontends fold such a turn to one line.
+    /// agent for), or a submission's `purpose` (`commit`, `crosscheck`); null for the person's own
+    /// turns and the agent's. Frontends fold a `summary` or `commit` turn to one line, and of a
+    /// `crosscheck` turn only its prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purpose: Option<String>,
 }
@@ -179,8 +180,8 @@ pub struct Submit {
     #[serde(default)]
     pub attachments: Vec<Attachment>,
     /// A prompt a frontend wrote for the person rather than one they typed: `commit` (Apply's
-    /// request to commit a workspace). Null or absent for the person's own words; other values
-    /// are refused. Carried to the submission and to the turn it starts.
+    /// request to commit a workspace) or `crosscheck` (the request to fix what a Crosscheck
+    /// found). Null or absent for the person's own words; other values are refused. Carried to the submission and to the turn it starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purpose: Option<String>,
 }

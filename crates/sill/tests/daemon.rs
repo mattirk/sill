@@ -1620,3 +1620,301 @@ fn autostart_off_blocks_fallback_but_allows_a_manual_daemon() {
     status.arg("status").env_remove("SILL_BOX");
     assert!(status.status().unwrap().success());
 }
+
+#[test]
+fn public_crosscheck_workers_are_hidden_and_cannot_be_widened_or_kept() {
+    use sill_proto::sessions::HostPath;
+    let d=Daemon::start();
+    let mut c=d.connect_caps(json!({"sill.permission_modes":1,"sill.host_control":1})).unwrap();
+    let made=c.call("_sill/sessions.create",json!({"create_id":"internal-review","agent":"claude","policy":"default"})).unwrap();
+    let id=made["result"]["session_id"].as_str().unwrap();
+    let store=sill_core::store::Store::open(&d.dir.join("state/sill/sill.db")).unwrap();
+    store.conn().execute("INSERT INTO crosscheck_workers VALUES(?1,'run')",[id]).unwrap();
+    let repo=d.dir.join("home/reviewer-copy"); std::fs::create_dir_all(&repo).unwrap();
+    assert!(Command::new("git").args(["init","-q"]).arg(&repo).status().unwrap().success());
+    let file=repo.join("generated"); std::fs::write(&file,"disposable").unwrap(); store.pin(id,&repo).unwrap();
+    let listed=c.call("_sill/sessions.list",json!({})).unwrap();
+    assert_eq!(listed["result"]["sessions"],json!([]),"{listed}");
+    let get=c.call("_sill/sessions.get",json!({"session_id":id})).unwrap();
+    assert_eq!(get["result"]["session_id"],id,"transcript metadata remains readable: {get}");
+    for method in ["_sill/sessions.update","_sill/sessions.pin","_sill/sessions.unpin","_sill/sessions.submit","_sill/sessions.control","_sill/sessions.reset","_sill/permissions.set","_sill/permissions.apply_development","_sill/permissions.restore_defaults","_sill/policy.allow_host","_sill/host_control.activate"] {
+        let refused=c.call(method,json!({"session_id":id})).unwrap();
+        assert_eq!(refused["error"]["data"]["code"],"permission_denied","{method}: {refused}");
+    }
+    let changes=c.call("_sill/changes.list",json!({})).unwrap();
+    assert_eq!(changes["result"]["entries"],json!([]),"reviewer pins must not become live changes: {changes}");
+    let keep=c.call("_sill/changes.keep",json!({"session_id":id,"items":[{"path":HostPath::from_path(&file),"expected_hash":null}]})).unwrap();
+    assert_eq!(keep["error"]["data"]["code"],"permission_denied","{keep}");
+    assert_eq!(std::fs::read_to_string(file).unwrap(),"disposable");
+}
+
+/// A scripted agent in place of a Crosscheck worker's jail. `SILL_LAUNCHER=attach` makes the
+/// daemon wait for a shim on the worker session's socket instead of launching one: this
+/// provides it, for every worker the daemon records, and plays the Reviewer on its ACP
+/// connection. Everything else is the daemon's real path: the capture, the copy, the worker
+/// session, its relay, the prompt, the journal, the report and the teardown.
+struct FakeReviewers {
+    /// The prompt each Reviewer was given, as it arrived.
+    prompts: std::sync::mpsc::Receiver<String>,
+    /// What the next Reviewer answers with. Unanswered, it works until it is stopped.
+    answers: std::sync::mpsc::Sender<String>,
+    /// The options each worker was asked to take: (option id, value).
+    chosen: std::sync::mpsc::Receiver<(String, String)>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    sleepers: std::sync::Arc<std::sync::Mutex<Vec<Child>>>,
+}
+
+impl FakeReviewers {
+    fn start(dir: &Path) -> Self {
+        use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}, mpsc};
+        let (prompt_tx, prompts) = mpsc::channel();
+        let (answers, answer_rx) = mpsc::channel::<String>();
+        let (chosen_tx, chosen) = mpsc::channel();
+        let answer_rx = Arc::new(Mutex::new(answer_rx));
+        let stop = Arc::new(AtomicBool::new(false));
+        let sleepers = Arc::new(Mutex::new(Vec::new()));
+        let (dir, stopping, kept) = (dir.to_path_buf(), stop.clone(), sleepers.clone());
+        std::thread::spawn(move || {
+            let mut served = std::collections::HashSet::new();
+            while !stopping.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(5));
+                let Ok(db) = rusqlite::Connection::open_with_flags(dir.join("state/sill/sill.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) else { continue };
+                let Ok(mut q) = db.prepare("SELECT session_id FROM crosscheck_workers") else { continue };
+                let Ok(rows) = q.query_map([], |r| r.get::<_, String>(0)) else { continue };
+                for id in rows.flatten() {
+                    if !served.insert(id.clone()) { continue; }
+                    let runtime = dir.join("run/sill").join(&id);
+                    std::fs::create_dir_all(&runtime).unwrap();
+                    // what stopping a session signals: a process that is the session's launcher
+                    let sleeper = Command::new("sh").args(["-c", "while :; do sleep 1; done", "sill", "launch", "--session", &id]).spawn().unwrap();
+                    std::fs::write(runtime.join("launch.pid"), sleeper.id().to_string()).unwrap();
+                    kept.lock().unwrap().push(sleeper);
+                    let listener = std::os::unix::net::UnixListener::bind(runtime.join("shim.sock")).unwrap();
+                    let (prompt_tx, answer_rx, chosen_tx) = (prompt_tx.clone(), answer_rx.clone(), chosen_tx.clone());
+                    std::thread::spawn(move || {
+                        for stream in listener.incoming().flatten() {
+                            let (prompt_tx, answer_rx, chosen_tx) = (prompt_tx.clone(), answer_rx.clone(), chosen_tx.clone());
+                            std::thread::spawn(move || Self::serve(stream, prompt_tx, answer_rx, chosen_tx));
+                        }
+                    });
+                }
+            }
+        });
+        Self { prompts, answers, chosen, stop, sleepers }
+    }
+
+    fn serve(mut stream: UnixStream, prompts: std::sync::mpsc::Sender<String>, answers: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<String>>>, chosen: std::sync::mpsc::Sender<(String, String)>) {
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut read = move || -> Option<Value> {
+            let mut line = String::new();
+            (reader.read_line(&mut line).ok()? > 0).then(|| serde_json::from_str(&line).unwrap())
+        };
+        let send = |stream: &mut UnixStream, message: Value| writeln!(stream, "{message}").is_ok();
+        let Some(role) = read() else { return };
+        if role["role"] == "control" {
+            while let Some(request) = read() {
+                let answer = if request["op"] == "status" { json!({"ok":true,"running":true,"pid":std::process::id(),"exit":null,"buffered_lines":0}) } else { json!({"ok":true}) };
+                if !send(&mut stream, answer) { return; }
+            }
+            return;
+        }
+        let options = |model: &str| json!([{"id":"model","name":"Model","category":"model","type":"select","currentValue":model,
+            "options":[{"value":"small","name":"Small"},{"value":"large","name":"Large"}]}]);
+        while let Some(request) = read() {
+            let id = request["id"].clone();
+            match request["method"].as_str() {
+                Some("initialize") => { send(&mut stream, json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}})); }
+                Some("session/new") => { send(&mut stream, json!({"jsonrpc":"2.0","id":id,"result":{"sessionId":"fake-review","configOptions":options("small")}})); }
+                Some("session/set_config_option") => {
+                    let value = request["params"]["value"].as_str().unwrap_or_default().to_string();
+                    let _ = chosen.send((request["params"]["configId"].as_str().unwrap_or_default().to_string(), value.clone()));
+                    send(&mut stream, json!({"jsonrpc":"2.0","id":id,"result":{"configOptions":options(&value)}}));
+                }
+                Some("session/prompt") => {
+                    let text = request["params"]["prompt"].as_array().unwrap().iter().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n");
+                    let _ = prompts.send(text);
+                    let update = |update: Value| json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fake-review","update":update}});
+                    send(&mut stream, update(json!({"sessionUpdate":"tool_call","toolCallId":"t1","title":"Read src/lib.rs","kind":"read","status":"completed"})));
+                    // works until told what to say, or until its session is stopped
+                    let Ok(answer) = answers.lock().unwrap().recv_timeout(Duration::from_secs(30)) else { return };
+                    send(&mut stream, update(json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":answer}})));
+                    send(&mut stream, json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}));
+                }
+                _ if !id.is_null() => { send(&mut stream, json!({"jsonrpc":"2.0","id":id,"result":{}})); }
+                _ => {}
+            }
+        }
+    }
+}
+
+impl Drop for FakeReviewers {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        for mut sleeper in self.sleepers.lock().unwrap().drain(..) { let _ = sleeper.kill(); let _ = sleeper.wait(); }
+    }
+}
+
+/// A whole review, start to end, against a scripted Reviewer (docs/crosscheck.md): what it is
+/// given to compare, what the person is shown, and that nothing of it is left behind — for a
+/// review that finds problems, one whose answer cannot be read, and one that is cancelled.
+#[test]
+fn public_crosscheck_runs_a_whole_review_against_a_scripted_reviewer() {
+    use sill_proto::sessions::HostPath;
+    let dir = Daemon::dir();
+    let home = dir.join("home");
+    let git = |at: &Path, args: &[&str]| {
+        let out = Command::new("git").arg("-C").arg(at).args(["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false"]).args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    // the person's checkout, and a workspace started from it
+    let source = home.join("project");
+    std::fs::create_dir_all(source.join("src")).unwrap();
+    git(&source, &["init", "-q", "--initial-branch=main"]);
+    std::fs::write(source.join("src/lib.rs"), "pub fn one() -> u32 { 1 }\n").unwrap();
+    git(&source, &["add", "-A"]);
+    git(&source, &["commit", "-q", "-m", "start"]);
+    let start = git(&source, &["rev-parse", "HEAD"]);
+    let clone = dir.join("state/workspaces/project");
+    std::fs::create_dir_all(clone.parent().unwrap()).unwrap();
+    git(&home, &["clone", "-q", source.to_str().unwrap(), clone.to_str().unwrap()]);
+    git(&clone, &["checkout", "-q", "-b", "sill/ws"]);
+    git(&clone, &["update-ref", "refs/sill/base", &start]);
+    // the work: one commit and one uncommitted new file
+    std::fs::write(clone.join("src/lib.rs"), "pub fn one() -> u32 { 2 }\n").unwrap();
+    git(&clone, &["commit", "-q", "-am", "the work"]);
+    std::fs::write(clone.join("src/new.rs"), "pub fn new() {}\n").unwrap();
+    // meanwhile the checkout gained another session's commit, which this work never had
+    std::fs::write(source.join("other.txt"), "another session's work\n").unwrap();
+    git(&source, &["add", "-A"]);
+    git(&source, &["commit", "-q", "-m", "another session"]);
+
+    let d = Daemon::start_env(dir, &[("SILL_LAUNCHER", "attach")]);
+    let fake = FakeReviewers::start(&d.dir);
+    let mut c = d.connect_caps(json!({"sill.crosscheck": 1})).unwrap();
+    let made = c.call("_sill/sessions.create", json!({"create_id":"author","agent":"claude","policy":"default"})).unwrap();
+    let author = made["result"]["session_id"].as_str().unwrap().to_string();
+    // an agent the person also uses: it reviews when no Reviewer is saved
+    let other = c.call("_sill/sessions.create", json!({"create_id":"other","agent":"codex","policy":"default"})).unwrap()["result"]["session_id"].as_str().unwrap().to_string();
+    {
+        // the session's workspace and its launch record, as a started workspace session has them
+        let store = sill_core::store::Store::open(&d.dir.join("state/sill/sill.db")).unwrap();
+        use std::os::unix::ffi::OsStrExt;
+        store.conn().execute("INSERT INTO workspaces(id,name,session_id,source,source_branch,base,branch,path,state,shallow,discards,created_by,created_at,updated_at) VALUES('ws-1','project',?1,?2,'main',?3,'sill/ws',?4,'open',0,0,'test',1,1)",
+            rusqlite::params![author, source.as_os_str().as_bytes(), start, clone.as_os_str().as_bytes()]).unwrap();
+        let base = sill_core::policy::Policy::load("default", &home).unwrap();
+        let resolution = sill_core::session::resolve(&base, &[]).unwrap();
+        let resolution = sill_core::session::freeze_filesystem(resolution, "claude", &home, &d.dir.join("state/author-state"), &[], false, &[]).unwrap();
+        let snapshots = d.dir.join("state/sill/policy-snapshots").join(&author);
+        std::fs::create_dir_all(&snapshots).unwrap();
+        std::fs::write(snapshots.join("latest.json"), serde_json::to_vec(&resolution).unwrap()).unwrap();
+    }
+    let current = |c: &mut Conn| c.call("_sill/crosscheck.get", json!({"workspace_id":"ws-1"})).unwrap()["result"]["run"].clone();
+    let wait = |c: &mut Conn, what: &str, done: &dyn Fn(&Value) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let run = current(c);
+            if done(&run) { return run; }
+            assert!(Instant::now() < deadline, "{what}: {run}\n{}", d.log());
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    };
+    let workers = || -> Vec<(String, bool)> {
+        let db = rusqlite::Connection::open(d.dir.join("state/sill/sill.db")).unwrap();
+        let mut q = db.prepare("SELECT w.session_id, s.ended_at IS NOT NULL FROM crosscheck_workers w JOIN sessions s ON s.id=w.session_id ORDER BY s.created_at, s.rowid").unwrap();
+        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(Result::unwrap).collect()
+    };
+    let leftovers = || std::fs::read_dir(d.dir.join("home/.local/share/sill/crosschecks")).map(|d| d.count()).unwrap_or(0);
+    assert!(current(&mut c).is_null(), "no review before one is asked for");
+
+    // the Reviewer setting: what each agent offers is unknown until one has run
+    let setup = c.call("_sill/crosscheck.reviewers", json!({})).unwrap();
+    assert_eq!(setup["result"]["reviewers"], json!([]), "{setup}");
+    let agents: Vec<&str> = setup["result"]["agents"].as_array().unwrap().iter().map(|a| a["agent"].as_str().unwrap()).collect();
+    assert!(agents.contains(&"claude") && agents.contains(&"codex"), "{setup}");
+    assert!(setup["result"]["agents"].as_array().unwrap().iter().all(|a| a["options"] == json!([])), "{setup}");
+
+    // 1. a review that finds a problem. No Reviewer is saved: another agent than the author's.
+    let started = c.call("_sill/crosscheck.start", json!({"operation_id":"press-1","workspace_id":"ws-1"})).unwrap();
+    let run_id = started["result"]["run_id"].as_str().unwrap_or_else(|| panic!("{started}\n{}", d.log())).to_string();
+    assert_eq!(started["result"]["base"], start, "compared with where the work leaves the checkout, not the checkout's tip: {started}");
+    assert_eq!(started["result"]["reviewers"][0]["reviewer"]["agent"], "codex", "{started}");
+    let prompt = fake.prompts.recv_timeout(Duration::from_secs(30)).unwrap_or_else(|_| panic!("the Reviewer was never asked: {}\n{}", current(&mut c), d.log()));
+    assert!(prompt.contains(&format!("refs/crosscheck/base ({start})")), "{prompt}");
+    let copy = PathBuf::from(prompt.split("Work only in ").nth(1).unwrap().split(": a disposable copy").next().unwrap());
+    // what the Reviewer sees is this work alone: the commit, the uncommitted file, and not the
+    // other session's commit as something removed (2026-11-13)
+    assert_eq!(git(&copy, &["diff", "--name-only", "refs/crosscheck/base"]), "src/lib.rs\nsrc/new.rs");
+    assert!(!copy.join("other.txt").exists());
+    assert!(copy.starts_with(d.dir.join("home/.local/share/sill/crosschecks").join(&run_id)), "{}", copy.display());
+    let working = wait(&mut c, "the Reviewer's step", &|run| run["reviewers"][0]["activity"] == json!(["Read src/lib.rs"]));
+    assert_eq!((working["state"].as_str(), working["reviewers"][0]["state"].as_str()), (Some("reviewing"), Some("running")), "{working}");
+    // the worker is nobody's session: not listed, and a second press starts nothing
+    let listed = c.call("_sill/sessions.list", json!({})).unwrap();
+    let mut ids: Vec<&str> = listed["result"]["sessions"].as_array().unwrap().iter().map(|s| s["session_id"].as_str().unwrap()).collect();
+    ids.sort();
+    let mut mine = [author.as_str(), other.as_str()];
+    mine.sort();
+    assert_eq!(ids, mine, "{listed}");
+    let again = c.call("_sill/crosscheck.start", json!({"operation_id":"press-1","workspace_id":"ws-1"})).unwrap();
+    assert_eq!(again["result"]["run_id"], run_id.as_str(), "{again}");
+    let second = c.call("_sill/crosscheck.start", json!({"operation_id":"press-1b","workspace_id":"ws-1"})).unwrap();
+    assert!(second["error"]["message"].as_str().unwrap().contains("already under way"), "{second}");
+    fake.answers.send("Done.\n```json\n{\"summary\":\"It does what was asked. One thing to look at.\",\"problems\":[{\"title\":\"one() returns 2.\",\"path\":\"src/lib.rs\",\"line\":1,\"detail\":\"The name says one.\"}]}\n```".into()).unwrap();
+    let done = wait(&mut c, "the review", &|run| run["state"] != "reviewing" && run["state"] != "capturing");
+    assert_eq!(done["state"], "complete", "{done}\n{}", d.log());
+    assert_eq!(done["reviewers"][0]["summary"], "It does what was asked. One thing to look at.", "{done}");
+    assert_eq!(done["problems"], json!([{"id":"r0-p0","reviewer_index":0,"title":"one() returns 2.","path":"src/lib.rs","line":1,"detail":"The name says one."}]), "{done}");
+    assert_eq!(done["stale"], false, "{done}");
+    assert_eq!(workers().len(), 1);
+    wait(&mut c, "the worker's end", &|_| workers().iter().all(|(_, ended)| *ended) && leftovers() == 0);
+    assert!(!copy.exists(), "a review keeps its words, not its copies");
+    // the work changes: the review no longer describes it
+    std::fs::write(clone.join("src/new.rs"), "pub fn new() { /* fixed */ }\n").unwrap();
+    assert_eq!(current(&mut c)["stale"], true);
+    // codex has run now: its options are known, and a Reviewer can be saved with one
+    let setup = c.call("_sill/crosscheck.reviewers", json!({})).unwrap();
+    let reviewer = done["reviewers"][0]["reviewer"]["agent"].as_str().unwrap();
+    let offered = setup["result"]["agents"].as_array().unwrap().iter().find(|a| a["agent"] == reviewer).unwrap();
+    assert_eq!(offered["options"][0]["option_id"], "model", "{setup}");
+    let saved = c.call("_sill/crosscheck.set_reviewers", json!({"reviewers":[{"name":"Careful","agent":reviewer,"options":{"model":"large"}}]})).unwrap();
+    assert_eq!(saved["result"]["reviewers"][0]["name"], "Careful", "{saved}");
+
+    // 2. a review whose answer cannot be read is not "no problems"; it replaces the first
+    let started = c.call("_sill/crosscheck.start", json!({"operation_id":"press-2","workspace_id":"ws-1"})).unwrap();
+    let second_id = started["result"]["run_id"].as_str().unwrap_or_else(|| panic!("{started}")).to_string();
+    assert_ne!(second_id, run_id);
+    assert_eq!(started["result"]["reviewers"][0]["reviewer"]["name"], "Careful", "{started}");
+    fake.prompts.recv_timeout(Duration::from_secs(30)).unwrap_or_else(|_| panic!("the second Reviewer was never asked: {}\n{}", current(&mut c), d.log()));
+    // the saved Reviewer's option was taken before the prompt went
+    assert_eq!(fake.chosen.try_recv().ok(), Some(("model".to_string(), "large".to_string())));
+    fake.answers.send("Looks good to me.".into()).unwrap();
+    let failed = wait(&mut c, "the unreadable answer", &|run| run["state"] == "failed");
+    assert_eq!(failed["run_id"], second_id.as_str());
+    assert!(failed["detail"].as_str().unwrap().contains("not the report"), "{failed}");
+    assert_eq!(failed["problems"], json!([]));
+    wait(&mut c, "the second worker's end", &|_| workers().iter().all(|(_, ended)| *ended) && leftovers() == 0);
+
+    // 3. the cross while the Reviewer works: the review is gone and its worker stopped
+    let started = c.call("_sill/crosscheck.start", json!({"operation_id":"press-3","workspace_id":"ws-1"})).unwrap();
+    let third = started["result"]["run_id"].as_str().unwrap_or_else(|| panic!("{started}")).to_string();
+    fake.prompts.recv_timeout(Duration::from_secs(30)).unwrap_or_else(|_| panic!("the third Reviewer was never asked: {}\n{}", current(&mut c), d.log()));
+    assert_eq!(workers().iter().filter(|(_, ended)| !ended).count(), 1);
+    let removed = c.call("_sill/crosscheck.remove", json!({"run_id":third})).unwrap();
+    assert!(removed.get("error").is_none(), "{removed}");
+    assert!(current(&mut c).is_null(), "removed at once");
+    wait(&mut c, "the cancelled worker's end", &|_| workers().len() == 3 && workers().iter().all(|(_, ended)| *ended) && leftovers() == 0);
+    let twice = c.call("_sill/crosscheck.remove", json!({"run_id":third})).unwrap();
+    assert!(twice.get("error").is_none(), "a review already gone is not an error: {twice}");
+
+    // nothing to review once the work is where the checkout is
+    git(&clone, &["add", "-A"]);
+    git(&clone, &["commit", "-q", "-m", "more"]);
+    git(&source, &["pull", "-q", "--no-rebase", clone.to_str().unwrap(), "sill/ws"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+    git(&clone, &["reset", "-q", "--hard", "origin/main"]);
+    let nothing = c.call("_sill/crosscheck.start", json!({"operation_id":"press-4","workspace_id":"ws-1"})).unwrap();
+    assert!(nothing["error"]["message"].as_str().unwrap().contains("nothing to review"), "{nothing}");
+    let _ = HostPath::from_path(&source);
+}

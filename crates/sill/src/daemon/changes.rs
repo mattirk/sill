@@ -35,6 +35,7 @@ impl Hub {
         let mut row = |c: Change| row(c, &known, &mut hashed);
         let mut out = Vec::new();
         for s in sessions {
+            if self.crosscheck_worker(&s.id) { continue; }
             let list: Vec<Change> = self.session_changes(&s, uid, &user).with_context(|| format!("reading changes for session {}", s.id))?.into_iter().filter(|c| !c.ignored).collect();
             let kept = kept_dir(uid, &s.id).map(|d| keep::undoable(&d)).unwrap_or_default();
             if list.is_empty() && kept.is_empty() {
@@ -67,6 +68,7 @@ impl Hub {
                 Ok(sill_core::changes::git_diff(&repo, &rel))
             }
             DiffOf::Kept { session, id } => {
+                self.review_changes_forbidden(&session)?;
                 let dir = kept_dir(who().0, &session)?;
                 let Some(k) = keep::list(&dir).into_iter().find(|k| k.id == id) else { bail!("no keep {id} in session {session}") };
                 Ok(sill_core::changes::undo_diff(&k.path, &keep::prior_path(&dir, &k)))
@@ -125,6 +127,7 @@ impl Hub {
     /// Undo keeps by id (all of the session's undoable ones when `ids` is empty), newest first;
     /// `force` puts the previous version back even when the host was edited since.
     pub(super) fn changes_undo(&self, session: &str, ids: Vec<String>, force: bool) -> Result<Done> {
+        self.review_changes_forbidden(session)?;
         let dir = kept_dir(who().0, session)?;
         let all = keep::undoable(&dir);
         let pick: Vec<_> = if ids.is_empty() { all } else { all.into_iter().filter(|k| ids.contains(&k.id)).collect() };
@@ -163,6 +166,7 @@ impl Hub {
         let (uid, user) = who();
         let sessions: Vec<Session> = self.with_store(|s| s.sessions()).unwrap_or_default().into_iter().filter(|s| !s.ghost).collect();
         for s in sessions {
+            if self.crosscheck_worker(&s.id) { continue; }
             if self.children.lock().unwrap().contains_key(&s.id) && self.runner(&s.id).map_or(true, |r| r.busy()) {
                 continue;
             }
@@ -200,6 +204,7 @@ impl Hub {
     /// After a turn, report ordinary overlay changes. Reading the ledger never adopts files
     /// or changes the filesystem rules of this or another session.
     pub fn turn_ended(self: &std::sync::Arc<Self>, id: &str) {
+        if self.crosscheck_worker(id) { return; }
         let hub = self.clone();
         let id = id.to_string();
         let _ = std::thread::Builder::new().name(format!("sill-turn-{id}")).spawn(move || {
@@ -261,7 +266,15 @@ impl Hub {
         Ok(sill_proto::JailView { layers: plan.layers.into_iter().map(|l| (l.host, l.upper)).collect(), masked: plan.masked })
     }
 
+    fn review_changes_forbidden(&self, session: &str) -> Result<()> {
+        if self.crosscheck_worker(session) {
+            return Err(sill_proto::rpc::Error::domain("permission_denied", "Crosscheck worker writes are disposable and cannot be kept").into());
+        }
+        Ok(())
+    }
+
     fn scan_one(&self, session: &str) -> Result<Vec<Change>> {
+        self.review_changes_forbidden(session)?;
         let Some(s) = self.with_store(|st| st.sessions())?.into_iter().find(|s| s.id == session) else { bail!("no session {session}") };
         let (uid, user) = who();
         self.session_changes(&s, uid, &user)
@@ -289,6 +302,8 @@ impl Hub {
     fn pinned_checkouts(&self, st: &sill_core::store::Store) -> Result<Vec<PathBuf>> {
         let mut out = Vec::new();
         for s in st.sessions()?.into_iter().filter(|s| s.ended_at.is_none()) {
+            let worker: bool = st.conn().query_row("SELECT EXISTS(SELECT 1 FROM crosscheck_workers WHERE session_id=?1)", [&s.id], |r| r.get(0))?;
+            if worker { continue; }
             out.extend(st.pins(&s.id)?.into_iter().filter(|p| p.join(".git").exists()));
         }
         Ok(out)

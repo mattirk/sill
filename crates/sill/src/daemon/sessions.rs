@@ -128,6 +128,25 @@ pub(super) fn create(store: &Store, mut a: api::Create) -> Result<api::SessionKe
     tx.commit()?;
     Ok(api::SessionKey { session_id })
 }
+/// Fill a public page across internal workers. The cursor still names the last visible
+/// row, so hidden rows neither shorten a page nor cause later sessions to disappear.
+fn public_page(store: &Store, after: Option<(i64, &str)>, limit: usize) -> Result<Vec<sill_core::store::Session>> {
+    let hidden = {
+        let mut statement = store.conn().prepare("SELECT session_id FROM crosscheck_workers")?;
+        statement.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<std::collections::HashSet<_>, _>>()?
+    };
+    let mut cursor = after.map(|(time, id)| (time, id.to_string()));
+    let mut visible = Vec::new();
+    while visible.len() < limit {
+        let rows = store.sessions_page(cursor.as_ref().map(|(time, id)| (*time, id.as_str())), 128)?;
+        let exhausted = rows.len() < 128;
+        if let Some(last) = rows.last() { cursor = Some((last.created_at, last.id.clone())); }
+        visible.extend(rows.into_iter().filter(|s| !hidden.contains(&s.id)).take(limit - visible.len()));
+        if exhausted { break; }
+    }
+    Ok(visible)
+}
+
 impl Hub {
     pub(in crate::daemon) fn public_sessions(self: &Arc<Self>, method: &str, params: Value) -> Option<Result<Value, Error>> {
         if let Some(result) = self.public_pins(method, params.clone()) { return Some(result); }
@@ -152,7 +171,7 @@ impl Hub {
                         })
                         .transpose()?;
                     self.with_store(|store| {
-                        let mut rows = store.sessions_page(after, limit + 1)?;
+                        let mut rows = public_page(store, after, limit + 1)?;
                         let more = rows.len() > limit;
                         rows.truncate(limit);
                         let next = more.then(|| {
@@ -310,6 +329,30 @@ impl Hub {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn public_pages_fill_across_worker_rows_without_losing_the_cursor() {
+        let dir = std::env::temp_dir().join(format!("sill-review-pages-{}", crate::daemon::sfp::id()));
+        let store = Store::open(&dir.join("store.db")).unwrap();
+        store.conn().execute_batch("CREATE TABLE crosscheck_workers(session_id TEXT PRIMARY KEY,run_id TEXT NOT NULL)").unwrap();
+        let mut ordinary = Vec::new();
+        for i in 0..135 {
+            let session = store.create("test", "default").unwrap();
+            store.conn().execute("UPDATE sessions SET created_at=?1 WHERE id=?2", rusqlite::params![i, session.id]).unwrap();
+            if i >= 7 {
+                store.conn().execute("INSERT INTO crosscheck_workers VALUES (?1,'run')", [&session.id]).unwrap();
+            } else { ordinary.push(session.id); }
+        }
+        ordinary.reverse();
+        let first = public_page(&store, None, 4).unwrap();
+        assert_eq!(first.iter().map(|s| s.id.clone()).collect::<Vec<_>>(), ordinary[..4]);
+        let cursor = first.last().unwrap();
+        let second = public_page(&store, Some((cursor.created_at, &cursor.id)), 4).unwrap();
+        assert_eq!(second.iter().map(|s| s.id.clone()).collect::<Vec<_>>(), ordinary[4..]);
+        assert!(public_page(&store, Some((0, &ordinary[6])), 4).unwrap().is_empty());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn remember_pins_inherits_session_pins_only_and_preserves_retries() {
         let dir = std::env::temp_dir().join(format!("sill-remember-pins-{}", crate::daemon::sfp::id()));

@@ -11,6 +11,7 @@ pub mod agents;
 pub mod agent_storage;
 pub mod changes;
 pub mod config;
+pub mod crosscheck;
 pub mod frontend;
 pub mod history;
 pub mod instructions;

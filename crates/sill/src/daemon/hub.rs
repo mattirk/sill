@@ -45,6 +45,8 @@ mod sessions;
 mod pins;
 #[path = "workspaces.rs"]
 mod workspaces;
+#[path = "crosscheck.rs"]
+mod crosscheck;
 
 /// What an end that waits for the agent's summary needs once the answer is in (the facts as they
 /// were when the end was asked for; the row's summary is replaced only when memory is on).
@@ -92,6 +94,7 @@ pub struct Hub {
     swept: Mutex<std::time::Instant>,
     /// Jails being rebuilt for a pin change, one at a time per session.
     rebuilds: Rebuilds,
+    crosscheck_lock: Mutex<()>,
 }
 
 /// Rebuilds of a session's jail after its pins changed: at most one runs per session, and a pin
@@ -150,6 +153,7 @@ impl Hub {
         let store = Store::open_default()?;
         sill_core::operations::Journal::new(store.conn())?.recover()?;
         sill_core::workspace::records::init(store.conn())?;
+        crosscheck::init(store.conn())?;
         store.conn().execute_batch("CREATE TABLE IF NOT EXISTS daemon_ends (id TEXT PRIMARY KEY, context TEXT NOT NULL); CREATE TABLE IF NOT EXISTS daemon_runners (id TEXT PRIMARY KEY, state TEXT NOT NULL);
             CREATE TRIGGER IF NOT EXISTS daemon_state_cleanup AFTER DELETE ON sessions BEGIN
                 DELETE FROM daemon_runners WHERE id=OLD.id;
@@ -181,6 +185,7 @@ impl Hub {
             conns: Mutex::new(Vec::new()),
             swept: Mutex::new(std::time::Instant::now()),
             rebuilds: Rebuilds::default(),
+            crosscheck_lock: Mutex::new(()),
         };
         hub.adopt_running();
         hub.sweep_dead_ghosts();
@@ -435,6 +440,9 @@ impl Hub {
     }
 
     pub fn dispatch(self: &Arc<Self>, conn: &Arc<Conn>, m: &str, params: Value) -> Result<Value, Error> {
+        if let Some(result) = self.crosscheck(conn, m, params.clone()) {
+            return result.map_err(super::sfp::failure);
+        }
         if let Some(result) = self.changes_public(m, params.clone()) { return result.map_err(super::sfp::failure); }
         if let Some(result) = super::agent_admin::handle(self, m, params.clone()) { return result.map_err(super::sfp::failure); }
         if let Some(result) = super::host_control::handle(self, conn, m, params.clone()) {
@@ -494,6 +502,7 @@ impl Hub {
     pub fn recover(self: &Arc<Self>) {
         // interrupted workspace operations settle from what is on disk before anything else runs
         self.workspaces_recover();
+        self.crosscheck_recover();
         // first what must not run at all, so no stray's relay is recovered below (§3.11)
         self.reap_strays();
         let Ok(dir) = sill_proto::runtime_dir() else { return };
@@ -641,12 +650,13 @@ impl Hub {
     }
 
     fn create_session_row(store: &Store, n: NewSession) -> Result<String> {
+        crosscheck::init(store.conn())?;
         let s = store.create_with(&n.agent, &n.policy, n.ghost)?;
         let pins = if n.ghost {
             vec![]
         } else if n.pins.is_empty() && n.remember_pins {
             // Sessions are newest first; saved shortcuts never enter this list.
-            store.sessions()?.into_iter().filter(|x| x.id != s.id).find_map(|x| store.pins(&x.id).ok().filter(|p| !p.is_empty())).unwrap_or_default()
+            store.sessions()?.into_iter().filter(|x| x.id != s.id && !store.conn().query_row("SELECT EXISTS(SELECT 1 FROM crosscheck_workers WHERE session_id=?1)", [&x.id], |r| r.get::<_, bool>(0)).unwrap_or(true)).find_map(|x| store.pins(&x.id).ok().filter(|p| !p.is_empty())).unwrap_or_default()
         } else {
             n.pins
         };
@@ -1255,6 +1265,17 @@ impl Hub {
         if sill_core::session::is_running(id) {
             return Ok(Started { socket: sill_core::shim::runtime_dir(id)?.join("shim.sock"), fresh: false });
         }
+        // `SILL_LAUNCHER=attach` (the daemon's own tests): a session's jail is the test's to
+        // provide, a scripted shim on the session's socket. Nothing is launched: a session the
+        // daemon made itself (a Crosscheck worker) waits here for its shim to answer.
+        if std::env::var("SILL_LAUNCHER").is_ok_and(|v| v == "attach") {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !sill_core::session::is_running(id) {
+                if std::time::Instant::now() >= deadline { bail!("SILL_LAUNCHER=attach: nothing answered on session {id}'s shim socket"); }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            return Ok(Started { socket: sill_core::shim::runtime_dir(id)?.join("shim.sock"), fresh: false });
+        }
         // a workspace session's workspaces, made or kept, before its jail (docs/parallel-coding.md §12)
         let workspace = if s.ghost {
             workspace
@@ -1289,7 +1310,7 @@ impl Hub {
         };
         let started = sill_core::session::ensure_started(&opts, &self.home, &self.exe).context("starting the jail")?;
         // the pinned repositories' HEAD when this open period began (kept across restarts)
-        if let Err(e) = self.with_store(|st| sill_core::history::note_pin_starts(st, &s)) {
+        if !self.crosscheck_worker(id) && let Err(e) = self.with_store(|st| sill_core::history::note_pin_starts(st, &s)) {
             eprintln!("sill daemon: session {id}: noting the pins' HEAD: {e:#}");
         }
         let fresh = started.child.is_some();

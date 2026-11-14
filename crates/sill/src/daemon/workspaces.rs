@@ -111,6 +111,9 @@ fn root() -> PathBuf {
 }
 
 impl Hub {
+    pub(super) fn workspace_detail_for_crosscheck(&self, id: &str) -> Result<api::Detail> {
+        records::get(&Daemon(self), id)
+    }
     /// At start, before workspace requests are worth anything: settle interrupted operations.
     pub(super) fn workspaces_recover(&self) {
         if let Err(e) = records::reconcile(&Daemon(self)) {

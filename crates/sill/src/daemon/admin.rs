@@ -354,12 +354,28 @@ fn permissions_changed(hub: &Hub, session_id: &str, live_revoked: bool) -> Resul
 }
 
 const PERMISSION_MODES: &str = "sill.permission_modes";
+fn worker_mutation(method: &str) -> bool {
+    matches!(method,
+        "_sill/sessions.update" | "_sill/sessions.start" | "_sill/sessions.reset"
+        | "_sill/sessions.pin" | "_sill/sessions.unpin" | "_sill/sessions.submit"
+        | "_sill/sessions.control" | "_sill/submissions.resume" | "_sill/submissions.send_now"
+        | "_sill/questions.answer" | "_sill/permissions.set" | "_sill/permissions.apply_development"
+        | "_sill/permissions.restore_defaults" | "_sill/policy.allow_host" | "_sill/policy.save_host"
+        | "_sill/host_control.activate")
+}
+
 /// The daemon side of "clients without the permission-modes capability support Default only"
 /// (docs/permission-modes.md, Frontends): such a connection — the line-mode `sill attach`, a
 /// script — cannot change session capability choices,
 /// nor operate or widen a session whose launch or next build uses Desktop development or Host
 /// control capabilities. Actual capabilities decide, not a mode label; stopping stays available.
 pub(super) fn frontend_gate(hub: &Hub, conn: &super::Conn, method: &str, params: &Value) -> Result<(), Error> {
+    // Internal review workers retain their captured scope and derived policy. Transcript
+    // reads/attach remain available, but a public client cannot turn one into an ordinary
+    // editing session or widen its permissions while a run is in progress.
+    if worker_mutation(method) && params.get("session_id").and_then(Value::as_str).is_some_and(|id| hub.crosscheck_worker(id)) {
+        return Err(Error::domain("permission_denied", "Crosscheck workers are controlled by their run; open Crosscheck to stop or rerun it"));
+    }
     if conn.has_capability(PERMISSION_MODES) { return Ok(()); }
     let missing = |message: String| {
         let mut error = Error::domain("unsupported", message);

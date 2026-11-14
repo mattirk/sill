@@ -427,7 +427,7 @@ impl<'a> Journal<'a> {
         self.atomic(|| {
             self.exists(&input.session_id)?;
             validate_id(&input.submission_id)?;
-            if input.purpose.as_deref().is_some_and(|p| p!="commit") { return Err(error("invalid_params","unknown submission purpose")); }
+            if input.purpose.as_deref().is_some_and(|p| p!="commit" && p!=sill_proto::crosscheck::FIX_PURPOSE) { return Err(error("invalid_params","unknown submission purpose")); }
             if serde_json::to_string(&input.text)?.len()>1024*1024 {return Err(DomainError::limit(sill_proto::rpc::LimitScope::Request, Some(1048576), "prompt text exceeds 1 MiB encoded limit"));}
             let fingerprint = serde_json::to_string(input)?;
             let previous: Option<String> = self.store.conn().query_row("SELECT input FROM sfp_submission_inputs WHERE session_id=?1 AND submission_id=?2", params![input.session_id,input.submission_id], |r| r.get(0)).optional()?;

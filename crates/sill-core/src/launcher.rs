@@ -16,6 +16,8 @@
 //!
 //! The daemon is the only process that starts sessions; `sill dev start` from a terminal uses the
 //! same code. `SILL_LAUNCHER=direct` skips the scopes, to try the no-systemd path on a host with it.
+//! `SILL_LAUNCHER=attach` is for the daemon's tests: no jail is launched at all, and a session
+//! waits for a shim the test provides on its socket (`Hub::start_session`).
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;

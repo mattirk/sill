@@ -18,6 +18,7 @@ pub struct Capability { pub name: &'static str, pub version: u32, pub doc: &'sta
 /// Every capability this daemon offers. The baseline sfp/1 contract needs none of them; later
 /// compatible additions arrive here (docs/protocol.md, Compatibility and errors).
 pub const CAPABILITIES: &[Capability] = &[
+    Capability { name: "sill.crosscheck", version: 1, doc: "_sill/crosscheck.*: a second opinion on a workspace's work from one Reviewer, a saved agent with its options; a submission may carry the purpose `crosscheck`." },
     Capability { name: "sill.send_now", version: 1, doc: "_sill/submissions.send_now: a queued submission goes next, the active turn stopped." },
     Capability { name: "sill.permission_modes", version: 1, doc: "The frontend shows session permission state: it may change session capability choices (_sill/permissions.set, apply_development, restore_defaults) and operate sessions using Desktop development or Host control capabilities." },
     Capability { name: "sill.desktop_view", version: 1, doc: "_sill/desktop.capture and _sill/desktop.read: pictures of a session's test desktop, for a live view." },

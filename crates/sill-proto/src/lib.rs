@@ -19,6 +19,7 @@ pub mod terminals;
 pub mod host;
 pub mod host_control;
 pub mod workspaces;
+pub mod crosscheck;
 pub mod admin;
 pub mod memory;
 pub mod transport;

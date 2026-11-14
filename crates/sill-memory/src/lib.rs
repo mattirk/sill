@@ -143,6 +143,20 @@ pub fn write_snapshot(src: &Path, dir: &Path, kept: &[(String, PathBuf, String)]
                  DROP TABLE ghosts;",
             )?;
         }
+        // Crosscheck's reviewer sessions are a run's evidence, kept with its report: not memory
+        let has_workers: bool = tx.query_row("SELECT count(*) FROM src.sqlite_master WHERE type = 'table' AND name = 'crosscheck_workers'", [], |r| r.get::<_, i64>(0))? > 0;
+        if has_workers {
+            tx.execute_batch(
+                "CREATE TEMP TABLE workers AS SELECT session_id AS id FROM src.crosscheck_workers;
+                 DELETE FROM memory_text WHERE session_id IN (SELECT id FROM workers);
+                 DELETE FROM entries WHERE session_id IN (SELECT id FROM workers);
+                 DELETE FROM memories WHERE session_id IN (SELECT id FROM workers);
+                 DELETE FROM session_pins WHERE session_id IN (SELECT id FROM workers);
+                 DELETE FROM history WHERE session_id IN (SELECT id FROM workers);
+                 DELETE FROM sessions WHERE id IN (SELECT id FROM workers);
+                 DROP TABLE workers;",
+            )?;
+        }
         {
             let mut st = tx.prepare("INSERT INTO kept VALUES (?1, ?2, ?3)")?;
             for (id, path, what) in kept {
@@ -223,9 +237,16 @@ fn pins_of(conn: &Connection, id: &str) -> Result<Vec<PathBuf>> {
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
 
+/// A condition on `sessions` that leaves out Crosscheck's reviewer sessions, where the store has
+/// any: they are a run's evidence, read from its report, and nobody's memory. A snapshot has none.
+fn remembered(conn: &Connection) -> Result<&'static str> {
+    let workers: i64 = conn.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'crosscheck_workers'", [], |r| r.get(0))?;
+    Ok(if workers > 0 { "id NOT IN (SELECT session_id FROM crosscheck_workers)" } else { "1" })
+}
+
 /// Every session with its pins, the most recently used first.
 pub fn sessions(conn: &Connection) -> Result<Vec<SessionInfo>> {
-    let mut st = conn.prepare(&format!("SELECT {SESSION_COLS} FROM sessions ORDER BY last_used DESC"))?;
+    let mut st = conn.prepare(&format!("SELECT {SESSION_COLS} FROM sessions WHERE {} ORDER BY last_used DESC", remembered(conn)?))?;
     let mut out: Vec<SessionInfo> = st.query_map([], session_row)?.collect::<std::result::Result<_, _>>()?;
     for s in &mut out {
         s.pins = pins_of(conn, &s.id)?;
@@ -441,7 +462,7 @@ pub fn recall_pick<'a>(all: &'a [SessionInfo], me: &str, pins: &[PathBuf], scope
 pub fn recall_candidates(conn:&Connection,me:&str,pins:&[PathBuf],scope:Scope,n:usize,first:Option<&str>)->Result<Vec<SessionInfo>> {
     let n=n.min(20);if n==0||scope==Scope::Off{return Ok(Vec::new());}
     let mut chosen=Vec::new();
-    let mut st=conn.prepare(&format!("SELECT {SESSION_COLS} FROM sessions WHERE ended_at IS NOT NULL AND id<>?1 ORDER BY last_used DESC"))?;
+    let mut st=conn.prepare(&format!("SELECT {SESSION_COLS} FROM sessions WHERE ended_at IS NOT NULL AND id<>?1 AND {} ORDER BY last_used DESC",remembered(conn)?))?;
     let rows=st.query_map([me],session_row)?;
     for row in rows {let mut candidate=row?;candidate.pins=pins_of(conn,&candidate.id)?;
         // Keep the one line recall_block quotes, plus one character so that its ellipsis
@@ -586,7 +607,7 @@ pub fn search_visit(conn:&Connection,q:&Query,now:i64,limit:usize,mut visit:impl
     let mut seen=std::collections::HashSet::new();
     match q.fts() {
         None=>{
-            let mut st=conn.prepare(&format!("SELECT {SESSION_COLS} FROM sessions ORDER BY last_used DESC"))?;
+            let mut st=conn.prepare(&format!("SELECT {SESSION_COLS} FROM sessions WHERE {} ORDER BY last_used DESC",remembered(conn)?))?;
             let rows=st.query_map([],session_row)?;
             for row in rows {
                 if seen.len()>=limit{break;}
@@ -596,7 +617,7 @@ pub fn search_visit(conn:&Connection,q:&Query,now:i64,limit:usize,mut visit:impl
         },
         Some(expr)=>{
             let mut st=conn.prepare("SELECT t.session_id,t.kind,snippet(memory_fts,0,'[',']','…',12) FROM memory_fts JOIN memory_text t ON t.id=memory_fts.rowid WHERE memory_fts MATCH ?1 ORDER BY rank LIMIT 2000")?;
-            let mut by_id=conn.prepare(&format!("SELECT {SESSION_COLS} FROM sessions WHERE id=?1"))?;
+            let mut by_id=conn.prepare(&format!("SELECT {SESSION_COLS} FROM sessions WHERE id=?1 AND {}",remembered(conn)?))?;
             let rows=st.query_map(params![expr],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?;
             for row in rows {
                 if seen.len()>=limit{break;}
@@ -950,6 +971,18 @@ mod tests {
              INSERT INTO entries VALUES ('ghst0001', 1, 2, 'user', 'phantom prompt', '');",
         )
         .unwrap();
+        // a Crosscheck reviewer session is not a ghost, and is left out the same way
+        src.execute_batch(
+            "CREATE TABLE crosscheck_workers (session_id TEXT PRIMARY KEY, run_id TEXT NOT NULL);
+             INSERT INTO sessions (id, agent, title, created_at, last_used, ended_at, ghost) VALUES ('work0001', 'codex', 'ghost one reviewed', 3, 3, 3, 0);
+             INSERT INTO entries VALUES ('work0001', 1, 3, 'agent', 'phantom finding', '');
+             INSERT INTO crosscheck_workers VALUES ('work0001', 'run');",
+        )
+        .unwrap();
+        assert_eq!(sessions(&src).unwrap().iter().filter(|s| s.id == "work0001").count(), 0);
+        assert!(recall_candidates(&src, "norm0001", &[], Scope::Everywhere, 5, None).unwrap().iter().all(|s| s.id != "work0001"));
+        let q = Query::parse("phantom", Path::new("/home/me"));
+        assert!(search(&src, &q, 10, 10).unwrap().iter().all(|h| h.session.id != "work0001"));
         let snapdir = dir.join("memory");
         write_snapshot(&db, &snapdir, &[]).unwrap();
         let snap = open_snapshot(&snapdir).unwrap().unwrap();

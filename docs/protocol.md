@@ -227,8 +227,9 @@ A `Turn` has `purpose`: why sill, not the person, started it. `summary` is a sum
 asked the agent for (a checkpoint or a session's end, `ask_summary`); `commit` is the turn a
 submission with `purpose` `commit` started. It is null, or absent in records from before the
 field, for the person's own turns and anything the agent began itself. A `Submit` may carry
-`purpose`: a prompt a frontend wrote for the person rather than one they typed. Only `commit`
-(Apply's request to commit a workspace, docs/parallel-coding.md) is accepted; any other value is
+`purpose`: a prompt a frontend wrote for the person rather than one they typed. `commit`
+(Apply's request to commit a workspace, docs/parallel-coding.md) and `crosscheck` (the request to
+fix what a Crosscheck found, below) are accepted; any other value is
 refused with `invalid_params`, and an absent `purpose` keeps an older submission's idempotency
 fingerprint. The `Submission` record repeats it, so a client knows the prompt's item (the `user`
 item whose `submission_id` names it) belongs with its turn.
@@ -969,3 +970,45 @@ socket mounts are removed rather than preserved as aliases. Rebuild daemon and f
 together. The stable `sfp/1` cutover is still pending; identity remains `sfp/1-dev.3`.
 
 `_sill/policy.quiet_host` (`sill.network_quiet: 1`) takes `{session_id, host}` and returns `{}`. It saves an exact hostname as a global persistent banner preference, without granting network access. Wildcards are rejected; a numeric port is stripped. Repeating the choice is idempotent.
+
+### Crosscheck (2026-11-14)
+
+Capability `sill.crosscheck: 1` adds a second opinion on the work waiting in a workspace
+([crosscheck.md](crosscheck.md)): one Reviewer, a saved agent with its options, reads a capture of
+the work in a worker session of its own and reports a summary and a list of problems. A first
+build of 2026-11-13 under the same capability name, with other methods, was reset the same day
+and never released.
+
+| Method | Parameters | Result |
+|---|---|---|
+| `_sill/crosscheck.reviewers` | `{}` | `{reviewers, agents}`: the saved Reviewers (`{name, agent, options}`), and for every agent that can review the `options` its latest session reported (`ControlOption`s; empty when none has) |
+| `_sill/crosscheck.set_reviewers` | `{reviewers}` | The same, as saved |
+| `_sill/crosscheck.get` | `{workspace_id}` | `{run}`: the workspace's review or null |
+| `_sill/crosscheck.start` | `{operation_id, workspace_id}` | The review (`Run`) it started |
+| `_sill/crosscheck.remove` | `{run_id}` | Nothing. A review under way is cancelled |
+| `_sill/crosscheck.changed` | Daemon notification: `{workspace_id, run_id}` | The workspace's review changed or was removed; read it again |
+
+A `Run` has `state` (`capturing`, `reviewing`, `complete`, `failed`; `failed` says why in
+`detail`), `reviewers` (one in this version: the `reviewer` used, its worker `session_id`, its
+`summary`, its latest steps in `activity`, an `error`), `problems` (`id`, `reviewer_index`,
+`title`, `path`, `line`, `detail`), the reviewed `state_tree`, the `base` commit it was compared
+against, and `stale`: the workspace's files are no longer the ones reviewed. Only `complete` is a
+review; a frontend never shows any other state as "no problems".
+
+- **One review a workspace.** A start replaces the workspace's finished review and is refused
+  while one is under way. The first saved Reviewer reviews; with none saved, an agent other than
+  the session's own when there is one. Its `options` are set on the worker session only.
+- **What is compared.** `base` is where the work leaves the person's checkout (the workspace's
+  upstream, as `workspaces.get`'s summary counts it): the review covers what an Apply would bring.
+  A workspace with nothing to apply is refused.
+- **Retry.** `start` with an `operation_id` already used answers with the review it started and
+  starts nothing. After an uncertain start, `get` the workspace before starting again.
+- **Restart.** Nothing is resumed or repeated: a review under way when the daemon stops is
+  `failed` at its next start, and its worker is stopped.
+- **Worker sessions** are not listed (`sessions.list`), have no Changes, are left out of memory,
+  and refuse the requests that would widen or redirect them (`permission_denied`).
+
+A submission may carry the `purpose` `crosscheck`: the request to fix a review's problems, which
+a frontend writes for the person (`sill_proto::crosscheck::fix_request`). Unlike `commit`, a
+frontend folds only that prompt to its first line; the turn it starts is the agent's ordinary work.
+
