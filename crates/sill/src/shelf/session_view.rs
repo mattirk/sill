@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use gtk4 as gtk;
+use sill_core::changes;
 use gtk::gdk;
 use gtk::glib;
 use sill_core::acp::{Attachment, AttachmentKind, AuthMethodInfo, Command, ConfigKind, ConfigValue, Controls, Event};
@@ -698,6 +699,7 @@ impl SessionView {
         }
         if !self.host_open.get() {
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+            let git_env = format!("{}={}", changes::HOST_SHELL_GIT_ENV.0, changes::HOST_SHELL_GIT_ENV.1);
             let dir = cwd
                 .or_else(|| self.store.pins(&self.id()).unwrap_or_default().into_iter().find(|p| p.is_dir()))
                 .or_else(|| session::home().ok())
@@ -707,8 +709,9 @@ impl SessionView {
                 vte4::PtyFlags::DEFAULT,
                 Some(&dir.to_string_lossy()),
                 &[&shell, "-l"],
-                // SILL_HOST_SHELL: `sill restart` run here knows to step outside the shelf first
-                &["TERM=xterm-256color", "COLORTERM=truecolor", "SILL_HOST_SHELL=1"],
+                // SILL_HOST_SHELL: `sill restart` run here knows to step outside the shelf first;
+                // the git env: the pin's .git/config is the agent's (S8)
+                &["TERM=xterm-256color", "COLORTERM=truecolor", "SILL_HOST_SHELL=1", &git_env],
                 glib::SpawnFlags::DEFAULT,
                 || {},
                 -1,

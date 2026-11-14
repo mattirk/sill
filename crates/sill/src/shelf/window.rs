@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gtk4 as gtk;
+use sill_core::changes;
 use gtk::gdk;
 use gtk::glib;
 use gtk::prelude::*;
@@ -68,6 +69,7 @@ fn launch_terminal(cmdline: &str, cwd: &Path) -> anyhow::Result<()> {
     let mut cmd = std::process::Command::new(prog);
     cmd.args(args.iter().map(|a| a.replace("{cwd}", &dir)))
         .current_dir(cwd)
+        .env(changes::HOST_SHELL_GIT_ENV.0, changes::HOST_SHELL_GIT_ENV.1) // S8: the folder's git config is the agent's
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -1406,7 +1408,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sill-term-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        launch_terminal("sh -c 'pwd > \"$0/out.txt\"; echo \"$0\" >> \"$0/out.txt\"' {cwd}", &dir).unwrap();
+        launch_terminal("sh -c 'pwd > \"$0/out.txt\"; echo \"$0\" >> \"$0/out.txt\"; echo \"$GIT_CONFIG_PARAMETERS\" >> \"$0/out.txt\"' {cwd}", &dir).unwrap();
         let out = dir.join("out.txt");
         let mut tries = 0;
         while !out.exists() && tries < 100 {
@@ -1416,10 +1418,11 @@ mod tests {
         let text = std::fs::read_to_string(&out).unwrap();
         let canon = dir.canonicalize().unwrap();
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.len(), 3);
         assert_eq!(std::path::Path::new(lines[0]).canonicalize().unwrap(), canon);
         assert_eq!(lines[1], dir.to_string_lossy());
         assert!(launch_terminal("", &dir).is_err());
+        assert_eq!(lines[2], changes::HOST_SHELL_GIT_ENV.1, "git's fsmonitor is off in a host shell (S8)");
         assert!(launch_terminal("/nonexistent/terminal", &dir).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }

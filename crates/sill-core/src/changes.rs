@@ -2,6 +2,13 @@
 //! layers, scan the ledger, group by repository. Nothing reaches the host without a keep: pinned
 //! folders are bound live and never appear here (SPEC §4.4, decision 18).
 
+/// Environment for a shell the person opens on the host (the shelf's host shell, a terminal
+/// window): git's per-repository config in a pinned folder is agent-writable, and a git-aware
+/// prompt runs `git status` there at the first prompt — `core.fsmonitor` names a program that
+/// `git status` runs, so it is off for every repository (docs/security.md S8). Hooks, filters and
+/// pagers stay as configured: those run only for git commands the person types on purpose.
+pub const HOST_SHELL_GIT_ENV: (&str, &str) = ("GIT_CONFIG_PARAMETERS", "'core.fsmonitor=false' 'core.useBuiltinFSMonitor=false'");
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
