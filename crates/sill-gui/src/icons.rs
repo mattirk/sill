@@ -17,7 +17,7 @@ const GHOST: &str = "M12 2.5a7 7 0 0 0-7 7V21l2.4-1.8 2.3 1.8 2.3-1.8 2.3 1.8 2.
 const PLUS: &str = "M11 4h2v7h7v2h-7v7h-2v-7H4v-2h7z";
 /// The send arrow and the stop square, on the shelf's 24-unit grid.
 const SEND: &str = "M5 4.5 20 12 5 19.5 7.5 12Z";
-const STOP: &str = "M4 4H20V20H4Z";
+const STOP: &str = "M5 5H19V19H5Z";
 
 /// The shelf's line glyphs (lucide, ISC; `shelf/icons.rs`), drawn as a 2.2 unit stroke: (name,
 /// 24×24 path data). Looked up by name with [`line`].

@@ -1062,7 +1062,7 @@ impl App {
                             }
                         }),
                 )
-                .padding(4)
+                .padding(3)
                 .style(style::send),
                 sendable.then_some(Message::Send),
             )
@@ -1245,7 +1245,7 @@ fn stop_button<'a>() -> Element<'a, Message> {
                 .height(12)
                 .style(style::icon(P.error)),
         )
-        .padding(4)
+        .padding(3)
         .style(style::tinted(P.error)),
         Message::Stop,
     ))
