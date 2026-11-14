@@ -381,6 +381,21 @@ fn render_iceberg() {
 }
 
 #[test]
+#[ignore = "writes the demo conversation in Sill Dark and Light for review"]
+fn render_sill() {
+    let (mut app, _) = App::new(true, None);
+    for _ in 0..=demo::CHUNKS.len() {
+        let _ = app.update(crate::Message::DemoTick);
+    }
+    let before = crate::style::theme_id().to_owned();
+    for id in ["sill-dark", "sill-light"] {
+        assert!(crate::style::set_theme(id));
+        render(&app, id);
+    }
+    crate::style::set_theme(&before);
+}
+
+#[test]
 #[ignore = "writes network prompt PNGs for review"]
 fn render_network() {
     let (mut app, _) = App::new(true, None);

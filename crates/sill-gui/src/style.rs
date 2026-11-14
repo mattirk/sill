@@ -34,7 +34,9 @@ const fn rgb(hex: u32) -> Color {
 }
 
 /// The themes, by id; the daemon's `theme` setting picks one. Miasma is the one sill is developed
-/// in (the person, 2026-11-05).
+/// in (the person, 2026-11-05). Sill Dark and Light (2026-11-09) are Miasma's backgrounds with
+/// Iceberg's highlight colours (accent, link, warning, success, error); Miasma has no light
+/// variant, so Sill Light's backgrounds are light tones in Miasma's warm olive-grey.
 pub const THEMES: &[(&str, Palette)] = &[
     (
         "adwaita",
@@ -210,6 +212,38 @@ pub const THEMES: &[(&str, Palette)] = &[
             error: rgb(0xcc517a),
             link: rgb(0x3f83a6),
             border: rgb(0xcad0de),
+        },
+    ),
+    (
+        "sill-dark",
+        Palette {
+            bg: rgb(0x222222),
+            surface: rgb(0x2b2b28),
+            code_bg: rgb(0x1c1c1c),
+            fg: rgb(0xc2c2b0),
+            fg_dim: rgb(0x787866),
+            accent: rgb(0x84a0c6),
+            warning: rgb(0xe2a478),
+            success: rgb(0xb4be82),
+            error: rgb(0xe27878),
+            link: rgb(0x89b8c2),
+            border: rgb(0x363632),
+        },
+    ),
+    (
+        "sill-light",
+        Palette {
+            bg: rgb(0xe8e8df),
+            surface: rgb(0xdcdcd0),
+            code_bg: rgb(0xe0e0d5),
+            fg: rgb(0x2b2b28),
+            fg_dim: rgb(0x787866),
+            accent: rgb(0x2d539e),
+            warning: rgb(0xc57339),
+            success: rgb(0x668e3d),
+            error: rgb(0xcc517a),
+            link: rgb(0x3f83a6),
+            border: rgb(0xcfcfc1),
         },
     ),
 ];
