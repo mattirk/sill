@@ -175,7 +175,16 @@ pub enum LimitScope {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct UnsupportedDetails { pub capability: String }
 
+/// `invalid_state` (with `sill.workspaces`): why a workspace operation cannot run, as a stable
+/// reason (`stale_revision`, `source_overlap`, `submodules`…), and the files involved.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct InvalidStateDetails {
+    pub reason: String,
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
 /// Codes whose `details` sfp/1 defines, with whether every occurrence carries them.
-pub fn detail_codes() -> [(&'static str, bool); 5] {
-    [("incompatible", true), ("stale_answer", true), ("limit_exceeded", true), ("unsupported", false), ("exception_required", true)]
+pub fn detail_codes() -> [(&'static str, bool); 6] {
+    [("incompatible", true), ("stale_answer", true), ("limit_exceeded", true), ("unsupported", false), ("exception_required", true), ("invalid_state", false)]
 }

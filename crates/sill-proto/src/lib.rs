@@ -18,6 +18,7 @@ pub mod sessions;
 pub mod terminals;
 pub mod host;
 pub mod host_control;
+pub mod workspaces;
 pub mod admin;
 pub mod memory;
 pub mod transport;

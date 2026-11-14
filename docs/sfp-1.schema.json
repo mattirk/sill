@@ -57,6 +57,13 @@
       ],
       "type": "object"
     },
+    "Against": {
+      "enum": [
+        "base",
+        "destination"
+      ],
+      "type": "string"
+    },
     "AgentCommand": {
       "properties": {
         "description": {
@@ -282,6 +289,27 @@
         "question_id",
         "answer_id",
         "answer"
+      ],
+      "type": "object"
+    },
+    "Apply": {
+      "additionalProperties": false,
+      "properties": {
+        "operation_id": {
+          "type": "string"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision",
+          "description": "The revision the person saw."
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation_id",
+        "workspace_id",
+        "revision"
       ],
       "type": "object"
     },
@@ -719,6 +747,35 @@
         }
       ]
     },
+    "Changed": {
+      "properties": {
+        "operation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Operation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Present for methods that take an `operation_id`."
+        },
+        "session_id": {
+          "description": "The session pinned to it (reopen).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspace": {
+          "$ref": "#/$defs/Workspace"
+        }
+      },
+      "required": [
+        "workspace"
+      ],
+      "type": "object"
+    },
     "ChangedLines": {
       "additionalProperties": false,
       "properties": {
@@ -1039,6 +1096,35 @@
         "agent": {
           "type": "string"
         },
+        "name": {
+          "type": "string"
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "policy": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/HostPath",
+          "description": "The source repository's top."
+        }
+      },
+      "required": [
+        "operation_id",
+        "source",
+        "name",
+        "agent",
+        "policy"
+      ],
+      "type": "object"
+    },
+    "Create2": {
+      "additionalProperties": false,
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
         "create_id": {
           "type": "string"
         },
@@ -1073,6 +1159,30 @@
         "create_id",
         "agent",
         "policy"
+      ],
+      "type": "object"
+    },
+    "Created": {
+      "properties": {
+        "operation": {
+          "$ref": "#/$defs/Operation"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "source_dirty": {
+          "description": "The source had uncommitted work the workspace does not include (from HEAD only).",
+          "type": "boolean"
+        },
+        "workspace": {
+          "$ref": "#/$defs/Workspace"
+        }
+      },
+      "required": [
+        "workspace",
+        "session_id",
+        "source_dirty",
+        "operation"
       ],
       "type": "object"
     },
@@ -1424,6 +1534,43 @@
       ],
       "type": "object"
     },
+    "Detail": {
+      "properties": {
+        "needs_rebase": {
+          "description": "The source moved past the base: a Merge needs the result rebased first.",
+          "type": "boolean"
+        },
+        "revision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Revision"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Absent once the clone is gone (discarded)."
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Summary2"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "workspace": {
+          "$ref": "#/$defs/Workspace"
+        }
+      },
+      "required": [
+        "workspace",
+        "needs_rebase"
+      ],
+      "type": "object"
+    },
     "Diff": {
       "additionalProperties": false,
       "properties": {
@@ -1466,6 +1613,38 @@
       "required": [
         "text",
         "fingerprint"
+      ],
+      "type": "object"
+    },
+    "DiffRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "against": {
+          "$ref": "#/$defs/Against"
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace_id",
+        "against"
+      ],
+      "type": "object"
+    },
+    "DiffText": {
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "truncated": {
+          "description": "The diff exceeded 4 MiB and was cut there.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text",
+        "truncated"
       ],
       "type": "object"
     },
@@ -2827,6 +3006,25 @@
       ],
       "type": "object"
     },
+    "InvalidStateDetails": {
+      "description": "`invalid_state` (with `sill.workspaces`): why a workspace operation cannot run, as a stable\nreason (`stale_revision`, `source_overlap`, `submodules`…), and the files involved.",
+      "properties": {
+        "paths": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "type": "object"
+    },
     "Item": {
       "properties": {
         "agent_generation_id": {
@@ -2969,6 +3167,18 @@
       },
       "required": [
         "path"
+      ],
+      "type": "object"
+    },
+    "Key": {
+      "additionalProperties": false,
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace_id"
       ],
       "type": "object"
     },
@@ -3118,14 +3328,15 @@
       "additionalProperties": false,
       "properties": {
         "after": {
+          "default": null,
           "type": [
             "string",
             "null"
           ]
         },
         "limit": {
-          "format": "uint16",
-          "maximum": 65535,
+          "default": null,
+          "format": "uint32",
           "minimum": 0,
           "type": [
             "integer",
@@ -3181,6 +3392,27 @@
       "additionalProperties": false,
       "properties": {
         "after": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "List5": {
+      "additionalProperties": false,
+      "properties": {
+        "after": {
           "anyOf": [
             {
               "$ref": "#/$defs/HostPath"
@@ -3209,7 +3441,7 @@
       },
       "type": "object"
     },
-    "List5": {
+    "List6": {
       "additionalProperties": false,
       "properties": {
         "after": {
@@ -3230,7 +3462,7 @@
       },
       "type": "object"
     },
-    "List6": {
+    "List7": {
       "additionalProperties": false,
       "properties": {
         "session_id": {
@@ -3241,6 +3473,26 @@
           ]
         }
       },
+      "type": "object"
+    },
+    "Listed": {
+      "properties": {
+        "next": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspaces": {
+          "items": {
+            "$ref": "#/$defs/Workspace"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "workspaces"
+      ],
       "type": "object"
     },
     "Log": {
@@ -3429,6 +3681,18 @@
       ],
       "type": "object"
     },
+    "Notice": {
+      "description": "`_sill/workspaces.changed`: refresh the workspace (invalidation only).",
+      "properties": {
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace_id"
+      ],
+      "type": "object"
+    },
     "Open": {
       "additionalProperties": false,
       "properties": {
@@ -3486,6 +3750,22 @@
       "required": [
         "cols",
         "rows"
+      ],
+      "type": "object"
+    },
+    "Operate": {
+      "additionalProperties": false,
+      "properties": {
+        "operation_id": {
+          "type": "string"
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation_id",
+        "workspace_id"
       ],
       "type": "object"
     },
@@ -4125,6 +4405,30 @@
       "required": [
         "session_id",
         "port"
+      ],
+      "type": "object"
+    },
+    "Prepared": {
+      "properties": {
+        "changed": {
+          "description": "Different from the revision prepared before: the person must look again.",
+          "type": "boolean"
+        },
+        "needs_rebase": {
+          "type": "boolean"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "workspace": {
+          "$ref": "#/$defs/Workspace"
+        }
+      },
+      "required": [
+        "workspace",
+        "revision",
+        "changed",
+        "needs_rebase"
       ],
       "type": "object"
     },
@@ -4839,6 +5143,37 @@
       ],
       "type": "object"
     },
+    "Reopen": {
+      "additionalProperties": false,
+      "properties": {
+        "agent": {
+          "default": null,
+          "description": "For a new session when the last one ended; unused while it is open.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "policy": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation_id",
+        "workspace_id"
+      ],
+      "type": "object"
+    },
     "Resize": {
       "additionalProperties": false,
       "properties": {
@@ -4881,6 +5216,33 @@
       "required": [
         "session_id",
         "paths"
+      ],
+      "type": "object"
+    },
+    "Revision": {
+      "description": "What the person saw: Merge and Discard name it, and a different current one is refused.",
+      "properties": {
+        "destination_branch": {
+          "description": "The source branch a Merge would move, and its tip when this revision was taken.",
+          "type": "string"
+        },
+        "destination_tip": {
+          "type": "string"
+        },
+        "tip": {
+          "description": "The workspace branch's tip.",
+          "type": "string"
+        },
+        "worktree": {
+          "description": "A fingerprint of the uncommitted state; empty when clean.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tip",
+        "worktree",
+        "destination_branch",
+        "destination_tip"
       ],
       "type": "object"
     },
@@ -6205,6 +6567,50 @@
       ],
       "type": "object"
     },
+    "Summary2": {
+      "description": "The result against `base` (§6). Counts of lines are decimal strings.",
+      "properties": {
+        "added": {
+          "type": "string"
+        },
+        "commits": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "files": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ignored": {
+          "description": "Ignored paths: outside the result, deleted with the clone.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "removed": {
+          "type": "string"
+        },
+        "uncommitted": {
+          "description": "Uncommitted paths, untracked included: not part of a Merge.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "commits",
+        "files",
+        "added",
+        "removed",
+        "uncommitted",
+        "ignored"
+      ],
+      "type": "object"
+    },
     "SummaryResult": {
       "properties": {
         "summary": {
@@ -6697,6 +7103,148 @@
         "size"
       ],
       "type": "object"
+    },
+    "Workspace": {
+      "properties": {
+        "base": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "limitations": {
+          "description": "e.g. `shallow_source`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "operation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkspaceOperation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "owner_session": {
+          "description": "The session working in it now; null when nothing writes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "$ref": "#/$defs/HostPath"
+        },
+        "retained_until": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reviewed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Revision"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The revision last prepared for Merge."
+        },
+        "session_id": {
+          "description": "The latest session pinned to it, owner or not.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/HostPath"
+        },
+        "source_branch": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/WorkspaceState"
+        },
+        "updated_at": {
+          "type": "string"
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace_id",
+        "name",
+        "source",
+        "source_branch",
+        "base",
+        "branch",
+        "path",
+        "state",
+        "limitations",
+        "created_at",
+        "updated_at"
+      ],
+      "type": "object"
+    },
+    "WorkspaceOperation": {
+      "description": "An operation on the workspace that a restart interrupted or that stopped part way.",
+      "properties": {
+        "detail": {
+          "type": "string"
+        },
+        "kind": {
+          "description": "`create`, `merge`, `discard`, `undo`.",
+          "type": "string"
+        },
+        "state": {
+          "description": "`interrupted`: its effect could not be established; shown, never redone.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "state",
+        "detail"
+      ],
+      "type": "object"
+    },
+    "WorkspaceState": {
+      "oneOf": [
+        {
+          "const": "open",
+          "description": "A session may be working in it.",
+          "type": "string"
+        },
+        {
+          "const": "result",
+          "description": "No writer: the result waits for the person.",
+          "type": "string"
+        },
+        {
+          "const": "merged",
+          "description": "Merged into the source; the clone stays until the person discards it.",
+          "type": "string"
+        },
+        {
+          "const": "discarded",
+          "description": "Moved aside; Undo restores it until `retained_until`.",
+          "type": "string"
+        }
+      ]
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -6720,6 +7268,11 @@
       {
         "doc": "_sill/agents.discover and _sill/agents.discovered: a first start in a throwaway jail proposes an installed agent's home_paths; the person approves them on the Agents page (saved with _sill/agents.save).",
         "name": "sill.agent_setup",
+        "version": 1
+      },
+      {
+        "doc": "_sill/workspaces.*: a session's own clone and branch of a repository; the person merges (fast-forward) or discards the result. _sill/workspaces.changed goes only to connections answered this capability.",
+        "name": "sill.workspaces",
         "version": 1
       },
       {
@@ -6759,6 +7312,12 @@
         "required": true,
         "shape": {
           "$ref": "#/$defs/IncompatibleDetails"
+        }
+      },
+      "invalid_state": {
+        "required": false,
+        "shape": {
+          "$ref": "#/$defs/InvalidStateDetails"
         }
       },
       "limit_exceeded": {
@@ -7162,12 +7721,166 @@
       }
     },
     {
+      "capabilities": {
+        "sill.workspaces": 1
+      },
+      "doc": "Workspaces, newest first, in live keyset pages (1–128). Reading reconciles: a workspace whose owner session ended has no writer and is a result.",
+      "kind": "request",
+      "name": "_sill/workspaces.list",
+      "params": {
+        "$ref": "#/$defs/List"
+      },
+      "result": {
+        "$ref": "#/$defs/Listed"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.workspaces": 1
+      },
+      "doc": "A workspace with its current revision and its summary against the base, computed through the hardened Git view.",
+      "kind": "request",
+      "name": "_sill/workspaces.get",
+      "params": {
+        "$ref": "#/$defs/Key"
+      },
+      "result": {
+        "$ref": "#/$defs/Detail"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.workspaces": 1
+      },
+      "doc": "The workspace's working tree against its base, or against the source's current tip; at most 4 MiB.",
+      "kind": "request",
+      "name": "_sill/workspaces.diff",
+      "params": {
+        "$ref": "#/$defs/DiffRequest"
+      },
+      "result": {
+        "$ref": "#/$defs/DiffText"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.workspaces": 1
+      },
+      "doc": "Make a workspace from the source's HEAD and a session pinned to it (not started). A retry with the same operation_id returns the same workspace. invalid_state details.reason names a source that cannot have one (submodules, linked_worktree, partial_clone, lfs, filter_drivers, borrowed_objects, detached_head, ref_format, no_commits, not_a_repository).",
+      "kind": "request",
+      "name": "_sill/workspaces.create",
+      "params": {
+        "$ref": "#/$defs/Create"
+      },
+      "result": {
+        "$ref": "#/$defs/Created"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.workspaces": 1
+      },
+      "doc": "Mark the workspace done: open → result once nothing writes (writer_active otherwise).",
+      "kind": "request",
+      "name": "_sill/workspaces.finish",
+      "params": {
+        "$ref": "#/$defs/Key"
+      },
+      "result": {
+        "$ref": "#/$defs/Changed"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.workspaces": 1
+      },
+      "doc": "result → open with a session pinned to it: the latest one while it has not ended, otherwise a new one for agent/policy. Clears the prepared revision.",
+      "kind": "request",
+      "name": "_sill/workspaces.reopen",
+      "params": {
+        "$ref": "#/$defs/Reopen"
+      },
+      "result": {
+        "$ref": "#/$defs/Changed"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.workspaces": 1
+      },
+      "doc": "Record the source's current branch and tip as the destination and return the revision a Merge would apply. needs_rebase when the result does not descend from the destination (rebase in the workspace).",
+      "kind": "request",
+      "name": "_sill/workspaces.prepare",
+      "params": {
+        "$ref": "#/$defs/Operate"
+      },
+      "result": {
+        "$ref": "#/$defs/Prepared"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.workspaces": 1
+      },
+      "doc": "Fast-forward the source's branch to the workspace's, keeping the person's other edits; only for exactly this revision. Refusals: invalid_state with reason stale_revision, source_moved, source_overlap, untracked_collision, uncommitted, writer_active.",
+      "kind": "request",
+      "name": "_sill/workspaces.merge",
+      "params": {
+        "$ref": "#/$defs/Apply"
+      },
+      "result": {
+        "$ref": "#/$defs/Changed"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.workspaces": 1
+      },
+      "doc": "Move the whole clone aside for 7 days of Undo; only for exactly this revision, and never while something writes.",
+      "kind": "request",
+      "name": "_sill/workspaces.discard",
+      "params": {
+        "$ref": "#/$defs/Apply"
+      },
+      "result": {
+        "$ref": "#/$defs/Changed"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.workspaces": 1
+      },
+      "doc": "Put a discarded workspace back while it is retained (path_taken when something else is there now).",
+      "kind": "request",
+      "name": "_sill/workspaces.undo",
+      "params": {
+        "$ref": "#/$defs/Operate"
+      },
+      "result": {
+        "$ref": "#/$defs/Changed"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.workspaces": 1
+      },
+      "doc": "A workspace changed; refresh it. Sent only to connections answered sill.workspaces.",
+      "kind": "notification",
+      "name": "_sill/workspaces.changed",
+      "params": {
+        "$ref": "#/$defs/Notice"
+      },
+      "result": {
+        "type": "object"
+      }
+    },
+    {
       "capabilities": {},
       "doc": "Public Changes operation; preserve filesystem preconditions and inspect current state after an uncertain mutation, never blindly retry.",
       "kind": "request",
       "name": "_sill/changes.list",
       "params": {
-        "$ref": "#/$defs/List"
+        "$ref": "#/$defs/List2"
       },
       "result": {
         "$ref": "#/$defs/Page"
@@ -7251,7 +7964,7 @@
       "kind": "request",
       "name": "_sill/memory.list",
       "params": {
-        "$ref": "#/$defs/List2"
+        "$ref": "#/$defs/List3"
       },
       "result": {
         "$ref": "#/$defs/Page2"
@@ -7335,7 +8048,7 @@
       "kind": "request",
       "name": "_sill/agents.list",
       "params": {
-        "$ref": "#/$defs/List3"
+        "$ref": "#/$defs/List4"
       },
       "result": {
         "$ref": "#/$defs/Page3"
@@ -7481,7 +8194,7 @@
       "kind": "request",
       "name": "_sill/pins.list",
       "params": {
-        "$ref": "#/$defs/List4"
+        "$ref": "#/$defs/List5"
       },
       "result": {
         "$ref": "#/$defs/Page4"
@@ -7793,7 +8506,7 @@
       "kind": "request",
       "name": "_sill/sessions.list",
       "params": {
-        "$ref": "#/$defs/List5"
+        "$ref": "#/$defs/List6"
       },
       "result": {
         "$ref": "#/$defs/Page5"
@@ -7817,7 +8530,7 @@
       "kind": "request",
       "name": "_sill/sessions.create",
       "params": {
-        "$ref": "#/$defs/Create"
+        "$ref": "#/$defs/Create2"
       },
       "result": {
         "$ref": "#/$defs/SessionKey"
@@ -7975,7 +8688,7 @@
       "kind": "request",
       "name": "_sill/terminals.list",
       "params": {
-        "$ref": "#/$defs/List6"
+        "$ref": "#/$defs/List7"
       },
       "result": {
         "$ref": "#/$defs/Terminals"

@@ -50,7 +50,7 @@ fn record(store: &Store, s: sill_core::store::Session) -> Result<api::Session> {
 fn exact(store: &Store, id: &str) -> Result<sill_core::store::Session> {
     store.session_exact(id)?.ok_or_else(|| Error::domain("not_found", "session not found").into())
 }
-fn create(store: &Store, mut a: api::Create) -> Result<api::SessionKey> {
+pub(super) fn create(store: &Store, mut a: api::Create) -> Result<api::SessionKey> {
     if a.create_id.is_empty() || a.create_id.len() > 128 || a.create_id.chars().any(char::is_control) {
         return Err(Error::invalid_params("create_id must contain 1–128 bytes without control characters").into());
     }

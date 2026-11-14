@@ -44,6 +44,11 @@ const fn req_empty<P: JsonSchema>(name: &'static str, doc: &'static str) -> Meth
     Method { name, kind: Kind::Request, doc, params: Some(|g| g.subschema_for::<P>()), result: None, capability: None }
 }
 
+/// A notification sent only to connections the daemon answered `capability` at `version` or later.
+const fn notification_needing<P: JsonSchema>(name: &'static str, capability: &'static str, version: u32, doc: &'static str) -> Method {
+    Method { capability: Some((capability, version)), ..notification::<P>(name, doc) }
+}
+
 const fn notification<P: JsonSchema>(name: &'static str, doc: &'static str) -> Method {
     Method { name, kind: Kind::Notification, doc, params: Some(|g| g.subschema_for::<P>()), result: None, capability: None }
 }
@@ -79,6 +84,17 @@ pub const METHODS: &[Method] = &[
     req_needing::<crate::sessions::SessionKey,crate::host_control::State>("_sill/host_control.state","sill.permission_modes",1,"A session's Host control state: active, generation, operations, displaying frontends, the last end, a base-policy ban, the repository restrictions host operations can bypass and the exception. Session records carry the active brief for every client."),
     req_needing::<crate::sessions::SessionKey,crate::admin::PermissionsChanged>("_sill/permissions.restore_defaults","sill.permission_modes",1,"Restore defaults: remove this session's added capability and host grants, keeping its policy and pins. A running jail keeps its launch state until restarted."),
     notification::<crate::Empty>("_sill/changes.changed", "Filesystem changes changed; refresh bounded public pages."),
+    req_needing::<crate::workspaces::List,crate::workspaces::Listed>("_sill/workspaces.list","sill.workspaces",1,"Workspaces, newest first, in live keyset pages (1–128). Reading reconciles: a workspace whose owner session ended has no writer and is a result."),
+    req_needing::<crate::workspaces::Key,crate::workspaces::Detail>("_sill/workspaces.get","sill.workspaces",1,"A workspace with its current revision and its summary against the base, computed through the hardened Git view."),
+    req_needing::<crate::workspaces::DiffRequest,crate::workspaces::DiffText>("_sill/workspaces.diff","sill.workspaces",1,"The workspace's working tree against its base, or against the source's current tip; at most 4 MiB."),
+    req_needing::<crate::workspaces::Create,crate::workspaces::Created>("_sill/workspaces.create","sill.workspaces",1,"Make a workspace from the source's HEAD and a session pinned to it (not started). A retry with the same operation_id returns the same workspace. invalid_state details.reason names a source that cannot have one (submodules, linked_worktree, partial_clone, lfs, filter_drivers, borrowed_objects, detached_head, ref_format, no_commits, not_a_repository)."),
+    req_needing::<crate::workspaces::Key,crate::workspaces::Changed>("_sill/workspaces.finish","sill.workspaces",1,"Mark the workspace done: open → result once nothing writes (writer_active otherwise)."),
+    req_needing::<crate::workspaces::Reopen,crate::workspaces::Changed>("_sill/workspaces.reopen","sill.workspaces",1,"result → open with a session pinned to it: the latest one while it has not ended, otherwise a new one for agent/policy. Clears the prepared revision."),
+    req_needing::<crate::workspaces::Operate,crate::workspaces::Prepared>("_sill/workspaces.prepare","sill.workspaces",1,"Record the source's current branch and tip as the destination and return the revision a Merge would apply. needs_rebase when the result does not descend from the destination (rebase in the workspace)."),
+    req_needing::<crate::workspaces::Apply,crate::workspaces::Changed>("_sill/workspaces.merge","sill.workspaces",1,"Fast-forward the source's branch to the workspace's, keeping the person's other edits; only for exactly this revision. Refusals: invalid_state with reason stale_revision, source_moved, source_overlap, untracked_collision, uncommitted, writer_active."),
+    req_needing::<crate::workspaces::Apply,crate::workspaces::Changed>("_sill/workspaces.discard","sill.workspaces",1,"Move the whole clone aside for 7 days of Undo; only for exactly this revision, and never while something writes."),
+    req_needing::<crate::workspaces::Operate,crate::workspaces::Changed>("_sill/workspaces.undo","sill.workspaces",1,"Put a discarded workspace back while it is retained (path_taken when something else is there now)."),
+    notification_needing::<crate::workspaces::Notice>("_sill/workspaces.changed", "sill.workspaces", 1, "A workspace changed; refresh it. Sent only to connections answered sill.workspaces."),
     req::<crate::changes::List, crate::changes::Page>("_sill/changes.list", "Public Changes operation; preserve filesystem preconditions and inspect current state after an uncertain mutation, never blindly retry."),
     req::<crate::changes::Diff, crate::changes::DiffPage>("_sill/changes.diff", "Public Changes operation; preserve filesystem preconditions and inspect current state after an uncertain mutation, never blindly retry."),
     req::<crate::changes::Keep, crate::changes::Done>("_sill/changes.keep", "Public Changes operation; preserve filesystem preconditions and inspect current state after an uncertain mutation, never blindly retry."),
@@ -204,6 +220,7 @@ pub fn document() -> Value {
             "limit_exceeded" => g.subschema_for::<crate::rpc::LimitDetails>(),
             "unsupported" => g.subschema_for::<crate::rpc::UnsupportedDetails>(),
             "exception_required" => g.subschema_for::<crate::rpc::ExceptionRequiredDetails>(),
+            "invalid_state" => g.subschema_for::<crate::rpc::InvalidStateDetails>(),
             other => unreachable!("detail schema for {other}"),
         }.to_value();
         (code.to_string(), json!({"required": always, "shape": shape}))

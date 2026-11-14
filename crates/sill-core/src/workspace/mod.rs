@@ -445,6 +445,46 @@ pub fn set_destination(source: &Path, clone: &Path, id: &str, branch: &str, work
     Ok(tip)
 }
 
+/// The source's checked-out branch (empty when detached) and its tip.
+pub fn source_head(source: &Path) -> Result<(String, String)> {
+    let git = Git::open(source)?;
+    let head = std::fs::read_to_string(git.dirs().0.join("HEAD"))?;
+    let branch = head.trim().strip_prefix("ref: refs/heads/").unwrap_or("").to_string();
+    let mut c = git.cmd();
+    c.args(["rev-parse", "HEAD"]);
+    Ok((branch, ok(c, "source HEAD")?))
+}
+
+/// Whether `ancestor` is reachable from `tip` in the clone (borrowed objects included).
+pub fn descends(clone: &Path, ancestor: &str, tip: &str) -> Result<bool> {
+    let git = Git::open(clone)?;
+    let mut c = git.cmd();
+    c.args(["merge-base", "--is-ancestor", ancestor, tip]);
+    Ok(run(c)?.status.success())
+}
+
+/// The clone's working tree against `commit` (its base, or a destination it borrows), at most
+/// `limit` bytes; true when cut there.
+pub fn diff(clone: &Path, commit: &str, limit: usize) -> Result<(String, bool)> {
+    let git = Git::open(clone)?;
+    let mut c = git.cmd();
+    c.args(["diff"]).args(Git::DIFF_SAFE).arg(commit).arg("--");
+    let out = run(c)?;
+    if !out.status.success() {
+        bail!("diff: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    if text.len() <= limit {
+        return Ok((text, false));
+    }
+    let mut cut = limit;
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    text.truncate(cut);
+    Ok((text, true))
+}
+
 /// Why a Merge did not apply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stop {
@@ -624,6 +664,7 @@ pub fn expire(retained: &Path, source: &Path, id: &str) -> Result<()> {
     Ok(())
 }
 
+pub mod records;
+
 #[cfg(test)]
-#[path = "workspace_tests.rs"]
-mod tests;
+mod git_tests;

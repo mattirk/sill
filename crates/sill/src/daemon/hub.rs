@@ -44,6 +44,8 @@ mod changes_public;
 mod sessions;
 #[path = "pins.rs"]
 mod pins;
+#[path = "workspaces.rs"]
+mod workspaces;
 
 /// What an end that waits for the agent's summary needs once the answer is in (the facts as they
 /// were when the end was asked for; the row's summary is replaced only when memory is on).
@@ -109,6 +111,7 @@ impl Hub {
     pub fn new(mode: &'static str) -> Result<Hub> {
         let store = Store::open_default()?;
         sill_core::operations::Journal::new(store.conn())?.recover()?;
+        sill_core::workspace::records::init(store.conn())?;
         store.conn().execute_batch("CREATE TABLE IF NOT EXISTS daemon_ends (id TEXT PRIMARY KEY, context TEXT NOT NULL); CREATE TABLE IF NOT EXISTS daemon_runners (id TEXT PRIMARY KEY, state TEXT NOT NULL);
             CREATE TRIGGER IF NOT EXISTS daemon_state_cleanup AFTER DELETE ON sessions BEGIN
                 DELETE FROM daemon_runners WHERE id=OLD.id;
@@ -390,6 +393,13 @@ impl Hub {
                 Error::domain("operation_failed", format!("{e:#}"))
             });
         }
+        if let Some(result) = self.workspaces(conn, m, params.clone()) {
+            return result.map_err(|e| {
+                if let Some(e) = e.downcast_ref::<Error>() { return e.clone(); }
+                if e.downcast_ref::<sill_core::sfp::DomainError>().is_some() { return super::sfp::failure(e); }
+                Error::domain("operation_failed", format!("{e:#}"))
+            });
+        }
         if let Some(result) = super::admin::handle(self, conn.id, m, params.clone()) {
             return result.map_err(|e| {
                 if let Some(e) = e.downcast_ref::<Error>() { return e.clone(); }
@@ -431,6 +441,8 @@ impl Hub {
     /// gets its runner on the first attach or prompt, as before the relay existed: a daemon
     /// restart wakes no agent.
     pub fn recover(self: &Arc<Self>) {
+        // interrupted workspace operations settle from what is on disk before anything else runs
+        self.workspaces_recover();
         // first what must not run at all, so no stray's relay is recovered below (§3.11)
         self.reap_strays();
         let Ok(dir) = sill_proto::runtime_dir() else { return };

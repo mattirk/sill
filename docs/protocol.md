@@ -767,6 +767,30 @@ characters. A name change does not alter `title`; it updates a known summary-sig
 Older sessions without a preserved name return null. The exported schema includes this additive
 extension; clients default absent name fields to null.
 
+### Workspaces (development addition, 2026-11-09)
+
+`sill.workspaces: 1` gates a session's own clone and branch of a repository
+([parallel-coding.md](parallel-coding.md) §11). `_sill/workspaces.list` (live keyset pages,
+newest first), `_sill/workspaces.get` (record, current `revision`, `summary`, `needs_rebase`) and
+`_sill/workspaces.diff` (against the base or the source's current tip, at most 4 MiB) read.
+`_sill/workspaces.create` makes the clone from the source's HEAD and a session pinned to it, not
+started. `_sill/workspaces.finish` and `_sill/workspaces.reopen` move between `open` and
+`result`. `_sill/workspaces.prepare` records the destination and returns the revision a Merge would
+apply. `_sill/workspaces.merge` fast-forwards the source for exactly that revision, keeping the
+person's other edits. `_sill/workspaces.discard` retains the whole clone for 7 days and
+`_sill/workspaces.undo` restores it. `_sill/workspaces.changed` (notification, this capability
+only) invalidates one workspace.
+
+Mutations other than `finish` take an `operation_id` with the receipts of
+[sfp-operations.md](sfp-operations.md): an identical retry returns the workspace as it is now,
+never repeats the work, and `_sill/operations.get` reports the receipt. Refusals use
+`invalid_state` with the new optional details `{reason, paths}`: for create the source's reason
+(`submodules`, `linked_worktree`, `partial_clone`, `lfs`, `filter_drivers`, `borrowed_objects`,
+`detached_head`, `ref_format`, `no_commits`, `not_a_repository`); otherwise `stale_revision`,
+`source_moved`, `source_overlap`, `untracked_collision`, `uncommitted`, `writer_active`,
+`path_taken`, `retention_expired` or `state`. A rebase in a helper jail and its abort are not part of
+this version: `needs_rebase` asks for it to be done in the workspace.
+
 ### `_sill/repos.root` answers for a repository folder (2026-11-08)
 
 The repository containing the path: the nearest directory with `.git`, the path itself included

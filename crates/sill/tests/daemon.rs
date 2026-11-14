@@ -1450,3 +1450,84 @@ fn daemon_only_restart_replaces_process_and_keeps_store() {
     assert_eq!(before["result"]["sessions"], after["result"]["sessions"]);
     assert!(d.wait_exit().success());
 }
+
+/// `_sill/workspaces.*` over the public protocol (docs/parallel-coding.md §11): gated by
+/// `sill.workspaces`, a source refused with its reason, then create → finish → prepare → Merge →
+/// discard → undo on a real repository, the source moved exactly as reviewed.
+#[test]
+fn public_workspaces_lifecycle() {
+    use sill_proto::sessions::HostPath;
+    let d = Daemon::start();
+    let git = |dir: &Path, args: &[&str]| -> String {
+        let out = Command::new("git").arg("-C").arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"])
+            .args(args).env("GIT_CONFIG_NOSYSTEM", "1").env("HOME", d.dir.join("home")).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let repo = d.dir.join("home/repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "one"]);
+
+    let mut plain = d.connect().unwrap();
+    let refused = plain.call("_sill/workspaces.list", json!({})).unwrap();
+    assert_eq!(refused["error"]["data"]["code"], "unsupported", "{refused}");
+    assert_eq!(refused["error"]["data"]["details"]["capability"], "sill.workspaces");
+
+    let mut c = d.connect_caps(json!({"sill.workspaces": 1})).unwrap();
+    let not_repo = c.call("_sill/workspaces.create", json!({"operation_id": "op-0", "source": HostPath::from_path(&d.dir), "name": "x", "agent": "claude", "policy": "default"})).unwrap();
+    assert_eq!(not_repo["error"]["data"]["code"], "invalid_state", "{not_repo}");
+    assert_eq!(not_repo["error"]["data"]["details"]["reason"], "not_a_repository");
+
+    let made = c.call("_sill/workspaces.create", json!({"operation_id": "op-1", "source": HostPath::from_path(&repo), "name": "First try", "agent": "claude", "policy": "default"})).unwrap();
+    assert!(made.get("error").is_none(), "{made}\n{}", d.log());
+    let ws = &made["result"]["workspace"];
+    let id = ws["workspace_id"].as_str().unwrap().to_string();
+    assert_eq!(ws["state"], "open");
+    let session = made["result"]["session_id"].as_str().unwrap().to_string();
+    assert_eq!(ws["owner_session"], session.as_str());
+    let path = serde_json::from_value::<HostPath>(ws["path"].clone()).unwrap().to_path().unwrap();
+    assert!(path.starts_with(d.dir.join("home/.local/share/sill/workspaces/repo")), "{}", path.display());
+    let got = c.call("_sill/sessions.get", json!({"session_id": session})).unwrap();
+    assert!(got.get("error").is_none(), "{got}");
+    // the same operation again: the same workspace
+    let again = c.call("_sill/workspaces.create", json!({"operation_id": "op-1", "source": HostPath::from_path(&repo), "name": "First try", "agent": "claude", "policy": "default"})).unwrap();
+    assert_eq!(again["result"]["workspace"]["workspace_id"], id.as_str());
+
+    // the agent's work, then the person marks it done (the session never ran)
+    std::fs::write(path.join("a.txt"), "two\n").unwrap();
+    git(&path, &["commit", "-qam", "two"]);
+    let finished = c.call("_sill/workspaces.finish", json!({"workspace_id": id})).unwrap();
+    assert_eq!(finished["result"]["workspace"]["state"], "result", "{finished}");
+    let detail = c.call("_sill/workspaces.get", json!({"workspace_id": id})).unwrap();
+    assert_eq!(detail["result"]["summary"]["commits"], 1, "{detail}");
+    let diff = c.call("_sill/workspaces.diff", json!({"workspace_id": id, "against": "base"})).unwrap();
+    assert!(diff["result"]["text"].as_str().unwrap().contains("+two"), "{diff}");
+
+    let prepared = c.call("_sill/workspaces.prepare", json!({"operation_id": "op-p", "workspace_id": id})).unwrap();
+    assert!(prepared.get("error").is_none(), "{prepared}");
+    assert_eq!(prepared["result"]["needs_rebase"], false);
+    let revision = prepared["result"]["revision"].clone();
+    let merged = c.call("_sill/workspaces.merge", json!({"operation_id": "op-m", "workspace_id": id, "revision": revision})).unwrap();
+    assert_eq!(merged["result"]["workspace"]["state"], "merged", "{merged}");
+    assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "two\n");
+    assert_eq!(git(&repo, &["rev-parse", "main"]), revision["tip"].as_str().unwrap());
+    let receipt = c.call("_sill/operations.get", json!({"operation_id": "op-m"})).unwrap();
+    assert_eq!(receipt["result"]["state"], "completed", "{receipt}");
+
+    // a stale revision is refused with its reason
+    let stale = c.call("_sill/workspaces.discard", json!({"operation_id": "op-d0", "workspace_id": id, "revision": {"tip": "0", "worktree": "", "destination_branch": "main", "destination_tip": "0"}})).unwrap();
+    assert_eq!(stale["error"]["data"]["details"]["reason"], "stale_revision", "{stale}");
+    let current = c.call("_sill/workspaces.get", json!({"workspace_id": id})).unwrap()["result"]["revision"].clone();
+    let gone = c.call("_sill/workspaces.discard", json!({"operation_id": "op-d", "workspace_id": id, "revision": current})).unwrap();
+    assert_eq!(gone["result"]["workspace"]["state"], "discarded", "{gone}");
+    assert!(!path.exists());
+    let back = c.call("_sill/workspaces.undo", json!({"operation_id": "op-u", "workspace_id": id})).unwrap();
+    assert_eq!(back["result"]["workspace"]["state"], "merged", "{back}");
+    assert!(path.join("a.txt").exists());
+    let listed = c.call("_sill/workspaces.list", json!({})).unwrap();
+    assert_eq!(listed["result"]["workspaces"].as_array().unwrap().len(), 1, "{listed}");
+}
