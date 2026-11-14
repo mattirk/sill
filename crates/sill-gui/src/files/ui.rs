@@ -144,7 +144,8 @@ impl App {
         if loading {
             chips = chips.push(text("Loading pins…").size(style::TINY).color(P.fg_dim));
         }
-        if !state.roots.iter().any(|r| !r.global) && !loading {
+        // after the pinned folders, always: one more is pinned from here
+        if !loading {
             chips = chips.push(tip(
                 keys::press_maybe(
                     button(crate::icons::glyph("folder-plus", 16.0, P.fg_dim))
