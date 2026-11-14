@@ -586,6 +586,7 @@ clients branch on `data.code`, not English text. Domain codes:
 | `invalid_cursor`, `snapshot_expired` | Invalid resume position or expired snapshot lease. |
 | `limit_exceeded`, `permission_denied` | Advertised bound exceeded or daemon policy refused the operation. |
 | `operation_failed` | A durable host operation (login, install) recorded a failure. |
+| `exception_required` | Host control operations that can bypass a pinned repository's restrictions need the person's recorded exception first (`_sill/host_control.exception`). Added 2026-11-07. |
 
 **Error details (settled for sfp/1, 2026-11-03).** Only these codes carry `details`; every other
 code carries none in sfp/1. The exported schema lists them under `errors.details`, each with its
@@ -598,6 +599,7 @@ details of unlisted or unknown codes.
 | `stale_answer` | `{question}`: the question record as resolved. | Always |
 | `limit_exceeded` | `{scope, maximum?}`: `scope` is `request` (send less), `result` (ask for a smaller page), `record` (one stored record is too large for this method; paging cannot help) or `capacity` (a daemon resource is full; release one or wait, an unchanged repeat fails again). `maximum` is the bound as a number in the unit the message names, where one exists. | Always |
 | `unsupported` | `{capability}`: the capability the connection did not negotiate. | Only when a capability is missing; refusals about the target (platform, policy, agent) carry none |
+| `exception_required` | `{conflicts}`: the restrictions the requested operations can bypass, as `_sill/host_control.state` lists them. | Always |
 
 A detail shape may gain optional fields within sfp/1 and clients ignore unknown fields. Adding
 details to another code is a compatible addition under the extension rule above.

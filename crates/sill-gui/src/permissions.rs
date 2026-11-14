@@ -194,7 +194,7 @@ impl App {
                 };
                 view.permissions.open = !view.permissions.open;
                 if view.permissions.open {
-                    return self.read_permissions(&id);
+                    return Task::batch([self.read_permissions(&id), self.read_host_control(&id)]);
                 }
             }
             Event::Read(id, serial, result) => {
@@ -848,6 +848,9 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>, narrow: bo
     host = host.push(heading(host_heading, if active { P.error } else { P.fg_dim }));
     for row in crate::host_control::rows(view, session, can_change) {
         host = host.push(slot(row));
+    }
+    if let Some(block) = crate::host_control::restrictions(view, can_change) {
+        host = host.push(block);
     }
     let host_buttons = crate::host_control::buttons(view, session, can_change);
 

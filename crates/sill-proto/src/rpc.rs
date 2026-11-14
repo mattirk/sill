@@ -135,7 +135,12 @@ pub enum DomainDetails {
     StaleAnswer(StaleAnswerDetails),
     LimitExceeded(LimitDetails),
     Unsupported(UnsupportedDetails),
+    ExceptionRequired(ExceptionRequiredDetails),
 }
+/// `exception_required`: the repository restrictions the requested Host control operations can
+/// bypass, as `_sill/host_control.state` lists them. Always present.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ExceptionRequiredDetails { pub conflicts: Vec<crate::host_control::Conflict> }
 /// `incompatible`: the protocol identities the daemon supports. Always present.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct IncompatibleDetails { pub supported_protocols: Vec<String> }
@@ -171,6 +176,6 @@ pub enum LimitScope {
 pub struct UnsupportedDetails { pub capability: String }
 
 /// Codes whose `details` sfp/1 defines, with whether every occurrence carries them.
-pub fn detail_codes() -> [(&'static str, bool); 4] {
-    [("incompatible", true), ("stale_answer", true), ("limit_exceeded", true), ("unsupported", false)]
+pub fn detail_codes() -> [(&'static str, bool); 5] {
+    [("incompatible", true), ("stale_answer", true), ("limit_exceeded", true), ("unsupported", false), ("exception_required", true)]
 }

@@ -1203,6 +1203,86 @@ fn host_control_is_an_activation_a_displaying_frontend_holds() {
     assert_eq!(host.call("_sill/host_control.state", json!({"session_id":"nope"})).unwrap()["error"]["data"]["code"], "not_found");
 }
 
+/// docs/permission-modes.md "Repository restrictions and Host control": a pinned repository's
+/// fragment conditions activation on the person's separate exception, named exactly; a base ban
+/// has none; an exception is withdrawn with the connection that recorded it.
+#[test]
+fn host_control_repository_exceptions_are_separate_exact_and_short_lived() {
+    use sill_proto::sessions::HostPath;
+    let d = Daemon::start();
+    let mut modes = d.connect_caps(json!({"sill.permission_modes":1})).unwrap();
+    let mut host = d.connect_caps(json!({"sill.permission_modes":1,"sill.host_control":1})).unwrap();
+    let root = d.dir.join("home/offline-repo");
+    std::fs::create_dir_all(root.join(".sill")).unwrap();
+    std::fs::write(root.join(".sill/policy.toml"), "[network]\nmode='none'\n").unwrap();
+    assert!(modes.call("_sill/pins.add", json!({"path":HostPath::from_path(&root)})).unwrap().get("error").is_none());
+    let created = modes.call("_sill/sessions.create", json!({"create_id":"repo-exception","agent":"claude","policy":"default"})).unwrap();
+    let session = created["result"]["session_id"].as_str().unwrap().to_string();
+    let key = json!({"session_id":session});
+    let state = |c: &mut Conn| c.call("_sill/host_control.state", key.clone()).unwrap()["result"].clone();
+    let record = |c: &mut Conn, operations: Value, acknowledged: Value|
+        c.call("_sill/host_control.exception", json!({"session_id":session,"operations":operations,"acknowledged":acknowledged})).unwrap();
+
+    // the state names the restriction, its source and content, and the operations that bypass it
+    let s = state(&mut modes);
+    assert!(s.get("forbidden").is_none(), "{s}");
+    let conflicts = s["conflicts"].as_array().unwrap().clone();
+    assert_eq!(conflicts.len(), 1, "{s}");
+    assert_eq!(conflicts[0]["restriction"], "offline");
+    assert_eq!(conflicts[0]["operations"], json!(["input", "launch", "commands"]));
+    assert_eq!(conflicts[0]["source"]["display"], root.join(".sill/policy.toml").to_str().unwrap());
+    let ack = json!([{"source":conflicts[0]["source"],"sha256":conflicts[0]["sha256"],"restriction":"offline"}]);
+
+    // only a frontend that displays Host control records one; only for what the operations meet;
+    // only naming exactly what they meet
+    assert_eq!(record(&mut modes, json!(["launch"]), ack.clone())["error"]["data"]["code"], "unsupported");
+    let none = record(&mut host, json!(["inspect", "stop"]), ack.clone());
+    assert_eq!(none["error"]["data"]["code"], "invalid_state", "{none}");
+    assert!(none["error"]["message"].as_str().unwrap().contains("no exception is needed"), "{none}");
+    let wrong = record(&mut host, json!(["launch"]), json!([]));
+    assert_eq!(wrong["error"]["data"]["code"], "invalid_state", "{wrong}");
+    assert!(wrong["error"]["message"].as_str().unwrap().contains("read the state"), "{wrong}");
+    let recorded = record(&mut host, json!(["launch", "inspect"]), ack.clone());
+    assert_eq!(recorded["result"]["exception"]["operations"], json!(["inspect", "launch"]), "{recorded}");
+    assert!(recorded["result"]["exception"].get("generation").is_none(), "waits for the activation: {recorded}");
+    assert!(recorded["result"]["active"] == false, "recording activates nothing: {recorded}");
+    let record_now = modes.call("_sill/sessions.get", key.clone()).unwrap();
+    assert!(record_now["result"].get("host_control").is_none(), "{record_now}");
+
+    // the fragment changed: the old acknowledgement no longer names what the operations meet
+    std::fs::write(root.join(".sill/policy.toml"), "[network]\nmode='none'\n[paths]\nmask=['.sill']\n").unwrap();
+    let stale = record(&mut host, json!(["launch"]), ack.clone());
+    assert_eq!(stale["error"]["data"]["code"], "invalid_state", "{stale}");
+    let s = state(&mut modes);
+    let restrictions: Vec<&str> = s["conflicts"].as_array().unwrap().iter().map(|c| c["restriction"].as_str().unwrap()).collect();
+    assert_eq!(restrictions, ["offline", "masked_paths"], "{s}");
+    let masked = s["conflicts"].as_array().unwrap().iter().find(|c| c["restriction"] == "masked_paths").unwrap().clone();
+    assert_eq!(masked["operations"], json!(["view", "input", "launch", "commands"]));
+    // viewing meets the mask alone
+    let view_ack = json!([{"source":masked["source"],"sha256":masked["sha256"],"restriction":"masked_paths"}]);
+    assert!(record(&mut host, json!(["view"]), view_ack)["result"]["exception"]["conflicts"][0]["restriction"] == "masked_paths");
+
+    // the connection that recorded it leaves: it is withdrawn, nobody else can use it
+    drop(host);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while state(&mut modes).get("exception").is_some() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(state(&mut modes).get("exception").is_none(), "{}", state(&mut modes));
+
+    // a base-policy ban has no exception, and says so
+    let policies = d.dir.join("home/exception-policies");
+    std::fs::create_dir_all(&policies).unwrap();
+    std::fs::write(policies.join("banned.toml"), "name='banned'\n[permissions]\nhost_control='forbidden'\n").unwrap();
+    let created = modes.call("_sill/sessions.create", json!({"create_id":"banned","agent":"claude","policy":policies.join("banned.toml").to_str().unwrap()})).unwrap();
+    let banned = created["result"]["session_id"].as_str().unwrap().to_string();
+    let s = modes.call("_sill/host_control.state", json!({"session_id":banned})).unwrap()["result"].clone();
+    assert!(s["forbidden"].as_str().unwrap().contains("no repository exception"), "{s}");
+    let mut host = d.connect_caps(json!({"sill.permission_modes":1,"sill.host_control":1})).unwrap();
+    let refused = host.call("_sill/host_control.exception", json!({"session_id":banned,"operations":["launch"],"acknowledged":ack})).unwrap();
+    assert_eq!(refused["error"]["data"]["code"], "permission_denied", "{refused}");
+}
+
 #[test]
 fn development_permissions_apply_together_or_not_at_all() {
     let d = Daemon::start();

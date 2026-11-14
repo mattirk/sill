@@ -205,6 +205,10 @@ enum HostControlCmd {
         session: String,
         #[arg(required = true, value_delimiter = ',')]
         operations: Vec<String>,
+        /// When these operations can bypass a pinned repository's restrictions (listed first),
+        /// record your exception for this one activation; the jail keeps the restrictions
+        #[arg(long)]
+        accept_repository_exception: bool,
     },
     /// End the session's activation
     Revoke { session: String },
@@ -738,6 +742,12 @@ fn host_control_cmd(cmd: HostControlCmd) -> Result<()> {
     if std::env::var_os("SILL_SESSION").is_some() {
         bail!("Host control is a host administrative action");
     }
+    let conflict_lines = |conflicts: &[&api::Conflict]| {
+        for c in conflicts {
+            println!("  {}: {}", c.source.display, c.detail);
+            println!("    {} Bypassed by: {}.", c.consequence, c.operations.join(", "));
+        }
+    };
     let print = |s: &api::State| {
         if s.active {
             println!("Host control active (generation {}): {}", s.generation, s.operations.join(", "));
@@ -747,6 +757,22 @@ fn host_control_cmd(cmd: HostControlCmd) -> Result<()> {
         }
         if let Some(ended) = &s.ended {
             println!("ended: {}", ended.reason);
+        }
+        if let Some(forbidden) = &s.forbidden {
+            println!("{forbidden}");
+        }
+        if let Some(error) = &s.conflicts_error {
+            println!("repository restrictions could not be read: {error}");
+        }
+        if !s.conflicts.is_empty() {
+            println!("repository restrictions host operations can bypass:");
+            conflict_lines(&s.conflicts.iter().collect::<Vec<_>>());
+        }
+        if let Some(e) = &s.exception {
+            match e.generation {
+                Some(g) => println!("generation {g} runs under a repository exception ({})", e.operations.join(", ")),
+                None => println!("repository exception recorded for the next activation ({})", e.operations.join(", ")),
+            }
         }
     };
     match cmd {
@@ -758,6 +784,8 @@ fn host_control_cmd(cmd: HostControlCmd) -> Result<()> {
             println!("{name}: keep after revocation = {keep}");
         }
         HostControlCmd::State { session } => {
+            // this command shows permission state, the contract that capability states
+            sill_proto::client::declare_capability("sill.permission_modes");
             let c = sill_proto::Client::connect_or_start()?;
             let key = policy_session_key(&c, &session)?;
             print(&c.call("_sill/host_control.state", SessionKey { session_id: key })?);
@@ -768,12 +796,31 @@ fn host_control_cmd(cmd: HostControlCmd) -> Result<()> {
             let key = policy_session_key(&c, &session)?;
             print(&c.call("_sill/host_control.revoke", SessionKey { session_id: key })?);
         }
-        HostControlCmd::Activate { session, operations } => {
+        HostControlCmd::Activate { session, operations, accept_repository_exception } => {
             // this command is the displaying frontend: it shows the state and keeps the connection,
             // and the activation, for as long as it runs
             sill_proto::client::declare_capability(api::CAPABILITY);
+            sill_proto::client::declare_capability("sill.permission_modes");
             let c = sill_proto::Client::connect_or_start()?;
             let key = policy_session_key(&c, &session)?;
+            let before: api::State = c.call("_sill/host_control.state", SessionKey { session_id: key.clone() })?;
+            if let Some(forbidden) = &before.forbidden {
+                bail!("{forbidden}");
+            }
+            let met: Vec<&api::Conflict> = before.conflicts.iter().filter(|c| c.applies(&operations)).collect();
+            if !met.is_empty() {
+                println!("These operations can bypass a pinned repository's restrictions:");
+                conflict_lines(&met);
+                if !accept_repository_exception {
+                    bail!("not activated; to record an exception for this one activation, run again with --accept-repository-exception");
+                }
+                let _: api::State = c.call("_sill/host_control.exception", api::RecordException {
+                    session_id: key.clone(),
+                    operations: operations.clone(),
+                    acknowledged: met.iter().map(|c| c.key()).collect(),
+                })?;
+                println!("Repository exception recorded for this activation; the jail keeps the restrictions.");
+            }
             let state: api::State = c.call("_sill/host_control.activate", api::Activate { session_id: key.clone(), operations })?;
             print(&state);
             println!("HOST CONTROL · actions can run outside the jail · session {key}");

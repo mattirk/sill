@@ -37,7 +37,10 @@ impl Daemon {
             self.reader.read_line(&mut line).unwrap();
             let request: Value = serde_json::from_str(&line)
                 .unwrap_or_else(|_| panic!("no request; expected {method}"));
-            if request["method"] == "_sill/policy.preview" && method != "_sill/policy.preview" {
+            // reads that go out beside the one under test (the panel reads Host control's state
+            // with its policy views, concurrently)
+            let incidental = ["_sill/policy.preview", "_sill/host_control.state"];
+            if incidental.contains(&request["method"].as_str().unwrap_or("")) && request["method"] != method {
                 self.refuse(&request, "unavailable", "not in this test");
                 continue;
             }

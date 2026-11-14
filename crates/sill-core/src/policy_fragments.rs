@@ -634,6 +634,133 @@ fn apply(f: &Fragment, root: &Path, source: &Path, out: &mut Resolution) -> Resu
     Ok(())
 }
 
+/// Host control's operations, in the specification's order (`sill_proto::host_control::OPERATIONS`).
+const HOST_OPERATIONS: [&str; 7] = ["view", "input", "inspect", "launch", "stop", "stop_existing", "commands"];
+/// The operations that are general host authority: they run, or drive, arbitrary code as the
+/// person, so every repository restriction is theirs to bypass (docs/permission-modes.md: "Treat
+/// command execution, launching agent-built applications and desktop input as potential general
+/// host authority").
+const GENERAL_HOST_AUTHORITY: [&str; 3] = ["input", "launch", "commands"];
+
+/// A repository restriction Host control can bypass (docs/permission-modes.md, "Repository
+/// restrictions and Host control"): one applied fragment's rule, what it means for host code, and
+/// the operations that bypass it. An activation whose operations meet one needs the person's
+/// separate exception; the jail itself keeps enforcing the restriction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostConflict {
+    pub path: PathBuf,
+    pub sha256: String,
+    /// A stable name: host_control_forbidden, offline, public_web_forbidden, read_only_paths,
+    /// masked_paths, resource_limits, port_exposure.
+    pub restriction: &'static str,
+    /// The rule as the fragment states it.
+    pub detail: String,
+    pub consequence: &'static str,
+    pub operations: Vec<&'static str>,
+}
+
+/// The repository restrictions of `resolution`'s applied fragments that host operations can
+/// bypass. Ignored fragments impose nothing and are not listed.
+pub fn host_conflicts(resolution: &Resolution) -> Result<Vec<HostConflict>> {
+    fn names(paths: &[String]) -> String {
+        let mut shown: Vec<&str> = paths.iter().take(4).map(String::as_str).collect();
+        if paths.len() > 4 {
+            shown.push("…");
+        }
+        shown.join(", ")
+    }
+    let general = || GENERAL_HOST_AUTHORITY.to_vec();
+    let mut out = vec![];
+    for source in resolution.sources.iter().filter(|s| !s.ignored && s.error.is_none()) {
+        let f = parse(&source.text).with_context(|| format!("{}", source.path.display()))?;
+        let mut push = |restriction, detail: String, consequence, operations: Vec<&'static str>| {
+            out.push(HostConflict {
+                path: source.path.clone(),
+                sha256: source.sha256.clone(),
+                restriction,
+                detail,
+                consequence,
+                operations,
+            })
+        };
+        if f.permissions.contains_key("host_control") {
+            push(
+                "host_control_forbidden",
+                "permissions.host_control = forbidden".into(),
+                "The repository forbids Host control; every host operation acts outside its jail.",
+                HOST_OPERATIONS.to_vec(),
+            );
+        }
+        if f.network.mode.is_some() {
+            push(
+                "offline",
+                "network.mode = none".into(),
+                "Host code has the host's network; the repository asks for none.",
+                general(),
+            );
+        }
+        if f.permissions.contains_key("public_web") {
+            push(
+                "public_web_forbidden",
+                "permissions.public_web = forbidden".into(),
+                "Host code reaches the public web; the repository forbids it.",
+                general(),
+            );
+        }
+        if !f.paths.ro.is_empty() {
+            push(
+                "read_only_paths",
+                format!("paths.ro: {}", names(&f.paths.ro)),
+                "Host code can write the paths the repository makes read-only.",
+                general(),
+            );
+        }
+        if !f.paths.mask.is_empty() {
+            // the screen shows whatever the person has open, a masked file included
+            let mut operations = vec!["view"];
+            operations.extend(GENERAL_HOST_AUTHORITY);
+            operations.sort_by_key(|op| HOST_OPERATIONS.iter().position(|o| o == op));
+            push(
+                "masked_paths",
+                format!("paths.mask: {}", names(&f.paths.mask)),
+                "Host code can read, and the screen can show, files the repository masks.",
+                operations,
+            );
+        }
+        let l = &f.limits;
+        let mut limits = vec![];
+        for (name, set) in [
+            ("cpu_weight", l.cpu_weight.is_some()),
+            ("io_weight", l.io_weight.is_some()),
+            ("memory_high", l.memory_high.is_some()),
+            ("memory_max", l.memory_max.is_some()),
+            ("tasks_max", l.tasks_max.is_some()),
+            ("required", l.required == Some(true)),
+        ] {
+            if set {
+                limits.push(name);
+            }
+        }
+        if !limits.is_empty() {
+            push(
+                "resource_limits",
+                format!("limits: {}", limits.join(", ")),
+                "Host code runs outside the jail's resource limits.",
+                general(),
+            );
+        }
+        if let Some(expose) = &f.processes.expose {
+            push(
+                "port_exposure",
+                format!("processes.expose: {}", if expose.is_empty() { "none".into() } else { expose.join(", ") }),
+                "Host code can listen on any port; the repository narrows what is exposed.",
+                general(),
+            );
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1031,4 +1158,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn host_conflicts_name_each_restriction_and_the_operations_that_bypass_it() {
+        let repo = Repo::new();
+        let base = Policy::builtin_default();
+        repo.write("");
+        assert!(host_conflicts(&repo.resolve(&base).unwrap()).unwrap().is_empty());
+        // suggestions and idle timeouts restrict nothing host code could bypass
+        repo.write("[network]\nallow=['packages.example']\n[limits]\nidle_timeout_minutes=5");
+        assert!(host_conflicts(&repo.resolve(&base).unwrap()).unwrap().is_empty());
+        repo.write(
+            "[permissions]\nhost_control='forbidden'\npublic_web='forbidden'\n[paths]\nro=['src']\nmask=['src/lib.rs']\n\
+             [network]\nmode='none'\n[limits]\nmemory_max='1G'\n[processes]\nexpose=[]",
+        );
+        let resolution = repo.resolve(&base).unwrap();
+        let conflicts = host_conflicts(&resolution).unwrap();
+        let by: std::collections::BTreeMap<_, _> = conflicts.iter().map(|c| (c.restriction, c)).collect();
+        assert_eq!(by.len(), 7, "{conflicts:?}");
+        assert_eq!(by["host_control_forbidden"].operations, HOST_OPERATIONS);
+        assert_eq!(by["masked_paths"].operations, ["view", "input", "launch", "commands"]);
+        for r in ["offline", "public_web_forbidden", "read_only_paths", "resource_limits", "port_exposure"] {
+            assert_eq!(by[r].operations, GENERAL_HOST_AUTHORITY, "{r}");
+        }
+        assert_eq!(by["read_only_paths"].detail, "paths.ro: src");
+        assert!(conflicts.iter().all(|c| c.path == repo.0.join(FRAGMENT) && c.sha256 == resolution.sources[0].sha256));
+        // an ignored fragment imposes nothing, so nothing conflicts
+        let ignored = resolve(&base, std::slice::from_ref(&repo.0), std::slice::from_ref(&repo.0)).unwrap();
+        assert!(host_conflicts(&ignored).unwrap().is_empty());
+    }
 }

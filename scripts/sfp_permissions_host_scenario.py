@@ -1040,6 +1040,62 @@ PY
         hc.call("_sill/host_control.revoke", {"session_id": ctl})
         check("revocation removes the pictures", not host_png.parent.exists())
         hc.close()
+
+        # -- 20. repository restrictions and Host control: a separate, exact, one-activation exception
+        repo = env.root / "offline-repo"
+        (repo / ".sill").mkdir(parents=True)
+        (repo / ".sill/policy.toml").write_text("[network]\nmode = 'none'\n")
+        off = create("repo-exception", env.policy("repo-exception"), pins=[repo])
+        check("a session pinned to an offline repository starts", start(off))
+        hc = Client(env.socket, capabilities=HOST, name="host-control")
+        st = hc_state(off)
+        conflicts = st.get("conflicts", [])
+        check("the state lists the repository's offline rule with the operations that bypass it",
+              [x["restriction"] for x in conflicts] == ["offline"] and conflicts[0]["operations"] == ["input", "launch", "commands"]
+              and st.get("forbidden") is None, json.dumps(st))
+        check("activation for an operation that bypasses it is refused until an exception is recorded",
+              code(hc.call, "_sill/host_control.activate", {"session_id": off, "operations": ["launch"]}) == "exception_required")
+        check("…leaving no activation", not hc_state(off)["active"])
+        generation = activate(hc, off, ["inspect"])["generation"]
+        check("operations that bypass nothing activate without one", hc_state(off)["active"] and hc_state(off).get("exception") is None)
+        listed = env.cli("host-control", "state", off, check=False)
+        check("the CLI lists the restriction with its source and what bypasses it",
+              listed.returncode == 0 and "network.mode = none" in listed.stdout and "Bypassed by: input, launch, commands" in listed.stdout,
+              listed.stdout + listed.stderr)
+        refused_cli = env.cli("host-control", "activate", off, "launch", check=False)
+        check("the CLI refuses without --accept-repository-exception, listing the restriction",
+              refused_cli.returncode != 0 and "--accept-repository-exception" in refused_cli.stderr and "network.mode = none" in refused_cli.stdout,
+              refused_cli.stdout + refused_cli.stderr)
+        hc.call("_sill/host_control.revoke", {"session_id": off})
+        ack = [{"source": conflicts[0]["source"], "sha256": conflicts[0]["sha256"], "restriction": "offline"}]
+        recorded = hc.call("_sill/host_control.exception", {"session_id": off, "operations": ["launch"], "acknowledged": ack})
+        check("recording the exception activates nothing", not recorded["active"] and recorded["exception"].get("generation") is None,
+              json.dumps(recorded))
+        other = Client(env.socket, capabilities=HOST, name="host-control-2")
+        check("another frontend cannot use that exception",
+              code(other.call, "_sill/host_control.activate", {"session_id": off, "operations": ["launch"]}) == "exception_required")
+        other.close()
+        st = activate(hc, off, ["launch"])
+        check("the activation consumes it, bound to its generation",
+              st["active"] and (st.get("exception") or {}).get("generation") == st["generation"], json.dumps(st))
+        check("the session record shows the activation runs under an exception",
+              (get(off).get("host_control") or {}).get("exception") is True, json.dumps(get(off).get("host_control")))
+        check("the jail keeps the repository's restriction (still offline)", refused_or_offline(c, off, ALLOWED))
+        rc, text = bridge(off, "launch", st["generation"], {"argv": ["/bin/sh", "-c", "echo exception-host"], "cwd": "/tmp"})
+        check("the granted host operation works under it", rc == 0, text)
+        check("a scope change needs a fresh exception",
+              code(hc.call, "_sill/host_control.activate", {"session_id": off, "operations": ["launch", "commands"]}) == "exception_required")
+        check("…and the refused change leaves the running generation working",
+              hc_state(off)["generation"] == st["generation"] and bridge(off, "state")[0] == 0)
+        hc.call("_sill/host_control.revoke", {"session_id": off})
+        check("revocation ends the exception",
+              hc_state(off).get("exception") is None
+              and code(hc.call, "_sill/host_control.activate", {"session_id": off, "operations": ["launch"]}) == "exception_required")
+        hc.call("_sill/host_control.exception", {"session_id": off, "operations": ["launch"], "acknowledged": ack})
+        (repo / ".sill/policy.toml").write_text("[network]\nmode = 'none'\n[limits]\ntasks_max = 64\n")
+        check("a fragment changed after recording: the exception no longer covers it",
+              code(hc.call, "_sill/host_control.activate", {"session_id": off, "operations": ["launch"]}) == "exception_required")
+        hc.close()
     finally:
         for sid in created:
             for method in ("_sill/sessions.stop", "_sill/sessions.delete"):

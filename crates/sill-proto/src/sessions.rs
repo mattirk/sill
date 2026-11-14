@@ -8,7 +8,7 @@ use std::{
 };
 
 /// Exact bytes name a path on the daemon host. Display text is never operational.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct HostPath {
     pub bytes_base64: String,
     pub display: String,
