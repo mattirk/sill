@@ -1205,9 +1205,8 @@ impl App {
         if let Some(processes) = crate::processes::indicator(view) {
             agent_controls = agent_controls.push(processes);
         }
-        if let Some(usage) = usage(view) {
-            agent_controls = agent_controls
-                .push(container(text(usage).size(CONTROL_TEXT).color(P.fg_dim)).padding([0, 6]));
+        if let Some((used, size)) = usage(view) {
+            agent_controls = agent_controls.push(context_ring(used, size));
         }
         let agent_controls = scrollable(agent_controls)
             .direction(scrollable::Direction::Horizontal(style::bar()))
@@ -1912,11 +1911,90 @@ fn controls(view: &SessionView) -> Vec<Element<'_, Message>> {
 }
 
 /// Context used of the model's window, as the agent last reported it.
-fn usage(view: &SessionView) -> Option<String> {
+/// The context window's use: tokens used and its size, when the agent reports both.
+fn usage(view: &SessionView) -> Option<(u64, u64)> {
     let usage = view.conversation.session.as_ref()?.usage.as_ref()?;
     let used: u64 = usage.used.parse().ok()?;
     let size: u64 = usage.size.parse().ok().filter(|s| *s > 0)?;
-    Some(format!("{}%", used * 100 / size))
+    Some((used, size))
+}
+
+/// The context share as a ring in the composer bar: a dim track, the used part of the circle
+/// drawn from the top clockwise, warning-coloured from 80 % and in the error colour from 95 %.
+/// The numbers are on hover.
+fn context_ring<'a>(used: u64, size: u64) -> Element<'a, Message> {
+    let share = (used as f32 / size as f32).clamp(0.0, 1.0);
+    let percent = (used * 100 / size).min(100);
+    let tip = format!("Context: {} of {} tokens ({percent}%)", thousands(used), thousands(size));
+    let ring = canvas(ContextRing { share })
+        .width(RING_SIZE + 2.0 * RING_PAD)
+        .height(BAR_BUTTON);
+    bar_tip(container(ring).id("context-ring"), tip)
+}
+
+/// `23000` as `23,000`.
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+const RING_SIZE: f32 = 14.0;
+const RING_LINE: f32 = 2.0;
+const RING_PAD: f32 = 4.0;
+
+struct ContextRing {
+    share: f32,
+}
+
+impl canvas::Program<Message> for ContextRing {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let center = iced::Point::new(bounds.width / 2.0, bounds.height / 2.0);
+        let radius = RING_SIZE / 2.0 - RING_LINE / 2.0;
+        let color = if self.share >= 0.95 {
+            P.error
+        } else if self.share >= 0.8 {
+            P.warning
+        } else {
+            P.fg_dim
+        };
+        let stroke = |color: Color| {
+            canvas::Stroke::default()
+                .with_width(RING_LINE)
+                .with_color(color)
+                .with_line_cap(canvas::LineCap::Butt)
+        };
+        frame.stroke(&canvas::Path::circle(center, radius), stroke(alpha(P.fg, 0.14)));
+        if self.share > 0.0 {
+            let start = -std::f32::consts::FRAC_PI_2;
+            let arc = canvas::Path::new(|path| {
+                path.arc(canvas::path::Arc {
+                    center,
+                    radius,
+                    start_angle: Radians(start),
+                    end_angle: Radians(start + self.share * std::f32::consts::TAU),
+                });
+            });
+            frame.stroke(&arc, stroke(color));
+        }
+        vec![frame.into_geometry()]
+    }
 }
 
 fn plan(item: &Item) -> Element<'_, Message> {
