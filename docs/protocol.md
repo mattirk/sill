@@ -903,8 +903,9 @@ changed only in the method's description. Identity remains `sfp/1-dev.3`.
 
 ### Host control activation (2026-11-07)
 
-Capability `sill.host_control` (frontend-declared: a program that shows the permanent "HOST
-CONTROL · actions can run outside the jail" caption on the session and a window-level line naming
+Capability `sill.host_control` (frontend-declared: a program that shows the "HOST
+CONTROL · actions can run outside the jail" caption on the session, as a line in the control's
+colour for as long as it is active with its words when it starts or its scope changes, and a window-level line naming
 every session with active control). Host control is an activation held in the daemon's memory,
 never a saved choice (docs/permission-modes.md, Host control):
 

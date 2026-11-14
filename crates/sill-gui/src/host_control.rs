@@ -1,7 +1,7 @@
 //! Host control in sill-gui (docs/permission-modes.md, Host control): the Host actions group of
 //! the Permissions panel, where the person ticks the operations and activates or revokes; the
-//! permanent "HOST CONTROL · actions can run outside the jail" caption over a session's
-//! composer; and a window-level band naming every other session with active control, so switching to
+//! "HOST CONTROL · actions can run outside the jail" caption over a session's composer (its
+//! words for a while, its line in the control's colour as long as the control); and a window-level band naming every other session with active control, so switching to
 //! a Default session cannot hide it. sill-gui declares `sill.host_control`: while a tab is
 //! attached to a session, this window displays that session's control and keeps it alive.
 use std::collections::BTreeSet;
@@ -46,12 +46,13 @@ pub struct View {
     pub error: Option<String>,
     serial: u64,
     /// The active control this window last saw on the session's record, and when it first did:
-    /// VM control's caption words go after `VM_CAPTION_SHOWN`.
+    /// the caption's words go after `CAPTION_SHOWN`.
     seen: Option<(sill_proto::host_control::Brief, std::time::Instant)>,
 }
 
-/// How long VM control's caption says its words; its yellow line stays as long as the control.
-pub const VM_CAPTION_SHOWN: std::time::Duration = std::time::Duration::from_secs(120);
+/// How long the caption says its words; its line, in the control's colour, stays as long as
+/// the control.
+pub const CAPTION_SHOWN: std::time::Duration = std::time::Duration::from_secs(120);
 
 impl View {
     /// The session's record came: note when its control (this scope of it) was first seen.
@@ -63,9 +64,9 @@ impl View {
         }
     }
 
-    /// Whether VM control's caption has said its words long enough. Not before `saw` noted it.
+    /// Whether the caption has said its words long enough. Not before `saw` noted the control.
     fn words_done(&self, now: std::time::Instant) -> bool {
-        self.seen.as_ref().is_some_and(|(_, since)| now.duration_since(*since) >= VM_CAPTION_SHOWN)
+        self.seen.as_ref().is_some_and(|(_, since)| now.duration_since(*since) >= CAPTION_SHOWN)
     }
 }
 
@@ -457,14 +458,14 @@ pub fn notice_color(text: &str, color: iced::Color) -> iced::Color {
     }
 }
 
-/// The permanent caption over the composer while the session has active Host control.
+/// The caption over the composer while the session has active Host control.
 ///
-/// Host control's caption stays as long as the control. VM control's words go after
-/// `VM_CAPTION_SHOWN` and its yellow line stays (the person, 2026-11-13).
+/// The words go after `CAPTION_SHOWN`; the line stays as long as the control, yellow for VM
+/// control and the warning's colour for Host control (the person, 2026-11-13).
 pub fn caption<'a>(session: &Session, view: &View) -> Option<Element<'a, Message>> {
     let brief = session.host_control.as_ref()?;
     let (words, color) = caption_words(&brief.operations);
-    if words == VM_CAPTION && view.words_done(std::time::Instant::now()) {
+    if view.words_done(std::time::Instant::now()) {
         return Some(rule::horizontal(1).style(style::rule_style(color)).into());
     }
     Some(
@@ -564,15 +565,15 @@ pub(crate) fn notice_summary(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn vm_controls_caption_words_go_after_a_while_and_return_with_a_new_scope() {
+    fn the_captions_words_go_after_a_while_and_return_with_a_new_scope() {
         use sill_proto::host_control::Brief;
         let mut view = View::default();
         let start = std::time::Instant::now();
-        let later = start + VM_CAPTION_SHOWN;
+        let later = start + CAPTION_SHOWN;
         assert!(!view.words_done(later), "not before the control was seen");
         let brief = Brief { generation: 1, operations: vec!["commands".into()] };
         view.saw(Some(&brief), start);
-        assert!(!view.words_done(start + VM_CAPTION_SHOWN - std::time::Duration::from_secs(1)));
+        assert!(!view.words_done(start + CAPTION_SHOWN - std::time::Duration::from_secs(1)));
         assert!(view.words_done(later));
         // the same control seen again keeps its time; another scope starts over
         view.saw(Some(&brief), later);
@@ -580,7 +581,7 @@ mod tests {
         view.saw(Some(&Brief { generation: 2, operations: vec!["commands".into(), "launch".into()] }), later);
         assert!(!view.words_done(later));
         view.saw(None, later);
-        assert!(!view.words_done(later + VM_CAPTION_SHOWN));
+        assert!(!view.words_done(later + CAPTION_SHOWN));
     }
 
     #[test]
