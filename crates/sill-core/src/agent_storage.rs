@@ -276,7 +276,8 @@ pub fn resolve(
             {
                 let restricted = rule.target.to_path()?;
                 ensure!(
-                    !(target.starts_with(&restricted) || restricted.starts_with(&target)),
+                    !(target.starts_with(&restricted) || restricted.starts_with(&target))
+                        || (rule.behavior == "mask" && private_under_wildcard_mask(policy, home, &target, &restricted)),
                     "agent storage {} conflicts with {} at {}",
                     target.display(),
                     rule.behavior,
@@ -323,6 +324,15 @@ pub fn resolve_development(
         );
     }
     Ok(plan)
+}
+
+/// A declared private profile can sit below a wildcard's conservative parent mask.
+/// It contains no host directory contents; literal secret masks still take precedence.
+pub(crate) fn private_under_wildcard_mask(policy: &Policy, home: &Path, target: &Path, mask: &Path) -> bool {
+    target != mask && target.starts_with(mask)
+        && policy.paths.mask.iter().any(|p| p.contains(['*', '?', '[']) && crate::paths::mask_root(p, home) == mask)
+        && !policy.paths.mask.iter().flat_map(|p| expanded(p, home))
+            .any(|p| target.starts_with(&p) || p.starts_with(target))
 }
 
 fn expanded(pattern: &str, home: &Path) -> Vec<PathBuf> {
@@ -562,6 +572,26 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[test]
+    fn private_config_profile_preserves_default_wildcard_mask() {
+        let mut f = Fixture::new();
+        let a = f.registry.get_mut("codex").unwrap();
+        a.home_paths = Some(vec![HomePath::directory("~/.config/opencode")]);
+        a.home_env = None;
+        a.login_files.clear();
+        let mut policy = Policy::builtin_default();
+        let resolve_plan = |policy: &Policy| resolve(&f.registry["codex"], &f.registry, policy, &f.state, &f.home, &[], false);
+        let plan = resolve_plan(&policy).unwrap();
+        assert!(plan.policy_paths.masks.iter().any(|m| m.path.to_path().unwrap() == f.home.join(".config")));
+        plan.prepare().unwrap();
+        assert!(plan.profile.to_path().unwrap().join(".config/opencode").is_dir());
+        policy.paths.mask.push("~/.config/opencode".into());
+        assert!(resolve_plan(&policy).is_err());
+        policy.paths.mask.pop();
+        f.put(&f.home.join(".config/opencode/credentials.json"), "host secret");
+        assert!(resolve_plan(&policy).is_err(), "an actual matching secret remains protected");
     }
 
     #[test]

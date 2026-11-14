@@ -569,13 +569,17 @@ impl JailSpec {
                 // sill's own tree in the host path's place (the session's private scratch, the
                 // agent's sill-owned home): nothing of the host's below it is exposed, so a mask
                 // beneath it is not buried but laid again on top — the masked path stays hidden
-                // inside the bound tree too. Inside a mask it is still refused: the copy was
-                // seeded from the host (2026-11-01: `~/.cache` scratch over a masked
-                // `~/.cache/<other agent's path>` refused every jail on a machine with one).
-                if let Some(m) = masked.iter().find(|m| is_under(inside, m)) {
-                    no_bind_across_mask(inside, std::slice::from_ref(m))?;
+                // inside the bound tree too. Only a declared private agent profile may sit
+                // below a wildcard's conservative parent mask; scratch and host copies cannot.
+                for m in masked.iter().filter(|m| is_under(inside, m)) {
+                    let private_profile = self.agent_binds.iter().any(|(target, _)| target == inside);
+                    if !private_profile || !crate::agent_storage::private_under_wildcard_mask(p, &self.home, inside, m) {
+                        no_bind_across_mask(inside, std::slice::from_ref(m))?;
+                    }
                 }
                 if let Some((_, expected)) = self.agent_binds.iter().find(|(target, _)| target == inside) {
+                    no_bind_across_mask(inside, &sill_own)?;
+                    no_bind_across_mask(inside, &self.masks)?;
                     use rustix::fs::{openat2, fstat, FileType, OFlags, Mode, ResolveFlags, CWD};
                     let fd = openat2(CWD, host, OFlags::PATH | OFlags::CLOEXEC | OFlags::NOFOLLOW, Mode::empty(), ResolveFlags::NO_SYMLINKS)
                         .with_context(|| format!("open declared agent storage {}", host.display()))?;
@@ -1012,6 +1016,33 @@ mod tests {
         assert!(!r.contains(".gemini"), "a path that does not exist is not masked");
         assert_eq!(plan.masked.iter().filter(|m| **m == dir.join(".codex")).count(), 1);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn private_config_binding_follows_parent_masks_without_exposing_host_config() {
+        use crate::agents::HomePathKind::Directory;
+        let tree = TempTree::new();
+        let mut s = spec();
+        s.home = tree.0.join("home");
+        let original = s.home.join(".config/opencode");
+        let source = tree.0.join("private/opencode");
+        std::fs::create_dir_all(&original).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        s.policy.paths.mask = vec!["~/.config/*/credentials*".into()];
+        s.agent_masks = vec![(original.clone(), Directory)];
+        s.agent_binds = vec![(original.clone(), Directory)];
+        s.binds = vec![(source.clone(), original.clone())];
+        let plan = s.plan().unwrap();
+        let a = &plan.argv;
+        let mask = a.windows(2).position(|a| a[0] == "--tmpfs" && a[1] == s.home.join(".config")).unwrap();
+        assert!(a.windows(2).any(|a| a[0] == "--tmpfs" && a[1] == host_view(&s.home.join(".config"))));
+        let bind = a.windows(3).position(|a| a[0] == "--bind-fd" && a[2] == original).unwrap();
+        assert!(bind > mask);
+        s.agent_binds.clear();
+        assert!(s.plan().is_err(), "scratch cannot override a parent mask");
+        s.agent_binds = vec![(original.clone(), Directory)];
+        s.policy.paths.mask.push("~/.config/opencode".into());
+        assert!(s.plan().is_err(), "explicit masks still win");
     }
 
     #[test]
