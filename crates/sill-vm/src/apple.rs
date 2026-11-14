@@ -14,7 +14,7 @@ use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
 use objc2::AnyThread;
 use objc2::rc::Retained;
-use objc2_foundation::{NSArray, NSData, NSDictionary, NSError, NSString, NSURL};
+use objc2_foundation::{NSArray, NSData, NSError, NSString, NSURL};
 use objc2_virtualization::*;
 
 use crate::{Config, State};
@@ -199,25 +199,19 @@ impl Vm {
         }
     }
 
-    /// Share exactly `folders` of this Mac with the guest, from now on (the running guest sees the
-    /// change at once): under the virtiofs tag `sill-mac`, each folder by its name.
-    pub fn share(&self, folders: &[crate::Shared]) -> Result<()> {
-        let names: Vec<Retained<NSString>> =
-            folders.iter().map(|f| NSString::from_str(&f.name)).collect();
+    /// Give the guest `folder` of this Mac under share slot `slot` (`sill-mac-<slot>`), or take
+    /// the slot's folder away (`None`). The other slots, and what is mounted from them, are left
+    /// as they are.
+    pub fn share_slot(&self, slot: usize, folder: Option<&Path>) -> Result<()> {
+        if slot >= crate::SHARE_SLOTS {
+            bail!("share slot {slot} out of {}", crate::SHARE_SLOTS);
+        }
         // SAFETY: the framework's share objects, made before they are handed to the machine
-        let dirs: Vec<Retained<VZSharedDirectory>> = folders
-            .iter()
-            .map(|f| unsafe {
-                VZSharedDirectory::initWithURL_readOnly(VZSharedDirectory::alloc(), &url(&f.path), f.read_only)
-            })
-            .collect();
-        let name_refs: Vec<&NSString> = names.iter().map(|n| &**n).collect();
-        let dir_refs: Vec<&VZSharedDirectory> = dirs.iter().map(|d| &**d).collect();
-        let dictionary = NSDictionary::from_slices(&name_refs, &dir_refs);
-        // SAFETY: as above
-        let share = OnQueue(unsafe {
-            VZMultipleDirectoryShare::initWithDirectories(VZMultipleDirectoryShare::alloc(), &dictionary)
+        let share: Option<Retained<VZDirectoryShare>> = folder.map(|path| unsafe {
+            let directory = VZSharedDirectory::initWithURL_readOnly(VZSharedDirectory::alloc(), &url(path), false);
+            Retained::into_super(VZSingleDirectoryShare::initWithDirectory(VZSingleDirectoryShare::alloc(), &directory))
         });
+        let share = OnQueue(share);
         let machine = &self.machine;
         let mut result = Ok(());
         let out = OnQueue(&mut result as *mut Result<()>);
@@ -226,13 +220,13 @@ impl Vm {
             // SAFETY: on the machine's queue; `out` outlives this synchronous call
             unsafe {
                 let devices = machine.0.directorySharingDevices();
-                *out.0 = match devices.firstObject() {
-                    Some(device) => {
-                        let device: Retained<VZVirtioFileSystemDevice> = Retained::cast_unchecked(device);
-                        device.setShare(Some(&share.0));
-                        Ok(())
-                    }
-                    None => Err(anyhow!("the VM has no shared-folder device")),
+                *out.0 = if slot < devices.count() {
+                    let device: Retained<VZVirtioFileSystemDevice> =
+                        Retained::cast_unchecked(devices.objectAtIndex(slot));
+                    device.setShare(share.0.as_deref());
+                    Ok(())
+                } else {
+                    Err(anyhow!("the VM has no share slot {slot}"))
                 };
             }
         });
@@ -429,12 +423,18 @@ fn configuration(config: &Config) -> Result<Retained<VZVirtualMachineConfigurati
         machine.setStorageDevices(&NSArray::from_retained_slice(&disks));
         machine.setNetworkDevices(&NSArray::from_retained_slice(&[Retained::into_super(net)]));
         machine.setSerialPorts(&NSArray::from_retained_slice(&[Retained::into_super(console)]));
-        let folders = VZVirtioFileSystemDeviceConfiguration::initWithTag(
-            VZVirtioFileSystemDeviceConfiguration::alloc(),
-            &NSString::from_str(crate::SHARE_TAG),
-        );
-        folders.setShare(Some(&VZMultipleDirectoryShare::new()));
-        machine.setDirectorySharingDevices(&NSArray::from_retained_slice(&[Retained::into_super(folders)]));
+        // the Mac's folders: a device per slot, each empty until given a folder
+        let slots: Vec<Retained<VZDirectorySharingDeviceConfiguration>> = (0..crate::SHARE_SLOTS)
+            .map(|slot| {
+                let device = VZVirtioFileSystemDeviceConfiguration::initWithTag(
+                    VZVirtioFileSystemDeviceConfiguration::alloc(),
+                    &NSString::from_str(&crate::share_tag(slot)),
+                );
+                device.setShare(Some(&VZMultipleDirectoryShare::new()));
+                Retained::into_super(device)
+            })
+            .collect();
+        machine.setDirectorySharingDevices(&NSArray::from_retained_slice(&slots));
         machine.setSocketDevices(&NSArray::from_retained_slice(&[Retained::into_super(
             VZVirtioSocketDeviceConfiguration::new(),
         )]));

@@ -133,7 +133,6 @@ let_in
 echo 'Setting up the data disks'
 git archive --format=tar HEAD packaging/mac/guest | guest 'rm -rf guest && mkdir guest && tar -x -C guest'
 guest 'sudo install -D -m755 guest/packaging/mac/guest/sill-disks /usr/local/lib/sill/sill-disks &&
-    sudo install -m755 guest/packaging/mac/guest/sill-mac-folders /usr/local/lib/sill/sill-mac-folders &&
     sudo install -m644 guest/packaging/mac/guest/sill-disks.service /etc/systemd/system/ &&
     sudo sh -c "cat guest/packaging/mac/guest/fstab >> /etc/fstab" &&
     sudo install -m644 guest/packaging/mac/guest/grub.cfg /etc/default/grub.d/sill.cfg &&

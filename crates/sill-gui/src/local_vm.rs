@@ -213,10 +213,20 @@ pub fn expose(path: &Path) -> Result<PathBuf, String> {
     let mut folders = load_folders(dir);
     // inside a folder already shared, it is in the VM already
     if !folders.iter().any(|f| path.starts_with(f)) {
+        if folders.len() >= sill_vm::SHARE_SLOTS {
+            return Err(format!(
+                "Sill can share up to {} folders of this Mac with its VM.",
+                sill_vm::SHARE_SLOTS
+            ));
+        }
         folders.push(path.clone());
         save_folders(dir, &folders).map_err(|e| format!("Sill could not save its folders: {e}"))?;
+        // the new folder's own slot: the others stay as they are
+        let slot = folders.len() - 1;
+        vm.share_slot(slot, Some(&path))
+            .map_err(|e| format!("Sill could not share {}: {e:#}", path.display()))?;
     }
-    sync_folders(dir, &vm)?;
+    mount_folders(dir, &folders)?;
     Ok(path)
 }
 
@@ -240,35 +250,42 @@ fn save_folders(dir: &Path, folders: &[PathBuf]) -> std::io::Result<()> {
     std::fs::rename(temp, dir.join("folders.json"))
 }
 
-/// A folder's name under the VM's share: stable, plain, from its path.
-fn share_name(path: &Path) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in path.as_os_str().as_encoded_bytes() {
-        hash = (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3);
+/// At the VM's start: every kept folder in its slot (by its place in the list), then mounted.
+fn sync_folders(dir: &Path, vm: &sill_vm::Vm) -> Result<(), String> {
+    let folders = load_folders(dir);
+    for (slot, path) in folders.iter().enumerate().take(sill_vm::SHARE_SLOTS) {
+        let present = path.is_dir().then_some(path.as_path());
+        vm.share_slot(slot, present)
+            .map_err(|e| format!("Sill could not share {}: {e:#}", path.display()))?;
     }
-    format!("f{hash:016x}")
+    mount_folders(dir, &folders)
 }
 
-/// Share the kept folders with the VM and bind each at its Mac path inside
-/// (`/usr/local/lib/sill/sill-mac-folders`, as root over the VM's SSH).
-fn sync_folders(dir: &Path, vm: &sill_vm::Vm) -> Result<(), String> {
-    let folders: Vec<PathBuf> = load_folders(dir).into_iter().filter(|f| f.is_dir()).collect();
-    let shared: Vec<sill_vm::Shared> = folders
+/// The guest's root helper, sent with each use (`packaging/mac/guest/sill-mac-folders`).
+const MOUNTER: &str = include_str!("../../../packaging/mac/guest/sill-mac-folders");
+
+/// Mount each shared folder at its Mac path inside the VM, as root over the VM's SSH.
+fn mount_folders(dir: &Path, folders: &[PathBuf]) -> Result<(), String> {
+    let lines: String = folders
         .iter()
-        .map(|path| sill_vm::Shared { name: share_name(path), path: path.clone(), read_only: false })
+        .enumerate()
+        .take(sill_vm::SHARE_SLOTS)
+        .filter(|(_, path)| path.is_dir())
+        .map(|(slot, path)| format!("{slot}\t{}\n", path.display()))
         .collect();
-    vm.share(&shared).map_err(|e| format!("Sill could not share the folders: {e:#}"))?;
-    if shared.is_empty() {
+    if lines.is_empty() {
         return Ok(());
     }
-    let lines: String = shared
-        .iter()
-        .map(|f| format!("{}\t{}\n", f.name, f.path.display()))
-        .collect();
+    // the script travels in the command (base64, no quoting to get wrong), the folders on stdin
+    let remote = format!(
+        "f=$(mktemp) && echo {} | base64 -d > \"$f\" && sudo sh \"$f\"; s=$?; rm -f \"$f\"; exit $s",
+        base64(MOUNTER.as_bytes())
+    );
     let mut child = std::process::Command::new("ssh")
         .arg("-F")
         .arg(dir.join("ssh_config"))
-        .args(["-T", "-o", "BatchMode=yes", setup::HOST, "sudo /usr/local/lib/sill/sill-mac-folders"])
+        .args(["-T", "-o", "BatchMode=yes", setup::HOST])
+        .arg(remote)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -286,6 +303,24 @@ fn sync_folders(dir: &Path, vm: &sill_vm::Vm) -> Result<(), String> {
     Ok(())
 }
 
+fn base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(TABLE[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -300,10 +335,11 @@ mod tests {
     }
 
     #[test]
-    fn share_names_are_plain_and_stable() {
-        let a = super::share_name(Path::new("/Users/someone/GIT/sill"));
-        assert_eq!(a, super::share_name(Path::new("/Users/someone/GIT/sill")));
-        assert_ne!(a, super::share_name(Path::new("/Users/someone/GIT/other")));
-        assert!(a.len() == 17 && a.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+    fn base64_is_standard() {
+        assert_eq!(super::base64(b""), "");
+        assert_eq!(super::base64(b"f"), "Zg==");
+        assert_eq!(super::base64(b"fo"), "Zm8=");
+        assert_eq!(super::base64(b"foo"), "Zm9v");
+        assert_eq!(super::base64(b"sill\n"), "c2lsbAo=");
     }
 }

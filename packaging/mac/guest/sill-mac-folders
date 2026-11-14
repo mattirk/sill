@@ -1,24 +1,28 @@
 #!/bin/sh
 # The person's Mac folders at their Mac paths inside the VM (docs/sill-stick.md section 9).
-# sill-gui shares each folder under the virtiofs tag sill-mac by a name of its own, then runs this
-# as root with lines of NAME<TAB>PATH on stdin; it mounts the share at /mnt/mac and binds each
-# folder at PATH, so the VM, its jails and the person see one path. Only folders of a Mac user
-# (/Users/…) or of a Mac volume (/Volumes/…): nothing of the guest's own can be covered.
+# sill-gui gives each folder a share slot of its own (virtiofs tag sill-mac-SLOT) and runs this as
+# root with lines of SLOT<TAB>PATH on stdin; each slot is mounted at its folder's Mac path, so the
+# VM, its jails and the person see one path. Only folders of a Mac user (/Users/…) or on a Mac
+# volume (/Volumes/…): nothing of the guest's own can be covered. A mount left stale (its slot
+# given another folder) is replaced. sill-gui sends this script with each use.
 set -eu
-share=/mnt/mac
-mkdir -p "$share"
-mountpoint -q "$share" || mount -t virtiofs sill-mac "$share"
 tab=$(printf '\t')
 status=0
-while IFS="$tab" read -r name path; do
-    case "$name" in '' | *[!a-z0-9]*) echo "sill-mac-folders: bad name: $name" >&2; status=1; continue ;; esac
+while IFS="$tab" read -r slot path; do
+    case "$slot" in '' | *[!0-9]*) echo "sill-mac-folders: bad slot: $slot" >&2; status=1; continue ;; esac
     case "$path" in
-        /Users/?*/* | /Users/?* | /Volumes/?*) ;;
+        /Users/?* | /Volumes/?*) ;;
         *) echo "sill-mac-folders: not a Mac user's folder: $path" >&2; status=1; continue ;;
     esac
     case "/$path/" in */../* | */./*) echo "sill-mac-folders: not a plain path: $path" >&2; status=1; continue ;; esac
-    [ -d "$share/$name" ] || { echo "sill-mac-folders: not shared: $path" >&2; status=1; continue; }
+    tag="sill-mac-$slot"
+    if findmnt -n --mountpoint "$path" >/dev/null 2>&1; then
+        if stat "$path" >/dev/null 2>&1 && [ "$(findmnt -n -o SOURCE --mountpoint "$path")" = "$tag" ]; then
+            continue
+        fi
+        umount -l "$path" || true
+    fi
     mkdir -p "$path"
-    mountpoint -q "$path" || mount --bind "$share/$name" "$path"
+    mount -t virtiofs "$tag" "$path" || { echo "sill-mac-folders: cannot mount $path" >&2; status=1; }
 done
 exit $status

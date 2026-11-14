@@ -19,15 +19,15 @@ mod apple;
 #[cfg(target_os = "macos")]
 pub use apple::{Vm, serve_ssh};
 
-/// The virtiofs tag the person's Mac folders reach the guest under (`Vm::share`).
-pub const SHARE_TAG: &str = "sill-mac";
+/// How many folders of the Mac the guest can have at once: one virtiofs device each, made with
+/// the VM (`Vm::share_slot`). Each folder has a device of its own because replacing a device's
+/// share leaves everything mounted from it stale in the guest (seen 2026-11-12): giving one
+/// folder must not take another away from running jails.
+pub const SHARE_SLOTS: usize = 16;
 
-/// A folder of this Mac shared with the guest, by `name` under the share.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Shared {
-    pub name: String,
-    pub path: PathBuf,
-    pub read_only: bool,
+/// The virtiofs tag of share slot `slot`.
+pub fn share_tag(slot: usize) -> String {
+    format!("sill-mac-{slot}")
 }
 
 /// The guest's SSH on vsock (systemd's ssh generator binds it when the VM has a vsock device).
