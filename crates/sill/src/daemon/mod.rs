@@ -1,0 +1,139 @@
+//! `sill daemon` (docs/daemon.md): sill-core behind a socket. M0: the socket, the connection loop
+//! and the read-only methods — status, sessions, memory, settings. Sessions are still the shelf's;
+//! they move here in M1 together with the ACP clients.
+//!
+//! One thread per connection, a line in, a line out (`sill_proto::rpc`). The transport is plain
+//! JSON-RPC over ndjson — the frames the ACP SDK's agent role writes, so M1 can put the SDK on this
+//! socket for `session/*` traffic without changing a client.
+
+use std::io::{BufRead, BufReader, Write};
+use std::os::fd::FromRawFd;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::Arc;
+
+use anyhow::{Context, Result, bail};
+use sill_proto::rpc::{Error, Incoming, Response};
+
+mod hub;
+pub use hub::Hub;
+
+/// Run until `_sill/daemon.shutdown` or a fatal socket error. The listener is systemd's when the
+/// unit passed one (`LISTEN_FDS`), ours otherwise (direct mode: spawned by the first client).
+pub fn run() -> Result<()> {
+    let (listener, mode) = match activated_listener()? {
+        Some(l) => (l, "unit"),
+        None => (bind_direct()?, "direct"),
+    };
+    let hub = Arc::new(Hub::new(mode)?);
+    let dir = sill_proto::runtime_dir()?;
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("daemon.pid"), std::process::id().to_string())?;
+    eprintln!("sill daemon: {} mode, pid {}, {} sessions in the store, protocol {}", mode, std::process::id(), hub.session_count(), sill_proto::PROTOCOL);
+    let me = rustix::process::geteuid();
+    for conn in listener.incoming() {
+        let conn = match conn {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("sill daemon: accept: {e}");
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                continue;
+            }
+        };
+        // the socket is 0600 in a 0700 dir; this is the belt to that: only the person's own processes
+        match rustix::net::sockopt::socket_peercred(&conn) {
+            Ok(cred) if cred.uid == me => {}
+            Ok(cred) => {
+                eprintln!("sill daemon: refused a connection from uid {}", cred.uid.as_raw());
+                continue;
+            }
+            Err(e) => {
+                eprintln!("sill daemon: peer credentials: {e}");
+                continue;
+            }
+        }
+        let hub = hub.clone();
+        if let Err(e) = std::thread::Builder::new().name("sill-daemon-conn".into()).spawn(move || {
+            if let Err(e) = serve(conn, hub) {
+                eprintln!("sill daemon: connection: {e:#}");
+            }
+        }) {
+            eprintln!("sill daemon: thread: {e}");
+        }
+    }
+    Ok(())
+}
+
+/// systemd's socket, when this process was started by it: fd 3, `LISTEN_PID` ours.
+fn activated_listener() -> Result<Option<UnixListener>> {
+    let pid_ok = std::env::var("LISTEN_PID").ok().and_then(|p| p.parse::<u32>().ok()) == Some(std::process::id());
+    let fds: u32 = std::env::var("LISTEN_FDS").ok().and_then(|n| n.parse().ok()).unwrap_or(0);
+    if !pid_ok || fds == 0 {
+        return Ok(None);
+    }
+    if fds > 1 {
+        bail!("sill.socket passed {fds} descriptors; one listening socket is expected");
+    }
+    // SAFETY: systemd put a listening socket on fd 3 before exec, and nothing else owns it.
+    Ok(Some(unsafe { UnixListener::from_raw_fd(3) }))
+}
+
+/// Our own socket at `socket_path`: refuses to replace a daemon that answers, replaces a stale file.
+fn bind_direct() -> Result<UnixListener> {
+    let path = sill_proto::socket_path()?;
+    let dir = path.parent().context("socket path")?;
+    std::fs::create_dir_all(dir)?;
+    std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+    if path.exists() {
+        if UnixStream::connect(&path).is_ok() {
+            bail!("a sill daemon already answers at {}", path.display());
+        }
+        std::fs::remove_file(&path)?;
+    }
+    let l = UnixListener::bind(&path).with_context(|| format!("bind {}", path.display()))?;
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    Ok(l)
+}
+
+/// One connection: requests answered in order, notifications from the client ignored for now.
+fn serve(stream: UnixStream, hub: Arc<Hub>) -> Result<()> {
+    let mut writer = stream.try_clone()?;
+    let mut lines = BufReader::new(stream).lines();
+    while let Some(line) = lines.next() {
+        let line = match line {
+            Ok(l) => l,
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => break,
+            Err(e) => return Err(e.into()),
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let msg: Incoming = match serde_json::from_str(&line) {
+            Ok(m) => m,
+            Err(e) => {
+                write(&mut writer, &Response::err(None, Error::new(Error::PARSE, e.to_string())))?;
+                continue;
+            }
+        };
+        let (Some(id), Some(method)) = (msg.id, msg.method.as_deref()) else {
+            continue; // a notification, or a stray response
+        };
+        let reply = match hub.dispatch(method, msg.params.unwrap_or(serde_json::Value::Null)) {
+            Ok(v) => Response::ok(id, v),
+            Err(e) => Response::err(Some(id), e),
+        };
+        write(&mut writer, &reply)?;
+        if method == sill_proto::method::DAEMON_SHUTDOWN {
+            eprintln!("sill daemon: shutdown asked, leaving");
+            let _ = writer.flush();
+            std::process::exit(0);
+        }
+    }
+    Ok(())
+}
+
+fn write(w: &mut UnixStream, r: &Response) -> Result<()> {
+    let mut line = serde_json::to_string(r)?;
+    line.push('\n');
+    w.write_all(line.as_bytes())?;
+    Ok(())
+}

@@ -1,0 +1,19 @@
+# The sill daemon (docs/daemon.md): sessions, ledger, memory behind $XDG_RUNTIME_DIR/sill/daemon.sock.
+# Started by sill.socket on the first connection; always on from then (decision 4).
+#   systemctl --user status sill          # is it up
+#   journalctl --user -u sill -f          # its log
+#   systemctl --user restart sill         # after an update — sessions survive it (KillMode=process)
+# Delegate=yes: the daemon puts each session in a cgroup of its own below this unit (M1).
+[Unit]
+Description=sill daemon
+Requires=sill.socket
+After=sill.socket
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sill daemon
+Restart=on-failure
+RestartSec=1
+KillMode=process
+Delegate=yes
+Slice=app.slice

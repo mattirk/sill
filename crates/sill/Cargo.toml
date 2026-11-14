@@ -14,10 +14,12 @@ path = "src/main.rs"
 [dependencies]
 sill-core.workspace = true
 sill-memory.workspace = true
+sill-proto.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 rustix.workspace = true
 toml.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 gtk4 = { version = "0.11", features = ["v4_18"] }
 gdk4-x11 = { version = "0.11", features = ["v4_18"] }

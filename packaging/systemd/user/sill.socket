@@ -1,0 +1,13 @@
+# The sill daemon's socket (docs/daemon.md §3.3): the first client starts sill.service.
+#   systemctl --user enable --now sill.socket
+[Unit]
+Description=sill daemon socket
+
+[Socket]
+ListenStream=%t/sill/daemon.sock
+SocketMode=0600
+DirectoryMode=0700
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

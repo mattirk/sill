@@ -1,0 +1,14 @@
+[package]
+name = "sill-proto"
+description = "sill: the daemon protocol — wire types, method names, the socket, a blocking client (docs/daemon.md §3.3)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rustix.workspace = true

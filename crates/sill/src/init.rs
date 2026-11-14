@@ -43,6 +43,8 @@ const UNIT_SETUP: &str = include_str!("../../../packaging/systemd/sill-state-set
 const UNIT_MOUNT: &str = include_str!("../../../packaging/systemd/var-lib-sill.mount");
 const UNIT_PERMS: &str = include_str!("../../../packaging/systemd/sill-state-perms.service");
 const UNIT_SHELF: &str = include_str!("../../../packaging/systemd/user/sill-shelf.service");
+const UNIT_DAEMON: &str = include_str!("../../../packaging/systemd/user/sill.service");
+const SOCKET_DAEMON: &str = include_str!("../../../packaging/systemd/user/sill.socket");
 const DESKTOP: &str = include_str!("../../../packaging/sill.desktop");
 const ICON: &str = include_str!("../../../packaging/icons/sill.svg");
 
@@ -297,6 +299,10 @@ fn install_files(i: &mut Init, prefix: &Path, has_systemd: bool) -> Result<()> {
     if has_systemd {
         let unit = UNIT_SHELF.replace("/usr/local/bin/sill", &bin.join("sill").display().to_string());
         i.put_file(Path::new("/etc/systemd/user/sill-shelf.service"), unit.as_bytes(), 0o644)?;
+        // the daemon: socket-activated (docs/daemon.md §3.1); per user `sill init --user` enables the socket
+        let unit = UNIT_DAEMON.replace("/usr/local/bin/sill", &bin.join("sill").display().to_string());
+        i.put_file(Path::new("/etc/systemd/user/sill.service"), unit.as_bytes(), 0o644)?;
+        i.put_file(Path::new("/etc/systemd/user/sill.socket"), SOCKET_DAEMON.as_bytes(), 0o644)?;
     }
     Ok(())
 }
@@ -578,6 +584,27 @@ fn stage_autostart(i: &mut Init, home: &Path, exe: &Path) -> Result<PathBuf> {
     Ok(dst)
 }
 
+/// `systemctl --user cat <unit>` succeeds: a system-wide or private copy of the unit exists.
+fn unit_known(unit: &str) -> bool {
+    std::process::Command::new("systemctl")
+        .args(["--user", "cat", unit])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// The staged copy, made once per run however many units need it.
+fn stage_once(i: &mut Init, staged: &mut Option<PathBuf>, home: &Path, exe: &Path) -> Result<PathBuf> {
+    if let Some(p) = staged {
+        return Ok(p.clone());
+    }
+    let p = stage_autostart(i, home, exe)?;
+    *staged = Some(p.clone());
+    Ok(p)
+}
+
 /// `sill init --user`: the shelf's autostart for this account, nothing else. The hotkey is the
 /// desktop's business: sill never edits anyone's shortcuts.
 fn user_setup(a: &InitArgs) -> Result<()> {
@@ -587,16 +614,10 @@ fn user_setup(a: &InitArgs) -> Result<()> {
     println!("sill init --user{} — launcher: {}", if a.dry_run { " (dry run)" } else { "" }, launcher.describe());
     let exe = std::env::current_exe()?;
     if launcher.mode == sill_core::launcher::Mode::Unit {
-        let known = std::process::Command::new("systemctl")
-            .args(["--user", "cat", "sill-shelf.service"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !known {
+        let mut staged: Option<PathBuf> = None;
+        if !unit_known("sill-shelf.service") {
             // no system-wide unit (cargo install, tarball without root): a private copy
-            let run = stage_autostart(&mut i, &home, &exe)?;
+            let run = stage_once(&mut i, &mut staged, &home, &exe)?;
             let unit = UNIT_SHELF.replace("/usr/local/bin/sill", &run.display().to_string());
             i.put_file(&home.join(".config/systemd/user/sill-shelf.service"), unit.as_bytes(), 0o644)?;
             i.run("reload user units", "systemctl", &["--user", "daemon-reload"])?;
@@ -610,6 +631,24 @@ fn user_setup(a: &InitArgs) -> Result<()> {
             i.skip("sill-shelf.service already enabled".to_string());
         } else {
             i.run("start the shelf with the session", "systemctl", &["--user", "enable", "--now", "sill-shelf.service"])?;
+        }
+        // the daemon's socket (docs/daemon.md §3.1): the first client starts sill.service
+        if !unit_known("sill.socket") {
+            let run = stage_once(&mut i, &mut staged, &home, &exe)?;
+            let unit = UNIT_DAEMON.replace("/usr/local/bin/sill", &run.display().to_string());
+            i.put_file(&home.join(".config/systemd/user/sill.service"), unit.as_bytes(), 0o644)?;
+            i.put_file(&home.join(".config/systemd/user/sill.socket"), SOCKET_DAEMON.as_bytes(), 0o644)?;
+            i.run("reload user units", "systemctl", &["--user", "daemon-reload"])?;
+        }
+        let socket_enabled = std::process::Command::new("systemctl")
+            .args(["--user", "is-enabled", "--quiet", "sill.socket"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if socket_enabled {
+            i.skip("sill.socket already enabled".to_string());
+        } else {
+            i.run("listen for the daemon's clients", "systemctl", &["--user", "enable", "--now", "sill.socket"])?;
         }
         let stale = home.join(".config/autostart/sill.desktop");
         if stale.is_file() {

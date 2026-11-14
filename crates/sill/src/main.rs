@@ -17,6 +17,7 @@ use sill_core::mounts;
 use sill_core::policy::Policy;
 use sill_core::shim;
 
+mod daemon;
 mod init;
 mod shelf;
 
@@ -64,6 +65,11 @@ enum Cmd {
     },
     /// Set the machine up (root): checks, binaries, policy, state filesystem, cgroup delegation;
     /// `--user` sets up the shelf autostart for this account instead (SPEC §4.12)
+    /// The daemon (docs/daemon.md): run it (what sill.service does), or ask the running one
+    Daemon {
+        #[command(subcommand)]
+        cmd: Option<DaemonCmd>,
+    },
     Init(init::InitArgs),
     /// Serve a session's network proxy (SPEC §4.8) on an inherited listening socket
     Proxy {
@@ -128,6 +134,14 @@ enum Cmd {
         #[arg(default_value = "default")]
         name: String,
     },
+}
+
+#[derive(Subcommand)]
+enum DaemonCmd {
+    /// Version, mode, uptime and sessions of the running daemon (starts one when none runs)
+    Status,
+    /// Ask the running daemon to leave; sessions are not touched
+    Stop,
 }
 
 #[derive(Subcommand)]
@@ -315,58 +329,49 @@ struct RunArgs {
 }
 
 fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
-    let store = sill_core::store::Store::open_default()?;
     let home = home()?;
+    // the readers go through the daemon (docs/daemon.md decision 13); what writes or recovers
+    // opens the store itself below
+    match cmd {
+        MemoryCmd::List => {
+            let c = sill_proto::Client::connect_or_start()?;
+            let rows: Vec<sill_proto::MemorySession> = c.call(sill_proto::method::MEMORY_LIST, sill_proto::Empty::default())?;
+            if rows.is_empty() {
+                println!("no ended sessions yet (a session ends when its tab is closed)");
+            }
+            for s in rows {
+                println!("{}  {}  {:<8} {}  — {}", s.id, sill_memory::date(s.ended_at), s.agent, s.title, s.summary);
+            }
+            return Ok(());
+        }
+        MemoryCmd::Show { id } => {
+            let c = sill_proto::Client::connect_or_start()?;
+            let t: sill_proto::Text = c.call(sill_proto::method::MEMORY_SHOW, sill_proto::Key { key: id.join(" ") })?;
+            print!("{}", t.text);
+            return Ok(());
+        }
+        MemoryCmd::Search { words, folder, agent, since } => {
+            let c = sill_proto::Client::connect_or_start()?;
+            let t: sill_proto::Text = c.call(sill_proto::method::MEMORY_SEARCH, sill_proto::MemorySearch { words, folder, agent, since })?;
+            print!("{}", t.text);
+            return Ok(());
+        }
+        MemoryCmd::Transcript { id, grep } => {
+            let c = sill_proto::Client::connect_or_start()?;
+            let t: sill_proto::Text = c.call(sill_proto::method::MEMORY_TRANSCRIPT, sill_proto::Transcript { key: id.join(" "), grep })?;
+            print!("{}", t.text);
+            return Ok(());
+        }
+        _ => {}
+    }
+    let store = sill_core::store::Store::open_default()?;
     let conn = store.conn();
     let find = |key: &[String]| -> Result<sill_memory::SessionInfo> {
         let key = key.join(" ");
         sill_memory::find_session(conn, &key)?.with_context(|| format!("no session {key}"))
     };
     match cmd {
-        MemoryCmd::List => {
-            let mut ended: Vec<_> = sill_memory::sessions(conn)?.into_iter().filter(|s| s.ended_at.is_some()).collect();
-            ended.sort_by_key(|s| std::cmp::Reverse(s.ended_at));
-            if ended.is_empty() {
-                println!("no ended sessions yet (a session ends when its tab is closed)");
-            }
-            for s in ended {
-                println!("{}  {}  {:<8} {}  — {}", s.id, sill_memory::date(s.ended_at.unwrap_or(0)), s.agent, s.title, sill_memory::first_line(&s.summary));
-            }
-        }
-        MemoryCmd::Show { id } => {
-            let s = find(&id)?;
-            print!("{}", sill_memory::show(conn, &s, &sill_core::memory::kept_of(&s.id), &home)?);
-        }
-        MemoryCmd::Search { words, folder, agent, since } => {
-            let mut text = words;
-            if let Some(f) = folder {
-                text.push(format!("folder:{f}"));
-            }
-            if let Some(a) = agent {
-                text.push(format!("agent:{a}"));
-            }
-            if let Some(s) = since {
-                if sill_memory::parse_age(&s).is_none() {
-                    bail!("--since expects 30d, 12h, 2w …");
-                }
-                text.push(format!("since:{s}"));
-            }
-            let q = sill_memory::Query::parse(&text.join(" "), &home);
-            if q.is_empty() {
-                bail!("search for what?");
-            }
-            let hits = sill_memory::search(conn, &q, sill_core::store::now(), 50)?;
-            if hits.is_empty() {
-                println!("nothing found");
-            }
-            for h in hits {
-                print!("{}", sill_memory::hit_lines(&h, &home));
-            }
-        }
-        MemoryCmd::Transcript { id, grep } => {
-            let s = find(&id)?;
-            print!("{}", sill_memory::transcript(conn, &s, grep.as_deref())?);
-        }
+        MemoryCmd::List | MemoryCmd::Show { .. } | MemoryCmd::Search { .. } | MemoryCmd::Transcript { .. } => unreachable!(),
         MemoryCmd::Recall { id } => {
             let s = find(&id)?;
             let Some(full) = store.sessions()?.into_iter().find(|x| x.id == s.id) else { bail!("no session {}", s.id) };
@@ -415,6 +420,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Memory { cmd } => memory_cmd(cmd),
+        Cmd::Daemon { cmd } => daemon_cmd(cmd),
         Cmd::Registry { cmd: RegistryCmd::Snapshot { out } } => {
             let out = out.unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sill-core/registry/snapshot.json"));
             sill_core::registry::build_snapshot(&out, &mut |line| eprintln!("{line}"))
@@ -945,6 +951,32 @@ fn shell_words(s: &str) -> Vec<String> {
 }
 
 // --- shared --------------------------------------------------------------------------------------
+
+fn daemon_cmd(cmd: Option<DaemonCmd>) -> Result<()> {
+    match cmd {
+        None => daemon::run(),
+        Some(DaemonCmd::Status) => {
+            let c = sill_proto::Client::connect_or_start()?;
+            let s: sill_proto::DaemonStatus = c.call(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default())?;
+            println!("sill daemon {} (protocol {}), pid {}, {} mode, up since {}", s.version, s.protocol, s.pid, s.mode, sill_memory::datetime(s.started));
+            println!("launcher: {}", s.launcher);
+            println!("socket:   {}", s.socket);
+            println!("sessions: {} in the store, {} running", s.sessions, s.running);
+            Ok(())
+        }
+        Some(DaemonCmd::Stop) => match sill_proto::Client::connect() {
+            Ok(c) => {
+                let _: serde_json::Value = c.call(sill_proto::method::DAEMON_SHUTDOWN, sill_proto::Empty::default())?;
+                println!("asked the daemon to leave; sessions keep running");
+                Ok(())
+            }
+            Err(_) => {
+                println!("no daemon running");
+                Ok(())
+            }
+        },
+    }
+}
 
 fn home() -> Result<PathBuf> {
     Ok(PathBuf::from(std::env::var("HOME").context("HOME not set")?))

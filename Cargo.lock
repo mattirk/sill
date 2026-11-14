@@ -1758,6 +1758,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sill-proto"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "rustix",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "sill-shelf"
 version = "0.0.1"
 dependencies = [
@@ -1769,10 +1779,12 @@ dependencies = [
  "gtk4",
  "pulldown-cmark",
  "rustix",
+ "serde",
  "serde_json",
  "shell-words",
  "sill-core",
  "sill-memory",
+ "sill-proto",
  "sourceview5",
  "toml",
  "vte4",
