@@ -230,6 +230,32 @@ fn read_num(path: &str) -> Option<u64> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
+/// The built-in policy into `dir/default.toml`, kept if the admin edited it. The copy as shipped
+/// sits beside it as `default.toml.dist` (the dpkg conffile idea): a file that still equals the
+/// last shipped copy is not an edit and is replaced, so an upgrade reaches the host; one that
+/// differs from both the shipped and the current built-in is the admin's and stays.
+fn install_policy(i: &mut Init, dir: &Path) -> Result<()> {
+    let policy = dir.join("default.toml");
+    let dist = dir.join("default.toml.dist");
+    let builtin = sill_core::policy::BUILTIN_DEFAULT;
+    let current = std::fs::read_to_string(&policy).ok();
+    let shipped = std::fs::read_to_string(&dist).ok();
+    match current {
+        Some(cur) if cur != builtin && shipped.as_deref() != Some(cur.as_str()) => {
+            if shipped.is_none() {
+                i.skip(format!("{} (differs from the built-in, kept; `rm` it to get the current one)", policy.display()));
+            } else {
+                i.skip(format!("{} (edited here, kept)", policy.display()));
+            }
+        }
+        _ => {
+            i.put_file(&policy, builtin.as_bytes(), 0o644)?;
+        }
+    }
+    i.put_file(&dist, builtin.as_bytes(), 0o644)?;
+    Ok(())
+}
+
 /// `<prefix>/bin/sill` is what the boot hook runs as root and the shelf unit per user, so the
 /// prefix must be absolute and every directory above it root-owned and writable by root only
 /// (security.md S12): a prefix under a home or a group-writable `/usr/local` would let whoever
@@ -280,13 +306,7 @@ fn install_files(i: &mut Init, prefix: &Path, has_systemd: bool) -> Result<()> {
         let content = std::fs::read(&src)?;
         i.put_file(&dst, &content, 0o755)?;
     }
-    // the built-in policy, kept if the admin edited it
-    let policy = Path::new("/etc/sill/policies/default.toml");
-    if policy.is_file() && std::fs::read_to_string(policy)? != sill_core::policy::BUILTIN_DEFAULT {
-        i.skip(format!("{} (edited here, kept)", policy.display()));
-    } else {
-        i.put_file(policy, sill_core::policy::BUILTIN_DEFAULT.as_bytes(), 0o644)?;
-    }
+    install_policy(i, Path::new("/etc/sill/policies"))?;
     // icons and the desktop file
     let share = prefix.join("share");
     i.put_file(&share.join("sill/sill.svg"), ICON.as_bytes(), 0o644)?;
@@ -681,4 +701,65 @@ fn user_setup(a: &InitArgs) -> Result<()> {
         if on_path { "sill".to_string() } else { exe.display().to_string() }
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn init() -> Init {
+        Init { dry: false, did: vec![], skipped: vec![], problems: vec![] }
+    }
+
+    fn read(p: &Path) -> String {
+        std::fs::read_to_string(p).unwrap_or_default()
+    }
+
+    #[test]
+    fn policy_install_cases() {
+        let builtin = sill_core::policy::BUILTIN_DEFAULT;
+        let old = "# an older shipped copy\n";
+        let edited = "# the admin's own\n";
+        let dir = std::env::temp_dir().join(format!("sill-policy-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.as_path();
+        let policy = dir.join("default.toml");
+        let dist = dir.join("default.toml.dist");
+
+        // fresh host: both written
+        install_policy(&mut init(), dir).unwrap();
+        assert_eq!(read(&policy), builtin);
+        assert_eq!(read(&dist), builtin);
+
+        // unchanged: nothing rewritten
+        let mut i = init();
+        install_policy(&mut i, dir).unwrap();
+        assert!(i.did.is_empty(), "{:?}", i.did);
+
+        // an older shipped copy, recorded as such: replaced
+        std::fs::write(&policy, old).unwrap();
+        std::fs::write(&dist, old).unwrap();
+        install_policy(&mut init(), dir).unwrap();
+        assert_eq!(read(&policy), builtin);
+        assert_eq!(read(&dist), builtin);
+
+        // the admin's edit, dist present: kept, dist brought up to date
+        std::fs::write(&policy, edited).unwrap();
+        std::fs::write(&dist, old).unwrap();
+        let mut i = init();
+        install_policy(&mut i, dir).unwrap();
+        assert_eq!(read(&policy), edited);
+        assert_eq!(read(&dist), builtin);
+        assert!(i.skipped.iter().any(|s| s.contains("edited here")), "{:?}", i.skipped);
+
+        // a differing file with no dist (a host from before .dist): kept, told how to upgrade
+        std::fs::remove_file(&dist).unwrap();
+        let mut i = init();
+        install_policy(&mut i, dir).unwrap();
+        assert_eq!(read(&policy), edited);
+        assert_eq!(read(&dist), builtin);
+        assert!(i.skipped.iter().any(|s| s.contains("`rm` it")), "{:?}", i.skipped);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
