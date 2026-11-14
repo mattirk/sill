@@ -562,7 +562,13 @@ pub fn indicator<'a>(view: &'a SessionView, session: Option<&Session>) -> Elemen
     } else {
         shield
     };
-    crate::ui::bar_tip(container(shield).id("permissions-button"), tip)
+    // no tooltip while the menu is open: both sit above the button and the tooltip is drawn
+    // over the menu's rows
+    let shield = container(shield).id("permissions-button");
+    if view.permissions.menu {
+        return shield.into();
+    }
+    crate::ui::bar_tip(shield, tip)
 }
 
 /// The shield menu's rows, in order: `DevelopmentRestarting`, then `HostControlAll`.

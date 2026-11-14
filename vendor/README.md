@@ -20,7 +20,9 @@ once upstream has an equivalent.
   produces a message for such a press — and captures that press. Upstream leaves closing to the
   pick list's own `update`, which never sees a press that a widget earlier in the tree (the prompt
   editor) captures first, so the menu stayed open (the person, 2026-11-08). The pick list uses
-  both; sill-gui's `popup.rs` (the shield's right-click menu) uses `on_dismiss`.
+  both; sill-gui's `popup.rs` (the shield's right-click menu) uses `on_dismiss`. The menu also
+  keeps its width near the window's right edge and moves left to fit (upstream limits it to the
+  room right of its control, which hid the shield's menu once the shield sat before Send).
 - `src/text_editor.rs`: optional `line_numbers` gutter, supplied with visible logical line
   positions from the renderer. Gutter width tracks the number of digits; source layout, pointer
   hit testing and IME positioning use the same inset. Unwrapped editors pass sideways/Shift-wheel

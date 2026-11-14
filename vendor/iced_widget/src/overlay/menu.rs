@@ -11,7 +11,7 @@ use crate::core::widget::tree::{self, Tree};
 use crate::core::window;
 use crate::core::{
     Background, Clipboard, Color, Event, Length, Padding, Pixels, Point,
-    Rectangle, Shadow, Size, Theme, Vector,
+    Rectangle, Shadow, Size, Theme,
 };
 use crate::core::{Element, Shell, Widget};
 use crate::scrollable::{self, Scrollable};
@@ -285,10 +285,13 @@ where
             bounds.height - (self.position.y + self.target_height);
         let space_above = self.position.y;
 
+        // sill patch: the menu may be wider than the room to the target's right (a control
+        // near the window's edge); it keeps its width and moves left to stay in the window,
+        // where upstream squeezed it to that room
         let limits = layout::Limits::new(
             Size::ZERO,
             Size::new(
-                bounds.width - self.position.x,
+                bounds.width,
                 if space_below > space_above {
                     space_below
                 } else {
@@ -300,11 +303,12 @@ where
 
         let node = self.list.layout(self.tree, renderer, &limits);
         let size = node.size();
+        let x = self.position.x.min(bounds.width - size.width).max(0.0);
 
         node.move_to(if space_below > space_above {
-            self.position + Vector::new(0.0, self.target_height)
+            Point::new(x, self.position.y + self.target_height)
         } else {
-            self.position - Vector::new(0.0, size.height)
+            Point::new(x, self.position.y - size.height)
         })
     }
 
