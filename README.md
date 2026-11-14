@@ -108,8 +108,10 @@ paths are private or read-only, the network allow-list, tool directories the jai
 memory recall block, then your file. Sent once per agent start and again after an edit, not with every
 prompt.
 
-**Tray icon**: left click shows/hides the shelf, menu has Show/hide and Quit. Settings → Tray icon turns it
-off.
+**Tray icon**: left click shows/hides the shelf, menu has Show/hide and Quit. Quit ends every open session
+the way closing its tab does — the agents write their summaries first, out of sight — and exits when the
+last one is done. While any agent works, the icon moves (the sill ripples, the fish rides it); it is still
+when all are idle. Settings → Tray icon turns it off.
 
 ## Memory
 
@@ -263,7 +265,9 @@ mounted, `sill` uses `/var/lib/sill/<uid>/sessions/<id>` by default. Grow the im
 - Gemini CLI's "Log in with Google" runs host-side like Codex's ChatGPT login, but Google stopped serving
   personal accounts through Gemini CLI on 2026-06-18. Use a Gemini API key (`GEMINI_API_KEY` in its
   environment, then *Gemini API key*), or install Antigravity from the Agents page.
-- Sessions end — and are summarised — only on a tab close; the idle timeout and Quit end none yet.
+- Sessions end — and are summarised — on a tab close, the idle timeout and the tray's Quit; a shelf restart
+  (`sill shelf`) ends none. A tab closed again while its agent writes the summary disappears at once and
+  the summary finishes in the background (still capped at 90 s).
 - No policies UI yet; edit the TOML.
 
 ## Look

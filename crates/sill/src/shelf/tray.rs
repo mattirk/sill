@@ -3,9 +3,16 @@
 //! extension) — spoken over the application's own D-Bus connection. No appindicator library (they
 //! link GTK3, which cannot share a process with GTK4), no XEmbed (GTK4 dropped `GtkStatusIcon`).
 //! A left click toggles the shelf; the menu — a minimal `com.canonical.dbusmenu`, which panels
-//! expect instead of calling `ContextMenu` — has Show/Hide and Quit. The item registers with the
-//! watcher whenever its name appears, so a panel restart brings the icon back; with no watcher
-//! there is no icon and the hotkey remains.
+//! expect instead of calling `ContextMenu` — has Show/Hide and Quit; Quit ends every session with
+//! its summary first (`window::quit_with_summaries`). While an agent works the icon moves — the
+//! sill ripples, the fish rides it — on a NewIcon signal every frame; still, and no timer, when
+//! every session is idle (SPEC: idle cost ≈ 0). The item registers with the watcher whenever its
+//! name appears, so a panel restart brings the icon back; with no watcher there is no icon and
+//! the hotkey remains.
+
+use std::cell::{Cell, RefCell};
+use std::f64::consts::PI;
+use std::rc::Rc;
 
 use gtk4 as gtk;
 use gtk::gio;
@@ -18,6 +25,23 @@ const WATCHER: &str = "org.kde.StatusNotifierWatcher";
 /// The logo, rendered to pixmaps at these sizes: panels pick the nearest and scale.
 const LOGO: &str = include_str!("../../../../packaging/icons/sill.svg");
 const SIZES: [i32; 4] = [22, 24, 32, 48];
+/// The moving icon: this many frames round one wave, this long each (≈ 8/s, a 1.5 s swell).
+const FRAMES: usize = 12;
+const FRAME_MS: u64 = 125;
+
+/// The exported item: its pixmaps (frame 0 the logo at rest, the rest rendered on the first
+/// busy), the frame showing, and whether the ticker runs.
+struct Tray {
+    conn: gio::DBusConnection,
+    frames: RefCell<Vec<glib::Variant>>,
+    frame: Cell<usize>,
+    busy: Cell<bool>,
+    ticking: Cell<bool>,
+}
+
+thread_local! {
+    static TRAY: RefCell<Option<Rc<Tray>>> = const { RefCell::new(None) };
+}
 
 const ITEM_XML: &str = r#"<node><interface name="org.kde.StatusNotifierItem">
  <property name="Category" type="s" access="read"/><property name="Id" type="s" access="read"/>
@@ -63,7 +87,7 @@ pub fn start(app: &gtk::Application) {
         eprintln!("sill: tray: no session bus connection");
         return;
     };
-    let pixmaps = pixmaps();
+    let tray = Rc::new(Tray { conn: conn.clone(), frames: RefCell::new(vec![pixmaps(LOGO)]), frame: Cell::new(0), busy: Cell::new(false), ticking: Cell::new(false) });
     let item = match gio::DBusNodeInfo::for_xml(ITEM_XML).ok().and_then(|n| n.lookup_interface("org.kde.StatusNotifierItem")) {
         Some(i) => i,
         None => return,
@@ -83,12 +107,16 @@ pub fn start(app: &gtk::Application) {
                 inv.return_value(None);
             }
         })
-        .property(move |_, _, _, _, name| item_property(name, &pixmaps))
+        .property({
+            let tray = tray.clone();
+            move |_, _, _, _, name| item_property(name, &tray.frames.borrow()[tray.frame.get()])
+        })
         .build();
     if let Err(e) = r {
         eprintln!("sill: tray: {e}");
         return;
     }
+    TRAY.with(|t| *t.borrow_mut() = Some(tray));
     let r = conn
         .register_object(MENU_PATH, &menu)
         .method_call({
@@ -141,6 +169,50 @@ fn toggle(app: &gtk::Application) {
     }
 }
 
+/// An agent is in a turn (or none is): the icon moves while `on`, rests otherwise. The window
+/// calls this as sessions go busy and idle; without a tray it is nothing.
+pub fn set_busy(on: bool) {
+    let Some(tray) = TRAY.with(|t| t.borrow().clone()) else { return };
+    tray.busy.set(on);
+    if !on || tray.ticking.replace(true) {
+        return; // the ticker sees `busy` drop and puts the logo back
+    }
+    if tray.frames.borrow().len() == 1 {
+        let more: Vec<glib::Variant> = (1..=FRAMES).map(|i| pixmaps(&frame_svg(i as f64 / FRAMES as f64))).collect();
+        tray.frames.borrow_mut().extend(more);
+    }
+    glib::timeout_add_local(std::time::Duration::from_millis(FRAME_MS), move || {
+        let next = if tray.busy.get() { tray.frame.get() % FRAMES + 1 } else { 0 };
+        tray.frame.set(next);
+        let _ = tray.conn.emit_signal(None, ITEM_PATH, "org.kde.StatusNotifierItem", "NewIcon", None);
+        if next == 0 {
+            tray.ticking.set(false);
+            glib::ControlFlow::Break
+        } else {
+            glib::ControlFlow::Continue
+        }
+    });
+}
+
+/// The logo at `phase` (0..1) of its swell: the sill a low wave travelling right, the fish lifted
+/// by the crest under it and leaning into the slope. Same plate, colours and sizes as `sill.svg`.
+fn frame_svg(phase: f64) -> String {
+    let t = 2.0 * PI * phase;
+    // one and a half waves along the sill, 0.9 px high: a ripple, not a sea
+    let wave = |x: f64| 45.0 + 0.9 * (2.0 * PI * 1.5 * (x - 10.0) / 44.0 - t).sin();
+    let mut d = String::new();
+    for i in 0..=22 {
+        let x = 10.0 + 2.0 * i as f64;
+        d.push_str(&format!("{}{x:.1} {:.2}", if i == 0 { "M" } else { " L" }, wave(x)));
+    }
+    // the fish sits over x≈13..50: it rides the water at its middle and tilts with the slope there
+    let (fx, fy) = (10.4 + 0.5 * (t + 0.5 * PI).sin(), 8.8 + (wave(32.0) - 45.0) * 0.8);
+    let tilt = 1.4 * (t - 0.3 * PI).sin();
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"><rect x="4" y="4" width="56" height="56" rx="12" fill="#2b2f36"/><path d="{d}" fill="none" stroke="#e8e8e8" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/><g transform="translate({fx:.2} {fy:.2}) rotate({tilt:.2} 21.6 21.6) scale(1.8)"><path fill="#e8e8e8" d="M1.5 12C4.5 6.5 12 5 17.5 10.5L22.5 6.5 20.5 12 22.5 17.5 17.5 13.5C12 19 4.5 17.5 1.5 12ZM4.7 11a1.3 1.3 0 1 0 2.6 0a1.3 1.3 0 1 0-2.6 0"/></g></svg>"##
+    )
+}
+
 fn item_property(name: &str, pixmaps: &glib::Variant) -> glib::Variant {
     match name {
         "Category" => "ApplicationStatus".to_variant(),
@@ -161,12 +233,12 @@ fn empty_pixmaps() -> glib::Variant {
     glib::Variant::array_from_iter_with_type(glib::VariantTy::new("(iiay)").expect("a type"), std::iter::empty::<glib::Variant>())
 }
 
-/// The logo as `a(iiay)`: ARGB32 in network byte order, straight alpha, one entry per size. An
+/// An SVG as `a(iiay)`: ARGB32 in network byte order, straight alpha, one entry per size. An
 /// SVG that fails to render (no pixbuf loader) gives an empty list and an iconless item.
-fn pixmaps() -> glib::Variant {
+fn pixmaps(svg: &str) -> glib::Variant {
     let mut out: Vec<glib::Variant> = Vec::new();
     for size in SIZES {
-        let stream = gio::MemoryInputStream::from_bytes(&glib::Bytes::from_static(LOGO.as_bytes()));
+        let stream = gio::MemoryInputStream::from_bytes(&glib::Bytes::from(svg.as_bytes()));
         let Ok(pb) = gtk::gdk_pixbuf::Pixbuf::from_stream_at_scale(&stream, size, size, true, None::<&gio::Cancellable>) else {
             continue;
         };
@@ -237,7 +309,7 @@ fn menu_call(app: &gtk::Application, method: &str, params: &glib::Variant, inv: 
             if event == "clicked" {
                 match id {
                     1 => toggle(app),
-                    3 => app.quit(),
+                    3 => super::window::quit_with_summaries(app),
                     _ => {}
                 }
             }
@@ -262,7 +334,7 @@ mod tests {
         assert_eq!(l.child_value(2).n_children(), MENU.len());
         assert_eq!(menu_props(2).type_().as_str(), "a{sv}");
         assert_eq!(glib::VariantDict::new(Some(&menu_props(1))).lookup_value("label", None).and_then(|v| v.get::<String>()).as_deref(), Some("Show / hide sill"));
-        let p = pixmaps();
+        let p = pixmaps(LOGO);
         assert_eq!(p.type_().as_str(), "a(iiay)");
         // the svg rendered (a pixbuf loader is present): each size, square, 4 bytes a pixel
         assert_eq!(p.n_children(), SIZES.len(), "{p}");
@@ -273,5 +345,21 @@ mod tests {
         }
         assert_eq!(item_property("ToolTip", &p).type_().as_str(), "(sa(iiay)ss)");
         assert_eq!(item_property("Menu", &p).type_().as_str(), "o");
+    }
+
+    /// Every frame renders at every size, and the motion is a ripple: no frame differs from the
+    /// logo at rest by more than a few pixels' worth of the icon.
+    #[test]
+    fn frames_render_and_stay_subtle() {
+        let rest = pixmaps(LOGO);
+        for i in 1..=FRAMES {
+            let f = pixmaps(&frame_svg(i as f64 / FRAMES as f64));
+            assert_eq!(f.n_children(), SIZES.len(), "frame {i}");
+            let (a, b) = (rest.child_value(0).child_value(2), f.child_value(0).child_value(2));
+            let (a, b) = (a.fixed_array::<u8>().unwrap(), b.fixed_array::<u8>().unwrap());
+            let changed = a.chunks(4).zip(b.chunks(4)).filter(|(p, q)| p[1].abs_diff(q[1]) > 64).count();
+            let pixels = (SIZES[0] * SIZES[0]) as usize;
+            assert!(changed > 0 && changed < pixels / 5, "frame {i}: {changed} of {pixels} pixels changed");
+        }
     }
 }

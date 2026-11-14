@@ -24,6 +24,8 @@ use super::{session, settings, theme, x11};
 
 thread_local! {
     pub static HOTKEY: RefCell<Option<Rc<super::hotkey::Hotkey>>> = const { RefCell::new(None) };
+    /// The one shelf, for the tray's Quit (`quit_with_summaries`).
+    static SHELF: RefCell<Option<std::rc::Weak<Shelf>>> = const { RefCell::new(None) };
 }
 
 pub struct Shelf {
@@ -52,6 +54,11 @@ pub struct Shelf {
     opened: RefCell<HashMap<String, i64>>,
     pending_restart: RefCell<std::collections::HashSet<String>>,
     views: RefCell<HashMap<String, Rc<SessionView>>>,
+    /// Sessions whose tab and page are gone while their agent still writes the summary
+    /// (`background_view`): the view lives until the turn ends, then `close_view` finishes.
+    backgrounded: RefCell<std::collections::HashSet<String>>,
+    /// Quit was asked: the shelf exits as soon as the last view has gone (`close_view`).
+    quitting: std::cell::Cell<bool>,
     changes: Rc<ChangesPage>,
     agents: Rc<AgentsPage>,
     /// The file tree (a drawer beside the main pane) and the viewer (over it), SPEC §3.1.
@@ -258,12 +265,15 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
         opened: RefCell::new(HashMap::new()),
         pending_restart: RefCell::new(std::collections::HashSet::new()),
         views: RefCell::new(HashMap::new()),
+        backgrounded: RefCell::new(std::collections::HashSet::new()),
+        quitting: std::cell::Cell::new(false),
         changes: changes.clone(),
         agents: agents_page.clone(),
         tree: tree.clone(),
         viewer: viewer.clone(),
         pane_host: pane_host.clone(),
     });
+    SHELF.with(|s| *s.borrow_mut() = Some(Rc::downgrade(&shelf)));
     {
         // auto-revert (SPEC §4.4): the Changes page sweeps once a minute; a session that is mid-turn
         // is left alone
@@ -1178,6 +1188,7 @@ impl Shelf {
                     shelf.busy.borrow_mut().remove(id);
                 }
                 shelf.sync_spinner();
+                super::tray::set_busy(!shelf.busy.borrow().is_empty());
                 if !busy && shelf.pending_restart.borrow_mut().remove(id) {
                     let shelf2 = shelf.clone();
                     let id = id.to_string();
@@ -1250,13 +1261,12 @@ impl Shelf {
     /// stays; then the end is recorded, the view goes and the jail stops. Without the agent, sill's
     /// own summary from the facts, and the same end at once. A reopened session closed without a
     /// turn keeps the summary it had (decision 13: no cold agent dressed as a continuation). With
-    /// memory off only `ended_at` is set, the summary stays empty.
+    /// memory off only `ended_at` is set, the summary stays empty. Closed again while the agent
+    /// writes, the tab goes and the summary finishes out of sight (`background_view`).
     fn close_session(self: &Rc<Self>, id: &str) {
         let view = self.views.borrow().get(id).cloned();
-        // closed again while the summary is written: end now with what the agent has so far
-        if let Some(v) = view.as_ref().filter(|v| v.summary_pending()) {
-            self.set_status("the session ends: summary cut short");
-            v.cut_summary_short();
+        if view.as_ref().is_some_and(|v| v.summary_pending()) {
+            self.background_view(id);
             return;
         }
         let stored = self.store.sessions().unwrap_or_default().into_iter().find(|s| s.id == id);
@@ -1316,12 +1326,51 @@ impl Shelf {
         }
     }
 
-    /// Drop the tab and the view; the jail is stopped separately (it can take seconds).
-    fn close_view(self: &Rc<Self>, id: &str) {
-        if let Some(v) = self.views.borrow_mut().remove(id) {
-            v.quit();
+    /// The tab, page and pane go while the agent still writes the summary: the view stays in
+    /// `views` so the turn runs on (the 90 s cap of `ask_summary` still holds) and `close_view`
+    /// takes it when the answer arrives. Until then the session is in neither list.
+    fn background_view(self: &Rc<Self>, id: &str) {
+        if !self.backgrounded.borrow_mut().insert(id.to_string()) {
+            return;
+        }
+        if let Some(v) = self.views.borrow().get(id) {
             self.pages.remove(&v.root);
             self.pane_host.remove(&v.pane);
+        }
+        self.tabs.remove(id);
+        self.set_status("the session ends: its summary is written in the background");
+    }
+
+    /// Quit: the window hides, every open session ends as its tab would be closed — the agents
+    /// that can write their summaries do, out of sight — and the shelf exits when the last view
+    /// has gone. Nothing open: exits at once.
+    fn quit_all(self: &Rc<Self>) {
+        self.window.set_visible(false);
+        self.quitting.set(true);
+        for id in self.tabs.ids() {
+            self.close_session(&id);
+            if self.views.borrow().contains_key(&id) {
+                self.background_view(&id);
+            }
+        }
+        self.quit_if_done();
+    }
+
+    fn quit_if_done(&self) {
+        if self.quitting.get() && self.views.borrow().is_empty() && let Some(app) = self.window.application() {
+            app.quit();
+        }
+    }
+
+    /// Drop the tab and the view; the jail is stopped separately (it can take seconds).
+    fn close_view(self: &Rc<Self>, id: &str) {
+        let hidden = self.backgrounded.borrow_mut().remove(id);
+        if let Some(v) = self.views.borrow_mut().remove(id) {
+            v.quit();
+            if !hidden {
+                self.pages.remove(&v.root);
+                self.pane_host.remove(&v.pane);
+            }
             // this `v` should be the last reference: anything else is a leak (SPEC §4.11 #15)
             if std::env::var_os("SILL_TRACE").is_some() {
                 eprintln!("{} view {id} closed, {} other reference(s) left", super::trace_ts(), Rc::strong_count(&v) - 1);
@@ -1332,6 +1381,10 @@ impl Shelf {
         if self.tabs.selected().is_none() {
             self.set_status("");
         }
+        // a view that went while in a turn sends no idle event: the busy set and the tray follow
+        self.busy.borrow_mut().remove(id);
+        super::tray::set_busy(!self.busy.borrow().is_empty());
+        self.quit_if_done();
     }
 
     fn fill_plus_menu(self: &Rc<Self>, menu: &gtk::Box, pop: &gtk::Popover) {
@@ -1617,6 +1670,15 @@ fn stop_then(id: &str, then: impl FnOnce() + 'static) {
         let _ = rx.recv().await;
         then();
     });
+}
+
+/// The tray's Quit: end every session with its summary, then exit (`Shelf::quit_all`); with no
+/// shelf built yet, exit at once.
+pub fn quit_with_summaries(app: &gtk::Application) {
+    match SHELF.with(|s| s.borrow().as_ref().and_then(|w| w.upgrade())) {
+        Some(shelf) => shelf.quit_all(),
+        None => app.quit(),
+    }
 }
 
 /// Show and focus; `time` is the X time of the triggering key press (0 when unknown).

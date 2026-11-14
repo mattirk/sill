@@ -2155,12 +2155,6 @@ impl SessionView {
         self.summarizing.borrow().is_some()
     }
 
-    /// The tab was closed again while the agent writes its summary: the turn is cancelled and what
-    /// it wrote so far is the summary, marked as cut short (None when it had written nothing).
-    pub fn cut_summary_short(&self) {
-        self.end_summary_turn("cut short: the tab was closed again while the agent wrote this");
-    }
-
     pub fn send(self: &Rc<Self>, text: &str) -> bool {
         let trace = std::env::var_os("SILL_TRACE").is_some();
         let t0 = std::time::Instant::now();
