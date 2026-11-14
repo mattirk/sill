@@ -209,6 +209,7 @@ fn shutdown_answers_then_exits_clean() {
     let st = d.wait_exit();
     assert!(st.success(), "{st}");
     assert!(c.read().is_err(), "the connection closes with the daemon");
+    assert_eq!(d.pid_file(), None, "a clean exit takes the pid file with it");
 }
 
 #[test]

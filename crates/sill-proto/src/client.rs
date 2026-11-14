@@ -23,6 +23,8 @@ type Pending = Arc<Mutex<HashMap<u64, Sender<Result<Value, Error>>>>>;
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// For `daemon.status` and `shutdown`: answered at once by a daemon that answers at all.
 pub const QUICK_TIMEOUT: Duration = Duration::from_secs(5);
+/// A bare daemon's `daemon.log` is rotated to `.1` past this when the next one starts.
+const LOG_KEEP: u64 = 8 * 1024 * 1024;
 
 pub struct Client {
     writer: Mutex<UnixStream>,
@@ -119,7 +121,12 @@ impl Client {
             }
         };
         if !unit_started {
-            let mut log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("daemon.log"))?;
+            // bare mode has no journal: the log is a file, kept to one generation of LOG_KEEP
+            let log_path = dir.join("daemon.log");
+            if std::fs::metadata(&log_path).is_ok_and(|m| m.len() > LOG_KEEP) {
+                let _ = std::fs::rename(&log_path, dir.join("daemon.log.1"));
+            }
+            let mut log = std::fs::OpenOptions::new().create(true).append(true).open(&log_path)?;
             // the person sees why in the daemon's own log, not on a CLI command's stderr
             let _ = std::io::Write::write_all(&mut log, format!("sill client: starting the daemon bare ({why_bare})\n").as_bytes());
             let mut cmd = std::process::Command::new(&exe);

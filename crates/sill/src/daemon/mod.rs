@@ -301,6 +301,10 @@ fn read_loop(stream: UnixStream, hub: &Arc<Hub>, conn: &Arc<Conn>) -> Result<()>
         if method == sill_proto::method::DAEMON_SHUTDOWN {
             eprintln!("sill daemon: shutdown asked, leaving");
             notify("STOPPING=1");
+            // a clean exit leaves no pid file; a crash does, and the next start replaces it
+            if let Ok(dir) = sill_proto::runtime_dir() {
+                let _ = std::fs::remove_file(dir.join("daemon.pid"));
+            }
             std::thread::sleep(std::time::Duration::from_millis(200)); // the writer sends the reply
             std::process::exit(0);
         }

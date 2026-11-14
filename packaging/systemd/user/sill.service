@@ -23,6 +23,9 @@ Type=notify
 NotifyAccess=main
 WatchdogSec=90
 ExecStart=/usr/local/bin/sill daemon
+# a stop is asked over the socket (the reply, STOPPING=1, the pid file removed, exit 0) rather
+# than signalled; SIGTERM follows only for a daemon that does not answer
+ExecStop=/usr/local/bin/sill daemon stop
 Restart=on-failure
 RestartSec=2
 Slice=app.slice
