@@ -691,26 +691,27 @@ impl Shelf {
         self.viewer.focus();
     }
 
-    /// A shell on the host (Ctrl+Shift+H, the shell button's right-click), in the folder the person
-    /// is looking at: the tree's selection, else the session's first pinned folder, else home. In the
-    /// selected session's bottom slot — the same pane as the jail shell, marked as host — or, with
-    /// `window`, the configured terminal in a window of its own. A host process by design — outside
-    /// the jail, nothing it does is recorded.
+    /// A shell on the host (Ctrl+Shift+H, the shell button's right-click). In the selected session's
+    /// bottom slot — the same pane as the jail shell, marked as host, with a directory of its own —
+    /// or, with `window`, the configured terminal in a window of its own, in the folder the person is
+    /// looking at: the tree's selection, else the session's first pinned folder, else home. A host
+    /// process by design — outside the jail, nothing it does is recorded.
     fn open_host_terminal(&self, window: bool) {
+        if !window {
+            // the pane keeps its own directory (SessionView::show_host_shell), whatever the tree shows
+            if let Some(id) = self.tabs.selected()
+                && let Some(v) = self.views.borrow().get(&id)
+            {
+                v.toggle_host_shell();
+            }
+            return;
+        }
         let tree = if self.tree.root.is_visible() { self.tree.selected_dir() } else { None };
         let pinned = || self.tabs.selected().and_then(|id| self.store.pins(&id).ok()).and_then(|pins| pins.into_iter().find(|p| p.is_dir()));
         let cwd = tree
             .or_else(pinned)
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("/"));
-        if !window {
-            if let Some(id) = self.tabs.selected()
-                && let Some(v) = self.views.borrow().get(&id)
-            {
-                v.toggle_host_shell(Some(cwd));
-            }
-            return;
-        }
         let Some(cmd) = sill_core::config::load().host_terminal() else {
             self.set_status("no terminal found on the host: set one under Settings → Host terminal");
             return;

@@ -55,6 +55,10 @@ pub struct SessionView {
     host_term: vte4::Terminal,
     host_scroll: gtk::ScrolledWindow,
     host_open: std::cell::Cell<bool>,
+    /// The host shell's pid while it runs, and the directory it was last seen in: its own place,
+    /// apart from the tree's selection; a shell started again (after `exit`) starts there.
+    host_pid: std::cell::Cell<Option<glib::Pid>>,
+    host_cwd: RefCell<Option<std::path::PathBuf>>,
     /// The terminal is running a login; when it closes the session is opened again.
     login_pending: Rc<std::cell::Cell<bool>>,
     /// `Ready` arrived on the current connection.
@@ -450,6 +454,8 @@ impl SessionView {
             host_term: host_term.clone(),
             host_scroll: host_scroll.clone(),
             host_open: std::cell::Cell::new(false),
+            host_pid: std::cell::Cell::new(None),
+            host_cwd: RefCell::new(None),
             login_pending: login_pending.clone(),
             ready: std::cell::Cell::new(false),
             mode_noted: std::cell::Cell::new(false),
@@ -625,6 +631,15 @@ impl SessionView {
             });
         }
         {
+            // where the host shell is now, read after each burst of output (a `cd` redraws the prompt)
+            let weak = Rc::downgrade(&view);
+            host_term.connect_contents_changed(move |_| {
+                if let Some(v) = weak.upgrade() {
+                    v.note_host_cwd();
+                }
+            });
+        }
+        {
             let weak = Rc::downgrade(&view);
             host_term.connect_child_exited(move |_, _| {
                 if let Some(v) = weak.upgrade() {
@@ -733,16 +748,25 @@ impl SessionView {
     }
 
     /// Ctrl+Shift+H: the host shell pane, or back to the prompt when it is shown.
-    pub fn toggle_host_shell(self: &Rc<Self>, cwd: Option<std::path::PathBuf>) {
+    pub fn toggle_host_shell(self: &Rc<Self>) {
         let on = self.bottom.visible_child_name().as_deref() != Some("host");
-        self.show_host_shell(on, cwd);
+        self.show_host_shell(on);
     }
 
-    /// The host shell in the bottom slot: a login shell on the host, started on first use in `cwd`
-    /// (else the session's first pinned folder, else home) and kept while hidden. A host process by
+    /// Remember the host shell's working directory (its `/proc` cwd: the shelf runs on the host).
+    fn note_host_cwd(&self) {
+        let Some(pid) = self.host_pid.get() else { return };
+        if let Ok(dir) = std::fs::read_link(format!("/proc/{}/cwd", pid.0)) {
+            *self.host_cwd.borrow_mut() = Some(dir);
+        }
+    }
+
+    /// The host shell in the bottom slot: a login shell on the host, started on first use where the
+    /// last one left off (else the session's first pinned folder, else home) and kept while hidden.
+    /// Its directory is its own: the tree's selection does not move it. A host process by
     /// design — outside the jail, nothing it does is recorded; the pane says so above the terminal
     /// and the shell button turns the warning colour while it shows.
-    pub fn show_host_shell(self: &Rc<Self>, on: bool, cwd: Option<std::path::PathBuf>) {
+    pub fn show_host_shell(self: &Rc<Self>, on: bool) {
         if let Some(b) = self.shell_btn.borrow().as_ref() {
             let t = theme::current();
             let fg = super::icons::fg_for(b, &t);
@@ -759,7 +783,11 @@ impl SessionView {
         if !self.host_open.get() {
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
             let git_env = format!("{}={}", changes::HOST_SHELL_GIT_ENV.0, changes::HOST_SHELL_GIT_ENV.1);
-            let dir = cwd
+            let dir = self
+                .host_cwd
+                .borrow()
+                .clone()
+                .filter(|d| d.is_dir())
                 .or_else(|| self.store.pins(&self.id()).unwrap_or_default().into_iter().find(|p| p.is_dir()))
                 .or_else(|| session::home().ok())
                 .unwrap_or_else(|| std::path::PathBuf::from("/"));
@@ -777,10 +805,13 @@ impl SessionView {
                 None::<&gtk::gio::Cancellable>,
                 move |res| {
                     let Some(v) = weak.upgrade() else { return };
-                    if let Err(e) = res {
-                        v.conv.add_note(&format!("host shell: {e}"));
-                        v.host_open.set(false);
-                        v.show_host_shell(false, None);
+                    match res {
+                        Ok(pid) => v.host_pid.set(Some(pid)),
+                        Err(e) => {
+                            v.conv.add_note(&format!("host shell: {e}"));
+                            v.host_open.set(false);
+                            v.show_host_shell(false);
+                        }
                     }
                 },
             );
@@ -798,9 +829,10 @@ impl SessionView {
     /// The host shell exited: forget it and show the prompt again.
     fn host_shell_closed(self: &Rc<Self>) {
         self.host_open.set(false);
+        self.host_pid.set(None);
         self.host_term.set_pty(None);
         self.host_term.reset(true, true);
-        self.show_host_shell(false, None);
+        self.show_host_shell(false);
     }
 
     /// Switch the bottom slot between prompt and shell; open the shell's pty on first use.
