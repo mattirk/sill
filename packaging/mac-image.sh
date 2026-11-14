@@ -81,16 +81,23 @@ guest() {
         -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 "sill@$address" "$@"
 }
 
-echo 'Waiting for the first boot (packages)'
 # SSH answers before cloud-init has made the account; OpenSSH holds failed logins against
 # the source for a while, so try at a gentle pace
-tries=0
-until guest true 2>/dev/null; do
-    tries=$((tries + 1))
-    [ $tries -lt 60 ] || { echo 'The guest never let the build in.' >&2; exit 1; }
-    sleep 10
-done
+let_in() {
+    tries=0
+    until guest true 2>/dev/null; do
+        tries=$((tries + 1))
+        [ $tries -lt 60 ] || { echo 'The guest never let the build in.' >&2; exit 1; }
+        sleep 10
+    done
+}
+echo 'Waiting for the first boot (packages)'
+let_in
 guest 'cloud-init status --wait >/dev/null; cloud-init status --long | grep -E "^(status|errors)"'
+# again, so the account's user manager starts with the session bus the packages brought
+guest 'sudo systemctl reboot' || true
+sleep 5
+let_in
 echo 'Setting up the data disks'
 git archive --format=tar HEAD packaging/mac/guest | guest 'rm -rf guest && mkdir guest && tar -x -C guest'
 guest 'sudo install -D -m755 guest/packaging/mac/guest/sill-disks /usr/local/lib/sill/sill-disks &&
