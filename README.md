@@ -7,7 +7,7 @@ the agent writes waits for your *Keep* or *Revert*. Sill remembers what each ses
 in the same folder starts informed.
 
 See [SPEC.md](SPEC.md) for the design and [docs/](docs/) for memory, security and design notes; this file
-is the practical side.
+is the practical side. The [roadmap](ROADMAP.md) links ideas, proposed features, current work and history.
 
 Status (2026-11-01): M0–M2 done and in daily use — sessions, pins, Changes, the file tree, a shell inside
 the jail, managed processes, the ACP agent registry, standing instructions, tray icon, and memory
