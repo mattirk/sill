@@ -14,3 +14,6 @@ serde_json.workspace = true
 rustix.workspace = true
 sill-memory.workspace = true
 rusqlite.workspace = true
+
+[dev-dependencies]
+sill-core.workspace = true

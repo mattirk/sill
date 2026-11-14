@@ -778,6 +778,113 @@ fn host_operation_receipts_survive_crash_and_do_not_repeat_uncertain_work() {
 }
 
 #[test]
+fn session_images_use_jail_descriptors_across_daemon_restart() {
+    use std::os::{fd::AsFd, unix::ffi::OsStrExt};
+    use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags, sendmsg};
+    use sill_proto::{admin as a, sessions::HostPath};
+
+    let mut d = Daemon::start();
+    let mut c = d.connect().unwrap();
+    let created = c.call("_sill/sessions.create", json!({"create_id":"image-test", "agent":"claude", "policy":"default"})).unwrap();
+    let session = created["result"]["session_id"].as_str().unwrap().to_owned();
+    let runtime = d.dir.join("run/sill").join(&session);
+    std::fs::create_dir_all(&runtime).unwrap();
+    let socket = runtime.join("shim.sock");
+    // Simulate the distinct mount view: the host has different bytes at the requested path.
+    let path = PathBuf::from(format!("/tmp/sill-image-{}-{session}.jpg", std::process::id()));
+    std::fs::write(&path, b"wrong host image").unwrap();
+    let jail_image = d.dir.join("jail-image.jpg");
+    let bytes = b"\xff\xd8\x00\x80receipt";
+    std::fs::write(&jail_image, bytes).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let expected_path = path.as_os_str().as_bytes().to_vec();
+    let served_image = jail_image.clone();
+    let server = std::thread::spawn(move || {
+        for connection in listener.incoming() {
+            let mut stream = connection.unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap() == 0 { continue; }
+            if line.trim() == "stop" { break; }
+            line.clear();
+            if reader.read_line(&mut line).unwrap() == 0 { continue; }
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["op"], "open_image");
+            if request["path_bytes"] == json!(expected_path) {
+                let file = std::fs::File::open(&served_image).unwrap();
+                let fds = [file.as_fd()];
+                let mut space = [std::mem::MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+                let mut control = SendAncillaryBuffer::new(&mut space);
+                control.push(SendAncillaryMessage::ScmRights(&fds));
+                // Deliberately split the response: the fd arrives before the JSON line.
+                sendmsg(&stream, &[std::io::IoSlice::new(b"{")], &mut control, SendFlags::empty()).unwrap();
+                stream.write_all(b"\"ok\":true}\n").unwrap();
+            } else {
+                writeln!(stream, "{}", json!({"ok":false, "errno":2, "error":"missing in jail"})).unwrap();
+            }
+        }
+    });
+    let request = |offset: &str, length, revision: Option<String>| json!(a::SessionImage {
+        session_id: session.clone(), path: HostPath::from_path(&path),
+        offset: offset.into(), length, revision,
+    });
+    let first = c.call("_sill/files.image", request("0", Some(2), None)).unwrap();
+    let page: a::FileBytes = serde_json::from_value(first["result"].clone()).unwrap();
+    assert_eq!(a::decode_bytes(&page.bytes_base64).unwrap(), &bytes[..2]);
+    assert!(!page.eof);
+    // Keep the same shim/socket and file while replacing only the daemon.
+    c.call(sill_proto::method::DAEMON_SHUTDOWN, json!({})).unwrap();
+    assert!(d.wait_exit().success());
+    let mut restarted = Daemon::start_in(d.dir.clone());
+    let mut c = restarted.connect().unwrap();
+    let rest = c.call("_sill/files.image", request(&page.next_offset, None, Some(page.revision.clone()))).unwrap();
+    let rest: a::FileBytes = serde_json::from_value(rest["result"].clone()).unwrap();
+    assert_eq!(a::decode_bytes(&rest.bytes_base64).unwrap(), &bytes[2..]);
+    assert!(rest.eof);
+    let bad_length = c.call("_sill/files.image", request("0", Some(a::FILE_CHUNK_BYTES as u32 + 1), None)).unwrap();
+    assert!(bad_length.get("error").is_some());
+    std::fs::write(&jail_image, b"changed image").unwrap();
+    let stale = c.call("_sill/files.image", request("2", None, Some(page.revision))).unwrap();
+    assert_eq!(stale["error"]["data"]["code"], "invalid_cursor");
+    let host_only = path.with_file_name(format!("sill-host-only-{session}.jpg"));
+    std::fs::write(&host_only, b"must not fall back to this").unwrap();
+    let mut missing = request("0", None, None);
+    missing["path"] = json!(HostPath::from_path(&host_only));
+    let absent = c.call("_sill/files.image", missing).unwrap();
+    assert_eq!(absent["error"]["data"]["code"], "not_found");
+    for forbidden in ["/.sill/host/tmp/private.jpg", "/tmp/../private.jpg"] {
+        let mut req = request("0", None, None);
+        req["path"] = json!(HostPath::from_path(Path::new(forbidden)));
+        assert!(c.call("_sill/files.image", req).unwrap().get("error").is_some());
+    }
+    let mut stop = UnixStream::connect(&socket).unwrap();
+    writeln!(stop, "stop").unwrap();
+    server.join().unwrap();
+    std::fs::remove_file(&socket).unwrap();
+    let stopped = c.call("_sill/files.image", request("0", None, None)).unwrap();
+    assert_eq!(stopped["error"]["data"]["code"], "not_found", "a stopped jail's tmp image cannot resolve to the host");
+    // A deliberately pinned directory under /tmp is a host bind, not private tmpfs.
+    let pinned = PathBuf::from(format!("/tmp/sill-image-pin-{session}"));
+    std::fs::create_dir(&pinned).unwrap();
+    let pinned_image = pinned.join("image.jpg");
+    std::fs::write(&pinned_image, bytes).unwrap();
+    let created = c.call("_sill/sessions.create", json!({"create_id":"pinned-image-test",
+        "agent":"claude", "policy":"default", "pins":[HostPath::from_path(&pinned)]})).unwrap();
+    let pinned_reply = c.call("_sill/files.image", json!(a::SessionImage {
+        session_id: created["result"]["session_id"].as_str().unwrap().into(),
+        path: HostPath::from_path(&pinned_image), offset:"0".into(), length:None, revision:None,
+    })).unwrap();
+    let pinned_page: a::FileBytes = serde_json::from_value(pinned_reply["result"].clone()).unwrap();
+    assert_eq!(a::decode_bytes(&pinned_page.bytes_base64).unwrap(), bytes);
+    std::fs::remove_dir_all(pinned).unwrap();
+    c.call(sill_proto::method::DAEMON_SHUTDOWN, json!({})).unwrap();
+    assert!(restarted.wait_exit().success());
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_file(host_only).unwrap();
+}
+
+#[test]
 fn public_host_files_and_settings_need_no_internal_capability() {
     use sill_proto::{admin as a, sessions::HostPath};
     use std::os::unix::ffi::OsStringExt;

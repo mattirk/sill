@@ -28,10 +28,14 @@ fn path(p: &HostPath) -> Result<PathBuf> {
     p.to_path().map_err(invalid)
 }
 fn io(error: std::io::Error) -> anyhow::Error {
+    if error.kind() == std::io::ErrorKind::InvalidInput {
+        return invalid(error);
+    }
     domain(
         match error.kind() {
             std::io::ErrorKind::NotFound => "not_found",
             std::io::ErrorKind::PermissionDenied => "permission_denied",
+            std::io::ErrorKind::Unsupported => "unsupported",
             _ => "operation_failed",
         },
         error,
@@ -123,21 +127,25 @@ fn list(a: api::FilesList) -> Result<api::FilesPage> {
     Ok(api::FilesPage { entries, next })
 }
 fn read(a: api::FileRead) -> Result<api::FileBytes> {
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-    let offset = a
-        .offset
-        .parse::<u64>()
-        .map_err(|_| invalid("offset must be a decimal u64"))?;
-    let n = a.length.unwrap_or(api::FILE_CHUNK_BYTES as u32) as usize;
-    if n == 0 || n > api::FILE_CHUNK_BYTES {
-        return Err(invalid("length must be 1–1048576"));
-    }
+    use std::os::unix::fs::OpenOptionsExt;
     // NOFOLLOW avoids opening a symlink swapped after metadata; NONBLOCK avoids FIFO hangs.
-    let mut f = fs::OpenOptions::new()
+    let f = fs::OpenOptions::new()
         .read(true)
         .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
         .open(path(&a.path)?)
         .map_err(io)?;
+    read_open_file(f, &a.offset, a.length, a.revision)
+}
+
+fn read_open_file(mut f: fs::File, offset: &str, length: Option<u32>, expected_revision: Option<String>) -> Result<api::FileBytes> {
+    use std::os::unix::fs::MetadataExt;
+    let offset = offset
+        .parse::<u64>()
+        .map_err(|_| invalid("offset must be a decimal u64"))?;
+    let n = length.unwrap_or(api::FILE_CHUNK_BYTES as u32) as usize;
+    if n == 0 || n > api::FILE_CHUNK_BYTES {
+        return Err(invalid("length must be 1–1048576"));
+    }
     let revision_of = |m: &fs::Metadata| {
         format!(
             "{}:{}:{}:{}:{}:{}:{}",
@@ -152,7 +160,7 @@ fn read(a: api::FileRead) -> Result<api::FileBytes> {
     };
     let meta = f.metadata().map_err(io)?;
     let revision = revision_of(&meta);
-    if a.revision.as_ref().is_some_and(|r| r != &revision) {
+    if expected_revision.as_ref().is_some_and(|r| r != &revision) {
         return Err(domain("invalid_cursor", "file changed; restart reading"));
     }
     if !meta.is_file() {
@@ -227,19 +235,17 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
         "_sill/files.image" => {
             let a: api::SessionImage = args(p)?;
             session(hub, &a.session_id)?;
-            let selected = super::frontend::resolve_image_path(
+            let image = super::frontend::open_session_image(
                 hub,
                 &a.session_id,
                 &path(&a.path)?,
                 &sill_core::changes::home()?,
-            )?
+            ).map_err(|e| match e.downcast::<std::io::Error>() {
+                Ok(e) => io(e),
+                Err(e) => domain("operation_failed", format!("{e:#}")),
+            })?
             .ok_or_else(|| domain("not_found", "image not visible in session"))?;
-            bounded(read(api::FileRead {
-                path: HostPath::from_path(&selected),
-                offset: a.offset,
-                length: a.length,
-                revision: a.revision,
-            })?)
+            bounded(read_open_file(image, &a.offset, a.length, a.revision)?)
         }
         "_sill/policy.denied" => bounded(denied(hub, args(p)?)?),
         "_sill/policy.remember_denied" | "_sill/policy.allow_host" => {

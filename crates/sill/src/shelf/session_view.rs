@@ -648,6 +648,28 @@ impl SessionView {
 
         // The attach notification supplies an atomic transcript tail before live state.
 
+        // Handle the TextView action, not a bubbling key event: GTK may consume Ctrl+V
+        // before that event reaches us. This also covers the context-menu Paste action.
+        {
+            let weak = Rc::downgrade(&view);
+            prompt.connect_paste_clipboard(move |prompt| {
+                let Some(v) = weak.upgrade() else { return };
+                let cb = prompt.clipboard();
+                let formats = cb.formats();
+                let has_image = formats.contains_type(gdk::Texture::static_type())
+                    || formats.mime_types().iter().any(|mime| mime.starts_with("image/"));
+                if !has_image { return; } // Let GTK paste ordinary text normally.
+                prompt.stop_signal_emission_by_name("paste-clipboard");
+                cb.read_texture_async(None::<&gtk::gio::Cancellable>, move |res| {
+                    match res {
+                        Ok(Some(tex)) => v.attach_texture(&tex),
+                        Ok(None) => v.conv.add_error("could not paste image: clipboard supplied no image; copy it again or attach the file"),
+                        Err(e) => v.conv.add_error(&format!("could not paste image: {e}; copy it again or attach the file")),
+                    }
+                });
+            });
+        }
+
         // Enter sends, Shift+Enter inserts a newline
         let keys = gtk::EventControllerKey::new();
         {
@@ -655,20 +677,6 @@ impl SessionView {
             let prompt = prompt.clone();
             keys.connect_key_pressed(move |_, key, _, state| {
                 let Some(v) = weak.upgrade() else { return glib::Propagation::Proceed };
-                // Ctrl+V with an image on the clipboard: attach it (text pastes as usual)
-                if (key == gdk::Key::v || key == gdk::Key::V) && state.contains(gdk::ModifierType::CONTROL_MASK) {
-                    let cb = prompt.clipboard();
-                    if cb.formats().contains_type(gdk::Texture::static_type()) {
-                        let v2 = v.clone();
-                        cb.read_texture_async(None::<&gtk::gio::Cancellable>, move |res| {
-                            if let Ok(Some(tex)) = res {
-                                v2.attach_texture(&tex);
-                            }
-                        });
-                        return glib::Propagation::Stop;
-                    }
-                    return glib::Propagation::Proceed;
-                }
                 if key == gdk::Key::Tab && v.command_pop.is_visible() {
                     if let Some(name) = v.command_matches().first().map(|c| c.name.clone()) { v.complete_command(&name); }
                     return glib::Propagation::Stop;
@@ -1952,7 +1960,7 @@ impl SessionView {
     fn attach_texture(self: &Rc<Self>, tex: &gdk::Texture) {
         let png = tex.save_to_png_bytes();
         if png.len() > 8 << 20 {
-            self.conv.add_note("image not attached: larger than 1 MB");
+            self.conv.add_note("image not attached: larger than 8 MB");
             return;
         }
         let n = self.attachments.borrow().iter().filter(|a| a.mime.starts_with("image/")).count() + 1;
@@ -2079,13 +2087,16 @@ impl SessionView {
         self.bottom.connect_visible_child_name_notify(move |_| f());
     }
 
-    /// An image path as the agent wrote it → the file it sees in its jail: relative to home, `..`
-    /// folded lexically; nothing under a masked path; a pinned folder is the host's own; otherwise
-    /// the session's overlay copy when it has one (a regular file — a whiteout means deleted), else
-    /// the host file. Images only.
+    /// Read through the daemon's session-image API, then cache locally for GTK. Live images
+    /// are opened by the jail's supervisor, including private mounts such as /tmp.
     fn resolve_jail_path(&self, src: &str) -> Option<std::path::PathBuf> {
-        let bytes = Some(remote::session_image(&self.id(),src).ok()?);
-        let bytes = bytes?;
+        let bytes = match remote::session_image(&self.id(), src) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                eprintln!("sill: session {} image {src:?}: {e:#}", self.id());
+                return None;
+            }
+        };
         let key = format!("{}:{}:{}", std::env::var("SILL_BOX").unwrap_or_default(), self.id(), src);
         remote::cache_image(&key, &bytes, std::path::Path::new(src).extension().and_then(|s| s.to_str()).unwrap_or("img"))
     }

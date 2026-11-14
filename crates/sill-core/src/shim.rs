@@ -126,6 +126,39 @@ impl Control {
         Ok(r.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string())
     }
 
+    /// Open an image inside the live jail. Binary bytes stay on the descriptor; no text
+    /// conversion, host-path lookup or agent process is involved.
+    pub fn open_image(&mut self, path: &Path) -> Result<std::fs::File> {
+        use std::io::Read;
+        use std::os::unix::ffi::OsStrExt;
+        use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, recvmsg};
+        writeln!(self.writer, "{}", json!({"op":"open_image", "path_bytes":path.as_os_str().as_bytes()}))?;
+        // Ancillary data rides on the first byte. Then read the rest as a bounded line,
+        // since a Unix stream may split even this small reply across multiple writes.
+        let mut first = [0u8; 1];
+        let mut space = [std::mem::MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+        let mut control = RecvAncillaryBuffer::new(&mut space);
+        let received = recvmsg(&self.writer, &mut [std::io::IoSliceMut::new(&mut first)], &mut control, RecvFlags::CMSG_CLOEXEC)?;
+        let mut fds = Vec::new();
+        for message in control.drain() {
+            if let RecvAncillaryMessage::ScmRights(rights) = message { fds.extend(rights); }
+        }
+        anyhow::ensure!(received.bytes == 1 && !received.flags.contains(rustix::net::ReturnFlags::CTRUNC), "incomplete shim image reply");
+        let mut reply = first.to_vec();
+        (&mut self.reader).take(8192).read_until(b'\n', &mut reply)?;
+        anyhow::ensure!(reply.last() == Some(&b'\n'), "incomplete shim image reply");
+        let reply: serde_json::Value = serde_json::from_slice(&reply).context("shim image reply")?;
+        if reply["ok"] != true {
+            if let Some(errno) = reply["errno"].as_i64().and_then(|n| i32::try_from(n).ok()) {
+                return Err(std::io::Error::from_raw_os_error(errno).into());
+            }
+            bail!("shim image read failed: {}; start a new session if its supervisor predates image reads",
+                reply["error"].as_str().unwrap_or("unknown error"));
+        }
+        anyhow::ensure!(fds.len() == 1, "expected one image fd in the shim reply");
+        Ok(std::fs::File::from(fds.pop().unwrap()))
+    }
+
     /// Open a pty in the jail running `argv`; returns the master fd and the child's pid.
     pub fn open_pty(
         &mut self,

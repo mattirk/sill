@@ -360,6 +360,13 @@ This milestone remains `sfp/1-dev.3`. **What stands between it and stable `sfp/1
   agent generation with explicit discontinuity is already the specified outcome. Performance
   is likewise not a gate (see the benchmark disposition below).
 
+**Acceptance progress, 2026-11-04:** the human confirmed that a shelf session survived a
+daemon restart during an active shell loop, and that a pending blocking question remained
+answerable after another restart, with the answer delivered to the agent. See
+[the recorded test scope](development-history.md#restart-acceptance) and
+[remaining acceptance work](work-items.md#stable-sfp-release). These results do not yet
+complete the release checklist above.
+
 Snapshot capture still copies under the store lock; canonical history
 and idempotency identities remain proportional to retained sessions, and native v2 reconstruction
 currently caches retained source payloads. The implemented quotas are intentional bounds, not a
@@ -548,6 +555,13 @@ network-denial, process and memory operations; CLI memory readers use the same p
   is live, ordered by exact path bytes; `after` is an exclusive direct-child path. Pages default
   to 64 entries and allow 1–128. Metadata describes the link itself and carries an absolute link
   target separately. Reads refuse symlinks and special files, including FIFOs.
+- Live-session image reads are opened inside the jail by its supervisor and passed to the
+  daemon as read-only file descriptors. This includes private mounts such as `/tmp`; a
+  missing jail file never falls back to a same-named host file. Image paths reject `..`,
+  symlink traversal and `/.sill` internals. After a jail stops, retained pin/overlay images
+  can still be read, but unpinned ephemeral mounts (`/tmp`, `/run`, `/proc`, `/dev`, `/sys`) cannot.
+  Deployment of this change requires a fresh session with the updated `sill-shim`;
+  restarting only the daemon retains the old supervisor. The public SFP schema is unchanged.
 - File and image reads return at most 1 MiB as base64. Preserve the returned `revision` for later
   chunks; inode, device, size, modification and change timestamps detect changes and produce
   `invalid_cursor`. This detects edits rather than providing an immutable file snapshot. Whole-file

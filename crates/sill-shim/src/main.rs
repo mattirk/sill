@@ -20,6 +20,7 @@
 //! sill's memory at `/.sill/memory/` ([`memory_cli`]; the queries are `sill_memory`'s).
 
 mod forward;
+mod images;
 mod procs;
 
 use std::collections::{BTreeMap, VecDeque};
@@ -65,6 +66,8 @@ enum Request {
     Revert { path: PathBuf },
     /// Read a file as the jail sees it (merged view).
     ReadFile { path: PathBuf },
+    /// Open a regular image in the jail and return its read-only fd via SCM_RIGHTS.
+    OpenImage { path_bytes: Vec<u8> },
     /// Write a file in the jail (merged view, recorded by the overlay).
     WriteFile { path: PathBuf, content: String },
     /// Managed processes (docs/tasks.md §2.4): what the jail's `sill-proc` can do, for the shelf.
@@ -322,6 +325,16 @@ fn control_loop(reader: BufReader<UnixStream>, mut writer: UnixStream, shared: S
                 continue;
             }
         };
+        if let Request::OpenImage { path_bytes } = req {
+            match images::open_image(&path_bytes) {
+                Ok(fd) => send_with_fd(&writer, b"{\"ok\":true}\n", &fd)?,
+                Err(e) => {
+                    let reply = Reply::err(e).with("errno", e.raw_os_error());
+                    writeln!(writer, "{}", serde_json::to_string(&reply)?)?;
+                }
+            }
+            continue;
+        }
         if let Request::OpenPty { argv, env, cwd, cols, rows } = req {
             match open_pty(argv, env, cwd, cols, rows) {
                 Ok((master, pid)) => {
@@ -345,7 +358,46 @@ fn control_loop(reader: BufReader<UnixStream>, mut writer: UnixStream, shared: S
     Ok(())
 }
 
-/// Reply line + the pty master fd in one message (SCM_RIGHTS rides on the first byte).
+#[cfg(test)]
+mod image_control_tests {
+    use super::*;
+    use std::io::Read;
+
+    #[test]
+    fn image_control_passes_binary_fds_and_preserves_read_errors() {
+        let dir = std::env::temp_dir().join(format!("sill-image-control-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("image.jpg");
+        let bytes = b"\xff\xd8\x00\x80\xfe";
+        std::fs::write(&path, bytes).unwrap();
+        let socket = dir.join("shim.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut hello = String::new();
+            reader.read_line(&mut hello).unwrap();
+            assert_eq!(serde_json::from_str::<serde_json::Value>(&hello).unwrap()["role"], "control");
+            let shared = Arc::new((Mutex::new(State::default()), Condvar::new()));
+            control_loop(reader, stream, shared, procs::Procs::default()).unwrap();
+        });
+        let mut control = sill_core::shim::Control::connect(&socket).unwrap();
+        let mut image = control.open_image(&path).unwrap();
+        let mut actual = Vec::new();
+        image.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, bytes);
+        assert!(rustix::io::fcntl_getfd(&image).unwrap().contains(rustix::io::FdFlags::CLOEXEC));
+        let error = control.open_image(&dir.join("missing.jpg")).unwrap_err();
+        assert_eq!(error.downcast_ref::<std::io::Error>().unwrap().kind(), std::io::ErrorKind::NotFound);
+        // An error must leave the control stream usable.
+        assert!(control.open_image(&path).is_ok());
+        drop(control);
+        server.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+/// Reply line + a descriptor (SCM_RIGHTS rides on the first byte).
 fn send_with_fd(sock: &UnixStream, bytes: &[u8], fd: &std::os::fd::OwnedFd) -> Result<()> {
     use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags, sendmsg};
     use std::os::fd::AsFd;
@@ -353,7 +405,10 @@ fn send_with_fd(sock: &UnixStream, bytes: &[u8], fd: &std::os::fd::OwnedFd) -> R
     let mut space = [std::mem::MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
     let mut control = SendAncillaryBuffer::new(&mut space);
     control.push(SendAncillaryMessage::ScmRights(&fds));
-    sendmsg(sock, &[std::io::IoSlice::new(bytes)], &mut control, SendFlags::empty())?;
+    let written = sendmsg(sock, &[std::io::IoSlice::new(bytes)], &mut control, SendFlags::empty())?;
+    // A stream send can be partial; only the first send carries the descriptor.
+    let mut socket = sock;
+    socket.write_all(&bytes[written..])?;
     Ok(())
 }
 
@@ -442,7 +497,7 @@ fn handle_request(req: Request, shared: &Shared, procs: &procs::Procs) -> Reply 
             Ok(()) => Reply::ok(),
             Err(e) => Reply::err(format!("{e:#}")),
         },
-        Request::OpenPty { .. } => Reply::err("handled by the control loop"),
+        Request::OpenPty { .. } | Request::OpenImage { .. } => Reply::err("handled by the control loop"),
     }
 }
 

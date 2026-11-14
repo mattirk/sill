@@ -7,17 +7,44 @@ use super::Hub;
 
 pub(super) static CONFIG: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-pub(super) fn resolve_image_path(hub:&Hub,session:&str,src:&Path,home:&Path)->Result<Option<std::path::PathBuf>> {
-    use std::path::{Component,PathBuf};
-    use std::os::unix::fs::FileTypeExt;
-    let raw = PathBuf::from(src);
-    let raw = if raw.is_absolute() { raw } else { home.join(raw) };
-    let mut p = PathBuf::from("/");
-    for c in raw.components() { match c { Component::ParentDir => { p.pop(); }, Component::Normal(n) => p.push(n), _ => {} } }
-    let image = p.extension().map(|e| e.to_string_lossy().to_lowercase()).is_some_and(|e| matches!(e.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp"));
+pub(super) fn open_session_image(hub:&Hub,session:&str,src:&Path,home:&Path)->Result<Option<std::fs::File>> {
+    use std::path::Component;
+    let p = if src.is_absolute() { src.to_path_buf() } else { home.join(src) };
+    if p.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "image path cannot contain ..").into());
+    }
+    if p.starts_with("/.sill") {
+        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "shim internals are not image sources").into());
+    }
+    let image = p.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp"));
     if !image { return Ok(None) }
+    let socket = sill_core::shim::runtime_dir(session)?.join("shim.sock");
+    match sill_core::shim::Control::connect(&socket) {
+        Ok(mut shim) => return shim.open_image(&p).map(Some),
+        Err(e) => {
+            // A stopped jail may still have persistent overlay images. A live supervisor's
+            // read failure must never fall back to a different file on the host.
+            let stopped = e.downcast_ref::<std::io::Error>().is_some_and(|e| matches!(e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused));
+            if !stopped { return Err(e); }
+        }
+    }
+    let Some(path) = stored_image_path(hub,session,&p)? else { return Ok(None) };
+    use std::os::unix::fs::OpenOptionsExt;
+    Ok(Some(std::fs::OpenOptions::new().read(true)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
+        .open(path)?))
+}
+
+fn stored_image_path(hub:&Hub,session:&str,p:&Path)->Result<Option<std::path::PathBuf>> {
+    use std::os::unix::fs::FileTypeExt;
     let pins = hub.with_store(|s| s.jail_pins(session))?;
-    if pins.iter().any(|pin| pin.is_dir() && p.starts_with(pin)) { return Ok(Some(p)) }
+    if pins.iter().any(|pin| pin.is_dir() && p.starts_with(pin)) { return Ok(Some(p.to_path_buf())) }
+    // These mounts disappear with the jail; a same-named host file is unrelated.
+    // Explicit pins take precedence, just as they do when constructing the jail.
+    if ["/tmp", "/run", "/proc", "/dev", "/sys"].iter().any(|root| p.starts_with(root)) {
+        return Ok(None);
+    }
     let view = hub.jail_view(session)?;
     if view.masked.iter().any(|mask| p.starts_with(mask)) { return Ok(None) }
     for (host, upper) in view.layers {
@@ -29,7 +56,7 @@ pub(super) fn resolve_image_path(hub:&Hub,session:&str,src:&Path,home:&Path)->Re
             }
         }
     }
-    Ok(Some(p))
+    Ok(Some(p.to_path_buf()))
 }
 
 #[cfg(test)]
