@@ -54,12 +54,15 @@ pub fn prepare(dir: &Path, image_dir: &Path) -> Result<Prepared> {
     Ok(Prepared { first, updated })
 }
 
-/// The image's `system.raw` in `dir`, unless the one there is the same build (by `commit`).
-/// A clone on APFS: instant, and no space taken until the guest writes.
+/// The image in `dir` as `system.raw`, unless the one there is the same build (by `commit`):
+/// cloned from `image_dir/system.raw` (a build of it, instant on APFS), or unpacked from
+/// `image_dir/system.raw.gz` (the app's: a sparse 16 GB file would not survive being copied out
+/// of a disk image), writing only what is not zeros.
 fn place_image(dir: &Path, image_dir: &Path) -> Result<bool> {
-    let source = image_dir.join("system.raw");
-    if !source.exists() {
-        bail!("no system image at {}", source.display());
+    let raw = image_dir.join("system.raw");
+    let packed = image_dir.join("system.raw.gz");
+    if !raw.exists() && !packed.exists() {
+        bail!("no system image in {}", image_dir.display());
     }
     let commit = std::fs::read_to_string(image_dir.join("commit")).unwrap_or_default();
     let placed = dir.join("system.raw");
@@ -69,11 +72,57 @@ fn place_image(dir: &Path, image_dir: &Path) -> Result<bool> {
     }
     let temp = dir.join("system.raw.new");
     let _ = std::fs::remove_file(&temp);
-    // std's copy clones the file on APFS (fclonefileat)
-    std::fs::copy(&source, &temp).with_context(|| format!("copying {}", source.display()))?;
+    if raw.exists() {
+        // std's copy clones the file on APFS (fclonefileat)
+        std::fs::copy(&raw, &temp).with_context(|| format!("copying {}", raw.display()))?;
+    } else {
+        unpack_sparse(&packed, &temp).with_context(|| format!("unpacking {}", packed.display()))?;
+    }
     std::fs::rename(&temp, &placed)?;
     std::fs::write(&placed_commit, commit)?;
     Ok(true)
+}
+
+/// Gunzip `from` into `to`, leaving zeros as holes: the image's free space takes none. The file
+/// is sized first (`from`'s `.size` beside it, when there) and only the 4 KB blocks with data are
+/// written into it: APFS fills a gap of up to 16 MB that a growing file skips, and writing
+/// whole megabytes would store the zeros between data (measured 2026-11-12: 1.8 GB on disk for
+/// the 1.7 GB image this way, 2.4 GB by seeking past megabytes of zeros).
+fn unpack_sparse(from: &Path, to: &Path) -> Result<()> {
+    use std::io::Read;
+    use std::os::unix::fs::FileExt;
+    const CHUNK: usize = 1 << 20;
+    const BLOCK: usize = 4096;
+    let mut input = flate2::read::GzDecoder::new(std::io::BufReader::new(std::fs::File::open(from)?));
+    let output = std::fs::File::create(to)?;
+    let size_file = from.with_extension("gz.size");
+    if let Some(size) = std::fs::read_to_string(&size_file).ok().and_then(|s| s.trim().parse::<u64>().ok()) {
+        output.set_len(size)?;
+    }
+    let mut buf = vec![0u8; CHUNK];
+    let mut offset: u64 = 0;
+    loop {
+        // a whole chunk, unless the stream ends
+        let mut filled = 0;
+        while filled < CHUNK {
+            match input.read(&mut buf[filled..])? {
+                0 => break,
+                n => filled += n,
+            }
+        }
+        if filled == 0 {
+            break;
+        }
+        for (i, block) in buf[..filled].chunks(BLOCK).enumerate() {
+            if block.iter().any(|b| *b != 0) {
+                output.write_all_at(block, offset + (i * BLOCK) as u64)?;
+            }
+        }
+        offset += filled as u64;
+    }
+    output.set_len(offset)?;
+    output.sync_all()?;
+    Ok(())
 }
 
 /// The NoCloud seed: the account's key, and an instance id of this VM's own, so the image's
@@ -154,6 +203,28 @@ pub fn default_dir() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_packed_image_unpacks_whole_with_its_zeros_as_holes() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("sill-vm-unpack-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // data, 64 MB of zeros, data (APFS fills gaps of 16 MB or less, keeps 32 MB and more
+        // as holes: measured 2026-11-12)
+        let mut image = b"start".to_vec();
+        image.resize(64 << 20, 0);
+        image.extend_from_slice(b"end");
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(&image).unwrap();
+        std::fs::write(dir.join("system.raw.gz"), gz.finish().unwrap()).unwrap();
+        std::fs::write(dir.join("system.raw.gz.size"), image.len().to_string()).unwrap();
+        super::unpack_sparse(&dir.join("system.raw.gz"), &dir.join("out.raw")).unwrap();
+        assert_eq!(std::fs::read(dir.join("out.raw")).unwrap(), image);
+        use std::os::unix::fs::MetadataExt;
+        let taken = std::fs::metadata(dir.join("out.raw")).unwrap().blocks() * 512;
+        assert!(taken < 8 << 20, "{taken} bytes on disk for a 64 MB file mostly zeros");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn the_ssh_config_quotes_paths_with_spaces() {
         let config = super::ssh_config(std::path::Path::new("/Users/a/Library/Application Support/Sill/vm"));

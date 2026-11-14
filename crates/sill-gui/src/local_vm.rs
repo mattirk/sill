@@ -342,14 +342,16 @@ pub fn reveal() -> Result<(), String> {
         .map_err(|e| format!("Could not open {}: {e}", dir.display()))
 }
 
-/// Where the system image is: `SILL_VM_IMAGE`, the app bundle's resources, or a build of it in
+/// Where the system image is: `SILL_VM_IMAGE`, the app bundle's resources (`Resources/vm`,
+/// compressed), or a build of it in
 /// the repository the program was built in (`packaging/mac-image.sh`, `dist/mac-image`).
 fn image_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("SILL_VM_IMAGE") {
         return Some(PathBuf::from(dir));
     }
     let exe = std::env::current_exe().ok()?;
-    let has_image = |dir: &std::path::Path| dir.join("system.raw").exists();
+    let has_image =
+        |dir: &std::path::Path| dir.join("system.raw").exists() || dir.join("system.raw.gz").exists();
     if let Some(resources) = exe.parent().and_then(|macos| macos.parent()).map(|c| c.join("Resources/vm"))
         && has_image(&resources)
     {
