@@ -57,11 +57,6 @@ impl App {
                 return self.empty();
             };
             let placement = self.layout.drawer(self.drawer.shown, size.width);
-            // Beside a composer the grip stands only beside what is above it, so the composer
-            // reaches the drawer's edge (no strip of the window's background between them);
-            // the feed keeps one place in the tree with or without it.
-            let beside_drawer = matches!(placement, Drawer::Beside(_));
-            let grip_inside = std::cell::Cell::new(false);
             let body = if let Some(editor) = &view.annotation {
                 column![crate::annotation::view(editor), self.composer(view)]
                     .height(Fill)
@@ -74,19 +69,13 @@ impl App {
                     // the test desktop in the conversation's place, the composer staying
                     None if view.desktop.shown => {
                         let session = self.all_sessions.iter().find(|s| s.session_id == view.id);
-                        {
-                            grip_inside.set(beside_drawer);
-                            column![self.above_composer(crate::desktop_view::pane(view, session), beside_drawer), self.composer(view)]
-                        }
+                        column![crate::desktop_view::pane(view, session), self.composer(view)]
                             .height(Fill)
                             .into()
                     }
-                    None => {
-                        grip_inside.set(beside_drawer);
-                        column![self.above_composer(self.feed(view), beside_drawer), self.composer(view)]
-                            .height(Fill)
-                            .into()
-                    }
+                    None => column![self.feed(view), self.composer(view)]
+                        .height(Fill)
+                        .into(),
                 }
             };
             // a file open takes the chips' row too
@@ -101,14 +90,17 @@ impl App {
             // it would give its scrollable fresh state (back at the top) and drop a selection
             let mut beside = row![main].height(Fill);
             if let Drawer::Beside(width) = placement {
-                if !grip_inside.get() {
-                    beside = beside.push(self.drawer_grip(false));
-                }
-                // the line between them is the drawer's own left edge, the whole height
+                // the line between them is the drawer's own left edge, the whole height, right
+                // beside the conversation's scrollbar and composer; the grip to drag it is on the
+                // drawer's side of the line, over its edge, so the drawer's own separators still
+                // meet the line (the person, 2026-11-13: no gap before the line)
                 let line = if self.layout.dragging { P.accent } else { P.border };
                 beside = beside.push(
-                    container(row![rule::vertical(1).style(style::rule_style(line)), self.file_drawer(view)])
-                        .width(width),
+                    container(stack![
+                        row![rule::vertical(1).style(style::rule_style(line)), self.file_drawer(view)],
+                        container(self.drawer_grip(false)).padding(Padding { left: 1.0, ..Padding::ZERO }),
+                    ])
+                    .width(width + layout::HANDLE),
                 );
             }
             let mut page = stack![beside];
@@ -244,15 +236,6 @@ impl App {
 
     /// The drawer's edge: flush with its horizontal separators. The wider drag target
     /// extends toward the conversation so it leaves no gap at any separator junction.
-    /// What stands over the composer, with the drawer's grip beside it when the drawer is.
-    fn above_composer<'a>(&'a self, content: Element<'a, Message>, grip: bool) -> Element<'a, Message> {
-        let mut line = row![content].height(Fill);
-        if grip {
-            line = line.push(self.drawer_grip(false));
-        }
-        line.into()
-    }
-
     /// The grip between the conversation and the drawer; `lined` draws the drawer's edge in
     /// it (the drawer over the conversation), else the drawer draws its own.
     fn drawer_grip(&self, lined: bool) -> Element<'_, Message> {
@@ -266,12 +249,10 @@ impl App {
         } else {
             space().into()
         };
-        mouse_area(
-            container(strip)
-                .align_right(layout::HANDLE)
-                .height(Fill)
-                .style(style::fill(P.bg)),
-        )
+        // lined, it stands between the two with the window's background; else it lies over the
+        // drawer's edge, unseen
+        let grip = container(strip).align_right(layout::HANDLE).height(Fill);
+        mouse_area(if lined { grip.style(style::fill(P.bg)) } else { grip })
         .interaction(iced::mouse::Interaction::ResizingHorizontally)
         .on_press(Message::Layout(layout::Action::DragStart))
         .into()
