@@ -827,8 +827,13 @@ back. `_sill/workspaces.changed` (notification, this capability only) invalidate
 Mutations take an `operation_id` with the receipts of [sfp-operations.md](sfp-operations.md): an
 identical retry never repeats the work, and `_sill/operations.get` reports the receipt. Refusals use
 `invalid_state` with the optional details `{reason, paths}`: `stale_revision`, `source_moved`,
-`source_overlap`, `untracked_collision`, `writer_active`, `rebase_in_progress`, `rebase_failed`,
-`changed_since`, `retention_expired`, `detached_head`, `no_session`. The workspace methods first
+`source_overlap`, `untracked_collision`, `uncommitted`, `no_identity`, `writer_active`,
+`rebase_in_progress`, `rebase_failed`, `changed_since`, `retention_expired`, `detached_head`,
+`no_session`. Apply brings commits only (2026-11-10): `uncommitted` means the workspace holds
+uncommitted changes its session's agent can still commit, and a frontend asks the agent to
+commit them, then applies if the detail's `state_tree` is unchanged; a workspace no agent will
+write again has them committed by the daemon as the person (`no_identity` when Git has no
+`user.name` and `user.email` for them). The workspace methods first
 recorded on 2026-11-09 (create, finish, reopen, merge) were replaced the same day, before any
 release, and removed from the recorded baseline.
 

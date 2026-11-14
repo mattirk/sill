@@ -180,9 +180,8 @@ fn create_borrows_the_real_store_and_leaves_only_an_anchor() {
     assert_eq!(git(&c.path, &["rev-parse", "HEAD"]), src.head);
     assert_eq!(git(&c.path, &["rev-parse", "refs/sill/base"]), src.head);
     assert_eq!(std::fs::read_to_string(c.path.join("f1.txt")).unwrap(), "line 1\n", "from HEAD only");
-    // nothing copied from the source: its only own object is the base snapshot's commit (§12)
-    assert!(git(&c.path, &["count-objects"]).starts_with("1 objects"));
-    assert_eq!(git(&c.path, &["rev-parse", "refs/sill/applied^{tree}"]), git(&c.path, &["rev-parse", "HEAD^{tree}"]));
+    // nothing copied from the source, and no object of its own
+    assert!(git(&c.path, &["count-objects"]).starts_with("0 objects"));
     // the source: its edit and status as they were, one anchor more
     assert_eq!(git(&s, &["status", "--porcelain"]), before_status);
     assert_eq!(git(&s, &["for-each-ref", "--format=%(refname)", "refs/sill/"]), "refs/sill/workspaces/ab12/base");
@@ -252,8 +251,7 @@ fn apply_works_with_packed_refs() {
     agent_commit(&c.path);
     git(&s, &["pack-refs", "--all"]);
     assert!(!s.join(".git/refs/heads/main").exists());
-    let was = super::flow::applied(&c.path).unwrap();
-    let new = super::flow::apply(&s, &c.path, "ab12", "main", &src.head, &c.branch, &was).unwrap().unwrap().tip;
+    let new = super::flow::apply(&s, &c.path, "ab12", "main", &src.head, &c.branch).unwrap().unwrap().tip;
     assert_eq!(git(&s, &["rev-parse", "main"]), new);
     assert!(git_ok(&s, &["fsck"]));
     // the view's link to packed-refs is intact: the real file is still a file
@@ -274,8 +272,7 @@ fn rebase_onto_a_moved_source_needs_no_fetch() {
     let before = git(&c.path, &["rev-parse", "HEAD"]);
     assert_eq!(git(&c.path, &["rev-parse", "refs/sill/pre-rebase"]), before);
     git(&c.path, &["rebase", "-q", "refs/sill/dest"]); // the helper jail's job; plain here
-    let was = super::flow::applied(&c.path).unwrap();
-    let new = super::flow::apply(&s, &c.path, "ab12", "main", &dest, &c.branch, &was).unwrap().unwrap().tip;
+    let new = super::flow::apply(&s, &c.path, "ab12", "main", &dest, &c.branch).unwrap().unwrap().tip;
     assert_eq!(std::fs::read_to_string(s.join("f3.txt")).unwrap(), "host work\n");
     assert_eq!(std::fs::read_to_string(s.join("f2.txt")).unwrap(), "agent work\n");
     assert_eq!(git(&s, &["rev-parse", "main"]), new);
@@ -321,13 +318,16 @@ fn no_program_from_either_config_runs_on_the_host() {
     let _ = summary(&c.path, &c.branch, &c.base).unwrap();
     let _ = revision(&c.path, &c.branch).unwrap();
     set_destination(&s, &c.path, "ab12", "main", &c.branch).unwrap();
-    // the §12 flow too: an Apply of uncommitted work, a Discard, an Undo, a workspace made warm
+    // the §12 flow too: sill's own commit of uncommitted work as the person, an Apply, a Discard,
+    // an Undo, a workspace made warm
     write(&c.path.join("f3.txt"), "agent uncommitted\n");
     write(&c.path.join("extra.txt"), "agent new\n");
+    git(&s, &["config", "user.name", "Pat Person"]);
+    git(&s, &["config", "user.email", "pat@example.org"]);
+    let (name, email) = super::flow::identity(&s).unwrap().unwrap();
+    assert!(super::flow::commit_all(&c.path, &c.branch, "the session's title", &name, &email).unwrap());
     let tip = git(&s, &["rev-parse", "main"]);
-    let was = super::flow::applied(&c.path).unwrap();
-    let a = super::flow::apply(&s, &c.path, "ab12", "main", &tip, &c.branch, &was).unwrap().unwrap();
-    super::flow::set_applied(&c.path, &a.snapshot).unwrap();
+    super::flow::apply(&s, &c.path, "ab12", "main", &tip, &c.branch).unwrap().unwrap();
     write(&c.path.join("f3.txt"), "more\n");
     let kept = super::flow::discard(&s, &c.path, "ab12", "1", &c.branch).unwrap();
     assert!(super::flow::undo(&s, &c.path, &c.branch, &kept).unwrap());

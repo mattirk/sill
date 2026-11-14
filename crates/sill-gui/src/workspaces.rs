@@ -22,6 +22,10 @@ pub struct State {
     pub notices: BTreeMap<String, (String, bool)>,
     /// The workspace whose diff is open in the shelf, and the diff.
     pub diff: Option<(String, Result<String, String>)>,
+    /// An Apply waiting for the agent to commit the workspace's uncommitted changes: the
+    /// workspace and its state (`Detail::state_tree`) when the person clicked. It applies at the
+    /// turn's end when that state is all committed and nothing else changed.
+    pub committing: Option<(String, String)>,
 }
 
 impl State {
@@ -62,6 +66,13 @@ pub enum Event {
     PageDone(String, bool),
     Loaded(String, Result<Loaded, String>),
     Apply(String, String),
+    /// An Apply found uncommitted changes: ask the session's agent to commit them; the Apply
+    /// follows at its turn's end.
+    Commit(String, String),
+    /// The turn after that prompt ended: the session's workspaces read afresh.
+    Committed(String, Result<Loaded, String>),
+    /// The Changes page's Apply found uncommitted changes in this workspace.
+    PageCommit(String),
     Discard(String, String),
     Abort(String, String),
     /// A stopped rebase: ask the session's agent to resolve it and finish the rebase.
@@ -83,7 +94,33 @@ fn resolve_prompt(detail: &str) -> String {
     )
 }
 
+/// What Apply sends the agent when its workspace holds uncommitted changes: Apply brings commits
+/// only, and the message is the agent's to write.
+fn commit_prompt(repository: &str) -> String {
+    format!(
+        "Commit the uncommitted changes in {repository} now, with a commit message of your own that says what they do, so that I can apply them to my checkout. \
+         Change nothing else. Every changed or new file must end up committed, ignored or removed: `git status` must be clean afterwards."
+    )
+}
+
 impl App {
+    /// After a turn's end: when an Apply waits for the agent's commit, read the session's
+    /// workspaces afresh and decide it ([`Event::Committed`]).
+    pub(crate) fn workspaces_turn_ended(&self, session: &str) -> Task<Message> {
+        if !self.views.get(session).is_some_and(|v| v.workspaces.committing.is_some()) {
+            return Task::none();
+        }
+        let Some(actions) = self.actions.clone() else { return Task::none() };
+        let id = session.to_string();
+        blocking(
+            move || ws::load(&actions, &id).map_err(|e| ws::message(&e)),
+            {
+                let id = session.to_string();
+                move |loaded| Message::Workspaces(Event::Committed(id, loaded))
+            },
+        )
+    }
+
     /// Read `session`'s workspaces; refreshed with its files (a turn's end, the 15 s poll, opening).
     pub(crate) fn workspaces_load(&self, session: &str) -> Task<Message> {
         let Some(actions) = self.actions.clone() else { return Task::none() };
@@ -148,12 +185,29 @@ impl App {
                 let (Some(actions), Some(seen)) = (self.actions.clone(), self.page_seen(&workspace)) else { return Task::none() };
                 blocking(
                     move || match ws::apply(&actions, &workspace, &seen) {
-                        Ok(ApplyOutcome::Applied) => ("Applied to your checkout.".to_string(), false),
-                        Ok(ApplyOutcome::Conflicts(paths)) => (format!("The rebase stopped on {}: resolve it in the session, or abort it there.", paths.join(", ")), true),
-                        Err(e) => (ws::message(&e), true),
+                        Ok(ApplyOutcome::Applied) => Event::PageDone("Applied to your checkout.".to_string(), false),
+                        Ok(ApplyOutcome::Conflicts(paths)) => Event::PageDone(format!("The rebase stopped on {}: resolve it in the session, or abort it there.", paths.join(", ")), true),
+                        Ok(ApplyOutcome::Uncommitted) => Event::PageCommit(workspace),
+                        Err(e) => Event::PageDone(ws::message(&e), true),
                     },
-                    |(said, bad)| Message::Workspaces(Event::PageDone(said, bad)),
+                    Message::Workspaces,
                 )
+            }
+            Event::PageCommit(workspace) => {
+                // the agent commits in its session: asked there when the session is open here
+                let session = self.changes_listing.details().iter().find(|d| d.workspace.workspace_id == workspace).map(|d| d.workspace.session_id.clone());
+                let open = session.filter(|s| self.views.get(s).is_some_and(|v| !v.conversation.busy() && v.workspaces.loaded.as_ref().is_some_and(|l| l.detail(&workspace).is_some())));
+                let said = match &open {
+                    Some(_) => "It has uncommitted changes: its session's agent is asked to commit them, and they are applied when its turn ends.",
+                    None => "It has uncommitted changes the agent commits first: open its session and apply there.",
+                };
+                if let Some(page) = &mut self.changes {
+                    page.said = Some(said.to_string());
+                }
+                match open {
+                    Some(session) => Task::done(Message::Workspaces(Event::Commit(session, workspace))),
+                    None => Task::none(),
+                }
             }
             Event::PageDiscard(workspace) => {
                 // the listing from before the page was opened is shown, not acted on
@@ -230,12 +284,43 @@ impl App {
                 let Some((actions, seen)) = self.workspace_action(&session, &workspace) else { return Task::none() };
                 blocking(
                     move || match ws::apply(&actions, &workspace, &seen) {
-                        Ok(ApplyOutcome::Applied) => (workspace, "Applied to your checkout.".to_string(), false),
-                        Ok(ApplyOutcome::Conflicts(paths)) => (workspace, format!("The rebase onto your checkout stopped on {}: Resolve asks the agent, or Abort.", paths.join(", ")), true),
-                        Err(e) => (workspace, ws::message(&e), true),
+                        Ok(ApplyOutcome::Applied) => Event::Done(session, workspace, "Applied to your checkout.".to_string(), false),
+                        Ok(ApplyOutcome::Conflicts(paths)) => Event::Done(session, workspace, format!("The rebase onto your checkout stopped on {}: Resolve asks the agent, or Abort.", paths.join(", ")), true),
+                        Ok(ApplyOutcome::Uncommitted) => Event::Commit(session, workspace),
+                        Err(e) => Event::Done(session, workspace, ws::message(&e), true),
                     },
-                    move |(w, said, bad)| Message::Workspaces(Event::Done(session, w, said, bad)),
+                    Message::Workspaces,
                 )
+            }
+            Event::Commit(session, workspace) => {
+                let Some(view) = self.views.get_mut(&session) else { return Task::none() };
+                view.workspaces.running = None;
+                let Some(d) = view.workspaces.loaded.as_ref().and_then(|l| l.detail(&workspace)) else { return Task::none() };
+                if view.conversation.busy() {
+                    view.workspaces.notices.insert(workspace, ("The agent is working; apply after its turn.".into(), true));
+                    return Task::none();
+                }
+                let prompt = commit_prompt(&d.workspace.source.display);
+                view.workspaces.committing = Some((workspace, d.state_tree.clone()));
+                self.submit(&session, prompt, vec![])
+            }
+            Event::Committed(session, loaded) => {
+                let Some(view) = self.views.get_mut(&session) else { return Task::none() };
+                let Some((workspace, seen)) = view.workspaces.committing.take() else { return Task::none() };
+                let Ok(loaded) = loaded else {
+                    view.workspaces.notices.insert(workspace, ("The workspace could not be read after the agent's turn: look again, then apply.".into(), true));
+                    return Task::none();
+                };
+                let now = loaded.detail(&workspace).map(|d| (d.summary.uncommitted.is_empty(), d.state_tree == seen));
+                view.workspaces.loaded = Some(loaded);
+                let said = match now {
+                    Some((true, true)) => return Task::done(Message::Workspaces(Event::Apply(session, workspace))),
+                    Some((false, _)) => "The agent left changes uncommitted, so nothing was applied.",
+                    Some((true, false)) => "The work changed while the agent committed it: look again, then apply.",
+                    None => return Task::none(),
+                };
+                view.workspaces.notices.insert(workspace, (said.into(), true));
+                Task::none()
             }
             Event::Discard(session, workspace) => {
                 let Some(view) = self.views.get_mut(&session) else { return Task::none() };

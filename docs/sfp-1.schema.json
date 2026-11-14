@@ -1508,7 +1508,7 @@
       "properties": {
         "checkout_only": {
           "default": 0,
-          "description": "The person's own uncommitted files in the checkout that the workspace does not have: a\nworkspace starts from HEAD (docs/parallel-coding.md §5). The agent's applied work is not\ncounted.",
+          "description": "The person's own uncommitted files in the checkout that the workspace does not have: a\nworkspace starts from HEAD (docs/parallel-coding.md §5).",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
@@ -1527,6 +1527,11 @@
         },
         "revision": {
           "$ref": "#/$defs/Revision"
+        },
+        "state_tree": {
+          "default": "",
+          "description": "The workspace's whole state, committed or not, as a Git tree id: the same before and after\nits uncommitted work is committed, so a frontend that asked the agent to commit can tell\nthat nothing else changed before it applies what the person saw.",
+          "type": "string"
         },
         "summary": {
           "$ref": "#/$defs/Summary2",
@@ -6774,7 +6779,7 @@
           "type": "string"
         },
         "uncommitted": {
-          "description": "Uncommitted paths, untracked included (applied too, as uncommitted changes).",
+          "description": "Uncommitted paths, untracked included. Apply brings commits only: while there are any,\nthey are committed first — by the session's agent, asked by the frontend, or by sill for\na workspace no agent will write again.",
           "items": {
             "type": "string"
           },
@@ -7966,7 +7971,7 @@
       "capabilities": {
         "sill.workspaces": 1
       },
-      "doc": "When the person's checkout moved, rebase the workspace onto it in a helper jail with the session's restrictions, keeping uncommitted changes uncommitted, and return the revision an Apply would bring. A rebase that stops leaves conflicts (resolve in the workspace, or abort).",
+      "doc": "When the person's checkout moved, rebase the workspace onto it in a helper jail with the session's restrictions — its uncommitted work committed first, as for an Apply (refused as uncommitted while the session's agent can commit it) — and return the revision an Apply would bring. A rebase that stops leaves conflicts (resolve in the workspace, or abort).",
       "kind": "request",
       "name": "_sill/workspaces.prepare",
       "params": {
@@ -7980,7 +7985,7 @@
       "capabilities": {
         "sill.workspaces": 1
       },
-      "doc": "Bring the workspace's commits (fast-forward) and uncommitted changes into the person's checkout, exactly this revision; repeatable, the workspace goes on. Refusals: invalid_state with reason stale_revision, source_moved, source_overlap, untracked_collision, writer_active, rebase_in_progress.",
+      "doc": "Bring the workspace's commits into the person's checkout by fast-forward, exactly this revision; repeatable, the workspace goes on. Commits only: uncommitted work is refused as uncommitted while the session's agent can commit it, and committed by sill as the person otherwise. Refusals: invalid_state with reason stale_revision, source_moved, source_overlap, untracked_collision, uncommitted, no_identity, writer_active, rebase_in_progress.",
       "kind": "request",
       "name": "_sill/workspaces.apply",
       "params": {

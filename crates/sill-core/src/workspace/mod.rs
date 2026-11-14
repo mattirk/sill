@@ -340,8 +340,6 @@ fn create_as(source: &Source, id: &str, name: &str, path: &Path, operation: &str
     c.arg("rev-parse").arg("--verify").arg(format!("{branch}^{{tree}}"));
     ok(c, "verify the clone")?;
     drop(git);
-    // what the person has from it so far: the base (§12 applied snapshot)
-    flow::set_applied(path, &flow::snapshot(path, "sill: base")?)?;
     Ok(Created { path: path.to_path_buf(), branch, base: source.head.clone() })
 }
 
@@ -648,6 +646,8 @@ pub enum Stop {
     Overlap(Vec<String>),
     /// Untracked files in the source would be overwritten.
     Untracked(Vec<String>),
+    /// The workspace holds work that is not committed: Apply brings commits only.
+    Uncommitted,
 }
 
 impl Stop {
@@ -657,6 +657,7 @@ impl Stop {
             Stop::NeedsPrepare => "stale_revision",
             Stop::Overlap(_) => "source_overlap",
             Stop::Untracked(_) => "untracked_collision",
+            Stop::Uncommitted => "uncommitted",
         }
     }
     pub fn paths(&self) -> &[String] {

@@ -53,6 +53,9 @@ impl Host for TestHost {
     fn root(&self) -> PathBuf {
         self.root.clone()
     }
+    fn title(&self, session: &str) -> Option<String> {
+        Some(format!("Session {session}"))
+    }
     fn overlay(&self, _session: &str) -> Result<Option<Overlay>> {
         Ok(self.overlay.lock().unwrap().clone())
     }
@@ -110,6 +113,9 @@ fn fixture(name: &str) -> Fixture {
     }
     git(&source, &["add", "."]);
     git(&source, &["commit", "-qm", "start"]);
+    // who the person is here: sill's own commit of an ended session's work is theirs
+    git(&source, &["config", "user.name", "Pat Person"]);
+    git(&source, &["config", "user.email", "pat@example.org"]);
     let conn = Connection::open_in_memory().unwrap();
     init(&conn).unwrap();
     let host = TestHost {
@@ -132,6 +138,12 @@ fn session(f: &Fixture, id: &str) -> api::Workspace {
     let layout = ensure_for_session(&f.host, id).unwrap();
     assert_eq!(layout.len(), 1);
     session_view(&f.host, id).unwrap().workspaces.remove(0)
+}
+
+/// The agent commits everything in its workspace.
+fn commit(clone: &Path, message: &str) {
+    git(clone, &["add", "-A"]);
+    git(clone, &["commit", "-qm", message]);
 }
 
 fn clone_of(w: &api::Workspace) -> PathBuf {
@@ -219,22 +231,60 @@ fn apply_repeatedly_during_the_session() {
     assert!(one(&f.source.join("../elsewhere")).is_err(), "not a path of the repository");
     assert!(one(std::path::Path::new("/etc/passwd")).is_err());
     assert!(one(&f.source).is_err(), "the repository itself is the whole diff, asked without a path");
-    let done = apply(&f.host, &apply_req("a1", &w, &detail.revision)).unwrap();
+    // commits only: while the session's agent can commit, uncommitted work is its to commit
+    assert_eq!(reason(&apply(&f.host, &apply_req("a0", &w, &detail.revision)).unwrap_err()), "uncommitted");
+    assert_eq!(git(&f.source, &["status", "--porcelain"]), "", "nothing written");
+    commit(&clone, "agent, the rest");
+    let committed = get(&f.host, &w.workspace_id).unwrap();
+    assert_eq!((committed.summary.commits, committed.summary.files), (2, 3));
+    assert!(committed.summary.uncommitted.is_empty());
+    assert_eq!(committed.state_tree, detail.state_tree, "the same work, now committed");
+    assert_eq!(committed.files, detail.files);
+    let done = apply(&f.host, &apply_req("a1", &w, &committed.revision)).unwrap();
     assert_eq!(done.workspace.unwrap().state, api::WorkspaceState::Open, "the workspace goes on");
     assert_eq!(read(&f.source.join("f1.txt")), "committed\n");
     assert_eq!(read(&f.source.join("f2.txt")), "uncommitted\n");
-    assert_eq!(git(&f.source, &["log", "-1", "--format=%s"]), "agent");
+    assert_eq!(read(&f.source.join("new.txt")), "new untracked file\n");
+    assert_eq!(git(&f.source, &["log", "-2", "--format=%s"]), "agent, the rest\nagent");
+    assert_eq!(git(&f.source, &["status", "--porcelain"]), "", "nothing arrives uncommitted");
     // nothing left to bring; then more work, applied again
     let after = get(&f.host, &w.workspace_id).unwrap();
     assert_eq!((after.summary.commits, after.summary.files), (0, 0));
-    assert!(!after.summary.uncommitted.is_empty(), "applied files remain dirty in the workspace");
+    assert!(after.summary.uncommitted.is_empty());
     write(&clone.join("new.txt"), "new untracked file, edited\n");
     assert_eq!(get(&f.host, &w.workspace_id).unwrap().summary.files, 1);
     write(&clone.join("f2.txt"), "uncommitted, again\n");
-    apply(&f.host, &apply_req("a2", &w, &rev(&f, &w))).unwrap();
+    commit(&clone, "a fix after testing");
+    let again = apply_req("a2", &w, &rev(&f, &w));
+    apply(&f.host, &again).unwrap();
     assert_eq!(read(&f.source.join("f2.txt")), "uncommitted, again\n");
     // the same request again does nothing more
-    assert!(apply(&f.host, &apply_req("a2", &w, &rev(&f, &w))).is_ok());
+    let tip = git(&f.source, &["rev-parse", "HEAD"]);
+    assert!(apply(&f.host, &again).is_ok());
+    assert_eq!(git(&f.source, &["rev-parse", "HEAD"]), tip);
+}
+
+/// A workspace no agent will write again: sill commits what is uncommitted as the person, under
+/// the session's title, and the Apply brings it. Nothing left, the workspace is done with.
+#[test]
+fn an_ended_sessions_uncommitted_work_is_committed_by_sill_and_applied() {
+    let f = fixture("ended-apply");
+    let w = session(&f, "s1");
+    let clone = clone_of(&w);
+    write(&clone.join("f1.txt"), "agent\n");
+    write(&clone.join("new.txt"), "new\n");
+    write(&clone.join("target/out"), "build\n");
+    f.host.lives.lock().unwrap().insert("s1".into(), Life::Ended);
+    let d = get(&f.host, &w.workspace_id).unwrap();
+    assert_eq!(d.workspace.state, api::WorkspaceState::Result);
+    assert_eq!(d.summary.uncommitted, vec!["f1.txt".to_string(), "new.txt".to_string()]);
+    let done = apply(&f.host, &apply_req("a1", &w, &d.revision)).unwrap();
+    assert!(done.workspace.is_none(), "applied, the result is done with");
+    assert!(!clone.exists());
+    assert_eq!(git(&f.source, &["log", "-1", "--format=%an <%ae>|%cn|%s"]), "Pat Person <pat@example.org>|Pat Person|Session s1");
+    assert_eq!((read(&f.source.join("f1.txt")), read(&f.source.join("new.txt"))), ("agent\n".into(), "new\n".into()));
+    assert!(!f.source.join("target").exists(), "ignored build output is not committed");
+    assert_eq!(git(&f.source, &["status", "--porcelain"]), "");
 }
 
 #[test]
@@ -243,9 +293,12 @@ fn apply_refuses_what_the_person_did_not_see_and_their_own_edits() {
     let w = session(&f, "s1");
     let clone = clone_of(&w);
     write(&clone.join("f1.txt"), "agent\n");
+    commit(&clone, "agent");
     let seen = rev(&f, &w);
     write(&clone.join("f1.txt"), "agent, later\n");
     assert_eq!(reason(&apply(&f.host, &apply_req("a1", &w, &seen)).unwrap_err()), "stale_revision");
+    commit(&clone, "agent, later");
+    assert_eq!(reason(&apply(&f.host, &apply_req("a1b", &w, &seen)).unwrap_err()), "stale_revision");
     f.host.busy.lock().unwrap().push("s1".into());
     assert_eq!(reason(&apply(&f.host, &apply_req("a2", &w, &rev(&f, &w))).unwrap_err()), "writer_active");
     f.host.busy.lock().unwrap().clear();
@@ -261,6 +314,7 @@ fn discard_and_undo_during_the_session() {
     let w = session(&f, "s1");
     let clone = clone_of(&w);
     write(&clone.join("f1.txt"), "kept\n");
+    commit(&clone, "kept");
     apply(&f.host, &apply_req("a1", &w, &rev(&f, &w))).unwrap();
     write(&clone.join("f2.txt"), "unwanted\n");
     write(&clone.join("target/out"), "build\n");
@@ -341,7 +395,7 @@ fn undo_after_the_folder_is_gone_makes_a_workspace_of_its_own() {
 }
 
 #[test]
-fn prepare_rebases_onto_a_moved_checkout_keeping_uncommitted_work() {
+fn prepare_rebases_onto_a_moved_checkout_once_the_work_is_committed() {
     let f = fixture("rebase");
     let w = session(&f, "s1");
     let clone = clone_of(&w);
@@ -353,9 +407,13 @@ fn prepare_rebases_onto_a_moved_checkout_keeping_uncommitted_work() {
     git(&f.source, &["commit", "-qm", "host"]);
     assert!(get(&f.host, &w.workspace_id).unwrap().needs_rebase);
     assert_eq!(reason(&apply(&f.host, &apply_req("a0", &w, &rev(&f, &w))).unwrap_err()), "stale_revision");
+    // uncommitted work is the agent's to commit before the rebase: nothing is rebased under it
+    assert_eq!(reason(&prepare(&f.host, &api::Operate { operation_id: "p0".into(), workspace_id: w.workspace_id.clone() }).unwrap_err()), "uncommitted");
+    assert_eq!(git(&clone, &["log", "-1", "--format=%s"]), "agent");
+    commit(&clone, "agent, the rest");
     let p = prepare(&f.host, &api::Operate { operation_id: "p1".into(), workspace_id: w.workspace_id.clone() }).unwrap();
     assert!(!p.needs_rebase && p.conflicts.is_empty());
-    assert_eq!(read(&clone.join("f2.txt")), "agent uncommitted\n", "uncommitted work kept");
+    assert_eq!(read(&clone.join("f2.txt")), "agent uncommitted\n");
     apply(&f.host, &apply_req("a1", &w, &p.revision)).unwrap();
     assert_eq!(read(&f.source.join("f1.txt")), "agent\n");
     assert_eq!(read(&f.source.join("f2.txt")), "agent uncommitted\n");
@@ -363,7 +421,6 @@ fn prepare_rebases_onto_a_moved_checkout_keeping_uncommitted_work() {
     // a conflicting move: the rebase stops, shown; abort puts it back
     write(&clone.join("f1.txt"), "agent again\n");
     git(&clone, &["commit", "-qam", "agent 2"]);
-    git(&f.source, &["checkout", "-q", "--", "f2.txt"]);
     write(&f.source.join("f1.txt"), "host again\n");
     git(&f.source, &["commit", "-qam", "host 2"]);
     let p = prepare(&f.host, &api::Operate { operation_id: "p2".into(), workspace_id: w.workspace_id.clone() }).unwrap();
@@ -554,9 +611,10 @@ fn the_persons_uncommitted_work_is_counted_as_not_in_the_workspace() {
     std::fs::remove_file(f.source.join("mine.txt")).unwrap();
     std::fs::remove_file(clone.join("mine.txt")).unwrap();
     assert_eq!(only(&f), 0);
-    // the agent's applied work is dirty in the checkout and not the person's, also once the
+    // the agent's applied work is the person's commit, not an edit of theirs, also once the
     // agent has gone on from it
     write(&clone.join("f1.txt"), "agent\n");
+    commit(&clone, "agent");
     apply(&f.host, &apply_req("a1", &w, &rev(&f, &w))).unwrap();
     assert_eq!(read(&f.source.join("f1.txt")), "agent\n");
     assert_eq!(only(&f), 0);
@@ -678,7 +736,8 @@ fn work_from_before_the_pin_without_a_base_is_taken_as_it_is_and_said() {
     let op = operation(&f, &w).expect("a note");
     assert_eq!((op.kind.as_str(), op.state.as_str()), ("carry", "notice"));
     assert!(op.detail.contains("taken as they are"), "{}", op.detail);
-    // seen through with the Apply
+    // seen through with the Apply, once the agent has committed the work
+    commit(&clone, "the work from before the pin");
     apply(&f.host, &apply_req("a1", &w, &rev(&f, &w))).unwrap();
     assert!(operation(&f, &w).is_none());
 }
@@ -838,8 +897,11 @@ fn a_link_planted_in_the_workspace_reads_nothing_outside_it() {
     assert!(!readable(&clone, &oid), "the file behind the link is not in the workspace's store");
     let text = diff(&f.host, &api::DiffRequest { workspace_id: w.workspace_id.clone(), against: api::Against::Applied, path: None }).unwrap().text;
     assert!(!text.contains("TOP SECRET"), "{text}");
-    // the links themselves are the work: applied as links
-    apply(&f.host, &apply_req("a1", &w, &d.revision)).unwrap();
+    // the links themselves are the work: committed and applied as links
+    let _ = d;
+    commit(&clone, "links");
+    assert!(!readable(&clone, &oid), "committing the link does not read through it either");
+    apply(&f.host, &apply_req("a1", &w, &rev(&f, &w))).unwrap();
     assert!(std::fs::symlink_metadata(f.source.join("d")).unwrap().file_type().is_symlink());
     assert!(!readable(&f.source, &oid) && !readable(&clone, &oid));
 }
@@ -886,6 +948,7 @@ fn apply_stops_at_an_ignored_file_of_the_persons() {
         } else {
             write(&clone.join(".gitignore"), "target/\n");
         }
+        commit(&clone, "agent");
         let e = apply(&f.host, &apply_req("a1", &w, &rev(&f, &w))).unwrap_err();
         assert_eq!((reason(&e), paths(&e)), ("untracked_collision".to_string(), vec!["local.env".to_string()]), "forced={forced}");
         assert_eq!(read(&f.source.join("local.env")), "PERSON=only copy\n");
@@ -897,16 +960,18 @@ fn apply_stops_at_an_ignored_file_of_the_persons() {
     }
 }
 
-/// Uncommitted work of the agent's that conflicts with a commit of the person's stops the rebase
-/// like a commit would: no conflict markers reach the checkout, Abort puts the work back
-/// uncommitted, and a rebase finished in the workspace leaves it uncommitted too.
+/// An ended session's uncommitted work that conflicts with a commit of the person's: sill
+/// commits it as theirs before the rebase, so the rebase stops on it like on any commit — no
+/// conflict markers reach the checkout — Abort leaves it committed, and once the rebase is
+/// finished in the workspace the Apply brings the commit.
 #[test]
-fn uncommitted_work_in_conflict_stops_the_rebase() {
+fn an_ended_sessions_uncommitted_work_in_conflict_stops_the_rebase() {
     let f = fixture("wip-conflict");
     let w = session(&f, "s1");
     let clone = clone_of(&w);
     write(&clone.join("f1.txt"), "agent uncommitted\n");
     write(&clone.join("new.txt"), "untracked\n");
+    f.host.lives.lock().unwrap().insert("s1".into(), Life::Ended);
     write(&f.source.join("f1.txt"), "host\n");
     git(&f.source, &["commit", "-qam", "host"]);
     let prepare_now = |op: &str| prepare(&f.host, &api::Operate { operation_id: op.into(), workspace_id: w.workspace_id.clone() }).unwrap();
@@ -915,24 +980,24 @@ fn uncommitted_work_in_conflict_stops_the_rebase() {
     assert_eq!(p.workspace.operation.as_ref().map(|o| o.state.as_str()), Some("conflict"));
     assert_eq!(reason(&apply(&f.host, &apply_req("a0", &w, &p.revision)).unwrap_err()), "rebase_in_progress");
     assert_eq!(read(&f.source.join("f1.txt")), "host\n");
-    // Abort: as before the rebase, nothing committed
+    // Abort: the work is as it was, in sill's commit of it
     abort(&f.host, &api::Operate { operation_id: "x".into(), workspace_id: w.workspace_id.clone() }).unwrap();
     assert_eq!(read(&clone.join("f1.txt")), "agent uncommitted\n");
-    assert_eq!(git(&clone, &["log", "-1", "--format=%s"]), "start");
-    assert_eq!(git(&clone, &["status", "--porcelain"]), "M f1.txt\n?? new.txt", "unstaged again (the helper trims the leading space)");
-    // again, resolved in the workspace as the agent would
+    assert_eq!(git(&clone, &["log", "-1", "--format=%an|%s"]), "Pat Person|Session s1");
+    assert_eq!(git(&clone, &["status", "--porcelain"]), "");
+    // again, resolved in the workspace
     prepare_now("p2");
     write(&clone.join("f1.txt"), "host and agent\n");
     git(&clone, &["add", "f1.txt"]);
     git(&clone, &["-c", "core.editor=true", "rebase", "--continue"]);
     let d = get(&f.host, &w.workspace_id).unwrap();
     assert!(d.workspace.operation.is_none() && !d.needs_rebase);
-    assert_eq!(d.summary.commits, 0, "the carried commit is off again");
-    assert_eq!(git(&clone, &["log", "-1", "--format=%s"]), "host");
+    assert_eq!(d.summary.commits, 1);
     apply(&f.host, &apply_req("a1", &w, &d.revision)).unwrap();
     assert_eq!(read(&f.source.join("f1.txt")), "host and agent\n");
     assert_eq!(read(&f.source.join("new.txt")), "untracked\n");
-    assert_eq!(git(&f.source, &["log", "-1", "--format=%s"]), "host", "applied uncommitted");
+    assert_eq!(git(&f.source, &["log", "-2", "--format=%s"]), "Session s1\nhost");
+    assert_eq!(git(&f.source, &["status", "--porcelain"]), "");
 }
 
 /// Work put back by Undo into a workspace of its own lives in the checkout's store: the

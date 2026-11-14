@@ -105,14 +105,31 @@ pub enum ApplyOutcome {
     Applied,
     /// The checkout had moved and the rebase onto it stopped on these files: nothing applied.
     Conflicts(Vec<String>),
+    /// The workspace holds uncommitted changes its session's agent can still commit: nothing
+    /// applied. Apply brings commits only, so the agent is asked to commit first.
+    Uncommitted,
+}
+
+/// Whether the daemon refused for `reason` (a refusal's `details.reason`).
+fn refused_for(e: &anyhow::Error, reason: &str) -> bool {
+    e.downcast_ref::<sill_proto::rpc::Error>()
+        .and_then(|e| e.data.as_ref())
+        .and_then(|d| d.get("details"))
+        .and_then(|d| d.get("reason"))
+        .and_then(|r| r.as_str())
+        == Some(reason)
 }
 
 /// Apply what the person saw (`seen`). When the checkout moved, the workspace is rebased onto it
 /// first and, when that goes cleanly, applied in the same click at the rebased revision: the
 /// rebase only puts the person's own commits under the agent's work (the person, 2026-11-09:
-/// Apply that only rebased looked as if it did nothing). A stopped rebase applies nothing.
+/// Apply that only rebased looked as if it did nothing). A stopped rebase applies nothing, and
+/// neither does uncommitted work the agent is still there to commit ([`ApplyOutcome::Uncommitted`]).
 pub fn apply(actions: &Actions, workspace_id: &str, seen: &api::Revision) -> anyhow::Result<ApplyOutcome> {
-    actions.once(|c| apply_steps(|method, params| c.call(method, params), workspace_id, seen))
+    actions.once(|c| match apply_steps(|method, params| c.call(method, params), workspace_id, seen) {
+        Err(e) if refused_for(&e, "uncommitted") => Ok(ApplyOutcome::Uncommitted),
+        other => other,
+    })
 }
 
 /// [`apply`]'s calls, through `call` (the daemon's methods by name).
@@ -213,6 +230,17 @@ mod tests {
             &seen,
         );
         (out, calls)
+    }
+
+    #[test]
+    fn only_the_uncommitted_refusal_asks_for_the_agents_commit() {
+        let refusal = |reason: &str| -> anyhow::Error {
+            sill_proto::rpc::Error { code: -32000, message: "refused".into(), data: Some(serde_json::json!({"code": "invalid_state", "details": {"reason": reason, "paths": []}})) }.into()
+        };
+        assert!(refused_for(&refusal("uncommitted"), "uncommitted"));
+        assert!(refused_for(&refusal("uncommitted").context("_sill/workspaces.apply"), "uncommitted"), "under the method's context too");
+        assert!(!refused_for(&refusal("source_overlap"), "uncommitted"));
+        assert!(!refused_for(&anyhow::anyhow!("connection lost"), "uncommitted"));
     }
 
     #[test]

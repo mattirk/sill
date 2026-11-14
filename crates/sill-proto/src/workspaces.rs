@@ -82,7 +82,9 @@ pub struct Summary {
     pub files: u32,
     pub added: String,
     pub removed: String,
-    /// Uncommitted paths, untracked included (applied too, as uncommitted changes).
+    /// Uncommitted paths, untracked included. Apply brings commits only: while there are any,
+    /// they are committed first — by the session's agent, asked by the frontend, or by sill for
+    /// a workspace no agent will write again.
     pub uncommitted: Vec<String>,
 }
 
@@ -151,10 +153,14 @@ pub struct Detail {
     /// The checkout moved past what the workspace started from: Apply rebases first (prepare).
     pub needs_rebase: bool,
     /// The person's own uncommitted files in the checkout that the workspace does not have: a
-    /// workspace starts from HEAD (docs/parallel-coding.md §5). The agent's applied work is not
-    /// counted.
+    /// workspace starts from HEAD (docs/parallel-coding.md §5).
     #[serde(default)]
     pub checkout_only: u32,
+    /// The workspace's whole state, committed or not, as a Git tree id: the same before and after
+    /// its uncommitted work is committed, so a frontend that asked the agent to commit can tell
+    /// that nothing else changed before it applies what the person saw.
+    #[serde(default)]
+    pub state_tree: String,
     /// What an Apply would bring, path by path, committed and uncommitted alike, sorted by path:
     /// `summary`'s `files`, `added` and `removed` are their count and sums.
     #[serde(default)]

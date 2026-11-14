@@ -30,6 +30,10 @@ impl Host for Daemon<'_> {
         }
     }
 
+    fn title(&self, session: &str) -> Option<String> {
+        self.0.with_store(|s| s.session_exact(session)).ok().flatten().map(|row| row.title)
+    }
+
     fn busy(&self, session: &str) -> bool {
         self.0.runners.lock().unwrap().get(session).is_some_and(|r| r.alive() && r.busy())
     }

@@ -2916,6 +2916,7 @@ impl App {
                 tasks.push(self.details_load(session.clone()));
             }
             tasks.push(self.files_refresh(&session));
+            tasks.push(self.workspaces_turn_ended(&session));
         }
         tasks.push(self.load_media(&session));
         if relist {
@@ -3206,6 +3207,8 @@ impl App {
                         sill_client::outbox::State::Failed(reason) => reason.clone(),
                         _ => String::new(),
                     };
+                    // an Apply's request to commit that never reached the agent is not waited for
+                    view.workspaces.committing = None;
                     view.draft = editor::Editor::with_text(pending.text());
                     view.attachments = view.pending_attachments.remove(&id).unwrap_or_else(|| pending.submit.attachments.into_iter().map(Into::into).collect());
                     view.failed = Some(format!(

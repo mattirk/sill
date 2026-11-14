@@ -56,10 +56,26 @@ impl App {
                 ));
                 line = line.push(quiet_button("Abort rebase", ev(Event::Abort(session.clone(), id.clone()))));
             } else {
-                line = line.push(keys::press_maybe(
+                let apply = keys::press_maybe(
                     button(text("Apply").size(style::SMALL)).padding([3, 10]).style(style::solid(P.accent)),
                     ev(Event::Apply(session.clone(), id.clone())),
-                ));
+                );
+                // Apply brings commits only: said before the click when it will ask for one first
+                let n = d.summary.uncommitted.len();
+                if n > 0 {
+                    let who = if d.workspace.state == sill_proto::workspaces::WorkspaceState::Open {
+                        "the agent is asked to commit first, and this applies when its turn ends"
+                    } else {
+                        "sill commits first, as you, under the session's title"
+                    };
+                    line = line.push(tooltip(
+                        apply,
+                        container(text(format!("{n} uncommitted file{}: {who}", if n == 1 { "" } else { "s" })).size(style::TINY)).padding(6).style(style::fill(P.surface)),
+                        tooltip::Position::Top,
+                    ));
+                } else {
+                    line = line.push(apply);
+                }
             }
             let discard = if state.armed.as_deref() == Some(id.as_str()) {
                 format!("Discard {}?", if d.summary.files > 0 { format!("{} file{}", d.summary.files, if d.summary.files == 1 { "" } else { "s" }) } else { "it".into() })

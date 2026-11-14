@@ -1,17 +1,17 @@
 //! The session flow of §12 (docs/parallel-coding.md): Apply as a repeatable checkpoint that brings
-//! a workspace's commits and uncommitted changes into the person's checkout, Discard back to what
-//! was last applied (kept as a snapshot for Undo).
+//! a workspace's commits into the person's checkout by fast-forward — commits only (2026-11-10):
+//! work still uncommitted is committed first, by the agent or, for an ended session, by sill
+//! ([`commit_all`]) — and Discard back to the person's commit (the discarded work kept as a
+//! snapshot for Undo).
 //!
 //! A **snapshot** is a commit of a clone's whole state — its HEAD plus every tracked change and
 //! every untracked file that is not ignored — made with a private index, so the clone's own index
 //! and files are untouched; it costs what is dirty, not the repository's size. The **mirror**
-//! ([`mirror`]) is the person's side: the clone's state with the agent's paths as the checkout
-//! has them, read fresh from the checkout at every look; what Apply would bring and what Discard
-//! resets to. A look makes trees only, no commits, and what it leaves behind is pruned when the
-//! folder changes hands ([`prune`]). `refs/sill/applied` in the clone is the snapshot of the last
-//! Apply (at creation, of the base), kept to tell the agent's earlier Apply from the person's own
-//! edit of a dirty file. All Git here runs through the hardened view ([`Git`]); nothing in
-//! either repository's config runs.
+//! ([`mirror`]) is the person's side: their commit the workspace's own work starts from, read
+//! fresh from the checkout at every look; what Apply would bring is the workspace's state
+//! against it. A look makes trees only, no commits, and what it leaves behind is pruned when the
+//! folder changes hands ([`prune`]). All Git here runs through the hardened view ([`Git`]);
+//! nothing in either repository's config runs.
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -19,9 +19,6 @@ use anyhow::{Context, Result, bail};
 
 use super::{Stop, ok, ok_raw, read_tree_stop, run};
 use crate::changes::Git;
-
-/// The snapshot of what the person already has from this workspace.
-pub const APPLIED: &str = "refs/sill/applied";
 
 pub(super) const IDENT: [(&str, &str); 4] = [
     ("GIT_AUTHOR_NAME", "sill"),
@@ -36,23 +33,75 @@ pub(super) fn rev(git: &Git, what: &str) -> Result<String> {
     ok(c, what)
 }
 
-fn try_rev(git: &Git, what: &str) -> Result<Option<String>> {
-    let mut c = git.cmd();
-    c.args(["rev-parse", "--verify", "-q", what]);
-    let out = run(c)?;
-    Ok(out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string()))
-}
-
 /// A commit of the clone's whole state on top of its HEAD (see the module docs).
 pub fn snapshot(clone: &Path, message: &str) -> Result<String> {
     let git = Git::open(clone)?;
     let tree = worktree_tree(&git, clone)?;
+    commit_tree(&git, &tree, message, &IDENT.map(|(k, v)| (k, v.to_string())))
+}
+
+fn commit_tree(git: &Git, tree: &str, message: &str, ident: &[(&str, String); 4]) -> Result<String> {
     let mut c = git.cmd_write();
-    for (k, v) in IDENT {
+    for (k, v) in ident {
         c.env(k, v);
     }
-    c.args(["commit-tree", &tree, "-p", "HEAD", "-m", message]);
+    c.args(["commit-tree", tree, "-p", "HEAD", "-m", message]);
     ok(c, "snapshot: commit")
+}
+
+/// Who the person's own commits in `source` are by: `user.name` and `user.email` from the
+/// repository's config, else from their own (global) one. Read as values only: nothing a config
+/// names runs. None when either is not set.
+pub fn identity(source: &Path) -> Result<Option<(String, String)>> {
+    let git = Git::open(source)?;
+    let get = |key: &str| -> Result<Option<String>> {
+        let mut own = std::process::Command::new("git");
+        own.args(["config", "--file"]).arg(git.dirs().1.join("config")).args(["--get", key]).env("GIT_CONFIG_NOSYSTEM", "1");
+        let mut theirs = git.cmd();
+        theirs.args(["config", "--get", key]);
+        for c in [own, theirs] {
+            let out = run(c)?;
+            let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if out.status.success() && !value.is_empty() {
+                return Ok(Some(value));
+            }
+        }
+        Ok(None)
+    };
+    Ok(get("user.name")?.zip(get("user.email")?))
+}
+
+/// Whether the clone holds work that is not committed: its state ([`state_tree`]) is not its
+/// HEAD's tree. What [`commit_all`] would commit, so the two never disagree.
+pub fn uncommitted(clone: &Path) -> Result<bool> {
+    let git = Git::open(clone)?;
+    Ok(worktree_tree(&git, clone)? != rev(&git, "HEAD^{tree}")?)
+}
+
+/// Commit the clone's uncommitted work — tracked changes and untracked files that are not
+/// ignored — at its branch's tip, as the person (`name`, `email`) with `message`: for a workspace
+/// whose session has ended, where no agent is left to commit it (2026-11-10: Apply brings commits
+/// only). False when there is nothing to commit.
+pub fn commit_all(clone: &Path, workspace_branch: &str, message: &str, name: &str, email: &str) -> Result<bool> {
+    let git = Git::open(clone)?;
+    let tree = worktree_tree(&git, clone)?;
+    if tree == rev(&git, "HEAD^{tree}")? {
+        return Ok(false);
+    }
+    let ident = [
+        ("GIT_AUTHOR_NAME", name.to_string()),
+        ("GIT_AUTHOR_EMAIL", email.to_string()),
+        ("GIT_COMMITTER_NAME", name.to_string()),
+        ("GIT_COMMITTER_EMAIL", email.to_string()),
+    ];
+    let commit = commit_tree(&git, &tree, message, &ident)?;
+    let mut c = git.cmd_write();
+    c.args(["update-ref", "-m", "sill: commit for Apply"]).arg(format!("refs/heads/{workspace_branch}")).arg(&commit);
+    ok(c, "commit the work")?;
+    let mut c = git.cmd_write();
+    c.args(["read-tree", &commit]);
+    ok(c, "index the commit")?;
+    Ok(true)
 }
 
 /// The tree of the clone's whole state now, no commit made: for a look.
@@ -322,30 +371,14 @@ pub(super) fn build_tree(git: &Git, base: &str, entries: &[(String, Have)]) -> R
     made
 }
 
-/// Record `snapshot` as what the person has (`refs/sill/applied`).
-pub fn set_applied(clone: &Path, snapshot: &str) -> Result<()> {
-    let git = Git::open(clone)?;
-    let mut c = git.cmd_write();
-    c.args(["update-ref", APPLIED, snapshot]);
-    ok(c, "applied ref").map(drop)
-}
-
-/// The clone's `refs/sill/applied`.
-pub fn applied(clone: &Path) -> Result<String> {
-    rev(&Git::open(clone)?, APPLIED)
-}
-
-/// The person's side of a workspace, as it is now (§12): the workspace's state with every path of
-/// the agent's work — changed since where the workspace's own commits start, or applied and still
-/// uncommitted in the checkout — replaced by what the person's checkout has there. What Apply
-/// would bring is the difference from it to the workspace: nothing where the checkout already has
-/// the workspace's content, however it got there; a revert where the checkout has the agent's
-/// earlier Apply and the workspace no longer does. Discard resets the workspace to it. Made fresh
-/// from the checkout at every look, so no record of what the person has can go stale under them
-/// (2026-11-09; the recorded last Apply had, twice). `refs/sill/applied` stays only to tell the
-/// agent's earlier Apply from the person's own edit of a dirty file.
+/// The person's side of a workspace, as it is now (§12): their commit the workspace's own work
+/// starts from. What Apply would bring is the difference from its tree to the workspace's state;
+/// Discard resets the workspace to it. Read fresh from the checkout at every look, so no record
+/// of what the person has can go stale under them (2026-11-09; the recorded last Apply had,
+/// twice). Since Apply brings commits only (2026-11-10), nothing of the agent's lies uncommitted
+/// in the checkout: every dirty file there is the person's own.
 pub struct Mirror {
-    /// The tree of the person's side, in the clone's own store.
+    /// The tree of the person's side: `upstream`'s.
     pub tree: String,
     /// Where the workspace's own commits start: the checkout's tip when the workspace has it,
     /// else their common ancestor (a rebase is due). `rev-list upstream..branch` is the
@@ -355,12 +388,11 @@ pub struct Mirror {
     pub now: String,
     /// Whether the workspace differs from the person's side at all: anything to apply.
     pub changed: bool,
+    /// Whether all of the workspace's state is committed: `now` is its tip's tree.
+    pub committed: bool,
     /// The person's own uncommitted work the workspace does not have (§5: a workspace starts from
-    /// HEAD): paths dirty in the checkout whose content there is neither the workspace's nor the
-    /// agent's earlier Apply. Sorted.
+    /// HEAD): paths dirty in the checkout whose content there is not the workspace's. Sorted.
     pub checkout_only: Vec<String>,
-    /// The agent's paths: those whose content in `tree` is the checkout's (above). Sorted.
-    pub paths: Vec<String>,
 }
 
 pub fn mirror(source: &Path, clone: &Path, workspace_branch: &str) -> Result<Mirror> {
@@ -377,40 +409,14 @@ pub fn mirror(source: &Path, clone: &Path, workspace_branch: &str) -> Result<Mir
         if out.status.success() { String::from_utf8_lossy(&out.stdout).trim().to_string() } else { rev(&ws, "refs/sill/base")? }
     };
     let now = worktree_tree(&ws, clone)?;
-    let applied = rev(&ws, APPLIED)?;
-    // the agent's paths: changed since upstream…
-    let mut paths: Vec<String> = diff_tree(&ws, &upstream, &now)?.into_iter().filter(|e| e.mode != "160000").map(|e| e.path).collect();
-    // …or dirty in the checkout, unstaged, holding what the agent's earlier Apply wrote there
-    let dirty = dirty(&src)?;
-    let dirty_paths: Vec<String> = dirty.iter().map(|(_, _, p)| p.clone()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
-    let unstaged: Vec<String> =
-        dirty.into_iter().filter(|(x, _, p)| (*x == ' ' || *x == '?') && !paths.contains(p)).map(|(_, _, p)| p).collect();
-    // every dirty path of the checkout is read, in the one batch: the agent's are told from the
-    // person's own below
-    let read: Vec<String> = paths.iter().chain(dirty_paths.iter().filter(|p| !paths.contains(p))).cloned().collect();
-    let mut host: BTreeMap<String, Have> = worktree_entries(&ws, source, &read)?.into_iter().collect();
-    let was = tree_entries(&ws, &applied, &dirty_paths)?;
-    let here = tree_entries(&ws, &now, &read)?;
-    let checkout_only: Vec<String> =
-        dirty_paths.into_iter().filter(|p| !same_blob(host.get(p), here.get(p)) && !same_blob(host.get(p), was.get(p))).collect();
-    for p in unstaged {
-        if same_blob(host.get(&p), was.get(&p)) {
-            paths.push(p);
-        }
-    }
-    paths.sort();
-    paths.dedup();
-    // what the checkout has on them, where that differs from the workspace
-    let entries: Vec<(String, Have)> = paths
-        .iter()
-        .cloned()
-        .filter_map(|p| {
-            let theirs = host.remove(&p).flatten();
-            (theirs.as_ref() != here.get(&p)).then_some((p, theirs))
-        })
-        .collect();
-    let tree = build_tree(&ws, &now, &entries)?;
-    Ok(Mirror { changed: tree != now, tree, upstream, now, checkout_only, paths })
+    let tree = rev(&ws, &format!("{upstream}^{{tree}}"))?;
+    let committed = now == rev(&ws, &format!("{tip}^{{tree}}"))?;
+    // the person's dirty files, against what the workspace has there
+    let dirty_paths: Vec<String> = dirty(&src)?.into_iter().map(|(_, _, p)| p).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    let host: BTreeMap<String, Have> = worktree_entries(&ws, source, &dirty_paths)?.into_iter().collect();
+    let here = tree_entries(&ws, &now, &dirty_paths)?;
+    let checkout_only: Vec<String> = dirty_paths.into_iter().filter(|p| !same_blob(host.get(p), here.get(p))).collect();
+    Ok(Mirror { changed: tree != now, tree, upstream, now, committed, checkout_only })
 }
 
 /// Whether a working tree's entry holds the blob a tree has at the path: the same content, or
@@ -521,15 +527,14 @@ pub struct Applied {
     /// The checkout's branch before and after the fast-forward (equal when nothing was committed).
     pub before: String,
     pub tip: String,
-    /// The snapshot now applied: the next `refs/sill/applied`.
-    pub snapshot: String,
 }
 
-/// Apply (§12): bring the clone's commits (fast-forward from `expected`) and its uncommitted
-/// changes into the person's checkout `source`. A dirty file there whose content is what the last
-/// Apply (`applied`) wrote counts as the agent's and is updated; any other dirty file the result
-/// touches is the person's and stops it, nothing written. The caller records the returned
-/// snapshot as `refs/sill/applied`.
+/// Apply (§12): fast-forward the person's checkout `source` from `expected` to the clone's
+/// commits, its files with it. Commits only: a clone with uncommitted work stops
+/// ([`Stop::Uncommitted`]) for the agent, or sill for an ended session, to commit first. A dirty
+/// or untracked file of the person's that the commits touch stops it, nothing written: Git's
+/// own check for a fast-forward, and [`files_in_the_way`] for the ignored files Git would write
+/// over. No record of earlier Applies is consulted: every dirty file there is the person's.
 pub fn apply(
     source: &Path,
     clone: &Path,
@@ -537,7 +542,6 @@ pub fn apply(
     branch: &str,
     expected: &str,
     workspace_branch: &str,
-    applied: &str,
 ) -> Result<std::result::Result<Applied, Stop>> {
     let src = Git::open(source)?;
     let head = std::fs::read_to_string(src.dirs().0.join("HEAD"))?;
@@ -549,191 +553,89 @@ pub fn apply(
     if !super::descends(clone, expected, &tip)? {
         return Ok(Err(Stop::NeedsPrepare));
     }
-    let snap = snapshot(clone, "sill: applied")?;
-    // the paths the result touches: since the branch tip, and since the last Apply (a revert of
-    // an applied uncommitted edit changes nothing against the tip, but the person's checkout)
-    let changed: std::collections::BTreeSet<String> =
-        diff_tree(&ws, expected, &snap)?.into_iter().chain(diff_tree(&ws, applied, &snap)?).map(|e| e.path).collect();
-    // the person's own dirty files against the agent's earlier Apply
-    let (mut ours, mut overlap, mut untracked) = (Vec::new(), Vec::new(), Vec::new());
-    let entries = dirty(&src)?;
-    let paths: Vec<String> = entries.iter().map(|(_, _, p)| p.clone()).collect();
-    let theirs: BTreeMap<String, Have> = worktree_entries(&ws, source, &paths)?.into_iter().collect();
-    let was = tree_entries(&ws, applied, &paths)?;
-    for (x, _y, path) in entries {
-        let staged = x != ' ' && x != '?';
-        let is_ours = !staged && same_blob(theirs.get(&path), was.get(&path));
-        if is_ours {
-            ours.push(path);
-        } else if changed.contains(&path) {
-            if x == '?' { untracked.push(path) } else { overlap.push(path) }
-        }
+    if worktree_tree(&ws, clone)? != rev(&ws, &format!("{tip}^{{tree}}"))? {
+        return Ok(Err(Stop::Uncommitted));
     }
-    // a file of the person's that their `status` does not list — an ignored one — where the
-    // uncommitted part would write (the workspace un-ignored the path, or staged it by force):
-    // what is on disk decides, not what status says. Theirs unless it already holds what would
-    // be written or what the last Apply wrote. A path tracked at either tip is `read-tree`'s.
-    let uncommitted = diff_tree(&ws, &tip, &snap)?;
-    {
-        let listed: std::collections::BTreeSet<&str> = paths.iter().map(String::as_str).collect();
-        let there: Vec<String> = uncommitted
-            .iter()
-            .filter(|e| e.blob.is_some() && !listed.contains(e.path.as_str()) && std::fs::symlink_metadata(source.join(&e.path)).is_ok())
-            .map(|e| e.path.clone())
-            .collect();
-        if !there.is_empty() {
-            let (old, new) = (tree_entries(&src, expected, &there)?, tree_entries(&ws, &tip, &there)?);
-            let rest: Vec<String> = there.into_iter().filter(|p| !old.contains_key(p) && !new.contains_key(p)).collect();
-            let (want, was) = (tree_entries(&ws, &snap, &rest)?, tree_entries(&ws, applied, &rest)?);
-            for (p, have) in worktree_entries(&ws, source, &rest)? {
-                let holds = |tree: &BTreeMap<String, (String, String)>| have.as_ref().is_some_and(|(_, b)| tree.get(&p).is_some_and(|(_, t)| t == b));
-                if !holds(&want) && !holds(&was) {
-                    untracked.push(p);
-                }
+    if tip == expected {
+        return Ok(Ok(Applied { before: expected.to_string(), tip }));
+    }
+    let collisions = files_in_the_way(&src, &ws, source, expected, &tip)?;
+    if !collisions.is_empty() {
+        return Ok(Err(Stop::Untracked(collisions)));
+    }
+    // the commits into the person's own store first, from the clone's view into the source's
+    let incoming = super::anchor_ref(id, "incoming");
+    let mut c = src.cmd_write();
+    c.args(["fetch", "-q", "--no-tags", "--no-write-fetch-head"]).arg(ws.view_dir()).arg(format!("+refs/heads/{workspace_branch}:{incoming}"));
+    ok(c, "import")?;
+    let mut c = src.cmd_write();
+    c.args(["update-index", "-q", "--refresh"]);
+    let _ = run(c);
+    let mut c = src.cmd_write();
+    c.args(["read-tree", "-m", "-u", "-n", expected, &tip]);
+    let dry = run(c)?;
+    if !dry.status.success() {
+        return Ok(Err(read_tree_stop(&String::from_utf8_lossy(&dry.stderr))));
+    }
+    let message = format!("sill: apply workspace {id}");
+    let mut c = src.cmd_write();
+    c.args(["update-ref", "-m", &message]).arg(format!("refs/heads/{branch}")).arg(&tip).arg(expected);
+    if !run(c)?.status.success() {
+        return Ok(Err(Stop::SourceMoved));
+    }
+    let mut c = src.cmd_write();
+    c.args(["read-tree", "-m", "-u", expected, &tip]);
+    let moved = run(c)?;
+    if !moved.status.success() {
+        let mut c = src.cmd_write();
+        c.args(["update-ref", "-m", "sill: apply undone"]).arg(format!("refs/heads/{branch}")).arg(expected).arg(&tip);
+        ok(c, "put the branch back")?;
+        return Ok(Err(read_tree_stop(&String::from_utf8_lossy(&moved.stderr))));
+    }
+    Ok(Ok(Applied { before: expected.to_string(), tip }))
+}
+
+/// Files of the person's that Git does not track, where the fast-forward from `expected` to `tip`
+/// would put a file: each path the commits add that is on disk in the checkout with other
+/// content, or lies below something there that is not a directory. `read-tree` itself stops only
+/// at an untracked file the person's `.gitignore` does not cover and writes over an ignored one —
+/// a `.env` with no other copy — so what is on disk decides, not what `status` says. A file
+/// that already holds what would be written is not in the way.
+fn files_in_the_way(src: &Git, ws: &Git, source: &Path, expected: &str, tip: &str) -> Result<Vec<String>> {
+    let added: Vec<Entry> = diff_tree(ws, expected, tip)?.into_iter().filter(|e| e.blob.is_some() && e.mode != "160000").collect();
+    let paths: Vec<String> = added.iter().map(|e| e.path.clone()).collect();
+    let tracked = tree_entries(src, expected, &paths)?;
+    let added: Vec<Entry> = added.into_iter().filter(|e| !tracked.contains_key(&e.path)).collect();
+    let mut there = Vec::new();
+    let mut below = std::collections::BTreeSet::new();
+    for e in &added {
+        // something on the way that is no directory: the nearest such ancestor
+        let mut at = Path::new(&e.path).parent();
+        let mut blocked = None;
+        while let Some(dir) = at.filter(|d| !d.as_os_str().is_empty()) {
+            if std::fs::symlink_metadata(source.join(dir)).is_ok_and(|m| !m.is_dir()) {
+                blocked = Some(dir.to_string_lossy().into_owned());
             }
+            at = dir.parent();
+        }
+        match blocked {
+            Some(dir) => drop(below.insert(dir)),
+            None if std::fs::symlink_metadata(source.join(&e.path)).is_ok() => there.push(e.path.clone()),
+            None => {}
         }
     }
-    if !overlap.is_empty() {
-        return Ok(Err(Stop::Overlap(overlap)));
-    }
-    if !untracked.is_empty() {
-        return Ok(Err(Stop::Untracked(untracked)));
-    }
-    if tip != expected {
-        // the commits into the person's own store first, from the clone's view into the source's
-        let incoming = super::anchor_ref(id, "incoming");
-        let mut c = src.cmd_write();
-        c.args(["fetch", "-q", "--no-tags", "--no-write-fetch-head"])
-            .arg(ws.view_dir())
-            .arg(format!("+refs/heads/{workspace_branch}:{incoming}"));
-        ok(c, "import")?;
-    }
-    // the agent's earlier uncommitted changes go back to the branch's state; the result writes
-    // them again as they are now
-    let rollback = |paths: &[String]| {
-        for p in paths {
-            match try_rev(&ws, &format!("{applied}:{p}")).ok().flatten() {
-                Some(blob) => {
-                    let mode = tree_mode(&ws, applied, p).unwrap_or_else(|| "100644".into());
-                    let _ = write_entry(&ws, source, p, &mode, &blob);
-                }
-                None => {
-                    let _ = remove_entry(source, p);
-                }
-            }
-        }
-    };
-    for p in &ours {
-        match try_rev(&src, &format!("{expected}:{p}"))? {
-            Some(blob) => write_entry(&src, source, p, &tree_mode(&src, expected, p).unwrap_or_else(|| "100644".into()), &blob)?,
-            None => remove_entry(source, p)?,
+    // an ancestor Git tracks is the fast-forward's own to replace
+    let below: Vec<String> = below.into_iter().collect();
+    let tracked = tree_entries(src, expected, &below)?;
+    let mut collisions: Vec<String> = below.into_iter().filter(|d| !tracked.contains_key(d)).collect();
+    let want = tree_entries(ws, tip, &there)?;
+    for (p, have) in worktree_entries(ws, source, &there)? {
+        if !have.as_ref().is_some_and(|(_, b)| want.get(&p).is_some_and(|(_, t)| t == b)) {
+            collisions.push(p);
         }
     }
-    if tip != expected {
-        let mut c = src.cmd_write();
-        c.args(["update-index", "-q", "--refresh"]);
-        let _ = run(c);
-        let mut c = src.cmd_write();
-        c.args(["read-tree", "-m", "-u", "-n", expected, &tip]);
-        let dry = run(c)?;
-        if !dry.status.success() {
-            rollback(&ours);
-            return Ok(Err(read_tree_stop(&String::from_utf8_lossy(&dry.stderr))));
-        }
-        let message = format!("sill: apply workspace {id}");
-        let mut c = src.cmd_write();
-        c.args(["update-ref", "-m", &message]).arg(format!("refs/heads/{branch}")).arg(&tip).arg(expected);
-        if !run(c)?.status.success() {
-            rollback(&ours);
-            return Ok(Err(Stop::SourceMoved));
-        }
-        let mut c = src.cmd_write();
-        c.args(["read-tree", "-m", "-u", expected, &tip]);
-        let moved = run(c)?;
-        if !moved.status.success() {
-            let mut c = src.cmd_write();
-            c.args(["update-ref", "-m", "sill: apply undone"]).arg(format!("refs/heads/{branch}")).arg(expected).arg(&tip);
-            ok(c, "put the branch back")?;
-            rollback(&ours);
-            return Ok(Err(read_tree_stop(&String::from_utf8_lossy(&moved.stderr))));
-        }
-    }
-    // the uncommitted part, written into the working tree as it is in the snapshot
-    for e in uncommitted {
-        match &e.blob {
-            Some(blob) => write_entry(&ws, source, &e.path, &e.mode, blob)?,
-            None => remove_entry(source, &e.path)?,
-        }
-    }
-    Ok(Ok(Applied { before: expected.to_string(), tip, snapshot: snap }))
-}
-
-/// The commit a rebase carries a workspace's uncommitted work in ([`commit_uncommitted`]).
-const WIP: &str = "refs/sill/wip";
-const WIP_SUBJECT: &str = "sill: uncommitted work";
-
-/// Before a rebase: the clone's uncommitted work — tracked changes and untracked files that are
-/// not ignored — as a commit at its branch's tip, so the rebase carries it like any other commit
-/// and a conflict in it stops the rebase, for Resolve or Abort. False when there is none.
-/// [`restore_uncommitted`] takes the commit off again once the rebase is over (2026-11-10;
-/// before, `rebase --autostash`: a conflict when the stash went back left git's markers in the
-/// files with the rebase reported clean, and the Apply that followed wrote them into the
-/// person's checkout).
-pub fn commit_uncommitted(clone: &Path, workspace_branch: &str) -> Result<bool> {
-    let git = Git::open(clone)?;
-    if dirty(&git)?.is_empty() {
-        return Ok(false);
-    }
-    let wip = snapshot(clone, WIP_SUBJECT)?;
-    for name in [WIP.to_string(), format!("refs/heads/{workspace_branch}")] {
-        let mut c = git.cmd_write();
-        c.args(["update-ref", "-m", WIP_SUBJECT, &name, &wip]);
-        ok(c, "keep the uncommitted work")?;
-    }
-    let mut c = git.cmd_write();
-    c.args(["read-tree", &wip]);
-    ok(c, "index the uncommitted work")?;
-    Ok(true)
-}
-
-/// Whether a rebase's commit of uncommitted work is still to take off ([`restore_uncommitted`]).
-pub fn uncommitted_pending(clone: &Path) -> bool {
-    clone.join(".git").join(WIP).exists()
-        || std::fs::read_to_string(clone.join(".git/packed-refs")).is_ok_and(|t| t.lines().any(|l| l.ends_with(WIP)))
-}
-
-/// After the rebase — gone through, aborted, or finished in the workspace: the commit
-/// [`commit_uncommitted`] made, now at the branch's tip, comes off and its changes are in the
-/// files, uncommitted, as before. Nothing where none was made. A tip that is not that commit
-/// (the agent built on it) stays as it is.
-pub fn restore_uncommitted(clone: &Path, workspace_branch: &str) -> Result<()> {
-    let git = Git::open(clone)?;
-    if try_rev(&git, WIP)?.is_none() {
-        return Ok(());
-    }
-    let branch = format!("refs/heads/{workspace_branch}");
-    let mut c = git.cmd();
-    c.args(["log", "-1", "--format=%ae%n%s", &branch]);
-    if ok(c, "the tip")? == format!("{}\n{WIP_SUBJECT}", IDENT[1].1) {
-        let parent = rev(&git, &format!("{branch}^"))?;
-        let mut c = git.cmd_write();
-        c.args(["update-ref", "-m", "sill: uncommitted again", &branch, &parent]);
-        ok(c, "take the commit off")?;
-        let mut c = git.cmd_write();
-        c.args(["read-tree", &parent]);
-        ok(c, "reset the index")?;
-    }
-    let mut c = git.cmd_write();
-    c.args(["update-ref", "-d", WIP]);
-    ok(c, "drop the kept commit").map(drop)
-}
-
-/// The mode of `path` in `commit`'s tree.
-fn tree_mode(git: &Git, commit: &str, path: &str) -> Option<String> {
-    let mut c = git.cmd();
-    c.args(["ls-tree", commit, "--", path]);
-    let out = ok(c, "ls-tree").ok()?;
-    out.split_whitespace().next().map(str::to_string)
+    collisions.sort();
+    Ok(collisions)
 }
 
 /// Put the clone into the state of snapshot `snap` (§12 Undo): its branch at the snapshot's
@@ -767,12 +669,8 @@ pub fn reset_to(clone: &Path, workspace_branch: &str, state: &str, at: &str) -> 
 
 /// Discard (§12): keep the clone's whole state as a snapshot in the source's own store
 /// (`refs/sill/workspaces/<id>/discarded/<n>`, for Undo even after the folder is reused), then
-/// reset the clone to the person's side ([`mirror`]): their checkout's content on the agent's
-/// paths. The branch goes to their tip whenever nothing of the workspace's own would be lost
-/// there — after a rebase, or when their tip has moved on past the workspace's (their commits
-/// since come with it, so the workspace is clean against its own commit, not a mix of the old
-/// commit and their newer files on the agent's paths, 2026-11-10); only when the two have
-/// diverged does it stay at their common ancestor. Returns the discarded snapshot.
+/// reset the clone to the person's commit ([`discard_target`]), clean. Returns the discarded
+/// snapshot.
 pub fn discard(
     source: &Path,
     clone: &Path,
@@ -810,10 +708,9 @@ pub(super) fn discard_retained(
         ));
     ok(c, "keep the discarded work")?;
     drop(ws);
-    let m = mirror(source, clone, workspace_branch)?;
-    let (tree, at) = discard_target(source, clone, workspace_branch, &m)?;
+    let at = discard_target(source, clone, workspace_branch)?;
     retain(&snap)?;
-    reset_to(clone, workspace_branch, &tree, &at)?;
+    reset_to(clone, workspace_branch, &at, &at)?;
     let ws = Git::open(clone)?;
     let mut c = ws.cmd_write();
     c.args(["update-ref", "-d", "refs/sill/discarding"]);
@@ -821,19 +718,20 @@ pub(super) fn discard_retained(
     Ok(snap)
 }
 
-/// Where Discard puts the clone: the tree and the commit for its branch. When the workspace's tip
-/// is behind the person's (it has no commits of its own they lack), their tip and its tree with
-/// the mirror's content on the agent's paths; otherwise the mirror as it is.
-fn discard_target(source: &Path, clone: &Path, workspace_branch: &str, m: &Mirror) -> Result<(String, String)> {
+/// Where Discard puts the clone's branch and files: the person's tip whenever nothing of the
+/// workspace's own would be lost there — the workspace has it already (after an Apply or a
+/// rebase), or their tip has moved on past the workspace's (their commits since come with it,
+/// 2026-11-10); only when the two have diverged, their common ancestor.
+fn discard_target(source: &Path, clone: &Path, workspace_branch: &str) -> Result<String> {
     let ws = Git::open(clone)?;
     let tip = rev(&ws, &format!("refs/heads/{workspace_branch}"))?;
     let (_, dest) = super::head_of(&Git::open(source)?)?;
-    if m.upstream == dest || !super::descends_in(&ws, &tip, &dest)? {
-        return Ok((m.tree.clone(), m.upstream.clone()));
+    if super::descends_in(&ws, &dest, &tip)? || super::descends_in(&ws, &tip, &dest)? {
+        return Ok(dest);
     }
-    let theirs = tree_entries(&ws, &m.tree, &m.paths)?;
-    let entries: Vec<(String, Have)> = m.paths.iter().map(|p| (p.clone(), theirs.get(p).cloned())).collect();
-    Ok((build_tree(&ws, &dest, &entries)?, dest))
+    let mut c = ws.cmd();
+    c.args(["merge-base", &dest, &tip]);
+    ok(c, "the common ancestor")
 }
 
 /// Undo a Discard: put snapshot `discarded` back, only while the clone has nothing to bring

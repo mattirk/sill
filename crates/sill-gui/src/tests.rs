@@ -59,6 +59,17 @@ impl Daemon {
         .unwrap();
     }
 
+    /// An `invalid_state` refusal with its reason, as the workspace methods refuse.
+    pub fn refuse_for(&mut self, request: &Value, reason: &str, message: &str) {
+        writeln!(
+            self.writer,
+            "{}",
+            json!({"jsonrpc":"2.0", "id":request["id"],
+                   "error":{"code":-32000, "message":message, "data":{"code":"invalid_state", "details":{"reason":reason, "paths":[]}}}})
+        )
+        .unwrap();
+    }
+
     pub fn refuse(&mut self, request: &Value, code: &str, message: &str) {
         writeln!(
             self.writer,

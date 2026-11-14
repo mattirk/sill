@@ -54,6 +54,10 @@ pub trait Host {
     fn run_jailed(&self, session: &str, cwd: &Path, argv: &[&str]) -> Result<std::process::Output>;
     /// Where workspaces are made.
     fn root(&self) -> PathBuf;
+    /// The session's title, for the commit sill makes of an ended session's uncommitted work.
+    fn title(&self, _session: &str) -> Option<String> {
+        None
+    }
     /// The session's overlay as its last jail had it, read while its jail is down: None when it
     /// never ran (§12 work from before the pin).
     fn overlay(&self, _session: &str) -> Result<Option<Overlay>> {
@@ -362,13 +366,27 @@ fn clear_conflict<H: Host>(h: &H, r: &Row) -> Result<()> {
     Ok(())
 }
 
-/// A rebase that is over leaves no commit of the workspace's uncommitted work behind
-/// (`flow::commit_uncommitted`): it comes off, between the agent's turns. For a caller holding
-/// the mutation lock.
-fn settle_uncommitted<H: Host>(h: &H, r: &Row) -> Result<()> {
-    if !rebasing(&r.path) && flow::uncommitted_pending(&r.path) && !h.busy(&r.session_id) {
-        flow::restore_uncommitted(&r.path, &r.branch)?;
+/// Apply brings commits only (2026-11-10): work the workspace holds uncommitted is committed
+/// first. While its session's agent can still write there, that is the agent's to do, with a
+/// message of its own — refused here as `uncommitted`, for the window to ask it. A workspace no
+/// agent will write again (its session ended or gone, or its pin removed) has sill commit it, as
+/// the person, under the session's title.
+fn commit_leftovers<H: Host>(h: &H, r: &Row) -> Result<()> {
+    if !flow::uncommitted(&r.path)? {
+        return Ok(());
     }
+    if r.state == "open" && h.life(&r.session_id) == Life::Alive {
+        return Err(refuse(
+            "uncommitted",
+            "The workspace has uncommitted changes: apply from its session, where the agent is asked to commit them first.",
+            vec![],
+        ));
+    }
+    let Some((name, email)) = flow::identity(&r.source)? else {
+        return Err(refuse("no_identity", "Set user.name and user.email in Git first: the session's uncommitted work is committed as yours.", vec![]));
+    };
+    let message = h.title(&r.session_id).map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).unwrap_or_else(|| format!("Work from a sill session in {}", r.name));
+    flow::commit_all(&r.path, &r.branch, &message, &name, &email)?;
     Ok(())
 }
 
@@ -768,7 +786,7 @@ fn summary(r: &Row, m: &flow::Mirror) -> Result<(api::Summary, Vec<api::FileChan
             removed: f.removed.to_string(),
         })
         .collect();
-    Ok((api::Summary { commits: s.commits, files: s.files, added: s.added.to_string(), removed: s.removed.to_string(), uncommitted: s.uncommitted }, files))
+    Ok((api::Summary { commits: s.commits, files: s.files, added: s.added.to_string(), removed: s.removed.to_string(), uncommitted: if m.committed { vec![] } else { s.uncommitted } }, files))
 }
 
 /// A workspace after one look (`detail`).
@@ -794,21 +812,12 @@ fn detail<H: Host>(h: &H, r: Row) -> Result<Settled> {
     };
     // a stopped rebase the agent or the person finished in the workspace is no longer one: the
     // shelf offers Apply again, not Resolve and Abort for a rebase that is over
-    // and the commit its rebase carried the uncommitted work in comes off, once no mutation
-    // is running in the workspace (the lock; a look is never made under it)
-    let l = if flow::uncommitted_pending(&r.path) {
-        let _g = lock();
-        settle_uncommitted(h, &r)?;
-        look(&r)?
-    } else {
-        l
-    };
     clear_conflict(h, &r)?;
     let workspace = h.db(|c| record(c, &r))?;
     let Some(m) = l else { return Ok(Settled::Record(workspace)) };
     let (revision, needs_rebase) = revision_now(&r)?;
     let (summary, files) = summary(&r, &m)?;
-    Ok(Settled::Full(api::Detail { workspace, revision, summary, needs_rebase, checkout_only: m.checkout_only.len() as u32, files }))
+    Ok(Settled::Full(api::Detail { workspace, revision, summary, needs_rebase, checkout_only: m.checkout_only.len() as u32, state_tree: m.now.clone(), files }))
 }
 
 fn changed<H: Host>(h: &H, r: Option<&Row>, operation: Option<&str>, discarded: Option<api::Discarded>) -> Result<api::Changed> {
@@ -906,8 +915,9 @@ pub fn diff<H: Host>(h: &H, a: &api::DiffRequest) -> Result<api::DiffText> {
     Ok(api::DiffText { text, truncated })
 }
 
-/// Rebase the result onto the checkout's current tip when it moved, in the helper jail, keeping
-/// uncommitted changes uncommitted (`--autostash`). Repeatable: a retry recomputes.
+/// Rebase the result onto the checkout's current tip when it moved, in the helper jail. Commits
+/// only: uncommitted work is committed first ([`commit_leftovers`]), so a conflict in it stops
+/// the rebase like any other. Repeatable: a retry recomputes.
 pub fn prepare<H: Host>(h: &H, a: &api::Operate) -> Result<api::Prepared> {
     const METHOD: &str = "_sill/workspaces.prepare";
     let fingerprint = input(a)?;
@@ -916,7 +926,6 @@ pub fn prepare<H: Host>(h: &H, a: &api::Operate) -> Result<api::Prepared> {
     if h.busy(&r.session_id) {
         return Err(refuse("writer_active", "The agent is working; wait for its turn to end.", vec![]));
     }
-    settle_uncommitted(h, &r)?;
     clear_conflict(h, &r)?;
     if rebasing(&r.path) {
         return Err(refuse("rebase_in_progress", "A rebase is stopped in the workspace: finish it there or abort it.", conflicted(&r.path)));
@@ -929,16 +938,14 @@ pub fn prepare<H: Host>(h: &H, a: &api::Operate) -> Result<api::Prepared> {
     if needs_rebase && h.life(&r.session_id) == Life::Missing {
         return Err(refuse("no_session", "The workspace's session is gone, so it cannot be rebased.", vec![]));
     }
+    if needs_rebase {
+        commit_leftovers(h, &r)?;
+    }
     let fresh = h.db(|c| receipts(c)?.begin(&a.operation_id, METHOD, &fingerprint))?.1;
     let dest = super::set_destination(&r.source, &r.path, &r.id, &branch, &r.branch)?;
     let mut conflicts = Vec::new();
     if needs_rebase {
-        // uncommitted work rides the rebase as a commit and comes off after it: a conflict in it
-        // stops the rebase like any other (never `--autostash`, whose conflict git reports clean)
-        flow::commit_uncommitted(&r.path, &r.branch)?;
-        let out = h.run_jailed(&r.session_id, &r.source, &["git", "rebase", "refs/sill/dest"]);
-        settle_uncommitted(h, &r)?;
-        let out = out?;
+        let out = h.run_jailed(&r.session_id, &r.source, &["git", "rebase", "refs/sill/dest"])?;
         if !out.status.success() {
             if rebasing(&r.path) {
                 conflicts = conflicted(&r.path);
@@ -974,8 +981,7 @@ pub fn abort<H: Host>(h: &H, a: &api::Operate) -> Result<api::Changed> {
     let _g = lock();
     let r = get_row(h, &a.workspace_id)?;
     if !rebasing(&r.path) {
-        settle_uncommitted(h, &r)?;
-        clear_conflict(h, &r)?;
+            clear_conflict(h, &r)?;
         return changed(h, Some(&r), None, None);
     }
     if h.busy(&r.session_id) {
@@ -985,7 +991,6 @@ pub fn abort<H: Host>(h: &H, a: &api::Operate) -> Result<api::Changed> {
     if !out.status.success() {
         return Err(refuse("rebase_failed", format!("The rebase could not be aborted: {}", String::from_utf8_lossy(&out.stderr).trim()), vec![]));
     }
-    settle_uncommitted(h, &r)?;
     clear_conflict(h, &r)?;
     changed(h, Some(&r), None, None)
 }
@@ -996,11 +1001,13 @@ fn stop_message(stop: &super::Stop) -> String {
         super::Stop::NeedsPrepare => "Your checkout has commits the workspace does not: it needs a rebase first.".into(),
         super::Stop::Overlap(p) => format!("Your own edits touch files the agent changed: {}", p.join(", ")),
         super::Stop::Untracked(p) => format!("Untracked files of yours would be overwritten: {}", p.join(", ")),
+        super::Stop::Uncommitted => "The workspace has uncommitted changes: they are committed before an Apply.".into(),
     }
 }
 
-/// Apply (§12): bring the workspace's commits and uncommitted changes into the person's checkout,
-/// exactly the revision they saw. The workspace goes on; what it has applied moves forward.
+/// Apply (§12): bring the workspace's commits into the person's checkout by fast-forward, exactly
+/// the revision they saw; work still uncommitted is committed first ([`commit_leftovers`]). The
+/// workspace goes on from the person's new commit.
 pub fn apply<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
     const METHOD: &str = "_sill/workspaces.apply";
     let fingerprint = input(a)?;
@@ -1014,7 +1021,6 @@ pub fn apply<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
     if h.busy(&r.session_id) {
         return Err(refuse("writer_active", "The agent is working; apply after its turn.", vec![]));
     }
-    settle_uncommitted(h, &r)?;
     if rebasing(&r.path) {
         return Err(refuse("rebase_in_progress", "A rebase is stopped in the workspace: finish it there or abort it.", conflicted(&r.path)));
     }
@@ -1028,15 +1034,16 @@ pub fn apply<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
     if now_rev.destination_branch.is_empty() {
         return Err(refuse("detached_head", "Check out a branch in your checkout first.", vec![]));
     }
-    let was = flow::applied(&r.path)?;
+    // what they saw, committed where it was not: the same files, at a new tip
+    commit_leftovers(h, &r)?;
+    let (now_rev, _) = revision_now(&r)?;
     h.db(|c| {
         receipts(c)?.begin(&a.operation_id, METHOD, &fingerprint)?;
         intent(c, &k, &r.id, "apply", &json!({"branch": now_rev.destination_branch, "old": now_rev.destination_tip, "tip": now_rev.tip}), h.now())
     })?;
-    let outcome = flow::apply(&r.source, &r.path, &r.id, &now_rev.destination_branch, &now_rev.destination_tip, &r.branch, &was);
+    let outcome = flow::apply(&r.source, &r.path, &r.id, &now_rev.destination_branch, &now_rev.destination_tip, &r.branch);
     match outcome {
-        Ok(Ok(done)) => {
-            flow::set_applied(&r.path, &done.snapshot)?;
+        Ok(Ok(_)) => {
             h.db(|c| {
                 settle(c, &k, "done", "")?;
                 settle_notices(c, &r.id)?;
@@ -1085,7 +1092,6 @@ pub fn discard<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
             vec![],
         ));
     }
-    settle_uncommitted(h, &r)?;
     if rebasing(&r.path) {
         return Err(refuse(
             "rebase_in_progress",
@@ -1287,7 +1293,7 @@ pub fn session_notice(conn: &Connection, session: &str) -> Result<Option<String>
     }
     let repos = rows.iter().map(|r| format!("{} (branch {})", r.source.display(), r.branch)).collect::<Vec<_>>().join(", ");
     let mut notice = format!(
-        "\n[This session works in workspaces: {repos} — each is your own copy of the repository at its usual path; the person's checkout is elsewhere and changes only when they apply your work. Commit or leave changes uncommitted as suits the work; the person applies both, or discards them. Do not push.]"
+        "\n[This session works in workspaces: {repos} — each is your own copy of the repository at its usual path; the person's checkout is elsewhere and changes only when they apply your work. Commit work that is ready for the person to try, with a message of your own: they apply your commits, never uncommitted changes, and when they apply while changes are uncommitted you are asked to commit them first. Do not push.]"
     );
     // the person's uncommitted work is not in the copy (§5): said, so the agent does not look
     // for code that is only in their checkout. A look that fails says nothing.

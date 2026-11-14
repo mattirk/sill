@@ -58,7 +58,6 @@ fn the_shelf_offers_work_not_yet_applied_and_the_chips_say_which_is_which() {
     let empty = loaded(0);
     let mut empty = empty;
     empty.details[0].summary.commits = 0;
-    empty.details[0].summary.uncommitted = vec!["already-applied.txt".into()];
     app.views.get_mut("idle").unwrap().workspaces.loaded = Some(empty);
     assert!(app.workspace_shelf(&app.views["idle"]).is_none());
 }
@@ -125,4 +124,91 @@ fn resolve_asks_the_agent_to_finish_a_stopped_rebase() {
     app.views.get_mut("idle").unwrap().workspaces.loaded = Some(loaded(3));
     let task = app.update(Message::Workspaces(Event::Resolve("idle".into(), "ws-1".into())));
     settle_task(&mut app, task);
+}
+
+/// The workspace as the person sees it with work the agent has not committed, and after the
+/// agent committed exactly that.
+fn uncommitted() -> Loaded {
+    let mut l = loaded(3);
+    l.details[0].summary.uncommitted = vec!["src/a.rs".into()];
+    l.details[0].state_tree = "tree-1".into();
+    l
+}
+
+fn committed(state_tree: &str) -> Loaded {
+    let mut l = loaded(3);
+    l.details[0].revision.tip = "t2".into();
+    l.details[0].revision.worktree = String::new();
+    l.details[0].state_tree = state_tree.into();
+    l
+}
+
+/// Apply brings commits only: with uncommitted changes in the workspace the click asks the
+/// session's agent to commit them, and the Apply follows at its turn's end when the same work is
+/// all committed.
+#[test]
+fn apply_with_uncommitted_changes_asks_the_agent_to_commit_and_applies_after_its_turn() {
+    let (client, mut daemon) = daemon();
+    let mut app = live_app(vec![client]);
+    let mut idle = crate::SessionView::new("idle");
+    idle.workspaces.loaded = Some(uncommitted());
+    idle.draft = crate::editor::Editor::with_text("half a thought");
+    app.views.insert("idle".into(), idle);
+    let server = std::thread::spawn(move || {
+        let get = daemon.expect("_sill/workspaces.get");
+        daemon.reply(&get, serde_json::to_value(&uncommitted().details[0]).unwrap());
+        let apply = daemon.expect("_sill/workspaces.apply");
+        daemon.refuse_for(&apply, "uncommitted", "The workspace has uncommitted changes: apply from its session, where the agent is asked to commit them first.");
+        let submit = daemon.expect("_sill/sessions.submit");
+        assert_eq!(submit["params"]["session_id"], "idle");
+        let text = submit["params"]["text"].as_str().unwrap().to_string();
+        daemon.reply(&submit, json!({}));
+        // after the turn: applied at the agent's commit
+        let get = daemon.expect("_sill/workspaces.get");
+        daemon.reply(&get, serde_json::to_value(&committed("tree-1").details[0]).unwrap());
+        let apply = daemon.expect("_sill/workspaces.apply");
+        assert_eq!(apply["params"]["revision"]["tip"], "t2");
+        daemon.reply(&apply, json!({"workspace": workspace(), "operation": null, "discarded": null}));
+        text
+    });
+    let task = app.update(Message::Workspaces(Event::Apply("idle".into(), "ws-1".into())));
+    settle_task(&mut app, task);
+    let state = &app.views["idle"].workspaces;
+    assert_eq!(state.committing, Some(("ws-1".to_string(), "tree-1".to_string())), "waiting for the agent's commit");
+    assert!(state.running.is_none() && state.notices.is_empty());
+    assert_eq!(app.views["idle"].draft.text().trim_end(), "half a thought", "the composer keeps what the person was writing");
+    // the turn ends with exactly that work committed
+    let task = app.update(Message::Workspaces(Event::Committed("idle".into(), Ok(committed("tree-1")))));
+    settle_task(&mut app, task);
+    let state = &app.views["idle"].workspaces;
+    assert!(state.committing.is_none());
+    assert_eq!(state.notices.get("ws-1"), Some(&("Applied to your checkout.".to_string(), false)));
+    let text = server.join().unwrap();
+    assert!(text.contains("/home/me/repo") && text.contains("commit message of your own") && text.contains("Change nothing else"), "{text}");
+}
+
+/// What the person saw is what is applied: a turn that left changes uncommitted, or changed the
+/// work, applies nothing and says so.
+#[test]
+fn a_commit_turn_that_changed_the_work_applies_nothing() {
+    let (client, _daemon) = daemon();
+    let mut app = live_app(vec![client]);
+    for (after, said) in [
+        (uncommitted(), "The agent left changes uncommitted, so nothing was applied."),
+        (committed("tree-2"), "The work changed while the agent committed it: look again, then apply."),
+    ] {
+        let mut idle = crate::SessionView::new("idle");
+        idle.workspaces.loaded = Some(uncommitted());
+        idle.workspaces.committing = Some(("ws-1".into(), "tree-1".into()));
+        app.views.insert("idle".into(), idle);
+        let task = app.update(Message::Workspaces(Event::Committed("idle".into(), Ok(after))));
+        settle_task(&mut app, task);
+        let state = &app.views["idle"].workspaces;
+        assert!(state.committing.is_none() && state.running.is_none());
+        assert_eq!(state.notices.get("ws-1"), Some(&(said.to_string(), true)));
+    }
+    // no Apply was waiting: a turn's end is only a turn's end
+    let task = app.update(Message::Workspaces(Event::Committed("idle".into(), Ok(committed("tree-1")))));
+    settle_task(&mut app, task);
+    assert_eq!(app.views["idle"].workspaces.notices.len(), 1);
 }
