@@ -395,7 +395,7 @@ fn aliased_paths_read_the_workspace_and_answer_under_the_repository() {
     assert_eq!(path.to_path().unwrap(), std::path::Path::new("/ws/repo-1/src"));
     assert_eq!(after.as_ref().unwrap().to_path().unwrap(), std::path::Path::new("/ws/repo-1/src/a"));
     // the repository itself, and paths elsewhere untouched
-    let Request::Repo(p) = aliased(&Request::Repo(path_of("/home/me/repo")), &pairs) else { panic!() };
+    let Request::Repo { path: p, counts: true } = aliased(&Request::Repo { path: path_of("/home/me/repo"), counts: true }, &pairs) else { panic!() };
     assert_eq!(p.to_path().unwrap(), std::path::Path::new("/ws/repo-1"));
     let Request::Inspect(p) = aliased(&Request::Inspect(path_of("/home/me/repository")), &pairs) else { panic!() };
     assert_eq!(p.to_path().unwrap(), std::path::Path::new("/home/me/repository"));
@@ -403,18 +403,14 @@ fn aliased_paths_read_the_workspace_and_answer_under_the_repository() {
     assert_eq!(path.to_path().unwrap(), std::path::Path::new("/home/me/repo"), "pins stay the repository's");
     // replies come back under the repository, displayed so
     let page = admin::FilesPage { entries: vec![admin::FileEntry { path: path_of("/ws/repo-1/src/b.rs"), metadata: metadata(false) }], next: None };
-    let Data::Directory(back) = unaliased(Data::Directory(page), &run, &pairs) else { panic!() };
+    let Data::Directory(back) = unaliased(Data::Directory(page), &pairs) else { panic!() };
     assert_eq!(back.entries[0].path.to_path().unwrap(), std::path::Path::new("/home/me/repo/src/b.rs"));
     assert_eq!(back.entries[0].path.display, "/home/me/repo/src/b.rs");
-    let repo = Data::Repo { root: Some(path_of("/ws/repo-1")), head: "main".into(), entries: vec![discovery::StatusEntry { path: path_of("/ws/repo-1/x"), status: "M".into() }], summary: String::new(), lines: None };
-    let Data::Repo { root, entries, .. } = unaliased(repo, &Request::Repo(path_of("/home/me/repo")), &pairs) else { panic!() };
+    let repo = Data::Repo { root: Some(path_of("/ws/repo-1")), head: "main".into(), entries: vec![discovery::StatusEntry { path: path_of("/ws/repo-1/x"), status: "M".into() }], summary: String::new(), lines: None, counts: vec![(path_of("/ws/repo-1/x"), Some((1, 2)))], truncated: false };
+    let Data::Repo { root, entries, counts, .. } = unaliased(repo, &pairs) else { panic!() };
     assert_eq!(root.unwrap().to_path().unwrap(), std::path::Path::new("/home/me/repo"));
     assert_eq!(entries[0].path.to_path().unwrap(), std::path::Path::new("/home/me/repo/x"));
-    // counts keyed as the original request keyed them
-    let original = Request::Counts { pin: path_of("/home/me/repo"), entries: vec![discovery::StatusEntry { path: path_of("/home/me/repo/x"), status: "M".into() }] };
-    let clone_key = key(&path_of("/ws/repo-1/x")).to_string();
-    let Data::Counts(counts) = unaliased(Data::Counts(vec![(clone_key, Some((1, 2)))]), &original, &pairs) else { panic!() };
-    assert_eq!(counts[0].0, key(&path_of("/home/me/repo/x")));
+    assert_eq!(counts[0].0.to_path().unwrap(), std::path::Path::new("/home/me/repo/x"), "a row's counts are its entry's");
     // the table: set, changed or not, cleared
     let table = Aliases::default();
     assert!(table.set("s", pairs.clone()));
@@ -422,4 +418,63 @@ fn aliased_paths_read_the_workspace_and_answer_under_the_repository() {
     assert_eq!(table.of("s"), pairs);
     assert!(table.set("s", vec![]));
     assert!(table.of("s").is_empty());
+}
+
+/// The Diff view's per-file counts come with every look at the repository (docs/sill-gui.md
+/// "Diff"): a file that stays modified — edited further, or committed and edited again — shows
+/// its lines as they are, with the totals they add up to. Outside the Diff view no file is counted.
+#[test]
+fn a_files_counts_follow_it_while_its_status_stays_the_same() {
+    let mut state = FilesState::default();
+    let repo = path_of("/r");
+    let file = path_of("/r/a.rs");
+    let roots = |state: &mut FilesState, serial| {
+        let request = state.prepare(serial, Request::Roots);
+        state.accept(Reply {
+            session: "s".into(),
+            serial,
+            request,
+            result: Ok(Data::Roots {
+                roots: vec![Root { path: repo.clone(), global: false, metadata: Some(metadata(true)), error: None }],
+                home: path_of("/home/me"),
+            }),
+        })
+    };
+    let looked = |state: &mut FilesState, serial, request: Request, counts: (u64, u64)| {
+        let Request::Repo { counts: asked, .. } = &request else { panic!("{request:?}") };
+        let asked = *asked;
+        let request = state.prepare(serial, request);
+        state.accept(Reply {
+            session: "s".into(),
+            serial,
+            request,
+            result: Ok(Data::Repo {
+                root: Some(repo.clone()),
+                head: "main".into(),
+                entries: vec![discovery::StatusEntry { path: file.clone(), status: "M".into() }],
+                summary: String::new(),
+                lines: Some((counts.0.to_string(), counts.1.to_string())),
+                counts: if asked { vec![(file.clone(), Some(counts))] } else { vec![] },
+                truncated: false,
+            }),
+        });
+    };
+    // the tree and the chips alone: the totals, no file counted
+    let repo_of = |follow: Vec<Request>| follow.into_iter().find(|r| matches!(r, Request::Repo { .. })).unwrap();
+    let request = repo_of(roots(&mut state, 1).follow);
+    assert!(matches!(request, Request::Repo { counts: false, .. }), "{request:?}");
+    looked(&mut state, 2, request, (35, 1));
+    assert!(state.repos[key(&repo)].counts.is_empty());
+    // the Diff view opens: the repository again, its files counted
+    let mut requests = state.set_diff_mode(true);
+    assert!(matches!(requests[..], [Request::Repo { counts: true, .. }]), "{requests:?}");
+    looked(&mut state, 3, requests.remove(0), (35, 1));
+    assert_eq!(state.repos[key(&repo)].counts[key(&file)], Some((35, 1)));
+    // committed and edited again: the same file, the same letter, other lines
+    let request = repo_of(roots(&mut state, 4).follow);
+    assert!(matches!(request, Request::Repo { counts: true, .. }), "{request:?}");
+    looked(&mut state, 5, request, (2, 2));
+    let read = &state.repos[key(&repo)];
+    assert_eq!(read.counts[key(&file)], Some((2, 2)));
+    assert_eq!(read.lines, Some(("2".into(), "2".into())));
 }

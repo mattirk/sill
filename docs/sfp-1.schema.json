@@ -2271,6 +2271,28 @@
       ],
       "type": "object"
     },
+    "FileLines": {
+      "description": "One changed file's lines; none for a binary file, or a new one that is too large.",
+      "properties": {
+        "lines": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LineCount"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "path": {
+          "$ref": "#/$defs/HostPath"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
     "FileMetadata": {
       "properties": {
         "directory": {
@@ -3282,6 +3304,21 @@
         "retained_events",
         "retained_event_bytes",
         "max_connection_queue_bytes"
+      ],
+      "type": "object"
+    },
+    "LineCount": {
+      "properties": {
+        "added": {
+          "type": "string"
+        },
+        "removed": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "added",
+        "removed"
       ],
       "type": "object"
     },
@@ -6634,8 +6671,24 @@
         "deletions": {
           "type": "string"
         },
+        "files": {
+          "description": "When asked for: the changed files in the order `repos.status` lists them, the first ones\nonly when `truncated`.",
+          "items": {
+            "$ref": "#/$defs/FileLines"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "insertions": {
           "type": "string"
+        },
+        "truncated": {
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "untracked": {
           "type": "string"
@@ -6681,6 +6734,25 @@
         "added",
         "removed",
         "uncommitted"
+      ],
+      "type": "object"
+    },
+    "SummaryKey": {
+      "additionalProperties": false,
+      "properties": {
+        "files": {
+          "description": "Also the lines of each changed file, new ones counted: what a list of the changes shows.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "path": {
+          "$ref": "#/$defs/HostPath"
+        }
+      },
+      "required": [
+        "path"
       ],
       "type": "object"
     },
@@ -7506,7 +7578,7 @@
       "kind": "request",
       "name": "_sill/repos.summary",
       "params": {
-        "$ref": "#/$defs/PathKey"
+        "$ref": "#/$defs/SummaryKey"
       },
       "result": {
         "$ref": "#/$defs/SummaryResult"

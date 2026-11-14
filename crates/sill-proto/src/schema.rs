@@ -62,7 +62,7 @@ pub const METHODS: &[Method] = &[
     req::<crate::discovery::Find,crate::discovery::Found>("_sill/files.find", "Read daemon-host file/repository information with exact path bytes and bounded results."),
     req::<crate::discovery::PathKey,crate::discovery::Root>("_sill/repos.root", "The repository containing the path: the nearest directory with `.git`, the path itself when it is a directory; null outside any repository."),
     req::<crate::discovery::PathKey,crate::discovery::HeadResult>("_sill/repos.head", "Read daemon-host file/repository information with exact path bytes and bounded results."),
-    req::<crate::discovery::PathKey,crate::discovery::SummaryResult>("_sill/repos.summary", "Read daemon-host file/repository information with exact path bytes and bounded results."),
+    req::<crate::discovery::SummaryKey,crate::discovery::SummaryResult>("_sill/repos.summary", "Read daemon-host file/repository information with exact path bytes and bounded results."),
     req::<crate::discovery::ChangedLines,crate::discovery::Lines>("_sill/repos.changed_lines", "Read daemon-host file/repository information with exact path bytes and bounded results."),
     req::<crate::discovery::Status,crate::discovery::StatusPage>("_sill/repos.status", "Read daemon-host file/repository information with exact path bytes and bounded results."),
 

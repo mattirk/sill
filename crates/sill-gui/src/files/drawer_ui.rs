@@ -5,7 +5,7 @@ use iced::widget::{
 use iced::{Alignment, Element, Fill, Font, Padding, Shrink};
 use sill_proto::sessions::HostPath;
 
-use sill_client::files::{COUNT_CAP, Change, FilesState as State, key, name, relative};
+use sill_client::files::{Change, FilesState as State, key, name, relative};
 
 use super::ui::{action, glyph_action, msg, short, tip};
 use crate::{
@@ -345,9 +345,9 @@ fn diff_list<'a>(mut body: Column<'a, Message>, state: &'a State) -> Column<'a, 
                 open.is_some_and(|r| key(&r.path) == key(&entry.path)),
             ));
         }
-        if repo.entries.len() > COUNT_CAP {
+        if repo.truncated {
             body = body.push(note(
-                &format!("past {COUNT_CAP} files the counts are not read"),
+                &format!("past {} files the counts are not read", repo.counts.len()),
                 P.fg_dim,
             ));
         }

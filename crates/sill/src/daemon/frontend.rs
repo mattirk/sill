@@ -213,7 +213,27 @@ mod tests {
     }
 }
 
-pub(super) fn git_summary(path: &std::path::Path) -> Option<(u64, u64, u64)> {
+/// What differs from HEAD in a repository, or in one file of it.
+pub(super) struct GitSummary {
+    pub added: u64,
+    pub removed: u64,
+    pub untracked: u64,
+    /// When asked for: each changed file's lines added and removed, in the order `repos.status`
+    /// lists them — none for a binary file or a new one that is too large to count.
+    pub files: Option<Vec<(std::path::PathBuf, Option<(u64, u64)>)>>,
+    /// More files changed than `files` holds.
+    pub truncated: bool,
+}
+
+/// The lines of this many changed files are given: what a list shows without being asked twice.
+pub(super) const COUNTED_FILES: usize = 150;
+/// A new file larger than this gets no line count.
+const NEW_FILE_MAX: u64 = 1_000_000;
+
+/// The totals and the per-file lines come from one `diff --numstat`, so a list of files and the
+/// sum above it cannot disagree. New files are read for their lines only when `files` is asked.
+pub(super) fn git_summary(path: &std::path::Path, files: bool) -> Option<GitSummary> {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
     let (repo, spec): (std::path::PathBuf, Option<std::path::PathBuf>) = if path.is_dir() {
         (path.to_path_buf(), None)
     } else {
@@ -225,23 +245,83 @@ pub(super) fn git_summary(path: &std::path::Path) -> Option<(u64, u64, u64)> {
     }
     let git = sill_core::changes::Git::open(&repo).ok()?;
     let mut cmd = git.cmd();
-    cmd.args(["diff", "--numstat"]).args(sill_core::changes::Git::DIFF_SAFE).args(["HEAD", "--"]);
+    cmd.args(["diff", "--numstat", "-z"]).args(sill_core::changes::Git::DIFF_SAFE).args(["HEAD", "--"]);
     if let Some(s) = &spec {
         cmd.arg(s);
     }
-    let out = cmd.output().ok()?;
-    let (mut add, mut del) = (0u64, 0u64);
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        let mut it = line.split('\t');
-        add += it.next().and_then(|x| x.parse::<u64>().ok()).unwrap_or(0);
-        del += it.next().and_then(|x| x.parse::<u64>().ok()).unwrap_or(0);
+    let tracked = numstat(&cmd.output().ok()?.stdout);
+    let (mut added, mut removed) = (0u64, 0u64);
+    for (a, r) in tracked.iter().filter_map(|(_, lines)| *lines) {
+        added += a;
+        removed += r;
     }
     let mut cmd = git.cmd();
-    cmd.args(["ls-files", "--others", "--exclude-standard", "--"]);
+    cmd.args(["ls-files", "--others", "--exclude-standard", "-z", "--"]);
     if let Some(s) = &spec {
         cmd.arg(s);
     }
     let out = cmd.output().ok()?;
-    let untracked = String::from_utf8_lossy(&out.stdout).lines().count() as u64;
-    Some((add, del, untracked))
+    let new: Vec<&[u8]> = out.stdout.split(|b| *b == 0).filter(|p| !p.is_empty()).collect();
+    let untracked = new.len() as u64;
+    let mut truncated = false;
+    let files = files.then(|| {
+        // tracked rows carry their counts; a new file is counted only once it is within the cap
+        let mut rows: Vec<(std::path::PathBuf, Option<Option<(u64, u64)>>)> = tracked
+            .into_iter()
+            .map(|(p, lines)| (repo.join(p), Some(lines)))
+            .chain(new.iter().map(|p| (repo.join(std::ffi::OsStr::from_bytes(p)), None)))
+            .collect();
+        rows.sort_by(|a, b| a.0.as_os_str().as_bytes().cmp(b.0.as_os_str().as_bytes()));
+        truncated = rows.len() > COUNTED_FILES;
+        rows.truncate(COUNTED_FILES);
+        rows.into_iter()
+            .map(|(p, lines)| {
+                let lines = lines.unwrap_or_else(|| new_file_lines(&p));
+                (p, lines)
+            })
+            .collect()
+    });
+    return Some(GitSummary { added, removed, untracked, files, truncated });
+
+    /// `diff --numstat -z`: `added⇥removed⇥path␀`, or for a rename `added⇥removed⇥␀old␀new␀`
+    /// (the row is the new path's); `-` for the counts of a binary file.
+    fn numstat(out: &[u8]) -> Vec<(std::path::PathBuf, Option<(u64, u64)>)> {
+        let mut rows = Vec::new();
+        let mut records = out.split(|b| *b == 0);
+        while let Some(record) = records.next() {
+            let mut parts = record.splitn(3, |b| *b == b'\t');
+            let (Some(a), Some(r), Some(path)) = (parts.next(), parts.next(), parts.next()) else {
+                continue;
+            };
+            let path = if path.is_empty() {
+                records.next();
+                let Some(new) = records.next() else { break };
+                new
+            } else {
+                path
+            };
+            let n = |b: &[u8]| std::str::from_utf8(b).ok()?.parse::<u64>().ok();
+            rows.push((std::ffi::OsString::from_vec(path.to_vec()).into(), n(a).zip(n(r))));
+        }
+        rows
+    }
+}
+
+/// A new file's lines, all of them added; none when it is not a regular file, is larger than
+/// [`NEW_FILE_MAX`], or holds a NUL in its first bytes (binary, as git judges it).
+fn new_file_lines(path: &std::path::Path) -> Option<(u64, u64)> {
+    use std::io::Read;
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > NEW_FILE_MAX {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    // bounded even when the file grew since it was measured
+    std::fs::File::open(path).ok()?.take(NEW_FILE_MAX + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > NEW_FILE_MAX || bytes.iter().take(8192).any(|b| *b == 0) {
+        return None;
+    }
+    let lines = bytes.iter().filter(|b| **b == b'\n').count() as u64
+        + u64::from(bytes.last().is_some_and(|b| *b != b'\n'));
+    Some((lines, 0))
 }

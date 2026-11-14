@@ -31,6 +31,26 @@ pub struct LineRange { pub start: String, pub end: String }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Lines { pub ranges: Option<Vec<LineRange>> }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct Summary { pub insertions: String, pub deletions: String, pub untracked: String }
+#[serde(deny_unknown_fields)]
+pub struct SummaryKey {
+    pub path: HostPath,
+    /// Also the lines of each changed file, new ones counted: what a list of the changes shows.
+    pub files: Option<bool>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct LineCount { pub added: String, pub removed: String }
+/// One changed file's lines; none for a binary file, or a new one that is too large.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FileLines { pub path: HostPath, pub lines: Option<LineCount> }
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Summary {
+    pub insertions: String,
+    pub deletions: String,
+    pub untracked: String,
+    /// When asked for: the changed files in the order `repos.status` lists them, the first ones
+    /// only when `truncated`.
+    pub files: Option<Vec<FileLines>>,
+    pub truncated: Option<bool>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SummaryResult { pub summary: Option<Summary> }

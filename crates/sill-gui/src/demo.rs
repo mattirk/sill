@@ -299,7 +299,7 @@ pub fn files(request: &Request) -> Result<Data, String> {
         } else {
             "# Your session's files\n\nBrowse pinned folders, read files and review **what changed** without leaving the conversation.\n\n## Staying oriented\n\n- Expanded folders stay open across refreshes.\n- Each session remembers its own files.\n- Close the viewer to return to the conversation.\n\n```rust\nfn main() {\n    println!(\"Hello from Sill\");\n}\n```\n\nThis is a synthetic file in the demo.\n".into()
         }),
-        Request::Repo(repo) => Data::Repo {
+        Request::Repo { path: repo, counts } => Data::Repo {
             root: Some(repo.clone()),
             head: "main".into(),
             entries: vec![
@@ -314,20 +314,16 @@ pub fn files(request: &Request) -> Result<Data, String> {
             ],
             summary: "+12 −3  ?1".into(),
             lines: Some(("12".into(), "3".into())),
+            counts: if *counts {
+                vec![
+                    (path("/home/demo/project/README.md"), Some((12, 3))),
+                    (path("/home/demo/project/src/main.rs"), Some((3, 0))),
+                ]
+            } else {
+                vec![]
+            },
+            truncated: false,
         },
-        Request::Counts { entries, .. } => Data::Counts(
-            entries
-                .iter()
-                .map(|e| {
-                    let counts = if e.status.contains('?') {
-                        (3, 0)
-                    } else {
-                        (12, 3)
-                    };
-                    (sill_client::files::key(&e.path).to_string(), Some(counts))
-                })
-                .collect(),
-        ),
         Request::Pin { .. } => {
             return Err("Demo pins are examples; use a real session to change pins.".into());
         }
