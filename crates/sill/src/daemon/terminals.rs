@@ -52,7 +52,7 @@ pub fn open(a: api::Open) -> Result<api::Terminal> {
     let cwd = a.cwd.as_ref().map(|c| c.to_path().map_err(|e| invalid(&format!("cwd: {e}")))).transpose()?;
     reap();
     if table().lock().unwrap().len() >= api::MAX_TERMINALS {
-        return Err(domain("limit_exceeded", "too many terminals; close one first"));
+        return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Capacity, None, "too many terminals; close one first"));
     }
     let defaults;
     let argv = if a.argv.is_empty() {
@@ -169,7 +169,7 @@ pub fn serve(id: &str, mut reader: BufReader<UnixStream>) -> Result<()> {
         let replay: Vec<u8> = t.ring.iter().copied().collect();
         if !replay.is_empty() { let _ = tx.try_send(Arc::from(replay)); }
         if t.exited_at.is_none() {
-            if t.viewers.len() >= api::MAX_VIEWERS { return Err(domain("limit_exceeded", "too many viewers on this terminal")); }
+            if t.viewers.len() >= api::MAX_VIEWERS { return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Capacity, None, "too many viewers on this terminal")); }
             t.viewers.push(Viewer { id: viewer, tx });
         }
         t.master.clone()

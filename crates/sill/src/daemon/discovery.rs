@@ -4,7 +4,7 @@ use sill_proto::{discovery as api, sessions::HostPath, rpc::Error};
 use std::path::PathBuf;
 fn args<T: serde::de::DeserializeOwned>(p: Value) -> Result<T> {serde_json::from_value(p).map_err(|e|Error::invalid_params(e).into())}
 fn path(p: &HostPath) -> Result<PathBuf> {p.to_path().map_err(|e|Error::invalid_params(e).into())}
-fn value(v: impl serde::Serialize) -> Result<Value> {let v=serde_json::to_value(v)?;if serde_json::to_vec(&v)?.len()>4*1024*1024{return Err(Error::domain("limit_exceeded","result exceeds 4 MiB").into());}Ok(v)}
+fn value(v: impl serde::Serialize) -> Result<Value> {let v=serde_json::to_value(v)?;if serde_json::to_vec(&v)?.len()>4*1024*1024{return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Result, Some(4194304), "result exceeds 4 MiB").into());}Ok(v)}
 pub(super) fn handle(method: &str, params: Value) -> Option<Result<Value>> {
     if !matches!(method,"_sill/files.find"|"_sill/repos.root"|"_sill/repos.head"|"_sill/repos.status"|"_sill/repos.changed_lines"|"_sill/repos.summary") {return None;}
     Some((||match method {

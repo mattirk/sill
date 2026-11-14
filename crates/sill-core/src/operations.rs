@@ -103,7 +103,7 @@ impl<'a> Journal<'a> {
         }
         let count: i64 = tx.query_row("SELECT count(*) FROM sfp_operations", [], |r| r.get(0))?;
         if count >= MAX_RECEIPTS {
-            return Err(error("limit_exceeded", "operation receipt ledger is full"));
+            return Err(crate::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Capacity, Some(65536), "operation receipt ledger is full"));
         }
         tx.execute(
             "INSERT INTO sfp_operations(id,fingerprint,method,state) VALUES(?1,?2,?3,'running')",

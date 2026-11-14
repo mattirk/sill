@@ -264,8 +264,8 @@ impl Snapshot {
     }
 }
 fn snapshot(journal:&Journal<'_>, conn:u64, session:&str, sub:&str, all:&mut Subscriptions)->Result<Attached,Error> {
-    if all.snapshots.values().filter(|s|s.conn==conn && s.session!=session).count() >= MAX_SNAPSHOTS { return Err(domain("limit_exceeded","too many snapshots")); }
-    if all.snapshots.values().filter(|s|s.conn!=conn || s.session!=session).count()>=64 {return Err(domain("limit_exceeded","too many active snapshots"));}
+    if all.snapshots.values().filter(|s|s.conn==conn && s.session!=session).count() >= MAX_SNAPSHOTS { return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Capacity, None, "too many snapshots")); }
+    if all.snapshots.values().filter(|s|s.conn!=conn || s.session!=session).count()>=64 {return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Capacity, Some(64), "too many active snapshots"));}
     // SQLite's empty filename creates a private, automatically deleted temporary database.
     // Bound its cache; unlike the former Vec this does not retain the full history in RAM.
     let spool = rusqlite::Connection::open("").map_err(Error::failed)?;
@@ -281,14 +281,14 @@ fn snapshot(journal:&Journal<'_>, conn:u64, session:&str, sub:&str, all:&mut Sub
         let json=serde_json::to_string(&page)?;
         bytes=bytes.saturating_add(json.len());
         if bytes > MAX_SNAPSHOT_BYTES || existing_bytes.saturating_add(bytes)>2*MAX_SNAPSHOT_BYTES {
-            return Err(domain("limit_exceeded","snapshot disk quota exceeded").into());
+            return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Capacity, None, "snapshot disk quota exceeded").into());
         }
         spool.execute("INSERT INTO pages VALUES (?1,?2)",rusqlite::params![page_count as i64,json])?;
         page_count+=1; Ok(())
     };
     let mut records=Vec::new(); let mut page_bytes=0usize; let mut record_index=0usize;
     journal.visit_snapshot(session, |json| {
-        if json.len()>64*1024*1024 {return Err(domain("limit_exceeded","record exceeds 64 MiB").into());}
+        if json.len()>64*1024*1024 {return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Record, Some(67108864), "record exceeds 64 MiB").into());}
         if json.len()>PAGE_BYTES {
             if !records.is_empty() { save(std::mem::take(&mut records),None)?; page_bytes=0; }
             let mut offset=0;

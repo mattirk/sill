@@ -28,6 +28,19 @@ try:
         raise AssertionError("unsafe agent identity accepted")
     except RpcError:
         pass
+    # Error details: required shapes are checked by the client against the exported schema.
+    try:
+        c.call("_sill/sessions.list", {"limit": 129}, check=False)
+        raise AssertionError("oversized page accepted")
+    except RpcError as e:
+        assert e.code == "limit_exceeded", e
+        assert e.error["data"]["details"] == {"scope": "request", "maximum": 128}, e.error
+    try:
+        c.call("_sill/internal/sessions.list", {}, check=False)
+        raise AssertionError("internal method without its capability")
+    except RpcError as e:
+        assert e.code == "unsupported" and e.error["data"]["details"] == {"capability": "sill.internal"}, e.error
+    assert any(cap["name"] == "sill.internal" for cap in c.schema["capabilities"]["offered"])
     home = c.call("_sill/files.home", {})
     raw = base64.b64decode(home["bytes_base64"]) + b"/conformance-\xff"
     path = {"bytes_base64": base64.b64encode(raw).decode(), "display": "deliberately not the operational path"}

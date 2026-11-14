@@ -342,7 +342,7 @@ fn dispatch_ready(st:&State)->bool {
 }
 fn validate_attachments(store:&Store,session_id:&str,input:&[p::Attachment])->Result<()> {
     let mut size=0usize;
-    if input.len()>32 {return Err(Error::domain("limit_exceeded","a submission supports at most 32 attachments").into());}
+    if input.len()>32 {return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Request, Some(32), "a submission supports at most 32 attachments").into());}
     for a in input {
         match a {
             p::Attachment::Inline{mime,data_base64,..}=>{
@@ -352,7 +352,7 @@ fn validate_attachments(store:&Store,session_id:&str,input:&[p::Attachment])->Re
             p::Attachment::Uploaded {upload_id,name,mime}=>super::super::uploads::validate(store,session_id,upload_id,name,mime)?,
         }
     }
-    if size>1024*1024 {return Err(Error::domain("limit_exceeded","inline attachments exceed 1 MiB").into());}Ok(())
+    if size>1024*1024 {return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Request, Some(1048576), "inline attachments exceed 1 MiB").into());}Ok(())
 }
 /// Journal records reference attachment bytes and never carry them: every attach would otherwise
 /// download every screenshot ever sent, and enough of them exceed the snapshot limit.

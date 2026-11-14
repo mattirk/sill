@@ -47,7 +47,7 @@ fn limit(n: Option<u16>) -> Result<usize> {
 fn bounded<T: serde::Serialize>(v: T) -> Result<Value> {
     let v = serde_json::to_value(v)?;
     if serde_json::to_vec(&v)?.len() > 4 * 1024 * 1024 {
-        return Err(domain("limit_exceeded", "result exceeds 4 MiB"));
+        return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Result, Some(4194304), "result exceeds 4 MiB"));
     }
     Ok(v)
 }
@@ -283,11 +283,11 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
         "_sill/files.write" => {
             let a: api::FileWrite = args(p)?;
             if a.bytes_base64.len() > api::FILE_CHUNK_BYTES.div_ceil(3) * 4 {
-                return Err(domain("limit_exceeded", "write exceeds 1 MiB"));
+                return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Request, Some(1048576), "write exceeds 1 MiB"));
             }
             let bytes = api::decode_bytes(&a.bytes_base64).map_err(invalid)?;
             if bytes.len() > api::FILE_CHUNK_BYTES {
-                return Err(domain("limit_exceeded", "write exceeds 1 MiB"));
+                return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Request, Some(1048576), "write exceeds 1 MiB"));
             }
             let path = path(&a.path)?;
             sill_core::safe_fs::replace_file(
@@ -305,11 +305,11 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
         }
         "_sill/settings.patch" => {
             if serde_json::to_vec(&p)?.len() > api::TEXT_BYTES {
-                return Err(domain("limit_exceeded", "settings input exceeds 1 MiB"));
+                return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Request, Some(1048576), "settings input exceeds 1 MiB"));
             }
             let a: api::SettingsPatch = args(p)?;
             if a.changes.len() > 64 {
-                return Err(domain("limit_exceeded", "at most 64 changes"));
+                return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Request, Some(64), "at most 64 changes"));
             }
             let _lock = super::frontend::CONFIG.lock().unwrap();
             let mut value = json!(sill_core::config::load());
@@ -330,7 +330,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
         "_sill/settings.instructions.set" => {
             let a: api::Text = args(p)?;
             if a.text.len() > api::TEXT_BYTES {
-                return Err(domain("limit_exceeded", "instructions exceed 1 MiB"));
+                return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Request, Some(1048576), "instructions exceed 1 MiB"));
             }
             sill_core::instructions::save_global(&a.text)?;
             Ok(json!({}))
@@ -489,10 +489,7 @@ fn denied(hub: &Hub, a: api::DeniedList) -> Result<api::NetworkDenied> {
                 break;
             }
             if count > 4096 {
-                return Err(domain(
-                    "limit_exceeded",
-                    "network denial line exceeds 4096 bytes",
-                ));
+                return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Record, Some(4096), "network denial line exceeds 4096 bytes"));
             }
             let host = line.trim();
             if !host.is_empty() {
@@ -510,7 +507,7 @@ fn denied(hub: &Hub, a: api::DeniedList) -> Result<api::NetworkDenied> {
         .unwrap_or_else(|_| sill_core::policy::quiet_default());
     for host in quiet {
         if host.len() > 4096 {
-            return Err(domain("limit_exceeded", "quiet host exceeds 4096 bytes"));
+            return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Record, Some(4096), "quiet host exceeds 4096 bytes"));
         }
         add(2, host);
     }

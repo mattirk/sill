@@ -48,7 +48,7 @@ fn create_owned(store: &Store, request: UploadCreate) -> Result<UploadCreated> {
         if name != request.name || mime != request.mime || bytes != old_bytes { return Err(domain("id_conflict", "upload ID already identifies different input")); }
     } else {
         let (count,total):(i64,i64)=store.conn().query_row("SELECT count(*),coalesce(sum(length(bytes)),0) FROM sfp_uploads WHERE session_id=?1",[&request.session_id],|r|Ok((r.get(0)?,r.get(1)?)))?;
-        if count>=4096 || total.saturating_add(bytes.len() as i64)>256*1024*1024 {return Err(domain("limit_exceeded","session uploads exceed 4096 objects or 256 MiB"));}
+        if count>=4096 || total.saturating_add(bytes.len() as i64)>256*1024*1024 {return Err(anyhow::Error::from(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Capacity, None, "session uploads exceed 4096 objects or 256 MiB")));}
         store.conn().execute("INSERT INTO sfp_uploads(session_id,upload_id,name,mime,bytes) VALUES (?1,?2,?3,?4,?5)",
             params![request.session_id,request.upload_id,request.name,request.mime,bytes])?;
     }
@@ -128,7 +128,7 @@ pub(super) fn resolve(store: &Store, session_id: &str, upload_id: &str, images: 
 }
 
 pub(super) fn decode(text: &str) -> Result<Vec<u8>> {
-    if text.len() > MAX_UPLOAD_BYTES.div_ceil(3)*4 { return Err(domain("limit_exceeded","upload exceeds 1 MiB decoded limit")); }
+    if text.len() > MAX_UPLOAD_BYTES.div_ceil(3)*4 { return Err(anyhow::Error::from(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Request, Some(1048576), "upload exceeds 1 MiB decoded limit"))); }
     if text.len()%4 != 0 { return Err(Error::invalid_params("base64 must use canonical padding").into()); }
     let value=|b:u8|->Result<u8> { match b { b'A'..=b'Z'=>Ok(b-b'A'), b'a'..=b'z'=>Ok(b-b'a'+26), b'0'..=b'9'=>Ok(b-b'0'+52), b'+'=>Ok(62), b'/'=>Ok(63), _=>Err(Error::invalid_params("invalid base64").into()) } };
     let mut out=Vec::with_capacity(text.len()/4*3);
@@ -146,7 +146,7 @@ pub(super) fn decode(text: &str) -> Result<Vec<u8>> {
             } else { out.push((d<<6)|value(c[3])?); }
         }
     }
-    if out.len()>MAX_UPLOAD_BYTES { return Err(domain("limit_exceeded","upload exceeds 1 MiB decoded limit")); }
+    if out.len()>MAX_UPLOAD_BYTES { return Err(anyhow::Error::from(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Request, Some(1048576), "upload exceeds 1 MiB decoded limit"))); }
     Ok(out)
 }
 

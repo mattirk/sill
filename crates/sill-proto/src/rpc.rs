@@ -63,6 +63,18 @@ impl Error {
     pub fn domain(code: &str, message: impl Into<String>) -> Self {
         Self { code: Self::FAILED, message: message.into(), data: Some(serde_json::json!({"code": code})) }
     }
+    /// `limit_exceeded` with its required details.
+    pub fn limit(scope: LimitScope, maximum: Option<u64>, message: impl Into<String>) -> Self {
+        let mut e = Self::domain("limit_exceeded", message);
+        e.data.as_mut().unwrap()["details"] = serde_json::to_value(LimitDetails { scope, maximum }).unwrap();
+        e
+    }
+    /// `unsupported` because the connection did not negotiate `capability`.
+    pub fn needs_capability(capability: &str, message: impl Into<String>) -> Self {
+        let mut e = Self::domain("unsupported", message);
+        e.data.as_mut().unwrap()["details"] = serde_json::to_value(UnsupportedDetails { capability: capability.into() }).unwrap();
+        e
+    }
     pub fn method_not_found(method: &str) -> Self {
         Self::new(Self::METHOD_NOT_FOUND, format!("unknown method {method}"))
     }
@@ -101,9 +113,51 @@ pub struct Incoming {
 /// unfamiliar error, timeout or disconnection.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DomainData { pub code: String, #[serde(skip_serializing_if="Option::is_none")] pub details: Option<DomainDetails> }
+/// `details` by code. Only the codes listed in [`detail_codes`] carry details; for those, the
+/// record shape is fixed by sfp/1 and may only gain optional fields. Clients ignore unknown fields.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum DomainDetails {
-    Incompatible { supported_protocols: Vec<String> },
-    StaleAnswer { question: crate::sfp::Question },
+    Incompatible(IncompatibleDetails),
+    StaleAnswer(StaleAnswerDetails),
+    LimitExceeded(LimitDetails),
+    Unsupported(UnsupportedDetails),
+}
+/// `incompatible`: the protocol identities the daemon supports. Always present.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct IncompatibleDetails { pub supported_protocols: Vec<String> }
+/// `stale_answer`: the question as currently resolved. Always present.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct StaleAnswerDetails { pub question: crate::sfp::Question }
+/// `limit_exceeded`: which kind of bound was hit, so a client knows what could succeed instead.
+/// Always present.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LimitDetails {
+    pub scope: LimitScope,
+    /// The bound, in the unit the message names (bytes, items, objects…), where it is a number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximum: Option<u64>,
+}
+/// What a client can do about a `limit_exceeded`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitScope {
+    /// The request itself is too large or names too many items: send less.
+    Request,
+    /// The response would be too large: ask for a smaller page.
+    Result,
+    /// One stored record is too large for this method; paging cannot help.
+    Record,
+    /// A daemon resource is full (connections, jobs, snapshots, receipts, pins…): release one
+    /// or wait. Repeating the same request unchanged fails again until something is released.
+    Capacity,
+}
+/// `unsupported`: present when the method or feature needs a capability the connection did not
+/// negotiate. Absent when the refusal is about the target (platform, policy, agent).
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct UnsupportedDetails { pub capability: String }
+
+/// Codes whose `details` sfp/1 defines, with whether every occurrence carries them.
+pub fn detail_codes() -> [(&'static str, bool); 4] {
+    [("incompatible", true), ("stale_answer", true), ("limit_exceeded", true), ("unsupported", false)]
 }

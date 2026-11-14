@@ -326,7 +326,7 @@ impl Hub {
         if let Some(result) = super::admin::handle(self, conn.id, m, params.clone()) {
             return result.map_err(|e| {
                 if let Some(e) = e.downcast_ref::<Error>() { return e.clone(); }
-                if let Some(e) = e.downcast_ref::<sill_core::sfp::DomainError>() { return Error::domain(e.code, &e.message); }
+                if e.downcast_ref::<sill_core::sfp::DomainError>().is_some() { return super::sfp::failure(e); }
                 Error::domain("operation_failed", format!("{e:#}"))
             });
         }

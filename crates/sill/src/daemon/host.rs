@@ -28,7 +28,7 @@ impl Job {
     pub(super) fn reserve(key: String) -> Result<Self> {
         let mut jobs = jobs().lock().unwrap();
         if jobs.contains(&key) { return Err(domain("busy", "this host operation is already running")); }
-        if jobs.len() >= api::MAX_JOBS { return Err(domain("limit_exceeded", "too many host jobs")); }
+        if jobs.len() >= api::MAX_JOBS { return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Capacity, None, "too many host jobs")); }
         jobs.insert(key.clone());
         Ok(Self(key))
     }
@@ -202,7 +202,7 @@ pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
                     let Some(entry) = entries.next() else { break };
                     let entry = summary(entry);
                     let size = serde_json::to_vec(&entry)?.len();
-                    if size > 4 * 1024 * 1024 { return Err(domain("limit_exceeded", "registry entry too large")); }
+                    if size > 4 * 1024 * 1024 { return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Record, Some(4194304), "registry entry too large")); }
                     if bytes + size > 4 * 1024 * 1024 { page.next = page.entries.last().map(|e| e.entry_id.clone()); break; }
                     bytes += size;
                     page.entries.push(entry);

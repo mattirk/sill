@@ -17,7 +17,7 @@ fn path(p: &HostPath) -> Result<std::path::PathBuf> {
 }
 fn batch(n: usize) -> Result<()> {
     if n == 0 || n > 128 {
-        Err(domain("limit_exceeded", "expected 1–128 items"))
+        Err(anyhow::Error::from(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Request, Some(128), "expected 1–128 items")))
     } else {
         Ok(())
     }
@@ -58,7 +58,7 @@ fn live(repo: &HostPath, p: &HostPath) -> Result<(std::path::PathBuf, std::path:
 fn bounded<T: serde::Serialize>(v: T) -> Result<Value> {
     let v = serde_json::to_value(v)?;
     if serde_json::to_vec(&v)?.len() > 4 * 1024 * 1024 {
-        return Err(domain("limit_exceeded", "result exceeds 4 MiB"));
+        return Err(anyhow::Error::from(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Result, Some(4194304), "result exceeds 4 MiB")));
     }
     Ok(v)
 }
@@ -175,7 +175,7 @@ impl Hub {
                 while let Some((key, row)) = rows.next() {
                     let size = serde_json::to_vec(&row)?.len();
                     if size > 3 * 1024 * 1024 {
-                        return Err(domain("limit_exceeded", "changes entry too large"));
+                        return Err(anyhow::Error::from(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Record, None, "changes entry too large")));
                     }
                     if page.entries.len() == limit || bytes + size > 3 * 1024 * 1024 {
                         page.next = last;
@@ -340,7 +340,7 @@ impl Hub {
                     };
                     let size = serde_json::to_vec(&entry)?.len();
                     if size > 3 * 1024 * 1024 {
-                        return Err(domain("limit_exceeded", "history entry too large"));
+                        return Err(anyhow::Error::from(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Record, None, "history entry too large")));
                     }
                     if bytes + size > 3 * 1024 * 1024 {
                         return bounded(api::HistoryPage { events, next });

@@ -8,6 +8,34 @@ pub const METHOD: &str = "_sill/initialize";
 /// Development implementation; the complete sfp/1-draft.1 contract is not frozen or advertised.
 pub const PROTOCOL_ID: &str = "sfp/1-dev.2";
 pub const INTERNAL_CAPABILITY: &str = "sill.internal";
+
+/// A negotiable optional feature. Names are `namespace.feature` in lowercase ASCII (`a-z`,
+/// `0-9`, `_`, `.`); the `sill.` namespace is the daemon's own. Versions start at 1 and are
+/// cumulative: version N keeps every guarantee of N−1. A client offers the highest version it
+/// implements; the daemon answers min(offered, its own), and omits a capability it does not have
+/// or that was offered as 0. Only answered capabilities may be used on the connection.
+pub struct Capability { pub name: &'static str, pub version: u32, pub doc: &'static str }
+
+/// Every capability this daemon offers. The baseline sfp/1 contract needs none of them; later
+/// compatible additions arrive here (docs/protocol.md §7.2).
+pub const CAPABILITIES: &[Capability] = &[
+    Capability { name: INTERNAL_CAPABILITY, version: 1, doc: "Same-build `_sill/internal/` adapters; not a compatibility contract." },
+];
+
+/// Whether `name` is a well-formed capability name.
+pub fn valid_capability_name(name: &str) -> bool {
+    let parts: Vec<&str> = name.split('.').collect();
+    parts.len() >= 2 && name.len() <= 64
+        && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'))
+}
+
+/// The capabilities answered for an offer: min(offered, supported) for each known one.
+pub fn negotiate(offer: &BTreeMap<String, u32>) -> BTreeMap<String, u32> {
+    CAPABILITIES.iter()
+        .filter_map(|c| offer.get(c.name).map(|&v| (c.name.to_string(), v.min(c.version))))
+        .filter(|(_, v)| *v > 0)
+        .collect()
+}
 pub const MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
 pub const INITIALIZE_TIMEOUT_SECONDS: u64 = 10;
 
@@ -64,7 +92,7 @@ impl ConnectionState {
             return Err(error);
         };
         self.initialized = true;
-        let capabilities = if request.capabilities.get(INTERNAL_CAPABILITY) == Some(&1) { BTreeMap::from([(INTERNAL_CAPABILITY.into(), 1)]) } else { BTreeMap::new() };
+        let capabilities = negotiate(&request.capabilities);
         Ok(Initialized { protocol, daemon: Peer { name: "sill".into(), version: version.into() }, capabilities, limits: Limits::default() })
     }
 }
@@ -105,6 +133,15 @@ mod tests {
         assert!(response.capabilities.is_empty());
         assert!(state.require_initialized().is_ok());
         assert_eq!(state.initialize(offer(&[PROTOCOL_ID]), "test").unwrap_err().data.unwrap()["code"], "invalid_state");
+    }
+    #[test]
+    fn capabilities_negotiate_to_the_lower_version_and_ignore_unknown_offers() {
+        let offer = |pairs: &[(&str, u32)]| pairs.iter().map(|(n, v)| (n.to_string(), *v)).collect::<BTreeMap<_, _>>();
+        assert!(negotiate(&offer(&[("unknown.feature", 3)])).is_empty());
+        assert_eq!(negotiate(&offer(&[(INTERNAL_CAPABILITY, 7)])), offer(&[(INTERNAL_CAPABILITY, 1)]));
+        assert!(negotiate(&offer(&[(INTERNAL_CAPABILITY, 0)])).is_empty());
+        for c in CAPABILITIES { assert!(valid_capability_name(c.name), "{}", c.name); assert!(c.version >= 1); }
+        assert!(!valid_capability_name("nodot") && !valid_capability_name("Upper.case") && !valid_capability_name("a..b"));
     }
     #[test]
     fn framing_bounds_include_newline_and_reject_partial_eof() {

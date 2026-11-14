@@ -213,6 +213,18 @@ pub fn document() -> Value {
     let progress = g.subschema_for::<crate::host::Progress>().to_value();
     let error = g.subschema_for::<crate::rpc::Error>().to_value();
     let domain_data = g.subschema_for::<crate::rpc::DomainData>().to_value();
+    let details: serde_json::Map<String, Value> = crate::rpc::detail_codes().into_iter().map(|(code, always)| {
+        let shape = match code {
+            "incompatible" => g.subschema_for::<crate::rpc::IncompatibleDetails>(),
+            "stale_answer" => g.subschema_for::<crate::rpc::StaleAnswerDetails>(),
+            "limit_exceeded" => g.subschema_for::<crate::rpc::LimitDetails>(),
+            "unsupported" => g.subschema_for::<crate::rpc::UnsupportedDetails>(),
+            other => unreachable!("detail schema for {other}"),
+        }.to_value();
+        (code.to_string(), json!({"required": always, "shape": shape}))
+    }).collect();
+    let capabilities: Vec<Value> = crate::initialize::CAPABILITIES.iter()
+        .map(|c| json!({"name": c.name, "version": c.version, "doc": c.doc})).collect();
     let defs = g.take_definitions(true);
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -220,10 +232,14 @@ pub fn document() -> Value {
         "protocol": crate::initialize::PROTOCOL_ID,
         "limits": crate::initialize::Limits::default(),
         "transport": "JSON-RPC 2.0, one message per line, over the unix socket at $XDG_RUNTIME_DIR/sill/daemon.sock (docs/protocol.md)",
+        "capabilities": {"offered": capabilities,
+            "rules": "Names are namespace.feature (lowercase ASCII, digits, '_'); versions are cumulative from 1; the daemon answers min(offered, supported) and omits unknown ones. A missing capability disables that feature only; it is never a protocol mismatch."},
         "methods": methods,
         "$defs": defs,
         "errors": {"shape": error, "domain_data": domain_data, "domain_numeric_code": -32000,
             "codes": ["incompatible","not_initialized","not_found","gone","invalid_state","unsupported","busy","id_conflict","stale_answer","invalid_cursor","snapshot_expired","limit_exceeded","permission_denied","operation_failed"],
+            "details": details,
+            "details_rule": "Codes not listed carry no details in sfp/1. Listed shapes may only gain optional fields; clients ignore unknown fields and unknown codes.",
             "retry": "Unknown codes, timeouts and disconnections never authorize automatic mutation retry. Recover durable outcomes or read current state as specified by the method."},
         "streams": {"host_progress": {"framing": "ndjson", "event": progress, "max_text_bytes": crate::host::MAX_PROGRESS_TEXT, "max_jobs": crate::host::MAX_JOBS}},
     })
@@ -250,6 +266,22 @@ mod tests {
         // a frontend reads the method table: the attach params say what to send
         let attach = doc["methods"].as_array().unwrap().iter().find(|m| m["name"] == "_sill/sessions.attach").unwrap();
         assert!(attach["params"]["$ref"].as_str().unwrap().ends_with("/Attach"), "{attach}");
+    }
+
+    #[test]
+    fn error_details_and_capabilities_are_exported() {
+        let doc = document();
+        let details = doc["errors"]["details"].as_object().unwrap();
+        for (code, required) in crate::rpc::detail_codes() {
+            assert!(doc["errors"]["codes"].as_array().unwrap().contains(&json!(code)), "{code} not a listed code");
+            assert_eq!(details[code]["required"], json!(required), "{code}");
+        }
+        let offered = doc["capabilities"]["offered"].as_array().unwrap();
+        assert!(offered.iter().any(|c| c["name"] == crate::initialize::INTERNAL_CAPABILITY && c["version"] == 1));
+        // a limit error's data reads back as typed details
+        let e = crate::rpc::Error::limit(crate::rpc::LimitScope::Result, Some(4), "too big");
+        let data: crate::rpc::DomainData = serde_json::from_value(e.data.unwrap()).unwrap();
+        assert!(matches!(data.details, Some(crate::rpc::DomainDetails::LimitExceeded(crate::rpc::LimitDetails { scope: crate::rpc::LimitScope::Result, maximum: Some(4) }))));
     }
 
     /// docs/protocol.md is the human reading of this table: a method the daemon answers is in it.

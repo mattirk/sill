@@ -417,7 +417,7 @@ fn read_loop(mut reader: BufReader<UnixStream>, first: String, hub: &Arc<Hub>, c
             continue;
         }
         if method.starts_with("_sill/internal/") && !conn.internal.load(Ordering::Acquire) {
-            conn.reply(&Response::err(Some(id), Error::domain("unsupported", "method requires the sill.internal capability")));
+            conn.reply(&Response::err(Some(id), Error::needs_capability(sill_proto::initialize::INTERNAL_CAPABILITY, "method requires the sill.internal capability")));
             continue;
         }
         if hub.sfp_request(conn, id, method, msg.params.clone().unwrap_or(serde_json::Value::Null))? { continue; }

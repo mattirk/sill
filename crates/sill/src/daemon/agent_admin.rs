@@ -19,7 +19,7 @@ fn select(home:&std::path::Path,a:&api::EntryKey)->Result<sill_core::registry::E
 pub fn handle(hub:&Hub,m:&str,p:Value)->Option<Result<Value>>{
     if !matches!(m,"_sill/agents.list"|"_sill/agents.get"|"_sill/agents.save"|"_sill/agents.remove"|"_sill/agents.available"|"_sill/agents.defaults.get"|"_sill/agents.defaults.set"|"_sill/registry.refresh"|"_sill/registry.installed"|"_sill/registry.uninstall"|"_sill/registry.icon"){return None;}
     Some((||{
-        if serde_json::to_vec(&p)?.len()>1024*1024{return Err(err("limit_exceeded","agent input exceeds 1 MiB"));}
+        if serde_json::to_vec(&p)?.len()>1024*1024{return Err(anyhow::Error::from(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Request, Some(1048576), "agent input exceeds 1 MiB")));}
         let home=sill_core::changes::home()?;
         let result=match m{
             "_sill/agents.list"=>{
@@ -64,12 +64,12 @@ pub fn handle(hub:&Hub,m:&str,p:Value)->Option<Result<Value>>{
                 let a:api::EntryKey=args(p)?;let entry=select(&home,&a)?;
                 let bytes=if let Some(path)=sill_core::registry::fetch_icon(&home,&entry){
                     let mut bytes=vec![];std::fs::File::open(path)?.take(1024*1024+1).read_to_end(&mut bytes)?;
-                    if bytes.len()>1024*1024{return Err(err("limit_exceeded","icon exceeds 1 MiB"));}Some(sill_proto::admin::encode_bytes(&bytes))
+                    if bytes.len()>1024*1024{return Err(anyhow::Error::from(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Record, Some(1048576), "icon exceeds 1 MiB")));}Some(sill_proto::admin::encode_bytes(&bytes))
                 }else{None};json!(api::Icon{bytes_base64:bytes})
             }
             _=>unreachable!(),
         };
-        if serde_json::to_vec(&result)?.len()>4*1024*1024{return Err(err("limit_exceeded","agent response exceeds 4 MiB"));}Ok(result)
+        if serde_json::to_vec(&result)?.len()>4*1024*1024{return Err(anyhow::Error::from(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Result, Some(4194304), "agent response exceeds 4 MiB")));}Ok(result)
     })())
 }
 #[cfg(test)]

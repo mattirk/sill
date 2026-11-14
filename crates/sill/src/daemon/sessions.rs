@@ -73,7 +73,7 @@ fn create(store: &Store, mut a: api::Create) -> Result<api::SessionKey> {
     }
     let count: i64 = store.conn().query_row("SELECT count(*) FROM sfp_creates", [], |r| r.get(0))?;
     if count >= 65536 {
-        return Err(Error::domain("limit_exceeded", "create retry ledger is full").into());
+        return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Capacity, None, "create retry ledger is full").into());
     }
     if !a.follows.is_empty() {
         exact(store, &a.follows)?;
@@ -107,7 +107,7 @@ impl Hub {
                     let a: api::List = args(params)?;
                     let limit = a.limit.unwrap_or(64) as usize;
                     if !(1..=128).contains(&limit) {
-                        return Err(Error::domain("limit_exceeded", "limit must be 1–128").into());
+                        return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Request, Some(128), "limit must be 1–128").into());
                     }
                     let after = a
                         .after
@@ -132,7 +132,7 @@ impl Hub {
                         let sessions = rows.into_iter().map(|s| record(store, s)).collect::<Result<Vec<_>>>()?;
                         let value = json!(api::Page { sessions, next });
                         if serde_json::to_vec(&value)?.len() > 4 * 1024 * 1024 {
-                            return Err(Error::domain("limit_exceeded", "session page exceeds 4 MiB; request fewer records").into());
+                            return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Result, Some(4194304), "session page exceeds 4 MiB; request fewer records").into());
                         }
                         Ok(value)
                     })
@@ -148,7 +148,7 @@ impl Hub {
                 "_sill/sessions.update" => {
                     let a: api::Update = args(params)?;
                     if serde_json::to_vec(&a.change)?.len() > 1024 * 1024 {
-                        return Err(Error::domain("limit_exceeded", "session update exceeds 1 MiB").into());
+                        return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Request, Some(1048576), "session update exceeds 1 MiB").into());
                     }
                     let refresh = matches!(&a.change, api::Change::Title { .. } | api::Change::Summary { .. });
                     self.with_store(|store| {
@@ -229,7 +229,7 @@ impl Hub {
                     let n = a.lines.unwrap_or(100);
                     if n == 0 || n > 20000 { return Err(Error::invalid_params("lines must be 1–20000").into()); }
                     let text = sill_core::session::read_log(&sill_core::session::log_source(&a.session_id), n as usize);
-                    if serde_json::to_vec(&text)?.len()>4*1024*1024 { return Err(Error::domain("limit_exceeded", "log exceeds 4 MiB; request fewer lines").into()); }
+                    if serde_json::to_vec(&text)?.len()>4*1024*1024 { return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Result, Some(4194304), "log exceeds 4 MiB; request fewer lines").into()); }
                     Ok(json!(sill_proto::Text { text }))
                 }
                 "_sill/sessions.start" | "_sill/sessions.stop" | "_sill/sessions.checkpoint" => {

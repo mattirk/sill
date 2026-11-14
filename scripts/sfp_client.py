@@ -189,8 +189,10 @@ class Client:
             raise ValueError("invalid JSON-RPC version")
         return message
 
-    def call(self, method, params):
-        self.validate(method, "params", params)
+    def call(self, method, params, check=True):
+        """check=False sends params the schema would refuse (conformance probes of daemon errors)."""
+        if check:
+            self.validate(method, "params", params)
         request_id = self.next_id
         self.next_id += 1
         frame = (json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}) + "\n").encode()
@@ -215,9 +217,24 @@ class Client:
                     shape = self.schema["errors"]["shape"]
                     error_schema = {"$schema": "https://json-schema.org/draft/2020-12/schema", "$defs": self.schema["$defs"], **shape}
                     self.validator(error_schema).validate(message["error"])
+                    self.validate_details(message["error"])
                 raise RpcError(message["error"])
             self.validate(method, "result", message["result"])
             return message["result"]
+
+    def validate_details(self, error):
+        """A listed code's details must match its exported shape; required ones must be present.
+        Unlisted and unknown codes are accepted as-is (their details are ignored)."""
+        data = error.get("data") or {}
+        rule = self.schema["errors"].get("details", {}).get(data.get("code"))
+        if rule is None:
+            return
+        if "details" not in data:
+            if rule["required"]:
+                raise ValueError(f"{data['code']} without its required details")
+            return
+        schema = {"$schema": "https://json-schema.org/draft/2020-12/schema", "$defs": self.schema["$defs"], **rule["shape"]}
+        self.validator(schema).validate(data["details"])
 
     def open_stream(self, token):
         """Claim once on a fresh transport; an uncertain claim must never be retried."""

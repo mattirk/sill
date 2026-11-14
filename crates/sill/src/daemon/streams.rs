@@ -28,7 +28,7 @@ fn add(endpoint: Endpoint) -> Result<String> {
     let mut s = state().lock().unwrap();
     s.retain(|_, p| p.expires > Instant::now());
     if s.len() >= MAX_PENDING {
-        return Err(sill_core::sfp::DomainError { code: "limit_exceeded", message: "too many unclaimed streams".into(), details: None }.into());
+        return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Capacity, None, "too many unclaimed streams"));
     }
     s.insert(token.clone(), Pending { endpoint, expires: Instant::now() + Duration::from_secs(TOKEN_SECONDS) });
     Ok(token)

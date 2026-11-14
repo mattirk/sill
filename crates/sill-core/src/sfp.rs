@@ -12,6 +12,13 @@ impl std::fmt::Display for DomainError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.message.fmt(f) }
 }
 impl std::error::Error for DomainError {}
+impl DomainError {
+    /// `limit_exceeded` with its required details (`sill_proto::rpc::LimitDetails`).
+    pub fn limit(scope: sill_proto::rpc::LimitScope, maximum: Option<u64>, message: impl Into<String>) -> anyhow::Error {
+        let details = serde_json::to_value(sill_proto::rpc::LimitDetails { scope, maximum }).unwrap();
+        DomainError { code: "limit_exceeded", message: message.into(), details: Some(details) }.into()
+    }
+}
 fn error(code: &'static str, message: impl Into<String>) -> anyhow::Error {
     DomainError { code, message: message.into(), details:None }.into()
 }
@@ -233,7 +240,7 @@ impl<'a> Journal<'a> {
             let mut seq = sequence(&self.cursor(session_id)?.seq)?;
             let mut output = Vec::with_capacity(events.len());
             for original in events {
-                seq = seq.checked_add(1).ok_or_else(|| error("limit_exceeded", "session event sequence exhausted"))?;
+                seq = seq.checked_add(1).ok_or_else(|| DomainError::limit(sill_proto::rpc::LimitScope::Capacity, None, "session event sequence exhausted"))?;
                 let mut event = original.clone();
                 match &mut event {
                     Event::SessionUpdated { session } => {
@@ -268,7 +275,7 @@ impl<'a> Journal<'a> {
 
     fn put(&self, session_id: &str, kind: &str, id: &str, seq: i64, record: &Record) -> Result<()> {
         let json = serde_json::to_string(record)?;
-        if json.len() > 64 * 1024 * 1024 { return Err(error("limit_exceeded", "record exceeds 64 MiB")); }
+        if json.len() > 64 * 1024 * 1024 { return Err(DomainError::limit(sill_proto::rpc::LimitScope::Record, Some(67108864), "record exceeds 64 MiB")); }
         self.store.conn().execute("INSERT INTO sfp_records(session_id,kind,id,created_seq,json) VALUES (?1,?2,?3,?4,?5)
             ON CONFLICT(session_id,kind,id) DO UPDATE SET json=excluded.json", params![session_id,kind,id,seq,json])?;
         Ok(())
@@ -407,7 +414,7 @@ impl<'a> Journal<'a> {
         self.atomic(|| {
             self.exists(&input.session_id)?;
             validate_id(&input.submission_id)?;
-            if serde_json::to_string(&input.text)?.len()>1024*1024 {return Err(error("limit_exceeded","prompt text exceeds 1 MiB encoded limit"));}
+            if serde_json::to_string(&input.text)?.len()>1024*1024 {return Err(DomainError::limit(sill_proto::rpc::LimitScope::Request, Some(1048576), "prompt text exceeds 1 MiB encoded limit"));}
             let fingerprint = serde_json::to_string(input)?;
             let previous: Option<String> = self.store.conn().query_row("SELECT input FROM sfp_submission_inputs WHERE session_id=?1 AND submission_id=?2", params![input.session_id,input.submission_id], |r| r.get(0)).optional()?;
             if let Some(previous) = previous {

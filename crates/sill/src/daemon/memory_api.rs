@@ -36,7 +36,7 @@ fn exact(s: &sill_core::store::Store, id: &str) -> Result<()> {
 fn bounded(v: impl serde::Serialize) -> Result<Value> {
     let v = json!(v);
     if serde_json::to_vec(&v)?.len() > 4 * 1024 * 1024 {
-        return Err(domain("limit_exceeded", "memory page exceeds 4 MiB"));
+        return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Result, Some(4194304), "memory page exceeds 4 MiB"));
     }
     Ok(v)
 }
@@ -112,10 +112,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 let row = row?;
                 let size = serde_json::to_vec(&row)?.len();
                 if size > 4 * 1024 * 1024 {
-                    return Err(domain(
-                        "limit_exceeded",
-                        "memory metadata record exceeds 4 MiB",
-                    ));
+                    return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Record, Some(4194304), "memory metadata record exceeds 4 MiB"));
                 }
                 if sessions.len() == n || bytes + size > 4 * 1024 * 1024 {
                     more = true;
@@ -178,7 +175,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 };
                 let size = serde_json::to_vec(&hit)?.len();
                 if size > 4 * 1024 * 1024 {
-                    return Err(domain("limit_exceeded", "memory hit exceeds 4 MiB"));
+                    return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Record, Some(4194304), "memory hit exceeds 4 MiB"));
                 }
                 if hits.len() == n || bytes + size > 4 * 1024 * 1024 {
                     more = true;
@@ -211,10 +208,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             let mut more = false;
             while let Some(r) = rows.next()? {
                 if r.get::<_, i64>(4)? > 4 * 1024 * 1024 {
-                    return Err(domain(
-                        "limit_exceeded",
-                        "memory note exceeds 4 MiB; use memory.text instead",
-                    ));
+                    return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Record, Some(4194304), "memory note exceeds 4 MiB; use memory.text instead"));
                 }
                 let note = api::Note {
                     cursor: r.get::<_, i64>(0)?.to_string(),
@@ -224,10 +218,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 };
                 let size = serde_json::to_vec(&note)?.len();
                 if size > 4 * 1024 * 1024 {
-                    return Err(domain(
-                        "limit_exceeded",
-                        "encoded memory note exceeds 4 MiB; use memory.text instead",
-                    ));
+                    return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Record, Some(4194304), "encoded memory note exceeds 4 MiB; use memory.text instead"));
                 }
                 if notes.len() == n || bytes + size > 4 * 1024 * 1024 {
                     more = true;
@@ -246,7 +237,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
         "_sill/memory.notes.add" => {
             let a: api::AddNote = args(p)?;
             if a.text.len() > 1024 * 1024 {
-                return Err(domain("limit_exceeded", "note exceeds 1 MiB"));
+                return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Request, Some(1048576), "note exceeds 1 MiB"));
             }
             hub.with_store(|s| {
                 exact(s, &a.session_id)?;
@@ -330,14 +321,11 @@ impl std::fmt::Write for TextWriter {
             return Err(std::fmt::Error);
         }
         if self.bytes.saturating_add(s.len()) > MAX_TEXT_BYTES {
-            self.failed = Some(domain("limit_exceeded", "memory snapshot exceeds 256 MiB"));
+            self.failed = Some(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Record, Some(268435456), "memory snapshot exceeds 256 MiB"));
             return Err(std::fmt::Error);
         }
         if Instant::now() > self.deadline {
-            self.failed = Some(domain(
-                "limit_exceeded",
-                "memory snapshot exceeded its 30-second build budget",
-            ));
+            self.failed = Some(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Record, None, "memory snapshot exceeded its 30-second build budget"));
             return Err(std::fmt::Error);
         }
         if let Err(e) = self.file.write_all(s.as_bytes()) {
@@ -368,10 +356,7 @@ fn create_text(hub: &Hub, conn: u64, a: &api::TextRead, identity: &str) -> Resul
                 .saturating_add(MAX_TEXT_BYTES)
                 > MAX_TEXT_TOTAL
         {
-            return Err(domain(
-                "limit_exceeded",
-                "memory snapshot lease or disk budget exhausted; close old snapshots",
-            ));
+            return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Capacity, None, "memory snapshot lease or disk budget exhausted; close old snapshots"));
         }
         leases.insert(
             id.clone(),
@@ -422,10 +407,7 @@ fn create_text(hub: &Hub, conn: u64, a: &api::TextRead, identity: &str) -> Resul
     // A pathological individual legacy row must not allocate unbounded memory in formatters.
     let largest:i64=store.conn().query_row("SELECT max(n) FROM (SELECT coalesce(max(length(CAST(text AS BLOB))),0) n FROM entries WHERE session_id=?1 UNION ALL SELECT coalesce(max(length(CAST(text AS BLOB))),0) FROM memories WHERE session_id=?1 UNION ALL SELECT length(CAST(summary AS BLOB)) FROM sessions WHERE id=?1)",[&a.session_id],|r|r.get(0))?;
     if largest > 64 * 1024 * 1024 {
-        return Err(domain(
-            "limit_exceeded",
-            "legacy memory record exceeds 64 MiB",
-        ));
+        return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Record, Some(67108864), "legacy memory record exceeds 64 MiB"));
     }
     let info = sill_memory::find_session(store.conn(), &a.session_id)?
         .ok_or_else(|| domain("not_found", "session not found"))?;

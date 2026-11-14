@@ -657,6 +657,27 @@ ceiling and the mandatory limit inventory remain freeze work. `_sill/daemon.sche
 the selected protocol's methods, notifications, errors, limits and capability requirements; it
 must not expose protocol 6 shapes under an SFP identity.
 
+**Capability names and versions (settled for sfp/1, 2026-11-03).** A capability name is
+`namespace.feature`: at least two dot-separated parts of lowercase ASCII letters, digits and `_`,
+at most 64 bytes. The `sill.` namespace is the daemon's own. Versions are integers from 1 and
+cumulative: version N keeps every guarantee of version N−1. In `_sill/initialize` the client
+offers each capability at the highest version it implements; the daemon answers each one it has
+at min(offered, its own) and omits unknown names and offers of 0. Only answered capabilities may
+be used on that connection. A method that needs a missing capability returns `unsupported` with
+`details.capability`. The exported schema lists the daemon's capabilities under
+`capabilities.offered` and each method's requirement under `methods[].capabilities`.
+
+The sfp/1 baseline contract needs no capability. The registry at freeze:
+
+| Capability | Version | Meaning |
+|---|---|---|
+| `sill.internal` | 1 | Same-build `_sill/internal/` adapters. Not a compatibility contract; independent clients do not offer it. |
+
+Agent abilities (`steering`, `images`) are not handshake capabilities: they are reported in
+session state, may change with the agent, and use the same open-map rule (unknown keys ignored).
+Native ACP v2 is how the daemon talks to an agent; it changes nothing on the SFP wire and so is
+not an SFP capability either.
+
 **Extension rule after the freeze (decided 2026-11-03).** The identity remains `sfp/1` for the
 lifetime of v1; there are no `sfp/1.x` minor versions. A compatible addition is a new method,
 notification, optional request/result field, enum variant or error detail that an old peer can
@@ -914,6 +935,22 @@ clients branch on `data.code`, not English text. Initial domain codes:
 | `id_conflict`, `stale_answer` | Idempotency-key conflict or an already resolved question. |
 | `invalid_cursor`, `snapshot_expired` | Invalid resume position or expired snapshot lease. |
 | `limit_exceeded`, `permission_denied` | Advertised bound exceeded or daemon policy refused the operation. |
+| `operation_failed` | A durable host operation (login, install) recorded a failure. |
+
+**Error details (settled for sfp/1, 2026-11-03).** Only these codes carry `details`; every other
+code carries none in sfp/1. The exported schema lists them under `errors.details`, each with its
+shape and whether it is always present. Clients validate a listed code's details and ignore
+details of unlisted or unknown codes.
+
+| Code | `details` | Present |
+|---|---|---|
+| `incompatible` | `{supported_protocols: [string]}`: the identities the daemon supports. | Always |
+| `stale_answer` | `{question}`: the question record as resolved. | Always |
+| `limit_exceeded` | `{scope, maximum?}`: `scope` is `request` (send less), `result` (ask for a smaller page), `record` (one stored record is too large for this method; paging cannot help) or `capacity` (a daemon resource is full; release one or wait, an unchanged repeat fails again). `maximum` is the bound as a number in the unit the message names, where one exists. | Always |
+| `unsupported` | `{capability}`: the capability the connection did not negotiate. | Only when a capability is missing; refusals about the target (platform, policy, agent) carry none |
+
+A detail shape may gain optional fields within sfp/1 and clients ignore unknown fields. Adding
+details to another code is a compatible addition under the §7.2 rule.
 
 Method schemas must define error details and whether failure establishes that no side effect
 occurred. A timeout/connection loss establishes no such thing. Unknown error codes display the
@@ -1004,7 +1041,7 @@ Required conformance scenarios include:
 
 These are design work, not reasons to reopen §6's product decisions. **Scope decided
 2026-11-03:** capability names/versions and required error-detail schemas must be settled before
-the freeze; migration of stored transcripts to stable IDs and history/terminal retention limits
+the freeze (done 2026-11-03: §7.2 and §7.8); migration of stored transcripts to stable IDs and history/terminal retention limits
 are out of v1 and may arrive later as capability-gated additions (§7.2).
 
 - Exact baseline item/content, session/activity, tool, form and attachment schemas; which related

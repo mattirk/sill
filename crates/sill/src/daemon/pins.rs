@@ -37,7 +37,7 @@ impl Hub {
                         if held.iter().any(|p| path.starts_with(p) || p.starts_with(&path)) {
                             return Err(Error::domain("invalid_state", "global pins must not overlap").into());
                         }
-                        if held.len() >= 128 { return Err(Error::domain("limit_exceeded", "at most 128 global pins").into()); }
+                        if held.len() >= 128 { return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Capacity, Some(128), "at most 128 global pins").into()); }
                         store.global_pin(&path)
                     })?;
                     Ok(json!(api::GlobalPin { path: HostPath::from_path(&path) }))
@@ -56,7 +56,7 @@ impl Hub {
                         if method == "_sill/sessions.pin" {
                             if session.ghost { return Err(Error::domain("invalid_state", GHOST_NO_PINS).into()); }
                             let held = store.pins(&a.session_id)?;
-                            if held.len() >= 128 && !held.contains(&path) { return Err(Error::domain("limit_exceeded", "at most 128 session pins").into()); }
+                            if held.len() >= 128 && !held.contains(&path) { return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Capacity, Some(128), "at most 128 session pins").into()); }
                             store.pin(&a.session_id, &path)?;
                         } else { store.unpin(&a.session_id, &path)?; }
                         Ok(json!({}))
