@@ -347,12 +347,14 @@ ACP v1 retained as the default. See [native behavior and recovery evidence](sfp-
 This milestone remains `sfp/1-dev.3`. **What stands between it and stable `sfp/1` (decided
 2026-11-03)** is only what could otherwise need `sfp/2`:
 
-- **SFP release work:** user acceptance on the shelf, `sill attach` line mode and one client
+- **SFP release checklist:** user acceptance on the shelf, `sill attach` line mode and one client
   over `sill daemon --stdio` (restart mid-turn, a question answered after reconnecting,
   uploads and agent images), with the independent Python conformance suite rerun; then one
   coordinated cutover that sets the identity to `sfp/1`, bumps the private relay protocol,
   re-records [`sfp-1.schema.json`](sfp-1.schema.json) and moves this document's development notes to
   [protocol-history.md](protocol-history.md).
+  Acceptance and the conformance rerun are complete as recorded below; only the coordinated
+  cutover remains.
 - **Not SFP release work:** the native ACP v2 adapter's own validation (a third-party v2
   agent, upstream draft extensions, history replay after relay replacement; see
   [sfp-operations.md](sfp-operations.md#experimental-native-acp-v2)). The adapter is opt-in and
@@ -361,12 +363,15 @@ This milestone remains `sfp/1-dev.3`. **What stands between it and stable `sfp/1
   agent generation with explicit discontinuity is already the specified outcome. Performance
   is likewise not a gate (see the benchmark disposition below).
 
-**Acceptance progress, 2026-11-04:** the human confirmed that a shelf session survived a
-daemon restart during an active shell loop, and that a pending blocking question remained
-answerable after another restart, with the answer delivered to the agent. See
-[the recorded test scope](development-history.md#restart-acceptance) and
-[remaining acceptance work](work-items.md#stable-sfp-release). These results do not yet
-complete the release checklist above.
+**Acceptance complete, 2026-11-04:** the human confirmed that restart mid-turn,
+answering a question after reconnecting, uploads and agent-produced images were already
+tested, completing the shelf, line-client and stdio-client acceptance items above.
+The independent Python conformance suite was also rerun inside the jail: all five scenarios
+passed, including lifecycle/restart/question recovery and loopback OpenSSH terminal
+reconnection. The headless workspace and Python client unit suites passed too.
+See [verification and remaining cutover work](work-items.md#stable-sfp-release).
+The coordinated identity/relay/schema/documentation cutover remains pending; the current
+identity is still `sfp/1-dev.3`.
 
 Snapshot capture still copies under the store lock; canonical history
 and idempotency identities remain proportional to retained sessions, and native v2 reconstruction
