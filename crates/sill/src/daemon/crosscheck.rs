@@ -382,6 +382,21 @@ impl Hub {
         });
         Ok(())
     }
+    /// The workspace's work was applied or discarded: its review described work that waited and
+    /// goes with it, and a Reviewer still at work on it is stopped as by the cross. The line it
+    /// would be cancelled from is gone from the shelf with the work.
+    pub(super) fn crosscheck_work_gone(self: &Arc<Self>, workspace: &str) {
+        let ids = self.with_store(|s| {
+            let mut q = s.conn().prepare("SELECT id FROM crosscheck_reviews WHERE workspace_id=?1")?;
+            Ok(q.query_map([workspace], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?)
+        });
+        match ids {
+            Ok(ids) => for id in ids {
+                if let Err(e) = self.cc_remove(&id) { eprintln!("sill Crosscheck: removing review {id} of work no longer waiting: {e:#}"); }
+            },
+            Err(e) => eprintln!("sill Crosscheck: reading the reviews of workspace {workspace}: {e:#}"),
+        }
+    }
     /// At start: a review that was under way is failed, never resumed, and no worker is left.
     pub(super) fn crosscheck_recover(&self) {
         for run in self.with_store(|s| all(s.conn())).unwrap_or_default().into_iter().filter(|r| active(&r.state)) {

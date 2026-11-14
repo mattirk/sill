@@ -1005,6 +1005,10 @@ review; a frontend never shows any other state as "no problems".
   starts nothing. After an uncertain start, `get` the workspace before starting again.
 - **Restart.** Nothing is resumed or repeated: a review under way when the daemon stops is
   `failed` at its next start, and its worker is stopped.
+- **Apply and Discard.** A completed `_sill/workspaces.apply` or `_sill/workspaces.discard`
+  removes the workspace's review as `remove` does, one under way included. A repeat of an
+  earlier request, answered from its receipt, removes nothing.
+  `_sill/workspaces.copy` does not.
 - **Worker sessions** are not listed (`sessions.list`), have no Changes, are left out of memory,
   and refuse the requests that would widen or redirect them (`permission_denied`).
 

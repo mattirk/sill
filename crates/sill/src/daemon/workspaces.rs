@@ -155,7 +155,7 @@ impl Hub {
         }
     }
 
-    pub(super) fn workspaces(&self, conn: &Conn, method: &str, params: Value) -> Option<Result<Value>> {
+    pub(super) fn workspaces(self: &Arc<Self>, conn: &Conn, method: &str, params: Value) -> Option<Result<Value>> {
         if !method.starts_with("_sill/workspaces.") {
             return None;
         }
@@ -168,6 +168,10 @@ impl Hub {
             serde_json::from_value(p).map_err(|e| Error::invalid_params(e.to_string()).into())
         }
         let h = Daemon(self);
+        // Whether this request is the one that applies or discards, not a repeat of one already
+        // recorded: a repeat answers with the earlier receipt and changes no files.
+        let first = |operation: &str| h.db(|c| Ok(sill_core::operations::Journal::new(c)?.get(operation).is_err()));
+        let mut work_gone = false;
         let result = (|| -> Result<(Value, Option<String>)> {
             Ok(match method {
                 "_sill/workspaces.list" => (json!(records::list(&h, &args(params)?)?), None),
@@ -180,7 +184,10 @@ impl Hub {
                 }
                 "_sill/workspaces.apply" => {
                     let a: api::Apply = args(params)?;
-                    (json!(records::apply(&h, &a)?), Some(a.workspace_id))
+                    let first = first(&a.operation_id)?;
+                    let done = json!(records::apply(&h, &a)?);
+                    work_gone = first;
+                    (done, Some(a.workspace_id))
                 }
                 "_sill/workspaces.copy" => {
                     let a: api::Apply = args(params)?;
@@ -188,7 +195,10 @@ impl Hub {
                 }
                 "_sill/workspaces.discard" => {
                     let a: api::Apply = args(params)?;
-                    (json!(records::discard(&h, &a)?), Some(a.workspace_id))
+                    let first = first(&a.operation_id)?;
+                    let done = json!(records::discard(&h, &a)?);
+                    work_gone = first;
+                    (done, Some(a.workspace_id))
                 }
                 "_sill/workspaces.undo" => {
                     let a: api::Undo = args(params)?;
@@ -205,6 +215,14 @@ impl Hub {
         })();
         Some(result.map(|(value, changed)| {
             if let Some(id) = changed {
+                // A review is of work waiting to be applied: applied or discarded, the work is
+                // not waiting, and its review goes with it, a Reviewer still at work stopped
+                // (docs/crosscheck.md). Only the request that did it removes the review: a repeat
+                // of an earlier Apply or Discard may arrive when newer work has a review of its
+                // own. A copy into the checkout leaves the work waiting.
+                if work_gone && value["operation"]["state"] == "completed" {
+                    self.crosscheck_work_gone(&id);
+                }
                 self.workspaces_changed(&id);
                 // an Apply changes a checkout the Changes page shows
                 self.changes_changed();

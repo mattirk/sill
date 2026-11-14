@@ -1916,5 +1916,19 @@ fn public_crosscheck_runs_a_whole_review_against_a_scripted_reviewer() {
     git(&clone, &["reset", "-q", "--hard", "origin/main"]);
     let nothing = c.call("_sill/crosscheck.start", json!({"operation_id":"press-4","workspace_id":"ws-1"})).unwrap();
     assert!(nothing["error"]["message"].as_str().unwrap().contains("nothing to review"), "{nothing}");
+
+    // 4. Discard while the Reviewer works: the review goes with the work and its worker is
+    // stopped, since the line with the cross is gone from the shelf
+    std::fs::write(clone.join("src/more.rs"), "pub fn more() {}\n").unwrap();
+    let started = c.call("_sill/crosscheck.start", json!({"operation_id":"press-5","workspace_id":"ws-1"})).unwrap();
+    assert!(started["result"]["run_id"].is_string(), "{started}\n{}", d.log());
+    fake.prompts.recv_timeout(Duration::from_secs(30)).unwrap_or_else(|_| panic!("the fourth Reviewer was never asked: {}\n{}", current(&mut c), d.log()));
+    assert_eq!(workers().iter().filter(|(_, ended)| !ended).count(), 1);
+    let mut w = d.connect_caps(json!({"sill.workspaces": 1, "sill.crosscheck": 1})).unwrap();
+    let detail = w.call("_sill/workspaces.get", json!({"workspace_id":"ws-1"})).unwrap();
+    let discarded = w.call("_sill/workspaces.discard", json!({"operation_id":"discard-1","workspace_id":"ws-1","revision":detail["result"]["revision"]})).unwrap();
+    assert!(discarded.get("error").is_none(), "{discarded}\n{}", d.log());
+    assert!(current(&mut c).is_null(), "the review went with the work");
+    wait(&mut c, "the discarded work's worker's end", &|_| workers().len() == 4 && workers().iter().all(|(_, ended)| *ended) && leftovers() == 0);
     let _ = HostPath::from_path(&source);
 }
