@@ -196,6 +196,58 @@ pub fn build() -> gtk::Box {
         });
     });
     actions.append(&export);
+    // delete every ended session: one click arms it, the next does it (was a row in the "+"
+    // menu, too close to the Reopen list for its weight); open tabs are not ended, so they stay
+    let delete = gtk::Button::with_label("Delete all…");
+    delete.set_tooltip_text(Some("Delete every ended session with its summary, notes, transcript and recorded changes. Sessions open in a tab stay. Click twice."));
+    delete.connect_clicked(|b| {
+        if !b.has_css_class("destructive-action") {
+            let n = sill_core::store::Store::open_default().and_then(|s| s.sessions()).map(|v| v.iter().filter(|s| s.ended_at.is_some()).count()).unwrap_or(0);
+            if n == 0 {
+                b.set_label("Nothing to delete");
+                return;
+            }
+            b.add_css_class("destructive-action");
+            b.set_label(&format!("Delete {n} sessions?"));
+            return;
+        }
+        b.remove_css_class("destructive-action");
+        b.set_sensitive(false);
+        let b = b.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let uid = rustix::process::getuid().as_raw();
+            let r = (|| -> anyhow::Result<usize> {
+                let store = sill_core::store::Store::open_default()?;
+                let ended: Vec<String> = store.sessions()?.into_iter().filter(|s| s.ended_at.is_some()).map(|s| s.id).collect();
+                for id in &ended {
+                    let _ = sill_core::session::remove_state(uid, id);
+                    store.delete(id)?;
+                }
+                store.vacuum()?;
+                drop(store);
+                sill_core::memory::refresh_snapshot()?;
+                Ok(ended.len())
+            })();
+            let _ = tx.send(r);
+        });
+        glib::timeout_add_local(std::time::Duration::from_millis(200), move || match rx.try_recv() {
+            Ok(r) => {
+                b.set_sensitive(true);
+                b.set_label(&match r {
+                    Ok(n) => format!("Deleted {n} sessions"),
+                    Err(e) => format!("Delete failed: {e}"),
+                });
+                glib::ControlFlow::Break
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+            Err(_) => {
+                b.set_sensitive(true);
+                glib::ControlFlow::Break
+            }
+        });
+    });
+    actions.append(&delete);
     root.append(&row("", &actions));
 
     // host terminal (Ctrl+Shift+H): a command line; empty = the first installed known terminal

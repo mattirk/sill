@@ -1209,9 +1209,9 @@ popover.sill-session-menu > contents { padding: 10px 12px; min-width: 260px; }
 .sill-menu-trash { padding: 0 6px; min-height: 0; opacity: 0.35; background: transparent; border: none; box-shadow: none; }
 .sill-menu-trash > image { -gtk-icon-size: 0.8em; }
 .sill-menu-trash:hover, .sill-menu-trash.sill-armed { opacity: 1; color: @error_color; }
-/* "delete all" beside the Reopen caption: caption-sized, armed in the error colour */
-.sill-menu-delete-all { font-size: 80%; padding: 0 8px; min-height: 0; opacity: 0.5; background: transparent; border: none; box-shadow: none; }
-.sill-menu-delete-all:hover, .sill-menu-delete-all.sill-armed { opacity: 1; color: @error_color; }
+.sill-menu-more { font-size: 80%; padding: 2px 10px; min-height: 0; opacity: 0.5; background: transparent; border: none; box-shadow: none; }
+.sill-menu-more:hover { opacity: 1; }
+.sill-menu-more label { padding: 0; }
 /* top-bar status: a small dot at rest, a spinner while working; the text lives in the tooltip */
 .sill-status-slot { padding: 6px 8px; }
 .sill-status { min-width: 8px; min-height: 8px; border-radius: 4px; background: alpha(@view_fg_color, 0.3); }

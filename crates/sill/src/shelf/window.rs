@@ -1505,36 +1505,7 @@ impl Shelf {
             head.add_css_class("sill-menu-caption");
             head.set_xalign(0.0);
             head.set_hexpand(true);
-            // delete every stored session: one click arms it, the next does it
-            let all = gtk::Button::with_label("delete all");
-            all.add_css_class("flat");
-            all.add_css_class("sill-menu-delete-all");
-            all.set_tooltip_text(Some("Delete every session listed here, with their recorded changes (click twice)"));
-            {
-                let s = self.clone();
-                let pop = pop.clone();
-                let ids: Vec<String> = stored.iter().map(|x| x.id.clone()).collect();
-                all.connect_clicked(move |b| {
-                    if !b.has_css_class("sill-armed") {
-                        b.add_css_class("sill-armed");
-                        b.set_label(&format!("delete {}?", ids.len()));
-                        return;
-                    }
-                    pop.popdown();
-                    for id in ids.clone() {
-                        let s = s.clone();
-                        stop_then(&id.clone(), move || {
-                            let _ = sill_core::session::remove_state(session::uid(), &id);
-                            let _ = s.store.delete(&id);
-                            refresh_memory();
-                        });
-                    }
-                });
-            }
-            let head_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-            head_row.append(&head);
-            head_row.append(&all);
-            menu.append(&head_row);
+            menu.append(&head);
             // search over memory (docs/memory.md §2.5): titles, summaries, notes, the person's
             // prompts, with folder: agent: since: — the list keeps the hits, best first
             let search = gtk::SearchEntry::new();
@@ -1548,9 +1519,23 @@ impl Shelf {
             none.set_visible(false);
             menu.append(&list);
             menu.append(&none);
+            // the newest few by default; the rest behind one row, so a long history does not
+            // push the menu off the screen. A search shows every hit regardless.
+            const SHOWN: usize = 5;
+            let more = gtk::Button::new();
+            more.add_css_class("flat");
+            more.add_css_class("sill-menu-more");
+            more.set_visible(stored.len() > SHOWN);
+            more.set_label(&format!("{} more…", stored.len().saturating_sub(SHOWN)));
+            if let Some(l) = more.child().and_downcast::<gtk::Label>() {
+                l.set_xalign(0.0); // left, under the rows' names like the captions
+            }
+            menu.append(&more);
+            let expanded = Rc::new(std::cell::Cell::new(false));
             let mut lines: Vec<(String, gtk::Box)> = Vec::new();
-            for sess in stored {
+            for (n, sess) in stored.into_iter().enumerate() {
                 let line = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                line.set_visible(n < SHOWN);
                 let sub = sess.ended_at.filter(|_| !sess.summary.is_empty()).map(|t| format!("{} · {}", sill_core::memory::date(t), sill_core::memory::first_line(&sess.summary)));
                 let b = row(registry.get(&sess.agent), &sess.title, sub.as_deref());
                 if !sess.summary.is_empty() {
@@ -1628,19 +1613,37 @@ impl Shelf {
                 lines.push((sess.id.clone(), line));
             }
             {
+                let lines = lines.clone();
+                let expanded = expanded.clone();
+                more.connect_clicked(move |b| {
+                    expanded.set(true);
+                    b.set_visible(false);
+                    for (_, line) in &lines {
+                        line.set_visible(true);
+                    }
+                });
+            }
+            {
                 let shelf = self.clone();
                 let list = list.clone();
                 let none = none.clone();
+                let more = more.clone();
                 search.connect_search_changed(move |e| {
                     let text = e.text().to_string();
                     let q = sill_memory::Query::parse(&text, &home);
                     if q.is_empty() {
-                        for (_, line) in &lines {
-                            line.set_visible(true);
+                        // back to the stored order and the first few, unless *more* was clicked
+                        let mut prev: Option<gtk::Box> = None;
+                        for (n, (_, line)) in lines.iter().enumerate() {
+                            list.reorder_child_after(line, prev.as_ref());
+                            prev = Some(line.clone());
+                            line.set_visible(expanded.get() || n < SHOWN);
                         }
+                        more.set_visible(!expanded.get() && lines.len() > SHOWN);
                         none.set_visible(false);
                         return;
                     }
+                    more.set_visible(false);
                     let hits = sill_memory::search(shelf.store.conn(), &q, sill_core::store::now(), 500).unwrap_or_default();
                     let mut prev: Option<gtk::Box> = None;
                     for h in &hits {
