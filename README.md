@@ -129,6 +129,12 @@ design; this is what you see.
   (`folder:` `agent:` `since:` filters). Clicking a row resumes the session with its history. *New here*
   (`+` on the row) starts a fresh session with the same agent, policy, desktop access, scope and pins,
   told the old one's summary first.
+- **The session page** (session menu → *Page*, or the page glyph on a Reopen row) shows the facts
+  (agent, when, how long, kept paths, folders), the summary — editable in place, saved as you type
+  and marked *edited by the person* — and your **notes**: one line each, Enter adds, × removes;
+  they are searched and recalled with the summary. *Summarize now* on an open session asks the agent
+  for a checkpoint summary that replaces the text; the one written when the session ends replaces
+  that (close the tab mid-checkpoint and the checkpoint becomes the final summary).
 - **Recall.** The next session in a folder gets a `[Memory — earlier sessions in these folders …]`
   block in its standing instructions: the last three ended sessions, each with date, duration, agent,
   folders, kept files, commits and the summary. The session menu's **Memory** picks the scope:
@@ -144,10 +150,8 @@ design; this is what you see.
   `transcript --grep`.
 - **Off switch**: Settings → Memory. With it off nothing is summarised or recalled.
 
-Coming: compaction (old transcripts shrink to their summary instead of being deleted or kept whole),
-retention settings, export; and **ghost sessions** — a per-session flag that leaves nothing behind:
-writes revert after an hour, no pins, a throwaway agent home, transcript and overlay deleted at close,
-no memory in or out.
+Coming: **ghost sessions** — a per-session flag that leaves nothing behind: writes revert after an
+hour, no pins, a throwaway agent home, transcript and overlay deleted at close, no memory in or out.
 
 ## Agents
 

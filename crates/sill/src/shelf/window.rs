@@ -762,6 +762,17 @@ impl Shelf {
         }
     }
 
+    /// A session's page in the viewer (docs/memory.md §2.5): summary, notes, the facts; from the
+    /// session menu or a Reopen row. Edits refresh memory's snapshot so the jail reads them too.
+    fn open_session_page(self: &Rc<Self>, id: &str) {
+        let Some(s) = self.store.sessions().unwrap_or_default().into_iter().find(|s| s.id == id) else { return };
+        let view = self.views.borrow().get(id).cloned();
+        let page = super::session_page::build(self.store.clone(), &s, view, Rc::new(refresh_memory));
+        self.viewer.open_page(&s.title, &page);
+        self.viewer.root.set_visible(true);
+        self.viewer.focus();
+    }
+
     /// A file in the viewer, over the main pane; the tree stays as it is.
     fn open_file(&self, path: &Path) {
         self.viewer.open(path);
@@ -1068,14 +1079,29 @@ impl Shelf {
                 shelf.open_log(&sid, &title);
             });
         }
-        grid.attach(&key("Log"), 0, 5, 1, 1);
-        grid.attach(&log_btn, 1, 5, 1, 1);
+        // the session's page (docs/memory.md §2.5): summary, notes, Summarize now
+        let page_btn = gtk::Button::with_label("Summary and notes");
+        page_btn.set_halign(gtk::Align::Start);
+        page_btn.set_tooltip_text(Some("The session's page in the viewer: its summary (editable), your notes, Summarize now (Escape comes back)"));
+        {
+            let shelf = self.clone();
+            let sid = id.to_string();
+            let p = pop.clone();
+            page_btn.connect_clicked(move |_| {
+                p.popdown();
+                shelf.open_session_page(&sid);
+            });
+        }
+        grid.attach(&key("Page"), 0, 5, 1, 1);
+        grid.attach(&page_btn, 1, 5, 1, 1);
+        grid.attach(&key("Log"), 0, 6, 1, 1);
+        grid.attach(&log_btn, 1, 6, 1, 1);
         let foot = gtk::Label::new(Some(&whereabouts));
         foot.add_css_class("sill-menu-caption");
         foot.set_xalign(0.0);
         foot.set_selectable(true);
         foot.set_wrap(true);
-        grid.attach(&foot, 0, 6, 2, 1);
+        grid.attach(&foot, 0, 7, 2, 1);
         pop.set_child(Some(&grid));
         pop.popup();
     }
@@ -1262,10 +1288,11 @@ impl Shelf {
     /// own summary from the facts, and the same end at once. A reopened session closed without a
     /// turn keeps the summary it had (decision 13: no cold agent dressed as a continuation). With
     /// memory off only `ended_at` is set, the summary stays empty. Closed again while the agent
-    /// writes, the tab goes and the summary finishes out of sight (`background_view`).
+    /// writes, the tab goes and the summary finishes out of sight (`background_view`); closed
+    /// during *Summarize now*, that checkpoint becomes the end's summary the same way.
     fn close_session(self: &Rc<Self>, id: &str) {
         let view = self.views.borrow().get(id).cloned();
-        if view.as_ref().is_some_and(|v| v.summary_pending()) {
+        if view.as_ref().is_some_and(|v| v.summary_pending() && !v.checkpoint_pending()) {
             self.background_view(id);
             return;
         }
@@ -1294,6 +1321,14 @@ impl Shelf {
             shelf.close_view(&sid);
             stop_then(&sid, || {});
         };
+        // Summarize now in flight (docs/memory.md §2.5): its answer is the end's summary — the
+        // page's callback is replaced, the tab goes, the turn finishes in the background
+        if view.checkpoint_pending() {
+            self.set_status("the session ends: its summary is being written");
+            view.adopt_summary(Box::new(finish));
+            self.background_view(id);
+            return;
+        }
         let said_anything = self.store.count_kind(id, "agent").unwrap_or(0) > 0;
         if memory && !keep_old && said_anything && view.agent_saw_session() && view.agent_idle() {
             self.set_status("the session ends: its summary is being written");
@@ -1546,6 +1581,21 @@ impl Shelf {
                     });
                 }
                 line.append(&b);
+                // its page: summary and notes, without opening it (docs/memory.md §2.5)
+                {
+                    let page = super::icons::glyph_button("sill-file-text");
+                    page.add_css_class("flat");
+                    page.add_css_class("sill-menu-trash");
+                    page.set_tooltip_text(Some("Summary and notes: the session's page, without opening the session"));
+                    let s = self.clone();
+                    let pop = pop.clone();
+                    let id = sess.id.clone();
+                    page.connect_clicked(move |_| {
+                        pop.popdown();
+                        s.open_session_page(&id);
+                    });
+                    line.append(&page);
+                }
                 // an ended session: a new one in the same folders, told this one's summary first
                 if sess.ended_at.is_some() && !sess.summary.is_empty() {
                     let here = super::icons::glyph_button("sill-plus");

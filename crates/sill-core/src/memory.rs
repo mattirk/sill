@@ -74,6 +74,14 @@ pub fn summary_prompt(f: &Facts, home: &Path) -> String {
     )
 }
 
+/// *Summarize now* (docs/memory.md §2.5): the same ask as a checkpoint, the session going on.
+pub fn checkpoint_prompt(f: &Facts, home: &Path) -> String {
+    format!(
+        "[sill: a checkpoint, the session goes on afterwards. Write 5–15 lines for a future agent that opens these folders: what was asked, what was done and where (paths), decisions and why, what is unfinished, what not to try again. Plain text, no greeting, no questions — only that agent reads it. Facts sill has: {}.]",
+        fact_lines(f, home).join("; ")
+    )
+}
+
 /// The summary sill writes when the agent cannot be asked: the facts, marked as such. It leads with
 /// what was asked — the line lists show next to the title and date, which they have already.
 pub fn auto_summary(f: &Facts, ended_at: i64, home: &Path) -> String {

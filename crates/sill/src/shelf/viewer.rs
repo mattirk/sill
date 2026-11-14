@@ -64,6 +64,10 @@ pub struct Viewer {
     log: RefCell<Option<(PathBuf, sill_core::session::LogSource)>>,
     /// The follow timer while a log is shown.
     log_tick: RefCell<Option<glib::SourceId>>,
+    /// A page of the shelf's own (a session's summary and notes, docs/memory.md §2.5) under its
+    /// history key (`page: <title>`), and the slot it is shown in.
+    page: RefCell<Option<(PathBuf, gtk::Widget)>>,
+    page_slot: gtk::Box,
 }
 
 impl Viewer {
@@ -126,7 +130,12 @@ impl Viewer {
         info.set_wrap(true);
         info.set_wrap_mode(gtk::pango::WrapMode::WordChar);
 
+        // a page of the shelf's own, in a column that scrolls
+        let page_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let page_scroll = gtk::ScrolledWindow::builder().child(&page_slot).vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build();
+
         let stack = gtk::Stack::new();
+        stack.add_named(&page_scroll, Some("page"));
         stack.add_named(&text_scroll, Some("text"));
         stack.add_named(&md_scroll, Some("markdown"));
         stack.add_named(&picture, Some("image"));
@@ -166,6 +175,8 @@ impl Viewer {
             on_saved: RefCell::new(None),
             log: RefCell::new(None),
             log_tick: RefCell::new(None),
+            page: RefCell::new(None),
+            page_slot,
         });
         *v.weak.borrow_mut() = Rc::downgrade(&v);
         {
@@ -302,6 +313,23 @@ impl Viewer {
 
     /// The log in the text view: read off the main thread now and every 2 s while shown; the view
     /// stays at the end unless the person scrolled up.
+    /// A page of the shelf's own on top of what is shown (Escape comes back): `widget` fills the
+    /// viewer under `title`. One page at a time; a new one replaces the last.
+    pub fn open_page(&self, title: &str, widget: &impl IsA<gtk::Widget>) {
+        self.drop_edits();
+        let key = PathBuf::from(format!("page: {title}"));
+        while let Some(c) = self.page_slot.first_child() {
+            self.page_slot.remove(&c);
+        }
+        self.page_slot.append(widget);
+        *self.page.borrow_mut() = Some((key.clone(), widget.clone().upcast()));
+        let mut h = self.history.borrow_mut();
+        h.retain(|k| !k.to_string_lossy().starts_with("page: "));
+        h.push(key.clone());
+        drop(h);
+        self.show(&key);
+    }
+
     fn show_log(&self, src: sill_core::session::LogSource) {
         self.text.set_language(None);
         self.text.set_highlight_syntax(false);
@@ -366,6 +394,10 @@ impl Viewer {
     pub fn close(&self) {
         self.stop_follow();
         *self.log.borrow_mut() = None;
+        *self.page.borrow_mut() = None;
+        while let Some(c) = self.page_slot.first_child() {
+            self.page_slot.remove(&c);
+        }
         self.drop_edits();
         self.history.borrow_mut().clear();
         if let Some(cb) = self.on_close.borrow().as_ref() {
@@ -462,6 +494,10 @@ impl Viewer {
         let log = self.log.borrow().as_ref().filter(|(k, _)| k == path).map(|(_, s)| s.clone());
         if let Some(src) = log {
             return self.show_log(src);
+        }
+        if self.page.borrow().as_ref().is_some_and(|(k, _)| k == path) {
+            self.stack.set_visible_child_name("page");
+            return;
         }
         // a link under a pin's name is the agent's pointer anywhere on the host: not shown as the
         // pin's file (security.md S9); the target itself can be opened by its own name

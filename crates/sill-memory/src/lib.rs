@@ -552,6 +552,15 @@ pub fn search(conn: &Connection, q: &Query, now: i64, limit: usize) -> Result<Ve
     Ok(out)
 }
 
+/// Who wrote a summary, from `summary_kind`: the agent, sill, or the person who edited it.
+pub fn summary_by(kind: &str) -> &'static str {
+    match kind {
+        "agent" => "by the agent",
+        "person" => "edited by the person",
+        _ => "by sill, from the facts",
+    }
+}
+
 /// The line a list shows for a summary.
 pub fn first_line(summary: &str) -> &str {
     summary.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("")
@@ -608,7 +617,7 @@ pub fn show(conn: &Connection, s: &SessionInfo, kept: &[(PathBuf, String)], home
     if s.summary.trim().is_empty() {
         out.push_str("\nno summary yet\n");
     } else {
-        out.push_str(&format!("\nsummary ({}):\n{}\n", if s.summary_kind == "agent" { "by the agent" } else { "by sill, from the facts" }, s.summary.trim_end()));
+        out.push_str(&format!("\nsummary ({}):\n{}\n", summary_by(&s.summary_kind), s.summary.trim_end()));
     }
     for (ts, kind, text) in notes(conn, &s.id)? {
         out.push_str(&format!("\n{kind} {}:\n{}\n", date(ts), text.trim_end()));
@@ -671,7 +680,7 @@ pub fn export_markdown(conn: &Connection, s: &SessionInfo, kept: &[(PathBuf, Str
     }
     out.push_str(&format!("- {} prompts, {} tool calls; times UTC\n", count_kind(conn, &s.id, "user"), count_kind(conn, &s.id, "tool")));
     if !s.summary.trim().is_empty() {
-        out.push_str(&format!("\n## Summary ({})\n\n{}\n", if s.summary_kind == "agent" { "by the agent" } else { "by sill, from the facts" }, s.summary.trim_end()));
+        out.push_str(&format!("\n## Summary ({})\n\n{}\n", summary_by(&s.summary_kind), s.summary.trim_end()));
     }
     let notes = notes(conn, &s.id)?;
     if !notes.is_empty() {

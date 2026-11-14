@@ -1130,6 +1130,16 @@ button.sill-md-image:hover { opacity: 0.85; }
 .sill-viewer { background: @window_bg_color; }
 .sill-viewer-bar { padding: 3px 6px 3px 12px; border-bottom: 1px solid alpha(@view_fg_color, 0.12); }
 .sill-viewer-btn { padding: 2px 8px; min-height: 0; min-width: 0; font-size: 90%; }
+/* a session's page in the viewer (docs/memory.md §2.5): summary, notes, the facts */
+.sill-page { padding: 10px 16px 16px 16px; }
+.sill-page-title { font-size: 120%; font-weight: bold; }
+.sill-page-meta { font-size: 90%; opacity: 0.7; }
+.sill-page-head { font-weight: bold; font-size: 95%; margin-top: 14px; }
+.sill-page-caption { font-size: 85%; opacity: 0.6; }
+.sill-page-text { background: alpha(@view_fg_color, 0.05); border-radius: 6px; padding: 6px 8px; }
+.sill-page-text text { background: transparent; }
+.sill-page-note { padding: 4px 0; border-bottom: 1px solid alpha(@view_fg_color, 0.08); }
+.sill-page-note label { color: inherit; }
 .sill-tree-panel { border-left: 1px solid alpha(@view_fg_color, 0.12); }
 /* the drawer's search box: as quiet as the bar's buttons, a plain field until it holds text */
 .sill-tree-search, .sill-tree-search:focus-within { min-height: 0; padding: 0 4px; font-size: 90%; background: transparent; border: none; box-shadow: none; outline: none; }

@@ -108,6 +108,9 @@ pub struct SessionView {
     /// The session is ending and its agent writes the summary (docs/memory.md §2.2): what gets the
     /// answer when the turn stops — or None when the agent is gone or too slow.
     summarizing: RefCell<Option<Box<dyn FnOnce(Option<String>)>>>,
+    /// The running summary turn is *Summarize now* (docs/memory.md §2.5): the session goes on
+    /// after it — unless the tab closes meanwhile, when the end adopts it (`adopt_summary`).
+    checkpoint: std::cell::Cell<bool>,
     /// The summary turn's text so far, across its tool calls (each one flushes `agent_md`).
     summary_text: RefCell<String>,
     /// Prompts the person sent in this view's life, and whether the agent resumed its own context
@@ -439,6 +442,7 @@ impl SessionView {
             store,
             agent_md: RefCell::new(String::new()),
             summarizing: RefCell::new(None),
+            checkpoint: std::cell::Cell::new(false),
             summary_text: RefCell::new(String::new()),
             turns_this_run: std::cell::Cell::new(0),
             resumed: std::cell::Cell::new(false),
@@ -2112,16 +2116,43 @@ impl SessionView {
     /// turn stops, None when the agent is gone, busy, or has not answered within 90 seconds (the
     /// turn is cancelled then; the caller writes the mechanical summary).
     pub fn ask_summary(self: &Rc<Self>, prompt: &str, then: Box<dyn FnOnce(Option<String>)>) {
+        self.ask_summary_turn(prompt, "the session ends: the agent writes its summary for memory", false, then);
+    }
+
+    /// *Summarize now* (docs/memory.md §2.5): the same turn as a checkpoint — the answer goes to
+    /// `then`, the session goes on. Refused (None at once) while the agent is busy or down.
+    pub fn ask_checkpoint(self: &Rc<Self>, prompt: &str, then: Box<dyn FnOnce(Option<String>)>) {
+        self.ask_summary_turn(prompt, "summarize now: the agent writes a checkpoint summary for memory", true, then);
+    }
+
+    /// A checkpoint is being written.
+    pub fn checkpoint_pending(&self) -> bool {
+        self.summarizing.borrow().is_some() && self.checkpoint.get()
+    }
+
+    /// The tab closed during a checkpoint: its answer becomes the session's final summary —
+    /// `then` replaces the page's callback, and the turn counts as the end's.
+    pub fn adopt_summary(&self, then: Box<dyn FnOnce(Option<String>)>) {
+        if self.summarizing.borrow().is_some() {
+            *self.summarizing.borrow_mut() = Some(then);
+            self.checkpoint.set(false);
+        } else {
+            then(None);
+        }
+    }
+
+    fn ask_summary_turn(self: &Rc<Self>, prompt: &str, note: &str, checkpoint: bool, then: Box<dyn FnOnce(Option<String>)>) {
         let Some(d) = self.driver.borrow().as_ref().map(|d| d.commands.clone()) else {
             then(None);
             return;
         };
-        if !self.agent_idle() || d.try_send(Command::Prompt(prompt.to_string(), vec![])).is_err() {
+        if !self.agent_idle() || self.summarizing.borrow().is_some() || d.try_send(Command::Prompt(prompt.to_string(), vec![])).is_err() {
             then(None);
             return;
         }
-        self.conv.add_note("the session ends: the agent writes its summary for memory");
-        let _ = self.store.append(&self.id(), "note", "the session ends: the agent writes its summary for memory", "");
+        self.conv.add_note(note);
+        let _ = self.store.append(&self.id(), "note", note, "");
+        self.checkpoint.set(checkpoint);
         *self.summarizing.borrow_mut() = Some(then);
         let weak = Rc::downgrade(self);
         glib::timeout_add_local_once(std::time::Duration::from_secs(90), move || {
@@ -2150,7 +2181,7 @@ impl SessionView {
     }
 
     /// Send a prompt; false if the agent is busy or the session is down.
-    /// The summary turn is running (the tab was closed, the agent is writing).
+    /// A summary turn is running (the end's, or a checkpoint): the agent is writing.
     pub fn summary_pending(&self) -> bool {
         self.summarizing.borrow().is_some()
     }

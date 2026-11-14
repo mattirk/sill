@@ -13,6 +13,7 @@ mod lang_icons;
 mod markdown;
 mod processes;
 mod session;
+mod session_page;
 mod session_view;
 mod settings;
 mod spinner;

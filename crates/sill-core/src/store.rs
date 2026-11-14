@@ -27,7 +27,8 @@ pub struct Session {
     /// When the session ended — its tab closed (docs/memory.md §2.1); None while it is open.
     pub ended_at: Option<i64>,
     /// What came of it, written at the end: by its agent (`summary_kind` "agent") or by sill from
-    /// the facts ("auto"); empty until the first end.
+    /// the facts ("auto"); "person" once edited in the session page; empty until the first end
+    /// or checkpoint.
     pub summary: String,
     pub summary_kind: String,
     /// Which earlier sessions its agent is told about (docs/memory.md §2.3): "here", "everywhere",
@@ -260,6 +261,13 @@ impl Store {
         Ok(())
     }
 
+    /// The summary alone, the session open or not (docs/memory.md §2.5): the person's edit
+    /// (`kind` "person") or a mid-session checkpoint by the agent ("agent"); the end replaces it.
+    pub fn set_summary(&self, id: &str, summary: &str, kind: &str) -> Result<()> {
+        self.conn.execute("UPDATE sessions SET summary = ?2, summary_kind = ?3 WHERE id = ?1", params![id, summary, kind])?;
+        Ok(())
+    }
+
     /// The session ended; its summary stays as it is (memory off, or a reopened session closed
     /// without a turn keeps the summary it had).
     pub fn end_only(&self, id: &str) -> Result<()> {
@@ -345,6 +353,12 @@ impl Store {
         let mut st = self.conn.prepare("SELECT ts, kind, text FROM memories WHERE session_id = ?1 ORDER BY ts, rowid")?;
         let rows = st.query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// One memory entry gone, by its stamp and text (the page's × on a note).
+    pub fn remove_memory(&self, id: &str, ts: i64, text: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM memories WHERE session_id = ?1 AND ts = ?2 AND text = ?3", params![id, ts, text])?;
+        Ok(())
     }
 
     pub fn delete(&self, id: &str) -> Result<()> {
