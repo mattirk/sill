@@ -176,11 +176,44 @@ impl Store {
         Ok(seq)
     }
 
+    /// Update a stored `tool` entry's title and/or status (tool-call updates arrive after the call).
+    pub fn update_tool(&self, session_id: &str, seq: i64, title: Option<&str>, status: Option<&str>) -> Result<()> {
+        if let Some(t) = title {
+            self.conn.execute("UPDATE entries SET text = ?3 WHERE session_id = ?1 AND seq = ?2", params![session_id, seq, t])?;
+        }
+        if let Some(st) = status {
+            self.conn.execute("UPDATE entries SET extra = ?3 WHERE session_id = ?1 AND seq = ?2", params![session_id, seq, st])?;
+        }
+        Ok(())
+    }
+
     pub fn entries(&self, session_id: &str) -> Result<Vec<Entry>> {
         let mut st = self.conn.prepare("SELECT seq, ts, kind, text, extra FROM entries WHERE session_id = ?1 ORDER BY seq")?;
         let rows = st.query_map(params![session_id], |r| {
             Ok(Entry { seq: r.get(0)?, ts: r.get(1)?, kind: r.get(2)?, text: r.get(3)?, extra: r.get(4)? })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_updates_reach_the_stored_entry() {
+        let dir = std::env::temp_dir().join(format!("sill-store-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("s.db")).unwrap();
+        let seq = store.append("s1", "tool", "Read", "Pending").unwrap();
+        store.update_tool("s1", seq, None, Some("InProgress")).unwrap();
+        store.update_tool("s1", seq, Some("Read src/main.rs"), Some("Completed")).unwrap();
+        let e = store.entries("s1").unwrap();
+        assert_eq!(e.len(), 1);
+        assert_eq!((e[0].text.as_str(), e[0].extra.as_str()), ("Read src/main.rs", "Completed"));
+        // an unknown seq is a harmless no-op
+        store.update_tool("s1", 99, Some("x"), None).unwrap();
+        assert_eq!(store.entries("s1").unwrap()[0].text, "Read src/main.rs");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

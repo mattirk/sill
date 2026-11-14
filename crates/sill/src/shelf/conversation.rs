@@ -23,6 +23,9 @@ pub struct Conversation {
     status: gtk::Label,
     /// Follow new content unless the person scrolled up.
     stick_to_bottom: std::cell::Cell<bool>,
+    ticking: std::cell::Cell<bool>,
+    tick_frames: std::cell::Cell<u32>,
+    weak: RefCell<std::rc::Weak<Conversation>>,
     /// Set while we move the adjustment ourselves, so it doesn't count as the person scrolling.
     following: std::cell::Cell<bool>,
     /// Previous adjustment value, to tell a scroll-up from everything else that moves it.
@@ -50,6 +53,9 @@ impl Conversation {
             tool_rows: RefCell::new(HashMap::new()),
             status,
             stick_to_bottom: std::cell::Cell::new(true),
+            ticking: std::cell::Cell::new(false),
+            tick_frames: std::cell::Cell::new(0),
+            weak: RefCell::new(std::rc::Weak::new()),
             following: std::cell::Cell::new(false),
             last_value: std::cell::Cell::new(0.0),
         });
@@ -58,6 +64,7 @@ impl Conversation {
         // of guessing when to scroll. Any scroll up that isn't ours releases it — by direction, not by
         // distance, so a touchpad's first few pixels aren't yanked back — and reaching the bottom
         // re-engages it.
+        *conv.weak.borrow_mut() = Rc::downgrade(&conv);
         let adj = conv.root.vadjustment();
         {
             let c = conv.clone();
@@ -96,7 +103,36 @@ impl Conversation {
 
     fn scroll_to_end(&self) {
         self.stick_to_bottom.set(true);
-        self.follow(&self.root.vadjustment());
+        self.request_follow();
+    }
+
+    /// Follow new content once layout has caught up: a frame-clock tick runs after each content
+    /// change, pins the view to the bottom for the next frames, and stops by itself (no permanent
+    /// tick: that would keep the frame clock awake). Streaming chunks re-arm it on every append.
+    fn request_follow(&self) {
+        if self.ticking.get() {
+            self.tick_frames.set(0);
+            return;
+        }
+        let weak = self.weak.borrow().clone();
+        self.ticking.set(true);
+        self.tick_frames.set(0);
+        self.root.add_tick_callback(move |_, _| {
+            let Some(c) = weak.upgrade() else { return gtk::glib::ControlFlow::Break };
+            if !c.stick_to_bottom.get() {
+                c.ticking.set(false);
+                return gtk::glib::ControlFlow::Break;
+            }
+            let adj = c.root.vadjustment();
+            c.follow(&adj);
+            let n = c.tick_frames.get() + 1;
+            c.tick_frames.set(n);
+            if n > 12 {
+                c.ticking.set(false);
+                return gtk::glib::ControlFlow::Break;
+            }
+            gtk::glib::ControlFlow::Continue
+        });
     }
 
     fn text_view(css: &str) -> gtk::TextView {
@@ -144,7 +180,7 @@ impl Conversation {
         md.push_str(chunk);
         markdown::render(&tv.buffer(), md);
         drop(cur);
-        self.scroll_to_end();
+        self.request_follow();
     }
 
     /// A complete agent message (stored transcript).
@@ -153,7 +189,7 @@ impl Conversation {
         let tv = Self::text_view("sill-agent");
         markdown::render(&tv.buffer(), md);
         self.column.append(&tv);
-        self.scroll_to_end();
+        self.request_follow();
     }
 
     pub fn add_thought_block(&self, md: &str) {
@@ -161,7 +197,7 @@ impl Conversation {
         let tv = Self::text_view("sill-thought");
         markdown::render(&tv.buffer(), md);
         self.column.append(&tv);
-        self.scroll_to_end();
+        self.request_follow();
     }
 
     pub fn add_tool_call(&self, id: String, title: &str, status: &str) {
@@ -180,7 +216,7 @@ impl Conversation {
         row.append(&status_l);
         self.column.append(&row);
         self.tool_rows.borrow_mut().insert(id, (title_l, status_l));
-        self.scroll_to_end();
+        self.request_follow();
     }
 
     pub fn update_tool_call(&self, id: &str, status: Option<&str>, title: Option<&str>) {
@@ -228,7 +264,7 @@ impl Conversation {
         }
         frame.append(&buttons);
         self.column.append(&frame);
-        self.scroll_to_end();
+        self.request_follow();
     }
 
     pub fn add_note(&self, text: &str) {
@@ -238,7 +274,7 @@ impl Conversation {
         l.set_xalign(0.0);
         l.set_wrap(true);
         self.column.append(&l);
-        self.scroll_to_end();
+        self.request_follow();
     }
 
     /// Apply one session event.

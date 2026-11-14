@@ -1,6 +1,7 @@
 //! One session tab: conversation + bottom area (prompt now; prompt/shell switcher in M3). Owns the
 //! driver, persists the transcript, runs auto-keep at turn end.
 
+use std::collections::HashMap;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -34,6 +35,8 @@ pub struct SessionView {
     store: Rc<Store>,
     /// Markdown of the agent message being streamed (persisted at turn end).
     agent_md: RefCell<String>,
+    /// Stored entry `seq` per live tool-call id, so title/status updates reach the transcript too.
+    tool_seqs: RefCell<HashMap<String, i64>>,
     /// After a resume with replay: ignore replayed events until the first turn starts.
     replaying: RefCell<bool>,
     /// Called when a turn ends (the window refreshes the ledger pages).
@@ -111,6 +114,7 @@ impl SessionView {
             driver: RefCell::new(None),
             store,
             agent_md: RefCell::new(String::new()),
+            tool_seqs: RefCell::new(HashMap::new()),
             replaying: RefCell::new(false),
             on_busy: RefCell::new(None),
             on_turn_end: RefCell::new(None),
@@ -494,9 +498,16 @@ impl SessionView {
                 return; // the stored transcript is already on screen
             }
             Event::Text(t) => self.agent_md.borrow_mut().push_str(t),
-            Event::ToolCall { title, status, .. } => {
+            Event::ToolCall { id, title, status, .. } => {
                 self.flush_agent();
-                let _ = self.store.append(&self.id(), "tool", title, status);
+                if let Ok(seq) = self.store.append(&self.id(), "tool", title, status) {
+                    self.tool_seqs.borrow_mut().insert(id.clone(), seq);
+                }
+            }
+            Event::ToolCallUpdate { id, status, title } => {
+                if let Some(seq) = self.tool_seqs.borrow().get(id) {
+                    let _ = self.store.update_tool(&self.id(), *seq, title.as_deref(), status.as_deref());
+                }
             }
             Event::Stopped(_) => {
                 self.set_busy(false);
