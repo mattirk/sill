@@ -622,11 +622,13 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
                     None => eprintln!("proxy: {l}"),
                 }
                 // `deny host:port (why)`: the host alone when the port is the default one a bare
-                // pattern grants, `host:port` otherwise — what the shelf offers is what would allow it
+                // pattern grants, `host:port` otherwise — what the shelf offers is what would allow
+                // it. Only a plain host name (or IP) gets there: a wildcard or garbage in the
+                // request line stays in the log and never becomes a button (security.md S7)
                 if let Some(rest) = l.strip_prefix("deny ")
                     && let Some(target) = rest.split_whitespace().next()
                     && let Some((host, port)) = target.rsplit_once(':')
-                    && !host.is_empty()
+                    && sill_core::proxy::valid_hostname(host)
                     && let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&denied)
                 {
                     use std::io::Write;

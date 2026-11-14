@@ -19,6 +19,9 @@ const HISTORY_TAIL: usize = 60;
 const HISTORY_CHUNK: usize = 120;
 
 use super::conversation::Conversation;
+
+/// Refused hosts the conversation asks about per session start; the rest go to the log (S7).
+const MAX_DENIED_PROMPTS: usize = 8;
 use super::viewer;
 use super::{markdown, session, theme};
 use vte4::prelude::*;
@@ -135,6 +138,8 @@ pub struct SessionView {
     /// Watches the session's runtime dir for `denied` (hosts the proxy refused).
     denied_monitor: RefCell<Option<gtk::gio::FileMonitor>>,
     denied_seen: RefCell<std::collections::HashSet<String>>,
+    /// Refused hosts asked about since the session started; past `MAX_DENIED_PROMPTS` one note.
+    denied_asked: std::cell::Cell<usize>,
     refresh_pending: std::cell::Cell<bool>,
     /// Rebuild this session's jail (the window: now, or after the turn). Behind an `Rc` and called
     /// through [`Self::request_restart`]: the callback may close this very view, whose `quit` takes
@@ -439,6 +444,7 @@ impl SessionView {
             chips: RefCell::new(Vec::new()),
             denied_monitor: RefCell::new(None),
             denied_seen: RefCell::new(Default::default()),
+            denied_asked: std::cell::Cell::new(0),
             refresh_pending: std::cell::Cell::new(false),
             on_restart: RefCell::new(None),
             connecting: std::cell::Cell::new(false),
@@ -1619,6 +1625,7 @@ impl SessionView {
     /// empty allow-list, so this is how their endpoints get in.
     fn watch_denied(self: &Rc<Self>) {
         self.denied_seen.borrow_mut().clear();
+        self.denied_asked.set(0);
         let Ok(rt) = sill_core::shim::runtime_dir(&self.id()) else { return };
         let Ok(m) = gtk::gio::File::for_path(&rt).monitor_directory(gtk::gio::FileMonitorFlags::NONE, None::<&gtk::gio::Cancellable>) else {
             return;
@@ -1648,9 +1655,25 @@ impl SessionView {
             }
             // telemetry stays blocked without a question (`host:port` when the port is not the default one)
             let name = host.rsplit_once(':').filter(|(h, p)| !h.is_empty() && p.parse::<u16>().is_ok()).map(|(h, _)| h).unwrap_or(host);
+            // the text shown is what a click saves: a plain name or nothing (security.md S7; the
+            // launcher filters too, this is the shelf's own check on a file in the runtime dir)
+            if !sill_core::proxy::valid_hostname(name) {
+                continue;
+            }
             if quiet.iter().any(|p| sill_core::proxy::host_matches(p, name)) {
                 continue;
             }
+            // an agent probing hosts in a loop must not fill the conversation with buttons: so
+            // many questions per session start, then one line pointing at the log
+            let asked = self.denied_asked.get();
+            if asked >= MAX_DENIED_PROMPTS {
+                if asked == MAX_DENIED_PROMPTS {
+                    self.denied_asked.set(asked + 1);
+                    self.conv.add_note(&format!("{MAX_DENIED_PROMPTS} refused hosts asked about; more are refused quietly — the proxy log (the session's log) lists them"));
+                }
+                continue;
+            }
+            self.denied_asked.set(asked + 1);
             let agent_name = agents::load(&session::home().unwrap_or_default())
                 .get(&self.session.borrow().agent)
                 .map(|a| a.name.clone())
@@ -1666,9 +1689,9 @@ impl SessionView {
                     }
                 }),
             ));
-            let labels: Vec<&str> = name.split('.').collect();
-            if labels.len() >= 3 {
-                let wild = format!("*.{}{}", labels[1..].join("."), host.strip_prefix(name).unwrap_or(""));
+            // `*.<parent>` for a deep name whose parent is a site, never a public suffix
+            if let Some(wild) = sill_core::proxy::wildcard_offer(name) {
+                let wild = format!("{wild}{}", host.strip_prefix(name).unwrap_or(""));
                 let weak = Rc::downgrade(self);
                 let w = wild.clone();
                 actions.push((

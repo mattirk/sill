@@ -71,6 +71,61 @@ pub fn host_matches(pattern: &str, host: &str) -> bool {
     host == pattern
 }
 
+/// A host name the shelf may show and offer to allow (security.md S7): an IP literal, or DNS
+/// labels of ASCII letters, digits and hyphens — no wildcard, no empty label, nothing a terminal
+/// renders as something else. The proxy denies on anything the rules don't match anyway; this is
+/// about what gets *written into a button* and, on a click, into the agent's allow-list.
+pub fn valid_hostname(host: &str) -> bool {
+    if host.parse::<IpAddr>().is_ok() {
+        return true;
+    }
+    if host.is_empty() || host.len() > 253 || host.ends_with('.') {
+        return false;
+    }
+    host.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    })
+}
+
+/// Multi-label public suffixes (an allow-list entry of `*.co.uk` would be "every site in the UK"):
+/// no wildcard offer ends in one of these. A short list of the common ones — the full public
+/// suffix list is thousands of lines and changes monthly; a name whose parent is not here still
+/// gets a wildcard only when that parent has two labels or more.
+const PUBLIC_SUFFIXES: &[&str] = &[
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "ltd.uk", "plc.uk", "net.uk", "sch.uk", "nhs.uk",
+    "com.au", "net.au", "org.au", "edu.au", "gov.au", "id.au",
+    "co.jp", "ne.jp", "or.jp", "ac.jp", "go.jp", "co.kr", "or.kr", "co.in", "net.in", "org.in",
+    "co.nz", "net.nz", "org.nz", "co.za", "org.za", "co.il", "org.il", "co.id", "or.id",
+    "com.br", "net.br", "org.br", "com.cn", "net.cn", "org.cn", "com.hk", "com.sg", "com.tw", "com.mx", "com.ar", "com.tr", "com.ua",
+    // hosting where every tenant has a sibling name: a wildcard would allow every tenant
+    "github.io", "gitlab.io", "herokuapp.com", "vercel.app", "netlify.app", "pages.dev", "workers.dev",
+    "web.app", "firebaseapp.com", "azurewebsites.net", "cloudfront.net", "amazonaws.com", "s3.amazonaws.com",
+    "appspot.com", "run.app", "fly.dev", "onrender.com", "railway.app", "ngrok.io", "ngrok-free.app", "ngrok.app",
+    "trycloudflare.com", "blogspot.com", "wordpress.com", "github.dev", "repl.co", "glitch.me", "surge.sh",
+];
+
+/// The wildcard the shelf may offer for a refused name: `*.<parent>` when the name has three
+/// labels or more and the parent is not a public suffix (`evil.co.uk` offers nothing, not
+/// `*.co.uk`; `api.example.com` offers `*.example.com`). `None` for IP literals.
+pub fn wildcard_offer(name: &str) -> Option<String> {
+    if !valid_hostname(name) || name.parse::<IpAddr>().is_ok() {
+        return None;
+    }
+    let labels: Vec<&str> = name.split('.').collect();
+    if labels.len() < 3 {
+        return None;
+    }
+    let parent = labels[1..].join(".").to_ascii_lowercase();
+    if PUBLIC_SUFFIXES.contains(&parent.as_str()) {
+        return None;
+    }
+    Some(format!("*.{parent}"))
+}
+
 /// What a pattern says about the port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PortRule {
@@ -411,6 +466,23 @@ mod tests {
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn names_the_shelf_may_show() {
+        for ok in ["api.anthropic.com", "localhost", "a-b.example", "10.0.0.1", "::1", "x.y.z.example.org"] {
+            assert!(valid_hostname(ok), "{ok}");
+        }
+        for bad in ["*", "*.example.com", "", "exa mple.com", "ex\u{202e}ample.com", "-a.example.com", "a..b", "a.example.com.", "a_b.example.com", "ünïcode.example"] {
+            assert!(!valid_hostname(bad), "{bad:?}");
+        }
+        assert_eq!(wildcard_offer("api.example.com").as_deref(), Some("*.example.com"));
+        assert_eq!(wildcard_offer("a.b.example.com").as_deref(), Some("*.b.example.com"));
+        assert_eq!(wildcard_offer("example.com"), None, "two labels: no wildcard");
+        assert_eq!(wildcard_offer("evil.co.uk"), None, "a public suffix is not a site");
+        assert_eq!(wildcard_offer("tenant.github.io"), None);
+        assert_eq!(wildcard_offer("*.example.com"), None);
+        assert_eq!(wildcard_offer("10.0.0.1"), None);
     }
 
     #[test]
