@@ -204,7 +204,8 @@ impl App {
         )
     }
 
-    /// The drawer's edge: flush with the conversation, with a wider drag target inside the drawer.
+    /// The drawer's edge: flush with its horizontal separators. The wider drag target
+    /// extends toward the conversation so it leaves no gap at any separator junction.
     fn drawer_grip(&self) -> Element<'_, Message> {
         let line = if self.layout.dragging {
             P.accent
@@ -213,7 +214,7 @@ impl App {
         };
         mouse_area(
             container(rule::vertical(1).style(style::rule_style(line)))
-                .align_left(layout::HANDLE)
+                .align_right(layout::HANDLE)
                 .height(Fill)
                 .style(style::fill(P.bg)),
         )
