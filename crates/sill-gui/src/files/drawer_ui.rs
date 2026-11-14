@@ -311,24 +311,29 @@ fn diff_list<'a>(mut body: Column<'a, Message>, state: &'a State, workspaces: &c
             continue;
         };
         any = true;
-        let head = if repo.head.is_empty() {
-            String::new()
-        } else {
-            format!("  git {}", repo.head)
-        };
         let section = |value: String| text(value).size(style::TINY).color(style::alpha(P.fg, 0.5));
-        body = body.push(tip(
-            container(
-                row![
-                    container(
-                        section(format!("{}{head}", name(base))).wrapping(text::Wrapping::None)
-                    )
+        // a workspace says so in the accent, as its row in the tree does; its generated branch
+        // name says nothing. The folder's name gives way first, so the word shows whole.
+        let folder = section(name(base).to_string()).wrapping(text::Wrapping::None);
+        let header = if workspaces.workspace_of(&root.path).is_some() {
+            row![
+                container(folder).width(Fill).clip(true),
+                text("workspace")
+                    .size(style::TINY)
+                    .font(Font::with_name(crate::fonts::MONO_FAMILY))
+                    .color(style::alpha(P.accent, 0.9))
+                    .wrapping(text::Wrapping::None),
+            ]
+        } else {
+            let head = if repo.head.is_empty() { String::new() } else { format!("  git {}", repo.head) };
+            row![
+                container(section(format!("{}{head}", name(base))).wrapping(text::Wrapping::None))
                     .width(Fill)
-                    .clip(true),
-                    section(summary_label(repo)).wrapping(text::Wrapping::None),
-                ]
-                .spacing(6),
-            )
+                    .clip(true)
+            ]
+        };
+        body = body.push(tip(
+            container(header.push(section(summary_label(repo)).wrapping(text::Wrapping::None)).spacing(6))
             .padding(Padding {
                 top: 8.0,
                 bottom: 2.0,
