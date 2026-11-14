@@ -13,6 +13,10 @@ use crate::shim;
 pub struct StartOptions {
     pub session: String,
     pub policy: String,
+    /// Pinned roots contributing repository policy fragments.
+    pub pins: Vec<PathBuf>,
+    /// Explicit human exceptions, valid for this launch only.
+    pub ignore_fragments: Vec<PathBuf>,
     pub cwd: PathBuf,
     pub state_dir: Option<PathBuf>,
     pub unsafe_state: bool,
@@ -475,6 +479,118 @@ pub fn socket_path(session: &str) -> Result<PathBuf> {
 
 /// A running jail was built before its policy file was last changed: mounts and the X11/D-Bus
 /// grants are fixed at launch, so the policy on disk no longer describes it.
+/// Resolve the base with the same overrides the launcher uses, before repository restrictions.
+pub fn effective_base_policy(name: &str, home: &Path, x11: Option<bool>, dbus: Option<bool>, ghost: bool) -> Result<Policy> {
+    let mut p = Policy::load(name, home)?;
+    if let Some(value) = x11 { p.jail.x11 = value; }
+    if let Some(value) = dbus { p.jail.dbus = value; }
+    if ghost { p.ghostly(home); }
+    Ok(p)
+}
+
+/// Freeze registry endpoints too: proxy behavior and the recorded policy must agree.
+pub fn session_base_policy(name: &str, home: &Path, x11: Option<bool>, dbus: Option<bool>, ghost: bool, agent: Option<&str>) -> Result<Policy> {
+    let mut policy = effective_base_policy(name, home, x11, dbus, ghost)?;
+    if policy.network.mode != crate::policy::NetMode::None {
+        if let Some(agent) = agent.and_then(|id| crate::agents::load(home).remove(id)) {
+            policy.network.allow.extend(agent.domains);
+        }
+    }
+    Ok(policy)
+}
+
+fn snapshot_dir(session: &str) -> Result<PathBuf> {
+    if !valid_id(session) { bail!("not a session id"); }
+    Ok(crate::store::default_path()?.with_file_name("policy-snapshots").join(session))
+}
+
+const MAX_POLICY_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
+
+pub fn policy_snapshot(session: &str) -> Result<Option<crate::policy_fragments::Resolution>> {
+    match read_policy_snapshot(&snapshot_dir(session)?)? {
+        Some(snapshot) => Ok(Some(snapshot)),
+        None => read_policy_snapshot(&shim::runtime_dir(session)?.join("policy-snapshot")),
+    }
+}
+
+/// Session deletion removes policy sources and history too; ghosts only use runtime storage.
+pub fn forget_policy_snapshots(session: &str) -> Result<()> {
+    for dir in [snapshot_dir(session)?, shim::runtime_dir(session)?.join("policy-snapshot")] {
+        match std::fs::remove_dir_all(dir) {
+            Ok(()) => {},
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
+fn read_policy_snapshot(dir: &Path) -> Result<Option<crate::policy_fragments::Resolution>> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = dir.join("latest.json");
+    let file = match std::fs::OpenOptions::new().read(true)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
+        .open(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).context("open launch policy snapshot"),
+    };
+    if !file.metadata()?.is_file() { bail!("launch policy snapshot is not a regular file"); }
+    let mut bytes = Vec::new();
+    file.take(MAX_POLICY_SNAPSHOT_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_POLICY_SNAPSHOT_BYTES { bail!("launch policy snapshot exceeds 4 MiB"); }
+    Ok(Some(serde_json::from_slice(&bytes).context("read launch policy snapshot")?))
+}
+
+/// Record only a successful launch; retain older builds without reconstructing from live files.
+fn record_policy_snapshot(session: &str, resolution: &crate::policy_fragments::Resolution) -> Result<()> {
+    write_policy_snapshot(&snapshot_dir(session)?, resolution)
+}
+
+fn write_policy_snapshot(dir: &Path, resolution: &crate::policy_fragments::Resolution) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::io::Write;
+    std::fs::create_dir_all(dir)?;
+    let _owner = crate::safe_fs::owned_dir(dir, rustix::process::getuid().as_raw(), false)?;
+    let bytes = serde_json::to_vec_pretty(resolution)?;
+    if bytes.len() > MAX_POLICY_SNAPSHOT_BYTES { bail!("launch policy snapshot exceeds 4 MiB"); }
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
+    let mut archive = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
+        .open(dir.join(format!("{stamp}-{:032x}.json", rand::random::<u128>())))?;
+    archive.write_all(&bytes)?;
+    archive.sync_all()?;
+    let temp = dir.join(format!("latest-{:032x}.tmp", rand::random::<u128>()));
+    let result = (|| -> Result<()> {
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&temp, dir.join("latest.json"))?;
+        std::fs::File::open(dir)?.sync_all()?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(&temp);
+    result
+}
+
+/// Compare source content, including absent fragments and pins, rather than modification times.
+pub fn jail_outdated_with_pins(session: &str, base: &Policy, pins: &[PathBuf]) -> bool {
+    snapshot_outdated(policy_snapshot(session), base, pins)
+}
+
+fn snapshot_outdated(snapshot: Result<Option<crate::policy_fragments::Resolution>>, base: &Policy, pins: &[PathBuf]) -> bool {
+    match snapshot {
+        Ok(Some(snapshot)) => crate::policy_fragments::input_fingerprint(base, pins)
+            .map(|current| current != snapshot.fingerprint).unwrap_or(true),
+        // A legacy jail has no evidence that it applied newly introduced fragments.
+        Ok(None) => crate::policy_fragments::resolve(base, pins, &[])
+            .map(|current| !current.sources.is_empty()).unwrap_or(true),
+        // Missing evidence must not make corrupt or unreadable snapshots appear current.
+        Err(_) => true,
+    }
+}
+
+/// Compatibility for pre-snapshot jails.
 pub fn jail_outdated(session: &str, policy: &str, home: &Path) -> bool {
     let Ok(sock) = socket_path(session) else { return false };
     let Ok(started) = std::fs::metadata(&sock).and_then(|m| m.modified()) else { return false };
@@ -592,11 +708,18 @@ pub struct Started {
 /// as a child of this process, in a session cgroup under the launcher's root when there is one,
 /// its output on a journald stream (info level; ghost sessions will log at warning) or in `jail.log`.
 pub fn ensure_started(opts: &StartOptions, home: &Path, exe: &Path) -> Result<Started> {
+    // Serialize launch attempts, including one-build exceptions and their frozen input file.
+    static LAUNCHING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _launching = LAUNCHING.lock().unwrap_or_else(|e| e.into_inner());
     let sock = socket_path(&opts.session)?;
     if shim::Control::connect(&sock).is_ok() {
         return Ok(Started { socket: sock, child: None });
     }
-    let policy = Policy::load(&opts.policy, home)?;
+    let base = session_base_policy(&opts.policy, home, opts.x11, opts.dbus, opts.ghost, opts.agent.as_deref())?;
+    let resolution = crate::policy_fragments::resolve(&base, &opts.pins, &opts.ignore_fragments)?;
+    let serialized_resolution = serde_json::to_vec_pretty(&resolution)?;
+    if serialized_resolution.len() > MAX_POLICY_SNAPSHOT_BYTES { bail!("launch policy snapshot exceeds 4 MiB"); }
+    let policy = &resolution.policy;
     let launcher = crate::launcher::current();
     if !launcher.has_limits() && policy.limits.required {
         bail!(
@@ -631,7 +754,16 @@ pub fn ensure_started(opts: &StartOptions, home: &Path, exe: &Path) -> Result<St
     } else {
         std::process::Command::new(exe)
     };
-    cmd.args(launch_args(opts)).arg("--child");
+    // Private host-side launch input: the child does not reread agent-writable fragments.
+    let resolved_path = rt.join("launch-policy.json");
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600)
+            .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32).open(&resolved_path)?;
+        file.write_all(&serialized_resolution)?;
+    }
+    cmd.args(launch_args(opts)).arg("--resolved-policy").arg(&resolved_path).arg("--child");
     if let Some(root) = &launcher.cgroup_root {
         cmd.arg("--cgroup-root").arg(root);
     }
@@ -639,6 +771,16 @@ pub fn ensure_started(opts: &StartOptions, home: &Path, exe: &Path) -> Result<St
     let mut child = crate::launcher::spawn_child(cmd, log)?;
     for _ in 0..50 {
         if shim::Control::connect(&sock).is_ok() {
+            let recorded = if opts.ghost {
+                write_policy_snapshot(&rt.join("policy-snapshot"), &resolution)
+            } else { record_policy_snapshot(&opts.session, &resolution) };
+            if let Err(error) = recorded {
+                let _ = stop(&opts.session);
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.context("recording launch policy; stopped unrecorded jail"));
+            }
+            let _ = std::fs::remove_file(&resolved_path);
             return Ok(Started { socket: sock, child: Some(child) });
         }
         if let Ok(Some(st)) = child.try_wait() {
@@ -720,6 +862,89 @@ mod tests {
         let codex = &registry["codex"];
         assert!(!codex.shared_files.iter().any(|p| crate::paths::expand_home(p, &home) == home.join(".codex/auth.json")));
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    struct PolicyTestTree(PathBuf);
+    impl PolicyTestTree {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!("sill-policy-snapshot-{:032x}", rand::random::<u128>()));
+            std::fs::create_dir_all(root.join("repo/.sill")).unwrap();
+            Self(root)
+        }
+        fn repo(&self) -> PathBuf { self.0.join("repo") }
+        fn snapshots(&self) -> PathBuf { self.0.join("snapshots") }
+        fn fragment(&self, text: &str) { std::fs::write(self.repo().join(".sill/policy.toml"), text).unwrap(); }
+        fn resolve(&self, base: &Policy) -> crate::policy_fragments::Resolution {
+            crate::policy_fragments::resolve(base, &[self.repo()], &[]).unwrap()
+        }
+    }
+    impl Drop for PolicyTestTree {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+
+    #[test]
+    fn policy_launch_snapshots_preserve_history_and_source_text_across_edits() {
+        let tree = PolicyTestTree::new();
+        let base = Policy::builtin_default();
+        tree.fragment("[network]\nallow=['example.com']");
+        let first = tree.resolve(&base);
+        write_policy_snapshot(&tree.snapshots(), &first).unwrap();
+        let snapshot = read_policy_snapshot(&tree.snapshots()).unwrap().unwrap();
+        assert_eq!(snapshot.fingerprint, first.fingerprint);
+        assert!(!snapshot_outdated(Ok(Some(snapshot.clone())), &base, &[tree.repo()]));
+        tree.fragment("[network]\nmode='none'");
+        assert!(snapshot_outdated(Ok(Some(snapshot)), &base, &[tree.repo()]));
+        let second = tree.resolve(&base);
+        write_policy_snapshot(&tree.snapshots(), &second).unwrap();
+        let latest = read_policy_snapshot(&tree.snapshots()).unwrap().unwrap();
+        assert_eq!(latest.policy.network.mode, crate::policy::NetMode::None);
+        let archives: Vec<_> = std::fs::read_dir(tree.snapshots()).unwrap().flatten()
+            .filter(|e| e.file_name() != "latest.json").collect();
+        assert_eq!(archives.len(), 2);
+        assert!(archives.into_iter().any(|entry| {
+            let old: crate::policy_fragments::Resolution = serde_json::from_slice(&std::fs::read(entry.path()).unwrap()).unwrap();
+            old.fingerprint == first.fingerprint && old.sources[0].text.contains("example.com")
+        }));
+        std::fs::remove_file(tree.repo().join(".sill/policy.toml")).unwrap();
+        assert!(snapshot_outdated(Ok(Some(latest)), &base, &[tree.repo()]));
+    }
+
+    #[test]
+    fn corrupt_or_unsafe_policy_snapshot_is_stale_and_never_reconstructed() {
+        let tree = PolicyTestTree::new();
+        let base = Policy::builtin_default();
+        assert!(read_policy_snapshot(&tree.snapshots()).unwrap().is_none());
+        write_policy_snapshot(&tree.snapshots(), &tree.resolve(&base)).unwrap();
+        std::fs::write(tree.snapshots().join("latest.json"), "corrupt").unwrap();
+        assert!(snapshot_outdated(read_policy_snapshot(&tree.snapshots()), &base, &[tree.repo()]));
+        std::fs::remove_file(tree.snapshots().join("latest.json")).unwrap();
+        std::os::unix::fs::symlink(tree.repo().join(".sill/policy.toml"), tree.snapshots().join("latest.json")).unwrap();
+        assert!(read_policy_snapshot(&tree.snapshots()).is_err());
+    }
+
+    #[test]
+    fn legacy_jail_needs_rebuild_for_valid_or_invalid_repository_fragment() {
+        let tree = PolicyTestTree::new();
+        let base = Policy::builtin_default();
+        assert!(!snapshot_outdated(Ok(None), &base, &[tree.repo()]));
+        tree.fragment("[network]\nmode='none'");
+        assert!(snapshot_outdated(Ok(None), &base, &[tree.repo()]));
+        tree.fragment("malformed [");
+        assert!(snapshot_outdated(Ok(None), &base, &[tree.repo()]));
+    }
+
+    #[test]
+    fn ignored_fragment_exception_survives_snapshot_but_not_next_build() {
+        let tree = PolicyTestTree::new();
+        let base = Policy::builtin_default();
+        tree.fragment("[paths]\ndirect=['.']");
+        let ignored = crate::policy_fragments::resolve(&base, &[tree.repo()], &[tree.repo()]).unwrap();
+        write_policy_snapshot(&tree.snapshots(), &ignored).unwrap();
+        let snapshot = read_policy_snapshot(&tree.snapshots()).unwrap().unwrap();
+        assert!(snapshot.sources[0].ignored);
+        assert!(snapshot.sources[0].text.contains("direct"));
+        assert!(!snapshot_outdated(Ok(Some(snapshot)), &base, &[tree.repo()]));
+        assert!(crate::policy_fragments::resolve(&base, &[tree.repo()], &[]).is_err());
     }
 
     #[test]

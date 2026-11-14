@@ -293,10 +293,14 @@ impl Hub {
             if runner.is_none() && self.relay_answers(&id) {
                 continue;
             }
-            let Ok(mut policy) = Policy::load(&s.policy, &self.home) else { continue };
-            if s.ghost {
-                policy.ghostly(&self.home); // at most an hour (docs/memory.md §3.2)
-            }
+            let policy = match sill_core::session::policy_snapshot(&id) {
+                Ok(Some(snapshot)) => snapshot.policy,
+                _ => {
+                    let Ok(mut policy) = Policy::load(&s.policy, &self.home) else { continue };
+                    if s.ghost { policy.ghostly(&self.home); }
+                    policy
+                }
+            };
             let limit = policy.limits.idle_timeout_minutes as i64 * 60;
             if limit <= 0 {
                 continue;
@@ -617,6 +621,7 @@ impl Hub {
         if let Err(e) = sill_core::session::remove_state(uid, id) {
             eprintln!("sill daemon: removing session {id}'s state: {e:#}");
         }
+        sill_core::session::forget_policy_snapshots(id)?;
         self.with_store(|s| {
             // a ghost's rows are overwritten as they go and the file is rewritten without them,
             // its WAL emptied: the depth docs/memory.md §3.4 promises, no more
@@ -1058,6 +1063,10 @@ impl Hub {
     /// Start a stored session's jail from its row — pins, policy, desktop grants, the agent's binds
     /// — or find it running (what `shelf/session.rs` built in-process before the daemon).
     fn start_session(&self, id: &str) -> Result<Started> {
+        self.start_session_ignoring(id, &[])
+    }
+
+    pub(super) fn start_session_ignoring(&self, id: &str, ignore_roots: &[PathBuf]) -> Result<Started> {
         self.sync_credentials_for(Some(id))?;
         if !sill_core::session::valid_id(id) {
             bail!("not a session id");
@@ -1071,6 +1080,7 @@ impl Hub {
         // Reuse a live jail before computing a new launch plan. Recovery must not
         // require the state mount or installed policy just to reconnect its shim.
         if sill_core::session::is_running(id) {
+            if !ignore_roots.is_empty() { bail!("jail already running; stop it before ignoring a fragment for a new build"); }
             return Ok(Started { socket: sill_core::shim::runtime_dir(id)?.join("shim.sock"), fresh: false });
         }
         let registry = sill_core::agents::load(&self.home);
@@ -1084,6 +1094,8 @@ impl Hub {
         let opts = StartOptions {
             session: id.to_string(),
             policy: s.policy.clone(),
+            pins: if s.ghost { vec![] } else { pins.clone() },
+            ignore_fragments: ignore_roots.to_vec(),
             cwd: self.home.clone(),
             state_dir: Some(sdir),
             unsafe_state: false,

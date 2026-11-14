@@ -1018,3 +1018,117 @@ fn public_network_denials_are_live_bounded_pages() {
     }
     assert!(c.call("_sill/policy.denied",json!({"session_id":session,"limit":0})).unwrap().get("error").is_some());
 }
+
+#[test]
+fn travelling_policy_check_import_and_explicit_replacement() {
+    let d = Daemon::start();
+    let mut c = d.connect().unwrap();
+    let text = "name = 'shared'\n[network]\nmode = 'none'\n";
+    let checked = c.call("_sill/policy.check", json!({"text":text})).unwrap();
+    assert_eq!(checked["result"]["valid"], true, "{checked}");
+    let invalid = c.call("_sill/policy.check", json!({"text":"name = 'bad'\nunknown = true"})).unwrap();
+    assert_eq!(invalid["result"]["valid"], false, "{invalid}");
+    assert!(!d.dir.join("home/.config/sill/policies/shared.toml").exists());
+    let imported = c.call("_sill/policy.import", json!({"name":"shared","text":text})).unwrap();
+    assert_eq!(imported["result"]["name"], "shared", "{imported}");
+    let saved = c.call("_sill/policy.get", json!({"name":"shared"})).unwrap();
+    assert_eq!(saved["result"]["text"], imported["result"]["text"]);
+    let changed = "name = 'shared'\n[network]\nmode = 'allow'\n";
+    let conflict = c.call("_sill/policy.import", json!({"name":"shared","text":changed})).unwrap();
+    assert_eq!(conflict["error"]["data"]["code"], "conflict", "{conflict}");
+    let unchanged = c.call("_sill/policy.get", json!({"name":"shared"})).unwrap();
+    assert_eq!(saved["result"], unchanged["result"]);
+    let replaced = c.call("_sill/policy.import", json!({"name":"shared","text":changed,"replace":true})).unwrap();
+    assert!(replaced.get("error").is_none(), "{replaced}");
+    let invalid_name = c.call("_sill/policy.import", json!({"name":"../escape","text":text})).unwrap();
+    assert_eq!(invalid_name["error"]["code"], -32602, "{invalid_name}");
+    let oversized = c.call("_sill/policy.check", json!({"text":"x".repeat(1024*1024+1)})).unwrap();
+    assert_eq!(oversized["error"]["data"]["code"], "limit_exceeded", "{oversized}");
+}
+
+#[test]
+fn travelling_policy_preview_retains_launch_view_when_fragment_changes() {
+    use sill_proto::sessions::HostPath;
+    let d = Daemon::start();
+    let mut c = d.connect().unwrap();
+    let root = d.dir.join("home/repo");
+    std::fs::create_dir_all(root.join(".sill")).unwrap();
+    std::fs::write(root.join("secret"), "secret").unwrap();
+    std::fs::write(root.join(".sill/policy.toml"), "[paths]\nro = ['secret']\n[network]\nallow = ['packages.example']\n").unwrap();
+    let pin = c.call("_sill/pins.add", json!({"path":HostPath::from_path(&root)})).unwrap();
+    assert!(pin.get("error").is_none(), "{pin}");
+    let created = c.call("_sill/sessions.create", json!({"create_id":"policy-preview","agent":"claude","policy":"default"})).unwrap();
+    let id = created["result"]["session_id"].as_str().unwrap();
+    let key = json!({"session_id":id});
+    let empty = c.call("_sill/policy.snapshot", key.clone()).unwrap();
+    assert!(empty["result"]["snapshot"].is_null(), "{empty}");
+    let preview = c.call("_sill/policy.preview", key.clone()).unwrap();
+    assert_eq!(preview["result"]["sources"].as_array().unwrap().len(), 1, "{preview}");
+    assert_eq!(preview["result"]["suggestions"][0]["host"], "packages.example");
+    let base = sill_core::policy::Policy::builtin_default();
+    let resolution = sill_core::policy_fragments::resolve(&base, &[root.clone()], &[]).unwrap();
+    // A fixture snapshot tests the public read boundary; no jail is launched in this test.
+    let snapshots = d.dir.join("state/sill/policy-snapshots").join(id);
+    std::fs::create_dir_all(&snapshots).unwrap();
+    std::fs::write(snapshots.join("latest.json"), serde_json::to_vec(&resolution).unwrap()).unwrap();
+    std::fs::write(root.join(".sill/policy.toml"), "[paths]\ndirect = ['secret']\n").unwrap();
+    let invalid = c.call("_sill/policy.preview", key.clone()).unwrap();
+    assert!(invalid["result"]["text"].is_null(), "{invalid}");
+    assert!(!invalid["result"]["diagnostics"].as_array().unwrap().is_empty());
+    let retained = c.call("_sill/policy.snapshot", key).unwrap();
+    assert_eq!(retained["result"]["snapshot"]["view"], "launch");
+    assert_eq!(retained["result"]["snapshot"]["suggestions"][0]["host"], "packages.example");
+    let checked = c.call("_sill/policy.check", json!({"text":"[paths]\nmask=['../escape']","fragment":true,"root":HostPath::from_path(&root)})).unwrap();
+    assert_eq!(checked["result"]["valid"], false, "{checked}");
+}
+
+#[test]
+fn travelling_policy_suggestions_are_session_grants_and_offline_is_not_overridden() {
+    use sill_proto::sessions::HostPath;
+    let d = Daemon::start();
+    let mut c = d.connect().unwrap();
+    let root = d.dir.join("home/repo");
+    std::fs::create_dir_all(root.join(".sill")).unwrap();
+    std::fs::write(root.join(".sill/policy.toml"), "[network]\nallow=['packages.example']").unwrap();
+    let created = c.call("_sill/sessions.create", json!({"create_id":"policy-suggestions","agent":"claude","policy":"default","pins":[HostPath::from_path(&root)]})).unwrap();
+    let id = created["result"]["session_id"].as_str().unwrap();
+    let mut resolution = sill_core::policy_fragments::resolve(&sill_core::policy::Policy::builtin_default(), &[root], &[]).unwrap();
+    let snapshot = d.dir.join("state/sill/policy-snapshots").join(id);
+    std::fs::create_dir_all(&snapshot).unwrap();
+    let runtime = d.dir.join("run/sill").join(id);
+    std::fs::create_dir_all(&runtime).unwrap();
+    std::fs::write(snapshot.join("latest.json"), serde_json::to_vec(&resolution).unwrap()).unwrap();
+    let denied = c.call("_sill/policy.denied", json!({"session_id":id})).unwrap();
+    assert!(denied["result"]["hosts"].as_array().unwrap().contains(&json!("packages.example")), "{denied}");
+    let allowed = c.call("_sill/policy.allow_host", json!({"session_id":id,"host":"packages.example"})).unwrap();
+    assert_eq!(allowed["result"]["agent_name"], "this session", "{allowed}");
+    assert_eq!(std::fs::read_to_string(runtime.join("session-allowed-hosts")).unwrap(), "packages.example\n");
+    assert!(!d.dir.join("home/.config/sill/agents/claude.toml").exists());
+    resolution.policy.network.mode = sill_core::policy::NetMode::None;
+    std::fs::write(snapshot.join("latest.json"), serde_json::to_vec(&resolution).unwrap()).unwrap();
+    let offline = c.call("_sill/policy.allow_host", json!({"session_id":id,"host":"packages.example"})).unwrap();
+    assert_eq!(offline["error"]["data"]["code"], "permission_denied", "{offline}");
+}
+
+#[test]
+fn travelling_policy_cli_preserves_base_shorthand_and_blocks_jailed_import() {
+    let d = Daemon::start();
+    let run = |args: &[&str], jailed: bool| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_sill"));
+        cmd.args(args).env("HOME", d.dir.join("home"))
+            .env("XDG_RUNTIME_DIR", d.dir.join("run"))
+            .env("XDG_STATE_HOME", d.dir.join("state"))
+            .env("XDG_CONFIG_HOME", d.dir.join("config"))
+            .env_remove("SILL_BOX");
+        if jailed { cmd.env("SILL_SESSION", "1"); } else { cmd.env_remove("SILL_SESSION"); }
+        cmd.output().unwrap()
+    };
+    let old = run(&["policy", "default"], false);
+    let explicit = run(&["policy", "show", "default"], false);
+    assert!(old.status.success(), "{}", String::from_utf8_lossy(&old.stderr));
+    assert!(explicit.status.success(), "{}", String::from_utf8_lossy(&explicit.stderr));
+    assert_eq!(old.stdout, explicit.stdout);
+    let denied = run(&["policy", "import", "/does-not-exist"], true);
+    assert!(!denied.status.success());
+    assert!(String::from_utf8_lossy(&denied.stderr).contains("host administrative actions"));
+}

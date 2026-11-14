@@ -54,6 +54,29 @@ try:
     policies = c.call("_sill/policy.list", {"limit": 1})
     assert len(policies["names"]) <= 1
     session = c.call("_sill/sessions.create", {"create_id": "memory-spool", "agent": "claude", "policy": "default"})["session_id"]
+    # Travelling policy administration uses transferred text and exact daemon-host roots.
+    assert c.call("_sill/policy.check", {"text": "name='shared'"})["valid"]
+    assert not c.call("_sill/policy.check", {"text": "name='bad'\nunknown=true"})["valid"]
+    assert c.call("_sill/policy.check", {"text": "[network]\nallow=['packages.example']", "fragment": True, "root": home})["valid"]
+    assert not c.call("_sill/policy.check", {"text": "[paths]\ndirect=['.']", "fragment": True, "root": home})["valid"]
+    installed = c.call("_sill/policy.import", {"name": "shared", "text": "name='shared'\n[network]\nmode='none'"})
+    assert c.call("_sill/policy.get", {"name": "shared"}) == installed
+    try:
+        c.call("_sill/policy.import", {"name": "shared", "text": "name='shared'"})
+        raise AssertionError("policy replaced without an explicit flag")
+    except RpcError as error:
+        assert error.code == "conflict", error
+    replaced = c.call("_sill/policy.import", {"name": "shared", "text": "name='shared'", "replace": True})
+    assert replaced != installed
+    preview = c.call("_sill/policy.preview", {"session_id": session})
+    assert preview["view"] == "preview" and not preview["diagnostics"]
+    assert preview["text"] and preview["fingerprint"]
+    assert c.call("_sill/policy.snapshot", {"session_id": session})["snapshot"] is None
+    try:
+        c.call("_sill/policy.start", {"session_id": "missing", "ignore_roots": []})
+        raise AssertionError("unknown session start accepted")
+    except RpcError as error:
+        assert error.code == "not_found", error
     c.call("_sill/memory.notes.add", {"session_id": session, "text": "immutable original note"})
     first = c.call("_sill/memory.text", {"session_id": session, "format": "show", "length": 8})
     c.call("_sill/memory.notes.add", {"session_id": session, "text": "later mutation"})

@@ -28,6 +28,8 @@ pub fn session_plan(
     binds: Vec<(PathBuf, PathBuf)>,
 ) -> Result<jail::JailPlan> {
     let spec = JailSpec {
+        fragment_ro: vec![],
+        fragment_masks: vec![],
         policy,
         home: home.to_path_buf(),
         user: user.to_string(),

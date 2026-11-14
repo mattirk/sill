@@ -14,6 +14,7 @@ mod icons;
 mod login_input;
 mod markdown;
 mod processes;
+mod policies;
 mod remote;
 mod remote_store;
 mod session;

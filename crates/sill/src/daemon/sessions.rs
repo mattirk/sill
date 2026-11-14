@@ -7,7 +7,16 @@ use sill_proto::sessions as api;
 fn record(store: &Store, s: sill_core::store::Session) -> Result<api::Session> {
     Ok(api::Session {
         running: s.ended_at.is_none() && sill_core::session::is_running(&s.id),
-        policy_changed: s.ended_at.is_none() && sill_core::changes::home().is_ok_and(|home| sill_core::session::jail_outdated(&s.id, &s.policy, &home)),
+        policy_changed: s.ended_at.is_none() && sill_core::changes::home().is_ok_and(|home| {
+            let cfg = sill_core::config::load();
+            let (x11, dbus) = sill_core::config::desktop_grants(&s.desktop, &cfg);
+            let pins = if s.ghost { vec![] } else { store.jail_pins(&s.id).unwrap_or_default() };
+            match sill_core::session::session_base_policy(&s.policy, &home, x11, dbus, s.ghost, Some(&s.agent)) {
+                Ok(base) => sill_core::session::jail_outdated_with_pins(&s.id, &base, &pins)
+                    || sill_core::session::jail_outdated(&s.id, &s.policy, &home),
+                Err(_) => true,
+            }
+        }),
         pins: store.pins(&s.id)?.iter().map(|p| api::HostPath::from_path(p)).collect(),
         session_id: s.id,
         agent: s.agent,

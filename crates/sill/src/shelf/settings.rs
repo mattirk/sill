@@ -1,7 +1,7 @@
 //! Backend page "Settings" (SPEC §3.1): theme, text size, width, default page, hotkey (saved to
 //! ~/.config/sill/sill.toml), plus where things are.
 //!
-//! The page is sections — Appearance, Shelf, Sessions, Instructions, Memory, then Where things
+//! The page is sections — Appearance, Shelf, Sessions, Instructions, Memory, Policies, then Where things
 //! are folded — each a title over a card of rows (label and a short dim line on the left, the
 //! control on the right; wide controls under their label), held to a reading width.
 //!
@@ -456,12 +456,14 @@ pub fn build(timer_auto: Rc<std::cell::Cell<bool>>) -> gtk::Widget {
     plain(&card, &actions);
     root.append(&sec);
 
+    root.append(&super::policies::build());
+
     // ---- Where things are: reference, folded — a title that opens a card
     let home = super::session::home().unwrap_or_default().display().to_string();
     let info: Vec<(String, String)> = vec![
         ("Config".into(), format!("{home}/.config/sill/sill.toml")),
         ("Instructions".into(), format!("{home}/.config/sill/instructions.md — the box above; per agent type and per session come later")),
-        ("Policy".into(), "default — /etc/sill/policies/default.toml, then ~/.config/sill/policies/, then built-in".into()),
+        ("Policy".into(), "Policies above — ~/.config/sill/policies/, then /etc/sill/policies/, then built-in default".into()),
         ("Agents".into(), "the Agents page: install from the ACP registry, the gear edits command, environment, domains (~/.config/sill/agents/*.toml)".into()),
         ("Sessions".into(), format!("{home}/.local/state/sill/sill.db; jails under /var/lib/sill/<uid>/sessions/")),
         ("Daemon".into(), "sill daemon status — sessions are its children in scopes sill-<id>.scope under sill.slice (systemctl --user list-units 'sill-*.scope'); logs: journalctl --user -t sill-<id>, or $XDG_RUNTIME_DIR/sill/<id>/jail.log without journald".into()),

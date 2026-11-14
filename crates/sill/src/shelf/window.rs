@@ -1079,6 +1079,69 @@ impl Shelf {
     /// name, policy, desktop access — and where its jail runs. Built fresh on each open and dropped
     /// when it closes; a policy or desktop change closes it first, since the restart replaces the tab
     /// it is anchored to.
+    fn show_policy_details(self: &Rc<Self>, id: &str) {
+        let dialog = gtk::Window::builder().title("Session policy").transient_for(&self.window)
+            .default_width(660).default_height(560).build();
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 10);
+        content.set_margin_top(12); content.set_margin_bottom(12);
+        content.set_margin_start(12); content.set_margin_end(12);
+        let status = gtk::Label::new(Some("Reading policy…"));
+        status.set_xalign(0.0); status.set_wrap(true);
+        content.append(&status);
+        let text = gtk::TextView::builder().editable(false).cursor_visible(false).monospace(true)
+            .wrap_mode(gtk::WrapMode::WordChar).build();
+        let scroll = gtk::ScrolledWindow::builder().vexpand(true).hexpand(true).child(&text).build();
+        content.append(&scroll);
+        let rebuild = gtk::Button::with_label("Rebuild with current policy");
+        rebuild.set_halign(gtk::Align::Start); rebuild.set_sensitive(false);
+        content.append(&rebuild);
+        let shelf = self.clone(); let sid = id.to_string(); let weak = dialog.downgrade();
+        rebuild.connect_clicked(move |_| {
+            if let Some(view) = shelf.views.borrow().get(&sid).cloned() {
+                view.restart_for_jail();
+                if let Some(dialog) = weak.upgrade() { dialog.close(); }
+            }
+        });
+        dialog.set_child(Some(&content)); dialog.present();
+        let (tx, rx) = async_channel::bounded(1); let sid = id.to_string();
+        std::thread::spawn(move || {
+            let result = (|| -> anyhow::Result<_> {
+                let key = sill_proto::sessions::SessionKey { session_id: sid };
+                let snapshot: sill_proto::admin::PolicySnapshot = super::client::call("_sill/policy.snapshot", &key)?;
+                let preview: sill_proto::admin::PolicyView = super::client::call("_sill/policy.preview", &key)?;
+                Ok((snapshot, preview))
+            })();
+            let _ = tx.send_blocking(result);
+        });
+        glib::spawn_future_local(async move {
+            match rx.recv().await {
+                Ok(Ok((snapshot, preview))) => {
+                    let describe = |view: &sill_proto::admin::PolicyView| {
+                        let mut text = format!("Base: {}\n", view.name);
+                        for source in &view.sources {
+                            text.push_str(&format!("{}{}\n", if source.ignored { "Ignored for this build: " } else { "Fragment: " }, source.path.display));
+                            if let Some(error) = &source.error { text.push_str(&format!("{error}\n")); }
+                        }
+                        for suggestion in &view.suggestions {
+                            text.push_str(&format!("Suggested host: {} ({})\n", suggestion.host, suggestion.source.display));
+                        }
+                        text.push_str(&format!("Read-only paths: {:?}\nHidden paths: {:?}\n\n", view.fragment_ro.iter().map(|p| &p.display).collect::<Vec<_>>(), view.fragment_masks.iter().map(|p| &p.display).collect::<Vec<_>>()));
+                        for diagnostic in &view.diagnostics { text.push_str(&format!("{diagnostic}\n")); }
+                        text.push_str(view.text.as_deref().unwrap_or("No valid resolved policy.")); text
+                    };
+                    let current = snapshot.snapshot.as_ref().map(describe).unwrap_or_else(|| "No recorded launch snapshot (not launched or an older jail).".into());
+                    text.buffer().set_text(&format!("RECORDED LAUNCH RULES\n{current}\n\nNEXT BUILD PREVIEW\n{}", describe(&preview)));
+                    let valid = preview.diagnostics.is_empty() && preview.text.is_some();
+                    rebuild.set_sensitive(valid);
+                    let changed = snapshot.snapshot.as_ref().is_some_and(|launch| launch.fingerprint != preview.fingerprint);
+                    status.set_text(if valid && changed { "Policy sources changed. The running jail retains its recorded launch rules. Rebuild waits for the active turn to finish." } else if valid { "Preview changes take effect only when you rebuild. Rebuild waits for the active turn to finish." } else { "Current fragments contain errors. Correct them before rebuilding; the running jail keeps its launch rules." });
+                }
+                Ok(Err(error)) => status.set_text(&format!("Could not inspect policy: {error:#}")),
+                Err(_) => status.set_text("Policy inspection ended without a result."),
+            }
+        });
+    }
+
     fn session_menu(self: &Rc<Self>, id: &str, anchor: &gtk::Widget) {
         let Some(s) = self.store.sessions().unwrap_or_default().into_iter().find(|s| s.id == id) else { return };
         let home = session::home().unwrap_or_default();
@@ -1160,7 +1223,18 @@ impl Shelf {
             });
         }
         grid.attach(&key("Policy"), 0, 2, 1, 1);
-        grid.attach(&pol, 1, 2, 1, 1);
+        let policy_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        policy_row.append(&pol);
+        let details = gtk::Button::with_label("Details");
+        details.set_tooltip_text(Some("Recorded launch rules, repository fragments and next-build preview"));
+        {
+            let shelf = self.clone();
+            let sid = id.to_string();
+            let pop = pop.clone();
+            details.connect_clicked(move |_| { pop.popdown(); shelf.show_policy_details(&sid); });
+        }
+        policy_row.append(&details);
+        grid.attach(&policy_row, 1, 2, 1, 1);
         // desktop access; "default" says what it resolves to for this session's policy
         let choices = super::remote::config::DESKTOP_CHOICES;
         let (dx, dd) = {
@@ -1344,14 +1418,21 @@ impl Shelf {
             self.tabs.select(&id);
             return;
         }
-        if note.is_none() && super::client::call::<sill_proto::sessions::Session>("_sill/sessions.get", sill_proto::sessions::SessionKey { session_id: id.clone() }).is_ok_and(|s| s.policy_changed) {
+        if note.is_none() && super::client::call::<sill_proto::sessions::Session>("_sill/sessions.get", sill_proto::sessions::SessionKey { session_id: id.clone() }).is_ok_and(|s| s.running && s.policy_changed) {
+            let dialog = gtk::AlertDialog::builder().modal(true)
+                .message("Policy sources changed")
+                .detail("This jail still uses its recorded launch rules. Keep using it, or rebuild with the current policy and repository fragments?")
+                .buttons(["Keep current jail", "Rebuild jail"]).default_button(0).cancel_button(0).build();
             let shelf = self.clone();
-            let s2 = s.clone();
-            stop_then(&id, move || {
-                shelf.open_session_with(
-                    s2,
-                    Some("policy changed since this jail was built: rebuilt it with the current policy".into()),
-                )
+            dialog.choose(Some(&self.window), None::<&gtk::gio::Cancellable>, move |answer| {
+                if answer == Ok(1) {
+                    let shelf = shelf.clone();
+                    let s = s.clone();
+                    stop_then(&s.id.clone(), move || shelf.open_session_with(s,
+                        Some("rebuilt with the current policy and repository fragments".into())));
+                } else {
+                    shelf.open_session_with(s.clone(), Some("policy sources changed; keeping this jail's recorded launch rules until you choose to rebuild".into()));
+                }
             });
             return;
         }

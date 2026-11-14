@@ -3279,6 +3279,51 @@
       ],
       "type": "object"
     },
+    "PolicyCheck": {
+      "additionalProperties": false,
+      "properties": {
+        "fragment": {
+          "default": false,
+          "type": "boolean"
+        },
+        "root": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HostPath"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text": {
+          "description": "Text is transferred from the client; paths in a fragment identify the daemon host.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "type": "object"
+    },
+    "PolicyChecked": {
+      "properties": {
+        "diagnostics": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "valid": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "valid",
+        "diagnostics"
+      ],
+      "type": "object"
+    },
     "PolicyEntry": {
       "properties": {
         "dbus": {
@@ -3302,6 +3347,26 @@
       ],
       "type": "object"
     },
+    "PolicyImport": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "replace": {
+          "default": false,
+          "type": "boolean"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "text"
+      ],
+      "type": "object"
+    },
     "PolicyKey": {
       "additionalProperties": false,
       "properties": {
@@ -3311,6 +3376,156 @@
       },
       "required": [
         "name"
+      ],
+      "type": "object"
+    },
+    "PolicySnapshot": {
+      "properties": {
+        "snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PolicyView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Older or never-started sessions may have no retained launch snapshot."
+        }
+      },
+      "type": "object"
+    },
+    "PolicySource": {
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ignored": {
+          "type": "boolean"
+        },
+        "path": {
+          "$ref": "#/$defs/HostPath"
+        },
+        "root": {
+          "$ref": "#/$defs/HostPath"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "root",
+        "path",
+        "text",
+        "sha256",
+        "ignored"
+      ],
+      "type": "object"
+    },
+    "PolicyStart": {
+      "additionalProperties": false,
+      "properties": {
+        "ignore_roots": {
+          "items": {
+            "$ref": "#/$defs/HostPath"
+          },
+          "type": "array"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "ignore_roots"
+      ],
+      "type": "object"
+    },
+    "PolicySuggestion": {
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/HostPath"
+        }
+      },
+      "required": [
+        "host",
+        "source"
+      ],
+      "type": "object"
+    },
+    "PolicyView": {
+      "description": "Policy inspection always identifies its view; previews are never evidence of enforcement.",
+      "properties": {
+        "diagnostics": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "fingerprint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fragment_masks": {
+          "items": {
+            "$ref": "#/$defs/HostPath"
+          },
+          "type": "array"
+        },
+        "fragment_ro": {
+          "items": {
+            "$ref": "#/$defs/HostPath"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "sources": {
+          "items": {
+            "$ref": "#/$defs/PolicySource"
+          },
+          "type": "array"
+        },
+        "suggestions": {
+          "items": {
+            "$ref": "#/$defs/PolicySuggestion"
+          },
+          "type": "array"
+        },
+        "text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "view": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "view",
+        "session_id",
+        "name",
+        "fragment_ro",
+        "fragment_masks",
+        "sources",
+        "suggestions",
+        "diagnostics"
       ],
       "type": "object"
     },
@@ -6633,6 +6848,66 @@
       "name": "_sill/policy.get",
       "params": {
         "$ref": "#/$defs/PolicyKey"
+      },
+      "result": {
+        "$ref": "#/$defs/PolicyEntry"
+      }
+    },
+    {
+      "capabilities": {},
+      "doc": "Start a session with explicit fragment-root exceptions for one jail build only; never blindly retry after uncertainty.",
+      "kind": "request",
+      "name": "_sill/policy.start",
+      "params": {
+        "$ref": "#/$defs/PolicyStart"
+      },
+      "result": {
+        "$ref": "#/$defs/Started"
+      }
+    },
+    {
+      "capabilities": {},
+      "doc": "Preview next-build session rules and fragment diagnostics; this view is not enforced by a running jail.",
+      "kind": "request",
+      "name": "_sill/policy.preview",
+      "params": {
+        "$ref": "#/$defs/SessionKey"
+      },
+      "result": {
+        "$ref": "#/$defs/PolicyView"
+      }
+    },
+    {
+      "capabilities": {},
+      "doc": "Inspect retained launch rules and fragment sources; null means no snapshot was recorded.",
+      "kind": "request",
+      "name": "_sill/policy.snapshot",
+      "params": {
+        "$ref": "#/$defs/SessionKey"
+      },
+      "result": {
+        "$ref": "#/$defs/PolicySnapshot"
+      }
+    },
+    {
+      "capabilities": {},
+      "doc": "Validate at most 1 MiB of transferred complete-policy or fragment text without installation or grants.",
+      "kind": "request",
+      "name": "_sill/policy.check",
+      "params": {
+        "$ref": "#/$defs/PolicyCheck"
+      },
+      "result": {
+        "$ref": "#/$defs/PolicyChecked"
+      }
+    },
+    {
+      "capabilities": {},
+      "doc": "Install at most 1 MiB of complete policy text in the daemon host user policy directory. Explicit replace permits overwrite; inspect named policy after uncertain replies.",
+      "kind": "request",
+      "name": "_sill/policy.import",
+      "params": {
+        "$ref": "#/$defs/PolicyImport"
       },
       "result": {
         "$ref": "#/$defs/PolicyEntry"

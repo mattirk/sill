@@ -1999,6 +1999,9 @@ impl SessionView {
     /// so the proxy picks it up.
     fn allow_domain(self: &Rc<Self>, pattern: &str) {
         match remote::request::<String>(Request::AllowHost { session: self.id(), host: pattern.into() }) {
+            Ok(name) if name == "this session" => {
+                self.conv.add_note(&format!("{pattern} allowed for this session"));
+            }
             Ok(name) => {
                 self.conv.add_note(&format!("{pattern} allowed for {name}; the session restarts"));
                 self.force_restart.set(true);
@@ -2254,7 +2257,7 @@ impl SessionView {
     }
 
     /// A jail property changed: rebuild the jail (the window waits for the turn to end).
-    fn restart_for_jail(self: &Rc<Self>) {
+    pub(super) fn restart_for_jail(self: &Rc<Self>) {
         self.force_restart.set(true);
         self.request_restart();
     }
@@ -2774,13 +2777,19 @@ impl SessionView {
         let running_ports: Vec<(u16, String)> = list.iter().filter(|p| p.running()).filter_map(|p| p.port.map(|port| (port, p.name.clone()))).collect();
         self.bridges.borrow_mut().retain(|port, _| running_ports.iter().any(|(p, _)| p == port));
         let allowed = {
-            // the session's policy as the daemon reads it (public policy.get), its process rules
+            // Automatic exposure must use the rules actually enforced at launch.
             let name = self.session.borrow().policy.clone();
-            remote::request::<String>(Request::PolicyText { name })
-                .ok()
-                .and_then(|text| sill_core::policy::Policy::parse(&text).ok())
-                .map(|p| p.processes)
-                .unwrap_or_default()
+            let snapshot = super::client::call::<sill_proto::admin::PolicySnapshot>(
+                "_sill/policy.snapshot", sill_proto::sessions::SessionKey { session_id: self.id() });
+            let text = match snapshot {
+                Ok(snapshot) => match snapshot.snapshot {
+                    Some(view) => view.text,
+                    None => remote::request::<String>(Request::PolicyText { name }).ok(),
+                },
+                Err(_) => None, // failed inspection never grants automatic exposure
+            };
+            text.and_then(|text| sill_core::policy::Policy::parse(&text).ok())
+                .map(|p| p.processes).unwrap_or_default()
         };
         for (port, name) in running_ports {
             if self.bridges.borrow().contains_key(&port) {

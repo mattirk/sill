@@ -23,6 +23,7 @@ pub mod memory;
 pub mod mounts;
 pub mod paths;
 pub mod policy;
+pub mod policy_fragments;
 pub mod proxy;
 pub mod registry;
 pub mod safe_fs;

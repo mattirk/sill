@@ -75,6 +75,67 @@ pub struct PolicyEntry {
     pub dbus: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyStart {
+    pub session_id: String,
+    pub ignore_roots: Vec<HostPath>,
+}
+/// Policy inspection always identifies its view; previews are never evidence of enforcement.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PolicyView {
+    pub view: String,
+    pub session_id: String,
+    pub name: String,
+    pub text: Option<String>,
+    pub fragment_ro: Vec<HostPath>,
+    pub fragment_masks: Vec<HostPath>,
+    pub sources: Vec<PolicySource>,
+    pub suggestions: Vec<PolicySuggestion>,
+    pub fingerprint: Option<String>,
+    pub diagnostics: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PolicySource {
+    pub root: HostPath,
+    pub path: HostPath,
+    pub text: String,
+    pub sha256: String,
+    pub ignored: bool,
+    pub error: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PolicySuggestion {
+    pub host: String,
+    pub source: HostPath,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PolicySnapshot {
+    /// Older or never-started sessions may have no retained launch snapshot.
+    pub snapshot: Option<PolicyView>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyCheck {
+    /// Text is transferred from the client; paths in a fragment identify the daemon host.
+    pub text: String,
+    #[serde(default)]
+    pub fragment: bool,
+    pub root: Option<HostPath>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PolicyChecked {
+    pub valid: bool,
+    pub diagnostics: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyImport {
+    pub name: String,
+    pub text: String,
+    #[serde(default)]
+    pub replace: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Names {
     pub names: Vec<String>,
     pub next: Option<String>,

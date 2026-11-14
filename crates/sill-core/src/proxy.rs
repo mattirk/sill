@@ -253,6 +253,12 @@ impl Rules {
 
 /// Serve forever on an already-bound listener. Returns only if the listener itself is gone.
 pub fn serve(listener: UnixListener, rules: Rules, log: impl Fn(&str) + Send + Sync + 'static) -> Result<()> {
+    serve_with_session_grants(listener, rules, None, log)
+}
+
+/// Session grants live outside the jail. Reload on each new connection; existing tunnels keep
+/// their original decision. Never grant access around an offline policy.
+pub fn serve_with_session_grants(listener: UnixListener, rules: Rules, grants: Option<std::path::PathBuf>, log: impl Fn(&str) + Send + Sync + 'static) -> Result<()> {
     let rules = Arc::new(rules);
     let log = Arc::new(log);
     let active = Arc::new(AtomicUsize::new(0));
@@ -284,7 +290,9 @@ pub fn serve(listener: UnixListener, rules: Rules, log: impl Fn(&str) + Send + S
             let _ = respond(&mut c, "503 Service Unavailable", "sill: too many connections");
             continue;
         }
-        let (rules, thread_log, counted) = (rules.clone(), log.clone(), active.clone());
+        let mut connection_rules = (*rules).clone();
+        if let Some(path) = &grants { load_session_grants(&mut connection_rules, path); }
+        let (rules, thread_log, counted) = (connection_rules, log.clone(), active.clone());
         let spawned = std::thread::Builder::new().name("sill-proxy-conn".into()).spawn(move || {
             struct Done(Arc<AtomicUsize>);
             impl Drop for Done {
@@ -300,6 +308,23 @@ pub fn serve(listener: UnixListener, rules: Rules, log: impl Fn(&str) + Send + S
         if spawned.is_err() {
             active.fetch_sub(1, Ordering::SeqCst);
             log("error: could not start a connection thread");
+        }
+    }
+}
+
+/// Bounded, regular, non-symlink input only. Failure keeps the base rules.
+fn load_session_grants(rules: &mut Rules, path: &std::path::Path) {
+    use std::os::unix::fs::OpenOptionsExt;
+    if rules.mode == NetMode::None { return; }
+    let Ok(file) = std::fs::OpenOptions::new().read(true)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32).open(path) else { return };
+    if !file.metadata().is_ok_and(|m| m.is_file() && m.len() <= 131072) { return; }
+    let mut text = String::new();
+    if file.take(131073).read_to_string(&mut text).is_err() || text.len() > 131072 { return; }
+    for host in text.lines().take(128) {
+        let name = host.rsplit_once(':').filter(|(_, p)| p.parse::<u16>().is_ok()).map(|(h, _)| h).unwrap_or(host);
+        if valid_hostname(name) && !host.contains('*') && host.len() <= 1024 {
+            rules.allow.push(host.to_string());
         }
     }
 }
@@ -462,6 +487,22 @@ fn pump(client: UnixStream, upstream: TcpStream) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn session_grants_never_override_offline_or_local_protection() {
+        let path = std::env::temp_dir().join(format!("sill-proxy-grants-{}", crate::store::new_id()));
+        std::fs::write(&path, "example.com\n*.example.org\nlocalhost\n").unwrap();
+        let mut rules = Rules { mode: NetMode::Allow, allow: vec![], allow_local: vec![] };
+        load_session_grants(&mut rules, &path);
+        assert_eq!(rules.decide_name("example.com", 443, CONNECT_PORT), Decision::Allow("allow-list"));
+        assert!(matches!(rules.decide_name("a.example.org", 443, CONNECT_PORT), Decision::Deny(_)));
+        assert!(matches!(rules.decide("localhost", 443, CONNECT_PORT, &["127.0.0.1".parse().unwrap()]), Decision::Deny(_)));
+        let mut offline = Rules { mode: NetMode::None, allow: vec![], allow_local: vec![] };
+        load_session_grants(&mut offline, &path);
+        assert!(offline.allow.is_empty());
+        assert!(matches!(offline.decide_name("example.com", 443, CONNECT_PORT), Decision::Deny(_)));
+        std::fs::remove_file(path).unwrap();
+    }
+
     use super::*;
 
     fn ip(s: &str) -> IpAddr {

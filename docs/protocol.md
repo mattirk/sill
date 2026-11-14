@@ -354,7 +354,8 @@ This milestone remains `sfp/1-dev.3`. **What stands between it and stable `sfp/1
   re-records [`sfp-1.schema.json`](sfp-1.schema.json) and moves this document's development notes to
   [protocol-history.md](protocol-history.md).
   Acceptance and the conformance rerun are complete as recorded below; only the coordinated
-  cutover remains.
+  cutover remains for that baseline. The travelling-policy addition below now needs its own
+  host/desktop acceptance before promotion.
 - **Not SFP release work:** the native ACP v2 adapter's own validation (a third-party v2
   agent, upstream draft extensions, history replay after relay replacement; see
   [sfp-operations.md](sfp-operations.md#experimental-native-acp-v2)). The adapter is opt-in and
@@ -371,7 +372,8 @@ passed, including lifecycle/restart/question recovery and loopback OpenSSH termi
 reconnection. The headless workspace and Python client unit suites passed too.
 See [verification and remaining cutover work](work-items.md#stable-sfp-release).
 The coordinated identity/relay/schema/documentation cutover remains pending; the current
-identity is still `sfp/1-dev.3`.
+identity is still `sfp/1-dev.3`. The subsequent travelling-policy addition has its own
+[acceptance work](work-items.md#travelling-policies) before stable promotion.
 
 Snapshot capture still copies under the store lock; canonical history
 and idempotency identities remain proportional to retained sessions, and native v2 reconstruction
@@ -629,3 +631,36 @@ including fragmented UTF-8 records and safe handling of unknown state events.
 Daemon and frontend binaries must be rebuilt together for this development identity. A failed
 handshake does not automatically stop or replace an existing daemon. No application installation,
 running-daemon replacement or repository commit is part of this source change.
+
+### Travelling policies (development addition, 2026-11-04)
+
+Repository fragments are restrictive inputs to a new jail build. All pinned folder roots,
+including global pins, contribute `.sill/policy.toml`; suggestions never grant access on
+read. The resolver freezes launch inputs, including agent endpoints. Read-only and masked
+fragment paths are represented separately from base-policy paths in inspection responses.
+
+| Method | Behavior |
+|---|---|
+| `_sill/policy.preview` | Session key; resolve current policy and fragments for the next build. Invalid inputs return diagnostics and no resolved text. |
+| `_sill/policy.snapshot` | Session key; return the recorded last successful launch, or null for an older/never-launched jail. |
+| `_sill/policy.check` | Validate transferred text as a complete policy or fragment; fragment roots identify daemon-host paths. |
+| `_sill/policy.import` | Install transferred complete-policy text under a name; existing user policies require explicit replacement. |
+| `_sill/policy.start` | Start a stopped, non-ended session with explicit ignored fragment roots for this build only. |
+
+All are host administrative APIs, unavailable through jailed-agent tooling. CLI file input
+is read on the frontend and transferred as text, capped at 1 MiB; fragment files are capped
+at 64 KiB, with at most 128 pins and 1 MiB aggregate source inputs. Inspection results are
+bounded at 4 MiB. Paths use the existing byte-exact `HostPath` type. Sources include their
+text, hash, ignored status and any read error. Views identify base/preview/launch semantics;
+preview does not imply enforcement. No mutation is blindly retried after an uncertain reply.
+
+Suggested concrete hosts appear through the existing denied-host controls. Approving an
+exact suggested host records a session grant, without modifying agent-wide domains; the
+proxy reloads those grants for new connections. Offline launch policies reject grants.
+Other existing denied-host approvals retain their agent-wide behavior. Import conflicts
+return `conflict`; invalid fragment/build errors retain their source diagnostics.
+
+The recorded development schema is refreshed for these additive methods. Identity remains
+`sfp/1-dev.3`; this is not the stable `sfp/1` cutover. See
+[travelling policies](travelling-policies.md) for command examples, implementation limits
+and remaining human acceptance.

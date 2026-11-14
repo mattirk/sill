@@ -273,8 +273,8 @@ pub fn cgroup_size(s: &str) -> Result<String> {
 }
 
 /// Create (or reuse) the session cgroup `sill-<id>` under the delegated subtree, write the policy's
-/// limits into it and return its path. Files whose controller is not enabled are skipped with a
-/// warning line returned in `warnings`.
+/// limits into it and return its path. Required limits fail closed if any controller write fails;
+/// optional limits report unavailable controllers through `warnings`.
 pub fn make_session_cgroup(root: &Path, session: &str, limits: &Limits, warnings: &mut Vec<String>) -> Result<PathBuf> {
     let dir = root.join(format!("sill-{session}"));
     if !dir.is_dir() {
@@ -282,14 +282,16 @@ pub fn make_session_cgroup(root: &Path, session: &str, limits: &Limits, warnings
     }
     let mut set = |file: &str, value: String| {
         if let Err(e) = std::fs::write(dir.join(file), &value) {
+            if limits.required { return Err(anyhow::anyhow!("required cgroup {file}={value} not applied ({e}); controller not delegated?")); }
             warnings.push(format!("cgroup {file}={value} not applied ({e}); controller not delegated?"));
         }
+        Ok(())
     };
-    set("cpu.weight", limits.cpu_weight.to_string());
-    set("io.weight", format!("default {}", limits.io_weight));
-    set("memory.high", cgroup_size(&limits.memory_high)?);
-    set("memory.max", cgroup_size(&limits.memory_max)?);
-    set("pids.max", limits.tasks_max.to_string());
+    set("cpu.weight", limits.cpu_weight.to_string())?;
+    set("io.weight", format!("default {}", limits.io_weight))?;
+    set("memory.high", cgroup_size(&limits.memory_high)?)?;
+    set("memory.max", cgroup_size(&limits.memory_max)?)?;
+    set("pids.max", limits.tasks_max.to_string())?;
     Ok(dir)
 }
 
@@ -442,6 +444,20 @@ fn children_of(pid: i32) -> Vec<i32> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn required_limits_fail_on_controller_write_failure() {
+        let root = std::env::temp_dir().join(format!("sill-cgroup-required-{}", crate::store::new_id()));
+        let dir = root.join("sill-test");
+        std::fs::create_dir_all(dir.join("cpu.weight")).unwrap();
+        let mut limits = Limits::default();
+        let mut warnings = vec![];
+        assert!(make_session_cgroup(&root, "test", &limits, &mut warnings).is_err());
+        limits.required = false;
+        assert!(make_session_cgroup(&root, "test", &limits, &mut warnings).is_ok());
+        assert_eq!(warnings.len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     use super::*;
 
     #[test]
