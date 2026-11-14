@@ -296,8 +296,14 @@ impl JailSpec {
             for k in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"] {
                 env.insert(k.into(), url.clone());
             }
-            env.insert("NO_PROXY".into(), "".into());
-            env.insert("no_proxy".into(), "".into());
+            // the jail has its own network namespace: its loopback is the jail's own (a dev server
+            // the agent started), never the host's, so it stays direct; the proxy refuses loopback
+            for k in ["NO_PROXY", "no_proxy"] {
+                env.insert(k.into(), "localhost,127.0.0.1,::1".into());
+            }
+            // Node's fetch (undici) ignores the variables above unless asked: Gemini CLI's API calls
+            // then went direct, which the jail cannot, and its prompts hung (2026-11-03)
+            env.insert("NODE_USE_ENV_PROXY".into(), "1".into());
         }
         env.extend(p.jail.env.iter().map(|(k, v)| (k.clone(), v.clone())));
         env.extend(self.env.iter().map(|(k, v)| (k.clone(), v.clone())));
@@ -588,6 +594,18 @@ mod tests {
     /// The memory snapshot's directory is bound read-only where `sill-memory` looks, when given
     /// and present; its host path is masked like the rest of sill's state.
     #[test]
+    /// Behind the proxy, Node's own `fetch` is told to use it (Gemini CLI went direct and hung),
+    /// and the jail's own loopback stays direct.
+    #[test]
+    fn node_uses_the_proxy_and_loopback_stays_in_the_jail() {
+        let mut s = spec();
+        s.proxy_socket = Some(PathBuf::from("/run/user/1000/sill/x/proxy.sock"));
+        let r = render(&s.plan().unwrap().argv);
+        assert!(r.contains("--setenv NODE_USE_ENV_PROXY 1"), "{r}");
+        assert!(r.contains("--setenv HTTPS_PROXY http://127.0.0.1:"), "{r}");
+        assert!(r.contains("--setenv NO_PROXY localhost,127.0.0.1,::1"), "{r}");
+    }
+
     /// Without D-Bus the jail gets a dead address, not an unset one: nothing autolaunches a bus.
     #[test]
     fn no_dbus_is_a_dead_address_not_an_autolaunch() {
