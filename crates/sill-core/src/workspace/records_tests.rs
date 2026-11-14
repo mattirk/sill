@@ -566,6 +566,8 @@ fn the_session_view_and_the_list_carry_each_workspaces_detail() {
     assert_eq!(listed.details[0].summary.files, 1);
     // the repository gone: the record stays, nothing to look at
     std::fs::rename(&f.source, f.dir.join("elsewhere")).unwrap();
+    // Shared folders can leave an empty mount point behind after a rename.
+    std::fs::create_dir(&f.source).unwrap();
     let view = session_view(&f.host, "s1").unwrap();
     assert_eq!(view.workspaces.len(), 1);
     assert!(view.details.is_empty());

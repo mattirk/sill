@@ -511,7 +511,7 @@ fn drop_ref(repo: &Path, name: &str) -> Result<()> {
 /// settling and the summary alike, so a request looks once. None when the folder or the checkout
 /// is gone: nothing can be read, and the work is kept.
 fn look(r: &Row) -> Result<Option<flow::Mirror>> {
-    if !r.path.exists() || !r.source.exists() {
+    if !r.path.join(".git").exists() || !r.source.join(".git").exists() {
         return Ok(None);
     }
     flow::mirror(&r.source, &r.path, &r.branch).map(Some)
