@@ -42,13 +42,10 @@ pub struct InitArgs {
 const UNIT_SETUP: &str = include_str!("../../../packaging/systemd/sill-state-setup.service");
 const UNIT_MOUNT: &str = include_str!("../../../packaging/systemd/var-lib-sill.mount");
 const UNIT_PERMS: &str = include_str!("../../../packaging/systemd/sill-state-perms.service");
-#[cfg(feature = "shelf")]
 const UNIT_SHELF: &str = include_str!("../../../packaging/systemd/user/sill-shelf.service");
 const UNIT_DAEMON: &str = include_str!("../../../packaging/systemd/user/sill.service");
 const SOCKET_DAEMON: &str = include_str!("../../../packaging/systemd/user/sill.socket");
-#[cfg(feature = "shelf")]
 const DESKTOP: &str = include_str!("../../../packaging/sill.desktop");
-#[cfg(feature = "shelf")]
 const ICON: &str = include_str!("../../../packaging/icons/sill.svg");
 
 const IMAGE: &str = "/var/lib/sill.img";
@@ -313,7 +310,8 @@ fn install_files(i: &mut Init, prefix: &Path, has_systemd: bool) -> Result<()> {
         i.put_file(&dst, &content, 0o755)?;
     }
     install_policy(i, Path::new("/etc/sill/policies"))?;
-    #[cfg(feature = "shelf")]
+    // icons, the desktop file and the shelf's service: `sill shelf` runs whichever frontend
+    // `sill frontend` chose, so they are the same with or without the GTK shelf in this binary
     {
     // icons and the desktop file
     let share = prefix.join("share");
@@ -326,7 +324,6 @@ fn install_files(i: &mut Init, prefix: &Path, has_systemd: bool) -> Result<()> {
     }
     // the shelf as a systemd user service (per user: sill init --user enables it)
     if has_systemd {
-        #[cfg(feature = "shelf")]
         {
             let unit = UNIT_SHELF.replace("/usr/local/bin/sill", &bin.join("sill").display().to_string());
             i.put_file(Path::new("/etc/systemd/user/sill-shelf.service"), unit.as_bytes(), 0o644)?;

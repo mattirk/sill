@@ -907,8 +907,12 @@ fn public_host_files_and_settings_need_no_internal_capability() {
     let link=d.dir.join("home/link");std::os::unix::fs::symlink(&p,&link).unwrap();
     assert!(c.call("_sill/files.read",json!(a::FileRead {path:HostPath::from_path(&link),offset:"0".into(),length:None,revision:None})).unwrap().get("error").is_some());
     assert!(c.call("_sill/files.list",json!({"path":root,"limit":0})).unwrap().get("error").is_some());
+    // a setting the protocol does not carry (the machine's frontend) survives a patch
+    let config=d.dir.join("config/sill/sill.toml");std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config,"frontend = \"iced\"\n").unwrap();
     let patch=c.call("_sill/settings.patch",json!({"changes":[{"type":"theme","value":"nord"},{"type":"tray","value":false}]})).unwrap();assert!(patch.get("error").is_none(),"{patch}");
     assert_eq!(c.call("_sill/settings.get",json!({})).unwrap()["result"]["theme"],"nord");
+    assert!(std::fs::read_to_string(&config).unwrap().contains("frontend = \"iced\""),"the frontend setting was dropped");
     assert!(c.call("_sill/settings.patch",json!({"changes":[{"type":"future","value":true}]})).unwrap().get("error").is_some());
 }
 

@@ -1,5 +1,6 @@
 #!/bin/sh
-# List only this account's local frontend processes. Remote windows have their own lifetime.
+# List only this account's local frontend processes — `sill shelf` (GTK) and sill-gui. Remote
+# windows have their own lifetime.
 # Optional proc root is useful for checking this parser against fixtures.
 set -eu
 sill_proc_root=${1:-/proc}
@@ -15,6 +16,14 @@ for sill_proc in "$sill_proc_root"/[0-9]*; do
         { args[++n]=$0 }
         END {
             executable=args[1]; sub(/^.*\//,"",executable)
+            # sill-gui (the iced frontend) is a frontend whatever its arguments, local unless SILL_BOX
+            if (executable=="sill-gui") {
+                if (box!="" && box!="local") exit
+                line=pid
+                for (i=1;i<=n;i++) if (args[i]!="") line=line " " args[i]
+                print line
+                exit
+            }
             if (executable!="sill") exit
             for (i=2;i<=n;i++) {
                 if (args[i]=="--box") { i++; if (i>n) exit; box=args[i] }

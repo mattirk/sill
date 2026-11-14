@@ -225,7 +225,7 @@ fn kill_old_shelves() {
 /// Make sure no shelf holds the application id, whoever started it (the unit, `--dev`, a hand-run
 /// `sill shelf`): ask it to quit over D-Bus, escalate to signals. Returns with the id free — every
 /// `gio::Application` made here is dropped, so the next shelf to start becomes the primary one.
-fn quit_running_shelf() -> Result<()> {
+pub(crate) fn quit_running_shelf() -> Result<()> {
     // Ask the running shelf to quit over D-Bus. A shelf whose main loop is wedged owns the name
     // but answers nothing: registering against it times out, so that too means "kill it".
     let app = gio::Application::new(Some(&application_id()), gio::ApplicationFlags::empty());
@@ -270,7 +270,7 @@ fn quit_running_shelf() -> Result<()> {
 /// does, from the shelf's own binary (the dev build for `--dev`, the installed one otherwise), so a
 /// shelf never talks to a daemon of another build. With the installed units, `--dev` also stops
 /// `sill.socket` (a dev daemon binds the same path itself) and a plain restart starts it again.
-fn restart_daemon(dev: bool) {
+pub(crate) fn restart_daemon(dev: bool) {
     let systemctl = |args: &[&str]| {
         std::process::Command::new("systemctl")
             .arg("--user")

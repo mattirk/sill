@@ -430,8 +430,10 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 let c = serde_json::to_value(change)?;
                 value[c["type"].as_str().unwrap()] = c["value"].clone();
             }
-            let typed: api::Settings = serde_json::from_value(value)?;
-            sill_core::config::save(&serde_json::from_value(json!(typed))?)?;
+            // the result must read as the protocol's settings; what is saved is the whole config,
+            // so a setting the protocol does not carry (`frontend`, the machine's own) stays
+            let _: api::Settings = serde_json::from_value(value.clone())?;
+            sill_core::config::save(&serde_json::from_value(value)?)?;
             Ok(json!({}))
         }
         "_sill/settings.instructions.get" => {

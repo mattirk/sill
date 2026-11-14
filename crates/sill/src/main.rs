@@ -18,6 +18,7 @@ use sill_core::policy::Policy;
 use sill_core::shim;
 
 mod daemon;
+mod frontend;
 mod changes_client;
 mod init;
 #[cfg(feature = "shelf")]
@@ -108,8 +109,7 @@ enum Cmd {
         #[arg(short, long, default_value = "default")]
         policy: String,
     },
-    /// Open the shelf (GTK); single instance per desktop session
-    #[cfg(feature = "shelf")]
+    /// Open the desktop frontend `sill frontend` chose: the GTK shelf or sill-gui
     Shelf {
         /// working directory of the main session (default: current directory)
         #[arg(long)]
@@ -119,8 +119,10 @@ enum Cmd {
         hidden: bool,
     },
     /// Show/hide the running shelf (bind this to a hotkey)
-    #[cfg(feature = "shelf")]
     Toggle,
+    /// Which desktop frontend runs on this machine: gtk (the shelf) or iced (sill-gui); without
+    /// an argument, the one chosen
+    Frontend { name: Option<String> },
     /// Restart the shelf: `systemctl --user restart sill-shelf` when the service is installed
     Restart {
         /// start hidden (dev mode)
@@ -733,30 +735,17 @@ fn main() -> Result<()> {
         Cmd::Dev { cmd } => dev_cmd(cmd),
         Cmd::Launch { session, jail, shim, agent, child, cgroup_root } => launch(&session, jail, shim, agent.as_deref(), child, cgroup_root),
         Cmd::Init(a) => init::run(a),
-        #[cfg(feature = "shelf")]
-        Cmd::Shelf { cwd, hidden } => shelf::run(cwd, hidden),
-        #[cfg(feature = "shelf")]
-        Cmd::Toggle => shelf::toggle(),
-        #[cfg(feature = "shelf")]
+        Cmd::Shelf { cwd, hidden } => frontend::shelf(cwd, hidden),
+        Cmd::Toggle => frontend::toggle(),
+        Cmd::Frontend { name } => frontend::set(name),
         Cmd::Restart { hidden, dev, detached } => {
             if sill_proto::transport::selected()?.is_some() { restart_box_daemon() }
-            else { shelf::restart(hidden, dev, detached) }
+            else { frontend::restart(hidden, dev, detached) }
         },
         #[cfg(feature = "shelf")]
         Cmd::Theme { name } => shelf::set_theme(&name),
         #[cfg(feature = "shelf")]
         Cmd::Hotkey { spec } => shelf::set_hotkey(&spec),
-        #[cfg(not(feature = "shelf"))]
-        Cmd::Restart { .. } => {
-            if sill_proto::transport::selected()?.is_some() { return restart_box_daemon(); }
-            if let Ok(c) = sill_proto::Client::connect() {
-                let _: serde_json::Value = c.call_within(sill_proto::method::DAEMON_SHUTDOWN, sill_proto::Empty::default(), sill_proto::client::QUICK_TIMEOUT)?;
-                drop(c);
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            let _ = sill_proto::Client::connect_or_start()?;
-            Ok(())
-        }
         Cmd::Login { agent, method } => {
             let home = home()?;
             let registry = sill_core::agents::load(&home);

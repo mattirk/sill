@@ -25,6 +25,10 @@ pub struct Config {
     pub default_page: Option<String>,
     /// Show the session timer automatically while the agent works. Unset = off.
     pub timer_auto: Option<bool>,
+    /// Which desktop frontend `sill shelf`, `sill toggle` and `sill restart` run on this machine:
+    /// `gtk` (the shelf) or `iced` (`sill-gui`, a binary of its own installed beside `sill`).
+    /// Unset = `gtk` where this `sill` has the GTK shelf, else `iced`. Set with `sill frontend`.
+    pub frontend: Option<String>,
     /// Zoom: a factor on the shelf's normal text size (1.0 = Normal, the default). The shelf's
     /// normal size is [`TEXT_SCALE_BASE`] × the desktop font — GTK scales that font for HiDPI first,
     /// so a factor means the same on a 1× and a 2× display. The Settings page offers
