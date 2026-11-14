@@ -916,7 +916,7 @@ never a saved choice (docs/permission-modes.md, Host control):
 | `_sill/host_control.keep` | `{session_id, name, keep}` | `{}` | `sill.host_control` |
 | `_sill/host_control.state` | `{session_id}` | state | `sill.permission_modes` |
 
-Operations: `view`, `input`, `inspect`, `launch`, `stop`, `stop_existing`, `commands`. `activate`
+Operations: `view`, `input`, `mac_view`, `mac_input`, `mac_commands`, `inspect`, `launch`, `stop`, `stop_existing`, `commands`. `activate`
 sets the scope exactly and is a new `generation` every time it takes effect, on a running session
 only; it is refused with `permission_denied` for a ghost or a policy
 forbidding Host control, `invalid_state` for a stopped or ended session, `unsupported` (with the
