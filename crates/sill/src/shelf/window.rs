@@ -278,7 +278,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         let s = shelf.clone();
         *viewer.on_saved.borrow_mut() = Some(Box::new(move |_| {
             if s.tree.root.is_visible() {
-                s.tree.refresh();
+                s.tree.refresh_soon(); // with the monitor's own event: one scan
             }
             if let Some(id) = s.tabs.selected()
                 && let Some(v) = s.views.borrow().get(&id)
@@ -432,7 +432,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
                 v.refresh_pins();
             }
             if s.tree.root.is_visible() {
-                s.tree.refresh(); // a file edited by hand: its badge; a new one: its row
+                s.tree.refresh_soon(); // a file edited by hand in a collapsed folder: no monitor saw it
             }
         });
     }
@@ -977,7 +977,7 @@ impl Shelf {
                     shelf.changes.refresh();
                 }
                 if shelf.tree.root.is_visible() {
-                    shelf.tree.refresh(); // badges
+                    shelf.tree.refresh_soon(); // badges: what the turn wrote where no monitor was
                 }
             }));
         }

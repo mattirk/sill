@@ -162,6 +162,9 @@ pub struct FolderTree {
     /// happens on disk (the agent's writes, hand edits, commits) while it is shown.
     monitors: RefCell<BTreeMap<PathBuf, gio::FileMonitor>>,
     refresh_pending: std::cell::Cell<bool>,
+    /// A scan is in flight; a refresh asked meanwhile runs once more after it (`again`).
+    scanning: std::cell::Cell<bool>,
+    again: std::cell::Cell<bool>,
 }
 
 impl FolderTree {
@@ -413,6 +416,8 @@ impl FolderTree {
             decorate,
             monitors: RefCell::new(BTreeMap::new()),
             refresh_pending: std::cell::Cell::new(false),
+            scanning: std::cell::Cell::new(false),
+            again: std::cell::Cell::new(false),
         });
         *tree_rc.borrow_mut() = Some(Rc::downgrade(&t));
         {
@@ -504,7 +509,15 @@ impl FolderTree {
     }
 
     /// Rescan every session's ledger and git status off the main thread, then rebuild badges and roots.
+    /// Refreshes come from several places (the monitors, a turn's end, an edit, a save, focus,
+    /// the tab): at most one scan runs, and one asked meanwhile runs once more after it — a burst
+    /// costs one or two scans, never a pile, and an older, slower scan can't land after a newer one.
+    /// `refresh_soon` is the coalesced form for the bursty callers.
     pub fn refresh(self: &Rc<Self>) {
+        if self.scanning.replace(true) {
+            self.again.set(true);
+            return;
+        }
         let _ = self.store.prune_pins(); // pins of deleted sessions would otherwise haunt the tree
         let sessions = self.store.sessions().unwrap_or_default();
         let home = session::home().unwrap_or_default();
@@ -554,6 +567,10 @@ impl FolderTree {
         glib::spawn_future_local(async move {
             if let Ok((all, owners)) = rx.recv().await {
                 t.apply(all, owners, pins);
+            }
+            t.scanning.set(false);
+            if t.again.replace(false) {
+                t.refresh();
             }
         });
     }
