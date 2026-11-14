@@ -504,17 +504,17 @@ pub fn indicator<'a>(view: &'a SessionView, session: Option<&Session>) -> Elemen
 }
 
 /// "Jailed · expanded access" over the composer, in the host terminal's warning treatment but
-/// naming the jail: the agent is still inside it. Without expanded access but with changes
-/// waiting for a restart, a quiet line says so (the running jail is what counts).
+/// naming the jail: the agent is still inside it. Pending changes without expanded access
+/// remain available through the shield tooltip and permissions panel.
 pub fn caption<'a>(view: &'a SessionView, session: Option<&Session>) -> Option<Element<'a, Message>> {
     let running = session.is_some_and(|s| s.running);
     let expanded = view.permissions.expanded(running);
     let pending = view.permissions.restart_pending(running) || session.is_some_and(|s| s.policy_changed);
-    let (mut said, color) = match (expanded.is_empty(), pending) {
-        (true, false) => return None,
-        (true, true) => ("Default · jailed".to_string(), P.fg_dim),
-        (false, _) => (format!("Jailed · expanded access · {}", expanded.join(" · ")), P.warning),
-    };
+    if expanded.is_empty() {
+        return None;
+    }
+    let mut said = format!("Jailed · expanded access · {}", expanded.join(" · "));
+    let color = P.warning;
     if pending {
         said.push_str(" · permission changes apply after a restart");
     }
@@ -1250,10 +1250,9 @@ mod tests {
         ui.find("Apply development permissions").unwrap();
     }
 
-    /// A change waiting for a restart shows over the composer even with nothing expanded yet:
-    /// the running jail is what counts, quietly.
+    /// Pending changes alone do not add a caption above the composer.
     #[test]
-    fn a_pending_change_shows_quietly_without_expanded_access() {
+    fn a_pending_change_has_no_caption_without_expanded_access() {
         let (mut app, _) = App::new(true, None);
         app.all_sessions = vec![session_record("demo", "demo", false, false)];
         let preview: PolicyView = serde_json::from_value(view("preview", true, json!([]))).unwrap();
@@ -1261,7 +1260,8 @@ mod tests {
         app.views.get_mut("demo").unwrap().permissions.views =
             Some(Views { preview, launch: Some(launch), agent_name: None });
         let mut ui = simulator(&app, (720.0, 860.0));
-        ui.find("Default · jailed · permission changes apply after a restart").unwrap();
+        assert!(caption(&app.views["demo"], app.all_sessions.first()).is_none());
+        assert!(ui.find("Default · jailed · permission changes apply after a restart").is_err());
         assert!(ui.find("Jailed · expanded access").is_err(), "the running jail has no public web yet");
     }
 
