@@ -46,7 +46,9 @@ fn file_icon(path: &Path, is_dir: bool, expanded: bool) -> gio::Icon {
 }
 
 /// A directory's entries as full paths: directories first, dot files last, case-insensitive.
-fn list_dir(dir: &Path) -> Vec<String> {
+/// `ghosts`: paths (below `dir`) that a session's overlay has and the host hasn't — listed as files
+/// too, so a change always has a row (a folder's dot never points at nothing).
+fn list_dir(dir: &Path, ghosts: &[String]) -> Vec<String> {
     let mut entries: Vec<(bool, String)> = std::fs::read_dir(dir)
         .map(|rd| {
             rd.filter_map(Result::ok)
@@ -54,6 +56,12 @@ fn list_dir(dir: &Path) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default();
+    for g in ghosts {
+        let name = Path::new(g).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if !name.is_empty() && !entries.iter().any(|(_, n)| *n == name) {
+            entries.push((false, name));
+        }
+    }
     entries.sort_by(|a, b| {
         b.0.cmp(&a.0)
             .then(a.1.starts_with('.').cmp(&b.1.starts_with('.')))
@@ -66,19 +74,29 @@ fn list_dir(dir: &Path) -> Vec<String> {
 /// collapses). A refresh brings each live one up to date in place.
 type Listed = Rc<RefCell<BTreeMap<PathBuf, glib::WeakRef<gio::ListStore>>>>;
 
-fn children_of(dir: &Path, listed: &Listed) -> gio::ListStore {
+fn children_of(dir: &Path, listed: &Listed, ghosts: &[String]) -> gio::ListStore {
     let store = gio::ListStore::new::<gtk::StringObject>();
-    for p in list_dir(dir) {
+    for p in list_dir(dir, ghosts) {
         store.append(&gtk::StringObject::new(&p));
     }
     listed.borrow_mut().insert(dir.to_path_buf(), store.downgrade());
     store
 }
 
+/// The badge paths right below `dir` that the host doesn't have (a session added them in its
+/// overlay, or they went on the host while an overlay copy remains): rows of their own.
+fn ghosts(badges: &BTreeMap<PathBuf, String>, dir: &Path) -> Vec<String> {
+    badges
+        .iter()
+        .filter(|(p, b)| p.parent() == Some(dir) && b.as_str() != "•" && !p.exists())
+        .map(|(p, _)| p.to_string_lossy().into_owned())
+        .collect()
+}
+
 /// Bring a listed directory up to date without rebuilding it: entries that went are removed, new
 /// ones inserted at their place; everything else keeps its row (and what is expanded below it).
-fn sync_children(dir: &Path, store: &gio::ListStore) {
-    let wanted = list_dir(dir);
+fn sync_children(dir: &Path, store: &gio::ListStore, ghosts: &[String]) {
+    let wanted = list_dir(dir, ghosts);
     let (mut i, mut w) = (0u32, 0usize);
     loop {
         let have = store.item(i).and_downcast::<gtk::StringObject>().map(|o| o.string().to_string());
@@ -178,12 +196,13 @@ impl FolderTree {
         let tree = gtk::TreeListModel::new(roots.clone(), false, false, {
             let listed = listed.clone();
             let tree_rc = tree_rc.clone();
+            let badges = badges.clone();
             move |item| {
                 let path = PathBuf::from(item.downcast_ref::<gtk::StringObject>()?.string().as_str());
                 if !path.is_dir() {
                     return None;
                 }
-                let children = children_of(&path, &listed);
+                let children = children_of(&path, &listed, &ghosts(&badges.borrow(), &path));
                 if let Some(t) = tree_rc.borrow().as_ref().and_then(|w| w.upgrade()) {
                     t.watch_one(&path); // an opened directory is followed from now on
                 }
@@ -266,6 +285,17 @@ impl FolderTree {
                     name.add_css_class("sill-new");
                 } else if badge_text == "•" {
                     name.add_css_class("sill-below"); // a folder with changes somewhere below
+                    // the dot's tooltip says what: the changed paths below, a few of them
+                    let below: Vec<String> = badges
+                        .borrow()
+                        .iter()
+                        .filter(|(p, b)| p.starts_with(&path) && **p != path && b.as_str() != "•")
+                        .take(8)
+                        .map(|(p, b)| format!("{b}  {}", p.strip_prefix(&path).unwrap_or(p).display()))
+                        .collect();
+                    if !below.is_empty() {
+                        name.set_tooltip_text(Some(&format!("changed below:\n{}", below.join("\n"))));
+                    }
                 } else if !badge_text.is_empty() {
                     name.add_css_class("sill-changed");
                 }
@@ -568,7 +598,8 @@ impl FolderTree {
         self.listed.borrow_mut().retain(|_, w| w.upgrade().is_some());
         let listed: Vec<(PathBuf, gio::ListStore)> = self.listed.borrow().iter().filter_map(|(d, w)| w.upgrade().map(|s| (d.clone(), s))).collect();
         for (dir, store) in listed {
-            sync_children(&dir, &store);
+            let g = ghosts(&self.badges.borrow(), &dir);
+            sync_children(&dir, &store, &g);
         }
         // keep the tree if the roots didn't change (expansion state survives)
         let current: Vec<String> = (0..self.roots.n_items())
@@ -678,21 +709,25 @@ mod tests {
         std::fs::write(dir.join("b.txt"), "").unwrap();
         std::fs::write(dir.join("README.md"), "").unwrap();
         let listed: Listed = Rc::new(RefCell::new(BTreeMap::new()));
-        let store = children_of(&dir, &listed);
+        let store = children_of(&dir, &listed, &[]);
         assert_eq!(names(&store), ["src", "b.txt", "README.md"]);
         let first = store.item(0).unwrap(); // the `src` row object must survive the sync
         std::fs::write(dir.join("a.txt"), "").unwrap(); // new, sorts first among the files
         std::fs::write(dir.join(".hidden"), "").unwrap(); // new, dot file: last
         std::fs::remove_file(dir.join("b.txt")).unwrap(); // gone
-        sync_children(&dir, &store);
+        sync_children(&dir, &store, &[]);
         assert_eq!(names(&store), ["src", "a.txt", "README.md", ".hidden"]);
         assert_eq!(store.item(0).unwrap(), first);
         // nothing changed: nothing moves
-        sync_children(&dir, &store);
+        sync_children(&dir, &store, &[]);
         assert_eq!(names(&store), ["src", "a.txt", "README.md", ".hidden"]);
+        // a ghost: a path a session has that the host hasn't gets a row among the files
+        let ghost = dir.join("gone.rs").to_string_lossy().into_owned();
+        sync_children(&dir, &store, &[ghost]);
+        assert_eq!(names(&store), ["src", "a.txt", "gone.rs", "README.md", ".hidden"]);
         // the directory went: the store empties
         std::fs::remove_dir_all(&dir).unwrap();
-        sync_children(&dir, &store);
+        sync_children(&dir, &store, &[]);
         assert_eq!(store.n_items(), 0);
     }
 }
