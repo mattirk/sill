@@ -233,6 +233,11 @@ fn restart_daemon(dev: bool) {
     };
     let socket_unit = systemctl(&["cat", "sill.socket"]);
     if socket_unit {
+        // a deploy rewrote the units (`sudo sill init`): the user manager must read them again
+        // before the restart, or the new daemon runs under the old text (docs/daemon.md §3.7)
+        if ["sill.service", "sill.socket", "sill-shelf.service"].iter().any(|u| crate::init::unit_stale(u)) {
+            systemctl(&["daemon-reload"]);
+        }
         systemctl(&["stop", "sill.service"]);
         if dev {
             systemctl(&["stop", "sill.socket"]);

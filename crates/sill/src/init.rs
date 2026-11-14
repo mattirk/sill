@@ -605,17 +605,15 @@ fn stage_autostart(i: &mut Init, home: &Path, exe: &Path) -> Result<PathBuf> {
 }
 
 /// `systemctl --user cat <unit>` succeeds: a system-wide or private copy of the unit exists.
-/// The user manager's loaded text of `unit` differs from the file it came from (`systemctl cat`
-/// prints the path on its first line, then the file).
-fn unit_stale(unit: &str) -> bool {
-    let Ok(out) = std::process::Command::new("systemctl").args(["--user", "cat", unit]).stderr(std::process::Stdio::null()).output() else { return false };
-    if !out.status.success() {
-        return false;
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let Some((head, body)) = text.split_once('\n') else { return false };
-    let Some(path) = head.strip_prefix("# ") else { return false };
-    std::fs::read_to_string(path.trim()).is_ok_and(|on_disk| on_disk != body)
+/// The user manager runs an older text of `unit` than the file on disk (systemd's own
+/// `NeedDaemonReload`): a `sudo sill init` rewrote it — an upgrade — and only this user's
+/// `systemctl --user daemon-reload` makes it current.
+pub(crate) fn unit_stale(unit: &str) -> bool {
+    std::process::Command::new("systemctl")
+        .args(["--user", "show", "-p", "NeedDaemonReload", "--value", unit])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .is_ok_and(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "yes")
 }
 
 fn unit_known(unit: &str) -> bool {
