@@ -111,7 +111,9 @@ fn render_files() {
     use sill_proto::sessions::HostPath;
     let path = |s: &str| HostPath::from_path(std::path::Path::new(s));
     let (mut app, _) = App::new(true, None);
-    let _ = app.update(Message::Workspace(Action::ToggleDrawer));
+    let _ = app.update(Message::Layout(crate::layout::Action::Mode(
+        crate::layout::Mode::Drawer,
+    )));
     let _ = app.update(Message::Workspace(Action::Toggle(path(
         "/home/demo/project/src",
     ))));

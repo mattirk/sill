@@ -292,3 +292,95 @@ fn a_refresh_of_two_loaded_pages_follows_the_cursor_across_both() {
     assert!(page.next.is_none());
     server.join().unwrap();
 }
+
+#[test]
+fn git_status_colours_files_and_the_folders_above_them_but_not_the_root() {
+    let entries = vec![
+        discovery::StatusEntry {
+            path: path_of("/r/docs/a.md"),
+            status: "M".into(),
+        },
+        discovery::StatusEntry {
+            path: path_of("/r/crates/x/new.rs"),
+            status: "?".into(),
+        },
+    ];
+    let mut state = FilesState::default();
+    state.repos.insert(
+        "pin".into(),
+        Repo {
+            root: Some(path_of("/r")),
+            changes: index(Some(&path_of("/r")), &entries),
+            entries,
+            ..Repo::default()
+        },
+    );
+    assert_eq!(
+        state.change(&path_of("/r/docs/a.md")),
+        Some(Change::Changed)
+    );
+    assert_eq!(state.change(&path_of("/r/docs")), Some(Change::Below));
+    assert_eq!(
+        state.change(&path_of("/r/crates/x/new.rs")),
+        Some(Change::New)
+    );
+    assert_eq!(state.change(&path_of("/r/crates")), Some(Change::Below));
+    assert_eq!(
+        state.change(&path_of("/r")),
+        None,
+        "the root shows its branch instead"
+    );
+    assert_eq!(state.change(&path_of("/r/tests")), None);
+}
+
+#[test]
+fn folders_list_as_the_shelf_lists_them() {
+    let mut state = FilesState::default();
+    let dir = path_of("/r");
+    let serial = 7;
+    let request = state.prepare(
+        serial,
+        Request::Directory {
+            path: dir.clone(),
+            after: None,
+            pages: 1,
+        },
+    );
+    let entry = |name: &str, directory: bool| admin::FileEntry {
+        path: path_of(&format!("/r/{name}")),
+        metadata: metadata(directory),
+    };
+    let page = admin::FilesPage {
+        entries: vec![
+            entry(".gitignore", false),
+            entry("README.md", false),
+            entry(".git", true),
+            entry("tests", true),
+            entry("crates", true),
+            entry("AGENTS.md", false),
+        ],
+        next: None,
+    };
+    state.accept(Reply {
+        session: "s".into(),
+        serial,
+        request,
+        result: Ok(Data::Directory(page)),
+    });
+    let names: Vec<&str> = state.directories[key(&dir)]
+        .entries
+        .iter()
+        .map(|e| name(&e.path))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "crates",
+            "tests",
+            ".git",
+            "AGENTS.md",
+            "README.md",
+            ".gitignore"
+        ]
+    );
+}

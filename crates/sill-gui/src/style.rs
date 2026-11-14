@@ -1,7 +1,7 @@
 //! Sill's look in iced, taken from the GTK shelf: the theme palette (`shelf/theme.rs`) and the
 //! conversation's rules (`shelf/conversation.rs` CSS) — flat and square, no bubbles or rounded
-//! corners, hierarchy by tone and a thin left rule. Only Dracula so far; the other shelf themes
-//! are the same struct with other values.
+//! corners, hierarchy by tone and a thin left rule. Dracula and Miasma so far; the other shelf
+//! themes are the same struct with other values.
 use iced::widget::{
     button, container, overlay::menu, pick_list, rule, scrollable, svg, text_editor,
 };
@@ -34,6 +34,7 @@ const fn rgb(hex: u32) -> Color {
     )
 }
 
+#[allow(dead_code)] // until themes can be chosen
 pub const DRACULA: Palette = Palette {
     bg: rgb(0x282a36),
     surface: rgb(0x343746),
@@ -48,8 +49,24 @@ pub const DRACULA: Palette = Palette {
     border: rgb(0x44475a),
 };
 
-/// The palette in use (one theme in the spike).
-pub const P: Palette = DRACULA;
+/// xero's Miasma, as the shelf has it (`shelf/theme.rs`): muted earth tones, the gold as accent,
+/// the orange standing in for red.
+pub const MIASMA: Palette = Palette {
+    bg: rgb(0x222222),
+    surface: rgb(0x2b2b28),
+    code_bg: rgb(0x1c1c1c),
+    fg: rgb(0xc2c2b0),
+    fg_dim: rgb(0x787866),
+    accent: rgb(0xc9a554),
+    warning: rgb(0xb36d43),
+    success: rgb(0x5f875f),
+    error: rgb(0xbb7744),
+    link: rgb(0xd7c483),
+    border: rgb(0x363632),
+};
+
+/// The palette in use: Miasma, the theme sill is developed in (the person, 2026-11-05).
+pub const P: Palette = MIASMA;
 
 /// Body text, logical pixels: what the shelf's 13 pt base comes to at its "Smaller" text size on
 /// this desktop, measured against `docs/reference-ui/02` — one line of agent text there is 870 px
@@ -71,7 +88,7 @@ pub fn alpha(color: Color, a: f32) -> Color {
 
 pub fn theme() -> Theme {
     Theme::custom(
-        "Sill Dracula",
+        "Sill Miasma",
         iced::theme::Palette {
             background: P.bg,
             text: P.fg,
@@ -137,6 +154,39 @@ pub fn row_button(_: &Theme, status: button::Status) -> button::Style {
     button::Style {
         background: hovered.then(|| alpha(P.fg, 0.04).into()),
         text_color: if hovered { P.fg } else { alpha(P.fg, 0.75) },
+        border: square(Color::TRANSPARENT, 0.0),
+        shadow: Shadow::default(),
+        snap: true,
+    }
+}
+
+/// A tree row that is open in the reader (`.sill-files > row:selected`).
+pub fn row_selected(_: &Theme, status: button::Status) -> button::Style {
+    let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+    button::Style {
+        background: Some(alpha(P.accent, if hovered { 0.3 } else { 0.25 }).into()),
+        text_color: P.fg,
+        border: square(Color::TRANSPARENT, 0.0),
+        shadow: Shadow::default(),
+        snap: true,
+    }
+}
+
+/// Send and Stop (`button.sill-send`): a square in a quarter of `color`, more on hover.
+pub fn tinted(color: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| button::Style {
+        background: Some(
+            alpha(
+                color,
+                match status {
+                    button::Status::Hovered | button::Status::Pressed => 0.45,
+                    button::Status::Disabled => 0.15,
+                    button::Status::Active => 0.25,
+                },
+            )
+            .into(),
+        ),
+        text_color: P.fg,
         border: square(Color::TRANSPARENT, 0.0),
         shadow: Shadow::default(),
         snap: true,
@@ -224,6 +274,11 @@ pub fn control_menu(_: &Theme) -> menu::Style {
         selected_background: alpha(P.accent, 0.25).into(),
         shadow: Shadow::default(),
     }
+}
+
+/// Every scrollbar's size: 3 px, 30 % of iced's default 10 (the person, 2026-11-05).
+pub fn bar() -> scrollable::Scrollbar {
+    scrollable::Scrollbar::new().width(3).scroller_width(3)
 }
 
 /// The conversation's scrollbar: hidden at rest, a thin bar while hovered or dragged (the

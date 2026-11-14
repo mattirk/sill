@@ -1040,12 +1040,12 @@ fn terminal_keys_are_encoded_as_xterm_sends_them() {
     assert!(key(named(Named::Shift), Modifiers::SHIFT, None, plain).is_none());
 }
 
-/// `>_` opens the shell in the prompt's place; typed keys go to it, not to the prompt.
+/// The terminal button opens the shell in the prompt's place; typed keys go to it, not to the prompt.
 #[test]
 fn the_terminal_button_opens_the_shell_and_takes_the_keys() {
     let (mut app, _) = App::new(true, None);
     let mut ui = simulator(&app, (720.0, 860.0));
-    ui.click(">_").unwrap();
+    ui.click(iced::widget::Id::new("terminal-button")).unwrap();
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(
         matches!(messages.as_slice(), [Message::ToggleTerminal]),
@@ -1086,7 +1086,9 @@ fn the_terminal_button_opens_the_shell_and_takes_the_keys() {
 fn file_drawer_buttons_open_the_viewer_and_return_to_conversation() {
     use crate::workspace::Action;
     let (mut app, _) = App::new(true, None);
-    let _ = app.update(Message::Workspace(Action::ToggleDrawer));
+    let _ = app.update(Message::Layout(crate::layout::Action::Mode(
+        crate::layout::Mode::Drawer,
+    )));
     let mut ui = simulator(&app, (1000.0, 860.0));
     ui.click("README.md").unwrap();
     let messages: Vec<_> = ui.into_messages().collect();
@@ -1163,39 +1165,81 @@ fn a_drawer_over_the_conversation_keeps_its_place() {
     let (before, after) = (before.unwrap(), after.unwrap());
     assert!(before > 100.0, "the conversation is longer than the window");
     // the status strip under the drawer shortens the view; at the tail, it stays at the tail
-    assert!(after >= before - 1.0, "back towards the top: {before} → {after}");
+    assert!(
+        after >= before - 1.0,
+        "back towards the top: {before} → {after}"
+    );
     assert!(app.current().unwrap().follow_tail);
 }
 
-/// Full conversation (Ctrl+Shift+E) puts the drawer away and keeps whether it was open; Escape
-/// leaves it before anything else, and the drawer's toggle leaves it with the drawer shown.
+/// The keys go between the modes: Ctrl+Shift+D from Shelf to Drawer and back, Ctrl+Shift+F into
+/// Full and back to where it came from, as Escape; putting Drawer mode's drawer away is Full; in
+/// Shelf mode a chip or the drawer's toggle is a quick look over the conversation.
 #[test]
-fn full_conversation_puts_the_drawer_away_until_left() {
-    use crate::layout::{Action, Drawer};
+fn the_keys_go_between_shelf_drawer_and_full() {
+    use crate::layout::Mode;
     use crate::workspace::Action as Files;
     let (mut app, _) = App::new(true, None);
+    assert_eq!(app.layout.mode, Mode::Shelf);
+    let press = |c: &str| {
+        crate::keys::shortcut(iced::keyboard::Event::KeyPressed {
+            key: iced::keyboard::Key::Character(c.into()),
+            modified_key: iced::keyboard::Key::Character(c.into()),
+            physical_key: iced::keyboard::key::Physical::Unidentified(
+                iced::keyboard::key::NativeCode::Unidentified,
+            ),
+            location: iced::keyboard::Location::Standard,
+            modifiers: iced::keyboard::Modifiers::CTRL | iced::keyboard::Modifiers::SHIFT,
+            text: None,
+            repeat: false,
+        })
+    };
+    assert!(press("E").is_none(), "Ctrl+Shift+E is free again");
     let _ = app.update(Message::Workspace(Files::ToggleDrawer));
-    let ctrl_shift_e = crate::keys::shortcut(iced::keyboard::Event::KeyPressed {
-        key: iced::keyboard::Key::Character("E".into()),
-        modified_key: iced::keyboard::Key::Character("E".into()),
-        physical_key: iced::keyboard::key::Physical::Unidentified(
-            iced::keyboard::key::NativeCode::Unidentified,
-        ),
-        location: iced::keyboard::Location::Standard,
-        modifiers: iced::keyboard::Modifiers::CTRL | iced::keyboard::Modifiers::SHIFT,
-        text: None,
-        repeat: false,
-    });
-    assert!(matches!(ctrl_shift_e, Some(Message::Layout(Action::ToggleFull))));
-    let _ = app.update(ctrl_shift_e.unwrap());
-    assert!(app.layout.full && app.workspace.shown);
-    assert_eq!(app.layout.drawer(true, 1200.0), Drawer::Hidden);
+    assert!(app.workspace.shown, "a quick look in Shelf mode");
+    assert!(matches!(
+        app.layout.drawer(true, 1200.0),
+        crate::layout::Drawer::Over(_)
+    ));
+    // Shelf → Full → back to Shelf
+    let _ = app.update(press("F").unwrap());
+    assert_eq!(app.layout.mode, Mode::Full);
+    let _ = app.update(press("F").unwrap());
+    assert_eq!(app.layout.mode, Mode::Shelf);
+    // Shelf → Drawer → Full → Escape back to Drawer
+    let _ = app.update(press("D").unwrap());
+    assert_eq!(app.layout.mode, Mode::Drawer);
+    assert!(app.workspace.shown);
+    let _ = app.update(press("F").unwrap());
+    assert_eq!(app.layout.mode, Mode::Full);
+    assert!(!app.workspace.shown);
     let _ = app.update(Message::Escape);
-    assert!(!app.layout.full && app.workspace.shown, "Escape leaves full first");
+    assert_eq!(app.layout.mode, Mode::Drawer, "Escape leaves Full first");
+    // the drawer's own close in Drawer mode: the same window without it
     let _ = app.update(Message::Workspace(Files::ToggleDrawer));
-    let _ = app.update(Message::Layout(Action::ToggleFull));
-    let _ = app.update(Message::Workspace(Files::ToggleDrawer));
-    assert!(!app.layout.full && app.workspace.shown);
+    assert_eq!(app.layout.mode, Mode::Full);
+    let _ = app.update(press("D").unwrap());
+    assert_eq!(app.layout.mode, Mode::Shelf);
+    assert!(!app.workspace.shown);
+}
+
+/// The `+` menu's foot switches the mode: Shelf, Drawer or Full.
+#[test]
+fn the_menu_switches_between_the_three_modes() {
+    use crate::layout::Mode;
+    let (mut app, _) = App::new(true, None);
+    let _ = app.update(Message::Menu(crate::menu::Event::Toggle));
+    let mut ui = simulator(&app, (720.0, 860.0));
+    ui.click(iced::widget::Id::new("view-full")).unwrap();
+    for message in ui.into_messages().collect::<Vec<_>>() {
+        let _ = app.update(message);
+    }
+    assert!(app.menu.is_none(), "choosing a mode closes the menu");
+    assert_eq!(app.layout.mode, Mode::Full);
+    let _ = app.update(Message::Menu(crate::menu::Event::View(Mode::Drawer)));
+    assert!(app.workspace.shown && app.layout.mode == Mode::Drawer);
+    let _ = app.update(Message::Menu(crate::menu::Event::View(Mode::Shelf)));
+    assert!(!app.workspace.shown && app.layout.mode == Mode::Shelf);
 }
 
 // --- selection ----------------------------------------------------------------------------------
@@ -1662,7 +1706,7 @@ fn opening_the_drawer_keeps_the_conversation_s_place() {
     live.frame(&app, |ui| before = scrolled(ui, "conversation"));
     live.apply(
         &mut app,
-        Message::Workspace(crate::workspace::Action::ToggleDrawer),
+        Message::Layout(crate::layout::Action::Mode(crate::layout::Mode::Drawer)),
     );
     assert!(app.workspace.shown);
     let mut after = None;
@@ -1809,9 +1853,6 @@ fn tab_reaches_every_control_in_reading_order_and_enter_presses_it() {
     assert_eq!(names[0], "ToggleChanges", "{names:?}");
     assert_eq!(names[1], "choose demo", "{names:?}");
     assert_eq!(names[2], "Menu(Toggle)", "{names:?}");
-    assert_eq!(names[3], "ToggleText", "{names:?}");
-    assert_eq!(names[4], "Layout(ToggleFull)", "{names:?}");
-    assert!(names[5].starts_with("files ToggleDrawer"), "{names:?}");
     let order = [
         at("files Toggle("),
         at("ToggleTool(\"tool\")"),
@@ -1905,7 +1946,7 @@ fn shortcuts_match_the_shelf_and_work_from_the_prompt() {
     ));
     assert!(matches!(
         shortcut(press(ch("F"), both)),
-        Some(Message::Workspace(crate::workspace::Action::ToggleDrawer))
+        Some(Message::Layout(crate::layout::Action::ToggleFull))
     ));
     assert!(matches!(
         shortcut(press(ch("t"), Modifiers::CTRL)),
@@ -2100,7 +2141,7 @@ fn closing_a_tab_ends_its_session_and_a_ghost_asks_first() {
     let mut app = live_app(vec![client]);
     app.all_sessions = vec![session_record("demo", "witty-willow", false, true)];
     let mut ui = simulator(&app, (720.0, 860.0));
-    ui.click("×").unwrap();
+    ui.click(iced::widget::Id::new("close-tab")).unwrap();
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(
         matches!(&messages[..], [Message::CloseTab(id)] if id == "demo"),

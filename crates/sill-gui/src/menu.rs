@@ -10,6 +10,7 @@ use iced::{Alignment, Element, Fill, Padding};
 use sill_client::sessions;
 use sill_proto::agent_admin::Definition;
 
+use crate::layout::Mode as View;
 use crate::style::{self, P, alpha};
 use crate::{App, Message, icons, keys};
 
@@ -39,6 +40,7 @@ pub enum Event {
     Reopen(String),
     NewHere(String),
     Delete(String),
+    View(View),
 }
 
 fn event(event: Event) -> Message {
@@ -133,6 +135,7 @@ impl App {
             }
             panel = panel.push(
                 scrollable(rows)
+                    .direction(scrollable::Direction::Vertical(style::bar()))
                     .height(iced::Shrink)
                     .style(style::feed_scroll),
             );
@@ -151,17 +154,25 @@ impl App {
                 ));
             }
         }
-        let panel = container(scrollable(panel).style(style::feed_scroll))
-            .max_height(640)
-            .style(|_| iced::widget::container::Style {
-                background: Some(P.surface.into()),
-                border: iced::Border {
-                    color: P.border,
-                    width: 1.0,
-                    radius: 0.0.into(),
-                },
-                ..iced::widget::container::Style::default()
-            });
+        let panel = container(column![
+            scrollable(panel)
+                .direction(scrollable::Direction::Vertical(style::bar()))
+                .height(iced::Shrink)
+                .style(style::feed_scroll),
+            rule::horizontal(1).style(style::rule_style(P.border)),
+            self.view_choice(),
+        ])
+        .width(330)
+        .max_height(640)
+        .style(|_| iced::widget::container::Style {
+            background: Some(P.surface.into()),
+            border: iced::Border {
+                color: P.border,
+                width: 1.0,
+                radius: 0.0.into(),
+            },
+            ..iced::widget::container::Style::default()
+        });
         let placed = container(panel)
             .padding(Padding {
                 top: 38.0,
@@ -175,6 +186,88 @@ impl App {
             mouse_area(container(space()).width(Fill).height(Fill)).on_press(event(Event::Toggle)),
             placed,
         ]
+        .into()
+    }
+
+    /// The menu's foot: which view the window shows — the conversation with files, alone, or
+    /// across the whole window. The view in use is marked.
+    fn view_choice(&self) -> Element<'_, Message> {
+        let current = self.layout.mode;
+        let choice = |view: View, glyph: &'static str, label: &'static str, what: &'static str| {
+            let on = view == current;
+            let color = if on { P.accent } else { alpha(P.fg, 0.7) };
+            let body = icons::glyph(glyph, 17.0, color);
+            let underline = rule::horizontal(2).style(style::rule_style(if on {
+                P.accent
+            } else {
+                iced::Color::TRANSPARENT
+            }));
+            tooltip(
+                container(keys::press(
+                    button(
+                        column![container(body).padding([8, 0]).center_x(Fill), underline]
+                            .width(Fill),
+                    )
+                    .padding(0)
+                    .width(Fill)
+                    .style(style::quiet),
+                    event(Event::View(view)),
+                ))
+                .id(match view {
+                    View::Shelf => "view-shelf",
+                    View::Drawer => "view-drawer",
+                    View::Full => "view-full",
+                }),
+                tip(format!("{label}: {what}")),
+                tooltip::Position::Bottom,
+            )
+        };
+        container(
+            row![
+                choice(
+                    View::Shelf,
+                    "panel",
+                    "Shelf",
+                    "the conversation alone, narrow: at most a share of the screen (Ctrl+Shift+D)"
+                ),
+                choice(
+                    View::Drawer,
+                    "panel-right",
+                    "Drawer",
+                    "the conversation with the drawer beside it (Ctrl+Shift+D)"
+                ),
+                choice(
+                    View::Full,
+                    "maximize",
+                    "Full",
+                    "the conversation across the whole window; Ctrl+Shift+F or Escape goes back (Ctrl+Shift+F)"
+                ),
+                // not a mode: the window goes, the daemon and its sessions go on
+                tooltip(
+                    container(keys::press(
+                        button(
+                            column![
+                                container(icons::glyph("x", 17.0, alpha(P.fg, 0.7)))
+                                    .padding([8, 0])
+                                    .center_x(Fill),
+                                rule::horizontal(2)
+                                    .style(style::rule_style(iced::Color::TRANSPARENT)),
+                            ]
+                            .width(Fill),
+                        )
+                        .padding(0)
+                        .width(Fill)
+                        .style(style::quiet),
+                        Message::Quit,
+                    ))
+                    .id("close-window"),
+                    tip("Close: the window goes; the daemon and the sessions go on. The tray icon or the hotkey will bring it back (Ctrl+Q)".into()),
+                    tooltip::Position::Bottom,
+                ),
+            ]
+            .spacing(2),
+        )
+        .padding(6)
         .into()
     }
 
@@ -248,11 +341,11 @@ impl App {
         let armed = menu.armed.as_deref() == Some(session.session_id.as_str());
         line = line.push(tooltip(
             keys::press(
-                button(
-                    text(if armed { "Delete?" } else { "✕" })
-                        .size(style::SMALL)
-                        .color(if armed { P.error } else { alpha(P.fg, 0.5) }),
-                )
+                button(if armed {
+                    Element::from(text("Delete?").size(style::SMALL).color(P.error))
+                } else {
+                    icons::glyph("trash", 13.0, alpha(P.fg, 0.5)).into()
+                })
                 .padding([6, 6])
                 .style(style::quiet),
                 event(Event::Delete(session.session_id.clone())),

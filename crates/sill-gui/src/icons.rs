@@ -1,6 +1,7 @@
 //! Icons as SVG handles, made once: the herring (`packaging/icons/herring/herring-silhouette.svg`),
 //! the agents' provider glyphs (simple-icons, CC0 1.0 — the same paths as `shelf/icons.rs`) and
-//! the composer's send and stop shapes. All are single-colour; the `svg` widget recolours them.
+//! the composer's send and stop shapes, and the shelf's lucide line glyphs. All are
+//! single-colour; the `svg` widget recolours them.
 use std::sync::OnceLock;
 
 use iced::widget::svg::Handle;
@@ -15,12 +16,194 @@ const AGENT: &str = "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 2a8 8 0 1 1 0 16
 const GHOST: &str = "M12 2.5a7 7 0 0 0-7 7V21l2.4-1.8 2.3 1.8 2.3-1.8 2.3 1.8 2.3-1.8L19 21V9.5a7 7 0 0 0-7-7zM9.5 8a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3zm5 0a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3z";
 /// A plus, for the new-session menu.
 const PLUS: &str = "M11 4h2v7h7v2h-7v7h-2v-7H4v-2h7z";
-/// Full conversation: four corners pointing out, and back: pointing in.
-const EXPAND: &str = "M4 4h6v2H6v4H4zM14 4h6v6h-2V6h-4zM4 14h2v4h4v2H4zM18 14h2v6h-6v-2h4z";
-const COLLAPSE: &str = "M8 4h2v6H4V8h4zM14 4h2v4h4v2h-6zM4 14h6v6H8v-4H4zM14 14h6v2h-4v4h-2z";
 /// The send arrow and the stop square, on the shelf's 24-unit grid.
 const SEND: &str = "M5 4.5 20 12 5 19.5 7.5 12Z";
 const STOP: &str = "M6 6H18V18H6Z";
+
+/// The shelf's line glyphs (lucide, ISC; `shelf/icons.rs`), drawn as a 2.2 unit stroke: (name,
+/// 24×24 path data). Looked up by name with [`line`].
+const LINES: &[(&str, &str)] = &[
+    // the + menu's views: drawer shown, the conversation alone, full width (lucide panel-right,
+    // square, maximize-2; sill-gui's own)
+    (
+        "panel-right",
+        "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM15 3v18",
+    ),
+    (
+        // the shelf: a narrow upright panel, as the shelf stands at the screen's edge
+        "panel",
+        "M9 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z",
+    ),
+    ("maximize", "M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"),
+    // the conversation as one text, to select across messages (lucide text-cursor; sill-gui's own)
+    (
+        "text-cursor",
+        "M17 22h-1a4 4 0 0 1-4-4V6a4 4 0 0 1 4-4h1M7 22h1a4 4 0 0 0 4-4v-1M7 2h1a4 4 0 0 1 4 4v1",
+    ),
+    (
+        "sessions",
+        "M3 5h.01M3 12h.01M3 19h.01M8 5h13M8 12h13M8 19h13",
+    ),
+    ("changes", "M12 3v14M5 10h14M5 21h14"),
+    (
+        "files",
+        "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z",
+    ),
+    (
+        "processes",
+        "M2 2h20v8h-20zM2 14h20v8h-20zM6 6L6.01 6M6 18L6.01 18",
+    ),
+    (
+        "list-tree",
+        "M21 12h-8M21 6H8M21 18h-8M3 6v4c0 1.1.9 2 2 2h3M3 10v6c0 1.1.9 2 2 2h3",
+    ),
+    (
+        "git-compare",
+        "M15 18a3 3 0 1 0 6 0a3 3 0 1 0 -6 0M3 6a3 3 0 1 0 6 0a3 3 0 1 0 -6 0M13 6h3a2 2 0 0 1 2 2v7M11 18H8a2 2 0 0 1-2-2V9",
+    ),
+    (
+        "folder-open",
+        "m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2",
+    ),
+    ("x", "M18 6 6 18M0 0m6 6 12 12"),
+    (
+        "search",
+        "M11 3a8 8 0 1 0 0 16 8 8 0 0 0 0-16M21 21l-4.3-4.3",
+    ),
+    (
+        "refresh",
+        "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8M21 3v5h-5M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16M8 16H3v5",
+    ),
+    (
+        "trash",
+        "M10 11v6M14 11v6M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2",
+    ),
+    (
+        "brain",
+        "M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18ZM12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18ZM15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4M17.599 6.5a3 3 0 0 0 .399-1.375M6.003 5.125A3 3 0 0 0 6.401 6.5M3.477 10.896a4 4 0 0 1 .585-.396M19.938 10.5a4 4 0 0 1 .585.396M6 18a4 4 0 0 1-1.967-.516M19.967 17.484A4 4 0 0 1 18 18",
+    ),
+    (
+        "ghost",
+        "M9 10h.01M15 10h.01M12 2a8 8 0 0 0-8 8v12l3-3 2.5 2.5L12 19l2.5 2.5L17 19l3 3V10a8 8 0 0 0-8-8z",
+    ),
+    ("chevron-right", "m9 18 6-6-6-6"),
+    ("chevron-left", "m15 18-6-6 6-6"),
+    ("chevron-down", "m6 9 6 6 6-6"),
+    ("check", "M20 6 9 17l-5-5"),
+    (
+        "copy",
+        "M10 8h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2zM4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2",
+    ),
+    (
+        "file",
+        "M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2zM14 2v5a1 1 0 0 0 1 1h5",
+    ),
+    (
+        "file-text",
+        "M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2zM14 2v5a1 1 0 0 0 1 1h5M10 9H8M16 13H8M16 17H8",
+    ),
+    (
+        "image",
+        "M3 3h18v18h-18zM7 9a2 2 0 1 0 4 0a2 2 0 1 0 -4 0M0 0m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21",
+    ),
+    (
+        "file-archive",
+        "M13.659 22H18a2 2 0 0 0 2-2V8a2.4 2.4 0 0 0-.706-1.706l-3.588-3.588A2.4 2.4 0 0 0 14 2H6a2 2 0 0 0-2 2v11.5M14 2v5a1 1 0 0 0 1 1h5M8 12v-1M8 18v-2M8 7V6M6 20a2 2 0 1 0 4 0a2 2 0 1 0 -4 0",
+    ),
+    (
+        "file-code",
+        "M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2zM14 2v5a1 1 0 0 0 1 1h5M10 12.5 8 15l2 2.5M0 0m14 12.5 2 2.5-2 2.5",
+    ),
+    (
+        "file-cog",
+        "M15 8a1 1 0 0 1-1-1V2a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8zM20 8v12a2 2 0 0 1-2 2h-4.182M0 0m3.305 19.53.923-.382M4 10.592V4a2 2 0 0 1 2-2h8M0 0m4.228 16.852-.924-.383M0 0m5.852 15.228-.383-.923M0 0m5.852 20.772-.383.924M0 0m8.148 15.228.383-.923M0 0m8.53 21.696-.382-.924M0 0m9.773 16.852.922-.383M0 0m9.773 19.148.922.383M4 18a3 3 0 1 0 6 0a3 3 0 1 0 -6 0",
+    ),
+    (
+        "file-terminal",
+        "M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2zM14 2v5a1 1 0 0 0 1 1h5M0 0m8 16 2-2-2-2M12 18h4",
+    ),
+    (
+        "settings",
+        "M10 5H3M12 19H3M14 3v4M16 17v4M21 12h-9M21 19h-5M21 5h-7M8 10v4M8 12H3",
+    ),
+    ("terminal", "M3 19l7-7-7-7M12 20h9"),
+    (
+        "agents",
+        "M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2M14 2h6a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z",
+    ),
+    ("code", "m16 18 6-6-6-6M8 6l-6 6 6 6"),
+    (
+        "link",
+        "M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6",
+    ),
+    ("plus", "M5 12h14M12 5v14"),
+    ("minus", "M5 12h14"),
+    (
+        "lock",
+        "M7 11V7a5 5 0 0 1 10 0v4M5 11h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2z",
+    ),
+    (
+        "lock-open",
+        "M7 11V7a5 5 0 0 1 9.9-1M5 11h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2z",
+    ),
+];
+
+/// A line glyph by its shelf name without the `sill-` prefix; an unknown name is the agent ring.
+pub fn line(name: &str) -> Handle {
+    static CACHE: OnceLock<std::sync::Mutex<std::collections::HashMap<String, Handle>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    let mut cache = cache.lock().expect("the icon cache");
+    if let Some(handle) = cache.get(name) {
+        return handle.clone();
+    }
+    let made = match LINES.iter().find(|(n, _)| *n == name) {
+        Some((_, d)) => Handle::from_memory(
+            format!(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" d="{d}"/></svg>"##
+            )
+            .into_bytes(),
+        ),
+        None => agent(),
+    };
+    cache.insert(name.to_string(), made.clone());
+    made
+}
+
+/// A line glyph `size` square in `color`.
+pub fn glyph<'a>(name: &str, size: f32, color: iced::Color) -> iced::widget::Svg<'a> {
+    iced::widget::svg(line(name))
+        .width(size)
+        .height(size)
+        .style(crate::style::icon(color))
+}
+
+/// The tree's glyph for a path, as the shelf picks it (`shelf/tree.rs`): a folder, open or closed,
+/// else the file's kind by its extension.
+pub fn for_path(name: &str, directory: bool, expanded: bool) -> &'static str {
+    if directory {
+        return if expanded { "folder-open" } else { "files" };
+    }
+    let ext = name
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico" | "avif" | "tiff" => {
+            "image"
+        }
+        "zip" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "zst" | "7z" | "rar" | "deb" | "rpm"
+        | "jar" => "file-archive",
+        "toml" | "yaml" | "yml" | "json" | "ini" | "cfg" | "conf" | "lock" | "env"
+        | "properties" => "file-cog",
+        "sh" | "bash" | "zsh" | "fish" | "ps1" | "bat" => "file-terminal",
+        "md" | "txt" | "rst" | "org" | "adoc" | "log" | "csv" => "file-text",
+        "rs" | "c" | "h" | "cc" | "cpp" | "hpp" | "go" | "py" | "js" | "ts" | "tsx" | "jsx"
+        | "java" | "kt" | "rb" | "php" | "cs" | "swift" | "lua" | "zig" | "hs" | "ml" | "css"
+        | "scss" | "html" | "xml" | "sql" | "proto" | "cmake" | "mk" | "nix" => "file-code",
+        _ => "file",
+    }
+}
 
 fn handle(path: &str) -> Handle {
     Handle::from_memory(
@@ -43,8 +226,6 @@ macro_rules! icon {
 icon!(herring, HERRING);
 icon!(ghost, GHOST);
 icon!(plus, PLUS);
-icon!(expand, EXPAND);
-icon!(collapse, COLLAPSE);
 icon!(send, SEND);
 icon!(stop, STOP);
 icon!(claude, CLAUDE);

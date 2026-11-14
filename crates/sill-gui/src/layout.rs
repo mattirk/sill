@@ -1,14 +1,21 @@
-//! How the window is divided (docs/sill-gui.md, *Window and layout modes*). The window's size is
-//! the window manager's or the person's, never the shelf's: the drawer keeps a width in pixels and
-//! the conversation takes the rest; when the window cannot fit both, the drawer opens over the
-//! conversation instead of beside it. Prose is held to a reading measure, except in *full
-//! conversation* (Ctrl+Shift+E), which also puts the drawer away until it is left.
+//! How the window is divided, in three modes (docs/sill-gui.md, *Window and layout modes*):
+//!
+//! - **Shelf**: the minimal conversation, at most a share of the monitor wide (35 % by default, 40 % at most),
+//!   the drawer a quick look over it (Ctrl+Shift+F);
+//! - **Drawer**: the conversation with the drawer always beside it, at the working size;
+//! - **Full**: the conversation alone across the working size, without the reading measure.
+//!
+//! Ctrl+Shift+D goes from Shelf to Drawer and back to Shelf from Drawer or Full; Ctrl+Shift+F goes
+//! into Full and back to the mode it came from. Only Shelf has a size rule of its own; the working size is whatever the
+//! window manager or the person made it. When a window cannot fit the drawer beside the
+//! conversation (a narrow tile), the drawer opens over it.
 use iced::{Event, Subscription, mouse};
 
 use crate::Message;
 
 /// The drawer's width until the person drags it.
-pub const DRAWER_DEFAULT: f32 = 280.0;
+/// 30 % narrower than the first 280 (the person, 2026-11-05).
+pub const DRAWER_DEFAULT: f32 = 196.0;
 pub const DRAWER_MIN: f32 = 160.0;
 /// What the conversation keeps at least with the drawer beside it.
 pub const MAIN_MIN: f32 = 360.0;
@@ -18,15 +25,63 @@ pub const UNCOVERED: f32 = 48.0;
 pub const MEASURE: f32 = 800.0;
 /// The grip between the conversation and the drawer.
 pub const HANDLE: f32 = 7.0;
+/// The shelf's share of the monitor's width, until set otherwise, and the most it may be
+/// (the person, 2026-11-05).
+pub const SHELF_SHARE: f32 = 0.35;
+pub const SHELF_MAX: f32 = 0.4;
+/// The working size's share of the monitor's width before the person has made one.
+pub const WORK_SHARE: f32 = 0.5;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    /// The minimal conversation, at most the shelf share of the monitor.
+    #[default]
+    Shelf,
+    /// The conversation with the drawer beside it.
+    Drawer,
+    /// The conversation alone, across the window.
+    Full,
+}
+
+impl Mode {
+    pub fn name(self) -> &'static str {
+        match self {
+            Mode::Shelf => "shelf",
+            Mode::Drawer => "drawer",
+            Mode::Full => "full",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "shelf" => Some(Mode::Shelf),
+            "drawer" => Some(Mode::Drawer),
+            "full" => Some(Mode::Full),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct Layout {
+    pub mode: Mode,
+    /// The mode Full was entered from, where Ctrl+Shift+F and Escape go back to.
+    pub before_full: Mode,
     /// The width the person dragged the drawer to; for this run of the window.
     pub drawer: Option<f32>,
-    /// Full conversation: no reading measure, the drawer put away.
-    pub full: bool,
     /// The drawer's edge is being dragged.
     pub dragging: bool,
+}
+
+impl Default for Layout {
+    fn default() -> Self {
+        Self {
+            mode: Mode::Shelf,
+            before_full: Mode::Drawer,
+            drawer: None,
+            dragging: false,
+        }
+    }
 }
 
 /// Where the drawer goes in a window `total` wide.
@@ -39,6 +94,10 @@ pub enum Drawer {
 
 #[derive(Debug, Clone, Copy)]
 pub enum Action {
+    Mode(Mode),
+    /// Ctrl+Shift+D: Shelf → Drawer; Drawer or Full → Shelf.
+    ToggleShelf,
+    /// Ctrl+Shift+F: into Full, and back to the mode it was entered from.
     ToggleFull,
     DragStart,
     /// The pointer's x in the window while dragging.
@@ -47,17 +106,23 @@ pub enum Action {
 }
 
 impl Layout {
+    /// The drawer's width in pixels, wherever it is.
+    pub fn drawer_width(&self) -> f32 {
+        self.wanted()
+    }
+
     fn wanted(&self) -> f32 {
         self.drawer.unwrap_or(DRAWER_DEFAULT).max(DRAWER_MIN)
     }
 
-    /// The drawer's place: beside the conversation when both fit, else over it.
+    /// The drawer's place, `shown` (always in Drawer mode, a quick look in the others): beside
+    /// the conversation in Drawer mode when both fit, else over it.
     pub fn drawer(&self, shown: bool, total: f32) -> Drawer {
-        if !shown || self.full {
+        if !shown {
             return Drawer::Hidden;
         }
         let wanted = self.wanted();
-        if total - wanted - HANDLE >= MAIN_MIN {
+        if self.mode == Mode::Drawer && total - wanted - HANDLE >= MAIN_MIN {
             Drawer::Beside(wanted)
         } else {
             Drawer::Over(wanted.min(total - UNCOVERED).max(DRAWER_MIN.min(total)))
@@ -66,7 +131,19 @@ impl Layout {
 
     /// The prose's widest line; `None` across the whole window.
     pub fn measure(&self) -> Option<f32> {
-        (!self.full).then_some(MEASURE)
+        (self.mode != Mode::Full).then_some(MEASURE)
+    }
+
+    /// Where Ctrl+Shift+D and Ctrl+Shift+E lead from the current mode.
+    pub fn after(&self, action: Action) -> Mode {
+        match (action, self.mode) {
+            (Action::Mode(mode), _) => mode,
+            (Action::ToggleShelf, Mode::Shelf) => Mode::Drawer,
+            (Action::ToggleShelf, _) => Mode::Shelf,
+            (Action::ToggleFull, Mode::Full) => self.before_full,
+            (Action::ToggleFull, _) => Mode::Full,
+            _ => self.mode,
+        }
     }
 
     /// The pointer at `x` in a window `total` wide while the drawer's edge is dragged: the drawer
@@ -102,23 +179,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_drawer_sits_beside_when_both_fit_and_over_when_not() {
-        let mut layout = Layout::default();
+    fn the_drawer_is_beside_in_drawer_mode_and_a_look_over_the_conversation_elsewhere() {
+        let mut layout = Layout {
+            mode: Mode::Drawer,
+            ..Layout::default()
+        };
         assert_eq!(layout.drawer(false, 1200.0), Drawer::Hidden);
         assert_eq!(layout.drawer(true, 1200.0), Drawer::Beside(DRAWER_DEFAULT));
         // a narrow tile: the same drawer, over the conversation
         assert_eq!(layout.drawer(true, 500.0), Drawer::Over(DRAWER_DEFAULT));
         assert_eq!(layout.drawer(true, 200.0), Drawer::Over(DRAWER_MIN));
-        // no share of the window: a wider window gives the conversation the room
-        assert_eq!(layout.drawer(true, 2400.0), Drawer::Beside(DRAWER_DEFAULT));
-        layout.full = true;
-        assert_eq!(layout.drawer(true, 1200.0), Drawer::Hidden);
+        layout.mode = Mode::Shelf;
+        assert_eq!(layout.drawer(true, 1200.0), Drawer::Over(DRAWER_DEFAULT));
+        assert_eq!(layout.measure(), Some(MEASURE));
+        layout.mode = Mode::Full;
         assert_eq!(layout.measure(), None);
     }
 
     #[test]
-    fn dragging_keeps_the_drawer_in_its_place() {
+    fn the_keys_go_between_the_modes() {
         let mut layout = Layout::default();
+        assert_eq!(layout.after(Action::ToggleShelf), Mode::Drawer);
+        layout.mode = Mode::Drawer;
+        assert_eq!(layout.after(Action::ToggleFull), Mode::Full);
+        assert_eq!(layout.after(Action::ToggleShelf), Mode::Shelf);
+        layout.mode = Mode::Full;
+        layout.before_full = Mode::Shelf;
+        assert_eq!(layout.after(Action::ToggleFull), Mode::Shelf);
+        assert_eq!(layout.after(Action::ToggleShelf), Mode::Shelf);
+    }
+
+    #[test]
+    fn dragging_keeps_the_drawer_in_its_place() {
+        let mut layout = Layout {
+            mode: Mode::Drawer,
+            ..Layout::default()
+        };
         layout.drag_to(600.0, true, 1000.0);
         assert_eq!(layout.drawer, Some(1000.0 - 600.0 - HANDLE / 2.0));
         // dragged far left: the conversation keeps its minimum

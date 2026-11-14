@@ -313,7 +313,21 @@ pub fn files(request: &Request) -> Result<Data, String> {
                 },
             ],
             summary: "+12 −3  ?1".into(),
+            lines: Some(("12".into(), "3".into())),
         },
+        Request::Counts { entries, .. } => Data::Counts(
+            entries
+                .iter()
+                .map(|e| {
+                    let counts = if e.status.contains('?') {
+                        (3, 0)
+                    } else {
+                        (12, 3)
+                    };
+                    (sill_client::files::key(&e.path).to_string(), Some(counts))
+                })
+                .collect(),
+        ),
         Request::Pin { .. } => {
             return Err("Demo pins are examples; use a real session to change pins.".into());
         }

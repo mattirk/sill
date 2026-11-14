@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/sill-core", "crates/sill-memory", "crates/sill-proto", "crates/sill-shim", "crates/sill", "crates/sill-client", "crates/sill-gui"]
+# patched copies of upstream crates (vendor/README.md), not members
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.0.1"
@@ -37,3 +39,7 @@ opt-level = 1
 lto = "off"
 codegen-units = 16
 incremental = true
+
+# iced_widget 0.14.2 with one accessor added (vendor/README.md)
+[patch.crates-io]
+iced_widget = { path = "vendor/iced_widget" }

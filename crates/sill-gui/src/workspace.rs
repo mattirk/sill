@@ -43,6 +43,9 @@ pub enum Action {
     },
     DiffMode(bool),
     DismissError,
+    /// The pointer came over a tree row (its key), or left it.
+    Hover(String),
+    Unhover(String),
     Reply(Box<Reply>),
 }
 
@@ -56,6 +59,8 @@ pub struct ReaderView {
 
 pub struct Workspace {
     pub shown: bool,
+    /// The tree row under the pointer: its pin button shows, as the shelf's does on hover.
+    pub hovered: Option<String>,
     serial: u64,
     /// None in `--demo`: requests are answered with synthetic files at once.
     files: Option<Files>,
@@ -67,6 +72,7 @@ impl Workspace {
             return (
                 Self {
                     shown: false,
+                    hovered: None,
                     serial: 0,
                     files: None,
                 },
@@ -81,6 +87,7 @@ impl Workspace {
         (
             Self {
                 shown: false,
+                hovered: None,
                 serial: 0,
                 files: Some(files),
             },
@@ -188,13 +195,25 @@ impl App {
                 self.files_send(&session, effects.follow);
                 Task::none()
             }
-            Action::ToggleDrawer => {
-                // in full conversation the drawer's toggle brings the drawer back
-                if std::mem::take(&mut self.layout.full) {
-                    self.workspace.shown = true;
-                } else {
-                    self.workspace.shown = !self.workspace.shown;
+            Action::Hover(key) => {
+                self.workspace.hovered = Some(key);
+                Task::none()
+            }
+            Action::Unhover(key) => {
+                if self.workspace.hovered.as_deref() == Some(key.as_str()) {
+                    self.workspace.hovered = None;
                 }
+                Task::none()
+            }
+            Action::ToggleDrawer => {
+                // in Drawer mode, putting the drawer away is Full: the same window without it
+                // (Ctrl+Shift+F brings it back); elsewhere a quick look over the conversation
+                if self.layout.mode == crate::layout::Mode::Drawer {
+                    return self.update(Message::Layout(crate::layout::Action::Mode(
+                        crate::layout::Mode::Full,
+                    )));
+                }
+                self.workspace.shown = !self.workspace.shown;
                 let Some(id) = self.selected.clone() else {
                     return Task::none();
                 };
@@ -279,7 +298,10 @@ impl App {
                         view.files.error = None;
                         vec![]
                     }
-                    Action::ToggleDrawer | Action::Reply(_) => unreachable!(),
+                    Action::ToggleDrawer
+                    | Action::Reply(_)
+                    | Action::Hover(_)
+                    | Action::Unhover(_) => unreachable!(),
                 };
                 view.sync_reader();
                 self.files_send(&id, requests);

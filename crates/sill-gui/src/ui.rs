@@ -7,7 +7,7 @@
 //! status strip keeps the selected session's state, its question and Stop in reach.
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use iced::keyboard::{Key, key::Named};
 use iced::widget::markdown::{self, Highlight};
@@ -23,8 +23,8 @@ use sill_client::outbox::State;
 use sill_client::supervision::{Activity, Attention, Level, clock};
 use sill_proto::sfp::{Answer, Item, Question, Tool};
 
-use crate::style::{self, P, alpha};
 use crate::layout::{self, Drawer};
+use crate::style::{self, P, alpha};
 use crate::{App, Message, Pick, SessionView, Tab, icons, keys, selection, viewer};
 
 const MONO_FONT: Font = Font::with_name(crate::fonts::MONO_FAMILY);
@@ -86,9 +86,7 @@ impl App {
                             .height(Fill)
                             .style(style::fill(alpha(Color::BLACK, 0.25)))
                     )
-                    .on_press(Message::Workspace(
-                        crate::workspace::Action::ToggleDrawer
-                    )),
+                    .on_press(Message::Workspace(crate::workspace::Action::ToggleDrawer)),
                     self.drawer_grip(),
                     container(drawer)
                         .width(width)
@@ -103,7 +101,8 @@ impl App {
             }
             screen.into()
         });
-        let window = column![self.top_bar(), content];
+        let bar = container(responsive(move |size| self.top_bar(size.width))).height(37);
+        let window = column![bar, content];
         match &self.menu {
             Some(menu) => iced::widget::stack![window, self.session_menu(menu)].into(),
             None => window.into(),
@@ -153,9 +152,12 @@ impl App {
 
     // --- top bar --------------------------------------------------------------------------------
 
-    fn top_bar(&self) -> Element<'_, Message> {
+    fn top_bar(&self, width: f32) -> Element<'_, Message> {
         // the herring opens the sill pages (Changes so far), underlined while one shows
         let shown = self.changes.is_some();
+        let drawer_open = self.workspace.shown && !shown && self.current().is_some();
+        // room on its right, as the shelf's status slot has (`.sill-status-slot`)
+        let activity = container(self.activity()).padding([0, 8]);
         let mark = tooltip(
             keys::press(
                 button(
@@ -198,18 +200,6 @@ impl App {
         for tab in &self.tabs {
             tabs = tabs.push(self.tab(tab));
         }
-        let select = tooltip(
-            keys::press_maybe(
-                button(text("⌶").size(style::TEXT))
-                    .padding([2, 8])
-                    .style(style::quiet),
-                self.current().map(|_| Message::ToggleText),
-            ),
-            container(text("The conversation as one text").size(style::TINY))
-                .padding([3, 8])
-                .style(style::fill(P.surface)),
-            tooltip::Position::Bottom,
-        );
         // the window has no title bar: a press here that no tab or button takes moves it
         mouse_area(
             container(
@@ -218,9 +208,7 @@ impl App {
                     scrollable(tabs)
                         .width(Fill)
                         .height(Fill)
-                        .direction(scrollable::Direction::Horizontal(
-                            scrollable::Scrollbar::default()
-                        ))
+                        .direction(scrollable::Direction::Horizontal(style::bar()))
                         .style(style::feed_scroll),
                     tooltip(
                         keys::press(
@@ -234,54 +222,23 @@ impl App {
                             .style(style::quiet),
                             Message::Menu(crate::menu::Event::Toggle),
                         ),
-                        container(text("New session, or reopen one").size(style::TINY))
-                            .padding([3, 8])
-                            .style(style::fill(P.surface)),
-                        tooltip::Position::Bottom,
-                    ),
-                    self.activity(),
-                    select,
-                    tooltip(
-                        keys::press(
-                            button(
-                                svg(if self.layout.full {
-                                    icons::collapse()
-                                } else {
-                                    icons::expand()
-                                })
-                                .width(14)
-                                .height(14)
-                                .style(style::icon(alpha(P.fg, 0.75))),
-                            )
-                            .padding([4, 6])
-                            .style(style::quiet),
-                            Message::Layout(layout::Action::ToggleFull),
-                        ),
                         container(
-                            text(if self.layout.full {
-                                "Back to the drawer and the reading width (Ctrl+Shift+E, Escape)"
-                            } else {
-                                "Full conversation: the whole width, drawer away (Ctrl+Shift+E)"
-                            })
-                            .size(style::TINY),
+                            text("New session, reopen one, or change the view").size(style::TINY)
                         )
                         .padding([3, 8])
                         .style(style::fill(P.surface)),
                         tooltip::Position::Bottom,
                     ),
-                    keys::press(
-                        button(
-                            text(if self.workspace.shown && !self.layout.full {
-                                "›"
-                            } else {
-                                "Files ‹"
-                            })
-                            .size(style::SMALL)
-                        )
-                        .padding([2, 8])
-                        .style(style::quiet),
-                        Message::Workspace(crate::workspace::Action::ToggleDrawer)
-                    ),
+                    // the activity over the drawer when it is beside the conversation, so the +
+                    // ends the conversation's side, as in the shelf
+                    match self.layout.drawer(drawer_open, width) {
+                        // reaching back across the bar's spacing and the +'s padding, so the +
+                        // sits about 10 px left of the divider (the shelf's place)
+                        Drawer::Beside(drawer) => container(activity)
+                            .width(drawer + layout::HANDLE - 14.0)
+                            .align_right(drawer + layout::HANDLE - 14.0),
+                        _ => container(activity),
+                    },
                 ]
                 .spacing(6)
                 .align_y(Alignment::Center),
@@ -289,7 +246,7 @@ impl App {
             .height(37)
             .padding(Padding {
                 top: 0.0,
-                right: 8.0,
+                right: 6.0,
                 bottom: 0.0,
                 left: 0.0,
             })
@@ -334,16 +291,17 @@ impl App {
             row![
                 label,
                 tooltip(
-                    keys::press(
-                        button(
-                            text(if armed { "Close?" } else { "×" })
-                                .size(style::SMALL)
-                                .color(if armed { P.error } else { alpha(P.fg, 0.55) }),
-                        )
-                        .padding([2, 6])
+                    container(keys::press(
+                        button(if armed {
+                            Element::from(text("Close?").size(style::SMALL).color(P.error))
+                        } else {
+                            icons::glyph("x", 12.0, alpha(P.fg, 0.55)).into()
+                        })
+                        .padding([4, 6])
                         .style(style::quiet),
                         Message::CloseTab(tab.id.clone()),
-                    ),
+                    ))
+                    .id("close-tab"),
                     container(
                         text(if armed {
                             "A ghost: closing deletes it and its unkept changes — press again"
@@ -405,35 +363,66 @@ impl App {
             .problem()
             .map(str::to_owned)
             .or_else(|| self.list_error.clone());
-        if trouble.is_none() && matches!(attention.activity, Activity::Working | Activity::Waiting)
-        {
-            let mut parts = row![].spacing(8).align_y(Alignment::Center);
-            if attention.activity == Activity::Working
-                && let Some(ms) = attention.working_ms
-            {
-                parts = parts.push(
-                    text(clock(ms))
-                        .size(style::TEXT)
-                        .font(MONO_FONT)
-                        .color(P.fg_dim),
-                );
+        let busy_now = trouble.is_none()
+            && matches!(attention.activity, Activity::Working | Activity::Waiting);
+        let indicator = if busy_now {
+            Indicator::Spinner(P.accent)
+        } else {
+            Indicator::Dot(match &trouble {
+                Some(_) => P.error,
+                None => alpha(P.fg, 0.35),
+            })
+        };
+        // the timer, as the shelf's: while the agent works, and whenever the pointer is over the
+        // activity — the session's worked time, still while it does not work; it slides out from
+        // under the indicator when it appears, as the shelf's revealer does
+        let working = attention
+            .working_ms
+            .filter(|_| attention.activity == Activity::Working);
+        let shown_ms = if self.activity_hovered {
+            attention.worked_ms
+        } else {
+            working
+        };
+        let clock = shown_ms.map(|ms| {
+            let shown = view.clock_shown.get().unwrap_or_else(Instant::now);
+            view.clock_shown.set(Some(shown));
+            let now = Instant::now();
+            Clock {
+                base: now.checked_sub(Duration::from_millis(ms)).unwrap_or(now),
+                ticking: attention.working_ms.is_some(),
+                ms,
+                shown,
+                width: text_width(&clock(ms).replace(char::is_numeric, "0"), style::TEXT)
+                    .max(text_width("00:00", style::TEXT))
+                    + 2.0,
             }
-            return parts.push(self.spinner(P.accent)).into();
+        });
+        if clock.is_none() {
+            view.clock_shown.set(None);
         }
-        match trouble {
-            Some(error) => status_dot(P.error, error),
-            None => status_dot(alpha(P.fg, 0.35), status_text(&view.status).into()),
-        }
+        let shown = activity_canvas(indicator, clock);
+        let shown: Element<'_, Message> = if busy_now {
+            shown
+        } else {
+            let tip = trouble.unwrap_or_else(|| status_text(&view.status).into());
+            tooltip(
+                shown,
+                container(text(tip).size(style::TINY))
+                    .padding([3, 8])
+                    .style(style::fill(P.surface)),
+                tooltip::Position::Bottom,
+            )
+            .into()
+        };
+        mouse_area(shown)
+            .on_enter(Message::ActivityHover(true))
+            .on_exit(Message::ActivityHover(false))
+            .into()
     }
 
     fn spinner(&self, color: Color) -> Element<'_, Message> {
-        canvas(Spinner {
-            angle: spin(self.now),
-            color,
-        })
-        .width(16)
-        .height(16)
-        .into()
+        activity_canvas(Indicator::Spinner(color), None)
     }
 
     // --- supervision ----------------------------------------------------------------------------
@@ -614,6 +603,7 @@ impl App {
             None => feed.into(),
         };
         let scroll = scrollable(feed)
+            .direction(scrollable::Direction::Vertical(style::bar()))
             .id("conversation")
             .height(Fill)
             .width(Fill)
@@ -925,8 +915,8 @@ impl App {
                     .width(Fill)
                     .clip(true),
                     keys::press(
-                        button(text("×").size(style::SMALL))
-                            .padding([0, 6])
+                        button(icons::glyph("x", 12.0, alpha(P.fg, 0.6)))
+                            .padding([2, 6])
                             .style(style::quiet),
                         Message::Unqueue(submission.submission_id.clone())
                     ),
@@ -953,25 +943,31 @@ impl App {
             keys::press_maybe(
                 button(
                     svg(icons::send())
-                        .width(14)
-                        .height(14)
-                        .style(style::icon(P.bg)),
+                        .width(12)
+                        .height(12)
+                        .style(style::icon(alpha(P.fg, 0.9))),
                 )
-                .padding(6)
-                .style(style::solid(P.accent)),
+                .padding(4)
+                .style(style::tinted(P.accent)),
                 (!view.draft.text().trim().is_empty()).then_some(Message::Send),
             )
         };
-        let shell = button(text(">_").size(style::SMALL).font(MONO_FONT).color(
+        let shell = button(icons::glyph(
+            "terminal",
+            12.0,
             if view.terminal_shown {
                 P.accent
             } else {
                 P.fg_dim
             },
         ))
-        .padding([2, 6])
+        .padding([4, 6])
         .style(style::quiet);
-        let shell = keys::press_maybe(shell, has_session.then_some(Message::ToggleTerminal));
+        let shell = container(keys::press_maybe(
+            shell,
+            has_session.then_some(Message::ToggleTerminal),
+        ))
+        .id("terminal-button");
         let shell = tooltip(
             shell,
             container(text("Terminal in the jail").size(style::SMALL))
@@ -987,7 +983,7 @@ impl App {
         }
         if let Some(usage) = usage(view) {
             bar =
-                bar.push(container(text(usage).size(style::SMALL).color(P.fg_dim)).padding([0, 6]));
+                bar.push(container(text(usage).size(style::TINY).color(P.fg_dim)).padding([0, 6]));
         }
         bar = bar.push(action);
         // as in the shelf, the prompt folds away while the terminal is up in its place
@@ -1113,12 +1109,12 @@ fn stop_button<'a>() -> Element<'a, Message> {
     container(keys::press(
         button(
             svg(icons::stop())
-                .width(14)
-                .height(14)
-                .style(style::icon(P.bg)),
+                .width(12)
+                .height(12)
+                .style(style::icon(alpha(P.fg, 0.9))),
         )
-        .padding(6)
-        .style(style::solid(P.error)),
+        .padding(4)
+        .style(style::tinted(P.error)),
         Message::Stop,
     ))
     .id("stop")
@@ -1486,13 +1482,14 @@ fn control<'a>(
     on_select: impl Fn(Pick) -> Message + 'a,
 ) -> Element<'a, Message> {
     let label = selected.as_ref().map_or("", |p| p.title.as_str());
-    let width = text_width(label, style::SMALL) + 12.0 + style::SMALL + 4.0;
+    // the shelf's controls are 80 % of the body text (`.sill-controls`)
+    let width = text_width(label, style::TINY) + 12.0 + style::TINY + 4.0;
     let on_select = std::rc::Rc::new(on_select);
     let select = on_select.clone();
     let choices = picks.clone();
     let current = selected.clone();
     let list = pick_list(picks, selected, move |pick| select(pick))
-        .text_size(style::SMALL)
+        .text_size(style::TINY)
         .padding([3, 6])
         .width(width)
         .style(style::control)
@@ -1741,20 +1738,76 @@ pub(crate) fn one_line(text: &str, max: usize) -> String {
 }
 
 /// The spinner's angle: one turn a second, from the time of the last tick.
-fn spin(now: Instant) -> f32 {
-    static START: OnceLock<Instant> = OnceLock::new();
-    let start = *START.get_or_init(Instant::now);
-    now.saturating_duration_since(start).as_secs_f32() * std::f32::consts::TAU
+/// The spinner's size and stroke, and its arc: one turn a second (`shelf/spinner.rs`).
+const SPIN_SIZE: f32 = 15.0;
+const SPIN_LINE: f32 = 2.0;
+const SPIN_ARC: f32 = 1.3 * std::f32::consts::PI / 2.0;
+/// The gap between the clock and the spinner, and how long the clock takes to slide out.
+const CLOCK_GAP: f32 = 8.0;
+const CLOCK_SLIDE: Duration = Duration::from_millis(260);
+
+/// The timer: the time worked — going on from `base` while the agent works (`ticking`), else
+/// `ms` — `width` wide, in view since `shown`.
+#[derive(Clone, Copy)]
+struct Clock {
+    base: Instant,
+    ticking: bool,
+    ms: u64,
+    shown: Instant,
+    width: f32,
 }
 
-/// A short arc going round (`shelf/spinner.rs`).
-struct Spinner {
-    angle: f32,
-    color: Color,
+/// What the activity shows at its right: the spinner while the agent is busy, else the status dot.
+#[derive(Clone, Copy)]
+enum Indicator {
+    Spinner(Color),
+    Dot(Color),
 }
 
-impl canvas::Program<Message> for Spinner {
+/// The activity: its indicator, with the timer beside it when shown.
+fn activity_canvas<'a>(indicator: Indicator, clock: Option<Clock>) -> Element<'a, Message> {
+    let width = clock.map_or(SPIN_SIZE, |c| c.width + CLOCK_GAP + SPIN_SIZE);
+    canvas(Busy { indicator, clock })
+        .width(width)
+        .height(22)
+        .into()
+}
+
+/// Drawn every frame from the clock's time, so it turns smoothly without the window building a
+/// new view for each frame (the shelf's spinner follows its frame clock the same way).
+struct Busy {
+    indicator: Indicator,
+    clock: Option<Clock>,
+}
+
+impl Busy {
+    /// Anything moving: the spinner, a ticking timer, or the timer still sliding out.
+    fn moving(&self) -> bool {
+        matches!(self.indicator, Indicator::Spinner(_))
+            || self
+                .clock
+                .is_some_and(|c| c.ticking || c.shown.elapsed() < CLOCK_SLIDE)
+    }
+}
+
+impl canvas::Program<Message> for Busy {
     type State = ();
+
+    fn update(
+        &self,
+        _state: &mut (),
+        event: &iced::Event,
+        _bounds: Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Option<canvas::Action<Message>> {
+        // only while something moves: an idle dot asks for no frames
+        (self.moving()
+            && matches!(
+                event,
+                iced::Event::Window(iced::window::Event::RedrawRequested(_))
+            ))
+        .then(canvas::Action::request_redraw)
+    }
 
     fn draw(
         &self,
@@ -1764,23 +1817,76 @@ impl canvas::Program<Message> for Spinner {
         bounds: Rectangle,
         _cursor: iced::mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
+        let now = Instant::now();
         let mut frame = canvas::Frame::new(renderer, bounds.size());
-        let center = frame.center();
-        let radius = bounds.width.min(bounds.height) / 2.0 - 2.0;
-        let arc = canvas::Path::new(|path| {
-            path.arc(canvas::path::Arc {
-                center,
-                radius,
-                start_angle: Radians(self.angle),
-                end_angle: Radians(self.angle + 4.2),
-            });
-        });
-        frame.stroke(
-            &arc,
+        let center = iced::Point::new(bounds.width - SPIN_SIZE / 2.0, bounds.height / 2.0);
+        let radius = SPIN_SIZE / 2.0 - SPIN_LINE;
+        let stroke = |color: Color| {
             canvas::Stroke::default()
-                .with_width(2.0)
-                .with_color(self.color),
-        );
+                .with_width(SPIN_LINE)
+                .with_color(color)
+                .with_line_cap(canvas::LineCap::Round)
+        };
+        match self.indicator {
+            Indicator::Spinner(color) => {
+                frame.stroke(
+                    &canvas::Path::circle(center, radius),
+                    stroke(alpha(color, 0.18)),
+                );
+                let turn = (spin_epoch().elapsed().as_micros() % 1_000_000) as f32 / 1_000_000.0;
+                let start = turn * std::f32::consts::TAU;
+                let arc = canvas::Path::new(|path| {
+                    path.arc(canvas::path::Arc {
+                        center,
+                        radius,
+                        start_angle: Radians(start),
+                        end_angle: Radians(start + SPIN_ARC),
+                    });
+                });
+                frame.stroke(&arc, stroke(alpha(color, 0.95)));
+            }
+            // the shelf's status square: 8 px, round
+            Indicator::Dot(color) => frame.fill(&canvas::Path::circle(center, 4.0), color),
+        }
+        if let Some(shown_clock) = self.clock {
+            // out from under the spinner: from its middle to its place, easing out, fading in
+            let t = (now
+                .saturating_duration_since(shown_clock.shown)
+                .as_secs_f32()
+                / CLOCK_SLIDE.as_secs_f32())
+            .clamp(0.0, 1.0);
+            let eased = 1.0 - (1.0 - t).powi(3);
+            let end = shown_clock.width;
+            let from = bounds.width - SPIN_SIZE / 2.0;
+            let x = from + (end - from) * eased;
+            let ms = if shown_clock.ticking {
+                now.saturating_duration_since(shown_clock.base).as_millis() as u64
+            } else {
+                shown_clock.ms
+            };
+            let visible = Rectangle::new(
+                iced::Point::ORIGIN,
+                iced::Size::new(bounds.width - SPIN_SIZE - 1.0, bounds.height),
+            );
+            frame.with_clip(visible, |frame| {
+                frame.fill_text(canvas::Text {
+                    content: clock(ms),
+                    position: iced::Point::new(x, bounds.height / 2.0),
+                    color: alpha(P.fg_dim, eased),
+                    size: style::TEXT.into(),
+                    font: MONO_FONT,
+                    align_x: text::Alignment::Right,
+                    align_y: iced::alignment::Vertical::Center,
+                    ..canvas::Text::default()
+                });
+            });
+        }
         vec![frame.into_geometry()]
     }
+}
+
+/// One clock for every spinner, so two in view turn together.
+fn spin_epoch() -> Instant {
+    static START: OnceLock<Instant> = OnceLock::new();
+    *START.get_or_init(Instant::now)
 }

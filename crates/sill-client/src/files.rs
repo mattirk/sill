@@ -68,6 +68,12 @@ pub enum Request {
         repo: Option<HostPath>,
     },
     Repo(HostPath),
+    /// Line counts of a pinned repository's changed files (the first [`COUNT_CAP`]), for the Diff
+    /// view; `entries` are the status they are counted for.
+    Counts {
+        pin: HostPath,
+        entries: Vec<discovery::StatusEntry>,
+    },
     Pin {
         path: HostPath,
         on: bool,
@@ -96,9 +102,19 @@ pub enum Data {
         head: String,
         entries: Vec<discovery::StatusEntry>,
         summary: String,
+        /// Lines added and removed in the working tree, as git counts them.
+        lines: Option<(String, String)>,
     },
+    /// Each counted file's lines added and removed; `None` when it has no counts (binary, too
+    /// large, unchanged lines).
+    Counts(Vec<(String, Option<(u64, u64)>)>),
     Pinned,
 }
+
+/// The Diff view counts the lines of this many changed files per repository, as the shelf does.
+pub const COUNT_CAP: usize = 150;
+/// A new file larger than this gets no line count.
+const NEW_FILE_MAX: u64 = 1_000_000;
 
 /// The file worker: one connection, requests in order, each reply tagged as it was asked.
 /// Dropping it lets the worker finish its current request and leave.
@@ -160,6 +176,15 @@ pub struct Repo {
     pub head: String,
     pub entries: Vec<discovery::StatusEntry>,
     pub summary: String,
+    /// Lines added and removed in the working tree.
+    pub lines: Option<(String, String)>,
+    /// What git says of each changed path, and of each folder with a change below it.
+    pub changes: BTreeMap<std::path::PathBuf, Change>,
+    /// Lines added and removed per changed file (by key), for the Diff view.
+    pub counts: BTreeMap<String, Option<(u64, u64)>>,
+    /// The status the counts were asked for: asked again only when it changes.
+    pub counted: Option<Vec<(String, String)>>,
+    pub counts_pending: Option<u64>,
     pub pending: Option<u64>,
     pub error: Option<String>,
 }
@@ -218,7 +243,117 @@ pub struct FilesState {
     revisions: u64,
 }
 
+/// What git says of a path in the tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Change {
+    /// Modified, added, renamed…
+    Changed,
+    /// Untracked.
+    New,
+    Deleted,
+    /// A folder with changes somewhere below it.
+    Below,
+}
+
+/// What a set of counts was read for: each file and its status.
+fn signature(entries: &[discovery::StatusEntry]) -> Vec<(String, String)> {
+    entries
+        .iter()
+        .map(|e| (key(&e.path).to_string(), e.status.clone()))
+        .collect()
+}
+
+/// One changed file's lines added and removed: git's numstat for a tracked file, the line count
+/// of a new one (`shelf/diffstat.rs`); none for binary or very large files.
+fn count(client: &Client, entry: &discovery::StatusEntry) -> anyhow::Result<Option<(u64, u64)>> {
+    if entry.status.contains('?') {
+        let meta: admin::FileMetadata = client.call(
+            "_sill/files.metadata",
+            admin::FileKey {
+                path: entry.path.clone(),
+            },
+        )?;
+        if !meta.file || meta.length.parse::<u64>().unwrap_or(u64::MAX) > NEW_FILE_MAX {
+            return Ok(None);
+        }
+        let page: admin::FileBytes = client.call(
+            "_sill/files.read",
+            admin::FileRead {
+                path: entry.path.clone(),
+                offset: "0".into(),
+                length: Some(NEW_FILE_MAX as u32),
+                revision: None,
+            },
+        )?;
+        let bytes = admin::decode_bytes(&page.bytes_base64)?;
+        if bytes.iter().take(8192).any(|b| *b == 0) {
+            return Ok(None);
+        }
+        let lines = bytes.split(|b| *b == b'\n').count() as u64
+            - u64::from(bytes.ends_with(b"\n") || bytes.is_empty());
+        return Ok(Some((lines, 0)));
+    }
+    let s: discovery::SummaryResult = client.call(
+        "_sill/repos.summary",
+        discovery::PathKey {
+            path: entry.path.clone(),
+        },
+    )?;
+    Ok(s.summary.and_then(|s| {
+        let (added, removed) = (s.insertions.parse().ok()?, s.deletions.parse().ok()?);
+        // numstat has no counts for a binary file
+        (added > 0 || removed > 0).then_some((added, removed))
+    }))
+}
+
+/// A repository's status by path: each entry's own state, and `Below` for every folder between
+/// it and the repository's root.
+fn index(
+    root: Option<&HostPath>,
+    entries: &[discovery::StatusEntry],
+) -> BTreeMap<std::path::PathBuf, Change> {
+    let mut changes = BTreeMap::new();
+    let Some(root) = root.and_then(|r| r.to_path().ok()) else {
+        return changes;
+    };
+    for entry in entries {
+        let Ok(path) = entry.path.to_path() else {
+            continue;
+        };
+        let change = if entry.status.contains('?') {
+            Change::New
+        } else if entry.status.contains('D') {
+            Change::Deleted
+        } else {
+            Change::Changed
+        };
+        let mut folder = path.parent();
+        changes.insert(path.clone(), change);
+        while let Some(dir) = folder {
+            if dir == root || !dir.starts_with(&root) || changes.contains_key(dir) {
+                break;
+            }
+            changes.insert(dir.to_path_buf(), Change::Below);
+            folder = dir.parent();
+        }
+    }
+    changes
+}
+
 impl FilesState {
+    /// The path's git state, from the status of the pinned repository it is in.
+    pub fn change(&self, path: &HostPath) -> Option<Change> {
+        let path = path.to_path().ok()?;
+        self.repos
+            .values()
+            .find_map(|r| r.changes.get(&path).copied())
+    }
+
+    /// The repository a pinned folder is in: its head and line totals.
+    pub fn repo_of(&self, pin: &HostPath) -> Option<&Repo> {
+        self.repos.get(key(pin)).filter(|r| r.root.is_some())
+    }
+
     /// Pinned to this session (not only globally).
     pub fn pinned(&self, path: &HostPath) -> bool {
         self.roots
@@ -256,6 +391,11 @@ impl FilesState {
             }
             Request::Repo(path) => {
                 self.repos.entry(key(path).to_string()).or_default().pending = Some(serial);
+            }
+            Request::Counts { pin, entries } => {
+                let repo = self.repos.entry(key(pin).to_string()).or_default();
+                repo.counts_pending = Some(serial);
+                repo.counted = Some(signature(entries));
             }
             Request::Inspect(_) => self.inspect_pending = Some(serial),
             Request::Pin { .. } => self.pin_pending = Some(serial),
@@ -400,6 +540,21 @@ impl FilesState {
         self.directory_roots().map(Request::Repo).collect()
     }
 
+    /// The counts to read for the Diff view of `pin`'s repository, unless they are read already
+    /// for its current status.
+    fn counts_for(&self, pin: &HostPath) -> Option<Request> {
+        let repo = self.repos.get(key(pin))?;
+        repo.root.as_ref()?;
+        let entries: Vec<_> = repo.entries.iter().take(COUNT_CAP).cloned().collect();
+        if entries.is_empty() || repo.counted.as_ref() == Some(&signature(&entries)) {
+            return None;
+        }
+        Some(Request::Counts {
+            pin: pin.clone(),
+            entries,
+        })
+    }
+
     fn directory_roots(&self) -> impl Iterator<Item = HostPath> + '_ {
         self.roots
             .iter()
@@ -415,6 +570,7 @@ impl FilesState {
                 self.directories.get(key(path)).and_then(|d| d.pending)
             }
             Request::Repo(path) => self.repos.get(key(path)).and_then(|r| r.pending),
+            Request::Counts { pin, .. } => self.repos.get(key(pin)).and_then(|r| r.counts_pending),
             Request::File { .. } => self.reader.as_ref().and_then(|f| f.pending),
             Request::Inspect(_) => self.inspect_pending,
             Request::Pin { .. } => self.pin_pending,
@@ -448,11 +604,10 @@ impl FilesState {
                         self.roots = roots;
                         self.home.get_or_insert(home);
                         self.initialized = true;
-                        if self.diff_mode {
-                            effects
-                                .follow
-                                .extend(self.directory_roots().map(Request::Repo));
-                        }
+                        // the tree and the chips show what changed, not only the Diff view
+                        effects
+                            .follow
+                            .extend(self.directory_roots().map(Request::Repo));
                     }
                     Err(error) => self.error = Some(error),
                     _ => {}
@@ -476,11 +631,16 @@ impl FilesState {
                                 None => dir.entries.push(entry),
                             }
                         }
+                        // as the shelf lists a folder: folders first, hidden names last, case
+                        // ignored
                         dir.entries.sort_by(|a, b| {
+                            let (a_name, b_name) = (name(&a.path), name(&b.path));
                             b.metadata
                                 .directory
                                 .cmp(&a.metadata.directory)
-                                .then_with(|| name(&a.path).cmp(name(&b.path)))
+                                .then_with(|| a_name.starts_with('.').cmp(&b_name.starts_with('.')))
+                                .then_with(|| a_name.to_lowercase().cmp(&b_name.to_lowercase()))
+                                .then_with(|| a_name.cmp(b_name))
                         });
                         dir.next = page.next;
                     }
@@ -497,14 +657,31 @@ impl FilesState {
                         head,
                         entries,
                         summary,
+                        lines,
                     }) => {
                         repo.root = root;
                         repo.head = head;
                         repo.entries = entries;
                         repo.summary = summary;
+                        repo.lines = lines;
+                        repo.changes = index(repo.root.as_ref(), &repo.entries);
                         repo.error = None;
                     }
                     Err(error) => repo.error = Some(error),
+                    _ => {}
+                }
+                // the Diff view's counts, when what changed is not what was counted
+                if self.diff_mode {
+                    effects.follow.extend(self.counts_for(&path));
+                }
+            }
+            Request::Counts { pin, .. } => {
+                let repo = self.repos.entry(key(&pin).to_string()).or_default();
+                repo.counts_pending = None;
+                match reply.result {
+                    Ok(Data::Counts(counts)) => repo.counts = counts.into_iter().collect(),
+                    // no counts is not an error worth a banner: the rows show none
+                    Err(_) => repo.counted = None,
                     _ => {}
                 }
             }
@@ -670,14 +847,26 @@ pub fn execute(client: &Client, session: &str, request: &Request) -> anyhow::Res
             Data::Pinned
         }
         Request::File { path, repo } => Data::File(read_text(client, path, repo.as_ref())?),
+        Request::Counts { entries, .. } => Data::Counts(
+            entries
+                .iter()
+                .map(|e| (key(&e.path).to_string(), count(client, e).ok().flatten()))
+                .collect(),
+        ),
         Request::Repo(path) => {
-            let root: discovery::Root = client.call(
-                "_sill/repos.root",
-                discovery::PathKey { path: path.clone() },
-            )?;
+            // the daemon looks for `.git` from the path's parent up (`changes::repo_root`, made for
+            // files), so a folder that is itself a repository is asked about through a child, as
+            // the shelf does (`shelf/tree.rs`)
+            let inside = path
+                .to_path()
+                .map(|p| HostPath::from_path(&p.join("x")))
+                .unwrap_or_else(|_| path.clone());
+            let root: discovery::Root =
+                client.call("_sill/repos.root", discovery::PathKey { path: inside })?;
             let mut head = String::new();
             let mut entries = Vec::new();
             let mut summary = String::new();
+            let mut lines = None;
             if let Some(repo) = &root.path {
                 let h: discovery::HeadResult = client.call(
                     "_sill/repos.head",
@@ -690,6 +879,7 @@ pub fn execute(client: &Client, session: &str, request: &Request) -> anyhow::Res
                 )?;
                 if let Some(s) = s.summary {
                     summary = format!("+{} −{}  ?{}", s.insertions, s.deletions, s.untracked);
+                    lines = Some((s.insertions, s.deletions));
                 }
                 let mut after = None;
                 loop {
@@ -718,6 +908,7 @@ pub fn execute(client: &Client, session: &str, request: &Request) -> anyhow::Res
                 head,
                 entries,
                 summary,
+                lines,
             }
         }
     })

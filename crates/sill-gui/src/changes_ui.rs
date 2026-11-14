@@ -125,12 +125,21 @@ impl App {
             space().width(Fill),
             toggle("Pending", false),
             toggle("History", true),
-            small(
-                if page.loading || page.history_loading {
-                    "…"
-                } else {
-                    "↻"
-                },
+            keys::press_maybe(
+                button(crate::icons::glyph(
+                    "refresh",
+                    13.0,
+                    alpha(
+                        P.fg,
+                        if page.loading || page.history_loading {
+                            0.3
+                        } else {
+                            0.7
+                        }
+                    ),
+                ))
+                .padding([4, 8])
+                .style(style::quiet),
                 Some(event(Event::Refresh)),
             ),
         ]
@@ -173,6 +182,7 @@ impl App {
             }),
             rule::horizontal(1).style(style::rule_style(P.border)),
             scrollable(container(body).padding([8, 12]))
+                .direction(scrollable::Direction::Vertical(style::bar()))
                 .id("changes")
                 .height(Fill)
                 .style(style::feed_scroll),
@@ -310,9 +320,15 @@ impl App {
                     )
                     .width(Fill)
                     .clip(true),
-                    text(if open { "▾" } else { "▸" })
-                        .size(style::TINY)
-                        .color(P.fg_dim),
+                    crate::icons::glyph(
+                        if open {
+                            "chevron-down"
+                        } else {
+                            "chevron-right"
+                        },
+                        12.0,
+                        P.fg_dim
+                    ),
                 ]
                 .spacing(6)
                 .align_y(Alignment::Center),

@@ -9,6 +9,7 @@ mod menu;
 #[cfg(test)]
 mod perf;
 mod selection;
+mod settings;
 #[cfg(test)]
 mod snapshots;
 mod style;
@@ -188,7 +189,13 @@ pub enum Message {
     ReopenTerminal,
     Workspace(workspace::Action),
     /// The window's new width.
-    Resized(f32),
+    Resized(iced::Size),
+    /// The window is open: ask for its monitor's size.
+    Opened(iced::window::Id),
+    /// The monitor's size, once the window knows it: Shelf mode's width comes from it.
+    Monitor(Option<iced::Size>),
+    /// The pointer came over the top bar's activity, or left it: the timer shows meanwhile.
+    ActivityHover(bool),
     /// Full conversation, and the drawer's edge dragged.
     Layout(layout::Action),
     /// Tab (true) or Shift+Tab: the keyboard moves to the next or previous control.
@@ -226,6 +233,9 @@ pub struct Rendered {
 /// Dropping it ends the lane and detaches the terminal; the session goes on.
 pub struct SessionView {
     pub id: String,
+    /// When the working clock came into view, for its slide out from under the spinner; set
+    /// while drawing (the view has no other way to see the clock appear).
+    pub clock_shown: std::cell::Cell<Option<Instant>>,
     lane: Option<Lane>,
     lane_epoch: u64,
     pub status: Status,
@@ -257,6 +267,7 @@ impl SessionView {
     fn new(id: &str) -> Self {
         Self {
             id: id.into(),
+            clock_shown: std::cell::Cell::new(None),
             lane: None,
             lane_epoch: 0,
             status: Status::Closed,
@@ -419,7 +430,15 @@ pub struct App {
     demo_step: usize,
     /// The window's width, for the narrow layout's choices.
     pub width: f32,
+    pub height: f32,
     pub layout: layout::Layout,
+    /// sill-gui's own settings (`settings.rs`); saved only when `persist` (not in the demo).
+    pub settings: settings::Settings,
+    persist: bool,
+    /// The monitor's logical size, once known.
+    pub monitor: Option<iced::Size>,
+    /// The pointer is over the top bar's activity (the shelf shows the timer then).
+    pub activity_hovered: bool,
     /// A selection is being dragged in the conversation: following the tail would pull the text
     /// from under the pointer, so new text does not scroll it until the drag ends.
     pub selecting: bool,
@@ -478,7 +497,12 @@ impl App {
             now: Instant::now(),
             demo_step: 0,
             width: 720.0,
+            height: 860.0,
             layout: layout::Layout::default(),
+            settings: settings::Settings::default(),
+            persist: false,
+            monitor: None,
+            activity_hovered: false,
             selecting: false,
         };
         if demo {
@@ -499,6 +523,19 @@ impl App {
             let files = app.files_refresh("demo");
             return (app, Task::batch([file_task, files]));
         }
+        // the window's mode and sizes as it last had them (not in the demo or tests)
+        if !demo && !cfg!(test) && app.connect.is_some() {
+            app.settings = settings::load();
+            app.persist = true;
+        }
+        app.layout.mode = app
+            .settings
+            .mode
+            .as_deref()
+            .and_then(layout::Mode::from_name)
+            .unwrap_or_default();
+        app.layout.drawer = app.settings.drawer_width;
+        app.workspace.shown = app.layout.mode == layout::Mode::Drawer;
         let (tx, rx) = async_channel::bounded(256);
         app.lanes = Some(tx);
         let lanes = iced::futures::stream::unfold(rx, |rx| async move {
@@ -517,15 +554,101 @@ impl App {
         )
     }
 
+    fn save_settings(&mut self) {
+        self.settings.mode = Some(self.layout.mode.name().into());
+        self.settings.drawer_width = self.layout.drawer;
+        if self.persist {
+            settings::save(&self.settings);
+        }
+    }
+
+    /// The working size (Drawer and Full): as the window last had it, else half the monitor.
+    fn work_size(&self) -> Option<iced::Size> {
+        let height = self.settings.work_height.unwrap_or(self.height);
+        match self.settings.work_width {
+            Some(width) => Some(iced::Size::new(width, height)),
+            None => self
+                .monitor
+                .map(|m| iced::Size::new((m.width * layout::WORK_SHARE).round(), height)),
+        }
+    }
+
+    /// The window's size rule for the mode it is in: Shelf mode is at most its share of the
+    /// monitor and held there (a maximum the window manager may honour; a tiling one decides for
+    /// itself); the other modes have the working size and no maximum.
+    fn fit_window(&self, entering: bool) -> Task<Message> {
+        // nothing to fit before the window knows its monitor (and no window in tests)
+        if self.monitor.is_none() {
+            return Task::none();
+        }
+        let mut tasks = vec![];
+        if self.layout.mode == layout::Mode::Shelf {
+            let Some(monitor) = self.monitor else {
+                return Task::none();
+            };
+            let width = (monitor.width * self.settings.shelf_share()).round();
+            let max = iced::Size::new(width, monitor.height.max(self.height));
+            let size = iced::Size::new(width.min(self.width.max(layout::MAIN_MIN)), self.height);
+            let size = if entering {
+                iced::Size::new(width, self.height)
+            } else {
+                size
+            };
+            tasks.push(
+                iced::window::latest()
+                    .and_then(move |id| iced::window::set_max_size(id, Some(max))),
+            );
+            tasks.push(iced::window::latest().and_then(move |id| iced::window::resize(id, size)));
+        } else {
+            tasks.push(iced::window::latest().and_then(|id| iced::window::set_max_size(id, None)));
+            if entering && let Some(size) = self.work_size() {
+                tasks.push(
+                    iced::window::latest().and_then(move |id| iced::window::resize(id, size)),
+                );
+            }
+        }
+        Task::batch(tasks)
+    }
+
+    /// Into `mode`: the drawer in Drawer mode only (a quick look elsewhere closes), the window's
+    /// size from Shelf to working and back; Drawer ⇄ Full keep the window as it is.
+    fn set_mode(&mut self, mode: layout::Mode) -> Task<Message> {
+        use layout::Mode;
+        let old = self.layout.mode;
+        if old == mode {
+            return Task::none();
+        }
+        if old != Mode::Shelf {
+            self.settings.work_width = Some(self.width);
+            self.settings.work_height = Some(self.height);
+        }
+        if mode == Mode::Full {
+            self.layout.before_full = old;
+        }
+        self.layout.mode = mode;
+        let opening = mode == Mode::Drawer && !self.workspace.shown;
+        self.workspace.shown = mode == Mode::Drawer;
+        self.save_settings();
+        let mut tasks = vec![self.restore_scroll()];
+        if opening && let Some(id) = self.selected.clone() {
+            tasks.push(self.files_refresh(&id));
+        }
+        if (old == Mode::Shelf) != (mode == Mode::Shelf) {
+            tasks.push(self.fit_window(true));
+        }
+        Task::batch(tasks)
+    }
+
     fn subscription(&self) -> Subscription<Message> {
         let mut subscriptions = vec![];
         if self.demo && self.demo_step <= demo::CHUNKS.len() {
             subscriptions
                 .push(iced::time::every(Duration::from_millis(600)).map(|_| Message::DemoTick));
         }
-        // the spinner and the timer move only while the agent is busy
+        // while the agent is busy: the summaries' clocks and the timer's width, once a second
+        // (the spinner and the timer draw themselves every frame, without a new view)
         if self.current().is_some_and(|v| v.conversation.busy()) {
-            subscriptions.push(iced::time::every(Duration::from_millis(80)).map(|_| Message::Tick));
+            subscriptions.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick));
         }
         // sessions started or ended elsewhere appear and go
         if !self.demo {
@@ -533,9 +656,10 @@ impl App {
                 .push(iced::time::every(Duration::from_secs(15)).map(|_| Message::Refresh));
         }
         subscriptions.push(iced::keyboard::listen().filter_map(keys::shortcut));
-        subscriptions
-            .push(iced::window::resize_events().map(|(_, size)| Message::Resized(size.width)));
+        subscriptions.push(iced::window::resize_events().map(|(_, size)| Message::Resized(size)));
         subscriptions.push(self.layout.subscription());
+        // the monitor's size once the window is there: Shelf mode's width comes from it
+        subscriptions.push(iced::window::open_events().map(Message::Opened));
         Subscription::batch(subscriptions)
     }
 
@@ -638,9 +762,8 @@ impl App {
                 {
                     tasks.push(self.changes_event(changes_ui::Event::Refresh));
                 }
-                if self.workspace.shown
-                    && let Some(id) = self.selected.clone()
-                {
+                // the pins' chips show their changed lines with the drawer closed too
+                if let Some(id) = self.selected.clone() {
                     tasks.push(self.files_refresh(&id));
                 }
                 return Task::batch(tasks);
@@ -807,7 +930,16 @@ impl App {
                 return self.restore_scroll();
             }
             Message::DragWindow => return iced::window::latest().and_then(iced::window::drag),
-            Message::Quit => return iced::exit(),
+            // the window goes; the daemon and its sessions go on (the tray icon and the hotkey
+            // will bring the window back, docs/sill-gui.md)
+            Message::Quit => {
+                if self.layout.mode != layout::Mode::Shelf {
+                    self.settings.work_width = Some(self.width);
+                    self.settings.work_height = Some(self.height);
+                }
+                self.save_settings();
+                return iced::exit();
+            }
             Message::ToggleTerminal => return self.toggle_terminal(),
             Message::ReopenTerminal => return self.open_terminal(),
             Message::EndTerminal => {
@@ -847,11 +979,24 @@ impl App {
                 }
             }
             Message::Workspace(action) => return self.workspace_action(action),
-            Message::Resized(width) => self.width = width,
+            Message::Resized(size) => {
+                self.width = size.width;
+                self.height = size.height;
+            }
+            Message::ActivityHover(on) => self.activity_hovered = on,
+            Message::Opened(id) => {
+                return iced::window::monitor_size(id).map(Message::Monitor);
+            }
+            Message::Monitor(size) => {
+                self.monitor = size;
+                return self.fit_window(false);
+            }
             Message::Layout(action) => match action {
-                layout::Action::ToggleFull => {
-                    self.layout.full = !self.layout.full;
-                    return self.restore_scroll();
+                layout::Action::Mode(_)
+                | layout::Action::ToggleShelf
+                | layout::Action::ToggleFull => {
+                    let mode = self.layout.after(action);
+                    return self.set_mode(mode);
                 }
                 layout::Action::DragStart => self.layout.dragging = true,
                 layout::Action::DragTo(x) => {
@@ -859,7 +1004,11 @@ impl App {
                         self.layout.drag_to(x, self.workspace.shown, self.width);
                     }
                 }
-                layout::Action::DragEnd => self.layout.dragging = false,
+                layout::Action::DragEnd => {
+                    if std::mem::take(&mut self.layout.dragging) {
+                        self.save_settings();
+                    }
+                }
             },
             Message::Focus(forward) => return keys::step(forward),
             Message::StepTab(delta) => {
@@ -1169,6 +1318,10 @@ impl App {
     fn menu_event(&mut self, event: menu::Event) -> Task<Message> {
         use menu::Event;
         match event {
+            Event::View(mode) => {
+                self.menu = None;
+                return self.set_mode(mode);
+            }
             Event::Toggle => {
                 if self.menu.take().is_some() {
                     return Task::none();
@@ -1288,13 +1441,13 @@ impl App {
         if self.changes.take().is_some() {
             return self.restore_scroll();
         }
-        // full conversation is left first, as in the shelf
-        if self.layout.full {
-            self.layout.full = false;
-            return self.restore_scroll();
+        // full conversation is left first, as in the shelf: back to where it came from
+        if self.layout.mode == layout::Mode::Full {
+            return self.set_mode(self.layout.before_full);
         }
         self.armed_close = None;
-        let drawer = self.workspace.shown;
+        // the quick look closes; the drawer of Drawer mode stays
+        let drawer = self.workspace.shown && self.layout.mode != layout::Mode::Drawer;
         let Some(view) = self.current_mut() else {
             return Task::none();
         };

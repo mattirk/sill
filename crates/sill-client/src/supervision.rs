@@ -39,6 +39,9 @@ pub struct Attention {
     pub link: Option<String>,
     /// Working time of the current turn in milliseconds, at `now_ms`.
     pub working_ms: Option<u64>,
+    /// The time the agent has worked in this session, at `now_ms`, whether or not it works now
+    /// (the shelf's timer, shown when its status is hovered).
+    pub worked_ms: Option<u64>,
 }
 
 impl Attention {
@@ -66,6 +69,11 @@ impl Attention {
             let since = s.active_since_ms?;
             Some(s.active_ms + now_ms.saturating_sub(since))
         });
+        let worked_ms = session.map(|s| {
+            s.active_ms
+                + s.active_since_ms
+                    .map_or(0, |since| now_ms.saturating_sub(since))
+        });
         Self {
             activity,
             questions: conversation
@@ -80,6 +88,7 @@ impl Attention {
                 .count(),
             link: status.problem().map(str::to_owned),
             working_ms,
+            worked_ms,
         }
     }
 

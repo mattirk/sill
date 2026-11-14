@@ -1,8 +1,8 @@
 //! Agent Markdown as the shelf shows it: prose and fenced code on the code background with a copy
 //! button that shows while the pointer is over the block (`.sill-code`, `.sill-copy`). Headings,
 //! paragraphs, list markers and every code line are selection leaves, so one selection runs
-//! across all of them inside the conversation's (or a reader's) selection area; tables and quotes
-//! reach them through iced's defaults, which call back into `paragraph`. Rules and images keep
+//! across all of them inside the conversation's (or a reader's) selection area; tables (drawn
+//! here for their thin scrollbar) and quotes reach them through `paragraph`. Rules and images keep
 //! iced's defaults.
 use iced::widget::markdown::{self, Bullet, HeadingLevel, Item, Settings, Text, Uri, Viewer};
 use iced::widget::{button, checkbox, column, container, hover, right, row, scrollable, text};
@@ -146,9 +146,7 @@ impl<'a> Viewer<'a, Message> for SillViewer {
                 })))
                 .padding(Padding::from([8.0, 12.0])),
             )
-            .direction(scrollable::Direction::Horizontal(
-                scrollable::Scrollbar::default().width(4).scroller_width(4),
-            ))
+            .direction(scrollable::Direction::Horizontal(crate::style::bar()))
             .style(style::feed_scroll),
         )
         .width(Fill)
@@ -162,6 +160,43 @@ impl<'a> Viewer<'a, Message> for SillViewer {
         .padding([4, 6]);
         container(hover(body, copy))
             .padding(Padding::from([2.0, 8.0]))
+            .into()
+    }
+
+    /// iced's table, scrolling sideways on the thin bar that hides at rest (iced's own is 10 px
+    /// with a visible track). Needs the patched `Row::cells` (vendor/README.md).
+    fn table(
+        &self,
+        settings: Settings,
+        columns: &'a [markdown::Column],
+        rows: &'a [markdown::Row],
+    ) -> Element<'a, Message> {
+        use iced::widget::table;
+        let table = table(
+            columns.iter().enumerate().map(move |(i, column)| {
+                table::column(
+                    markdown::items(self, settings, &column.header),
+                    move |row: &markdown::Row| match row.cells().get(i) {
+                        Some(cells) => markdown::items(self, settings, cells),
+                        None => text("").into(),
+                    },
+                )
+                // the parser's alignment, by name: iced does not re-export its type
+                .align_x(match format!("{:?}", column.alignment).as_str() {
+                    "Center" => alignment::Horizontal::Center,
+                    "Right" => alignment::Horizontal::Right,
+                    _ => alignment::Horizontal::Left,
+                })
+            }),
+            rows,
+        )
+        .padding_x(settings.spacing.0)
+        .padding_y(settings.spacing.0 / 2.0)
+        .separator_x(0);
+        scrollable(table)
+            .direction(scrollable::Direction::Horizontal(crate::style::bar()))
+            .spacing(settings.spacing.0 / 2.0)
+            .style(style::feed_scroll)
             .into()
     }
 }
