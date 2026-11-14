@@ -288,7 +288,8 @@ impl App {
                     // not move away as the pointer approaches it from the indicator.
                     mouse_area(
                         row![
-                            keys::press(
+                            // the menu opens as the pointer comes over the +; a click still toggles
+                            mouse_area(keys::press(
                                 button(
                                     svg(icons::plus())
                                         .width(15)
@@ -298,7 +299,8 @@ impl App {
                                 .padding(4)
                                 .style(style::quiet),
                                 Message::Menu(crate::menu::Event::Toggle),
-                            ),
+                            ))
+                            .on_enter(Message::Menu(crate::menu::Event::Hover)),
                             // the activity over the drawer when it is beside the conversation, so the +
                             // ends the conversation's side, as in the shelf
                             match self.layout.drawer(drawer_open, width) {

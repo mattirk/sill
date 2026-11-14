@@ -2503,8 +2503,14 @@ impl App {
                 self.menu = None;
                 return self.set_mode(mode);
             }
-            Event::Toggle => {
-                if self.menu.take().is_some() {
+            Event::Leave => {
+                self.menu = None;
+            }
+            Event::Toggle | Event::Hover => {
+                if matches!(event, Event::Toggle) && self.menu.take().is_some() {
+                    return Task::none();
+                }
+                if self.menu.is_some() {
                     return Task::none();
                 }
                 self.menu = Some(menu::Menu::default());

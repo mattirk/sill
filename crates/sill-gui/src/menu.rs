@@ -32,6 +32,10 @@ pub struct Menu {
 #[derive(Debug, Clone)]
 pub enum Event {
     Toggle,
+    /// The pointer came over the +: the menu opens without a click (and stays if already open).
+    Hover,
+    /// The pointer left the menu: it closes.
+    Leave,
     Agents(Result<Vec<Definition>, String>),
     RememberPins(bool),
     Filter(String),
@@ -181,10 +185,11 @@ impl App {
                 left: 0.0,
             })
             .align_right(Fill);
-        // a press anywhere else closes the menu
+        // a press anywhere else closes the menu, and so does the pointer leaving it (it opened as
+        // the pointer came over the +, which the menu's top padding covers)
         iced::widget::stack![
             mouse_area(container(space()).width(Fill).height(Fill)).on_press(event(Event::Toggle)),
-            placed,
+            mouse_area(placed).on_exit(event(Event::Leave)),
         ]
         .into()
     }
