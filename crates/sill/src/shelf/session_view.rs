@@ -660,13 +660,52 @@ impl SessionView {
                     || formats.mime_types().iter().any(|mime| mime.starts_with("image/"));
                 if !has_image { return; } // Let GTK paste ordinary text normally.
                 prompt.stop_signal_emission_by_name("paste-clipboard");
-                cb.read_texture_async(None::<&gtk::gio::Cancellable>, move |res| {
-                    match res {
-                        Ok(Some(tex)) => v.attach_texture(&tex),
-                        Ok(None) => v.conv.add_error("could not paste image: clipboard supplied no image; copy it again or attach the file"),
-                        Err(e) => v.conv.add_error(&format!("could not paste image: {e}; copy it again or attach the file")),
+                v.conv.add_note("reading image from clipboard…");
+                let cancellable = gtk::gio::Cancellable::new();
+                let finished = Rc::new(std::cell::Cell::new(false));
+                let timeout_finished = finished.clone();
+                let timeout_cancel = cancellable.clone();
+                let timeout_view = Rc::downgrade(&v);
+                glib::timeout_add_local_once(std::time::Duration::from_secs(15), move || {
+                    if !timeout_finished.replace(true) {
+                        timeout_cancel.cancel();
+                        if let Some(v) = timeout_view.upgrade() {
+                            v.conv.add_error("clipboard image read timed out; save the image and attach the file instead");
+                        }
                     }
                 });
+                // Prefer explicit encoded image data. This separates transfer from GTK's
+                // texture deserializer, which can otherwise stall without showing a stage.
+                let image_mimes: Vec<&str> = ["image/png", "image/jpeg", "image/webp", "image/bmp", "image/gif"]
+                    .into_iter().filter(|mime| formats.contain_mime_type(mime)).collect();
+                if !image_mimes.is_empty() {
+                    let read_cancel = cancellable.clone();
+                    cb.read_async(&image_mimes, glib::Priority::DEFAULT, Some(&cancellable), move |res| {
+                        if finished.get() { return; }
+                        match res {
+                            Ok((stream, mime)) => {
+                                v.conv.add_note(&format!("clipboard {mime} stream opened; receiving image…"));
+                                v.read_clipboard_image(stream, read_cancel, finished, Vec::new());
+                            }
+                            Err(e) => {
+                                finished.set(true);
+                                v.conv.add_error(&format!("could not open clipboard image stream: {e}"));
+                            }
+                        }
+                    });
+                } else {
+                    cb.read_texture_async(Some(&cancellable), move |res| {
+                        if finished.replace(true) { return; }
+                        match res {
+                            Ok(Some(tex)) => {
+                                v.conv.add_note(&format!("clipboard image received ({}×{}); preparing attachment…", tex.width(), tex.height()));
+                                v.attach_texture(&tex);
+                            }
+                            Ok(None) => v.conv.add_error("could not paste image: clipboard supplied no image; copy it again or attach the file"),
+                            Err(e) => v.conv.add_error(&format!("could not paste image: {e}; copy it again or attach the file")),
+                        }
+                    });
+                }
             });
         }
 
@@ -1956,11 +1995,53 @@ impl SessionView {
         }
     }
 
-    /// A pasted image: PNG, inline. Refused above 8 MB (the agent would choke on it anyway).
+    /// Drain asynchronously so large clipboard transfers never block the GTK event loop.
+    fn read_clipboard_image(
+        self: &Rc<Self>, stream: gtk::gio::InputStream,
+        cancel: gtk::gio::Cancellable, finished: Rc<std::cell::Cell<bool>>,
+        mut bytes: Vec<u8>,
+    ) {
+        let v = self.clone();
+        let next_stream = stream.clone();
+        let next_cancel = cancel.clone();
+        stream.read_bytes_async(64 * 1024, glib::Priority::DEFAULT, Some(&cancel), move |res| {
+            if finished.get() { return; }
+            match res {
+                Ok(chunk) if chunk.is_empty() => {
+                    finished.set(true);
+                    let _ = next_stream.close(Some(&next_cancel));
+                    v.conv.add_note(&format!("clipboard transfer complete ({} bytes); decoding image…", bytes.len()));
+                    match gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes)) {
+                        Ok(tex) => v.attach_texture(&tex),
+                        Err(e) => v.conv.add_error(&format!("could not decode clipboard image: {e}")),
+                    }
+                }
+                Ok(chunk) => {
+                    // Transport safety bound, independent of the decoded attachment limit.
+                    if bytes.len().saturating_add(chunk.len()) > 16 * 1024 * 1024 {
+                        finished.set(true);
+                        next_cancel.cancel();
+                        let _ = next_stream.close(None::<&gtk::gio::Cancellable>);
+                        v.conv.add_error("clipboard image transfer exceeds 16 MiB");
+                        return;
+                    }
+                    bytes.extend_from_slice(&chunk);
+                    v.read_clipboard_image(next_stream, next_cancel, finished, bytes);
+                }
+                Err(e) => {
+                    finished.set(true);
+                    let _ = next_stream.close(None::<&gtk::gio::Cancellable>);
+                    v.conv.add_error(&format!("clipboard image transfer failed after {} bytes: {e}", bytes.len()));
+                }
+            }
+        });
+    }
+
+    /// A pasted image: PNG, inline, bounded by the daemon's decoded attachment limit.
     fn attach_texture(self: &Rc<Self>, tex: &gdk::Texture) {
         let png = tex.save_to_png_bytes();
-        if png.len() > 8 << 20 {
-            self.conv.add_note("image not attached: larger than 8 MB");
+        if png.len() > 1 << 20 {
+            self.conv.add_note(&format!("image not attached: PNG is {:.2} MiB; inline images are limited to 1 MiB", png.len() as f64 / (1024.0 * 1024.0)));
             return;
         }
         let n = self.attachments.borrow().iter().filter(|a| a.mime.starts_with("image/")).count() + 1;
