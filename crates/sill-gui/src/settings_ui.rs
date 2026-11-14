@@ -41,6 +41,8 @@ pub struct SettingsPage {
     /// Delete all ended sessions was pressed once.
     pub armed_delete: bool,
     pub where_open: bool,
+    /// The hotkey as typed, before it is applied.
+    pub hotkey: Option<String>,
 }
 
 impl Default for SettingsPage {
@@ -53,6 +55,7 @@ impl Default for SettingsPage {
             said: None,
             armed_delete: false,
             where_open: false,
+            hotkey: None,
         }
     }
 }
@@ -72,6 +75,9 @@ pub enum Event {
     Compact,
     DeleteAll,
     ToggleWhere,
+    AlwaysOnTop(bool),
+    HotkeyInput(String),
+    ApplyHotkey,
 }
 
 fn event(event: Event) -> Message {
@@ -330,6 +336,64 @@ impl App {
                     choice(SHELF_SHARES.iter().map(|(_, l)| *l), share_at, |i| {
                         event(Event::ShelfShare(SHELF_SHARES[i].0))
                     }),
+                ),
+            ],
+        ));
+
+        // ---- Window
+        let spec = page.hotkey.clone().unwrap_or_else(|| {
+            s.hotkey
+                .clone()
+                .unwrap_or_else(|| crate::hotkey::DEFAULT.into())
+        });
+        let typed_ok = crate::hotkey::validate(&spec).err();
+        let saved = s.hotkey.as_deref().unwrap_or(crate::hotkey::DEFAULT);
+        let mut hotkey = column![
+            row![
+                text_input("<Control>Tab", &spec)
+                    .size(style::SMALL)
+                    .padding(7)
+                    .width(180)
+                    .on_input(|v| event(Event::HotkeyInput(v)))
+                    .on_submit(event(Event::ApplyHotkey)),
+                quiet_button(
+                    "Apply",
+                    (typed_ok.is_none() && spec.trim() != saved).then(|| event(Event::ApplyHotkey)),
+                ),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(6);
+        if let Some(why) = typed_ok {
+            hotkey = hotkey.push(text(format!("{why:#}")).size(style::SMALL).color(P.error));
+        }
+        if let Some(status) = &self.hotkey_status {
+            hotkey = hotkey.push(text(status).size(style::SMALL).color(P.fg_dim));
+        }
+        page_column = page_column.push(section(
+            "Window",
+            vec![
+                setting(
+                    "Always on top",
+                    Some("The window stays above others (sill-gui)"),
+                    switch(self.settings.always_on_top(), |v| {
+                        event(Event::AlwaysOnTop(v))
+                    }),
+                ),
+                setting(
+                    "Tray icon",
+                    Some("Click to show or hide; its menu quits the window (shared with the shelf)"),
+                    switch(s.tray.unwrap_or(true), move |v| {
+                        change(SettingChange::Tray { value: Some(v) })
+                    }),
+                ),
+                wide(
+                    "Hotkey",
+                    Some(
+                        "Shows, raises or hides the window — GTK accelerator syntax: <Control>Tab, <Alt>space, <Super>grave, F12",
+                    ),
+                    hotkey,
                 ),
             ],
         ));

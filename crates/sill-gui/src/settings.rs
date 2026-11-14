@@ -17,9 +17,19 @@ pub struct Settings {
     pub work_height: Option<f32>,
     /// The drawer's width as last dragged, logical pixels.
     pub drawer_width: Option<f32>,
+    /// The window stays above others. Unset = on, as the GTK shelf.
+    pub always_on_top: Option<bool>,
+    /// Where the window was left in Drawer and Full mode, device pixels (Shelf mode is always on
+    /// its edge). Unset = the top-left of the working area.
+    pub window_x: Option<i32>,
+    pub window_y: Option<i32>,
 }
 
 impl Settings {
+    pub fn always_on_top(&self) -> bool {
+        self.always_on_top.unwrap_or(true)
+    }
+
     /// Shelf mode's share of the monitor's width.
     pub fn shelf_share(&self) -> f32 {
         self.shelf_width

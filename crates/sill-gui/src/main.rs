@@ -1,8 +1,11 @@
 mod changes_ui;
+mod control;
 mod demo;
+mod desktop;
 mod fonts;
 mod forms;
 mod herring;
+mod hotkey;
 mod icons;
 mod keys;
 mod layout;
@@ -19,6 +22,7 @@ mod style;
 mod terminal;
 #[cfg(test)]
 mod tests;
+mod tray;
 mod ui;
 mod viewer;
 mod workspace;
@@ -53,24 +57,65 @@ struct Options {
     /// Show a synthetic streaming conversation without connecting to a daemon.
     #[arg(long)]
     demo: bool,
+    /// Start without showing the window (the shelf's service): `sill toggle`, the hotkey or
+    /// starting sill-gui again shows it.
+    #[arg(long)]
+    hidden: bool,
 }
+
+/// What the control socket received, for the window to do (`control.rs`); taken once by the app.
+static CONTROL: std::sync::Mutex<Option<async_channel::Receiver<control::Command>>> =
+    std::sync::Mutex::new(None);
+/// The window started hidden.
+static HIDDEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn main() -> iced::Result {
     prefer_low_power_gpu();
     let options = Options::parse();
+    // one sill-gui per account: a second start shows the running one and leaves
+    if !options.demo {
+        let (tx, rx) = async_channel::unbounded();
+        match control::claim(move |command| tx.send_blocking(command).is_ok()) {
+            Ok(Some(())) => *CONTROL.lock().unwrap() = Some(rx),
+            Ok(None) => {
+                if !options.hidden && !control::send(control::Command::Show) {
+                    eprintln!(
+                        "sill-gui: another sill-gui holds the control socket but did not answer"
+                    );
+                }
+                return Ok(());
+            }
+            Err(e) => eprintln!(
+                "sill-gui: no control socket ({e}): `sill toggle` and a second start cannot reach this window"
+            ),
+        }
+    }
+    HIDDEN.store(options.hidden, std::sync::atomic::Ordering::Relaxed);
     fonts::install();
+    let above = !options.demo && settings::load().always_on_top();
     iced::application(
         move || App::new(options.demo, options.session.clone()),
         App::update,
         App::view,
     )
-    .title("Sill · Iced preview")
+    .title("Sill")
     .theme(|_: &App| style::theme())
     .subscription(App::subscription)
     .default_font(Font::with_name(fonts::SANS_FAMILY))
-    .window_size((720.0, 860.0))
-    // no title bar, like the shelf: the top bar's empty space moves the window, Ctrl+Q quits
-    .decorations(false)
+    .window(iced::window::Settings {
+        size: iced::Size::new(720.0, 860.0),
+        // no title bar, like the shelf: the top bar's empty space moves the window
+        decorations: false,
+        visible: !options.hidden,
+        // closing hides: the window stays, and with it the hotkey and `sill toggle`
+        exit_on_close_request: options.demo,
+        level: if above {
+            iced::window::Level::AlwaysOnTop
+        } else {
+            iced::window::Level::Normal
+        },
+        ..iced::window::Settings::default()
+    })
     .run()
 }
 
@@ -199,6 +244,24 @@ pub enum Message {
     Resized(iced::Size),
     /// The window is open: ask for its monitor's size.
     Opened(iced::window::Id),
+    /// The window's X11 id, for placing and activating it.
+    XId(u64),
+    /// From the control socket: show, hide, toggle, quit.
+    Control(control::Command),
+    /// From the hotkey's thread: a press, or how the grab stands.
+    Hotkey(hotkey::Report),
+    /// A toggle on a shown window: hidden when it is the active one, else raised.
+    ToggleDecided(bool, u32),
+    /// The window manager asked to close the window: it hides.
+    CloseRequested,
+    /// From the tray icon.
+    Tray(tray::Asked),
+    /// Where the window was when it hid (Drawer and Full mode keep it).
+    Hidden(Option<(i32, i32)>),
+    /// Where the window was when it went into Shelf mode.
+    Remember(Option<(i32, i32)>),
+    /// Work done off the window's thread that needs no answer.
+    Nothing,
     /// The monitor's size, once the window knows it: Shelf mode's width comes from it.
     Monitor(Option<iced::Size>),
     /// The pointer came over the top bar's activity, or left it: the timer shows meanwhile.
@@ -458,6 +521,17 @@ pub struct App {
     persist: bool,
     /// The monitor's logical size, once known.
     pub monitor: Option<iced::Size>,
+    /// The window, once open, and its X11 id.
+    pub window_id: Option<iced::window::Id>,
+    pub xid: Option<u64>,
+    /// The window is shown (not hidden by the hotkey, `sill toggle` or Close).
+    pub visible: bool,
+    /// The global hotkey's thread (none in the demo and the tests), and how its grab stands.
+    hotkey: Option<hotkey::Hotkey>,
+    pub hotkey_status: Option<String>,
+    /// The tray icon while the shared `tray` setting has it, and where its clicks go.
+    tray: Option<tray::Tray>,
+    tray_asked: Option<async_channel::Sender<tray::Asked>>,
     /// The pointer is over the top bar's activity (the shelf shows the timer then).
     pub activity_hovered: bool,
     /// When the view last went between the session and the backend: the herring swims a stroke.
@@ -528,6 +602,13 @@ impl App {
             settings: settings::Settings::default(),
             persist: false,
             monitor: None,
+            window_id: None,
+            xid: None,
+            visible: !HIDDEN.load(std::sync::atomic::Ordering::Relaxed),
+            hotkey: None,
+            hotkey_status: None,
+            tray: None,
+            tray_asked: None,
             activity_hovered: false,
             herring_flick: None,
             selecting: false,
@@ -563,6 +644,31 @@ impl App {
             .unwrap_or_default();
         app.layout.drawer = app.settings.drawer_width;
         app.workspace.shown = app.layout.mode == layout::Mode::Drawer;
+        // the control socket's commands, and the hotkey (a real window only)
+        let mut desktop_tasks = Vec::new();
+        if let Some(control) = CONTROL.lock().unwrap().take() {
+            let commands = iced::futures::stream::unfold(control, |rx| async move {
+                rx.recv().await.ok().map(|command| (command, rx))
+            });
+            desktop_tasks.push(Task::run(commands, Message::Control));
+        }
+        if !demo && !cfg!(test) {
+            let (tx, rx) = async_channel::unbounded();
+            app.hotkey = Some(hotkey::start(move |report| {
+                tx.send_blocking(report).is_ok()
+            }));
+            let reports = iced::futures::stream::unfold(rx, |rx| async move {
+                rx.recv().await.ok().map(|report| (report, rx))
+            });
+            desktop_tasks.push(Task::run(reports, Message::Hotkey));
+            // the tray's clicks; the icon itself once the settings say whether to show it
+            let (tx, rx) = async_channel::unbounded();
+            app.tray_asked = Some(tx);
+            let asked = iced::futures::stream::unfold(rx, |rx| async move {
+                rx.recv().await.ok().map(|asked| (asked, rx))
+            });
+            desktop_tasks.push(Task::run(asked, Message::Tray));
+        }
         let (tx, rx) = async_channel::bounded(256);
         app.lanes = Some(tx);
         let lanes = iced::futures::stream::unfold(rx, |rx| async move {
@@ -577,7 +683,162 @@ impl App {
                     Message::Lane(session, epoch, update)
                 }),
                 list,
+                Task::batch(desktop_tasks),
             ]),
+        )
+    }
+
+    /// Where the window goes when shown, off the window's thread: Shelf mode on its edge, sized;
+    /// otherwise where it was left, else the working area's top-left. Set before the window is
+    /// mapped and again after, so the window manager neither places it nor moves it back.
+    fn placing(&self) -> impl Fn() + Send + Clone + 'static {
+        let xid = self.xid;
+        let shelf = (self.layout.mode == layout::Mode::Shelf).then(|| self.settings.shelf_share());
+        let left = self.settings.window_x.zip(self.settings.window_y);
+        move || {
+            let Some(xid) = xid else { return };
+            desktop::stamp(xid);
+            match shelf {
+                Some(share) => {
+                    if let Some(p) = desktop::shelf_placement(share) {
+                        desktop::pre_place(xid, p.x, p.y, Some((p.width, p.height)));
+                    }
+                }
+                None => {
+                    if let Some((x, y)) = left.or_else(desktop::work_origin) {
+                        desktop::pre_place(xid, x, y, None);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Show the window: placed, mapped, placed again, then activated with the time of the press
+    /// that asked for it (0 when none did).
+    fn show(&mut self, time: u32) -> Task<Message> {
+        let Some(id) = self.window_id else {
+            return Task::none();
+        };
+        self.visible = true;
+        let xid = self.xid;
+        let place = self.placing();
+        let again = place.clone();
+        blocking(place, |()| Message::Nothing)
+            .chain(iced::window::set_mode(id, iced::window::Mode::Windowed))
+            .chain(blocking(
+                move || {
+                    let Some(xid) = xid else { return };
+                    // the window manager maps it first; then it is placed again and activated —
+                    // asked again a moment later, should the first ask come before it was managed
+                    std::thread::sleep(std::time::Duration::from_millis(60));
+                    again();
+                    desktop::activate(xid, time);
+                    // the window manager now and then lets the request go by, or gives the focus
+                    // back to the window before: asked again, and the focus set directly, until
+                    // the window is active — for a little over a second, never once it is
+                    let mut asks = 1;
+                    for wait in [200u64, 250, 300, 400] {
+                        std::thread::sleep(std::time::Duration::from_millis(wait));
+                        if desktop::is_active(xid) {
+                            break;
+                        }
+                        asks += 1;
+                        desktop::activate(xid, time);
+                        desktop::focus(xid);
+                    }
+                    // to the journal when it took more than one ask: how often the window
+                    // manager lets a request go by
+                    if asks > 1 {
+                        eprintln!(
+                            "sill-gui: brought up: {} after {asks} asks",
+                            if desktop::is_active(xid) {
+                                "active"
+                            } else {
+                                "still not active"
+                            }
+                        );
+                    }
+                },
+                |()| Message::Nothing,
+            ))
+            // and the keyboard in the session's prompt
+            .chain(self.focus_prompt())
+    }
+
+    /// The prompt takes the keyboard, where a session's conversation is shown.
+    fn focus_prompt(&self) -> Task<Message> {
+        if self.backend_shown() || self.current().is_none_or(|v| v.terminal_shown) {
+            return Task::none();
+        }
+        operation::focus("prompt")
+    }
+
+    /// Hide the window; it goes on, and the hotkey or `sill toggle` shows it again. Where it was
+    /// is read first, to show it there again.
+    fn hide(&mut self) -> Task<Message> {
+        if self.window_id.is_none() {
+            return Task::none();
+        }
+        self.visible = false;
+        match self.xid {
+            Some(xid) => blocking(move || desktop::position(xid), Message::Hidden),
+            None => self.hidden(None),
+        }
+    }
+
+    /// The window's place kept (Drawer and Full mode), and the window unmapped.
+    fn hidden(&mut self, at: Option<(i32, i32)>) -> Task<Message> {
+        if self.layout.mode != layout::Mode::Shelf {
+            self.settings.work_width = Some(self.width);
+            self.settings.work_height = Some(self.height);
+            if let Some((x, y)) = at {
+                self.settings.window_x = Some(x);
+                self.settings.window_y = Some(y);
+            }
+        }
+        self.save_settings();
+        match self.window_id {
+            Some(id) => iced::window::set_mode(id, iced::window::Mode::Hidden),
+            None => Task::none(),
+        }
+    }
+
+    /// The hotkey's toggle: shown and active, it hides; shown behind others, it comes up; hidden,
+    /// it shows.
+    fn toggle(&mut self, time: u32) -> Task<Message> {
+        if !self.visible {
+            return self.show(time);
+        }
+        let Some(xid) = self.xid else {
+            return self.hide();
+        };
+        blocking(
+            move || desktop::is_active(xid),
+            move |active| Message::ToggleDecided(active, time),
+        )
+    }
+
+    /// The window where it goes (`placing`), while it is shown (X11).
+    fn place_window(&self) -> Task<Message> {
+        if self.xid.is_none() {
+            return Task::none();
+        }
+        blocking(self.placing(), |()| Message::Nothing)
+    }
+
+    fn set_always_on_top(&mut self, on: bool) -> Task<Message> {
+        self.settings.always_on_top = Some(on);
+        self.save_settings();
+        let Some(id) = self.window_id else {
+            return Task::none();
+        };
+        iced::window::set_level(
+            id,
+            if on {
+                iced::window::Level::AlwaysOnTop
+            } else {
+                iced::window::Level::Normal
+            },
         )
     }
 
@@ -634,6 +895,11 @@ impl App {
                 );
             }
         }
+        // into a mode, the window goes where it belongs there: Shelf mode on its edge, its full
+        // working height; Drawer and Full where the window was left
+        if entering {
+            return Task::batch(tasks).chain(self.place_window());
+        }
         Task::batch(tasks)
     }
 
@@ -661,7 +927,14 @@ impl App {
             tasks.push(self.files_refresh(&id));
         }
         if (old == Mode::Shelf) != (mode == Mode::Shelf) {
-            tasks.push(self.fit_window(true));
+            // into Shelf mode: where the window was is kept for when it comes out
+            match self.xid.filter(|_| mode == Mode::Shelf) {
+                Some(xid) => tasks.push(
+                    blocking(move || desktop::position(xid), Message::Remember)
+                        .chain(self.fit_window(true)),
+                ),
+                None => tasks.push(self.fit_window(true)),
+            }
         }
         Task::batch(tasks)
     }
@@ -687,6 +960,7 @@ impl App {
         subscriptions.push(self.layout.subscription());
         // the monitor's size once the window is there: Shelf mode's width comes from it
         subscriptions.push(iced::window::open_events().map(Message::Opened));
+        subscriptions.push(iced::window::close_requests().map(|_| Message::CloseRequested));
         Subscription::batch(subscriptions)
     }
 
@@ -943,13 +1217,18 @@ impl App {
             Message::DragWindow => return iced::window::latest().and_then(iced::window::drag),
             // the window goes; the daemon and its sessions go on (the tray icon and the hotkey
             // will bring the window back, docs/sill-gui.md)
+            // Close and Ctrl+Q hide the window: it stays, so the hotkey and `sill toggle` bring
+            // it back (the demo, with neither, quits)
             Message::Quit => {
-                if self.layout.mode != layout::Mode::Shelf {
-                    self.settings.work_width = Some(self.width);
-                    self.settings.work_height = Some(self.height);
+                if self.demo || self.window_id.is_none() {
+                    if self.layout.mode != layout::Mode::Shelf {
+                        self.settings.work_width = Some(self.width);
+                        self.settings.work_height = Some(self.height);
+                    }
+                    self.save_settings();
+                    return iced::exit();
                 }
-                self.save_settings();
-                return iced::exit();
+                return self.hide();
             }
             Message::ToggleTerminal => return self.toggle_terminal(),
             Message::ReopenTerminal => return self.open_terminal(),
@@ -996,8 +1275,52 @@ impl App {
             }
             Message::ActivityHover(on) => self.activity_hovered = on,
             Message::Opened(id) => {
-                return iced::window::monitor_size(id).map(Message::Monitor);
+                self.window_id = Some(id);
+                return Task::batch([
+                    iced::window::monitor_size(id).map(Message::Monitor),
+                    iced::window::raw_id::<Message>(id).map(Message::XId),
+                ]);
             }
+            Message::XId(xid) => {
+                self.xid = Some(xid);
+                if self.visible {
+                    return self.place_window();
+                }
+            }
+            Message::Control(command) => match command {
+                control::Command::Show => return self.show(0),
+                control::Command::Hide => return self.hide(),
+                control::Command::Toggle(time) => return self.toggle(time),
+                control::Command::Quit => {
+                    let _ = self.hide();
+                    return iced::exit();
+                }
+            },
+            Message::Hotkey(hotkey::Report::Pressed(time)) => return self.toggle(time),
+            Message::Hotkey(hotkey::Report::Status(status)) => {
+                eprintln!("sill-gui: hotkey: {status}");
+                self.hotkey_status = Some(status);
+            }
+            Message::ToggleDecided(active, time) => {
+                return if active { self.hide() } else { self.show(time) };
+            }
+            Message::CloseRequested => return self.hide(),
+            Message::Hidden(at) => return self.hidden(at),
+            Message::Remember(at) => {
+                if let Some((x, y)) = at {
+                    self.settings.window_x = Some(x);
+                    self.settings.window_y = Some(y);
+                    self.save_settings();
+                }
+            }
+            Message::Tray(tray::Asked::Toggle) => return self.toggle(0),
+            Message::Tray(tray::Asked::Quit) => {
+                if let Some(tray) = self.tray.take() {
+                    tray.shutdown();
+                }
+                return self.hide().chain(iced::exit());
+            }
+            Message::Nothing => {}
             Message::Monitor(size) => {
                 self.monitor = size;
                 return self.fit_window(false);
@@ -1049,6 +1372,25 @@ impl App {
             Message::Settings(event) => return self.settings_event(event),
             Message::DaemonSettings(Ok(settings)) => {
                 style::set_theme(&settings.theme);
+                if let Some(hotkey) = &self.hotkey {
+                    // `SILL_GUI_HOTKEY` overrides the shared setting: a second sill-gui beside the
+                    // running one, for trying a build
+                    let spec = std::env::var("SILL_GUI_HOTKEY").ok();
+                    hotkey.set(
+                        spec.as_deref()
+                            .or(settings.hotkey.as_deref())
+                            .unwrap_or(hotkey::DEFAULT),
+                    );
+                }
+                // the tray icon as the shared setting says (unset: shown, as the shelf's)
+                let want = settings.tray.unwrap_or(true);
+                if want && self.tray.is_none() {
+                    if let Some(asked) = self.tray_asked.clone() {
+                        self.tray = tray::start(asked);
+                    }
+                } else if !want && let Some(tray) = self.tray.take() {
+                    tray.shutdown();
+                }
                 self.daemon_settings = Some(settings);
             }
             Message::DaemonSettings(Err(_)) => {}
@@ -1364,6 +1706,27 @@ impl App {
                 });
             }
             Event::ToggleWhere => page.where_open = !page.where_open,
+            Event::AlwaysOnTop(on) => return self.set_always_on_top(on),
+            Event::HotkeyInput(value) => page.hotkey = Some(value),
+            Event::ApplyHotkey => {
+                let Some(spec) = page.hotkey.clone() else {
+                    return Task::none();
+                };
+                if crate::hotkey::validate(&spec).is_err() {
+                    return Task::none();
+                }
+                page.hotkey = None;
+                // the grab follows at once; the setting is shared with the GTK shelf
+                if let Some(hotkey) = &self.hotkey {
+                    hotkey.set(spec.trim());
+                }
+                return self.settings_call(
+                    settings::patch(sill_proto::admin::SettingChange::Hotkey {
+                        value: Some(spec.trim().to_string()),
+                    }),
+                    |_| String::new(),
+                );
+            }
         }
         Task::none()
     }

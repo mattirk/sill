@@ -62,8 +62,16 @@ pub fn set(name: Option<String>) -> Result<()> {
         println!("{}", chosen().name());
         println!(
             "available: gtk {} · iced {}",
-            if HAS_GTK { "(in this binary)" } else { "(not in this binary)" },
-            if gui.is_absolute() { format!("({})", gui.display()) } else { "(sill-gui not installed beside sill)".into() }
+            if HAS_GTK {
+                "(in this binary)"
+            } else {
+                "(not in this binary)"
+            },
+            if gui.is_absolute() {
+                format!("({})", gui.display())
+            } else {
+                "(sill-gui not installed beside sill)".into()
+            }
         );
         return Ok(());
     };
@@ -76,10 +84,15 @@ pub fn set(name: Option<String>) -> Result<()> {
         bail!("this sill was built without the GTK shelf (the `shelf` feature)");
     }
     if frontend == Frontend::Iced && !gui_exe(false).is_absolute() {
-        eprintln!("warning: sill-gui is not installed beside this sill; `sill shelf` will look for it on PATH");
+        eprintln!(
+            "warning: sill-gui is not installed beside this sill; `sill shelf` will look for it on PATH"
+        );
     }
     sill_core::config::update(|c| c.frontend = Some(frontend.name().into()))?;
-    println!("frontend: {} — `sill restart` switches to it", frontend.name());
+    println!(
+        "frontend: {} — `sill restart` switches to it",
+        frontend.name()
+    );
     Ok(())
 }
 
@@ -90,9 +103,12 @@ pub fn shelf(cwd: Option<PathBuf>, hidden: bool) -> Result<()> {
         Frontend::Iced => {
             use std::os::unix::process::CommandExt;
             let exe = gui_exe(false);
-            // sill-gui has no hidden start yet: it comes with show/hide and the hotkey
-            let _ = (cwd, hidden);
-            let error = std::process::Command::new(&exe).exec();
+            let _ = cwd;
+            let mut command = std::process::Command::new(&exe);
+            if hidden {
+                command.arg("--hidden");
+            }
+            let error = command.exec();
             Err(error).with_context(|| format!("start {}", exe.display()))
         }
         #[cfg(feature = "shelf")]
@@ -105,7 +121,7 @@ pub fn shelf(cwd: Option<PathBuf>, hidden: bool) -> Result<()> {
 /// `sill toggle`: show or hide the chosen frontend's window.
 pub fn toggle() -> Result<()> {
     match chosen() {
-        Frontend::Iced => bail!("sill-gui has no show/hide yet (it comes with the hotkey)"),
+        Frontend::Iced => gui_command("toggle 0"),
         #[cfg(feature = "shelf")]
         Frontend::Gtk => crate::shelf::toggle(),
         #[cfg(not(feature = "shelf"))]
@@ -124,6 +140,33 @@ pub fn restart(hidden: bool, dev: bool, detached: bool) -> Result<()> {
             let _ = (hidden, detached);
             restart_iced(dev)
         }
+    }
+}
+
+/// sill-gui's control socket (`sill-gui`'s `control.rs`, the same path).
+fn gui_socket() -> PathBuf {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("sill-{}", rustix::process::getuid().as_raw()))
+        });
+    runtime.join("sill").join("gui.sock")
+}
+
+/// One command to the running sill-gui, and its answer.
+fn gui_command(line: &str) -> Result<()> {
+    use std::io::{BufRead, BufReader, Write};
+    let path = gui_socket();
+    let mut stream = std::os::unix::net::UnixStream::connect(&path)
+        .with_context(|| format!("sill-gui is not running ({})", path.display()))?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
+    writeln!(stream, "{line}")?;
+    let mut answer = String::new();
+    BufReader::new(stream).read_line(&mut answer)?;
+    match answer.trim() {
+        "ok" => Ok(()),
+        other => bail!("sill-gui answered: {other}"),
     }
 }
 
