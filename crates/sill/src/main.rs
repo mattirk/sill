@@ -139,12 +139,28 @@ enum Cmd {
         #[command(subcommand)]
         cmd: RegistryCmd,
     },
+    /// The global pins (docs/pins.md): bound in every new session's jail, a chip only when pinned
+    /// in the session too
+    Pin {
+        #[command(subcommand)]
+        cmd: Option<PinCmd>,
+    },
     /// Show a policy as sill reads it
     Policy {
         /// name (searched in ~/.config/sill/policies, /etc/sill/policies, built-in) or path
         #[arg(default_value = "default")]
         name: String,
     },
+}
+
+#[derive(Subcommand)]
+enum PinCmd {
+    /// List the global pins
+    List,
+    /// Add a folder or file (refused inside another global pin, or inside sill's own state)
+    Add { path: PathBuf },
+    /// Remove one; sessions started later no longer bind it
+    Remove { path: PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -494,6 +510,7 @@ fn main() -> Result<()> {
         }
         Cmd::Memory { cmd } => memory_cmd(cmd),
         Cmd::Session { cmd } => session_cmd(cmd),
+        Cmd::Pin { cmd } => pin_cmd(cmd.unwrap_or(PinCmd::List)),
         Cmd::Changes { cmd } => changes_cmd(cmd.unwrap_or(ChangesCmd::List)),
         Cmd::Daemon { cmd } => daemon_cmd(cmd),
         Cmd::Registry { cmd: RegistryCmd::Snapshot { out } } => {
@@ -1108,6 +1125,29 @@ fn changes_cmd(cmd: ChangesCmd) -> Result<()> {
         }
         ChangesCmd::Undo { session: key, ids, force } => report(c.call(m::CHANGES_UNDO, sill_proto::ChangesUndo { session: session(&key)?, ids, force })?),
     }
+}
+
+fn pin_cmd(cmd: PinCmd) -> Result<()> {
+    let c = sill_proto::Client::connect_or_start()?;
+    match cmd {
+        PinCmd::List => {
+            let pins: Vec<PathBuf> = c.call(sill_proto::method::PINS_LIST, sill_proto::Empty::default())?;
+            for p in pins {
+                println!("{}", p.display());
+            }
+        }
+        PinCmd::Add { path } => {
+            let path = path.canonicalize().with_context(|| format!("pin {}", path.display()))?;
+            let _: serde_json::Value = c.call(sill_proto::method::PINS_ADD, sill_proto::GlobalPin { path: path.clone() })?;
+            println!("{} pinned globally", path.display());
+        }
+        PinCmd::Remove { path } => {
+            let path = path.canonicalize().unwrap_or(path);
+            let _: serde_json::Value = c.call(sill_proto::method::PINS_REMOVE, sill_proto::GlobalPin { path: path.clone() })?;
+            println!("{} removed from the global pins", path.display());
+        }
+    }
+    Ok(())
 }
 
 fn session_cmd(cmd: SessionCmd) -> Result<()> {

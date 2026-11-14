@@ -176,6 +176,12 @@ pub fn build() -> gtk::Widget {
     });
     row(&card, "Remember pins", Some("A new session starts with the latest session's pins"), &pins);
 
+    // global pins (docs/pins.md): always bound, never a chip; a list with × and add buttons
+    let pins_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    let pins_msg = wide(&card, "Global pins", Some("Folders and files every new session may work in; a chip and the agent's focus only when pinned in the session too"), &pins_box);
+    pins_msg.set_visible(true);
+    fill_global_pins(&pins_box, &pins_msg);
+
     // desktop access for new sessions (SPEC §4.2): X11 / D-Bus — policy, on, off
     let home_path = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
     let (pol_x11, pol_dbus) = sill_core::policy::Policy::load("default", &home_path).map(|p| (p.jail.x11, p.jail.dbus)).unwrap_or((false, false));
@@ -484,6 +490,71 @@ pub fn build() -> gtk::Widget {
 
 /// A section: its title over an empty card. Rows go into the card with [`row`], [`wide`] or
 /// [`plain`]; the whole goes into the page.
+/// The global pins list in Settings: one row per pin with a ×, then "Add folder…" and "Add
+/// file…". The daemon takes the adds and removes (and refuses nested ones); the tree follows.
+fn fill_global_pins(list: &gtk::Box, msg: &gtk::Label) {
+    while let Some(c) = list.first_child() {
+        list.remove(&c);
+    }
+    let home = std::env::var("HOME").map(std::path::PathBuf::from).unwrap_or_default();
+    let pins = sill_core::store::Store::open_default().and_then(|st| st.global_pins()).unwrap_or_default();
+    for p in &pins {
+        let r = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let shown = p.strip_prefix(&home).map(|rel| format!("~/{}", rel.display())).unwrap_or_else(|_| p.display().to_string());
+        let l = gtk::Label::new(Some(&shown));
+        l.set_xalign(0.0);
+        l.set_hexpand(true);
+        l.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+        l.set_tooltip_text(Some(&p.display().to_string()));
+        r.append(&l);
+        let x = gtk::Button::new();
+        x.add_css_class("flat");
+        x.set_child(Some(&super::icons::scalable("sill-minus", super::icons::fg_for(&x, &super::theme::current()))));
+        x.set_tooltip_text(Some("Remove from the global pins (sessions started later no longer bind it)"));
+        let (l2, m2, p) = (list.clone(), msg.clone(), p.clone());
+        x.connect_clicked(move |_| {
+            match super::client::global_pin(&p, false) {
+                Ok(()) => super::window::refresh_tree(),
+                Err(e) => m2.set_label(&format!("{e:#}")),
+            }
+            fill_global_pins(&l2, &m2);
+        });
+        r.append(&x);
+        list.append(&r);
+    }
+    if pins.is_empty() {
+        let l = gtk::Label::new(Some("None yet"));
+        l.add_css_class("dim-label");
+        l.set_xalign(0.0);
+        list.append(&l);
+    }
+    let adds = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    for (label, folder) in [("Add folder…", true), ("Add file…", false)] {
+        let b = gtk::Button::with_label(label);
+        let (l2, m2) = (list.clone(), msg.clone());
+        b.connect_clicked(move |b| {
+            let dialog = gtk::FileDialog::builder().title(if folder { "Pin a folder globally" } else { "Pin a file globally" }).modal(true).build();
+            let parent = b.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+            let (list, msg) = (l2.clone(), m2.clone());
+            let done = move |res: Result<gtk::gio::File, glib::Error>| {
+                let Some(path) = res.ok().and_then(|f| f.path()) else { return };
+                match super::client::global_pin(&path, true) {
+                    Ok(()) => super::window::refresh_tree(),
+                    Err(e) => msg.set_label(&format!("{e:#}")),
+                }
+                fill_global_pins(&list, &msg);
+            };
+            if folder {
+                dialog.select_folder(parent.as_ref(), None::<&gtk::gio::Cancellable>, done);
+            } else {
+                dialog.open(parent.as_ref(), None::<&gtk::gio::Cancellable>, done);
+            }
+        });
+        adds.append(&b);
+    }
+    list.append(&adds);
+}
+
 fn section(title: &str) -> (gtk::Box, gtk::Box) {
     let outer = gtk::Box::new(gtk::Orientation::Vertical, 6);
     let t = gtk::Label::new(Some(title));

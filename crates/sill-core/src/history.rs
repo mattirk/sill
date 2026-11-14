@@ -59,7 +59,7 @@ pub fn note_pin_starts(store: &Store, s: &Session) -> Result<()> {
     if s.ghost {
         return Ok(());
     }
-    for repo in store.pins(&s.id)?.into_iter().filter(|p| p.join(".git").exists()) {
+    for repo in store.jail_pins(&s.id)?.into_iter().filter(|p| p.join(".git").exists()) {
         if let Some(h) = head(&repo) {
             store.conn().execute(
                 "INSERT OR IGNORE INTO pin_heads (session_id, repo, head, ts) VALUES (?1, ?2, ?3, ?4)",

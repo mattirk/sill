@@ -154,6 +154,13 @@ pub fn pin(id: &str, path: &std::path::Path, on: bool) -> Result<()> {
     Ok(())
 }
 
+/// A global pin added or removed (docs/pins.md); the daemon canonicalizes and refuses nested ones.
+pub fn global_pin(path: &std::path::Path, on: bool) -> Result<()> {
+    let m = if on { sill_proto::method::PINS_ADD } else { sill_proto::method::PINS_REMOVE };
+    write::<serde_json::Value>(m, sill_proto::GlobalPin { path: path.to_path_buf() })?;
+    Ok(())
+}
+
 pub fn note_add(id: &str, text: &str) -> Result<()> {
     write::<serde_json::Value>(sill_proto::method::MEMORY_NOTE_ADD, sill_proto::Note { key: id.to_string(), text: text.to_string(), ts: 0 })?;
     Ok(())

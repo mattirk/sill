@@ -15,7 +15,7 @@ pub mod rpc;
 pub use client::Client;
 
 /// Bumped when a method or a type changes shape; the daemon reports its own in [`DaemonStatus`].
-pub const PROTOCOL: u32 = 3;
+pub const PROTOCOL: u32 = 4;
 
 /// Method names. Groups follow the table in docs/daemon.md §3.3.
 pub mod method {
@@ -57,6 +57,12 @@ pub mod method {
     pub const SESSIONS_DELETE: &str = "_sill/sessions.delete";
     pub const SESSIONS_PIN: &str = "_sill/sessions.pin";
     pub const SESSIONS_UNPIN: &str = "_sill/sessions.unpin";
+    /// The global pins (docs/pins.md): bound in every non-ghost jail, a chip only when pinned in
+    /// the session too. `pins.list` answers `Vec<PathBuf>`; `pins.add` and `pins.remove` take a
+    /// [`GlobalPin`] (added paths are canonical, refused inside another global pin or sill's state).
+    pub const PINS_LIST: &str = "_sill/pins.list";
+    pub const PINS_ADD: &str = "_sill/pins.add";
+    pub const PINS_REMOVE: &str = "_sill/pins.remove";
     pub const MEMORY_NOTE_ADD: &str = "_sill/memory.note_add";
     pub const MEMORY_NOTE_REMOVE: &str = "_sill/memory.note_remove";
     /// Compaction and retention now (docs/memory.md §2.4); answers [`Compacted`].
@@ -276,6 +282,12 @@ pub struct SessionSet {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pin {
     pub key: String,
+    pub path: PathBuf,
+}
+
+/// `_sill/pins.add`, `_sill/pins.remove`: a global pin.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GlobalPin {
     pub path: PathBuf,
 }
 

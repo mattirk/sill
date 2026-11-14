@@ -270,6 +270,9 @@ pub struct FolderTree {
     pinned: Rc<RefCell<Vec<PathBuf>>>,
     /// Pinned by some other session than the current one: shown, but the button pins here.
     elsewhere: Rc<RefCell<Vec<PathBuf>>>,
+    /// The global pins not pinned to the current session (docs/pins.md): their own group, the
+    /// tooltip says they are bound in every jail.
+    global: Rc<RefCell<Vec<PathBuf>>>,
     message: gtk::Label,
     /// Under the rows when the global view has nothing but home: how to get a folder into it.
     hint: gtk::Label,
@@ -324,6 +327,7 @@ impl FolderTree {
         let badges: Rc<RefCell<BTreeMap<PathBuf, Badge>>> = Rc::new(RefCell::new(BTreeMap::new()));
         let pinned: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
         let elsewhere: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
+        let global: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
         let roots = gio::ListStore::new::<gtk::StringObject>();
         let listed: Listed = Rc::new(RefCell::new(BTreeMap::new()));
         // the tree itself, for closures made before it exists (set below)
@@ -396,6 +400,7 @@ impl FolderTree {
             let badges = badges.clone();
             let pinned = pinned.clone();
             let elsewhere = elsewhere.clone();
+            let global = global.clone();
             let tree_rc = tree_rc.clone();
             let home = session::home().unwrap_or_default();
             Rc::new(move |item: &gtk::ListItem| {
@@ -430,15 +435,10 @@ impl FolderTree {
                     return;
                 }
                 let Some(path) = path_of(&row) else { return };
-                // the global view's home root is a caption of its own that opens: "Home" in the
-                // caption's style with the folder icon (it opens like one), no pin — a folder among
-                // the pinned ones otherwise
+                // the global view's home root is a row of its own: "home" at the rows' size, its
+                // folder icon in its own colour, no pin — a folder among the pinned ones otherwise
                 let home_caption = row.depth() == 0 && path == home && tree_rc.borrow().as_ref().and_then(|w| w.upgrade()).is_some_and(|t| t.scope.borrow().is_none());
-                if home_caption {
-                    name.add_css_class("sill-tree-section");
-                } else {
-                    name.remove_css_class("sill-tree-section");
-                }
+                name.remove_css_class("sill-tree-section");
                 icon.set_visible(true);
                 pin.set_visible(!home_caption);
                 let is_dir = is_real_dir(&path);
@@ -461,6 +461,12 @@ impl FolderTree {
                 } else {
                     icon.remove_css_class("sill-pinned");
                 }
+                if home_caption {
+                    if let Ok(c) = gtk::gdk::RGBA::parse(theme::current().success) {
+                        fg = c;
+                    }
+                    icon.add_css_class("sill-pinned");
+                }
                 let glyph = if link { "sill-link" } else { row_glyph(&path, is_dir, row.is_expanded()) };
                 icon.set_paintable(super::icons::stroke_texture(glyph, fg).as_ref());
                 let fname = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -473,7 +479,7 @@ impl FolderTree {
                 // every row shows its name alone — a root too, since the branch took the room the
                 // path had; its glyph marks it as a root and the tooltip has the whole path
                 let label = if home_caption {
-                    "Home".to_string()
+                    "home".to_string()
                 } else if searching && row.depth() == 0 {
                     let base = tree_rc.borrow().as_ref().and_then(|w| w.upgrade()).and_then(|t| t.scope.borrow().clone());
                     match base.as_ref().and_then(|b| path.strip_prefix(b).ok()) {
@@ -550,8 +556,11 @@ impl FolderTree {
                         None => "git repository".into(),
                     });
                 }
+                let is_global = !is_pinned && global.borrow().contains(&path);
                 if is_pinned {
                     tip.push("pinned to the current session".into());
+                } else if is_global {
+                    tip.push("a global pin: in every session's jail; + makes it this session's focus too".into());
                 } else if is_elsewhere {
                     tip.push("pinned by another session, not this one".into());
                 }
@@ -626,6 +635,7 @@ impl FolderTree {
             changes: Rc::new(RefCell::new(Vec::new())),
             pinned,
             elsewhere,
+            global,
             message,
             hint,
             pin_target: RefCell::new(None),
@@ -828,6 +838,15 @@ impl FolderTree {
                 pins.push(p.clone());
             }
         }
+        // the global pins (docs/pins.md): bound in every jail, shown as their own group, suggestions
+        // for the pin button; one pinned here too is in "Pinned here" and not repeated
+        let global: Vec<PathBuf> = self.store.global_pins().unwrap_or_default().into_iter().filter(|p| !target_pins.contains(p)).collect();
+        for p in &global {
+            if !pins.contains(p) {
+                pins.push(p.clone());
+            }
+        }
+        *self.global.borrow_mut() = global;
         *self.elsewhere.borrow_mut() = elsewhere;
         *self.pinned.borrow_mut() = target_pins;
         let scope = self.scope.borrow().clone();
@@ -914,7 +933,8 @@ impl FolderTree {
             Some(s) => vec![s.clone()],
             None => self.pinned.borrow().iter().filter(|p| p.is_dir()).cloned().collect(),
         };
-        // the global view's second group: every repository a session changed that isn't pinned here
+        let global: Vec<PathBuf> = self.global.borrow().iter().filter(|p| p.is_dir()).cloned().collect();
+        // the global view's third group: every repository a session changed that isn't pinned
         let mut touched: Vec<PathBuf> = Vec::new();
         for c in all.iter().filter(|c| !c.ignored) {
             let mark = format!("{}{}", c.kind.letter(), if c.conflict { "!" } else { "" });
@@ -928,6 +948,7 @@ impl FolderTree {
             if scope.is_none()
                 && let Some(r) = changes::repo_root(&c.path)
                 && !roots.contains(&r)
+                && !global.contains(&r)
                 && !touched.contains(&r)
             {
                 touched.push(r);
@@ -935,7 +956,7 @@ impl FolderTree {
         }
         roots.dedup();
         // the global view with nothing but home: say how to get a folder into it
-        self.hint.set_visible(scope.is_none() && roots.is_empty() && touched.is_empty());
+        self.hint.set_visible(scope.is_none() && roots.is_empty() && global.is_empty() && touched.is_empty());
         // the rows to show: the scoped folder alone, or the global view's groups under their
         // captions (a group that is empty has no caption)
         let text = |p: &PathBuf| p.to_string_lossy().into_owned();
@@ -950,9 +971,10 @@ impl FolderTree {
                     }
                 };
                 section("Pinned here", &roots);
+                section("Global pins", &global);
                 section("Repositories with changes", &touched);
                 // home is its own caption: the row reads "Home" and opens on click (decorate)
-                if !roots.contains(&home) && !touched.contains(&home) {
+                if !roots.contains(&home) && !global.contains(&home) && !touched.contains(&home) {
                     w.push(text(&home));
                 }
                 w

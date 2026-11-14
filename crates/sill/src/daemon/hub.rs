@@ -15,7 +15,7 @@ use sill_core::session::StartOptions;
 use sill_core::store::Store;
 use sill_proto::rpc::Error;
 use sill_proto::{
-    AgentSettingsSet, Attach, Compacted, Count, DaemonStatus, End, Ending, Key, LogRequest, MemorySearch, MemorySession, NewSession, Note, Pin, Session,
+    AgentSettingsSet, Attach, Compacted, Count, DaemonStatus, End, Ending, GlobalPin, Key, LogRequest, MemorySearch, MemorySession, NewSession, Note, Pin, Session,
     SessionAnswer, SessionCommand, SessionSet, Started, Text, Transcript, method,
 };
 
@@ -265,6 +265,17 @@ impl Hub {
                 }
                 self.with_session(&p.key, |s, id| if m == method::SESSIONS_PIN { s.pin(id, &p.path) } else { s.unpin(id, &p.path) })
                     .map_err(|e| Error::failed(format!("{e:#}")))?;
+                Ok(json!({}))
+            }
+            method::PINS_LIST => to_value(self.with_store(|st| st.global_pins()).map_err(|e| Error::failed(format!("{e:#}")))?),
+            method::PINS_ADD => {
+                let p: GlobalPin = args(params)?;
+                self.add_global_pin(&p.path).map_err(|e| Error::failed(format!("{e:#}")))?;
+                Ok(json!({}))
+            }
+            method::PINS_REMOVE => {
+                let p: GlobalPin = args(params)?;
+                self.with_store(|st| st.global_unpin(&p.path)).map_err(|e| Error::failed(format!("{e:#}")))?;
                 Ok(json!({}))
             }
             method::MEMORY_NOTE_ADD => {
@@ -575,6 +586,27 @@ impl Hub {
         f(&store, id)
     }
 
+    /// A global pin (docs/pins.md): a folder or file that is there, canonical, outside sill's own
+    /// state, and not inside (or around) a global pin already held.
+    fn add_global_pin(&self, path: &std::path::Path) -> Result<()> {
+        let path = path.canonicalize().with_context(|| format!("pin {}", path.display()))?;
+        if !path.is_dir() && !path.is_file() {
+            bail!("{}: not a folder or a file", path.display());
+        }
+        let state = self.home.join(".local/state/sill");
+        if path.starts_with(&state) || path == self.home {
+            bail!("{}: sill's own state and the home itself cannot be pinned", path.display());
+        }
+        let held = self.with_store(|st| st.global_pins())?;
+        if let Some(h) = held.iter().find(|h| path.starts_with(h)) {
+            bail!("{}: already inside the global pin {}", path.display(), h.display());
+        }
+        if let Some(h) = held.iter().find(|h| h.starts_with(&path)) {
+            bail!("{}: the global pin {} is inside it; remove that one first", path.display(), h.display());
+        }
+        self.with_store(|st| st.global_pin(&path))
+    }
+
     /// A new session row (what `Store::create` and the shelf's `create_session` / `new_here` did).
     fn new_session(&self, n: NewSession) -> Result<String> {
         if n.ghost && !n.pins.is_empty() {
@@ -739,7 +771,7 @@ impl Hub {
         if !sdir.is_dir() {
             return Ok(vec![]);
         }
-        let pins = self.with_store(|st| st.pins(&s.id)).unwrap_or_default();
+        let pins = self.with_store(|st| st.jail_pins(&s.id)).unwrap_or_default();
         let binds = sill_core::session::binds_for(agent, &policy, &sdir, &self.home, &pins, s.ghost)?;
         let plan = sill_core::changes::session_plan(policy.clone(), sdir, &self.home, uid, user, binds)?;
         sill_core::changes::scan(&policy, &plan, None)
@@ -983,7 +1015,7 @@ impl Hub {
         let (s, pins) = {
             let store = self.store.lock().unwrap();
             let Some(s) = store.sessions()?.into_iter().find(|x| x.id == id) else { bail!("no session {id}") };
-            let pins = store.pins(id)?;
+            let pins = store.jail_pins(id)?; // the global pins too (docs/pins.md)
             (s, pins)
         };
         let registry = sill_core::agents::load(&self.home);

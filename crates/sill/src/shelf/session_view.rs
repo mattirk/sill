@@ -1996,7 +1996,7 @@ impl SessionView {
         if !viewer::is_image(&p) {
             return None;
         }
-        if self.store.pins(&self.id()).unwrap_or_default().iter().any(|pin| pin.is_dir() && p.starts_with(pin)) {
+        if self.store.jail_pins(&self.id()).unwrap_or_default().iter().any(|pin| pin.is_dir() && p.starts_with(pin)) {
             return p.is_file().then_some(p);
         }
         let (layers, masked) = self.jail_view()?;

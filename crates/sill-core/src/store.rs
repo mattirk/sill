@@ -121,6 +121,7 @@ impl Store {
                  acp_session_id TEXT, policy TEXT NOT NULL DEFAULT 'default');
              CREATE TABLE IF NOT EXISTS session_pins (
                  session_id TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (session_id, path));
+             CREATE TABLE IF NOT EXISTS global_pins (path TEXT PRIMARY KEY, added_at INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS entries (
                  session_id TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL,
                  kind TEXT NOT NULL, text TEXT NOT NULL, extra TEXT NOT NULL DEFAULT '',
@@ -411,6 +412,36 @@ impl Store {
         Ok(())
     }
 
+    /// The user's global pins (docs/pins.md): bound in every non-ghost jail, never a chip.
+    pub fn global_pins(&self) -> Result<Vec<PathBuf>> {
+        let mut st = self.conn.prepare("SELECT path FROM global_pins ORDER BY path")?;
+        let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.filter_map(Result::ok).map(PathBuf::from).collect())
+    }
+
+    pub fn global_pin(&self, path: &Path) -> Result<()> {
+        self.conn.execute("INSERT OR IGNORE INTO global_pins (path, added_at) VALUES (?1, ?2)", params![path.to_string_lossy(), now()])?;
+        Ok(())
+    }
+
+    pub fn global_unpin(&self, path: &Path) -> Result<()> {
+        self.conn.execute("DELETE FROM global_pins WHERE path = ?1", params![path.to_string_lossy()])?;
+        Ok(())
+    }
+
+    /// What a session's jail binds: its own pins, then the global ones it does not already hold (a
+    /// session pin inside a global folder adds nothing, the global folder covers it). The session's
+    /// own pins alone are its focus (chips, instructions, memory scope).
+    pub fn jail_pins(&self, session_id: &str) -> Result<Vec<PathBuf>> {
+        let mut out = self.pins(session_id)?;
+        for g in self.global_pins()? {
+            if !out.contains(&g) {
+                out.push(g);
+            }
+        }
+        Ok(out)
+    }
+
     /// Drop pins whose session no longer exists (older deletes didn't clear them); how many went.
     pub fn prune_pins(&self) -> Result<usize> {
         Ok(self.conn.execute("DELETE FROM session_pins WHERE session_id NOT IN (SELECT id FROM sessions)", [])?)
@@ -513,6 +544,26 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn global_pins_join_a_sessions_jail_but_not_its_focus() {
+        let dir = std::env::temp_dir().join(format!("sill-store-gpins-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("s.db")).unwrap();
+        let (g, own) = (Path::new("/tmp/g"), Path::new("/tmp/own"));
+        store.global_pin(g).unwrap();
+        store.global_pin(g).unwrap(); // once
+        store.pin("s1", own).unwrap();
+        assert_eq!(store.pins("s1").unwrap(), vec![own.to_path_buf()]);
+        assert_eq!(store.jail_pins("s1").unwrap(), vec![own.to_path_buf(), g.to_path_buf()]);
+        // pinned in the session too: once in the jail list, in the session's place
+        store.pin("s1", g).unwrap();
+        assert_eq!(store.jail_pins("s1").unwrap(), vec![g.to_path_buf(), own.to_path_buf()]);
+        store.global_unpin(g).unwrap();
+        assert!(store.global_pins().unwrap().is_empty());
+        assert_eq!(store.jail_pins("s1").unwrap(), vec![g.to_path_buf(), own.to_path_buf()]); // the session pin stays
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn tool_updates_reach_the_stored_entry() {

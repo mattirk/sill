@@ -1833,6 +1833,13 @@ fn create_session(store: &Store, agent: &str, policy: &str, ghost: bool) -> anyh
     store.sessions()?.into_iter().find(|x| x.id == id).ok_or_else(|| anyhow::anyhow!("the new session {id} is not in the store"))
 }
 
+/// The file tree reads again (the global pins changed in Settings).
+pub fn refresh_tree() {
+    if let Some(shelf) = SHELF.with(|s| s.borrow().as_ref().and_then(|w| w.upgrade())) {
+        shelf.tree.refresh_soon();
+    }
+}
+
 /// Write the jail's memory snapshot anew off the GTK thread (docs/memory.md §2.3): when a session
 /// ends or is deleted, at start, when memory is switched. Removes it with memory off.
 pub fn refresh_memory() {

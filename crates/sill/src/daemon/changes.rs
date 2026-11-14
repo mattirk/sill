@@ -213,7 +213,7 @@ impl Hub {
             let agent = registry.get(&s.agent);
             let mut adopted_note = String::new();
             if let Some(agent) = agent.filter(|_| !s.ghost) {
-                let pins = hub.with_store(|st| st.pins(&s.id)).unwrap_or_default();
+                let pins = hub.with_store(|st| st.jail_pins(&s.id)).unwrap_or_default();
                 match sill_core::session::adopt_agent_state(agent, &hub.home, &changes, &pins) {
                     Ok(adopted) if !adopted.is_empty() => {
                         let names: Vec<String> = adopted.iter().map(|p| format!("~/{}", p.strip_prefix(&hub.home).unwrap_or(p).display())).collect();
@@ -274,7 +274,7 @@ impl Hub {
         let registry = sill_core::agents::load(&self.home);
         let Some(agent) = registry.get(&s.agent) else { bail!("unknown agent {}", s.agent) };
         let sdir = sill_core::session::state_dir(uid, &s.id)?;
-        let pins = self.with_store(|st| st.pins(&s.id)).unwrap_or_default();
+        let pins = self.with_store(|st| st.jail_pins(&s.id)).unwrap_or_default();
         let binds = sill_core::session::binds_for(agent, &policy, &sdir, &self.home, &pins, s.ghost)?;
         let plan = sill_core::changes::session_plan(policy, sdir, &self.home, uid, &user, binds)?;
         Ok(sill_proto::JailView { layers: plan.layers.into_iter().map(|l| (l.host, l.upper)).collect(), masked: plan.masked })
@@ -293,13 +293,14 @@ impl Hub {
         }
     }
 
-    /// Every session's pinned folders that are git repositories.
+    /// Every session's pinned folders, and the global ones, that are git repositories.
     fn pinned_repos(&self) -> Result<Vec<PathBuf>> {
         self.with_store(|st| {
             let mut out = Vec::new();
             for s in st.sessions()? {
                 out.extend(st.pins(&s.id)?.into_iter().filter(|p| p.join(".git").exists()));
             }
+            out.extend(st.global_pins()?.into_iter().filter(|p| p.join(".git").exists()));
             Ok(out)
         })
     }
