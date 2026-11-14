@@ -1184,13 +1184,13 @@ fn session_permission_choices_restore_defaults_and_frontend_gate() {
     assert_eq!(state(&unchanged["result"], "public_web")["effective"], false, "grants belong to one session");
 
     // Widening is refused where no backend or a limit blocks it; declining always applies.
-    // (the private bus has no backend; the test desktop's depends on Weston being installed)
-    let blocked = set(&mut modes, &web, "private_bus", json!(true));
+    // (the GPU has no backend; the test desktop's and the private bus's depend on what is installed)
+    let blocked = set(&mut modes, &web, "gpu", json!(true));
     assert_eq!(blocked["error"]["data"]["code"], "permission_denied", "{blocked}");
     assert!(blocked["error"]["message"].as_str().unwrap().contains("backend"), "{blocked}");
     assert_eq!(set(&mut modes, &web, "host_control", json!(true))["error"]["data"]["code"], "permission_denied");
     assert_eq!(set(&mut modes, &web, "unknown", json!(true))["error"]["code"], -32602);
-    assert!(set(&mut modes, &web, "gpu", json!(false)).get("error").is_none());
+    assert!(set(&mut modes, &web, "test_desktop", json!(false)).get("error").is_none());
     assert_eq!(set(&mut modes, &ghost, "public_web", json!(true))["error"]["data"]["code"], "permission_denied");
 
     // A newly imposed ceiling blocks the remembered choice instead of being bypassed.

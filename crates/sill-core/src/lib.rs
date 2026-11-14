@@ -19,6 +19,7 @@ pub mod launcher;
 pub mod ledger;
 pub mod login;
 pub mod credentials;
+pub mod bus;
 pub mod desktop;
 pub mod desktop_capture;
 pub mod memory;

@@ -28,11 +28,13 @@ pub struct Permissions {
 pub const MODE_CAPABILITIES: [&str; 4] = ["test_desktop", "private_bus", "gpu", "host_control"];
 
 /// Whether this machine can enforce `capability`: the public web proxy always; the test desktop
-/// when a usable Weston with Xwayland is installed (`desktop::probe`); nothing else yet.
+/// when a usable Weston with Xwayland is installed (`desktop::probe`); the private bus when
+/// `dbus-daemon` is (`bus::probe`); nothing else yet.
 pub fn available(capability: &str) -> bool {
     match capability {
         "public_web" => true,
         "test_desktop" => crate::desktop::probe().available(),
+        "private_bus" => crate::bus::probe().available(),
         _ => false,
     }
 }
@@ -41,6 +43,7 @@ pub fn available(capability: &str) -> bool {
 fn unavailable_reason(capability: &str) -> String {
     match capability {
         "test_desktop" => crate::desktop::probe().missing.clone(),
+        "private_bus" => crate::bus::probe().missing.clone(),
         _ => "enforcement backend not implemented".into(),
     }
 }
@@ -144,6 +147,7 @@ impl Permissions {
         if !available(capability) {
             return Some(match capability {
                 "test_desktop" => "no test desktop on this machine (Weston and Xwayland)",
+                "private_bus" => "no dbus-daemon on this machine (the dbus package)",
                 _ => "enforcement backend not implemented",
             });
         }
@@ -215,6 +219,8 @@ impl Permissions {
                     unavailable_reason(capability)
                 } else if effective && capability == "test_desktop" {
                     "an isolated Weston desktop with Xwayland; the real display stays out of reach".into()
+                } else if effective && capability == "private_bus" {
+                    "a D-Bus session bus of the jail's own; the person's buses stay out of reach".into()
                 } else if effective {
                     "public web proxy enabled; local destinations remain separately restricted".into()
                 } else if let Some(refusal) = refusal {
@@ -254,9 +260,9 @@ mod tests {
         )
         .unwrap();
         let states = p.permissions.states(&p.network, &[]);
-        // (the private bus has no backend yet; the test desktop's depends on the machine)
-        assert!(states[1].allowed && !states[1].effective && !states[1].available);
-        assert!(!states[2].allowed);
+        // (the private bus's backend depends on the machine; off is allowed and not effective)
+        assert!(states[1].allowed && !states[1].effective);
+        assert!(!states[2].allowed && !states[2].available, "the GPU has no backend yet");
         assert!(states[3].effective);
         assert!(p.permissions.validate_launch(&p.network).is_ok());
     }
@@ -275,8 +281,8 @@ mod tests {
 
     #[test]
     fn unsupported_defaults_never_claim_enforcement() {
-        let p = Policy::parse("name='future'\n[permissions]\nprivate_bus='on'").unwrap();
-        let state = &p.permissions.states(&p.network, &[])[1];
+        let p = Policy::parse("name='future'\n[permissions]\ngpu='on'").unwrap();
+        let state = &p.permissions.states(&p.network, &[])[2];
         assert!(state.default_enabled && !state.effective && !state.available);
         assert!(p.permissions.validate_launch(&p.network).is_err());
         assert!(p.permissions.uses_modes());
@@ -326,25 +332,40 @@ mod tests {
     #[test]
     fn session_choices_widen_only_within_limits_and_always_tighten() {
         let mut p = Policy::parse("name='test'\n[network]\nmode='allow'").unwrap();
-        let applied = p.permissions.apply_session(&mut p.network, &choices(&[("public_web", true), ("private_bus", true)]));
+        let applied = p.permissions.apply_session(&mut p.network, &choices(&[("public_web", true), ("gpu", true)]));
         assert_eq!(p.network.mode, NetMode::All);
         assert!(applied.iter().find(|c| c.capability == "public_web").unwrap().blocked.is_none());
-        let bus = applied.iter().find(|c| c.capability == "private_bus").unwrap();
-        assert_eq!(bus.blocked.as_deref(), Some("enforcement backend not implemented"));
+        let gpu = applied.iter().find(|c| c.capability == "gpu").unwrap();
+        assert_eq!(gpu.blocked.as_deref(), Some("enforcement backend not implemented"));
         // A blocked desktop choice is reported, never forced into a launch it would refuse.
         assert!(p.permissions.validate_launch(&p.network).is_ok());
         assert!(!p.permissions.uses_modes());
         let states = p.permissions.states(&p.network, &applied);
         assert!(states[3].effective && states[3].source == "session" && states[3].requested == Some(true) && !states[3].default_enabled);
-        assert!(states[1].blocked && states[1].source == "policy" && states[1].reason.contains("backend"));
+        assert!(states[2].blocked && states[2].source == "policy" && states[2].reason.contains("backend"));
 
-        let mut p = Policy::parse("name='test'\n[permissions]\npublic_web='on'\nprivate_bus='on'").unwrap();
-        let applied = p.permissions.apply_session(&mut p.network, &choices(&[("public_web", false), ("private_bus", false)]));
+        let mut p = Policy::parse("name='test'\n[permissions]\npublic_web='on'\ngpu='on'").unwrap();
+        let applied = p.permissions.apply_session(&mut p.network, &choices(&[("public_web", false), ("gpu", false)]));
         assert_eq!(p.network.mode, NetMode::Allow);
         assert!(p.permissions.validate_launch(&p.network).is_ok(), "a session may decline a policy default");
         let states = p.permissions.states(&p.network, &applied);
         assert!(!states[3].effective && states[3].default_enabled && states[3].requested == Some(false));
-        assert!(states[1].default_enabled && !p.permissions.uses_modes());
+        assert!(states[2].default_enabled && !p.permissions.uses_modes());
+    }
+
+    #[test]
+    fn the_private_bus_depends_on_dbus_daemon() {
+        let p = Policy::parse("name='t'\n[network]\nmode='none'\n[permissions]\nprivate_bus='on'").unwrap();
+        let state = &p.permissions.states(&p.network, &[])[1];
+        assert_eq!(state.capability, "private_bus");
+        if available("private_bus") {
+            assert!(p.permissions.enable_refusal("private_bus", &p.network).is_none(), "not a network grant");
+            assert!(state.effective && state.reason.contains("jail's own"), "{}", state.reason);
+            assert!(p.permissions.validate_launch(&p.network).is_ok());
+        } else {
+            assert!(p.permissions.enable_refusal("private_bus", &p.network).unwrap().contains("dbus-daemon"));
+            assert!(!state.effective && state.reason.contains("dbus-daemon"), "{}", state.reason);
+        }
     }
 
     #[test]

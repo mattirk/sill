@@ -19,6 +19,7 @@
 //! `sill-memory` (docs/memory.md §2.3): search, show and transcript over the read-only snapshot of
 //! sill's memory at `/.sill/memory/` ([`memory_cli`]; the queries are `sill_memory`'s).
 
+mod bus;
 mod forward;
 mod images;
 mod procs;
@@ -233,6 +234,16 @@ fn main() -> Result<()> {
         agent_idle = Some(args.remove(i + 1).parse().context("--agent-idle expects seconds")?);
         args.remove(i);
     }
+    // --bus PATH : Desktop development's private D-Bus session bus, a dbus-daemon of this jail's
+    // own on PATH, started before anything else can ask for it
+    let mut bus: Option<PathBuf> = None;
+    while let Some(i) = args.iter().position(|a| a == "--bus") {
+        if i + 1 >= args.len() {
+            bail!("--bus expects a socket path");
+        }
+        bus = Some(PathBuf::from(args.remove(i + 1)));
+        args.remove(i);
+    }
     let listener = match args.as_slice() {
         [flag, fd] if flag == "--control-fd" => {
             let fd: i32 = fd.parse().context("--control-fd expects a number")?;
@@ -250,6 +261,9 @@ fn main() -> Result<()> {
         }
         _ => bail!("usage: sill-shim --control-fd N | --listen PATH"),
     };
+    if let Some(socket) = &bus {
+        bus::start(socket)?;
+    }
     eprintln!("sill-shim: ready (pid {})", std::process::id());
 
     let shared: Shared = Arc::new((Mutex::new(State::default()), Condvar::new()));

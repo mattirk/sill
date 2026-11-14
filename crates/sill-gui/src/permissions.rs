@@ -36,12 +36,12 @@ const ROWS: &[(&str, &str, &str)] = &[
     (
         "test_desktop",
         "Test desktop",
-        "An isolated Weston desktop with Xwayland for running GUI applications, never the real one; it shows as a window on your desktop, or runs without one where the daemon has no display. The agent can take screenshots of it.",
+        "An isolated Weston desktop with Xwayland for running GUI applications, never the real one. Headless: watch it from the monitor button. The agent can take screenshots of it and drive X11 programs.",
     ),
     (
         "private_bus",
         "Private D-Bus",
-        "A session bus of the jail's own, for test applications and services.",
+        "A D-Bus session bus of the jail's own, for test applications and the services they activate, which run in the jail too. Your session and system buses stay out of reach.",
     ),
     ("gpu", "GPU rendering", "A selected render device for the jail."),
 ];

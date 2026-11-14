@@ -327,6 +327,14 @@ impl JailSpec {
         }
         env.extend(p.jail.env.iter().map(|(k, v)| (k.clone(), v.clone())));
         env.extend(self.env.iter().map(|(k, v)| (k.clone(), v.clone())));
+        // Last, over anything a policy or agent sets: the buses are dead addresses (never unset:
+        // nothing autolaunches one) and no host bus socket is shared. Desktop development's
+        // private bus is the one the shim starts inside the jail (`sill-shim --bus`).
+        env.insert("DBUS_SYSTEM_BUS_ADDRESS".into(), "disabled:".into());
+        env.insert(
+            "DBUS_SESSION_BUS_ADDRESS".into(),
+            if p.permissions.private_bus == crate::permissions::Rule::On { crate::bus::address(self.uid) } else { "disabled:".into() },
+        );
         for (k, v) in &env {
             push(&mut a, &[&"--setenv", k, v]);
         }
@@ -345,8 +353,6 @@ impl JailSpec {
             push(&mut a, &[&"--symlink", target, &Path::new("/").join(name)]);
         }
         push(&mut a, &[&"--dir", &format!("/run/user/{}", self.uid)]);
-        // Refuse bus autolaunch; no host display or bus sockets are shared.
-        push(&mut a, &[&"--setenv", &"DBUS_SESSION_BUS_ADDRESS", &"disabled:", &"--setenv", &"DBUS_SYSTEM_BUS_ADDRESS", &"disabled:"]);
         for r in &ro_binds {
             push(&mut a, &[&"--ro-bind", r, r]);
         }
@@ -903,6 +909,19 @@ mod tests {
         assert!(r.contains("--setenv DBUS_SYSTEM_BUS_ADDRESS disabled:"), "{r}");
         assert!(!r.contains("unix:path="), "{r}");
         assert!(!r.contains(".X11-unix") && !r.contains("XAUTHORITY"), "{r}");
+    }
+
+    /// With the private bus the session address is the jail's own socket; the system bus stays
+    /// dead, and a policy's environment cannot point the agent at the person's bus.
+    #[test]
+    fn the_private_bus_is_the_jail_s_own_address() {
+        let mut s = spec();
+        s.policy.permissions.private_bus = crate::permissions::Rule::On;
+        s.policy.jail.env.insert("DBUS_SESSION_BUS_ADDRESS".into(), "unix:path=/run/user/1000/sill-host-bus".into());
+        let r = render(&s.plan().unwrap().argv);
+        assert!(r.contains("--setenv DBUS_SESSION_BUS_ADDRESS unix:path=/run/user/1000/bus "), "{r}");
+        assert!(!r.contains("sill-host-bus"), "{r}");
+        assert!(r.contains("--setenv DBUS_SYSTEM_BUS_ADDRESS disabled:"), "{r}");
     }
 
     #[test]

@@ -104,12 +104,12 @@ try:
         denied(session("ceiling", "allow_additional_hosts=false"), "example.com")
         denied(first, "*.example.com")
         # Permission inspection must distinguish an eligible capability from an implemented backend.
-        desktop = session("desktop", "mode='allow'\n[permissions]\nprivate_bus='on'\nhost_control='forbidden'")
+        desktop = session("desktop", "mode='allow'\n[permissions]\ngpu='on'\nhost_control='forbidden'")
         view = client.call("_sill/policy.preview", {"session_id": desktop})
         states = {item["capability"]: item for item in view["permissions"]}
-        # the private bus has no backend yet (the test desktop's depends on Weston being installed)
-        assert states["private_bus"]["allowed"] and states["private_bus"]["default_enabled"]
-        assert not states["private_bus"]["effective"] and not states["private_bus"]["available"]
+        # the GPU has no backend yet (the test desktop's and the private bus's depend on what is installed)
+        assert states["gpu"]["allowed"] and states["gpu"]["default_enabled"]
+        assert not states["gpu"]["effective"] and not states["gpu"]["available"]
         assert not states["host_control"]["allowed"] and not states["host_control"]["effective"]
         try:
             modes.call("_sill/sessions.start", {"session_id": desktop})
@@ -139,7 +139,7 @@ try:
         states = {item["capability"]: item for item in changed["preview"]["permissions"]}
         assert states["public_web"]["effective"] and states["public_web"]["source"] == "session", states
         assert not changed["restart_required"]
-        assert code(modes.call, "_sill/permissions.set", choice(second, "private_bus", True)) == "permission_denied"
+        assert code(modes.call, "_sill/permissions.set", choice(second, "gpu", True)) == "permission_denied"
         assert code(modes.call, "_sill/permissions.set", choice(second, "host_control", True)) == "permission_denied"
         assert code(modes.call, "_sill/permissions.set", choice(session("restricted", "mode='allow'\nallow_additional_hosts=false"), "public_web", True)) == "permission_denied"
         restored = modes.call("_sill/permissions.restore_defaults", {"session_id": second})

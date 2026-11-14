@@ -5,7 +5,8 @@ Runs a throwaway daemon with its own HOME, runtime and state directories, a stub
 real bubblewrap jails (systemd scopes when the user manager answers). Every check that needs a
 jail runs a shell inside it through a session terminal. Needs internet access for the public-web
 checks (example.com/.org/.net, www.iana.org), Python jsonschema (scripts/requirements-sfp.txt),
-and for the test desktop Weston, Xwayland, xdotool and ImageMagick (`magick`); it runs headless,
+and for the test desktop Weston, Xwayland, xdotool and ImageMagick (`magick`), for the private bus
+dbus-daemon and dbus-send; it runs headless,
 since the throwaway daemon gets no display:
 
     python scripts/sfp_permissions_host_scenario.py --binary target/local/sill [--keep]
@@ -462,16 +463,16 @@ PY
               json.dumps(ghost_view)[:400])
 
         # -- 10. Desktop development requests and the frontend gate ------------------------------
-        # (the private bus has no backend yet: the request without one; the test desktop is 14.)
-        d = create("desktop", env.policy("desktop", permissions='private_bus = "on"\ngpu = "forbidden"'))
+        # (the GPU has no backend yet: the request without one; the test desktop is 14, the bus 15.)
+        d = create("desktop", env.policy("desktop", permissions='gpu = "on"\nprivate_bus = "forbidden"'))
         shown = env.cli("permissions", "show", d).stdout
-        info("sill permissions show (private bus request):\n       " + "\n       ".join(shown.splitlines()))
-        line = next((l for l in shown.splitlines() if l.startswith("private_bus")), "")
-        check("the CLI shows a requested private bus as unavailable, policy default on",
+        info("sill permissions show (GPU request):\n       " + "\n       ".join(shown.splitlines()))
+        line = next((l for l in shown.splitlines() if l.startswith("gpu")), "")
+        check("the CLI shows a requested GPU as unavailable, policy default on",
               "unavailable" in line and "policy default: on" in line, shown)
         check("the CLI shows a forbidden capability",
-              any(l.startswith("gpu") and "policy default: forbidden" in l for l in shown.splitlines()), shown)
-        check("a private-bus request refuses launch (no backend)", code(c.call, "_sill/sessions.start", {"session_id": d}) is not None)
+              any(l.startswith("private_bus") and "policy default: forbidden" in l for l in shown.splitlines()), shown)
+        check("a GPU request refuses launch (no backend)", code(c.call, "_sill/sessions.start", {"session_id": d}) is not None)
         time.sleep(0.5)
         check("…and no jail or scope was created (no fallback)", not scope_active(d) and not get(d)["running"])
         check("a GTK-like client cannot start it", code(gtk.call, "_sill/sessions.start", {"session_id": d}) == "unsupported")
@@ -482,7 +483,7 @@ PY
         # a running Default jail whose next build would request a Desktop development capability
         nxt = create("next-desktop", env.policy("next-desktop"))
         start(nxt)
-        env.policy("next-desktop", permissions='private_bus = "on"')
+        env.policy("next-desktop", permissions='gpu = "on"')
         submit = {"session_id": nxt, "submission_id": "gate-1", "text": "hello"}
         # while running, the launch decides: the jail is still a Default one until it is rebuilt
         check("GTK-like submit reaches the running Default jail despite an edited policy",
@@ -722,6 +723,77 @@ PY
         env.start_daemon()
         c = env.client()
         gtk = env.client(modes=False, name="gtk-like")
+
+        # -- 15. the private D-Bus session bus (a dbus-daemon of the jail's own, inside it) --------
+        if not shutil.which("dbus-daemon"):
+            check("dbus-daemon is installed for the private bus checks", False, "install dbus")
+            return created
+        bus = create("private-bus", env.policy("private-bus", permissions='private_bus = "on"'))
+        view = states(c.call("_sill/policy.preview", {"session_id": bus}))["private_bus"]
+        check("the private bus is available and on for a requesting policy",
+              view["available"] and view["effective"] and "jail's own" in view["reason"], json.dumps(view))
+        check("a GTK-like client cannot start a private-bus session",
+              code(gtk.call, "_sill/sessions.start", {"session_id": bus}) == "unsupported")
+        check("a permission-modes client starts it", start(bus))
+        names = "dbus-send --session --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.ListNames"
+        status, out = sh(c, bus, f"""
+            echo "env [$DBUS_SESSION_BUS_ADDRESS] [$DBUS_SYSTEM_BUS_ADDRESS] [$WAYLAND_DISPLAY]"
+            [ -S "/run/user/$(id -u)/bus" ] && echo bus-socket
+            {names} 2>&1 | grep -c 'string "' | sed 's/^/names /'
+            {names} 2>&1 | grep -q systemd1 && echo HOST-NAMES-VISIBLE
+            dbus-send --system --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.ListNames >/dev/null 2>&1 && echo SYSTEM-BUS-REACHED
+            [ -e /run/dbus/system_bus_socket ] && echo SYSTEM-SOCKET-VISIBLE
+            mkdir -p ~/.local/share/dbus-1/services
+            printf '[D-BUS Service]\\nName=org.sill.Probe\\nExec=/bin/sh -c "echo activated > /tmp/sill-activated; exec sleep 20"\\n' > ~/.local/share/dbus-1/services/org.sill.Probe.service
+            dbus-send --session --print-reply --reply-timeout=4000 --dest=org.sill.Probe / org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1
+            sleep 1
+            [ -f /tmp/sill-activated ] && echo activated-in-jail
+            exit 0""", timeout=90)
+        lines = out.splitlines()
+        env_line = next((l for l in lines if l.startswith("env ")), "")
+        check("the jail's bus address is its own socket; the system bus stays dead; no desktop",
+              env_line == f"env [unix:path=/run/user/{os.getuid()}/bus] [disabled:] []" and "bus-socket" in lines, out)
+        names_line = next((l for l in lines if l.startswith("names ")), "names 0")
+        check("dbus-send talks to the private bus", int(names_line.split()[1]) >= 2, out)
+        check("none of the person's bus names, no system bus, no system socket",
+              not any(m in out for m in ("HOST-NAMES-VISIBLE", "SYSTEM-BUS-REACHED", "SYSTEM-SOCKET-VISIBLE")), out)
+        check("a service file of the agent's own activates inside the jail, not on the host",
+              "activated-in-jail" in lines and not pathlib.Path("/tmp/sill-activated").exists(), out)
+        # (an activation leaves a forked babysitter with the same comm until the service settles)
+        daemons = [pid for pid in os.listdir("/proc") if pid.isdigit() and comm(pid) == "dbus-daemon"
+                   and f"sill-{bus}.scope" in read(f"/proc/{pid}/cgroup")]
+        parent = lambda pid: next((l.split()[1] for l in read(f"/proc/{pid}/status").splitlines() if l.startswith("PPid:")), "")
+        daemons = [pid for pid in daemons if parent(pid) not in daemons]
+        check("one dbus-daemon runs in the session's scope", len(daemons) == 1, str(daemons))
+        if daemons:
+            argv = read(f"/proc/{daemons[0]}/cmdline").split("\0")
+            environ = dict(kv.split("=", 1) for kv in read(f"/proc/{daemons[0]}/environ").split("\0") if "=" in kv)
+            try:
+                jailed = os.stat(f"/proc/{daemons[0]}/ns/mnt").st_ino != os.stat("/proc/self/ns/mnt").st_ino
+            except OSError as error:
+                jailed = f"ns: {error}"
+            check("…inside the jail (its mount namespace, the jail's environment), on sill's configuration only",
+                  jailed is True and environ.get("SILL_SESSION") == "1" and "DISPLAY" not in environ
+                  and any(a.endswith("/sill-bus.conf") for a in argv) and "--nofork" in argv,
+                  f"{jailed} {' '.join(argv)} {' '.join(sorted(environ))}")
+        c.call("_sill/sessions.stop", {"session_id": bus})
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and any(pathlib.Path(f"/proc/{p}").exists() for p in daemons):
+            time.sleep(0.2)
+        check("stopping the session ends its dbus-daemon", not any(pathlib.Path(f"/proc/{p}").exists() for p in daemons))
+        # a Default session has none; as a session choice it comes with the next build
+        plain = create("no-bus", env.policy("no-bus"))
+        start(plain)
+        has_bus = lambda sid: sh(c, sid, f'echo "[$DBUS_SESSION_BUS_ADDRESS]"; {names} >/dev/null 2>&1 && echo BUS-REACHED')[1]
+        before = has_bus(plain)
+        check("a Default session has a dead bus address and no bus", before == "[disabled:]", before)
+        changed = c.call("_sill/permissions.set", {"session_id": plain, "capability": "private_bus", "enabled": True})
+        check("turning the private bus on for a running session needs a restart", changed["restart_required"])
+        after = has_bus(plain) if restart(plain) else "no restart"
+        check("after the restart the session has its bus", after.endswith("BUS-REACHED") and "unix:path=" in after, after)
+        ghost_bus = create("ghost-bus", env.policy("ghost-bus", permissions='private_bus = "on"'), ghost=True)
+        check("a ghost refuses a private bus",
+              not states(c.call("_sill/policy.preview", {"session_id": ghost_bus}))["private_bus"]["allowed"])
     finally:
         for sid in created:
             for method in ("_sill/sessions.stop", "_sill/sessions.delete"):

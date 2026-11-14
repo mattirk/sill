@@ -1174,6 +1174,11 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
     spec.masks = sill_core::session::other_agents_paths(&sill_core::agents::load(&spec.home), agent, &spec.home);
     let idle = spec.policy.limits.agent_idle_minutes as u64 * 60;
     spec.command.extend(["--agent-idle".into(), idle.to_string().into()]);
+    // Desktop development's private bus: the shim starts dbus-daemon inside the jail, on the
+    // socket the jail's environment names (docs/permission-modes.md)
+    if spec.policy.permissions.private_bus == sill_core::permissions::Rule::On {
+        spec.command.extend(["--bus".into(), sill_core::bus::socket_path(spec.uid).into()]);
+    }
     // the shim, and the same binary as `sill-proc` on the jail's PATH (docs/tasks.md §2.4)
     spec.extra_args = vec!["--ro-bind".into(), shim_bin.clone().into(), "/.sill/shim".into(), "--ro-bind".into(), shim_bin.clone().into(), "/.sill/bin/sill-proc".into()];
     // memory (docs/memory.md §2.3): the snapshot's directory read-only, and the shim as
