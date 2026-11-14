@@ -148,8 +148,8 @@ Sill remembers sessions on this machine — not *you*, and not the agent's own m
 design; this is what you see.
 
 - **Ending a session writes a summary.** Closing a tab with the agent up asks it one last prompt —
-  what was asked, what was done and where, decisions, what is unfinished, what not to try again —
-  with the facts attached (pins, kept paths, repos and their heads). The tab stays while it answers
+  one sentence on what the session was about and how it stands, then what is unfinished, what not
+  to try again, what you decided, and a line on what was done — with the facts attached (pins, kept paths, repos and their heads). The tab stays while it answers
   (90 s cap; a second close ends at once with what it has). When the agent can't be asked, sill writes a
   mechanical summary from the facts. Either is stored on the session and marked which kind it is.
 - **The Reopen list** (`+`) shows each ended session with its date or state and its name, the summary

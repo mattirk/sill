@@ -444,25 +444,32 @@ pub fn recall_candidates(conn:&Connection,me:&str,pins:&[PathBuf],scope:Scope,n:
     let mut st=conn.prepare(&format!("SELECT {SESSION_COLS} FROM sessions WHERE ended_at IS NOT NULL AND id<>?1 ORDER BY last_used DESC"))?;
     let rows=st.query_map([me],session_row)?;
     for row in rows {let mut candidate=row?;candidate.pins=pins_of(conn,&candidate.id)?;
-        // Preserve exactly the lines recall_block can quote, plus one character when needed
-        // to preserve its ellipsis, without retaining every selected full summary in memory.
-        let mut excerpt=String::new();let mut remaining=RECALL_CHARS;
-        for line in candidate.summary.lines().map(str::trim_end).filter(|l|!l.trim().is_empty()).take(15) {
-            if remaining==0{break;}let len=line.chars().count();
-            excerpt.extend(line.chars().take(remaining+1));excerpt.push('\n');
-            if len>remaining{break;}remaining-=len;
-        }
-        candidate.summary=excerpt;
+        // Keep the one line recall_block quotes, plus one character so that its ellipsis
+        // survives, without retaining every selected full summary in memory.
+        candidate.summary=first_line(&candidate.summary).chars().take(HOOK_CHARS+1).collect();
         chosen.push(candidate);
         chosen=recall_pick(&chosen,me,pins,scope,n,first).into_iter().cloned().collect();
     }Ok(chosen)
 }
 
-/// The most of one summary a recall block quotes.
-const RECALL_CHARS: usize = 1500;
+/// The most of a summary's first line a recall block quotes.
+const HOOK_CHARS: usize = 300;
 
-/// The recall block for the standing instructions; `kept_count` says how many files a session kept.
-/// Empty when there is nothing to say and the snapshot is not there to search either.
+/// What the recall block quotes of a summary: its first line (the summary prompt asks for one
+/// sentence that stands alone there), cut at [`HOOK_CHARS`] — summaries from before that ask
+/// open with a paragraph.
+pub fn hook(summary: &str) -> String {
+    let line = first_line(summary);
+    if line.chars().count() <= HOOK_CHARS {
+        return line.to_string();
+    }
+    line.chars().take(HOOK_CHARS).collect::<String>().trim_end().to_string() + "…"
+}
+
+/// The recall block for the standing instructions: one line of each session's summary ([`hook`])
+/// under its date, agent, place and name — the whole summary is pulled with `sill-memory show`,
+/// not pushed. `kept_count` says how many files a session kept. Empty when there is nothing to
+/// say and the snapshot is not there to search either.
 pub fn recall_block(picked: &[&SessionInfo], scope: Scope, searchable: bool, home: &Path, kept_count: impl Fn(&str) -> usize) -> String {
     let tools = "`sill-memory search WORDS` searches all sessions, `sill-memory show ID` a whole summary, `sill-memory transcript ID [--grep WORDS]` the conversation";
     if picked.is_empty() {
@@ -481,25 +488,10 @@ pub fn recall_block(picked: &[&SessionInfo], scope: Scope, searchable: bool, hom
             n => format!(", kept {n} files"),
         };
         out.push_str(&format!("- {}, {}, {}{place}{kept} — “{}” ({}):\n", date(ended), duration(ended - s.created_at), s.agent, s.title, s.id));
-        // 15 lines and 1500 characters at most: agents write paragraphs as often as lines
-        let mut budget = RECALL_CHARS;
-        for l in s.summary.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).take(15) {
-            if budget == 0 {
-                break;
-            }
-            let n = l.chars().count();
-            if n <= budget {
-                out.push_str(&format!("  {l}\n"));
-                budget -= n;
-            } else {
-                let cut: String = l.chars().take(budget).collect();
-                out.push_str(&format!("  {cut}… (`sill-memory show {}` has the rest)\n", s.id));
-                budget = 0;
-            }
-        }
+        out.push_str(&format!("  {}\n", hook(&s.summary)));
     }
     if searchable {
-        out.push_str(&format!("{tools}.]"));
+        out.push_str(&format!("Each is the first line of a longer summary: before working on what a session touched, read the rest with `sill-memory show ID` — what is unfinished and what not to try is there. {tools}.]"));
     } else {
         out.pop();
         out.push(']');
@@ -1024,7 +1016,7 @@ mod tests {
             assert_eq!(old.iter().map(|s|&s.id).collect::<Vec<_>>(),selected.iter().map(|s|&s.id).collect::<Vec<_>>());
             let new=selected.iter().collect::<Vec<_>>();
             assert_eq!(recall_block(&old,Scope::Everywhere,true,home,|_|0),recall_block(&new,Scope::Everywhere,true,home,|_|0));
-            assert!(selected.iter().all(|s|s.summary.chars().count()<=1516));
+            assert!(selected.iter().all(|s|s.summary.chars().count()<=HOOK_CHARS+1));
         }
     }
 
@@ -1108,12 +1100,19 @@ mod tests {
         let picked = recall_pick(&all, "me", &me_pins, Scope::Here, 1, None);
         let b = recall_block(&picked, Scope::Here, true, home, |id| if id == "same" { 7 } else { 0 });
         assert!(b.starts_with("[Memory — earlier sessions in these folders"), "{b}");
-        assert!(b.contains("\n- 1970-01-01, 1 min, claude in ~/sill, kept 7 files — “same” (same):\n  summary of same\n`sill-memory search"), "{b}");
+        assert!(b.contains("\n- 1970-01-01, 1 min, claude in ~/sill, kept 7 files — “same” (same):\n  summary of same\nEach is the first line of a longer summary"), "{b}");
+        assert!(b.contains("read the rest with `sill-memory show ID`"), "{b}");
         assert!(b.ends_with("the conversation.]"), "{b}");
         let mut long = s("long", &["/w/sill"], Some(60));
+        // one line of a summary, however long the summary: the rest is pulled, not pushed
+        long.summary = format!("\n  the hook  \nunfinished: the tray\n{}", "x".repeat(2000));
+        let lb = recall_block(&[&long], Scope::Here, false, home, |_| 0);
+        assert!(lb.ends_with("“long” (long):\n  the hook]"), "{lb}");
+        assert!(!lb.contains("sill-memory"), "no snapshot, nothing to point at: {lb}");
+        // a summary from before the hook was asked for opens with a paragraph: cut, marked
         long.summary = "x".repeat(2000);
         let lb = recall_block(&[&long], Scope::Here, false, home, |_| 0);
-        assert!(lb.contains(&format!("  {}… (`sill-memory show long` has the rest)]", "x".repeat(1500))) && lb.ends_with(']'), "{lb}");
+        assert!(lb.ends_with(&format!("  {}…]", "x".repeat(HOOK_CHARS))), "{lb}");
         let none = recall_block(&[], Scope::Here, true, home, |_| 0);
         assert!(none.starts_with("[Earlier sessions on this machine are remembered by sill"), "{none}");
         assert_eq!(recall_block(&[], Scope::Here, false, home, |_| 0), "");

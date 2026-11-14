@@ -71,8 +71,11 @@ fn fact_lines(f: &Facts, home: &Path) -> Vec<String> {
 }
 
 /// The ask shared by the end and a checkpoint: the summary, with the session's name on its first
-/// line (title.rs: the summary names the session; [`split_title`] takes it off again).
-const ASK: &str = "Write 5–15 lines for a future agent that opens these folders: what was asked, what was done and where (paths), decisions and why, what is unfinished, what not to try again. Plain text, no greeting, no questions — only that agent reads it. First line: `Title: ` and 2–5 words describing this session for a list of sessions (what it was about, not the folder). This is a summary title; it does not change the session name.";
+/// line (title.rs: the summary names the session; [`split_title`] takes it off again). The line
+/// after it is all the recall block quotes (`sill_memory::hook`), so it must stand alone; the rest
+/// leads with what no diff records, and a session that left nothing stops after that line
+/// (docs/memory.md §2.2).
+const ASK: &str = "Write a summary for a future agent that opens these folders. Plain text, no greeting, no questions — only that agent reads it. First line: `Title: ` and 2–5 words describing this session for a list of sessions (what it was about, not the folder). This is a summary title; it does not change the session name. Second line: one sentence that stands alone — what the session was about and how it stands now; a later agent sees only this line unless it asks for the rest. Then at most 12 lines, in this order: what is unfinished or untested; what not to do or try again, and why; what the person decided, and why; last, one line on what was done, with the commit or the paths — the diff has the detail, do not retell it. Leave out what does not apply. A session that changed nothing and decided nothing: the first two lines and no more.";
 
 /// What the agent is asked as the session's last turn (docs/memory.md §2.2). The facts go with it
 /// so the summary names real places, not "the file I edited".
@@ -346,6 +349,8 @@ mod tests {
         let p = summary_prompt(&f, home);
         assert!(p.starts_with("[sill: this session is ending."), "{p}");
         assert!(p.contains("First line: `Title: `"), "{p}");
+        assert!(p.contains("Second line: one sentence that stands alone"), "{p}");
+        assert!(p.find("what is unfinished").unwrap() < p.find("what was done").unwrap(), "what no diff records comes first: {p}");
         assert!(checkpoint_prompt(&f, home).starts_with("[sill: a checkpoint"));
         assert!(p.contains("pinned folders: ~/GIT/sill; kept to the host (2): updated ~/GIT/sill/src/a.rs, added /etc/x; 1 prompt, 12 tool calls.]"), "{p}");
         let a = auto_summary(&f, 1_793_491_200 + 3600, home);
