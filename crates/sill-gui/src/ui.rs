@@ -560,14 +560,20 @@ impl App {
             .clip(true),
             right(fade).height(Fill),
         ];
+        // the glyph's and the close button's hover as tall as the title's: the tab's height
+        // (the person, 2026-11-13)
         let agent = keys::press(
-            button(icons::tab_agent(
-                &tab.agent,
-                self.agent_icons.get(&tab.agent).map(Vec::as_slice),
-                if working { pulse } else { color },
-                working,
-            ))
-            .padding([4, 4])
+            button(
+                container(icons::tab_agent(
+                    &tab.agent,
+                    self.agent_icons.get(&tab.agent).map(Vec::as_slice),
+                    if working { pulse } else { color },
+                    working,
+                ))
+                .center_y(Fill),
+            )
+            .height(Fill)
+            .padding([0, 4])
             .style(style::quiet),
             Message::Details(crate::details::Event::Open(tab.id.clone())),
         );
@@ -622,13 +628,17 @@ impl App {
             let armed = self.armed_close.as_deref() == Some(tab.id.as_str());
             label = label.push(
                 container(keys::press(
-                    button(icons::glyph(
-                        "x",
-                        12.0,
-                        if armed { P.error } else { alpha(P.fg, 0.55) },
-                    ))
+                    button(
+                        container(icons::glyph(
+                            "x",
+                            12.0,
+                            if armed { P.error } else { alpha(P.fg, 0.55) },
+                        ))
+                        .center_y(Fill),
+                    )
                     .width(TAB_CLOSE)
-                    .padding([4, 6])
+                    .height(Fill)
+                    .padding([0, 6])
                     .style(style::quiet),
                     Message::CloseTab(tab.id.clone()),
                 ))
