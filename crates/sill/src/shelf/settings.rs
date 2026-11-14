@@ -34,16 +34,16 @@ pub fn build() -> gtk::Box {
     // text size: steps from the table; a hand-edited value in between shows as the nearest step
     let scales = sill_core::config::TEXT_SCALES;
     let labels: Vec<&str> = scales.iter().map(|(_, l)| *l).collect();
-    let current = theme::text_scale();
+    let current = sill_core::config::load().zoom();
     let nearest = scales
         .iter()
         .enumerate()
         .min_by(|(_, a), (_, b)| (a.0 - current).abs().partial_cmp(&(b.0 - current).abs()).unwrap())
         .map(|(i, _)| i);
     let size_dd = choice(&labels, nearest, move |i| {
-        if let Some((scale, _)) = scales.get(i) {
-            theme::set_text_scale(*scale);
-            let _ = sill_core::config::update(|c| c.text_scale = Some(*scale));
+        if let Some((zoom, _)) = scales.get(i) {
+            theme::set_text_scale(*zoom * sill_core::config::TEXT_SCALE_BASE);
+            let _ = sill_core::config::update(|c| c.text_scale = Some(*zoom));
         }
     });
     root.append(&row("Text size", &size_dd));

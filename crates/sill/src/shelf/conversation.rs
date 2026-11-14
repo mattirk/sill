@@ -246,7 +246,7 @@ impl Conversation {
         }
         let (tv, md) = cur.as_mut().unwrap();
         md.push_str(chunk);
-        markdown::render(&tv.buffer(), md);
+        markdown::render(tv, md);
         tv.queue_resize(); // the view must re-measure: lazy line validation leaves stale heights behind
         drop(cur);
         self.request_follow();
@@ -256,7 +256,7 @@ impl Conversation {
     pub fn add_agent_block(&self, md: &str) {
         self.finish_current();
         let tv = Self::text_view("sill-agent");
-        markdown::render(&tv.buffer(), md);
+        markdown::render(&tv, md);
         tv.queue_resize(); // the view must re-measure: lazy line validation leaves stale heights behind
         self.column.append(&tv);
         self.request_follow();
@@ -265,7 +265,7 @@ impl Conversation {
     pub fn add_thought_block(&self, md: &str) {
         self.finish_current();
         let tv = Self::text_view("sill-thought");
-        markdown::render(&tv.buffer(), md);
+        markdown::render(&tv, md);
         tv.queue_resize(); // the view must re-measure: lazy line validation leaves stale heights behind
         self.column.append(&tv);
         self.request_follow();
@@ -635,6 +635,9 @@ entry { border-radius: 0; }
 .sill-agent text { background: transparent; }
 .sill-thought { background: transparent; color: alpha(@view_fg_color, 0.55); font-size: 90%; }
 .sill-thought text { background: transparent; }
+/* a fenced code block: the theme's source scheme, a quiet frame */
+.sill-code { font-size: 92%; margin: 2px 0; }
+.sill-code, .sill-code text { background: @sill_code_bg; }
 /* a tool call: one quiet line; the body opens under it */
 .sill-tool { background: transparent; border-radius: 0; padding: 0; border-left: 2px solid alpha(@view_fg_color, 0.18); }
 .sill-tool-line { padding: 3px 6px; font-size: 90%; color: alpha(@view_fg_color, 0.75); }

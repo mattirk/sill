@@ -217,6 +217,7 @@ pub fn set_text_scale(scale: f64) {
 /// The full stylesheet for a theme: text scale, named colours + sill's own rules.
 pub fn stylesheet(t: &Theme) -> String {
     let mut s = String::new();
+    s.push_str(&format!("@define-color sill_code_bg {};\n", t.code_bg));
     let scale = text_scale();
     if (scale - 1.0).abs() > 0.001 {
         // percentages are relative to the parent; at the toplevel that is the desktop font, so this
@@ -279,9 +280,18 @@ pub fn apply(t: &Theme) {
 pub struct TagColors {
     pub code_bg: String,
     pub link: String,
+    /// Dimmed text (quotes); none for Adwaita, which keeps the stock colour.
+    pub dim: Option<String>,
+    /// Hairlines (rules, table header underline).
+    pub rule: String,
 }
 
 pub fn tag_colors() -> TagColors {
     let t = current();
-    TagColors { code_bg: t.code_bg.to_string(), link: t.link.to_string() }
+    TagColors {
+        code_bg: t.code_bg.to_string(),
+        link: t.link.to_string(),
+        dim: if t.fg_dim.is_empty() { None } else { Some(t.fg_dim.to_string()) },
+        rule: if t.border.is_empty() { "rgba(128,128,128,0.4)".to_string() } else { t.border.to_string() },
+    }
 }

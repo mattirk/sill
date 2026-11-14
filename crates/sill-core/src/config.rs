@@ -16,8 +16,10 @@ pub struct Config {
     pub hotkey: Option<String>,
     /// Backend page the "sill" button opens: `changes` (default), `files`, `agents`, `settings`.
     pub default_page: Option<String>,
-    /// Text size as a factor of the desktop's font size (1.0 = as the desktop). The Settings page
-    /// offers [`TEXT_SCALES`]; any value in [`TEXT_SCALE_RANGE`] is accepted when edited by hand.
+    /// Zoom: a factor on the shelf's normal text size (1.0 = Normal, the default). The shelf's
+    /// normal size is [`TEXT_SCALE_BASE`] × the desktop font — GTK scales that font for HiDPI first,
+    /// so a factor means the same on a 1× and a 2× display. The Settings page offers
+    /// [`TEXT_SCALES`]; any value in [`TEXT_SCALE_RANGE`] is accepted when edited by hand.
     pub text_scale: Option<f64>,
 }
 
@@ -33,16 +35,23 @@ pub const TEXT_SCALES: &[(f64, &str)] = &[
     (1.3, "Larger"),
 ];
 
-/// Accepted `text_scale` values; anything outside (or unparsable) falls back to 1.0.
-pub const TEXT_SCALE_RANGE: (f64, f64) = (0.6, 2.0);
+/// Accepted `text_scale` values; anything outside (or unparsable) falls back to 1.0 (Normal).
+pub const TEXT_SCALE_RANGE: (f64, f64) = (0.5, 1.8);
+/// The shelf's normal text size as a factor of the desktop font: what zoom 1.0 means.
+pub const TEXT_SCALE_BASE: f64 = 1.15;
 
 impl Config {
-    /// The text scale, 1.0 unless a sane value is set.
-    pub fn text_scale(&self) -> f64 {
+    /// The zoom as set (1.0 = Normal), the value the Settings page shows and saves.
+    pub fn zoom(&self) -> f64 {
         match self.text_scale {
             Some(s) if s.is_finite() && s >= TEXT_SCALE_RANGE.0 && s <= TEXT_SCALE_RANGE.1 => s,
             _ => 1.0,
         }
+    }
+
+    /// The factor applied to the desktop font: zoom × [`TEXT_SCALE_BASE`].
+    pub fn text_scale(&self) -> f64 {
+        self.zoom() * TEXT_SCALE_BASE
     }
 
     /// A valid default page id.
