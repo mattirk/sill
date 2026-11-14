@@ -243,11 +243,12 @@ impl Hub {
         });
     }
 
-    /// One history row by session `id` (anonymous for a ghost, none for a ghost's revert — a ghost
-    /// leaves only what the person kept, SPEC §3.6 decision 1).
+    /// One history row by session `id`. A ghost leaves a row only for what changed the host — its
+    /// keeps and their undos, anonymous — never for a revert, which touched only its own overlay
+    /// (SPEC §3.6 decision 1).
     fn history(&self, id: &str, kind: H, path: &Path, fill: impl FnOnce(&mut sill_core::history::Event)) {
         let Some(s) = self.with_store(|st| st.sessions()).ok().and_then(|v| v.into_iter().find(|s| s.id == id)) else { return };
-        if s.ghost && kind != H::Kept {
+        if s.ghost && !matches!(kind, H::Kept | H::Undone) {
             return;
         }
         let mut e = sill_core::history::event(&s, kind, path);
