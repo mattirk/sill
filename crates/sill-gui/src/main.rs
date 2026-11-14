@@ -375,6 +375,9 @@ pub enum Message {
     CloseRequested,
     /// From the tray icon.
     Tray(tray::Asked),
+    /// The Mac's menu bar icon: the next frame while an agent works.
+    #[cfg(target_os = "macos")]
+    TrayTick,
     /// Work done off the window's thread that needs no answer.
     Nothing,
     /// The monitor's size as iced reports it: Shelf mode's width where there is no X11.
@@ -1327,6 +1330,14 @@ impl App {
             subscriptions
                 .push(iced::time::every(Duration::from_millis(600)).map(|_| Message::DemoTick));
         }
+        // the menu bar's icon moves while an agent works; the Mac steps it on the main thread
+        // (Linux's tray has a thread of its own)
+        #[cfg(target_os = "macos")]
+        if self.tray_busy && self.tray.is_some() {
+            subscriptions.push(
+                iced::time::every(Duration::from_millis(tray::FRAME_MS)).map(|_| Message::TrayTick),
+            );
+        }
         // While busy, update the timer label and its width together once a second.
         // The spinner and timer reveal animate between these samples.
         if self.current().is_some_and(|v| v.conversation.busy()) {
@@ -1929,6 +1940,12 @@ impl App {
                 return if active { self.hide() } else { self.show(time) };
             }
             Message::CloseRequested => return self.hide(),
+            #[cfg(target_os = "macos")]
+            Message::TrayTick => {
+                if let Some(tray) = &self.tray {
+                    tray.tick();
+                }
+            }
             Message::Tray(tray::Asked::Toggle) => return self.toggle(0),
             Message::Tray(tray::Asked::Quit) => {
                 if let Some(tray) = self.tray.take() {

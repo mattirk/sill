@@ -373,7 +373,7 @@ impl App {
                     style::with_hue(P.error, RED),
                     "close-window",
                     Message::Quit,
-                    "Hide: the window goes; the daemon and the sessions go on. `sill toggle` or starting sill again brings it back (Ctrl+Q)",
+                    "Hide: the window goes; the daemon and the sessions go on. The menu bar icon brings it back (Ctrl+Q)",
                 ),
                 dot(style::with_hue(P.warning, YELLOW), "minimize-window", Message::Minimize, "Minimize: into the Dock"),
                 dot(P.success, "zoom-window", Message::Zoom, "Zoom: fill the screen, and back"),
