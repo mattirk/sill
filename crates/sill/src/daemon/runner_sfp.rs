@@ -35,6 +35,7 @@ impl Runner {
             let key_file=sill_core::agents::save_api_key(&hub.home,&agent,&method_id,&key)?;
             let mut st=self.st.lock().unwrap();
             if st.ended || st.retired { return Err(Error::domain("invalid_state","the session is not running").into()); }
+            st.key_tried=true;
             Self::queue(&mut st,relay::Command::AuthenticateKey{method:method_id,key_file});
             self.save(store,&st)?;
             self.drain(store,&mut st)
@@ -44,6 +45,7 @@ impl Runner {
     /// open: the session asked for it at a prompt, not at its start, so there is nothing to open
     /// again. The login is taken as done — the next prompt tells otherwise — and the queue moves.
     fn sfp_login_done(&self,hub:&Hub)->Result<()> {
+        hub.sync_credentials_for(Some(&self.id))?;
         hub.with_store(|store| {
             let mut st=self.st.lock().unwrap();
             let tx=store.conn().unchecked_transaction()?;
@@ -127,7 +129,6 @@ impl Runner {
         let authenticated=matches!(event,relay::Event::Other(text) if text=="_sill_authenticated" || text=="logged in; send the message again");
         let mut events=if authenticated {
             st.auth=None;
-            st.key_tried=false;
             let mut next=session.clone();next.authentication=None;
             if next.question_ids.is_empty() && next.turn_id.is_none() {next.activity="idle".into();}
             vec![p::Event::SessionUpdated{session:next}]
@@ -151,7 +152,8 @@ impl Runner {
         }
         let interrupted=matches!(event,relay::Event::Stopped(acp::StopReason::Other(reason)) if reason=="_sill_prompt_error")
             || matches!(event,relay::Event::Stopped(acp::StopReason::Cancelled)) && !cancel_evidence
-            || matches!(event,relay::Event::AuthRequired{..}|relay::Event::Ended(_));
+            || matches!(event,relay::Event::AuthRequired{..}) && (st.ready.is_some() || st.active_submission.is_some())
+            || matches!(event,relay::Event::Ended(_));
         if interrupted {
             let reason=if matches!(event,relay::Event::AuthRequired{..}) {"authentication_required"}
                 else if matches!(event,relay::Event::Ended(_)) {"agent_lost"} else {"adapter_error"};
@@ -205,6 +207,7 @@ impl Runner {
         Ok(out)
     }
     pub(in crate::daemon) fn sfp_submit(&self,hub:&Hub,input:p::Submit)->Result<p::Submission> {
+        hub.sync_credentials_for(Some(&self.id))?;
         if input.session_id != self.id { return Err(Error::domain("not_found","session not found").into()); }
         hub.with_store(|store| {
             let mut st=self.st.lock().unwrap();

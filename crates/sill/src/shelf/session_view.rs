@@ -2349,6 +2349,63 @@ impl SessionView {
                 self.status.set_text("logged in");
                 return;
             }
+            Event::Other(t) if t.starts_with("sill:held:") => {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t["sill:held:".len()..])
+                    && let Some(sub_id) = v["submission_id"].as_str().map(str::to_string)
+                {
+                    let text = v["text"].as_str().unwrap_or("");
+                    let reason = v["reason"].as_str().unwrap_or("");
+                    let sid_resume = self.id();
+                    let sub_resume = sub_id.clone();
+                    let weak_resume = Rc::downgrade(self);
+                    let on_resume = Rc::new(move || {
+                        let (sid, sub, weak) = (sid_resume.clone(), sub_resume.clone(), weak_resume.clone());
+                        let retry_id = sub.clone();
+                        glib::spawn_future_local(async move {
+                            let res = gtk::gio::spawn_blocking(move || super::client::resume_submission(&sid, &sub)).await;
+                            let error = match res {
+                                Ok(Ok(())) => return,
+                                Ok(Err(e)) => format!("{e:#}"),
+                                Err(_) => "request worker failed".to_string(),
+                            };
+                            if let Some(v) = weak.upgrade() {
+                                v.conv.retry_held(&retry_id);
+                                v.conv.add_error(&format!("resume prompt: {error}"));
+                            }
+                        });
+                    });
+                    let sid_cancel = self.id();
+                    let sub_cancel = sub_id.clone();
+                    let weak_cancel = Rc::downgrade(self);
+                    let on_cancel = Rc::new(move || {
+                        let (sid, sub, weak) = (sid_cancel.clone(), sub_cancel.clone(), weak_cancel.clone());
+                        let retry_id = sub.clone();
+                        glib::spawn_future_local(async move {
+                            let res = gtk::gio::spawn_blocking(move || super::client::cancel_submission(&sid, &sub)).await;
+                            let error = match res {
+                                Ok(Ok(())) => return,
+                                Ok(Err(e)) => format!("{e:#}"),
+                                Err(_) => "request worker failed".to_string(),
+                            };
+                            if let Some(v) = weak.upgrade() {
+                                v.conv.retry_held(&retry_id);
+                                v.conv.add_error(&format!("discard prompt: {error}"));
+                            }
+                        });
+                    });
+                    self.conv.add_held(&sub_id, text, reason, on_resume, on_cancel);
+                }
+                return;
+            }
+            Event::Other(t) if t.starts_with("sill:held-resolved:") => {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t["sill:held-resolved:".len()..])
+                    && let Some(sub_id) = v["submission_id"].as_str()
+                {
+                    let status = v["status"].as_str().unwrap_or("done");
+                    self.conv.resolve_held(sub_id, status);
+                }
+                return;
+            }
             Event::Other(t) if t == "sill:reconnecting" => {
                 self.status.set_text("reconnecting");
                 return;

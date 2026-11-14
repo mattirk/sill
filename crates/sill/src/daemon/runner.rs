@@ -213,7 +213,6 @@ impl Runner {
                 // the session opened: a login asked for before is done (an agent that wants one
                 // per prompt asks again there). Kept, it held every prompt in the queue.
                 st.auth = None;
-                st.key_tried = false;
             }
             relay::Event::Capabilities { images } => st.images = Some(*images),
             relay::Event::Controls(c) => { self.restore(store, st, c, false)?; st.controls = Some(c.clone()); },
@@ -258,9 +257,12 @@ impl Runner {
                     store.update_tool(&id, seq, title.as_deref(), status.as_deref(), detail.as_deref(), diff.as_deref())?;
                 }
             }
-            relay::Event::Stopped(_) => {
+            relay::Event::Stopped(reason) => {
                 st.busy = false;
                 st.cancel_sent = false;
+                if !matches!(reason, acp::StopReason::Other(r) if r == "_sill_prompt_error") {
+                    st.key_tried = false;
+                }
                 st.last_turn_end = Some(sill_core::store::now());
                 flush(store, &id, st)?;
                 // the summary turn: its text goes to the hub once this event is out

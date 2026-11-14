@@ -103,6 +103,20 @@ pub fn run() -> Result<()> {
     };
     let hub = Arc::new(Hub::new(mode)?);
     {
+        let hub = hub.clone();
+        std::thread::Builder::new().name("sill-credentials".into()).spawn(move || {
+            let mut last_error = None;
+            loop {
+                let error = hub.sync_credentials().err().map(|e| format!("{e:#}"));
+                if error != last_error && let Some(e) = &error {
+                    eprintln!("sill daemon: synchronizing credentials: {e}");
+                }
+                last_error = error;
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+        })?;
+    }
+    {
         // the minute sweep: idle sessions end, memory's nightly run (docs/daemon.md §3.6)
         let hub = hub.clone();
         std::thread::Builder::new().name("sill-daemon-sweep".into()).spawn(move || {

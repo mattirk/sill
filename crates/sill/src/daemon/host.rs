@@ -113,8 +113,9 @@ pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
                 if a.method_id.is_empty() || a.method_id.len() > 256 || a.method_id.chars().any(char::is_control) { return Err(invalid("invalid method_id")); }
                 let home = sill_core::changes::home()?;
                 let agent = sill_core::agents::load(&home).remove(&a.agent_id).ok_or_else(|| domain("not_found", "agent not found"))?;
+                let ghosts = hub.ghost_homes_of(&agent.id);
                 Ok(json!(start(format!("login:{}", agent.id), move |progress| {
-                    sill_core::login::run(&agent, &home, &a.method_id, |line| {
+                    sill_core::login::run_into(&agent, &home, &ghosts, &a.method_id, |line| {
                         progress.send(match line {
                             sill_core::login::Line::Status(s) => api::Progress::Status { text: text(s) },
                             sill_core::login::Line::Stderr(s) => api::Progress::Stderr { text: text(s) },
@@ -128,11 +129,15 @@ pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
                 valid_id(&a.agent_id)?;
                 let home = sill_core::changes::home()?;
                 let agent = sill_core::agents::load(&home).remove(&a.agent_id).ok_or_else(|| domain("not_found", "agent not found"))?;
+                // Reset must not race a daemon host login that will copy credentials back later.
+                let _job = Job::reserve(format!("login:{}", agent.id))?;
                 // first the running sessions: a running agent holds its login and writes to its home
                 let stopped = hub.stop_sessions_of(&agent.id);
                 let mut homes = vec![sill_core::session::agent_home(&home, &agent.id)];
                 homes.extend(hub.ghost_homes_of(&agent.id));
+                let mut credentials = hub.credentials.lock().unwrap();
                 let removed = sill_core::agents::reset_homes(&homes)? + sill_core::agents::remove_api_keys(&home, &agent.id)?;
+                *credentials = Default::default();
                 Ok(json!(api::AgentResetDone { removed: removed as u32, stopped }))
             }
             "_sill/registry.install" => {

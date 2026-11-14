@@ -63,6 +63,9 @@ struct Script {
     /// A key in the other shape is accepted without being read, as Gemini CLI does: the login
     /// "succeeds" and the session still cannot open. Sending that shape first would end there.
     lenient: bool,
+    /// Accept any key at `authenticate` and `session/new`, and check it only on `session/prompt`
+    /// (as Gemini CLI and codex-acp do when given a syntactically valid but revoked/wrong key).
+    check_key_at_prompt: bool,
 }
 
 fn agent_method() -> Value { json!({"id": "browser", "name": "Browser"}) }
@@ -95,6 +98,7 @@ fn serve(stream: UnixStream, script: Script, credential: PathBuf, observed: mpsc
     }
     let auth_required = json!({"code": -32000, "message": "Authentication required"});
     let mut key_accepted = false;
+    let mut key_sent = false;
     while let Some(message) = read(&mut reader) {
         let (Some(id), Some(method)) = (message.get("id").cloned(), message["method"].as_str()) else { continue };
         let logged_in = credential.exists() || key_accepted;
@@ -104,7 +108,7 @@ fn serve(stream: UnixStream, script: Script, credential: PathBuf, observed: mpsc
         }
         let reply = match method {
             "initialize" => Ok(json!({"protocolVersion": 1, "agentCapabilities": {"loadSession": false, "promptCapabilities": {"image": false}}, "authMethods": script.methods})),
-            "session/new" if script.asks == Ask::AtOpen && !logged_in => Err(auth_required.clone()),
+            "session/new" if script.asks == Ask::AtOpen && !logged_in && !(script.check_key_at_prompt && key_sent) => Err(auth_required.clone()),
             "session/new" => Ok(json!({"sessionId": "login-session"})),
             "authenticate" if message["params"]["methodId"] == "api-key" && script.key.is_some() => {
                 let (shape, expected) = script.key.unwrap();
@@ -114,6 +118,11 @@ fn serve(stream: UnixStream, script: Script, credential: PathBuf, observed: mpsc
                 let _ = observed.send(format!("key {}", given.unwrap_or("-")));
                 if given == Some(expected) {
                     key_accepted = true;
+                    key_sent = true;
+                    Ok(json!({}))
+                } else if script.check_key_at_prompt && given.is_some() {
+                    key_accepted = false;
+                    key_sent = true;
                     Ok(json!({}))
                 } else if script.lenient && other_shape {
                     Ok(json!({}))
@@ -135,9 +144,14 @@ fn serve(stream: UnixStream, script: Script, credential: PathBuf, observed: mpsc
                 let text = message["params"]["prompt"].as_array().into_iter().flatten().filter_map(|b| b["text"].as_str()).collect::<String>();
                 let marker = text.split_whitespace().find(|w| w.starts_with("PROMPT-")).unwrap_or("?").to_string();
                 let _ = observed.send(format!("prompt {marker}"));
+                if marker == "PROMPT-SLOW" && !logged_in {
+                    std::thread::sleep(Duration::from_millis(200));
+                }
                 if logged_in {
                     send(&mut writer, json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "login-session", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": format!("answer to {marker}")}}}}));
                     Ok(json!({"stopReason": "end_turn"}))
+                } else if script.check_key_at_prompt {
+                    Err(json!({"code": -32603, "message": "API key not valid. Please pass a valid API key."}))
                 } else {
                     Err(auth_required.clone())
                 }
@@ -384,9 +398,13 @@ impl Frontend {
     fn control(&self, control: Value) {
         let _: Value = self.client.call("_sill/sessions.control", json!({"session_id": self.session, "control": control})).unwrap();
     }
+
+    fn resume(&self, marker: &str) {
+        let _: Value = self.client.call("_sill/submissions.resume", json!({"session_id": self.session, "submission_id": marker})).unwrap();
+    }
 }
 
-fn script(asks: Ask, methods: Value) -> Script { Script { asks, methods, failing: Arc::new(Mutex::new(0)), key: None, lenient: false } }
+fn script(asks: Ask, methods: Value) -> Script { Script { asks, methods, failing: Arc::new(Mutex::new(0)), key: None, lenient: false, check_key_at_prompt: false } }
 
 /// An agent whose `api-key` method takes `key` in `shape`; a Gemini-like one (`Text`) accepts the
 /// other shape without reading it, as Gemini CLI does.
@@ -466,6 +484,29 @@ fn login_at_first_prompt_with_the_terminal_releases_queued_prompts() {
     frontend.answer(&fixture, "PROMPT-TWO");
 }
 
+/// A second prompt queued while the first turn is still in flight is held when that turn fails with
+/// `auth_required`: the frontend gets the held-prompt card (`sill:held:…`), and resuming it after
+/// login sends it and resolves the card (`sill:held-resolved:…`).
+#[test]
+fn a_prompt_queued_during_a_failing_turn_is_held_and_resumable_from_the_card() {
+    let fixture = Fixture::new(script(Ask::AtPrompt, json!([agent_method()])));
+    let mut frontend = Frontend::attach(&fixture);
+    frontend.wait_for(&fixture, "the session opening", |e| matches!(e, Event::Ready { .. }));
+    frontend.submit("PROMPT-SLOW");
+    fixture.expect("prompt PROMPT-SLOW");
+    frontend.submit("PROMPT-HELD");
+    frontend.wait_for(&fixture, "the held prompt card", |e| matches!(e, Event::Other(t) if t.starts_with("sill:held:") && t.contains("PROMPT-HELD")));
+    frontend.login_card(&fixture);
+    assert_eq!(frontend.view.held_submission_ids(), ["PROMPT-HELD"]);
+    frontend.control(json!({"type": "authenticate", "method_id": "browser"}));
+    frontend.login_card_closes(&fixture);
+    fixture.never("prompt PROMPT-HELD", Duration::from_millis(200));
+    frontend.resume("PROMPT-HELD");
+    frontend.wait_for(&fixture, "the held prompt card closing", |e| matches!(e, Event::Other(t) if t.starts_with("sill:held-resolved:") && t.contains("PROMPT-HELD")));
+    fixture.expect("prompt PROMPT-HELD");
+    frontend.answer(&fixture, "PROMPT-HELD");
+}
+
 /// A terminal closed without logging in: the queued prompt goes, the agent asks again, and the
 /// card is back — nothing hangs in "working" or "queued".
 #[test]
@@ -488,20 +529,23 @@ fn a_terminal_login_that_did_not_take_asks_again() {
 }
 
 /// Antigravity: with no login, `session/new` hangs while the agent waits for a browser login it
-/// started itself. After the open timeout the card shows; a login lets the session open.
+/// started itself. A prompt sent while the session is still opening is not held when the timeout
+/// asks for a login — once the login finishes, the session opens and that prompt goes out.
 #[test]
 fn an_agent_that_hangs_at_open_gets_the_login_card_after_the_timeout() {
     let fixture = Fixture::with_relay_env(script(Ask::HangsAtOpen, json!([agent_method()])), &[("SILL_SESSION_OPEN_TIMEOUT_MS", "300")]);
     fixture.expect("session/new unanswered");
     let mut frontend = Frontend::attach(&fixture);
+    frontend.submit("PROMPT-ONE");
     let (reason, methods) = frontend.login_card(&fixture);
     assert!(reason.contains("did not open a session within 300 ms"), "{reason}");
     assert_eq!(methods, ["browser"]);
+    assert_eq!(frontend.submission("PROMPT-ONE")["held"], false, "a prompt sent before the session opened is not held");
     frontend.control(json!({"type": "authenticate", "method_id": "browser"}));
     fixture.expect("authenticate");
     fixture.expect("session/new");
     frontend.login_card_closes(&fixture);
-    frontend.submit("PROMPT-ONE");
+    fixture.expect("prompt PROMPT-ONE");
     frontend.answer(&fixture, "PROMPT-ONE");
 }
 
@@ -549,8 +593,6 @@ fn a_saved_api_key_answers_a_new_agent_without_the_card() {
 /// reason, and the key typed there replaces it.
 #[test]
 fn a_refused_saved_api_key_shows_the_card_with_the_reason() {
-    // an agent that checks the key at login (Gemini CLI and codex-acp do not: theirs fails at the
-    // first prompt, and Log out clears it)
     let fixture = Fixture::with_saved_key(Script { lenient: false, ..key_script(Shape::Text, "sk-new-9999") }, "api-key", "sk-old-0000");
     let mut frontend = Frontend::attach(&fixture);
     let (reason, _) = frontend.login_card(&fixture);
@@ -560,6 +602,29 @@ fn a_refused_saved_api_key_shows_the_card_with_the_reason() {
     frontend.submit("PROMPT-ONE");
     frontend.answer(&fixture, "PROMPT-ONE");
     assert_eq!(std::fs::read_to_string(fixture.saved_key("api-key")).unwrap(), "sk-new-9999");
+}
+
+/// Gemini CLI and codex-acp accept any key at `authenticate` and open the session; a revoked or
+/// wrong key fails only on the first `session/prompt` (often with a generic JSON-RPC error code
+/// naming the invalid API key). That failure opens the login card with the provider's reason
+/// instead of resending the bad saved key, and a new key recovers the session.
+#[test]
+fn a_saved_api_key_rejected_at_first_prompt_shows_the_card_instead_of_resending() {
+    let fixture = Fixture::with_saved_key(Script { check_key_at_prompt: true, ..key_script(Shape::Text, "sk-valid-7777") }, "api-key", "sk-bad-0000");
+    let mut frontend = Frontend::attach(&fixture);
+    fixture.expect("key sk-bad-0000");
+    frontend.wait_for(&fixture, "the session opening", |e| matches!(e, Event::Ready { .. }));
+    frontend.submit("PROMPT-ONE");
+    fixture.expect("prompt PROMPT-ONE");
+    let (reason, _) = frontend.login_card(&fixture);
+    assert!(reason.contains("API key not valid"), "{reason}");
+    fixture.never("key sk-bad-0000", Duration::from_millis(300));
+    frontend.control(json!({"type": "authenticate", "method_id": "api-key", "api_key": "sk-valid-7777"}));
+    fixture.expect("key sk-valid-7777");
+    frontend.login_card_closes(&fixture);
+    frontend.submit("PROMPT-TWO");
+    frontend.answer(&fixture, "PROMPT-TWO");
+    assert_eq!(std::fs::read_to_string(fixture.saved_key("api-key")).unwrap(), "sk-valid-7777");
 }
 
 // --- reset ----------------------------------------------------------------------------------------
@@ -694,6 +759,58 @@ fn a_host_login_copies_only_the_login_and_stops_the_adapters_helpers() {
     assert!(!login.own(".tmp").exists(), "temp files are not the login");
     assert!(login.helper_stopped(), "the adapter's helper still runs");
     assert!(login.leftovers().is_empty(), "left behind: {:?}", login.leftovers());
+}
+
+#[test]
+fn a_host_login_propagates_to_existing_ghost_session_homes() {
+    let login = if let Some(dir) = std::env::var_os("SILL_GHOST_LOGIN_TEST_CHILD") {
+        HostLogin { dir: dir.into() }
+    } else {
+        let login = HostLogin::new(false);
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "a_host_login_propagates_to_existing_ghost_session_homes", "--nocapture"])
+            .env("SILL_GHOST_LOGIN_TEST_CHILD", &login.dir)
+            .env("XDG_STATE_HOME", login.dir.join("state"))
+            .status().unwrap();
+        assert!(status.success());
+        return;
+    };
+    let ghost = login.dir.join("ghost-home/fakelogin");
+    std::fs::create_dir_all(ghost.join(".fakelogin")).unwrap();
+    std::fs::write(ghost.join(".fakelogin/state.sqlite"), "ghost history").unwrap();
+    let home = login.dir.join("home");
+    // The subprocess owns its environment; the parallel test runner is never mutated.
+    let agent = sill_core::agents::load(&home).remove("fakelogin").unwrap();
+    let mut env_agent = agent;
+    env_agent.env.insert("XDG_STATE_HOME".into(), login.dir.join("state").display().to_string());
+    // Run `run_into` with `ghost` as an existing ghost session's agent home copy.
+
+    sill_core::login::run_into(&env_agent, &home, std::slice::from_ref(&ghost), "browser", |_| {}).unwrap();
+    assert_eq!(std::fs::read_to_string(sill_core::session::agent_home(&home, "fakelogin").join(".fakelogin/auth.json")).unwrap(), "token");
+    assert_eq!(std::fs::read_to_string(ghost.join(".fakelogin/auth.json")).unwrap(), "token", "the ghost home got the new login");
+    assert_eq!(std::fs::read_to_string(ghost.join(".fakelogin/state.sqlite")).unwrap(), "ghost history", "the ghost's history is untouched");
+    // The mount plan must expose registry credentials from the private ghost home, while
+    // neither mounting the normal agent home nor importing its config or history.
+    let mut registry_agent = env_agent.clone();
+    registry_agent.home_paths.clear();
+    let policy = sill_core::policy::Policy::builtin_default();
+    let state = login.dir.join("ghost-state");
+    let binds = sill_core::session::binds_for(&registry_agent, &policy, &state, &home, &[], true).unwrap();
+    let inside = home.join(".fakelogin/auth.json");
+    let (source, target) = binds.iter().find(|(_, target)| inside.starts_with(target)).expect("ghost credential directory is mounted");
+    let mounted = source.join(inside.strip_prefix(target).unwrap());
+    assert_eq!(std::fs::read_to_string(mounted).unwrap(), "token");
+    assert!(!source.join("state.sqlite").exists());
+    assert!(!source.join("config.toml").exists());
+    assert!(source.starts_with(&state));
+    // A first Claude login needs a regular .claude.json even when no host copy exists.
+    let claude = sill_core::agents::builtin().into_iter().find(|a| a.id == "claude").unwrap();
+    let claude_state = login.dir.join("claude-ghost-state");
+    let binds = sill_core::session::binds_for(&claude, &policy, &claude_state, &home, &[], true).unwrap();
+    let (source, _) = binds.iter().find(|(_, target)| *target == home.join(".claude.json")).unwrap();
+    assert!(source.is_file());
+    assert_eq!(std::fs::read(source).unwrap(), b"{}");
+    assert!(login.helper_stopped());
 }
 
 #[test]

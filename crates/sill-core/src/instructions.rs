@@ -120,7 +120,7 @@ pub fn facts_block(policy: &Policy, home: &Path) -> String {
 }
 
 /// What a ghost session's agent is told on top of the facts (docs/memory.md §3.2).
-pub const GHOST_NOTICE: &str = "\n[This is a ghost session: your writes revert after an hour unless the person keeps them; nothing you write to your own home persists; do not try to remember anything — no notes, no memory files, no summaries for later.]";
+pub const GHOST_NOTICE: &str = "\n[This is a ghost session: your writes revert after an hour unless the person keeps them; only login credentials persist from your own home; do not try to remember anything — no notes, no memory files, no summaries for later.]";
 
 /// The person's global instructions: Markdown, any agent. Under `~/.config/sill`, which the jail
 /// masks — the agent neither reads nor edits its own instructions.

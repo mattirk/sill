@@ -461,7 +461,21 @@ fn reconnect(mut waiting: Vec<(String, u64)>) {
     }
 }
 
+pub fn resume_submission(session_id: &str, submission_id: &str) -> Result<()> {
+    quick::<serde_json::Value>("_sill/submissions.resume", sill_proto::sfp::SubmissionKey { session_id: session_id.to_string(), submission_id: submission_id.to_string() })?;
+    Ok(())
+}
+
+pub fn cancel_submission(session_id: &str, submission_id: &str) -> Result<()> {
+    quick::<serde_json::Value>("_sill/submissions.cancel", sill_proto::sfp::SubmissionKey { session_id: session_id.to_string(), submission_id: submission_id.to_string() })?;
+    Ok(())
+}
+
 fn deliver(_client: &Arc<Client>, id: &str, tx: &async_channel::Sender<Event>, view: &sill_core::sfp_client::View, wire: sill_core::wire::Event) {
+    if matches!(&wire, sill_core::wire::Event::Note(n) if n == "Queued prompt is held until explicitly resumed") {
+        // Rendered as an interactive Send / Discard card via `sill:held:` instead of a plain note.
+        return;
+    }
     if matches!(&wire, sill_core::wire::Event::SessionEnded { .. } | sill_core::wire::Event::Summarized { .. } | sill_core::wire::Event::Note(_)) {
         super::remote::invalidate();
         lifecycle(id.into(), Lifecycle::Event(wire));

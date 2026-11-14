@@ -40,6 +40,10 @@ pub struct Agent {
     /// Files copied from the host into the sill-owned home when it is first created (login only).
     #[serde(default)]
     pub seed_files: Vec<String>,
+    /// Credential files relative to the sill-owned agent home. Only these files may cross
+    /// the ghost boundary; settings, plugins and history remain session-private.
+    #[serde(default)]
+    pub login_files: Vec<String>,
     /// Files bound from the host *over* the sill-owned home: the login itself. OAuth refresh tokens
     /// rotate, so two copies of the credentials revoke each other; one shared file is the only
     /// workable option (and the only thing the agent writes to the host).
@@ -117,6 +121,7 @@ pub fn builtin() -> Vec<Agent> {
             state_dirs: vec!["~/.claude".into(), "~/.claude.json".into()],
             home_paths: vec!["~/.claude".into(), "~/.claude.json".into()],
             seed_files: vec!["~/.claude.json".into()],
+            login_files: vec![".claude/.credentials.json".into()],
             // sill's Claude logs in on its own (terminal login inside the jail, written to the sill-owned
             // home): a separate grant from the host's Claude Code / Zed, so neither can revoke the other
             shared_files: vec![],
@@ -138,6 +143,7 @@ pub fn builtin() -> Vec<Agent> {
             state_dirs: vec!["~/.codex".into()],
             home_paths: vec!["~/.codex".into()],
             seed_files: vec![],
+            login_files: vec![],
             // no host login is shared into jails: Codex in sill logs in on its own (the host-side
             // login lands in the sill-owned home through `CODEX_HOME`)
             shared_files: vec![],
@@ -159,6 +165,7 @@ pub fn builtin() -> Vec<Agent> {
             state_dirs: vec!["~/.gemini".into()],
             home_paths: vec!["~/.gemini".into()],
             seed_files: vec![],
+            login_files: vec![],
             // its login lands in the sill-owned home (the host-side login relocates GEMINI_CLI_HOME)
             shared_files: vec![],
             // "Log in with Google" opens a browser and waits on a 127.0.0.1 callback port: host only
@@ -187,6 +194,7 @@ pub fn load(home: &Path) -> BTreeMap<String, Agent> {
             {
                 // an override written before a field existed keeps the built-in's value for it
                 if let Some(b) = out.get(&a.id) {
+                    if a.login_files.is_empty() { a.login_files = b.login_files.clone(); }
                     if a.icon.is_none() {
                         a.icon = b.icon.clone();
                     }

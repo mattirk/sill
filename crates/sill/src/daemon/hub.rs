@@ -42,6 +42,7 @@ struct EndCtx {
 
 pub struct Hub {
     pub(super) store: Mutex<Store>,
+    pub(super) credentials: Mutex<sill_core::credentials::Sync>,
     pub(super) sfp: Mutex<super::sfp::Subscriptions>,
     started: i64,
     mode: &'static str,
@@ -104,6 +105,7 @@ impl Hub {
             launcher,
             exe: sill_core::session::staged_exe()?,
             home: sill_core::changes::home()?,
+            credentials: Mutex::default(),
             children: Arc::default(),
             runners: Mutex::new(HashMap::new()),
             starting: Mutex::new(()),
@@ -115,6 +117,28 @@ impl Hub {
         hub.sweep_dead_ghosts();
         hub.sweep_orphan_runtime();
         Ok(hub)
+    }
+
+    /// Called outside store/runner locks; only credential files cross the ghost boundary.
+    pub(super) fn sync_credentials(&self) -> Result<()> {
+        self.sync_credentials_for(None)
+    }
+
+    pub(super) fn sync_credentials_for(&self, session: Option<&str>) -> Result<()> {
+        let mut sync = self.credentials.lock().unwrap();
+        let rows = self.with_store(|s| s.sessions())?;
+        let registry = sill_core::agents::load(&self.home);
+        let target = session.and_then(|id| rows.iter().find(|s| s.id == id)).map(|s| s.agent.as_str());
+        let mut first_error = None;
+        for agent in registry.values().filter(|a| session.is_none() || target == Some(a.id.as_str())) {
+            let ghosts = sill_core::session::existing_ghost_homes(&rows, &agent.id);
+            if !ghosts.is_empty() {
+                if let Err(e) = sync.reconcile(agent, &sill_core::session::agent_home(&self.home, &agent.id), &ghosts) {
+                    if first_error.is_none() { first_error = Some(e); }
+                }
+            }
+        }
+        match first_error { Some(e) => Err(e), None => Ok(()) }
     }
 
     pub fn session_count(&self) -> usize {
@@ -869,6 +893,9 @@ impl Hub {
         if let Err(e) = sill_core::session::stop(id) {
             eprintln!("sill daemon: stopping session {id} for deletion: {e:#}");
         }
+        if let Err(e) = self.sync_credentials_for(Some(id)) {
+            eprintln!("sill daemon: credentials before deleting {id}: {e:#}");
+        }
         let uid = rustix::process::getuid().as_raw();
         if let Err(e) = sill_core::session::remove_state(uid, id) {
             eprintln!("sill daemon: removing session {id}'s state: {e:#}");
@@ -1042,14 +1069,8 @@ impl Hub {
     /// The copies of `agent`'s home in this daemon's ghost sessions (a ghost's agent starts from a
     /// copy of the sill-owned home, its login included).
     pub(super) fn ghost_homes_of(&self, agent: &str) -> Vec<std::path::PathBuf> {
-        let uid = rustix::process::getuid().as_raw();
         let rows = self.store.lock().unwrap().sessions().unwrap_or_default();
-        rows.into_iter()
-            .filter(|s| s.agent == agent)
-            .filter_map(|s| sill_core::session::state_dir(uid, &s.id).ok())
-            .map(|dir| sill_core::session::ghost_agent_home(&dir, agent))
-            .filter(|p| p.is_dir())
-            .collect()
+        sill_core::session::existing_ghost_homes(&rows, agent)
     }
 
     fn retire_runner(&self, id: &str) {
@@ -1071,6 +1092,9 @@ impl Hub {
     /// deleted instead: there is nothing to remember. Asked again while the agent writes: still
     /// pending. Asked during a checkpoint: that checkpoint becomes the end's summary.
     fn end_session(self: &Arc<Self>, id: &str, reason: &str) -> Result<Ending> {
+        if let Err(e) = self.sync_credentials_for(Some(id)) {
+            eprintln!("sill daemon: credentials before ending {id}: {e:#}");
+        }
         if !sill_core::session::valid_id(id) {
             bail!("not a session id");
         }
@@ -1252,6 +1276,7 @@ impl Hub {
     /// Start a stored session's jail from its row — pins, policy, desktop grants, the agent's binds
     /// — or find it running (what `shelf/session.rs` built in-process before the daemon).
     fn start_session(&self, id: &str) -> Result<Started> {
+        self.sync_credentials_for(Some(id))?;
         if !sill_core::session::valid_id(id) {
             bail!("not a session id");
         }

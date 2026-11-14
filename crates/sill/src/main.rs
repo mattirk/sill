@@ -654,7 +654,11 @@ fn main() -> Result<()> {
                 Some(m) => m,
                 None => bail!("{agent} has no host-side login method; set the key in its environment instead"),
             };
-            sill_core::login::run(a, &home, &method, |line| match line {
+            let ghosts = sill_core::store::Store::open_default()
+                .and_then(|s| s.sessions())
+                .map(|rows| sill_core::session::existing_ghost_homes(&rows, &a.id))
+                .unwrap_or_default();
+            sill_core::login::run_into(a, &home, &ghosts, &method, |line| match line {
                 sill_core::login::Line::Status(t) => eprintln!("{t}"),
                 sill_core::login::Line::Stderr(t) => eprintln!("\x1b[2m{t}\x1b[0m"),
             })?;

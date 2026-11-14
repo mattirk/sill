@@ -48,6 +48,9 @@ impl View {
     pub fn question_id(&self, request: u64) -> Option<&str> {
         self.requests.iter().find_map(|(id, n)| (*n == request).then_some(id.as_str()))
     }
+    pub fn held_submission_ids(&self) -> Vec<String> {
+        self.submissions.values().filter(|s| s.held && s.outcome == "pending").map(|s| s.submission_id.clone()).collect()
+    }
     pub fn accept(&mut self, notification: SessionEvent) -> Result<Vec<wire::Event>> {
         if notification.session_id != self.session_id || notification.subscription_id != self.subscription_id { return Ok(vec![]); }
         let seq: u64 = notification.seq.parse()?;
@@ -111,10 +114,22 @@ impl View {
                 self.questions.insert(question.question_id.clone(), question);
             }
             Event::SubmissionUpdated { submission } => {
+                let was_held = self.submissions.get(&submission.submission_id).is_some_and(|s| s.held && s.outcome == "pending");
                 if !self.submissions.contains_key(&submission.submission_id) && submission.delivery == "queued" && self.session.as_ref().is_some_and(|s|s.activity != "idle") {
                     events.push(wire::Event::Note("Prompt queued until the agent is ready".into()));
                 }
-                if submission.held { events.push(wire::Event::Note("Queued prompt is held until explicitly resumed".into())); }
+                if submission.held && submission.outcome == "pending" && !was_held {
+                    events.push(wire::Event::Note("Queued prompt is held until explicitly resumed".into()));
+                    events.push(held_event(&submission));
+                } else if was_held && (!submission.held || submission.outcome != "pending") {
+                    let status = match submission.outcome.as_str() {
+                        "cancelled" => "discarded",
+                        "unknown" => "outcome uncertain",
+                        "failed" | "rejected" => "failed",
+                        _ => "sent",
+                    };
+                    events.push(wire::Event::Other(format!("sill:held-resolved:{}", serde_json::json!({"submission_id": submission.submission_id, "status": status}))));
+                }
                 if submission.insertion == "unknown" || submission.outcome == "unknown" { events.push(wire::Event::Note("Prompt outcome is uncertain; it will not be resent automatically".into())); }
                 self.submissions.insert(submission.submission_id.clone(),submission);
             }
@@ -150,8 +165,12 @@ impl View {
         let questions: Vec<Question> = self.questions.values().filter(|q| q.state == "open").cloned().collect();
         for question in questions { out.extend(self.render_question(&question)); }
         for submission in self.submissions.values() {
-            if submission.held { out.push(wire::Event::Note("Queued prompt is held until explicitly resumed".into())); }
-            else if submission.delivery == "queued" && submission.outcome == "pending" { out.push(wire::Event::Note("Prompt queued until the agent is ready".into())); }
+            if submission.held && submission.outcome == "pending" {
+                out.push(wire::Event::Note("Queued prompt is held until explicitly resumed".into()));
+                out.push(held_event(submission));
+            } else if submission.delivery == "queued" && submission.outcome == "pending" {
+                out.push(wire::Event::Note("Prompt queued until the agent is ready".into()));
+            }
         }
         out
     }
@@ -181,6 +200,16 @@ impl View {
             _ => vec![wire::Event::Note(format!("Unsupported question {}; remains pending", question.kind))],
         }
     }
+}
+fn held_event(submission: &Submission) -> wire::Event {
+    wire::Event::Other(format!(
+        "sill:held:{}",
+        serde_json::json!({
+            "submission_id": submission.submission_id,
+            "text": submission.text,
+            "reason": submission.hold_reason.as_ref().map(|r| r.message.as_str()).unwrap_or(""),
+        })
+    ))
 }
 fn content_parent(item: &Item) -> Option<&str> {
     item.content.iter().find_map(|block|block.extra.get("parent_item_id").and_then(|v|v.as_str()))

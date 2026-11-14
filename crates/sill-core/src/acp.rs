@@ -635,6 +635,19 @@ async fn open_fresh(
     }
 }
 
+/// Lenient adapters (Gemini CLI, codex-acp) accept any key at `authenticate` and only fail on the
+/// first `session/prompt`, sometimes with a provider error message instead of `-32000`.
+fn is_prompt_auth_error(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    let normalized = lower.replace(['_', '-'], " ").replace("apikey", "api key");
+    ["unauthorized", "authentication error", "authentication failed", "unauthenticated",
+        "invalid api key", "incorrect api key", "missing api key", "expired api key", "revoked api key",
+        "api key not valid", "api key is not valid", "api key invalid", "api key is invalid",
+        "api key expired", "api key has expired", "api key revoked", "api key was revoked",
+        "api key not provided", "api key was not provided"]
+        .iter().any(|s| normalized.contains(s))
+}
+
 /// Run an open session until `Command::Quit`, the commands channel closes, or the connection
 /// fails. Works for fresh and restored sessions alike (the restore's replay arrives as updates).
 async fn drive(
@@ -699,7 +712,7 @@ async fn drive(
                     Ok(resp) => {
                         let _ = events_loop.send(Event::Stopped(stop_reason(resp.stop_reason))).await;
                     }
-                    Err(e) if e.code == ErrorCode::AuthRequired => {
+                    Err(e) if e.code == ErrorCode::AuthRequired || (!auth_methods.is_empty() && is_prompt_auth_error(&e.message)) => {
                         // A failed RPC does not establish cancellation or successful insertion.
                         let _ = events_loop.send(Event::Stopped(StopReason::Other("_sill_prompt_error".into()))).await;
                         let _ = events_loop
@@ -1074,6 +1087,16 @@ fn kind_name(block: &ContentBlock) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn provider_auth_detection_excludes_quota_and_permission_errors() {
+        for text in ["API key not valid", "invalid_api_key", "API key expired", "401 Unauthorized", "authentication_error"] {
+            assert!(super::is_prompt_auth_error(text), "{text}");
+        }
+        for text in ["Quota exceeded for API key", "API key has insufficient permissions", "Rate limit exceeded", "API key billing limit reached"] {
+            assert!(!super::is_prompt_auth_error(text), "{text}");
+        }
+    }
+
     use super::*;
 
     fn update(json: serde_json::Value) -> Event { to_event(serde_json::from_value(json).unwrap()) }

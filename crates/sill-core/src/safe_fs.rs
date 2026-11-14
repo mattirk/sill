@@ -230,3 +230,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+
+/// Read a bounded regular file without following any link, including intermediate components.
+/// Missing files are distinct from unsafe paths and I/O failures.
+pub fn read_file_beneath(root: &Path, rel: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
+    use std::io::Read;
+    let dir = match open_dir_beneath(root, rel.parent().unwrap_or(Path::new("")), false) {
+        Ok(d) => d,
+        Err(e) if e.chain().any(|e| e.downcast_ref::<Errno>() == Some(&Errno::NOENT)) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let name = rel.file_name().context("no file name")?;
+    let fd = match openat2(&dir, name, OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC, Mode::empty(), RESOLVE) {
+        Ok(fd) => fd,
+        Err(Errno::NOENT) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let st = fstat(&fd)?;
+    if FileType::from_raw_mode(st.st_mode as RawMode) != FileType::RegularFile { bail!("not a regular file"); }
+    let mut bytes = Vec::new();
+    std::fs::File::from(fd).take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit { bail!("file exceeds {limit} bytes"); }
+    Ok(Some(bytes))
+}
+
+/// Atomic private-file replacement anchored to directory descriptors throughout.
+pub fn replace_private_beneath(root: &Path, rel: &Path, bytes: &[u8]) -> Result<()> {
+    use rustix::fs::{renameat, statat};
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = open_dir_beneath(root, rel.parent().unwrap_or(Path::new("")), true)?;
+    let name = rel.file_name().context("no file name")?;
+    match statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(st) if FileType::from_raw_mode(st.st_mode as RawMode) != FileType::RegularFile => bail!("not a regular file"),
+        Ok(_) | Err(Errno::NOENT) => {},
+        Err(e) => return Err(e.into()),
+    }
+    let tmp = format!(".sill-credential-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let fd = openat2(&dir, tmp.as_str(), OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::from_raw_mode(0o600), RESOLVE)?;
+    let result = (|| -> Result<()> {
+        let mut file = std::fs::File::from(fd);
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        renameat(&dir, tmp.as_str(), &dir, name)?;
+        Ok(())
+    })();
+    if result.is_err() { let _ = unlinkat(&dir, tmp.as_str(), AtFlags::empty()); }
+    result
+}

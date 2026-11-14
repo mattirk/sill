@@ -34,7 +34,13 @@ pub enum Line {
 }
 
 /// Run `method` of `agent` on the host; `report` gets progress lines. Blocking.
-pub fn run(agent: &Agent, home: &Path, method: &str, mut report: impl FnMut(Line)) -> Result<()> {
+pub fn run(agent: &Agent, home: &Path, method: &str, report: impl FnMut(Line)) -> Result<()> {
+    run_into(agent, home, &[], method, report)
+}
+
+/// Run `method` of `agent` on the host, copying login files into its sill-owned home and each
+/// existing directory in `extra_homes` (such as ghost sessions' copies of the agent home).
+pub fn run_into(agent: &Agent, home: &Path, extra_homes: &[PathBuf], method: &str, mut report: impl FnMut(Line)) -> Result<()> {
     let Some(prog) = agent.command.first() else { bail!("agent {} has no command", agent.id) };
     let mut env = agent.env.clone();
     let mut unset: Vec<&str> = Vec::new();
@@ -155,7 +161,17 @@ pub fn run(agent: &Agent, home: &Path, method: &str, mut report: impl FnMut(Line
     })();
     stop_agent(&mut child, &crate::registry::tools_dir(home));
     let copied = match (&result, copy_back) {
-        (Ok(()), Some(dst)) => std::fs::create_dir_all(&dst).map_err(Into::into).and_then(|()| copy_login(&scratch, &dst)).map(Some),
+        (Ok(()), Some(dst)) => (|| -> Result<usize> {
+            std::fs::create_dir_all(&dst)?;
+            let n = copy_login(&scratch, &dst)?;
+            for extra in extra_homes {
+                if extra.is_dir() {
+                    crate::credentials::seed(agent, &dst, extra)?;
+                }
+            }
+            Ok(n)
+        })()
+        .map(Some),
         _ => Ok(None),
     };
     // the scratch holds a credential: gone whatever happened

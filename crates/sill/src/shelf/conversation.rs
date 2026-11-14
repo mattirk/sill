@@ -105,6 +105,8 @@ pub struct Conversation {
     open_forms: RefCell<Vec<Rc<dyn Fn() -> bool>>>,
     /// Login cards still asking (their label, buttons and API key row), closed when the login is done.
     auth_cards: RefCell<Vec<(gtk::Label, gtk::FlowBox, gtk::Box)>>,
+    /// Queued submissions held after an interruption, keyed by submission_id (header label, buttons).
+    held_cards: RefCell<HashMap<String, (gtk::Label, gtk::FlowBox)>>,
     /// A prompt's attachment → a local file to draw (runs off the main thread: it may ask the daemon).
     image_loader: RefCell<Option<ImageLoader>>,
 }
@@ -127,6 +129,9 @@ impl Conversation {
         self.current.borrow_mut().take();
         self.current_thought.borrow_mut().take();
         self.open_permissions.borrow_mut().clear();
+        self.open_forms.borrow_mut().clear();
+        self.auth_cards.borrow_mut().clear();
+        self.held_cards.borrow_mut().clear();
         self.tool_rows.borrow_mut().clear();
         self.last_tool.borrow_mut().take();
         self.plan.borrow_mut().take();
@@ -184,6 +189,7 @@ impl Conversation {
             keep_view: std::cell::Cell::new(None),
             plan: RefCell::new(None),
             auth_cards: RefCell::new(Vec::new()),
+            held_cards: RefCell::new(HashMap::new()),
             open_forms: RefCell::new(Vec::new()),
             image_loader: RefCell::new(None),
         });
@@ -1290,10 +1296,88 @@ impl Conversation {
         self.request_follow();
     }
 
-    /// The agent waits for the person: a permission, a form or a login card is unanswered.
+    /// The agent waits for the person: a permission, a form, a login card or a held prompt is unanswered.
     pub fn asking(&self) -> bool {
         self.open_forms.borrow_mut().retain(|pending| pending());
-        !self.open_permissions.borrow().is_empty() || !self.open_forms.borrow().is_empty() || !self.auth_cards.borrow().is_empty()
+        !self.open_permissions.borrow().is_empty()
+            || !self.open_forms.borrow().is_empty()
+            || !self.auth_cards.borrow().is_empty()
+            || !self.held_cards.borrow().is_empty()
+    }
+
+    /// A queued prompt held after an interrupted turn or session restart: offer Send now / Discard.
+    pub fn add_held(&self, submission_id: &str, text: &str, reason: &str, on_resume: Rc<dyn Fn()>, on_cancel: Rc<dyn Fn()>) {
+        if self.held_cards.borrow().contains_key(submission_id) {
+            return;
+        }
+        self.finish_current();
+        let frame = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        frame.add_css_class("sill-permission");
+        let preview = text.lines().next().unwrap_or("").trim();
+        let title = if preview.is_empty() {
+            "Queued prompt held".to_string()
+        } else {
+            let short: String = preview.chars().take(120).collect();
+            let ellipsis = if preview.chars().count() > 120 || text.lines().count() > 1 { "…" } else { "" };
+            format!("Queued prompt held: “{short}{ellipsis}”")
+        };
+        let label = gtk::Label::new(Some(&title));
+        label.set_xalign(0.0);
+        label.set_wrap(true);
+        label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        frame.append(&label);
+        if !reason.is_empty() {
+            let note = gtk::Label::new(Some(reason));
+            note.add_css_class("dim-label");
+            note.set_xalign(0.0);
+            note.set_wrap(true);
+            note.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+            frame.append(&note);
+        }
+        let buttons = answer_row();
+        let send = answer_button("Send now");
+        send.add_css_class("suggested-action");
+        {
+            let buttons2 = buttons.clone();
+            let label2 = label.clone();
+            send.connect_clicked(move |_| {
+                buttons2.set_sensitive(false);
+                label2.set_text("Queued prompt → sending…");
+                on_resume();
+            });
+        }
+        let discard = answer_button("Discard");
+        discard.add_css_class("destructive-action");
+        {
+            let buttons2 = buttons.clone();
+            let label2 = label.clone();
+            discard.connect_clicked(move |_| {
+                buttons2.set_sensitive(false);
+                label2.set_text("Queued prompt → discarding…");
+                on_cancel();
+            });
+        }
+        buttons.append(&send);
+        buttons.append(&discard);
+        frame.append(&buttons);
+        self.held_cards.borrow_mut().insert(submission_id.to_string(), (label, buttons));
+        self.place(&frame);
+        self.request_follow();
+    }
+
+    pub fn retry_held(&self, submission_id: &str) {
+        if let Some((label, buttons)) = self.held_cards.borrow().get(submission_id) {
+            buttons.set_sensitive(true);
+            label.set_text("Queued prompt held — action failed; try again");
+        }
+    }
+
+    pub fn resolve_held(&self, submission_id: &str, status: &str) {
+        if let Some((label, buttons)) = self.held_cards.borrow_mut().remove(submission_id) {
+            buttons.set_visible(false);
+            label.set_text(&format!("Queued prompt → {status}"));
+            label.add_css_class("dim-label");
+        }
     }
 
     /// The agent no longer asks for a login: the open cards say so instead of offering buttons.

@@ -272,11 +272,13 @@ pub fn load_cached(home: &Path) -> Option<(Registry, SystemTime)> {
 
 /// What the Agents page lists: the snapshot's entries, each carrying the live index's newer
 /// version as `newer` when it has one, then the live entries the snapshot does not know, as
-/// [`Trust::Live`]. The time the live index was fetched, if it is cached.
+/// [`Trust::Live`]. The duplicate `opencode-v2` listing is omitted in favour of `opencode`;
+/// existing installations keep their id and remain usable. The time the live index was fetched,
+/// if it is cached.
 pub fn merged(home: &Path) -> (Vec<Entry>, Option<SystemTime>) {
-    let mut out: Vec<Entry> = snapshot().agents.clone();
+    let mut out: Vec<Entry> = snapshot().agents.iter().filter(|e| e.id != "opencode-v2").cloned().collect();
     let Some((live, when)) = load_cached(home) else { return (out, None) };
-    for mut l in live.agents {
+    for mut l in live.agents.into_iter().filter(|e| e.id != "opencode-v2") {
         l.trust = Trust::Live;
         match out.iter_mut().find(|s| s.id == l.id) {
             Some(s) => {
@@ -399,6 +401,7 @@ pub fn install(home: &Path, entry: &Entry, log: &mut dyn FnMut(String)) -> Resul
             state_dirs: vec![],
             home_paths: vec![],
             seed_files: vec![],
+            login_files: vec![],
             shared_files: vec![],
             host_login: vec![],
             home_env: None,
@@ -943,17 +946,24 @@ mod snapshot_tests {
         let _ = std::fs::remove_dir_all(&dir);
         let home = dir.join("home");
         let cache = cache_path(&home);
+        let (entries, when) = merged(&home);
+        assert!(when.is_none());
+        assert!(entries.iter().any(|e| e.id == "opencode"));
+        assert!(!entries.iter().any(|e| e.id == "opencode-v2"));
         std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
         let snap = snapshot();
         let known = &snap.agents[0];
         let live = serde_json::json!({ "version": "1", "agents": [
             { "id": known.id, "name": known.name, "version": "999.0.0", "icon": "https://example/x.svg", "distribution": { "npx": { "package": "x@999.0.0" } } },
-            { "id": "brand-new", "name": "New", "version": "1.0.0", "distribution": { "npx": { "package": "new@1.0.0" } } }
+            { "id": "brand-new", "name": "New", "version": "1.0.0", "distribution": { "npx": { "package": "new@1.0.0" } } },
+            { "id": "opencode-v2", "name": "OpenCode V2", "version": "999.0.0" }
         ]});
         std::fs::write(&cache, live.to_string()).unwrap();
         let (entries, when) = merged(&home);
         assert!(when.is_some());
-        assert_eq!(entries.len(), snap.agents.len() + 1);
+        assert_eq!(entries.len(), snap.agents.iter().filter(|e| e.id != "opencode-v2").count() + 1);
+        assert!(entries.iter().any(|e| e.id == "opencode"));
+        assert!(!entries.iter().any(|e| e.id == "opencode-v2"));
         let k = entries.iter().find(|e| e.id == known.id).unwrap();
         assert_eq!(k.trust, Trust::Snapshot);
         assert_eq!(k.version, known.version, "the snapshot's version stays");
