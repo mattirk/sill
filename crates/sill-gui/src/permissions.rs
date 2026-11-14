@@ -571,8 +571,8 @@ pub fn indicator<'a>(view: &'a SessionView, session: Option<&Session>) -> Elemen
 
 /// The shield menu's rows, in order: `DevelopmentRestarting`, then `HostControlAll`.
 pub const SHIELD_CHOICES: [&str; 2] = [
-    "Apply development permissions (restarts)",
-    "Activate host control (every operation)",
+    "Development mode",
+    "Host control mode",
 ];
 
 /// "Jailed · expanded access" over the composer, in the host terminal's warning treatment but
