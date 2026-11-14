@@ -49,6 +49,9 @@ enum Cmd {
         /// sill-shim binary to bind into the jail (default: next to this executable)
         #[arg(long)]
         shim: Option<PathBuf>,
+        /// registry id of the agent: its domains join the proxy allow-list
+        #[arg(long)]
+        agent: Option<String>,
     },
     /// Serve a session's network proxy (SPEC §4.8) on an inherited listening socket
     Proxy {
@@ -85,6 +88,15 @@ enum Cmd {
     Theme { name: String },
     /// Set the show/hide key, GTK accelerator syntax: "<Alt>space", "<Super>grave", "F12"
     Hotkey { spec: String },
+    /// Log an agent in on this machine (browser flows that cannot run inside the jail, e.g. Codex
+    /// with ChatGPT); the login file is bound into the agent's jails from then on
+    Login {
+        /// registry id: claude | codex | gemini
+        agent: String,
+        /// login method id as the agent advertises it (default: the agent's first host-side method)
+        #[arg(long)]
+        method: Option<String>,
+    },
     /// Show a policy as sill reads it
     Policy {
         /// name (searched in ~/.config/sill/policies, /etc/sill/policies, built-in) or path
@@ -212,12 +224,24 @@ fn main() -> Result<()> {
         }
         Cmd::Jail { cmd } => jail_cmd(cmd),
         Cmd::Dev { cmd } => dev_cmd(cmd),
-        Cmd::Launch { session, jail, shim } => launch(&session, jail, shim),
+        Cmd::Launch { session, jail, shim, agent } => launch(&session, jail, shim, agent.as_deref()),
         Cmd::Shelf { cwd, hidden } => shelf::run(cwd, hidden),
         Cmd::Toggle => shelf::toggle(),
         Cmd::Restart { hidden, dev } => shelf::restart(hidden, dev),
         Cmd::Theme { name } => shelf::set_theme(&name),
         Cmd::Hotkey { spec } => shelf::set_hotkey(&spec),
+        Cmd::Login { agent, method } => {
+            let home = home()?;
+            let registry = sill_core::agents::load(&home);
+            let Some(a) = registry.get(&agent) else { bail!("unknown agent {agent}") };
+            let method = match method.or_else(|| a.host_login.first().cloned()) {
+                Some(m) => m,
+                None => bail!("{agent} has no host-side login method; set the key in its environment instead"),
+            };
+            sill_core::login::run(a, &home, &method, |line| eprintln!("{line}"))?;
+            eprintln!("logged in; running {agent} sessions pick it up when they start again");
+            Ok(())
+        }
         Cmd::Proxy { fd, socket, policy } => {
             let policy = Policy::load(&policy, &home()?)?;
             let listener = match socket {
@@ -498,7 +522,7 @@ fn dev_cmd(cmd: DevCmd) -> Result<()> {
 }
 
 /// `sill launch`: the process that owns a session on the host side, inside its systemd user unit.
-fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>) -> Result<()> {
+fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Option<&str>) -> Result<()> {
     let rt = shim::runtime_dir(session)?;
     std::fs::create_dir_all(&rt)?;
     let shim_bin = match shim_bin {
@@ -525,7 +549,11 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>) -> Result<()
     let mut proxy_thread = None;
     if use_proxy {
         let listener = UnixListener::bind(&proxy_sock).with_context(|| format!("bind {}", proxy_sock.display()))?;
-        let rules = sill_core::proxy::Rules::from(&spec.policy.network);
+        let mut rules = sill_core::proxy::Rules::from(&spec.policy.network);
+        // the agent's own endpoints (registry `domains`) on top of the policy's list
+        if let Some(a) = agent.and_then(|id| sill_core::agents::load(&home().ok()?).remove(id)) {
+            rules.allow.extend(a.domains);
+        }
         eprintln!("sill launch: proxy mode {:?}, {} allow patterns", rules.mode, rules.allow.len());
         proxy_thread = Some(std::thread::spawn(move || sill_core::proxy::serve(listener, rules, |l| eprintln!("proxy: {l}"))));
         spec.proxy_socket = Some(proxy_sock);
@@ -578,6 +606,7 @@ fn start_unit(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>) -> Resul
         share_net: jail.net,
         env: jail.env.clone(),
         shim_bin,
+        agent: None,
         binds: vec![],
     };
     let sock = sill_core::session::ensure_started(&opts, &home()?, &std::env::current_exe()?)?;

@@ -24,7 +24,9 @@ pub fn uid() -> u32 {
 }
 
 /// Start (or reconnect to) a stored session. The jail's cwd is the home directory (SPEC §3.1).
-pub fn start(s: &store::Session, store: &store::Store) -> Result<Driver> {
+/// `fresh`: an agent still running in the jail is stopped and started again instead of being
+/// reattached (for adapters that refuse a second `initialize`, Codex's "Already initialized").
+pub fn start(s: &store::Session, store: &store::Store, fresh: bool) -> Result<Driver> {
     let home = home()?;
     let registry = agents::load(&home);
     let Some(agent) = registry.get(&s.agent) else { bail!("unknown agent {}", s.agent) };
@@ -41,10 +43,14 @@ pub fn start(s: &store::Session, store: &store::Store) -> Result<Driver> {
         share_net: false,
         env: vec![],
         shim_bin: None,
+        agent: Some(s.agent.clone()),
         binds,
     };
     let sock = ensure_started(&opts, &home, &sill_core::session::staged_exe()?)?;
     let mut control = shim::Control::connect(&sock)?;
+    if fresh && control.status()?.running {
+        control.kill(3000)?;
+    }
     if !control.status()?.running {
         let mut env = agent.env.clone();
         env.extend(agent.sandbox_off_env.clone());

@@ -482,7 +482,7 @@ impl Shelf {
         head.add_css_class("dim-label");
         head.set_xalign(0.0);
         menu.append(&head);
-        for (id, agent) in agents::load(&home) {
+        for (id, agent) in agents::load(&home).into_iter().filter(|(_, a)| a.enabled) {
             let b = gtk::Button::with_label(&agent.name);
             b.add_css_class("flat");
             let s = self.clone();

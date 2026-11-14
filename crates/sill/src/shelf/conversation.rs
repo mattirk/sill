@@ -288,6 +288,36 @@ impl Conversation {
         self.request_follow();
     }
 
+    /// The agent wants a login first: one button per method it offers.
+    pub fn add_auth(&self, message: &str, methods: Vec<sill_core::acp::AuthMethodInfo>, pick: Rc<dyn Fn(sill_core::acp::AuthMethodInfo)>) {
+        self.finish_current();
+        let frame = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        frame.add_css_class("sill-permission");
+        let text = if message.is_empty() { "Login needed".to_string() } else { format!("Login needed: {message}") };
+        let label = gtk::Label::new(Some(&text));
+        label.set_xalign(0.0);
+        label.set_wrap(true);
+        frame.append(&label);
+        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        for m in methods {
+            let b = gtk::Button::with_label(&m.name);
+            b.set_tooltip_text(m.description.as_deref());
+            b.add_css_class("suggested-action");
+            let pick = pick.clone();
+            let buttons2 = buttons.clone();
+            let label2 = label.clone();
+            b.connect_clicked(move |_| {
+                buttons2.set_sensitive(false);
+                label2.set_text(&format!("{} → {}", label2.text(), m.name));
+                pick(m.clone());
+            });
+            buttons.append(&b);
+        }
+        frame.append(&buttons);
+        self.column.append(&frame);
+        self.request_follow();
+    }
+
     pub fn add_note(&self, text: &str) {
         self.finish_current();
         let l = gtk::Label::new(Some(text));
@@ -301,7 +331,7 @@ impl Conversation {
     /// Apply one session event.
     pub fn handle(&self, ev: Event) {
         match ev {
-            Event::Controls(_) => {}
+            Event::Controls(_) | Event::AuthRequired { .. } => {}
             Event::Ready { session_id, resumed, .. } => {
                 self.status.set_text(&format!("{} · {}", if resumed { "resumed" } else { "ready" }, &session_id[..session_id.len().min(8)]))
             }

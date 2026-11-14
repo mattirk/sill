@@ -1,6 +1,8 @@
 //! Backend page "Settings" (SPEC §3.1): theme and width (saved to ~/.config/sill/sill.toml), plus
 //! where things are.
 
+use std::path::{Path, PathBuf};
+
 use gtk4 as gtk;
 use gtk::gdk;
 use gtk::glib;
@@ -131,15 +133,35 @@ pub fn build() -> gtk::Box {
     hkbox.append(&hk_msg);
     root.append(&row("Hotkey", &hkbox));
 
+    // agents: what the "+" menu offers and how each one is started inside its jail
+    let sep0 = gtk::Separator::new(gtk::Orientation::Horizontal);
+    sep0.set_margin_top(8);
+    root.append(&sep0);
+    let home = std::env::var("HOME").unwrap_or_default();
+    let ahead = gtk::Label::new(Some("Agents"));
+    ahead.add_css_class("heading");
+    ahead.set_xalign(0.0);
+    root.append(&ahead);
+    let ahint = gtk::Label::new(Some(
+        "Saved to ~/.config/sill/agents/<id>.toml and used by the next session. Command and environment apply inside the jail; \
+         an API key put in the environment is visible to that agent only. Domains join the proxy allow-list.",
+    ));
+    ahint.add_css_class("dim-label");
+    ahint.set_xalign(0.0);
+    ahint.set_wrap(true);
+    root.append(&ahint);
+    for (_, agent) in sill_core::agents::load(Path::new(&home)) {
+        root.append(&agent_editor(PathBuf::from(&home), agent));
+    }
+
     let sep = gtk::Separator::new(gtk::Orientation::Horizontal);
     sep.set_margin_top(8);
     root.append(&sep);
 
-    let home = std::env::var("HOME").unwrap_or_default();
     let info: Vec<(String, String)> = vec![
         ("Config".into(), format!("{home}/.config/sill/sill.toml")),
         ("Policy".into(), "default — /etc/sill/policies/default.toml, then ~/.config/sill/policies/, then built-in".into()),
-        ("Agents".into(), "built-in: claude, codex, gemini; overrides in ~/.config/sill/agents/*.toml".into()),
+        ("Agents".into(), "built-in: claude, codex, gemini; edited above, overrides in ~/.config/sill/agents/*.toml".into()),
         ("Sessions".into(), format!("{home}/.local/state/sill/sill.db; jails under /var/lib/sill/<uid>/sessions/")),
         ("Units".into(), "systemctl --user list-units 'sill-*'; logs: journalctl --user -u sill-<id>".into()),
         ("Keys".into(), "hotkey show/hide · Escape back/hide · Enter send · Shift+Enter newline · Ctrl+T shell · F2 or double-click rename".into()),
@@ -218,4 +240,93 @@ fn pretty(spec: &str) -> String {
     };
     out.push(key);
     out.join("+")
+}
+
+/// One agent's registry entry, editable: on/off, command, environment, domains.
+fn agent_editor(home: PathBuf, agent: sill_core::agents::Agent) -> gtk::Expander {
+    let exp = gtk::Expander::new(Some(&format!("{} ({}){}", agent.name, agent.id, if agent.enabled { "" } else { " — off" })));
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    body.set_margin_start(12);
+    body.set_margin_top(6);
+    fn line(label: &str, w: &impl IsA<gtk::Widget>) -> gtk::Box {
+        let b = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        let l = gtk::Label::new(Some(label));
+        l.set_xalign(0.0);
+        l.set_width_chars(12);
+        b.append(&l);
+        b.append(w);
+        b
+    }
+    let enabled = gtk::Switch::new();
+    enabled.set_active(agent.enabled);
+    enabled.set_halign(gtk::Align::Start);
+    body.append(&line("Offered", &enabled));
+    let command = gtk::Entry::new();
+    command.set_text(&agent.command.join(" "));
+    command.set_hexpand(true);
+    command.set_tooltip_text(Some("program and arguments, space separated; found on the jail's PATH"));
+    body.append(&line("Command", &command));
+    let env = gtk::TextView::new();
+    env.set_monospace(true);
+    env.buffer().set_text(&agent.env.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("\n"));
+    let env_scroll = gtk::ScrolledWindow::builder().child(&env).min_content_height(48).hexpand(true).build();
+    env_scroll.add_css_class("frame");
+    env_scroll.set_tooltip_text(Some("one KEY=VALUE per line, e.g. OPENAI_API_KEY=sk-…"));
+    body.append(&line("Environment", &env_scroll));
+    let domains = gtk::Entry::new();
+    domains.set_text(&agent.domains.join(" "));
+    domains.set_hexpand(true);
+    domains.set_tooltip_text(Some("hosts the agent may reach, space separated; *.example.com matches subdomains"));
+    body.append(&line("Domains", &domains));
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let save = gtk::Button::with_label("Save");
+    save.add_css_class("suggested-action");
+    let reset = gtk::Button::with_label("Reset to built-in");
+    let msg = gtk::Label::new(None);
+    msg.add_css_class("dim-label");
+    msg.set_xalign(0.0);
+    buttons.append(&save);
+    buttons.append(&reset);
+    buttons.append(&msg);
+    body.append(&buttons);
+    {
+        let (home, base, msg) = (home.clone(), agent.clone(), msg.clone());
+        let (enabled, command, env, domains) = (enabled.clone(), command.clone(), env.clone(), domains.clone());
+        save.connect_clicked(move |_| {
+            let mut a = base.clone();
+            a.enabled = enabled.is_active();
+            a.command = command.text().split_whitespace().map(str::to_string).collect();
+            if a.command.is_empty() {
+                msg.set_text("command is empty");
+                return;
+            }
+            a.domains = domains.text().split_whitespace().map(str::to_string).collect();
+            let b = env.buffer();
+            let text = b.text(&b.start_iter(), &b.end_iter(), false);
+            a.env = text
+                .lines()
+                .filter_map(|l| {
+                    let l = l.trim();
+                    if l.is_empty() || l.starts_with('#') {
+                        return None;
+                    }
+                    l.split_once('=').map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+                })
+                .collect();
+            match sill_core::agents::save_override(&home, &a) {
+                Ok(p) => msg.set_text(&format!("saved {}", p.display().to_string().replace(&home.display().to_string(), "~"))),
+                Err(e) => msg.set_text(&format!("save failed: {e:#}")),
+            }
+        });
+    }
+    {
+        let (home, id, msg) = (home.clone(), agent.id.clone(), msg.clone());
+        reset.connect_clicked(move |_| match sill_core::agents::remove_override(&home, &id) {
+            Ok(true) => msg.set_text("override removed; reopen Settings to see the built-in values"),
+            Ok(false) => msg.set_text("no override to remove"),
+            Err(e) => msg.set_text(&format!("reset failed: {e:#}")),
+        });
+    }
+    exp.set_child(Some(&body));
+    exp
 }

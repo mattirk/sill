@@ -12,6 +12,9 @@ pub struct Agent {
     /// Short id used in the store and the UI (`claude`, `codex`, …).
     pub id: String,
     pub name: String,
+    /// Offered in the "+" menu. Off hides it without losing its settings.
+    #[serde(default = "yes")]
+    pub enabled: bool,
     /// Command line inside the jail.
     pub command: Vec<String>,
     /// Extra environment for the agent process.
@@ -42,6 +45,48 @@ pub struct Agent {
     /// workable option (and the only thing the agent writes to the host).
     #[serde(default)]
     pub shared_files: Vec<String>,
+    /// Login methods (ids from `initialize`) that run on the host instead of inside the jail: a
+    /// browser flow with a localhost callback cannot be reached from the jail's own network
+    /// namespace, so sill runs the agent on the host for the login only and the result lands in the
+    /// `shared_files` login file (see [`crate::login`]).
+    #[serde(default)]
+    pub host_login: Vec<String>,
+    /// Environment variable that relocates the agent's home directory (`CODEX_HOME`). A host-side
+    /// login is run with it pointing at the sill-owned copy of `home_paths[0]`, so the login file
+    /// lands there directly and the host never gets a `~/.codex` of its own.
+    #[serde(default)]
+    pub home_env: Option<String>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// The user's override file for an agent.
+pub fn override_path(home: &Path, id: &str) -> std::path::PathBuf {
+    home.join(".config/sill/agents").join(format!("{id}.toml"))
+}
+
+/// Write an agent as the user's override (the whole entry: overrides replace built-ins).
+pub fn save_override(home: &Path, agent: &Agent) -> anyhow::Result<std::path::PathBuf> {
+    let path = override_path(home, &agent.id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let text = toml::to_string_pretty(agent)?;
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(path)
+}
+
+/// Drop the user's override; the built-in (or the system file) applies again.
+pub fn remove_override(home: &Path, id: &str) -> anyhow::Result<bool> {
+    match std::fs::remove_file(override_path(home, id)) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.into()),
+    }
 }
 
 pub fn builtin() -> Vec<Agent> {
@@ -49,6 +94,7 @@ pub fn builtin() -> Vec<Agent> {
         Agent {
             id: "claude".into(),
             name: "Claude Code".into(),
+            enabled: true,
             command: vec!["claude-agent-acp".into()],
             env: Default::default(),
             supports_load: true,
@@ -58,23 +104,29 @@ pub fn builtin() -> Vec<Agent> {
             home_paths: vec!["~/.claude".into(), "~/.claude.json".into()],
             seed_files: vec!["~/.claude.json".into()],
             shared_files: vec!["~/.claude/.credentials.json".into()],
+            host_login: vec![],
+            home_env: None,
         },
         Agent {
             id: "codex".into(),
             name: "Codex".into(),
+            enabled: true,
             command: vec!["codex-acp".into()],
             env: Default::default(),
-            supports_load: false,
+            supports_load: true,
             domains: vec!["api.openai.com".into(), "*.openai.com".into(), "chatgpt.com".into(), "*.chatgpt.com".into()],
             sandbox_off_env: Default::default(),
             state_dirs: vec!["~/.codex".into()],
             home_paths: vec!["~/.codex".into()],
             seed_files: vec![],
             shared_files: vec!["~/.codex/auth.json".into()],
+            host_login: vec!["chat-gpt".into(), "chatgpt".into()],
+            home_env: Some("CODEX_HOME".into()),
         },
         Agent {
             id: "gemini".into(),
             name: "Gemini CLI".into(),
+            enabled: true,
             command: vec!["gemini".into(), "--experimental-acp".into()],
             env: Default::default(),
             supports_load: false,
@@ -84,6 +136,8 @@ pub fn builtin() -> Vec<Agent> {
             home_paths: vec!["~/.gemini".into()],
             seed_files: vec![],
             shared_files: vec!["~/.gemini/oauth_creds.json".into()],
+            host_login: vec![],
+            home_env: None,
         },
     ]
 }

@@ -8,7 +8,8 @@ use std::rc::Rc;
 use gtk4 as gtk;
 use gtk::gdk;
 use gtk::glib;
-use sill_core::acp::{Command, ConfigKind, ConfigValue, Controls, Event};
+use sill_core::acp::{AuthMethodInfo, Command, ConfigKind, ConfigValue, Controls, Event};
+use sill_core::agents;
 use sill_core::store::{Session, Store};
 
 use super::conversation::Conversation;
@@ -24,6 +25,14 @@ pub struct SessionView {
     term_scroll: gtk::ScrolledWindow,
     /// The shell's pty is opened on first use and kept while hidden.
     shell_open: std::cell::Cell<bool>,
+    /// The terminal is running a login; when it closes the session is opened again.
+    login_pending: std::cell::Cell<bool>,
+    /// `Ready` arrived on the current connection.
+    ready: std::cell::Cell<bool>,
+    /// The connection died before `Ready` and the agent was restarted once already.
+    startup_retried: std::cell::Cell<bool>,
+    /// The jail must be rebuilt at the next restart even if the pins are unchanged (new login file).
+    force_restart: std::cell::Cell<bool>,
     shell_btn: RefCell<Option<gtk::ToggleButton>>,
     pins_row: gtk::Box,
     /// Agent controls (mode, model, effort, toggles) + send button, under the prompt.
@@ -103,6 +112,28 @@ impl SessionView {
         terminal.set_scroll_on_output(false);
         terminal.set_scroll_on_keystroke(true);
         terminal.add_css_class("sill-terminal");
+        // printed links open on the host with Ctrl+click: the jail has no browser, and logins
+        // start with a URL (0x400 = PCRE2_MULTILINE, which VTE requires for match regexes)
+        if let Ok(re) = vte4::Regex::for_match(r#"https?://[^\s'"<>)\]]+"#, 0x400) {
+            let tag = terminal.match_add_regex(&re, 0);
+            terminal.match_set_cursor_name(tag, "pointer");
+        }
+        {
+            let click = gtk::GestureClick::new();
+            click.set_button(1);
+            click.set_propagation_phase(gtk::PropagationPhase::Capture);
+            let t = terminal.clone();
+            click.connect_pressed(move |g, _, x, y| {
+                if !g.current_event_state().contains(gdk::ModifierType::CONTROL_MASK) {
+                    return;
+                }
+                if let (Some(url), _) = t.check_match_at(x, y) {
+                    gtk::UriLauncher::new(&url).launch(None::<&gtk::Window>, None::<&gtk::gio::Cancellable>, |_| {});
+                    g.set_state(gtk::EventSequenceState::Claimed);
+                }
+            });
+            terminal.add_controller(click);
+        }
         let term_scroll = gtk::ScrolledWindow::builder()
             .child(&terminal)
             .hscrollbar_policy(gtk::PolicyType::Never)
@@ -144,6 +175,10 @@ impl SessionView {
             terminal: terminal.clone(),
             term_scroll: term_scroll.clone(),
             shell_open: std::cell::Cell::new(false),
+            login_pending: std::cell::Cell::new(false),
+            ready: std::cell::Cell::new(false),
+            startup_retried: std::cell::Cell::new(false),
+            force_restart: std::cell::Cell::new(false),
             shell_btn: RefCell::new(None),
             pins_row,
             controls_row,
@@ -225,7 +260,7 @@ impl SessionView {
             let v = view.clone();
             terminal.connect_eof(move |_| v.shell_closed());
         }
-        view.connect();
+        view.connect(false);
         view
     }
 
@@ -291,6 +326,10 @@ impl SessionView {
         self.terminal.set_pty(None);
         self.terminal.reset(true, true);
         self.show_shell(false);
+        if self.login_pending.replace(false) {
+            self.status.set_text("retrying");
+            self.command(Command::RetrySession);
+        }
     }
 
     pub fn toggle_shell(self: &Rc<Self>) {
@@ -299,18 +338,100 @@ impl SessionView {
     }
 
     fn open_shell(&self) -> anyhow::Result<()> {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+        self.open_pty(&[shell, "-l".into()], &std::collections::BTreeMap::new())
+    }
+
+    /// Run `argv` on a fresh pty inside the jail, shown in the terminal pane.
+    fn open_pty(&self, argv: &[String], env: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
         let sock = sill_core::session::socket_path(&self.id())?;
         let mut c = sill_core::shim::Control::connect(&sock).map_err(|_| anyhow::anyhow!("session is not running"))?;
         let home = session::home()?;
         let cwd = self.store.pins(&self.id()).unwrap_or_default().into_iter().find(|p| p.is_dir()).unwrap_or(home);
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
         let cols = self.terminal.column_count().max(20) as u16;
         let rows = self.terminal.row_count().max(5) as u16;
-        let (fd, _pid) = c.open_pty(&[shell, "-l".into()], &std::collections::BTreeMap::new(), Some(&cwd), cols, rows)?;
+        let (fd, _pid) = c.open_pty(argv, env, Some(&cwd), cols, rows)?;
         let pty = vte4::Pty::foreign_sync(fd, None::<&gtk::gio::Cancellable>)?;
         self.terminal.set_pty(Some(&pty));
         self.terminal.feed(b"\x1b[2J\x1b[H");
         Ok(())
+    }
+
+    /// The person picked a login method. Agent-side methods go through the protocol; terminal
+    /// methods run the agent's own command in the pane (Claude: `--cli auth login …`), and the
+    /// session is opened again when that exits.
+    fn authenticate(self: &Rc<Self>, m: AuthMethodInfo) {
+        let home = session::home().unwrap_or_default();
+        let agent_id = self.session.borrow().agent.clone();
+        let Some(agent) = agents::load(&home).remove(&agent_id) else {
+            self.conv.add_note(&format!("unknown agent {agent_id}"));
+            return;
+        };
+        if agent.host_login.contains(&m.id) {
+            self.login_on_host(agent, m);
+            return;
+        }
+        let Some((args, env)) = m.terminal else {
+            self.command(Command::Authenticate(m.id));
+            return;
+        };
+        let mut argv = agent.command.clone();
+        argv.extend(args);
+        let mut e = agent.env.clone();
+        e.extend(env);
+        self.terminal.set_pty(None);
+        match self.open_pty(&argv, &e) {
+            Ok(()) => {
+                self.shell_open.set(true);
+                self.login_pending.set(true);
+                self.conv.add_note("finish the login in the terminal below (Ctrl+click opens a link); the session continues when it closes");
+                self.show_shell(true);
+            }
+            Err(err) => self.conv.add_note(&format!("login: {err:#}")),
+        }
+    }
+
+    /// Browser login with a localhost callback (Codex ChatGPT): run the agent on the host for the
+    /// login only (`sill_core::login`), then rebuild the jail so the new login file is bound in.
+    fn login_on_host(self: &Rc<Self>, agent: agents::Agent, m: AuthMethodInfo) {
+        self.status.set_text("logging in");
+        self.conv.add_note(&format!("{}: the login runs on this machine; finish it in the browser that opens", m.name));
+        let (tx, rx) = async_channel::unbounded::<Result<String, String>>();
+        let home = session::home().unwrap_or_default();
+        let method = m.id.clone();
+        std::thread::Builder::new()
+            .name("sill-login".into())
+            .spawn(move || {
+                let progress = tx.clone();
+                let r = sill_core::login::run(&agent, &home, &method, |line| {
+                    let _ = progress.send_blocking(Ok(line));
+                });
+                let _ = tx.send_blocking(r.map(|()| String::new()).map_err(|e| format!("{e:#}")));
+            })
+            .ok();
+        let v = self.clone();
+        glib::spawn_future_local(async move {
+            while let Ok(msg) = rx.recv().await {
+                match msg {
+                    Ok(line) if !line.is_empty() => v.conv.add_note(&line),
+                    Ok(_) => {
+                        v.conv.add_note("logged in; the session starts again with the new login");
+                        v.status.set_text("logged in");
+                        v.force_restart.set(true);
+                        if let Some(cb) = v.on_restart.borrow().as_ref() {
+                            cb(&v.id());
+                        }
+                        break;
+                    }
+                    Err(e) => {
+                        v.conv.add_note(&format!("login failed: {e}"));
+                        v.status.set_text("login needed");
+                        v.command(Command::RetrySession);
+                        break;
+                    }
+                }
+            }
+        });
     }
 
     /// Update and persist the remembered agent settings.
@@ -632,7 +753,7 @@ impl SessionView {
 
     /// Pins the jail was started with, for deciding whether a rebuild is needed.
     pub fn pins_changed(&self) -> bool {
-        self.store.pins(&self.id()).unwrap_or_default() != *self.live_pins.borrow()
+        self.force_restart.get() || self.store.pins(&self.id()).unwrap_or_default() != *self.live_pins.borrow()
     }
 
     /// Context block prepended to prompts while pins exist (SPEC §3.1 pins).
@@ -653,10 +774,11 @@ impl SessionView {
         self.session.borrow().id.clone()
     }
 
-    fn connect(self: &Rc<Self>) {
+    fn connect(self: &Rc<Self>, fresh: bool) {
         let s = self.session.borrow().clone();
         *self.live_pins.borrow_mut() = self.store.pins(&s.id).unwrap_or_default();
-        match session::start(&s, &self.store) {
+        self.ready.set(false);
+        match session::start(&s, &self.store, fresh) {
             Ok(d) => {
                 let events = d.events.clone();
                 *self.driver.borrow_mut() = Some(d);
@@ -684,7 +806,7 @@ impl SessionView {
             }
         };
         if self.driver.borrow().is_none() {
-            self.connect(); // after Ended: the shim respawns the agent and session/load resumes
+            self.connect(false); // after Ended: the shim respawns the agent and session/load resumes
         }
         let Some(d) = self.driver.borrow().as_ref().map(|d| d.commands.clone()) else {
             self.conv.add_note("session is not running");
@@ -731,6 +853,8 @@ impl SessionView {
         let replaying = *self.replaying.borrow();
         match &ev {
             Event::Ready { session_id, resumed, controls } => {
+                self.ready.set(true);
+                self.startup_retried.set(false);
                 let _ = self.store.set_acp_session_id(&self.id(), session_id);
                 self.session.borrow_mut().acp_session_id = Some(session_id.clone());
                 *self.replaying.borrow_mut() = *resumed;
@@ -812,7 +936,22 @@ impl SessionView {
                 let v = self.clone();
                 glib::idle_add_local_once(move || v.after_turn(&id));
             }
-            Event::Ended(_) => {
+            Event::AuthRequired { message, methods } => {
+                self.status.set_text("login needed");
+                let v = self.clone();
+                self.conv.add_auth(message, methods.clone(), Rc::new(move |m| v.authenticate(m)));
+                return;
+            }
+            Event::Ended(err) => {
+                // the connection failed before the session was even open: usually an agent that was
+                // still running from an earlier shelf and refuses a second `initialize`. Start it
+                // again, once; session/load brings the conversation back.
+                if err.is_some() && !self.ready.get() && !self.startup_retried.replace(true) {
+                    *self.driver.borrow_mut() = None;
+                    self.conv.add_note("the agent did not accept the connection; starting it again");
+                    self.connect(true);
+                    return;
+                }
                 // the agent or its stream is gone (crash, OOM, kill): the turn is over whether or not
                 // Stopped arrived, and the next send reconnects instead of waiting for it
                 let was_busy = self.busy.get();

@@ -17,7 +17,8 @@ use agent_client_protocol::schema::v1::{
 };
 use agent_client_protocol::util::MatchDispatch;
 pub use agent_client_protocol::schema::v1::PermissionOptionKind;
-use agent_client_protocol::{ByteStreams, Client, SessionMessage};
+use agent_client_protocol::schema::v1::{AuthCapabilities, AuthMethod, AuthenticateRequest};
+use agent_client_protocol::{ActiveSession, Agent, ByteStreams, Client, ErrorCode, SessionMessage};
 use anyhow::{Context, Result, anyhow};
 use futures::AsyncReadExt;
 use futures::channel::oneshot;
@@ -118,15 +119,48 @@ pub enum Event {
     /// The agent asks for permission; answer with the chosen option id (None = cancel).
     PermissionRequest { title: String, options: Vec<PermissionOption>, reply: oneshot::Sender<Option<String>> },
     Other(String),
+    /// The agent wants a login before it opens a session; answer with [`Command::Authenticate`]
+    /// (agent-side method) or run the terminal method and send [`Command::RetrySession`].
+    AuthRequired { message: String, methods: Vec<AuthMethodInfo> },
     /// A prompt turn ended.
     Stopped(StopReason),
     /// The session ended (connection closed or error).
     Ended(Option<String>),
 }
 
+/// One way to log in, as the agent advertises it in `initialize`.
+#[derive(Debug, Clone)]
+pub struct AuthMethodInfo {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    /// Terminal method: run the agent's own command with these extra args and env in a terminal the
+    /// person can see; the agent never gets `authenticate` for it. None: the `authenticate` RPC.
+    pub terminal: Option<(Vec<String>, std::collections::BTreeMap<String, String>)>,
+}
+
+impl From<&AuthMethod> for AuthMethodInfo {
+    fn from(m: &AuthMethod) -> Self {
+        let terminal = match m {
+            AuthMethod::Terminal(t) => Some((t.args.clone(), t.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect())),
+            _ => None,
+        };
+        AuthMethodInfo {
+            id: m.id().to_string(),
+            name: m.name().to_string(),
+            description: m.description().map(str::to_string),
+            terminal,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum Command {
     Prompt(String),
+    /// Run an agent-side auth method (`authenticate`), then open the session again.
+    Authenticate(String),
+    /// Open the session again (after a terminal login ran outside the protocol).
+    RetrySession,
     SetMode(String),
     SetConfig(String, ConfigValue),
     /// Stop the current turn (`session/cancel`); the agent still reports a stop reason.
@@ -208,144 +242,204 @@ pub fn run_session(
                 agent_client_protocol::on_receive_request!(),
             )
             .connect_with(transport, async move |cx| {
+                // the agent may hand us a login to run in a terminal (its own CLI's login flow)
+                let mut auth_caps = AuthCapabilities::new();
+                auth_caps.terminal = true;
                 let init = cx
-                    .send_request(InitializeRequest::new(ProtocolVersion::V1).client_capabilities(ClientCapabilities::new()))
+                    .send_request(
+                        InitializeRequest::new(ProtocolVersion::V1).client_capabilities(ClientCapabilities::new().auth(auth_caps)),
+                    )
                     .block_task()
                     .await?;
                 let can_load = init.agent_capabilities.load_session;
+                let auth_methods: Vec<AuthMethodInfo> = init.auth_methods.iter().map(AuthMethodInfo::from).collect();
 
-                // either resume (history replayed as updates) or start fresh
-                let resume = opts.resume.clone().filter(|_| can_load);
-                let (mut session, resumed) = match resume {
-                    Some(id) => match cx.load_session(id, &opts.cwd).block_task().start_session().await {
-                        Ok(restored) => (restored.into_session(), true),
-                        Err(e) => {
-                            tracing::warn!("session/load failed, starting fresh: {e}");
-                            (cx.build_session(&opts.cwd).block_task().start_session().await?, false)
-                        }
-                    },
-                    None => (cx.build_session(&opts.cwd).block_task().start_session().await?, false),
-                };
-                let _ = events_loop
-                    .send(Event::Ready {
-                        session_id: session.session_id().to_string(),
-                        resumed,
-                        controls: controls_from(session.modes(), session.config_options()),
-                    })
-                    .await;
-                let mut last_modes: Option<SessionModeState> = session.modes().cloned();
-                let mut last_options: Vec<SessionConfigOption> = session.config_options().map(|o| o.to_vec()).unwrap_or_default();
-
-                let mut in_turn = false;
+                // Open the session and drive it until Quit. A session refused for want of a login is
+                // tried again after the person logged in. `session/new` goes through `run_until`:
+                // the SDK's `start_session` shuts the whole connection down when the request fails,
+                // which would turn "authentication required" into a dead session.
                 loop {
-                    // wait for either a command or an update, whichever comes first; both futures are
-                    // dropped before `session` is used again
-                    enum Next {
-                        Cmd(Option<Command>),
-                        Update(Result<SessionMessage, agent_client_protocol::Error>),
-                    }
-                    let next = {
-                        let cmd_fut = Box::pin(commands.recv());
-                        let upd_fut = Box::pin(session.read_update());
-                        match futures::future::select(cmd_fut, upd_fut).await {
-                            futures::future::Either::Left((cmd, _)) => Next::Cmd(cmd.ok()),
-                            futures::future::Either::Right((upd, _)) => Next::Update(upd),
+                    let resume = opts.resume.clone().filter(|_| can_load);
+                    let attempt: Result<(), agent_client_protocol::Error> = match resume {
+                        Some(id) => match cx.load_session(id, &opts.cwd).block_task().start_session().await {
+                            Ok(restored) => {
+                                let mut session = restored.into_session();
+                                drive(&mut session, true, &commands, &events_loop).await
+                            }
+                            Err(e) if e.code == ErrorCode::AuthRequired => Err(e),
+                            Err(e) => {
+                                tracing::warn!("session/load failed, starting fresh: {e}");
+                                cx.build_session(&opts.cwd)
+                                    .block_task()
+                                    .run_until(async |mut s| drive(&mut s, false, &commands, &events_loop).await)
+                                    .await
+                            }
+                        },
+                        None => {
+                            cx.build_session(&opts.cwd)
+                                .block_task()
+                                .run_until(async |mut s| drive(&mut s, false, &commands, &events_loop).await)
+                                .await
                         }
                     };
-                    match next {
-                        Next::Cmd(Some(Command::Prompt(text))) => {
-                            if in_turn {
-                                let _ = events_loop.send(Event::Other("busy: prompt dropped".into())).await;
-                                continue;
-                            }
-                            session.send_prompt(text.as_str())?;
-                            in_turn = true;
-                            let _ = events_loop.send(Event::TurnStarted).await;
-                        }
-                        Next::Cmd(Some(Command::SetMode(id))) => {
-                            let sid = session.session_id().clone();
-                            match session.connection().send_request(SetSessionModeRequest::new(sid, id.clone())).block_task().await {
-                                Ok(_) => {
-                                    if let Some(m) = last_modes.as_mut() {
-                                        m.current_mode_id = id.into();
-                                    }
-                                    let _ = events_loop.send(Event::Controls(controls_from(last_modes.as_ref(), Some(&last_options)))).await;
-                                }
-                                Err(e) => {
-                                    let _ = events_loop.send(Event::Other(format!("set mode failed: {e}"))).await;
-                                }
-                            }
-                        }
-                        Next::Cmd(Some(Command::SetConfig(config_id, value))) => {
-                            let sid = session.session_id().clone();
-                            let v = match value {
-                                ConfigValue::Id(id) => SessionConfigOptionValue::value_id(id),
-                                ConfigValue::Bool(b) => SessionConfigOptionValue::Boolean { value: b },
-                            };
-                            match session.connection().send_request(SetSessionConfigOptionRequest::new(sid, config_id, v)).block_task().await {
-                                Ok(resp) => {
-                                    last_options = resp.config_options.clone();
-                                    let _ = events_loop.send(Event::Controls(controls_from(last_modes.as_ref(), Some(&last_options)))).await;
-                                }
-                                Err(e) => {
-                                    let _ = events_loop.send(Event::Other(format!("set option failed: {e}"))).await;
-                                }
-                            }
-                        }
-                        Next::Cmd(Some(Command::Cancel)) => {
-                            if !in_turn {
-                                continue;
-                            }
-                            let sid = session.session_id().clone();
-                            if let Err(e) = session.connection().send_notification(CancelNotification::new(sid)) {
-                                let _ = events_loop.send(Event::Other(format!("cancel failed: {e}"))).await;
-                            }
-                        }
-                        Next::Cmd(Some(Command::Quit)) | Next::Cmd(None) => break,
-                        Next::Update(update) => match update? {
-                            SessionMessage::StopReason(reason) => {
-                                in_turn = false;
-                                let _ = events_loop.send(Event::Stopped(reason)).await;
-                            }
-                            SessionMessage::SessionMessage(dispatch) => {
-                                let events = events_loop.clone();
-                                let modes_cell = std::cell::RefCell::new(&mut last_modes);
-                                let options_cell = std::cell::RefCell::new(&mut last_options);
-                                MatchDispatch::new(dispatch)
-                                    .if_notification(async |n: SessionNotification| {
-                                        match n.update {
-                                            SessionUpdate::CurrentModeUpdate(u) => {
-                                                if let Some(m) = modes_cell.borrow_mut().as_mut() {
-                                                    m.current_mode_id = u.current_mode_id.clone();
-                                                }
-                                                let c = controls_from(modes_cell.borrow().as_ref(), Some(options_cell.borrow().as_slice()));
-                                                let _ = events.send(Event::Controls(c)).await;
-                                            }
-                                            SessionUpdate::ConfigOptionUpdate(u) => {
-                                                **options_cell.borrow_mut() = u.config_options.clone();
-                                                let c = controls_from(modes_cell.borrow().as_ref(), Some(options_cell.borrow().as_slice()));
-                                                let _ = events.send(Event::Controls(c)).await;
-                                            }
-                                            other => {
-                                                let _ = events.send(to_event(other)).await;
-                                            }
+                    match attempt {
+                        Ok(()) => return Ok(()),
+                        Err(e) if e.code == ErrorCode::AuthRequired => {
+                            let mut message = e.message.clone();
+                            loop {
+                                let _ = events_loop
+                                    .send(Event::AuthRequired { message: message.clone(), methods: auth_methods.clone() })
+                                    .await;
+                                match commands.recv().await {
+                                    Ok(Command::Authenticate(id)) => {
+                                        // agent-side login (API key from its environment, …): a
+                                        // failure is shown with the choices again, not fatal
+                                        match cx.send_request(AuthenticateRequest::new(id)).block_task().await {
+                                            Ok(_) => break,
+                                            Err(err) => message = format!("login failed: {}", err.message),
                                         }
-                                        Ok(())
-                                    })
-                                    .await
-                                    .otherwise_ignore()?;
+                                    }
+                                    Ok(Command::RetrySession) => break,
+                                    Ok(Command::Quit) | Err(_) => return Ok(()),
+                                    Ok(_) => {}
+                                }
                             }
-                            _ => {}
-                        },
+                        }
+                        Err(e) => return Err(e),
                     }
                 }
-                Ok(())
             })
             .await
     });
     let err = result.as_ref().err().map(|e| e.to_string());
     let _ = events.send_blocking(Event::Ended(err));
     result.map_err(|e| anyhow!("acp: {e}"))
+}
+
+/// Run an open session until `Command::Quit`, the commands channel closes, or the connection
+/// fails. Works for fresh and restored sessions alike (the restore's replay arrives as updates).
+async fn drive(
+    session: &mut ActiveSession<'_, Agent>,
+    resumed: bool,
+    commands: &async_channel::Receiver<Command>,
+    events_loop: &async_channel::Sender<Event>,
+) -> Result<(), agent_client_protocol::Error> {
+    let _ = events_loop
+        .send(Event::Ready {
+            session_id: session.session_id().to_string(),
+            resumed,
+            controls: controls_from(session.modes(), session.config_options()),
+        })
+        .await;
+    let mut last_modes: Option<SessionModeState> = session.modes().cloned();
+    let mut last_options: Vec<SessionConfigOption> = session.config_options().map(|o| o.to_vec()).unwrap_or_default();
+
+    let mut in_turn = false;
+    loop {
+        // wait for either a command or an update, whichever comes first; both futures are
+        // dropped before `session` is used again
+        enum Next {
+            Cmd(Option<Command>),
+            Update(Result<SessionMessage, agent_client_protocol::Error>),
+        }
+        let next = {
+            let cmd_fut = Box::pin(commands.recv());
+            let upd_fut = Box::pin(session.read_update());
+            match futures::future::select(cmd_fut, upd_fut).await {
+                futures::future::Either::Left((cmd, _)) => Next::Cmd(cmd.ok()),
+                futures::future::Either::Right((upd, _)) => Next::Update(upd),
+            }
+        };
+        match next {
+            // a session is open: nothing to log in for, nothing to retry
+            Next::Cmd(Some(Command::Authenticate(_) | Command::RetrySession)) => {}
+            Next::Cmd(Some(Command::Prompt(text))) => {
+                if in_turn {
+                    let _ = events_loop.send(Event::Other("busy: prompt dropped".into())).await;
+                    continue;
+                }
+                session.send_prompt(text.as_str())?;
+                in_turn = true;
+                let _ = events_loop.send(Event::TurnStarted).await;
+            }
+            Next::Cmd(Some(Command::SetMode(id))) => {
+                let sid = session.session_id().clone();
+                match session.connection().send_request(SetSessionModeRequest::new(sid, id.clone())).block_task().await {
+                    Ok(_) => {
+                        if let Some(m) = last_modes.as_mut() {
+                            m.current_mode_id = id.into();
+                        }
+                        let _ = events_loop.send(Event::Controls(controls_from(last_modes.as_ref(), Some(&last_options)))).await;
+                    }
+                    Err(e) => {
+                        let _ = events_loop.send(Event::Other(format!("set mode failed: {e}"))).await;
+                    }
+                }
+            }
+            Next::Cmd(Some(Command::SetConfig(config_id, value))) => {
+                let sid = session.session_id().clone();
+                let v = match value {
+                    ConfigValue::Id(id) => SessionConfigOptionValue::value_id(id),
+                    ConfigValue::Bool(b) => SessionConfigOptionValue::Boolean { value: b },
+                };
+                match session.connection().send_request(SetSessionConfigOptionRequest::new(sid, config_id, v)).block_task().await {
+                    Ok(resp) => {
+                        last_options = resp.config_options.clone();
+                        let _ = events_loop.send(Event::Controls(controls_from(last_modes.as_ref(), Some(&last_options)))).await;
+                    }
+                    Err(e) => {
+                        let _ = events_loop.send(Event::Other(format!("set option failed: {e}"))).await;
+                    }
+                }
+            }
+            Next::Cmd(Some(Command::Cancel)) => {
+                if !in_turn {
+                    continue;
+                }
+                let sid = session.session_id().clone();
+                if let Err(e) = session.connection().send_notification(CancelNotification::new(sid)) {
+                    let _ = events_loop.send(Event::Other(format!("cancel failed: {e}"))).await;
+                }
+            }
+            Next::Cmd(Some(Command::Quit)) | Next::Cmd(None) => break,
+            Next::Update(update) => match update? {
+                SessionMessage::StopReason(reason) => {
+                    in_turn = false;
+                    let _ = events_loop.send(Event::Stopped(reason)).await;
+                }
+                SessionMessage::SessionMessage(dispatch) => {
+                    let events = events_loop.clone();
+                    let modes_cell = std::cell::RefCell::new(&mut last_modes);
+                    let options_cell = std::cell::RefCell::new(&mut last_options);
+                    MatchDispatch::new(dispatch)
+                        .if_notification(async |n: SessionNotification| {
+                            match n.update {
+                                SessionUpdate::CurrentModeUpdate(u) => {
+                                    if let Some(m) = modes_cell.borrow_mut().as_mut() {
+                                        m.current_mode_id = u.current_mode_id.clone();
+                                    }
+                                    let c = controls_from(modes_cell.borrow().as_ref(), Some(options_cell.borrow().as_slice()));
+                                    let _ = events.send(Event::Controls(c)).await;
+                                }
+                                SessionUpdate::ConfigOptionUpdate(u) => {
+                                    **options_cell.borrow_mut() = u.config_options.clone();
+                                    let c = controls_from(modes_cell.borrow().as_ref(), Some(options_cell.borrow().as_slice()));
+                                    let _ = events.send(Event::Controls(c)).await;
+                                }
+                                other => {
+                                    let _ = events.send(to_event(other)).await;
+                                }
+                            }
+                            Ok(())
+                        })
+                        .await
+                        .otherwise_ignore()?;
+                }
+                _ => {}
+            },
+        }
+    }
+    Ok(())
 }
 
 /// One prompt in a fresh session (M0 CLI).
@@ -362,7 +456,8 @@ pub fn run_prompt(
     let opts = SessionOptions { cwd: cwd.to_path_buf(), auto, resume: None };
     let worker = std::thread::spawn(move || run_session(stream, opts, cmd_rx, ev_tx));
     while let Ok(ev) = ev_rx.recv_blocking() {
-        let stop = matches!(ev, Event::Stopped(_));
+        // a login request ends the one-shot too: nobody is here to answer it
+        let stop = matches!(ev, Event::Stopped(_) | Event::AuthRequired { .. });
         let ended = matches!(ev, Event::Ended(_));
         on_event(ev);
         if stop {

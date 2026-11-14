@@ -18,6 +18,8 @@ pub struct StartOptions {
     pub share_net: bool,
     pub env: Vec<String>,
     pub shim_bin: Option<PathBuf>,
+    /// Registry id of the agent the session runs: its domains join the proxy allow-list.
+    pub agent: Option<String>,
     /// Extra read-write binds (host, jail), see [`binds_for`].
     pub binds: Vec<(PathBuf, PathBuf)>,
 }
@@ -25,6 +27,17 @@ pub struct StartOptions {
 /// The binds a session needs beyond the policy's mounts: the agent's sill-owned home paths and the
 /// session-private scratch directories. Creates what is missing (seeding the agent home from the host
 /// on first use, login files only).
+/// The sill-owned home of an agent: `~/.local/state/sill/agents/<id>/`, holding the jail's copy of
+/// each `home_paths` entry under its basename (`.codex`, `.claude`, `.claude.json`).
+pub fn agent_home(home: &Path, agent_id: &str) -> PathBuf {
+    std::env::var("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join(".local/state"))
+        .join("sill")
+        .join("agents")
+        .join(agent_id)
+}
+
 pub fn binds_for(
     agent: &crate::agents::Agent,
     policy: &Policy,
@@ -35,12 +48,7 @@ pub fn binds_for(
     use crate::paths::{expand_home, expand_pattern, layer_name};
     let mut out = Vec::new();
     // agent home: ~/.local/state/sill/agents/<id>/<basename of the path>
-    let agents_base = std::env::var("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home.join(".local/state"))
-        .join("sill")
-        .join("agents")
-        .join(&agent.id);
+    let agents_base = agent_home(home, &agent.id);
     for p in &agent.home_paths {
         let inside = expand_home(p, home);
         let name = inside.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -226,6 +234,9 @@ pub fn ensure_started(opts: &StartOptions, home: &Path, exe: &Path) -> Result<Pa
     }
     if let Some(s) = &opts.shim_bin {
         cmd.arg("--shim").arg(s);
+    }
+    if let Some(a) = &opts.agent {
+        cmd.arg("--agent").arg(a);
     }
     for (host, inside) in &opts.binds {
         cmd.arg("--bind").arg(format!("{}={}", host.display(), inside.display()));

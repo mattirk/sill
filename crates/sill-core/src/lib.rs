@@ -12,6 +12,7 @@ pub mod config;
 pub mod jail;
 pub mod keep;
 pub mod ledger;
+pub mod login;
 pub mod mounts;
 pub mod paths;
 pub mod policy;
