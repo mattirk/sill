@@ -71,6 +71,20 @@ pub fn start(s: &store::Session, store: &store::Store, fresh: bool) -> Result<Dr
     Ok(Driver { commands: cmd_tx, events: ev_rx })
 }
 
+/// What a session's conversation says about how its jail runs: nothing in `unit` mode (the
+/// normal case), one line in `direct` mode — with the warning when there are no limits.
+pub fn mode_note() -> Option<String> {
+    let l = sill_core::launcher::current();
+    match l.mode {
+        sill_core::launcher::Mode::Unit => None,
+        sill_core::launcher::Mode::Direct if l.has_limits() => Some(format!("jail runs detached, direct mode ({}); limits in its own cgroup", l.reason)),
+        sill_core::launcher::Mode::Direct => Some(format!(
+            "jail runs detached, direct mode ({}): no resource limits — a busy agent can starve the host (sudo sill init)",
+            l.reason
+        )),
+    }
+}
+
 /// The binds a stored session runs with (for ledger scans on the host side).
 pub fn binds_of(s: &store::Session, policy: &sill_core::policy::Policy, home: &std::path::Path, store: &store::Store) -> Vec<(PathBuf, PathBuf)> {
     let registry = agents::load(home);

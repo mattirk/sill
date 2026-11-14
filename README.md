@@ -15,7 +15,8 @@ Settings. Next: M3 — a terminal inside the session's jail, policies UI, more a
 | `crates/sill-shim` | the supervisor that runs inside the jail: agent stdio relay, control channel, revert, proxy forwarder |
 | `crates/sill` | the `sill` command and the GTK shelf (`crates/sill/src/shelf/`) |
 | `policies/default.toml` | the built-in policy, also installed to `/etc/sill/policies/` |
-| `packaging/systemd/` | state-filesystem units (`/var/lib/sill.img` → `/var/lib/sill`) |
+| `packaging/systemd/` | state-filesystem units (`/var/lib/sill.img` → `/var/lib/sill`), the shelf's user service; `sill init` embeds and installs them |
+| `packaging/release.sh`, `packaging/deb.sh` | the release tarball + `SHA256SUMS`, the `.deb`; `packaging/sill.desktop`, `packaging/icons/` |
 
 ## Build
 
@@ -28,6 +29,26 @@ cargo test
 ```
 
 The shelf needs `libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev libgtksourceview-5-dev`.
+
+## Install
+
+`sill` runs on any Linux box with bubblewrap, cgroup v2 and a kernel ≥ 6.2; systemd makes sessions
+nicer (units, journal, limits) but is not required (SPEC §4.12). One root step does everything an
+installer or a package would, idempotently, and says what it did and what it skipped:
+
+```bash
+sudo sill init                 # checks · binaries to /usr/local · policy · icons · state image + units/fstab
+sudo sill init --dry-run       # the plan only
+sudo sill init --prefix /opt/sill
+sudo sill init --state-dir /mnt/fast/sill    # an own partition instead of the 32 GB image
+sill init --user               # per account: the shelf starts with your session; prints the hotkey hint
+```
+
+Channels: the release tarball (`sill-<ver>-<arch>.tar.gz` + `SHA256SUMS`, `packaging/release.sh`) with
+`sudo ./sill init` inside; the `.deb` (`packaging/deb.sh`, `postinst` runs `sill init`); from source,
+`cargo install sill-shelf sill-shim` then `sudo sill init` (binaries are taken from next to the running
+`sill`). On studio-debian `studio-debian-system/sound/config/install.sh` runs `sill init` from the
+repo's release build. Signed sums, `sill.io` and the apt repository come later.
 
 ## The jail from the command line
 
@@ -52,13 +73,20 @@ $S dev revert ~/some/repo/other.txt                          # restore from the 
 $S dev stop
 ```
 
-Logs: `$XDG_RUNTIME_DIR/sill/dev/{jail,proxy}.log` (the proxy log lists every allow/deny).
-`--net` shares the host network instead of using the proxy (testing only).
+The dev session starts the way the shelf's sessions do (SPEC §4.7): as the transient user unit
+`sill-dev.service` where the systemd user instance is reachable (logs: `journalctl --user -u sill-dev`),
+otherwise — or with `--direct`, or `SILL_LAUNCHER=direct` — as a detached process with pids and logs
+in `$XDG_RUNTIME_DIR/sill/dev/` (`{launch,bwrap}.pid`, `{jail,proxy}.log`; the proxy log lists every
+allow/deny). Direct mode without a delegated cgroup (`sudo sill init` makes one on hosts without
+systemd) has no resource limits: the default policy refuses to start then (`[limits] required = true`);
+set it to `false` to run anyway with a warning. `--net` shares the host network instead of using the
+proxy (testing only).
 
 ## The shelf
 
 ```bash
-systemctl --user enable --now sill-shelf   # once: the shelf as a user service, hidden, with the session
+sill init --user                           # once: the shelf starts with the session (user service, or
+                                           # ~/.config/autostart/sill.desktop without systemd)
 systemctl --user restart sill-shelf        # after an update (same as `sill restart`)
 journalctl --user -u sill-shelf -f         # its log
 sill toggle                                # show/hide — bind to Alt+Space (Cinnamon custom shortcut)
@@ -89,26 +117,19 @@ sill restart --dev                         # run the build in target/ instead of
   jail* — same mounts, pins and proxy the agent has, so `git status`, builds and tests show the agent's
   view. It starts in the first pinned folder, keeps running while hidden, and dies with the session.
 
-Per-user setup (done): `~/.config/autostart/sill.desktop`, Cinnamon shortcut
-`custom0` = `/usr/local/bin/sill toggle`. Binaries are installed system-wide by
-`studio-debian-system/sound/config/install.sh` from `target/release/` (build with `cargo build --release`
-first).
+Per-user setup (done): `sill-shelf.service` enabled, Cinnamon shortcut `custom0` =
+`/usr/local/bin/sill toggle`. Binaries are installed system-wide by `sudo sill init` (the studio
+install script runs it from `target/release/`; build with `cargo build --release` first). Settings
+shows which launcher mode the shelf found (unit / direct) and where a session's logs are.
 
 ## State filesystem
 
-Session upper trees must not live inside an overlaid tree (SPEC §4.9). The units in
-`packaging/systemd/` create a sparse 32 GB ext4 image and mount it at `/var/lib/sill` (sticky, like
-`/tmp`; each user gets a 0700 dir). On studio-debian `studio-debian-system/sound/config/install.sh`
-installs and enables them; elsewhere:
-
-```bash
-sudo install -m 644 packaging/systemd/* /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now var-lib-sill.mount sill-state-perms.service
-```
-
-With that mounted, `sill` uses `/var/lib/sill/<uid>/sessions/<id>` by default and `--unsafe-state` is
-no longer needed.
+Session upper trees must not live inside an overlaid tree (SPEC §4.9). `sill init` creates a sparse
+32 GB ext4 image `/var/lib/sill.img` and mounts it at `/var/lib/sill` (sticky, like `/tmp`; each user
+gets a 0700 dir) — through the units in `packaging/systemd/` where systemd exists, through an
+`/etc/fstab` line elsewhere; `--state-dir` bind-mounts an own partition there instead. With that
+mounted, `sill` uses `/var/lib/sill/<uid>/sessions/<id>` by default and `--unsafe-state` is no longer
+needed. Grow the image: stop the mount, `truncate -s 64G`, `e2fsck -f`, `resize2fs`, start it again.
 
 ## Agent home and private scratch
 

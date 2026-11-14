@@ -29,6 +29,8 @@ pub struct SessionView {
     login_pending: Rc<std::cell::Cell<bool>>,
     /// `Ready` arrived on the current connection.
     ready: std::cell::Cell<bool>,
+    /// The launcher-mode note was shown in this view (once per tab, SPEC §4.7).
+    mode_noted: std::cell::Cell<bool>,
     /// The connection died before `Ready` and the agent was restarted once already.
     startup_retried: std::cell::Cell<bool>,
     /// The jail must be rebuilt at the next restart even if the pins are unchanged (new login file).
@@ -313,6 +315,7 @@ impl SessionView {
             shell_open: std::cell::Cell::new(false),
             login_pending: login_pending.clone(),
             ready: std::cell::Cell::new(false),
+            mode_noted: std::cell::Cell::new(false),
             startup_retried: std::cell::Cell::new(false),
             force_restart: std::cell::Cell::new(false),
             shell_btn: RefCell::new(None),
@@ -1022,6 +1025,11 @@ impl SessionView {
         self.ready.set(false);
         match session::start(&s, &self.store, fresh) {
             Ok(d) => {
+                if !self.mode_noted.replace(true)
+                    && let Some(n) = session::mode_note()
+                {
+                    self.conv.add_note(&n);
+                }
                 self.watch_denied();
                 let events = d.events.clone();
                 *self.driver.borrow_mut() = Some(d);

@@ -1,0 +1,30 @@
+# Release artefacts (SPEC §4.12): on a v* tag, build the tarball, SHA256SUMS and the .deb on x86_64
+# and attach them to the GitHub release. Signing the sums (minisign) is a later, separate step.
+name: release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: GTK build dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends libgtk-4-dev libadwaita-1-dev \
+            libvte-2.91-gtk4-dev libgtksourceview-5-dev bubblewrap
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace
+      - run: packaging/release.sh
+      - run: packaging/deb.sh --no-build
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+            dist/*.deb

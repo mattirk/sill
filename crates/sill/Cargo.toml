@@ -1,11 +1,15 @@
 [package]
-name = "sill"
-description = "sill: agent shelf — CLI and (later) the GTK shelf"
+name = "sill-shelf"
+description = "sill: agent shelf — the `sill` command and the GTK shelf (the crate is sill-shelf, SPEC §8 #7)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+
+[[bin]]
+name = "sill"
+path = "src/main.rs"
 
 [dependencies]
 sill-core.workspace = true

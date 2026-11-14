@@ -68,6 +68,8 @@ memory_max = "12G"
 tasks_max = 512
 idle_timeout_minutes = 120    # stop the whole jail after this long without a turn
 agent_idle_minutes = 10       # stop just the agent process (≈1.6 % CPU parked, SPEC §4.10 #17); resume via session/load
+required = true               # no cgroup to hold these limits (direct launcher, no delegated subtree): no session.
+                              # false = start anyway, with a "no resource limits" warning (SPEC §4.7)
 
 [jail]
 allow_userns = false

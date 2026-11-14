@@ -104,6 +104,14 @@ pub struct Limits {
     /// shelf; 0 = never.
     #[serde(default = "default_agent_idle")]
     pub agent_idle_minutes: u32,
+    /// Refuse to start a session that would run without resource limits (`direct` launcher mode
+    /// with no delegated cgroup subtree, SPEC §4.7). `false` starts it anyway, with a warning.
+    #[serde(default = "default_true")]
+    pub required: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_agent_idle() -> u32 {
@@ -120,6 +128,7 @@ impl Default for Limits {
             tasks_max: 512,
             idle_timeout_minutes: 120,
             agent_idle_minutes: 10,
+            required: true,
         }
     }
 }

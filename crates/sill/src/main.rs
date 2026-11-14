@@ -17,6 +17,7 @@ use sill_core::mounts;
 use sill_core::policy::Policy;
 use sill_core::shim;
 
+mod init;
 mod shelf;
 
 #[derive(Parser)]
@@ -38,8 +39,9 @@ enum Cmd {
         #[command(subcommand)]
         cmd: DevCmd,
     },
-    /// Session launcher, runs inside the session's systemd user unit (SPEC §4.7): binds the shim and
-    /// proxy sockets, starts bwrap with the shim inside, serves the proxy, exits when the jail ends
+    /// Session launcher (SPEC §4.7): binds the shim and proxy sockets, starts bwrap with the shim
+    /// inside, serves the proxy, exits when the jail ends. Runs inside the session's systemd user
+    /// unit, or detached in `direct` mode
     Launch {
         /// session id (sockets under $XDG_RUNTIME_DIR/sill/<id>)
         #[arg(long)]
@@ -52,7 +54,17 @@ enum Cmd {
         /// registry id of the agent: its domains join the proxy allow-list
         #[arg(long)]
         agent: Option<String>,
+        /// direct launcher mode: no unit around this process — write pid files, log the proxy to a
+        /// file, limit the jail through --cgroup-root
+        #[arg(long)]
+        detached: bool,
+        /// delegated cgroup subtree to create the session cgroup in (direct mode)
+        #[arg(long)]
+        cgroup_root: Option<PathBuf>,
     },
+    /// Set the machine up (root): checks, binaries, policy, state filesystem, cgroup delegation;
+    /// `--user` sets up the shelf autostart for this account instead (SPEC §4.12)
+    Init(init::InitArgs),
     /// Serve a session's network proxy (SPEC §4.8) on an inherited listening socket
     Proxy {
         /// listening Unix socket fd (inherited from the launcher)
@@ -200,9 +212,10 @@ struct JailArgs {
     /// extra read-write bind HOST=JAIL (agent home, private scratch); repeatable
     #[arg(long = "bind")]
     binds: Vec<String>,
-    /// dev start: detach with setsid instead of a systemd user unit
+    /// dev start: force the `direct` launcher (detached process, no systemd unit) even where the
+    /// user instance is usable; same as SILL_LAUNCHER=direct
     #[arg(long)]
-    no_unit: bool,
+    direct: bool,
 }
 
 #[derive(Args, Clone)]
@@ -224,7 +237,8 @@ fn main() -> Result<()> {
         }
         Cmd::Jail { cmd } => jail_cmd(cmd),
         Cmd::Dev { cmd } => dev_cmd(cmd),
-        Cmd::Launch { session, jail, shim, agent } => launch(&session, jail, shim, agent.as_deref()),
+        Cmd::Launch { session, jail, shim, agent, detached, cgroup_root } => launch(&session, jail, shim, agent.as_deref(), detached, cgroup_root),
+        Cmd::Init(a) => init::run(a),
         Cmd::Shelf { cwd, hidden } => shelf::run(cwd, hidden),
         Cmd::Toggle => shelf::toggle(),
         Cmd::Restart { hidden, dev } => shelf::restart(hidden, dev),
@@ -369,54 +383,12 @@ fn dev_cmd(cmd: DevCmd) -> Result<()> {
                 bail!("a dev session is already running ({})", socket.display());
             }
             let _ = std::fs::remove_file(&socket);
-            if !jail.no_unit {
-                return start_unit(DEV, jail, shim_bin);
+            if jail.direct {
+                // before the launcher is probed (first use is in ensure_started)
+                // SAFETY: single-threaded at this point.
+                unsafe { std::env::set_var("SILL_LAUNCHER", "direct") };
             }
-            let shim_bin = match shim_bin {
-                Some(p) => p,
-                None => std::env::current_exe()?.with_file_name("sill-shim"),
-            };
-            if !shim_bin.is_file() {
-                bail!("sill-shim not found at {}", shim_bin.display());
-            }
-            let use_proxy = !jail.net;
-            let mut command: Vec<OsString> = vec!["/.sill/shim".into(), "--control-fd".into(), "3".into()];
-            if use_proxy {
-                command.extend(["--forward".into(), format!("127.0.0.1:{}={}", jail::PROXY_PORT, jail::PROXY_SOCKET).into()]);
-            }
-            let mut spec = build_spec(jail, command)?;
-            let idle = spec.policy.limits.agent_idle_minutes as u64 * 60;
-            spec.command.extend(["--agent-idle".into(), idle.to_string().into()]);
-            spec.extra_args = vec!["--ro-bind".into(), shim_bin.clone().into(), "/.sill/shim".into()];
-            let proxy_socket = rt.join("proxy.sock");
-            if use_proxy {
-                let _ = std::fs::remove_file(&proxy_socket);
-                let listener = UnixListener::bind(&proxy_socket).with_context(|| format!("bind {}", proxy_socket.display()))?;
-                let log = std::fs::File::create(rt.join("proxy.log"))?;
-                let mut cmd = std::process::Command::new(std::env::current_exe()?);
-                cmd.args(["proxy", "--fd", "3", "--policy", &spec.policy.name]);
-                let child = spawn_detached(cmd, listener.as_fd().as_raw_fd(), log)?;
-                std::fs::write(rt.join("proxy.pid"), child.id().to_string())?;
-                spec.proxy_socket = Some(proxy_socket);
-            }
-            let plan = spec.plan()?;
-            for w in &plan.warnings {
-                eprintln!("sill: warning: {w}");
-            }
-            jail::prepare(&plan)?;
-            std::fs::write(rt.join("cwd"), spec.cwd.to_string_lossy().as_bytes())?;
-            std::fs::write(rt.join("state_dir"), spec.state_dir.to_string_lossy().as_bytes())?;
-
-            let listener = UnixListener::bind(&socket).with_context(|| format!("bind {}", socket.display()))?;
-            let log = std::fs::File::create(rt.join("jail.log"))?;
-            let mut cmd = std::process::Command::new(&plan.argv[0]);
-            cmd.args(&plan.argv[1..]);
-            let child = spawn_detached(cmd, listener.as_fd().as_raw_fd(), log)?;
-            std::fs::write(rt.join("bwrap.pid"), child.id().to_string())?;
-            drop(listener); // the jail owns the listening end now
-            println!("dev session started: bwrap pid {}, socket {}", child.id(), socket.display());
-            println!("state dir {}, log {}", spec.state_dir.display(), rt.join("jail.log").display());
-            Ok(())
+            start_session(DEV, jail, shim_bin)
         }
         DevCmd::Status => {
             let pid = std::fs::read_to_string(rt.join("bwrap.pid")).ok();
@@ -503,35 +475,24 @@ fn dev_cmd(cmd: DevCmd) -> Result<()> {
                     Err(e) => eprintln!("agent: {e}"),
                 }
             }
-            let unit = format!("sill-{DEV}.service");
-            if std::process::Command::new("systemctl").args(["--user", "is-active", "--quiet", &unit]).status().map(|s| s.success()).unwrap_or(false) {
-                let st = std::process::Command::new("systemctl").args(["--user", "stop", &unit]).status()?;
-                println!("unit {unit} stopped ({st})");
-            }
-            // legacy setsid sessions: bwrap ignores SIGTERM, so kill the whole process group it leads
-            // (setsid made it a session leader; its pgid == its pid), which takes the shim with it
-            for (name, file) in [("bwrap", "bwrap.pid"), ("proxy", "proxy.pid")] {
-                if let Ok(pid) = std::fs::read_to_string(rt.join(file)) {
-                    if let Ok(pid) = pid.trim().parse::<i32>()
-                        && let Some(pid) = rustix::process::Pid::from_raw(pid)
-                    {
-                        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-                        println!("{name} process group {} killed", pid.as_raw_nonzero());
-                    }
-                    let _ = std::fs::remove_file(rt.join(file));
-                }
-            }
-            let _ = std::fs::remove_file(&socket);
-            let _ = std::fs::remove_file(rt.join("proxy.sock"));
+            sill_core::session::stop(DEV)?;
+            // a proxy of the pre-launcher dev path, if one is still around
+            sill_core::launcher::kill_pid_file(&rt.join("proxy.pid"));
+            let _ = std::fs::remove_file(rt.join("proxy.pid"));
+            println!("dev session stopped");
             Ok(())
         }
     }
 }
 
-/// `sill launch`: the process that owns a session on the host side, inside its systemd user unit.
-fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Option<&str>) -> Result<()> {
+/// `sill launch`: the process that owns a session on the host side — inside its systemd user unit,
+/// or detached in `direct` mode (SPEC §4.7), where it records its pids and limits the jail itself.
+fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Option<&str>, direct: bool, cgroup_root: Option<PathBuf>) -> Result<()> {
     let rt = shim::runtime_dir(session)?;
     std::fs::create_dir_all(&rt)?;
+    if direct {
+        std::fs::write(rt.join("launch.pid"), std::process::id().to_string())?;
+    }
     let shim_bin = match shim_bin {
         Some(p) => p,
         None => std::env::current_exe()?.with_file_name("sill-shim"),
@@ -566,9 +527,18 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
         // offers to allow the host for this agent (SPEC §4.8)
         let denied = rt.join("denied");
         let _ = std::fs::remove_file(&denied);
+        // unit mode: the journal; direct mode: its own file next to jail.log
+        let proxy_log = if direct { std::fs::File::create(rt.join("proxy.log")).ok() } else { None };
         proxy_thread = Some(std::thread::spawn(move || {
             sill_core::proxy::serve(listener, rules, move |l| {
-                eprintln!("proxy: {l}");
+                use std::io::Write;
+                match proxy_log.as_ref() {
+                    Some(mut f) => {
+                        // &File is Write
+                        let _ = writeln!(f, "{l}");
+                    }
+                    None => eprintln!("proxy: {l}"),
+                }
                 if let Some(rest) = l.strip_prefix("deny ")
                     && let Some(host) = rest.split(':').next()
                     && let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&denied)
@@ -588,11 +558,29 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
     std::fs::write(rt.join("cwd"), spec.cwd.to_string_lossy().as_bytes())?;
     std::fs::write(rt.join("state_dir"), spec.state_dir.to_string_lossy().as_bytes())?;
 
+    // direct mode limits: the session cgroup under the delegated subtree, bwrap moves itself in
+    // before exec so every process of the jail is born inside it
+    let mut cgroup_procs: Option<PathBuf> = None;
+    if direct {
+        match &cgroup_root {
+            Some(root) => {
+                let mut warnings = Vec::new();
+                let dir = sill_core::launcher::make_session_cgroup(root, session, &spec.policy.limits, &mut warnings)?;
+                for w in warnings {
+                    eprintln!("sill launch: warning: {w}");
+                }
+                eprintln!("sill launch: limits in cgroup {}", dir.display());
+                cgroup_procs = Some(dir.join("cgroup.procs"));
+            }
+            None => eprintln!("sill launch: warning: no resource limits — a busy agent can starve the host"),
+        }
+    }
+
     let listener = UnixListener::bind(&shim_sock).with_context(|| format!("bind {}", shim_sock.display()))?;
     let listener_fd = listener.as_fd().as_raw_fd();
     let mut cmd = std::process::Command::new(&plan.argv[0]);
     cmd.args(&plan.argv[1..]).stdin(std::process::Stdio::null());
-    // SAFETY: only dup2/fcntl between fork and exec.
+    // SAFETY: only dup2/fcntl/open/write/getpid between fork and exec.
     unsafe {
         cmd.pre_exec(move || {
             let src = std::os::fd::BorrowedFd::borrow_raw(listener_fd);
@@ -603,22 +591,37 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
                 rustix::io::dup2(src, &mut fd3)?;
                 std::mem::forget(fd3);
             }
+            if let Some(procs) = &cgroup_procs {
+                let f = rustix::fs::open(procs, rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty())?;
+                let pid = rustix::process::getpid().as_raw_nonzero().get().to_string();
+                rustix::io::write(&f, pid.as_bytes())?;
+            }
             Ok(())
         });
     }
     let mut child = cmd.spawn().context("spawn bwrap")?;
     drop(listener);
-    eprintln!("sill launch: jail started (bwrap pid {}), sockets in {}", child.id(), rt.display());
+    if direct {
+        std::fs::write(rt.join("bwrap.pid"), child.id().to_string())?;
+    }
+    eprintln!("sill launch: jail started (bwrap pid {}, {} mode), sockets in {}", child.id(), if direct { "direct" } else { "unit" }, rt.display());
     let status = child.wait()?;
     eprintln!("sill launch: jail ended ({status})");
     let _ = std::fs::remove_file(&shim_sock);
     let _ = std::fs::remove_file(rt.join("proxy.sock"));
+    if direct {
+        let _ = std::fs::remove_file(rt.join("bwrap.pid"));
+        let _ = std::fs::remove_file(rt.join("launch.pid"));
+        if let Some(root) = &cgroup_root {
+            let _ = std::fs::remove_dir(root.join(format!("sill-{session}")));
+        }
+    }
     drop(proxy_thread); // the proxy thread dies with the process
     Ok(())
 }
 
-/// Start a session as a transient systemd user unit (sill-core `session`).
-fn start_unit(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>) -> Result<()> {
+/// Start a session through sill-core `session` in whichever launcher mode this host offers.
+fn start_session(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>) -> Result<()> {
     let opts = sill_core::session::StartOptions {
         session: session.to_string(),
         policy: jail.policy.clone(),
@@ -639,32 +642,23 @@ fn start_unit(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>) -> Resul
             .collect::<Result<Vec<_>>>()?,
     };
     let sock = sill_core::session::ensure_started(&opts, &home()?, &std::env::current_exe()?)?;
-    println!("session {session} started as unit {}.service; socket {}", sill_core::session::unit_name(session), sock.display());
-    println!("logs: journalctl --user -u {} -f", sill_core::session::unit_name(session));
-    Ok(())
-}
-
-/// Spawn `cmd` in its own session with `listener_fd` on fd 3 (close-on-exec cleared) and stdout/stderr
-/// on `log`. Used for the jail and the proxy, both of which must outlive this process.
-fn spawn_detached(mut cmd: std::process::Command, listener_fd: i32, log: std::fs::File) -> Result<std::process::Child> {
-    cmd.stdin(std::process::Stdio::null()).stdout(log.try_clone()?).stderr(log);
-    // SAFETY: only async-signal-safe calls (dup2/fcntl, setsid) between fork and exec.
-    unsafe {
-        cmd.pre_exec(move || {
-            let src = std::os::fd::BorrowedFd::borrow_raw(listener_fd);
-            if listener_fd == 3 {
-                // dup2 onto itself keeps close-on-exec; clear it instead
-                rustix::io::fcntl_setfd(src, rustix::io::FdFlags::empty())?;
-            } else {
-                let mut fd3 = OwnedFd::from_raw_fd(3);
-                rustix::io::dup2(src, &mut fd3)?; // dup2 clears close-on-exec on the target
-                std::mem::forget(fd3);
+    let launcher = sill_core::launcher::current();
+    let unit = sill_core::session::unit_name(session);
+    match launcher.mode {
+        sill_core::launcher::Mode::Unit => {
+            println!("session {session} started as unit {unit}.service; socket {}", sock.display());
+            println!("logs: journalctl --user -u {unit} -f");
+        }
+        sill_core::launcher::Mode::Direct => {
+            let rt = shim::runtime_dir(session)?;
+            println!("session {session} started detached ({}); socket {}", launcher.reason, sock.display());
+            println!("logs: {}/{{jail,proxy}}.log", rt.display());
+            if !launcher.has_limits() {
+                println!("warning: no resource limits — a busy agent can starve the host (sudo sill init)");
             }
-            rustix::process::setsid()?;
-            Ok(())
-        });
+        }
     }
-    cmd.spawn().context("spawn")
+    Ok(())
 }
 
 fn shell_words(s: &str) -> Vec<String> {
