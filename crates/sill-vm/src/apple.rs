@@ -309,7 +309,8 @@ fn url(path: &Path) -> Retained<NSURL> {
 }
 
 /// The machine: EFI boot from `system.raw`, the data disks and seed when present, NAT network,
-/// a vsock device, the console into `console.log`, and an identity kept beside the disks.
+/// a vsock device, the console into `console.log`, and an identity and network address kept
+/// beside the disks.
 fn configuration(config: &Config) -> Result<Retained<VZVirtualMachineConfiguration>> {
     let dir = &config.dir;
     let system = dir.join("system.raw");
@@ -367,6 +368,9 @@ fn configuration(config: &Config) -> Result<Retained<VZVirtualMachineConfigurati
 
         let net = VZVirtioNetworkDeviceConfiguration::new();
         net.setAttachment(Some(&VZNATNetworkDeviceAttachment::new()));
+        // the same address every start: the guest's network setup recognises its interface by it
+        let mac = mac_address(&dir.join("mac"))?;
+        net.setMACAddress(&mac);
 
         let console = VZVirtioConsoleDeviceSerialPortConfiguration::new();
         let log = VZFileSerialPortAttachment::initWithURL_append_error(
@@ -395,6 +399,22 @@ fn configuration(config: &Config) -> Result<Retained<VZVirtualMachineConfigurati
             .validateWithError()
             .map_err(|e| anyhow!("the VM's configuration: {}", said(&e)))?;
         Ok(machine)
+    }
+}
+
+/// The network interface's address, made once (random, locally administered) and kept.
+fn mac_address(path: &Path) -> Result<Retained<VZMACAddress>> {
+    // SAFETY: the framework's address, from its own string form or new
+    unsafe {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && let Some(address) =
+                VZMACAddress::initWithString(VZMACAddress::alloc(), &NSString::from_str(text.trim()))
+        {
+            return Ok(address);
+        }
+        let address = VZMACAddress::randomLocallyAdministeredAddress();
+        std::fs::write(path, address.string().to_string())?;
+        Ok(address)
     }
 }
 

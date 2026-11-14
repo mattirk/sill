@@ -1,0 +1,10 @@
+# The Mac app's VM: its one network interface, whatever its address (cloud-init's own setup
+# matched the address of the first boot; packaging/mac/guest/cloud-network.cfg turns it off).
+network:
+  version: 2
+  ethernets:
+    virtio:
+      match:
+        driver: virtio_net
+      dhcp4: true
+      dhcp6: true

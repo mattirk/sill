@@ -3,7 +3,7 @@
 //! A VM directory holds `system.raw` (the image), `home.raw` and `state.raw` (the data disks,
 //! `/dev/disk/by-id/virtio-sill-home` and `virtio-sill-state` in the guest), `seed.iso`
 //! (cloud-init: the account's key), and what the VM keeps of itself: its EFI variables, its
-//! identity and `console.log`. The VM runs in this process — it ends with it — and is reached
+//! identity, its network address and `console.log`. The VM runs in this process — it ends with it — and is reached
 //! over the framework's host–guest socket (vsock), never the guest's network: `Vm::connect` for
 //! one port, `serve_ssh` for OpenSSH (`ProxyCommand nc -U <socket>`).
 use std::path::PathBuf;

@@ -136,6 +136,9 @@ guest 'sudo install -D -m755 guest/packaging/mac/guest/sill-disks /usr/local/lib
     sudo install -m644 guest/packaging/mac/guest/sill-disks.service /etc/systemd/system/ &&
     sudo sh -c "cat guest/packaging/mac/guest/fstab >> /etc/fstab" &&
     sudo install -m644 guest/packaging/mac/guest/grub.cfg /etc/default/grub.d/sill.cfg &&
+    sudo install -m600 guest/packaging/mac/guest/network.yaml /etc/netplan/90-sill.yaml &&
+    sudo install -m644 guest/packaging/mac/guest/cloud-network.cfg /etc/cloud/cloud.cfg.d/99-sill-network.cfg &&
+    sudo rm -f /etc/netplan/50-cloud-init.yaml &&
     sudo update-grub 2>/dev/null &&
     sudo mkdir -p /mnt/sill-state && rm -rf guest &&
     sudo systemctl daemon-reload && sudo systemctl enable sill-disks.service &&
