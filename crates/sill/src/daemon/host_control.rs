@@ -117,6 +117,13 @@ fn operations_of(named: &[String]) -> Result<BTreeSet<String>> {
         if !OPERATIONS.contains(&op.as_str()) {
             return Err(Error::invalid_params(format!("unknown host operation {op:?}")).into());
         }
+        // the Mac's operations only where there is a Mac: a daemon in Sill.app's VM
+        if api::MAC_OPERATIONS.contains(&op.as_str()) && !super::host_mac::attached() {
+            return Err(Error::invalid_params(format!(
+                "{op} needs Sill.app on a Mac: this daemon does not run in its VM"
+            ))
+            .into());
+        }
         operations.insert(op.clone());
     }
     if operations.is_empty() {

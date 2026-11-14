@@ -125,6 +125,10 @@ fn run(dir: &std::path::Path) -> Result<(), String> {
     if let Err(e) = sync_folders(dir, &vm) {
         eprintln!("sill-gui: Mac folders: {e}");
     }
+    // sill-mac: the Mac's side of Host control's Mac operations, for the daemon in the VM
+    if let Err(e) = serve_mac(dir, &vm) {
+        eprintln!("sill-gui: Mac operations: {e}");
+    }
     set(Phase::Ready);
     Ok(())
 }
@@ -621,4 +625,146 @@ mod tests {
         assert_eq!(super::load_folders(&dir), vec![None, Some(PathBuf::from("/Users/a/two"))]);
         let _ = std::fs::remove_dir_all(dir);
     }
+}
+
+// --- sill-mac: the Mac's side of Host control's Mac operations (docs/sill-mac.md) -------------
+
+/// Where the daemon in the VM asks for the Mac: the VM's socket device, this port.
+const MAC_PORT: u32 = 7695;
+/// The largest request line accepted.
+const MAC_REQUEST_MAX: u64 = 64 << 10;
+
+/// At each VM start: a new secret for the daemon, written into its runtime directory (which jails
+/// never see), and the port the daemon reaches the Mac on. A request without the secret is
+/// refused: vsock is not confined by the jail's network namespace, so a jailed process could
+/// reach the port itself.
+fn serve_mac(dir: &Path, vm: &sill_vm::Vm) -> Result<(), String> {
+    let mut secret = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut secret))
+        .map_err(|e| format!("no randomness: {e}"))?;
+    let secret: String = secret.iter().map(|b| format!("{b:02x}")).collect();
+    let mut child = std::process::Command::new("ssh")
+        .arg("-F")
+        .arg(dir.join("ssh_config"))
+        .args(["-T", "-o", "BatchMode=yes", setup::HOST])
+        .arg("umask 077 && mkdir -p \"$XDG_RUNTIME_DIR/sill\" && cat > \"$XDG_RUNTIME_DIR/sill/mac.token\"")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("ssh: {e}"))?;
+    {
+        use std::io::Write;
+        let _ = child.stdin.take().map(|mut stdin| stdin.write_all(secret.as_bytes()));
+    }
+    let out = child.wait_with_output().map_err(|e| format!("ssh: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "the daemon's secret could not be written: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let secret = Arc::new(secret);
+    vm.listen(
+        MAC_PORT,
+        Arc::new(move |stream| {
+            let secret = secret.clone();
+            if let Err(e) = answer_mac(stream, &secret) {
+                eprintln!("sill-gui: Mac operation: {e}");
+            }
+        }),
+    )
+    .map_err(|e| format!("{e:#}"))
+}
+
+/// One request from the daemon: checked, done, answered (a JSON line, then the picture's bytes).
+fn answer_mac(stream: std::os::unix::net::UnixStream, secret: &str) -> Result<(), String> {
+    use std::io::{BufRead, Read, Write};
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let mut writer = stream.try_clone().map_err(|e| e.to_string())?;
+    let mut line = String::new();
+    std::io::BufReader::new(stream.take(MAC_REQUEST_MAX))
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?;
+    let (reply, picture) = match mac_request(&line, secret) {
+        Ok(done) => done,
+        Err(said) => (serde_json::json!({"error": said}), None),
+    };
+    let mut head = reply;
+    if let Some(bytes) = &picture {
+        head["bytes"] = serde_json::json!(bytes.len());
+    }
+    writeln!(writer, "{head}").map_err(|e| e.to_string())?;
+    if let Some(bytes) = picture {
+        writer.write_all(&bytes).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn mac_request(line: &str, secret: &str) -> Result<(serde_json::Value, Option<Vec<u8>>), String> {
+    use serde_json::{Value, json};
+    let request: Value = serde_json::from_str(line).map_err(|_| "not a request".to_string())?;
+    let given = request["token"].as_str().unwrap_or_default();
+    // the same time whatever the secret's first wrong byte
+    if given.len() != secret.len()
+        || given.bytes().zip(secret.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) != 0
+    {
+        return Err("refused: not Sill's daemon".into());
+    }
+    let session = request["session"].as_str().ok_or("no session")?;
+    let generation = request["generation"].as_u64().ok_or("no generation")?;
+    // the daemon checked the grant; the Mac checks it again, against the daemon's own state
+    let state: sill_proto::host_control::State = sill_proto::Client::connect()
+        .and_then(|client| client.call("_sill/host_control.state", json!({"session_id": session})))
+        .map_err(|e| format!("the grant could not be checked: {e:#}"))?;
+    if !state.active || state.generation != generation {
+        return Err("refused: stale Host control generation".into());
+    }
+    if !state.operations.iter().any(|op| op == "mac_view") {
+        return Err("refused: mac_view is not granted".into());
+    }
+    let args = &request["args"];
+    match request["op"].as_str() {
+        Some("view") => {}
+        _ => return Err("unknown Mac operation".into()),
+    }
+    if let Some(list) = args["list"].as_str() {
+        let result = match list {
+            "displays" => json!({"displays": crate::mac_screen::displays()}),
+            "windows" => json!({
+                "windows": crate::mac_screen::windows(),
+                "titles": crate::mac_screen::allowed(),
+            }),
+            _ => return Err("list is \"displays\" or \"windows\"".into()),
+        };
+        return Ok((json!({"result": result}), None));
+    }
+    let (target, about) = if let Some(id) = args["display"].as_u64() {
+        let display = crate::mac_screen::displays()
+            .into_iter()
+            .find(|d| u64::from(d.id) == id)
+            .ok_or_else(|| format!("the Mac has no display {id}: `sill-mac displays` lists them"))?;
+        (crate::mac_screen::Target::Display(display.id), json!({"display": display}))
+    } else if let Some(id) = args["window"].as_u64() {
+        let window = crate::mac_screen::windows()
+            .into_iter()
+            .find(|w| u64::from(w.id) == id)
+            .ok_or_else(|| format!("the Mac has no window {id} on screen: `sill-mac windows` lists them"))?;
+        (crate::mac_screen::Target::Window(window.id), json!({"window": window}))
+    } else {
+        return Err("a picture of {\"display\":ID} or {\"window\":ID}".into());
+    };
+    let (png, width, height) = crate::mac_screen::capture(&target)?;
+    // the frame: what the picture shows and how its pixels map to the Mac's desktop, for the
+    // input that comes after this slice
+    let mut result = about;
+    result["width"] = json!(width);
+    result["height"] = json!(height);
+    result["captured"] = json!(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
+    );
+    Ok((json!({"result": result}), Some(png)))
 }

@@ -59,7 +59,10 @@ pub fn serve(hub: Arc<Hub>, session: String, generation: u64, listener: UnixList
                         );
                         anyhow::ensure!(active.generation == generation, "stale bridge");
                         if request.operation == "state" {
-                            return Ok(json!(active));
+                            // whether the Mac's operations can reach a Mac (Sill.app's VM)
+                            let mut state = json!(active);
+                            state["mac"] = json!(super::host_mac::attached());
+                            return Ok(state);
                         }
                         anyhow::ensure!(
                             request.generation == Some(generation),
@@ -359,6 +362,31 @@ fn action(hub: &Arc<Hub>, session: &str, generation: u64, r: &Request) -> Result
             super::host_display::availability()?;
             super::host_display::input(&r.args)
         }
+        "mac_view" => {
+            super::host_mac::check_view(&r.args)?;
+            let (result, picture) = super::host_mac::request(session, generation, "view", &r.args)?;
+            let Some(png) = picture else {
+                return Ok(json!({"result": result, "location": "mac"}));
+            };
+            // readable in the jail through the bridge directory, apart from the host's pictures;
+            // only the newest few stay
+            let dir = mac_views(session)?;
+            std::fs::create_dir_all(&dir)?;
+            let id = super::sfp::id();
+            std::fs::write(dir.join(format!("{id}.png")), &png)?;
+            let mut old: Vec<_> = std::fs::read_dir(&dir)?
+                .flatten()
+                .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+                .collect();
+            old.sort();
+            for (_, path) in old.iter().rev().skip(KEPT_VIEWS) {
+                let _ = std::fs::remove_file(path);
+            }
+            let mut reply = result;
+            reply["path"] = json!(format!("{}/mac/{id}.png", sill_core::jail::BRIDGE_DIR));
+            reply["location"] = json!("mac");
+            Ok(reply)
+        }
         _ => bail!("operation backend unavailable"),
     }
 }
@@ -366,6 +394,10 @@ fn action(hub: &Arc<Hub>, session: &str, generation: u64, r: &Request) -> Result
 const KEPT_VIEWS: usize = 8;
 fn views(session: &str) -> Result<PathBuf> {
     Ok(sill_core::shim::runtime_dir(session)?.join("bridge/view"))
+}
+/// The session's pictures of the Mac, readable in the jail as `/.sill/bridge/mac/ID.png`.
+fn mac_views(session: &str) -> Result<PathBuf> {
+    Ok(sill_core::shim::runtime_dir(session)?.join("bridge/mac"))
 }
 /// The session's host processes as its jail sees them (read-only through the bridge directory):
 /// `processes.json`, the records, and `<id>.log`, each one's captured output. They stay after
@@ -408,6 +440,9 @@ pub fn publish(hub: &Hub, session: &str) {
 pub fn cleanup(hub: &Hub, session: &str) {
     if let Ok(path) = socket(session) {
         let _ = std::fs::remove_file(path);
+    }
+    if let Ok(dir) = mac_views(session) {
+        let _ = std::fs::remove_dir_all(dir);
     }
     if let Ok(dir) = views(session) {
         let _ = std::fs::remove_dir_all(dir);

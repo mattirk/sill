@@ -12,9 +12,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
-use objc2::AnyThread;
+use objc2::{AnyThread, DefinedClass};
 use objc2::rc::Retained;
-use objc2_foundation::{NSArray, NSData, NSError, NSString, NSURL};
+use objc2_foundation::{NSArray, NSData, NSError, NSObject, NSObjectProtocol, NSString, NSURL};
 use objc2_virtualization::*;
 
 use crate::{Config, State};
@@ -39,6 +39,60 @@ pub struct Vm {
     queue: DispatchRetained<DispatchQueue>,
     /// Held while the VM is this process's: a second owner of the same disks is refused.
     _lock: std::fs::File,
+    /// The ports the guest may connect to (`listen`), each listener with its delegate: the
+    /// framework holds the delegate weakly, so it lives here.
+    listeners: std::sync::Mutex<Vec<OnQueue<(Retained<VZVirtioSocketListener>, Retained<Accepting>)>>>,
+}
+
+/// What a connection from the guest is handed to, on a thread of its own.
+pub type Accept = Arc<dyn Fn(UnixStream) + Send + Sync>;
+
+/// The delegate of a vsock listener: every connection the guest makes is accepted and handed,
+/// as a stream of its own, to the port's [`Accept`].
+pub struct AcceptingIvars {
+    accept: Accept,
+}
+
+objc2::define_class!(
+    // SAFETY: NSObject has no subclassing requirements; Accepting does not implement Drop
+    #[unsafe(super(NSObject))]
+    #[ivars = AcceptingIvars]
+    pub struct Accepting;
+
+    unsafe impl NSObjectProtocol for Accepting {}
+
+    unsafe impl VZVirtioSocketListenerDelegate for Accepting {
+        #[unsafe(method(listener:shouldAcceptNewConnection:fromSocketDevice:))]
+        fn should_accept(
+            &self,
+            _listener: &VZVirtioSocketListener,
+            connection: &VZVirtioSocketConnection,
+            _device: &VZVirtioSocketDevice,
+        ) -> objc2::runtime::Bool {
+            // the connection closes its own descriptor when it goes: keep a copy
+            // SAFETY: the connection's descriptor is open while it lives
+            let fd = unsafe { libc::dup(connection.fileDescriptor()) };
+            if fd < 0 {
+                return objc2::runtime::Bool::NO;
+            }
+            // SAFETY: a descriptor of our own, just made
+            let stream = UnixStream::from(unsafe { OwnedFd::from_raw_fd(fd) });
+            let accept = self.ivars().accept.clone();
+            let spawned = std::thread::Builder::new()
+                .name("sill-vm-accepted".into())
+                .spawn(move || accept(stream))
+                .is_ok();
+            objc2::runtime::Bool::new(spawned)
+        }
+    }
+);
+
+impl Accepting {
+    fn new(accept: Accept) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(AcceptingIvars { accept });
+        // SAFETY: NSObject's init on a freshly allocated object
+        unsafe { objc2::msg_send![super(this), init] }
+    }
 }
 
 impl Vm {
@@ -82,6 +136,7 @@ impl Vm {
             machine: OnQueue(machine),
             queue,
             _lock: lock,
+            listeners: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -231,6 +286,32 @@ impl Vm {
             }
         });
         result
+    }
+
+    /// Let the guest connect to `port` on the host (vsock address 2): each connection is handed
+    /// to `accept`. Anything in the guest can connect; what it may ask is the caller's to check.
+    pub fn listen(&self, port: u32, accept: Accept) -> Result<()> {
+        let machine = &self.machine;
+        let mut made: Option<(Retained<VZVirtioSocketListener>, Retained<Accepting>)> = None;
+        let out = OnQueue(&mut made as *mut Option<(Retained<VZVirtioSocketListener>, Retained<Accepting>)>);
+        let accept = OnQueue(accept);
+        self.queue.exec_sync(move || {
+            let (out, accept) = (&out, &accept);
+            // SAFETY: on the machine's queue; `out` outlives this synchronous call
+            unsafe {
+                let devices = machine.0.socketDevices();
+                let Some(device) = devices.firstObject() else { return };
+                let device: Retained<VZVirtioSocketDevice> = Retained::cast_unchecked(device);
+                let delegate = Accepting::new(accept.0.clone());
+                let listener = VZVirtioSocketListener::new();
+                listener.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*delegate)));
+                device.setSocketListener_forPort(&listener, port);
+                *out.0 = Some((listener, delegate));
+            }
+        });
+        let made = made.ok_or_else(|| anyhow!("the VM has no socket device"))?;
+        self.listeners.lock().unwrap().push(OnQueue(made));
+        Ok(())
     }
 
     /// Wait until the guest's SSH answers on vsock, up to `patience`.

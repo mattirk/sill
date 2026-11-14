@@ -202,6 +202,9 @@ fn main() -> Result<()> {
     if Path::new(&me).file_name().and_then(|n| n.to_str()) == Some("sill-host") {
         return host_cli::run(&args);
     }
+    if Path::new(&me).file_name().and_then(|n| n.to_str()) == Some("sill-mac") {
+        return host_cli::run_mac(&args);
+    }
     if Path::new(&me).file_name().and_then(|n| n.to_str()) == Some("sill-proc") {
         std::process::exit(procs::cli(args));
     }

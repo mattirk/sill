@@ -1295,6 +1295,7 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
     }
     spec.bridge_dir = Some(bridge);
     spec.extra_args.extend(["--ro-bind".into(), shim_bin.clone().into(), "/.sill/bin/sill-host".into()]);
+    spec.extra_args.extend(["--ro-bind".into(), shim_bin.clone().into(), "/.sill/bin/sill-mac".into()]);
 
     let shim_sock = rt.join("shim.sock");
     let proxy_sock = rt.join("proxy.sock");

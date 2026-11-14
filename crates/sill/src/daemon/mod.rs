@@ -28,6 +28,7 @@ mod host;
 mod host_control;
 mod host_bridge;
 mod host_display;
+mod host_mac;
 mod context;
 mod frontend;
 mod admin;

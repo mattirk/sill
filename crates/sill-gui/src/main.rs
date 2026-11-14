@@ -26,6 +26,8 @@ mod login_ui;
 #[cfg(target_os = "macos")]
 mod local_vm;
 #[cfg(target_os = "macos")]
+mod mac_screen;
+#[cfg(target_os = "macos")]
 mod macos;
 mod media;
 mod menu;

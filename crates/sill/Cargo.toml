@@ -17,6 +17,8 @@ sill-proto.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 rustix.workspace = true
+# sill-mac: the vsock socket to Sill.app on the Mac (daemon/host_mac.rs)
+libc = "0.2"
 toml.workspace = true
 serde.workspace = true
 serde_json.workspace = true

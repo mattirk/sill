@@ -50,6 +50,7 @@ fn label(operation: &str) -> &'static str {
     match operation {
         "view" => "Display viewing",
         "input" => "Display input",
+        "mac_view" => "View Mac screen",
         "inspect" => "Process inspection",
         "launch" => "Process launch",
         "stop" => "Process stop",
@@ -57,6 +58,28 @@ fn label(operation: &str) -> &'static str {
         "commands" => "General host commands",
         other => describe(other),
     }
+}
+
+/// The operations this window offers: the Mac's in Sill.app with its own VM, where the daemon's
+/// host is the VM and has no desktop of its own; the host desktop's everywhere else.
+pub fn offered() -> Vec<&'static str> {
+    let mac = cfg!(target_os = "macos") && mac_attached();
+    OPERATIONS
+        .iter()
+        .copied()
+        .filter(|op| match *op {
+            "mac_view" => mac,
+            "view" | "input" => !mac,
+            _ => true,
+        })
+        .collect()
+}
+
+fn mac_attached() -> bool {
+    #[cfg(target_os = "macos")]
+    return crate::local_vm::phase().is_some();
+    #[cfg(not(target_os = "macos"))]
+    false
 }
 
 impl App {
@@ -76,7 +99,7 @@ impl App {
                 let Some(view) = self.views.get_mut(&id) else {
                     return Task::none();
                 };
-                view.host_control.selected = OPERATIONS.iter().map(|op| op.to_string()).collect();
+                view.host_control.selected = offered().iter().map(|op| op.to_string()).collect();
                 self.host_control_event(Event::Activate(id))
             }
             Event::Activate(id) => {
@@ -87,6 +110,12 @@ impl App {
                 if operations.is_empty() {
                     view.host_control.error = Some("Tick at least one operation.".into());
                     return Task::none();
+                }
+                // viewing the Mac needs macOS's consent too: asked now, by the person's action,
+                // never by the agent's request
+                #[cfg(target_os = "macos")]
+                if operations.iter().any(|op| op == "mac_view") && !crate::mac_screen::allowed() {
+                    crate::mac_screen::ask();
                 }
                 let params = json!({"session_id": id, "operations": operations});
                 self.host_control_request(id, "_sill/host_control.activate", params)
@@ -175,9 +204,10 @@ pub fn rows<'a>(view: &'a SessionView, session: &'a Session, can_change: bool) -
     let id = view.id.as_str();
     let hc = &view.host_control;
     let brief: BTreeSet<String> = session.host_control.as_ref().map(|b| b.operations.iter().cloned().collect()).unwrap_or_default();
-    OPERATIONS
-        .iter()
+    offered()
+        .into_iter()
         .map(|operation| {
+            let operation = &operation;
             let ticked = hc.selected.contains(*operation);
             let set = can_change.then(|| {
                 let (id, operation) = (id.to_string(), operation.to_string());
@@ -191,6 +221,13 @@ pub fn rows<'a>(view: &'a SessionView, session: &'a Session, can_change: bool) -
             }
             if *operation == "input" {
                 said.push_str(" Input can invoke anything on your desktop; a window scope is not a boundary.");
+            }
+            if *operation == "mac_view" {
+                said.push_str(" Everything shown on the Mac, other apps and private windows included.");
+                #[cfg(target_os = "macos")]
+                if !crate::mac_screen::allowed() {
+                    said.push_str(" macOS does not allow Sill to record the screen yet: activating asks; turn Sill on in System Settings → Privacy & Security → Screen & System Audio Recording.");
+                }
             }
             row![
                 crate::permissions::name(label(operation), said),
@@ -502,8 +539,10 @@ mod tests {
         app.all_sessions = vec![session_record("demo", "demo", false, false)];
         let _ = app.update(Message::Perms(crate::permissions::Event::ShieldMenu("demo".into())));
         assert!(app.views["demo"].permissions.menu && !app.views["demo"].permissions.open);
-        // the selection is a sorted set; the daemon receives every operation in that order
-        let mut all: Vec<&str> = OPERATIONS.to_vec();
+        // the selection is a sorted set; the daemon receives every operation this window offers
+        // (no Mac here: everything but mac_view) in that order
+        let mut all: Vec<&str> = super::offered();
+        assert!(!all.contains(&"mac_view") && all.len() == OPERATIONS.len() - 1);
         all.sort_unstable();
         let fake = std::thread::spawn(move || {
             let mut listed = false;
@@ -539,8 +578,8 @@ mod tests {
         let perms = &app.views["demo"].permissions;
         assert!(!perms.open && !perms.menu, "the menu closes; the panel stays as it was");
         let state = app.views["demo"].host_control.state.as_ref().unwrap();
-        assert!(state.active && state.operations.len() == OPERATIONS.len());
-        assert_eq!(app.views["demo"].host_control.selected.len(), OPERATIONS.len());
+        assert!(state.active && state.operations.len() == OPERATIONS.len() - 1);
+        assert_eq!(app.views["demo"].host_control.selected.len(), OPERATIONS.len() - 1);
     }
 
     /// A long Host control notice (an inspection's process list) is one line until clicked.
