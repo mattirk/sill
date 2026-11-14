@@ -14,7 +14,7 @@ pub use sill_memory::{Scope, brief, date, first_line, tilde};
 use crate::store::{Session, Store};
 
 /// What sill knows of a session without asking anyone.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Facts {
     pub title: String,
     pub agent: String,

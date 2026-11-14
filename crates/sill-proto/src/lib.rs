@@ -13,15 +13,19 @@ pub mod client;
 pub mod rpc;
 pub mod schema;
 pub mod wire;
+pub mod transport;
 
 pub use client::Client;
 
 /// Bumped when a method or a type changes shape (docs/protocol.md has the changelog); the daemon
 /// reports its own in [`DaemonStatus`], and a client of another number restarts it.
-pub const PROTOCOL: u32 = 5;
+pub const PROTOCOL: u32 = 6;
 
 /// Method names. Groups follow the table in docs/daemon.md §3.3.
 pub mod method {
+    pub const SESSION_REPLAY: &str = "_sill/session.replay";
+    pub const FRONTEND_REQUEST: &str = "_sill/frontend.request";
+    pub const DAEMON_SCHEMA: &str = "_sill/daemon.schema";
     pub const DAEMON_STATUS: &str = "_sill/daemon.status";
     pub const DAEMON_SHUTDOWN: &str = "_sill/daemon.shutdown";
     pub const SESSIONS_LIST: &str = "_sill/sessions.list";

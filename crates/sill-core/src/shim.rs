@@ -16,7 +16,7 @@ pub struct Control {
 }
 
 /// A managed process as the shim reports it (docs/tasks.md §2.4).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 pub struct Proc {
     pub name: String,
     pub argv: Vec<String>,

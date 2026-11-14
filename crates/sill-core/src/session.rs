@@ -423,7 +423,7 @@ pub fn unit_name(session: &str) -> String {
 }
 
 /// Where a session's log is (SPEC §4.7): its journald stream, or its files in the runtime dir.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum LogSource {
     /// A journald stream identifier (`sill-<id>`).
     Journal(String),

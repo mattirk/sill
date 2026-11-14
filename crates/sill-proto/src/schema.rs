@@ -44,6 +44,9 @@ const fn notification<P: JsonSchema>(name: &'static str, doc: &'static str) -> M
 
 /// Every method the daemon answers and every notification it sends, in the order of docs/protocol.md.
 pub const METHODS: &[Method] = &[
+    notification::<Value>(method::SESSION_REPLAY, "Atomic stored transcript tail before attach live state; core transcript entries are opaque in this schema."),
+    req::<Value, Value>(method::FRONTEND_REQUEST, "Host data operations for the rendering frontend; sill_core::frontend::Request is typed in Rust, opaque in this schema."),
+    req::<crate::Empty, Value>(method::DAEMON_SCHEMA, "The daemon protocol schema and method capabilities, for remote negotiation."),
     req::<crate::Empty, crate::DaemonStatus>(method::DAEMON_STATUS, "Version, protocol, pid, mode and session counts of the daemon."),
     req_empty::<crate::Empty>(method::DAEMON_SHUTDOWN, "Ask the daemon to leave; sessions keep running and the next daemon adopts them."),
     req::<crate::Empty, Vec<crate::Session>>(method::SESSIONS_LIST, "Every session in the store, newest first."),

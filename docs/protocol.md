@@ -1,9 +1,10 @@
 # sill — the daemon protocol
 
-Status: protocol **5**, frozen 2026-11-02 (docs/daemon.md M3). From here every change
+Status: protocol **6**, frozen 2026-11-02 (docs/daemon.md M4–M6). From here every change
 to a method or a type's shape is a line in the changelog below and a bump of
-`sill_proto::PROTOCOL`; a client whose number differs from the daemon's asks it to leave and
-connects to (or starts) the installed binary, so the two are never mismatched for long.
+`sill_proto::PROTOCOL`. A local client asks a mismatched daemon to leave and starts the installed
+binary. An SSH client instead compares method schemas and refuses an unsupported operation; it
+never replaces or restarts the remote daemon merely to match its own version.
 
 `sill daemon schema` prints the whole protocol as one JSON document — this table, each method's
 params and result as `$ref`s, and the JSON Schema (draft 2020-12) of every type under `$defs` —
@@ -19,6 +20,10 @@ daemon answers is named here.
   refuses a peer whose uid is not its own (`SO_PEERCRED`). A frontend that finds no socket starts
   the daemon (`Client::connect_or_start`): the systemd socket unit where installed, else a
   transient `sill-daemon` user unit, else a bare process (docs/daemon.md §3.1).
+- **SSH**: the system SSH client runs `sill daemon --stdio` on a saved box. The stdio command
+  bridges to that host’s existing daemon; it does not create a second store writer. Select a saved
+  box with `SILL_BOX=NAME` or `sill box connect NAME`. SSH retains the person’s authentication and
+  host-key policy.
 - **Framing**: JSON-RPC 2.0, one message per line (`\n`), UTF-8. A request carries `id`; its
   answer comes with the same `id`, in order of arrival on that connection. A notification has no
   `id` and no answer. Errors use JSON-RPC's `error {code, message}`; the codes are
@@ -31,16 +36,27 @@ daemon answers is named here.
   controls, a waiting login, the turn in flight with its text so far, unanswered questions);
   `sessions.detach`, a `Quit` command or the connection closing unsubscribes. The daemon's queue
   per connection is bounded; a frontend that stops reading is cut off and attaches again.
+  Before the live snapshot, `_sill/session.replay {key, entries, total}` supplies the stored
+  transcript atomically with subscription. A frontend replaces its stored-history view from this
+  replay before applying subsequent events; it must not stitch an earlier separate read onto the
+  live stream. The core-owned stored `Entry` shape is currently opaque in the standalone schema.
 - **Questions**: a permission request or a form arrives as an event with a `request` number and
   waits — with nobody attached too — until some frontend answers it with `sessions.answer`; the
   first answer counts and every attached frontend then gets `Resolved {request}`.
-- **Timeouts**: the Rust client waits 120 s for an answer (5 s for `daemon.status` and
-  `daemon.shutdown`) and then reports the daemon stuck (docs/daemon.md §3.7).
+- **Timeouts**: a single Rust client deadline covers outbound queuing, sending and the answer
+  (120 s by default, 5 s for `daemon.status` and `daemon.shutdown`). Timeout closes the transport
+  so a blocked send cannot strand subsequent calls. Long browser login and registry install progress use streams.
+- **Byte streams**: `frontend.request` operations `OpenPty`, `OpenPort`, `HostLogin` and `Install` return a
+  one-use token. Open the same transport again, write `{"_sill_stream":"TOKEN"}\n`, then exchange
+  raw bytes. Tokens expire after 60 s if unused. `ResizePty`/`PtyCwd` use the original control
+  connection and token; descriptors never cross the frontend protocol.
 
 ## 2. Methods
 
 | Method | Kind | Params | Result | What |
 |---|---|---|---|---|
+| `_sill/frontend.request` | request | any | any | Typed host-data operations for the shelf (sill_core::frontend::Request); suboperation shapes are not yet in this schema. |
+| `_sill/daemon.schema` | request | `Empty` | any | Protocol schema and supported method shapes, for remote capability negotiation. |
 | `_sill/daemon.status` | request | `Empty` | `DaemonStatus` | Version, protocol, pid, mode and session counts of the daemon. |
 | `_sill/daemon.shutdown` | request | `Empty` | `{}` | Ask the daemon to leave; sessions keep running and the next daemon adopts them. |
 | `_sill/sessions.list` | request | `Empty` | `[Session]` | Every session in the store, newest first. |
@@ -57,6 +73,7 @@ daemon answers is named here.
 | `_sill/sessions.detach` | request | `Key` | `{}` | Unsubscribe; the agent stays the daemon's. |
 | `_sill/sessions.command` | request | `SessionCommand` | `{}` | A prompt, cancel, mode, option, login or quit for a running session; a prompt during a turn is refused. |
 | `_sill/sessions.answer` | request | `SessionAnswer` | `{}` | The answer to an agent's question (permission or form); the first answer counts. |
+| `_sill/session.replay` | notification | any | — | An attach’s atomic stored transcript snapshot: key, entries and total (core-owned Entry shape). |
 | `_sill/session.event` | notification | `SessionEvent` | — | One event of a session, to every connection attached to it. |
 | `_sill/sessions.end` | request | `End` | `Ending` | End a session as closing its tab would: the summary turn when the agent can be asked, the row written or deleted, the jail stopped. |
 | `_sill/sessions.checkpoint` | request | `Key` | `{}` | Summarize now, without ending; the summary comes as a Summarized event. |
@@ -85,7 +102,10 @@ daemon answers is named here.
 | `_sill/settings.get` | request | `Empty` | any | sill's settings (sill.toml); the type is sill_core::config's, not in this schema yet. |
 
 `Empty` is `{}`; `[path]` is a JSON array of path strings; "any" is a shape not in the schema
-yet (`changes.history` and `settings.get` carry `sill_core`'s types; only the shelf reads them).
+yet (`changes.history`, `settings.get`, `session.replay` and `frontend.request` carry core-owned types). A generated
+client still needs those definitions; schema negotiation cannot validate the opaque suboperation
+shapes of `frontend.request`. Its request is a serde externally tagged enum (for example
+`{"Metadata":{"path":"/home/me/file"}}`); its result is the operation’s value, not another enum.
 
 ## 3. Events
 
@@ -107,11 +127,20 @@ externally tagged — `{"Text": "…"}`, `{"ToolCall": {…}}`, `"TurnStarted"`)
 tool calls come back, a permission request is answered on the next line (a number, `y`, `n`, or
 Enter to cancel), a form is shown and left waiting for a frontend that can fill it, `/cancel`
 stops the turn, `/quit` or Ctrl-D detaches and the session keeps running. `--verbose` adds
-thoughts, tool call updates and usage. The prompt goes to the agent as typed: the standing
-instructions block the shelf prepends (docs/daemon.md §3.2) is still the shelf's.
+thoughts, tool call updates and usage. Both line mode and the shelf send the plain prompt. The
+daemon prepends current jail facts, standing instructions, scoped recall and session pin context,
+and restores remembered agent controls independently of either frontend.
 
 ## 5. Changelog
 
+- **6** — 2026-11-02. `daemon.schema` for remote method negotiation; `frontend.request` for
+  daemon-host data and actions (store reads, files, config/instructions, registry, uploads, denied
+  hosts, processes and logs), terminal/port/login one-use byte streams and their control operations.
+  The latter’s suboperation types are in `sill_core::frontend` and are opaque in this schema.
+  `session.replay` supplies stored transcript rows atomically with attachment, before the live
+  snapshot, preventing a missed or duplicated tail between a separate history read and attach.
+  SSH/stdio is an alternative transport. Main-daemon recovery uses a private ACP relay and
+  transactional event cursors; that private worker protocol is not a frontend API.
 - **5** — 2026-11-02, frozen. The wire types moved from `sill_core::wire` (and `acp`, `store`,
   `keep`, `ledger`) to `sill_proto::wire`, unchanged on the wire; the envelopes
   (`sessions.command`, `sessions.answer`, `sessions.set`, `agents.set_settings`,
