@@ -222,6 +222,84 @@ fn discard_returns_to_what_was_applied_and_undo_brings_it_back() {
     assert_eq!(read(&c.path.join("f2.txt")), "newer\n");
 }
 
+/// The person reverts an applied file in their checkout and the agent reverts it in the
+/// workspace: both sides equal, nothing to bring, however the record of the last Apply reads.
+#[test]
+fn a_revert_on_both_sides_leaves_nothing_to_apply() {
+    let d = tmp("reconcile");
+    let (s, _, c) = setup(&d);
+    write(&c.path.join("f1.txt"), "edited\n");
+    write(&c.path.join("new.txt"), "untracked\n");
+    apply_now(&s, &c).unwrap();
+    assert_eq!(read(&s.join("f1.txt")), "edited\n");
+    git(&s, &["reset", "-q", "--hard"]);
+    std::fs::remove_file(s.join("new.txt")).unwrap();
+    git(&c.path, &["reset", "-q", "--hard"]);
+    std::fs::remove_file(c.path.join("new.txt")).unwrap();
+    assert!(unapplied(&c.path).unwrap(), "the record alone still says the revert is pending");
+    assert!(reconcile(&s, &c.path).unwrap());
+    assert!(!unapplied(&c.path).unwrap(), "the person already has what the workspace has");
+    assert!(!reconcile(&s, &c.path).unwrap(), "settled once");
+    assert_eq!(git(&c.path, &["status", "--porcelain"]), "", "the workspace is untouched");
+    assert_eq!(git(&s, &["status", "--porcelain"]), "", "the checkout is untouched");
+    // a later Discard has nothing to bring back
+    discard(&s, &c.path, "w1", "1", &c.branch).unwrap();
+    assert_eq!(read(&c.path.join("f1.txt")), "line 1\n");
+    assert!(!c.path.join("new.txt").exists());
+}
+
+/// The person resets their checkout after an Apply while the workspace keeps the change: the
+/// change is not theirs any more, so it is offered again and Apply brings it back.
+#[test]
+fn a_reset_checkout_gets_the_applied_change_offered_again() {
+    let d = tmp("reconcile-host");
+    let (s, _, c) = setup(&d);
+    write(&c.path.join("f1.txt"), "edited\n");
+    write(&c.path.join("new.txt"), "untracked\n");
+    apply_now(&s, &c).unwrap();
+    git(&s, &["reset", "-q", "--hard"]);
+    std::fs::remove_file(s.join("new.txt")).unwrap();
+    // the agent goes on in another file
+    write(&c.path.join("f2.txt"), "more\n");
+    assert!(reconcile(&s, &c.path).unwrap());
+    let changed = git(&c.path, &["diff", "--name-only", APPLIED, &snapshot(&c.path, "x").unwrap()]);
+    assert_eq!(changed.lines().collect::<Vec<_>>(), ["f1.txt", "f2.txt", "new.txt"], "all of it is pending again");
+    assert!(!reconcile(&s, &c.path).unwrap(), "settled once");
+    apply_now(&s, &c).unwrap();
+    assert_eq!(read(&s.join("f1.txt")), "edited\n");
+    assert_eq!(read(&s.join("new.txt")), "untracked\n");
+    assert_eq!(read(&s.join("f2.txt")), "more\n");
+    assert!(!unapplied(&c.path).unwrap());
+    // the person's own different edit of an applied file is theirs: not taken into the record
+    write(&s.join("f1.txt"), "the person's own\n");
+    assert!(!reconcile(&s, &c.path).unwrap());
+}
+
+/// Reverting in the workspace alone is a real difference: the checkout still has the edit, and
+/// bringing the revert there is offered as before. The person's own other edit stays theirs.
+#[test]
+fn a_revert_in_the_workspace_alone_still_offers_the_reverse() {
+    let d = tmp("reconcile-one");
+    let (s, _, c) = setup(&d);
+    write(&c.path.join("f1.txt"), "edited\n");
+    apply_now(&s, &c).unwrap();
+    git(&c.path, &["reset", "-q", "--hard"]);
+    assert!(!reconcile(&s, &c.path).unwrap());
+    assert!(unapplied(&c.path).unwrap(), "the checkout has the edit, the workspace does not");
+    apply_now(&s, &c).unwrap();
+    assert_eq!(read(&s.join("f1.txt")), "line 1\n", "the revert is brought over");
+    assert!(!unapplied(&c.path).unwrap());
+    // the person edits the applied file to something else: theirs, and it stops Apply
+    write(&c.path.join("f1.txt"), "edited again\n");
+    apply_now(&s, &c).unwrap();
+    write(&s.join("f1.txt"), "the person's own\n");
+    git(&c.path, &["reset", "-q", "--hard"]);
+    assert!(!reconcile(&s, &c.path).unwrap());
+    assert!(unapplied(&c.path).unwrap());
+    assert_eq!(apply_now(&s, &c).unwrap_err(), Stop::Overlap(vec!["f1.txt".into()]));
+    assert_eq!(read(&s.join("f1.txt")), "the person's own\n");
+}
+
 #[test]
 fn a_reused_folder_keeps_build_output_but_nothing_a_session_planted() {
     let d = tmp("reuse");

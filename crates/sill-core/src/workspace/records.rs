@@ -369,6 +369,7 @@ fn drop_ref(repo: &Path, name: &str) -> Result<()> {
 /// A workspace whose session ended: with work left, a result; with nothing, freed (§12).
 /// Returns the row still there.
 fn settle_session<H: Host>(h: &H, mut r: Row) -> Result<Option<Row>> {
+    settle_applied(&r)?;
     if r.state == "open" && matches!(h.life(&r.session_id), Life::Missing | Life::Ended) {
         if r.path.exists() && !rebasing(&r.path) && !flow::unapplied(&r.path)? {
             free(h, &r)?;
@@ -383,6 +384,7 @@ fn settle_session<H: Host>(h: &H, mut r: Row) -> Result<Option<Row>> {
 
 /// After an Apply or Discard of a result: nothing left, so it is done with.
 fn settle_result<H: Host>(h: &H, r: Row) -> Result<Option<Row>> {
+    settle_applied(&r)?;
     if r.state == "result" && !rebasing(&r.path) && !flow::unapplied(&r.path)? {
         free(h, &r)?;
         return Ok(None);
@@ -552,6 +554,16 @@ fn revision_now(r: &Row) -> Result<(api::Revision, bool)> {
     Ok((api::Revision { tip: rev.tip, worktree: rev.worktree, destination_branch: branch, destination_tip: tip }, needs_rebase))
 }
 
+/// What the person has may have moved under the record (`flow::reconcile`): bring the record up
+/// to date before anything reads `refs/sill/applied`. Nothing to do without both folders or
+/// while a rebase is stopped.
+fn settle_applied(r: &Row) -> Result<()> {
+    if r.path.exists() && r.source.exists() && !rebasing(&r.path) {
+        flow::reconcile(&r.source, &r.path)?;
+    }
+    Ok(())
+}
+
 /// What an Apply would bring: commits and changes since what the person has.
 fn summary(r: &Row) -> Result<api::Summary> {
     let applied = flow::applied(&r.path)?;
@@ -625,6 +637,7 @@ pub fn get<H: Host>(h: &H, id: &str) -> Result<api::Detail> {
 
 pub fn diff<H: Host>(h: &H, a: &api::DiffRequest) -> Result<api::DiffText> {
     let r = get_row(h, &a.workspace_id)?;
+    settle_applied(&r)?;
     let against = match a.against {
         api::Against::Applied => flow::applied(&r.path)?,
         api::Against::Base => r.base.clone(),

@@ -69,6 +69,83 @@ pub fn set_applied(clone: &Path, snapshot: &str) -> Result<()> {
     ok(c, "applied ref").map(drop)
 }
 
+/// The person may change an applied file in their checkout after the Apply — revert it, reset
+/// the checkout, edit it — and then `refs/sill/applied` no longer says what they have. Every path
+/// of the agent's work (changed since the last Apply, or applied and not yet committed) is
+/// looked at in the checkout and the record follows it:
+/// - the checkout as recorded: nothing to do;
+/// - the checkout as the workspace is now: the record takes it, nothing is pending there (the
+///   person, 2026-11-09: a revert on both sides left the shelf offering the revert, and Discard
+///   brought the edit back);
+/// - the checkout as its own HEAD: the person took the change back, and the record does too, so
+///   the shelf offers it again (royal-horse, 2026-11-09: after a `git reset --hard` in the
+///   checkout, an applied file the workspace still had changed was no longer offered);
+/// - anything else is the person's own edit: left as it is, and it stops Apply.
+///
+/// Only the record moves; neither working tree is touched. Returns whether it moved.
+pub fn reconcile(source: &Path, clone: &Path) -> Result<bool> {
+    let ws = Git::open(clone)?;
+    let applied = rev(&ws, APPLIED)?;
+    let now = snapshot(clone, "sill: check")?;
+    let src = Git::open(source)?;
+    // the agent's paths: changed since the last Apply, or applied but uncommitted
+    let mut paths: Vec<Entry> = diff_tree(&ws, &applied, &now)?;
+    for e in diff_tree(&ws, "HEAD", &applied)? {
+        if !paths.iter().any(|p| p.path == e.path) {
+            paths.push(e);
+        }
+    }
+    // (path, the record's new entry: mode and blob, None when absent)
+    let mut moved: Vec<(String, Option<(String, String)>)> = Vec::new();
+    for e in paths {
+        if e.mode == "160000" {
+            continue;
+        }
+        let host = worktree_blob(&src, source, &e.path)?;
+        if host == try_rev(&ws, &format!("{applied}:{}", e.path))? {
+            continue;
+        }
+        let in_now = try_rev(&ws, &format!("{now}:{}", e.path))?;
+        if host == in_now {
+            moved.push((e.path.clone(), in_now.map(|b| (tree_mode(&ws, &now, &e.path).unwrap_or_else(|| "100644".into()), b))));
+            continue;
+        }
+        let in_head = try_rev(&src, &format!("HEAD:{}", e.path))?;
+        if host == in_head {
+            moved.push((e.path.clone(), in_head.map(|b| (tree_mode(&src, "HEAD", &e.path).unwrap_or_else(|| "100644".into()), b))));
+        }
+    }
+    if moved.is_empty() {
+        return Ok(false);
+    }
+    let index = ws.dirs().0.join(format!("sill-applied-index-{}", std::process::id()));
+    let _ = std::fs::remove_file(&index);
+    let with = |args: &[&str]| {
+        let mut c = ws.cmd_write();
+        c.env("GIT_INDEX_FILE", &index);
+        for (k, v) in IDENT {
+            c.env(k, v);
+        }
+        c.args(args);
+        c
+    };
+    let made = (|| {
+        ok(with(&["read-tree", &applied]), "reconcile: read applied")?;
+        for (path, entry) in &moved {
+            match entry {
+                Some((mode, blob)) => ok(with(&["update-index", "--add", "--cacheinfo", &format!("{mode},{blob},{path}")]), "reconcile: update")?,
+                None => ok(with(&["update-index", "--force-remove", "--", path]), "reconcile: remove")?,
+            };
+        }
+        let tree = ok(with(&["write-tree"]), "reconcile: write tree")?;
+        let parent = rev(&ws, &format!("{applied}^"))?;
+        ok(with(&["commit-tree", &tree, "-p", &parent, "-m", "sill: applied"]), "reconcile: commit")
+    })();
+    let _ = std::fs::remove_file(&index);
+    set_applied(clone, &made?)?;
+    Ok(true)
+}
+
 /// The clone's `refs/sill/applied`.
 pub fn applied(clone: &Path) -> Result<String> {
     rev(&Git::open(clone)?, APPLIED)
@@ -227,7 +304,10 @@ pub fn apply(
         return Ok(Err(Stop::NeedsPrepare));
     }
     let snap = snapshot(clone, "sill: applied")?;
-    let changed: std::collections::BTreeSet<String> = diff_tree(&ws, expected, &snap)?.into_iter().map(|e| e.path).collect();
+    // the paths the result touches: since the branch tip, and since the last Apply (a revert of
+    // an applied uncommitted edit changes nothing against the tip, but the person's checkout)
+    let changed: std::collections::BTreeSet<String> =
+        diff_tree(&ws, expected, &snap)?.into_iter().chain(diff_tree(&ws, applied, &snap)?).map(|e| e.path).collect();
     // the person's own dirty files against the agent's earlier Apply
     let (mut ours, mut overlap, mut untracked) = (Vec::new(), Vec::new(), Vec::new());
     for (x, _y, path) in dirty(&src)? {
