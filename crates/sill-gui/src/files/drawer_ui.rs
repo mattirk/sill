@@ -135,7 +135,12 @@ impl App {
 
 fn caption(value: &str) -> Element<'_, Message> {
     container(text(value).size(style::TINY).color(P.fg_dim))
-        .padding([5, 10])
+        .padding(Padding {
+            top: 5.0,
+            bottom: 5.0,
+            left: 4.0,
+            right: 10.0,
+        })
         .into()
 }
 
@@ -327,7 +332,7 @@ fn diff_list<'a>(mut body: Column<'a, Message>, state: &'a State, workspaces: &c
             .padding(Padding {
                 top: 8.0,
                 bottom: 2.0,
-                left: 12.0,
+                left: 4.0,
                 right: 10.0,
             }),
             "Same totals as the pin chip: +tracked insertions −tracked deletions against HEAD, \
@@ -475,7 +480,12 @@ fn summary_label(repo: &sill_client::files::Repo) -> String {
 
 fn note<'a>(value: &str, color: iced::Color) -> Element<'a, Message> {
     container(text(value.to_string()).size(style::TINY).color(color))
-        .padding([5, 12])
+        .padding(Padding {
+            top: 5.0,
+            bottom: 5.0,
+            left: 4.0,
+            right: 12.0,
+        })
         .into()
 }
 
