@@ -26,12 +26,23 @@ pub fn run(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-const MAC_USAGE: &str = "usage: sill-mac state | displays GENERATION | windows GENERATION | screenshot GENERATION (--display ID | --window ID) [--output PATH]
+const MAC_USAGE: &str = "usage: sill-mac state | displays G | windows G | screenshot G (--display ID | --window ID) [--output PATH]
+       sill-mac click G --frame F X Y [--right] [--double] | move G --frame F X Y | drag G --frame F X1 Y1 X2 Y2
+       sill-mac scroll G --frame F X Y DY [DX] | type G TEXT | key G COMBO | input G JSON
   state       Host control's generation and grants, and whether a Mac is attached
   displays    the Mac's displays: id, position and size in points, pixels, scale
   windows     the Mac's windows on screen: id, app, title, position and size in points
-  screenshot  a PNG of one display or window, under /.sill/bridge/mac/ (and copied to PATH)
-Needs the mac_view grant; macOS must allow Sill to record the screen.";
+  screenshot  a PNG of one display or window, under /.sill/bridge/mac/ (and copied to PATH); its
+              reply names the picture's frame
+  click/move/drag/scroll  at X Y in frame F's pixels (a picture from the last two minutes whose
+              target has not moved); scroll DY/DX in pixels, negative scrolls up/left
+  type        text where the Mac's focus is (not through the clipboard)
+  key         a combination like cmd+shift+p, return, escape, left
+  input       up to 32 actions in one request: {\"frame\":F,\"actions\":[{\"click\":[x,y]},{\"type\":\"text\"},…]}
+G is the generation (`sill-mac state`). Viewing needs the mac_view grant and macOS's Screen
+Recording consent for Sill; input needs mac_input and macOS's Accessibility consent. When the
+person uses the mouse or keyboard, the agent's input stops and says how far it got: never repeat
+it blindly, take a new picture.";
 
 /// `sill-mac`: the Mac's screen, through the bridge's `mac_view`.
 pub fn run_mac(args: &[String]) -> Result<()> {
@@ -69,6 +80,12 @@ pub fn run_mac(args: &[String]) -> Result<()> {
             }
             (target.context("screenshot needs --display ID or --window ID")?, output)
         }
+        "click" | "move" | "drag" | "scroll" | "type" | "key" | "input" => {
+            let request = mac_input(command, rest)?;
+            let result = call("mac_input", Some(generation), request)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            return Ok(());
+        }
         _ => anyhow::bail!("{MAC_USAGE}"),
     };
     let result = call("mac_view", Some(generation), request)?;
@@ -78,6 +95,53 @@ pub fn run_mac(args: &[String]) -> Result<()> {
     }
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
+}
+
+/// An input request from `sill-mac click|move|drag|scroll|type|key|input` and its arguments.
+fn mac_input(command: &str, rest: &[String]) -> Result<Value> {
+    if command == "input" {
+        anyhow::ensure!(rest.len() == 1, "input takes one JSON argument");
+        return Ok(serde_json::from_str(&rest[0])?);
+    }
+    if command == "type" || command == "key" {
+        anyhow::ensure!(rest.len() == 1, "{command} takes one argument (quote it)");
+        return Ok(json!({"actions": [{command: rest[0]}]}));
+    }
+    let mut frame = None;
+    let mut numbers = Vec::new();
+    let (mut right, mut double) = (false, false);
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--frame" => {
+                frame = Some(rest.get(i + 1).context("--frame needs a value")?.clone());
+                i += 1;
+            }
+            "--right" => right = true,
+            "--double" => double = true,
+            n => numbers.push(n.parse::<f64>().with_context(|| format!("{n} is not a number\n{MAC_USAGE}"))?),
+        }
+        i += 1;
+    }
+    let frame = frame.context("--frame F: the frame of a recent picture (`sill-mac screenshot`)")?;
+    let action = match (command, numbers.as_slice()) {
+        ("click", [x, y]) => {
+            let mut a = json!({"click": [x, y]});
+            if right {
+                a["button"] = json!("right");
+            }
+            if double {
+                a["count"] = json!(2);
+            }
+            a
+        }
+        ("move", [x, y]) => json!({"move": [x, y]}),
+        ("drag", [x1, y1, x2, y2]) => json!({"drag": [[x1, y1], [x2, y2]]}),
+        ("scroll", [x, y, dy]) => json!({"scroll": [x, y], "dy": dy}),
+        ("scroll", [x, y, dy, dx]) => json!({"scroll": [x, y], "dy": dy, "dx": dx}),
+        _ => anyhow::bail!("wrong number of coordinates for {command}\n{MAC_USAGE}"),
+    };
+    Ok(json!({"frame": frame, "actions": [action]}))
 }
 
 /// One request on the session's bridge: the result, or the refusal as the error.

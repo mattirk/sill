@@ -51,6 +51,7 @@ fn label(operation: &str) -> &'static str {
         "view" => "Display viewing",
         "input" => "Display input",
         "mac_view" => "View Mac screen",
+        "mac_input" => "Control Mac",
         "inspect" => "Process inspection",
         "launch" => "Process launch",
         "stop" => "Process stop",
@@ -68,7 +69,7 @@ pub fn offered() -> Vec<&'static str> {
         .iter()
         .copied()
         .filter(|op| match *op {
-            "mac_view" => mac,
+            "mac_view" | "mac_input" => mac,
             "view" | "input" => !mac,
             _ => true,
         })
@@ -116,6 +117,10 @@ impl App {
                 #[cfg(target_os = "macos")]
                 if operations.iter().any(|op| op == "mac_view") && !crate::mac_screen::allowed() {
                     crate::mac_screen::ask();
+                }
+                #[cfg(target_os = "macos")]
+                if operations.iter().any(|op| op == "mac_input") && !crate::mac_input::allowed() {
+                    crate::mac_input::ask();
                 }
                 let params = json!({"session_id": id, "operations": operations});
                 self.host_control_request(id, "_sill/host_control.activate", params)
@@ -221,6 +226,13 @@ pub fn rows<'a>(view: &'a SessionView, session: &'a Session, can_change: bool) -
             }
             if *operation == "input" {
                 said.push_str(" Input can invoke anything on your desktop; a window scope is not a boundary.");
+            }
+            if *operation == "mac_input" {
+                said.push_str(" The whole Mac desktop: clicks and keys reach whatever is in front, as yours would. Needs View Mac screen; your own mouse or keyboard pauses it.");
+                #[cfg(target_os = "macos")]
+                if !crate::mac_input::allowed() {
+                    said.push_str(" macOS does not allow Sill to control the mouse and keyboard yet: activating asks; turn Sill on in System Settings → Privacy & Security → Accessibility.");
+                }
             }
             if *operation == "mac_view" {
                 said.push_str(" Everything shown on the Mac, other apps and private windows included.");
@@ -540,9 +552,10 @@ mod tests {
         let _ = app.update(Message::Perms(crate::permissions::Event::ShieldMenu("demo".into())));
         assert!(app.views["demo"].permissions.menu && !app.views["demo"].permissions.open);
         // the selection is a sorted set; the daemon receives every operation this window offers
-        // (no Mac here: everything but mac_view) in that order
+        // (no Mac here: everything but the Mac's operations) in that order
         let mut all: Vec<&str> = super::offered();
-        assert!(!all.contains(&"mac_view") && all.len() == OPERATIONS.len() - 1);
+        let mac = sill_proto::host_control::MAC_OPERATIONS.len();
+        assert!(!all.contains(&"mac_view") && all.len() == OPERATIONS.len() - mac);
         all.sort_unstable();
         let fake = std::thread::spawn(move || {
             let mut listed = false;
@@ -578,8 +591,8 @@ mod tests {
         let perms = &app.views["demo"].permissions;
         assert!(!perms.open && !perms.menu, "the menu closes; the panel stays as it was");
         let state = app.views["demo"].host_control.state.as_ref().unwrap();
-        assert!(state.active && state.operations.len() == OPERATIONS.len() - 1);
-        assert_eq!(app.views["demo"].host_control.selected.len(), OPERATIONS.len() - 1);
+        assert!(state.active && state.operations.len() == OPERATIONS.len() - mac);
+        assert_eq!(app.views["demo"].host_control.selected.len(), OPERATIONS.len() - mac);
     }
 
     /// A long Host control notice (an inspection's process list) is one line until clicked.

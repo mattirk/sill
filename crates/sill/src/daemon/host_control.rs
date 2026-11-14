@@ -129,6 +129,10 @@ fn operations_of(named: &[String]) -> Result<BTreeSet<String>> {
     if operations.is_empty() {
         return Err(Error::invalid_params("Host control needs at least one operation").into());
     }
+    // the agent aims the Mac's input in pictures it has taken: control comes with viewing
+    if operations.contains("mac_input") && !operations.contains("mac_view") {
+        return Err(Error::invalid_params("mac_input needs mac_view: input is aimed in a picture of the Mac").into());
+    }
     Ok(operations)
 }
 

@@ -11,11 +11,11 @@ use serde::{Deserialize, Serialize};
 pub const CAPABILITY: &str = "sill.host_control";
 
 /// The separately grantable operations, in the specification's order.
-pub const OPERATIONS: [&str; 8] = ["view", "input", "mac_view", "inspect", "launch", "stop", "stop_existing", "commands"];
+pub const OPERATIONS: [&str; 9] = ["view", "input", "mac_view", "mac_input", "inspect", "launch", "stop", "stop_existing", "commands"];
 
 /// The operations on the Mac the daemon's VM runs on (docs/sill-mac.md), served by Sill.app;
 /// the others act on the daemon's own host.
-pub const MAC_OPERATIONS: [&str; 1] = ["mac_view"];
+pub const MAC_OPERATIONS: [&str; 2] = ["mac_view", "mac_input"];
 
 /// What an operation name means, for frontends and the CLI.
 pub fn describe(operation: &str) -> &'static str {
@@ -23,6 +23,7 @@ pub fn describe(operation: &str) -> &'static str {
         "view" => "Display viewing: pictures of the real desktop or one of its windows",
         "input" => "Display input: mouse and keyboard on the real desktop",
         "mac_view" => "Mac screen viewing: the Mac's displays and windows, and pictures of them",
+        "mac_input" => "Mac control: mouse and keyboard on the whole Mac desktop, aimed in a recent picture",
         "inspect" => "Process inspection: list host processes and their status",
         "launch" => "Process launch: start a program on the host with explicit arguments",
         "stop" => "Process stop: stop processes the bridge launched",

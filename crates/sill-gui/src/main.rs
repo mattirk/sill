@@ -28,6 +28,8 @@ mod local_vm;
 #[cfg(target_os = "macos")]
 mod mac_screen;
 #[cfg(target_os = "macos")]
+mod mac_input;
+#[cfg(target_os = "macos")]
 mod macos;
 mod media;
 mod menu;
@@ -1365,6 +1367,9 @@ impl App {
             subscriptions.push(
                 iced::time::every(Duration::from_millis(tray::FRAME_MS)).map(|_| Message::TrayTick),
             );
+        } else if self.tray.is_some() && local_vm::phase().is_some() {
+            // the agent's Mac input starts without a message of its own: looked for here
+            subscriptions.push(iced::time::every(Duration::from_millis(400)).map(|_| Message::TrayTick));
         }
         // While busy, update the timer label and its width together once a second.
         // The spinner and timer reveal animate between these samples.
@@ -1561,6 +1566,9 @@ impl App {
         }
         // the tray moves while any session's agent works
         let busy = self.views.values().any(|v| v.conversation.busy());
+        // an agent driving the Mac's mouse and keyboard shows on the menu-bar herring too
+        #[cfg(target_os = "macos")]
+        let busy = busy || mac_input::active();
         if busy != self.tray_busy {
             self.tray_busy = busy;
             if let Some(tray) = &self.tray {

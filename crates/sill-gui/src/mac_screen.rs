@@ -198,6 +198,7 @@ fn string(value: Option<*mut AnyObject>) -> String {
 }
 
 /// A picture of the display `id` or the window `id`: PNG bytes, and its size in pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Target {
     Display(u32),
     Window(u32),

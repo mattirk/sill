@@ -714,19 +714,13 @@ fn mac_request(line: &str, secret: &str) -> Result<(serde_json::Value, Option<Ve
     }
     let session = request["session"].as_str().ok_or("no session")?;
     let generation = request["generation"].as_u64().ok_or("no generation")?;
-    // the daemon checked the grant; the Mac checks it again, against the daemon's own state
-    let state: sill_proto::host_control::State = sill_proto::Client::connect()
-        .and_then(|client| client.call("_sill/host_control.state", json!({"session_id": session})))
-        .map_err(|e| format!("the grant could not be checked: {e:#}"))?;
-    if !state.active || state.generation != generation {
-        return Err("refused: stale Host control generation".into());
-    }
-    if !state.operations.iter().any(|op| op == "mac_view") {
-        return Err("refused: mac_view is not granted".into());
-    }
     let args = &request["args"];
     match request["op"].as_str() {
-        Some("view") => {}
+        Some("view") => granted(session, generation, "mac_view")?,
+        Some("input") => {
+            granted(session, generation, "mac_input")?;
+            return mac_input(session, generation, args).map(|result| (json!({"result": result}), None));
+        }
         _ => return Err("unknown Mac operation".into()),
     }
     if let Some(list) = args["list"].as_str() {
@@ -740,25 +734,37 @@ fn mac_request(line: &str, secret: &str) -> Result<(serde_json::Value, Option<Ve
         };
         return Ok((json!({"result": result}), None));
     }
-    let (target, about) = if let Some(id) = args["display"].as_u64() {
-        let display = crate::mac_screen::displays()
-            .into_iter()
-            .find(|d| u64::from(d.id) == id)
-            .ok_or_else(|| format!("the Mac has no display {id}: `sill-mac displays` lists them"))?;
-        (crate::mac_screen::Target::Display(display.id), json!({"display": display}))
+    let target = if let Some(id) = args["display"].as_u64() {
+        crate::mac_screen::Target::Display(u32::try_from(id).map_err(|_| "no such display")?)
     } else if let Some(id) = args["window"].as_u64() {
-        let window = crate::mac_screen::windows()
-            .into_iter()
-            .find(|w| u64::from(w.id) == id)
-            .ok_or_else(|| format!("the Mac has no window {id} on screen: `sill-mac windows` lists them"))?;
-        (crate::mac_screen::Target::Window(window.id), json!({"window": window}))
+        crate::mac_screen::Target::Window(u32::try_from(id).map_err(|_| "no such window")?)
     } else {
         return Err("a picture of {\"display\":ID} or {\"window\":ID}".into());
     };
+    let (about, place) = locate(&target)?;
     let (png, width, height) = crate::mac_screen::capture(&target)?;
+    // a frame to aim input in: what the picture showed, where, at what size
+    let frame = new_frame_id();
+    FRAMES.lock().unwrap().retain(|_, f| f.taken.elapsed() < crate::mac_input::FRAME_LIFETIME);
+    FRAMES.lock().unwrap().insert(
+        frame.clone(),
+        crate::mac_input::Frame {
+            session: session.into(),
+            generation,
+            target,
+            x: place.0,
+            y: place.1,
+            width: place.2,
+            height: place.3,
+            pixel_width: width,
+            pixel_height: height,
+            taken: std::time::Instant::now(),
+        },
+    );
     // the frame: what the picture shows and how its pixels map to the Mac's desktop, for the
     // input that comes after this slice
     let mut result = about;
+    result["frame"] = json!(frame);
     result["width"] = json!(width);
     result["height"] = json!(height);
     result["captured"] = json!(
@@ -767,4 +773,138 @@ fn mac_request(line: &str, secret: &str) -> Result<(serde_json::Value, Option<Ve
             .map_or(0, |d| d.as_secs())
     );
     Ok((json!({"result": result}), Some(png)))
+}
+
+/// Frames of the pictures taken, by id: what input is aimed in.
+static FRAMES: Mutex<std::collections::BTreeMap<String, crate::mac_input::Frame>> =
+    Mutex::new(std::collections::BTreeMap::new());
+
+fn new_frame_id() -> String {
+    let mut bytes = [0u8; 8];
+    let _ = std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut bytes));
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The session's Host control is active at this generation with `operation` granted: asked of
+/// the daemon itself (it checked too; the Mac checks again).
+fn granted(session: &str, generation: u64, operation: &str) -> Result<(), String> {
+    let state: sill_proto::host_control::State = sill_proto::Client::connect()
+        .and_then(|client| client.call("_sill/host_control.state", serde_json::json!({"session_id": session})))
+        .map_err(|e| format!("the grant could not be checked: {e:#}"))?;
+    if !state.active || state.generation != generation {
+        return Err("refused: stale Host control generation".into());
+    }
+    if !state.operations.iter().any(|op| op == operation) {
+        return Err(format!("refused: {operation} is not granted"));
+    }
+    Ok(())
+}
+
+/// A target's description and its place on the desktop in points (x, y, width, height), now.
+fn locate(target: &crate::mac_screen::Target) -> Result<(serde_json::Value, (f64, f64, f64, f64)), String> {
+    use crate::mac_screen::Target;
+    match *target {
+        Target::Display(id) => {
+            let d = crate::mac_screen::displays()
+                .into_iter()
+                .find(|d| d.id == id)
+                .ok_or_else(|| format!("the Mac has no display {id}: `sill-mac displays` lists them"))?;
+            let place = (d.x, d.y, d.width, d.height);
+            Ok((serde_json::json!({"display": d}), place))
+        }
+        Target::Window(id) => {
+            let w = crate::mac_screen::windows()
+                .into_iter()
+                .find(|w| w.id == id)
+                .ok_or_else(|| format!("the Mac has no window {id} on screen: `sill-mac windows` lists them"))?;
+            let place = (w.x, w.y, w.width, w.height);
+            Ok((serde_json::json!({"window": w}), place))
+        }
+    }
+}
+
+/// The actions of one input request, in order, each checked first: the grant, the person's own
+/// input, the frame's target still where it was. A stop says how far it got; nothing is repeated.
+fn mac_input(session: &str, generation: u64, args: &serde_json::Value) -> Result<serde_json::Value, String> {
+    use crate::mac_input as input;
+    use serde_json::json;
+    if !input::allowed() {
+        return Err(input::NOT_ALLOWED.into());
+    }
+    let actions = args["actions"].as_array().filter(|a| !a.is_empty() && a.len() <= 32).ok_or("1 to 32 actions")?;
+    let frame = match args["frame"].as_str() {
+        Some(id) => {
+            let frame = FRAMES.lock().unwrap().get(id).cloned().ok_or(
+                "no such frame: take a picture with `sill-mac screenshot` and aim in its frame",
+            )?;
+            if frame.session != session || frame.generation != generation {
+                return Err("that frame belongs to another session or grant: take a new picture".into());
+            }
+            if frame.taken.elapsed() > input::FRAME_LIFETIME {
+                return Err("that frame is over two minutes old: take a new picture".into());
+            }
+            Some(frame)
+        }
+        None => None,
+    };
+    let _driving = input::drive().ok_or("another session is using the Mac's mouse and keyboard")?;
+    if input::person_active() {
+        return Err("paused: the person is using the Mac's mouse or keyboard; take a new picture in a few seconds".into());
+    }
+    let total = actions.len();
+    let stop = |done: usize, why: &str| Ok(json!({"done": done, "of": total, "interrupted": why}));
+    for (done, action) in actions.iter().enumerate() {
+        if done > 0 && granted(session, generation, "mac_input").is_err() {
+            return stop(done, "Host control changed or was revoked");
+        }
+        if input::person_active() {
+            return stop(done, "the person used the mouse or keyboard");
+        }
+        let aimed = |p: &serde_json::Value| -> Result<input::Point, String> {
+            let frame = frame.as_ref().ok_or("an action with a point needs a frame")?;
+            // the target is still where the picture showed it
+            let (_, now) = locate(&frame.target)?;
+            if (now.0 - frame.x).abs() > 0.5
+                || (now.1 - frame.y).abs() > 0.5
+                || (now.2 - frame.width).abs() > 0.5
+                || (now.3 - frame.height).abs() > 0.5
+            {
+                return Err("the target moved or changed size since the picture: take a new one".into());
+            }
+            let x = p[0].as_f64().ok_or("a point is [x, y]")?;
+            let y = p[1].as_f64().ok_or("a point is [x, y]")?;
+            frame.to_desktop(x, y)
+        };
+        let outcome: Result<(), String> = (|| {
+            if let Some(p) = action.get("move") {
+                input::move_to(aimed(p)?);
+            } else if let Some(p) = action.get("click") {
+                let right = action["button"].as_str() == Some("right");
+                let count = action["count"].as_u64().unwrap_or(1) as u32;
+                input::click(aimed(p)?, right, count);
+            } else if let Some(ends) = action.get("drag") {
+                input::drag(aimed(&ends[0])?, aimed(&ends[1])?);
+            } else if let Some(p) = action.get("scroll") {
+                let at = aimed(p)?;
+                input::scroll(at, action["dy"].as_f64().unwrap_or(0.0), action["dx"].as_f64().unwrap_or(0.0));
+            } else if let Some(text) = action.get("type").and_then(|t| t.as_str()) {
+                if text.len() > 1024 || text.chars().any(|c| c.is_control() && c != '\n' && c != '\t') {
+                    return Err("text is at most 1 KiB, without control characters".into());
+                }
+                input::type_text(text);
+            } else if let Some(combination) = action.get("key").and_then(|k| k.as_str()) {
+                input::key(combination)?;
+            } else if let Some(ms) = action.get("wait").and_then(|w| w.as_u64()) {
+                std::thread::sleep(Duration::from_millis(ms.min(2000)));
+            } else {
+                return Err("an action is move, click, drag, scroll, type, key or wait".into());
+            }
+            Ok(())
+        })();
+        if let Err(said) = outcome {
+            return if done == 0 { Err(said) } else { stop(done, &said) };
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    Ok(json!({"done": total, "of": total}))
 }

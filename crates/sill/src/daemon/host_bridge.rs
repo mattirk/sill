@@ -362,6 +362,13 @@ fn action(hub: &Arc<Hub>, session: &str, generation: u64, r: &Request) -> Result
             super::host_display::availability()?;
             super::host_display::input(&r.args)
         }
+        "mac_input" => {
+            super::host_mac::check_input(&r.args)?;
+            let (result, _) = super::host_mac::request(session, generation, "input", &r.args)?;
+            let mut reply = result;
+            reply["location"] = json!("mac");
+            Ok(reply)
+        }
         "mac_view" => {
             super::host_mac::check_view(&r.args)?;
             let (result, picture) = super::host_mac::request(session, generation, "view", &r.args)?;

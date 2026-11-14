@@ -111,9 +111,96 @@ pub fn check_view(args: &Value) -> Result<()> {
     }
 }
 
+/// The most actions in one input request, as for the host desktop's input.
+const MAX_ACTIONS: usize = 32;
+
+/// What `mac_input` accepts: `{"frame":ID,"actions":[…]}`, the frame a picture's (required when an
+/// action has a point), each action one of move, click, drag, scroll, type, key and wait. Checked
+/// here and again on the Mac; nothing is done if anything is wrong.
+pub fn check_input(args: &Value) -> Result<()> {
+    let object = args.as_object().context("mac_input takes a JSON object")?;
+    for key in object.keys() {
+        anyhow::ensure!(key == "frame" || key == "actions", "unknown field {key}");
+    }
+    let actions = object.get("actions").and_then(Value::as_array).context("mac_input needs \"actions\": [...]")?;
+    anyhow::ensure!(!actions.is_empty() && actions.len() <= MAX_ACTIONS, "1 to {MAX_ACTIONS} actions");
+    let point = |v: &Value| -> Result<()> {
+        let p = v.as_array().filter(|p| p.len() == 2).context("a point is [x, y] in the picture's pixels")?;
+        anyhow::ensure!(p.iter().all(|c| c.as_f64().is_some_and(|c| c >= 0.0)), "a point is two non-negative numbers");
+        Ok(())
+    };
+    let mut aimed = false;
+    for action in actions {
+        let action = action.as_object().context("an action is an object")?;
+        let kind = ["move", "click", "drag", "scroll", "type", "key", "wait"]
+            .into_iter()
+            .find(|k| action.contains_key(*k))
+            .context("an action is move, click, drag, scroll, type, key or wait")?;
+        for key in action.keys() {
+            anyhow::ensure!(
+                key == kind || matches!((kind, key.as_str()), ("click", "button" | "count") | ("scroll", "dx" | "dy")),
+                "unknown field {key} in a {kind}"
+            );
+        }
+        match kind {
+            "move" | "click" | "scroll" => {
+                point(&action[kind])?;
+                aimed = true;
+            }
+            "drag" => {
+                let ends = action["drag"].as_array().filter(|e| e.len() == 2).context("a drag is [[x, y], [x, y]]")?;
+                ends.iter().try_for_each(point)?;
+                aimed = true;
+            }
+            "type" => {
+                let text = action["type"].as_str().context("type takes text")?;
+                anyhow::ensure!(text.len() <= 1024, "at most 1 KiB of text per action");
+            }
+            "key" => {
+                action["key"].as_str().filter(|k| !k.is_empty() && k.len() <= 64).context("key takes a combination like \"cmd+shift+p\"")?;
+            }
+            _ => {
+                let ms = action["wait"].as_u64().context("wait takes milliseconds")?;
+                anyhow::ensure!(ms <= 2000, "a wait is at most 2000 ms");
+            }
+        }
+    }
+    if aimed {
+        object.get("frame").and_then(Value::as_str).context("an action with a point needs the \"frame\" of a picture")?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+
+    #[test]
+    fn mac_input_is_checked_whole_before_anything_happens() {
+        let ok = [
+            json!({"frame":"f1","actions":[{"move":[10,20]},{"click":[10,20],"button":"right","count":2},{"drag":[[1,1],[50,60]]},{"scroll":[5,5],"dy":-300}]}),
+            json!({"actions":[{"type":"hello"},{"key":"cmd+shift+p"},{"wait":200}]}),
+        ];
+        for a in ok {
+            assert!(super::check_input(&a).is_ok(), "{a}");
+        }
+        let bad = [
+            json!({"actions":[{"click":[10,20]}]}),
+            json!({"frame":"f1","actions":[]}),
+            json!({"frame":"f1","actions":[{"click":[-1,20]}]}),
+            json!({"frame":"f1","actions":[{"click":[1]}]}),
+            json!({"actions":[{"type":"x".repeat(2000)}]}),
+            json!({"actions":[{"wait":5000}]}),
+            json!({"actions":[{"shell":"rm -rf /"}]}),
+            json!({"actions":[{"key":"cmd+q","exec":"x"}]}),
+            json!({"frame":"f1","actions":[{"click":[1,1]}],"session":"other"}),
+        ];
+        for a in bad {
+            assert!(super::check_input(&a).is_err(), "{a}");
+        }
+        let many: Vec<_> = (0..33).map(|_| json!({"wait":1})).collect();
+        assert!(super::check_input(&json!({"actions": many})).is_err());
+    }
 
     #[test]
     fn mac_view_takes_one_listing_or_one_picture() {
