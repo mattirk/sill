@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
+    /// Exact hostnames whose network refusal banners are hidden across sessions.
+    pub network_quiet_hosts: Vec<String>,
     /// Colour theme id (`adwaita`, `dracula`, `nord`, `gruvbox-dark`, `iceberg-light`, …: sill-gui's `style::THEMES`).
     pub theme: String,
     /// The drawer's view follows the repository (the shown folder's, else the session's first

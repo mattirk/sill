@@ -405,6 +405,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             | "_sill/desktop.capture"
             | "_sill/desktop.read"
             | "_sill/policy.denied"
+            | "_sill/policy.quiet_host"
             | "_sill/policy.remember_denied"
             | "_sill/policy.allow_host"
             | "_sill/policy.save_host"
@@ -501,6 +502,23 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             bounded(read_open_file(image, &a.offset, a.length, a.revision)?)
         }
         "_sill/policy.denied" => bounded(denied(hub, args(p)?)?),
+        "_sill/policy.quiet_host" => {
+            let a: api::NetworkHost = args(p)?;
+            session(hub, &a.session_id)?;
+            let host = a.host.rsplit_once(':')
+                .filter(|(_, port)| port.parse::<u16>().is_ok())
+                .map_or(a.host.as_str(), |(name, _)| name);
+            if !sill_core::proxy::valid_hostname(host) {
+                return Err(invalid("a concrete hostname is required"));
+            }
+            let host = host.to_ascii_lowercase();
+            sill_core::config::update(|c| {
+                if !c.network_quiet_hosts.contains(&host) {
+                    c.network_quiet_hosts.push(host);
+                }
+            })?;
+            Ok(json!({}))
+        },
         "_sill/policy.remember_denied" | "_sill/policy.allow_host" => {
             let a: api::NetworkHost = args(p)?;
             session(hub, &a.session_id)?;
@@ -901,7 +919,7 @@ fn denied(hub: &Hub, a: api::DeniedList) -> Result<api::NetworkDenied> {
     let quiet = sill_core::policy::Policy::load(&row.policy, &home)
         .map(|p| p.network.quiet)
         .unwrap_or_else(|_| sill_core::policy::quiet_default());
-    for host in quiet {
+    for host in quiet.into_iter().chain(sill_core::config::load().network_quiet_hosts) {
         if host.len() > 4096 {
             return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Record, Some(4096), "quiet host exceeds 4096 bytes"));
         }

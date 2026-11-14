@@ -281,7 +281,7 @@ pub enum Message {
     /// The live view of a session's test desktop (`desktop_view.rs`).
     Desktop(desktop_view::Event),
     NetworkRead(String, Result<sill_proto::admin::NetworkDenied, String>),
-    NetworkAnswer(String, String, bool),
+    NetworkAnswer(String, String, bool, bool),
     NetworkDone(String, network::Choice, Outcome),
     /// A network choice's note has had its time (its number, so a later note stays).
     NetworkNoticeExpired(String, u64),
@@ -1574,7 +1574,7 @@ impl App {
             Message::HostControl(event) => return self.host_control_event(event),
             Message::Desktop(event) => return self.desktop_event(event),
             Message::NetworkRead(id, result) => self.network.read(id, result),
-            Message::NetworkAnswer(id, host, allow) => return self.answer_network(id, host, allow),
+            Message::NetworkAnswer(id, host, allow, quiet) => return self.answer_network(id, host, allow, quiet),
             Message::NetworkDone(id, choice, outcome) => {
                 return self.network_done(id, choice, outcome);
             }

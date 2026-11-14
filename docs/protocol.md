@@ -570,7 +570,7 @@ RSS. Those remain separate validation areas; no production locking change was ma
 
 `_sill/changes.changed` is the public invalidation notification for Changes views.
 `_sill/files.image` provides bounded session image reads; `_sill/policy.denied`,
-`_sill/policy.remember_denied`, and `_sill/policy.allow_host` expose network permission state and explicit decisions.
+`_sill/policy.remember_denied`, `_sill/policy.quiet_host`, and `_sill/policy.allow_host` expose network permission state and explicit decisions.
 
 These baseline APIs need no optional capability. The exported schema is authoritative for their
 named request/result records. They do not make the development identity a stable `sfp/1` release.
@@ -944,3 +944,5 @@ The pre-freeze development schema was deliberately rebaselined to remove session
 setting-change variants, and `x11`/`dbus` policy-result fields. These controls and their host
 socket mounts are removed rather than preserved as aliases. Rebuild daemon and frontends
 together. The stable `sfp/1` cutover is still pending; identity remains `sfp/1-dev.3`.
+
+`_sill/policy.quiet_host` takes `{session_id, host}` and returns `{}`. It saves an exact hostname as a global persistent banner preference, without granting network access. Wildcards are rejected; a numeric port is stripped. Repeating the choice is idempotent.

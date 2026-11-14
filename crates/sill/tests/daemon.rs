@@ -1027,6 +1027,22 @@ fn public_network_denials_are_live_bounded_pages() {
     let answer=c.call("_sill/policy.remember_denied",json!({"session_id":session,"host":"host-000.example"})).unwrap();
     assert!(answer.get("error").is_none(),"{answer}");
     assert_eq!(std::fs::read_to_string(runtime.join("denied.answered")).unwrap(),"host-000.example\n");
+    // A permanent quiet choice survives another session and never grants access.
+    for host in ["SDMNTPRCENTRALUS.oaiusercontent.com:443", "sdmntprcentralus.oaiusercontent.com"] {
+        let saved=c.call("_sill/policy.quiet_host",json!({"session_id":session,"host":host})).unwrap();
+        assert!(saved.get("error").is_none(),"{saved}");
+    }
+    for host in ["*.oaiusercontent.com", "bad\nname", "../invalid"] {
+        let saved=c.call("_sill/policy.quiet_host",json!({"session_id":session,"host":host})).unwrap();
+        assert!(saved.get("error").is_some(),"{saved}");
+    }
+    let config=std::fs::read_to_string(d.dir.join("config/sill/sill.toml")).unwrap();
+    assert_eq!(config.matches("sdmntprcentralus.oaiusercontent.com").count(),1);
+    let other=c.call("_sill/sessions.create",json!({"create_id":"quiet-other","agent":"claude","policy":"default"})).unwrap();
+    let other_id=other["result"]["session_id"].as_str().unwrap();
+    let page=c.call("_sill/policy.denied",json!({"session_id":other_id,"limit":128})).unwrap();
+    assert!(page["result"]["quiet"].as_array().unwrap().contains(&json!("sdmntprcentralus.oaiusercontent.com")),"{page}");
+    assert!(!runtime.join("session-allowed-hosts").exists());
     // Allow is session-only and concrete (2026-11-06); a wildcard is only an agent-wide default,
     // saved deliberately by a frontend that shows permission state
     let allowed=c.call("_sill/policy.allow_host",json!({"session_id":session,"host":"*.example.test"})).unwrap();

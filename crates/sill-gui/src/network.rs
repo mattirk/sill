@@ -32,6 +32,7 @@ pub(crate) struct State {
 pub struct Choice {
     pub host: String,
     pub allow: bool,
+    pub quiet: bool,
     /// The session was started again (an allow for the agent, not this session alone).
     pub restarted: bool,
 }
@@ -81,6 +82,7 @@ impl State {
         let agent = self.agents.get(&id).map_or("the agent", String::as_str);
         let (said, failed) = match outcome.problem() {
             Some(problem) => (format!("{host}: {problem}"), true),
+            None if choice.quiet => (format!("{host}: won’t ask again in any session. Network access is unchanged."), false),
             None if !choice.allow => (format!("{host} stays blocked."), false),
             None if choice.restarted => (
                 format!("{host} allowed for {agent}; the session starts again."),
@@ -152,6 +154,7 @@ impl App {
         id: String,
         host: String,
         allow: bool,
+        quiet: bool,
     ) -> Task<Message> {
         let Some(actions) = self.actions.clone() else {
             return Task::none();
@@ -167,6 +170,9 @@ impl App {
             move || {
                 let params = json!({"session_id": session, "host": target});
                 let mut restarted = false;
+                if quiet {
+                    return (actions.call("_sill/policy.quiet_host", params), false);
+                }
                 if allow {
                     let result = actions.call("_sill/policy.allow_host", params.clone());
                     let Outcome::Done(value) = result else {
@@ -199,6 +205,7 @@ impl App {
                     Choice {
                         host,
                         allow,
+                        quiet,
                         restarted,
                     },
                     outcome,
@@ -271,7 +278,7 @@ impl App {
             // the HTTPS port goes without saying; another port is part of the name
             let shown = host.strip_suffix(":443").unwrap_or(host);
             let answer = |allow| {
-                (!pending).then(|| Message::NetworkAnswer(view.id.clone(), host.clone(), allow))
+                (!pending).then(|| Message::NetworkAnswer(view.id.clone(), host.clone(), allow, false))
             };
             let card = Column::new()
                 .spacing(8)
@@ -294,6 +301,14 @@ impl App {
                                 .padding([4, 10])
                                 .style(style::quiet),
                             answer(false),
+                        ),
+                        keys::press_maybe(
+                            button(text("Don’t ask again").size(style::SMALL))
+                                .padding([4, 10])
+                                .style(style::quiet),
+                            (!pending).then(|| Message::NetworkAnswer(
+                                view.id.clone(), host.clone(), false, true,
+                            )),
                         ),
                     ]
                     .spacing(8),
@@ -331,6 +346,7 @@ mod tests {
         let allow = Choice {
             host: "a.com".into(),
             allow: true,
+            quiet: false,
             restarted: true,
         };
         state.done(
@@ -390,6 +406,7 @@ mod tests {
             "demo".into(),
             "example.com:443".into(),
             true,
+            false,
         ));
         settle_task(&mut app, task);
         let seen = fake.join().unwrap();
