@@ -14,7 +14,7 @@ use gtk4 as gtk;
 use gtk::glib;
 use sill_core::changes;
 use sill_core::keep::{self, KeepOptions, Kept};
-use sill_core::ledger::{Change, Kind};
+use sill_core::ledger::{Change, FileType, Kind};
 use sill_core::store::{Session, Store};
 use sourceview5::prelude::*;
 
@@ -55,6 +55,19 @@ struct Scanned {
     /// `<state dir>/kept`: where keep saves the host's previous versions.
     kept_dir: PathBuf,
     kept: Vec<Kept>,
+    /// SHA-256 of each changed regular file's upper content as listed: what the person reviews is
+    /// what keep must copy (`KeepOptions::expected_hash`; a swap in between is refused).
+    hashes: std::collections::HashMap<PathBuf, String>,
+}
+
+/// Keep all keeps what a glance can vouch for: a regular file added or modified. Deletions, type
+/// changes, replaced directories and symlinks go one by one, each a click of its own.
+fn keeps_in_bulk(c: &Change) -> bool {
+    matches!(c.kind, Kind::Added | Kind::Modified) && matches!(c.file_type, FileType::File | FileType::Dir)
+}
+
+fn keep_opts(c: &Change, hashes: &std::collections::HashMap<PathBuf, String>, kept_dir: &Path) -> KeepOptions {
+    KeepOptions { undo: Some(kept_dir.to_path_buf()), expected_hash: hashes.get(&c.path).cloned(), ..Default::default() }
 }
 
 impl ChangesPage {
@@ -200,8 +213,15 @@ impl ChangesPage {
                     .get(&s.agent)
                     .map(|a| sill_core::session::state_paths(a, &home))
                     .unwrap_or_default();
-                let (agent_state, changes) = list.into_iter().partition(|c| changes::is_agent_state(&c.path, &state_dirs, &home));
-                out.push(Scanned { session: s, changes, agent_state, kept_dir, kept });
+                let (agent_state, changes): (Vec<Change>, Vec<Change>) = list.into_iter().partition(|c| changes::is_agent_state(&c.path, &state_dirs, &home));
+                // the content as listed, for keep to check against (regular files; the rest has none)
+                let hashes = changes
+                    .iter()
+                    .chain(agent_state.iter())
+                    .filter(|c| c.file_type == FileType::File && matches!(c.kind, Kind::Added | Kind::Modified))
+                    .filter_map(|c| keep::sha256_file(&c.upper).ok().map(|h| (c.path.clone(), h)))
+                    .collect();
+                out.push(Scanned { session: s, changes, agent_state, kept_dir, kept, hashes });
             }
             let _ = tx.send_blocking((live, out));
         });
@@ -378,6 +398,7 @@ impl ChangesPage {
         for g in groups {
             let s = g.session;
             let kept_dir = g.kept_dir;
+            let hashes = Rc::new(g.hashes);
             let mut repo_groups: Vec<(PathBuf, Vec<Change>, bool)> =
                 changes::group_by_repo(&g.changes).into_iter().map(|(r, v)| (r, v, false)).collect();
             if !g.agent_state.is_empty() {
@@ -405,23 +426,29 @@ impl ChangesPage {
                 let keep_all = gtk::Button::with_label("Keep all");
                 keep_all.add_css_class("flat");
                 keep_all.add_css_class("sill-change-btn");
+                keep_all.set_tooltip_text(Some("copy every added or modified file to the host — deletions, type changes, replaced folders and links are kept one by one"));
                 {
                     let p = self.clone();
                     let items: Vec<Change> = changes_in_repo.clone();
-                    let opts = KeepOptions { undo: Some(kept_dir.clone()), ..Default::default() };
+                    let hashes = hashes.clone();
+                    let kept_dir = kept_dir.clone();
                     keep_all.connect_clicked(move |b| {
                         b.set_sensitive(false);
-                        let (p, items, opts) = (p.clone(), items.clone(), opts.clone());
+                        let p = p.clone();
+                        let jobs: Vec<(Change, KeepOptions)> = items
+                            .iter()
+                            .filter(|c| !c.conflict && !c.ignored && keep::protected(&c.path).is_none() && keeps_in_bulk(c))
+                            .map(|c| (c.clone(), keep_opts(c, &hashes, &kept_dir)))
+                            .collect();
+                        let skipped = items.len() - jobs.len();
                         offload(
-                            move || {
-                                items
-                                    .iter()
-                                    .filter(|c| !c.conflict && !c.ignored && keep::protected(&c.path).is_none())
-                                    .filter(|c| keep::keep(c, &opts).is_ok())
-                                    .count()
-                            },
+                            move || jobs.iter().filter(|(c, opts)| keep::keep(c, opts).is_ok()).count(),
                             move |n| {
-                                p.message.set_text(&format!("kept {n} file(s)"));
+                                p.message.set_text(&if skipped == 0 {
+                                    format!("kept {n} file(s)")
+                                } else {
+                                    format!("kept {n} file(s); {skipped} left for a click of their own (deletions, type changes, links, conflicts)")
+                                });
                                 p.refresh();
                             },
                         );
@@ -501,7 +528,7 @@ impl ChangesPage {
                     {
                         let p = self.clone();
                         let c2 = c.clone();
-                        let opts = KeepOptions { undo: Some(kept_dir.clone()), ..Default::default() };
+                        let opts = keep_opts(&c, &hashes, &kept_dir);
                         keep_b.connect_clicked(move |b| {
                             b.set_sensitive(false);
                             let (p, c, opts, shown) = (p.clone(), c2.clone(), opts.clone(), c2.path.display().to_string());
