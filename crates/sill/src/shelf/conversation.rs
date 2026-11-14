@@ -1670,7 +1670,9 @@ popover.sill-session-menu > contents { padding: 10px 12px; min-width: 260px; }
 .sill-menu-ghost { padding: 0 6px; min-height: 0; opacity: 0.35; background: transparent; border: none; box-shadow: none; }
 .sill-menu-ghost > image { -gtk-icon-size: 0.9em; }
 .sill-menu-ghost:hover { opacity: 1; }
-.sill-menu-trash { padding: 0 6px; min-height: 0; opacity: 0.35; background: transparent; border: none; box-shadow: none; }
+/* Match the title button’s top padding; height follows its title through a size group. */
+.sill-menu-actions { margin-top: 5px; }
+.sill-menu-trash { padding: 0 4px; min-width: 0; min-height: 0; opacity: 0.35; background: transparent; border: none; box-shadow: none; }
 .sill-menu-trash > image { -gtk-icon-size: 0.8em; }
 .sill-menu-trash:hover, .sill-menu-trash.sill-armed { opacity: 1; color: @error_color; }
 .sill-menu-more { font-size: 80%; padding: 2px 10px; min-height: 0; opacity: 0.5; background: transparent; border: none; box-shadow: none; }

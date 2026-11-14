@@ -1719,39 +1719,39 @@ impl Shelf {
         // a quiet row: icon, name, nothing else; the glyph takes the menu's own text colour
         let color = menu.color();
         // `sub`: a dim second line under the name (an ended session's summary, docs/memory.md §2.5)
-        let row = |agent: Option<&agents::Agent>, text: &str, sub: Option<&str>| -> gtk::Button {
+        let row = |agent: Option<&agents::Agent>, text: &str, sub: Option<&str>| -> (gtk::Button, gtk::SizeGroup) {
             let b = gtk::Button::new();
             b.add_css_class("flat");
             b.add_css_class("sill-menu-item");
-            let h = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+            // Keep the icon in the title's grid row so a date below cannot shift its centre.
+            let grid = gtk::Grid::new();
+            grid.set_column_spacing(10);
             let i = super::icons::image(agent, color, 15);
             i.add_css_class("sill-menu-icon");
-            i.set_valign(gtk::Align::Start);
+            i.set_valign(gtk::Align::Center);
             let l = gtk::Label::new(Some(text));
             l.set_xalign(0.0);
+            l.set_valign(gtk::Align::Center);
             l.set_hexpand(true);
             l.set_ellipsize(gtk::pango::EllipsizeMode::End);
             // caps the menu's width: a long session title truncates instead of widening it
-            l.set_max_width_chars(24);
-            h.append(&i);
-            match sub {
-                Some(sub) => {
-                    let v = gtk::Box::new(gtk::Orientation::Vertical, 0);
-                    v.set_hexpand(true);
-                    let s = gtk::Label::new(Some(sub));
-                    s.set_xalign(0.0);
-                    s.set_ellipsize(gtk::pango::EllipsizeMode::End);
-                    s.set_max_width_chars(24);
-                    s.add_css_class("dim-label");
-                    s.add_css_class("sill-menu-sub");
-                    v.append(&l);
-                    v.append(&s);
-                    h.append(&v);
-                }
-                None => h.append(&l),
+            l.set_max_width_chars(22);
+            let title_height = gtk::SizeGroup::new(gtk::SizeGroupMode::Vertical);
+            title_height.add_widget(&i);
+            title_height.add_widget(&l);
+            grid.attach(&i, 0, 0, 1, 1);
+            grid.attach(&l, 1, 0, 1, 1);
+            if let Some(sub) = sub {
+                let s = gtk::Label::new(Some(sub));
+                s.set_xalign(0.0);
+                s.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                s.set_max_width_chars(22);
+                s.add_css_class("dim-label");
+                s.add_css_class("sill-menu-sub");
+                grid.attach(&s, 1, 1, 1, 1);
             }
-            b.set_child(Some(&h));
-            b
+            b.set_child(Some(&grid));
+            (b, title_height)
         };
         // only agents that can actually start here: enabled, and their command exists (a built-in
         // whose package was removed on the Agents page drops out until it is installed again).
@@ -1759,7 +1759,7 @@ impl Shelf {
         // §3.1), fixed from then on.
         for (id, agent) in registry.iter().filter(|(_, a)| a.enabled && super::remote::registry::available(a, &home).is_some()) {
             let line = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-            let b = row(Some(agent), &agent.name, None);
+            let (b, _) = row(Some(agent), &agent.name, None);
             b.set_hexpand(true);
             let g = super::icons::glyph_button("sill-ghost");
             g.add_css_class("flat");
@@ -1833,7 +1833,7 @@ impl Shelf {
                 } else {
                     sess.ended_at.filter(|_| !sess.summary.is_empty()).map(|t| sill_core::memory::date(t))
                 };
-                let b = row(registry.get(&sess.agent), &sess.title, sub.as_deref());
+                let (b, title_height) = row(registry.get(&sess.agent), &sess.title, sub.as_deref());
                 if !sess.summary.is_empty() {
                     // the opening paragraphs only: a whole summary as a tooltip covers the menu
                     b.set_tooltip_text(Some(&sill_core::memory::brief(&sess.summary, 400)));
@@ -1867,6 +1867,14 @@ impl Shelf {
                     });
                 }
                 line.append(&b);
+                let actions = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                actions.set_halign(gtk::Align::End);
+                title_height.add_widget(&actions);
+                let actions_wrap = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                actions_wrap.set_valign(gtk::Align::Start);
+                actions_wrap.add_css_class("sill-menu-actions");
+                actions_wrap.append(&actions);
+                line.append(&actions_wrap);
                 // its page: summary and notes, without opening it (docs/memory.md §2.5)
                 {
                     let page = super::icons::glyph_button("sill-file-text");
@@ -1880,7 +1888,7 @@ impl Shelf {
                         pop.popdown();
                         s.open_session_page(&id);
                     });
-                    line.append(&page);
+                    actions.append(&page);
                 }
                 // an ended session: a new one in the same folders, told this one's summary first
                 if sess.ended_at.is_some() && !sess.summary.is_empty() {
@@ -1895,9 +1903,9 @@ impl Shelf {
                         pop.popdown();
                         s.new_here(&sess);
                     });
-                    line.append(&here);
+                    actions.append(&here);
                 }
-                line.append(&del);
+                actions.append(&del);
                 list.append(&line);
                 lines.push((sess.id.clone(), line));
             }
