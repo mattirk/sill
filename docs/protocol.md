@@ -1,4 +1,9 @@
-# sill — the daemon protocol
+# sill — Sill Frontend Protocol (SFP)
+
+**Direction agreed 2026-11-03:** the public frontend contract is named **Sill Frontend Protocol
+(SFP)**. SFP v1 is a design target, not an implemented or frozen public release. Sections 1–5
+describe the existing development protocol; [section 6](#6-sfp-v1-design-direction-2026-11-03)
+records the work needed before declaring SFP v1 stable. ACP is the separate agent-facing protocol.
 
 Status: protocol **6**, frozen 2026-11-02 (docs/daemon.md M4–M6). From here every change
 to a method or a type's shape is a line in the changelog below and a bump of
@@ -6,9 +11,11 @@ to a method or a type's shape is a line in the changelog below and a bump of
 binary. An SSH client instead compares method schemas and refuses an unsupported operation; it
 never replaces or restarts the remote daemon merely to match its own version.
 
-`sill daemon schema` prints the whole protocol as one JSON document — this table, each method's
+`sill daemon schema` prints the method inventory as one JSON document — this table, each typed method's
 params and result as `$ref`s, and the JSON Schema (draft 2020-12) of every type under `$defs` —
-for a frontend in another language to generate from. The Rust side is `crates/sill-proto`
+for a frontend in another language to generate from. Some payloads remain opaque, notably
+`frontend.request`, transcript replay and changes history; this is not yet a complete contract
+for an independently generated frontend. The Rust side is `crates/sill-proto`
 (`sill_proto::wire` for the types, `sill_proto::Client` for a blocking client); it links no jail,
 store or GTK code. This file is the human reading of the same thing; the table below is generated
 from the schema output and a test (`sill_proto::schema::tests`) checks that every method the
@@ -154,3 +161,101 @@ and restores remembered agent controls independently of either frontend.
 - **2** — 2026-11-02 (M1b): `sessions.attach|detach|command|answer`, `session.event`.
 - **1** — 2026-11-02 (M0, M1a): `daemon.status|shutdown`, `sessions.list|get|start|stop|log`,
   `memory.*` reads, `settings.get`.
+
+
+## 6. SFP v1 design direction (2026-11-03)
+
+This section records the agreed direction and proposed implementation requirements. It does not
+change development protocol 6 or claim that the work below is implemented.
+
+### Boundary and independence
+
+```text
+Frontend <--- SFP ---> Sill daemon / relay <--- ACP ---> Agent
+```
+
+SFP serves GUI, terminal and other clients. The daemon owns sessions, persistence, jail policy,
+prompt context and host operations. A separate frontend must be implementable from the public
+contract without importing `sill-core`, opening `sill.db`, or interpreting backend implementation
+files. The existing GTK shelf may stay in the same repository and executable and reuse core
+helpers. Splitting crates or binaries is optional packaging work, not a prerequisite for
+independent frontends. The daemon remains `sill daemon`.
+
+SFP versions are independent of ACP versions and Sill application versions. The daemon adapts
+agent-facing ACP v1/v2 into SFP's conversation model. Do not expose SDK-specific Rust types as
+the public contract or require each frontend to implement the agent adapters. The private relay
+protocol is separately versioned and remains internal.
+
+The current wire version is 6 and earlier development versions include 1. SFP v1 therefore needs
+an unambiguous protocol identity and negotiation scheme; simply resetting `PROTOCOL` to 1 would
+collide with the old meaning. Exact handshake fields and legacy transition policy remain to be
+specified. A naming change alone does not change the existing `_sill/` method namespace.
+
+### ACP v2 considerations
+
+ACP v2 was announced as a draft on 2026-07-20 and was still documented as draft when reviewed on
+2026-11-03. Treat its detailed wire shapes as provisional. Sources:
+
+- [Official draft announcement](https://github.com/agentclientprotocol/agent-client-protocol/blob/main/docs/announcements/acp-v2-draft.mdx): draft status, message identities, broader permission subjects and extensibility.
+- [Migration guide](https://github.com/agentclientprotocol/agent-client-protocol/blob/main/docs/protocol/v2/migration.mdx): lifecycle, replay, patch semantics, capabilities and removal of client execution APIs.
+
+Design SFP for the following semantics now, while retaining ACP v1 support:
+
+- **Acceptance and activity are separate.** ACP v2 acknowledges insertion of a user message;
+  completion arrives through state updates. SFP should distinguish submission status, foreground
+  activity and background work. A foreground idle state does not establish that no process is
+  running or that automatic cleanup is safe. Do not freeze the runner's single `busy` flag as
+  the public model. Define cancellation scope and distinguish a cancellation request from its
+  confirmed outcome.
+- **Transcript items have durable identities.** Messages, tool calls and their updates need IDs,
+  with documented omitted/null/replacement/append behavior. Replaying or reconnecting must not
+  duplicate items. Specify ordering, cursor scope, snapshot-to-live handoff, retention gaps and
+  when a client must replace its snapshot. IDs and cursors exposed by SFP must remain meaningful
+  across main-daemon restarts; define what happens when the underlying agent is replaced.
+- **Submission recovery is explicit.** Proposed SFP contract: client-generated submission IDs,
+  durable daemon acceptance and a status query. Distinguish accepted by Sill, inserted into the
+  agent conversation, rejected, and outcome unknown. ACP v2 does not make retry after a lost
+  prompt reply automatically safe. Sill must not infer insertion from identical message text or
+  replay omission, or promise exactly-once execution after loss of agent/relay state. Specify
+  submission-ID scope and deduplication retention before freezing the API.
+- **Questions are independent objects.** Permissions and forms have their own IDs, lifecycle,
+  title and optional description/subject; a tool-call ID need not exist. Preserve the first-answer
+  rule across frontends and broadcast resolution. Document stale answers and cancellation.
+- **Compatibility is deliberate.** Negotiate protocol versions and optional capabilities;
+  document handling of unknown fields, enum values and content types. Preserve unfamiliar display
+  data where possible, but never turn an unknown authorization meaning into permission. Additive
+  features should not force coordinated frontend/daemon releases.
+- **Display and execution remain distinct.** ACP v2 removes client filesystem and terminal
+  execution methods and adds agent-owned terminal display updates. SFP still needs host file
+  operations, interactive PTYs, managed processes, ports and Keep/Revert. Agent terminal output
+  does not grant an interactive shell. Structured agent-reported changes are presentation data;
+  Sill's own filesystem checks remain authoritative for host mutations.
+
+### Work required before the v1 freeze
+
+1. Specify every operation, result, event and error in language-independent schemas, including
+   today's opaque `frontend.request`, stored transcript and changes-history payloads. Document
+   path ownership (box versus frontend), binary data, limits and pagination. Choose whether to
+   retain a typed dispatcher or expose separate methods as an implementation design step.
+2. Specify the conversation and recovery semantics above, including concurrent frontends,
+   question resolution and retry rules for mutating operations beyond prompts.
+3. Specify byte-stream framing, token ownership/expiry, backpressure, end-of-stream, cancellation,
+   reconnection and PTY resize/exit semantics. Socket and SSH clients must observe the same contract.
+4. Specify negotiation, extension rules, lifecycle ownership and migration from development
+   protocol 6. A running daemon's compatibility must be evaluated independently of its build ID.
+5. Exercise the contract with a small independent client importing no `sill-core` types. Include
+   reconnect/replay, duplicate submission, multiple observers answering one question, unknown
+   variants and stream teardown in conformance checks. A Rust schema-generation test alone is
+   insufficient evidence of frontend independence.
+
+### Open product decisions
+
+Asked through a form on 2026-11-03; unanswered choices remain open, not implicitly approved.
+Technical details above still need a concrete specification after these choices.
+
+| Decision | Recommended choice | Alternative |
+|---|---|---|
+| Transition from protocol 6 | Coordinated upgrade to SFP v1, without a legacy compatibility layer | Serve both during a transition period |
+| Incompatible daemon | Explain mismatch and offer explicit restart/upgrade; no automatic replacement | Retain automatic replacement locally, explicit action remotely |
+| ACP v2 implementation timing | Design for v2 now; gate its adapter until stable and keep v1 working | Require an experimental v2 adapter before freezing SFP v1 |
+| Prompt submitted during work | Queue by default; offer steering when supported | Require explicit queue/steer choice, or steer by default with queue fallback |
