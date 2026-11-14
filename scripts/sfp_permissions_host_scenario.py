@@ -1111,6 +1111,19 @@ PY
               out == "BESIDE" and intact() and read(ruled / "conf/deep/beside") == "beside\n", out)
         out = sh(c, rs, probe)[1] if restart(rs) else "no restart"
         check("…the folders on the way to them cannot be moved, so the next build finds them the same", out == "BESIDE" and intact(), out)
+        # New credentials created after launch must be hidden in both views, including live pins.
+        future = env.root / "future-secrets"
+        (future / "config").mkdir(parents=True)
+        (future / "missing").mkdir()
+        fs = create("future-secrets", env.policy("future-secrets", masks=[future / "config/*/credentials*", future / "missing/token"]), pins=[future])
+        launched = start(fs)
+        (future / "config/new-app").mkdir(parents=True)
+        (future / "config/new-app/credentials.json").write_text("late-secret-text")
+        (future / "missing/token").write_text("late-secret-text")
+        qf = shlex.quote(str(future))
+        out = sh(c, fs, f"cat {qf}/config/new-app/credentials.json {qf}/missing/token /.sill/host{qf}/config/new-app/credentials.json /.sill/host{qf}/missing/token 2>/dev/null; true")[1] if launched else "no start"
+        check("secrets created after launch remain hidden through live pins and the host view", launched and out == "", out)
+
         # the same mask in a workspace session: the clone holds the checkout's ignored file, hidden too
         wsrepo = env.root / "ws-repo"
         (wsrepo / "conf").mkdir(parents=True)

@@ -454,24 +454,34 @@ impl JailSpec {
             .chain(crate::paths::sill_backups(&state_base)?)
             .collect();
         let own: Vec<PathBuf> = sill_own.iter().cloned().chain(self.masks.iter().cloned()).filter(|p| p.exists()).collect();
-        let policy_masks: Vec<(PathBuf, bool)> = match &self.policy_paths {
+        let mut policy_masks: Vec<(PathBuf, bool)> = match &self.policy_paths {
             Some(paths) => paths.masks.iter().map(|m| Ok((m.path.to_path()?, m.kind == crate::agents::HomePathKind::Directory))).collect::<Result<_>>()?,
-            None => p.paths.mask.iter().flat_map(|pat| expand_pattern(pat, &self.home)).chain(own).map(|p| { let dir = p.is_dir(); (p, dir) }).collect(),
+            None => p.paths.mask.iter().map(|pat| crate::paths::mask_root(pat, &self.home)).chain(own).map(|p| { let dir = !p.is_file(); (p, dir) }).collect(),
         };
+        policy_masks.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut host_masks: Vec<PathBuf> = Vec::new();
         for (path, is_dir) in policy_masks {
-            if masked.contains(&path) {
-                continue;
-            }
-            {
-                for target in [path.clone(), host_view(&path)] {
-                    if is_dir {
-                        push(&mut a, &[&"--tmpfs", &target]);
-                    } else {
-                        push(&mut a, &[&"--ro-bind", &"/dev/null", &target]);
-                    }
-                }
-                masked.push(path);
-            }
+            if masked.iter().any(|m| path.starts_with(m)) { continue; }
+            anyhow::ensure!(path.is_absolute() && path != Path::new("/"), "mask must have an absolute, non-root literal prefix: {}", path.display());
+            // The host view is read-only: for an absent target hide its nearest existing
+            // ancestor, rather than omit the mask and expose files created later.
+            let existing = path.ancestors().find(|p| p.symlink_metadata().is_ok()).context("mask has no existing ancestor")?;
+            rustix::fs::openat2(rustix::fs::CWD, existing, rustix::fs::OFlags::PATH | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(), rustix::fs::ResolveFlags::NO_SYMLINKS)
+                .with_context(|| format!("mask {} must not contain symlinks", path.display()))?;
+            if is_dir { push(&mut a, &[&"--tmpfs", &path]); }
+            else { push(&mut a, &[&"--ro-bind", &"/dev/null", &path]); }
+            host_masks.push(existing.to_path_buf());
+            masked.push(path);
+        }
+        host_masks.sort();
+        let mut hidden: Vec<PathBuf> = Vec::new();
+        for path in host_masks {
+            if hidden.iter().any(|m| path.starts_with(m)) { continue; }
+            let target = host_view(&path);
+            if path.is_dir() { push(&mut a, &[&"--tmpfs", &target]); }
+            else { push(&mut a, &[&"--ro-bind", &"/dev/null", &target]); }
+            hidden.push(path);
         }
         // Host agent originals are never reachable through the host view. A selected agent's
         // private binding may replace an agent mask, but never a policy secret mask.
@@ -669,6 +679,16 @@ impl JailSpec {
         for m in masks {
             let Some(b) = home_of(m).filter(|b| b.at != *m) else { continue };
             // what the jail has at the path decides: nothing there, nothing of the host's to hide
+            let mut target = m.clone();
+            if b.borrowed.is_none() {
+                while backing(b, &target).symlink_metadata().is_err() && target != b.at {
+                    target = target.parent().context("mask has no parent")?.to_path_buf();
+                }
+            }
+            if target != *m {
+                warnings.push(format!("absent mask {} hides {} inside the live pin so future host files stay hidden", m.display(), target.display()));
+            }
+            let m = &target;
             let Ok(meta) = backing(b, m).symlink_metadata() else { continue };
             if !meta.is_dir() && !meta.is_file() {
                 warnings.push(format!("masked {} is neither a file nor a folder in {}; not masked there", m.display(), b.at.display()));
@@ -942,6 +962,24 @@ mod tests {
         s.memory_dir = None;
         assert!(!render(&s.plan().unwrap().argv).contains(sill_memory::JAIL_DIR));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn future_secrets_have_masks_before_they_exist() {
+        let tree = std::env::temp_dir().join(format!("sill-future-mask-{}", std::process::id()));
+        std::fs::create_dir_all(tree.join("config")).unwrap();
+        let mut s = spec();
+        s.policy.paths.mask = vec![format!("{}/config/*/credentials*", tree.display()), format!("{}/absent/token", tree.display())];
+        let plan = s.plan().unwrap();
+        assert!(plan.masked.contains(&tree.join("config")));
+        assert!(plan.masked.contains(&tree.join("absent/token")));
+        let r = render(&plan.argv);
+        assert!(r.contains(&format!("--tmpfs {}", host_view(&tree).display())), "absent host-view paths hide the existing parent: {r}");
+        // Creating a new matching file cannot change the chosen mask root.
+        std::fs::create_dir_all(tree.join("config/new-app")).unwrap();
+        std::fs::write(tree.join("config/new-app/credentials.json"), "secret").unwrap();
+        assert_eq!(plan.masked, s.plan().unwrap().masked);
+        std::fs::remove_dir_all(tree).unwrap();
     }
 
     #[test]

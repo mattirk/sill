@@ -310,9 +310,13 @@ the person asked which of these are security issues):
 - **A read-only path in a workspace** protects the clone's files while the agent works. It is
   not a promise about what the person later applies: a commit can change the path without
   writing the file, and Apply is the person's review.
-- **A file that appears after the jail was built** at a path a mask's glob would match is not
-  masked until the next build. This is so for every mask, pinned or not, since the mounts of a
-  running jail are fixed: a secret a program writes on the host while a session runs (a new
-  `~/.config/<app>/credentials…`) is readable there until the session restarts. **Open**: it
-  needs mounts added to a running jail, or masking the folders such files appear in; neither is
-  a small change.
+- **Files created after launch:** fixed in source on 2026-11-10; host validation pending.
+  Wildcard masks now hide the literal parent before the first wildcard component, including
+  future children. For example `~/.config/*/credentials*` hides all host `~/.config` settings.
+  Exact paths remain masked when absent. In the read-only host view an absent path hides its
+  nearest existing ancestor; inside a live pin the same broader ancestor mask avoids creating
+  mount points on the host. A missing workspace path cannot import later host files.
+  Symlinked mask ancestors refuse launch. Bind conflicts remain fail-closed, including private
+  agent roots under a widened mask. Existing sessions require restart; the launch fingerprint
+  changes so they are marked outdated. Core tests cover resolution and mount plans; the host
+  scenario now creates secrets after launch and checks both views, but has not run for this fix.

@@ -323,6 +323,7 @@ fn pinned_folders(pins: &[PathBuf]) -> Result<Vec<PathBuf>> {
 pub fn input_fingerprint(base: &Policy, pins: &[PathBuf]) -> Result<String> {
     use sha2::{Digest, Sha256};
     let mut hash = Sha256::new();
+    hash.update(b"future-secret-masks-v1");
     let base = serde_json::to_vec(base)?;
     hash.update((base.len() as u64).to_le_bytes());
     hash.update(&base);

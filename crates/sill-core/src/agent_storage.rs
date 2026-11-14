@@ -185,7 +185,7 @@ pub fn resolve(
         ),
     ] {
         for pattern in patterns {
-            for target in expand_pattern(pattern, home) {
+            for target in if behavior == "mask" { vec![crate::paths::mask_root(pattern, home)] } else { expand_pattern(pattern, home) } {
                 plan.rule(
                     &target,
                     None,
@@ -539,10 +539,13 @@ mod tests {
             }
         }
         fn plan(&self, id: &str, ghost: bool) -> Plan {
+            // These fixtures exercise arbitrary declared roots, including ~/.config.
+            let mut policy = Policy::builtin_default();
+            policy.paths.mask.retain(|p| !p.contains('*'));
             resolve(
                 &self.registry[id],
                 &self.registry,
-                &Policy::builtin_default(),
+                &policy,
                 &self.state,
                 &self.home,
                 &[],
@@ -773,6 +776,7 @@ mod tests {
         let f = Fixture::new();
         let before = f.plan("codex", false);
         let mut policy = Policy::builtin_default();
+        policy.paths.mask.retain(|p| !p.contains('*'));
         policy.permissions.private_bus = crate::permissions::Rule::On;
         policy.permissions.test_desktop = crate::permissions::Rule::On;
         let after = resolve(
@@ -821,14 +825,14 @@ mod tests {
     #[test]
     fn changes_inspection_uses_recorded_masks_without_preparing_or_rescanning_storage() {
         let f = Fixture::new();
-        let first = f.home.join("hidden-first");
-        let second = f.home.join("hidden-second");
+        let first = f.home.join("hidden/first");
+        let second = f.home.join("hidden/second");
         f.put(&first, "fixture secret");
         let mut policy = Policy::builtin_default();
         policy
             .paths
             .mask
-            .push(f.home.join("hidden-*").display().to_string());
+            .push(f.home.join("hidden/*").display().to_string());
         let storage = resolve(
             &f.registry["codex"],
             &f.registry,
@@ -850,7 +854,7 @@ mod tests {
             &storage,
         )
         .unwrap();
-        assert!(plan.masked.contains(&first));
+        assert!(plan.masked.contains(&f.home.join("hidden")));
         assert!(
             !plan.masked.contains(&second),
             "current glob matches must not rewrite launch evidence"

@@ -39,6 +39,8 @@ private = ["~/.cache", "~/.npm"]
 mask = [
   "~/.ssh", "~/.gnupg", "~/secrets",
   "~/.local/share/keyrings",
+  # Wildcard masks hide their literal parent, including credentials created after launch.
+  # This hides all host ~/.config; non-secret settings there are hidden too.
   "~/.config/*/credentials*", "~/.netrc", "~/.git-credentials",
   "~/.cargo/credentials", "~/.cargo/credentials.toml",
   "~/.aws", "~/.azure", "~/.config/gcloud",

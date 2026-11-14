@@ -27,6 +27,18 @@ pub fn expand_pattern(pattern: &str, home: &Path) -> Vec<PathBuf> {
     }
 }
 
+/// A mask must also hide future matches. Wildcards therefore hide their literal parent
+/// tree; exact paths are retained even when absent. Never expand against today's files.
+pub fn mask_root(pattern: &str, home: &Path) -> PathBuf {
+    let expanded = expand_home(pattern, home);
+    let mut root = PathBuf::new();
+    for part in expanded.components() {
+        if part.as_os_str().to_string_lossy().contains(['*', '?', '[']) { break; }
+        root.push(part);
+    }
+    root
+}
+
 /// Name of the upper/work directory for a host mount point or top-level directory.
 /// `/etc` → `etc`, `/mnt/disk` → `mnt%disk`. Flat on purpose: one overlay's upper must never sit inside
 /// another's (SPEC §4.9).
