@@ -590,7 +590,10 @@ impl App {
                             &q.answer_id,
                             view.answering.contains(&q.question_id),
                             view.open_answers.contains(&q.question_id),
-                            format!("{:?}", view.forms.get(&q.question_id)),
+                            // Form edits do not change height: text inputs are single-line
+                            // and choice marks keep their size. Invalidating this measurement
+                            // on each keystroke makes virtualization temporarily count the row
+                            // as zero height, which can remove it and lose input focus.
                         )
                     })
                     .collect();
