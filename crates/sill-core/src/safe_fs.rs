@@ -1,7 +1,7 @@
 //! Host-side writes below a directory the agent can reach (a pin, a private scratch dir, its own
 //! home): every component is resolved without following symlinks and without leaving the root
 //! (`openat2` with `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`), so a link the agent planted cannot
-//! steer the shelf's write anywhere else on the host; a FIFO cannot stall it (security.md S6, S9,
+//! steer the daemon's write anywhere else on the host; a FIFO cannot stall it (security.md S6, S9,
 //! S11). Also the owner check for a per-user directory under a world-writable parent (S5).
 
 use std::io::Write;
@@ -54,7 +54,7 @@ pub fn write_file_beneath(root: &Path, rel: &Path, bytes: &[u8], mode: u32) -> R
     let parent = rel.parent().unwrap_or(Path::new(""));
     let name = rel.file_name().with_context(|| format!("{}: no file name", rel.display()))?;
     let dir = open_dir_beneath(root, parent, true)?;
-    // NONBLOCK: a FIFO planted here would otherwise hold the shelf until something reads it
+    // NONBLOCK: a FIFO planted here would otherwise hold the writer until something reads it
     let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
     let fd = openat2(&dir, name, flags, Mode::from_raw_mode(mode), RESOLVE)
         .with_context(|| format!("create {} below {} (no symlinks)", rel.display(), root.display()))?;
@@ -116,7 +116,7 @@ pub fn replace_file(dir: &Path, name: &std::ffi::OsStr, bytes: &[u8]) -> Result<
     written
 }
 
-/// Copy the regular files below `src` — a tree the shelf wrote itself — to the same paths below
+/// Copy the regular files below `src` — a tree sill itself wrote — to the same paths below
 /// `dst`, a tree the agent can reach, through [`write_file_beneath`]. Symlinks and special files
 /// in `src` are skipped. Returns how many files were written.
 pub fn copy_files_beneath(src: &Path, dst: &Path) -> Result<usize> {

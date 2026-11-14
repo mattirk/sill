@@ -1,4 +1,4 @@
-//! The login card (the shelf's `add_auth`, `shelf/conversation.rs`): when the session says its
+//! The login card: when the session says its
 //! agent needs a login (`SessionState::authentication`), a card at the end of the conversation
 //! with one button per method the agent offers. A method that takes an API key opens a field for
 //! it first. Picking a method runs it the way `sill_client::login` routes it: on the daemon's

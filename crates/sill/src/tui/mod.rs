@@ -26,7 +26,7 @@ pub fn line_mode(key: &str, fresh: bool, verbose: bool) -> Result<()> {
     let s = c.resolve_session(key)?;
     let id = s.session_id;
     if fresh {
-        // a new agent conversation in the same session, as the shelf's "fresh" does
+        // a new agent conversation in the same session, as sill-gui's "fresh" does
         c.call::<serde_json::Value>("_sill/sessions.reset", sill_proto::sessions::SessionKey { session_id: id.clone() })?;
     }
     eprintln!("sill: {} — {}; /cancel stops the turn, /quit detaches", id, s.title);
@@ -176,7 +176,7 @@ fn render(ev: Event, verbose: bool, pending: &Mutex<Option<Pending>>) -> bool {
                 };
                 let _ = writeln!(out, "  {}: {kind}", f.title);
             }
-            let _ = writeln!(out, "\x1b[33m  (a form: answer it in the shelf; it waits)\x1b[0m");
+            let _ = writeln!(out, "\x1b[33m  (a form: answer it in sill-gui; it waits)\x1b[0m");
         }
         Event::Resolved { request } => {
             let mut p = pending.lock().unwrap();

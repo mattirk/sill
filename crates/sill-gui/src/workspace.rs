@@ -75,7 +75,7 @@ pub struct ReaderView {
 
 pub struct Workspace {
     pub shown: bool,
-    /// The tree row under the pointer: its pin button shows, as the shelf's does on hover.
+    /// The tree row under the pointer: its pin button shows on hover.
     pub hovered: Option<String>,
     pub pending_discard: Option<(String, Box<Message>)>,
     serial: u64,

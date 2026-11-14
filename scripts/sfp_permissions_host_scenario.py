@@ -267,7 +267,9 @@ def scope_active(session_id):
 
 def scenario(env, port, lan):
     c = env.client()
-    gtk = env.client(modes=False, name="gtk-like")
+    # plain: a client without the permission-modes capability (line mode, scripts); it may inspect and stop,
+    # never widen or operate a session using Desktop development or Host control capabilities
+    plain = env.client(modes=False, name="plain")
     created = []
     background = []
 
@@ -486,31 +488,31 @@ PY
         check("a GPU request refuses launch (no backend)", code(c.call, "_sill/sessions.start", {"session_id": d}) is not None)
         time.sleep(0.5)
         check("…and no jail or scope was created (no fallback)", not scope_active(d) and not get(d)["running"])
-        check("a GTK-like client cannot start it", code(gtk.call, "_sill/sessions.start", {"session_id": d}) == "unsupported")
-        check("a GTK-like client cannot approve hosts for it",
-              code(gtk.call, "_sill/policy.allow_host", {"session_id": d, "host": OTHER}) == "unsupported")
-        check("a GTK-like client cannot change choices",
-              code(gtk.call, "_sill/permissions.set", {"session_id": a, "capability": "public_web", "enabled": False}) == "unsupported")
+        check("a plain client cannot start it", code(plain.call, "_sill/sessions.start", {"session_id": d}) == "unsupported")
+        check("a plain client cannot approve hosts for it",
+              code(plain.call, "_sill/policy.allow_host", {"session_id": d, "host": OTHER}) == "unsupported")
+        check("a plain client cannot change choices",
+              code(plain.call, "_sill/permissions.set", {"session_id": a, "capability": "public_web", "enabled": False}) == "unsupported")
         # a running Default jail whose next build would request a Desktop development capability
         nxt = create("next-desktop", env.policy("next-desktop"))
         start(nxt)
         env.policy("next-desktop", permissions='gpu = "on"')
         submit = {"session_id": nxt, "submission_id": "gate-1", "text": "hello"}
         # while running, the launch decides: the jail is still a Default one until it is rebuilt
-        check("GTK-like submit reaches the running Default jail despite an edited policy",
-              code(gtk.call, "_sill/sessions.submit", submit) is None)
-        check("GTK-like clients can stop it", code(gtk.call, "_sill/sessions.stop", {"session_id": nxt}) is None)
+        check("a plain client's submit reaches the running Default jail despite an edited policy",
+              code(plain.call, "_sill/sessions.submit", submit) is None)
+        check("plain clients can stop it", code(plain.call, "_sill/sessions.stop", {"session_id": nxt}) is None)
         deadline = time.monotonic() + 20
         while get(nxt)["running"] and time.monotonic() < deadline:
             time.sleep(0.2)
-        check("stopped, its next build decides: GTK-like submit is refused",
-              code(gtk.call, "_sill/sessions.submit", dict(submit, submission_id="gate-2")) == "unsupported")
-        check("…and GTK-like start is refused",
-              code(gtk.call, "_sill/sessions.start", {"session_id": nxt}) == "unsupported")
+        check("stopped, its next build decides: a plain client's submit is refused",
+              code(plain.call, "_sill/sessions.submit", dict(submit, submission_id="gate-2")) == "unsupported")
+        check("…and a plain client's start is refused",
+              code(plain.call, "_sill/sessions.start", {"session_id": nxt}) == "unsupported")
         check("a permission-modes client is refused by the missing backend instead",
               code(c.call, "_sill/sessions.start", {"session_id": nxt}) not in (None, "unsupported"))
-        check("an ordinary Default session stays operable from a GTK-like client",
-              code(gtk.call, "_sill/sessions.submit", {"session_id": b, "submission_id": "gate-3", "text": "hi"}) is None)
+        check("an ordinary Default session stays operable from a plain client",
+              code(plain.call, "_sill/sessions.submit", {"session_id": b, "submission_id": "gate-3", "text": "hi"}) is None)
         check("host_control can never be on in a policy",
               not c.call("_sill/policy.check", {"text": policy_text("hc", permissions='host_control = "on"')})["valid"])
         check("host_control is never a session choice",
@@ -519,12 +521,12 @@ PY
         # -- 11. daemon restart: running jails keep their actual state ---------------------------
         c.call("_sill/policy.allow_host", {"session_id": b, "host": OTHER})
         c.close()
-        gtk.close()
+        plain.close()
         env.stop_daemon()
         check("B's jail outlives the daemon", scope_active(b) or os.environ.get("SILL_LAUNCHER") == "direct")
         env.start_daemon()
         c = env.client()
-        gtk = env.client(modes=False, name="gtk-like")
+        plain = env.client(modes=False, name="plain")
         check("after a daemon restart B still reaches its live-approved host", reaches(c, b, OTHER))
         check("…and A still refuses it (ceiling)", refused(c, a, OTHER))
         check("A is still reported as running and current", get(a)["running"] and not get(a)["policy_changed"])
@@ -552,7 +554,7 @@ PY
 
         # -- 13. a jail that cannot start is a failed start, not a running session ---------------
         c.close()
-        gtk.close()
+        plain.close()
         env.stop_daemon()
         fake = env.root / "fake-bin"
         fake.mkdir()
@@ -562,7 +564,7 @@ PY
         env.environment["PATH"] = f"{fake}:{path}"
         env.start_daemon()
         c = env.client()
-        gtk = env.client(modes=False, name="gtk-like")
+        plain = env.client(modes=False, name="plain")
         broken = create("broken", env.policy("broken"))
         started_at = time.monotonic()
         failure = None
@@ -575,12 +577,12 @@ PY
         info(f"failed start after {time.monotonic() - started_at:.1f} s: {failure}")
         check("…and the session is not running, with no scope left", not get(broken)["running"] and not scope_active(broken))
         c.close()
-        gtk.close()
+        plain.close()
         env.stop_daemon()
         env.environment["PATH"] = path
         env.start_daemon()
         c = env.client()
-        gtk = env.client(modes=False, name="gtk-like")
+        plain = env.client(modes=False, name="plain")
 
         # -- 14. the test desktop (Weston + Xwayland, headless: this daemon has no display) ------
         if not shutil.which("weston"):
@@ -590,8 +592,8 @@ PY
         view = states(c.call("_sill/policy.preview", {"session_id": desk}))["test_desktop"]
         check("the test desktop is available and on for a requesting policy",
               view["available"] and view["effective"] and "Weston" in view["reason"], json.dumps(view))
-        check("a GTK-like client cannot start a test-desktop session",
-              code(gtk.call, "_sill/sessions.start", {"session_id": desk}) == "unsupported")
+        check("a plain client cannot start a test-desktop session",
+              code(plain.call, "_sill/sessions.start", {"session_id": desk}) == "unsupported")
         check("a permission-modes client starts it", start(desk))
         status, out = sh(c, desk, """
             echo "env $WAYLAND_DISPLAY $DISPLAY $DBUS_SESSION_BUS_ADDRESS"
@@ -689,7 +691,7 @@ PY
               and code(c.call, "_sill/permissions.set", {"session_id": ghost_desktop, "capability": "test_desktop", "enabled": True}) == "permission_denied")
         # a Weston that cannot start fails the launch: no jail, never the real display instead
         c.close()
-        gtk.close()
+        plain.close()
         env.stop_daemon()
         fake = env.root / "fake-weston"
         fake.mkdir()
@@ -698,7 +700,7 @@ PY
         env.environment["PATH"] = f"{fake}:{path}"
         env.start_daemon()
         c = env.client()
-        gtk = env.client(modes=False, name="gtk-like")
+        plain = env.client(modes=False, name="plain")
         broken = create("broken-desktop", env.policy("broken-desktop", permissions='test_desktop = "on"'))
         failure = None
         try:
@@ -710,14 +712,14 @@ PY
         info(f"broken Weston: {failure}")
         check("…with no jail or scope left", not get(broken)["running"] and not scope_active(broken))
         c.close()
-        gtk.close()
+        plain.close()
         env.stop_daemon()
         env.environment["PATH"] = path
         # the person's screen scale: a HiDPI picture of a desktop of the same size
         env.environment["SILL_TEST_DESKTOP_SCALE"] = "2"
         env.start_daemon()
         c = env.client()
-        gtk = env.client(modes=False, name="gtk-like")
+        plain = env.client(modes=False, name="plain")
         hidpi = create("hidpi-desktop", env.policy("hidpi-desktop", permissions='test_desktop = "on"'))
         start(hidpi)
         frame = c.call("_sill/desktop.capture", {"session_id": hidpi})
@@ -728,12 +730,12 @@ PY
         check("a session without a test desktop has no pictures",
               code(c.call, "_sill/desktop.capture", {"session_id": a}) == "not_found")
         c.close()
-        gtk.close()
+        plain.close()
         env.stop_daemon()
         del env.environment["SILL_TEST_DESKTOP_SCALE"]
         env.start_daemon()
         c = env.client()
-        gtk = env.client(modes=False, name="gtk-like")
+        plain = env.client(modes=False, name="plain")
 
         # -- 15. the private D-Bus session bus (a dbus-daemon of the jail's own, inside it) --------
         if not shutil.which("dbus-daemon"):
@@ -743,8 +745,8 @@ PY
         view = states(c.call("_sill/policy.preview", {"session_id": bus}))["private_bus"]
         check("the private bus is available and on for a requesting policy",
               view["available"] and view["effective"] and "jail's own" in view["reason"], json.dumps(view))
-        check("a GTK-like client cannot start a private-bus session",
-              code(gtk.call, "_sill/sessions.start", {"session_id": bus}) == "unsupported")
+        check("a plain client cannot start a private-bus session",
+              code(plain.call, "_sill/sessions.start", {"session_id": bus}) == "unsupported")
         check("a permission-modes client starts it", start(bus))
         names = "dbus-send --session --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.ListNames"
         status, out = sh(c, bus, f"""
@@ -809,8 +811,8 @@ PY
         # -- 16. Apply development permissions: the test desktop and the private bus together -----
         dev = create("development", env.policy("development"))
         start(dev)
-        check("a GTK-like client cannot apply development permissions",
-              code(gtk.call, "_sill/permissions.apply_development", {"session_id": dev}) == "unsupported")
+        check("a plain client cannot apply development permissions",
+              code(plain.call, "_sill/permissions.apply_development", {"session_id": dev}) == "unsupported")
         changed = c.call("_sill/permissions.apply_development", {"session_id": dev})
         st = states(changed["preview"])
         check("applied together: both are session choices for the next build, restart required",
@@ -841,8 +843,8 @@ PY
         ctl = create("host-control", env.policy("host-control"))
         activate = lambda client, sid, ops: client.call("_sill/host_control.activate", {"session_id": sid, "operations": ops})
         hc_state = lambda sid: c.call("_sill/host_control.state", {"session_id": sid})
-        check("a GTK-like client cannot activate Host control",
-              code(gtk.call, "_sill/host_control.activate", {"session_id": ctl, "operations": ["launch"]}) == "unsupported")
+        check("a plain client cannot activate Host control",
+              code(plain.call, "_sill/host_control.activate", {"session_id": ctl, "operations": ["launch"]}) == "unsupported")
         check("a permission-modes client without the host-control capability cannot either",
               code(c.call, "_sill/host_control.activate", {"session_id": ctl, "operations": ["launch"]}) == "unsupported")
         check("a stopped session cannot be activated",
@@ -1109,7 +1111,7 @@ PY
         # One session with every grant at once (test desktop, private bus, public web, a masked
         # repository, Host control active under an exception) next to a running Default session.
         uid = os.getuid()
-        gtk = env.client(modes=False, name="gtk-like")
+        plain = env.client(modes=False, name="plain")
         hc = Client(env.socket, capabilities=HOST, name="host-control")
         masked_repo = env.root / "repo-masked"
         (masked_repo / ".sill").mkdir(parents=True)
@@ -1255,11 +1257,11 @@ PY
             "_sill/permissions.set": {"session_id": plain, "capability": "public_web", "enabled": True},
             "_sill/permissions.apply_development": {"session_id": plain},
             "_sill/permissions.restore_defaults": {"session_id": combo},
-            # (approving a host is GTK's to do for a Default session; this one uses permission modes)
-            "_sill/policy.allow_host": {"session_id": combo, "host": "allowed-by-gtk.example"},
+            # (approving a host is a plain client's to do for a Default session; this one uses permission modes)
+            "_sill/policy.allow_host": {"session_id": combo, "host": "allowed-by-plain.example"},
         }
-        accepted = [m for m, params in attempts.items() if code(gtk.call, m, params) is None]
-        check("a GTK-like frontend is refused at every grant and Host control entry point", not accepted, " ".join(accepted))
+        accepted = [m for m, params in attempts.items() if code(plain.call, m, params) is None]
+        check("a plain frontend is refused at every grant and Host control entry point", not accepted, " ".join(accepted))
         check("…and Host control on the session is as it was", hc_state(combo)["active"] and hc_state(combo)["generation"] == generation)
 
         # revocation racing the agent's launches: every launch admitted before it is cleaned up
@@ -1291,7 +1293,7 @@ EOF
         kept = json.loads(bridge(combo, "launch", generation, {"argv": ["/bin/sleep", "3072"], "cwd": "/tmp"})[1])
         unkept = json.loads(bridge(combo, "launch", generation, {"argv": ["/bin/sleep", "3073"], "cwd": "/tmp"})[1])
         hc.call("_sill/host_control.keep", {"session_id": combo, "name": kept["name"], "keep": True})
-        for client in (c, gtk, hc):
+        for client in (c, plain, hc):
             client.close()
         env.stop_daemon()
         check("an orderly daemon stop stops the unkept host process and keeps the kept one",
@@ -1376,7 +1378,7 @@ EOF
                 time.sleep(0.1)
         try:
             c.close()
-            gtk.close()
+            plain.close()
         except Exception:
             pass
         for process in background:

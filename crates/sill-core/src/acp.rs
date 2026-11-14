@@ -410,7 +410,7 @@ pub enum Command {
 }
 
 /// How permission requests are answered when no one listens for [`Event::PermissionRequest`]
-/// (the M0 CLI). The shelf answers them itself.
+/// (the M0 CLI). The daemon handles them itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutoPermission {
     AllowOnce,
@@ -1122,7 +1122,7 @@ mod tests {
         let commands = update(serde_json::json!({"sessionUpdate":"available_commands_update","availableCommands":[
             {"name":"review","description":"Review changes","input":{"hint":"what to review"}},{"name":"init","description":"Write AGENTS.md"}]}));
         assert!(matches!(&commands, Event::Commands(c) if c[0].hint.as_deref()==Some("what to review") && c[1].hint.is_none()), "{commands:?}");
-        assert!(matches!(update(serde_json::json!({"sessionUpdate":"session_info_update","title":"Fix the shelf"})), Event::AgentTitle(t) if t=="Fix the shelf"));
+        assert!(matches!(update(serde_json::json!({"sessionUpdate":"session_info_update","title":"Fix the hotkey"})), Event::AgentTitle(t) if t=="Fix the hotkey"));
         // Codex: after every turn, only `_meta`; the old dump of this became a visible note
         let codex = update(serde_json::json!({"sessionUpdate":"session_info_update","_meta":{"codex":{"threadStatus":"idle"}}}));
         assert!(matches!(&codex, Event::Other(t) if is_diagnostic(t)), "{codex:?}");

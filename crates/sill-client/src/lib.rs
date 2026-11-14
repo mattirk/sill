@@ -1,6 +1,5 @@
 //! What any Sill frontend needs beyond raw protocol calls, without a GUI toolkit
-//! (docs/sill-gui.md §4.1). sill-gui adopts it first; the GTK shelf keeps its own client until these
-//! interfaces settle.
+//! (docs/sill-gui.md §4.1); sill-gui is built on it.
 //!
 //! - [`conversation`]: one session's public SFP view, rebuilt from a snapshot and sequenced events,
 //!   reporting what each event changed.

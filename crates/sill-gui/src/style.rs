@@ -1,13 +1,12 @@
-//! Sill's look in iced, taken from the GTK shelf: the theme palette (`shelf/theme.rs`) and the
-//! conversation's rules (`shelf/conversation.rs` CSS) — flat and square, no bubbles or rounded
-//! corners, hierarchy by tone and a thin left rule. Every shelf theme is here, the same struct
-//! with other values.
+//! Sill's look in iced: the theme palette and the conversation's rules — flat and square, no
+//! bubbles or rounded corners, hierarchy by tone and a thin left rule. Every theme is here, the
+//! same struct with other values.
 use iced::widget::{
     button, container, overlay::menu, pick_list, rule, scrollable, svg, text_editor,
 };
 use iced::{Background, Border, Color, Shadow, Theme};
 
-/// One shelf theme: the values `shelf/theme.rs` derives everything from.
+/// One theme: the values everything else is derived from.
 #[derive(Debug, Clone, Copy)]
 pub struct Palette {
     /// Window / page background.
@@ -34,8 +33,8 @@ const fn rgb(hex: u32) -> Color {
     )
 }
 
-/// The shelf's themes, by id, with the same values (`shelf/theme.rs`); the daemon's `theme`
-/// setting picks one. Miasma is the one sill is developed in (the person, 2026-11-05).
+/// The themes, by id; the daemon's `theme` setting picks one. Miasma is the one sill is developed
+/// in (the person, 2026-11-05).
 pub const THEMES: &[(&str, Palette)] = &[
     (
         "adwaita",
@@ -247,13 +246,13 @@ pub fn theme_id() -> &'static str {
     THEMES[CURRENT.load(std::sync::atomic::Ordering::Relaxed)].0
 }
 
-/// Body text, logical pixels: what the shelf's 13 pt base comes to at its "Smaller" text size on
+/// Body text, logical pixels: what a 13 pt base comes to at the "Smaller" text size on
 /// this desktop, measured against `docs/reference-ui/02` — one line of agent text there is 870 px
 /// wide at scale 2, and so is the same line here at 15.3 (`snapshots::calibrate`).
 pub const TEXT: f32 = 15.3;
-/// Tool rows, thoughts (the shelf's 90 %).
+/// Tool rows, thoughts (90 % of the body).
 pub const SMALL: f32 = TEXT * 0.9;
-/// Code, tool output and diffs: the shelf's 85–92 %, and the code face runs wide.
+/// Code, tool output and diffs: a little under the reference's 85–92 %, as the code face runs wide.
 pub const MONO: f32 = TEXT * 0.82;
 /// Captions and badges.
 pub const TINY: f32 = TEXT * 0.8;
@@ -496,7 +495,7 @@ pub fn bar() -> scrollable::Scrollbar {
 }
 
 /// The conversation's scrollbar: hidden at rest, a thin bar while hovered or dragged (the
-/// reference's note on `02`: the shelf's overlay scrollbar autohides).
+/// reference's note on `02`: the overlay scrollbar autohides).
 pub fn feed_scroll(_: &Theme, status: scrollable::Status) -> scrollable::Style {
     let shown = !matches!(status, scrollable::Status::Active { .. });
     let bar = if shown {

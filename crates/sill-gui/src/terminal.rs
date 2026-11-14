@@ -818,7 +818,7 @@ fn draw_cursor(frame: &mut Frame, term: &Term<Listener>, focused: bool) {
 
 // --- colours and keys -----------------------------------------------------------------------
 
-/// The 16 ANSI slots as the shelf maps them onto the theme: red is the error colour, green
+/// The 16 ANSI slots mapped onto the theme: red is the error colour, green
 /// success, yellow warning, blue and magenta the accent, cyan the link colour.
 fn ansi16(index: usize) -> Color {
     let normal = [

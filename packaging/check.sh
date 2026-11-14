@@ -48,7 +48,7 @@ say "## install"
 # deploy.sh names the build it installed (SILL_BUILD_DIR: target/release, or target/local with
 # --fast); run on its own, the installed binary may be either profile's
 sill_build_dirs=${SILL_BUILD_DIR:-target/release target/local}
-for b in sill sill-shim; do
+for b in sill sill-shim sill-gui; do
     if [ ! -x "$PREFIX/bin/$b" ]; then
         fail "$PREFIX/bin/$b installed"
         continue
@@ -70,7 +70,7 @@ say ""
 
 # --- daemon and units ----------------------------------------------------------------------------
 say "## daemon"
-for u in sill.socket sill.service sill-shelf.service; do
+for u in sill.socket sill.service sill-gui.service; do
     if ! systemctl --user cat "$u" >/dev/null 2>&1; then
         say "SKIP  $u not installed"
     elif systemctl --user is-active --quiet "$u"; then
@@ -112,12 +112,10 @@ if systemctl --user cat sill.service >/dev/null 2>&1; then
     if [ "$n" -gt 0 ]; then say "WARN  the daemon stopped $n stray(s) since it started — each is a bug elsewhere"; log <"$TMP/reaped"; fi
 fi
 run "sill changes list" "$SILL" changes list
-shelves=$(packaging/local-shelves.sh)
-n=$(printf '%s\n' "$shelves" | grep -c . || true)
-if [ "$n" -eq 1 ]; then pass "one local shelf process"; else fail "one local shelf process (found $n)"; fi
-printf '%s\n' "$shelves" | log
-say "## shelf width diagnostics (logical pixels, latest shelf startup)"
-journalctl --user -u sill-shelf.service -n 400 --no-pager -o cat 2>/dev/null | grep '^sill width:' | tail -n 22 | log
+windows=$(packaging/local-gui.sh)
+n=$(printf '%s\n' "$windows" | grep -c . || true)
+if [ "$n" -eq 1 ]; then pass "one local sill-gui process"; else fail "one local sill-gui process (found $n)"; fi
+printf '%s\n' "$windows" | log
 say ""
 
 # --- a jail of our own: what a session sees ------------------------------------------------------
@@ -219,8 +217,8 @@ fi
 # --- logs a session cannot read ------------------------------------------------------------------
 say "## journal since $STARTED (sill units and sessions, last 80 lines)"
 journalctl --user --since "$STARTED" -o short-monotonic --no-pager \
-    -u sill.service -u sill.socket -u sill-shelf.service -t sill-dev 2>&1 | tail -n 80 | log
-journalctl --user --since "-1h" -p warning --no-pager -u sill.service -u sill-shelf.service 2>&1 | tail -n 40 >"$TMP/out"
+    -u sill.service -u sill.socket -u sill-gui.service -t sill-dev 2>&1 | tail -n 80 | log
+journalctl --user --since "-1h" -p warning --no-pager -u sill.service -u sill-gui.service 2>&1 | tail -n 40 >"$TMP/out"
 if grep -q . "$TMP/out" && ! grep -q '^-- No entries --$' "$TMP/out"; then
     say "NOTE  warnings or worse from sill in the last hour:"
     log <"$TMP/out"

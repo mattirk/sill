@@ -69,7 +69,7 @@ fn still(host: &Path, before: Option<Snapshot>) -> Result<()> {
     Ok(())
 }
 
-/// Why keep refuses a path outright, or `None`. What the shelf itself runs or reads — its
+/// Why keep refuses a path outright, or `None`. What the daemon itself runs or reads — its
 /// configuration (policies, agent overrides: a session's mounts and allowed domains are made of
 /// them) and its state (the session store, the staged binaries, the agents' homes) — and a
 /// repository's own executable configuration (`.git/config`, `.git/hooks`). A kept line there is

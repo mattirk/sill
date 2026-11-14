@@ -1,14 +1,12 @@
-//! The global show/hide key, grabbed on the X server (the GTK shelf's `shelf/hotkey.rs`, made to
-//! keep working; the person, 2026-11-05: the shelf's was not reliable). Spec syntax as GTK
-//! accelerators: `<Control>Tab`, `<Alt>space`, `<Super>grave`, `F12` — the daemon's shared
-//! `hotkey` setting. What the shelf's lost, this one keeps:
+//! The global show/hide key, grabbed on the X server, made to keep working (the person,
+//! 2026-11-05: an earlier grab was not reliable). Spec syntax as GTK accelerators: `<Control>Tab`,
+//! `<Alt>space`, `<Super>grave`, `F12` — the daemon's shared `hotkey` setting. What it keeps:
 //!
-//! - **a lost X connection** ended the shelf's grab thread for good; here the thread connects
-//!   again, and grabs again;
+//! - **a lost X connection**: the thread connects again, and grabs again;
 //! - **a refused grab** (another program, or the previous frontend not gone yet, holds the key)
-//!   stayed refused; here it is tried again every few seconds, and the Settings page says so;
+//!   is tried again every few seconds, and the Settings page says so;
 //! - **a changed keyboard mapping** (a layout switch, the desktop applying its keyboard settings
-//!   after login) left the grab on a stale keycode; here `MappingNotify` grabs it again;
+//!   after login) would leave the grab on a stale keycode; `MappingNotify` grabs it again;
 //! - **key repeat**: a press is taken once — X's repeated press (same time as the release before
 //!   it, or a press while the key is still down) and a second press within 250 ms are dropped;
 //! - **the grab's own focus**: while the key is down the keyboard is grabbed, and a window brought
@@ -25,7 +23,7 @@ use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{ConnectionExt, GrabMode, KeyButMask, ModMask};
 use x11rb::rust_connection::RustConnection;
 
-/// The shelf's default, when the setting is unset.
+/// The default, when the setting is unset.
 pub const DEFAULT: &str = "<Alt>space";
 /// How long a refused grab waits before it is tried again.
 const RETRY: Duration = Duration::from_secs(5);

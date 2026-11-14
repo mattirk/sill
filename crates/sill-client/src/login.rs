@@ -1,4 +1,4 @@
-//! An agent's login, as the shelf runs it (`shelf/session_view.rs`, `authenticate`): the session
+//! An agent's login: the session
 //! says it needs one (`SessionState::authentication`) and lists the agent's methods; each method
 //! goes one of three ways, decided by the agent's definition on the daemon:
 //!
@@ -38,7 +38,7 @@ pub enum Route {
     Agent,
 }
 
-/// Which way `method` goes for `agent`, as the shelf decides it: the agent's host-login methods
+/// Which way `method` goes for `agent`: the agent's host-login methods
 /// and every protocol-level method of an agent installed from the registry (no home paths, no
 /// curated method list) go to the host; a method with a terminal command runs it in the jail;
 /// the rest is the agent's own.
@@ -174,7 +174,7 @@ mod tests {
     }
 
     #[test]
-    fn methods_route_as_the_shelf_routes_them() {
+    fn methods_route_as_the_frontend_routes_them() {
         let curated = agent(&["chatgpt"], &[".codex"]);
         assert_eq!(route(&curated, &method("chatgpt", None)), Route::Host);
         assert_eq!(route(&curated, &method("api-key", None)), Route::Agent);

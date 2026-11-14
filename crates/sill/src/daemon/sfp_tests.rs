@@ -111,7 +111,7 @@ fn replacement_capture_counts_old_lease_and_failure_preserves_it() {
 
 /// Explicit benchmark, excluded even from the optional conformance run unless sized.
 /// Run one size per process so Linux VmHWM is meaningful:
-/// SILL_SFP_BENCH_MIB=100 cargo test -p sill-shelf --no-default-features
+/// SILL_SFP_BENCH_MIB=100 cargo test -p sill
 ///     snapshot_capture_benchmark -- --ignored --nocapture --test-threads=1
 #[test]
 #[ignore = "large-session benchmark; requires SILL_SFP_BENCH_MIB"]

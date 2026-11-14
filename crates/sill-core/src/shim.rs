@@ -1,4 +1,4 @@
-//! Shelf side of the shim protocol (SPEC §4.3): connect to a session's control socket, drive the
+//! The daemon's side of the shim protocol (SPEC §4.3): connect to a session's control socket, drive the
 //! agent process, open the agent's ACP byte stream.
 
 use std::collections::BTreeMap;
@@ -60,8 +60,8 @@ fn connect(socket: &Path, role: &str) -> Result<UnixStream> {
     Ok(s)
 }
 
-/// How long a control request may take before it is an error. The shelf calls these on its main
-/// loop at startup; a shim that doesn't answer must not freeze the UI.
+/// How long a control request may take before it is an error. The daemon calls these as a session
+/// starts; a shim that doesn't answer must not hold it up.
 const CONTROL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// The jail's shim answers on its control socket. A connection alone is no proof: the launcher

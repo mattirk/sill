@@ -12,11 +12,11 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: GTK build dependencies
+      - name: Build dependencies (bubblewrap for the tests; what iced needs for sill-gui)
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y --no-install-recommends libgtk-4-dev libadwaita-1-dev \
-            libvte-2.91-gtk4-dev libgtksourceview-5-dev bubblewrap
+          sudo apt-get install -y --no-install-recommends bubblewrap pkg-config \
+            libwayland-dev libxkbcommon-dev
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --workspace
       - run: packaging/release.sh

@@ -1,12 +1,12 @@
-//! The tray icon (the GTK shelf's `shelf/tray.rs`): a StatusNotifierItem — the freedesktop/KDE
+//! The tray icon: a StatusNotifierItem — the freedesktop/KDE
 //! protocol current Linux panels take (Cinnamon, KDE, XFCE, MATE, LXQt, Budgie; GNOME with the
-//! AppIndicator extension) — over the session bus, by `ksni` (pure Rust, no GTK). A click shows,
+//! AppIndicator extension) — over the session bus, by `ksni` (pure Rust). A click shows,
 //! raises or hides the window as the hotkey does; its menu has the same and Quit, which ends
 //! this window (the daemon and its sessions go on). The item registers again when the panel's
 //! watcher comes back; with no panel to show it, there is no icon and the hotkey remains.
 //!
 //! The icon is the herring on its sill (`sill-tray.svg`, not the application icon). While an
-//! agent works it moves as the shelf's does — the sill ripples, the fish rides it — a frame every
+//! agent works it moves — the sill ripples, the fish rides it — a frame every
 //! 125 ms on a thread of its own; still, and no thread, when every session is idle.
 use std::f64::consts::PI;
 use std::sync::Arc;
@@ -146,7 +146,7 @@ fn frame_icons(svg: &str) -> Vec<ksni::Icon> {
     SIZES.iter().filter_map(|size| pixmap(svg, *size)).collect()
 }
 
-/// The tray picture at `phase` (0..1) of its swell, as the shelf draws it (`shelf/tray.rs`): the
+/// The tray picture at `phase` (0..1) of its swell: the
 /// sill a low wave travelling right, the fish lifted by the crest under it and leaning into the
 /// slope. Same plate, colours and sizes as `sill-tray.svg`.
 fn frame_svg(phase: f64) -> String {

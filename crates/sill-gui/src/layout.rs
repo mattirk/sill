@@ -21,11 +21,11 @@ pub const DRAWER_MIN: f32 = 160.0;
 pub const MAIN_MIN: f32 = 360.0;
 /// What stays visible of the conversation beside a drawer over it: a press there closes it.
 pub const UNCOVERED: f32 = 48.0;
-/// The conversation's reading measure, as the shelf's (`shelf/conversation.rs`).
+/// The conversation's reading measure.
 pub const MEASURE: f32 = 800.0;
 /// The grip between the conversation and the drawer.
 pub const HANDLE: f32 = 7.0;
-/// The shelf's share of the monitor's width, until set otherwise, and the most it may be
+/// Shelf mode's share of the monitor's width, until set otherwise, and the most it may be
 /// (the person, 2026-11-05).
 pub const SHELF_SHARE: f32 = 0.35;
 pub const SHELF_MAX: f32 = 0.4;

@@ -125,8 +125,8 @@ fn host_pty(id: &str, argv: &[String], env: &BTreeMap<String, String>, cwd: Opti
     // NOCTTY: under systemd the daemon is a session leader without a terminal, and opening the
     // slave without it makes the shell's terminal the *daemon's* controlling terminal — the child's
     // TIOCSCTTY then takes it, and the hangup that follows kills the daemon with SIGHUP (no log, no
-    // core: the host shell "lost the daemon connection", 2026-11-03). The shim and the shelf's
-    // bridge open their peers the same way.
+    // core: the host shell "lost the daemon connection", 2026-11-03). The shim opens its
+    // peers the same way.
     let slave = File::from(rustix::pty::ioctl_tiocgptpeer(&master, OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC)?);
     size(&master, cols, rows)?;
     let prog = argv.first().context("empty terminal command")?;

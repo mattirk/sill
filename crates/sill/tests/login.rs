@@ -1,6 +1,6 @@
 //! Logins end to end, in each way agents have asked for one: a real daemon and relay, a scripted
 //! agent in place of a jail, and the frontend's own view of the session (`sfp_client::View`, whose
-//! events are what the shelf draws). Host-side logins run the real `sill login` against a scripted
+//! events are what sill-gui draws). Host-side logins run the real `sill login` against a scripted
 //! adapter. No network, no credentials, no browser.
 //!
 //! When an agent's login behaves in a way none of these scenarios does, add the scenario here
@@ -323,7 +323,7 @@ impl Drop for Fixture {
     }
 }
 
-// --- the frontend, as the shelf sees the session --------------------------------------------------
+// --- the frontend, as sill-gui sees the session --------------------------------------------------
 
 struct Frontend {
     session: String,

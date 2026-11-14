@@ -361,7 +361,7 @@ pub fn command_request(session_id: &str, command: &wire::Command, view: Option<&
         wire::Command::Prompt { text, attachments, .. } => {
             let attachments: Vec<serde_json::Value> = attachments.iter().map(|a| match &a.kind {
                 wire::AttachmentKind::Image { data_base64 } => json!({"type":"inline","name":a.name,"mime":a.mime,"data_base64":data_base64}),
-                // The shelf stores an immutable uploaded-object ID in its local attachment
+                // The frontend stores an immutable uploaded-object ID in its local attachment
                 // carrier. It is never interpreted as a path by the SFP client or server.
                 wire::AttachmentKind::File { jail_path } => json!({"type":"uploaded","name":a.name,"mime":a.mime,"upload_id":jail_path.to_string_lossy()}),
             }).collect();

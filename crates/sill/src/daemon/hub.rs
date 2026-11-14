@@ -1077,7 +1077,7 @@ impl Hub {
     }
 
     /// Start a stored session's jail from its row — pins, policy, the agent's binds
-    /// — or find it running (what `shelf/session.rs` built in-process before the daemon).
+    /// — or find it running (what the frontend built in-process before the daemon).
     fn start_session(&self, id: &str) -> Result<Started> {
         self.start_session_ignoring(id, &[])
     }

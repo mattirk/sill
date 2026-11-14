@@ -2,7 +2,7 @@
 //! — a dev server, a watcher — owned by the shim, so they survive the agent's restarts and idle
 //! stops, are listed with their state and output, and die with the jail.
 //!
-//! Two doors to the same service: the shelf asks over the control socket (`proc_*` requests in
+//! Two doors to the same service: the daemon asks over the control socket (`proc_*` requests in
 //! `main.rs`), and anything in the jail — the agent's shell — asks over [`PROC_SOCKET`] with the
 //! `sill-proc` command (this binary under that name, [`cli`]). That socket offers only
 //! start/list/tail/stop of this session's own processes: nothing the agent could not do already,

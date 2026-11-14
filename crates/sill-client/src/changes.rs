@@ -1,4 +1,4 @@
-//! The Changes page's data (reference `07`, `shelf/changes.rs`): what sessions wrote outside their
+//! The Changes page's data (reference `07`): what sessions wrote outside their
 //! pins — held in their overlays until the person keeps or reverts it — the pinned repositories'
 //! own changes, which are live on the host, and changes kept recently, which can be undone. Groups,
 //! requests and diffs, without a toolkit.
@@ -289,7 +289,7 @@ pub fn diff(client: &Client, target: Target) -> anyhow::Result<String> {
     }
 }
 
-/// What a keep, revert or undo did, in one line (the shelf's message under the page).
+/// What a keep, revert or undo did, in one line (the message under the page).
 pub fn said(verb: &str, value: &Value) -> String {
     let Ok(done) = serde_json::from_value::<Done>(value.clone()) else {
         return format!("{verb}: done");

@@ -1,4 +1,4 @@
-//! Agent Markdown as the shelf shows it: prose and fenced code on the code background with a copy
+//! Agent Markdown: prose and fenced code on the code background with a copy
 //! button that shows while the pointer is over the block (`.sill-code`, `.sill-copy`). Headings,
 //! paragraphs, list markers and every code line are selection leaves, so one selection runs
 //! across all of them inside the conversation's (or a reader's) selection area; tables (drawn
@@ -70,7 +70,7 @@ impl<'a> Viewer<'a, Message> for SillViewer<'a> {
     }
 
     /// Inline code a size smaller than the prose: the code face is wider than the prose face,
-    /// and the shelf sets code one step down (`.sill-code`: 92 %).
+    /// so code is set one step down (92 %).
     fn paragraph(&self, settings: Settings, text: &Text) -> Element<'a, Message> {
         let code = Font::with_name(crate::fonts::MONO_FAMILY);
         let spans: Vec<_> = text

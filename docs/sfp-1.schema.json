@@ -5185,46 +5185,6 @@
           "additionalProperties": false,
           "properties": {
             "type": {
-              "const": "width",
-              "type": "string"
-            },
-            "value": {
-              "format": "double",
-              "type": [
-                "number",
-                "null"
-              ]
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "type": {
-              "const": "drawer_width",
-              "type": "string"
-            },
-            "value": {
-              "format": "int32",
-              "type": [
-                "integer",
-                "null"
-              ]
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "type": {
               "const": "drawer_follow_changes",
               "type": "string"
             },
@@ -5301,26 +5261,6 @@
           "additionalProperties": false,
           "properties": {
             "type": {
-              "const": "text_scale",
-              "type": "string"
-            },
-            "value": {
-              "format": "double",
-              "type": [
-                "number",
-                "null"
-              ]
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "type": {
               "const": "auto_revert_minutes",
               "type": "string"
             },
@@ -5329,25 +5269,6 @@
               "minimum": 0,
               "type": [
                 "integer",
-                "null"
-              ]
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "type": {
-              "const": "host_terminal",
-              "type": "string"
-            },
-            "value": {
-              "type": [
-                "string",
                 "null"
               ]
             }
@@ -5553,25 +5474,10 @@
             "null"
           ]
         },
-        "drawer_width": {
-          "default": null,
-          "format": "int32",
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
         "ghost_memory": {
           "default": null,
           "type": [
             "boolean",
-            "null"
-          ]
-        },
-        "host_terminal": {
-          "default": null,
-          "type": [
-            "string",
             "null"
           ]
         },
@@ -5612,14 +5518,6 @@
             "null"
           ]
         },
-        "text_scale": {
-          "default": null,
-          "format": "double",
-          "type": [
-            "number",
-            "null"
-          ]
-        },
         "theme": {
           "default": "",
           "type": "string"
@@ -5635,14 +5533,6 @@
           "default": null,
           "type": [
             "boolean",
-            "null"
-          ]
-        },
-        "width": {
-          "default": null,
-          "format": "double",
-          "type": [
-            "number",
             "null"
           ]
         }

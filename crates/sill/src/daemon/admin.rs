@@ -357,8 +357,9 @@ fn permissions_changed(hub: &Hub, session_id: &str, live_revoked: bool) -> Resul
 }
 
 const PERMISSION_MODES: &str = "sill.permission_modes";
-/// The daemon side of "GTK supports Default only" (docs/permission-modes.md, Frontends): a
-/// connection without the permission-modes capability cannot change session capability choices,
+/// The daemon side of "clients without the permission-modes capability support Default only"
+/// (docs/permission-modes.md, Frontends): such a connection — the line-mode `sill attach`, a
+/// script — cannot change session capability choices,
 /// nor operate or widen a session whose launch or next build uses Desktop development or Host
 /// control capabilities. Actual capabilities decide, not a mode label; stopping stays available.
 pub(super) fn frontend_gate(hub: &Hub, conn: &super::Conn, method: &str, params: &Value) -> Result<(), Error> {
@@ -668,8 +669,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 let c = serde_json::to_value(change)?;
                 value[c["type"].as_str().unwrap()] = c["value"].clone();
             }
-            // the result must read as the protocol's settings; what is saved is the whole config,
-            // so a setting the protocol does not carry (`frontend`, the machine's own) stays
+            // the result must read as the protocol's settings; what is saved is the whole config
             let _: api::Settings = serde_json::from_value(value.clone())?;
             sill_core::config::save(&serde_json::from_value(value)?)?;
             Ok(json!({}))

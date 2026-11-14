@@ -1,4 +1,4 @@
-//! The window on an X11 desktop (after the GTK shelf's `shelf/x11.rs`):
+//! The window on an X11 desktop:
 //!
 //! - **where it goes:** Shelf mode on the primary monitor's left edge at its full working height
 //!   (panels excluded); Drawer and Full where the window was left — set before the window is
@@ -225,9 +225,9 @@ fn server_time(conn: &x11rb::rust_connection::RustConnection, root: u32) -> Opti
     time
 }
 
-/// The window's own user time, as GTK's present sets it: the window manager weighs a window's
-/// last use against the focused one's, and gave the focus back to the other window when ours
-/// looked older (a window brought up from hidden, 2026-11-05).
+/// The window's own user time, set as a toolkit's present does: the window manager weighs a
+/// window's last use against the focused one's, and gave the focus back to the other window when
+/// ours looked older (a window brought up from hidden, 2026-11-05).
 fn set_user_time(conn: &x11rb::rust_connection::RustConnection, xid: u64, time: u32) {
     if let Ok(c) = conn.intern_atom(false, b"_NET_WM_USER_TIME")
         && let Ok(r) = c.reply()

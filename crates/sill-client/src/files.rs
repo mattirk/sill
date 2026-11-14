@@ -111,7 +111,7 @@ pub enum Data {
     Pinned,
 }
 
-/// The Diff view counts the lines of this many changed files per repository, as the shelf does.
+/// The Diff view counts the lines of this many changed files per repository.
 pub const COUNT_CAP: usize = 150;
 /// A new file larger than this gets no line count.
 const NEW_FILE_MAX: u64 = 1_000_000;
@@ -270,7 +270,7 @@ fn signature(entries: &[discovery::StatusEntry]) -> Vec<(String, String)> {
 }
 
 /// One changed file's lines added and removed: git's numstat for a tracked file, the line count
-/// of a new one (`shelf/diffstat.rs`); none for binary or very large files.
+/// of a new one; none for binary or very large files.
 fn count(client: &Client, entry: &discovery::StatusEntry) -> anyhow::Result<Option<(u64, u64)>> {
     if entry.status.contains('?') {
         let meta: admin::FileMetadata = client.call(
@@ -629,7 +629,7 @@ impl FilesState {
                                 None => dir.entries.push(entry),
                             }
                         }
-                        // as the shelf lists a folder: folders first, hidden names last, case
+                        // a folder's order: folders first, hidden names last, case
                         // ignored
                         dir.entries.sort_by(|a, b| {
                             let (a_name, b_name) = (name(&a.path), name(&b.path));
@@ -854,8 +854,7 @@ pub fn execute(client: &Client, session: &str, request: &Request) -> anyhow::Res
         ),
         Request::Repo(path) => {
             // the daemon looks for `.git` from the path's parent up (`changes::repo_root`, made for
-            // files), so a folder that is itself a repository is asked about through a child, as
-            // the shelf does (`shelf/tree.rs`)
+            // files), so a folder that is itself a repository is asked about through a child
             let inside = path
                 .to_path()
                 .map(|p| HostPath::from_path(&p.join("x")))

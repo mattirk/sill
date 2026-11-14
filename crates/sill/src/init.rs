@@ -17,7 +17,7 @@ pub struct InitArgs {
     /// install prefix for the binaries, icons and the desktop file
     #[arg(long, default_value = "/usr/local")]
     pub prefix: PathBuf,
-    /// per-user setup (no root): shelf autostart, hotkey hint
+    /// per-user setup (no root): sill-gui autostart, hotkey hint
     #[arg(long)]
     pub user: bool,
     /// use an existing partition (a mount point) as the state filesystem instead of an image; it is
@@ -42,7 +42,7 @@ pub struct InitArgs {
 const UNIT_SETUP: &str = include_str!("../../../packaging/systemd/sill-state-setup.service");
 const UNIT_MOUNT: &str = include_str!("../../../packaging/systemd/var-lib-sill.mount");
 const UNIT_PERMS: &str = include_str!("../../../packaging/systemd/sill-state-perms.service");
-const UNIT_SHELF: &str = include_str!("../../../packaging/systemd/user/sill-shelf.service");
+const UNIT_GUI: &str = include_str!("../../../packaging/systemd/user/sill-gui.service");
 const UNIT_DAEMON: &str = include_str!("../../../packaging/systemd/user/sill.service");
 const SOCKET_DAEMON: &str = include_str!("../../../packaging/systemd/user/sill.socket");
 const DESKTOP: &str = include_str!("../../../packaging/sill.desktop");
@@ -148,10 +148,7 @@ pub fn run(a: InitArgs) -> Result<()> {
         i.skip("cgroup delegation: the systemd user instance limits sessions (--delegate-cgroup forces it)".to_string());
     }
     summary(&i)?;
-    #[cfg(feature = "shelf")]
-    println!("per user, once: sill init --user   (shelf autostart; then bind `sill toggle` to a key)");
-    #[cfg(not(feature = "shelf"))]
-    println!("per user, once: sill init --user   (enable the daemon socket)");
+    println!("per user, once: sill init --user   (sill-gui autostart; then bind `sill toggle` to a key)");
     Ok(())
 }
 
@@ -259,7 +256,7 @@ fn install_policy(i: &mut Init, dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `<prefix>/bin/sill` is what the boot hook runs as root and the shelf unit per user, so the
+/// `<prefix>/bin/sill` is what the boot hook runs as root and the sill-gui unit per user, so the
 /// prefix must be absolute and every directory above it root-owned and writable by root only
 /// (security.md S12): a prefix under a home or a group-writable `/usr/local` would let whoever
 /// writes there put code into every boot.
@@ -295,11 +292,16 @@ fn install_files(i: &mut Init, prefix: &Path, has_systemd: bool) -> Result<()> {
     let bin = prefix.join("bin");
     let me = std::env::current_exe()?.canonicalize()?;
     let src_dir = me.parent().context("executable has no parent")?.to_path_buf();
-    for name in ["sill", "sill-shim"] {
+    // sill-gui is the desktop window: beside sill on a desktop, absent from a headless box
+    for name in ["sill", "sill-shim", "sill-gui"] {
         let src = src_dir.join(name);
         let dst = bin.join(name);
         if !src.is_file() {
-            i.problem(format!("{} not found next to this binary ({})", name, src.display()));
+            if name == "sill-gui" {
+                i.skip(format!("sill-gui not found next to this binary ({}): no desktop window installed", src.display()));
+            } else {
+                i.problem(format!("{} not found next to this binary ({})", name, src.display()));
+            }
             continue;
         }
         if src.canonicalize().ok() == dst.canonicalize().ok() {
@@ -310,10 +312,8 @@ fn install_files(i: &mut Init, prefix: &Path, has_systemd: bool) -> Result<()> {
         i.put_file(&dst, &content, 0o755)?;
     }
     install_policy(i, Path::new("/etc/sill/policies"))?;
-    // icons, the desktop file and the shelf's service: `sill shelf` runs whichever frontend
-    // `sill frontend` chose, so they are the same with or without the GTK shelf in this binary
-    {
     // icons and the desktop file
+    {
     let share = prefix.join("share");
     i.put_file(&share.join("sill/sill.svg"), ICON.as_bytes(), 0o644)?;
     i.put_file(&share.join("icons/hicolor/scalable/apps/sill.svg"), ICON.as_bytes(), 0o644)?;
@@ -322,12 +322,10 @@ fn install_files(i: &mut Init, prefix: &Path, has_systemd: bool) -> Result<()> {
         let _ = std::process::Command::new("update-desktop-database").arg("-q").arg(share.join("applications")).status();
     }
     }
-    // the shelf as a systemd user service (per user: sill init --user enables it)
+    // sill-gui as a systemd user service (per user: sill init --user enables it)
     if has_systemd {
-        {
-            let unit = UNIT_SHELF.replace("/usr/local/bin/sill", &bin.join("sill").display().to_string());
-            i.put_file(Path::new("/etc/systemd/user/sill-shelf.service"), unit.as_bytes(), 0o644)?;
-        }
+        let unit = UNIT_GUI.replace("/usr/local/bin/sill", &bin.join("sill").display().to_string());
+        i.put_file(Path::new("/etc/systemd/user/sill-gui.service"), unit.as_bytes(), 0o644)?;
         // the daemon: socket-activated (docs/daemon.md §3.1); per user `sill init --user` enables the socket
         let unit = UNIT_DAEMON.replace("/usr/local/bin/sill", &bin.join("sill").display().to_string());
         i.put_file(Path::new("/etc/systemd/user/sill.service"), unit.as_bytes(), 0o644)?;
@@ -586,12 +584,12 @@ fn boot_hook(i: &mut Init, prefix: &Path, has_systemd: bool) -> Result<()> {
 
 // --- 5. per user --------------------------------------------------------------------------------
 
-/// The binary the autostart runs: a sill-owned copy of this one (and its `sill-shim`) under
-/// `~/.local/state/sill/bin/autostart/`, which every jail masks — never `current_exe()` itself,
-/// which may be a checkout's `target/debug/sill` in a pinned folder, where an agent could rewrite
-/// what every login runs (security.md S12). `sill init --user` again refreshes the copy; the
-/// system-wide unit (`sill init` as root) runs `<prefix>/bin/sill` and needs none. Replaced by
-/// rename, so a shelf running the old copy keeps it.
+/// The binary the autostart runs: a sill-owned copy of this one (with its `sill-shim` and
+/// `sill-gui`) under `~/.local/state/sill/bin/autostart/`, which every jail masks — never
+/// `current_exe()` itself, which may be a checkout's `target/debug/sill` in a pinned folder, where
+/// an agent could rewrite what every login runs (security.md S12). `sill init --user` again
+/// refreshes the copy; the system-wide unit (`sill init` as root) runs `<prefix>/bin/sill` and
+/// needs none. Replaced by rename, so a window running the old copy keeps it.
 fn stage_autostart(i: &mut Init, home: &Path, exe: &Path) -> Result<PathBuf> {
     let dir = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".local/state")).join("sill/bin/autostart");
     let dst = dir.join("sill");
@@ -600,10 +598,14 @@ fn stage_autostart(i: &mut Init, home: &Path, exe: &Path) -> Result<PathBuf> {
         return Ok(dst);
     }
     std::fs::create_dir_all(&dir)?;
-    for name in ["sill", "sill-shim"] {
+    for name in ["sill", "sill-shim", "sill-gui"] {
         let src = exe.with_file_name(name);
         if !src.is_file() {
-            i.problem(format!("{} not found next to {}: sessions need it", name, exe.display()));
+            if name == "sill-gui" {
+                i.skip(format!("sill-gui not found next to {}: the autostart looks for it on PATH", exe.display()));
+            } else {
+                i.problem(format!("{} not found next to {}: sessions need it", name, exe.display()));
+            }
             continue;
         }
         let tmp = dir.join(format!(".{name}.part"));
@@ -645,7 +647,7 @@ fn stage_once(i: &mut Init, staged: &mut Option<PathBuf>, home: &Path, exe: &Pat
     Ok(p)
 }
 
-/// `sill init --user`: the shelf's autostart for this account, nothing else. The hotkey is the
+/// `sill init --user`: sill-gui's autostart for this account, nothing else. The hotkey is the
 /// desktop's business: sill never edits anyone's shortcuts.
 fn user_setup(a: &InitArgs) -> Result<()> {
     let mut i = Init { dry: a.dry_run, did: vec![], skipped: vec![], problems: vec![] };
@@ -656,32 +658,28 @@ fn user_setup(a: &InitArgs) -> Result<()> {
         if a.dry_run { " (dry run)" } else { "" },
         match &systemd {
             Ok(()) => "systemd user instance reachable: units".to_string(),
-            Err(e) if cfg!(feature = "shelf") => format!("no systemd user instance ({e}): autostart file, daemon spawned by its first client"),
-            Err(e) => format!("no systemd user instance ({e}): daemon spawned by its first client"),
+            Err(e) => format!("no systemd user instance ({e}): autostart file, daemon spawned by its first client"),
         }
     );
     let exe = std::env::current_exe()?;
     if systemd.is_ok() {
         let mut staged: Option<PathBuf> = None;
-        #[cfg(feature = "shelf")]
-        {
-        if !unit_known("sill-shelf.service") {
+        if !unit_known("sill-gui.service") {
             // no system-wide unit (cargo install, tarball without root): a private copy
             let run = stage_once(&mut i, &mut staged, &home, &exe)?;
-            let unit = UNIT_SHELF.replace("/usr/local/bin/sill", &run.display().to_string());
-            i.put_file(&home.join(".config/systemd/user/sill-shelf.service"), unit.as_bytes(), 0o644)?;
+            let unit = UNIT_GUI.replace("/usr/local/bin/sill", &run.display().to_string());
+            i.put_file(&home.join(".config/systemd/user/sill-gui.service"), unit.as_bytes(), 0o644)?;
             i.run("reload user units", "systemctl", &["--user", "daemon-reload"])?;
         }
         let enabled = std::process::Command::new("systemctl")
-            .args(["--user", "is-enabled", "--quiet", "sill-shelf.service"])
+            .args(["--user", "is-enabled", "--quiet", "sill-gui.service"])
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
         if enabled {
-            i.skip("sill-shelf.service already enabled".to_string());
+            i.skip("sill-gui.service already enabled".to_string());
         } else {
-            i.run("start the shelf with the session", "systemctl", &["--user", "enable", "--now", "sill-shelf.service"])?;
-        }
+            i.run("start sill-gui with the session", "systemctl", &["--user", "enable", "--now", "sill-gui.service"])?;
         }
         // the daemon's socket (docs/daemon.md §3.1): the first client starts sill.service
         if !unit_known("sill.socket") {
@@ -707,35 +705,27 @@ fn user_setup(a: &InitArgs) -> Result<()> {
         }
         let stale = home.join(".config/autostart/sill.desktop");
         if stale.is_file() {
-            i.done(format!("remove {} (the service starts the shelf now)", stale.display()));
+            i.done(format!("remove {} (the service starts sill-gui now)", stale.display()));
             if !i.dry {
                 std::fs::remove_file(&stale)?;
             }
         }
     } else {
-        #[cfg(feature = "shelf")]
-        {
         let run = stage_autostart(&mut i, &home, &exe)?;
         let entry = format!(
-            "[Desktop Entry]\nType=Application\nName=sill\nComment=agent shelf (hidden; `sill toggle` shows it)\n\
-             Exec={} shelf --hidden\nIcon=sill\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
+            "[Desktop Entry]\nType=Application\nName=sill\nComment=sill's desktop window (hidden; `sill toggle` shows it)\n\
+             Exec={} gui --hidden\nIcon=sill\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
             run.display()
         );
         i.put_file(&home.join(".config/autostart/sill.desktop"), entry.as_bytes(), 0o644)?;
-        }
-        #[cfg(not(feature = "shelf"))]
-        i.skip("the daemon starts when a client connects (no user manager)");
     }
     summary(&i)?;
-    #[cfg(feature = "shelf")]
-    {
     let on_path = which("sill").and_then(|p| p.canonicalize().ok()) == exe.canonicalize().ok();
     println!(
         "hotkey: bind `{} toggle` to a key in your desktop's keyboard shortcuts (Alt+Space is the usual choice; \
-         the shelf's own grab, Settings → Hotkey, works on X11)",
+         sill-gui's own grab, Settings → Window → Hotkey, works on X11)",
         if on_path { "sill".to_string() } else { exe.display().to_string() }
     );
-    }
     Ok(())
 }
 

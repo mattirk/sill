@@ -1,6 +1,7 @@
 //! Headless probe of `acp::run_session` against a real agent: `cargo run -p sill-core --example
-//! acp_probe -- claude-agent-acp`. On Ready it sends what the shelf's `apply_remembered` would
-//! (model, mode, effort) and prints every Controls event, so the drive loop can be watched without GTK.
+//! acp_probe -- claude-agent-acp`. On Ready it sends what the daemon's restore of remembered controls
+//! would (model, mode, effort) and prints every Controls event, so the drive loop can be watched
+//! without a frontend.
 //! With `ACP_PROBE_PROMPT=hi` it sends one prompt instead — against `fake-agent.py` next to this
 //! file, which answers with a usage update and an update kind sill doesn't know, both of which the
 //! loop must survive.
@@ -45,7 +46,7 @@ fn main() {
             Event::Ready { controls, resumed, .. } => {
                 show(&format!("{ms:>5} READY(resumed={resumed})"), controls);
                 // ACP_PROBE_PROMPT=text: one prompt turn instead of the settings (for a fake agent that
-                // emits updates the shelf must survive)
+                // emits updates the drive loop must survive)
                 let cmds = match std::env::var("ACP_PROBE_PROMPT") {
                     Ok(text) => vec![Command::Prompt(text, vec![])],
                     Err(_) => vec![

@@ -1,6 +1,6 @@
 #!/bin/sh
-# List only this account's local frontend processes — `sill shelf` (GTK) and sill-gui. Remote
-# windows have their own lifetime.
+# List only this account's local sill-gui processes: pid and argv, one per line. A window opened on a
+# saved box (SILL_BOX in its environment) has its own lifetime and is left out.
 # Optional proc root is useful for checking this parser against fixtures.
 set -eu
 sill_proc_root=${1:-/proc}
@@ -16,22 +16,7 @@ for sill_proc in "$sill_proc_root"/[0-9]*; do
         { args[++n]=$0 }
         END {
             executable=args[1]; sub(/^.*\//,"",executable)
-            # sill-gui (the iced frontend) is a frontend whatever its arguments, local unless SILL_BOX
-            if (executable=="sill-gui") {
-                if (box!="" && box!="local") exit
-                line=pid
-                for (i=1;i<=n;i++) if (args[i]!="") line=line " " args[i]
-                print line
-                exit
-            }
-            if (executable!="sill") exit
-            for (i=2;i<=n;i++) {
-                if (args[i]=="--box") { i++; if (i>n) exit; box=args[i] }
-                else if (index(args[i],"--box=")==1) box=substr(args[i],7)
-                else if (args[i]!="") positional[++m]=args[i]
-            }
-            if (positional[1]=="box" && positional[2]=="connect" && positional[3]!="") box=positional[3]
-            else if (positional[1]!="shelf") exit
+            if (executable!="sill-gui") exit
             if (box!="" && box!="local") exit
             line=pid
             for (i=1;i<=n;i++) if (args[i]!="") line=line " " args[i]

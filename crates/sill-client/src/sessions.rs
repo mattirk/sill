@@ -1,5 +1,5 @@
-//! Starting, reopening, ending and deleting sessions: the requests the shelf's `+` menu and a
-//! tab's close make (`shelf/window.rs`), built from public records only. Each is one mutation for
+//! Starting, reopening, ending and deleting sessions: the requests the `+` menu and a tab's close
+//! make, built from public records only. Each is one mutation for
 //! [`crate::actions::Actions`]; a new session's identity is the frontend's, so a retry after a
 //! lost connection returns the same session instead of a second one (docs/protocol.md).
 use serde_json::{Value, json};
@@ -101,7 +101,7 @@ pub fn matches(session: &Session, filter: &str) -> bool {
 }
 
 /// The agents a new session can start with: enabled, and their command present on the daemon's
-/// host (as the shelf's menu shows them).
+/// host (as the `+` menu shows them).
 pub fn startable(client: &sill_proto::Client) -> anyhow::Result<Vec<Definition>> {
     use sill_proto::agent_admin::{AgentKey, Available, List, Page};
     let mut agents = vec![];

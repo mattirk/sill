@@ -40,7 +40,7 @@ pub struct Attention {
     /// Working time of the current turn in milliseconds, at `now_ms`.
     pub working_ms: Option<u64>,
     /// The time the agent has worked in this session, at `now_ms`, whether or not it works now
-    /// (the shelf's timer, shown when its status is hovered).
+    /// (the timer, shown when the status is hovered).
     pub worked_ms: Option<u64>,
 }
 

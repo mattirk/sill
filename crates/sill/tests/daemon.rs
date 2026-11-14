@@ -912,12 +912,9 @@ fn public_host_files_and_settings_need_no_internal_capability() {
     let link=files.join("link");std::os::unix::fs::symlink(&p,&link).unwrap();
     assert!(c.call("_sill/files.read",json!(a::FileRead {path:HostPath::from_path(&link),offset:"0".into(),length:None,revision:None})).unwrap().get("error").is_some());
     assert!(c.call("_sill/files.list",json!({"path":root,"limit":0})).unwrap().get("error").is_some());
-    // a setting the protocol does not carry (the machine's frontend) survives a patch
-    let config=d.dir.join("config/sill/sill.toml");std::fs::create_dir_all(config.parent().unwrap()).unwrap();
-    std::fs::write(&config,"frontend = \"iced\"\n").unwrap();
+    // settings go through the daemon: a patch is read back, an unknown change is refused
     let patch=c.call("_sill/settings.patch",json!({"changes":[{"type":"theme","value":"nord"},{"type":"tray","value":false}]})).unwrap();assert!(patch.get("error").is_none(),"{patch}");
     assert_eq!(c.call("_sill/settings.get",json!({})).unwrap()["result"]["theme"],"nord");
-    assert!(std::fs::read_to_string(&config).unwrap().contains("frontend = \"iced\""),"the frontend setting was dropped");
     assert!(c.call("_sill/settings.patch",json!({"changes":[{"type":"future","value":true}]})).unwrap().get("error").is_some());
 }
 
@@ -1286,7 +1283,8 @@ fn host_control_repository_exceptions_are_separate_exact_and_short_lived() {
 #[test]
 fn development_permissions_apply_together_or_not_at_all() {
     let d = Daemon::start();
-    let mut gtk = d.connect().unwrap();
+    // bare: a connection without the permission-modes capability (line mode, scripts)
+    let mut bare = d.connect().unwrap();
     let mut modes = d.connect_caps(json!({"sill.permission_modes":1})).unwrap();
     let policies = d.dir.join("home/development-policies");
     std::fs::create_dir_all(&policies).unwrap();
@@ -1303,7 +1301,7 @@ fn development_permissions_apply_together_or_not_at_all() {
         .find(|p| p["capability"] == capability).cloned().unwrap();
     let apply = |c: &mut Conn, session: &str| c.call("_sill/permissions.apply_development", json!({"session_id":session})).unwrap();
 
-    let refused = apply(&mut gtk, &plain);
+    let refused = apply(&mut bare, &plain);
     assert_eq!(refused["error"]["data"]["details"]["capability"], "sill.permission_modes", "{refused}");
     let preview = modes.call("_sill/policy.preview", json!({"session_id":plain})).unwrap();
     let available = ["test_desktop", "private_bus"].iter().all(|c| state(&preview["result"], c)["available"] == true);
@@ -1333,7 +1331,8 @@ fn development_permissions_apply_together_or_not_at_all() {
 #[test]
 fn session_permission_choices_restore_defaults_and_frontend_gate() {
     let d = Daemon::start();
-    let mut gtk = d.connect().unwrap();
+    // bare: a connection without the permission-modes capability (line mode, scripts)
+    let mut bare = d.connect().unwrap();
     let mut modes = d.connect_caps(json!({"sill.permission_modes":1})).unwrap();
     let policies = d.dir.join("home/permission-policies");
     std::fs::create_dir_all(&policies).unwrap();
@@ -1353,7 +1352,7 @@ fn session_permission_choices_restore_defaults_and_frontend_gate() {
         c.call("_sill/permissions.set", json!({"session_id":session,"capability":capability,"enabled":enabled})).unwrap();
 
     // Only a frontend that shows permission state may change choices.
-    let refused = set(&mut gtk, &web, "public_web", json!(true));
+    let refused = set(&mut bare, &web, "public_web", json!(true));
     assert_eq!(refused["error"]["data"]["code"], "unsupported", "{refused}");
     assert_eq!(refused["error"]["data"]["details"]["capability"], "sill.permission_modes");
     let changed = set(&mut modes, &web, "public_web", json!(true));
@@ -1381,7 +1380,7 @@ fn session_permission_choices_restore_defaults_and_frontend_gate() {
     std::fs::write(policies.join("web.toml"), "name='web'\n[network]\nmode='allow'").unwrap();
 
     // Restore defaults removes added grants and keeps the selected policy.
-    assert!(gtk.call("_sill/policy.allow_host", json!({"session_id":web,"host":"api.example.test"})).unwrap().get("error").is_none());
+    assert!(bare.call("_sill/policy.allow_host", json!({"session_id":web,"host":"api.example.test"})).unwrap().get("error").is_none());
     let restored = modes.call("_sill/permissions.restore_defaults", json!({"session_id":web})).unwrap();
     let web_state = state(&restored["result"]["preview"], "public_web");
     assert_eq!((web_state["effective"].clone(), web_state["requested"].clone()), (json!(false), Value::Null), "{web_state}");
@@ -1389,22 +1388,22 @@ fn session_permission_choices_restore_defaults_and_frontend_gate() {
     let row = modes.call("_sill/sessions.get", json!({"session_id":web})).unwrap();
     assert!(row["result"]["policy"].as_str().unwrap().ends_with("web.toml"), "{row}");
 
-    // GTK operates Default sessions, never ones requesting Desktop development capabilities.
+    // A bare client operates Default sessions, never ones requesting Desktop development capabilities.
     for (method, params) in [
         ("_sill/sessions.submit", json!({"session_id":desktop,"submission_id":"s1","content":[]})),
         ("_sill/questions.answer", json!({"session_id":desktop,"question_id":"q"})),
         ("_sill/policy.allow_host", json!({"session_id":desktop,"host":"example.com"})),
         ("_sill/sessions.start", json!({"session_id":desktop})),
     ] {
-        let refused = gtk.call(method, params).unwrap();
+        let refused = bare.call(method, params).unwrap();
         assert_eq!(refused["error"]["data"]["details"]["capability"], "sill.permission_modes", "{method}: {refused}");
     }
     let permitted = modes.call("_sill/policy.allow_host", json!({"session_id":desktop,"host":"example.com"})).unwrap();
     assert!(permitted.get("error").is_none(), "{permitted}");
-    assert!(gtk.call("_sill/policy.preview", json!({"session_id":desktop})).unwrap().get("error").is_none(), "inspection stays available");
-    // Declining the default makes it a Default session again, operable by GTK.
+    assert!(bare.call("_sill/policy.preview", json!({"session_id":desktop})).unwrap().get("error").is_none(), "inspection stays available");
+    // Declining the default makes it a Default session again, operable by a bare client.
     assert!(set(&mut modes, &desktop, "test_desktop", json!(false)).get("error").is_none());
-    assert!(gtk.call("_sill/policy.allow_host", json!({"session_id":desktop,"host":"example.org"})).unwrap().get("error").is_none());
+    assert!(bare.call("_sill/policy.allow_host", json!({"session_id":desktop,"host":"example.org"})).unwrap().get("error").is_none());
 }
 
 #[test]

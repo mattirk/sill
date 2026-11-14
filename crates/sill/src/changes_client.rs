@@ -258,17 +258,6 @@ pub fn undo(call: Call<'_>, a: sill_proto::ChangesUndo) -> Result<wire::Done> {
     )?;
     d.try_into()
 }
-#[cfg(feature = "shelf")]
-pub fn git_revert(call: Call<'_>, a: sill_proto::GitRevert) -> Result<sill_proto::Text> {
-    invoke(
-        call,
-        "_sill/changes.git-revert",
-        api::GitRevert {
-            path: P::from_path(&a.repo.join(a.rel)),
-            repo: P::from_path(&a.repo),
-        },
-    )
-}
 pub fn history(
     call: Call<'_>,
     f: sill_core::history::Filter,

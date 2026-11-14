@@ -1,7 +1,7 @@
 //! The Settings page's data, through public SFP only (`_sill/settings.*`, `_sill/pins.*`,
 //! `_sill/memory.*`): what it reads in one go, the choices it offers and the defaults an unset
-//! setting means. The choices and defaults are the shelf's (`sill-core`'s config, `shelf/
-//! settings.rs`), kept here so a frontend needs no `sill-core`; a change there belongs here too.
+//! setting means. The choices and defaults are the daemon's (`sill-core`'s config), kept here so a
+//! frontend needs no `sill-core`; a change there belongs here too.
 use serde_json::{Value, json};
 use sill_proto::admin::{SettingChange, Settings, SettingsPatch, Text};
 use sill_proto::pins;
@@ -47,7 +47,7 @@ pub const COMPACT_DEFAULT: u32 = 30;
 pub const FULL_TEXT_DEFAULT: u32 = 365;
 pub const DELETE_DEFAULT: u32 = 0;
 
-/// The shelf's themes, by id and name, in its order (`shelf/theme.rs`).
+/// The themes, by id and name, in order (sill-gui's `style::THEMES` has their palettes).
 pub const THEMES: &[(&str, &str)] = &[
     ("adwaita", "Adwaita Dark"),
     ("adwaita-light", "Adwaita Light"),
@@ -174,7 +174,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn settings_requests_and_choices_read_as_the_shelf_does() {
+    fn settings_requests_and_choices_read_as_the_frontend_does() {
         let (method, params) = patch(SettingChange::Memory { value: Some(false) });
         assert_eq!(method, "_sill/settings.patch");
         assert_eq!(params, json!({"changes":[{"type":"memory","value":false}]}));

@@ -89,10 +89,10 @@ pub fn conversation() -> Conversation {
     ));
     let mut shell = item("tool", "2", "tool", "");
     shell.tool = Some(tool(
-        "rg -n 'sill-send' crates/sill/src/shelf",
+        "rg -n 'SEND_SIZE' crates/sill-gui/src",
         "execute",
         "completed",
-        "crates/sill/src/shelf/conversation.rs:1640:button.sill-send > image { -gtk-icon-size: 1.1em; }",
+        "crates/sill-gui/src/icons.rs:18:const SEND_SIZE: f32 = 1.1;",
         "",
     ));
     view.insert_item(shell);
@@ -140,7 +140,7 @@ fn question(state: &str, answer: Option<&str>) -> Question {
     .expect("valid synthetic question")
 }
 
-const DIFF: &str = "@@ -1638,3 +1638,3 @@\n button.sill-send { min-width: 1.6em; }\n-button.sill-send > image { -gtk-icon-size: 1.1em; }\n+button.sill-send > image { -gtk-icon-size: 1em; }\n";
+const DIFF: &str = "@@ -17,3 +17,3 @@\n /// The send arrow's size, relative to the composer's text.\n-const SEND_SIZE: f32 = 1.1;\n+const SEND_SIZE: f32 = 1.0;\n";
 
 /// After the last chunk: the edit, its question, the session waiting on it.
 pub fn waiting(seq: u64) -> Vec<SessionEvent> {

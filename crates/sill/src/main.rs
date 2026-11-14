@@ -1,5 +1,5 @@
-//! `sill` command line. M0: drive the jail builder (`sill jail …`) and one development session
-//! (`sill dev …`) by hand; the shelf and the real session commands come after.
+//! `sill` command line: the daemon, sessions, changes, memory, policies and the jail by hand
+//! (`sill jail …`, `sill dev …`). The desktop window is sill-gui: `sill gui`, `sill toggle`, `sill restart`.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -21,12 +21,10 @@ mod daemon;
 mod frontend;
 mod changes_client;
 mod init;
-#[cfg(feature = "shelf")]
-mod shelf;
 mod tui;
 
 #[derive(Parser)]
-#[command(name = "sill", version, about = "agent shelf")]
+#[command(name = "sill", version, about = "AI agents in a jail the host controls")]
 struct Cli {
     /// Connect to a saved Linux box instead of the local daemon (see `sill box add`).
     #[arg(long = "box", global = true)]
@@ -96,7 +94,7 @@ enum Cmd {
         cmd: BoxCmd,
     },
     /// Set the machine up (root): checks, binaries, policy, state filesystem, cgroup delegation;
-    /// `--user` sets up the shelf autostart for this account instead (SPEC §4.12)
+    /// `--user` sets up the sill-gui autostart for this account instead (SPEC §4.12)
     Init(init::InitArgs),
     /// Serve a session's network proxy (SPEC §4.8) on an inherited listening socket
     Proxy {
@@ -109,38 +107,27 @@ enum Cmd {
         #[arg(short, long, default_value = "default")]
         policy: String,
     },
-    /// Open the desktop frontend `sill frontend` chose: the GTK shelf or sill-gui
-    Shelf {
-        /// working directory of the main session (default: current directory)
-        #[arg(long)]
-        cwd: Option<PathBuf>,
-        /// start without showing the window (autostart); `sill toggle` shows it
+    /// Open the desktop window, sill-gui (installed beside this binary); a second start shows the
+    /// running one
+    Gui {
+        /// start without showing the window (the service's start); `sill toggle` shows it
         #[arg(long)]
         hidden: bool,
     },
-    /// Show/hide the running shelf (bind this to a hotkey)
+    /// Show/hide the running sill-gui (bind this to a hotkey)
     Toggle,
-    /// Which desktop frontend runs on this machine: gtk (the shelf) or iced (sill-gui); without
-    /// an argument, the one chosen
-    Frontend { name: Option<String> },
-    /// Restart the shelf: `systemctl --user restart sill-shelf` when the service is installed
+    /// Restart the daemon and sill-gui, under the `sill-gui` user service when it is installed
     Restart {
-        /// start hidden (dev mode)
+        /// start sill-gui hidden
         #[arg(long)]
         hidden: bool,
-        /// stop the service and run THIS binary instead (try a build without installing it)
+        /// stop the service and run the checkout's debug build instead (try a build without installing it)
         #[arg(long)]
         dev: bool,
-        /// (internal) already running outside the shelf's process group — do not detach again
+        /// (internal) already running outside sill's cgroups — do not detach again
         #[arg(long, hide = true)]
         detached: bool,
     },
-    /// Switch the shelf's colour theme: adwaita | adwaita-light | dracula | solarized-dark | solarized-light | nord | miasma | gruvbox-dark | gruvbox-light | iceberg-dark | iceberg-light
-    #[cfg(feature = "shelf")]
-    Theme { name: String },
-    /// Set the show/hide key, GTK accelerator syntax: "<Alt>space", "<Super>grave", "F12"
-    #[cfg(feature = "shelf")]
-    Hotkey { spec: String },
     /// Log an agent in on this machine (browser flows that cannot run inside the jail, e.g. Codex
     /// with ChatGPT); the login file is bound into the agent's jails from then on
     Login {
@@ -177,10 +164,8 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<PinCmd>,
     },
-    /// Inspect, validate and import policies
+    /// Inspect, validate and import policies (without a subcommand: `show default`)
     Policy {
-        /// Backwards-compatible shorthand for `policy show NAME`
-        name: Option<String>,
         #[command(subcommand)]
         cmd: Option<PolicyCmd>,
     },
@@ -194,6 +179,8 @@ enum Cmd {
     HostControl {
         #[command(subcommand)]
         cmd: HostControlCmd,
+        /// Backwards-compatible shorthand for `policy show NAME`
+        name: Option<String>,
     },
 }
 
@@ -267,7 +254,7 @@ enum PolicyCmd {
 
 #[derive(Subcommand)]
 enum BoxCmd {
-    /// Verify a box and save it. --install pushes a GTK-free sill binary first.
+    /// Verify a box and save it. --install pushes a headless sill binary first (packaging/headless.sh).
     Add {
         host: String,
         #[arg(long)]
@@ -279,7 +266,7 @@ enum BoxCmd {
     },
     List,
     Remove { name: String },
-    /// Open the shelf on a saved box, or show its status in a headless build.
+    /// Open sill-gui on a saved box.
     Connect { name: String },
 }
 
@@ -355,7 +342,7 @@ enum ChangesCmd {
 
 #[derive(Subcommand)]
 enum SessionCmd {
-    /// A new session with its jail started; prints its id. The shelf lists it under Reopen to
+    /// A new session with its jail started; prints its id. sill-gui lists it under Reopen to
     /// open its conversation.
     New {
         /// registry id of the agent
@@ -404,9 +391,9 @@ enum MemoryCmd {
     },
     /// What a session's agent is told about earlier sessions when it starts (the recall block)
     Recall { id: Vec<String> },
-    /// Write the jail's read-only snapshot anew (the shelf does this when a session ends)
+    /// Write the jail's read-only snapshot anew (the daemon does this when a session ends)
     Refresh,
-    /// Compaction and retention now, by the settings (the shelf runs this nightly)
+    /// Compaction and retention now, by the settings (the daemon runs this nightly)
     Compact,
     /// One Markdown file per session into a folder: facts, summary, notes, the conversation
     Export { dir: PathBuf },
@@ -962,17 +949,12 @@ fn main() -> Result<()> {
             result
         }
         Cmd::Init(a) => init::run(a),
-        Cmd::Shelf { cwd, hidden } => frontend::shelf(cwd, hidden),
+        Cmd::Gui { hidden } => frontend::gui(hidden),
         Cmd::Toggle => frontend::toggle(),
-        Cmd::Frontend { name } => frontend::set(name),
         Cmd::Restart { hidden, dev, detached } => {
             if sill_proto::transport::selected()?.is_some() { restart_daemon_only() }
             else { frontend::restart(hidden, dev, detached) }
         },
-        #[cfg(feature = "shelf")]
-        Cmd::Theme { name } => shelf::set_theme(&name),
-        #[cfg(feature = "shelf")]
-        Cmd::Hotkey { spec } => shelf::set_hotkey(&spec),
         Cmd::Login { agent, method } => {
             let home = home()?;
             let registry = sill_core::agents::load(&home);
@@ -1258,9 +1240,6 @@ fn dev_cmd(cmd: DevCmd) -> Result<()> {
                 }
             }
             sill_core::session::stop(DEV)?;
-            // a proxy of the pre-launcher dev path, if one is still around
-            sill_core::launcher::kill_pid_file(&rt.join("proxy.pid"));
-            let _ = std::fs::remove_file(rt.join("proxy.pid"));
             println!("dev session stopped");
             Ok(())
         }
@@ -1279,6 +1258,9 @@ fn own_scope() -> Option<String> {
 /// scope, or with `--cgroup-root` in a session cgroup it makes (docs/daemon.md §3.1); it records its
 /// pids for re-adoption.
 fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Option<&str>, child: bool, cgroup_root: Option<PathBuf>) -> Result<()> {
+            // a proxy of the pre-launcher dev path, if one is still around
+            sill_core::launcher::kill_pid_file(&rt.join("proxy.pid"));
+            let _ = std::fs::remove_file(rt.join("proxy.pid"));
     // bwrap passes what it inherits on into the jail: only the descriptors made below for it get
     // there, nothing this launcher was started with (docs/daemon.md §3.11)
     let inherited = sill_core::launcher::cloexec_inherited();
@@ -1317,7 +1299,7 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
     // the shim, and the same binary as `sill-proc` on the jail's PATH (docs/tasks.md §2.4)
     spec.extra_args = vec!["--ro-bind".into(), shim_bin.clone().into(), "/.sill/shim".into(), "--ro-bind".into(), shim_bin.clone().into(), "/.sill/bin/sill-proc".into()];
     // memory (docs/memory.md §2.3): the snapshot's directory read-only, and the shim as
-    // `sill-memory` to read it; made here if the shelf has not written one yet, so the first
+    // `sill-memory` to read it; made here if the daemon has not written one yet, so the first
     // snapshot shows up in jails already running
     let cfg = sill_core::config::load();
     if if ghost { cfg.ghost_memory() } else { cfg.memory() } {
@@ -1355,8 +1337,8 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
             rules.allow.extend(a.domains);
         }
         eprintln!("sill launch: proxy mode {:?}, {} allow patterns", rules.mode, rules.allow.len());
-        // refused hosts also go to <runtime dir>/denied, one per line: the shelf watches it and
-        // offers to allow the host for this agent (SPEC §4.8)
+        // refused hosts also go to <runtime dir>/denied, one per line: the daemon serves it to the
+        // frontend (`_sill/policy.denied`), which offers to allow the host for this agent (SPEC §4.8)
         let denied = rt.join("denied");
         let _ = std::fs::remove_file(&denied);
         let session_grants = spec.policy.network.allow_additional_hosts.then(|| rt.join("session-allowed-hosts"));
@@ -1364,7 +1346,7 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
             sill_core::proxy::serve_with_session_grants(listener, rules, session_grants, move |l| {
                 // stderr is the session's journald stream or its jail.log (docs/daemon.md §3.1)
                 eprintln!("proxy: {l}");
-                // what an allow would let through, for the shelf's offer (`proxy::denial_offer`)
+                // what an allow would let through, for the frontend's offer (`proxy::denial_offer`)
                 if let Some(offer) = sill_core::proxy::denial_offer(&l)
                     && let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&denied)
                 {
@@ -1871,7 +1853,7 @@ fn box_cmd(cmd: BoxCmd) -> Result<()> {
                 binary = "~/.local/bin/sill".into();
             }
             let c = sill_proto::Client::ssh(&host, &binary)
-                .context("checking the box; if sill is missing, use `--install PATH` with a GTK-free sill binary")?;
+                .context("checking the box; if sill is missing, use `--install PATH` with a headless sill binary")?;
             let status: sill_proto::DaemonStatus = c.call(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default())?;
             transport::save(&name, BoxTarget { host, binary })?;
             println!("{name}: sill {}, protocol {}, {} sessions", status.version, status.protocol, status.sessions);
@@ -1881,10 +1863,7 @@ fn box_cmd(cmd: BoxCmd) -> Result<()> {
             if name != "local" && !all.contains_key(&name) { bail!("unknown sill box {name:?}"); }
             // SAFETY: command dispatch is still single-threaded.
             unsafe { std::env::set_var("SILL_BOX", name); }
-            #[cfg(feature = "shelf")]
-            return shelf::run(None, false);
-            #[cfg(not(feature = "shelf"))]
-            return daemon_cmd(Some(DaemonCmd::Status));
+            return frontend::gui(false);
         }
     }
     Ok(())

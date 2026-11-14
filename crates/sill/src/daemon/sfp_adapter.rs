@@ -542,8 +542,8 @@ mod tests {
 
         let commands = adapter.project(&session, &relay::Event::Commands(vec![acp::AgentCommand { name: "review".into(), description: "Review".into(), hint: None }]), None);
         assert!(matches!(&commands[..], [sfp::Event::SessionUpdated { session }] if session.commands[0].name == "review"));
-        let titled = adapter.project(&session, &relay::Event::AgentTitle("Fix the shelf".into()), None);
-        assert!(matches!(&titled[..], [sfp::Event::SessionUpdated { session: s }] if s.agent_title.as_deref() == Some("Fix the shelf") && s.title == session.title));
+        let titled = adapter.project(&session, &relay::Event::AgentTitle("Fix the window".into()), None);
+        assert!(matches!(&titled[..], [sfp::Event::SessionUpdated { session: s }] if s.agent_title.as_deref() == Some("Fix the window") && s.title == session.title));
         let notice = adapter.project(&session, &relay::Event::Notice { severity: "warning".into(), title: "Rate limited".into(), description: Some("retrying".into()) }, None);
         assert!(matches!(&notice[0], sfp::Event::ItemCreated { item } if item.kind == "notice" && item.content[0].text.as_deref() == Some("Rate limited\nretrying") && item.content[0].extra["severity"] == "warning"));
     }

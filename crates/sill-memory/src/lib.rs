@@ -1,5 +1,5 @@
 //! Memory queries (docs/memory.md §2.3), the same on the host and in the jail: the host runs them
-//! on `sill.db`, the jail's `sill-memory` on the read-only snapshot the shelf writes
+//! on `sill.db`, the jail's `sill-memory` on the read-only snapshot the daemon writes
 //! ([`write_snapshot`]) and the jail builder binds at [`JAIL_DIR`]. Both databases have the tables
 //! the queries read under the same names — `sessions`, `session_pins`, `memories`, `entries`, and the
 //! searchable text with its index ([`TEXT_SCHEMA`]) — the snapshot only a subset of their columns.
@@ -13,7 +13,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OpenFlags, params};
 
-/// Where the jail sees the snapshot's directory (read-only). A directory, not the file: the shelf
+/// Where the jail sees the snapshot's directory (read-only). A directory, not the file: the daemon
 /// replaces the file by rename, and a bind of the directory shows the new one to running sessions.
 pub const JAIL_DIR: &str = "/.sill/memory";
 /// The snapshot's file name, in its directory on both sides.
@@ -1151,11 +1151,11 @@ mod tests {
         )
         .unwrap();
         install(&src).unwrap();
-        session(&src, "bbbb2222", "tray icon", &["/home/me/GIT/sill"], Some((1_793_560_000, "Added the tray icon in shelf/tray.rs.\nNo appindicator.")));
+        session(&src, "bbbb2222", "tray icon", &["/home/me/GIT/sill"], Some((1_793_560_000, "Added the tray icon in tray.rs.\nNo appindicator.")));
         src.execute("INSERT INTO entries (session_id, seq, ts, kind, text, detail) VALUES ('bbbb2222', 1, 1793545200, 'user', 'add a tray icon', '')", []).unwrap();
         src.execute("INSERT INTO entries (session_id, seq, ts, kind, text, detail) VALUES ('bbbb2222', 2, 1793545260, 'tool', 'Edit tray.rs', 'SECRET DETAIL')", []).unwrap();
         src.execute("INSERT INTO entries (session_id, seq, ts, kind, text, detail) VALUES ('bbbb2222', 3, 1793545320, 'agent', 'Done: StatusNotifierItem\nover D-Bus', '')", []).unwrap();
-        // written while the shelf holds the db open in WAL mode
+        // written while the daemon holds the db open in WAL mode
         let snapdir = dir.join("memory");
         write_snapshot(&db, &snapdir, &[("bbbb2222".into(), PathBuf::from("/home/me/.config/x"), "added".into())]).unwrap();
         let names: Vec<_> = std::fs::read_dir(&snapdir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();

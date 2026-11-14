@@ -649,7 +649,7 @@ impl<Message> Area<'_, Message> {
                 if state.drag.take().is_some() {
                     state.autoscroll = 0.0;
                     state.last_frame = None;
-                    // the X11 / Wayland primary selection, as GTK sets it
+                    // the X11 / Wayland primary selection, as toolkits set it
                     if state.has_selection()
                         && let Some(text) = self.selected_text(state, child, content, renderer)
                     {

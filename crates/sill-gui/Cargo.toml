@@ -1,6 +1,6 @@
 [package]
 name = "sill-gui"
-description = "Experimental Iced frontend for the Sill public protocol"
+description = "sill: the desktop window (iced), a client of the daemon's public protocol"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,7 +9,7 @@ rust-version.workspace = true
 
 [features]
 # The GPU renderer by default (the person's decision, 2026-11-04: the software renderer scrolled at
-# five times GTK's CPU). iced falls back to software where no GPU can be used;
+# five times the CPU of the GTK shelf it replaced). iced falls back to software where no GPU can be used;
 # `--no-default-features` builds the software renderer only.
 default = ["gpu"]
 gpu = ["iced/wgpu"]
@@ -35,8 +35,8 @@ alacritty_terminal = { version = "0.25.1", default-features = false }
 iced_runtime = "=0.14.0"
 unicode-segmentation = "1"
 unicode-width = "0.2"
-# the desktop on X11: the global hotkey, placing the shelf on the screen edge, asking the window
-# manager to activate the window (the GTK shelf's x11rb, same version)
+# the desktop on X11: the global hotkey, placing the window on the screen edge, asking the window
+# manager to activate it (the daemon's x11rb, same version)
 x11rb = { version = "0.14", features = ["randr"] }
 rustix.workspace = true
 ksni = { version = "0.3.7", default-features = false, features = ["tokio", "blocking"] }

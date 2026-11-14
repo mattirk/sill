@@ -1,39 +1,10 @@
-//! Which desktop frontend this machine runs (the person, 2026-11-05): the GTK shelf, built into
-//! this binary with the `shelf` feature, or sill-gui, a binary of its own installed beside it. The
-//! two stay separate binaries; `frontend` in `sill.toml` picks one, and `sill shelf`, `sill toggle`
-//! and `sill restart` go to it — so the service file stays the same and switching back is
-//! `sill frontend gtk && sill restart`, without a rebuild.
+//! The desktop window, sill-gui: a binary of its own, installed beside `sill`. `sill gui` runs it,
+//! `sill toggle` shows or hides it over its control socket, and `sill restart` restarts the daemon
+//! and the window — under the `sill-gui` user service when that is installed.
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Frontend {
-    Gtk,
-    Iced,
-}
-
-impl Frontend {
-    pub fn name(self) -> &'static str {
-        match self {
-            Frontend::Gtk => "gtk",
-            Frontend::Iced => "iced",
-        }
-    }
-}
-
-/// What this `sill` can run of the GTK shelf.
-const HAS_GTK: bool = cfg!(feature = "shelf");
-
-/// The frontend chosen: the setting, else the GTK shelf where this binary has it.
-pub fn chosen() -> Frontend {
-    match sill_core::config::load().frontend.as_deref() {
-        Some("iced") => Frontend::Iced,
-        Some("gtk") => Frontend::Gtk,
-        _ if HAS_GTK => Frontend::Gtk,
-        _ => Frontend::Iced,
-    }
-}
 
 /// sill-gui: the debug build of the checkout this binary came from with `dev`, else the one
 /// installed beside this binary, else whichever is on PATH.
@@ -55,95 +26,38 @@ pub fn gui_exe(dev: bool) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("sill-gui"))
 }
 
-/// `sill frontend [gtk|iced]`: show the choice, or change it.
-pub fn set(name: Option<String>) -> Result<()> {
-    let Some(name) = name else {
-        let gui = gui_exe(false);
-        println!("{}", chosen().name());
-        println!(
-            "available: gtk {} · iced {}",
-            if HAS_GTK {
-                "(in this binary)"
-            } else {
-                "(not in this binary)"
-            },
-            if gui.is_absolute() {
-                format!("({})", gui.display())
-            } else {
-                "(sill-gui not installed beside sill)".into()
-            }
-        );
-        return Ok(());
-    };
-    let frontend = match name.as_str() {
-        "gtk" => Frontend::Gtk,
-        "iced" => Frontend::Iced,
-        other => bail!("unknown frontend {other:?}: gtk or iced"),
-    };
-    if frontend == Frontend::Gtk && !HAS_GTK {
-        bail!("this sill was built without the GTK shelf (the `shelf` feature)");
-    }
-    if frontend == Frontend::Iced && !gui_exe(false).is_absolute() {
-        eprintln!(
-            "warning: sill-gui is not installed beside this sill; `sill shelf` will look for it on PATH"
-        );
-    }
-    sill_core::config::update(|c| c.frontend = Some(frontend.name().into()))?;
-    println!(
-        "frontend: {} — `sill restart` switches to it",
-        frontend.name()
-    );
-    Ok(())
+/// A saved box selected for this command (`--box`, `SILL_BOX`), when it is not this machine.
+fn remote_box() -> Option<String> {
+    std::env::var("SILL_BOX")
+        .ok()
+        .filter(|name| !name.is_empty() && name != "local")
 }
 
-/// `sill shelf`: the chosen frontend. sill-gui replaces this process, so the service's main
-/// process is the window itself.
-pub fn shelf(cwd: Option<PathBuf>, hidden: bool) -> Result<()> {
-    match chosen() {
-        Frontend::Iced => {
-            use std::os::unix::process::CommandExt;
-            let exe = gui_exe(false);
-            let _ = cwd;
-            let mut command = std::process::Command::new(&exe);
-            if hidden {
-                command.arg("--hidden");
-            }
-            let error = command.exec();
-            Err(error).with_context(|| format!("start {}", exe.display()))
-        }
-        #[cfg(feature = "shelf")]
-        Frontend::Gtk => crate::shelf::run(cwd, hidden),
-        #[cfg(not(feature = "shelf"))]
-        Frontend::Gtk => bail!("this sill has no GTK shelf; `sill frontend iced` runs sill-gui"),
+/// `sill gui [--hidden]`: sill-gui replaces this process, so the service's main process is the
+/// window itself; a second start shows the running window and leaves (sill-gui's `control.rs`).
+/// On a saved box (`sill --box NAME gui`, `sill box connect NAME`) the window gets a control socket
+/// of its own, beside the local window's.
+pub fn gui(hidden: bool) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    let exe = gui_exe(false);
+    let mut command = std::process::Command::new(&exe);
+    if hidden {
+        command.arg("--hidden");
     }
+    if remote_box().is_some() {
+        command.env("SILL_GUI_SOCKET", gui_socket());
+    }
+    let error = command.exec();
+    Err(error).with_context(|| format!("start {}", exe.display()))
 }
 
-/// `sill toggle`: show or hide the chosen frontend's window.
+/// `sill toggle`: show or hide the window.
 pub fn toggle() -> Result<()> {
-    match chosen() {
-        Frontend::Iced => gui_command("toggle 0"),
-        #[cfg(feature = "shelf")]
-        Frontend::Gtk => crate::shelf::toggle(),
-        #[cfg(not(feature = "shelf"))]
-        Frontend::Gtk => bail!("this sill has no GTK shelf"),
-    }
+    gui_command("toggle 0")
 }
 
-/// `sill restart`: the daemon and the chosen frontend, under the service when it is installed.
-pub fn restart(hidden: bool, dev: bool, detached: bool) -> Result<()> {
-    match chosen() {
-        #[cfg(feature = "shelf")]
-        Frontend::Gtk => crate::shelf::restart(hidden, dev, detached),
-        #[cfg(not(feature = "shelf"))]
-        Frontend::Gtk => bail!("this sill has no GTK shelf; `sill frontend iced` runs sill-gui"),
-        Frontend::Iced => {
-            let _ = (hidden, detached);
-            restart_iced(dev)
-        }
-    }
-}
-
-/// sill-gui's control socket (`sill-gui`'s `control.rs`, the same path).
+/// sill-gui's control socket (`sill-gui`'s `control.rs`, the same path): `gui.sock` in the runtime
+/// directory, `gui-<box>.sock` for a window on a saved box.
 fn gui_socket() -> PathBuf {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -151,7 +65,11 @@ fn gui_socket() -> PathBuf {
         .unwrap_or_else(|| {
             std::env::temp_dir().join(format!("sill-{}", rustix::process::getuid().as_raw()))
         });
-    runtime.join("sill").join("gui.sock")
+    let name = match remote_box() {
+        Some(name) => format!("gui-{name}.sock"),
+        None => "gui.sock".into(),
+    };
+    runtime.join("sill").join(name)
 }
 
 /// One command to the running sill-gui, and its answer.
@@ -159,7 +77,7 @@ fn gui_command(line: &str) -> Result<()> {
     use std::io::{BufRead, BufReader, Write};
     let path = gui_socket();
     let mut stream = std::os::unix::net::UnixStream::connect(&path)
-        .with_context(|| format!("sill-gui is not running ({})", path.display()))?;
+        .with_context(|| format!("sill-gui is not running ({}); `sill gui` starts it", path.display()))?;
     stream.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
     writeln!(stream, "{line}")?;
     let mut answer = String::new();
@@ -182,29 +100,52 @@ fn systemctl(args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-fn restart_iced(dev: bool) -> Result<()> {
-    let unit_known = systemctl(&["cat", "sill-shelf.service"]);
-    if unit_known {
-        systemctl(&["stop", "sill-shelf.service"]);
+/// `sill restart`: with the `sill-gui` user service installed this stops the unit, ends any other
+/// sill-gui (a `--dev` one, a hand-started one), restarts the daemon and starts the unit again (the
+/// installed binaries); `--dev` instead stops the service and runs the checkout's debug build of
+/// sill-gui on its own, for trying a build without installing it. The next daemon is started by
+/// its first client, so a `--dev` window brings up the daemon of its own build (docs/daemon.md §3.6).
+pub fn restart(hidden: bool, dev: bool, detached: bool) -> Result<()> {
+    // run from a host shell of the window (the daemon's pty) or anywhere in the units' cgroups,
+    // the stops below would take this command down before it starts anything — so the work is
+    // handed to a copy outside: its own scope, its own session, its output in gui.log
+    if !detached && inside_sill() {
+        return restart_detached(hidden, dev);
     }
-    // a GTK shelf still running from before the switch goes too
-    #[cfg(feature = "shelf")]
-    crate::shelf::quit_running_shelf()?;
+    let unit_known = systemctl(&["cat", "sill-gui.service"]);
+    if unit_known {
+        systemctl(&["stop", "sill-gui.service"]);
+    }
     stop_running_gui();
-    restart_daemon(dev)?;
+    restart_daemon(dev);
     if unit_known && !dev {
-        if !systemctl(&["start", "sill-shelf.service"]) {
-            bail!("systemctl --user start sill-shelf failed");
+        if !systemctl(&["start", "sill-gui.service"]) {
+            bail!("systemctl --user start sill-gui failed");
         }
-        println!("sill-shelf.service restarted with sill-gui (journalctl --user -u sill-shelf)");
+        println!("sill-gui.service restarted (journalctl --user -u sill-gui)");
         return Ok(());
     }
     // no service, or --dev: sill-gui on its own, in a session of its own, its output in gui.log
     let exe = gui_exe(dev);
+    // running a build from a pinned folder is running what the agent could have written there
+    if let Ok(store) = sill_core::store::Store::open_default()
+        && let Ok(sessions) = store.sessions()
+    {
+        let pins: Vec<PathBuf> = sessions
+            .iter()
+            .flat_map(|s| store.pins(&s.id).unwrap_or_default())
+            .chain(store.global_pins().unwrap_or_default())
+            .collect();
+        if let Some(p) = sill_core::session::inside_any(&exe, &pins) {
+            eprintln!("warning: {} is inside the pinned folder {} — the agent can write there", exe.display(), p.display());
+        }
+    }
     println!("starting {}", exe.display());
     let mut cmd = std::process::Command::new(&exe);
+    if hidden {
+        cmd.arg("--hidden");
+    }
     let log = sill_core::store::default_path().ok().and_then(|p| {
-        use std::os::unix::fs::OpenOptionsExt;
         std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -233,6 +174,43 @@ fn restart_iced(dev: bool) -> Result<()> {
     }
     cmd.spawn()
         .with_context(|| format!("start {}", exe.display()))?;
+    Ok(())
+}
+
+/// Is this process a descendant of sill itself — in a host shell the daemon opened for the window
+/// (marked with `SILL_HOST_SHELL`) or anywhere in the daemon's or the window's unit cgroup?
+fn inside_sill() -> bool {
+    std::env::var_os("SILL_HOST_SHELL").is_some()
+        || std::fs::read_to_string("/proc/self/cgroup")
+            .is_ok_and(|c| c.contains("sill.service") || c.contains("sill-gui.service"))
+}
+
+/// Run `sill restart` again outside: in a transient scope of its own (not a unit's cgroup, so the
+/// stops don't reach it), in a new session (no controlling pty to hang up when the shell goes),
+/// logging to gui.log.
+fn restart_detached(hidden: bool, dev: bool) -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let log_path = sill_core::store::default_path()?.with_file_name("gui.log");
+    let log = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(&log_path)?;
+    let mut args: Vec<std::ffi::OsString> = vec!["--user".into(), "--scope".into(), "--quiet".into(), "--".into()];
+    args.extend(["setsid".into(), "-f".into(), exe.into_os_string(), "restart".into(), "--detached".into()]);
+    if hidden {
+        args.push("--hidden".into());
+    }
+    if dev {
+        args.push("--dev".into());
+    }
+    let st = std::process::Command::new("systemd-run")
+        .args(&args)
+        .stdin(std::process::Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log)
+        .status()
+        .map_err(|e| anyhow::anyhow!("systemd-run (the restart must run outside sill's cgroups): {e}"))?;
+    if !st.success() {
+        bail!("systemd-run failed ({st}); run `sill restart` from a terminal that is not sill's");
+    }
+    println!("restarting outside sill; its output goes to {}", log_path.display());
     Ok(())
 }
 
@@ -266,25 +244,43 @@ fn stop_running_gui() {
     signal("-KILL");
 }
 
-fn restart_daemon(dev: bool) -> Result<()> {
-    #[cfg(feature = "shelf")]
-    {
-        crate::shelf::restart_daemon(dev);
-        Ok(())
-    }
-    #[cfg(not(feature = "shelf"))]
-    {
-        let _ = dev;
-        if let Ok(c) = sill_proto::Client::connect() {
-            let _: serde_json::Value = c.call_within(
-                sill_proto::method::DAEMON_SHUTDOWN,
-                sill_proto::Empty::default(),
-                sill_proto::client::QUICK_TIMEOUT,
-            )?;
-            drop(c);
-            std::thread::sleep(std::time::Duration::from_millis(100));
+/// The daemon goes with the window (docs/daemon.md §3.1, §3.6): sessions stay — each is a scope of
+/// its own — and the next daemon adopts them. Nothing starts it here: the new window's first call
+/// does, from the window's own build (the dev build for `--dev`, the installed one otherwise), so a
+/// window never talks to a daemon of another build. With the installed units, `--dev` also stops
+/// `sill.socket` (a dev daemon binds the same path itself) and a plain restart starts it again.
+fn restart_daemon(dev: bool) {
+    let socket_unit = systemctl(&["cat", "sill.socket"]);
+    if socket_unit {
+        // a deploy rewrote the units (`sudo sill init`): the user manager must read them again
+        // before the restart, or the new daemon runs under the old text (docs/daemon.md §3.7)
+        if ["sill.service", "sill.socket", "sill-gui.service"].iter().any(|u| crate::init::unit_stale(u)) {
+            systemctl(&["daemon-reload"]);
         }
-        let _ = sill_proto::Client::connect_or_start()?;
-        Ok(())
+        systemctl(&["stop", "sill.service"]);
+        if dev {
+            systemctl(&["stop", "sill.socket"]);
+        }
+    }
+    if socket_unit && !dev {
+        // the socket unit still listens: a connect from here would only activate a fresh daemon
+        // to ask it to leave, and a second one after it (docs/daemon.md §3.9 item 8). The stop was
+        // synchronous; the next client's connection starts the daemon that stays.
+        systemctl(&["stop", "sill-daemon.service"]);
+        return;
+    }
+    // a daemon a client started (transient unit sill-daemon, or bare): ask it to leave
+    if let Ok(c) = sill_proto::Client::connect() {
+        let _ = c.call::<serde_json::Value>(sill_proto::method::DAEMON_SHUTDOWN, sill_proto::Empty::default());
+    }
+    systemctl(&["stop", "sill-daemon.service"]);
+    for _ in 0..40 {
+        if sill_proto::Client::connect().is_err() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if socket_unit && !dev {
+        systemctl(&["start", "sill.socket"]);
     }
 }

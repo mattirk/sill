@@ -9,9 +9,10 @@ in the same folder starts informed.
 See [SPEC.md](SPEC.md) for the design and [docs/](docs/) for memory, security and design notes; this file
 is the practical side. The [roadmap](ROADMAP.md) links ideas, proposed features, current work and history.
 
-Status (2026-11-01): M0–M2 done and in daily use — sessions, pins, Changes, the file tree, a shell inside
+Status (2026-11-07): M0–M2 done and in daily use — sessions, pins, Changes, the file tree, a shell inside
 the jail, managed processes, the ACP agent registry, standing instructions, tray icon, and memory
-(remember, recall, search). Next: memory compaction and retention, ghost sessions, policies UI.
+(remember, recall, search). The window is **sill-gui** (Iced, [docs/sill-gui.md](docs/sill-gui.md)) — the only
+frontend since 2026-11-07, when the GTK shelf was removed. Direction and open work: the [roadmap](ROADMAP.md).
 
 ## How it works
 
@@ -32,7 +33,8 @@ Three ideas carry the whole thing:
 
 Plus **memory**: when a session ends, its agent writes a short summary as its last turn; sill stores it
 with the facts (folders, kept files, repo heads, counts) and tells the next session in that folder what
-came before. All of it is searchable, from the shelf, the host and inside the jail.
+came before. All of it is searchable from the host and inside the jail; sill-gui's Reopen list filters by
+title and summary.
 
 ## Quick start
 
@@ -42,25 +44,25 @@ nicer (units, journal, limits) but is not required (SPEC §4.12).
 ```bash
 # 1. Install — from the release tarball, the .deb, or source (see Build below). One root step does
 #    everything an installer would, idempotently, and says what it did and skipped:
-sudo sill init                 # binaries to /usr/local · policy · icons · state image + units
-sill init --user               # per account: the shelf starts with your session; prints the hotkey hint
+sudo sill init                 # sill, sill-shim, sill-gui to /usr/local · policy · icons · state image + units
+sill init --user               # per account: sill-gui starts with your session; prints the hotkey hint
 
-# 2. Open the shelf
-sill toggle                    # or Alt+Space once you've bound it (Settings → Hotkey)
+# 2. Open sill-gui
+sill toggle                    # or the hotkey once you've set it (Settings → Window → Hotkey; Alt+Space is the usual choice)
 ```
 
-Then, in the shelf: `+` → pick an agent → it asks you to log in the first time (buttons in the
+Then, in sill-gui: `+` → pick an agent → it asks you to log in the first time (buttons in the
 conversation; Claude Code's login runs in a terminal pane inside the jail). Pin the folder you want to
 work in (the folder button opens the file tree; `+` on a row pins it). Type. Enter sends,
 Shift+Enter is a newline.
 
-When you're done, close the tab (Ctrl+Shift+W): the agent writes its summary, the jail stops, the
+When you're done, close the tab (Ctrl+W): the agent writes its summary, the jail stops, the
 session stays in the Reopen list with its summary under its name.
 
 Other `sill init` forms: `--dry-run` (the plan only), `--prefix /opt/sill`, `--state-dir /mnt/fast/sill`
 (an own partition instead of the 32 GB image).
 
-## Using the shelf
+## Using sill-gui
 
 **The herring** (top left; *sill* is Swedish for herring) flips between the sessions and the backend
 pages — *Changes*, *Files*, *Agents*, *Settings* (Settings → Default page picks which opens first).
@@ -83,10 +85,10 @@ changes and symlinks take a click each. Nothing is kept automatically.
 
 **Files** is a tree of pinned folders, repositories with changes, and home — git branch on a repo root,
 badges for what sessions changed, a search box for names and path fragments. A file opens in the viewer
-over the session: read, or *Edit* and Ctrl+S. The tree is a drawer with a dragged width (Ctrl+Shift+F
-toggles it).
+over the session: read, or *Edit* and Ctrl+S. The tree is a drawer with a dragged width (Ctrl+Shift+D
+switches between the Shelf and Drawer layouts, Ctrl+Shift+F into the Full layout and back).
 
-**Shell**: the terminal icon (or Ctrl+T) swaps the prompt for a terminal running *inside the session's
+**Shell**: the terminal icon (or Ctrl+Shift+T) swaps the prompt for a terminal running *inside the session's
 jail* — same mounts, pins and proxy the agent has, so `git status`, builds and tests show the agent's
 view. It starts in the first pinned folder, keeps running while hidden, dies with the session.
 Ctrl+Shift+H is a shell on the host instead, marked `host · outside the jail`.
@@ -108,7 +110,7 @@ paths are private or read-only, the network allow-list, tool directories the jai
 memory recall block, then your file. Sent once per agent start and again after an edit, not with every
 prompt.
 
-**Tray icon**: left click shows/hides the shelf, menu has Show/hide and Quit. Quit ends every open session
+**Tray icon**: left click shows/hides the window, menu has Show/hide and Quit. Quit ends every open session
 the way closing its tab does — the agents write their summaries first, out of sight — and exits when the
 last one is done. While any agent works, the icon moves (the sill ripples, the fish rides it); it is still
 when all are idle. Settings → Tray icon turns it off.
@@ -124,9 +126,8 @@ design; this is what you see.
   with the facts attached (pins, kept paths, repos and their heads). The tab stays while it answers
   (90 s cap; a second close ends at once with what it has). When the agent can't be asked, sill writes a
   mechanical summary from the facts. Either is stored on the session and marked which kind it is.
-- **The Reopen list** (`+`) shows date and the summary's first line under each ended session, the
-  whole summary as a tooltip, and a search box over titles, summaries, notes and your prompts
-  (`folder:` `agent:` `since:` filters). Clicking a row resumes the session with its history. *New here*
+- **The Reopen list** (`+`) shows date and the summary's first line under each ended session, with a
+  filter over titles and summaries. Clicking a row resumes the session with its history. *New here*
   (`+` on the row) starts a fresh session with the same agent, policy, scope and pins,
   told the old one's summary first.
 - **The session page** (session menu → *Page*, or the page glyph on a Reopen row) shows the facts
@@ -146,7 +147,7 @@ design; this is what you see.
 - **Search from anywhere.** On the host, `sill memory list | show <id|title> | search <words> |
   transcript <id> [--grep WORDS] | recall <id> | refresh`. Inside the jail the agent has
   `sill-memory search | show | transcript` over a read-only snapshot (`/.sill/memory/memory.db`,
-  refreshed at shelf start and when a session ends) — it can read memory, never write it. Full-text
+  refreshed when a session ends or is deleted, and by `sill memory refresh`) — it can read memory, never write it. Full-text
   search (SQLite FTS5, no embeddings) over titles, summaries, notes and prompts; agent text through
   `transcript --grep`.
 - **Off switch**: Settings → Memory. With it off nothing is summarised or recalled.
@@ -174,7 +175,7 @@ jail. A new dot-path an agent creates under `~` is adopted into its sill home af
 `~/.local/state/sill/agents/<id>` to make the agent log in again.
 
 **Logging in.** When an agent refuses to open a session without a login, the conversation shows one
-button per method. Claude Code logs in in the shelf's terminal pane inside the jail — its own login,
+button per method. Claude Code logs in in sill-gui's terminal pane inside the jail — its own login,
 separate from the host's Claude Code or Zed. Codex with an API key: put `OPENAI_API_KEY` in its
 environment (the gear) and pick *API Key*; with ChatGPT pick *ChatGPT* (or `sill login codex`) — that
 login runs on this machine because its browser callback can't reach the jail, but with `CODEX_HOME`
@@ -182,20 +183,20 @@ pointing at the jail's copy, so nothing lands on the host. Gemini: see Known lim
 
 **Policy changes.** A jail gets its mounts and permission state when it is launched. After editing the
 policy (`/etc/sill/policies/default.toml`, then `~/.config/sill/policies/`), reopen a session's tab: a
-jail older than the policy file is rebuilt. Restarting the shelf alone does not touch running sessions.
+jail older than the policy file is rebuilt. Restarting sill-gui alone does not touch running sessions.
 
 ## The command line
 
 ```bash
-sill toggle                                # show / hide the shelf
-sill restart [--dev]                       # after an update (--dev runs the build in target/)
-sill theme NAME · sill hotkey SPEC         # the same as the Settings rows
+sill gui [--hidden]                        # start sill-gui (a second start shows the running window)
+sill toggle                                # show / hide sill-gui (bind it to a key)
+sill restart [--dev] [--hidden]            # after an update: the daemon and sill-gui (--dev runs the checkout's target/debug build of both)
 sill memory …                              # see Memory above
 sill policy                                # the policy as sill reads it
-journalctl --user -u sill-shelf -f         # the shelf's log
+journalctl --user -u sill-gui -f           # sill-gui's log
 ```
 
-The jail without the shelf — handy for experiments and scripting. Until the state filesystem is
+The jail without sill-gui — handy for experiments and scripting. Until the state filesystem is
 mounted, point `--state-dir` at a directory that is not inside an overlaid tree and pass
 `--unsafe-state` (`/tmp` works; it's tmpfs, so copy-ups cost RAM).
 
@@ -218,7 +219,7 @@ $S dev revert ~/some/repo/other.txt                          # restore from the 
 $S dev stop
 ```
 
-The dev session starts the way the daemon starts the shelf's sessions (docs/daemon.md §3.1): in a
+The dev session starts the way the daemon starts sill-gui's sessions (docs/daemon.md §3.1): in a
 transient scope `sill-dev.scope` under `sill.slice` with the policy's limits where the systemd user
 instance answers, its log in the journal (`journalctl --user -t sill-dev`, the proxy's allow/deny
 lines included); otherwise — or with `--direct`, or `SILL_LAUNCHER=direct` — in a cgroup made by hand
@@ -229,9 +230,9 @@ it to `false` to run anyway with a warning. `--net` shares the host network (tes
 ## Build
 
 ```bash
-# Debian 13: rustup stable (Debian's 1.85 is too old), bubblewrap, GTK 4
+# Debian 13: rustup stable (Debian's 1.85 is too old), bubblewrap, and what iced needs to build; no GTK
 curl -sSf https://sh.rustup.rs | sh
-sudo apt install bubblewrap libgtk-4-dev libvte-2.91-gtk4-dev libgtksourceview-5-dev
+sudo apt install bubblewrap libwayland-dev libxkbcommon-dev
 cargo build --release
 cargo test --workspace
 packaging/deploy.sh --fast     # quicker local builds; incremental cache in target/local
@@ -246,7 +247,7 @@ builds retain their full optimization settings.
 
 Release channels: the tarball (`sill-<ver>-<arch>.tar.gz` + `SHA256SUMS`, `packaging/release.sh`)
 with `sudo ./sill init` inside; the `.deb` (`packaging/deb.sh`, `postinst` runs `sill init`); from
-source, `cargo install sill-shelf sill-shim` then `sudo sill init` (binaries are taken from next to the
+source, `cargo install sill sill-shim sill-gui` then `sudo sill init` (binaries are taken from next to the
 running `sill`). Signed sums, `sill.io` and the apt repository come later.
 
 | Path | What |
@@ -254,11 +255,14 @@ running `sill`). Signed sums, `sill.io` and the apt repository come later.
 | `crates/sill-core` | library: policies, mount table, jail builder (bwrap argv), ledger, keep, memory, shim client, ACP client, proxy |
 | `crates/sill-shim` | the supervisor inside the jail: agent stdio relay, control channel, revert, proxy forwarder, `sill-proc`, `sill-memory` |
 | `crates/sill-memory` | the FTS5 index, the read-only snapshot and the search queries |
-| `crates/sill` | the `sill` command and the GTK shelf (`crates/sill/src/shelf/`) |
+| `crates/sill` | the `sill` command and the daemon |
+| `crates/sill-gui` | the desktop window (Iced); the fonts under `crates/sill-gui/fonts/` |
+| `crates/sill-client` | the toolkit-free frontend core sill-gui is built on |
+| `crates/sill-proto` | the daemon protocol (SFP): wire types, schema, the client |
 | `policies/default.toml` | the built-in policy, also installed to `/etc/sill/policies/` |
-| `packaging/systemd/` | state-filesystem units (`/var/lib/sill.img` → `/var/lib/sill`), the shelf's user service |
+| `packaging/systemd/` | state-filesystem units (`/var/lib/sill.img` → `/var/lib/sill`), sill-gui's user service |
 | `packaging/release.sh`, `packaging/deb.sh` | the release tarball + `SHA256SUMS`, the `.deb`; `packaging/sill.desktop`, `packaging/icons/` |
-| `docs/` | `memory.md`, `security.md`, `design.md`, `tasks.md` |
+| `docs/` | `sill-gui.md`, `memory.md`, `security.md`, `design.md`, `tasks.md` |
 
 ## State filesystem
 
@@ -278,31 +282,35 @@ mounted, `sill` uses `/var/lib/sill/<uid>/sessions/<id>` by default. Grow the im
 - Gemini CLI's "Log in with Google" runs host-side like Codex's ChatGPT login, but Google stopped serving
   personal accounts through Gemini CLI on 2026-06-18. Use a Gemini API key (`GEMINI_API_KEY` in its
   environment, then *Gemini API key*), or install Antigravity from the Agents page.
-- Sessions end — and are summarised — on a tab close, the idle timeout and the tray's Quit; a shelf restart
-  (`sill shelf`) ends none. A tab closed again while its agent writes the summary disappears at once and
+- Sessions end — and are summarised — on a tab close, the idle timeout and the tray's Quit; `sill restart`
+  ends none. A tab closed again while its agent writes the summary disappears at once and
   the summary finishes in the background (still capped at 90 s).
-- No policies UI yet; edit the TOML.
 
 ## Look
 
 Sill's look is its own and the same on every machine: its icons are drawn glyphs (the mark too — a
-herring silhouette, `packaging/icons/herring/herring-silhouette.svg`), every theme is a complete
-palette (nothing follows the desktop's GTK theme, icon theme or dark/light setting), no libadwaita,
-and the text is set in two faces embedded in the binary — **Source Sans 3** for everything
+herring silhouette, `packaging/icons/herring/herring-silhouette.svg`), every theme is sill's own, a
+complete palette (nothing follows the desktop's theme, icon theme or dark/light setting; no GTK, no
+libadwaita), and the text is set in two faces embedded in the binary — **Source Sans 3** for everything
 proportional, **Source Code Pro** for terminals, code and the editor (both by Adobe, SIL Open Font
-License 1.1; the licence texts ship under `crates/sill/fonts/`). Text size is 13 pt at Normal and
-scales with the Text size setting only. `docs/design.md` says why.
+License 1.1; the licence texts ship under `crates/sill-gui/fonts/`). Text scales with the interface
+scale only (Settings, or Ctrl+Plus / Ctrl+- / Ctrl+0). `docs/design.md` says why.
 
 ## Keys
 
 | Key | What |
 |---|---|
-| Alt+Space (Settings → Hotkey) | show / hide the shelf |
-| Ctrl+Shift+Left / Right | previous / next session tab |
-| Ctrl+Shift+T / Ctrl+Shift+W | a new session tab with the same agent / close the tab (writes the summary) |
-| Ctrl+Shift+F | the file tree: the session's first pinned folder, else everything; again closes it |
-| Ctrl+T | the shell inside the session's jail |
-| Ctrl+Shift+H | a shell on the host, in the same pane, marked `host · outside the jail` |
-| Escape | the viewer steps back, then back to the sessions |
-| F2 | rename the selected tab |
+| the hotkey (Settings → Window → Hotkey; Alt+Space is the usual choice — or bind `sill toggle` in the desktop's keyboard settings) | show / hide the window |
+| Ctrl+T / Ctrl+W | a new session / close the session (writes the summary) |
+| Ctrl+, / Ctrl+. | previous / next tab |
+| Ctrl+1 … Ctrl+9 | tab N |
+| Ctrl+Shift+T | the terminal inside the session's jail |
+| Ctrl+Shift+H | a shell on the host, marked `host · outside the jail` |
+| Ctrl+Shift+D | Shelf ⇄ Drawer layout |
+| Ctrl+Shift+F | Full layout |
+| Ctrl+Plus / Ctrl+- / Ctrl+0 | interface scale |
+| Escape | the sessions ⇄ the backend pages |
 | Enter / Shift+Enter | send / newline |
+| Ctrl+Q | hides the window |
+
+All of these are editable in Settings.

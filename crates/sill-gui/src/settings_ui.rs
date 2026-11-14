@@ -1,10 +1,9 @@
-//! The Settings page (reference `03`, `13`, `14`; `shelf/settings.rs`): sections, each a title
-//! over a card of rows — the setting and a short dim line on the left, its control on the right,
-//! wide controls under their title — held to a reading width. The daemon's settings are shared
-//! with the GTK shelf (`_sill/settings.*`, sill-client's `settings`); sill-gui's own (the shelf
-//! width) are in `~/.config/sill/sill-gui.toml`. Rows only for what sill-gui or every session
-//! uses; the GTK shelf's own window settings (text size, its width, hotkey, tray, default page,
-//! host terminal) stay on its page for now.
+//! The Settings page (reference `03`, `13`, `14`): sections, each a title over a card of rows —
+//! the setting and a short dim line on the left, its control on the right, wide controls under
+//! their title — held to a reading width. The daemon's settings are read and changed over SFP
+//! (`_sill/settings.*`, sill-client's `settings`) and live in `sill.toml`; sill-gui's own (the
+//! Shelf width, Interface scale, the shortcuts, the window's modes and sizes) are in
+//! `~/.config/sill/sill-gui.toml`.
 use iced::widget::{
     Column, button, column, container, pick_list, row, rule, scrollable, space, text, text_editor,
     text_input, toggler,
@@ -17,7 +16,7 @@ use sill_proto::sessions::HostPath;
 use crate::style::{self, P, alpha};
 use crate::{App, Message, keys};
 
-/// The page's reading width, as the shelf's (`MEASURE` in `shelf/settings.rs`).
+/// The page's reading width.
 const MEASURE: f32 = 680.0;
 
 /// Shelf mode's width, a share of the monitor (sill-gui's own setting).
@@ -304,7 +303,7 @@ fn wide<'a>(
         .into()
 }
 
-/// A path as the shelf shows it: the home directory as `~`.
+/// A path as the page shows it: the home directory as `~`.
 fn home_relative(path: &str) -> String {
     match std::env::var("HOME") {
         Ok(home) if !home.is_empty() && path.starts_with(&format!("{home}/")) => {
@@ -519,7 +518,7 @@ impl App {
                 ),
                 setting(
                     "Tray icon",
-                    Some("Click to show or hide; its menu quits the window (shared with the shelf)"),
+                    Some("Click to show or hide; its menu quits the window (a daemon setting)"),
                     switch(s.tray.unwrap_or(true), move |v| {
                         change(SettingChange::Tray { value: Some(v) })
                     }),
@@ -527,7 +526,7 @@ impl App {
                 wide(
                     "Hotkey",
                     Some(
-                        "Shows, raises or hides the window — GTK accelerator syntax: <Control>Tab, <Alt>space, <Super>grave, F12",
+                        "Shows, raises or hides the window — for example <Control>Tab, <Alt>space, <Super>grave, F12",
                     ),
                     hotkey,
                 ),
@@ -829,7 +828,7 @@ fn where_things_are() -> Vec<(&'static str, String)> {
         (
             "Config",
             format!(
-                "{home}/.config/sill/sill.toml (shared with the shelf); {home}/.config/sill/sill-gui.toml (this window's modes and sizes)"
+                "{home}/.config/sill/sill.toml (the daemon's settings, edited here); {home}/.config/sill/sill-gui.toml (this window's modes and sizes)"
             ),
         ),
         (
@@ -838,7 +837,7 @@ fn where_things_are() -> Vec<(&'static str, String)> {
         ),
         (
             "Policy",
-            "~/.config/sill/policies/, then /etc/sill/policies/, then the built-in default; edited on the shelf's Settings page for now".into(),
+            "~/.config/sill/policies/, then /etc/sill/policies/, then the built-in default; the Policies section above".into(),
         ),
         (
             "Sessions",

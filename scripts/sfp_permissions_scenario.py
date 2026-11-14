@@ -125,7 +125,7 @@ try:
         (root / "first.toml").write_text("name='first'\n[network]\nallow_additional_hosts=false")
         assert "permission-fixture.example.com" not in client.call("_sill/policy.preview", {"session_id": first})["text"]
         denied(first, "another.example.com")
-        # Session capability choices need the frontend-declared capability; GTK-like clients lack it.
+        # Session capability choices need the frontend-declared capability; clients without it (line mode, scripts) are refused.
         assert "sill.permission_modes" not in client.capabilities and modes.capabilities["sill.permission_modes"] == 1
         def code(call, *args):
             try:

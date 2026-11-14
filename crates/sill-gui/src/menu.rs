@@ -1,4 +1,4 @@
-//! The `+` menu (reference `09`, `shelf/window.rs`): one row per agent that can start here, with a
+//! The `+` menu (reference `09`): one row per agent that can start here, with a
 //! ghost button at its right; then *Reopen* — a filter, and the sessions not open as tabs, newest
 //! first, the first few and "N more…". A row reopens its session; *New here* starts a new one
 //! that follows an ended session; the bin deletes, on a second press.
@@ -14,7 +14,7 @@ use crate::layout::Mode as View;
 use crate::style::{self, P, alpha};
 use crate::{App, Message, icons, keys};
 
-/// Rows shown before "N more…", as the shelf does.
+/// Rows shown before "N more…".
 const SHOWN: usize = 5;
 
 #[derive(Default)]
@@ -397,7 +397,7 @@ fn tip<'a>(value: String) -> Element<'a, Message> {
         .into()
 }
 
-/// A Unix time as the shelf dates sessions: year-month-day, in UTC.
+/// A Unix time as sessions are dated: year-month-day, in UTC.
 pub(crate) fn date(seconds: i64) -> String {
     let days = seconds.div_euclid(86_400);
     // civil from days (Howard Hinnant's algorithm)

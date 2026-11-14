@@ -315,7 +315,7 @@ impl JailSpec {
         env.insert("USER".into(), self.user.clone());
         env.insert("LOGNAME".into(), self.user.clone());
         env.insert("SHELL".into(), "/bin/bash".into());
-        // under the shelf's systemd unit TERM arrives empty, which leaves TUIs (login prompts) unable
+        // under the daemon's systemd unit TERM arrives empty, which leaves TUIs (login prompts) unable
         // to draw: an empty value counts as unset
         env.insert("TERM".into(), std::env::var("TERM").ok().filter(|t| !t.is_empty()).unwrap_or_else(|| "xterm-256color".into()));
         if let Ok(lang) = std::env::var("LANG") {
@@ -414,7 +414,7 @@ impl JailSpec {
         // configuration (policies, agent overrides — a session's mounts and allowed domains are made
         // of them) and its whole state directory — the session store, the staged binaries
         // (security.md S2), every agent's sill-owned home (`agents/`, the login scratch), the
-        // daemon's lock, the shelf's log, and whatever is put there next: an allow-list, so a new
+        // daemon's lock, and whatever is put there next: an allow-list, so a new
         // file is hidden until someone decides otherwise. The current agent gets its own home bound
         // at `~/.claude` etc. from the host side, the others' stay out of sight (SPEC §4.11 #8); the
         // installed adapters (`tools/`) are bound back read-only below, the agent runs from there.

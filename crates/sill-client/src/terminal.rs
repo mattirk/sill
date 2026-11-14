@@ -1,5 +1,5 @@
 //! A session's jail shell: the terminal the daemon keeps in the jail (docs/protocol.md, terminals),
-//! under the label the shelf uses, so either frontend finds the shell the other one opened. Its
+//! under a fixed label, so the daemon-owned shell survives a window restart and is found again. Its
 //! bytes come and go over the daemon's byte stream, never a local pty; the emulator is the
 //! frontend's.
 //!
@@ -15,7 +15,8 @@ use std::sync::{Arc, Mutex, mpsc};
 use sill_proto::terminals as api;
 use sill_proto::transport::RawStream;
 
-/// The shelf's name for a session's plain shell, shared so the two frontends find each other's.
+/// The label of a session's plain shell: the daemon-owned shell survives a window restart, found
+/// again by its label.
 pub const LABEL: &str = "shell";
 
 /// The requests that steer a terminal besides its bytes.
@@ -241,7 +242,7 @@ fn run(
 }
 
 /// The session's jail shell over a connection of its own: the running one under [`LABEL`] when
-/// there is one (the shelf's, or this frontend's from before), else a new login shell.
+/// there is one (from before a window restart), else a new login shell.
 pub fn jail_shell(
     connect: crate::Connector,
     session_id: String,
@@ -261,7 +262,7 @@ pub fn jail_terminal(
     named_terminal(connect, Some(session_id), label.into(), argv, env, None)
 }
 
-/// A host shell owned by the daemon, sharing the GTK shelf's per-session label.
+/// A host shell owned by the daemon, under its per-session label.
 pub fn host_shell(
     connect: crate::Connector,
     session_id: String,

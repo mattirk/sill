@@ -1,5 +1,5 @@
 //! Proxy denials are runtime records, independent of the agent conversation stream. A card over
-//! the composer per refused host (the shelf's `add_actions`, `shelf/session_view.rs`): Allow adds
+//! the composer per refused host: Allow adds
 //! it to the agent's allow-list and, unless it was for this session only, starts the session
 //! again and attaches anew, which brings the agent back up; Keep blocked remembers the answer.
 //! What came of it is a short note that goes by itself.

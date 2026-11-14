@@ -69,7 +69,7 @@ pub struct Network {
     pub allow: Vec<String>,
     #[serde(default)]
     pub allow_local: Vec<String>,
-    /// Refused hosts the shelf does not ask about: telemetry and crash reporting the agent would
+    /// Refused hosts the frontend does not ask about: telemetry and crash reporting the agent would
     /// send anyway. Still refused, just quietly.
     #[serde(default = "quiet_default")]
     pub quiet: Vec<String>,
@@ -139,7 +139,7 @@ pub struct Limits {
     pub tasks_max: u32,
     pub idle_timeout_minutes: u32,
     /// Stop the agent process (not the jail) after this long without traffic and without a connected
-    /// shelf; 0 = never.
+    /// frontend; 0 = never.
     #[serde(default = "default_agent_idle")]
     pub agent_idle_minutes: u32,
     /// Refuse to start a session that would run without resource limits (`direct` launcher mode

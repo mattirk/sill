@@ -1,4 +1,4 @@
-//! sill core: everything the shelf and the CLI share and that has no UI.
+//! sill core: everything the daemon and the CLI share and that has no UI.
 //!
 //! - [`policy`]  — what a session may see, write and reach (TOML, SPEC §4.2 / §4.9)
 //! - [`mounts`]  — the host's mount table, the basis for the per-directory overlays

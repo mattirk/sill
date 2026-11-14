@@ -28,7 +28,7 @@ use anyhow::{Context, Result, bail};
 use crate::policy::{NetMode, Network};
 
 /// Connections served at once; the rest get a 503 and go. The jail's unit shares `TasksMax` with
-/// the proxy's threads, so a client opening sockets in a loop must not take the shelf down.
+/// the proxy's threads, so a client opening sockets in a loop must not take the launcher down.
 pub const MAX_CONNECTIONS: usize = 64;
 /// The request line and each header line are read up to this many bytes; a longer one is a 431.
 const MAX_LINE: usize = 8 * 1024;
@@ -71,7 +71,7 @@ pub fn host_matches(pattern: &str, host: &str) -> bool {
     host == pattern
 }
 
-/// A host name the shelf may show and offer to allow (security.md S7): an IP literal, or DNS
+/// A host name the frontend may show and offer to allow (security.md S7): an IP literal, or DNS
 /// labels of ASCII letters, digits and hyphens — no wildcard, no empty label, nothing a terminal
 /// renders as something else. The proxy denies on anything the rules don't match anyway; this is
 /// about what gets *written into a button* and, on a click, into the agent's allow-list.
@@ -108,7 +108,7 @@ const PUBLIC_SUFFIXES: &[&str] = &[
     "trycloudflare.com", "blogspot.com", "wordpress.com", "github.dev", "repl.co", "glitch.me", "surge.sh",
 ];
 
-/// The wildcard the shelf may offer for a refused name: `*.<parent>` when the name has three
+/// The wildcard the frontend may offer for a refused name: `*.<parent>` when the name has three
 /// labels or more and the parent is not a public suffix (`evil.co.uk` offers nothing, not
 /// `*.co.uk`; `api.example.com` offers `*.example.com`). `None` for IP literals.
 pub fn wildcard_offer(name: &str) -> Option<String> {
@@ -544,7 +544,7 @@ mod tests {
     }
 
     #[test]
-    fn names_the_shelf_may_show() {
+    fn names_the_frontend_may_show() {
         for ok in ["api.anthropic.com", "localhost", "a-b.example", "10.0.0.1", "::1", "x.y.z.example.org"] {
             assert!(valid_hostname(ok), "{ok}");
         }

@@ -293,7 +293,7 @@ fn notify(state: &str) {
 /// a panic under one of the hub's locks poisons it, so every later request panics too — a daemon
 /// that answers the socket and does nothing. A dead daemon is the case the design handles: the
 /// sessions are scopes of their own, `Restart=on-failure` (or the next client) starts a new one
-/// and it adopts them. Installed only here — the shelf and the CLI share this binary and keep
+/// and it adopts them. Installed only here — the CLI shares this binary and keeps
 /// Rust's default. `exit`, not `abort`: no core dump of the person's conversations, and a non-zero
 /// status is what the unit restarts on.
 fn exit_on_panic() {

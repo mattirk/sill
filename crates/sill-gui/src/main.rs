@@ -64,7 +64,7 @@ use sill_proto::sfp::{
 };
 
 #[derive(Parser)]
-#[command(about = "Experimental Iced frontend for Sill (runs beside the shelf)")]
+#[command(about = "Sill's desktop window")]
 struct Options {
     /// Open an existing session by exact ID, unique prefix or title.
     #[arg(long, conflicts_with = "demo")]
@@ -72,7 +72,7 @@ struct Options {
     /// Show a synthetic streaming conversation without connecting to a daemon.
     #[arg(long)]
     demo: bool,
-    /// Start without showing the window (the shelf's service): `sill toggle`, the hotkey or
+    /// Start without showing the window (the sill-gui service): `sill toggle`, the hotkey or
     /// starting sill-gui again shows it.
     #[arg(long)]
     hidden: bool,
@@ -125,7 +125,7 @@ fn main() -> iced::Result {
     .default_font(Font::with_name(fonts::SANS_FAMILY))
     .window(iced::window::Settings {
         size: START_SIZE,
-        // no title bar, like the shelf: the top bar's empty space moves the window
+        // no title bar: the top bar's empty space moves the window
         decorations: false,
         visible: !options.hidden,
         // closing hides: the window stays, and with it the hotkey and `sill toggle`
@@ -151,7 +151,7 @@ fn main() -> iced::Result {
 /// The window's size as made, in its own units (iced makes it this much times Interface scale).
 const START_SIZE: iced::Size = iced::Size::new(720.0, 860.0);
 
-/// The shelf stays open all day: draw on the integrated GPU and never wake a discrete one, unless
+/// The window stays open all day: draw on the integrated GPU and never wake a discrete one, unless
 /// the person asks otherwise (`WGPU_POWER_PREF=high`). iced 0.14 asks wgpu for the
 /// high-performance adapter, and this variable is the only way to change that.
 fn prefer_low_power_gpu() {
@@ -678,7 +678,7 @@ pub struct App {
     tray_asked: Option<async_channel::Sender<tray::Asked>>,
     /// What the tray was last told: an agent works.
     tray_busy: bool,
-    /// The pointer is over the top bar's activity (the shelf shows the timer then).
+    /// The pointer is over the top bar's activity (the timer shows then).
     pub activity_hovered: bool,
     /// When the view last went between the session and the backend: the herring swims a stroke.
     pub herring_flick: Option<Instant>,
@@ -1888,7 +1888,7 @@ impl App {
                             .unwrap_or(hotkey::DEFAULT),
                     );
                 }
-                // the tray icon as the shared setting says (unset: shown, as the shelf's)
+                // the tray icon as the shared setting says (unset: shown)
                 let want = settings.tray.unwrap_or(true);
                 if want && self.tray.is_none() {
                     if let Some(asked) = self.tray_asked.clone() {
@@ -2334,7 +2334,7 @@ impl App {
                     return Task::none();
                 }
                 page.hotkey = None;
-                // the grab follows at once; the setting is shared with the GTK shelf
+                // the grab follows at once; the setting is the daemon's
                 if let Some(hotkey) = &self.hotkey {
                     hotkey.set(spec.trim());
                 }
@@ -2628,7 +2628,7 @@ impl App {
         Task::none()
     }
 
-    /// Escape goes between the session and the backend, as the shelf's sessions ⇄ backend; an
+    /// Escape goes between the session and the backend; an
     /// open menu or file closes first, and the session's shell keeps Escape for itself.
     fn escape(&mut self) -> Task<Message> {
         if self.name_editor.take().is_some() {
@@ -2663,8 +2663,8 @@ impl App {
         self.show_page(self.default_page())
     }
 
-    /// The page Escape opens from the conversation: Settings → Default page (the shelf's
-    /// `default_page`; Changes unless set).
+    /// The page Escape opens from the conversation: Settings → Default page (the daemon's
+    /// `default_page` setting; Changes unless set).
     fn default_page(&self) -> Page {
         match self
             .daemon_settings
@@ -3091,7 +3091,7 @@ impl App {
         ])
     }
 
-    /// Stop the turn. As the shelf does, prompts still queued are removed first: stopping first
+    /// Stop the turn. Prompts still queued are removed first: stopping first
     /// could let the turn's end dispatch the next one.
     fn stop(&mut self) -> Task<Message> {
         if self.demo {

@@ -622,7 +622,7 @@ mod tests {
     #[test]
     fn a_terminal_login_during_an_open_session_releases_the_queue() {
         // Claude opens its session without a login and asks at the first prompt; the person logs
-        // in with the agent's own terminal command, and the shelf sends a retry when it closes
+        // in with the agent's own terminal command, and the frontend sends a retry when it closes
         let f=Fixture::new();let j=Journal::new(&f.store).unwrap();
         let mut st=f.runner.st.lock().unwrap();
         let ask=relay::Event::AuthRequired{message:"Authentication required".into(),methods:vec![]};

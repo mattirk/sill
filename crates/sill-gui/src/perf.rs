@@ -9,7 +9,7 @@ use sill_proto::sfp::{Content, Event, Item, SessionEvent, Tool};
 
 use crate::{App, SessionView, demo};
 
-const PROSE: &str = "A paragraph of agent prose with **bold**, `inline code` and a [link](https://example.org), long enough to wrap twice at the shelf's width so layout has real work to do.\n\n- a first point\n- a second point with `code`\n\n```rust\nfn main() {\n    println!(\"sill\");\n}\n```\n";
+const PROSE: &str = "A paragraph of agent prose with **bold**, `inline code` and a [link](https://example.org), long enough to wrap twice at Shelf mode's width so layout has real work to do.\n\n- a first point\n- a second point with `code`\n\n```rust\nfn main() {\n    println!(\"sill\");\n}\n```\n";
 
 fn item(id: usize, kind: &str, text: &str) -> Item {
     Item {

@@ -1,5 +1,5 @@
 //! A blocking client: one connection, requests answered in order of arrival by id, notifications
-//! handed out on a channel. What the CLI uses; the shelf wraps the same thing in a GLib channel.
+//! handed out on a channel. What the CLI and sill-client use.
 
 use std::collections::HashMap;
 use std::io::{BufReader, Read, Write};
@@ -104,7 +104,7 @@ impl Client {
         let _ = std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700));
         let exe = std::env::current_exe()?;
         // `sill-daemon.service`, transient, its log in the journal and its cgroup its own (a bare
-        // child of a shelf would live — and die — in the shelf's unit); `systemctl --user stop
+        // child of a frontend would live — and die — in the frontend's unit); `systemctl --user stop
         // sill-daemon` ends it and sessions stay, they are scopes of their own. Where that fails —
         // no user manager, or a unit of that name still loaded — the daemon is spawned bare.
         // the installed units exist but gave up (docs/daemon.md §3.7: the start limit after

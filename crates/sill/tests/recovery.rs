@@ -438,7 +438,7 @@ fn a_jail_left_running_by_an_ended_session_is_stopped_at_start() {
     assert_eq!(fixture.database().query_row("SELECT count(*) FROM sessions WHERE id=?1", [&fixture.session], |row| row.get::<_, i64>(0)).unwrap(), 1, "the reaper deleted the row");
 }
 
-/// The shelf's close of a tab nobody typed in: the frontend detached, then the end. Before
+/// sill-gui's close of a tab nobody typed in: the frontend detached, then the end. Before
 /// docs/daemon.md §3.11 the end retired the runner and the deletion then met its relay halfway out
 /// — a reset connection, every time on the host — and gave up before the jail's stop. Now the
 /// deletion retires the runner itself and waits for the relay: jail, relay and row all go, with

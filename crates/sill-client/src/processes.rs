@@ -4,8 +4,7 @@
 //! on `127.0.0.1:<port>` and relays every connection through the daemon's byte stream
 //! (`_sill/streams.port`), which connects to `127.0.0.1:<port>` inside, only for a port a
 //! running managed process declared. Nothing new becomes reachable from inside the jail; the
-//! bridge lives as long as its value (the frontend drops it when the process ends), as the GTK
-//! shelf's (`shelf/processes.rs`).
+//! bridge lives as long as its value (the frontend drops it when the process ends).
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -372,6 +371,8 @@ mod tests {
             cwd: sill_proto::sessions::HostPath::from_path(std::path::Path::new("/tmp")),
             port: Some(3000),
             pid: 7,
+            location: "jail".into(),
+            kept: false,
             started: started.to_string(),
             state: state.into(),
             exit_code,

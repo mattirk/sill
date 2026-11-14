@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
 Name=sill
-Comment=Agent shelf: AI agents in a jail the host controls, every change in a ledger
-Exec=@PREFIX@/bin/sill shelf
+Comment=AI agents in a jail the host controls, every change in a ledger
+Exec=@PREFIX@/bin/sill gui
 Icon=sill
 Terminal=false
 Categories=Development;Utility;

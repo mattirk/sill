@@ -2,7 +2,7 @@
 //! layers, scan the ledger, group by repository. Nothing reaches the host without a keep: pinned
 //! folders are bound live and never appear here (SPEC §4.4, decision 18).
 
-/// Environment for a shell the person opens on the host (the shelf's host shell, a terminal
+/// Environment for a shell the person opens on the host (the daemon's host shell, a terminal
 /// window): git's per-repository config in a pinned folder is agent-writable, and a git-aware
 /// prompt runs `git status` there at the first prompt — `core.fsmonitor` names a program that
 /// `git status` runs, so it is off for every repository (docs/security.md S8). Hooks, filters and
@@ -493,7 +493,7 @@ pub fn git_revert(repo: &Path, rel: &Path) -> Result<&'static str> {
     Ok("restored from HEAD")
 }
 
-/// Larger files are not diffed: reading and diffing them would hold the GTK thread (SPEC §4.11 #13).
+/// Larger files are not diffed: reading and diffing them would hold the daemon (SPEC §4.11 #13).
 pub const DIFF_MAX: u64 = 4 << 20;
 
 /// One side of a diff: the bytes of a regular file, or a line saying why there are none.

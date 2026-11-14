@@ -1,6 +1,6 @@
 //! sill-gui's own settings, `~/.config/sill/sill-gui.toml`: the window's modes and sizes. A file of
-//! its own, not a table in `sill.toml`: the GTK shelf and the daemon write that file from their own
-//! settings and would drop a table they do not know.
+//! its own, not a table in `sill.toml`: the daemon writes that file from its own settings and would
+//! drop a table it does not know.
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ pub struct Settings {
     pub work_height: Option<f32>,
     /// The drawer's width as last dragged, logical pixels.
     pub drawer_width: Option<f32>,
-    /// The window stays above others. Unset = on, as the GTK shelf.
+    /// The window stays above others. Unset = on.
     pub always_on_top: Option<bool>,
     /// Where the window was left in Drawer and Full mode, device pixels (Shelf mode is always on
     /// its edge). Unset = the top-left of the working area.

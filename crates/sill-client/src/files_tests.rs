@@ -334,7 +334,7 @@ fn git_status_colours_files_and_the_folders_above_them_but_not_the_root() {
 }
 
 #[test]
-fn folders_list_as_the_shelf_lists_them() {
+fn folders_list_as_the_frontend_lists_them() {
     let mut state = FilesState::default();
     let dir = path_of("/r");
     let serial = 7;

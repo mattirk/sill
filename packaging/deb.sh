@@ -1,9 +1,9 @@
 #!/bin/sh
-# Build the Debian package (SPEC §4.12): binaries under /usr, the policy as a conffile, the user unit,
+# Build the Debian package (SPEC §4.12): binaries under /usr, the policy as a conffile, the user units,
 # postinst = `sill init --no-copy --prefix /usr` (state image, system units; the package's own files
-# stay dpkg's). Plain dpkg-deb, no debhelper: the package is two static-ish binaries and a few files.
+# stay dpkg's). Plain dpkg-deb.
 # Output: dist/sill_<ver>_<arch>.deb. Publishing to an apt repository (which needs a signing key) is
-# not done here.
+# not done here. No debhelper: the package is three binaries and a few files.
 #
 #   packaging/deb.sh            # cargo build --release, then package
 #   packaging/deb.sh --no-build
@@ -19,11 +19,11 @@ rm -rf "$PKG"
 mkdir -p "$PKG/DEBIAN" "$PKG/usr/bin" "$PKG/etc/sill/policies" "$PKG/etc/systemd/user" \
          "$PKG/usr/share/sill" "$PKG/usr/share/applications" "$PKG/usr/share/icons/hicolor/scalable/apps" \
          "$PKG/usr/share/doc/sill"
-install -m 755 target/release/sill target/release/sill-shim "$PKG/usr/bin/"
+install -m 755 target/release/sill target/release/sill-shim target/release/sill-gui "$PKG/usr/bin/"
 install -m 644 policies/default.toml "$PKG/etc/sill/policies/"
-sed 's|/usr/local/bin/sill|/usr/bin/sill|' packaging/systemd/user/sill-shelf.service > "$PKG/etc/systemd/user/sill-shelf.service"
+sed 's|/usr/local/bin/sill|/usr/bin/sill|' packaging/systemd/user/sill-gui.service > "$PKG/etc/systemd/user/sill-gui.service"
 sed 's|@PREFIX@|/usr|' packaging/sill.desktop > "$PKG/usr/share/applications/sill.desktop"
-chmod 644 "$PKG/etc/systemd/user/sill-shelf.service" "$PKG/usr/share/applications/sill.desktop"
+chmod 644 "$PKG/etc/systemd/user/sill-gui.service" "$PKG/usr/share/applications/sill.desktop"
 install -m 644 packaging/icons/sill.svg "$PKG/usr/share/sill/sill.svg"
 install -m 644 packaging/icons/sill.svg "$PKG/usr/share/icons/hicolor/scalable/apps/sill.svg"
 install -m 644 README.md SPEC.md "$PKG/usr/share/doc/sill/"
@@ -36,19 +36,19 @@ Priority: optional
 Architecture: $DEB_ARCH
 Maintainer: Matti Rita-Kasari <matti@rita-kasari.fi>
 Installed-Size: $SIZE
-Depends: bubblewrap, e2fsprogs, libgtk-4-1, libvte-2.91-gtk4-0, libgtksourceview-5-0
-Recommends: systemd
+Depends: bubblewrap, e2fsprogs, libxkbcommon0, libwayland-client0
+Recommends: systemd, libvulkan1
 Suggests: weston, xwayland, dbus
-Homepage: https://github.com/mattirk/sill-shelf
-Description: agent shelf — AI agents in a jail the host controls
- A shelf for AI agents on your own Linux machine: an ACP client, a
- bubblewrap jail with every write recorded in an overlay, and a ledger
- of every change the agent makes. The shelf is a GTK window; the jail
- runs as a systemd user unit where there is one.
+Homepage: https://github.com/mattirk/sill
+Description: AI agents in a jail the host controls
+ AI agents on your own Linux machine: an ACP client, a bubblewrap jail
+ with every write recorded in an overlay, and a ledger of every change
+ the agent makes. sill-gui is the desktop window; the jail runs as a
+ systemd user unit where there is one.
 CTL
 cat > "$PKG/DEBIAN/conffiles" <<CF
 /etc/sill/policies/default.toml
-/etc/systemd/user/sill-shelf.service
+/etc/systemd/user/sill-gui.service
 CF
 cat > "$PKG/DEBIAN/postinst" <<'PI'
 #!/bin/sh

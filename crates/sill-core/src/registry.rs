@@ -670,7 +670,7 @@ fn install_binary(dir: &Path, d: &BinaryDist, log: &mut dyn FnMut(String)) -> Re
     Ok((command, d.env.clone()))
 }
 
-/// A program by name on the shelf's `PATH` (and `~/.local/bin`), or as given when absolute.
+/// A program by name on the daemon's `PATH` (and `~/.local/bin`), or as given when absolute.
 fn resolve_program(name: &str, home: &Path) -> Option<PathBuf> {
     let p = Path::new(name);
     if p.is_absolute() {

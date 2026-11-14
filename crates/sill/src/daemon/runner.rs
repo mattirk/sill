@@ -1,8 +1,8 @@
 //! One running session's conversation, owned by the daemon (docs/daemon.md §3.3, decision 2): the
-//! ACP client (`acp::run_session` on a thread, as the shelf ran it), the transcript it writes, and
+//! ACP client (`acp::run_session` on a thread, as the frontend ran it before the split), the transcript it writes, and
 //! the frontends attached to it. It runs whether or not anyone is attached.
 //!
-//! What the shelf did per event before the split is done here, once: the agent's text is gathered
+//! What the frontend did per event before the split is done here, once: the agent's text is gathered
 //! and written as an `agent` entry when a tool call or the end of the turn closes it, tool calls are
 //! written and updated, the agent's session id is kept for `session/load`, and a session/load's
 //! replay is neither written nor sent (the stored transcript is already what a frontend shows). A

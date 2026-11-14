@@ -1,6 +1,6 @@
-//! Managed processes and exposed ports (docs/tasks.md §2.4, §2.5), as the shelf's
-//! (`shelf/session_view.rs`): every open session's processes are read every few seconds; the
-//! composer's bar shows how many run (warning colour while an ended one failed), and pressing it
+//! Managed processes and exposed ports (docs/tasks.md §2.4, §2.5): every open session's processes
+//! are read every few seconds; the composer's bar shows how many run (warning colour while an
+//! ended one failed), and pressing it
 //! shows the list above the composer — name, state and uptime, the command, the last output line,
 //! the address when its port is exposed — with Log, Stop / Dismiss per row and Stop all.
 //!

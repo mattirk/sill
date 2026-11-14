@@ -348,7 +348,7 @@ impl Conversation {
         self.questions.values().filter(|q| q.state == "open")
     }
 
-    /// Prompts the daemon still holds unsent: removable before stopping, as the shelf does.
+    /// Prompts the daemon still holds unsent: removable before stopping.
     pub fn queued_submission_ids(&self) -> Vec<String> {
         self.submissions
             .values()

@@ -130,17 +130,17 @@ mod tests {
     fn find_files_by_name_and_path() {
         let d = std::env::temp_dir().join(format!("sill-find-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        for f in ["src/main.rs", "src/shelf/tree.rs", "docs/Tree.md", "target/debug/tree.d", "node_modules/x/tree.js"] {
+        for f in ["src/main.rs", "src/ui/tree.rs", "docs/Tree.md", "target/debug/tree.d", "node_modules/x/tree.js"] {
             let p = d.join(f);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(&p, "").unwrap();
         }
         let (found, cut) = find_files(&[d.clone()], "tree", 100, 10_000);
         let rel: Vec<String> = found.iter().map(|p| p.strip_prefix(&d).unwrap().display().to_string()).collect();
-        assert_eq!(rel, vec!["docs/Tree.md", "src/shelf/tree.rs"], "noise folders skipped, case folded");
+        assert_eq!(rel, vec!["docs/Tree.md", "src/ui/tree.rs"], "noise folders skipped, case folded");
         assert!(!cut);
-        let (found, _) = find_files(&[d.clone()], "shelf/tr", 100, 10_000);
-        assert_eq!(found, vec![d.join("src/shelf/tree.rs")]);
+        let (found, _) = find_files(&[d.clone()], "ui/tr", 100, 10_000);
+        assert_eq!(found, vec![d.join("src/ui/tree.rs")]);
         let (found, cut) = find_files(&[d.clone()], "", 2, 10_000);
         assert_eq!(found.len(), 2);
         assert!(cut);

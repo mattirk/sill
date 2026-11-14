@@ -1,4 +1,4 @@
-//! The shelf's open-items row, file drawer and reader, drawn from daemon-owned paths.
+//! The open-items row, file drawer and reader, drawn from daemon-owned paths.
 use iced::widget::{
     Column, button, column, container, markdown, responsive, row, rule, scrollable, space, text,
     text_editor, text_input, tooltip,
@@ -22,7 +22,7 @@ fn msg(action: Action) -> Message {
 fn action<'a>(label: impl Into<String>, event: Action) -> Element<'a, Message> {
     sized_action(label, style::SMALL, event)
 }
-/// A text button at `size`: the drawer's Files / Diff switch is body text, as in the shelf.
+/// A text button at `size`: the drawer's Files / Diff switch is body text.
 fn sized_action<'a>(label: impl Into<String>, size: f32, event: Action) -> Element<'a, Message> {
     keys::press(
         button(text(label.into()).size(size))
@@ -58,7 +58,7 @@ fn tip<'a>(content: impl Into<Element<'a, Message>>, value: String) -> Element<'
             .style(style::fill(P.surface)),
         tooltip::Position::Bottom,
     )
-    // as the shelf's tooltips: after the pointer rests, not while it passes over the tree
+    // after the pointer rests, not while it passes over the tree
     .delay(std::time::Duration::from_millis(350))
     .into()
 }
@@ -84,7 +84,7 @@ impl App {
             ]
             .spacing(6)
             .align_y(Alignment::Center);
-            // Match GTK: tracked line totals against HEAD, plus untracked files separately.
+            // Tracked line totals against HEAD, plus untracked files separately.
             if let Some(repo) = state.repo_of(&root.path) {
                 if let Some((added, removed)) = &repo.lines {
                     for (value, sign, color) in [(added, "+", P.success), (removed, "−", P.error)]
@@ -165,7 +165,7 @@ impl App {
     pub(crate) fn file_drawer<'a>(&'a self, view: &'a SessionView) -> Element<'a, Message> {
         let state = &view.files;
         let hovered = self.workspace.hovered.as_deref();
-        // as the shelf's bar: the drawer's close at the left, its one view switch at the right,
+        // the drawer's close at the left, its one view switch at the right,
         // showing where it goes — the changes from the tree, the tree from the changes
         let toolbar = row![
             glyph_action(
@@ -286,7 +286,7 @@ impl App {
         let file = state.reader.as_ref()?;
         let rendering = view.reader.as_ref()?;
         let is_diff = file.repo.is_some();
-        // one bar, as the shelf's viewer (reference 10, 11): the path — `git diff: <path>` for a
+        // one bar (reference 10, 11): the path — `git diff: <path>` for a
         // diff — dimmed, shortened with ~ and cut at its start; then what can be done; close
         let shown = home_relative(&file.path.display);
         let title = if is_diff {
@@ -505,7 +505,7 @@ impl App {
     }
 }
 
-/// A path as the shelf titles it: the home directory as `~`.
+/// A path as the reader titles it: the home directory as `~`.
 fn home_relative(path: &str) -> String {
     match std::env::var("HOME") {
         Ok(home) if !home.is_empty() && path.starts_with(&format!("{home}/")) => {
@@ -521,7 +521,7 @@ fn caption(value: &str) -> Element<'_, Message> {
         .into()
 }
 
-/// One tree row as the shelf draws it (`shelf/tree.rs`): indent guides, the kind's glyph (in the
+/// One tree row: indent guides, the kind's glyph (in the
 /// accent when pinned), the name coloured by what git says of it, a repository root's `git
 /// <branch>` at the end, and the pin button while the pointer is over the row.
 fn node<'a>(
@@ -605,7 +605,7 @@ fn node<'a>(
         msg(event),
     );
     let mut line = row![].height(Shrink).align_y(Alignment::Center);
-    // a guide per level, as the shelf's indents draw them
+    // a guide per level
     for _ in 0..depth.min(12) {
         line = line.push(
             container(rule::vertical(1).style(style::rule_style(style::alpha(P.fg, 0.14))))
@@ -641,7 +641,7 @@ fn node<'a>(
     tip(line, path.display.clone())
 }
 
-/// The Diff view as the shelf's (`shelf/diffstat.rs`): per pinned repository a dim header — its
+/// The Diff view: per pinned repository a dim header — its
 /// folder and branch, and `N files · +a −d ?u` — then a row per changed file: git's letter (`N`
 /// for new), the file's name (its path below the repository in the tooltip) and its lines added
 /// and removed, or `—` without counts.
@@ -923,7 +923,7 @@ pub(crate) fn numbered_diff(source: &str) -> Vec<(Option<usize>, Option<usize>, 
         .collect()
 }
 
-/// A diff as the shelf shows it: one column of line numbers down the diff's own text, in the
+/// A diff: one column of line numbers down the diff's own text, in the
 /// code's face and size so each number sits on its line; additions and deletions in git's
 /// colours, hunk headers in the accent, the file headers bold.
 pub(crate) fn diff_rows<'a>(source: &'a str, path: &str) -> Column<'a, Message> {

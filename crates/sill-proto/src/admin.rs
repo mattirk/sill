@@ -270,15 +270,11 @@ pub struct ProcessesPage {
 #[serde(default)]
 pub struct Settings {
     pub theme: String,
-    pub width: Option<f64>,
-    pub drawer_width: Option<i32>,
     pub drawer_follow_changes: Option<bool>,
     pub hotkey: Option<String>,
     pub default_page: Option<String>,
     pub timer_auto: Option<bool>,
-    pub text_scale: Option<f64>,
     pub auto_revert_minutes: Option<u32>,
-    pub host_terminal: Option<String>,
     pub tray: Option<bool>,
     pub remember_pins: Option<bool>,
     pub memory: Option<bool>,
@@ -293,15 +289,11 @@ pub struct Settings {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SettingChange {
     Theme { value: String },
-    Width { value: Option<f64> },
-    DrawerWidth { value: Option<i32> },
     DrawerFollowChanges { value: Option<bool> },
     Hotkey { value: Option<String> },
     DefaultPage { value: Option<String> },
     TimerAuto { value: Option<bool> },
-    TextScale { value: Option<f64> },
     AutoRevertMinutes { value: Option<u32> },
-    HostTerminal { value: Option<String> },
     Tray { value: Option<bool> },
     RememberPins { value: Option<bool> },
     Memory { value: Option<bool> },

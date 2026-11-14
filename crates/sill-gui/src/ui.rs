@@ -1,4 +1,4 @@
-//! The window as the shelf draws it (`docs/reference-ui` 01–02 and 19–22): a top bar with the
+//! The window (`docs/reference-ui` 01–02 and 19–22): a top bar with the
 //! sill mark, one tab per open session and the selected agent's activity at the right; the
 //! conversation; the composer with the agent's controls and send / stop.
 //!
@@ -63,7 +63,7 @@ impl App {
                         .into(),
                 }
             };
-            // a file open takes the chips' row too, as in the shelf
+            // a file open takes the chips' row too
             let chips: Element<'_, Message> =
                 if self.details.is_some() || view.files.reader.is_some() {
                     space().height(0).into()
@@ -137,7 +137,7 @@ impl App {
         // Keep the conversation at the same tree position when the menu opens/closes.
         // Wrapping it in a stack only while open discards its scroll and selection state.
         let mut layers = stack![window];
-        // GTK's corner chevron borrows the drawer's space without adding a row.
+        // The corner chevron borrows the drawer's space without adding a row.
         if self.workspace.shown && !self.backend_shown() && self.current().is_some() {
             layers = layers.push(
                 container(keys::press(
@@ -197,7 +197,7 @@ impl App {
         } else if !self.listed {
             "Connecting…".into()
         } else if self.tabs.is_empty() {
-            "No open session. Start one in the shelf; it shows here as a tab.".into()
+            "No open session. Start one with +; it shows here as a tab.".into()
         } else {
             "No session is running. Choose one above to open it.".into()
         };
@@ -219,7 +219,7 @@ impl App {
         // the herring opens the sill pages, underlined while one shows
         let shown = self.backend_shown();
         let drawer_open = self.workspace.shown && !shown && self.current().is_some();
-        // room on its right, as the shelf's status slot has (`.sill-status-slot`)
+        // room on its right
         let activity = container(self.activity()).padding(Padding {
             left: 2.0,
             right: 8.0,
@@ -261,7 +261,7 @@ impl App {
         );
         let mut tabs = row![].spacing(2).height(Fill);
         if shown {
-            // the pages' own tabs in place of the sessions', as the shelf's backend
+            // the pages' own tabs in place of the sessions'
             for (page, glyph, title) in [
                 (crate::Page::Changes, "changes", "Changes"),
                 (crate::Page::Agents, "agents", "Agents"),
@@ -302,10 +302,10 @@ impl App {
                             ))
                             .on_enter(Message::Menu(crate::menu::Event::Hover)),
                             // the activity over the drawer when it is beside the conversation, so the +
-                            // ends the conversation's side, as in the shelf
+                            // ends the conversation's side
                             match self.layout.drawer(drawer_open, width) {
                                 // reaching back across the bar's spacing and the +'s padding, so the +
-                                // sits about 10 px left of the divider (the shelf's place)
+                                // sits about 10 px left of the divider
                                 Drawer::Beside(drawer) => container(activity)
                                     .width(drawer + layout::HANDLE - 14.0)
                                     .align_right(drawer + layout::HANDLE - 14.0),
@@ -529,9 +529,9 @@ impl App {
         } else {
             self.daemon_dot()
         };
-        // the timer, as the shelf's: while the agent works, and whenever the pointer is over the
+        // the timer: while the agent works, and whenever the pointer is over the
         // activity — the session's worked time, still while it does not work; it slides out from
-        // under the indicator when it appears, as the shelf's revealer does
+        // under the indicator when it appears
         let working = attention
             .working_ms
             .filter(|_| attention.activity == Activity::Working);
@@ -911,7 +911,7 @@ impl App {
                 .width(Fill)
                 .style(style::fill(P.code_bg)),
             ),
-            // the agent's reasoning: Markdown as the shelf draws it (Codex's summaries are bold
+            // the agent's reasoning: Markdown (Codex's summaries are bold
             // titles after blank lines), smaller, dimmed and in italics
             "thought" => match view.rendered.get(&item.item_id) {
                 Some(rendered) => container(markdown::view_with(
@@ -1376,7 +1376,7 @@ impl App {
             .style(style::prompt);
         // the bar knows its width, so the agent's controls can give way to the buttons
         let bar = responsive(move |size| self.composer_bar(view, size.width)).height(Shrink);
-        // as in the shelf, the prompt folds away while the terminal is up in its place
+        // the prompt folds away while the terminal is up in its place
         let terminal = view.terminal.as_ref().filter(|_| view.terminal_shown);
         let input: Element<'_, Message> = match terminal {
             Some(pane) => self.terminal_pane(pane, view.terminal_host),
@@ -1405,7 +1405,7 @@ impl App {
     }
 
     /// The jail shell under its caption: a rule and label in the success colour, the counterpart
-    /// of the host shell's warning-coloured one (the shelf's `sill-jail-caption`).
+    /// of the host shell's warning-coloured one.
     fn terminal_pane<'a>(
         &'a self,
         pane: &'a crate::terminal::Pane,
@@ -1547,7 +1547,7 @@ fn option_style(
 }
 
 /// A form question's fields — choices as marks to press, text and numbers as fields — with
-/// Submit and Decline. Values are encoded as the shelf sends them (`forms.rs`).
+/// Submit and Decline. Values are encoded by `forms.rs`.
 fn form<'a>(view: &'a SessionView, question: &'a Question) -> Element<'a, Message> {
     let entries = view.forms.get(&question.question_id);
     let sending = view.answering.contains(&question.question_id);
@@ -1812,8 +1812,7 @@ fn controls(view: &SessionView) -> Vec<Element<'_, Message>> {
         out.push(control(picks, selected, Message::SetMode));
     }
     for option in &controls.options {
-        // the mode set already covers a "mode"-category option (Claude Code sends both; the
-        // shelf skips it the same way)
+        // the mode set already covers a "mode"-category option (Claude Code sends both)
         if option.category == "mode" && !controls.modes.is_empty() {
             continue;
         }
@@ -1903,7 +1902,7 @@ const CONTROL_PAD_Y: f32 = (BAR_BUTTON - CONTROL_TEXT * 1.3) / 2.0;
 /// The room a control keeps at its right for its caret.
 const CARET_ROOM: f32 = 19.0;
 
-/// One ACP control: as wide as its selected label, as the shelf's dropdowns are. iced's pick
+/// One ACP control: as wide as its selected label. iced's pick
 /// list sizes its menu to the control, so a longer choice wraps in the open menu — a dropdown that
 /// sizes the two apart is still to be written.
 /// Room on each side of a choice in an agent control's menu.
@@ -1915,8 +1914,7 @@ fn control<'a>(
     on_select: impl Fn(Pick) -> Message + 'a,
 ) -> Element<'a, Message> {
     let label = selected.as_ref().map_or("", |p| p.title.as_str());
-    // a little smaller than the shelf's 80 % of the body text (`.sill-controls`); room at the right for
-    // the caret
+    // a little under 80 % of the body text; room at the right for the caret
     let width = text_width(label, CONTROL_TEXT) + 6.0 + CARET_ROOM;
     let on_select = std::rc::Rc::new(on_select);
     let select = on_select.clone();
@@ -2122,7 +2120,7 @@ fn thought_settings() -> markdown::Settings {
     settings
 }
 
-/// `content` behind a left rule `width` wide in `color`: how the shelf marks a block's kind.
+/// `content` behind a left rule `width` wide in `color`: how a block's kind is marked.
 pub(crate) fn ruled<'a>(
     width: f32,
     color: Color,
@@ -2259,7 +2257,7 @@ fn diff(diff: &str) -> Element<'_, Message> {
     .into()
 }
 
-/// The shelf's glyph for an ACP tool kind (`shelf/conversation.rs` `kind_glyph`).
+/// The glyph for an ACP tool kind.
 fn kind_glyph(kind: &str) -> &'static str {
     match kind.to_ascii_lowercase().as_str() {
         "read" => "›",
@@ -2275,8 +2273,8 @@ fn kind_glyph(kind: &str) -> &'static str {
     }
 }
 
-/// GTK's `Conversation::mark_area`: a 12 px drawing with a 1.3 px round stroke.
-/// Keep these paths independent of the text font, as in the shelf.
+/// A tool's status mark: a 12 px drawing with a 1.3 px round stroke.
+/// Keep these paths independent of the text font.
 fn status_mark<'a>(status: &str) -> Element<'a, Message> {
     let (shape, color) = match status.to_ascii_lowercase().replace('_', "").as_str() {
         "completed" => (r#"<path d="M2.5 6.5 5 9 9.5 3.5"/>"#, alpha(P.fg, 0.375)),
@@ -2308,7 +2306,7 @@ pub(crate) fn one_line(text: &str, max: usize) -> String {
 }
 
 /// The spinner's angle: one turn a second, from the time of the last tick.
-/// The spinner's size and stroke, and its arc: one turn a second (`shelf/spinner.rs`).
+/// The spinner's size and stroke, and its arc: one turn a second.
 const SPIN_SIZE: f32 = 15.0;
 const SPIN_LINE: f32 = 2.0;
 const SPIN_ARC: f32 = 1.3 * std::f32::consts::PI / 2.0;
@@ -2350,7 +2348,7 @@ fn activity_canvas<'a>(indicator: Indicator, clock: Option<Clock>) -> Element<'a
 }
 
 /// Drawn every frame from the clock's time, so it turns smoothly without the window building a
-/// new view for each frame (the shelf's spinner follows its frame clock the same way).
+/// new view for each frame.
 struct Busy {
     indicator: Indicator,
     clock: Option<Clock>,
@@ -2427,7 +2425,7 @@ impl canvas::Program<Message> for Busy {
                 });
                 frame.stroke(&arc, stroke(alpha(color, 0.95)));
             }
-            // the shelf's status square: 8 px, round
+            // the status square: 8 px, round
             Indicator::Pulse(color) => {
                 let phase = spin_epoch().elapsed().as_secs_f32() * std::f32::consts::TAU / 4.0;
                 frame.fill(

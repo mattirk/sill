@@ -1,5 +1,5 @@
-//! Renders views headlessly to PNG for visual review against `docs/reference-ui/`, at the shelf's
-//! logical size (720×860; the simulator draws at scale 2, the captures' 1440×1720). Ignored by
+//! Renders views headlessly to PNG for visual review against `docs/reference-ui/`, at the window's
+//! start size (720×860; the simulator draws at scale 2, the captures' 1440×1720). Ignored by
 //! default: `cargo test -p sill-gui snapshots -- --ignored`, then look in
 //! `target/sill-gui-snapshots/`. These are for looking at, not pixel assertions.
 use std::path::PathBuf;

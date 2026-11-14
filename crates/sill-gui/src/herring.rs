@@ -1,4 +1,4 @@
-//! The herring in the top-left corner, as the shelf draws it (`shelf/herring.rs`): sill's mark, one
+//! The herring in the top-left corner: sill's mark, one
 //! solid fish with a notched tail and the eye a hole. Still at rest; when the view goes between
 //! the session and the backend it swims one stroke — a travelling wave down the body, the nose
 //! pinned — and stops. It asks for frames only during the stroke.

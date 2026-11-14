@@ -1,7 +1,7 @@
 //! The Changes page's work in the daemon (docs/daemon.md §7 M2): every session's overlay scanned
 //! against its policy, the pinned repositories' git status, keep with its hash check, revert (in
 //! the jail through the shim while it runs, the upper entry dropped when it does not), undo, the
-//! diffs — and the auto-revert sweep, which the shelf ran before. Frontends name a change by
+//! diffs — and the auto-revert sweep, which the frontend ran before the split. Frontends name a change by
 //! session and host path; the daemon finds it again in a fresh scan, so nothing a frontend sends
 //! points at a file of its choosing.
 
@@ -193,7 +193,7 @@ impl Hub {
     }
 
     /// After each turn, on a thread (it scans): the agent's own new dot-paths move into its
-    /// sill-owned home (SPEC §4.2, what the shelf's `after_turn` did) — never for a ghost, whose
+    /// sill-owned home (SPEC §4.2, what the frontend's `after_turn` did before the split) — never for a ghost, whose
     /// state must not reach the home every later session shares — and the attached frontends get
     /// a note: how many changes wait in Changes, what was adopted.
     pub fn turn_ended(self: &std::sync::Arc<Self>, id: &str) {

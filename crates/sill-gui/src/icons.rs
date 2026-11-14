@@ -1,7 +1,6 @@
 //! Icons as SVG handles, made once (the herring is drawn by `herring.rs`): the agents' provider
-//! glyphs (simple-icons, CC0 1.0 — the same paths as `shelf/icons.rs`), the composer's send and
-//! stop shapes, and the shelf's lucide line glyphs. All are single-colour; the `svg` widget
-//! recolours them.
+//! glyphs (simple-icons, CC0 1.0), the composer's send and stop shapes, and the lucide line
+//! glyphs. All are single-colour; the `svg` widget recolours them.
 use std::sync::OnceLock;
 
 use iced::widget::svg::Handle;
@@ -15,11 +14,11 @@ const AGENT: &str = "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 2a8 8 0 1 1 0 16
 const GHOST: &str = "M12 2.5a7 7 0 0 0-7 7V21l2.4-1.8 2.3 1.8 2.3-1.8 2.3 1.8 2.3-1.8L19 21V9.5a7 7 0 0 0-7-7zM9.5 8a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3zm5 0a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3z";
 /// A plus, for the new-session menu.
 const PLUS: &str = "M11 4h2v7h7v2h-7v7h-2v-7H4v-2h7z";
-/// The send arrow and the stop square, on the shelf's 24-unit grid.
+/// The send arrow and the stop square, on the 24-unit grid.
 const SEND: &str = "M5 4.5 20 12 5 19.5 7.5 12Z";
 const STOP: &str = "M5 5H19V19H5Z";
 
-/// The shelf's line glyphs (lucide, ISC; `shelf/icons.rs`), drawn as a 2.2 unit stroke: (name,
+/// The line glyphs (lucide, ISC), drawn as a 2.2 unit stroke: (name,
 /// 24×24 path data). Looked up by name with [`line`].
 const LINES: &[(&str, &str)] = &[
     // The + menu modes: an upright shelf, a divided drawer, and a wide full window.
@@ -28,7 +27,7 @@ const LINES: &[(&str, &str)] = &[
         "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM15 3v18",
     ),
     (
-        // the shelf: a narrow upright panel, as the shelf stands at the screen's edge
+        // Shelf mode: a narrow upright panel, as the window stands at the screen's edge
         "panel",
         "M9 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z",
     ),
@@ -156,7 +155,7 @@ const LINES: &[(&str, &str)] = &[
     ),
 ];
 
-/// A line glyph by its shelf name without the `sill-` prefix; an unknown name is the agent ring.
+/// A line glyph by name; an unknown name is the agent ring.
 pub fn line(name: &str) -> Handle {
     static CACHE: OnceLock<std::sync::Mutex<std::collections::HashMap<String, Handle>>> =
         OnceLock::new();
@@ -186,7 +185,7 @@ pub fn glyph<'a>(name: &str, size: f32, color: iced::Color) -> iced::widget::Svg
         .style(crate::style::icon(color))
 }
 
-/// The tree's glyph for a path, as the shelf picks it (`shelf/tree.rs`): a folder, open or closed,
+/// The tree's glyph for a path: a folder, open or closed,
 /// else the file's kind by its extension.
 pub fn for_path(name: &str, directory: bool, expanded: bool) -> &'static str {
     if directory {
@@ -240,7 +239,7 @@ icon!(openai, OPENAI);
 icon!(gemini, GEMINI);
 icon!(agent, AGENT);
 
-/// The provider glyph for a registry agent id (the shelf's choice: Codex is OpenAI's).
+/// The provider glyph for a registry agent id (Codex is OpenAI's).
 pub fn for_agent(id: &str) -> Handle {
     match id {
         "claude" => claude(),
@@ -250,7 +249,7 @@ pub fn for_agent(id: &str) -> Handle {
     }
 }
 
-/// The shelf's working-tab glyph: only the icon scales, inside a fixed slot.
+/// The working-tab glyph: only the icon scales, inside a fixed slot.
 pub fn tab_agent<'a>(
     id: &str,
     color: iced::Color,

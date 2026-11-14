@@ -151,7 +151,7 @@ pub fn snapshot_dir() -> PathBuf {
     crate::store::default_path().ok().and_then(|p| p.parent().map(|d| d.join("memory"))).unwrap_or_else(|| PathBuf::from(".local/state/sill/memory"))
 }
 
-/// Write the jail's snapshot anew from `sill.db` (its own connection: callable off the GTK
+/// Write the jail's snapshot anew from `sill.db` (its own connection: callable from any
 /// thread), or — memory off — remove it. Called when a session ends or is deleted, and at start.
 pub fn refresh_snapshot() -> Result<()> {
     // one at a time: two refreshes (a session's end, then a delete) must rename in the order they
@@ -220,7 +220,7 @@ pub fn compact_all(store: &Store, now: i64, remove_state: &dyn Fn(&str)) -> Resu
 
 const NIGHTLY_KEY: &str = "memory_nightly";
 
-/// The nightly run, if a day has passed since the last (own connection: callable off the GTK
+/// The nightly run, if a day has passed since the last (own connection: callable from any
 /// thread): compaction and retention, a vacuum when anything went, the snapshot anew. None when it
 /// was not due or memory is off.
 pub fn nightly_if_due(remove_state: &dyn Fn(&str)) -> Result<Option<Compaction>> {

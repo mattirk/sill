@@ -1,4 +1,4 @@
-//! Sill's faces, as in the shelf (`shelf/fonts.rs`): Source Sans 3 for prose, Source Code Pro for
+//! Sill's faces: Source Sans 3 for prose, Source Code Pro for
 //! code, both bundled as variable fonts.
 //!
 //! fontdb registers a variable font once, at its default instance's weight — ExtraLight, 200, for
@@ -12,9 +12,9 @@ use std::sync::OnceLock;
 
 use iced::advanced::graphics::text::{cosmic_text::fontdb, font_system};
 
-const SANS: &[u8] = include_bytes!("../../sill/fonts/SourceSans3.ttf");
-const SANS_ITALIC: &[u8] = include_bytes!("../../sill/fonts/SourceSans3-Italic.ttf");
-const MONO: &[u8] = include_bytes!("../../sill/fonts/SourceCodePro.ttf");
+const SANS: &[u8] = include_bytes!("../fonts/SourceSans3.ttf");
+const SANS_ITALIC: &[u8] = include_bytes!("../fonts/SourceSans3-Italic.ttf");
+const MONO: &[u8] = include_bytes!("../fonts/SourceCodePro.ttf");
 
 /// The family names the views ask for.
 pub const SANS_FAMILY: &str = "Source Sans 3";

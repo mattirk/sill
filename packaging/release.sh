@@ -1,6 +1,6 @@
 #!/bin/sh
 # Build the release tarball for this machine's architecture (SPEC §4.12 "Channels"):
-#   sill-<ver>-<arch>.tar.gz   the two binaries, the built-in policy, icon, desktop file, units, README
+#   sill-<ver>-<arch>.tar.gz   the three binaries, the built-in policy, icon, desktop file, units, README
 #   SHA256SUMS                 over the tarball
 # Output in dist/. Signing (minisign) is a separate, later step and is not done here.
 #
@@ -15,23 +15,23 @@ NAME="sill-$VER-$ARCH"
 if [ "${1:-}" != "--no-build" ]; then
     cargo build --release
 fi
-for b in sill sill-shim; do
+for b in sill sill-shim sill-gui; do
     [ -x "target/release/$b" ] || { echo "target/release/$b missing" >&2; exit 1; }
 done
 rm -rf "dist/$NAME"
 mkdir -p "dist/$NAME/policies" "dist/$NAME/systemd/user" "dist/$NAME/icons"
-install -m 755 target/release/sill target/release/sill-shim "dist/$NAME/"
+install -m 755 target/release/sill target/release/sill-shim target/release/sill-gui "dist/$NAME/"
 install -m 644 policies/default.toml "dist/$NAME/policies/"
 install -m 644 packaging/sill.desktop "dist/$NAME/"
 install -m 644 packaging/icons/sill.svg "dist/$NAME/icons/"
 install -m 644 packaging/systemd/*.mount packaging/systemd/*.service "dist/$NAME/systemd/"
-install -m 644 packaging/systemd/user/sill-shelf.service "dist/$NAME/systemd/user/"
+install -m 644 packaging/systemd/user/sill-gui.service "dist/$NAME/systemd/user/"
 install -m 644 README.md "dist/$NAME/"
 cat > "dist/$NAME/INSTALL" <<'TXT'
 sill — install from this tarball
 
     sudo ./sill init              # checks, binaries to /usr/local, policy, state filesystem, units
-    sill init --user              # per account: the shelf starts with your session
+    sill init --user              # per account: sill-gui starts with your session
     sudo ./sill init --dry-run    # shows the plan without changing anything
     sudo ./sill init --prefix /opt/sill
 

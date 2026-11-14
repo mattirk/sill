@@ -21,7 +21,7 @@ Verified in code and, where marked ⊙, confirmed from inside a running jail:
   layer, never recursive — no `/proc`, `/run`, state filesystem (`jail.rs:327-356`).
 - ⊙ Shim sockets unreachable: inherited fd, `FD_CLOEXEC` re-armed (`sill-shim/main.rs:154-159`),
   no path, `open()` through `/proc/<pid>/fd` → ENXIO. Runtime dir invisible.
-- `--clearenv` + explicit allow-list (`jail.rs:246-279`): no shelf env reaches the agent.
+- `--clearenv` + explicit allow-list (`jail.rs:246-279`): none of sill's own env reaches the agent.
 - Units run a **staged** copy of the binary (`session::staged_exe`), unbound in any jail (§4.11 #1).
 - Keep: `openat2` `RESOLVE_NO_SYMLINKS|BENEATH` for source and host parent, `O_EXCL|O_NOFOLLOW`
   destination, hash from the bytes copied, setuid/setgid stripped; ledger paths from directory entry
@@ -32,7 +32,7 @@ Verified in code and, where marked ⊙, confirmed from inside a running jail:
   checked, connect to the checked one. No headers logged.
 - No Pango markup from agent text anywhere; markdown links are tags without handlers; remote images
   never fetched; SQL fully parameterised; `host_terminal` split with `shell_words`, never a shell;
-  `restart` argv is constants; `kill_old_shelves` matches only the user's own `sill shelf`.
+  `restart` argv is constants; it ends only the user's own sill-gui.
 - The "session env file" of §4.9 is not read by anything (env is baked into argv at launch).
 
 ## Findings
@@ -93,9 +93,9 @@ by the user. That is the stance, and the reasoning is by reader:
 | Reader | What protects the data | Would a sill cipher add anything |
 |---|---|---|
 | Another local user | 0700 per-uid dirs (S21 makes it explicit) | no |
-| Someone with the disk (theft, a discarded drive) | **full-disk encryption**, the OS's | no: a key sill can read at shelf start sits under the same uid as the data; the thief has both. Only a passphrase typed at every start would differ, and the agents' homes (`~/.claude.json` credentials, their own transcripts, plaintext as the vendors ship them) would stay in the clear anyway |
+| Someone with the disk (theft, a discarded drive) | **full-disk encryption**, the OS's | no: a key sill can read at start sits under the same uid as the data; the thief has both. Only a passphrase typed at every start would differ, and the agents' homes (`~/.claude.json` credentials, their own transcripts, plaintext as the vendors ship them) would stay in the clear anyway |
 | Another process running as the user on the host | nothing — it reads a key the way sill would | no; this is the jail's threat in the other direction |
-| **The agent in the jail** | masking: `~/.config/sill` and the whole of `~/.local/state/sill` (`sill.db*`, `bin`, the agents' homes, the daemon's lock, the shelf's log) are tmpfs in every jail, only `tools/` bound back read-only (S2, S16, §4.11 #8; whole-directory since 2026-11-02) | no — and this is the reader that matters |
+| **The agent in the jail** | masking: `~/.config/sill` and the whole of `~/.local/state/sill` (`sill.db*`, `bin`, the agents' homes, the daemon's lock, sill-gui's log) are tmpfs in every jail, only `tools/` bound back read-only (S2, S16, §4.11 #8; whole-directory since 2026-11-02) | no — and this is the reader that matters |
 
 So an application-level layer would protect against none of the four and suggest protection against
 the second. What does help, and what sill does or should do:
@@ -141,7 +141,7 @@ under any path with a separate confirmation. The `expected_hash` wiring (S10) fi
 the hash the diff showed goes into `KeepOptions`.
 
 **3. Never run an agent on the host from a directory the jail writes (S4, S3).** The host login
-runs from a pristine, shelf-owned copy of the agent home: copy out only the credential files named
+runs from a pristine, sill-owned copy of the agent home: copy out only the credential files named
 in `shared_files`/`home_paths`, point `CODEX_HOME`/`GEMINI_CLI_HOME`/`$HOME` at a fresh temp dir
 seeded with nothing else, copy the login file back when it exits. The install probe
 (`probe_load_session`) runs inside a throwaway jail (`--unshare-all`, no home, no network) or is
@@ -204,13 +204,13 @@ Memory and transcripts are read-only snapshots inside the jail.
    `unshare`/`setns` with namespace flags, `add_key`, `request_key`) — the escape surface of nearly
    every container CVE of the last years, and an hour of code against bwrap's existing flag.
    Then `NoNewPrivileges=`, `ProtectSystem=strict`, `RestrictNamespaces=` on `sill-<id>` units
-   and `sill-shelf.service` as the layer outside bwrap. Landlock for the ro-policy paths later
+   and `sill-gui.service` as the layer outside bwrap. Landlock for the ro-policy paths later
    (needs a PID 1 in the jail to apply it; the shim is the candidate).
 2. **The small ones in the same pass**: S15 (mask `/var/log/journal`), S19 (`nosuid,nodev`, image
    mode), S12 (refuse to bake a `current_exe` under a pin or a writable checkout into autostart —
    point the unit at the installed `<prefix>/bin/sill` or refuse with the reason).
 3. **S13, before the registry is public**: a signed index (minisign, key in the binary), exact
    npm specs with integrity hashes, sdists refused for `uv tool install`.
-4. **Pause the agent during Keep** (S10 remainder): the shim holds the agent's turn (or the shelf
+4. **Pause the agent during Keep** (S10 remainder): the shim holds the agent's turn (or sill
    waits for idle) while the copy runs, closing the window the hash check only narrows.
 5. S17 (link click-through, decode images in a jail or via a size-capped loader).

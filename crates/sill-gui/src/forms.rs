@@ -1,7 +1,7 @@
 //! Form questions — an agent asking for values rather than permission. What the person has entered
-//! so far, and the answer's values encoded as the shelf sends them (`shelf/conversation.rs`): a
-//! choice is its value, choices an array of values, yes/no a bool, text a string, a number a
-//! number; an empty text or number field is left out.
+//! so far, and the answer's values encoded as they are sent: a choice is its value, choices an
+//! array of values, yes/no a bool, text a string, a number a number; an empty text or number
+//! field is left out.
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
@@ -139,7 +139,7 @@ mod tests {
     }
 
     #[test]
-    fn values_are_encoded_as_the_shelf_sends_them() {
+    fn values_are_encoded_as_the_frontend_sends_them() {
         let q = question();
         let mut form = Form::new();
         for edit in [

@@ -2,14 +2,14 @@
 //!
 //! Started by bwrap as the jail's first process with the control socket inherited as a file
 //! descriptor (`--control-fd N`; `--listen PATH` for development). It owns everything that lives in the
-//! jail: the agent process and its stdio, later the ptys. The shelf (or the CLI) connects to the socket;
+//! jail: the agent process and its stdio, later the ptys. The daemon connects to the socket;
 //! each connection starts with one JSON "hello" line naming its role:
 //!
 //! - `{"role":"control"}` — newline-delimited JSON requests, one reply line each (see [`Request`]);
 //! - `{"role":"agent"}`   — after the hello the connection is the agent's ACP byte stream: lines from
 //!   the socket go to the agent's stdin, the agent's stdout lines go to the socket. Only one agent
 //!   connection at a time; a new one replaces the old. While no one is connected the agent's output
-//!   is buffered (bounded; the agent blocks on stdout when the buffer is full), so the shelf can go
+//!   is buffered (bounded; the agent blocks on stdout when the buffer is full), so the daemon can go
 //!   away and come back without the agent noticing.
 //!
 //! Plain std threads: the shim has nothing to do but wait on file descriptors.
@@ -39,7 +39,7 @@ use serde::{Deserialize, Serialize};
 
 /// The real tree, read-only, as mounted by the jail builder (sill-core `jail::HOST_VIEW`).
 const HOST_VIEW: &str = "/.sill/host";
-/// Buffered agent output while no shelf is connected.
+/// Buffered agent output while no one is connected.
 const OUTBOX_LIMIT: usize = 64 << 20;
 
 #[derive(Deserialize)]
@@ -71,7 +71,7 @@ enum Request {
     OpenImage { path_bytes: Vec<u8> },
     /// Write a file in the jail (merged view, recorded by the overlay).
     WriteFile { path: PathBuf, content: String },
-    /// Managed processes (docs/tasks.md §2.4): what the jail's `sill-proc` can do, for the shelf.
+    /// Managed processes (docs/tasks.md §2.4): what the jail's `sill-proc` can do, for the daemon.
     ProcList,
     ProcTail { name: String, #[serde(default = "default_lines")] lines: usize },
     ProcStop { name: String },
@@ -147,12 +147,12 @@ struct State {
     outbox_bytes: usize,
     /// Bumped for every new agent connection so an old relay thread knows it was replaced.
     relay_generation: u64,
-    /// A shelf is attached to the agent stream.
+    /// The daemon is attached to the agent stream.
     relay_connected: bool,
     /// Frontends attached through the daemon, as it last said (None: never told — the stream alone
     /// decides, as before the daemon).
     frontends: Option<u32>,
-    /// Last agent stdio traffic or shelf (dis)connect.
+    /// Last agent stdio traffic or daemon (dis)connect.
     last_activity: Option<std::time::Instant>,
 }
 
@@ -164,7 +164,7 @@ impl State {
 
 type Shared = Arc<(Mutex<State>, Condvar)>;
 
-/// `sill-memory …` in the jail: the snapshot the shelf wrote, read-only; exit status 1 on an error,
+/// `sill-memory …` in the jail: the snapshot the daemon wrote, read-only; exit status 1 on an error,
 /// 2 when this jail has no memory (memory off, or a session started before it was turned on).
 fn memory_cli(args: &[String]) -> i32 {
     let dir = std::env::var_os("SILL_MEMORY_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(sill_memory::JAIL_DIR));
@@ -255,7 +255,7 @@ fn main() -> Result<()> {
             // SAFETY: the launcher put a listening Unix socket on this fd before exec.
             let l = unsafe { UnixListener::from_raw_fd(fd) };
             // the launcher cleared close-on-exec so the fd would survive *our* exec; from here on it
-            // must not survive anyone else's: the agent or a shell could accept() the shelf's
+            // must not survive anyone else's: the agent or a shell could accept() the daemon's
             // connections and answer as the shim (SPEC §4.11 #2)
             rustix::io::fcntl_setfd(&l, rustix::io::FdFlags::CLOEXEC).context("control fd cloexec")?;
             l
@@ -617,7 +617,7 @@ fn kill_agent(shared: &Shared, grace_ms: u64) -> Result<Option<i32>> {
         drop(st);
         if std::time::Instant::now() >= deadline {
             // SIGKILL the group and the leader itself, then poll: never a blocking wait() while
-            // holding the lock — every other control request (status, spawn, the shelf's startup)
+            // holding the lock — every other control request (status, spawn, the daemon's startup)
             // queues on that lock, and an agent that somehow survives would wedge the whole shim
             let _ = kill_process_group(pgid, Signal::KILL);
             let _ = rustix::process::kill_process(pgid, Signal::KILL);
@@ -735,7 +735,7 @@ fn agent_relay(reader: BufReader<UnixStream>, writer: UnixStream, shared: Shared
 
 // --- exposed ports --------------------------------------------------------------------------------
 
-/// The shelf's side of an exposed port: one line says yes or no, then bytes both ways between the
+/// The daemon's connection for an exposed port: one line says yes or no, then bytes both ways between the
 /// connection and `127.0.0.1:port` inside. Only a port a running managed process declared.
 fn port_relay(mut reader: BufReader<UnixStream>, mut writer: UnixStream, port: u16, procs: procs::Procs) -> Result<()> {
     let declared = procs.list().iter().any(|p| p.port == Some(port) && p.state == procs::ProcState::Running);

@@ -343,7 +343,7 @@ pub fn binds_for(
     Ok(out)
 }
 
-/// Where the shelf puts files attached to a prompt: inside the session's private `~/.cache`
+/// Where the daemon puts files attached to a prompt: inside the session's private `~/.cache`
 /// scratch (SPEC §3.2 attachments), so the jail sees them at the returned jail path and they go
 /// with the session. `None` when the policy keeps no private `~/.cache`.
 pub fn uploads_dir(policy: &Policy, state_dir: &Path, home: &Path) -> Option<(PathBuf, PathBuf)> {
@@ -675,7 +675,7 @@ pub fn is_running(session: &str) -> bool {
 /// host later executes on a session's behalf (`<exe> launch` in the unit, the shim bound into the jail).
 /// `current_exe()` may sit in a pinned folder (developing sill in sill): the agent can write there, and
 /// the unit would re-read the file from disk at every session start (SPEC §4.11 #1). The copy is taken
-/// when the person started the shelf, which is the moment they chose to run this build.
+/// when the daemon started, which is the moment the person chose to run this build.
 pub fn staged_exe() -> Result<PathBuf> {
     static STAGED: std::sync::OnceLock<std::result::Result<PathBuf, String>> = std::sync::OnceLock::new();
     STAGED
@@ -692,8 +692,8 @@ fn stage_exe() -> Result<PathBuf> {
         .join("sill")
         .join("bin");
     std::fs::create_dir_all(&base)?;
-    // one directory per shelf process: units started by an earlier shelf keep running their copy;
-    // directories of shelves that are gone are removed here
+    // one directory per daemon process: units started by an earlier daemon keep running their copy;
+    // directories of daemons that are gone are removed here
     let me = std::process::id();
     if let Ok(rd) = std::fs::read_dir(&base) {
         for e in rd.flatten() {

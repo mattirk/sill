@@ -121,8 +121,8 @@ change controls, start, approve hosts or change pins for a session whose launch 
 or next build requests Desktop development or Host control capabilities (`test_desktop`,
 `private_bus`, `gpu`, `host_control`). Those requests return `unsupported` with
 `details.capability`; an undeterminable permission state is refused the same way. Attaching,
-reading, cancelling and stopping remain available. This keeps GTK and the line-mode attach
-Default-only; it is not a defense against impersonation by host code.
+reading, cancelling and stopping remain available. This keeps clients without the capability —
+the line-mode attach, the scripts — Default-only; it is not a defense against impersonation by host code.
 The schema command exports the concrete records and method shapes. Counters are decimal strings;
 records/events use named objects and `type` tags. `scripts/sfp_client.py` is an independent Python
 consumer and schema validator (install `scripts/requirements-sfp.txt`).
@@ -195,7 +195,7 @@ attach one to a submission like any upload. ACP v1 tool-call images are not yet 
 Inline upload IDs now hash the complete submission identity and index under the reserved
 `sill-inline-` prefix. Public upload creation rejects that prefix; retries of previously accepted
 submissions deterministically use the same hashed references. Session uploads are bounded at 4096 objects and
-256 MiB of decoded bytes; identical retries still work at the limit. Shelf upload caching and
+256 MiB of decoded bytes; identical retries still work at the limit. Frontend upload caching and
 some presentation duplication remain UI optimizations rather than compatibility blockers.
 
 A login method in `session.authentication` with `api_key` set (the provider the agent names,
@@ -230,7 +230,7 @@ These baseline methods need no optional capability. Metadata is an explicit publ
 including settings, pins and decimal-string Unix-second timestamps; it exposes no ACP session
 identity or shim socket. `policy_changed` is true when a running session's policy file changed
 after its jail was built; stopping and starting the session applies it. Every operation uses an exact session ID. The CLI resolves unique
-prefixes/titles locally and rejects ambiguity. Shelf session listing and lifecycle writes, the
+prefixes/titles locally and rejects ambiguity. sill-gui's session listing and lifecycle writes, the
 CLI and the Python client's `list/create/get/update/start/stop/end/checkpoint` use this surface.
 Public `update` uses a named, `type`-tagged change; unknown change kinds are rejected.
 The metadata write and corresponding conversation session event commit atomically.
@@ -267,7 +267,7 @@ a jail or agent.
 
 Other lifecycle mutations **must not be blindly retried** after timeout/connection loss: read
 metadata and conversation state first; uncertainty does not establish that nothing happened.
-The shelf drops a closed connection but does not resubmit these actions. `start` starts/reuses
+sill-gui drops a closed connection but does not resubmit these actions. `start` starts/reuses
 the jail, `attach` starts the agent, and `stop` preserves session history. Starting/checkpointing
 an ended session requires an explicit `update` with `reopen`. `end.reason` is `close`, `idle`
 or `quit`; `pending` means the summary is still running, and `deleted` means deletion was
@@ -281,7 +281,7 @@ path are accepted. Pin storage and jail setup preserve non-UTF-8 bytes. Existing
 Independent lifecycle conformance (with `jsonschema` installed in a venv):
 
 ```sh
-SILL_SFP_PYTHON=/path/to/venv/bin/python cargo test -p sill-shelf --no-default-features --test recovery independent_python_client -- --ignored
+SILL_SFP_PYTHON=/path/to/venv/bin/python cargo test -p sill --test recovery independent_python_client -- --ignored
 ```
 
 The fixture supplies a scripted ACP agent; Python creates the session, submits work, reconnects
@@ -305,13 +305,13 @@ Public terminals are implemented too (2026-11-03):
 The daemon owns each PTY master. A terminal runs in a session's jail (`session_id`) or on the
 daemon host; empty `argv` runs the login shell; `cwd` is a host path record in the jail's or
 the host's namespace. `label` (at most 128 bytes) is the frontend's own name for finding the
-terminal again; the shelf uses `shell` in a session and `host:<session id>` on the host.
+terminal again; sill-gui uses `shell` in a session and `host:<session id>` on the host.
 
 `attach` returns a one-use byte-stream token (see Transport below). The stream carries, in order, the replay
 buffer — the last 256 KiB of output, trimmed to start on a line — and then live output; bytes
 written to it are keystrokes. The replay is taken and the viewer subscribed under one lock, so
 nothing is missed or doubled between them. `discarded_bytes` in the record counts output no longer
-kept: nonzero means a replay starts partway (the shelf says so in the terminal). Raw bytes are
+kept: nonzero means a replay starts partway (the frontend says so in the terminal). Raw bytes are
 unframed; the stream's end means the viewer detached, fell behind, or the terminal exited or was
 closed, and `get` tells which (`state`, `exit_code`). Closing the stream only detaches. At most
 8 viewers attach to one terminal; all receive output, any may type, and the last resize wins. A
@@ -360,7 +360,7 @@ at most one newer version per entry and a 4 MiB entry payload budget per page. P
 live registry contents, so concurrent refresh can change later pages. Records expose name,
 version, source, description, links, icon availability, builtin-agent mapping and daemon-platform
 installation facts, without raw package manifests or executable commands. Pages also report
-the live index fetch time as decimal Unix seconds. Shelf builds its presentation from these
+the live index fetch time as decimal Unix seconds. sill-gui builds its presentation from these
 public registry and agent methods.
 
 Claim tokens as described under Transport: one use, on a new transport within 60 seconds. Port streams
@@ -450,7 +450,9 @@ with `SILL_SFP_SCHEMA_ACCEPT=1 cargo test -p sill-proto`, so every extension app
 as a diff of the file. Documentation text is ignored. The guard cannot see which capability
 an added optional field or variant belongs to; that pairing remains a review rule. Until the
 cutover, the identity check holds the baseline at `sfp/1-dev.3`. A deliberate pre-freeze
-break is recorded by deleting the file and rerunning the test.
+break is recorded by deleting the file and rerunning the test. One such break: on 2026-11-07 the
+document was re-recorded after the GTK-only settings keys (`width`, `drawer_width`, `text_scale`,
+`host_terminal`) left the settings type with the GTK shelf.
 
 ### Snapshot benchmark and disposition (2026-11-03)
 
@@ -475,7 +477,7 @@ also passed.
 Reproduce each size separately (replace `100` with `10` or `500`):
 
 ```sh
-SILL_SFP_BENCH_MIB=100 cargo test --profile local -p sill-shelf --no-default-features snapshot_capture_benchmark -- --ignored --nocapture --test-threads=1
+SILL_SFP_BENCH_MIB=100 cargo test --profile local -p sill snapshot_capture_benchmark -- --ignored --nocapture --test-threads=1
 ```
 
 **Decision:** defer the shared-lock redesign. The 500 MiB fixture is an extreme text-history
@@ -519,8 +521,8 @@ named request/result records. They do not make the development identity a stable
 
 Unless a method explicitly offers a durable retry identity, a lost mutation reply is uncertain:
 read back the target before deciding whether to retry. Desired-state writes can overwrite a
-concurrent edit; a retry is not permission to do so. Shelf no longer blindly retries mutations
-through its frontend data connection. Most public data responses have a 4 MiB payload ceiling.
+concurrent edit; a retry is not permission to do so. Frontends do not blindly retry mutations
+through their data connections. Most public data responses have a 4 MiB payload ceiling.
 The public files methods identify the daemon **host** namespace; they do not yet provide a
 complete merged-session filesystem API. Memory text uses connection-bound immutable disk leases built by streaming formatters against a separate read-only SQLite snapshot; subsequent pages seek within the spool. `_sill/memory.text.close` releases a lease early.
 
@@ -616,7 +618,7 @@ frontend reconnects. Older state defaults to zero; past work is not reconstructe
 The exported schema now describes `files.home/metadata/list/read/write/image`,
 `settings.get/patch`, `settings.instructions.get/set`, `policy.list/get/denied/remember_denied/allow_host`,
 `procs.list/tail/stop/dismiss`, and `memory.list/text/search/notes.list/notes.add/notes.remove/compact/forget/refresh`.
-They need no optional capability. Shelf uses the public file, settings, instructions,
+They need no optional capability. sill-gui uses the public file, settings, instructions,
 network-denial, process and memory operations; CLI memory readers use the same public contract.
 
 - `files.*` paths name the daemon host. `files.image` instead names an absolute path in the
@@ -670,7 +672,7 @@ Additional public method names in this development revision: `_sill/files.find`,
 
 ### Public-only clients and server
 
-Shelf, CLI and line mode use only public methods. The internal dispatcher, legacy
+sill-gui, the CLI and line mode use only public methods. The internal dispatcher, legacy
 conversation subscriptions, schema entries, and `sill.internal` negotiation have been removed.
 Unknown methods return JSON-RPC method-not-found; they cannot fall back to an internal handler.
 New functionality must have explicit public schemas and bounds.
@@ -678,11 +680,11 @@ New functionality must have explicit public schemas and bounds.
 ### Development milestone validation
 
 The headless workspace suite covers persistence, relay adoption, login, paths, queues, snapshots,
-public administration and native ACP v2 SDK exchanges. The full GTK frontend also compiles.
-Run `cargo test --workspace --no-default-features` and `cargo check -p sill-shelf`.
+public administration and native ACP v2 SDK exchanges.
+Run `cargo test --workspace` and `cargo check -p sill`.
 
 With Python `jsonschema` installed (set `SILL_SFP_PYTHON` to that environment's interpreter),
-`cargo test -p sill-shelf --no-default-features -- --ignored` runs the independent Python
+`cargo test -p sill -- --ignored` runs the independent Python
 administration, Changes, host stream and lifecycle/recovery scenarios plus real OpenSSH
 control/terminal reconnection. The SSH test needs `ssh`, `sshd` and `ssh-keygen`; it uses only
 throwaway keys, a loopback listener and temporary daemon state, and shuts them down afterwards.

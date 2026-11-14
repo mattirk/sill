@@ -161,7 +161,7 @@ impl Store {
                 let _ = std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600));
             }
         }
-        // another shelf or a CLI holding a write: wait a little instead of failing at once (a
+        // another writer (a CLI) holding a write: wait a little instead of failing at once (a
         // failure here is the service's crash loop, SPEC §4.11 #17)
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         require_columns(&conn, "sessions", &["auto_allow", "agent_settings", "ended_at", "summary", "summary_kind", "memory_scope", "follows", "compacted", "title_kind", "ghost"])
@@ -413,7 +413,7 @@ impl Store {
         Ok(())
     }
 
-    /// A small key/value the shelf keeps about itself (when the nightly memory run last went).
+    /// A small key/value the daemon keeps about itself (when the nightly memory run last went).
     pub fn meta(&self, key: &str) -> Option<String> {
         self.conn.query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| r.get(0)).ok()
     }
@@ -638,7 +638,7 @@ impl Store {
     }
 
     pub fn append(&self, session_id: &str, kind: &str, text: &str, extra: &str) -> Result<i64> {
-        // the next seq and the insert in one statement: two writers (a shelf and the CLI) can't
+        // the next seq and the insert in one statement: two writers (the daemon and a CLI) can't
         // pick the same number
         let seq: i64 = self.conn.query_row(
             "INSERT INTO entries (session_id, seq, ts, kind, text, extra)

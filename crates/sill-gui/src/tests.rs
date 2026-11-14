@@ -561,7 +561,7 @@ fn send_now_needs_the_capability() {
     assert!(demo_view(&app).failed.is_none());
 }
 
-/// Stop removes prompts still queued first, as the shelf does, then stops the turn.
+/// Stop removes prompts still queued first, then stops the turn.
 #[test]
 fn stop_removes_queued_prompts_before_stopping() {
     let (client, mut daemon) = daemon();
@@ -1873,7 +1873,7 @@ fn a_button_keeps_its_press_and_a_click_clears_the_selection() {
     let from = aim_at(&mut ui, "Make the send arrow", "send");
     let to = aim_at(&mut ui, "The arrow's size", "rule");
     drag(&mut ui, from, to);
-    ui.click("rg -n 'sill-send' crates/sill/src/shelf").unwrap();
+    ui.click("rg -n 'SEND_SIZE' crates/sill-gui/src").unwrap();
     assert_eq!(highlighted(&mut ui).len(), 2);
     let elsewhere = aim_at(&mut ui, "I'll make the arrow", "arrow");
     press_at(&mut ui, elsewhere);
@@ -2377,7 +2377,7 @@ fn closing_a_tab_ends_its_session_and_a_ghost_asks_first() {
     server.join().unwrap();
 }
 
-/// A form question is answered in place: its fields, then Submit with the values as the shelf
+/// A form question is answered in place: its fields, then Submit with the values as `forms`
 /// encodes them; Decline cancels.
 #[test]
 fn a_form_question_is_answered_with_its_values() {

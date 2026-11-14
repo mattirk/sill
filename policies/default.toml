@@ -21,7 +21,7 @@ allow_local = []          # host-local addresses are refused in every mode unles
 # A pattern grants one port: 443 for CONNECT (TLS) and 80 for plain HTTP; "host:8443" names another,
 # "host:*" any. e.g. allow_local = ["localhost:8080", "server.lan:*"]
 
-# Refused hosts the shelf never asks about: telemetry / crash reporting (still blocked, just quietly).
+# Refused hosts sill never asks about: telemetry / crash reporting (still blocked, just quietly).
 # Leave this out to get the built-in list; set it to [] to be asked about everything.
 quiet = [
   "*.datadoghq.com", "*.datadoghq.eu", "*.sentry.io", "sentry.io", "*.ingest.sentry.io", "*.statsig.com",

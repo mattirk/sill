@@ -1,4 +1,4 @@
-//! The Changes page (reference `07`, `12`; `shelf/changes.rs`), opened with the herring: what
+//! The Changes page (reference `07`, `12`), opened with the herring: what
 //! sessions wrote outside their pins, held in their overlays until kept or reverted; the pinned
 //! repositories' own changes, live on the host; and recent keeps, which can be undone. A row opens
 //! its diff. Reverting asks for a second press; a keep is refused for a file the host changed
@@ -510,7 +510,7 @@ fn now() -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
-/// `just now`, `3 min ago`, `2 h ago`, `4 d ago` (the shelf's).
+/// `just now`, `3 min ago`, `2 h ago`, `4 d ago`.
 fn ago(seconds: i64) -> String {
     let minutes = seconds.max(0) / 60;
     if minutes < 1 {
