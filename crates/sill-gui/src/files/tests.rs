@@ -1,6 +1,8 @@
 //! Files in the window: each session keeps its own folders and reader across refreshes and tab
 //! switches, and a reply only changes the session it was asked for.
 use super::*;
+use super::links::{FindHeading, LinkTarget, heading_index, resolve_link};
+use iced::widget::markdown;
 use sill_client::files::{Data, Request, key};
 use sill_proto::admin;
 
@@ -35,13 +37,13 @@ fn app() -> App {
 }
 
 fn act(app: &mut App, action: Action) {
-    let _ = app.update(Message::Workspace(action));
+    let _ = app.update(Message::Files(action));
 }
 
 /// A request for the demo session made by hand, so its reply can come late; its serial.
 fn pending(app: &mut App, session: &str, request: Request) -> (u64, Request) {
-    app.workspace.serial += 1;
-    let serial = app.workspace.serial;
+    app.drawer.serial += 1;
+    let serial = app.drawer.serial;
     let request = app
         .views
         .get_mut(session)
@@ -216,12 +218,12 @@ fn a_background_reply_only_updates_its_own_session() {
 fn a_background_reply_never_opens_the_drawer_over_another_session() {
     let mut app = app();
     act(&mut app, Action::ToggleDrawer);
-    assert!(app.workspace.shown);
+    assert!(app.drawer.shown);
     let browsed = path("/home/demo/elsewhere");
     let (serial, request) = pending(&mut app, "demo", Request::Inspect(browsed.clone()));
     let _ = app.update(Message::Choose("b".into()));
     act(&mut app, Action::ToggleDrawer);
-    assert!(!app.workspace.shown);
+    assert!(!app.drawer.shown);
     reply(
         &mut app,
         "demo",
@@ -230,7 +232,7 @@ fn a_background_reply_never_opens_the_drawer_over_another_session() {
         Ok(Data::Metadata(metadata(true))),
     );
     assert!(
-        !app.workspace.shown,
+        !app.drawer.shown,
         "the other session's drawer stays closed"
     );
     let demo = files(&app, "demo");
@@ -255,7 +257,7 @@ fn closing_the_drawer_cancels_a_reveal_on_its_way() {
         request,
         Ok(Data::Metadata(metadata(true))),
     );
-    assert!(!app.workspace.shown);
+    assert!(!app.drawer.shown);
 }
 
 #[test]
@@ -297,7 +299,7 @@ fn source_is_editable_and_binary_file_errors_are_visible() {
 
 #[test]
 fn automatic_drawer_follows_repo_transitions_and_preserves_manual_choice() {
-    let (mut workspace, _) = Workspace::new(None);
+    let (mut drawer, _) = Drawer::new(None);
     let mut files = files::FilesState::default();
     let pin = path("/repo");
     files.roots.push(files::Root {
@@ -315,10 +317,10 @@ fn automatic_drawer_follows_repo_transitions_and_preserves_manual_choice() {
         },
     );
     files.diff_mode = true;
-    workspace.follow("a", &mut files, true);
+    drawer.follow("a", &mut files, true);
     assert!(!files.diff_mode, "a clean repository selects Files");
     files.diff_mode = true;
-    workspace.follow("a", &mut files, true);
+    drawer.follow("a", &mut files, true);
     assert!(
         files.diff_mode,
         "a manual choice holds through an unchanged scan"
@@ -333,15 +335,15 @@ fn automatic_drawer_follows_repo_transitions_and_preserves_manual_choice() {
             status: " M".into(),
         });
     files.diff_mode = false;
-    workspace.follow("a", &mut files, true);
+    drawer.follow("a", &mut files, true);
     assert!(files.diff_mode, "a dirty transition selects Diff");
     files.repos.get_mut(key(&pin)).unwrap().entries.clear();
-    workspace.follow("a", &mut files, true);
+    drawer.follow("a", &mut files, true);
     assert!(!files.diff_mode, "cleaning the repository restores Files");
     files.diff_mode = true;
-    workspace.follow("a", &mut files, false);
+    drawer.follow("a", &mut files, false);
     assert!(files.diff_mode, "disabled leaves the manual view alone");
-    workspace.follow("a", &mut files, true);
+    drawer.follow("a", &mut files, true);
     assert!(!files.diff_mode, "enabling starts fresh");
 }
 
@@ -374,9 +376,9 @@ fn unsaved_source_survives_navigation_and_close_requires_explicit_discard() {
     );
     let _ = app.update(Message::Escape);
     assert!(app.views["demo"].reader.as_ref().unwrap().dirty);
-    assert!(app.workspace.pending_discard.is_some());
+    assert!(app.drawer.pending_discard.is_some());
     act(&mut app, Action::CancelDiscard);
-    assert!(app.workspace.pending_discard.is_none());
+    assert!(app.drawer.pending_discard.is_none());
     act(&mut app, Action::RefreshFile);
     assert_eq!(
         app.views["demo"].reader.as_ref().unwrap().content.text(),
@@ -384,7 +386,7 @@ fn unsaved_source_survives_navigation_and_close_requires_explicit_discard() {
     );
     act(&mut app, Action::CancelDiscard);
     let _ = app.update(Message::CloseRequested);
-    assert!(app.workspace.pending_discard.is_some());
+    assert!(app.drawer.pending_discard.is_some());
     act(&mut app, Action::CancelDiscard);
     act(
         &mut app,
@@ -494,7 +496,7 @@ fn save_writes_exact_source_and_failed_save_keeps_the_edits() {
         let request = peer.expect("_sill/files.write");
         peer.refuse(&request, "permission_denied", "read-only file");
     });
-    let task = app.update(Message::Workspace(Action::SaveFile));
+    let task = app.update(Message::Files(Action::SaveFile));
     settle_task(&mut app, task);
     assert!(!app.views["demo"].reader.as_ref().unwrap().dirty);
     assert_eq!(
@@ -515,7 +517,7 @@ fn save_writes_exact_source_and_failed_save_keeps_the_edits() {
     assert!(!app.views["demo"].reader.as_ref().unwrap().dirty);
     insert(&mut app, 'Y');
     let second = app.views["demo"].reader.as_ref().unwrap().content.text();
-    let task = app.update(Message::Workspace(Action::SaveFile));
+    let task = app.update(Message::Files(Action::SaveFile));
     settle_task(&mut app, task);
     let r = app.views["demo"].reader.as_ref().unwrap();
     assert!(r.dirty);
@@ -670,12 +672,12 @@ fn source_history_restores_selection_extent_and_respects_preview_and_reload() {
 fn folder_picker_pins_only_the_originating_session() {
     let mut app = app();
     act(&mut app, Action::PickFolder);
-    let (session, token) = app.workspace.folder_picker.clone().unwrap();
+    let (session, token) = app.drawer.folder_picker.clone().unwrap();
     assert_eq!(session, "demo");
     app.selected = Some("b".into());
     act(&mut app, Action::PickFolder);
     assert_eq!(
-        app.workspace.folder_picker,
+        app.drawer.folder_picker,
         Some((session.clone(), token.clone()))
     );
     act(
@@ -686,7 +688,7 @@ fn folder_picker_pins_only_the_originating_session() {
             path: Some("/home/demo/project".into()),
         },
     );
-    assert!(app.workspace.folder_picker.is_none());
+    assert!(app.drawer.folder_picker.is_none());
     // The demo refuses pin requests: its error proves the request reached the original tab.
     assert!(
         app.views["demo"]
@@ -703,7 +705,7 @@ fn folder_picker_pins_only_the_originating_session() {
 fn folder_picker_cancel_and_removed_session_do_nothing() {
     let mut app = app();
     act(&mut app, Action::PickFolder);
-    let (session, token) = app.workspace.folder_picker.clone().unwrap();
+    let (session, token) = app.drawer.folder_picker.clone().unwrap();
     act(
         &mut app,
         Action::FolderPicked {
@@ -712,11 +714,11 @@ fn folder_picker_cancel_and_removed_session_do_nothing() {
             path: None,
         },
     );
-    assert!(app.workspace.folder_picker.is_none());
+    assert!(app.drawer.folder_picker.is_none());
     assert!(app.views["demo"].files.error.is_none());
 
     act(&mut app, Action::PickFolder);
-    let (session, token) = app.workspace.folder_picker.clone().unwrap();
+    let (session, token) = app.drawer.folder_picker.clone().unwrap();
     app.views.remove(&session);
     act(
         &mut app,
@@ -726,7 +728,7 @@ fn folder_picker_cancel_and_removed_session_do_nothing() {
             path: Some("/home/demo/project".into()),
         },
     );
-    assert!(app.workspace.folder_picker.is_none());
+    assert!(app.drawer.folder_picker.is_none());
     assert!(app.views["b"].files.error.is_none());
 }
 
@@ -734,7 +736,7 @@ fn folder_picker_cancel_and_removed_session_do_nothing() {
 fn folder_picker_ignores_a_replaced_session_view() {
     let mut app = app();
     act(&mut app, Action::PickFolder);
-    let (session, token) = app.workspace.folder_picker.clone().unwrap();
+    let (session, token) = app.drawer.folder_picker.clone().unwrap();
     app.views
         .insert(session.clone(), SessionView::new(&session));
     act(
@@ -745,7 +747,7 @@ fn folder_picker_ignores_a_replaced_session_view() {
             path: Some("/home/demo/project".into()),
         },
     );
-    assert!(app.workspace.folder_picker.is_none());
+    assert!(app.drawer.folder_picker.is_none());
     assert!(app.views[&session].files.error.is_none());
 }
 
@@ -852,15 +854,15 @@ fn document_links_keep_history_guard_edits_and_ignore_stale_sources() {
             target: "third.md".into(),
         },
     );
-    assert!(app.workspace.pending_discard.is_some());
+    assert!(app.drawer.pending_discard.is_some());
     assert_eq!(
         files(&app, "demo").reader.as_ref().unwrap().path.display,
         second.display
     );
     act(&mut app, Action::CancelDiscard);
     act(&mut app, Action::Back(false));
-    assert!(app.workspace.pending_discard.is_some());
-    assert_eq!(app.workspace.navigation["demo"].back.len(), 1);
+    assert!(app.drawer.pending_discard.is_some());
+    assert_eq!(app.drawer.navigation["demo"].back.len(), 1);
 }
 
 #[test]
@@ -916,6 +918,6 @@ fn heading_jump_finds_the_heading_in_the_laid_out_reader() {
     };
     ui.operate(&renderer, &mut operation::black_box(&mut find));
     assert!(
-        matches!(find.finish(), operation::Outcome::Some(Message::Workspace(Action::AnchorOffset { y, .. })) if y > 860.0)
+        matches!(find.finish(), operation::Outcome::Some(Message::Files(Action::AnchorOffset { y, .. })) if y > 860.0)
     );
 }

@@ -406,7 +406,7 @@ impl App {
                     .into(),
                 Some(Ok(diff)) => Element::from(
                     container(
-                        container(crate::workspace_ui::diff_rows(
+                        container(crate::files::ui::diff_rows(
                             diff,
                             &changes::path(entry).display,
                         ))

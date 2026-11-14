@@ -12,11 +12,11 @@ use crate::{
     App, Message, SessionView, keys, selection,
     style::{self, P},
     viewer,
-    workspace::Action,
+    files::Action,
 };
 
 fn msg(action: Action) -> Message {
-    Message::Workspace(action)
+    Message::Files(action)
 }
 /// A quiet text button the keyboard reaches too.
 fn action<'a>(label: impl Into<String>, event: Action) -> Element<'a, Message> {
@@ -141,7 +141,7 @@ impl App {
                     button(crate::icons::glyph("folder-plus", 16.0, P.fg_dim))
                         .padding([3, 8])
                         .style(style::quiet),
-                    (self.workspace.folder_picker.is_none() && state.pin_pending.is_none())
+                    (self.drawer.folder_picker.is_none() && state.pin_pending.is_none())
                         .then(|| msg(Action::PickFolder)),
                 ),
                 "Pin a folder".into(),
@@ -173,7 +173,7 @@ impl App {
 
     pub(crate) fn file_drawer<'a>(&'a self, view: &'a SessionView) -> Element<'a, Message> {
         let state = &view.files;
-        let hovered = self.workspace.hovered.as_deref();
+        let hovered = self.drawer.hovered.as_deref();
         // The view switch shows where it goes: tree or changes.
         let toolbar = row![
             space().width(Fill),
@@ -497,7 +497,7 @@ impl App {
                 .spacing(8)
                 .align_y(Alignment::Center);
             if self
-                .workspace
+                .drawer
                 .pending_discard
                 .as_ref()
                 .is_some_and(|(id, _)| id == &view.id)

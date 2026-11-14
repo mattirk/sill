@@ -77,7 +77,7 @@ impl App {
                     self.file_chips(view)
                 };
             let main = column![chips, body].width(Fill).height(Fill);
-            let placement = self.layout.drawer(self.workspace.shown, size.width);
+            let placement = self.layout.drawer(self.drawer.shown, size.width);
             // the conversation keeps one place in the widget tree wherever the drawer is: moving
             // it would give its scrollable fresh state (back at the top) and drop a selection
             let mut beside = row![main].height(Fill);
@@ -90,8 +90,8 @@ impl App {
             if let Drawer::Over(width) = placement {
                 // A file opened from the overlay takes the conversation's place.
                 let drawer = self.file_drawer(view).map(|message| match message {
-                    Message::Workspace(crate::workspace::Action::Open { path, repo }) => {
-                        Message::Workspace(crate::workspace::Action::OpenAndHide { path, repo })
+                    Message::Files(crate::files::Action::Open { path, repo }) => {
+                        Message::Files(crate::files::Action::OpenAndHide { path, repo })
                     }
                     message => message,
                 });
@@ -102,7 +102,7 @@ impl App {
                             .height(Fill)
                             .style(style::fill(alpha(Color::BLACK, 0.25)))
                     )
-                    .on_press(Message::Workspace(crate::workspace::Action::ToggleDrawer)),
+                    .on_press(Message::Files(crate::files::Action::ToggleDrawer)),
                     self.drawer_grip(),
                     container(drawer)
                         .width(width)
@@ -241,7 +241,7 @@ impl App {
     fn top_bar(&self, width: f32) -> Element<'_, Message> {
         // the herring opens the sill pages, underlined while one shows
         let shown = self.backend_shown();
-        let drawer_open = self.workspace.shown && !shown && self.current().is_some();
+        let drawer_open = self.drawer.shown && !shown && self.current().is_some();
         // room on its right
         let activity = container(self.activity()).padding(Padding {
             left: 2.0,
@@ -649,7 +649,7 @@ impl App {
         }
         // the layout every row height depends on: the window's width, the drawer beside the
         // conversation, the reading measure
-        let drawer = match self.layout.drawer(self.workspace.shown, self.width) {
+        let drawer = match self.layout.drawer(self.drawer.shown, self.width) {
             Drawer::Beside(width) => width,
             _ => 0.0,
         };
@@ -2194,15 +2194,15 @@ pub(crate) fn reading_keys(
     key_press: text_editor::KeyPress,
 ) -> Option<text_editor::Binding<Message>> {
     if let Some(redo) = history_shortcut(&key_press) {
-        return Some(text_editor::Binding::Custom(Message::Workspace(
-            crate::workspace::Action::History(redo),
+        return Some(text_editor::Binding::Custom(Message::Files(
+            crate::files::Action::History(redo),
         )));
     }
     if key_press.modifiers.command()
         && matches!(&key_press.key, iced::keyboard::Key::Character(c) if c.eq_ignore_ascii_case("s"))
     {
-        return Some(text_editor::Binding::Custom(Message::Workspace(
-            crate::workspace::Action::SaveFile,
+        return Some(text_editor::Binding::Custom(Message::Files(
+            crate::files::Action::SaveFile,
         )));
     }
     if let Some(message) = keys::from_text(&key_press.key, key_press.modifiers, false) {

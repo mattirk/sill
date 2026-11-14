@@ -107,25 +107,25 @@ fn calibrate() {
 #[test]
 #[ignore = "writes file-workflow PNGs for review"]
 fn render_files() {
-    use crate::{Message, workspace::Action};
+    use crate::{Message, files::Action};
     use sill_proto::sessions::HostPath;
     let path = |s: &str| HostPath::from_path(std::path::Path::new(s));
     let (mut app, _) = App::new(true, None);
     let _ = app.update(Message::Layout(crate::layout::Action::Mode(
         crate::layout::Mode::Drawer,
     )));
-    let _ = app.update(Message::Workspace(Action::Toggle(path(
+    let _ = app.update(Message::Files(Action::Toggle(path(
         "/home/demo/project/src",
     ))));
     render_size(&app, "6-drawer", (1000.0, 860.0));
     render(&app, "7-drawer-small");
-    let _ = app.update(Message::Workspace(Action::Open {
+    let _ = app.update(Message::Files(Action::Open {
         path: path("/home/demo/project/README.md"),
         repo: None,
     }));
     render_size(&app, "8-file", (1000.0, 860.0));
-    let _ = app.update(Message::Workspace(Action::DiffMode(true)));
-    let _ = app.update(Message::Workspace(Action::Open {
+    let _ = app.update(Message::Files(Action::DiffMode(true)));
+    let _ = app.update(Message::Files(Action::Open {
         path: path("/home/demo/project/README.md"),
         repo: Some(path("/home/demo/project")),
     }));
@@ -260,11 +260,11 @@ fn render_thoughts() {
 #[test]
 #[ignore = "writes source and diff highlighting PNGs for review"]
 fn render_syntax_views() {
-    use crate::{Message, workspace::Action};
+    use crate::{Message, files::Action};
     use sill_proto::sessions::HostPath;
     let path = |s: &str| HostPath::from_path(std::path::Path::new(s));
     let (mut app, _) = App::new(true, None);
-    let _ = app.update(Message::Workspace(Action::Open {
+    let _ = app.update(Message::Files(Action::Open {
         path: path("/home/demo/project/src/main.rs"),
         repo: None,
     }));
@@ -286,19 +286,19 @@ fn render_syntax_views() {
 #[test]
 #[ignore = "writes source editing and unsaved notice PNGs for review"]
 fn render_source_editing() {
-    use crate::{Message, workspace::Action};
+    use crate::{Message, files::Action};
     use iced::widget::text_editor;
     use sill_proto::sessions::HostPath;
     let (mut app, _) = App::new(true, None);
-    let _ = app.update(Message::Workspace(Action::Open {
+    let _ = app.update(Message::Files(Action::Open {
         path: HostPath::from_path(std::path::Path::new("/home/demo/project/src/main.rs")),
         repo: None,
     }));
-    let _ = app.update(Message::Workspace(Action::Text(text_editor::Action::Edit(
+    let _ = app.update(Message::Files(Action::Text(text_editor::Action::Edit(
         text_editor::Edit::Insert('X'),
     ))));
     render(&app, "edit-source");
-    let _ = app.update(Message::Workspace(Action::CloseViewer));
+    let _ = app.update(Message::Files(Action::CloseViewer));
     render(&app, "unsaved-source");
     render_size(&app, "narrow-unsaved-source", (480.0, 860.0));
 }
@@ -458,15 +458,15 @@ fn render_processes() {
 #[test]
 #[ignore = "writes source gutter PNGs for review"]
 fn render_source_gutter() {
-    use crate::{Message, workspace::Action};
+    use crate::{Message, files::Action};
     use iced::widget::text_editor;
     use sill_proto::sessions::HostPath;
     let (mut app, _) = App::new(true, None);
-    let _ = app.update(Message::Workspace(Action::Open {
+    let _ = app.update(Message::Files(Action::Open {
         path: HostPath::from_path(std::path::Path::new("/home/demo/project/README.md")),
         repo: None,
     }));
-    let _ = app.update(Message::Workspace(Action::Source));
+    let _ = app.update(Message::Files(Action::Source));
     let content = (1..=130)
         .map(|line| {
             if line == 3 {
@@ -492,7 +492,7 @@ fn render_source_gutter() {
         .reader
         .as_mut()
         .unwrap()
-        .source_columns = crate::workspace::source_columns(&content);
+        .source_columns = crate::files::source_columns(&content);
     render_size(&app, "source-gutter-top", (720.0, 860.0));
     {
         let mut ui = iced_test::Simulator::with_size(settings(), (720.0, 860.0), app.view());
@@ -510,17 +510,17 @@ fn render_source_gutter() {
         );
         assert!(!ui.into_messages().any(|m| matches!(
             m,
-            Message::Workspace(Action::Text(text_editor::Action::Scroll { .. }))
+            Message::Files(Action::Text(text_editor::Action::Scroll { .. }))
         )));
     }
-    let _ = app.update(Message::Workspace(Action::Text(
+    let _ = app.update(Message::Files(Action::Text(
         text_editor::Action::Scroll { lines: 95 },
     )));
     render_size(&app, "source-gutter-scrolled", (720.0, 860.0));
-    let _ = app.update(Message::Workspace(Action::Text(text_editor::Action::Move(
+    let _ = app.update(Message::Files(Action::Text(text_editor::Action::Move(
         text_editor::Motion::DocumentEnd,
     ))));
-    let _ = app.update(Message::Workspace(Action::Text(text_editor::Action::Edit(
+    let _ = app.update(Message::Files(Action::Text(text_editor::Action::Edit(
         text_editor::Edit::Enter,
     ))));
     render_size(&app, "source-gutter-edited", (720.0, 860.0));

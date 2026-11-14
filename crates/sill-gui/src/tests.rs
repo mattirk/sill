@@ -695,12 +695,12 @@ fn a_draft_stays_with_its_session() {
 /// A file takes the full view without a bottom status panel; its close returns to the conversation.
 #[test]
 fn a_file_has_no_bottom_status_panel_and_can_be_closed() {
-    use crate::workspace::Action;
+    use crate::files::Action;
     let (mut app, _) = App::new(true, None);
     for _ in 0..=demo::CHUNKS.len() {
         let _ = app.update(Message::DemoTick);
     }
-    let _ = app.update(Message::Workspace(Action::ToggleDrawer));
+    let _ = app.update(Message::Files(Action::ToggleDrawer));
     let mut ui = simulator(&app, (1000.0, 860.0));
     ui.click("README.md").unwrap();
     for message in ui.into_messages().collect::<Vec<_>>() {
@@ -726,7 +726,7 @@ fn a_file_has_no_bottom_status_panel_and_can_be_closed() {
 /// Another session waiting on the person stays marked in its tab while a file is open.
 #[test]
 fn other_sessions_waiting_on_the_person_are_marked() {
-    use crate::workspace::Action;
+    use crate::files::Action;
     let (mut app, _) = App::new(true, None);
     add_session(&mut app, "other");
     let view = app.views.get_mut("other").unwrap();
@@ -742,7 +742,7 @@ fn other_sessions_waiting_on_the_person_are_marked() {
     let mut ui = simulator(&app, (1000.0, 860.0));
     ui.find("?").unwrap();
     drop(ui);
-    let _ = app.update(Message::Workspace(Action::Open {
+    let _ = app.update(Message::Files(Action::Open {
         path: sill_proto::sessions::HostPath::from_path(std::path::Path::new(
             "/home/demo/project/README.md",
         )),
@@ -1159,7 +1159,7 @@ fn the_terminal_button_opens_the_shell_and_takes_the_keys() {
 
 #[test]
 fn file_drawer_buttons_open_the_viewer_and_return_to_conversation() {
-    use crate::workspace::Action;
+    use crate::files::Action;
     let (mut app, _) = App::new(true, None);
     let _ = app.update(Message::Layout(crate::layout::Action::Mode(
         crate::layout::Mode::Drawer,
@@ -1170,7 +1170,7 @@ fn file_drawer_buttons_open_the_viewer_and_return_to_conversation() {
     assert!(
         messages
             .iter()
-            .any(|m| matches!(m, Message::Workspace(Action::Open { .. })))
+            .any(|m| matches!(m, Message::Files(Action::Open { .. })))
     );
     for message in messages {
         let _ = app.update(message);
@@ -1186,7 +1186,7 @@ fn file_drawer_buttons_open_the_viewer_and_return_to_conversation() {
 
 #[test]
 fn diff_numbers_distinguish_context_changes_and_untracked_markdown() {
-    use crate::workspace_ui::numbered_diff;
+    use crate::files::ui::numbered_diff;
     assert_eq!(
         numbered_diff("@@ -3,2 +5,3 @@\n keep\n-old\n+new\n+extra"),
         vec![
@@ -1206,15 +1206,15 @@ fn diff_numbers_distinguish_context_changes_and_untracked_markdown() {
 
 #[test]
 fn narrow_drawer_opens_files_in_the_full_content_area() {
-    use crate::workspace::Action;
+    use crate::files::Action;
     let (mut app, _) = App::new(true, None);
-    let _ = app.update(Message::Workspace(Action::ToggleDrawer));
+    let _ = app.update(Message::Files(Action::ToggleDrawer));
     let mut ui = simulator(&app, (480.0, 700.0));
     ui.click("README.md").unwrap();
     for message in ui.into_messages().collect::<Vec<_>>() {
         let _ = app.update(message);
     }
-    assert!(!app.workspace.shown);
+    assert!(!app.drawer.shown);
     assert!(demo_view(&app).files.reader.is_some());
 }
 
@@ -1231,7 +1231,7 @@ fn a_drawer_over_the_conversation_keeps_its_place() {
     app.width = 520.0;
     live.apply(
         &mut app,
-        Message::Workspace(crate::workspace::Action::ToggleDrawer),
+        Message::Files(crate::files::Action::ToggleDrawer),
     );
     assert!(app.narrow(), "520 px does not fit the drawer beside");
     let mut after = None;
@@ -1252,7 +1252,7 @@ fn a_drawer_over_the_conversation_keeps_its_place() {
 #[test]
 fn the_keys_go_between_shelf_drawer_and_full() {
     use crate::layout::Mode;
-    use crate::workspace::Action as Files;
+    use crate::files::Action as Files;
     let (mut app, _) = App::new(true, None);
     assert_eq!(app.layout.mode, Mode::Shelf);
     let press = |c: &str| {
@@ -1269,8 +1269,8 @@ fn the_keys_go_between_shelf_drawer_and_full() {
         })
     };
     assert!(press("E").is_none(), "Ctrl+Shift+E is free again");
-    let _ = app.update(Message::Workspace(Files::ToggleDrawer));
-    assert!(app.workspace.shown, "a quick look in Shelf mode");
+    let _ = app.update(Message::Files(Files::ToggleDrawer));
+    assert!(app.drawer.shown, "a quick look in Shelf mode");
     assert!(matches!(
         app.layout.drawer(true, 1200.0),
         crate::layout::Drawer::Over(_)
@@ -1283,18 +1283,18 @@ fn the_keys_go_between_shelf_drawer_and_full() {
     // Shelf → Drawer → Full → Escape back to Drawer
     let _ = app.update(press("D").unwrap());
     assert_eq!(app.layout.mode, Mode::Drawer);
-    assert!(app.workspace.shown);
+    assert!(app.drawer.shown);
     let _ = app.update(press("F").unwrap());
     assert_eq!(app.layout.mode, Mode::Full);
-    assert!(!app.workspace.shown);
+    assert!(!app.drawer.shown);
     let _ = app.update(press("F").unwrap());
     assert_eq!(app.layout.mode, Mode::Drawer, "Ctrl+Shift+F leaves Full");
     // the drawer's own close in Drawer mode: the same window without it
-    let _ = app.update(Message::Workspace(Files::ToggleDrawer));
+    let _ = app.update(Message::Files(Files::ToggleDrawer));
     assert_eq!(app.layout.mode, Mode::Full);
     let _ = app.update(press("D").unwrap());
     assert_eq!(app.layout.mode, Mode::Shelf);
-    assert!(!app.workspace.shown);
+    assert!(!app.drawer.shown);
 }
 
 /// The `+` menu's foot switches the mode: Shelf, Drawer or Full.
@@ -1311,9 +1311,9 @@ fn the_menu_switches_between_the_three_modes() {
     assert!(app.menu.is_none(), "choosing a mode closes the menu");
     assert_eq!(app.layout.mode, Mode::Full);
     let _ = app.update(Message::Menu(crate::menu::Event::View(Mode::Drawer)));
-    assert!(app.workspace.shown && app.layout.mode == Mode::Drawer);
+    assert!(app.drawer.shown && app.layout.mode == Mode::Drawer);
     let _ = app.update(Message::Menu(crate::menu::Event::View(Mode::Shelf)));
-    assert!(!app.workspace.shown && app.layout.mode == Mode::Shelf);
+    assert!(!app.drawer.shown && app.layout.mode == Mode::Shelf);
 }
 
 /// A long conversation builds only the rows near the view; the rest are gaps of their measured
@@ -1895,7 +1895,7 @@ fn opening_the_drawer_keeps_the_conversation_s_place() {
         &mut app,
         Message::Layout(crate::layout::Action::Mode(crate::layout::Mode::Drawer)),
     );
-    assert!(app.workspace.shown);
+    assert!(app.drawer.shown);
     let mut after = None;
     live.frame(&app, |ui| after = scrolled(ui, "conversation"));
     let (before, after) = (before.unwrap(), after.unwrap());
@@ -1936,11 +1936,11 @@ fn a_button_keeps_its_press_and_a_click_clears_the_selection() {
 /// diff's lines without their line numbers.
 #[test]
 fn the_reader_selects_across_markdown_blocks_and_diff_lines() {
-    use crate::workspace::Action;
+    use crate::files::Action;
     use sill_proto::sessions::HostPath;
     let path = |s: &str| HostPath::from_path(std::path::Path::new(s));
     let (mut app, _) = App::new(true, None);
-    let _ = app.update(Message::Workspace(Action::Open {
+    let _ = app.update(Message::Files(Action::Open {
         path: path("/home/demo/project/README.md"),
         repo: None,
     }));
@@ -1958,8 +1958,8 @@ fn the_reader_selects_across_markdown_blocks_and_diff_lines() {
           • Close the viewer to return to the conversation.\n\
           fn main() {\n    println!(\""]
     );
-    let _ = app.update(Message::Workspace(Action::DiffMode(true)));
-    let _ = app.update(Message::Workspace(Action::Open {
+    let _ = app.update(Message::Files(Action::DiffMode(true)));
+    let _ = app.update(Message::Files(Action::Open {
         path: path("/home/demo/project/README.md"),
         repo: Some(path("/home/demo/project")),
     }));
@@ -2023,7 +2023,7 @@ fn tab_reaches_every_control_in_reading_order_and_enter_presses_it() {
         .iter()
         .map(|m| match m {
             Some(Message::Choose(id)) => format!("choose {id}"),
-            Some(Message::Workspace(action)) => {
+            Some(Message::Files(action)) => {
                 format!("files {action:?}").chars().take(24).collect()
             }
             Some(Message::Answer { option_id, .. }) => format!("answer {option_id}"),
@@ -2225,11 +2225,11 @@ fn stepping_tabs_wraps_round() {
 #[test]
 fn escape_toggles_session_and_backend() {
     use crate::layout::Mode;
-    use crate::workspace::Action;
+    use crate::files::Action;
     let (mut app, _) = App::new(true, None);
     let _ = app.update(Message::Layout(crate::layout::Action::Mode(Mode::Full)));
-    let _ = app.update(Message::Workspace(Action::ToggleDrawer));
-    let _ = app.update(Message::Workspace(Action::Open {
+    let _ = app.update(Message::Files(Action::ToggleDrawer));
+    let _ = app.update(Message::Files(Action::Open {
         path: sill_proto::sessions::HostPath::from_path(std::path::Path::new(
             "/home/demo/project/README.md",
         )),
@@ -2246,7 +2246,7 @@ fn escape_toggles_session_and_backend() {
     assert!(app.changes.is_some(), "then to the backend's default page");
     let _ = app.update(Message::Escape);
     assert!(app.changes.is_none(), "and back");
-    assert!(app.workspace.shown, "the drawer stays");
+    assert!(app.drawer.shown, "the drawer stays");
     assert_eq!(app.layout.mode, Mode::Full, "the mode stays");
     // a menu closes first
     let _ = app.update(Message::Menu(crate::menu::Event::Toggle));
@@ -3664,7 +3664,7 @@ fn prompt_undo_and_redo_shortcuts() {
         assert!(matches!(crate::ui::enter_sends(press.clone()),
             Some(Binding::Custom(Message::PromptHistory(value))) if value == redo));
         assert!(matches!(crate::ui::reading_keys(press),
-            Some(Binding::Custom(Message::Workspace(crate::workspace::Action::History(value)))) if value == redo));
+            Some(Binding::Custom(Message::Files(crate::files::Action::History(value)))) if value == redo));
     }
 }
 
@@ -3798,7 +3798,7 @@ fn markdown_link_click_navigates_and_secondary_click_copies() {
     let source = sill_proto::sessions::HostPath::from_path(std::path::Path::new(
         "/home/demo/project/README.md",
     ));
-    let _ = app.update(Message::Workspace(crate::workspace::Action::Open {
+    let _ = app.update(Message::Files(crate::files::Action::Open {
         path: source.clone(),
         repo: None,
     }));
@@ -3823,6 +3823,6 @@ fn markdown_link_click_navigates_and_secondary_click_copies() {
             iced::mouse::Button::Left,
         )),
     ]);
-    assert!(ui.into_messages().any(|m| matches!(m, Message::Workspace(crate::workspace::Action::Link { session, source: from, target })
+    assert!(ui.into_messages().any(|m| matches!(m, Message::Files(crate::files::Action::Link { session, source: from, target })
         if session == "demo" && from.display == source.display && target == "docs/next.md#heading")));
 }

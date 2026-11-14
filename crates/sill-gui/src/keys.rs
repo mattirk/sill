@@ -538,7 +538,7 @@ pub fn navigation(event: keyboard::Event) -> Option<Message> {
     let (ctrl, shift) = (modifiers.command(), modifiers.shift());
     Some(match key.as_ref() {
         Key::Named(Named::Tab) if !ctrl && !modifiers.alt() => Message::Focus(!shift),
-        Key::Character("s") if ctrl => Message::Workspace(crate::workspace::Action::SaveFile),
+        Key::Character("s") if ctrl => Message::Files(crate::files::Action::SaveFile),
         Key::Character("q") if ctrl => Message::Quit,
         Key::Named(Named::Escape) => Message::Escape,
         Key::Named(Named::PageUp) if !ctrl => Message::Page(false),
@@ -604,8 +604,8 @@ mod annotation_tests {
                     Message::Annotation(crate::annotation::Event::Undo),
                 ]));
             } else {
-                assert!(messages.iter().any(|m| matches!(m, Message::Workspace(
-                    crate::workspace::Action::SaveFile
+                assert!(messages.iter().any(|m| matches!(m, Message::Files(
+                    crate::files::Action::SaveFile
                 ))));
                 assert!(!messages.iter().any(|m| matches!(m, Message::Annotation(_))));
             }

@@ -46,8 +46,7 @@ mod tests;
 mod tray;
 mod ui;
 mod viewer;
-mod workspace;
-mod workspace_ui;
+mod files;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -318,7 +317,7 @@ pub enum Message {
     /// End the shell itself (hiding the pane only detaches from it).
     EndTerminal,
     ReopenTerminal,
-    Workspace(workspace::Action),
+    Files(files::Action),
     /// The window's new width.
     Resized(iced::Size),
     /// The window is open: ask for its monitor's size.
@@ -431,7 +430,7 @@ pub struct SessionView {
     /// The agent's login under way, if any (`login_ui`).
     login: login_ui::Login,
     pub files: FilesState,
-    pub reader: Option<workspace::ReaderView>,
+    pub reader: Option<files::ReaderView>,
     /// The failed turn the person has looked at, so its mark goes.
     seen_failure: Option<String>,
     /// What the person has entered in open form questions.
@@ -664,7 +663,7 @@ pub struct App {
     list_again: bool,
     settings_pending: bool,
     settings_revision: u64,
-    pub workspace: workspace::Workspace,
+    pub drawer: files::Drawer,
     /// Set by each tick while the agent is busy; the spinner's angle comes from it.
     pub now: Instant,
     demo_step: usize,
@@ -759,7 +758,7 @@ impl App {
         initial: Option<String>,
         connect: Option<Connector>,
     ) -> (Self, Task<Message>) {
-        let (workspace, file_task) = workspace::Workspace::new(connect.clone());
+        let (drawer, file_task) = files::Drawer::new(connect.clone());
         let mut app = Self {
             daemon: daemon_ui::State::default(),
             network: network::State::default(),
@@ -796,7 +795,7 @@ impl App {
             list_again: false,
             settings_pending: false,
             settings_revision: 0,
-            workspace,
+            drawer,
             now: Instant::now(),
             demo_step: 0,
             width: START_SIZE.width,
@@ -856,7 +855,7 @@ impl App {
             .and_then(layout::Mode::from_name)
             .unwrap_or_default();
         app.layout.drawer = app.settings.drawer_width;
-        app.workspace.shown = app.layout.mode == layout::Mode::Drawer;
+        app.drawer.shown = app.layout.mode == layout::Mode::Drawer;
         // the control socket's commands, and the hotkey (a real window only)
         let mut desktop_tasks = Vec::new();
         if let Some(control) = CONTROL.lock().unwrap().take() {
@@ -1205,8 +1204,8 @@ impl App {
             self.layout.before_full = old;
         }
         self.layout.mode = mode;
-        let opening = mode == Mode::Drawer && !self.workspace.shown;
-        self.workspace.shown = mode == Mode::Drawer;
+        let opening = mode == Mode::Drawer && !self.drawer.shown;
+        self.drawer.shown = mode == Mode::Drawer;
         self.save_settings();
         let mut tasks = vec![self.restore_scroll()];
         if opening && let Some(id) = self.selected.clone() {
@@ -1299,7 +1298,7 @@ impl App {
     /// The drawer is over the conversation rather than beside it.
     pub fn narrow(&self) -> bool {
         matches!(
-            self.layout.drawer(self.workspace.shown, self.width),
+            self.layout.drawer(self.drawer.shown, self.width),
             layout::Drawer::Over(_)
         )
     }
@@ -1780,7 +1779,7 @@ impl App {
                     pane.paste(&text);
                 }
             }
-            Message::Workspace(action) => return self.workspace_action(action),
+            Message::Files(action) => return self.files_action(action),
             Message::Resized(size) => {
                 self.width = size.width;
                 self.height = size.height;
@@ -1848,7 +1847,7 @@ impl App {
                 layout::Action::DragStart => self.layout.dragging = true,
                 layout::Action::DragTo(x) => {
                     if self.layout.dragging {
-                        self.layout.drag_to(x, self.workspace.shown, self.width);
+                        self.layout.drag_to(x, self.drawer.shown, self.width);
                     }
                 }
                 layout::Action::DragEnd => {
@@ -2730,7 +2729,7 @@ impl App {
         }
         // Closing an edited source goes through the same unsaved notice as its close button.
         if self.current().is_some_and(|v| v.files.reader.is_some()) {
-            return self.update(Message::Workspace(workspace::Action::CloseViewer));
+            return self.update(Message::Files(files::Action::CloseViewer));
         }
         // the session: to the backend's default page — the drawer and the mode stay as they are
         // (they have their own controls)
