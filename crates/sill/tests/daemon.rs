@@ -1015,8 +1015,17 @@ fn public_network_denials_are_live_bounded_pages() {
     assert_eq!(std::fs::read_to_string(runtime.join("denied.answered")).unwrap(),"host-000.example\n");
     let allowed=c.call("_sill/policy.allow_host",json!({"session_id":session,"host":"*.example.test"})).unwrap();
     assert!(allowed.get("error").is_none(),"{allowed}");
+    assert_eq!(allowed["result"]["live"],false,"a wildcard needs a rebuilt jail: {allowed}");
     let agent=c.call("_sill/agents.get",json!({"agent_id":"claude"})).unwrap();
     assert!(agent["result"]["domains"].as_array().unwrap().contains(&json!("*.example.test")),"{agent}");
+    // a running session gets an exact host at once, as a live grant its proxy reads per
+    // connection: the agent goes on without a restart (2026-11-05)
+    let _shim=std::os::unix::net::UnixListener::bind(runtime.join("shim.sock")).unwrap();
+    let allowed=c.call("_sill/policy.allow_host",json!({"session_id":session,"host":"api.example.test"})).unwrap();
+    assert_eq!(allowed["result"]["live"],true,"{allowed}");
+    assert_eq!(std::fs::read_to_string(runtime.join("session-allowed-hosts")).unwrap(),"api.example.test\n");
+    let agent=c.call("_sill/agents.get",json!({"agent_id":"claude"})).unwrap();
+    assert!(agent["result"]["domains"].as_array().unwrap().contains(&json!("api.example.test")),"kept for its next jails: {agent}");
     for host in ["bad\nname", "../invalid"] {
         assert!(c.call("_sill/policy.allow_host",json!({"session_id":session,"host":host})).unwrap().get("error").is_some());
     }

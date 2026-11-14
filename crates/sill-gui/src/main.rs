@@ -193,6 +193,7 @@ pub enum Act {
     Unqueue,
     SendNow,
     Login,
+    CarryOn,
     Control,
 }
 
@@ -224,7 +225,9 @@ pub enum Message {
     NetworkPoll,
     NetworkRead(String, Result<sill_proto::admin::NetworkDenied, String>),
     NetworkAnswer(String, String, bool),
-    NetworkDone(String, String, Outcome),
+    NetworkDone(String, network::Choice, Outcome),
+    /// A network choice's note has had its time (its number, so a later note stays).
+    NetworkNoticeExpired(String, u64),
     /// The conversation scrolled: at its end, its offset, and the height in view.
     Scrolled(bool, f32, f32),
     Latest,
@@ -983,7 +986,8 @@ impl App {
             subscriptions.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick));
         }
         if !self.demo {
-            subscriptions.push(iced::time::every(Duration::from_secs(2)).map(|_| Message::NetworkPoll));
+            subscriptions
+                .push(iced::time::every(Duration::from_secs(2)).map(|_| Message::NetworkPoll));
         }
         // sessions started or ended elsewhere appear and go
         if !self.demo {
@@ -1043,6 +1047,15 @@ impl App {
         view.lane = Some(Lane::open(id, mode, connect, move |update| {
             tx.send_blocking((session.clone(), epoch, update)).is_ok()
         }));
+    }
+
+    /// The session's jail was started again under this window: attach anew, which starts its
+    /// agent (the daemon starts one for an attachment or a prompt, not for the jail alone) and
+    /// reads the conversation afresh.
+    pub(crate) fn reattach(&mut self, id: &str) {
+        if !self.demo && self.views.contains_key(id) {
+            self.open_lane(id, lane::Mode::Open);
+        }
     }
 
     /// One request the person made in `session`; its outcome comes back as `Done`.
@@ -1160,7 +1173,10 @@ impl App {
             Message::NetworkPoll => return self.poll_network(),
             Message::NetworkRead(id, result) => self.network.read(id, result),
             Message::NetworkAnswer(id, host, allow) => return self.answer_network(id, host, allow),
-            Message::NetworkDone(id, host, outcome) => self.network.done(id, host, outcome),
+            Message::NetworkDone(id, choice, outcome) => {
+                return self.network_done(id, choice, outcome);
+            }
+            Message::NetworkNoticeExpired(id, serial) => self.network.expire(&id, serial),
             Message::Prompt(action) => {
                 if let Some(view) = self.current_mut() {
                     view.draft.perform(action);
@@ -2410,6 +2426,7 @@ impl App {
                         Act::Unqueue => "Removing the queued prompt",
                         Act::SendNow => "Sending the queued prompt now",
                         Act::Login => "Logging in",
+                        Act::CarryOn => "Telling the agent to carry on",
                         Act::Control => "Changing the agent's setting",
                         Act::Send(_) | Act::Check(_) => unreachable!(),
                     };

@@ -1120,22 +1120,12 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
             sill_core::proxy::serve_with_session_grants(listener, rules, Some(session_grants), move |l| {
                 // stderr is the session's journald stream or its jail.log (docs/daemon.md §3.1)
                 eprintln!("proxy: {l}");
-                // `deny host:port (why)`: the host alone when the port is the default one a bare
-                // pattern grants, `host:port` otherwise — what the shelf offers is what would allow
-                // it. Only a plain host name (or IP) gets there: a wildcard or garbage in the
-                // request line stays in the log and never becomes a button (security.md S7)
-                if let Some(rest) = l.strip_prefix("deny ")
-                    && let Some(target) = rest.split_whitespace().next()
-                    && let Some((host, port)) = target.rsplit_once(':')
-                    && sill_core::proxy::valid_hostname(host)
+                // what an allow would let through, for the shelf's offer (`proxy::denial_offer`)
+                if let Some(offer) = sill_core::proxy::denial_offer(&l)
                     && let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&denied)
                 {
                     use std::io::Write;
-                    let _ = if port == sill_core::proxy::CONNECT_PORT.to_string() || port == sill_core::proxy::HTTP_PORT.to_string() {
-                        writeln!(f, "{host}")
-                    } else {
-                        writeln!(f, "{target}")
-                    };
+                    let _ = writeln!(f, "{offer}");
                 }
             })
         }));

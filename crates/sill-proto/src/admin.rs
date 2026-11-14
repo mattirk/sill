@@ -260,6 +260,11 @@ pub struct NetworkHost {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AllowedHost {
     pub agent_name: String,
+    /// The running session has the host now (a live grant its proxy reads per connection): no
+    /// restart is needed. False from older daemons, and for a wildcard, which only a restart
+    /// applies.
+    #[serde(default)]
+    pub live: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

@@ -374,12 +374,17 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 }
                 if suggested {
                     remember_session_host(&a.session_id, &a.host)?;
-                    return bounded(api::AllowedHost { agent_name: "this session".into() });
+                    return bounded(api::AllowedHost { agent_name: "this session".into(), live: true });
                 }
                 let mut agent = sill_core::agents::load(&home).remove(&row.agent).context("unknown agent")?;
-                if !agent.domains.contains(&a.host) { agent.domains.push(a.host); }
+                if !agent.domains.contains(&a.host) { agent.domains.push(a.host.clone()); }
                 sill_core::agents::save_override(&home, &agent)?;
-                bounded(api::AllowedHost { agent_name: agent.name })
+                // the agent's list is for its next jails; the running one gets the exact host as a
+                // live grant, so the agent goes on without a restart (a wildcard still needs one)
+                let live = !a.host.contains('*')
+                    && sill_core::session::is_running(&a.session_id)
+                    && remember_session_host(&a.session_id, &a.host).is_ok();
+                bounded(api::AllowedHost { agent_name: agent.name, live })
             }
         }
 

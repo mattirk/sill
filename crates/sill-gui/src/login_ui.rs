@@ -143,6 +143,8 @@ impl App {
                             .into(),
                         false,
                     ));
+                    // its agent comes back up with the attachment
+                    self.reattach(&session);
                 }
                 return match route {
                     Route::Agent => self.login_control(
@@ -157,10 +159,13 @@ impl App {
                 };
             }
             Event::Line(line) => login.notes.push((line, false)),
-            Event::HostDone(Ok(())) => login.notes.push((
-                "Logged in; the session starts again with the new login.".into(),
-                false,
-            )),
+            Event::HostDone(Ok(())) => {
+                login.notes.push((
+                    "Logged in; the session starts again with the new login.".into(),
+                    false,
+                ));
+                self.reattach(&session);
+            }
             Event::HostDone(Err(why)) => {
                 login.chosen = None;
                 login.notes.push((format!("Login failed: {why}"), true));

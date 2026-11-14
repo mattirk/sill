@@ -72,6 +72,9 @@ turn is cancelled so it goes as soon as the agent has stopped. A prompt's user i
 it is dispatched, not when it is accepted: a queued prompt appears where the agent receives it (an
 item made at acceptance by an older daemon is removed and made again there, reason
 `moved_to_dispatch`).
+`_sill/policy.allow_host` answers `live: true` when the running session got the host as a live
+grant, read by its proxy per connection, so no restart is needed; an older daemon omits it, and a
+wildcard is never live (2026-11-05).
 The schema command exports the concrete records and method shapes. Counters are decimal strings;
 records/events use named objects and `type` tags. `scripts/sfp_client.py` is an independent Python
 consumer and schema validator (install `scripts/requirements-sfp.txt`).

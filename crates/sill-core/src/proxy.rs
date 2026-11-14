@@ -224,7 +224,7 @@ impl Rules {
                 if self.allow.iter().any(|p| pattern_matches(p, host, port, default_port)) {
                     Decision::Allow("allow-list")
                 } else {
-                    Decision::Deny("not in allow-list".into())
+                    Decision::Deny(NOT_ALLOWED.into())
                 }
             }
         }
@@ -485,8 +485,42 @@ fn pump(client: UnixStream, upstream: TcpStream) {
     let _ = t.join();
 }
 
+/// The reason a host is refused because no rule names it: the one refusal an allow can lift.
+pub const NOT_ALLOWED: &str = "not in allow-list";
+
+/// What a proxy log line offers to allow, if anything: `deny host:port (not in allow-list)` gives
+/// the host alone when the port is the default one a bare pattern grants, `host:port` otherwise.
+/// Other refusals offer nothing, since allowing the name would not change them (a name that does
+/// not resolve, an address the policy refuses: offered anyway, an allowed host came back as
+/// "blocked", 2026-11-05). Only a plain host name (or IP) is offered: a wildcard or garbage in the
+/// request line stays in the log and never becomes a button (security.md S7).
+pub fn denial_offer(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("deny ")?;
+    let (target, why) = rest.split_once(' ')?;
+    if why != format!("({NOT_ALLOWED})") {
+        return None;
+    }
+    let (host, port) = target.rsplit_once(':')?;
+    if !valid_hostname(host) {
+        return None;
+    }
+    Some(if port == CONNECT_PORT.to_string() || port == HTTP_PORT.to_string() { host.to_string() } else { target.to_string() })
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_a_name_not_in_the_list_is_offered() {
+        assert_eq!(denial_offer("deny example.com:443 (not in allow-list)").as_deref(), Some("example.com"));
+        assert_eq!(denial_offer("deny example.com:80 (not in allow-list)").as_deref(), Some("example.com"));
+        assert_eq!(denial_offer("deny example.com:8443 (not in allow-list)").as_deref(), Some("example.com:8443"));
+        // allowed already, but it does not resolve, or its address is refused: no allow helps
+        assert_eq!(denial_offer("deny nowhere.example:443 (resolve: failed to lookup address information)"), None);
+        assert_eq!(denial_offer("deny lan.example:443 (private address 10.0.0.1)"), None);
+        assert_eq!(denial_offer("deny *.example.com:443 (not in allow-list)"), None);
+        assert_eq!(denial_offer("allow example.com:443 (example.com)"), None);
+    }
+
     #[test]
     fn session_grants_never_override_offline_or_local_protection() {
         let path = std::env::temp_dir().join(format!("sill-proxy-grants-{}", crate::store::new_id()));

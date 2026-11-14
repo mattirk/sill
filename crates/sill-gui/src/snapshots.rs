@@ -379,3 +379,27 @@ fn render_iceberg() {
     }
     crate::style::set_theme(&before);
 }
+
+#[test]
+#[ignore = "writes network prompt PNGs for review"]
+fn render_network() {
+    let (mut app, _) = App::new(true, None);
+    for _ in 0..=demo::CHUNKS.len() {
+        let _ = app.update(crate::Message::DemoTick);
+    }
+    app.views
+        .get_mut("demo")
+        .unwrap()
+        .conversation
+        .questions
+        .clear();
+    let _ = app.update(crate::Message::NetworkRead(
+        "demo".into(),
+        Ok(serde_json::from_value(serde_json::json!({
+            "next": null, "hosts": ["files.example.org:443"], "answered": [],
+            "quiet": [], "agent_name": "Codex"
+        }))
+        .unwrap()),
+    ));
+    render(&app, "15-network");
+}

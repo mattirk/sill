@@ -132,6 +132,11 @@
       "properties": {
         "agent_name": {
           "type": "string"
+        },
+        "live": {
+          "default": false,
+          "description": "The running session has the host now (a live grant its proxy reads per connection): no\nrestart is needed. False from older daemons, and for a wildcard, which only a restart\napplies.",
+          "type": "boolean"
         }
       },
       "required": [
