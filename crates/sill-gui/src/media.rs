@@ -625,7 +625,7 @@ impl App {
                                 "_sill/uploads.get",
                                 serde_json::json!({"session_id":session,"upload_id":id}),
                             )
-                            .map_err(|e| e.to_string())?;
+                            .map_err(|e| format!("{e:#}"))?;
                         admin::decode_bytes(&upload.data_base64).map_err(|e| e.to_string())?
                     } else {
                         let path = key.strip_prefix("file://").unwrap_or(&key);
@@ -658,7 +658,7 @@ impl App {
                                     })
                                     .unwrap(),
                                 )
-                                .map_err(|e| e.to_string())?;
+                                .map_err(|e| format!("{e:#}"))?;
                             bytes.extend(
                                 admin::decode_bytes(&page.bytes_base64)
                                     .map_err(|e| e.to_string())?,
