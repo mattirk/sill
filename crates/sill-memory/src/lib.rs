@@ -21,7 +21,7 @@ pub const SNAPSHOT_FILE: &str = "memory.db";
 
 /// The searchable text — one row per session title, summary, note and prompt of the person — and
 /// its FTS5 index (external content: the index stores no second copy). `kind` is `title`,
-/// `summary`, `note` or `prompt`; `ref` tells rows of one kind apart (an entry's seq, a note's ts).
+/// `name`, `summary`, `note` or `prompt`; `ref` tells rows of one kind apart (an entry's seq, a note's ts).
 pub mod history;
 
 pub const TEXT_SCHEMA: &str = "
@@ -66,6 +66,27 @@ CREATE TRIGGER IF NOT EXISTS memory_text_au AFTER UPDATE ON memory_text BEGIN
     INSERT INTO memory_fts (memory_fts, rowid, text) VALUES ('delete', old.id, old.text);
     INSERT INTO memory_fts (rowid, text) VALUES (new.id, new.text); END;
 ";
+
+/// Session names (`session_names`, created by the store after [`install`]) are searchable text of
+/// kind `name`, kept in step by triggers; summaries no longer repeat the name.
+const NAME_TRIGGERS: &str = "
+CREATE TRIGGER IF NOT EXISTS memory_name_ai AFTER INSERT ON session_names BEGIN
+    INSERT INTO memory_text (session_id, kind, ref, text) VALUES (new.session_id, 'name', 0, new.name); END;
+CREATE TRIGGER IF NOT EXISTS memory_name_au AFTER UPDATE OF name ON session_names BEGIN
+    UPDATE memory_text SET text = new.name WHERE session_id = new.session_id AND kind = 'name'; END;
+CREATE TRIGGER IF NOT EXISTS memory_name_ad AFTER DELETE ON session_names BEGIN
+    DELETE FROM memory_text WHERE session_id = old.session_id AND kind = 'name'; END;
+";
+
+/// Index session names (idempotent); names stored before the triggers existed are added once.
+pub fn install_names(conn: &Connection) -> Result<()> {
+    conn.execute_batch(NAME_TRIGGERS)?;
+    conn.execute_batch(
+        "INSERT INTO memory_text (session_id, kind, ref, text) SELECT n.session_id, 'name', 0, n.name FROM session_names n
+         WHERE NOT EXISTS (SELECT 1 FROM memory_text t WHERE t.session_id = n.session_id AND t.kind = 'name');",
+    )?;
+    Ok(())
+}
 
 /// Set the searchable text up in `sill.db` (idempotent). The first time, it is filled from what
 /// the store already holds, so sessions from before memory are searchable too.

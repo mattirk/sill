@@ -58,7 +58,7 @@ fn some(items: &[String], n: usize) -> String {
 fn fact_lines(f: &Facts, home: &Path) -> Vec<String> {
     let mut lines = Vec::new();
     if let Some(name) = &f.name {
-        lines.push(format!("session name: {name}. End the summary with exactly: As summarized by {name}"));
+        lines.push(format!("session name: {name}"));
     }
     if !f.pins.is_empty() {
         lines.push(format!("pinned folders: {}", f.pins.iter().map(|p| tilde(p, home)).collect::<Vec<_>>().join(", ")));
