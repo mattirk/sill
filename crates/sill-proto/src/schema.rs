@@ -66,7 +66,7 @@ pub const METHODS: &[Method] = &[
     req::<crate::admin::SessionImage,crate::admin::FileBytes>("_sill/files.image","Read an image visible through the session filesystem view in bounded chunks; revision detects concurrent edits."),
     req::<crate::admin::DeniedList,crate::admin::NetworkDenied>("_sill/policy.denied","Read network denials and their acknowledgement state (4 MiB response bound)."),
     req_empty::<crate::admin::NetworkHost>("_sill/policy.remember_denied","Acknowledge a denial; inspect denied state after uncertainty before retrying."),
-    req::<crate::admin::NetworkHost,crate::admin::AllowedHost>("_sill/policy.allow_host","Add an explicit host pattern to the session agent network defaults; inspect policy after uncertainty."),
+    req::<crate::admin::NetworkHost,crate::admin::AllowedHost>("_sill/policy.allow_host","Approve a concrete host for this session only; policy limits apply. Inspect policy after uncertainty."),
     notification::<crate::Empty>("_sill/changes.changed", "Filesystem changes changed; refresh bounded public pages."),
     req::<crate::changes::List, crate::changes::Page>("_sill/changes.list", "Public Changes operation; preserve filesystem preconditions and inspect current state after an uncertain mutation, never blindly retry."),
     req::<crate::changes::Diff, crate::changes::DiffPage>("_sill/changes.diff", "Public Changes operation; preserve filesystem preconditions and inspect current state after an uncertain mutation, never blindly retry."),

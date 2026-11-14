@@ -6363,7 +6363,7 @@
     },
     {
       "capabilities": {},
-      "doc": "Add an explicit host pattern to the session agent network defaults; inspect policy after uncertainty.",
+      "doc": "Approve a concrete host for this session only; policy limits apply. Inspect policy after uncertainty.",
       "kind": "request",
       "name": "_sill/policy.allow_host",
       "params": {

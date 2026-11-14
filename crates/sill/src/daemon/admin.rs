@@ -1,6 +1,6 @@
 //! Public host data methods. No core structs are serialized across this boundary.
 use super::Hub;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use sill_proto::{admin as api, rpc::Error, sessions::HostPath};
@@ -361,30 +361,29 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 let row = hub.with_store(|s| s.session_exact(&a.session_id))?.ok_or_else(|| domain("not_found", "session not found"))?;
                 let name = a.host.rsplit_once(':').filter(|(_, port)| port.parse::<u16>().is_ok()).map(|(name, _)| name).unwrap_or(&a.host);
                 let name = name.strip_prefix("*.").unwrap_or(name);
-                if !sill_core::proxy::valid_hostname(name) { return Err(invalid("invalid host pattern")); }
+                if a.host.contains('*') || !sill_core::proxy::valid_hostname(name) { return Err(invalid("session approvals require a concrete hostname")); }
                 let home = sill_core::changes::home()?;
-                let snapshot = sill_core::session::policy_snapshot(&a.session_id)?;
-                let suggested = snapshot.as_ref().is_some_and(|s| s.suggestions.iter().any(|suggestion| suggestion.host == a.host));
+                let running = sill_core::session::is_running(&a.session_id);
+                let snapshot = if running { sill_core::session::policy_snapshot(&a.session_id)? } else { None };
                 let policy = match snapshot {
                     Some(snapshot) => snapshot.policy,
-                    None => sill_core::policy::Policy::load(&row.policy, &home)?,
+                    None => {
+                        let cfg = sill_core::config::load();
+                        let (x11, dbus) = sill_core::config::desktop_grants(&row.desktop, &cfg);
+                        let base = sill_core::session::session_base_policy(&row.policy, &home, x11, dbus, row.ghost, Some(&row.agent))?;
+                        let pins = if row.ghost { vec![] } else { hub.with_store(|store| store.jail_pins(&a.session_id))? };
+                        sill_core::policy_fragments::resolve(&base, &pins, &[])?.policy
+                    }
                 };
                 if policy.network.mode == sill_core::policy::NetMode::None {
                     return Err(domain("permission_denied", "network is disabled by the launch policy; change the policy and rebuild"));
                 }
-                if suggested {
-                    remember_session_host(&a.session_id, &a.host)?;
-                    return bounded(api::AllowedHost { agent_name: "this session".into(), live: true });
+                if !policy.network.allow_additional_hosts {
+                    return Err(domain("permission_denied", "additional hosts are forbidden by the launch policy"));
                 }
-                let mut agent = sill_core::agents::load(&home).remove(&row.agent).context("unknown agent")?;
-                if !agent.domains.contains(&a.host) { agent.domains.push(a.host.clone()); }
-                sill_core::agents::save_override(&home, &agent)?;
-                // the agent's list is for its next jails; the running one gets the exact host as a
-                // live grant, so the agent goes on without a restart (a wildcard still needs one)
-                let live = !a.host.contains('*')
-                    && sill_core::session::is_running(&a.session_id)
-                    && remember_session_host(&a.session_id, &a.host).is_ok();
-                bounded(api::AllowedHost { agent_name: agent.name, live })
+                hub.with_store(|store| store.allow_network_host(&a.session_id, &a.host))?;
+                if running { remember_session_host(&a.session_id, &a.host)?; }
+                bounded(api::AllowedHost { agent_name: "this session".into(), live: running })
             }
         }
 
@@ -507,7 +506,8 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             let (x11, dbus) = sill_core::config::desktop_grants(&row.desktop, &cfg);
             let pins = if row.ghost { vec![] } else { pins };
             let result = sill_core::session::session_base_policy(&row.policy, &home, x11, dbus, row.ghost, Some(&row.agent))
-                .and_then(|base| sill_core::policy_fragments::resolve(&base, &pins, &[]));
+                .and_then(|base| sill_core::policy_fragments::resolve(&base, &pins, &[]))
+                .and_then(|resolved| sill_core::session::resolved_policy_with_grants(resolved, &a.session_id));
             let view = match result {
                 Ok(resolved) => policy_view("preview", &a.session_id, &row.policy, resolved)?,
                 Err(e) => api::PolicyView {
@@ -689,7 +689,7 @@ fn denied(hub: &Hub, a: api::DeniedList) -> Result<api::NetworkDenied> {
     let home = sill_core::changes::home()?;
     if let Some(snapshot) = sill_core::session::policy_snapshot(&a.session_id)? {
         if snapshot.policy.network.mode != sill_core::policy::NetMode::None {
-            let approved = session_hosts(&a.session_id)?;
+            let approved: std::collections::BTreeSet<_> = hub.with_store(|store| store.network_hosts(&a.session_id))?.into_iter().collect();
             for suggestion in snapshot.suggestions {
                 if !approved.contains(&suggestion.host) {
                     add(0, suggestion.host);

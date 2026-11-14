@@ -165,6 +165,8 @@ impl Store {
              CREATE INDEX IF NOT EXISTS sessions_creation_order ON sessions(created_at DESC,id DESC);
              CREATE TABLE IF NOT EXISTS session_pins (
                  session_id TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (session_id, path));
+             CREATE TABLE IF NOT EXISTS session_network_hosts (
+                 session_id TEXT NOT NULL, host TEXT NOT NULL, PRIMARY KEY (session_id, host));
              CREATE TABLE IF NOT EXISTS global_pins (path TEXT PRIMARY KEY, added_at INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS entries (
                  session_id TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL,
@@ -479,10 +481,29 @@ impl Store {
         self.conn.execute("DELETE FROM memories WHERE session_id = ?1", params![id])?;
         self.conn.execute("DELETE FROM entries WHERE session_id = ?1", params![id])?;
         self.conn.execute("DELETE FROM session_pins WHERE session_id = ?1", params![id])?;
+        self.conn.execute("DELETE FROM session_network_hosts WHERE session_id = ?1", params![id])?;
         self.conn.execute("DELETE FROM pin_heads WHERE session_id = ?1", params![id])?;
         // its history rows stay (SPEC §3.6): what it did to the host outlives it
         self.conn.execute("DELETE FROM session_names WHERE session_id = ?1", params![id])?;
         self.conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Human approvals belong to a session, never the agent's endpoint defaults.
+    pub fn network_hosts(&self, session_id: &str) -> Result<Vec<String>> {
+        let mut statement = self.conn.prepare("SELECT host FROM session_network_hosts WHERE session_id = ?1 ORDER BY host")?;
+        let rows = statement.query_map(params![session_id], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn allow_network_host(&self, session_id: &str, host: &str) -> Result<()> {
+        let transaction = self.conn.unchecked_transaction()?;
+        anyhow::ensure!(self.session_exact(session_id)?.is_some(), "session not found");
+        anyhow::ensure!(!host.is_empty() && host.len() <= 1024 && !host.chars().any(char::is_control), "invalid host grant");
+        self.conn.execute("INSERT OR IGNORE INTO session_network_hosts (session_id, host) VALUES (?1, ?2)", params![session_id, host])?;
+        let count: i64 = self.conn.query_row("SELECT count(*) FROM session_network_hosts WHERE session_id = ?1", params![session_id], |row| row.get(0))?;
+        anyhow::ensure!(count <= 128, "at most 128 session host grants");
+        transaction.commit()?;
         Ok(())
     }
 
@@ -933,4 +954,27 @@ mod tests {
         assert!(store.sessions().unwrap().iter().all(|x| x.id != s.id));
         let _ = std::fs::remove_dir_all(&dir);
     }
+    #[test]
+    fn host_grants_are_bounded_persistent_and_session_owned() {
+        let dir = std::env::temp_dir().join(format!("sill-host-grants-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("store.db");
+        let store = Store::open(&path).unwrap();
+        let first = store.create("codex", "default").unwrap();
+        let second = store.create("codex", "default").unwrap();
+        for n in 0..128 { store.allow_network_host(&first.id, &format!("h{n}.example.com")).unwrap(); }
+        store.allow_network_host(&first.id, "h0.example.com").unwrap();
+        assert!(store.allow_network_host(&first.id, "overflow.example.com").is_err());
+        assert!(store.allow_network_host("missing", "example.com").is_err());
+        assert!(store.network_hosts(&second.id).unwrap().is_empty());
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.network_hosts(&first.id).unwrap().len(), 128);
+        assert!(!store.network_hosts(&first.id).unwrap().contains(&"overflow.example.com".into()));
+        store.delete(&first.id).unwrap();
+        assert!(store.network_hosts(&first.id).unwrap().is_empty());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
 }

@@ -50,9 +50,12 @@ impl Processes {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Network {
+    /// Hard ceiling: whether human approvals may add hosts beyond the policy defaults.
+    #[serde(default = "default_true")]
+    pub allow_additional_hosts: bool,
     /// `none` | `all` | `allow` (only the domains in `allow`)
     #[serde(default)]
     pub mode: NetMode,
@@ -68,6 +71,12 @@ pub struct Network {
     /// send anyway. Still refused, just quietly.
     #[serde(default = "quiet_default")]
     pub quiet: Vec<String>,
+}
+
+impl Default for Network {
+    fn default() -> Self {
+        Self { allow_additional_hosts: true, mode: Default::default(), allow: vec![], allow_local: vec![], quiet: quiet_default() }
+    }
 }
 
 pub fn quiet_default() -> Vec<String> {
@@ -331,4 +340,12 @@ mod tests {
         assert!(p.paths.mask.iter().any(|m| m.contains(".ssh")));
         assert!(!p.jail.allow_userns);
     }
+    #[test]
+    fn additional_host_limit_is_distinct_from_initial_allow_list() {
+        let policy = Policy::parse("name = 'restricted'\n[network]\nallow = ['example.com']\nallow_additional_hosts = false").unwrap();
+        assert!(!policy.network.allow_additional_hosts);
+        assert_eq!(policy.network.allow, ["example.com"]);
+        assert!(Policy::builtin_default().network.allow_additional_hosts);
+    }
+
 }

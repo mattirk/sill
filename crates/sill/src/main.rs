@@ -1117,9 +1117,9 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
         // offers to allow the host for this agent (SPEC §4.8)
         let denied = rt.join("denied");
         let _ = std::fs::remove_file(&denied);
-        let session_grants = rt.join("session-allowed-hosts");
+        let session_grants = spec.policy.network.allow_additional_hosts.then(|| rt.join("session-allowed-hosts"));
         proxy_thread = Some(std::thread::spawn(move || {
-            sill_core::proxy::serve_with_session_grants(listener, rules, Some(session_grants), move |l| {
+            sill_core::proxy::serve_with_session_grants(listener, rules, session_grants, move |l| {
                 // stderr is the session's journald stream or its jail.log (docs/daemon.md §3.1)
                 eprintln!("proxy: {l}");
                 // what an allow would let through, for the shelf's offer (`proxy::denial_offer`)

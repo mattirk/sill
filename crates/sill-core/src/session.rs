@@ -499,6 +499,17 @@ pub fn session_base_policy(name: &str, home: &Path, x11: Option<bool>, dbus: Opt
     Ok(policy)
 }
 
+/// Apply remembered human grants within resolved restrictions. Live approvals are not policy
+/// source edits, so retain the source fingerprint while recording grants in the launch rules.
+pub fn resolved_policy_with_grants(mut resolution: crate::policy_fragments::Resolution, session: &str) -> Result<crate::policy_fragments::Resolution> {
+    let base = &mut resolution.policy;
+    if base.network.mode != crate::policy::NetMode::None && base.network.allow_additional_hosts {
+        let store = crate::store::Store::open(&crate::store::default_path()?)?;
+        base.network.allow.extend(store.network_hosts(session)?);
+    }
+    Ok(resolution)
+}
+
 fn snapshot_dir(session: &str) -> Result<PathBuf> {
     if !valid_id(session) { bail!("not a session id"); }
     Ok(crate::store::default_path()?.with_file_name("policy-snapshots").join(session))
@@ -717,6 +728,7 @@ pub fn ensure_started(opts: &StartOptions, home: &Path, exe: &Path) -> Result<St
     }
     let base = session_base_policy(&opts.policy, home, opts.x11, opts.dbus, opts.ghost, opts.agent.as_deref())?;
     let resolution = crate::policy_fragments::resolve(&base, &opts.pins, &opts.ignore_fragments)?;
+    let resolution = resolved_policy_with_grants(resolution, &opts.session)?;
     let serialized_resolution = serde_json::to_vec_pretty(&resolution)?;
     if serialized_resolution.len() > MAX_POLICY_SNAPSHOT_BYTES { bail!("launch policy snapshot exceeds 4 MiB"); }
     let policy = &resolution.policy;

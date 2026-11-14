@@ -72,9 +72,12 @@ turn is cancelled so it goes as soon as the agent has stopped. A prompt's user i
 it is dispatched, not when it is accepted: a queued prompt appears where the agent receives it (an
 item made at acceptance by an older daemon is removed and made again there, reason
 `moved_to_dispatch`).
-`_sill/policy.allow_host` answers `live: true` when the running session got the host as a live
-grant, read by its proxy per connection, so no restart is needed; an older daemon omits it, and a
-wildcard is never live (2026-11-05).
+`_sill/policy.allow_host` approves a concrete hostname for the selected session only. It
+returns `agent_name: "this session"` and `live: true` when a running proxy can use the grant
+on new connections. Grants persist with the session, enter policy previews and subsequent
+launch snapshots, and are deleted with it. Wildcards are refused. Offline policies and
+`network.allow_additional_hosts = false` reject approval; repository restrictions are resolved
+again before a new launch. Agent-wide endpoint defaults are never changed by Allow.
 The schema command exports the concrete records and method shapes. Counters are decimal strings;
 records/events use named objects and `type` tags. `scripts/sfp_client.py` is an independent Python
 consumer and schema validator (install `scripts/requirements-sfp.txt`).
