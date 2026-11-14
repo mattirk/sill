@@ -111,6 +111,9 @@ let_in() {
         [ $tries -lt 60 ] || { echo 'The guest never let the build in.' >&2; exit 1; }
         sleep 10
     done
+    # vsock answers before the guest's network is up; the build downloads
+    guest 'timeout 120 sh -c "until getent hosts deb.debian.org >/dev/null; do sleep 1; done"' ||
+        { echo 'The guest has no network.' >&2; exit 1; }
 }
 echo 'Waiting for the first boot (packages; console: target/mac-image/console.log)'
 # cloud-init's last step marks the console; logins before it would only fail, and OpenSSH holds
