@@ -17,7 +17,8 @@ once upstream has an equivalent.
   read as menus (the person's request of 2026-11-05). Unset, upstream's behaviour.
 - `src/text_editor.rs`: optional `line_numbers` gutter, supplied with visible logical line
   positions from the renderer. Gutter width tracks the number of digits; source layout, pointer
-  hit testing and IME positioning use the same inset. Default editors stay unchanged.
+  hit testing and IME positioning use the same inset. Unwrapped editors pass sideways/Shift-wheel
+  events to a parent horizontal scrollbar. Default editors stay unchanged.
 - `src/lib.rs`: `#![allow(deprecated)]`, so upstream's own deprecation warnings do not show in
   sill's builds (a path dependency's warnings are not capped as a registry crate's are).
 

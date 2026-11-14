@@ -551,6 +551,8 @@ pub struct State<Highlighter: text::Highlighter> {
     last_click: Option<mouse::Click>,
     drag_click: Option<mouse::click::Kind>,
     partial_scroll: f32,
+    // sill patch: let a horizontal parent handle sideways source scrolling.
+    modifiers: keyboard::Modifiers,
     last_theme: RefCell<Option<String>>,
     highlighter: RefCell<Highlighter>,
     highlighter_settings: Highlighter::Settings,
@@ -626,6 +628,7 @@ where
             last_click: None,
             drag_click: None,
             partial_scroll: 0.0,
+            modifiers: keyboard::Modifiers::default(),
             last_theme: RefCell::default(),
             highlighter: RefCell::new(Highlighter::new(
                 &self.highlighter_settings,
@@ -716,6 +719,20 @@ where
         };
 
         let state = tree.state.downcast_mut::<State<Highlighter>>();
+        // sill patch: unwrapped source editors delegate sideways scrolling to their parent.
+        if let Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) = event {
+            state.modifiers = *modifiers;
+        }
+        if self.wrapping == Wrapping::None {
+            if let Event::Mouse(mouse::Event::WheelScrolled { delta }) = event {
+                let x = match delta {
+                    mouse::ScrollDelta::Lines { x, .. } | mouse::ScrollDelta::Pixels { x, .. } => *x,
+                };
+                if state.modifiers.shift() || x != 0.0 {
+                    return;
+                }
+            }
+        }
         let is_redraw = matches!(
             event,
             Event::Window(window::Event::RedrawRequested(_now)),

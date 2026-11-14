@@ -1,7 +1,7 @@
 //! The shelf's open-items row, file drawer and reader, drawn from daemon-owned paths.
 use iced::widget::{
-    Column, button, column, container, markdown, row, rule, scrollable, space, text, text_editor,
-    text_input, tooltip,
+    Column, button, column, container, markdown, responsive, row, rule, scrollable, space, text,
+    text_editor, text_input, tooltip,
 };
 use iced::{Alignment, Element, Fill, Font, Padding, Shrink};
 use sill_proto::sessions::HostPath;
@@ -374,41 +374,56 @@ impl App {
                 .height(Fill)
                 .into()
         } else if file.source {
-            text_editor(&rendering.content)
-                .id("file-reader")
-                .height(Fill)
-                .padding(12)
-                .size(style::MONO)
-                .font(Font::with_name(crate::fonts::MONO_FAMILY))
-                .style(|theme, status| {
-                    let mut style = style::reader(theme, status);
-                    style.border = iced::Border::default();
-                    style
-                })
-                .line_numbers(|editor| {
-                    let mut previous = None;
-                    editor
-                        .buffer()
-                        .layout_runs()
-                        .filter_map(|run| {
-                            let first = previous != Some(run.line_i);
-                            previous = Some(run.line_i);
-                            (first && run.glyphs.first().is_none_or(|glyph| glyph.start == 0))
-                                .then_some((run.line_i + 1, run.line_top))
-                        })
-                        .collect()
-                })
-                .on_action(|a| msg(Action::Text(a)))
-                .key_binding(crate::ui::reading_keys)
-                .highlight(
-                    if is_diff {
-                        "diff"
-                    } else {
-                        crate::syntax::token(&file.path.display)
-                    },
-                    crate::syntax::theme(),
-                )
-                .into()
+            let digits = rendering.content.line_count().max(1).ilog10() + 1;
+            let width =
+                (rendering.source_columns as f32 + digits.max(2) as f32 + 4.0) * style::MONO * 0.6
+                    + 24.0;
+            responsive(move |size| {
+                let editor = text_editor(&rendering.content)
+                    .id("file-reader")
+                    .height(Fill)
+                    .width(width.max(size.width))
+                    .wrapping(iced::widget::text::Wrapping::None)
+                    .padding(12)
+                    .size(style::MONO)
+                    .font(Font::with_name(crate::fonts::MONO_FAMILY))
+                    .style(|theme, status| {
+                        let mut style = style::reader(theme, status);
+                        style.border = iced::Border::default();
+                        style
+                    })
+                    .line_numbers(|editor| {
+                        let mut previous = None;
+                        editor
+                            .buffer()
+                            .layout_runs()
+                            .filter_map(|run| {
+                                let first = previous != Some(run.line_i);
+                                previous = Some(run.line_i);
+                                (first && run.glyphs.first().is_none_or(|glyph| glyph.start == 0))
+                                    .then_some((run.line_i + 1, run.line_top))
+                            })
+                            .collect()
+                    })
+                    .on_action(|a| msg(Action::Text(a)))
+                    .key_binding(crate::ui::reading_keys)
+                    .highlight(
+                        if is_diff {
+                            "diff"
+                        } else {
+                            crate::syntax::token(&file.path.display)
+                        },
+                        crate::syntax::theme(),
+                    );
+                scrollable(editor)
+                    .id(format!("source-horizontal-{}", rendering.key))
+                    .direction(scrollable::Direction::Horizontal(style::bar()))
+                    .width(Fill)
+                    .height(Fill)
+                    .style(style::feed_scroll)
+                    .into()
+            })
+            .into()
         } else if is_diff {
             let diff = diff_rows(&file.text, &file.path.display);
             selection::area(

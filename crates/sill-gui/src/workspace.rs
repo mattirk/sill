@@ -64,6 +64,7 @@ pub struct ReaderView {
     pub key: String,
     pub revision: u64,
     pub content: text_editor::Content,
+    pub source_columns: usize,
     pub markdown: Option<markdown::Content>,
     pub saved: String,
     pub dirty: bool,
@@ -80,6 +81,66 @@ pub struct Workspace {
     follow_seen: std::collections::BTreeMap<String, String>,
     /// None in `--demo`: requests are answered with synthetic files at once.
     files: Option<Files>,
+}
+
+/// Source Code Pro uses fixed-width cells; tabs advance to eight-column stops.
+pub(crate) fn source_columns(text: &str) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    text.lines()
+        .map(|line| {
+            line.split('\t')
+                .enumerate()
+                .fold(0, |columns, (index, part)| {
+                    let columns = if index == 0 {
+                        columns
+                    } else {
+                        (columns / 8 + 1) * 8
+                    };
+                    columns + part.width()
+                })
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// Keep the caret visible inside the source's horizontal viewport during keyboard editing.
+struct RevealSourceCaret {
+    id: iced::advanced::widget::Id,
+    x: f32,
+}
+
+impl iced::advanced::widget::operation::Operation for RevealSourceCaret {
+    fn traverse(
+        &mut self,
+        operate: &mut dyn FnMut(&mut dyn iced::advanced::widget::operation::Operation),
+    ) {
+        operate(self);
+    }
+
+    fn scrollable(
+        &mut self,
+        id: Option<&iced::advanced::widget::Id>,
+        bounds: iced::Rectangle,
+        _content: iced::Rectangle,
+        translation: iced::Vector,
+        state: &mut dyn iced::advanced::widget::operation::Scrollable,
+    ) {
+        if id != Some(&self.id) {
+            return;
+        }
+        let margin = 12.0;
+        let offset = if self.x < translation.x + margin {
+            self.x - margin
+        } else if self.x > translation.x + bounds.width - margin {
+            self.x - bounds.width + margin
+        } else {
+            return;
+        };
+        state.scroll_to(iced::widget::scrollable::AbsoluteOffset {
+            x: Some(offset.max(0.0)),
+            y: None,
+        });
+    }
 }
 
 impl Workspace {
@@ -135,6 +196,7 @@ impl SessionView {
                 key: key.into(),
                 revision: file.revision,
                 content: text_editor::Content::with_text(&file.text),
+                source_columns: source_columns(&file.text),
                 markdown: None,
                 saved: file.text.clone(),
                 dirty: false,
@@ -378,9 +440,10 @@ impl App {
             .filter(|v| {
                 // Do not supersede slow replies or pile up work on a remote daemon.
                 v.files.directories.values().all(|d| d.pending.is_none())
-                    && v.files.repos.values().all(|r| {
-                        r.pending.is_none() && r.counts_pending.is_none()
-                    })
+                    && v.files
+                        .repos
+                        .values()
+                        .all(|r| r.pending.is_none() && r.counts_pending.is_none())
             })
             .map(|v| v.files.refresh())
             .unwrap_or_default();
@@ -454,6 +517,7 @@ impl App {
                         return Task::none();
                     }
                     reader.content = text_editor::Content::with_text(&reader.saved);
+                    reader.source_columns = source_columns(&reader.saved);
                     reader.dirty = false;
                     reader.notice = None;
                     reader.markdown = None;
@@ -574,6 +638,12 @@ impl App {
                     }
                     Action::Text(action) => {
                         let editing = matches!(action, text_editor::Action::Edit(_));
+                        let reveal = matches!(
+                            action,
+                            text_editor::Action::Edit(_)
+                                | text_editor::Action::Move(_)
+                                | text_editor::Action::Select(_)
+                        );
                         let editable = view.files.reader.as_ref().is_some_and(|f| {
                             f.source && f.repo.is_none() && f.pending.is_none() && f.error.is_none()
                         });
@@ -582,9 +652,32 @@ impl App {
                         {
                             reader.content.perform(action);
                             if editing {
-                                reader.dirty = reader.content.text() != reader.saved;
+                                let text = reader.content.text();
+                                reader.source_columns = source_columns(&text);
+                                reader.dirty = text != reader.saved;
                                 reader.markdown = None;
                                 reader.notice = None;
+                            }
+                            if reveal {
+                                let cursor = reader.content.cursor().position;
+                                let columns = reader.content.line(cursor.line).map_or(0, |line| {
+                                    source_columns(
+                                        line.text.get(..cursor.column).unwrap_or(&line.text),
+                                    )
+                                });
+                                let digits = reader.content.line_count().max(1).ilog10() + 1;
+                                return iced_runtime::task::effect(iced_runtime::Action::widget(
+                                    RevealSourceCaret {
+                                        id: iced::advanced::widget::Id::from(format!(
+                                            "source-horizontal-{}",
+                                            reader.key
+                                        )),
+                                        x: 12.0
+                                            + (columns as f32 + digits.max(2) as f32 + 2.0)
+                                                * crate::style::MONO
+                                                * 0.6,
+                                    },
+                                ));
                             }
                         }
                         vec![]

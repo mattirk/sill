@@ -4514,6 +4514,7 @@ dependencies = [
  "sill-proto",
  "toml",
  "unicode-segmentation",
+ "unicode-width",
  "x11rb 0.14.0",
 ]
 

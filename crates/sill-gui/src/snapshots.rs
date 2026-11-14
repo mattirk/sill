@@ -486,7 +486,33 @@ fn render_source_gutter() {
         .as_mut()
         .unwrap()
         .content = text_editor::Content::with_text(&content);
+    app.views
+        .get_mut("demo")
+        .unwrap()
+        .reader
+        .as_mut()
+        .unwrap()
+        .source_columns = crate::workspace::source_columns(&content);
     render_size(&app, "source-gutter-top", (720.0, 860.0));
+    {
+        let mut ui = iced_test::Simulator::with_size(settings(), (720.0, 860.0), app.view());
+        ui.point_at(iced::Point::new(350.0, 250.0));
+        let statuses = ui.simulate([iced::Event::Mouse(iced::mouse::Event::WheelScrolled {
+            delta: iced::mouse::ScrollDelta::Lines { x: -12.0, y: 0.0 },
+        })]);
+        assert_eq!(statuses, [iced::event::Status::Captured]);
+        // Sideways scrolling is handled by the outer scrollbar, not a vertical editor action.
+        let snapshot = ui.snapshot(&crate::style::theme()).unwrap();
+        assert!(
+            snapshot
+                .matches_image(dir().join("source-horizontal-right"))
+                .unwrap()
+        );
+        assert!(!ui.into_messages().any(|m| matches!(
+            m,
+            Message::Workspace(Action::Text(text_editor::Action::Scroll { .. }))
+        )));
+    }
     let _ = app.update(Message::Workspace(Action::Text(
         text_editor::Action::Scroll { lines: 95 },
     )));

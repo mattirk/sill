@@ -584,3 +584,31 @@ fn an_ended_session_keeps_its_unsaved_buffer_and_uncertain_save_does_not_clear_i
         edited
     );
 }
+
+#[test]
+fn source_extent_accounts_for_tabs_wide_characters_and_edits() {
+    assert_eq!(super::source_columns("a\tb"), 9);
+    assert_eq!(super::source_columns("12345678\tx"), 17);
+    assert_eq!(super::source_columns("a\n你好\ne\u{301}"), 4);
+    let mut app = app();
+    open_source(&mut app);
+    act(&mut app, Action::Text(text_editor::Action::SelectAll));
+    act(
+        &mut app,
+        Action::Text(text_editor::Action::Edit(text_editor::Edit::Paste(
+            std::sync::Arc::new("x".repeat(300)),
+        ))),
+    );
+    assert_eq!(
+        app.views["demo"].reader.as_ref().unwrap().source_columns,
+        300
+    );
+    act(&mut app, Action::Text(text_editor::Action::SelectAll));
+    act(
+        &mut app,
+        Action::Text(text_editor::Action::Edit(text_editor::Edit::Paste(
+            std::sync::Arc::new("short".into()),
+        ))),
+    );
+    assert_eq!(app.views["demo"].reader.as_ref().unwrap().source_columns, 5);
+}
