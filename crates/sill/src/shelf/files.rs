@@ -36,6 +36,7 @@ pub struct FilesPage {
     badges: Rc<RefCell<BTreeMap<PathBuf, String>>>,
     changes: Rc<RefCell<Vec<Change>>>,
     pinned: Rc<RefCell<Vec<PathBuf>>>,
+    elsewhere: Rc<RefCell<Vec<PathBuf>>>,
     /// File open in the editor (None while showing a diff or nothing).
     open: RefCell<Option<PathBuf>>,
     dirty: Cell<bool>,
@@ -117,10 +118,13 @@ impl FilesPage {
         });
         let page_for_bind: Rc<RefCell<Option<std::rc::Weak<FilesPage>>>> = Rc::new(RefCell::new(None));
         let pinned_paths: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
+        // pinned by some other session than the current one: shown, but the button pins here
+        let elsewhere_paths: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
         {
             let badges = badges.clone();
             let page_for_bind = page_for_bind.clone();
             let pinned_paths = pinned_paths.clone();
+            let elsewhere_paths = elsewhere_paths.clone();
             factory.connect_bind(move |_, item| {
                 let item = item.downcast_ref::<gtk::ListItem>().unwrap();
                 let row = item.item().and_downcast::<gtk::TreeListRow>().unwrap();
@@ -166,14 +170,19 @@ impl FilesPage {
                 if is_repo {
                     parts.push("git".into());
                 }
+                let elsewhere = !pinned && elsewhere_paths.borrow().contains(&path);
                 if pinned {
                     parts.push("⌖".into());
+                } else if elsewhere {
+                    parts.push("⌖ other".into());
                 }
                 badge.set_text(&parts.join(" "));
-                badge.set_tooltip_text(match (is_repo, pinned) {
-                    (true, true) => Some("git repository · pinned to the current session"),
-                    (true, false) => Some("git repository"),
-                    (false, true) => Some("pinned to the current session"),
+                badge.set_tooltip_text(match (is_repo, pinned, elsewhere) {
+                    (true, true, _) => Some("git repository · pinned to the current session"),
+                    (true, false, true) => Some("git repository · pinned by another session, not this one"),
+                    (true, false, false) => Some("git repository"),
+                    (false, true, _) => Some("pinned to the current session"),
+                    (false, false, true) => Some("pinned by another session, not this one"),
                     _ => None,
                 });
                 pin.set_visible(is_dir);
@@ -279,6 +288,7 @@ impl FilesPage {
             badges,
             changes: Rc::new(RefCell::new(Vec::new())),
             pinned: pinned_paths.clone(),
+            elsewhere: elsewhere_paths.clone(),
             open: RefCell::new(None),
             dirty: Cell::new(false),
             pin_target: RefCell::new(None),
@@ -469,12 +479,21 @@ impl FilesPage {
 
     /// Rescan all sessions and rebuild badges and roots.
     pub fn refresh(self: &Rc<Self>) {
+        let _ = self.store.prune_pins(); // pins of deleted sessions would otherwise haunt the tree
         let sessions = self.store.sessions().unwrap_or_default();
         let home = session::home().unwrap_or_default();
         let uid = session::uid();
         let user = std::env::var("USER").unwrap_or_default();
         let pins: Vec<PathBuf> = sessions.iter().flat_map(|s| self.store.pins(&s.id).unwrap_or_default()).collect();
         let target_pins: Vec<PathBuf> = self.pin_target.borrow().as_ref().and_then(|t| self.store.pins(t).ok()).unwrap_or_default();
+        let target = self.pin_target.borrow().clone();
+        let elsewhere: Vec<PathBuf> = sessions
+            .iter()
+            .filter(|s| Some(&s.id) != target.as_ref())
+            .flat_map(|s| self.store.pins(&s.id).unwrap_or_default())
+            .filter(|p| !target_pins.contains(p))
+            .collect();
+        *self.elsewhere.borrow_mut() = elsewhere;
         *self.pinned.borrow_mut() = target_pins;
         let (tx, rx) = async_channel::bounded::<Vec<Change>>(1);
         std::thread::spawn(move || {

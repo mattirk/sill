@@ -139,7 +139,8 @@ pub fn set_theme(name: &str) -> Result<()> {
 }
 
 /// SIGTERM every other `sill shelf` process of this user (fallback for `restart`).
-fn kill_old_shelves() {
+/// Send `sig` to every other `sill shelf` process.
+fn kill_old_shelves_with(sig: rustix::process::Signal) {
     let me = std::process::id();
     let Ok(rd) = std::fs::read_dir("/proc") else { return };
     for e in rd.filter_map(Result::ok) {
@@ -152,9 +153,13 @@ fn kill_old_shelves() {
         let is_shelf = args.first().map(|a| a.ends_with(b"/sill") || *a == b"sill").unwrap_or(false)
             && args.get(1).map(|a| *a == b"shelf").unwrap_or(false);
         if is_shelf && let Some(p) = rustix::process::Pid::from_raw(pid as i32) {
-            let _ = rustix::process::kill_process(p, rustix::process::Signal::TERM);
+            let _ = rustix::process::kill_process(p, sig);
         }
     }
+}
+
+fn kill_old_shelves() {
+    kill_old_shelves_with(rustix::process::Signal::TERM);
 }
 
 /// `sill restart`: with the `sill-shelf` user service installed this is `systemctl --user restart`
@@ -179,21 +184,35 @@ pub fn restart(hidden: bool, dev: bool) -> Result<()> {
     if unit_known {
         let _ = std::process::Command::new("systemctl").args(["--user", "stop", "sill-shelf.service"]).status();
     }
+    // Ask the running shelf to quit over D-Bus. A shelf whose main loop is wedged owns the name
+    // but answers nothing: registering against it times out, so that too means "kill it".
     let app = gio::Application::new(Some(APP_ID), gio::ApplicationFlags::empty());
-    app.register(None::<&gio::Cancellable>)?;
-    if app.is_remote() {
-        app.activate_action("quit", None);
-        // wait for the old instance to release the application id; if it doesn't, terminate it
+    let remote = match app.register(None::<&gio::Cancellable>) {
+        Ok(()) => app.is_remote(),
+        Err(e) => {
+            eprintln!("sill: the running shelf does not answer ({e}); terminating it");
+            kill_old_shelves();
+            true
+        }
+    };
+    if remote {
+        if app.is_registered() && app.is_remote() {
+            app.activate_action("quit", None);
+        }
+        // wait for the old instance to release the application id; escalate if it doesn't
         let mut freed = false;
-        for i in 0..60 {
+        for i in 0..80 {
             std::thread::sleep(std::time::Duration::from_millis(100));
             let probe = gio::Application::new(Some(APP_ID), gio::ApplicationFlags::empty());
             if probe.register(None::<&gio::Cancellable>).is_ok() && !probe.is_remote() {
                 freed = true;
                 break;
             }
-            if i == 30 {
+            if i == 20 {
                 kill_old_shelves();
+            }
+            if i == 45 {
+                kill_old_shelves_with(rustix::process::Signal::KILL);
             }
         }
         if !freed {

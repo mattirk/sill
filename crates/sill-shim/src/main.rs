@@ -435,15 +435,26 @@ fn kill_agent(shared: &Shared, grace_ms: u64) -> Result<Option<i32>> {
         }
         drop(st);
         if std::time::Instant::now() >= deadline {
+            // SIGKILL the group and the leader itself, then poll: never a blocking wait() while
+            // holding the lock — every other control request (status, spawn, the shelf's startup)
+            // queues on that lock, and an agent that somehow survives would wedge the whole shim
             let _ = kill_process_group(pgid, Signal::KILL);
-            let mut st = lock.lock().unwrap();
-            if let Some(child) = st.child.as_mut() {
-                let status = child.wait()?;
-                st.exit = Some(status.code().unwrap_or(-9));
-                st.child = None;
+            let _ = rustix::process::kill_process(pgid, Signal::KILL);
+            let hard = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                let mut st = lock.lock().unwrap();
+                reap(&mut st);
+                if st.child.is_none() {
+                    cvar.notify_all();
+                    return Ok(st.exit);
+                }
+                drop(st);
+                if std::time::Instant::now() >= hard {
+                    eprintln!("sill-shim: agent pid {pid} did not die after SIGKILL; giving up on it");
+                    bail!("agent pid {pid} did not exit after SIGKILL");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            cvar.notify_all();
-            return Ok(st.exit);
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }

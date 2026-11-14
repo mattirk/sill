@@ -271,7 +271,37 @@ impl ChangesPage {
                     hbox.prepend(&t);
                     toggle = Some(t);
                 }
+                let revert_all = gtk::Button::with_label("Revert all");
+                revert_all.add_css_class("flat");
+                {
+                    let p = self.clone();
+                    let sid = s.id.clone();
+                    let items: Vec<Change> = changes_in_repo.clone();
+                    revert_all.connect_clicked(move |_| {
+                        let running = sill_core::session::is_running(&sid);
+                        let (mut n, mut failed) = (0, 0);
+                        // deepest paths first, so directories go after their contents
+                        let mut sorted = items.clone();
+                        sorted.sort_by_key(|c| std::cmp::Reverse(c.path.components().count()));
+                        for c in &sorted {
+                            let ok = if running {
+                                session::revert(&sid, &c.path).is_ok()
+                            } else {
+                                remove_upper_entry(&c.upper).is_ok()
+                            };
+                            if ok { n += 1 } else { failed += 1 }
+                        }
+                        p.message.set_text(&if failed == 0 {
+                            format!("reverted {n} path(s)")
+                        } else {
+                            format!("reverted {n} path(s), {failed} failed")
+                        });
+                        p.refresh();
+                    });
+                }
+                hbox.set_margin_start(10);
                 hbox.append(&keep_all);
+                hbox.append(&revert_all);
                 hrow.set_child(Some(&hbox));
                 self.list.append(&hrow);
                 self.rows.borrow_mut().push((s.id.clone(), changes_in_repo[0].clone())); // placeholder for the header index
@@ -284,6 +314,7 @@ impl ChangesPage {
                     }
                     let row = gtk::ListBoxRow::new();
                     let b = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                    b.set_margin_start(10); // the buttons' own padding gives the right side this much
                     let letter = gtk::Label::new(Some(&format!("{}{}", c.kind.letter(), if c.conflict { "!" } else { " " })));
                     letter.add_css_class("monospace");
                     match c.kind {

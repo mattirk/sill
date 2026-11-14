@@ -29,9 +29,15 @@ fn connect(socket: &Path, role: &str) -> Result<UnixStream> {
     Ok(s)
 }
 
+/// How long a control request may take before it is an error. The shelf calls these on its main
+/// loop at startup; a shim that doesn't answer must not freeze the UI.
+const CONTROL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 impl Control {
     pub fn connect(socket: &Path) -> Result<Self> {
         let s = connect(socket, "control")?;
+        s.set_read_timeout(Some(CONTROL_TIMEOUT))?;
+        s.set_write_timeout(Some(CONTROL_TIMEOUT))?;
         Ok(Self { reader: BufReader::new(s.try_clone()?), writer: s })
     }
 
@@ -40,8 +46,13 @@ impl Control {
         line.push('\n');
         self.writer.write_all(line.as_bytes())?;
         let mut reply = String::new();
-        if self.reader.read_line(&mut reply)? == 0 {
-            bail!("shim closed the control connection");
+        match self.reader.read_line(&mut reply) {
+            Ok(0) => bail!("shim closed the control connection"),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+                bail!("the session's shim did not answer within {} s", CONTROL_TIMEOUT.as_secs())
+            }
+            Err(e) => return Err(e.into()),
         }
         let reply: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(reply.trim()).context("shim reply")?;

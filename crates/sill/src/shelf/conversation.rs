@@ -395,6 +395,9 @@ impl Conversation {
 pub const CSS: &str = r#"
 /* flat and square: no bubbles, no rounded corners, hierarchy by tone and a thin left rule */
 window, .background { border-radius: 0; }
+/* no client-side shadow or resize margin around the toplevel: the content would sit a few pixels in
+   on the first frame and hop to the edge once the window is placed */
+window, window.csd, window.csd.background { margin: 0; box-shadow: none; outline: none; }
 tabbar tab, tabbar .tab { border-radius: 0; }
 .boxed-list, .boxed-list row, .frame, scrolledwindow.frame { border-radius: 0; }
 popover > contents { border-radius: 0; }

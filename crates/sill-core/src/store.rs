@@ -179,6 +179,11 @@ impl Store {
         Ok(())
     }
 
+    /// Drop pins whose session no longer exists (older deletes didn't clear them); how many went.
+    pub fn prune_pins(&self) -> Result<usize> {
+        Ok(self.conn.execute("DELETE FROM session_pins WHERE session_id NOT IN (SELECT id FROM sessions)", [])?)
+    }
+
     pub fn unpin(&self, session_id: &str, path: &Path) -> Result<()> {
         self.conn.execute("DELETE FROM session_pins WHERE session_id = ?1 AND path = ?2", params![session_id, path.to_string_lossy()])?;
         Ok(())

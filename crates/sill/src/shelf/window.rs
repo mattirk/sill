@@ -324,11 +324,38 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
     }
     window.add_controller(esc);
 
-    // place on the left edge each time it is mapped
+    // geometry before the first frame: on realize the X window exists but isn't mapped yet, so
+    // the window manager shows it straight at the left edge, final size, no visible jump
+    {
+        let s = shelf.clone();
+        window.connect_realize(move |w| {
+            let w: gtk::Window = w.clone().upcast();
+            let fraction = if s.stack.visible_child_name().as_deref() == Some("files") {
+                x11::width_fraction().max(0.5)
+            } else {
+                x11::width_fraction()
+            };
+            if let Some(area) = x11::work_area_with(&w, fraction) {
+                w.set_default_size(area.width as i32, area.height as i32);
+                x11::pre_place(&w, &area);
+            }
+        });
+    }
+    // GTK rewrites the size hints when it presents the surface (dropping ours), and its MapWindow
+    // sits in Xlib's buffer until the frame ends; a synchronous handler on `map` gets geometry and
+    // hints to the server ahead of it. Then once more after the map as a correction.
     {
         let s = shelf.clone();
         window.connect_map(move |w| {
             let w: gtk::Window = w.clone().upcast();
+            let fraction = if s.stack.visible_child_name().as_deref() == Some("files") {
+                x11::width_fraction().max(0.5)
+            } else {
+                x11::width_fraction()
+            };
+            if let Some(area) = x11::work_area_with(&w, fraction) {
+                x11::pre_place(&w, &area);
+            }
             let s = s.clone();
             glib::idle_add_local_once(move || {
                 let fraction = if s.stack.visible_child_name().as_deref() == Some("files") {
@@ -698,6 +725,10 @@ fn stop_then(id: &str, then: impl FnOnce() + 'static) {
 
 /// Show and focus; `time` is the X time of the triggering key press (0 when unknown).
 pub fn show(w: &gtk::Window, time: u32) {
+    // the size GTK will realize the surface with (the realize handler refines position and hints)
+    if let Some(area) = x11::work_area_with(w, x11::width_fraction()) {
+        w.set_default_size(area.width as i32, area.height as i32);
+    }
     w.present();
     x11::activate(w, time);
 }

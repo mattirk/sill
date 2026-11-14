@@ -71,6 +71,22 @@ fn net_workarea() -> Option<(i32, i32, u32, u32)> {
 }
 
 /// Move/resize the mapped window and set the EWMH state (above, skip taskbar/pager).
+/// Geometry for a window that is realized but not yet mapped: set it on the X window and in its
+/// size hints as user-specified, so the window manager maps it there in one go instead of placing
+/// it, then watching us move and resize it (the visible jump on every show). GTK4 destroys the X
+/// window on hide, so this runs on every realize.
+pub fn pre_place(window: &gtk::Window, p: &Placement) {
+    use x11rb::properties::{WmSizeHints, WmSizeHintsSpecification};
+    let Some(xid) = xid(window) else { return };
+    let Ok((conn, _)) = x11rb::connect(None) else { return };
+    let _ = conn.configure_window(xid, &ConfigureWindowAux::new().x(p.x).y(p.y).width(p.width).height(p.height));
+    let mut hints = WmSizeHints::get_normal_hints(&conn, xid).ok().and_then(|c| c.reply().ok()).flatten().unwrap_or_default();
+    hints.position = Some((WmSizeHintsSpecification::UserSpecified, p.x, p.y));
+    hints.size = Some((WmSizeHintsSpecification::UserSpecified, p.width as i32, p.height as i32));
+    let _ = hints.set_normal_hints(&conn, xid);
+    let _ = conn.flush();
+}
+
 pub fn place(window: &gtk::Window, p: &Placement) {
     let Some(xid) = xid(window) else { return };
     let Ok((conn, screen_num)) = x11rb::connect(None) else { return };
