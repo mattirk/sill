@@ -235,3 +235,128 @@ pub fn for_agent(id: &str) -> Handle {
         _ => agent(),
     }
 }
+
+/// The shelf's working-tab glyph: only the icon scales, inside a fixed slot.
+pub fn tab_agent<'a>(
+    id: &str,
+    color: iced::Color,
+    working: bool,
+) -> iced::Element<'a, crate::Message> {
+    iced::Element::new(TabAgent {
+        handle: tab_texture(id, color),
+        working,
+    })
+}
+
+// Rasterize once at 8× the display size. Iced's SVG renderer uses nearest-neighbour
+// sampling and rounds raster sizes, which makes a 13 px scaling animation visibly step.
+fn tab_texture(id: &str, color: iced::Color) -> iced::advanced::image::Handle {
+    use iced::advanced::image::Handle as Image;
+    type Key = (String, [u32; 4]);
+    static CACHE: OnceLock<std::sync::Mutex<std::collections::HashMap<Key, Image>>> =
+        OnceLock::new();
+    let key = (
+        id.to_owned(),
+        [
+            color.r.to_bits(),
+            color.g.to_bits(),
+            color.b.to_bits(),
+            color.a.to_bits(),
+        ],
+    );
+    let mut cache = CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .expect("tab icon cache");
+    cache.entry(key).or_insert_with(|| {
+        let path = match id {
+            "claude" => CLAUDE,
+            "codex" => OPENAI,
+            "gemini" => GEMINI,
+            _ => AGENT,
+        };
+        let [r, g, b, a] = color.into_rgba8();
+        let svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="rgb({r},{g},{b})" fill-opacity="{}" d="{path}"/></svg>"#, f32::from(a) / 255.0);
+        Image::from_rgba(104, 104, crate::tray::rgba(&svg, 104).expect("built-in agent SVG"))
+    }).clone()
+}
+
+struct TabAgent {
+    handle: iced::advanced::image::Handle,
+    working: bool,
+}
+
+impl iced::advanced::Widget<crate::Message, iced::Theme, iced::Renderer> for TabAgent {
+    fn size(&self) -> iced::Size<iced::Length> {
+        iced::Size::new(iced::Length::Fixed(13.0), iced::Length::Fixed(13.0))
+    }
+
+    fn layout(
+        &mut self,
+        _tree: &mut iced::advanced::widget::Tree,
+        _renderer: &iced::Renderer,
+        limits: &iced::advanced::layout::Limits,
+    ) -> iced::advanced::layout::Node {
+        iced::advanced::layout::Node::new(limits.resolve(13.0, 13.0, iced::Size::ZERO))
+    }
+
+    fn update(
+        &mut self,
+        _tree: &mut iced::advanced::widget::Tree,
+        event: &iced::Event,
+        _layout: iced::advanced::Layout<'_>,
+        _cursor: iced::mouse::Cursor,
+        _renderer: &iced::Renderer,
+        _clipboard: &mut dyn iced::advanced::Clipboard,
+        shell: &mut iced::advanced::Shell<'_, crate::Message>,
+        _viewport: &iced::Rectangle,
+    ) {
+        if self.working
+            && matches!(
+                event,
+                iced::Event::Window(iced::window::Event::RedrawRequested(_))
+            )
+        {
+            shell.request_redraw();
+        }
+    }
+
+    fn draw(
+        &self,
+        _tree: &iced::advanced::widget::Tree,
+        renderer: &mut iced::Renderer,
+        _theme: &iced::Theme,
+        _style: &iced::advanced::renderer::Style,
+        layout: iced::advanced::Layout<'_>,
+        _cursor: iced::mouse::Cursor,
+        _viewport: &iced::Rectangle,
+    ) {
+        use iced::advanced::image::Renderer as _;
+        static EPOCH: OnceLock<std::time::Instant> = OnceLock::new();
+        let scale = if self.working {
+            let phase = EPOCH
+                .get_or_init(std::time::Instant::now)
+                .elapsed()
+                .as_secs_f64()
+                / 2.2;
+            0.9 + 0.1 * (phase * std::f64::consts::TAU).cos() as f32
+        } else {
+            1.0
+        };
+        let bounds = layout.bounds();
+        let size = bounds.size() * scale;
+        let drawing = iced::Rectangle::new(
+            iced::Point::new(
+                bounds.center_x() - size.width / 2.0,
+                bounds.center_y() - size.height / 2.0,
+            ),
+            size,
+        );
+        renderer.draw_image(
+            iced::advanced::image::Image::new(self.handle.clone())
+                .filter_method(iced::advanced::image::FilterMethod::Linear),
+            drawing,
+            bounds,
+        );
+    }
+}

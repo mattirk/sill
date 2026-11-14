@@ -305,8 +305,8 @@ impl App {
         .into()
     }
 
-    /// A tab: the agent's glyph, the title, and the session's mark — accent while working,
-    /// warning while a question waits, error for a problem. Dimmer when the session is not running.
+    /// A tab: the agent glyph pulses in accent while working; question/problem marks follow
+    /// the title. Dimmer when the session is not running.
     fn tab<'a>(&'a self, tab: &'a Tab) -> Element<'a, Message> {
         let active = self.selected.as_deref() == Some(tab.id.as_str());
         let view = self.views.get(&tab.id);
@@ -316,16 +316,16 @@ impl App {
             (false, true) => alpha(P.fg, 0.6),
             (false, false) => alpha(P.fg, 0.35),
         };
+        let attention = view.map(SessionView::attention);
+        let working = attention
+            .as_ref()
+            .is_some_and(|a| a.activity == Activity::Working);
         let mut label = row![
-            svg(icons::for_agent(&tab.agent))
-                .width(13)
-                .height(13)
-                .style(style::icon(color)),
+            icons::tab_agent(&tab.agent, if working { P.accent } else { color }, working),
             text(&tab.title).size(style::TEXT).color(color),
         ]
         .spacing(8)
         .align_y(Alignment::Center);
-        let attention = view.map(SessionView::attention);
         if let Some(mark) = attention.as_ref().and_then(mark) {
             label = label.push(mark);
         }
@@ -1119,19 +1119,9 @@ fn mark<'a>(attention: &Attention) -> Option<Element<'a, Message>> {
     let (glyph, color) = match attention.level() {
         Level::Question => ("?", P.warning),
         Level::Problem => ("!", P.error),
-        Level::Working => ("●", P.accent),
-        Level::Calm => return None,
+        Level::Working | Level::Calm => return None,
     };
-    Some(
-        text(glyph)
-            .size(if glyph == "●" {
-                style::TINY
-            } else {
-                style::SMALL
-            })
-            .color(color)
-            .into(),
-    )
+    Some(text(glyph).size(style::SMALL).color(color).into())
 }
 
 /// Stop the selected session's turn (found by its id in tests: it has no text).
