@@ -1540,12 +1540,17 @@ impl Shelf {
         }
         self.drop_tab(id);
         self.sync_pane();
-        if self.tabs.selected().is_none() {
-            self.set_status("");
-        }
         // a view that went while in a turn sends no idle event: the busy set and the tray follow
         self.busy.borrow_mut().remove(id);
         super::tray::set_busy(!self.busy.borrow().is_empty());
+        // the status is the selected tab's again: a session that ended in the background (its tab
+        // long gone, `background_view`) left "its summary is written in the background" on
+        // whichever tab took the selection, and nothing else would replace it
+        if self.tabs.selected().is_none() {
+            self.set_status("");
+        } else {
+            self.sync_status();
+        }
         self.quit_if_done();
     }
 
