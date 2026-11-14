@@ -147,7 +147,11 @@ impl App {
         let shown = self.changes.is_some() || self.settings_page.is_some();
         let drawer_open = self.workspace.shown && !shown && self.current().is_some();
         // room on its right, as the shelf's status slot has (`.sill-status-slot`)
-        let activity = container(self.activity()).padding([0, 8]);
+        let activity = container(self.activity()).padding(Padding {
+            left: 2.0,
+            right: 8.0,
+            ..Padding::ZERO
+        });
         let mark = tooltip(
             keys::press(
                 // a box just round the mark, its underline as wide as the box (as a tab's)
@@ -214,7 +218,7 @@ impl App {
                                     .height(15)
                                     .style(style::icon(alpha(P.fg, 0.75))),
                             )
-                            .padding([4, 8])
+                            .padding(4)
                             .style(style::quiet),
                             Message::Menu(crate::menu::Event::Toggle),
                         ),
@@ -761,7 +765,6 @@ impl App {
         item: &'a Item,
         tool: &'a Tool,
     ) -> Element<'a, Message> {
-        let (mark, mark_color) = status_mark(&tool.status);
         let line = button(
             row![
                 text(kind_glyph(&tool.kind))
@@ -776,7 +779,7 @@ impl App {
                 )
                 .width(Fill)
                 .clip(true),
-                text(mark).size(style::SMALL).color(mark_color),
+                status_mark(&tool.status),
             ]
             .spacing(6)
             .align_y(Alignment::Center),
@@ -906,13 +909,16 @@ impl App {
         {
             composer = composer.push(held(submission));
         }
+        let mut queued = Column::new().spacing(4);
+        let mut has_queued = false;
         for submission in view
             .conversation
             .submissions
             .values()
             .filter(|s| s.delivery == "queued" && !(s.held && s.outcome == "pending"))
         {
-            composer = composer.push(
+            has_queued = true;
+            queued = queued.push(
                 row![
                     text("Queued").size(style::TINY).color(P.fg_dim),
                     container(
@@ -933,6 +939,16 @@ impl App {
                 .align_y(Alignment::Center)
                 .padding([2, 12]),
             );
+        }
+        if has_queued {
+            composer = composer.push(column![
+                container(queued)
+                    .padding([6, 0])
+                    .width(Fill)
+                    .style(style::fill(alpha(P.accent, 0.05))),
+                rule::horizontal(1).style(style::rule_style(P.border)),
+                space().height(4),
+            ]);
         }
         composer = outbox(composer, view);
         let editor = text_editor(&view.draft)
@@ -1119,7 +1135,7 @@ fn stop_button<'a>() -> Element<'a, Message> {
             svg(icons::stop())
                 .width(12)
                 .height(12)
-                .style(style::icon(alpha(P.fg, 0.9))),
+                .style(style::icon(P.error)),
         )
         .padding(4)
         .style(style::tinted(P.error)),
@@ -1743,14 +1759,24 @@ fn kind_glyph(kind: &str) -> &'static str {
     }
 }
 
-/// The status mark at the end of a tool line, and its colour.
-fn status_mark(status: &str) -> (&'static str, Color) {
-    match status.to_ascii_lowercase().replace('_', "").as_str() {
-        "completed" => ("✓", alpha(P.fg, 0.5)),
-        "failed" => ("✗", P.error),
-        "inprogress" => ("◌", P.accent),
-        _ => ("•", alpha(P.fg, 0.4)),
-    }
+/// GTK's `Conversation::mark_area`: a 12 px drawing with a 1.3 px round stroke.
+/// Keep these paths independent of the text font, as in the shelf.
+fn status_mark<'a>(status: &str) -> Element<'a, Message> {
+    let (shape, color) = match status.to_ascii_lowercase().replace('_', "").as_str() {
+        "completed" => (r#"<path d="M2.5 6.5 5 9 9.5 3.5"/>"#, alpha(P.fg, 0.375)),
+        "failed" => (r#"<path d="M3.5 3.5 8.5 8.5M8.5 3.5 3.5 8.5"/>"#, P.error),
+        "inprogress" => (r#"<circle cx="6" cy="6" r="3"/>"#, P.accent),
+        _ => (
+            r#"<circle cx="6" cy="6" r="1.2" fill="black" stroke="none"/>"#,
+            alpha(P.fg, 0.3),
+        ),
+    };
+    let handle = svg::Handle::from_memory(format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="black" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">{shape}</svg>"#
+    ).into_bytes());
+    container(svg(handle).width(12).height(12).style(style::icon(color)))
+        .padding([0, 2])
+        .into()
 }
 
 /// One line of at most `max` characters: newlines shown as ⏎, the rest cut with "…" (iced 0.14
