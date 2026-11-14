@@ -323,6 +323,67 @@ fn discard_after_a_rebase_stays_on_the_persons_commit() {
     assert!(!unapplied(&s, &c.path, &c.branch).unwrap());
 }
 
+/// The person commits on past where the workspace started, touching a file the agent also
+/// edited, and the agent's work is discarded: the workspace comes to the person's commit, clean
+/// against it. Before 2026-11-10 its branch stayed on the old commit with the person's newer file
+/// uncommitted on top: nothing to apply on the Changes page, yet a changed file in the session.
+#[test]
+fn discard_after_the_person_moved_on_comes_to_their_commit_clean() {
+    let d = tmp("mirror-ahead");
+    let (s, _, c) = setup(&d);
+    write(&c.path.join("f1.txt"), "agent\n");
+    write(&c.path.join("scratch.txt"), "agent's new file\n");
+    write(&s.join("f1.txt"), "the person's commit\n");
+    write(&s.join("f2.txt"), "also theirs\n");
+    git(&s, &["commit", "-qam", "theirs"]);
+    // the person's uncommitted edit of a path the agent touched comes along, as Discard's mirror
+    // has always taken it; one on a path the agent never touched does not (§5)
+    write(&s.join("f3.txt"), "dirty, the person's\n");
+    discard(&s, &c.path, "w1", "1", &c.branch).unwrap();
+    assert_eq!(git(&c.path, &["rev-parse", &format!("refs/heads/{}", c.branch)]), head(&s), "on the person's commit");
+    assert_eq!(read(&c.path.join("f1.txt")), "the person's commit\n");
+    assert_eq!(read(&c.path.join("f2.txt")), "also theirs\n");
+    assert_eq!(read(&c.path.join("f3.txt")), "line 3\n");
+    assert!(!c.path.join("scratch.txt").exists());
+    assert_eq!(git(&c.path, &["status", "--porcelain"]), "", "nothing changed in the workspace");
+    assert!(!unapplied(&s, &c.path, &c.branch).unwrap());
+}
+
+/// The same when the agent's path is dirty in the checkout: the person's content there stays in
+/// the workspace, uncommitted on their commit, and nothing else differs.
+#[test]
+fn discard_after_the_person_moved_on_keeps_their_dirty_file_on_the_agents_path() {
+    let d = tmp("mirror-ahead-dirty");
+    let (s, _, c) = setup(&d);
+    write(&c.path.join("f1.txt"), "agent\n");
+    write(&s.join("f2.txt"), "theirs\n");
+    git(&s, &["commit", "-qam", "theirs"]);
+    write(&s.join("f1.txt"), "the person's uncommitted\n");
+    discard(&s, &c.path, "w1", "1", &c.branch).unwrap();
+    assert_eq!(git(&c.path, &["rev-parse", &format!("refs/heads/{}", c.branch)]), head(&s));
+    assert_eq!(read(&c.path.join("f1.txt")), "the person's uncommitted\n");
+    assert_eq!(read(&c.path.join("f2.txt")), "theirs\n");
+    assert_eq!(git(&c.path, &["status", "--porcelain"]), "M f1.txt");
+    assert!(!unapplied(&s, &c.path, &c.branch).unwrap());
+}
+
+/// When the workspace has commits of its own the person lacks and they have moved on too, its
+/// branch stays at their common ancestor: their tip would lose nothing, but taking it is a rebase.
+#[test]
+fn discard_with_diverged_history_stays_at_the_common_ancestor() {
+    let d = tmp("mirror-diverged");
+    let (s, _, c) = setup(&d);
+    let start = head(&s);
+    write(&c.path.join("f1.txt"), "agent\n");
+    git(&c.path, &["commit", "-qam", "agent's"]);
+    write(&s.join("f2.txt"), "theirs\n");
+    git(&s, &["commit", "-qam", "theirs"]);
+    discard(&s, &c.path, "w1", "1", &c.branch).unwrap();
+    assert_eq!(git(&c.path, &["rev-parse", &format!("refs/heads/{}", c.branch)]), start);
+    assert_eq!(read(&c.path.join("f1.txt")), "line 1\n");
+    assert!(!unapplied(&s, &c.path, &c.branch).unwrap());
+}
+
 /// The checkout as the person may have it when a session starts: build output, an edit, a
 /// deletion, files of their own, links, a repository nested in it, Git settings.
 fn lived_in(s: &Path) {

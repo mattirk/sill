@@ -359,6 +359,8 @@ pub struct Mirror {
     /// HEAD): paths dirty in the checkout whose content there is neither the workspace's nor the
     /// agent's earlier Apply. Sorted.
     pub checkout_only: Vec<String>,
+    /// The agent's paths: those whose content in `tree` is the checkout's (above). Sorted.
+    pub paths: Vec<String>,
 }
 
 pub fn mirror(source: &Path, clone: &Path, workspace_branch: &str) -> Result<Mirror> {
@@ -396,16 +398,19 @@ pub fn mirror(source: &Path, clone: &Path, workspace_branch: &str) -> Result<Mir
             paths.push(p);
         }
     }
+    paths.sort();
+    paths.dedup();
     // what the checkout has on them, where that differs from the workspace
     let entries: Vec<(String, Have)> = paths
-        .into_iter()
+        .iter()
+        .cloned()
         .filter_map(|p| {
             let theirs = host.remove(&p).flatten();
             (theirs.as_ref() != here.get(&p)).then_some((p, theirs))
         })
         .collect();
     let tree = build_tree(&ws, &now, &entries)?;
-    Ok(Mirror { changed: tree != now, tree, upstream, now, checkout_only })
+    Ok(Mirror { changed: tree != now, tree, upstream, now, checkout_only, paths })
 }
 
 /// Whether a working tree's entry holds the blob a tree has at the path: the same content, or
@@ -763,8 +768,11 @@ pub fn reset_to(clone: &Path, workspace_branch: &str, state: &str, at: &str) -> 
 /// Discard (§12): keep the clone's whole state as a snapshot in the source's own store
 /// (`refs/sill/workspaces/<id>/discarded/<n>`, for Undo even after the folder is reused), then
 /// reset the clone to the person's side ([`mirror`]): their checkout's content on the agent's
-/// paths, the branch at their tip (after a rebase, still on their commit). Returns the discarded
-/// snapshot.
+/// paths. The branch goes to their tip whenever nothing of the workspace's own would be lost
+/// there — after a rebase, or when their tip has moved on past the workspace's (their commits
+/// since come with it, so the workspace is clean against its own commit, not a mix of the old
+/// commit and their newer files on the agent's paths, 2026-11-10); only when the two have
+/// diverged does it stay at their common ancestor. Returns the discarded snapshot.
 pub fn discard(
     source: &Path,
     clone: &Path,
@@ -803,13 +811,29 @@ pub(super) fn discard_retained(
     ok(c, "keep the discarded work")?;
     drop(ws);
     let m = mirror(source, clone, workspace_branch)?;
+    let (tree, at) = discard_target(source, clone, workspace_branch, &m)?;
     retain(&snap)?;
-    reset_to(clone, workspace_branch, &m.tree, &m.upstream)?;
+    reset_to(clone, workspace_branch, &tree, &at)?;
     let ws = Git::open(clone)?;
     let mut c = ws.cmd_write();
     c.args(["update-ref", "-d", "refs/sill/discarding"]);
     let _ = run(c);
     Ok(snap)
+}
+
+/// Where Discard puts the clone: the tree and the commit for its branch. When the workspace's tip
+/// is behind the person's (it has no commits of its own they lack), their tip and its tree with
+/// the mirror's content on the agent's paths; otherwise the mirror as it is.
+fn discard_target(source: &Path, clone: &Path, workspace_branch: &str, m: &Mirror) -> Result<(String, String)> {
+    let ws = Git::open(clone)?;
+    let tip = rev(&ws, &format!("refs/heads/{workspace_branch}"))?;
+    let (_, dest) = super::head_of(&Git::open(source)?)?;
+    if m.upstream == dest || !super::descends_in(&ws, &tip, &dest)? {
+        return Ok((m.tree.clone(), m.upstream.clone()));
+    }
+    let theirs = tree_entries(&ws, &m.tree, &m.paths)?;
+    let entries: Vec<(String, Have)> = m.paths.iter().map(|p| (p.clone(), theirs.get(p).cloned())).collect();
+    Ok((build_tree(&ws, &dest, &entries)?, dest))
 }
 
 /// Undo a Discard: put snapshot `discarded` back, only while the clone has nothing to bring
