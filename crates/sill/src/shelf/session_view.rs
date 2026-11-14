@@ -1209,16 +1209,19 @@ impl SessionView {
             chip.add_css_class("sill-chip");
             let l = gtk::Button::new();
             let lbox = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-            lbox.append(&gtk::Label::new(Some(&p.to_string_lossy().replace(&home, "~"))));
+            let is_dir = p.is_dir();
+            let shown = p.to_string_lossy().replace(&home, "~");
+            // a folder chip says where it is; a file chip just its name (the path is the tooltip)
+            let name = if is_dir { shown.clone() } else { p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(shown.clone()) };
+            lbox.append(&gtk::Label::new(Some(&name)));
             summaries.push((p.clone(), lbox.clone()));
             l.set_child(Some(&lbox));
             l.add_css_class("flat");
             l.add_css_class("sill-chip-open");
-            let is_dir = p.is_dir();
-            l.set_tooltip_text(Some(if is_dir {
-                "Show the folder's tree · +lines −lines vs HEAD, ?untracked files"
+            l.set_tooltip_text(Some(&if is_dir {
+                "Show the folder's tree · +lines −lines vs HEAD, ?untracked files".to_string()
             } else {
-                "Open the file (Escape returns)"
+                format!("{shown} · open the file (Escape returns)")
             }));
             {
                 let v = self.clone();
