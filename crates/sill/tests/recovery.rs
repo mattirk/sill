@@ -29,6 +29,24 @@ impl Connection {
         Ok(connection)
     }
 
+    /// The whole reply, an error included.
+    fn try_call(&mut self, method: &str, params: Value) -> Value {
+        let id = self.next;
+        self.next += 1;
+        writeln!(self.writer, "{}", json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})).unwrap();
+        loop {
+            let mut line = String::new();
+            assert!(self.reader.read_line(&mut line).unwrap() > 0, "daemon closed the connection before answering {method}");
+            let message: Value = serde_json::from_str(&line).unwrap();
+            if message.get("method").is_some() {
+                self.events.push(message);
+                continue;
+            }
+            assert_eq!(message["id"], id, "{message}");
+            return message;
+        }
+    }
+
     fn call(&mut self, method: &str, params: Value) -> Value {
         let id = self.next;
         self.next += 1;
@@ -105,7 +123,10 @@ impl Fixture {
         let runtime = dir.join("run/sill").join(&session);
         std::fs::create_dir_all(&runtime).unwrap();
         // A separate, harmless launch process lets adoption and stop exercise real PID handling.
-        let launcher = Command::new("sleep").arg("120").spawn().unwrap();
+        // Its command line is a session launcher's: the daemon adopts, waits on and signals only
+        // a pid that is the session's own (docs/daemon.md §3.11). Short sleeps in a loop, so
+        // killing the shell leaves at most a second's orphan.
+        let launcher = Command::new("sh").args(["-c", "while :; do sleep 1; done", "sill", "launch", "--session", &session]).spawn().unwrap();
         std::fs::write(runtime.join("launch.pid"), launcher.id().to_string()).unwrap();
         let listener = UnixListener::bind(runtime.join("shim.sock")).unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -199,10 +220,44 @@ impl Drop for Fixture {
         if let Some(mut child) = self.daemon.take() { let _ = child.kill(); let _ = child.wait(); }
         let _ = self.relay.kill(); let _ = self.relay.wait();
         let _ = self.launcher.kill(); let _ = self.launcher.wait();
+        kill_strays(&self.dir);
         self.shutdown.store(true, Ordering::Relaxed);
         if let Some(shim) = self.shim.take() { let _ = shim.join(); }
         let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+/// Every process whose command line names this fixture's directory: relays the test's daemon
+/// started itself (never `Fixture::relay`), daemons a failed test left. One relay per run of this
+/// file outlived it until 2026-11-04 (docs/daemon.md §3.11).
+fn kill_strays(dir: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    let needle = dir.as_os_str().as_bytes();
+    let Ok(proc) = std::fs::read_dir("/proc") else { return };
+    for entry in proc.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<i32>().ok()) else { continue };
+        if pid as u32 == std::process::id() {
+            continue;
+        }
+        let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else { continue };
+        if cmdline.windows(needle.len()).any(|w| w == needle)
+            && let Some(pid) = rustix::process::Pid::from_raw(pid)
+        {
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        }
+    }
+}
+
+/// `child` exits within `within`.
+fn exits(child: &mut Child, within: Duration) -> bool {
+    let deadline = Instant::now() + within;
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    true
 }
 
 fn send(writer: &mut UnixStream, message: Value) { writeln!(writer, "{message}").unwrap(); }
@@ -361,6 +416,113 @@ fn an_unowned_dead_ghost_worker_stops_before_its_runtime_and_memory_are_scrubbed
         assert!(Instant::now() < deadline, "deleted ghost left a worker alive; {}", fixture.logs());
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// The leak found on the host 2026-11-04 (docs/daemon.md §3.11): sessions nobody had prompted were
+/// "deleted" on close, the deletion gave up before the jail's stop (its relay reset the connection
+/// as it left), and the ended row's jail ran on — adopted by every daemon after, for a day. The
+/// daemon now stops such a jail as it starts: jail and relay go; the row is the nightly run's.
+#[test]
+fn a_jail_left_running_by_an_ended_session_is_stopped_at_start() {
+    let (mut fixture, _release, observed) = Fixture::new();
+    assert_eq!(observed.recv_timeout(Duration::from_secs(5)).unwrap(), "initialize");
+    rusqlite::Connection::open(fixture.dir.join("state/sill/sill.db")).unwrap()
+        .execute("UPDATE sessions SET ended_at = strftime('%s','now') - 3600 WHERE id=?1", [&fixture.session]).unwrap();
+    fixture.start();
+    assert!(exits(&mut fixture.launcher, Duration::from_secs(10)), "the ended session's jail is still running; {}", fixture.logs());
+    assert!(exits(&mut fixture.relay, Duration::from_secs(10)), "the ended session's relay is still running; {}", fixture.logs());
+    assert_eq!(observed.recv_timeout(Duration::from_secs(5)).unwrap(), "finished", "the agent connection was not closed");
+    let log = fixture.logs();
+    assert!(log.contains("ended 60 min ago, but its jail and ACP relay are still running: stopping it"), "{log}");
+    assert!(!log.contains("recovered session"), "a stray's conversation was recovered; {log}");
+    assert_eq!(fixture.database().query_row("SELECT count(*) FROM sessions WHERE id=?1", [&fixture.session], |row| row.get::<_, i64>(0)).unwrap(), 1, "the reaper deleted the row");
+}
+
+/// The shelf's close of a tab nobody typed in: the frontend detached, then the end. Before
+/// docs/daemon.md §3.11 the end retired the runner and the deletion then met its relay halfway out
+/// — a reset connection, every time on the host — and gave up before the jail's stop. Now the
+/// deletion retires the runner itself and waits for the relay: jail, relay and row all go, with
+/// nothing evicted.
+#[test]
+fn an_unprompted_session_closed_after_its_frontend_left_goes_jail_and_all() {
+    let (mut fixture, _release, observed) = Fixture::new();
+    assert_eq!(observed.recv_timeout(Duration::from_secs(5)).unwrap(), "initialize");
+    fixture.start();
+    {
+        let mut frontend = Connection::connect(&fixture.socket()).unwrap();
+        frontend.call("_sill/sessions.attach", json!({"session_id": fixture.session}));
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    let mut closing = Connection::connect(&fixture.socket()).unwrap();
+    let ending = closing.call("_sill/sessions.end", json!({"session_id": fixture.session, "reason": "close"}));
+    assert_eq!(ending["deleted"], true, "{ending}");
+    assert!(exits(&mut fixture.launcher, Duration::from_secs(10)), "the deleted session's jail is still running; {}", fixture.logs());
+    assert!(exits(&mut fixture.relay, Duration::from_secs(10)), "the deleted session's relay is still running; {}", fixture.logs());
+    fixture.wait("the row to go", || fixture.database().query_row("SELECT count(*) FROM sessions WHERE id=?1", [&fixture.session], |row| row.get::<_, i64>(0)).unwrap() == 0);
+    // the line comes after the row and the runtime dir are gone
+    let deleted = format!("session {} deleted", fixture.session);
+    fixture.wait("the deletion's log line", || fixture.logs().contains(&deleted));
+    let log = fixture.logs();
+    assert!(!log.contains("evict") && !log.contains("reset by peer"), "the deletion fought its own relay; {log}");
+}
+
+/// A jail whose session is not in the store at all (deleted by a run that died half-way, or a
+/// store replaced under running jails) belongs to nobody: stopped at start, as an ended one is.
+#[test]
+fn a_jail_whose_session_is_gone_from_the_store_is_stopped_at_start() {
+    let (mut fixture, _release, observed) = Fixture::new();
+    assert_eq!(observed.recv_timeout(Duration::from_secs(5)).unwrap(), "initialize");
+    sill_core::store::Store::open(&fixture.dir.join("state/sill/sill.db")).unwrap().delete(&fixture.session).unwrap();
+    fixture.start();
+    assert!(exits(&mut fixture.launcher, Duration::from_secs(10)), "a jail of no session is still running; {}", fixture.logs());
+    assert!(exits(&mut fixture.relay, Duration::from_secs(10)), "a relay of no session is still running; {}", fixture.logs());
+    let log = fixture.logs();
+    assert!(log.contains("is not in the store, but its jail and ACP relay are still running: stopping it"), "{log}");
+}
+
+/// A relay that can be stopped neither way — it answers in an old protocol and `relay.pid` names
+/// nothing — keeps the session's files and row, never its jail: the reaper and a deletion both
+/// stop the jail whatever the relay does (docs/daemon.md §3.11).
+#[test]
+fn a_relay_that_cannot_be_stopped_never_keeps_the_jail_running() {
+    let (mut fixture, _release, _observed) = Fixture::new();
+    let runtime = fixture.dir.join("run/sill").join(&fixture.session);
+    let _ = fixture.relay.kill();
+    let _ = fixture.relay.wait();
+    for f in ["relay.sock", "relay.pid", "relay.lock"] {
+        let _ = std::fs::remove_file(runtime.join(f));
+    }
+    let old = UnixListener::bind(runtime.join("relay.sock")).unwrap();
+    old.set_nonblocking(true).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let serving = stop.clone();
+    let listener = std::thread::spawn(move || {
+        while !serving.load(Ordering::Relaxed) {
+            match old.accept() {
+                Ok((stream, _)) => {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut hello = String::new();
+                    let _ = reader.read_line(&mut hello);
+                    let mut writer = stream;
+                    let _ = writeln!(writer, "{}", json!({"Hello": {"acknowledged": 0, "last": 0, "version": 0}}));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(5)),
+                Err(_) => break,
+            }
+        }
+    });
+    rusqlite::Connection::open(fixture.dir.join("state/sill/sill.db")).unwrap()
+        .execute("UPDATE sessions SET ended_at = strftime('%s','now') - 3600 WHERE id=?1", [&fixture.session]).unwrap();
+    fixture.start();
+    assert!(exits(&mut fixture.launcher, Duration::from_secs(15)), "an unstoppable relay kept the jail running; {}", fixture.logs());
+    let mut connection = Connection::connect(&fixture.socket()).unwrap();
+    let reply = connection.try_call("_sill/sessions.delete", json!({"session_id": fixture.session}));
+    assert!(reply.get("error").is_some(), "deleting under a relay that still answers succeeded: {reply}");
+    assert!(reply["error"].to_string().contains("jail is stopped"), "{reply}");
+    assert_eq!(fixture.database().query_row("SELECT count(*) FROM sessions WHERE id=?1", [&fixture.session], |row| row.get::<_, i64>(0)).unwrap(), 1);
+    assert!(runtime.join("relay.sock").exists(), "the files of a relay that still answers were scrubbed");
+    stop.store(true, Ordering::Relaxed);
+    let _ = listener.join();
 }
 
 fn exercise_recovery(adopt_checkpoint: bool, lose_worker: bool) {

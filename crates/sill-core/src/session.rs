@@ -683,17 +683,20 @@ pub fn stop(session: &str) -> Result<()> {
             None => false,
         }
     };
+    // what the pid files name is signalled only while it is still the session's (a jail that died
+    // unwatched leaves them behind, and pids are reused: docs/daemon.md §3.11)
+    use crate::launcher::SessionProcess::{Bwrap, Launcher};
     if !killed_group {
-        crate::launcher::kill_pid_file(&rt.join("bwrap.pid"));
+        crate::launcher::kill_session_process(&rt.join("bwrap.pid"), session, Bwrap);
     }
     // the launcher exits when bwrap does; give it a moment, then make sure
     for _ in 0..20 {
-        if !crate::launcher::pid_file_alive(&rt.join("launch.pid")) {
+        if crate::launcher::session_pid(&rt.join("launch.pid"), session, Launcher).is_none() {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    crate::launcher::kill_pid_file(&rt.join("launch.pid"));
+    crate::launcher::kill_session_process(&rt.join("launch.pid"), session, Launcher);
     for f in ["bwrap.pid", "launch.pid", "shim.sock", "proxy.sock"] {
         let _ = std::fs::remove_file(rt.join(f));
     }

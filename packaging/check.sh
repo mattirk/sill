@@ -94,6 +94,23 @@ if systemctl --user cat sill.service >/dev/null 2>&1; then
     journalctl --user -u sill.service -n 20 --no-pager -o short 2>&1 | log
 fi
 run "sill session list" "$SILL" session list
+# nothing outlives its session (docs/daemon.md §3.11): a jail or relay of a session that is not
+# open is a stray the daemon stops within two minutes, and each such stop is in its journal — a
+# bug somewhere else, worth reading
+running=$("$SILL" session list 2>/dev/null | awk '$2 == "running" {print $1}')
+strays=$({
+    systemctl --user list-units 'sill-*.scope' --no-legend --plain 2>/dev/null | awk '{print $1}' | sed 's/^sill-//; s/\.scope$//'
+    pgrep -af '[s]ill daemon relay --session' 2>/dev/null | sed -n 's/.* --session \([0-9a-f]\{8,\}\).*/\1/p'
+} | sort -u | while read -r id; do
+    printf '%s\n' "$running" | grep -qx "$id" || printf '%s ' "$id"
+done)
+if [ -z "$strays" ]; then pass "no jail or relay of a session that is not open"; else fail "jails or relays of sessions that are not open: $strays"; fi
+if systemctl --user cat sill.service >/dev/null 2>&1; then
+    since=$(systemctl --user show sill.service -p ExecMainStartTimestamp --value)
+    journalctl --user -u sill.service --since "$since" --no-pager -o cat 2>/dev/null | grep 'still running: stopping it' >"$TMP/reaped" || true
+    n=$(grep -c . "$TMP/reaped" || true)
+    if [ "$n" -gt 0 ]; then say "WARN  the daemon stopped $n stray(s) since it started — each is a bug elsewhere"; log <"$TMP/reaped"; fi
+fi
 run "sill changes list" "$SILL" changes list
 shelves=$(packaging/local-shelves.sh)
 n=$(printf '%s\n' "$shelves" | grep -c . || true)

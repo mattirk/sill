@@ -12,7 +12,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,15 @@ use sill_core::acp;
 
 const JOURNAL_BYTES: usize = 64 * 1024 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a relay whose ACP conversation has ended waits, with no daemon connected, for one to
+/// take its last events before it leaves on its own (docs/daemon.md §3.11): far longer than any
+/// restart, short enough that a daemon that never comes back — a crashed one, a test's — does not
+/// leave the relay behind for good. A relay whose conversation is live never leaves for this.
+const ORPHAN_GRACE: Duration = Duration::from_secs(15 * 60);
+/// How often the relay checks that its socket is still the one it listens on.
+const REACHABLE_CHECK: Duration = Duration::from_secs(1);
+/// How long a relay that gives up waits for its ACP worker to close the agent connection.
+const QUIT_PATIENCE: Duration = Duration::from_secs(10);
 
 /// The relay's own protocol — the shape of `Input` and `Output` and of the relay types they carry
 /// ([`Event`], [`Command`], [`Answer`] and the `acp` data inside them). Both hellos say it; a
@@ -322,15 +331,22 @@ impl Shared {
 /// of its final Ended event; dropping the daemon connection never closes the agent connection.
 pub(crate) fn run(session: &str, socket: &Path, agent_socket: &Path, cwd: &Path, resume: Option<String>, experimental_acp_v2: bool) -> Result<()> {
     super::exit_on_panic();
-    run_with(session, socket, cwd, resume, experimental_acp_v2, || sill_core::shim::agent_stream(agent_socket))
+    run_with(session, socket, cwd, resume, experimental_acp_v2, ORPHAN_GRACE, || sill_core::shim::agent_stream(agent_socket))
 }
 
 #[cfg(test)]
 fn run_stream(session: &str, socket: &Path, stream: UnixStream, cwd: &Path, resume: Option<String>) -> Result<()> {
-    run_with(session, socket, cwd, resume, false, || Ok(stream))
+    run_with(session, socket, cwd, resume, false, ORPHAN_GRACE, || Ok(stream))
 }
 
-fn run_with(session: &str, socket: &Path, cwd: &Path, resume: Option<String>, experimental_acp_v2: bool, open: impl FnOnce() -> Result<UnixStream>) -> Result<()> {
+/// The socket file's identity (device, inode), so the relay can tell its own listener from a
+/// path that was removed or taken by another one.
+fn socket_identity(socket: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(socket).ok().map(|m| (m.dev(), m.ino()))
+}
+
+fn run_with(session: &str, socket: &Path, cwd: &Path, resume: Option<String>, experimental_acp_v2: bool, orphan_grace: Duration, open: impl FnOnce() -> Result<UnixStream>) -> Result<()> {
     if let Some(dir) = socket.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -345,9 +361,10 @@ fn run_with(session: &str, socket: &Path, cwd: &Path, resume: Option<String>, ex
     let listener = UnixListener::bind(socket)?;
     std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
     listener.set_nonblocking(true)?;
+    let bound = socket_identity(socket).context("the relay socket vanished as it was bound")?;
     let pid_file = socket.with_extension("pid");
     std::fs::write(&pid_file, std::process::id().to_string())?;
-    let cleanup = Cleanup { socket: socket.to_path_buf(), pid_file };
+    let cleanup = Cleanup { socket: socket.to_path_buf(), identity: bound, pid_file };
     // Claim the worker lock before opening the shim stream: a duplicate relay must never steal
     // the live SDK's agent connection merely while checking whether another worker exists.
     let stream = open()?;
@@ -370,11 +387,29 @@ fn run_with(session: &str, socket: &Path, cwd: &Path, resume: Option<String>, ex
         }
     })?;
     let uid = rustix::process::geteuid();
-    loop {
+    // The relay outlives the daemon on purpose, but never its use (docs/daemon.md §3.11): it
+    // leaves once its Ended is acknowledged, as always, and on its own when nobody can come for
+    // it — its socket gone or taken (the runtime dir swept, the session deleted, a test's
+    // directory removed), or its conversation over with no daemon connected for `orphan_grace`.
+    // Before this a relay whose daemon never came back waited for an acknowledgement for ever.
+    let mut owned = Instant::now(); // last moment the conversation was live or a daemon connected
+    let mut checked = Instant::now();
+    let leaving = loop {
         {
             let state = shared.state.lock().unwrap();
             if state.ended_at.is_some_and(|seq| state.acknowledged >= seq) {
-                break;
+                break None;
+            }
+            if state.ended_at.is_none() || state.subscriber.is_some() {
+                owned = Instant::now();
+            } else if owned.elapsed() >= orphan_grace {
+                break Some(format!("the ACP conversation ended and no daemon came for its last events in {} s", orphan_grace.as_secs()));
+            }
+        }
+        if checked.elapsed() >= REACHABLE_CHECK {
+            checked = Instant::now();
+            if socket_identity(socket) != Some(bound) {
+                break Some(format!("{} was removed or replaced, so no daemon can reach this relay", socket.display()));
             }
         }
         match listener.accept() {
@@ -392,6 +427,9 @@ fn run_with(session: &str, socket: &Path, cwd: &Path, resume: Option<String>, ex
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(20)),
             Err(error) => return Err(error.into()),
         }
+    };
+    if let Some(why) = &leaving {
+        eprintln!("sill relay: session {session}: {why}; leaving");
     }
     {
         let mut state = shared.state.lock().unwrap();
@@ -401,21 +439,42 @@ fn run_with(session: &str, socket: &Path, cwd: &Path, resume: Option<String>, ex
         }
         shared.changed.notify_all();
     }
-    let _ = worker.join();
-    let _ = collector.join();
+    if leaving.is_some() {
+        // given up rather than done: a conversation still live is asked to close its agent
+        // connection, and a worker that does not within the patience goes with the process
+        let _ = shared.commands.try_send(acp::Command::Quit);
+        let deadline = Instant::now() + QUIT_PATIENCE;
+        while !(worker.is_finished() && collector.is_finished()) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if worker.is_finished() && collector.is_finished() {
+            let _ = worker.join();
+            let _ = collector.join();
+        }
+    } else {
+        let _ = worker.join();
+        let _ = collector.join();
+    }
     drop(cleanup);
     Ok(())
 }
 
+/// The relay's files go with it — only while they are still its own: a relay that gave up because
+/// its socket was taken must not remove the socket or pid file of the one that took it.
 struct Cleanup {
     socket: PathBuf,
+    identity: (u64, u64),
     pid_file: PathBuf,
 }
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.socket);
-        let _ = std::fs::remove_file(&self.pid_file);
+        if socket_identity(&self.socket) == Some(self.identity) {
+            let _ = std::fs::remove_file(&self.socket);
+        }
+        if std::fs::read_to_string(&self.pid_file).is_ok_and(|pid| pid.trim() == std::process::id().to_string()) {
+            let _ = std::fs::remove_file(&self.pid_file);
+        }
     }
 }
 
@@ -647,31 +706,46 @@ pub(super) fn connect(socket: &Path, since: u64) -> Result<(Arc<Client>, mpsc::R
 }
 
 /// Stop an orphaned worker before its session/runtime is scrubbed. This uses the authenticated
-/// private socket, never a pid read from disk. Deletion deliberately discards the buffered events
-/// after acknowledging them; otherwise an Ended worker waits forever with ghost data in memory.
+/// private socket first, and a pid read from disk only to evict. Deletion deliberately discards
+/// the buffered events after acknowledging them; otherwise an Ended worker waits with ghost data
+/// in memory.
+///
+/// A relay that answers but will not take the connection — another build's, a cursor it no longer
+/// retains, or one leaving at this very moment because the runner that owned it was just retired
+/// (a connection reset at Hello: how a "nothing was asked" deletion used to fail, leaving the jail
+/// running, docs/daemon.md §3.11) — or that does not end when asked, is evicted. Only a relay
+/// that can be stopped neither way is an error.
 pub(super) fn stop_unowned(socket: &Path, session: &str, cursor: u64) -> Result<()> {
+    let dir = socket.parent().unwrap_or(Path::new("."));
     let (client, events) = match connect(socket, cursor) {
         Ok(connection) => connection,
         Err(error) if error.downcast_ref::<std::io::Error>().is_some_and(|error| matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused)) => return Ok(()),
-        Err(error) if error.downcast_ref::<Refused>().is_some() => {
-            // a worker this daemon cannot talk to goes the hard way; its journal was for a
-            // session being deleted anyway
-            eprintln!("sill daemon: session {session}: orphaned ACP relay refused ({error:#}); evicting it");
-            return evict(socket.parent().unwrap_or(Path::new(".")), session);
+        Err(error) => {
+            // its journal was for a session being deleted anyway
+            eprintln!("sill daemon: session {session}: the orphaned ACP relay did not take a connection ({error:#}); evicting it");
+            return evict(dir, session);
         }
-        Err(error) => return Err(error.context("connecting orphaned ACP worker before deletion")),
     };
     // A reserved terminal command id is greater than every persisted normal command, and remains
     // idempotent if a prior deletion attempt was interrupted after sending it.
     let quit = client.command(u64::MAX, Command::Quit);
-    let deadline = std::time::Instant::now() + IO_TIMEOUT;
-    loop {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        let event = events.recv_timeout(remaining).with_context(|| format!("orphaned ACP worker did not end before deletion (quit: {quit:?})"))?;
-        client.ack(event.seq)?;
-        if matches!(event.event, Event::Ended(_)) { break; }
+    let deadline = Instant::now() + IO_TIMEOUT;
+    let ended = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Ok(event) = events.recv_timeout(remaining) else { break false };
+        if client.ack(event.seq).is_err() {
+            break false;
+        }
+        if matches!(event.event, Event::Ended(_)) {
+            break true;
+        }
+    };
+    drop(client);
+    if ended && wait_stopped(socket).is_ok() {
+        return Ok(());
     }
-    wait_stopped(socket)
+    eprintln!("sill daemon: session {session}: the orphaned ACP relay did not end when asked (quit: {quit:?}); evicting it");
+    evict(dir, session)
 }
 
 /// A relay that answers but will not cooperate — another build's after a deploy, a cursor it no
@@ -889,7 +963,7 @@ mod tests {
         let socket = dir.join("relay.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let opened = AtomicBool::new(false);
-        let result = run_with("test", &socket, Path::new("/tmp"), None, false, || {
+        let result = run_with("test", &socket, Path::new("/tmp"), None, false, ORPHAN_GRACE, || {
             opened.store(true, Ordering::Relaxed);
             bail!("must not open the agent stream")
         });
@@ -914,6 +988,130 @@ mod tests {
         let state=shared.state.lock().unwrap();
         assert!(state.subscriber.is_some());assert_eq!(state.generation,0);
     }
+    /// A fake agent that completes `initialize` and `session/new`, then reports what happened to
+    /// its connection: "closed" when the relay closed it.
+    fn idle_agent(agent: UnixStream) -> std::thread::JoinHandle<&'static str> {
+        std::thread::spawn(move || {
+            agent.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+            let mut reader = BufReader::new(agent.try_clone().unwrap());
+            let mut writer = agent;
+            let initialize = read(&mut reader);
+            message(&mut writer, json!({"jsonrpc":"2.0", "id":initialize["id"], "result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}}));
+            let new_session = read(&mut reader);
+            message(&mut writer, json!({"jsonrpc":"2.0", "id":new_session["id"], "result":{"sessionId":"fake-session"}}));
+            let mut rest = String::new();
+            match reader.read_line(&mut rest) {
+                Ok(0) => "closed",
+                Ok(_) => "unexpected message",
+                Err(_) => "still open",
+            }
+        })
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("sill-relay-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn finishes<T>(worker: &std::thread::JoinHandle<T>, within: Duration) -> bool {
+        let deadline = Instant::now() + within;
+        while !worker.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        worker.is_finished()
+    }
+
+    /// The leak found on the host 2026-11-04 (docs/daemon.md §3.11): a test fixture removed its
+    /// directory, the daemon it ran was gone, and the relay waited for an acknowledgement for ever.
+    /// A relay whose socket is gone leaves, and closes the agent connection it held.
+    #[test]
+    fn a_relay_whose_socket_is_removed_leaves_and_closes_the_agent() {
+        let dir = scratch("socket-removed");
+        let socket = dir.join("relay.sock");
+        let (agent, worker_stream) = UnixStream::pair().unwrap();
+        let fake = idle_agent(agent);
+        let path = socket.clone();
+        let worker = std::thread::spawn(move || run_with("test", &path, Path::new("/tmp"), None, false, ORPHAN_GRACE, || Ok(worker_stream)));
+        let (client, events) = loop {
+            match connect(&socket, 0) {
+                Ok(connection) => break connection,
+                Err(_) => std::thread::sleep(Duration::from_millis(5)),
+            }
+        };
+        let mut cursor = 0;
+        until(&events, &client, &mut cursor, |event| matches!(event, Event::Ready { .. }));
+        drop(client);
+        std::fs::remove_file(&socket).unwrap();
+        assert!(finishes(&worker, Duration::from_secs(5)), "a relay nobody can reach stayed");
+        worker.join().unwrap().unwrap();
+        assert_eq!(fake.join().unwrap(), "closed", "the relay left the agent connection open");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The conversation ended (the jail went), no daemon connected: after the grace the relay
+    /// leaves on its own; its files go with it.
+    #[test]
+    fn a_relay_whose_ended_conversation_nobody_claims_leaves_after_the_grace() {
+        let dir = scratch("unclaimed");
+        let socket = dir.join("relay.sock");
+        let (agent, worker_stream) = UnixStream::pair().unwrap();
+        let path = socket.clone();
+        let worker = std::thread::spawn(move || run_with("test", &path, Path::new("/tmp"), None, false, Duration::from_millis(300), || Ok(worker_stream)));
+        // the agent goes at once, as with a jail that died: the worker journals Ended
+        drop(agent);
+        assert!(finishes(&worker, Duration::from_secs(5)), "a relay with an ended, unclaimed conversation stayed");
+        worker.join().unwrap().unwrap();
+        assert!(!socket.exists() && !socket.with_extension("pid").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The grace is for ended conversations only: a live one waits for its daemon however long.
+    #[test]
+    fn a_relay_with_a_live_conversation_stays_without_a_daemon() {
+        let dir = scratch("live");
+        let socket = dir.join("relay.sock");
+        let (agent, worker_stream) = UnixStream::pair().unwrap();
+        let fake = idle_agent(agent);
+        let path = socket.clone();
+        let worker = std::thread::spawn(move || run_with("test", &path, Path::new("/tmp"), None, false, Duration::from_millis(100), || Ok(worker_stream)));
+        std::thread::sleep(Duration::from_millis(800));
+        assert!(!worker.is_finished(), "a relay with a live conversation left for want of a daemon");
+        let (client, events) = connect(&socket, 0).unwrap();
+        let mut cursor = 0;
+        client.command(1, Command::Quit).unwrap();
+        until(&events, &client, &mut cursor, |event| matches!(event, Event::Ended(_)));
+        assert!(finishes(&worker, Duration::from_secs(5)));
+        worker.join().unwrap().unwrap();
+        assert_eq!(fake.join().unwrap(), "closed");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// How the deletion of a session nobody had prompted failed on the host (docs/daemon.md
+    /// §3.11): the runner was retired a moment before, the relay was closing, and the Hello met a
+    /// reset connection — `stop_unowned` returned that error and the jail was never stopped. A
+    /// relay already on its way out is stopped, not an error.
+    #[test]
+    fn a_relay_leaving_as_it_is_stopped_is_not_an_error() {
+        let dir = scratch("leaving");
+        let socket = dir.join("relay.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let path = socket.clone();
+        let fake = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            // the Hello arrives and is never read: closing now resets the connection
+            std::thread::sleep(Duration::from_millis(100));
+            drop(stream);
+            drop(listener);
+            let _ = std::fs::remove_file(&path);
+        });
+        stop_unowned(&socket, "test", 0).unwrap();
+        fake.join().unwrap();
+        assert!(!socket.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn native_cancellation_removes_pending_handlers_without_false_answer_confirmation() {
         let (commands,_)=async_channel::unbounded();let shared=Shared{state:Mutex::new(State::default()),changed:Condvar::new(),commands};

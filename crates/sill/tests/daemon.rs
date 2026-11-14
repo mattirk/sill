@@ -1,4 +1,4 @@
-//! The daemon's lifecycle in bare mode (docs/daemon.md §3.11), against a throwaway runtime and
+//! The daemon's lifecycle in bare mode (docs/daemon.md §3.7), against a throwaway runtime and
 //! state dir of its own: it needs no systemd, no jail and no agent, so it runs anywhere the
 //! binary builds — a sill session included.
 

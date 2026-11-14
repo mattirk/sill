@@ -960,6 +960,12 @@ fn own_scope() -> Option<String> {
 /// scope, or with `--cgroup-root` in a session cgroup it makes (docs/daemon.md §3.1); it records its
 /// pids for re-adoption.
 fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Option<&str>, child: bool, cgroup_root: Option<PathBuf>) -> Result<()> {
+    // bwrap passes what it inherits on into the jail: only the descriptors made below for it get
+    // there, nothing this launcher was started with (docs/daemon.md §3.11)
+    let inherited = sill_core::launcher::cloexec_inherited();
+    if inherited > 0 {
+        eprintln!("sill launch: {inherited} inherited descriptors marked close-on-exec");
+    }
     let rt = shim::runtime_dir(session)?;
     std::fs::create_dir_all(&rt)?;
     if child {

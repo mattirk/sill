@@ -121,6 +121,13 @@ pub fn run() -> Result<()> {
     if std::env::var_os("SILL_SESSION").is_some() {
         bail!("sill daemon does not run inside a session");
     }
+    // nothing this process inherited goes on to a relay, a launcher or a host shell — systemd's
+    // socket included, which `activated_listener` then takes as its own (docs/daemon.md §3.11)
+    let inherited = sill_core::launcher::cloexec_inherited();
+    let activated = std::env::var("LISTEN_PID").ok().and_then(|p| p.parse::<u32>().ok()) == Some(std::process::id());
+    if inherited > usize::from(activated) {
+        eprintln!("sill daemon: {inherited} inherited descriptors marked close-on-exec");
+    }
     // one daemon per store, whatever socket it listens on: two would be two writers of sill.db
     let _store_lock = lock_store()?;
     exit_on_panic();
@@ -262,7 +269,7 @@ fn notify(state: &str) {
     }
 }
 
-/// A panic anywhere in the daemon ends the whole process (docs/daemon.md §3.11): a connection
+/// A panic anywhere in the daemon ends the whole process (docs/daemon.md §3.7): a connection
 /// thread that panics would otherwise leave its runner subscriptions and writer thread behind, and
 /// a panic under one of the hub's locks poisons it, so every later request panics too — a daemon
 /// that answers the socket and does nothing. A dead daemon is the case the design handles: the

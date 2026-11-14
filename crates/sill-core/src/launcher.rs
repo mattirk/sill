@@ -312,19 +312,105 @@ pub fn kill_session_cgroup(root: &Path, session: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// Whether the pid named in `file` is still alive.
+/// Whether the pid named in `file` is still alive. Says nothing about *what* it is: for a
+/// session's own pid files use [`session_pid`].
 pub fn pid_file_alive(file: &Path) -> bool {
     let Ok(text) = std::fs::read_to_string(file) else { return false };
     let Ok(pid) = text.trim().parse::<u32>() else { return false };
     Path::new("/proc").join(pid.to_string()).is_dir()
 }
 
+/// Mark every descriptor above stderr close-on-exec; how many were not (docs/daemon.md §3.11).
+/// Whatever this process inherited — a listening socket systemd passed, a terminal's or a
+/// desktop's leftovers — then reaches no child it starts, and through `sill launch` no jail: bwrap
+/// hands its own inherited descriptors on to the jail. Descriptors opened afterwards are
+/// close-on-exec already (Rust and SQLite open them so); the few a child is meant to have are
+/// handed over explicitly (the shim's listener, the seccomp filter). Before this the daemon's
+/// systemd socket reached a session's launcher, which held it — unanswered — for a day.
+pub fn cloexec_inherited() -> usize {
+    let Ok(dir) = std::fs::read_dir("/proc/self/fd") else { return 0 };
+    let fds: Vec<i32> = dir.flatten().filter_map(|e| e.file_name().to_str()?.parse().ok()).filter(|fd| *fd > 2).collect();
+    let mut marked = 0;
+    for fd in fds {
+        // SAFETY: only the descriptor's flags are read and set. A number that is no longer open —
+        // the directory handle listed above — fails with EBADF and is skipped; one reused by
+        // another thread meanwhile only becomes close-on-exec, which nothing here relies on.
+        let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+        if let Ok(flags) = rustix::io::fcntl_getfd(fd)
+            && !flags.contains(rustix::io::FdFlags::CLOEXEC)
+            && rustix::io::fcntl_setfd(fd, flags | rustix::io::FdFlags::CLOEXEC).is_ok()
+        {
+            marked += 1;
+        }
+    }
+    marked
+}
+
+/// Which of a session's processes a pid file names (`launch.pid`, `bwrap.pid`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionProcess {
+    /// `sill launch … --session <id>`.
+    Launcher,
+    /// The outer bwrap, whose arguments name the session's paths.
+    Bwrap,
+}
+
+/// The live pid `file` names, when that process is this user's and its command line is the
+/// session's `kind` of process; None otherwise. A pid file outlives its process when a jail dies
+/// with nobody watching, and pids are reused — on a busy machine within days (this one wrapped past
+/// 4 M in two) — so what a stale file names is never adopted, waited on or signalled
+/// (docs/daemon.md §3.11). A zombie has an empty command line and counts as gone.
+pub fn session_pid(file: &Path, session: &str, kind: SessionProcess) -> Option<u32> {
+    let pid: u32 = std::fs::read_to_string(file).ok()?.trim().parse().ok()?;
+    is_session_process(pid, session, kind).then_some(pid)
+}
+
+/// `pid` is this user's process and its command line is the session's `kind` of process.
+pub fn is_session_process(pid: u32, session: &str, kind: SessionProcess) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    if session.is_empty() {
+        return false;
+    }
+    let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else { return false };
+    let mine = std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .ok()
+        .and_then(|s| s.lines().find(|l| l.starts_with("Uid:")).and_then(|l| l.split_whitespace().nth(1)?.parse::<u32>().ok()))
+        == Some(rustix::process::geteuid().as_raw());
+    if !mine {
+        return false;
+    }
+    let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).filter(|a| !a.is_empty()).collect();
+    match kind {
+        SessionProcess::Launcher => args.contains(&&b"launch"[..]) && args.windows(2).any(|w| w[0] == b"--session" && w[1] == session.as_bytes()),
+        SessionProcess::Bwrap => {
+            args.first().is_some_and(|a| Path::new(std::ffi::OsStr::from_bytes(a)).file_name() == Some(std::ffi::OsStr::new("bwrap")))
+                && cmdline.windows(session.len()).any(|w| w == session.as_bytes())
+        }
+    }
+}
+
+/// SIGKILL to the session process `file` names and to its direct children — only when it is that
+/// process ([`session_pid`]); true if a signal was sent.
+pub fn kill_session_process(file: &Path, session: &str, kind: SessionProcess) -> bool {
+    match session_pid(file, session, kind) {
+        Some(pid) => kill_with_children(pid as i32),
+        None => false,
+    }
+}
+
 /// Send SIGKILL to the pid read from a file and to its direct children; true if a signal was
-/// sent. bwrap is two processes: the outer one that waits, and its child, pid 1 of the jail's
-/// namespace — the one whose death takes everything in the jail with it.
+/// sent. Unchecked: only for files that name no session process (the dev path's old `proxy.pid`);
+/// a session's own go through [`kill_session_process`].
 pub fn kill_pid_file(file: &Path) -> bool {
     let Ok(text) = std::fs::read_to_string(file) else { return false };
     let Ok(pid) = text.trim().parse::<i32>() else { return false };
+    kill_with_children(pid)
+}
+
+/// SIGKILL to `pid` and its direct children. bwrap is two processes: the outer one that waits,
+/// and its child, pid 1 of the jail's namespace — the one whose death takes everything in the
+/// jail with it.
+fn kill_with_children(pid: i32) -> bool {
     let mut targets = children_of(pid);
     targets.push(pid);
     let mut sent = false;
@@ -366,5 +452,48 @@ mod tests {
         assert_eq!(cgroup_size("12345").unwrap(), "12345");
         assert_eq!(cgroup_size("max").unwrap(), "max");
         assert!(cgroup_size("lots").is_err());
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("sill-launcher-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A launcher is recognised by its command line, for its own session only.
+    #[test]
+    fn a_session_process_is_known_by_its_command_line() {
+        // a loop of short sleeps: killing the shell leaves at most a second's orphan behind
+        let mut launcher = std::process::Command::new("sh").args(["-c", "while :; do sleep 1; done", "sill", "launch", "--session", "abcd1234"]).spawn().unwrap();
+        let mut other = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        assert!(is_session_process(launcher.id(), "abcd1234", SessionProcess::Launcher));
+        assert!(!is_session_process(launcher.id(), "abcd12", SessionProcess::Launcher), "a prefix of the id is another session");
+        assert!(!is_session_process(launcher.id(), "abcd1234", SessionProcess::Bwrap));
+        assert!(!is_session_process(other.id(), "abcd1234", SessionProcess::Launcher));
+        let _ = launcher.kill();
+        let _ = launcher.wait();
+        assert!(!is_session_process(launcher.id(), "abcd1234", SessionProcess::Launcher), "a reaped launcher is gone");
+        let _ = other.kill();
+        let _ = other.wait();
+    }
+
+    /// The hazard behind the check (docs/daemon.md §3.11): a jail died unwatched, its pid was
+    /// reused by something else of the person's — that process is never adopted or signalled.
+    #[test]
+    fn a_stale_pid_file_naming_a_reused_pid_is_never_signalled() {
+        let dir = scratch("reused");
+        let mut bystander = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        for f in ["launch.pid", "bwrap.pid"] {
+            std::fs::write(dir.join(f), bystander.id().to_string()).unwrap();
+        }
+        assert_eq!(session_pid(&dir.join("launch.pid"), "abcd1234", SessionProcess::Launcher), None);
+        assert!(!kill_session_process(&dir.join("launch.pid"), "abcd1234", SessionProcess::Launcher));
+        assert!(!kill_session_process(&dir.join("bwrap.pid"), "abcd1234", SessionProcess::Bwrap));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(bystander.try_wait().unwrap().is_none(), "an unrelated process was killed through a stale pid file");
+        let _ = bystander.kill();
+        let _ = bystander.wait();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

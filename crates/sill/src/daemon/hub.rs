@@ -239,6 +239,7 @@ impl Hub {
         self.sfp.lock().unwrap().expire();
         super::streams::reap();
         super::terminals::reap();
+        self.reap_strays();
         let now = sill_core::store::now();
         let mut ids: Vec<String> = self.children.lock().unwrap().keys().cloned().collect();
         ids.extend(self.runners.lock().unwrap().keys().cloned());
@@ -281,6 +282,13 @@ impl Hub {
         self.auto_revert();
         let uid = rustix::process::getuid().as_raw();
         match sill_core::memory::nightly_if_due(&|id| {
+            // a session deleted for good takes a jail that still runs with it, before its state
+            // goes from under it
+            if sill_proto::runtime_dir().is_ok_and(|d| launcher_alive(&d.join(id), id))
+                && let Err(e) = sill_core::session::stop(id)
+            {
+                eprintln!("sill daemon: memory nightly: stopping session {id}: {e:#}");
+            }
             let _ = sill_core::session::remove_state(uid, id);
         }) {
             Ok(Some(done)) => eprintln!("sill daemon: memory nightly: {} compacted, {} trimmed, {} deleted", done.compacted, done.trimmed, done.deleted),
@@ -349,6 +357,8 @@ impl Hub {
     /// gets its runner on the first attach or prompt, as before the relay existed: a daemon
     /// restart wakes no agent.
     pub fn recover(self: &Arc<Self>) {
+        // first what must not run at all, so no stray's relay is recovered below (§3.11)
+        self.reap_strays();
         let Ok(dir) = sill_proto::runtime_dir() else { return };
         let Ok(entries) = std::fs::read_dir(&dir) else { return };
         let mut ids: Vec<String> = entries.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
@@ -526,11 +536,17 @@ impl Hub {
         super::terminals::forget_session(id);
         let ghost = self.is_ghost(id);
         let had_runner = self.runners.lock().unwrap().contains_key(id);
-        let relay_socket = sill_proto::runtime_dir()?.join(id).join("relay.sock");
-        if !had_runner {
-            let snapshot = self.with_store(|store| Runner::load(id, store))?;
-            super::relay::stop_unowned(&relay_socket, id, Runner::cursor(&snapshot))?;
-        }
+        let relay_dir = sill_proto::runtime_dir()?.join(id);
+        let relay_socket = relay_dir.join("relay.sock");
+        // Nothing below returns before the jail's stop: a deletion that gave up half-way used to
+        // leave the session's jail running for good, adopted by every later daemon
+        // (docs/daemon.md §3.11). A relay that could not be stopped only keeps the runtime dir,
+        // state and row — after the jail is gone.
+        let mut relay = if had_runner {
+            Ok(())
+        } else {
+            self.with_store(|store| Runner::load(id, store)).and_then(|snapshot| super::relay::stop_unowned(&relay_socket, id, Runner::cursor(&snapshot)))
+        };
         // the history (SPEC §3.6): the pinned repositories' range and the deletion itself, before
         // the row goes; a ghost leaves neither
         if !ghost && let Some(s) = self.with_store(|st| st.sessions()).ok().and_then(|v| v.into_iter().find(|s| s.id == id)) {
@@ -543,10 +559,24 @@ impl Hub {
             }
         }
         self.retire_runner(id);
-        if had_runner { super::relay::wait_stopped(&relay_socket)?; }
+        if had_runner {
+            // the retired runner's Quit ends the relay; one that does not leave goes the hard way
+            relay = super::relay::wait_stopped(&relay_socket).or_else(|e| {
+                eprintln!("sill daemon: session {id}: {e:#}; evicting the ACP relay");
+                super::relay::evict(&relay_dir, id)
+            });
+        }
         self.ending.lock().unwrap().remove(id);
         if let Err(e) = sill_core::session::stop(id) {
             eprintln!("sill daemon: stopping session {id} for deletion: {e:#}");
+        }
+        if let Err(e) = relay
+            && self.relay_answers(id)
+        {
+            // the jail is stopped; what stays is the relay's journal and the session's files, which
+            // must not be scrubbed under a worker that still answers. With its agent gone the
+            // relay leaves by itself (relay.rs `ORPHAN_GRACE`); the deletion can be asked again.
+            return Err(e.context(format!("session {id}'s jail is stopped, but its ACP relay still answers; its files and row stay until it is gone")));
         }
         if let Err(e) = self.sync_credentials_for(Some(id)) {
             eprintln!("sill daemon: credentials before deleting {id}: {e:#}");
@@ -690,11 +720,75 @@ impl Hub {
             if id == "dev" || !sill_core::session::valid_id(&id) || !e.path().is_dir() || rows.contains(&id) {
                 continue;
             }
-            if sill_core::launcher::pid_file_alive(&e.path().join("launch.pid")) || self.children.lock().unwrap().contains_key(&id) {
+            if launcher_alive(&e.path(), &id) || self.children.lock().unwrap().contains_key(&id) {
                 continue;
             }
             if std::fs::remove_dir_all(e.path()).is_ok() {
                 eprintln!("sill daemon: removed the runtime dir of deleted session {id}");
+            }
+        }
+    }
+
+    /// Jails and relays that must not be running (docs/daemon.md §3.11): their session is gone
+    /// from the store, or ended more than [`STRAY_GRACE_SECS`] ago — an end or a deletion that
+    /// stopped half-way, a daemon that left before its stop thread was done. Each is stopped the
+    /// way a deletion stops one: its runner retired, an unowned relay asked to quit (evicted when
+    /// it will not), the jail stopped; the session's state and row are left as they are. Before
+    /// this, nothing ever looked again: such a jail was adopted by every later daemon. Run on the
+    /// recovery thread after `READY=1`, then by the minute sweep.
+    pub(super) fn reap_strays(&self) {
+        let Ok(dir) = sill_proto::runtime_dir() else { return };
+        let Ok(entries) = std::fs::read_dir(&dir) else { return };
+        // a store that cannot be read says nothing about which sessions exist: never a reason to
+        // stop one
+        let sessions = match self.with_store(|s| s.sessions()) {
+            Ok(sessions) => sessions,
+            Err(e) => {
+                eprintln!("sill daemon: looking for stray jails: {e:#}");
+                return;
+            }
+        };
+        let now = sill_core::store::now();
+        for e in entries.flatten() {
+            let Some(id) = e.file_name().to_str().map(str::to_string) else { continue };
+            if !sill_core::session::valid_id(&id) || !e.path().is_dir() {
+                continue;
+            }
+            let why = match sessions.iter().find(|s| s.id == id) {
+                None => "is not in the store".to_string(),
+                Some(s) => match s.ended_at {
+                    Some(ended) if now - ended > STRAY_GRACE_SECS => format!("ended {} min ago", (now - ended) / 60),
+                    _ => continue,
+                },
+            };
+            let jail = launcher_alive(&e.path(), &id) || self.children.lock().unwrap().contains_key(&id);
+            let runner = self.runners.lock().unwrap().contains_key(&id);
+            let relay = runner || self.relay_answers(&id);
+            if !jail && !relay {
+                continue;
+            }
+            let what = match (jail, relay) {
+                (true, true) => "jail and ACP relay are",
+                (true, false) => "jail is",
+                _ => "ACP relay is",
+            };
+            eprintln!("sill daemon: session {id} {why}, but its {what} still running: stopping it");
+            if relay {
+                let socket = e.path().join("relay.sock");
+                let result = if runner {
+                    // the retired runner's Quit ends the relay; one that does not leave is evicted
+                    self.retire_runner(&id);
+                    super::relay::wait_stopped(&socket).or_else(|_| super::relay::evict(&e.path(), &id))
+                } else {
+                    let cursor = self.with_store(|store| Runner::load(&id, store)).map(|snapshot| Runner::cursor(&snapshot)).unwrap_or(0);
+                    super::relay::stop_unowned(&socket, &id, cursor)
+                };
+                if let Err(err) = result {
+                    eprintln!("sill daemon: stopping the ACP relay of session {id}: {err:#}");
+                }
+            }
+            if jail && let Err(err) = sill_core::session::stop(&id) {
+                eprintln!("sill daemon: stopping the jail of session {id}: {err:#}");
             }
         }
     }
@@ -901,7 +995,12 @@ impl Hub {
             .ok();
         }
         if let Err(e)=self.sfp_lifecycle(id,Some((delete,reason)),None){eprintln!("sill daemon: publishing session end: {e:#}");}
-        self.retire_runner(id);
+        // a deletion retires the runner itself and then waits for its relay to leave; retired
+        // here, the relay was always halfway out when the deletion connected to it as an unowned
+        // one — a reset connection, and before docs/daemon.md §3.11 a jail left running
+        if !delete {
+            self.retire_runner(id);
+        }
         self.ending.lock().unwrap().remove(id);
         // The terminal runner cursor survives until session deletion/retention. The relay may
         // still be delivering Ended when this daemon stops; deleting its cursor now strands that
@@ -1022,7 +1121,8 @@ impl Hub {
             let pid_file = e.path().join("launch.pid");
             let pid = std::fs::read_to_string(&pid_file).ok().and_then(|t| t.trim().parse::<u32>().ok());
             match pid {
-                Some(pid) if sill_core::launcher::pid_file_alive(&pid_file) => {
+                // only the session's own launcher: a stale file's pid may be anybody's by now
+                Some(pid) if sill_core::launcher::is_session_process(pid, &id, sill_core::launcher::SessionProcess::Launcher) => {
                     self.children.lock().unwrap().insert(id.clone(), pid);
                     self.started_at.lock().unwrap().insert(id.clone(), sill_core::store::now());
                     eprintln!("sill daemon: adopted session {id} (launch pid {pid})");
@@ -1045,6 +1145,15 @@ impl Hub {
             }
         }
     }
+}
+
+/// How long after its end a session's jail may still be running before the minute sweep calls it a
+/// stray (`Hub::reap_strays`): the end's own stop runs on a thread of its own and takes seconds.
+const STRAY_GRACE_SECS: i64 = 120;
+
+/// The session's own launcher is alive (its `launch.pid`, checked to be that process).
+fn launcher_alive(runtime: &std::path::Path, id: &str) -> bool {
+    sill_core::launcher::session_pid(&runtime.join("launch.pid"), id, sill_core::launcher::SessionProcess::Launcher).is_some()
 }
 
 /// The shim still has an agent process: the relay stays up when the shim stops an idle agent, so
