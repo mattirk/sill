@@ -258,6 +258,23 @@ def main():
     parser.add_argument("--socket", default=str(Path(os.environ.get("XDG_RUNTIME_DIR", "/run/user/" + str(os.getuid()))) / "sill/daemon.sock"))
     parser.add_argument("--schema", type=Path, help="JSON exported by sill daemon schema (otherwise fetched)")
     commands = parser.add_subparsers(dest="command", required=True)
+    listing = commands.add_parser("list", help="list sessions through bounded public pages")
+    listing.add_argument("--limit", type=int, default=64)
+    create = commands.add_parser("create", help="create a session without starting its jail")
+    create.add_argument("--create-id", required=True, help="reuse this ID and identical input after an uncertain reply")
+    create.add_argument("--agent", required=True)
+    create.add_argument("--policy", default="default")
+    create.add_argument("--ghost", action="store_true")
+    create.add_argument("--pin", action="append", default=[], help="absolute path on the daemon host")
+    for name in ("get", "start", "stop", "checkpoint"):
+        action = commands.add_parser(name)
+        action.add_argument("session_id")
+    end = commands.add_parser("end")
+    end.add_argument("session_id")
+    end.add_argument("--reason", choices=("close", "idle", "quit"), default="close")
+    update = commands.add_parser("update")
+    update.add_argument("session_id")
+    update.add_argument("change", type=json.loads, help='tagged change, e.g. {"type":"title","text":"Name","kind":"person"}')
     watch = commands.add_parser("watch")
     watch.add_argument("session_id")
     watch.add_argument("--state", type=Path, help="persist the complete view and its cursor for reconnect")
@@ -288,7 +305,27 @@ def main():
     schema = json.loads(args.schema.read_text()) if args.schema else None
     client = Client(args.socket, schema)
     try:
-        if args.command == "watch":
+        if args.command == "list":
+            after = None
+            while True:
+                page = client.call("_sill/sessions.list", {"after": after, "limit": args.limit})
+                for session in page["sessions"]:
+                    print(json.dumps(session, ensure_ascii=False))
+                after = page["next"]
+                if after is None:
+                    break
+        elif args.command == "create":
+            pins = [{"bytes_base64": base64.b64encode(os.fsencode(p)).decode(), "display": os.fsdecode(os.fsencode(p)).encode("utf-8", "replace").decode()} for p in args.pin]
+            result = client.call("_sill/sessions.create", {"create_id": args.create_id, "agent": args.agent, "policy": args.policy, "ghost": args.ghost, "pins": pins})
+            print(json.dumps(result))
+        elif args.command in ("get", "start", "stop", "checkpoint", "end", "update"):
+            params = {"session_id": args.session_id}
+            if args.command == "end":
+                params["reason"] = args.reason
+            elif args.command == "update":
+                params["change"] = args.change
+            print(json.dumps(client.call("_sill/sessions." + args.command, params), ensure_ascii=False))
+        elif args.command == "watch":
             view = View(**json.loads(args.state.read_text())) if args.state and args.state.exists() else None
             subscription, view = client.attach(args.session_id, view)
             view.save(args.state)

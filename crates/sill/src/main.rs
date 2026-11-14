@@ -1168,7 +1168,7 @@ fn shell_words(s: &str) -> Vec<String> {
 fn changes_cmd(cmd: ChangesCmd) -> Result<()> {
     use sill_proto::method as m;
     let c = sill_proto::Client::connect_or_start()?;
-    let session = |key: &str| -> Result<String> { Ok(c.call::<sill_proto::Session>(m::SESSIONS_GET, sill_proto::Key { key: key.to_string() })?.id) };
+    let session = |key: &str| -> Result<String> { Ok(c.resolve_session(key)?.session_id) };
     let abs = |paths: Vec<PathBuf>| -> Result<Vec<PathBuf>> {
         let cwd = std::env::current_dir()?;
         Ok(paths.into_iter().map(|p| if p.is_absolute() { p } else { cwd.join(p) }).collect())
@@ -1276,25 +1276,25 @@ fn session_cmd(cmd: SessionCmd) -> Result<()> {
         SessionCmd::New { agent, policy, ghost, pins } => {
             let pins = pins.into_iter().map(|p| p.canonicalize().with_context(|| format!("pin {}", p.display()))).collect::<Result<Vec<_>>>()?;
             let new = sill_proto::NewSession { agent, policy, pins, ghost, ..Default::default() };
-            let k: sill_proto::Key = c.call(sill_proto::method::SESSIONS_NEW, new)?;
-            let started: sill_proto::Started = c.call(sill_proto::method::SESSIONS_START, sill_proto::Key { key: k.key.clone() })?;
-            println!("{}", k.key);
-            eprintln!("{}session {} started; socket {}", if ghost { "ghost " } else { "" }, k.key, started.socket.display());
+            let k: sill_proto::sessions::SessionKey = c.call("_sill/sessions.create", sill_proto::sessions::Create::from_legacy(new,sill_core::sfp::new_id()))?;
+            let _: sill_proto::sessions::Started = c.call("_sill/sessions.start", &k)?;
+            println!("{}", k.session_id);
+            eprintln!("{}session {} started", if ghost { "ghost " } else { "" }, k.session_id);
         }
         SessionCmd::List => {
-            let rows: Vec<sill_proto::Session> = c.call(sill_proto::method::SESSIONS_LIST, sill_proto::Empty::default())?;
+            let rows = c.list_sessions()?;
             for s in rows {
                 let state = if s.running { "running" } else if s.ended_at.is_some() { "ended" } else { "open" };
-                println!("{}  {:<7} {}{:<8} {}", s.id, state, if s.ghost { "ghost " } else { "" }, s.agent, s.title);
+                println!("{}  {:<7} {}{:<8} {}", s.session_id, state, if s.ghost { "ghost " } else { "" }, s.agent, s.title);
             }
         }
         SessionCmd::End { key } => {
-            let s: sill_proto::Session = c.call(sill_proto::method::SESSIONS_GET, sill_proto::Key { key: key.join(" ") })?;
-            let e: sill_proto::Ending = c.call(sill_proto::method::SESSIONS_END, sill_proto::End { key: s.id.clone(), reason: "close".into() })?;
+            let s = c.resolve_session(&key.join(" "))?;
+            let e: sill_proto::sessions::Ending = c.call("_sill/sessions.end", sill_proto::sessions::End { session_id: s.session_id.clone(), reason: "close".into() })?;
             match (e.pending, e.deleted) {
-                (true, _) => println!("{}: the agent writes its summary; the session ends when it is done", s.id),
-                (false, true) => println!("{}: deleted ({})", s.id, if s.ghost { "a ghost leaves nothing" } else { "nothing was asked in it" }),
-                (false, false) => println!("{}: ended", s.id),
+                (true, _) => println!("{}: the agent writes its summary; the session ends when it is done", s.session_id),
+                (false, true) => println!("{}: deleted ({})", s.session_id, if s.ghost { "a ghost leaves nothing" } else { "nothing was asked in it" }),
+                (false, false) => println!("{}: ended", s.session_id),
             }
         }
     }

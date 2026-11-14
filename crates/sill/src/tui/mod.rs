@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use sill_proto::wire::{Answer, Command, Event, FieldKind, PermissionOptionKind};
-use sill_proto::{Attach, Client, Key, Session, method};
+use sill_proto::{Attach, Client, Key, method};
 
 /// Whether `> ` is on the screen waiting for a line: a note that arrives then (the daemon's
 /// "N changes pending" after a turn) takes the line over and the mark is shown again after it.
@@ -23,8 +23,8 @@ struct Pending {
 
 pub fn line_mode(key: &str, fresh: bool, verbose: bool) -> Result<()> {
     let c = Arc::new(Client::connect_or_start()?);
-    let s: Session = c.call(method::SESSIONS_GET, Key { key:key.into() })?;
-    let id = s.id;
+    let s = c.resolve_session(key)?;
+    let id = s.session_id;
     if fresh {
         c.call::<serde_json::Value>(method::SESSIONS_ATTACH, Attach { key:id.clone(),fresh:true })?;
         c.call::<serde_json::Value>(method::SESSIONS_DETACH, Key { key:id.clone() })?;

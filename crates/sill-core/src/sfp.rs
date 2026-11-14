@@ -662,3 +662,9 @@ fn update_active_time(previous: &SessionState, next: &mut SessionState, now: u64
     }
     if working && next.active_since_ms.is_none() { next.active_since_ms = Some(now); }
 }
+
+/// A create retry retains only the input fingerprint, never pins or ghost configuration.
+pub fn create_fingerprint(input:&str)->String {
+    use sha2::{Digest,Sha256};
+    Sha256::digest(input.as_bytes()).iter().map(|b|format!("{b:02x}")).collect()
+}

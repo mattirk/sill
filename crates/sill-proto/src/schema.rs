@@ -44,6 +44,14 @@ const fn notification<P: JsonSchema>(name: &'static str, doc: &'static str) -> M
 
 /// Every method the daemon answers and every notification it sends, in the order of docs/protocol.md.
 pub const METHODS: &[Method] = &[
+    req::<crate::sessions::List, crate::sessions::Page>("_sill/sessions.list", "List sessions in bounded live pages ordered by immutable creation time and identity."),
+    req::<crate::sessions::SessionKey, crate::sessions::Session>("_sill/sessions.get", "Read one exact session identity."),
+    req::<crate::sessions::Create, crate::sessions::SessionKey>("_sill/sessions.create", "Atomically create a session; retry the same create_id and input to recover its identity."),
+    req_empty::<crate::sessions::Update>("_sill/sessions.update", "Update one session field. Do not blindly retry after connection loss."),
+    req::<crate::sessions::SessionKey, crate::sessions::Started>("_sill/sessions.start", "Start a jail. Do not blindly retry after connection loss."),
+    req_empty::<crate::sessions::SessionKey>("_sill/sessions.stop", "Stop the jail, preserving the session. Do not blindly retry after connection loss."),
+    req::<crate::sessions::End, crate::sessions::Ending>("_sill/sessions.end", "End a session, possibly waiting for its summary. Do not blindly retry after connection loss."),
+    req_empty::<crate::sessions::SessionKey>("_sill/sessions.checkpoint", "Request a summary. Do not blindly retry after connection loss."),
     req::<crate::sfp::UploadCreate, crate::sfp::UploadCreated>("_sill/uploads.create", "Create an immutable session upload with an idempotency key."),
     req::<crate::sfp::UploadGet, crate::sfp::Upload>("_sill/uploads.get", "Read an upload's immutable bytes (attachments are referenced, never embedded)."),
     req_empty::<crate::sfp::SessionControl>("_sill/sessions.control", "Change adapter controls; do not blindly retry an uncertain login or retry-session action."),

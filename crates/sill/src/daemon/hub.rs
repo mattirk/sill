@@ -25,6 +25,8 @@ use super::runner::{Runner, SummaryDone, SummaryKind};
 // the Changes page's methods: a child module, so it reaches the hub's own fields
 #[path = "changes.rs"]
 mod changes;
+#[path = "sessions.rs"]
+mod sessions;
 
 /// What an end that waits for the agent's summary needs once the answer is in (the facts as they
 /// were when the end was asked for; the row's summary is replaced only when memory is on).
@@ -785,6 +787,10 @@ impl Hub {
             bail!("{GHOST_NO_PINS}");
         }
         let store = self.store.lock().unwrap();
+        Self::create_session_row(&store, n)
+    }
+
+    fn create_session_row(store: &Store, n: NewSession) -> Result<String> {
         let s = store.create_with(&n.agent, &n.policy, n.ghost)?;
         let pins = if n.ghost {
             vec![]
@@ -1217,6 +1223,11 @@ impl Hub {
             let pins = store.jail_pins(id)?; // the global pins too (docs/pins.md)
             (s, pins)
         };
+        // Reuse a live jail before computing a new launch plan. Recovery must not
+        // require the state mount or installed policy just to reconnect its shim.
+        if sill_core::session::is_running(id) {
+            return Ok(Started { socket: sill_core::shim::runtime_dir(id)?.join("shim.sock"), fresh: false });
+        }
         let registry = sill_core::agents::load(&self.home);
         let Some(agent) = registry.get(&s.agent) else { bail!("unknown agent {}", s.agent) };
         let uid = rustix::process::getuid().as_raw();

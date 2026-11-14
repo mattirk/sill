@@ -115,6 +115,7 @@ impl Store {
                  id TEXT PRIMARY KEY, agent TEXT NOT NULL, title TEXT NOT NULL,
                  created_at INTEGER NOT NULL, last_used INTEGER NOT NULL,
                  acp_session_id TEXT, policy TEXT NOT NULL DEFAULT 'default');
+             CREATE INDEX IF NOT EXISTS sessions_creation_order ON sessions(created_at DESC,id DESC);
              CREATE TABLE IF NOT EXISTS session_pins (
                  session_id TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (session_id, path));
              CREATE TABLE IF NOT EXISTS global_pins (path TEXT PRIMARY KEY, added_at INTEGER NOT NULL);
@@ -202,10 +203,23 @@ impl Store {
     }
 
     pub fn sessions(&self) -> Result<Vec<Session>> {
-        let mut st = self.conn.prepare(
-            "SELECT id, agent, title, created_at, last_used, acp_session_id, policy, auto_allow, agent_settings, desktop, ended_at, summary, summary_kind, memory_scope, follows, compacted, title_kind, ghost FROM sessions ORDER BY last_used DESC",
-        )?;
-        let rows = st.query_map([], |r| {
+        self.session_query("ORDER BY last_used DESC", rusqlite::params![])
+    }
+
+    /// Stable keyset pagination. Rows are live at each request; creation keys never change.
+    pub fn sessions_page(&self, after: Option<(i64, &str)>, limit: usize) -> Result<Vec<Session>> {
+        let (time,id)=after.unwrap_or((i64::MAX,""));
+        self.session_query("WHERE created_at < ?1 OR (created_at = ?1 AND id < ?2) ORDER BY created_at DESC, id DESC LIMIT ?3",
+            params![time,id,limit as i64])
+    }
+    pub fn session_exact(&self, id:&str) -> Result<Option<Session>> {
+        Ok(self.session_query("WHERE id = ?1", params![id])?.pop())
+    }
+    fn session_query(&self, suffix:&str, params: impl rusqlite::Params) -> Result<Vec<Session>> {
+        let mut st = self.conn.prepare(&format!(
+            "SELECT id, agent, title, created_at, last_used, acp_session_id, policy, auto_allow, agent_settings, desktop, ended_at, summary, summary_kind, memory_scope, follows, compacted, title_kind, ghost FROM sessions {suffix}"
+        ))?;
+        let rows = st.query_map(params, |r| {
             Ok(Session {
                 id: r.get(0)?,
                 agent: r.get(1)?,

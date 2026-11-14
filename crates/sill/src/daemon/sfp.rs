@@ -53,7 +53,7 @@ pub(super) fn id() -> String {
 fn domain(code: &str, message: &str) -> Error {
     let mut e = Error::new(Error::FAILED, message); e.data = Some(json!({"code":code})); e
 }
-fn failure(e: anyhow::Error) -> Error {
+pub(super) fn failure(e: anyhow::Error) -> Error {
     if let Some(e) = e.downcast_ref::<sill_core::sfp::DomainError>() {
         let mut rpc=domain(e.code,&e.message);
         if let Some(details)=&e.details {rpc.data.as_mut().unwrap()["details"]=details.clone();}
@@ -107,6 +107,10 @@ impl Hub {
         self.sfp.lock().unwrap().publish(session, events);
     }
     pub(super) fn sfp_request(self: &Arc<Self>, conn: &Arc<Conn>, request_id: u64, method: &str, params: Value) -> Result<bool> {
+        if let Some(result) = self.public_sessions(method, params.clone()) {
+            conn.reply(&match result { Ok(value)=>Response::ok(request_id,value), Err(error)=>Response::err(Some(request_id),error) });
+            return Ok(true);
+        }
         if method == "_sill/sessions.attach" {
             let result = (|| -> Result<(), Error> {
                 let a: Attach = args(params)?;

@@ -72,7 +72,9 @@ impl Fixture {
         command
     }
 
-    fn new() -> (Self, mpsc::Sender<()>, mpsc::Receiver<String>) {
+    fn new() -> (Self, mpsc::Sender<()>, mpsc::Receiver<String>) { Self::with_python_create(false) }
+
+    fn with_python_create(python:bool) -> (Self, mpsc::Sender<()>, mpsc::Receiver<String>) {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!("sill-live-recovery-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
         let _ = std::fs::remove_dir_all(&dir);
@@ -80,8 +82,19 @@ impl Fixture {
             std::fs::create_dir_all(dir.join(sub)).unwrap();
         }
         std::fs::write(dir.join("config/sill/instructions.md"), "Keep the recovery test's instructions.").unwrap();
+        let public_session=if python {
+            let log=std::fs::File::create(dir.join("daemon.log")).unwrap();
+            let mut daemon=Self::environment(&dir).arg("daemon").stderr(log).spawn().unwrap();
+            let socket=dir.join("run/sill/daemon.sock");
+            let deadline=Instant::now()+Duration::from_secs(10);
+            while !socket.exists() && Instant::now()<deadline {std::thread::sleep(Duration::from_millis(10));}
+            let output=python_phase(&socket,"create","",&dir.join("view.json"));
+            let _=daemon.kill();let _=daemon.wait();
+            assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+            Some(serde_json::from_slice::<Value>(&output.stdout).unwrap()["session_id"].as_str().unwrap().to_string())
+        }else{None};
         let store = sill_core::store::Store::open(&dir.join("state/sill/sill.db")).unwrap();
-        let session = store.create("claude", "default").unwrap().id;
+        let session = public_session.unwrap_or_else(||store.create("claude", "default").unwrap().id);
         let pin = dir.join("home/pinned.txt");
         std::fs::write(&pin, "focus").unwrap();
         store.pin(&session, &pin).unwrap();
@@ -395,10 +408,10 @@ fn exercise_recovery(adopt_checkpoint: bool, lose_worker: bool) {
     frontend.call(method::SESSIONS_DETACH, json!({"key":fixture.session}));
     drop(frontend);
     if adopt_checkpoint {
-        Connection::connect(&fixture.socket()).unwrap().call(method::SESSIONS_CHECKPOINT, json!({"key":fixture.session}));
+        Connection::connect(&fixture.socket()).unwrap().call("_sill/sessions.checkpoint", json!({"session_id":fixture.session}));
         fixture.wait("partial checkpoint committed", || fixture.snapshot()["agent_md"].as_str().is_some_and(|text| text.contains("Summary before restart")));
     }
-    let ending = Connection::connect(&fixture.socket()).unwrap().call(method::SESSIONS_END, json!({"key":fixture.session,"reason":"close"}));
+    let ending = Connection::connect(&fixture.socket()).unwrap().call("_sill/sessions.end", json!({"session_id":fixture.session,"reason":"close"}));
     assert_eq!(ending["pending"], true, "the agent should write the final summary");
     fixture.wait("partial closing summary committed", || fixture.snapshot()["agent_md"].as_str().is_some_and(|text| text.contains("Summary before restart")));
     fixture.stop(false);
@@ -479,7 +492,7 @@ fn sfp_submission_question_and_item_identity_survive_main_daemon_restart() {
     assert_eq!(attached["mode"],"replay");
     assert_eq!(attached["after"],cursor);
     assert!(client.events.is_empty(),"attach response precedes this subscription's notifications");
-    client.call(method::DAEMON_STATUS,json!({})); // drain the replay already queued after attach's reply
+    client.call("_sill/sessions.get",json!({"session_id":fixture.session})); // drain the replay already queued after attach's reply
     let replay:Vec<_>=client.events.iter().filter(|e|e["method"]=="_sill/session.event" && e["params"]["subscription_id"]==attached["subscription_id"]).collect();
     let mut seq=cursor["seq"].as_str().unwrap().parse::<u64>().unwrap();
     for event in replay {
@@ -507,10 +520,41 @@ fn sfp_submission_question_and_item_identity_survive_main_daemon_restart() {
     let result=client.call("_sill/submissions.get",json!({"session_id":fixture.session,"submission_id":"recovery-submission"}));
     assert_eq!(result["outcome"],"completed");
     assert_eq!(fixture.database().query_row("SELECT count(*) FROM entries WHERE session_id=?1 AND kind='user'",[&fixture.session],|r|r.get::<_,i64>(0)).unwrap(),1);
-    let ending=client.call(method::SESSIONS_END,json!({"key":fixture.session,"reason":"close"}));
+    let ending=client.call("_sill/sessions.end",json!({"session_id":fixture.session,"reason":"close"}));
     assert_eq!(ending["pending"],true);
     fixture.wait("SFP closing summary started",||fixture.snapshot()["agent_md"].as_str().is_some_and(|t|t.contains("Summary before restart")));
     release.send(()).unwrap();
     assert_eq!(observed.recv_timeout(Duration::from_secs(5)).unwrap(),"summary-complete");
     assert_eq!(observed.recv_timeout(Duration::from_secs(5)).unwrap(),"finished");
+}
+
+fn python_phase(socket:&Path,phase:&str,session:&str,state:&Path)->std::process::Output {
+    let script=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/sfp_lifecycle_scenario.py");
+    Command::new(std::env::var("SILL_SFP_PYTHON").unwrap_or_else(|_|"python3".into()))
+        .arg(script).arg(socket).arg(phase).arg(session).arg(state).output().expect("run Python SFP client")
+}
+
+/// Run with SILL_SFP_PYTHON pointing to a venv containing scripts/requirements-sfp.txt.
+#[test]
+#[ignore = "requires Python jsonschema; run explicitly with SILL_SFP_PYTHON"]
+fn independent_python_client_creates_converses_reconnects_and_ends() {
+    let (mut fixture,release,observed)=Fixture::with_python_create(true);
+    let phase=|f:&Fixture,name:&str| {
+        let out=python_phase(&f.socket(),name,&f.session,&f.dir.join("view.json"));
+        assert!(out.status.success(),"Python {name}: {}\n{}",String::from_utf8_lossy(&out.stderr),f.logs());
+    };
+    fixture.start();assert_eq!(observed.recv_timeout(Duration::from_secs(5)).unwrap(),"initialize");
+    phase(&fixture,"submit");
+    assert!(observed.recv_timeout(Duration::from_secs(5)).unwrap().contains("work"));
+    fixture.wait("Python turn streaming",||fixture.snapshot()["agent_md"]=="before restart ");
+    fixture.stop(true);release.send(()).unwrap();fixture.start();
+    fixture.wait("Python question recovered",||fixture.snapshot()["pending"].as_object().is_some_and(|q|q.len()==1));
+    phase(&fixture,"resume");fixture.wait("Python turn completed",||fixture.snapshot()["busy"]==false);
+    phase(&fixture,"end");
+    fixture.wait("Python summary started",||fixture.snapshot()["agent_md"].as_str().is_some_and(|t|t.contains("Summary before restart")));
+    release.send(()).unwrap();
+    assert_eq!(observed.recv_timeout(Duration::from_secs(5)).unwrap(),"summary-complete");
+    assert_eq!(observed.recv_timeout(Duration::from_secs(5)).unwrap(),"finished");
+    fixture.wait("Python session ended",||fixture.database().query_row("SELECT ended_at IS NOT NULL FROM sessions WHERE id=?1",[&fixture.session],|r|r.get::<_,bool>(0)).unwrap());
+    phase(&fixture,"ended");
 }

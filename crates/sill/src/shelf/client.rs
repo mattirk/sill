@@ -120,6 +120,9 @@ fn call_on<T: DeserializeOwned>(l: &'static Lane, method: &str, params: impl Ser
                 *s = None;
             }
             drop(s);
+            if matches!(method, "_sill/sessions.update" | "_sill/sessions.start" | "_sill/sessions.stop" | "_sill/sessions.end" | "_sill/sessions.checkpoint") {
+                return Err(e.context("The session action may have taken effect; inspect its state before trying again"));
+            }
             lane(l)?.call(method, params)
         }
         r => r,
@@ -141,7 +144,7 @@ pub fn quick<T: DeserializeOwned>(method: &str, params: impl Serialize + Clone) 
 /// An error is logged, not raised: the view has already changed what it shows.
 pub fn set(id: &str, set: sill_core::wire::SessionSet) {
     let what = format!("{set:?}");
-    match write::<serde_json::Value>(sill_proto::method::SESSIONS_SET, sill_proto::SessionSet { key: id.to_string(), set }) {
+    match write::<serde_json::Value>("_sill/sessions.update", sill_proto::sessions::Update { session_id: id.to_string(), change: set.into() }) {
         Ok(_) => {}
         Err(e) => eprintln!("sill: session {id} {what}: {e:#}"),
     }
@@ -149,7 +152,7 @@ pub fn set(id: &str, set: sill_core::wire::SessionSet) {
 
 /// A new session row; its id.
 pub fn new_session(n: sill_proto::NewSession) -> Result<String> {
-    Ok(write::<sill_proto::Key>(sill_proto::method::SESSIONS_NEW, n)?.key)
+    Ok(write::<sill_proto::sessions::SessionKey>("_sill/sessions.create", sill_proto::sessions::Create::from_legacy(n, sill_core::sfp::new_id()))?.session_id)
 }
 
 /// The trash can: jail, state and row go. Blocking for as long as the stop takes.
@@ -302,12 +305,13 @@ pub fn command(id: &str, cmd: &sill_core::wire::Command) -> Result<()> {
 /// End a session as closing its tab does (docs/memory.md §2.2); the daemon writes the summary or
 /// asks the agent for it first (`pending`), then sends `SessionEnded`.
 pub fn end(id: &str, reason: &str) -> Result<sill_proto::Ending> {
-    call(sill_proto::method::SESSIONS_END, sill_proto::End { key: id.to_string(), reason: reason.to_string() })
+    let e:sill_proto::sessions::Ending=call("_sill/sessions.end", sill_proto::sessions::End { session_id: id.to_string(), reason: reason.to_string() })?;
+    Ok(sill_proto::Ending{pending:e.pending,deleted:e.deleted})
 }
 
 /// *Summarize now*: the answer comes as a `Summarized` event.
 pub fn checkpoint(id: &str) -> Result<()> {
-    call::<serde_json::Value>(sill_proto::method::SESSIONS_CHECKPOINT, sill_proto::Key { key: id.to_string() })?;
+    call::<serde_json::Value>("_sill/sessions.checkpoint", sill_proto::sessions::SessionKey { session_id: id.to_string() })?;
     Ok(())
 }
 
@@ -413,7 +417,7 @@ fn reconnect(mut waiting: Vec<(String, u64)>) {
                 (sub.events.clone(), sub.view.clone())
             };
             let result = (|| -> Result<()> {
-                let session: sill_proto::Session = c.call(sill_proto::method::SESSIONS_GET, sill_proto::Key { key: id.clone() })?;
+                let session: sill_proto::sessions::Session = c.call("_sill/sessions.get", sill_proto::sessions::SessionKey { session_id: id.clone() })?;
                 if session.ended_at.is_some() {
                     lifecycle(id.clone(), Lifecycle::Event(sill_core::wire::Event::SessionEnded { deleted: false, reason: "ended".into() }));
                     anyhow::bail!("the session ended while the daemon reconnected");

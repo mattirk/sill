@@ -100,11 +100,13 @@ impl Daemon {
         panic!("the daemon did not come up; log:\n{}", self.log());
     }
 
-    fn connect(&self) -> std::io::Result<Conn> {
+    fn connect(&self) -> std::io::Result<Conn> { self.connect_caps(json!({"sill.internal":1})) }
+
+    fn connect_caps(&self, capabilities:Value) -> std::io::Result<Conn> {
         let s = UnixStream::connect(self.socket())?;
         s.set_read_timeout(Some(Duration::from_secs(5)))?;
         let mut conn = Conn { reader: BufReader::new(s.try_clone()?), stream: s, next: 1 };
-        let reply = conn.call(sill_proto::initialize::METHOD, json!({"protocols":[sill_proto::initialize::PROTOCOL_ID], "client":{"name":"test","version":"0"}, "capabilities":{"sill.internal":1}}))?;
+        let reply = conn.call(sill_proto::initialize::METHOD, json!({"protocols":[sill_proto::initialize::PROTOCOL_ID], "client":{"name":"test","version":"0"}, "capabilities":capabilities}))?;
         if reply.get("error").is_some() { return Err(std::io::Error::other(reply.to_string())); }
         Ok(conn)
     }
@@ -449,4 +451,56 @@ fn public_and_uninitialized_connections_do_not_receive_internal_change_notificat
         let error=conn.read().unwrap_err();
         assert!(matches!(error.kind(),std::io::ErrorKind::WouldBlock|std::io::ErrorKind::TimedOut),"{error}");
     }
+}
+
+#[test]
+fn public_session_lifecycle_retries_pagination_and_restart() {
+    let mut d=Daemon::start();
+    let mut c=d.connect_caps(json!({})).unwrap();
+    let call=|c:&mut Conn,m:&str,p:Value| {
+        let r=c.call(m,p).unwrap();assert!(r.get("error").is_none(),"{m}: {r}");r["result"].clone()
+    };
+    assert_eq!(c.call(sill_proto::method::SESSIONS_LIST,json!({})).unwrap()["error"]["data"]["code"],"unsupported");
+    let input=json!({"create_id":"durable-create","agent":"claude","policy":"default"});
+    let first=call(&mut c,"_sill/sessions.create",input.clone());
+    assert_eq!(call(&mut c,"_sill/sessions.create",input.clone()),first);
+    assert_eq!(call(&mut c,"_sill/sessions.stop",first.clone()),json!({}));
+    assert_eq!(call(&mut c,"_sill/sessions.get",first.clone())["ended_at"],Value::Null);
+    let conflict=c.call("_sill/sessions.create",json!({"create_id":"durable-create","agent":"codex","policy":"default"})).unwrap();
+    assert_eq!(conflict["error"]["data"]["code"],"id_conflict");
+    for i in 0..4 {call(&mut c,"_sill/sessions.create",json!({"create_id":format!("page-{i}"),"agent":"claude","policy":"default"}));}
+    let page=call(&mut c,"_sill/sessions.list",json!({"limit":2}));
+    assert_eq!(page["sessions"].as_array().unwrap().len(),2);
+    let mut seen:Vec<Value>=page["sessions"].as_array().unwrap().iter().map(|s|s["session_id"].clone()).collect();
+    // Rename a record between pages: stable creation ordering must not repeat or skip it.
+    call(&mut c,"_sill/sessions.update",json!({"session_id":first["session_id"],"change":{"type":"title","text":"Public name","kind":"person"}}));
+    let mut next=page["next"].clone();
+    while !next.is_null() {
+        let page=call(&mut c,"_sill/sessions.list",json!({"limit":2,"after":next}));
+        for s in page["sessions"].as_array().unwrap() {assert!(!seen.contains(&s["session_id"]));seen.push(s["session_id"].clone());}
+        next=page["next"].clone();
+    }
+    assert_eq!(seen.len(),5);
+    assert_eq!(call(&mut c,"_sill/sessions.get",first.clone())["title"],"Public name");
+    assert_eq!(c.call("_sill/sessions.get",json!({"session_id":first["session_id"].as_str().unwrap()[..4].to_string()})).unwrap()["error"]["data"]["code"],"not_found");
+    assert_eq!(c.call("_sill/sessions.list",json!({"limit":129})).unwrap()["error"]["data"]["code"],"limit_exceeded");
+    assert_eq!(c.call("_sill/sessions.list",json!({"after":"bad"})).unwrap()["error"]["data"]["code"],"invalid_cursor");
+    // Unknown change kinds cannot mutate permissions or fall back to another operation.
+    assert!(c.call("_sill/sessions.update",json!({"session_id":first["session_id"],"change":{"type":"future","enabled":true}})).unwrap().get("error").is_some());
+    drop(c);d.child.kill().unwrap();d.wait_exit();
+    let dir=d.dir.clone();std::mem::forget(d);
+    let d=Daemon::start_in(dir);let mut c=d.connect_caps(json!({})).unwrap();
+    assert_eq!(call(&mut c,"_sill/sessions.create",input.clone()),first);
+    assert_eq!(call(&mut c,"_sill/sessions.get",first.clone())["title"],"Public name");
+    // A no-prompt end deletes the row. Retried creation must never resurrect it.
+    let end=call(&mut c,"_sill/sessions.end",json!({"session_id":first["session_id"],"reason":"close"}));
+    assert_eq!(end,json!({"pending":false,"deleted":true}));
+    let deadline=Instant::now()+Duration::from_secs(5);
+    loop {
+        let result=c.call("_sill/sessions.create",input.clone()).unwrap();
+        if result["error"]["data"]["code"]=="gone" {break;}
+        assert!(Instant::now()<deadline,"deletion did not finish: {result}; {}",d.log());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(c.call("_sill/sessions.start",first).unwrap()["error"]["data"]["code"],"not_found");
 }

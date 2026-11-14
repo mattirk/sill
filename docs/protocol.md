@@ -58,6 +58,70 @@ ACP v1 updates beyond text and tools are projected too: `plan` becomes a `plan` 
 `commands`, and a `session_info_update` title the session's `agent_title` (sill's own title is
 unaffected). Other update kinds are logged by the daemon and never become conversation items.
 
+Public session administration is now implemented too (2026-11-03):
+
+| Method | Request | Result |
+|---|---|---|
+| `_sill/sessions.list` | `{after?, limit?}` | `{sessions, next}` |
+| `_sill/sessions.get` | `{session_id}` | public session metadata |
+| `_sill/sessions.create` | `{create_id, agent, policy, pins?, desktop?, memory_scope?, follows?, remember_pins?, ghost?}` | `{session_id}` |
+| `_sill/sessions.update` | `{session_id, change}` | `{}` |
+| `_sill/sessions.start` | `{session_id}` | `{session_id, fresh}` |
+| `_sill/sessions.stop` | `{session_id}` | `{}` |
+| `_sill/sessions.end` | `{session_id, reason}` | `{pending, deleted}` |
+| `_sill/sessions.checkpoint` | `{session_id}` | `{}` |
+
+These methods require no `sill.internal` capability. Metadata is an explicit public record,
+including settings, pins and decimal-string Unix-second timestamps; it exposes no ACP session
+identity or shim socket. Every operation uses an exact session ID. The CLI resolves unique
+prefixes/titles locally and rejects ambiguity. Shelf session listing and lifecycle writes, the
+CLI and the Python client's `list/create/get/update/start/stop/end/checkpoint` use this surface.
+Remaining internal administration handlers are temporary same-build APIs, not a compatibility
+contract. Public `update` uses a named, `type`-tagged change; unknown change kinds are rejected.
+The metadata write and corresponding conversation session event commit atomically.
+
+Lists default to 64 records, allow 1–128, and cap each response at 4 MiB. The opaque `next`
+cursor becomes the next request's `after`. Keyset ordering is descending immutable creation
+time and ID, so renaming/touching sessions cannot reorder them between pages. Each page reads
+current metadata, not an immutable list snapshot: concurrent insertions may appear after the
+cursor or be missed before it; deletions disappear. Start a new traversal to refresh membership.
+
+Create IDs are daemon-store scoped, 1–128 bytes without control characters. Identical normalized
+input returns the original identity across disconnect/restart; changed input returns
+`id_conflict`. Creation, configuration and the retry receipt are one transaction. Display-path
+text is excluded from retry identity. Deleting a session clears its identity from the receipt;
+a subsequent retry returns `gone`, never creates another session. Receipts retain only SHA-256
+fingerprints of the key and input and the live session ID. They currently have no time expiry;
+the ledger is bounded at 65,536 entries (further new IDs return `limit_exceeded`). Receipt
+retention/compaction remains freeze work. Creation does not start a jail or agent.
+
+Other lifecycle mutations **must not be blindly retried** after timeout/connection loss: read
+metadata and conversation state first; uncertainty does not establish that nothing happened.
+The shelf drops a closed connection but does not resubmit these actions. `start` starts/reuses
+the jail, `attach` starts the agent, and `stop` preserves session history. Starting/checkpointing
+an ended session requires an explicit `update` with `reopen`. `end.reason` is `close`, `idle`
+or `quit`; `pending` means the summary is still running, and `deleted` means deletion was
+selected (jail teardown and row removal can finish asynchronously). Checkpoint completion is
+observed through the journaled summary/session update. Update input is limited to 1 MiB.
+
+Pins use `{bytes_base64, display}` host paths: exact absolute Linux bytes are authoritative,
+not the frontend's filesystem or the display text. At most 128 pins and 4096 decoded bytes per
+path are accepted. The existing pin storage/jail pipeline still requires UTF-8: non-UTF-8 input
+currently returns `unsupported`, never a lossy replacement. Completing that pipeline remains
+part of the lossless-path milestone.
+
+Independent lifecycle conformance (with `jsonschema` installed in a venv):
+
+```sh
+SILL_SFP_PYTHON=/path/to/venv/bin/python cargo test -p sill-shelf --no-default-features --test recovery independent_python_client -- --ignored
+```
+
+The fixture supplies a scripted ACP agent; Python creates the session, submits work, reconnects
+with its saved view after the main daemon is killed, answers the recovered question and ends
+the session. Every Python request/result/event is checked against the exported schema, without
+negotiating internal APIs or reading the database. Rust tests also cover create rollback,
+conflicting/repeated IDs, deletion tombstones, paging and lifecycle metadata across restart.
+
 Host/session administration and presentation operations still awaiting public SFP schemas are
 under `_sill/internal/…`, marked `x-sill-internal` in the exported schema. These are temporary
 same-build implementation APIs, not protocol 6 compatibility handlers. The old `_sill/…` names

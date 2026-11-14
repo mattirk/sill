@@ -2011,7 +2011,7 @@ fn stop_then(id: &str, then: impl FnOnce() + 'static) {
     std::thread::Builder::new()
         .name(format!("sill-stop-{id}"))
         .spawn(move || {
-            if let Err(e) = super::client::call::<serde_json::Value>(sill_proto::method::SESSIONS_STOP, sill_proto::Key { key: id.clone() }) {
+            if let Err(e) = super::client::call::<serde_json::Value>("_sill/sessions.stop", sill_proto::sessions::SessionKey { session_id: id.clone() }) {
                 eprintln!("sill: stopping session {id}: {e:#}");
             }
             let _ = tx.send_blocking(());
