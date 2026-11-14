@@ -528,7 +528,7 @@ pub fn caption<'a>(view: &'a SessionView, session: Option<&Session>) -> Option<E
 pub(crate) fn small<'a>(label: &'a str, message: Option<Message>) -> Element<'a, Message> {
     keys::press_maybe(
         button(text(label).size(style::TINY))
-            .padding([2, 8])
+            .padding([2, 0])
             .style(style::quiet),
         message,
     )
@@ -540,6 +540,30 @@ const DEVELOPMENT: [&str; 2] = ["test_desktop", "private_bus"];
 /// Fixed slots, so nothing moves when a state changes: the switch and Restart now are always
 /// there (or a gap their size).
 const SWITCH_SLOT: f32 = 40.0;
+/// The two columns' widths (the jail column carries the longer button row) and the gap between
+/// them; a narrower pane stacks them.
+const JAIL_COLUMN: f32 = 290.0;
+const HOST_COLUMN: f32 = 210.0;
+const GUTTER: f32 = 16.0;
+/// The width under which the columns stack: both columns, the gutter and the panel's padding.
+pub const NARROW: f32 = JAIL_COLUMN + GUTTER + HOST_COLUMN + 24.0;
+
+/// Every row of both columns is this tall, so the columns' rows line up with each other.
+const ROW: f32 = 26.0;
+const HEADING_ROW: f32 = 22.0;
+
+/// A column's heading: the only words in the panel that are not a row.
+fn heading<'a>(label: &'static str, color: iced::Color) -> Element<'a, Message> {
+    container(text(label).size(style::TINY).color(color))
+        .height(HEADING_ROW)
+        .align_y(Alignment::Center)
+        .into()
+}
+
+/// One row of a column, at the rows' fixed height.
+fn slot<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    container(content).height(ROW).width(Fill).align_y(Alignment::Center).into()
+}
 const RESTART_SLOT: f32 = 92.0;
 
 /// An on/off switch in a fixed slot: the warning colour when on (expanded access), dimmed when it
@@ -658,14 +682,8 @@ fn capitalised(reason: &str) -> String {
 }
 
 /// A capability that cannot be had and nobody asks for: folded into one quiet line.
-fn idle(views: &Views, capability: &str) -> bool {
-    state(&views.preview, capability).is_none_or(|s| {
-        !s.available && !s.effective && !s.default_enabled && s.requested.is_none()
-    })
-}
-
 /// The panel over the composer, when open: one line per thing, explanations on hover.
-pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>) -> Element<'a, Message> {
+pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>, narrow: bool) -> Element<'a, Message> {
     let perms = &view.permissions;
     if !perms.open || session.is_none() {
         return space().height(0).into();
@@ -728,8 +746,12 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>) -> Element
         .align_y(Alignment::Center),
     );
 
+    // IN THE JAIL: tool approvals, then jail access; ON THE HOST: Host control. Two columns of
+    // fixed width (the second under the first in a narrow window); nothing moves between states.
+    let mut jail = Column::new().width(JAIL_COLUMN);
+    jail = jail.push(heading("IN THE JAIL", P.fg_dim));
     // a tool approval, not jail access: said on hover
-    content = content.push(
+    jail = jail.push(slot(
         row![
             name(
                 "Auto-allow",
@@ -746,50 +768,28 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>) -> Element
         ]
         .spacing(8)
         .align_y(Alignment::Center),
-    );
-
+    ));
     match &perms.views {
         None => {
-            content = content.push(text(match &perms.error {
+            jail = jail.push(text(match &perms.error {
                 Some(error) => format!("Permissions could not be read: {error}"),
                 None => "Reading permissions…".into(),
             }).size(style::TINY).color(P.fg_dim));
         }
         Some(views) => {
             for diagnostic in &views.preview.diagnostics {
-                content = content.push(text(diagnostic).size(style::TINY).color(P.error));
+                jail = jail.push(text(diagnostic).size(style::TINY).color(P.error));
             }
-            let mut folded = vec![];
-            let mut why = vec![];
             for (capability, label, meaning) in ROWS {
-                if *capability != "public_web" && idle(views, capability) {
-                    folded.push(*label);
-                    if let Some(s) = state(&views.preview, capability) {
-                        why.push(format!("{label}: {}.", capitalised(&s.reason)));
-                    }
-                    continue;
-                }
-                content = content.push(capability_row(
-                    id, capability, label, meaning, views, running, can_change,
-                ));
+                jail = jail.push(slot(capability_row(id, capability, label, meaning, views, running, can_change)));
                 if *capability == "public_web" {
-                    content = content.push(hosts(id, views, perms, can_change));
+                    // one host (or none) is a row; more take the lines they need
+                    let list = hosts(id, views, perms, can_change);
+                    jail = jail.push(if views.preview.session_hosts.len() <= 1 { slot(list) } else { list });
                 }
-            }
-            if !folded.is_empty() {
-                content = content.push(tip(
-                    text(format!("{}: not available yet", folded.join(", ")))
-                        .size(style::TINY)
-                        .color(P.fg_dim)
-                        .wrapping(text::Wrapping::None),
-                    why.join("\n"),
-                ));
             }
         }
     }
-    // Host actions: the separately labelled group of docs/permission-modes.md, independent of
-    // the policy read
-    content = content.push(crate::host_control::group(view, session, can_change));
     let restorable = perms.views.as_ref().is_some_and(|views| {
         views.preview.permissions.iter().any(|p| p.requested.is_some())
             || !views.preview.session_hosts.is_empty()
@@ -821,6 +821,55 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>) -> Element
         }
         None => (false, String::new()),
     };
+    let jail_buttons: Element<'a, Message> = row![
+        tip(
+            small(
+                "Restore defaults",
+                (can_change && restorable).then(|| Message::Perms(Event::Restore(id.into()))),
+            ),
+            "Removes this session's added permissions and approved hosts. The policy and pins stay.".into(),
+        ),
+        tip(
+            small(
+                "Apply development permissions",
+                (can_change && development).then(|| Message::Perms(Event::ApplyDevelopment(id.into()))),
+            ),
+            development_tip,
+        ),
+    ]
+    .spacing(16)
+    .align_y(Alignment::Center)
+    .into();
+
+    // the host column: docs/permission-modes.md's separately labelled Host actions, independent
+    // of the policy read, in the warning colour while active
+    let (host_heading, active) = crate::host_control::heading(session);
+    let mut host = Column::new().width(HOST_COLUMN);
+    host = host.push(heading(host_heading, if active { P.error } else { P.fg_dim }));
+    for row in crate::host_control::rows(view, session, can_change) {
+        host = host.push(slot(row));
+    }
+    let host_buttons = crate::host_control::buttons(view, session, can_change);
+
+    // the buttons on one line under both columns, each under its own; stacked, each column
+    // keeps its buttons
+    let columns: Element<'a, Message> = if narrow {
+        column![jail, space().height(4), jail_buttons, space().height(12), host, space().height(4), host_buttons].into()
+    } else {
+        column![
+            row![jail, space().width(GUTTER), host].align_y(Alignment::Start),
+            space().height(4),
+            row![
+                container(jail_buttons).width(JAIL_COLUMN),
+                space().width(GUTTER),
+                container(host_buttons).width(HOST_COLUMN),
+            ]
+            .align_y(Alignment::Center),
+        ]
+        .into()
+    };
+    content = content.push(columns);
+
     let pending = perms.restart_pending(running) || session.policy_changed;
     // one line for the last change's note, else the restart that is waiting
     let (said, color): (String, _) = match &perms.notice {
@@ -849,20 +898,6 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>) -> Element
     };
     content = content.push(
         row![
-            tip(
-                small(
-                    "Restore defaults",
-                    (can_change && restorable).then(|| Message::Perms(Event::Restore(id.into()))),
-                ),
-                "Removes this session's added permissions and approved hosts. The policy and pins stay.".into(),
-            ),
-            tip(
-                small(
-                    "Apply development permissions",
-                    (can_change && development).then(|| Message::Perms(Event::ApplyDevelopment(id.into()))),
-                ),
-                development_tip,
-            ),
             container(
                 text(said)
                     .size(style::TINY)
@@ -1002,8 +1037,10 @@ mod tests {
         ui.find("Applies after a restart").unwrap();
         ui.find("blocked.example · blocked").unwrap();
         ui.find("Requested · unavailable").is_err().then_some(()).unwrap();
-        ui.find("Test desktop, Private D-Bus, GPU rendering: not available yet").unwrap();
-        assert!(ui.find("TOOL APPROVALS").is_err(), "no group headings");
+        ui.find("IN THE JAIL").unwrap();
+        ui.find("ON THE HOST").unwrap();
+        ui.find("GPU rendering").unwrap();
+        assert!(ui.find("TOOL APPROVALS").is_err(), "no group headings beyond the two columns'");
     }
 
     /// A choice goes to the daemon only over a connection that negotiated the capability; its
@@ -1186,7 +1223,8 @@ mod tests {
         perms.views = Some(Views { launch: Some(preview.clone()), preview, agent_name: None });
         let mut ui = simulator(&app, (720.0, 860.0));
         ui.find("Desktop development").unwrap();
-        ui.find("Private D-Bus, GPU rendering: not available yet").unwrap();
+        ui.find("Private D-Bus").unwrap();
+        ui.find("GPU rendering").unwrap();
         ui.find("Jailed · expanded access · Test desktop").unwrap();
     }
 

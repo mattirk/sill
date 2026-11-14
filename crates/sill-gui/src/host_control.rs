@@ -6,7 +6,7 @@
 //! attached to a session, this window displays that session's control and keeps it alive.
 use std::collections::BTreeSet;
 
-use iced::widget::{Column, column, container, row, rule, space, text};
+use iced::widget::{column, container, row, rule, space, text};
 use iced::{Alignment, Element, Fill, Task};
 use sill_client::actions::Outcome;
 use sill_proto::host_control::{OPERATIONS, State, describe};
@@ -133,63 +133,65 @@ impl App {
     }
 }
 
-/// The Host actions group of the Permissions panel: the operations with their switches (the
-/// ticked set is the scope to activate), Activate and Revoke, and the last answer or error.
-pub fn group<'a>(view: &'a SessionView, session: &'a Session, can_change: bool) -> Element<'a, Message> {
+/// The host column's rows of the Permissions panel: one per operation, its switch the choice
+/// of scope to activate, "active" beside the ones the running activation grants.
+pub fn rows<'a>(view: &'a SessionView, session: &'a Session, can_change: bool) -> Vec<Element<'a, Message>> {
     let id = view.id.as_str();
     let hc = &view.host_control;
     let brief: BTreeSet<String> = session.host_control.as_ref().map(|b| b.operations.iter().cloned().collect()).unwrap_or_default();
-    let is_active = session.host_control.is_some();
-    let mut content = Column::new().spacing(4);
-    content = content.push(
-        crate::permissions::tip(
-            text(if is_active { "Host actions · ACTIVE · outside the jail" } else { "Host actions · outside the jail" })
-                .size(style::SMALL)
-                .color(if is_active { P.error } else { P.fg_dim }),
-            "Host control: named operations the agent may delegate to run on this machine, outside the jail, as you. Tick the operations, then Activate. It lasts until you revoke it, this window stops showing the session, or the session stops; it is never saved. Effects on the host are real and not undone by Sill. ACP tool approvals stay separate; auto-allow never activates it.".into(),
-        ),
-    );
-    for operation in OPERATIONS {
-        let ticked = hc.selected.contains(operation);
-        let set = can_change.then(|| {
-            let (id, operation) = (id.to_string(), operation.to_string());
-            move |on: bool| Message::HostControl(Event::Select(id.clone(), operation.clone(), on))
-        });
-        let status = if brief.contains(operation) { "active" } else { "" };
-        let mut said = describe(operation).to_string();
-        said.push('.');
-        if operation == "commands" {
-            said.push_str(" Unrestricted: Sill records the command, not what it did or left running.");
-        }
-        if operation == "input" {
-            said.push_str(" Input can invoke anything on your desktop; a window scope is not a boundary.");
-        }
-        content = content.push(
+    OPERATIONS
+        .iter()
+        .map(|operation| {
+            let ticked = hc.selected.contains(*operation);
+            let set = can_change.then(|| {
+                let (id, operation) = (id.to_string(), operation.to_string());
+                move |on: bool| Message::HostControl(Event::Select(id.clone(), operation.clone(), on))
+            });
+            let status = if brief.contains(*operation) { "active" } else { "" };
+            let mut said = describe(operation).to_string();
+            said.push('.');
+            if *operation == "commands" {
+                said.push_str(" Unrestricted: Sill records the command, not what it did or left running.");
+            }
+            if *operation == "input" {
+                said.push_str(" Input can invoke anything on your desktop; a window scope is not a boundary.");
+            }
             row![
                 crate::permissions::name(label(operation), said),
                 crate::permissions::switch(ticked, set),
                 text(status).size(style::SMALL).color(P.error).wrapping(text::Wrapping::None).width(Fill),
             ]
             .spacing(8)
-            .align_y(Alignment::Center),
-        );
-    }
+            .align_y(Alignment::Center)
+            .into()
+        })
+        .collect()
+}
+
+/// What the host column says over its rows, and whether it is the warning colour.
+pub fn heading(session: &Session) -> (&'static str, bool) {
+    if session.host_control.is_some() { ("ON THE HOST · ACTIVE", true) } else { ("ON THE HOST", false) }
+}
+
+/// Activate and Revoke under the host column's rows, with the last answer or refusal beside
+/// them (whole on hover).
+pub fn buttons<'a>(view: &'a SessionView, session: &'a Session, can_change: bool) -> Element<'a, Message> {
+    let id = view.id.as_str();
+    let hc = &view.host_control;
+    let brief: BTreeSet<String> = session.host_control.as_ref().map(|b| b.operations.iter().cloned().collect()).unwrap_or_default();
+    let is_active = session.host_control.is_some();
     let selection_differs = hc.selected != brief;
     let can_activate = can_change && !hc.busy && !hc.selected.is_empty() && (!is_active || selection_differs);
     let activate_tip = if is_active && !selection_differs {
         "Active with exactly these operations.".to_string()
     } else if is_active {
-        "Changes the active control's scope to the ticked operations: a new generation.".to_string()
+        "Changes the active control's scope to the switched-on operations: a new generation.".to_string()
     } else {
-        "Activates Host control for this session with the ticked operations, outside the jail, as you. Until you revoke it, this window stops showing the session, or the session stops.".to_string()
+        "Activates Host control for this session with the switched-on operations: the agent may delegate them to run on this machine, outside the jail, as you, until you revoke, this window stops showing the session, or the session stops. Never saved. Effects on the host are real and not undone by Sill; ACP approvals stay separate.".to_string()
     };
     let said: String = match (&hc.error, &hc.state) {
         (Some(error), _) => error.clone(),
-        (None, Some(state)) if state.active => format!(
-            "Active, generation {}, {} displaying.",
-            state.generation,
-            state.displaying
-        ),
+        (None, Some(state)) if state.active => format!("Active, generation {}, {} displaying.", state.generation, state.displaying),
         (None, Some(state)) => match &state.ended {
             Some(ended) => format!("Inactive: {}.", ended.reason),
             None => "Inactive.".into(),
@@ -197,39 +199,35 @@ pub fn group<'a>(view: &'a SessionView, session: &'a Session, can_change: bool) 
         (None, None) if is_active => "Active.".into(),
         (None, None) => String::new(),
     };
-    content = content.push(
-        row![
-            crate::permissions::tip(
-                crate::permissions::small(
-                    "Activate host control",
-                    can_activate.then(|| Message::HostControl(Event::Activate(id.into()))),
-                ),
-                activate_tip,
+    row![
+        crate::permissions::tip(
+            crate::permissions::small(
+                "Activate host control",
+                can_activate.then(|| Message::HostControl(Event::Activate(id.into()))),
             ),
-            crate::permissions::tip(
-                crate::permissions::small(
-                    "Revoke",
-                    (can_change && !hc.busy && is_active).then(|| Message::HostControl(Event::Revoke(id.into()))),
-                ),
-                "Ends Host control for this session. Processes it launched are stopped unless kept; what already happened on the host stays.".into(),
+            activate_tip,
+        ),
+        crate::permissions::tip(
+            crate::permissions::small(
+                "Revoke",
+                (can_change && !hc.busy && is_active).then(|| Message::HostControl(Event::Revoke(id.into()))),
             ),
+            "Ends Host control for this session. Processes it launched are stopped unless kept; what already happened on the host stays.".into(),
+        ),
+        crate::permissions::tip(
             container(
-                text(said)
+                text(said.clone())
                     .size(style::TINY)
                     .color(if hc.error.is_some() { P.error } else { alpha(P.fg, 0.7) })
                     .wrapping(text::Wrapping::None),
             )
             .width(Fill)
             .clip(true),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center),
-    );
-    column![
-        rule::horizontal(1).style(style::rule_style(if is_active { P.error } else { P.border })),
-        content,
+            said,
+        ),
     ]
-    .spacing(6)
+    .spacing(16)
+    .align_y(Alignment::Center)
     .into()
 }
 
@@ -326,7 +324,7 @@ mod tests {
         {
             let mut ui = simulator(&app, (720.0, 900.0));
             ui.find("Activate host control").unwrap();
-            ui.find("Host actions · outside the jail").unwrap();
+            ui.find("ON THE HOST").unwrap();
             assert!(ui.find(CAPTION).is_err(), "nothing active yet");
         }
         for operation in ["launch", "stop"] {
@@ -361,7 +359,7 @@ mod tests {
         let mut ui = simulator(&app, (720.0, 900.0));
         ui.find(format!("{CAPTION} · launch, stop")).unwrap();
         ui.find("HOST CONTROL active:").unwrap();
-        ui.find("Host actions · ACTIVE · outside the jail").unwrap();
+        ui.find("ON THE HOST · ACTIVE").unwrap();
         ui.find("Revoke").unwrap();
     }
 

@@ -1222,8 +1222,12 @@ impl App {
         if let Some(caption) = crate::permissions::caption(view, session) {
             composer = composer.push(caption);
         }
+        // the panel lays its two columns out by the width it actually gets
         let mut composer = composer
-            .push(crate::permissions::panel(view, session))
+            .push(
+                responsive(move |size| crate::permissions::panel(view, session, size.width < crate::permissions::NARROW))
+                    .height(Shrink),
+            )
             .push(crate::processes::panel(view))
             .push(self.network_prompt(view));
         if !view.attachments.is_empty() {
