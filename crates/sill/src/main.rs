@@ -654,34 +654,49 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
 
     let listener = UnixListener::bind(&shim_sock).with_context(|| format!("bind {}", shim_sock.display()))?;
     let listener_fd = listener.as_fd().as_raw_fd();
-    let mut cmd = std::process::Command::new(&plan.argv[0]);
-    cmd.args(&plan.argv[1..]).stdin(std::process::Stdio::null());
-    // SAFETY: only dup2/fcntl/open/write/getpid between fork and exec.
-    unsafe {
-        cmd.pre_exec(move || {
-            let src = std::os::fd::BorrowedFd::borrow_raw(listener_fd);
-            if listener_fd == 3 {
-                rustix::io::fcntl_setfd(src, rustix::io::FdFlags::empty())?;
-            } else {
-                let mut fd3 = OwnedFd::from_raw_fd(3);
-                rustix::io::dup2(src, &mut fd3)?;
-                std::mem::forget(fd3);
-            }
-            if let Some(procs) = &cgroup_procs {
-                let f = rustix::fs::open(procs, rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty())?;
-                let pid = rustix::process::getpid().as_raw_nonzero().get().to_string();
-                rustix::io::write(&f, pid.as_bytes())?;
-            }
-            Ok(())
-        });
-    }
-    let mut child = cmd.spawn().context("spawn bwrap")?;
+    // A jail that dies the moment it starts is almost always the overlay refusing its workdir while
+    // the previous jail of the same session is still being torn down (a restart right after a stop:
+    // "Can't make overlay mount … Device or resource busy"); the teardown takes a moment, so try again.
+    let mut attempt = 0;
+    let status = loop {
+        attempt += 1;
+        let mut cmd = std::process::Command::new(&plan.argv[0]);
+        cmd.args(&plan.argv[1..]).stdin(std::process::Stdio::null());
+        let cgroup_procs = cgroup_procs.clone();
+        // SAFETY: only dup2/fcntl/open/write/getpid between fork and exec.
+        unsafe {
+            cmd.pre_exec(move || {
+                let src = std::os::fd::BorrowedFd::borrow_raw(listener_fd);
+                if listener_fd == 3 {
+                    rustix::io::fcntl_setfd(src, rustix::io::FdFlags::empty())?;
+                } else {
+                    let mut fd3 = OwnedFd::from_raw_fd(3);
+                    rustix::io::dup2(src, &mut fd3)?;
+                    std::mem::forget(fd3);
+                }
+                if let Some(procs) = &cgroup_procs {
+                    let f = rustix::fs::open(procs, rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty())?;
+                    let pid = rustix::process::getpid().as_raw_nonzero().get().to_string();
+                    rustix::io::write(&f, pid.as_bytes())?;
+                }
+                Ok(())
+            });
+        }
+        let mut child = cmd.spawn().context("spawn bwrap")?;
+        if direct {
+            std::fs::write(rt.join("bwrap.pid"), child.id().to_string())?;
+        }
+        eprintln!("sill launch: jail started (bwrap pid {}, {} mode), sockets in {}", child.id(), if direct { "direct" } else { "unit" }, rt.display());
+        let started = std::time::Instant::now();
+        let status = child.wait()?;
+        if !status.success() && started.elapsed() < std::time::Duration::from_secs(2) && attempt < 6 {
+            eprintln!("sill launch: jail ended at once ({status}); the previous jail may still be going away, retrying ({attempt}/5)");
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            continue;
+        }
+        break status;
+    };
     drop(listener);
-    if direct {
-        std::fs::write(rt.join("bwrap.pid"), child.id().to_string())?;
-    }
-    eprintln!("sill launch: jail started (bwrap pid {}, {} mode), sockets in {}", child.id(), if direct { "direct" } else { "unit" }, rt.display());
-    let status = child.wait()?;
     eprintln!("sill launch: jail ended ({status})");
     let _ = std::fs::remove_file(&shim_sock);
     let _ = std::fs::remove_file(rt.join("proxy.sock"));
