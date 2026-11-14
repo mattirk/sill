@@ -229,6 +229,11 @@ fn render_session(session: &SessionState, previous: Option<&SessionState>) -> Ve
         }
     }
     if previous.is_none() || previous.is_some_and(|old| old.capabilities != session.capabilities) { out.push(wire::Event::Capabilities { images:session.capabilities.get("images").copied().unwrap_or(false) }); }
+    // a login that was asked for is no longer needed: the agent took it (a restart carries the
+    // request until the new agent says it is ready without one)
+    if session.authentication.is_none() && previous.is_some_and(|old| old.authentication.is_some()) {
+        out.push(wire::Event::Other("sill:authenticated".into()));
+    }
     if (previous.is_none() || previous.is_some_and(|old| old.authentication != session.authentication)) && let Some(a)=&session.authentication {
         out.push(wire::Event::AuthRequired { message:a.message.clone(),methods:a.methods.iter().map(|m|wire::AuthMethodInfo { id:m.method_id.clone(),name:m.title.clone(),description:m.description.clone(),terminal:m.terminal.as_ref().map(|t|(t.args.clone(),t.env.clone())) }).collect() });
     }
@@ -386,6 +391,19 @@ mod tests {
         let offered=view.accept(notification("2",Event::SessionUpdated {session:session.clone()})).unwrap();
         assert!(offered.iter().any(|e|matches!(e,wire::Event::Commands(c) if c[0].name=="review" && c[0].hint.as_deref()==Some("what"))));
         assert!(!view.accept(notification("3",Event::SessionUpdated {session})).unwrap().iter().any(|e|matches!(e,wire::Event::Commands(_))));
+    }
+    #[test]
+    fn a_login_that_is_no_longer_needed_closes_its_card() {
+        let mut view=View {session_id:"s".into(),subscription_id:"sub".into(),..Default::default()};
+        let mut session=SessionState { session_id:"s".into(),agent_generation_id:"g".into(),lifecycle:"open".into(),title:None,summary:None,end_reason:None,deleted:false,activity:"waiting".into(),turn_id:None,question_ids:vec![],background:None,capabilities:BTreeMap::new(),controls:None,authentication:Some(Authentication {message:"Authentication required".into(),methods:vec![]}),usage:None,agent_title:None,commands:vec![],active_ms:0,active_since_ms:None };
+        let asked=view.accept(notification("1",Event::SessionUpdated {session:session.clone()})).unwrap();
+        assert!(asked.iter().any(|e|matches!(e,wire::Event::AuthRequired {..})));
+        session.agent_generation_id="restarted".into(); session.activity="unknown".into();
+        let restarted=view.accept(notification("2",Event::SessionUpdated {session:session.clone()})).unwrap();
+        assert!(!restarted.iter().any(|e|matches!(e,wire::Event::Other(t) if t=="sill:authenticated")),"a restart alone proves no login");
+        session.authentication=None; session.activity="idle".into();
+        let ready=view.accept(notification("3",Event::SessionUpdated {session})).unwrap();
+        assert!(ready.iter().any(|e|matches!(e,wire::Event::Other(t) if t=="sill:authenticated")));
     }
     #[test]
     fn missing_patch_target_requires_resynchronization() {

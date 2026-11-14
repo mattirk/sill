@@ -101,6 +101,8 @@ pub struct Conversation {
     keep_view: std::cell::Cell<Option<(f64, f64)>>,
     /// The turn's plan, redrawn in place as the agent revises it; a new prompt starts another.
     plan: RefCell<Option<gtk::Label>>,
+    /// Login cards still asking (their label and buttons), closed when the login is done.
+    auth_cards: RefCell<Vec<(gtk::Label, gtk::FlowBox)>>,
     /// A prompt's attachment → a local file to draw (runs off the main thread: it may ask the daemon).
     image_loader: RefCell<Option<ImageLoader>>,
 }
@@ -179,6 +181,7 @@ impl Conversation {
             insert_after: RefCell::new(None),
             keep_view: std::cell::Cell::new(None),
             plan: RefCell::new(None),
+            auth_cards: RefCell::new(Vec::new()),
             image_loader: RefCell::new(None),
         });
         // The content height is only known after layout: follow the adjustment's geometry (`changed` covers
@@ -1218,8 +1221,20 @@ impl Conversation {
             buttons.append(&b);
         }
         frame.append(&buttons);
+        self.auth_cards.borrow_mut().push((label, buttons.clone()));
         self.place(&frame);
         self.request_follow();
+    }
+
+    /// The agent no longer asks for a login: the open cards say so instead of offering buttons.
+    pub fn auth_done(&self) {
+        let cards: Vec<_> = self.auth_cards.borrow_mut().drain(..).collect();
+        if cards.is_empty() { return; }
+        for (label, buttons) in cards {
+            buttons.set_visible(false);
+            label.set_text("Logged in");
+        }
+        self.add_note("logged in; the agent is ready");
     }
 
     pub fn add_note(&self, text: &str) {

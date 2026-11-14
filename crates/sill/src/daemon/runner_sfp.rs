@@ -5,6 +5,10 @@ use sill_proto::{sfp as p, rpc::Error};
 
 impl Runner {
     pub(in crate::daemon) fn sfp_control(&self, hub:&Hub, control:p::Control)->Result<()> {
+        if matches!(control,p::Control::RetrySession) {
+            self.command(hub,0,wire::Command::RetrySession)?;
+            return self.sfp_login_done(hub);
+        }
         let command=match control {
             p::Control::Authenticate{method_id}=>wire::Command::Authenticate(method_id),
             p::Control::RetrySession=>wire::Command::RetrySession,
@@ -12,6 +16,24 @@ impl Runner {
             p::Control::SetConfig{option_id,value}=>wire::Command::SetConfig(option_id,match value{p::ConfigValue::Id{value}=>wire::ConfigValue::Id(value),p::ConfigValue::Bool{value}=>wire::ConfigValue::Bool(value)}),
         };
         self.command(hub,0,command)
+    }
+    /// A login ran outside the protocol (the agent's own terminal command) while its session was
+    /// open: the session asked for it at a prompt, not at its start, so there is nothing to open
+    /// again. The login is taken as done — the next prompt tells otherwise — and the queue moves.
+    fn sfp_login_done(&self,hub:&Hub)->Result<()> {
+        hub.with_store(|store| {
+            let mut st=self.st.lock().unwrap();
+            let tx=store.conn().unchecked_transaction()?;
+            let Some(events)=self.sfp_login_events(store,&mut st)? else { return Ok(()) };
+            self.save(store,&st)?;
+            tx.commit()?;
+            hub.sfp_publish(&self.id,&events);
+            self.sfp_dispatch(store,hub,&mut st)
+        })
+    }
+    fn sfp_login_events(&self,store:&Store,st:&mut State)->Result<Option<Vec<p::StoredEvent>>> {
+        if st.ready.is_none() || st.auth.is_none() || st.ended || st.retired { return Ok(None); }
+        Ok(Some(self.sfp_project(store,st,&relay::Event::Other("_sill_authenticated".into()),0)?))
     }
     pub(in crate::daemon) fn sfp_cancel_turn(&self,hub:&Hub,turn_id:&str)->Result<()> {
         hub.with_store(|store| {
@@ -552,6 +574,25 @@ mod tests {
         let stored=inline_as_uploads(&f.store,long).unwrap();
         let [p::Attachment::Uploaded{name,..}]=&stored.attachments[..] else {panic!("expected a reference")};
         assert!(name.len()<=255 && name.starts_with("kuvakaappaus-ä"));
+    }
+    #[test]
+    fn a_terminal_login_during_an_open_session_releases_the_queue() {
+        // Claude opens its session without a login and asks at the first prompt; the person logs
+        // in with the agent's own terminal command, and the shelf sends a retry when it closes
+        let f=Fixture::new();let j=Journal::new(&f.store).unwrap();
+        let mut st=f.runner.st.lock().unwrap();
+        let ask=relay::Event::AuthRequired{message:"Authentication required".into(),methods:vec![]};
+        f.runner.sfp_project(&f.store,&mut st,&ask,1).unwrap();
+        f.runner.handle_locked(&f.store,&mut st,ask.clone(),false).unwrap();
+        st.auth=Some(ask);
+        j.accept(&f.input(),"queued").unwrap();
+        assert!(!dispatch_ready(&st),"the queue waits for the login");
+        assert!(j.session(&f.runner.id).unwrap().authentication.is_some());
+        assert!(f.runner.sfp_login_events(&f.store,&mut st).unwrap().is_some());
+        assert!(st.auth.is_none());
+        assert!(j.session(&f.runner.id).unwrap().authentication.is_none(),"the login card closes");
+        assert!(dispatch_ready(&st),"the queued prompt goes");
+        assert!(f.runner.sfp_login_events(&f.store,&mut st).unwrap().is_none(),"a retry without a pending login changes nothing");
     }
     #[test]
     fn diagnostic_dumps_from_the_acp_loop_are_not_conversation() {

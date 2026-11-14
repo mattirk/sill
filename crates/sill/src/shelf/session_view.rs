@@ -2306,6 +2306,11 @@ impl SessionView {
                 }
                 return;
             }
+            Event::Other(t) if t == "sill:authenticated" => {
+                self.conv.auth_done();
+                self.status.set_text("logged in");
+                return;
+            }
             Event::Other(t) if t == "sill:reconnecting" => {
                 self.status.set_text("reconnecting");
                 return;
