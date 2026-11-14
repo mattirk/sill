@@ -14,6 +14,8 @@ if [ -d /.sill ]; then
     echo "check.sh: this is a sill jail; run it in a host terminal (Ctrl+Shift+H)" >&2
     exit 1
 fi
+# Deployment and host checks always address this machine, even from a shell with SILL_BOX set.
+SILL_BOX=local; export SILL_BOX
 PREFIX=${PREFIX:-/usr/local}
 SILL="$PREFIX/bin/sill"
 QUICK=; [ "${1:-}" = "--quick" ] && QUICK=1
@@ -82,9 +84,9 @@ if systemctl --user cat sill.service >/dev/null 2>&1; then
 fi
 run "sill session list" "$SILL" session list
 run "sill changes list" "$SILL" changes list
-shelves=$(pgrep -a -f 'sill shelf' || true)
+shelves=$(packaging/local-shelves.sh)
 n=$(printf '%s\n' "$shelves" | grep -c . || true)
-if [ "$n" -eq 1 ]; then pass "one shelf process"; else fail "one shelf process (found $n)"; fi
+if [ "$n" -eq 1 ]; then pass "one local shelf process"; else fail "one local shelf process (found $n)"; fi
 printf '%s\n' "$shelves" | log
 say ""
 

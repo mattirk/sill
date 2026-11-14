@@ -12,6 +12,8 @@ if [ -d /.sill ]; then
     echo "deploy.sh: this is a sill jail; run it in a host terminal (Ctrl+Shift+H)" >&2
     exit 1
 fi
+# Deployment and host checks always address this machine, even from a shell with SILL_BOX set.
+SILL_BOX=local; export SILL_BOX
 PREFIX=${PREFIX:-/usr/local}
 sudo -v # the password now, not after the build
 if [ "${1:-}" != "--no-build" ]; then
@@ -33,18 +35,21 @@ done
 # restart: stops the unit, quits any other shelf holding the application id, starts the unit
 "$PREFIX/bin/sill" restart
 
-# exactly one shelf, the installed one, under the unit
+# exactly one local shelf, the installed one, under the unit
 sleep 2
-shelves=$(pgrep -a -f 'sill shelf' || true)
+shelves=$(packaging/local-shelves.sh)
 n=$(printf '%s\n' "$shelves" | grep -c . || true)
 if [ "$n" -ne 1 ]; then
-    echo "deploy.sh: expected one shelf process, found $n:" >&2
+    echo "deploy.sh: expected one local shelf process, found $n:" >&2
     printf '%s\n' "$shelves" >&2
     exit 1
 fi
-case "$shelves" in
-    *"$PREFIX/bin/sill shelf"*) ;;
-    *) echo "deploy.sh: the running shelf is not $PREFIX/bin/sill: $shelves" >&2; exit 1 ;;
+sill_shelf_pid=${shelves%% *}
+sill_shelf_exe=$(readlink "/proc/$sill_shelf_pid/exe" 2>/dev/null || true)
+sill_expected_exe=$(readlink -f "$PREFIX/bin/sill")
+case "$sill_shelf_exe" in
+    "$sill_expected_exe") ;;
+    *) echo "deploy.sh: the running local shelf is not $PREFIX/bin/sill: $shelves" >&2; exit 1 ;;
 esac
 if command -v systemctl >/dev/null 2>&1 && systemctl --user cat sill-shelf.service >/dev/null 2>&1; then
     systemctl --user is-active --quiet sill-shelf.service || {
