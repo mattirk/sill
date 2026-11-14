@@ -4,7 +4,7 @@
 //! with the GTK shelf (`_sill/settings.*`, sill-client's `settings`); sill-gui's own (the shelf
 //! width) are in `~/.config/sill/sill-gui.toml`. Rows only for what sill-gui or every session
 //! uses; the GTK shelf's own window settings (text size, its width, hotkey, tray, default page,
-//! drawer follows changes, host terminal) stay on its page for now.
+//! host terminal) stay on its page for now.
 use iced::widget::{
     Column, button, column, container, pick_list, row, rule, scrollable, space, text, text_editor,
     text_input, toggler,
@@ -466,6 +466,13 @@ impl App {
                     Some("Show the timer while the agent works; hover to show it anytime"),
                     switch(s.timer_auto.unwrap_or(false), move |v| {
                         change(SettingChange::TimerAuto { value: Some(v) })
+                    }),
+                ),
+                setting(
+                    "Drawer follows changes",
+                    Some("Diff while the first pinned repository has changes; Files when clean"),
+                    switch(s.drawer_follow_changes.unwrap_or(false), move |v| {
+                        change(SettingChange::DrawerFollowChanges { value: Some(v) })
                     }),
                 ),
                 setting(

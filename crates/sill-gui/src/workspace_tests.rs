@@ -293,3 +293,53 @@ fn viewer_selection_is_read_only_and_binary_file_errors_are_visible() {
         Some("Binary file")
     );
 }
+
+#[test]
+fn automatic_drawer_follows_repo_transitions_and_preserves_manual_choice() {
+    let (mut workspace, _) = Workspace::new(None);
+    let mut files = files::FilesState::default();
+    let pin = path("/repo");
+    files.roots.push(files::Root {
+        path: pin.clone(),
+        global: false,
+        metadata: Some(metadata(true)),
+        error: None,
+    });
+    files.repos.insert(
+        key(&pin).into(),
+        files::Repo {
+            root: Some(pin.clone()),
+            read: true,
+            ..Default::default()
+        },
+    );
+    files.diff_mode = true;
+    workspace.follow("a", &mut files, true);
+    assert!(!files.diff_mode, "a clean repository selects Files");
+    files.diff_mode = true;
+    workspace.follow("a", &mut files, true);
+    assert!(
+        files.diff_mode,
+        "a manual choice holds through an unchanged scan"
+    );
+    files
+        .repos
+        .get_mut(key(&pin))
+        .unwrap()
+        .entries
+        .push(sill_proto::discovery::StatusEntry {
+            path: path("/repo/file"),
+            status: " M".into(),
+        });
+    files.diff_mode = false;
+    workspace.follow("a", &mut files, true);
+    assert!(files.diff_mode, "a dirty transition selects Diff");
+    files.repos.get_mut(key(&pin)).unwrap().entries.clear();
+    workspace.follow("a", &mut files, true);
+    assert!(!files.diff_mode, "cleaning the repository restores Files");
+    files.diff_mode = true;
+    workspace.follow("a", &mut files, false);
+    assert!(files.diff_mode, "disabled leaves the manual view alone");
+    workspace.follow("a", &mut files, true);
+    assert!(!files.diff_mode, "enabling starts fresh");
+}

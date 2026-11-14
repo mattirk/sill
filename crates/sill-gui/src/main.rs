@@ -1421,6 +1421,7 @@ impl App {
                     tray.shutdown();
                 }
                 self.daemon_settings = Some(settings);
+                self.sync_drawer_follow();
             }
             Message::DaemonSettings(Err(_)) => {}
             Message::Changes(event) => return self.changes_event(event),
@@ -1659,6 +1660,7 @@ impl App {
                     }
                 }
                 page.snapshot = Some(loaded);
+                self.sync_drawer_follow();
             }
             Event::Change(change) => {
                 page.armed_delete = false;

@@ -61,6 +61,7 @@ pub struct Workspace {
     /// The tree row under the pointer: its pin button shows, as the shelf's does on hover.
     pub hovered: Option<String>,
     serial: u64,
+    follow_seen: std::collections::BTreeMap<String, String>,
     /// None in `--demo`: requests are answered with synthetic files at once.
     files: Option<Files>,
 }
@@ -73,6 +74,7 @@ impl Workspace {
                     shown: false,
                     hovered: None,
                     serial: 0,
+                    follow_seen: Default::default(),
                     files: None,
                 },
                 Task::none(),
@@ -88,6 +90,7 @@ impl Workspace {
                 shown: false,
                 hovered: None,
                 serial: 0,
+                follow_seen: Default::default(),
                 files: Some(files),
             },
             Task::run(stream, |reply| {
@@ -130,7 +133,66 @@ impl SessionView {
     }
 }
 
+impl Workspace {
+    /// Follow status transitions, so a manual choice lasts until the repository changes.
+    fn follow(
+        &mut self,
+        session: &str,
+        files: &mut files::FilesState,
+        enabled: bool,
+    ) -> Vec<Request> {
+        if !enabled {
+            self.follow_seen.remove(session);
+            return vec![];
+        }
+        // Iced has no separate scoped folder: follow the first session-pinned repository.
+        let repo = files
+            .roots
+            .iter()
+            .filter(|r| !r.global)
+            .find_map(|r| files.repo_of(&r.path));
+        let Some(repo) = repo.filter(|r| r.read && r.error.is_none()) else {
+            self.follow_seen.remove(session);
+            return vec![];
+        };
+        let state = format!(
+            "{:?}:{:?}:{:?}:{:?}",
+            repo.root, repo.head, repo.entries, repo.lines
+        );
+        let dirty = !repo.entries.is_empty();
+        if self.follow_seen.get(session) == Some(&state) {
+            return vec![];
+        }
+        self.follow_seen.insert(session.into(), state);
+        if files.diff_mode != dirty {
+            files.set_diff_mode(dirty)
+        } else {
+            vec![]
+        }
+    }
+}
+
 impl App {
+    pub fn sync_drawer_follow(&mut self) {
+        let enabled = self
+            .daemon_settings
+            .as_ref()
+            .is_some_and(|s| s.drawer_follow_changes.unwrap_or(false));
+        let requests: Vec<_> = self
+            .views
+            .iter_mut()
+            .map(|(id, view)| {
+                (
+                    id.clone(),
+                    self.workspace.follow(id, &mut view.files, enabled),
+                )
+            })
+            .collect();
+        for (id, requests) in requests {
+            self.files_send(&id, requests);
+        }
+    }
+
     /// Send `requests` for `session`'s files: each recorded as awaited, then to the worker (in the
     /// demo, answered at once).
     fn files_send(&mut self, session: &str, requests: Vec<Request>) {
@@ -156,7 +218,16 @@ impl App {
                         result: demo::files(&request),
                         request,
                     };
-                    let effects = view.files.accept(reply);
+                    let mut effects = view.files.accept(reply);
+                    effects.follow.extend(
+                        self.workspace.follow(
+                            session,
+                            &mut view.files,
+                            self.daemon_settings
+                                .as_ref()
+                                .is_some_and(|s| s.drawer_follow_changes.unwrap_or(false)),
+                        ),
+                    );
                     view.sync_reader();
                     queue.extend(effects.follow);
                     if effects.reveal && self.selected.as_deref() == Some(session) {
@@ -185,7 +256,16 @@ impl App {
                 let Some(view) = self.views.get_mut(&session) else {
                     return Task::none();
                 };
-                let effects = view.files.accept(*reply);
+                let mut effects = view.files.accept(*reply);
+                effects.follow.extend(
+                    self.workspace.follow(
+                        &session,
+                        &mut view.files,
+                        self.daemon_settings
+                            .as_ref()
+                            .is_some_and(|s| s.drawer_follow_changes.unwrap_or(false)),
+                    ),
+                );
                 view.sync_reader();
                 // a background session's reply updates its own state, never the window
                 if effects.reveal && active {
