@@ -783,7 +783,34 @@ where
                 return;
             }
 
+            // sill patch: after it scrolled, upstream keeps every wheel event from the
+            // content for a while, so a nested scrollable does not take over mid-gesture.
+            // A wheel event along an axis this one does not scroll is not its gesture: a
+            // sideways-only scrollable around an editor held the editor's vertical scroll
+            // for 1.5 s after any sideways movement.
+            let is_other_axis = match event {
+                Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                    let (x, y) = match *delta {
+                        mouse::ScrollDelta::Lines { x, y }
+                        | mouse::ScrollDelta::Pixels { x, y } => (x, y),
+                    };
+                    let sideways = if state.keyboard_modifiers.shift() {
+                        true
+                    } else {
+                        x.abs() > y.abs()
+                    };
+
+                    match self.direction {
+                        Direction::Horizontal(_) => !sideways,
+                        Direction::Vertical(_) => sideways,
+                        Direction::Both { .. } => false,
+                    }
+                }
+                _ => false,
+            };
+
             if state.last_scrolled.is_none()
+                || is_other_axis
                 || !matches!(
                     event,
                     Event::Mouse(mouse::Event::WheelScrolled { .. })
@@ -845,7 +872,8 @@ where
 
             match event {
                 Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
-                    if cursor_over_scrollable.is_none() {
+                    // sill patch: not this scrollable's axis; a parent may scroll it
+                    if cursor_over_scrollable.is_none() || is_other_axis {
                         return;
                     }
 

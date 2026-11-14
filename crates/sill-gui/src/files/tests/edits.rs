@@ -343,3 +343,38 @@ fn source_history_restores_selection_extent_and_respects_preview_and_reload() {
         refreshed
     );
 }
+
+/// A trackpad reports both axes in nearly every wheel event, and the source editor sits in a
+/// sideways scrollable. A mostly vertical event scrolls the editor's lines, also right after a
+/// sideways one: the scrollable used to keep every wheel event for itself for a while after it
+/// moved, and the editor used to give up any event with a sideways part.
+#[test]
+fn source_scrolls_down_right_after_scrolling_sideways() {
+    use iced::mouse::{Event::WheelScrolled, ScrollDelta::Pixels};
+    let mut app = app();
+    open_source(&mut app);
+    let long = format!("{}\n", "x".repeat(600)).repeat(200);
+    act(&mut app, Action::Text(text_editor::Action::SelectAll));
+    act(
+        &mut app,
+        Action::Text(text_editor::Action::Edit(text_editor::Edit::Paste(long.into()))),
+    );
+    let wheel = |x, y| iced::Event::Mouse(WheelScrolled { delta: Pixels { x, y } });
+    let scrolled = |events: Vec<iced::Event>| {
+        let mut ui = crate::tests::simulator(&app, (1000.0, 700.0));
+        // the editor is as wide as its longest line: aim inside the window
+        let bounds = ui.find(iced_test::selector::id("file-reader")).expect("the source editor").bounds();
+        ui.point_at(iced::Point::new(bounds.x + 120.0, bounds.center_y()));
+        let _ = ui.simulate(events);
+        ui.into_messages()
+            .filter(|m| matches!(m, Message::Files(Action::Text(text_editor::Action::Scroll { lines })) if *lines > 0))
+            .count()
+    };
+    assert_eq!(scrolled(vec![wheel(-3.0, -80.0)]), 1, "a slight sideways drift still scrolls down");
+    assert_eq!(scrolled(vec![wheel(-80.0, -3.0)]), 0, "a sideways scroll is the scrollable's");
+    assert_eq!(
+        scrolled(vec![wheel(-80.0, 0.0), wheel(-2.0, -80.0)]),
+        1,
+        "down right after sideways"
+    );
+}

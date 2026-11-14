@@ -26,7 +26,13 @@ once upstream has an equivalent.
 - `src/text_editor.rs`: optional `line_numbers` gutter, supplied with visible logical line
   positions from the renderer. Gutter width tracks the number of digits; source layout, pointer
   hit testing and IME positioning use the same inset. Unwrapped editors pass sideways/Shift-wheel
-  events to a parent horizontal scrollbar. Default editors stay unchanged.
+  events to a parent horizontal scrollbar: an event whose larger axis is sideways (a trackpad
+  reports both axes in nearly every event), the rest scrolls the editor. Default editors stay
+  unchanged.
+- `src/scrollable.rs`: a wheel event along an axis the scrollable does not scroll reaches its
+  content also just after the scrollable scrolled. Upstream withholds every wheel event from the
+  content for up to 1.5 s then; around the source editor that froze vertical scrolling after any
+  sideways movement (the person, 2026-11-14, on a Mac trackpad).
 - `src/lib.rs`: `#![allow(deprecated)]`, so upstream's own deprecation warnings do not show in
   sill's builds (a path dependency's warnings are not capped as a registry crate's are).
 

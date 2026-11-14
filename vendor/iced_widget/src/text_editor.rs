@@ -725,10 +725,13 @@ where
         }
         if self.wrapping == Wrapping::None {
             if let Event::Mouse(mouse::Event::WheelScrolled { delta }) = event {
-                let x = match delta {
-                    mouse::ScrollDelta::Lines { x, .. } | mouse::ScrollDelta::Pixels { x, .. } => *x,
+                let (x, y) = match delta {
+                    mouse::ScrollDelta::Lines { x, y } | mouse::ScrollDelta::Pixels { x, y } => (*x, *y),
                 };
-                if state.modifiers.shift() || x != 0.0 {
+                // A trackpad reports both axes in nearly every event: the larger one says
+                // which way the person scrolls. Sideways goes to the parent; the rest is
+                // this editor's own vertical scroll, which captures the event.
+                if state.modifiers.shift() || x.abs() > y.abs() {
                     return;
                 }
             }
