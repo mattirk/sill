@@ -375,10 +375,12 @@ pub fn caption<'a>(session: &Session) -> Option<Element<'a, Message>> {
                 ))
                     .size(style::TINY)
                     .color(P.error)
-                    .wrapping(text::Wrapping::None)
+                    .width(Fill)
+                    .wrapping(text::Wrapping::WordOrGlyph)
             )
             .width(Fill)
             .padding([2, 8])
+            .clip(true)
             .style(style::fill(alpha(P.error, 0.08))),
         ]
         .into(),
