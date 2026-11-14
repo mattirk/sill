@@ -848,6 +848,21 @@ popover.sill-menu > contents { padding: 4px; min-width: 180px; }
 button.sill-install { padding: 1px 10px; min-height: 22px; font-weight: normal; background: alpha(@accent_bg_color, 0.25); border: none; box-shadow: none; }
 button.sill-install:hover { background: alpha(@accent_bg_color, 0.45); }
 .sill-filter { padding: 2px 10px; min-height: 0; font-weight: normal; }
+/* Changes page: flat rows, quiet buttons that show on hover, badges for where a change lives */
+.sill-changes { background: transparent; }
+.sill-changes > row { padding: 2px 6px; min-height: 0; border-radius: 0; }
+.sill-changes > row:hover { background: alpha(@view_fg_color, 0.04); }
+.sill-changes > row:selected { background: alpha(@accent_bg_color, 0.2); }
+.sill-changes > row.sill-changes-header { padding-top: 10px; padding-bottom: 2px; border-bottom: 1px solid alpha(@view_fg_color, 0.12); }
+.sill-changes > row.sill-changes-header:hover { background: transparent; }
+.sill-change-btn { padding: 0 8px; min-height: 0; opacity: 0.35; font-size: 90%; }
+.sill-changes > row:hover .sill-change-btn, .sill-changes > row:selected .sill-change-btn, .sill-changes-header:hover .sill-change-btn { opacity: 1; }
+.sill-change-note { font-size: 85%; }
+.sill-badge.sill-badge-git { color: @success_color; }
+.sill-badge.sill-badge-live { color: @accent_color; }
+.sill-badge.sill-badge-nogit { color: @warning_color; }
+.sill-diff-frame { border-top: 1px solid alpha(@view_fg_color, 0.12); }
+.sill-diff { font-size: 90%; }
 .sill-files > row { padding: 1px 4px; min-height: 0; }
 .sill-files > row:selected { background: alpha(@accent_bg_color, 0.25); }
 .sill-files treeexpander { padding: 1px 0; }

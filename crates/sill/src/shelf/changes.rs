@@ -1,36 +1,49 @@
 //! Backend page "Changes": the global ledger across sessions (SPEC §3.1), grouped by session and
-//! repository, with keep / revert and a diff view.
+//! repository, with keep / revert and a highlighted diff. Minimal rows: a status letter, the path,
+//! quiet buttons that light up on hover. Where a change lives is said in badges: `git` (a
+//! repository: review with git), `live` (a pinned folder: host = jail), `no git` (an overlay change
+//! outside any repository — these auto-revert, SPEC §4.4, and the row says when).
 
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::{Duration, SystemTime};
 
 use gtk4 as gtk;
 use gtk::glib;
-use gtk::prelude::*;
 use sill_core::changes;
 use sill_core::ledger::{Change, Kind};
 use sill_core::store::{Session, Store};
+use sourceview5::prelude::*;
 
-use super::session;
+use super::{session, theme};
 
 pub struct ChangesPage {
     pub root: gtk::Box,
     list: gtk::ListBox,
-    diff: gtk::TextView,
+    diff: sourceview5::Buffer,
     summary: gtk::Label,
     message: gtk::Label,
     store: Rc<Store>,
     rows: RefCell<Vec<(String, Change)>>, // (session id, change) per list row index
+    /// Is this session mid-turn? Auto-revert leaves it alone then (set by the window).
+    busy: RefCell<Option<Box<dyn Fn(&str) -> bool>>>,
+}
+
+/// A scanned session: its changes, split into the agent's own state and the rest.
+struct Scanned {
+    session: Session,
+    changes: Vec<Change>,
+    agent_state: Vec<Change>,
 }
 
 impl ChangesPage {
     pub fn new(store: Rc<Store>) -> Rc<Self> {
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 4);
         root.set_margin_start(12);
         root.set_margin_end(12);
         root.set_margin_top(6);
-        root.set_margin_bottom(12);
+        root.set_margin_bottom(8);
 
         let bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let summary = gtk::Label::new(Some("no changes"));
@@ -38,6 +51,7 @@ impl ChangesPage {
         summary.set_hexpand(true);
         summary.add_css_class("dim-label");
         let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
+        refresh.add_css_class("flat");
         refresh.set_tooltip_text(Some("Rescan"));
         bar.append(&summary);
         bar.append(&refresh);
@@ -50,28 +64,47 @@ impl ChangesPage {
         root.append(&message);
 
         let list = gtk::ListBox::new();
-        list.add_css_class("boxed-list");
+        list.add_css_class("sill-changes");
         list.set_selection_mode(gtk::SelectionMode::Single);
         let list_scroll = gtk::ScrolledWindow::builder().vexpand(true).child(&list).build();
 
-        let diff = gtk::TextView::builder()
-            .editable(false)
-            .cursor_visible(false)
-            .monospace(true)
-            .left_margin(8)
-            .right_margin(8)
-            .build();
-        let diff_scroll = gtk::ScrolledWindow::builder().vexpand(true).child(&diff).build();
-        diff_scroll.add_css_class("frame");
+        // the diff: GtkSourceView's diff language in the theme's scheme, like the Files editor
+        let diff = sourceview5::Buffer::new(None);
+        diff.set_language(sourceview5::LanguageManager::default().language("diff").as_ref());
+        diff.set_highlight_syntax(true);
+        diff.set_highlight_matching_brackets(false);
+        let diff_view = sourceview5::View::with_buffer(&diff);
+        diff_view.set_editable(false);
+        diff_view.set_cursor_visible(false);
+        diff_view.set_monospace(true);
+        diff_view.set_wrap_mode(gtk::WrapMode::WordChar);
+        diff_view.set_left_margin(8);
+        diff_view.set_right_margin(8);
+        diff_view.set_top_margin(6);
+        diff_view.add_css_class("sill-diff");
+        let diff_scroll = gtk::ScrolledWindow::builder().vexpand(true).child(&diff_view).build();
+        diff_scroll.add_css_class("sill-diff-frame");
 
         let paned = gtk::Paned::new(gtk::Orientation::Vertical);
         paned.set_start_child(Some(&list_scroll));
         paned.set_end_child(Some(&diff_scroll));
-        paned.set_position(500);
+        paned.set_position(420);
         paned.set_vexpand(true);
         root.append(&paned);
 
-        let page = Rc::new(Self { root, list, diff, summary, message, store, rows: RefCell::new(Vec::new()) });
+        let page = Rc::new(Self { root, list, diff, summary, message, store, rows: RefCell::new(Vec::new()), busy: RefCell::new(None) });
+        if let Some(dir) = theme::write_source_schemes() {
+            sourceview5::StyleSchemeManager::default().append_search_path(&dir.to_string_lossy());
+        }
+        page.apply_scheme(&theme::current());
+        {
+            let weak = Rc::downgrade(&page);
+            theme::on_change(move |t| {
+                if let Some(p) = weak.upgrade() {
+                    p.apply_scheme(t);
+                }
+            });
+        }
         {
             let p = page.clone();
             refresh.connect_clicked(move |_| p.refresh());
@@ -91,20 +124,35 @@ impl ChangesPage {
                     } else {
                         changes::unified_diff(c).unwrap_or_else(|e| format!("diff: {e:#}"))
                     };
-                    p.diff.buffer().set_text(&text);
+                    p.diff.set_text(&text);
                 }
             });
         }
         page
     }
 
-    /// Rescan every stored session's upper trees (fast: only touched files are read).
-    pub fn refresh(self: &Rc<Self>) {
+    fn apply_scheme(&self, t: &theme::Theme) {
+        if let Some(s) = sourceview5::StyleSchemeManager::default().scheme(&theme::source_scheme(t)) {
+            self.diff.set_style_scheme(Some(&s));
+        }
+    }
+
+    pub fn set_busy_probe(&self, f: impl Fn(&str) -> bool + 'static) {
+        *self.busy.borrow_mut() = Some(Box::new(f));
+    }
+
+    fn is_busy(&self, sid: &str) -> bool {
+        self.busy.borrow().as_ref().map(|f| f(sid)).unwrap_or(false)
+    }
+
+    /// Scan every stored session's upper trees off the GTK thread (fast: only touched files are
+    /// read), then hand the result to `done`.
+    fn scan(&self, done: impl FnOnce(Vec<Scanned>) + 'static) {
         let sessions = self.store.sessions().unwrap_or_default();
         let home = session::home().unwrap_or_default();
         let uid = session::uid();
         let user = std::env::var("USER").unwrap_or_default();
-        let (tx, rx) = async_channel::bounded::<Vec<(Session, Vec<Change>)>>(1);
+        let (tx, rx) = async_channel::bounded::<Vec<Scanned>>(1);
         std::thread::spawn(move || {
             let mut out = Vec::new();
             for s in sessions {
@@ -118,27 +166,133 @@ impl ChangesPage {
                     Err(_) => vec![],
                 };
                 let Ok(plan) = changes::session_plan(policy.clone(), state_dir, &home, uid, &user, binds) else { continue };
-                let list = changes::scan(&policy, &plan, None).unwrap_or_default();
-                if !list.is_empty() {
-                    out.push((s, list));
+                // build output (git-ignored / ledger_ignore) is the overlay's business, not the person's
+                let list: Vec<Change> = changes::scan(&policy, &plan, None).unwrap_or_default().into_iter().filter(|c| !c.ignored).collect();
+                if list.is_empty() {
+                    continue;
                 }
+                let state_dirs = sill_core::agents::load(&home)
+                    .get(&s.agent)
+                    .map(|a| sill_core::session::state_paths(a, &home))
+                    .unwrap_or_default();
+                let (agent_state, changes) = list.into_iter().partition(|c| changes::is_agent_state(&c.path, &state_dirs, &home));
+                out.push(Scanned { session: s, changes, agent_state });
             }
             let _ = tx.send_blocking(out);
         });
-        let p = self.clone();
         glib::spawn_future_local(async move {
             if let Ok(groups) = rx.recv().await {
-                p.populate(groups);
+                done(groups);
             }
         });
     }
 
-    fn populate(self: &Rc<Self>, groups: Vec<(Session, Vec<Change>)>) {
+    pub fn refresh(self: &Rc<Self>) {
+        let p = self.clone();
+        self.scan(move |groups| p.populate(groups));
+    }
+
+    /// Auto-revert (SPEC §4.4): once a minute, every overlay change outside any git repository
+    /// whose last write is older than the configured delay is reverted — unless its session is
+    /// mid-turn. Pinned folders never appear here (live), repositories are git's business, the
+    /// agent's own state is left alone.
+    pub fn sweep(self: &Rc<Self>) {
+        let minutes = sill_core::config::load().auto_revert_minutes();
+        if minutes == 0 {
+            return;
+        }
+        let p = self.clone();
+        self.scan(move |groups| {
+            let mut n = 0;
+            for g in &groups {
+                if p.is_busy(&g.session.id) {
+                    continue;
+                }
+                let running = sill_core::session::is_running(&g.session.id);
+                // deepest paths first, so directories go after their contents
+                let mut due: Vec<&Change> = g.changes.iter().filter(|c| auto_reverts(c) && revert_due(c, minutes).is_some_and(|d| d.is_zero())).collect();
+                due.sort_by_key(|c| std::cmp::Reverse(c.path.components().count()));
+                for c in due {
+                    let ok = if running { session::revert(&g.session.id, &c.path).is_ok() } else { remove_upper_entry(&c.upper).is_ok() };
+                    if ok {
+                        n += 1;
+                    }
+                }
+            }
+            if n > 0 {
+                p.message.set_text(&format!("auto-reverted {n} path(s) outside git"));
+                p.refresh();
+            }
+        });
+    }
+
+    /// A group header row: title, badges, actions.
+    fn header_row(&self, title: &str, tooltip: Option<&str>, badges: &[(&str, &str)], actions: Vec<gtk::Widget>) -> gtk::ListBoxRow {
+        let hrow = gtk::ListBoxRow::new();
+        hrow.set_selectable(false);
+        hrow.set_activatable(false);
+        hrow.add_css_class("sill-changes-header");
+        let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let label = gtk::Label::new(Some(title));
+        label.set_xalign(0.0);
+        label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+        label.add_css_class("heading");
+        label.set_tooltip_text(tooltip);
+        hbox.append(&label);
+        for (text, class) in badges {
+            let b = gtk::Label::new(Some(text));
+            b.add_css_class("sill-badge");
+            b.add_css_class(class);
+            hbox.append(&b);
+        }
+        let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        spacer.set_hexpand(true);
+        hbox.append(&spacer);
+        for a in actions {
+            hbox.append(&a);
+        }
+        hrow.set_child(Some(&hbox));
+        hrow
+    }
+
+    /// A change row: letter, path, an optional note (dim, right), buttons.
+    fn change_row(&self, letter: &str, class: &str, path: &str, note: Option<String>, buttons: Vec<gtk::Button>) -> gtk::ListBoxRow {
+        let row = gtk::ListBoxRow::new();
+        row.add_css_class("sill-change");
+        let b = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let l = gtk::Label::new(Some(letter));
+        l.add_css_class("monospace");
+        l.add_css_class(class);
+        l.set_width_chars(2);
+        let p = gtk::Label::new(Some(path));
+        p.set_xalign(0.0);
+        p.set_hexpand(true);
+        p.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+        p.set_tooltip_text(Some(path));
+        b.append(&l);
+        b.append(&p);
+        if let Some(n) = note {
+            let nl = gtk::Label::new(Some(&n));
+            nl.add_css_class("dim-label");
+            nl.add_css_class("sill-change-note");
+            b.append(&nl);
+        }
+        for btn in buttons {
+            btn.add_css_class("flat");
+            btn.add_css_class("sill-change-btn");
+            b.append(&btn);
+        }
+        row.set_child(Some(&b));
+        row
+    }
+
+    fn populate(self: &Rc<Self>, groups: Vec<Scanned>) {
         while let Some(child) = self.list.first_child() {
             self.list.remove(&child);
         }
         self.rows.borrow_mut().clear();
-        self.diff.buffer().set_text("");
+        self.diff.set_text("");
+        let minutes = sill_core::config::load().auto_revert_minutes();
         let mut total = 0;
         let mut conflicts = 0;
         // pinned folders first: live (host = jail); git repositories among them show git's view
@@ -157,100 +311,72 @@ impl ChangesPage {
             if status.is_empty() {
                 continue;
             }
-            let hrow = gtk::ListBoxRow::new();
-            hrow.set_selectable(false);
-            hrow.set_activatable(false);
-            let header = gtk::Label::new(Some(&format!("{} · pinned, live (host = jail) · git", repo.display())));
-            header.set_xalign(0.0);
-            header.add_css_class("heading");
-            header.set_margin_top(8);
-            hrow.set_child(Some(&header));
+            let hrow = self.header_row(&short_path(&repo), Some(&repo.display().to_string()), &[("git", "sill-badge-git"), ("live", "sill-badge-live")], vec![]);
             self.list.append(&hrow);
             self.rows.borrow_mut().push((String::new(), placeholder_change(&repo)));
             for (rel, st) in status {
                 total += 1;
-                let row = gtk::ListBoxRow::new();
-                let b = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-                let letter = gtk::Label::new(Some(&format!("{st} ")));
-                letter.add_css_class("monospace");
-                match st.as_str() {
-                    "?" | "A" => letter.add_css_class("success"),
-                    "D" => letter.add_css_class("error"),
-                    _ => letter.add_css_class("accent"),
-                }
-                let path = gtk::Label::new(Some(&rel.display().to_string()));
-                path.set_xalign(0.0);
-                path.set_hexpand(true);
-                path.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+                let class = match st.as_str() {
+                    "?" | "A" => "success",
+                    "D" => "error",
+                    _ => "accent",
+                };
                 let revert_b = gtk::Button::with_label("Revert");
-                revert_b.add_css_class("flat");
+                revert_b.set_tooltip_text(Some("git checkout HEAD (an untracked file is removed)"));
                 {
                     let p = self.clone();
                     let repo = repo.clone();
                     let rel = rel.clone();
-                    revert_b.connect_clicked(move |_| {
-                        match changes::git_revert(&repo, &rel) {
-                            Ok(what) => {
-                                p.message.set_text(&format!("{}: {what}", rel.display()));
-                                p.refresh();
-                            }
-                            Err(e) => p.message.set_text(&format!("revert failed: {e:#}")),
+                    revert_b.connect_clicked(move |_| match changes::git_revert(&repo, &rel) {
+                        Ok(what) => {
+                            p.message.set_text(&format!("{}: {what}", rel.display()));
+                            p.refresh();
                         }
+                        Err(e) => p.message.set_text(&format!("revert failed: {e:#}")),
                     });
                 }
-                b.append(&letter);
-                b.append(&path);
-                b.append(&revert_b);
-                row.set_child(Some(&b));
+                let row = self.change_row(&st, class, &rel.display().to_string(), None, vec![revert_b]);
                 self.list.append(&row);
                 let mut c = placeholder_change(&repo.join(&rel));
                 c.upper = repo.clone(); // marker: diff via git
                 self.rows.borrow_mut().push((String::new(), c));
             }
         }
-        for (s, list) in groups {
-            // build output (git-ignored / ledger_ignore) is the overlay's business, not the person's
-            let list: Vec<Change> = list.into_iter().filter(|c| !c.ignored).collect();
-            if list.is_empty() {
-                continue;
+        for g in groups {
+            let s = g.session;
+            let mut repo_groups: Vec<(PathBuf, Vec<Change>, bool)> =
+                changes::group_by_repo(&g.changes).into_iter().map(|(r, v)| (r, v, false)).collect();
+            if !g.agent_state.is_empty() {
+                repo_groups.push((PathBuf::from("agent state"), g.agent_state, true));
             }
-            // the agent's own files go last, collapsed: reviewable, but not in the way
-            let home = session::home().unwrap_or_default();
-            let state_dirs = sill_core::agents::load(&home)
-                .get(&s.agent)
-                .map(|a| sill_core::session::state_paths(a, &home))
-                .unwrap_or_default();
-            let (agent_state, list): (Vec<Change>, Vec<Change>) =
-                list.into_iter().partition(|c| changes::is_agent_state(&c.path, &state_dirs, &home));
-            let mut groups: Vec<(PathBuf, Vec<Change>, bool)> =
-                changes::group_by_repo(&list).into_iter().map(|(r, v)| (r, v, false)).collect();
-            if !agent_state.is_empty() {
-                groups.push((PathBuf::from("agent state"), agent_state, true));
-            }
-            for (repo, changes_in_repo, collapsed) in groups {
-                let header = gtk::Label::new(Some(&format!(
-                    "{} · {}{}",
-                    s.title,
-                    if repo.as_os_str().is_empty() { "outside any repo".to_string() } else { repo.display().to_string() },
-                    if collapsed { format!(" ({})", changes_in_repo.len()) } else { String::new() }
-                )));
-                header.set_xalign(0.0);
-                header.add_css_class("heading");
-                header.set_margin_top(8);
-                let hrow = gtk::ListBoxRow::new();
-                hrow.set_selectable(false);
-                hrow.set_activatable(false);
-                let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-                header.set_hexpand(true);
-                hbox.append(&header);
+            for (repo, changes_in_repo, collapsed) in repo_groups {
+                let in_git = !collapsed && !repo.as_os_str().is_empty();
+                let title = if collapsed {
+                    format!("{} · the agent's own files ({})", s.title, changes_in_repo.len())
+                } else if in_git {
+                    format!("{} · {}", s.title, short_path(&repo))
+                } else {
+                    format!("{} · outside any repository", s.title)
+                };
+                let tooltip = if in_git { Some(repo.display().to_string()) } else { None };
+                let mut badges: Vec<(&str, &str)> = Vec::new();
+                if in_git {
+                    badges.push(("git", "sill-badge-git"));
+                } else if !collapsed {
+                    badges.push(("no git", "sill-badge-nogit"));
+                    if minutes > 0 {
+                        badges.push(("auto-revert", "sill-badge-nogit"));
+                    }
+                }
                 let keep_all = gtk::Button::with_label("Keep all");
                 keep_all.add_css_class("flat");
+                keep_all.add_css_class("sill-change-btn");
                 {
                     let p = self.clone();
-                    let items: Vec<(String, Change)> = changes_in_repo.iter().map(|c| (s.id.clone(), c.clone())).collect();
+                    let items: Vec<Change> = changes_in_repo.clone();
                     keep_all.connect_clicked(move |_| {
                         let mut n = 0;
-                        for (_, c) in &items {
+                        for c in &items {
                             if c.conflict || c.ignored {
                                 continue;
                             }
@@ -262,17 +388,9 @@ impl ChangesPage {
                         p.refresh();
                     });
                 }
-                let mut toggle: Option<gtk::ToggleButton> = None;
-                if collapsed {
-                    let t = gtk::ToggleButton::new();
-                    t.set_icon_name("pan-end-symbolic");
-                    t.add_css_class("flat");
-                    t.set_tooltip_text(Some("Show the agent's own files"));
-                    hbox.prepend(&t);
-                    toggle = Some(t);
-                }
                 let revert_all = gtk::Button::with_label("Revert all");
                 revert_all.add_css_class("flat");
+                revert_all.add_css_class("sill-change-btn");
                 {
                     let p = self.clone();
                     let sid = s.id.clone();
@@ -280,29 +398,27 @@ impl ChangesPage {
                     revert_all.connect_clicked(move |_| {
                         let running = sill_core::session::is_running(&sid);
                         let (mut n, mut failed) = (0, 0);
-                        // deepest paths first, so directories go after their contents
                         let mut sorted = items.clone();
                         sorted.sort_by_key(|c| std::cmp::Reverse(c.path.components().count()));
                         for c in &sorted {
-                            let ok = if running {
-                                session::revert(&sid, &c.path).is_ok()
-                            } else {
-                                remove_upper_entry(&c.upper).is_ok()
-                            };
+                            let ok = if running { session::revert(&sid, &c.path).is_ok() } else { remove_upper_entry(&c.upper).is_ok() };
                             if ok { n += 1 } else { failed += 1 }
                         }
-                        p.message.set_text(&if failed == 0 {
-                            format!("reverted {n} path(s)")
-                        } else {
-                            format!("reverted {n} path(s), {failed} failed")
-                        });
+                        p.message.set_text(&if failed == 0 { format!("reverted {n} path(s)") } else { format!("reverted {n} path(s), {failed} failed") });
                         p.refresh();
                     });
                 }
-                hbox.set_margin_start(10);
-                hbox.append(&keep_all);
-                hbox.append(&revert_all);
-                hrow.set_child(Some(&hbox));
+                let mut actions: Vec<gtk::Widget> = vec![keep_all.upcast(), revert_all.upcast()];
+                let mut toggle: Option<gtk::ToggleButton> = None;
+                if collapsed {
+                    let t = gtk::ToggleButton::new();
+                    t.set_icon_name("pan-end-symbolic");
+                    t.add_css_class("flat");
+                    t.set_tooltip_text(Some("Show the agent's own files"));
+                    actions.insert(0, t.clone().upcast());
+                    toggle = Some(t);
+                }
+                let hrow = self.header_row(&title, tooltip.as_deref(), &badges, actions);
                 self.list.append(&hrow);
                 self.rows.borrow_mut().push((s.id.clone(), changes_in_repo[0].clone())); // placeholder for the header index
                 let mut group_rows: Vec<gtk::ListBoxRow> = Vec::new();
@@ -312,39 +428,32 @@ impl ChangesPage {
                     if c.conflict {
                         conflicts += 1;
                     }
-                    let row = gtk::ListBoxRow::new();
-                    let b = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-                    b.set_margin_start(10); // the buttons' own padding gives the right side this much
-                    let letter = gtk::Label::new(Some(&format!("{}{}", c.kind.letter(), if c.conflict { "!" } else { " " })));
-                    letter.add_css_class("monospace");
-                    match c.kind {
-                        Kind::Added => letter.add_css_class("success"),
-                        Kind::Deleted => letter.add_css_class("error"),
-                        _ => letter.add_css_class("accent"),
-                    }
-                    let path = gtk::Label::new(Some(&display_path(&c.path, &repo)));
-                    path.set_xalign(0.0);
-                    path.set_hexpand(true);
-                    path.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-                    if c.ignored {
-                        path.add_css_class("dim-label");
-                    }
+                    let class = match c.kind {
+                        Kind::Added => "success",
+                        Kind::Deleted => "error",
+                        _ => "accent",
+                    };
+                    let letter = format!("{}{}", c.kind.letter(), if c.conflict { "!" } else { "" });
+                    let note = if c.conflict {
+                        Some("changed on the host too".to_string())
+                    } else if !in_git && !collapsed && minutes > 0 && auto_reverts(&c) {
+                        revert_due(&c, minutes).map(|d| if d.is_zero() { "reverting".to_string() } else { format!("reverts in {}", human_minutes(d)) })
+                    } else {
+                        None
+                    };
                     let keep_b = gtk::Button::with_label("Keep");
-                    keep_b.add_css_class("flat");
                     keep_b.set_sensitive(!c.conflict);
+                    keep_b.set_tooltip_text(Some("copy to the host"));
                     let revert_b = gtk::Button::with_label("Revert");
-                    revert_b.add_css_class("flat");
                     {
                         let p = self.clone();
                         let c2 = c.clone();
-                        keep_b.connect_clicked(move |_| {
-                            match sill_core::keep::keep(&c2, &sill_core::keep::KeepOptions::default()) {
-                                Ok(what) => {
-                                    p.message.set_text(&format!("kept {}: {what}", c2.path.display()));
-                                    p.refresh();
-                                }
-                                Err(e) => p.message.set_text(&format!("keep failed: {e:#}")),
+                        keep_b.connect_clicked(move |_| match sill_core::keep::keep(&c2, &sill_core::keep::KeepOptions::default()) {
+                            Ok(what) => {
+                                p.message.set_text(&format!("kept {}: {what}", c2.path.display()));
+                                p.refresh();
                             }
+                            Err(e) => p.message.set_text(&format!("keep failed: {e:#}")),
                         });
                     }
                     {
@@ -369,11 +478,7 @@ impl ChangesPage {
                             }
                         });
                     }
-                    b.append(&letter);
-                    b.append(&path);
-                    b.append(&keep_b);
-                    b.append(&revert_b);
-                    row.set_child(Some(&b));
+                    let row = self.change_row(&letter, class, &display_path(&c.path, &repo), note, vec![keep_b, revert_b]);
                     if collapsed {
                         row.set_visible(false);
                     }
@@ -399,7 +504,34 @@ impl ChangesPage {
     }
 }
 
-fn placeholder_change(path: &std::path::Path) -> Change {
+/// Does auto-revert apply to this change? Only overlay changes outside any git repository; a
+/// conflict (changed on the host too) is left for the person.
+fn auto_reverts(c: &Change) -> bool {
+    !c.conflict && !c.ignored && changes::repo_root(&c.path).is_none()
+}
+
+/// Time left before auto-revert, from the upper entry's last write; `None` when it can't be told.
+fn revert_due(c: &Change, minutes: u32) -> Option<Duration> {
+    let written = std::fs::symlink_metadata(&c.upper).ok()?.modified().ok()?;
+    let age = SystemTime::now().duration_since(written).unwrap_or_default();
+    Some(Duration::from_secs(minutes as u64 * 60).saturating_sub(age))
+}
+
+fn human_minutes(d: Duration) -> String {
+    let m = d.as_secs().div_ceil(60);
+    if m >= 120 { format!("{} h", m / 60) } else { format!("{m} min") }
+}
+
+/// `~/GIT/x/repo` → `GIT/x/repo`: the path without the home prefix.
+fn short_path(p: &Path) -> String {
+    let home = session::home().unwrap_or_default();
+    match p.strip_prefix(&home) {
+        Ok(rel) if !rel.as_os_str().is_empty() => format!("~/{}", rel.display()),
+        _ => p.display().to_string(),
+    }
+}
+
+fn placeholder_change(path: &Path) -> Change {
     Change {
         path: path.to_path_buf(),
         upper: PathBuf::new(),
@@ -412,7 +544,7 @@ fn placeholder_change(path: &std::path::Path) -> Change {
 }
 
 /// Remove an entry from an unmounted upper tree (whiteout, file, symlink or directory).
-fn remove_upper_entry(upper: &std::path::Path) -> anyhow::Result<()> {
+fn remove_upper_entry(upper: &Path) -> anyhow::Result<()> {
     match upper.symlink_metadata() {
         Ok(md) if md.is_dir() => std::fs::remove_dir_all(upper)?,
         Ok(_) => std::fs::remove_file(upper)?,
@@ -421,11 +553,11 @@ fn remove_upper_entry(upper: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn display_path(path: &PathBuf, repo: &PathBuf) -> String {
+fn display_path(path: &Path, repo: &Path) -> String {
     if !repo.as_os_str().is_empty()
         && let Ok(rel) = path.strip_prefix(repo)
     {
         return rel.display().to_string();
     }
-    path.display().to_string()
+    short_path(path)
 }

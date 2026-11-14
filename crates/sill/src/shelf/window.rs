@@ -175,6 +175,17 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         files: files.clone(),
     });
     {
+        // auto-revert (SPEC §4.4): the Changes page sweeps once a minute; a session that is mid-turn
+        // is left alone
+        let weak = Rc::downgrade(&shelf);
+        changes.set_busy_probe(move |id| weak.upgrade().map(|s| s.busy.borrow().contains(id)).unwrap_or(true));
+        let c = changes.clone();
+        gtk::glib::timeout_add_seconds_local(60, move || {
+            c.sweep();
+            gtk::glib::ControlFlow::Continue
+        });
+    }
+    {
         // drawn glyphs don't follow CSS: redraw the tab icons in the new theme's foreground
         let weak = Rc::downgrade(&shelf);
         theme::on_change(move |_| {

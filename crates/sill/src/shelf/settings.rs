@@ -48,6 +48,28 @@ pub fn build() -> gtk::Box {
     });
     root.append(&row("Text size", &size_dd));
 
+    // auto-revert: unkept changes outside git and pins go away after this long
+    let choices = sill_core::config::AUTO_REVERT_CHOICES;
+    let labels: Vec<&str> = choices.iter().map(|(_, l)| *l).collect();
+    let current = sill_core::config::load().auto_revert_minutes();
+    let nearest = choices.iter().enumerate().min_by_key(|(_, (m, _))| (*m as i64 - current as i64).abs()).map(|(i, _)| i);
+    let ar_dd = choice(&labels, nearest, move |i| {
+        if let Some((m, _)) = choices.get(i) {
+            let _ = sill_core::config::update(|c| c.auto_revert_minutes = Some(*m));
+        }
+    });
+    let ar_hint = gtk::Label::new(Some("what the agent changed outside git and outside pinned folders is reverted this long after its last write, once the session is idle; Keep in Changes stops the clock"));
+    ar_hint.add_css_class("dim-label");
+    ar_hint.set_wrap(true);
+    ar_hint.set_xalign(0.0);
+    let arbox = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    arbox.set_hexpand(true);
+    let arrow = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    arrow.append(&ar_dd);
+    arbox.append(&arrow);
+    arbox.append(&ar_hint);
+    root.append(&row("Auto-revert", &arbox));
+
     // width
     let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.2, 0.8, 0.02);
     scale.set_value(x11::width_fraction());

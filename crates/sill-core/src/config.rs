@@ -21,7 +21,16 @@ pub struct Config {
     /// so a factor means the same on a 1× and a 2× display. The Settings page offers
     /// [`TEXT_SCALES`]; any value in [`TEXT_SCALE_RANGE`] is accepted when edited by hand.
     pub text_scale: Option<f64>,
+    /// Auto-revert (SPEC §4.4): a change the agent made outside any git repository and outside a
+    /// pinned folder is reverted this many minutes after its last write, once the session is idle.
+    /// 0 = never; unset = [`AUTO_REVERT_DEFAULT`].
+    pub auto_revert_minutes: Option<u32>,
 }
+
+/// Auto-revert delays the Settings page offers: (minutes, label).
+pub const AUTO_REVERT_CHOICES: &[(u32, &str)] =
+    &[(0, "Never"), (10, "10 minutes"), (30, "30 minutes"), (60, "1 hour"), (240, "4 hours"), (1440, "1 day")];
+pub const AUTO_REVERT_DEFAULT: u32 = 60;
 
 /// The backend pages, in tab order: (id, title).
 pub const PAGES: &[(&str, &str)] = &[("changes", "Changes"), ("files", "Files"), ("agents", "Agents"), ("settings", "Settings")];
@@ -48,6 +57,11 @@ impl Config {
             Some(s) if s.is_finite() && s >= TEXT_SCALE_RANGE.0 && s <= TEXT_SCALE_RANGE.1 => s,
             _ => 1.0,
         }
+    }
+
+    /// Minutes before an unkept change outside git is reverted; 0 = never.
+    pub fn auto_revert_minutes(&self) -> u32 {
+        self.auto_revert_minutes.unwrap_or(AUTO_REVERT_DEFAULT)
     }
 
     /// The factor applied to the desktop font: zoom × [`TEXT_SCALE_BASE`].
