@@ -55,6 +55,7 @@ pub struct Shelf {
     /// Full shelf width, with the drawer temporarily hidden.
     expanded: std::cell::Cell<bool>,
     restore_tree: std::cell::Cell<bool>,
+    open_drawer: gtk::Button,
     busy: RefCell<std::collections::HashSet<String>>,
     pending_restart: RefCell<std::collections::HashSet<String>>,
     /// The prompt being written in a session whose view is closed to be made anew (a pin restarts
@@ -243,8 +244,7 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     stack.add_named(&pages, Some("sessions"));
     let changes = ChangesPage::new(store.clone());
     let tree = FolderTree::new(store.clone());
-    tree.root.bind_property("visible", &open_drawer, "visible")
-        .invert_boolean().sync_create().build();
+    open_drawer.set_visible(!tree.root.is_visible());
     let viewer = Viewer::new(tree.changes.clone());
     let agents_page = AgentsPage::new();
     let timer_auto = Rc::new(std::cell::Cell::new(super::remote::config::load().timer_auto.unwrap_or(false)));
@@ -346,6 +346,7 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
         paned: body.clone(),
         expanded: std::cell::Cell::new(false),
         restore_tree: std::cell::Cell::new(false),
+        open_drawer: open_drawer.clone(),
         busy: RefCell::new(std::collections::HashSet::new()),
         pending_restart: RefCell::new(std::collections::HashSet::new()),
         drafts: RefCell::new(HashMap::new()),
@@ -426,6 +427,12 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     }
 
     {
+        let weak = Rc::downgrade(&shelf);
+        tree.root.connect_visible_notify(move |tree| {
+            if let Some(s) = weak.upgrade() {
+                s.open_drawer.set_visible(!s.expanded.get() && !tree.is_visible());
+            }
+        });
         let weak = Rc::downgrade(&shelf);
         open_drawer.connect_clicked(move |_| {
             if let Some(s) = weak.upgrade() {
@@ -797,6 +804,7 @@ impl Shelf {
         } else {
             self.tree.root.set_visible(self.restore_tree.get());
         }
+        self.open_drawer.set_visible(!expanded && !self.tree.root.is_visible());
         for view in self.views.borrow().values() {
             view.conv.set_expanded(expanded);
         }
