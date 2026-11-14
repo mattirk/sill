@@ -415,8 +415,7 @@ fn handle(mut client: UnixStream, rules: &Rules, log: &dyn Fn(&str)) -> Result<(
         Decision::Allow(rule) => log(&format!("allow {host}:{port} ({rule})")),
     }
 
-    let mut upstream = TcpStream::connect_timeout(&std::net::SocketAddr::new(addrs[0], port), Duration::from_secs(20))
-        .with_context(|| format!("connect {host}:{port}"))?;
+    let mut upstream = connect_any(&addrs, port).with_context(|| format!("connect {host}:{port}"))?;
     client.set_read_timeout(None)?;
 
     if let Some(path) = origin_form {
@@ -507,8 +506,72 @@ pub fn denial_offer(line: &str) -> Option<String> {
     Some(if port == CONNECT_PORT.to_string() || port == HTTP_PORT.to_string() { host.to_string() } else { target.to_string() })
 }
 
+/// How long one address may take to answer before the next is tried.
+const CONNECT_EACH: Duration = Duration::from_secs(4);
+
+/// The first of `addrs` to answer, tried in turn, IPv6 and IPv4 alternating. One address that
+/// does not answer must not hold up the request: the Mac's VM saw IPv4 to chatgpt.com time out
+/// for minutes while IPv6 worked (2026-11-12), and only the first address was ever tried.
+/// Every address already passed the policy (`decide_addrs` checks them all).
+fn connect_any(addrs: &[IpAddr], port: u16) -> Result<TcpStream> {
+    let mut last = None;
+    for addr in interleaved(addrs) {
+        match TcpStream::connect_timeout(&std::net::SocketAddr::new(addr, port), CONNECT_EACH) {
+            Ok(stream) => return Ok(stream),
+            Err(e) => last = Some(anyhow::Error::new(e).context(addr.to_string())),
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow::anyhow!("no address")))
+}
+
+/// `addrs` without repeats, IPv6 and IPv4 taking turns, each family in the resolver's order.
+fn interleaved(addrs: &[IpAddr]) -> Vec<IpAddr> {
+    let mut v6: Vec<IpAddr> = Vec::new();
+    let mut v4: Vec<IpAddr> = Vec::new();
+    for a in addrs {
+        let family = if a.is_ipv6() { &mut v6 } else { &mut v4 };
+        if !family.contains(a) {
+            family.push(*a);
+        }
+    }
+    let first_v6 = addrs.first().is_some_and(IpAddr::is_ipv6);
+    let (mut a, mut b) = if first_v6 { (v6.into_iter(), v4.into_iter()) } else { (v4.into_iter(), v6.into_iter()) };
+    let mut out = Vec::new();
+    loop {
+        match (a.next(), b.next()) {
+            (None, None) => return out,
+            (x, y) => out.extend(x.into_iter().chain(y)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn addresses_are_tried_ipv6_and_ipv4_in_turn_without_repeats() {
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        let resolved = [ip("2a06::1"), ip("2a06::2"), ip("104.18.32.47"), ip("2a06::1"), ip("172.64.155.209")];
+        assert_eq!(
+            super::interleaved(&resolved),
+            [ip("2a06::1"), ip("104.18.32.47"), ip("2a06::2"), ip("172.64.155.209")]
+        );
+        let v4_first = [ip("1.1.1.1"), ip("2606::1")];
+        assert_eq!(super::interleaved(&v4_first), [ip("1.1.1.1"), ip("2606::1")]);
+        assert!(super::interleaved(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_silent_address_gives_way_to_the_next() {
+        // a listener on the IPv4 loopback; the documentation address before it never answers
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let silent = "192.0.2.1".parse().unwrap();
+        let live = "127.0.0.1".parse().unwrap();
+        let started = std::time::Instant::now();
+        assert!(super::connect_any(&[silent, live], port).is_ok());
+        assert!(started.elapsed() < super::CONNECT_EACH + std::time::Duration::from_secs(2));
+    }
+
     #[test]
     fn only_a_name_not_in_the_list_is_offered() {
         assert_eq!(denial_offer("deny example.com:443 (not in allow-list)").as_deref(), Some("example.com"));
