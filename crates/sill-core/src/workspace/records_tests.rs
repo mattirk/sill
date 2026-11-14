@@ -696,3 +696,110 @@ fn work_from_before_the_pin_conflicting_with_the_workspaces_own_waits_in_the_ove
     assert!(!up.join("f1.txt").exists());
     assert!(operation(&f, &w).is_none());
 }
+
+#[test]
+fn undo_does_not_replace_a_reopened_workspace() {
+    let f = fixture("undo-reopened");
+    let old = session(&f, "s1");
+    write(&clone_of(&old).join("f1.txt"), "old work\n");
+    let d = discard(&f.host, &apply_req("d", &old, &rev(&f, &old)))
+        .unwrap()
+        .discarded
+        .unwrap();
+    f.host
+        .lives
+        .lock()
+        .unwrap()
+        .insert("s1".into(), Life::Ended);
+    list(
+        &f.host,
+        &api::List {
+            session_id: None,
+            after: None,
+            limit: None,
+        },
+    )
+    .unwrap();
+    let current = session(&f, "s1");
+    write(&clone_of(&current).join("f1.txt"), "new work\n");
+    let req = api::Undo {
+        operation_id: "u".into(),
+        discard_id: d.discard_id,
+    };
+    f.host.busy.lock().unwrap().push("s1".into());
+    assert_eq!(reason(&undo(&f.host, &req).unwrap_err()), "writer_active");
+    f.host.busy.lock().unwrap().clear();
+    assert_eq!(reason(&undo(&f.host, &req).unwrap_err()), "changed_since");
+    assert_eq!(
+        session_view(&f.host, "s1").unwrap().workspaces[0].workspace_id,
+        current.workspace_id
+    );
+    assert_eq!(read(&clone_of(&current).join("f1.txt")), "new work\n");
+}
+
+#[test]
+fn discard_database_failure_does_not_reset_work() {
+    let f = fixture("discard-db-failure");
+    let w = session(&f, "s1");
+    write(&clone_of(&w).join("f1.txt"), "precious\n");
+    f.host.db(|c| { c.execute_batch("CREATE TRIGGER fail_discard BEFORE INSERT ON workspace_discards BEGIN SELECT RAISE(ABORT, 'injected'); END;")?; Ok(()) }).unwrap();
+    assert!(discard(&f.host, &apply_req("d", &w, &rev(&f, &w))).is_err());
+    assert_eq!(read(&clone_of(&w).join("f1.txt")), "precious\n");
+    reconcile(&f.host).unwrap();
+    assert_eq!(read(&clone_of(&w).join("f1.txt")), "precious\n");
+}
+
+#[test]
+fn unreadable_work_stops_apply_and_discard() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fixture("unreadable-work");
+    let w = session(&f, "s1");
+    let file = clone_of(&w).join("f1.txt");
+    write(&file, "precious\n");
+    let seen = rev(&f, &w);
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0)).unwrap();
+    assert!(apply(&f.host, &apply_req("a", &w, &seen)).is_err());
+    assert!(discard(&f.host, &apply_req("d", &w, &seen)).is_err());
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(read(&file), "precious\n");
+    assert_eq!(read(&f.source.join("f1.txt")), "line 1\n");
+}
+
+#[test]
+fn discard_interrupted_after_reset_keeps_undo_across_recovery() {
+    let f = fixture("discard-after-reset");
+    let w = session(&f, "s1");
+    write(&clone_of(&w).join("f1.txt"), "precious\n");
+    f.host.db(|c| { c.execute_batch("CREATE TRIGGER fail_settle BEFORE UPDATE ON workspace_journal WHEN NEW.kind='discard' AND NEW.state='done' BEGIN SELECT RAISE(ABORT, 'injected'); END;")?; Ok(()) }).unwrap();
+    assert!(discard(&f.host, &apply_req("d", &w, &rev(&f, &w))).is_err());
+    assert_eq!(read(&clone_of(&w).join("f1.txt")), "line 1\n");
+    reconcile(&f.host).unwrap();
+    let listed = list(
+        &f.host,
+        &api::List {
+            session_id: None,
+            after: None,
+            limit: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(listed.discarded.len(), 1);
+    let first = listed.discarded[0].discard_id.clone();
+    f.host
+        .db(|c| {
+            c.execute_batch("DROP TRIGGER fail_settle;")?;
+            Ok(())
+        })
+        .unwrap();
+    write(&clone_of(&w).join("f1.txt"), "second\n");
+    discard(&f.host, &apply_req("d2", &w, &rev(&f, &w))).unwrap();
+    undo(
+        &f.host,
+        &api::Undo {
+            operation_id: "u".into(),
+            discard_id: first,
+        },
+    )
+    .unwrap();
+    assert_eq!(read(&clone_of(&w).join("f1.txt")), "precious\n");
+}

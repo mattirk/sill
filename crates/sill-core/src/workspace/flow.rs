@@ -92,21 +92,37 @@ pub(super) type Have = Option<(String, String)>;
 /// the person's clean filters run as for their own commits; a link's target is the blob, never
 /// followed; nothing (None) where there is no file or link. A file that goes while being read
 /// counts as gone.
-pub(super) fn worktree_entries(store: &Git, root: &Path, paths: &[String]) -> Result<Vec<(String, Have)>> {
+pub(super) fn worktree_entries(
+    store: &Git,
+    root: &Path,
+    paths: &[String],
+) -> Result<Vec<(String, Have)>> {
     use std::os::unix::fs::PermissionsExt;
     let mut out: Vec<(String, Have)> = Vec::with_capacity(paths.len());
     let mut files = Vec::new();
     for p in paths {
         let full = root.join(p);
         let entry = match std::fs::symlink_metadata(&full) {
-            Err(_) => None,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e).with_context(|| format!("read {}", full.display())),
             Ok(m) if m.file_type().is_symlink() => {
                 let target = std::fs::read_link(&full)?;
-                Some(("120000".to_string(), hash_stdin(store, target.as_os_str().as_encoded_bytes())?))
+                Some((
+                    "120000".to_string(),
+                    hash_stdin(store, target.as_os_str().as_encoded_bytes())?,
+                ))
             }
             Ok(m) if m.is_file() => {
                 files.push(out.len());
-                Some(((if m.permissions().mode() & 0o111 != 0 { "100755" } else { "100644" }).to_string(), String::new()))
+                Some((
+                    (if m.permissions().mode() & 0o111 != 0 {
+                        "100755"
+                    } else {
+                        "100644"
+                    })
+                    .to_string(),
+                    String::new(),
+                ))
             }
             Ok(_) => None,
         };
@@ -125,11 +141,7 @@ pub(super) fn worktree_entries(store: &Git, root: &Path, paths: &[String]) -> Re
         Ok(ids)
     };
     for chunk in files.chunks(256) {
-        let ids = match hash(chunk) {
-            Ok(ids) => ids.into_iter().map(Some).collect::<Vec<_>>(),
-            // one of them went: read them one by one
-            Err(_) => chunk.iter().map(|&i| hash(&[i]).ok().map(|mut v| v.remove(0))).collect(),
-        };
+        let ids = hash(chunk)?.into_iter().map(Some).collect::<Vec<_>>();
         for (&i, id) in chunk.iter().zip(ids) {
             out[i].1 = id.map(|id| (out[i].1.take().unwrap().0, id));
         }
@@ -578,7 +590,25 @@ pub fn reset_to(clone: &Path, workspace_branch: &str, state: &str, at: &str) -> 
 /// reset the clone to the person's side ([`mirror`]): their checkout's content on the agent's
 /// paths, the branch at their tip (after a rebase, still on their commit). Returns the discarded
 /// snapshot.
-pub fn discard(source: &Path, clone: &Path, id: &str, n: &str, workspace_branch: &str) -> Result<String> {
+pub fn discard(
+    source: &Path,
+    clone: &Path,
+    id: &str,
+    n: &str,
+    workspace_branch: &str,
+) -> Result<String> {
+    discard_retained(source, clone, id, n, workspace_branch, |_| Ok(()))
+}
+
+/// Persist the Undo record after retaining the snapshot, before any destructive reset.
+pub(super) fn discard_retained(
+    source: &Path,
+    clone: &Path,
+    id: &str,
+    n: &str,
+    workspace_branch: &str,
+    retain: impl FnOnce(&str) -> Result<()>,
+) -> Result<String> {
     if clone.join(".git/rebase-merge").exists() || clone.join(".git/rebase-apply").exists() {
         bail!("a rebase is stopped in the workspace");
     }
@@ -591,10 +621,14 @@ pub fn discard(source: &Path, clone: &Path, id: &str, n: &str, workspace_branch:
     let mut c = src.cmd_write();
     c.args(["fetch", "-q", "--no-tags", "--no-write-fetch-head"])
         .arg(ws.view_dir())
-        .arg(format!("+refs/sill/discarding:{}", super::anchor_ref(id, &format!("discarded/{n}"))));
+        .arg(format!(
+            "+refs/sill/discarding:{}",
+            super::anchor_ref(id, &format!("discarded/{n}"))
+        ));
     ok(c, "keep the discarded work")?;
     drop(ws);
     let m = mirror(source, clone, workspace_branch)?;
+    retain(&snap)?;
     reset_to(clone, workspace_branch, &m.tree, &m.upstream)?;
     let ws = Git::open(clone)?;
     let mut c = ws.cmd_write();

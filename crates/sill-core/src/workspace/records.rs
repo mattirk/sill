@@ -1019,45 +1019,62 @@ pub fn discard<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
     const METHOD: &str = "_sill/workspaces.discard";
     let fingerprint = input(a)?;
     let _g = lock();
-    if h.db(|c| receipts(c)?.existing(&a.operation_id, METHOD, &fingerprint))?.is_some() {
+    if h.db(|c| receipts(c)?.existing(&a.operation_id, METHOD, &fingerprint))?
+        .is_some()
+    {
         let r = h.db(|c| load(c, &a.workspace_id))?;
         return changed(h, r.as_ref(), Some(&a.operation_id), None);
     }
-    let mut r = settle_session(h, get_row(h, &a.workspace_id)?)?.ok_or_else(|| not_found("workspace"))?;
+    let mut r =
+        settle_session(h, get_row(h, &a.workspace_id)?)?.ok_or_else(|| not_found("workspace"))?;
     if h.busy(&r.session_id) {
-        return Err(refuse("writer_active", "The agent is working; discard after its turn.", vec![]));
+        return Err(refuse(
+            "writer_active",
+            "The agent is working; discard after its turn.",
+            vec![],
+        ));
     }
     if rebasing(&r.path) {
-        return Err(refuse("rebase_in_progress", "A rebase is stopped in the workspace: finish it there or abort it first.", conflicted(&r.path)));
+        return Err(refuse(
+            "rebase_in_progress",
+            "A rebase is stopped in the workspace: finish it there or abort it first.",
+            conflicted(&r.path),
+        ));
     }
     let now_rev = super::revision(&r.path, &r.branch)?;
     if now_rev.tip != a.revision.tip || now_rev.worktree != a.revision.worktree {
-        return Err(refuse("stale_revision", "The workspace changed since you looked; look again at what would be discarded.", vec![]));
+        return Err(refuse(
+            "stale_revision",
+            "The workspace changed since you looked; look again at what would be discarded.",
+            vec![],
+        ));
     }
     h.db(|c| receipts(c)?.begin(&a.operation_id, METHOD, &fingerprint))?;
-    let n = (r.discards + 1).to_string();
-    let kept = match flow::discard(&r.source, &r.path, &r.id, &n, &r.branch) {
-        Ok(k) => k,
-        Err(e) => {
-            let _ = h.db(|c| receipts(c)?.finish(&a.operation_id, None, Some("operation_failed")));
-            return Err(e);
-        }
-    };
-    let d = Discard {
-        id: format!("wsd-{}", crate::store::new_id()),
-        workspace_id: r.id.clone(),
-        session_id: r.session_id.clone(),
-        name: r.name.clone(),
-        source: r.source.clone(),
-        branch: r.branch.clone(),
-        snapshot: kept,
-        anchor: super::anchor_ref(&r.id, &format!("discarded/{n}")),
-        until: h.now() + RETENTION,
-        created_at: h.now(),
-    };
-    r.discards += 1;
-    r.updated_at = h.now();
-    h.db(|c| {
+    // Unique anchors cannot overwrite a snapshot retained by a failed earlier attempt.
+    let n = crate::store::new_id();
+    let mut discarded = None;
+    flow::discard_retained(
+        &r.source.clone(),
+        &r.path.clone(),
+        &r.id.clone(),
+        &n,
+        &r.branch.clone(),
+        |kept| {
+            let d = Discard {
+                id: format!("wsd-{}", crate::store::new_id()),
+                workspace_id: r.id.clone(),
+                session_id: r.session_id.clone(),
+                name: r.name.clone(),
+                source: r.source.clone(),
+                branch: r.branch.clone(),
+                snapshot: kept.to_string(),
+                anchor: super::anchor_ref(&r.id, &format!("discarded/{n}")),
+                until: h.now() + RETENTION,
+                created_at: h.now(),
+            };
+            r.discards += 1;
+            r.updated_at = h.now();
+            h.db(|c| {
         let tx = c.unchecked_transaction()?;
         save(c, &r)?;
         c.execute(
@@ -1065,12 +1082,26 @@ pub fn discard<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
             params![d.id, d.workspace_id, d.session_id, d.name, bytes(&d.source), d.branch, d.snapshot, d.anchor, d.until, d.created_at],
         )?;
         settle_notices(c, &d.workspace_id)?;
-        receipts(c)?.finish(&a.operation_id, None, None)?;
+        intent(c, &key(&a.operation_id), &r.id, "discard", &json!({"snapshot": kept, "anchor": d.anchor}), h.now())?;
         tx.commit()?;
         Ok(())
     })?;
+            discarded = Some(d);
+            Ok(())
+        },
+    )?;
+    h.db(|c| {
+        settle(c, &key(&a.operation_id), "done", "")?;
+        receipts(c)?.finish(&a.operation_id, None, None)
+    })?;
+    let d = discarded.context("discard snapshot was not retained")?;
     let r = settle_result(h, r)?;
-    changed(h, r.as_ref(), Some(&a.operation_id), Some(discard_record(&d)))
+    changed(
+        h,
+        r.as_ref(),
+        Some(&a.operation_id),
+        Some(discard_record(&d)),
+    )
 }
 
 /// Undo a Discard: the work back into its workspace when nothing happened there since, or into a
@@ -1080,29 +1111,69 @@ pub fn undo<H: Host>(h: &H, a: &api::Undo) -> Result<api::Changed> {
     let fingerprint = input(a)?;
     let _g = lock();
     let d = h
-        .db(|c| Ok(c.query_row(&format!("SELECT {DISCARD_COLUMNS} FROM workspace_discards WHERE id=?1"), [&a.discard_id], discard_row).optional()?))?
+        .db(|c| {
+            Ok(c.query_row(
+                &format!("SELECT {DISCARD_COLUMNS} FROM workspace_discards WHERE id=?1"),
+                [&a.discard_id],
+                discard_row,
+            )
+            .optional()?)
+        })?
         .ok_or_else(|| not_found("discarded work"))?;
-    if h.db(|c| receipts(c)?.existing(&a.operation_id, METHOD, &fingerprint))?.is_some() {
+    if h.db(|c| receipts(c)?.existing(&a.operation_id, METHOD, &fingerprint))?
+        .is_some()
+    {
         let r = h.db(|c| load(c, &d.workspace_id))?;
         return changed(h, r.as_ref(), Some(&a.operation_id), None);
     }
     if h.now() > d.until {
-        return Err(refuse("retention_expired", "The discarded work is no longer kept.", vec![]));
+        return Err(refuse(
+            "retention_expired",
+            "The discarded work is no longer kept.",
+            vec![],
+        ));
     }
-    let existing = h.db(|c| load(c, &d.workspace_id))?.filter(|r| r.path.exists());
+    let existing = h
+        .db(|c| load(c, &d.workspace_id))?
+        .filter(|r| r.path.exists());
     let r = match existing {
         Some(r) => {
             if h.busy(&r.session_id) {
-                return Err(refuse("writer_active", "The agent is working; undo after its turn.", vec![]));
+                return Err(refuse(
+                    "writer_active",
+                    "The agent is working; undo after its turn.",
+                    vec![],
+                ));
             }
             h.db(|c| receipts(c)?.begin(&a.operation_id, METHOD, &fingerprint))?;
             if !flow::undo(&r.source, &r.path, &r.branch, &d.snapshot)? {
                 let _ = h.db(|c| receipts(c)?.finish(&a.operation_id, None, Some("invalid_state")));
-                return Err(refuse("changed_since", "The workspace has new work since the Discard; apply or discard it first.", vec![]));
+                return Err(refuse(
+                    "changed_since",
+                    "The workspace has new work since the Discard; apply or discard it first.",
+                    vec![],
+                ));
             }
             r
         }
         None => {
+            if h.busy(&d.session_id) {
+                return Err(refuse(
+                    "writer_active",
+                    "The agent is working; undo after its turn.",
+                    vec![],
+                ));
+            }
+            if h.db(|c| of_session(c, &d.session_id))?
+                .iter()
+                .any(|r| r.source == d.source)
+            {
+                return Err(refuse(
+                    "changed_since",
+                    "This session already has a workspace for this repository; its newer work must be settled before Undo.",
+                    vec![],
+                ));
+            }
             // its folder went: a workspace of its own, a result for the person to decide on
             let src = match super::inspect(&d.source)? {
                 Ok(s) => s,
