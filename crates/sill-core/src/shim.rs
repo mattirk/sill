@@ -15,6 +15,34 @@ pub struct Control {
     writer: UnixStream,
 }
 
+/// A managed process as the shim reports it (docs/tasks.md §2.4).
+#[derive(Debug, Clone, Deserialize)]
+pub struct Proc {
+    pub name: String,
+    pub argv: Vec<String>,
+    pub cwd: PathBuf,
+    pub port: Option<u16>,
+    pub pid: u32,
+    /// Unix seconds.
+    pub started: u64,
+    /// `"running"` | `"stopped"` | `{"exited": code}`.
+    pub state: serde_json::Value,
+    pub last_line: String,
+}
+
+impl Proc {
+    pub fn running(&self) -> bool {
+        self.state.as_str() == Some("running")
+    }
+    /// The exit code of one that ended on its own.
+    pub fn exit_code(&self) -> Option<i64> {
+        self.state.get("exited").and_then(|v| v.as_i64())
+    }
+    pub fn failed(&self) -> bool {
+        self.exit_code().is_some_and(|c| c != 0)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Status {
     pub running: bool,
@@ -129,6 +157,33 @@ impl Control {
 
     pub fn write_file(&mut self, path: &Path, content: &str) -> Result<()> {
         self.call(json!({ "op": "write_file", "path": path, "content": content }))?;
+        Ok(())
+    }
+
+    // --- managed processes (docs/tasks.md §2.4)
+
+    pub fn proc_list(&mut self) -> Result<Vec<Proc>> {
+        let r = self.call(json!({ "op": "proc_list" }))?;
+        Ok(serde_json::from_value(r.get("procs").cloned().unwrap_or_default())?)
+    }
+
+    pub fn proc_tail(&mut self, name: &str, lines: usize) -> Result<String> {
+        let r = self.call(json!({ "op": "proc_tail", "name": name, "lines": lines }))?;
+        Ok(r.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string())
+    }
+
+    pub fn proc_stop(&mut self, name: &str) -> Result<()> {
+        self.call(json!({ "op": "proc_stop", "name": name }))?;
+        Ok(())
+    }
+
+    pub fn proc_stop_all(&mut self) -> Result<usize> {
+        let r = self.call(json!({ "op": "proc_stop_all" }))?;
+        Ok(r.get("stopped").and_then(|v| v.as_u64()).unwrap_or(0) as usize)
+    }
+
+    pub fn proc_dismiss(&mut self, name: &str) -> Result<()> {
+        self.call(json!({ "op": "proc_dismiss", "name": name }))?;
         Ok(())
     }
 }

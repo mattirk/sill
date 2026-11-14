@@ -264,7 +264,8 @@ impl JailSpec {
         let home = self.home.to_string_lossy().into_owned();
         env.insert(
             "PATH".into(),
-            format!("{home}/.local/bin:{home}/.cargo/bin:/usr/local/bin:/usr/bin:/bin"),
+            // /.sill/bin: `sill-proc` (docs/tasks.md §2.4), the shim under that name
+            format!("/.sill/bin:{home}/.local/bin:{home}/.cargo/bin:/usr/local/bin:/usr/bin:/bin"),
         );
         env.insert("HOME".into(), home.clone());
         env.insert("USER".into(), self.user.clone());

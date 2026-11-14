@@ -587,7 +587,8 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
     let mut spec = build_spec(jail, command)?;
     let idle = spec.policy.limits.agent_idle_minutes as u64 * 60;
     spec.command.extend(["--agent-idle".into(), idle.to_string().into()]);
-    spec.extra_args = vec!["--ro-bind".into(), shim_bin.into(), "/.sill/shim".into()];
+    // the shim, and the same binary as `sill-proc` on the jail's PATH (docs/tasks.md §2.4)
+    spec.extra_args = vec!["--ro-bind".into(), shim_bin.clone().into(), "/.sill/shim".into(), "--ro-bind".into(), shim_bin.into(), "/.sill/bin/sill-proc".into()];
 
     let shim_sock = rt.join("shim.sock");
     let proxy_sock = rt.join("proxy.sock");
@@ -798,7 +799,7 @@ fn build_spec(a: JailArgs, command: Vec<OsString>) -> Result<JailSpec> {
     };
     let mut extra_args = vec![];
     if let Some(shim) = &a.shim_bin {
-        extra_args.extend(["--ro-bind".into(), shim.clone().into(), "/.sill/shim".into()]);
+        extra_args.extend(["--ro-bind".into(), shim.clone().into(), "/.sill/shim".into(), "--ro-bind".into(), shim.clone().into(), "/.sill/bin/sill-proc".into()]);
     }
     let mut binds = Vec::new();
     for b in &a.binds {

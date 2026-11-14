@@ -1802,6 +1802,10 @@ impl SessionView {
             let list: Vec<String> = files.iter().map(|p| p.display().to_string()).collect();
             out.push_str(&format!("[Pinned files — the person keeps these at hand: {}]\n", list.join(", ")));
         }
+        if !dirs.is_empty() {
+            // managed processes (docs/tasks.md §2.4): where a dev server would be started
+            out.push_str("[A command that must keep running after your turn (a dev server, a watcher): `sill-proc start --name NAME [--port PORT] -- COMMAND…`; `sill-proc list|tail NAME|stop NAME`. A background `&` dies with you.]\n");
+        }
         if !out.is_empty() {
             out.push('\n');
         }

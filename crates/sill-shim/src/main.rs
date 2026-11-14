@@ -13,6 +13,11 @@
 //!   away and come back without the agent noticing.
 //!
 //! Plain std threads: the shim has nothing to do but wait on file descriptors.
+//!
+//! The same binary is `sill-proc` inside the jail (docs/tasks.md §2.4): run under that name (or
+//! as `sill-shim proc …`) it is the client of the managed-process service in [`procs`].
+
+mod procs;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
@@ -50,6 +55,12 @@ enum Request {
     ReadFile { path: PathBuf },
     /// Write a file in the jail (merged view, recorded by the overlay).
     WriteFile { path: PathBuf, content: String },
+    /// Managed processes (docs/tasks.md §2.4): what the jail's `sill-proc` can do, for the shelf.
+    ProcList,
+    ProcTail { name: String, #[serde(default = "default_lines")] lines: usize },
+    ProcStop { name: String },
+    ProcStopAll,
+    ProcDismiss { name: String },
     /// Open a pty inside the jail and run `argv` on it (the person's shell, SPEC §3.1). The reply
     /// line carries the pty master as an SCM_RIGHTS fd, so the client must read it with recvmsg.
     OpenPty {
@@ -74,6 +85,9 @@ fn default_rows() -> u16 {
 fn default_grace() -> u64 {
     5000
 }
+fn default_lines() -> usize {
+    50
+}
 
 #[derive(Serialize)]
 struct Reply {
@@ -94,6 +108,16 @@ impl Reply {
     }
     fn err(e: impl std::fmt::Display) -> Self {
         Reply { ok: false, error: Some(e.to_string()), data: Default::default() }
+    }
+    /// A reply object from the process service, as is.
+    fn from_value(v: serde_json::Value) -> Self {
+        let mut data = match v {
+            serde_json::Value::Object(m) => m,
+            _ => Default::default(),
+        };
+        let ok = data.remove("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+        let error = data.remove("error").and_then(|v| v.as_str().map(str::to_string));
+        Reply { ok, error, data }
     }
 }
 
@@ -123,6 +147,14 @@ type Shared = Arc<(Mutex<State>, Condvar)>;
 
 fn main() -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // `sill-proc …` (the binary under that name in the jail) or `sill-shim proc …`: the client
+    let me = std::env::args().next().unwrap_or_default();
+    if Path::new(&me).file_name().and_then(|n| n.to_str()) == Some("sill-proc") {
+        std::process::exit(procs::cli(args));
+    }
+    if args.first().map(String::as_str) == Some("proc") {
+        std::process::exit(procs::cli(args.split_off(1)));
+    }
     // --forward 127.0.0.1:3128=/.sill/proxy.sock : TCP → Unix forwarder for the session proxy (SPEC §4.8)
     while let Some(i) = args.iter().position(|a| a == "--forward") {
         if i + 1 >= args.len() {
@@ -167,6 +199,16 @@ fn main() -> Result<()> {
     eprintln!("sill-shim: ready (pid {})", std::process::id());
 
     let shared: Shared = Arc::new((Mutex::new(State::default()), Condvar::new()));
+    // the managed-process service and its door for the jail
+    let procs = procs::Procs::default();
+    {
+        let p = procs.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = p.serve(&procs::socket_path()) {
+                eprintln!("sill-shim: process service: {e:#}");
+            }
+        });
+    }
     if let Some(secs) = agent_idle.filter(|s| *s > 0) {
         let shared = shared.clone();
         std::thread::spawn(move || idle_monitor(shared, std::time::Duration::from_secs(secs)));
@@ -189,8 +231,9 @@ fn main() -> Result<()> {
             }
         };
         let shared = shared.clone();
+        let procs = procs.clone();
         std::thread::spawn(move || {
-            if let Err(e) = handle_connection(conn, shared) {
+            if let Err(e) = handle_connection(conn, shared, procs) {
                 eprintln!("sill-shim: connection: {e:#}");
             }
         });
@@ -198,13 +241,13 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn handle_connection(conn: UnixStream, shared: Shared) -> Result<()> {
+fn handle_connection(conn: UnixStream, shared: Shared, procs: procs::Procs) -> Result<()> {
     let mut reader = BufReader::new(conn.try_clone()?);
     let mut hello = String::new();
     reader.read_line(&mut hello)?;
     let hello: Hello = serde_json::from_str(hello.trim()).context("hello line")?;
     match hello.role.as_str() {
-        "control" => control_loop(reader, conn, shared),
+        "control" => control_loop(reader, conn, shared, procs),
         "agent" => agent_relay(reader, conn, shared),
         other => bail!("unknown role {other}"),
     }
@@ -212,7 +255,7 @@ fn handle_connection(conn: UnixStream, shared: Shared) -> Result<()> {
 
 // --- control -------------------------------------------------------------------------------------
 
-fn control_loop(reader: BufReader<UnixStream>, mut writer: UnixStream, shared: Shared) -> Result<()> {
+fn control_loop(reader: BufReader<UnixStream>, mut writer: UnixStream, shared: Shared, procs: procs::Procs) -> Result<()> {
     for line in reader.lines() {
         let line = line?;
         if line.trim().is_empty() {
@@ -242,7 +285,7 @@ fn control_loop(reader: BufReader<UnixStream>, mut writer: UnixStream, shared: S
             }
             continue;
         }
-        let reply = handle_request(req, &shared);
+        let reply = handle_request(req, &shared, &procs);
         let mut out = serde_json::to_string(&reply)?;
         out.push('\n');
         writer.write_all(out.as_bytes())?;
@@ -304,8 +347,13 @@ fn open_pty(argv: Vec<String>, env: BTreeMap<String, String>, cwd: Option<PathBu
     Ok((master, pid))
 }
 
-fn handle_request(req: Request, shared: &Shared) -> Reply {
+fn handle_request(req: Request, shared: &Shared, procs: &procs::Procs) -> Reply {
     match req {
+        Request::ProcList => Reply::from_value(procs.handle(procs::Op::List)),
+        Request::ProcTail { name, lines } => Reply::from_value(procs.handle(procs::Op::Tail { name, lines })),
+        Request::ProcStop { name } => Reply::from_value(procs.handle(procs::Op::Stop { name })),
+        Request::ProcStopAll => Reply::from_value(procs.handle(procs::Op::StopAll)),
+        Request::ProcDismiss { name } => Reply::from_value(procs.handle(procs::Op::Dismiss { name })),
         Request::Spawn { argv, env, cwd } => match spawn_agent(argv, env, cwd, shared) {
             Ok(pid) => Reply::ok().with("pid", pid),
             Err(e) => Reply::err(format!("{e:#}")),
