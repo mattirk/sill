@@ -315,7 +315,7 @@ impl SessionView {
         // the host shell: the same kind of pane, marked as host above it
         let (host_term, host_scroll) = Self::host_terminal_pane();
         let host_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        let host_caption = gtk::Label::new(Some("host · outside the jail · nothing here is recorded"));
+        let host_caption = gtk::Label::new(Some("host · outside the jail"));
         host_caption.add_css_class("sill-host-caption");
         host_caption.set_xalign(0.0);
         host_box.append(&host_caption);

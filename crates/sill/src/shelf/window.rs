@@ -375,7 +375,13 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
                         return glib::Propagation::Stop;
                     }
                     gdk::Key::F | gdk::Key::f => {
-                        if s.tree.root.is_visible() { s.close_tree() } else { s.toggle_tree(None) }
+                        // the session's first pinned folder, scoped (as its chip does); else everything
+                        if s.tree.root.is_visible() {
+                            s.close_tree()
+                        } else {
+                            let pinned = s.tabs.selected().and_then(|id| s.store.pins(&id).ok()).and_then(|pins| pins.into_iter().find(|p| p.is_dir()));
+                            s.toggle_tree(pinned)
+                        }
                         return glib::Propagation::Stop;
                     }
                     gdk::Key::T | gdk::Key::t => {
