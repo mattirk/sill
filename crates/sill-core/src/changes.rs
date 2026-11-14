@@ -102,10 +102,35 @@ pub fn ghost_due(changes: &[Change], now: std::time::SystemTime, after: std::tim
 
 static GIT_VIEWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// A repository's index, or `None` when it has none. In a folder of the Mac shared into its VM
+/// (virtiofs), the name stays bound to the old file for about a second after git there replaced
+/// the index, and opening it fails as if there were none (seen 2026-11-12: 90 of 100 reads while
+/// the Mac's git kept refreshing). Listing the directory looks the name up afresh: only when the
+/// listing has no index either is there none.
+fn read_index(gitdir: &Path) -> Result<Option<Vec<u8>>> {
+    let path = gitdir.join("index");
+    for attempt in 0..5 {
+        match std::fs::read(&path) {
+            Ok(bytes) => return Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let listed = std::fs::read_dir(gitdir)?
+                    .filter_map(|entry| entry.ok())
+                    .any(|entry| entry.file_name() == "index");
+                if !listed {
+                    return Ok(None);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20 * (attempt + 1)));
+            }
+            Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+        }
+    }
+    bail!("{}: the index is listed but cannot be read", path.display())
+}
+
 /// Git on a repository the agent can write — a pin is live, and a kept overlay copy is the agent's
 /// too. Its `.git/config` (hooks path, fsmonitor, filters, diff drivers, promisor remotes…) can make
 /// git run anything, so git runs here with `--git-dir` at a private directory of sill's: links to
-/// the real objects, refs, HEAD, index and packed-refs, and a config that keeps only the
+/// the real objects, refs and packed-refs, copies of HEAD and the index, and a config that keeps only the
 /// repository's format (version, object format, ref storage) — nothing that names a program.
 /// Hooks and fsmonitor are switched off on the command line as well, diffs never call out
 /// ([`Git::DIFF_SAFE`]), and nothing is written back (`--no-optional-locks`). Every host-side git
@@ -145,7 +170,7 @@ impl Git {
         std::fs::create_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
         std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
         let view = Git { work_tree: repo.to_path_buf(), dir, gitdir: gitdir.clone(), common: common.clone() };
-        for (base, name) in [(&common, "objects"), (&common, "refs"), (&common, "packed-refs"), (&common, "info"), (&common, "shallow"), (&common, "logs"), (&gitdir, "index")] {
+        for (base, name) in [(&common, "objects"), (&common, "refs"), (&common, "packed-refs"), (&common, "info"), (&common, "shallow"), (&common, "logs")] {
             let src = base.join(name);
             if src.exists() {
                 std::os::unix::fs::symlink(&src, view.dir.join(name))?;
@@ -154,6 +179,10 @@ impl Git {
         // HEAD is copied, not linked: git takes a symlinked HEAD for the ancient `HEAD -> refs/…`
         // form and refuses any other target
         std::fs::copy(gitdir.join("HEAD"), view.dir.join("HEAD")).with_context(|| format!("{}: no HEAD", repo.display()))?;
+        // the index is copied too: a missing one is an empty one to git, every file deleted
+        if let Some(index) = read_index(&gitdir)? {
+            std::fs::write(view.dir.join("index"), index)?;
+        }
         let original = std::fs::read_to_string(common.join("config")).unwrap_or_default();
         std::fs::write(view.dir.join("config"), format_config(&original))?;
         Ok(view)
@@ -655,6 +684,16 @@ pub fn home() -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_index_is_read_and_a_missing_one_is_none() {
+        let dir = std::env::temp_dir().join(format!("sill-index-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(super::read_index(&dir).unwrap(), None);
+        std::fs::write(dir.join("index"), b"DIRC").unwrap();
+        assert_eq!(super::read_index(&dir).unwrap(), Some(b"DIRC".to_vec()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     use super::*;
 
     /// A folder that is itself a repository answers for itself; a file, a missing path and a
