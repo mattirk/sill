@@ -181,10 +181,88 @@ pub fn install(
     )
 }
 
+/// A domain pattern for the compact Settings editor. Keep URLs and paths out of proxy rules.
+pub fn domain_pattern(input: &str) -> Option<String> {
+    let pattern = input.trim().to_ascii_lowercase();
+    let (host, port) = if let Some(rest) = pattern.strip_prefix('[') {
+        let (host, tail) = rest.split_once(']')?;
+        host.parse::<std::net::Ipv6Addr>().ok()?;
+        (
+            host,
+            if tail.is_empty() {
+                None
+            } else {
+                Some(tail.strip_prefix(':')?)
+            },
+        )
+    } else if pattern.parse::<std::net::IpAddr>().is_ok() {
+        (pattern.as_str(), None)
+    } else {
+        match pattern.rsplit_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (pattern.as_str(), None),
+        }
+    };
+    if let Some(port) = port {
+        if port != "*" && !port.parse::<u16>().is_ok_and(|p| p > 0) {
+            return None;
+        }
+    }
+    let host = host.strip_prefix("*.").unwrap_or(host);
+    let valid = host.parse::<std::net::IpAddr>().is_ok()
+        || (!host.is_empty()
+            && host.len() <= 253
+            && host.split('.').all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+                    && label
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            }));
+    valid.then_some(pattern)
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn domain_patterns_reject_urls_and_preserve_explicit_scope() {
+        for input in [
+            "example.com",
+            "*.example.com",
+            "example.com:8443",
+            "example.com:*",
+            "[::1]:8080",
+            "::1",
+        ] {
+            assert_eq!(domain_pattern(input).as_deref(), Some(input));
+        }
+        assert_eq!(
+            domain_pattern("  GOOGLE.com  ").as_deref(),
+            Some("google.com")
+        );
+        for input in [
+            "",
+            "https://google.com",
+            "google.com/path",
+            "a,b",
+            "*.com/",
+            "a:0",
+            "a:65536",
+            "a:",
+            "a:abc",
+            "bad\nname",
+            "-bad.com",
+            "a..com",
+            "*",
+        ] {
+            assert_eq!(domain_pattern(input), None, "{input}");
+        }
+    }
+
     #[test]
     fn an_install_receipt_is_read_without_replaying_the_mutation() {
         let (client, mut peer) = crate::fake::pair();

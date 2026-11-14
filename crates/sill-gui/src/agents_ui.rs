@@ -35,7 +35,8 @@ struct Editor {
     definition: Definition,
     command: String,
     env: iced::widget::text_editor::Content,
-    domains: String,
+    domain_input: String,
+    domain_error: Option<String>,
 }
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Filter {
@@ -67,7 +68,9 @@ pub enum Event {
     CloseEditor,
     Command(String),
     Env(iced::widget::text_editor::Action),
-    Domains(String),
+    DomainInput(String),
+    AddDomain,
+    RemoveDomain(String),
     Enabled(bool),
     Save,
     Icon(String, Option<Vec<u8>>),
@@ -85,6 +88,75 @@ fn control(label: &str, event: Event) -> Element<'_, Message> {
         msg(event),
     )
 }
+fn domain_controls(editor: &Editor) -> Element<'_, Message> {
+    let mut domains = column![
+        text("Allowed domains").size(style::SMALL),
+        text("Save applies to new sessions. Running sessions keep their access; policies may allow other domains.")
+            .size(style::SMALL).color(P.fg_dim),
+    ].spacing(4);
+    for domain in &editor.definition.domains {
+        domains = domains.push(
+            row![
+                text(domain).size(style::TEXT).width(Fill),
+                keys::press(
+                    button(crate::icons::glyph("minus", 13.0, style::alpha(P.fg, 0.7)))
+                        .padding([6, 8])
+                        .style(style::quiet),
+                    msg(Event::RemoveDomain(domain.clone())),
+                ),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
+    }
+    if editor.definition.domains.is_empty() {
+        domains = domains.push(text("No domains added").size(style::SMALL).color(P.fg_dim));
+    }
+    let pattern = agents::domain_pattern(&editor.domain_input);
+    let duplicate = pattern.as_ref().is_some_and(|domain| {
+        editor
+            .definition
+            .domains
+            .iter()
+            .any(|d| d.eq_ignore_ascii_case(domain))
+    });
+    let can_add = pattern.is_some() && !duplicate;
+    let mut input = text_input("example.com or *.example.com", &editor.domain_input)
+        .on_input(|s| msg(Event::DomainInput(s)))
+        .padding(7)
+        .size(style::SMALL);
+    if can_add {
+        input = input.on_submit(msg(Event::AddDomain));
+    }
+    domains = domains.push(
+        row![
+            input,
+            keys::press_maybe(
+                button(text("Add").size(style::SMALL))
+                    .padding([6, 10])
+                    .style(style::quiet),
+                can_add.then(|| msg(Event::AddDomain))
+            ),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    );
+    if let Some(error) = &editor.domain_error {
+        domains = domains.push(text(error).size(style::SMALL).color(P.error));
+    } else if !editor.domain_input.trim().is_empty() && !can_add {
+        domains = domains.push(
+            text(if duplicate {
+                "Already in the list"
+            } else {
+                "Use a domain, optionally with :port; leave out https:// and paths"
+            })
+            .size(style::SMALL)
+            .color(P.fg_dim),
+        );
+    }
+    domains.into()
+}
+
 impl App {
     pub fn agents_load(&mut self, refresh: bool) -> Task<Message> {
         if self.agents_page.loading {
@@ -220,7 +292,8 @@ impl App {
                                 .collect::<Vec<_>>()
                                 .join("\n"),
                         ),
-                        domains: d.domains.join(", "),
+                        domain_input: String::new(),
+                        domain_error: None,
                         definition: d,
                     });
                 }
@@ -235,9 +308,34 @@ impl App {
                     e.env.perform(s);
                 }
             }
-            Event::Domains(s) => {
+            Event::DomainInput(s) => {
                 if let Some(e) = &mut p.editor {
-                    e.domains = s;
+                    e.domain_input = s;
+                    e.domain_error = None;
+                }
+            }
+            Event::AddDomain => {
+                if let Some(e) = &mut p.editor {
+                    let Some(domain) = agents::domain_pattern(&e.domain_input) else {
+                        e.domain_error = Some("Use a domain such as example.com or *.example.com, without https:// or a path".into());
+                        return Task::none();
+                    };
+                    if e.definition
+                        .domains
+                        .iter()
+                        .any(|d| d.eq_ignore_ascii_case(&domain))
+                    {
+                        e.domain_error = Some("Already in the list".into());
+                        return Task::none();
+                    }
+                    e.definition.domains.push(domain);
+                    e.domain_input.clear();
+                    e.domain_error = None;
+                }
+            }
+            Event::RemoveDomain(domain) => {
+                if let Some(e) = &mut p.editor {
+                    e.definition.domains.retain(|d| d != &domain);
                 }
             }
             Event::Enabled(v) => {
@@ -267,13 +365,10 @@ impl App {
                     env.insert(k.trim().into(), v.into());
                 }
                 definition.env = env;
-                definition.domains = editor
-                    .domains
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned)
-                    .collect();
+                if !editor.domain_input.trim().is_empty() {
+                    p.note = Some("Add the typed domain or clear it before saving.".into());
+                    return Task::none();
+                }
                 let id = editor.id.clone();
                 return self.agent_call(
                     id,
@@ -544,10 +639,7 @@ impl App {
                         .on_action(|a| msg(Event::Env(a)))
                         .height(100)
                         .padding(7),
-                    text("Proxy domains (comma separated)").size(style::SMALL),
-                    text_input("example.com, api.example.com", &editor.domains)
-                        .on_input(|s| msg(Event::Domains(s)))
-                        .padding(7),
+                    domain_controls(editor),
                     toggler(editor.definition.enabled)
                         .label("Offer in the new session menu")
                         .on_toggle(|v| msg(Event::Enabled(v))),
@@ -578,6 +670,91 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn allowed_domains_use_the_agent_save_and_keep_failed_edits() {
+        use crate::tests::{connector, daemon, settle_task};
+        use serde_json::json;
+        let (mut app, _) = App::new(true, None);
+        let definition: Definition = serde_json::from_value(json!({
+            "id":"codex", "name":"Codex", "command":["codex-acp"],
+            "env":{"KEEP":"yes"}, "domains":["openai.com", "google.com"]
+        }))
+        .unwrap();
+        app.agents_page.editor = Some(Editor {
+            id: "codex-acp".into(),
+            command: "[\"codex-acp\"]".into(),
+            env: iced::widget::text_editor::Content::with_text("KEEP=yes"),
+            domain_input: String::new(),
+            domain_error: None,
+            definition,
+        });
+        let _ = app.update(msg(Event::DomainInput("https://example.com/".into())));
+        let _ = app.update(msg(Event::AddDomain));
+        assert!(
+            app.agents_page
+                .editor
+                .as_ref()
+                .unwrap()
+                .domain_error
+                .is_some()
+        );
+        let _ = app.update(msg(Event::DomainInput("GOOGLE.com".into())));
+        let _ = app.update(msg(Event::AddDomain));
+        assert_eq!(
+            app.agents_page
+                .editor
+                .as_ref()
+                .unwrap()
+                .definition
+                .domains
+                .len(),
+            2
+        );
+        let _ = app.update(msg(Event::RemoveDomain("google.com".into())));
+        let _ = app.update(msg(Event::DomainInput("  *.Example.com:8443  ".into())));
+        let _ = app.update(msg(Event::AddDomain));
+        let editor = app.agents_page.editor.as_ref().unwrap();
+        assert_eq!(
+            editor.definition.domains,
+            ["openai.com", "*.example.com:8443"]
+        );
+        assert!(editor.domain_input.is_empty());
+
+        let (client, mut daemon) = daemon();
+        app.actions = Some(sill_client::actions::Actions::new(connector(vec![client])));
+        let worker = std::thread::spawn(move || {
+            let req = daemon.expect("_sill/agents.save");
+            assert_eq!(req["params"]["id"], "codex");
+            assert_eq!(
+                req["params"]["domains"],
+                json!(["openai.com", "*.example.com:8443"])
+            );
+            assert_eq!(req["params"]["env"], json!({"KEEP":"yes"}));
+            assert_eq!(req["params"]["command"], json!(["codex-acp"]));
+            daemon.refuse(&req, "permission_denied", "Cannot save");
+        });
+        // A typed domain must be added or cleared before Save can send anything.
+        let _ = app.update(msg(Event::DomainInput("pending.com".into())));
+        let _ = app.update(msg(Event::Save));
+        assert!(
+            app.agents_page
+                .note
+                .as_ref()
+                .unwrap()
+                .contains("Add the typed domain")
+        );
+        assert!(app.agents_page.busy.is_empty());
+        let _ = app.update(msg(Event::DomainInput(String::new())));
+        let task = app.update(msg(Event::Save));
+        settle_task(&mut app, task);
+        worker.join().unwrap();
+        assert!(app.agents_page.logs["codex-acp"].contains("Cannot save"));
+        assert_eq!(
+            app.agents_page.editor.as_ref().unwrap().definition.domains,
+            ["openai.com", "*.example.com:8443"]
+        );
+    }
+
     #[test]
     fn agents_navigation_returns_to_the_conversation_and_keeps_job_state() {
         let (mut app, _) = App::new(true, None);
@@ -657,7 +834,8 @@ mod tests {
                 "has_icon":false,"builtin_agent_id":null,"newer":null
             })).unwrap();
             let definition = serde_json::from_value(serde_json::json!({
-                "id":id,"name":name,"command":["agent", "--acp"],"env":{"API_KEY":"example"}
+                "id":id,"name":name,"command":["agent", "--acp"],"env":{"API_KEY":"example"},
+                "domains":["openai.com", "github.com", "google.com"]
             }))
             .unwrap();
             app.agents_page.entries.push(Entry {
