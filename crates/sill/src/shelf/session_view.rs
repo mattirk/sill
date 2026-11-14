@@ -468,6 +468,7 @@ impl SessionView {
         prompt_queue.add_css_class("sill-prompt-queue");
         prompt_queue.set_visible(false);
         let queue_scroll = gtk::ScrolledWindow::new();
+        queue_scroll.add_css_class("sill-prompt-queue-boundary");
         queue_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
         queue_scroll.set_max_content_height(100);
         queue_scroll.set_propagate_natural_height(true);

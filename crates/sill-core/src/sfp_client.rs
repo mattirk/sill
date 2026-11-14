@@ -67,14 +67,16 @@ impl View {
         match notification.event {
             Event::ItemCreated { item } => {
                 if self.items.contains_key(&item.item_id) { bail!("duplicate SFP item identity"); }
-                events.extend(render_item(&item, &self.attachments_of(&item)));
+                if !self.is_unsent_user(&item) {
+                    events.extend(render_item(&item, &self.attachments_of(&item)));
+                }
                 self.items.insert(item.item_id.clone(), item);
             }
             Event::ItemTextAppended { item_id, block_id, text } => {
                 // The existing renderer appends text at its visual tail. Queued user items and
                 // background output can put a newer item after this target: reconstruct then
                 // so stable SFP order survives without appending to the wrong visual message.
-                let at_tail = self.items.values().max_by_key(|item|item.created_seq.parse::<u64>().unwrap_or_default()).is_some_and(|item|item.item_id == item_id);
+                let at_tail = self.items.values().filter(|item| !self.is_unsent_user(item)).max_by_key(|item|item.created_seq.parse::<u64>().unwrap_or_default()).is_some_and(|item|item.item_id == item_id);
                 let item = self.items.get_mut(&item_id).context("SFP append target missing")?;
                 let content = item.content.iter_mut().find(|b| b.block_id == block_id).context("SFP text block missing")?;
                 content.text.as_mut().context("SFP append target is not text")?.push_str(&text);
@@ -121,6 +123,7 @@ impl View {
                 self.questions.insert(question.question_id.clone(), question);
             }
             Event::SubmissionUpdated { submission } => {
+                let became_dispatched = submission.delivery != "queued" && self.submissions.get(&submission.submission_id).is_some_and(|s| s.delivery == "queued");
                 let was_held = self.submissions.get(&submission.submission_id).is_some_and(|s| s.held && s.outcome == "pending");
                 let new_queued = !self.submissions.contains_key(&submission.submission_id) && submission.delivery == "queued";
                 // the queue keeps its order: a held prompt ahead holds everything behind it, which
@@ -144,15 +147,19 @@ impl View {
                     events.push(wire::Event::Other(format!("sill:held-resolved:{}", serde_json::json!({"submission_id": submission.submission_id, "status": status}))));
                 }
                 if submission.insertion == "unknown" || submission.outcome == "unknown" { events.push(wire::Event::Note("Prompt outcome is uncertain; it will not be resent automatically".into())); }
-                self.submissions.insert(submission.submission_id.clone(),submission);
-                events.push(self.queue_event());
+                self.submissions.insert(submission.submission_id.clone(),submission.clone());
+                if became_dispatched && self.items.values().any(|i| i.submission_id.as_ref() == Some(&submission.submission_id)) {
+                    events.extend(self.render_snapshot());
+                } else {
+                    events.push(self.queue_event());
+                }
             }
         }
         self.seq = seq;
         Ok(events)
     }
     fn render_snapshot(&mut self) -> Vec<wire::Event> {
-        let mut items: Vec<&Item> = self.items.values().collect();
+        let mut items: Vec<&Item> = self.items.values().filter(|item| !self.is_unsent_user(item)).collect();
         items.sort_by_key(|item| item.created_seq.parse::<u64>().unwrap_or_default());
         // Leave trailing blocks in the active turn open in the renderer, so the next delta
         // continues that block rather than creating a second visual message after reconnect.
@@ -180,14 +187,17 @@ impl View {
         for question in questions { out.extend(self.render_question(&question)); }
         for submission in self.submissions.values() {
             if submission.held && submission.outcome == "pending" {
-                out.push(wire::Event::Note("Queued prompt is held until explicitly resumed".into()));
                 out.push(held_event(submission));
-            } else if submission.delivery == "queued" && submission.outcome == "pending" {
-                out.push(wire::Event::Note("Prompt queued until the agent is ready".into()));
             }
         }
         out.push(self.queue_event());
         out
+    }
+    /// Acceptance creates a user item immediately; show its text only after dispatch.
+    /// Cancelled unsent submissions remain hidden as well.
+    fn is_unsent_user(&self, item: &Item) -> bool {
+        item.kind == "user" && item.submission_id.as_ref()
+            .and_then(|id| self.submissions.get(id)).is_some_and(|s| s.delivery == "queued")
     }
     /// A complete replacement so reconnects also clear stale rows. Only submissions still
     /// known to be unsent have actions; dispatch removes the row before agent insertion.
@@ -533,6 +543,32 @@ mod tests {
         assert!(rows(view.accept(notification("4", Event::SubmissionUpdated { submission: second })).unwrap()).is_empty());
         assert!(rows(view.render_snapshot()).is_empty(), "reconnect clears stale rows");
         assert!(view.queued_submission_ids().is_empty(), "Stop never removes dispatched or already cancelled prompts");
+    }
+    #[test]
+    fn queued_text_waits_for_dispatch_and_snapshot_does_not_repeat_queue_notices() {
+        let mut view = View { session_id: "s".into(), subscription_id: "sub".into(), ..Default::default() };
+        let mut submission = Submission {
+            submission_id: "pending".into(), session_id: "s".into(), accepted_seq: "1".into(),
+            agent_generation_id: "g".into(), text: "waiting text".into(), attachments: vec![],
+            acceptance: "accepted".into(), delivery: "queued".into(), held: false,
+            hold_reason: None, insertion: "pending".into(), outcome: "pending".into(), reason: None,
+        };
+        view.accept(notification("1", Event::SubmissionUpdated { submission: submission.clone() })).unwrap();
+        let mut user = item();
+        user.kind = "user".into();
+        user.submission_id = Some("pending".into());
+        user.content = vec![Content::text("waiting text")];
+        let live = view.accept(notification("2", Event::ItemCreated { item: user })).unwrap();
+        assert!(live.is_empty(), "unsent text belongs only in the queue");
+        for _ in 0..3 {
+            let snapshot = view.render_snapshot();
+            assert!(replay_of(&snapshot)["entries"].as_array().unwrap().is_empty());
+            assert!(!snapshot.iter().any(|e| matches!(e, wire::Event::Note(n) if n.contains("queued"))));
+        }
+        submission.delivery = "direct".into();
+        let dispatched = view.accept(notification("3", Event::SubmissionUpdated { submission })).unwrap();
+        assert_eq!(replay_of(&dispatched)["entries"][0]["text"], "waiting text");
+        assert_eq!(replay_of(&view.render_snapshot())["entries"].as_array().unwrap().len(), 1);
     }
     #[test]
     fn missing_patch_target_requires_resynchronization() {

@@ -1531,6 +1531,7 @@ searchentry > image { -gtk-icon-size: 1.1em; }
 .sill-tree-panel row:hover .sill-pin:hover { opacity: 1; }
 /* attachments waiting above the prompt: small chips with a remove cross */
 .sill-attach-strip { padding: 4px 8px 0 8px; }
+.sill-prompt-queue-boundary { border-top: 1px solid alpha(@view_fg_color, 0.15); padding-top: 3px; }
 .sill-prompt-queue { font-size: 75%; }
 .sill-prompt-queue button { min-width: 16px; min-height: 16px; padding: 0; margin: 0; border-radius: 3px; }
 .sill-prompt-queue image { -gtk-icon-size: 10px; }
