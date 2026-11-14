@@ -17,6 +17,7 @@ fn record(store: &Store, s: sill_core::store::Session) -> Result<api::Session> {
                 Err(_) => true,
             }
         }),
+        name: store.session_name(&s.id),
         pins: store.pins(&s.id)?.iter().map(|p| api::HostPath::from_path(p)).collect(),
         session_id: s.id,
         agent: s.agent,
@@ -160,7 +161,7 @@ impl Hub {
                     if serde_json::to_vec(&a.change)?.len() > 1024 * 1024 {
                         return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Request, Some(1048576), "session update exceeds 1 MiB").into());
                     }
-                    let refresh = matches!(&a.change, api::Change::Title { .. } | api::Change::Summary { .. });
+                    let refresh = matches!(&a.change, api::Change::Name { .. } | api::Change::Title { .. } | api::Change::Summary { .. });
                     self.with_store(|store| {
                         let row = exact(store, &a.session_id)?;
                         if row.ghost && matches!(&a.change, api::Change::Summary { .. }) {
@@ -173,6 +174,13 @@ impl Hub {
                             return Err(Error::domain("gone", "session is being deleted").into());
                         }
                         match a.change {
+                            api::Change::Name { text } => {
+                                let text = text.trim();
+                                if text.is_empty() || text.chars().count() > 80 || text.chars().any(char::is_control) {
+                                    return Err(Error::invalid_params("name must contain 1–80 characters without control characters").into());
+                                }
+                                store.set_name(&a.session_id, text)?;
+                            }
                             api::Change::Title { text, kind } => store.set_title(&a.session_id, &text, &kind)?,
                             api::Change::Summary { text, kind } => store.set_summary(&a.session_id, &text, &kind)?,
                             api::Change::AutoAllow { enabled } => store.set_auto_allow(&a.session_id, enabled)?,

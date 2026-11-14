@@ -466,6 +466,23 @@
         {
           "additionalProperties": false,
           "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "const": "name",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
             "kind": {
               "type": "string"
             },
@@ -4368,6 +4385,14 @@
         },
         "memory_scope": {
           "type": "string"
+        },
+        "name": {
+          "default": null,
+          "description": "Human-editable session name, initially generated; independent of the summary title.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "pins": {
           "items": {

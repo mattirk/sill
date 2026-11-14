@@ -345,6 +345,7 @@ pub enum Answer {
 /// `summary_kind`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub enum SessionSet {
+    Name(String),
     Title { title: String, kind: String },
     AutoAllow(bool),
     Desktop(String),

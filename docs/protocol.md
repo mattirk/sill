@@ -673,3 +673,12 @@ The recorded development schema is refreshed for these additive methods. Identit
 `sfp/1-dev.3`; this is not the stable `sfp/1` cutover. See
 [travelling policies](travelling-policies.md) for command examples, implementation limits
 and remaining human acceptance.
+
+
+Session naming extension (2026-11-05): session administration records include optional `name`,
+the human-editable identity initially generated at creation. The existing `title` remains the
+descriptive summary title. `_sill/sessions.update` accepts `{ "type": "name", "text": "…" }`
+in its change field. The daemon trims names and accepts 1–80 characters without control
+characters. A name change does not alter `title`; it updates a known summary-signature footer.
+Older sessions without a preserved name return null. The exported schema includes this additive
+extension; clients default absent name fields to null.

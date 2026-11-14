@@ -184,6 +184,8 @@ impl Store {
             "CREATE TABLE IF NOT EXISTS pin_heads (session_id TEXT NOT NULL, repo TEXT NOT NULL, head TEXT NOT NULL, ts INTEGER NOT NULL,
                  PRIMARY KEY (session_id, repo))",
         )?;
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS session_names (session_id TEXT PRIMARY KEY, name TEXT NOT NULL);
+            INSERT OR IGNORE INTO session_names SELECT id, title FROM sessions WHERE title_kind = '';")?;
         Ok(Self { conn })
     }
 
@@ -300,7 +302,42 @@ impl Store {
             "INSERT INTO sessions (id, agent, title, created_at, last_used, acp_session_id, policy, agent_settings, ghost) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8)",
             params![s.id, s.agent, s.title, s.created_at, s.last_used, s.policy, serde_json::to_string(&s.agent_settings)?, ghost as i32],
         )?;
+        self.conn.execute("INSERT INTO session_names (session_id, name) VALUES (?1, ?2)", params![s.id, s.title])?;
         Ok(s)
+    }
+
+    /// The session name, initially generated and editable by the person.
+    pub fn session_name(&self, id: &str) -> Option<String> {
+        self.conn.query_row("SELECT name FROM session_names WHERE session_id = ?1", [id], |r| r.get(0)).ok()
+    }
+
+    /// Set the identity used for summary signatures; never replace the summary title.
+    pub fn set_name(&self, id: &str, name: &str) -> Result<()> {
+        let name = name.trim();
+        anyhow::ensure!(!name.is_empty() && name.chars().count() <= 80 && !name.chars().any(char::is_control), "name must contain 1–80 characters without control characters");
+        let previous = self.session_name(id);
+        self.conn.execute("INSERT INTO session_names (session_id, name) VALUES (?1, ?2) ON CONFLICT(session_id) DO UPDATE SET name = excluded.name", params![id, name])?;
+        // Keep a known signature current without modifying the summary's prose or title.
+        if let (Some(previous), Some(session)) = (previous, self.session_exact(id)?) {
+            let mut text = session.summary.clone();
+            for prefix in ["As summarized by ", "Original session: "] {
+                if let Some(body) = text.trim_end().strip_suffix(&format!("{prefix}{previous}")) {
+                    if body.is_empty() || body.ends_with('\n') { text = format!("{body}{prefix}{name}"); }
+                }
+            }
+            if text != session.summary {
+                self.conn.execute("UPDATE sessions SET summary = ?2 WHERE id = ?1", params![id, text])?;
+            }
+        }
+        Ok(())
+    }
+
+    fn signed_summary(&self, id: &str, text: &str, kind: &str) -> String {
+        let Some(name) = self.session_name(id) else { return text.to_owned() };
+        if text.trim().is_empty() || kind == "person" { return text.to_owned(); }
+        let signature = if kind == "agent" { format!("As summarized by {name}") } else { format!("Original session: {name}") };
+        if text.lines().any(|line| line.trim().eq_ignore_ascii_case(&signature)) { return text.to_owned(); }
+        format!("{}\n\n{signature}", text.trim_end())
     }
 
     pub fn set_acp_session_id(&self, id: &str, acp: &str) -> Result<()> {
@@ -322,6 +359,7 @@ impl Store {
 
     /// The session ended: when, and what came of it (docs/memory.md §2.2); `kind` is "agent" or "auto".
     pub fn end(&self, id: &str, summary: &str, kind: &str) -> Result<()> {
+        let summary = self.signed_summary(id, summary, kind);
         self.conn.execute("UPDATE sessions SET ended_at = ?2, summary = ?3, summary_kind = ?4 WHERE id = ?1", params![id, now(), summary, kind])?;
         Ok(())
     }
@@ -329,6 +367,7 @@ impl Store {
     /// The summary alone, the session open or not (docs/memory.md §2.5): the person's edit
     /// (`kind` "person") or a mid-session checkpoint by the agent ("agent"); the end replaces it.
     pub fn set_summary(&self, id: &str, summary: &str, kind: &str) -> Result<()> {
+        let summary = self.signed_summary(id, summary, kind);
         self.conn.execute("UPDATE sessions SET summary = ?2, summary_kind = ?3 WHERE id = ?1", params![id, summary, kind])?;
         Ok(())
     }
@@ -432,6 +471,7 @@ impl Store {
         self.conn.execute("DELETE FROM session_pins WHERE session_id = ?1", params![id])?;
         self.conn.execute("DELETE FROM pin_heads WHERE session_id = ?1", params![id])?;
         // its history rows stay (SPEC §3.6): what it did to the host outlives it
+        self.conn.execute("DELETE FROM session_names WHERE session_id = ?1", params![id])?;
         self.conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
         Ok(())
     }
@@ -801,6 +841,33 @@ mod tests {
     }
 
     #[test]
+    fn original_name_survives_renaming_and_reopen_without_duplicate_signatures() {
+        let dir = std::env::temp_dir().join(format!("sill-original-name-{}", std::process::id()));
+        let path = dir.join("store.db");
+        let store = Store::open(&path).unwrap();
+        let session = store.create("test", "default").unwrap();
+        store.set_title(&session.id, "A new title", "person").unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.session_name(&session.id).as_deref(), Some(session.title.as_str()));
+        store.set_summary(&session.id, "Work completed", "agent").unwrap();
+        let text = store.sessions().unwrap().into_iter().find(|s| s.id == session.id).unwrap().summary;
+        assert!(text.ends_with(&format!("As summarized by {}", session.title)));
+        store.set_summary(&session.id, &text, "agent").unwrap();
+        assert_eq!(store.sessions().unwrap().into_iter().find(|s| s.id == session.id).unwrap().summary, text);
+        store.set_name(&session.id, "human choice").unwrap();
+        let renamed = store.session_exact(&session.id).unwrap().unwrap();
+        assert_eq!(renamed.title, "A new title");
+        assert!(renamed.summary.ends_with("As summarized by human choice"));
+        assert_eq!(store.session_name(&session.id).as_deref(), Some("human choice"));
+        for invalid in ["", "  ", "two\nlines", "bad\tname"] { assert!(store.set_name(&session.id, invalid).is_err()); }
+        assert!(store.set_name(&session.id, &"a".repeat(81)).is_err());
+        store.delete(&session.id).unwrap();
+        assert_eq!(store.session_name(&session.id), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_session_ends_reopens_and_its_memory_goes_with_it() {
         let dir = std::env::temp_dir().join(format!("sill-store-memory-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -816,12 +883,13 @@ mod tests {
         store.end(&s.id, "fixed the proxy\nin proxy.rs", "agent").unwrap();
         let e = get(&s.id);
         assert!(e.ended_at.is_some());
-        assert_eq!((e.summary.as_str(), e.summary_kind.as_str()), ("fixed the proxy\nin proxy.rs", "agent"));
+        assert_eq!(e.summary, format!("fixed the proxy\nin proxy.rs\n\nAs summarized by {}", s.title));
+        assert_eq!(e.summary_kind, "agent");
         // reopened: open again, the summary stays until the next end replaces it
         store.reopen(&s.id).unwrap();
         let r = get(&s.id);
         assert!(r.ended_at.is_none());
-        assert_eq!(r.summary, "fixed the proxy\nin proxy.rs");
+        assert_eq!(r.summary, e.summary);
         // named by the person, then by the agent's summary: the last name wins
         store.set_title(&s.id, "my name", "person").unwrap();
         assert_eq!((get(&s.id).title.as_str(), get(&s.id).title_kind.as_str()), ("my name", "person"));

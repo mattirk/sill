@@ -42,6 +42,9 @@ pub struct Settings {
 pub struct Session {
     pub session_id: String,
     pub agent: String,
+    /// Human-editable session name, initially generated; independent of the summary title.
+    #[serde(default)]
+    pub name: Option<String>,
     pub title: String,
     pub title_kind: String,
     /// Unix seconds, encoded as decimal strings.
@@ -108,6 +111,7 @@ pub struct Update {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Change {
+    Name { text: String },
     Title { text: String, kind: String },
     AutoAllow { enabled: bool },
     Desktop { value: String },
@@ -155,6 +159,7 @@ impl From<crate::wire::SessionSet> for Change {
     fn from(s: crate::wire::SessionSet) -> Self {
         use crate::wire::SessionSet as S;
         match s {
+            S::Name(text) => Self::Name { text },
             S::Title { title, kind } => Self::Title { text: title, kind },
             S::AutoAllow(enabled) => Self::AutoAllow { enabled },
             S::Desktop(value) => Self::Desktop { value },
@@ -169,6 +174,7 @@ impl From<crate::wire::SessionSet> for Change {
 impl From<Change> for crate::wire::SessionSet {
     fn from(s: Change) -> Self {
         match s {
+            Change::Name { text } => Self::Name(text),
             Change::Title { text, kind } => Self::Title { title: text, kind },
             Change::AutoAllow { enabled } => Self::AutoAllow(enabled),
             Change::Desktop { value } => Self::Desktop(value),

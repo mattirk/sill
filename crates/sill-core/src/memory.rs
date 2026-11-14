@@ -17,6 +17,8 @@ use crate::store::{Session, Store};
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Facts {
     pub title: String,
+    #[serde(default, alias = "original_name")]
+    pub name: Option<String>,
     pub agent: String,
     pub created_at: i64,
     pub pins: Vec<PathBuf>,
@@ -32,6 +34,7 @@ pub struct Facts {
 pub fn collect(store: &Store, s: &Session, kept_dir: &Path) -> Facts {
     Facts {
         title: s.title.clone(),
+        name: store.session_name(&s.id),
         agent: s.agent.clone(),
         created_at: s.created_at,
         pins: store.pins(&s.id).unwrap_or_default(),
@@ -54,6 +57,9 @@ fn some(items: &[String], n: usize) -> String {
 /// The facts as one sentence each, shared by the prompt and the mechanical summary.
 fn fact_lines(f: &Facts, home: &Path) -> Vec<String> {
     let mut lines = Vec::new();
+    if let Some(name) = &f.name {
+        lines.push(format!("session name: {name}. End the summary with exactly: As summarized by {name}"));
+    }
     if !f.pins.is_empty() {
         lines.push(format!("pinned folders: {}", f.pins.iter().map(|p| tilde(p, home)).collect::<Vec<_>>().join(", ")));
     }
@@ -67,7 +73,7 @@ fn fact_lines(f: &Facts, home: &Path) -> Vec<String> {
 
 /// The ask shared by the end and a checkpoint: the summary, with the session's name on its first
 /// line (title.rs: the summary names the session; [`split_title`] takes it off again).
-const ASK: &str = "Write 5–15 lines for a future agent that opens these folders: what was asked, what was done and where (paths), decisions and why, what is unfinished, what not to try again. Plain text, no greeting, no questions — only that agent reads it. First line: `Title: ` and 2–5 words naming this session for a list of sessions (what it was about, not the folder).";
+const ASK: &str = "Write 5–15 lines for a future agent that opens these folders: what was asked, what was done and where (paths), decisions and why, what is unfinished, what not to try again. Plain text, no greeting, no questions — only that agent reads it. First line: `Title: ` and 2–5 words describing this session for a list of sessions (what it was about, not the folder). This is a summary title; it does not change the session name.";
 
 /// What the agent is asked as the session's last turn (docs/memory.md §2.2). The facts go with it
 /// so the summary names real places, not "the file I edited".
@@ -329,6 +335,7 @@ mod tests {
         let home = Path::new("/home/me");
         let f = Facts {
             title: "proxy allow button".into(),
+            name: None,
             agent: "claude".into(),
             created_at: 1_793_491_200,
             pins: vec![home.join("GIT/sill")],
