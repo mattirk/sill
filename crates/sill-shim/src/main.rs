@@ -222,6 +222,10 @@ fn main() -> Result<()> {
     if args.first().map(String::as_str) == Some("memory") {
         std::process::exit(memory_cli(&args[1..]));
     }
+    // CLOEXEC alone cannot prevent same-UID children stealing private descriptors with
+    // pidfd_getfd or ptrace. Protect the supervisor before any threads or children start.
+    rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
+        .context("protect shim descriptors")?;
     // --forward 127.0.0.1:3128=/.sill/proxy.sock : TCP → Unix forwarder for the session proxy (SPEC §4.8)
     while let Some(i) = args.iter().position(|a| a == "--forward") {
         if i + 1 >= args.len() {

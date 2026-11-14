@@ -740,14 +740,26 @@ fn serve_mac(dir: &Path, vm: &sill_vm::Vm) -> Result<(), String> {
 
 /// One request from the daemon: checked, done, answered (a JSON line, then the picture's bytes).
 fn answer_mac(stream: std::os::unix::net::UnixStream, secret: &str) -> Result<(), String> {
-    use std::io::{BufRead, Read, Write};
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-    let mut writer = stream.try_clone().map_err(|e| e.to_string())?;
-    let mut line = String::new();
-    std::io::BufReader::new(stream.take(MAC_REQUEST_MAX))
-        .read_line(&mut line)
-        .map_err(|e| e.to_string())?;
-    let (reply, picture) = match mac_request(&line, secret) {
+    use std::io::{Read, Write};
+    // Absolute deadlines stop slow senders/readers from retaining a worker indefinitely.
+    let deadline = std::time::Instant::now() + Duration::from_secs(25);
+    let read_until = std::time::Instant::now() + Duration::from_secs(5);
+    let mut stream = stream;
+    let mut line = Vec::new();
+    let mut chunk = [0; 4096];
+    loop {
+        let left = read_until.checked_duration_since(std::time::Instant::now())
+            .ok_or("Mac request timed out")?;
+        stream.set_read_timeout(Some(left)).map_err(|e| e.to_string())?;
+        let n = stream.read(&mut chunk).map_err(|e| e.to_string())?;
+        if n == 0 { return Err("incomplete Mac request".into()); }
+        let end = chunk[..n].iter().position(|b| *b == b'\n');
+        line.extend_from_slice(&chunk[..end.map_or(n, |i| i + 1)]);
+        if line.len() as u64 > MAC_REQUEST_MAX { return Err("Mac request too large".into()); }
+        if end.is_some() { break; }
+    }
+    let line = std::str::from_utf8(&line).map_err(|e| e.to_string())?;
+    let (reply, picture) = match mac_request(line, secret, deadline) {
         Ok(done) => done,
         Err(said) => (serde_json::json!({"error": said}), None),
     };
@@ -755,14 +767,22 @@ fn answer_mac(stream: std::os::unix::net::UnixStream, secret: &str) -> Result<()
     if let Some(bytes) = &picture {
         head["bytes"] = serde_json::json!(bytes.len());
     }
-    writeln!(writer, "{head}").map_err(|e| e.to_string())?;
-    if let Some(bytes) = picture {
-        writer.write_all(&bytes).map_err(|e| e.to_string())?;
+    let mut bytes = serde_json::to_vec(&head).map_err(|e| e.to_string())?;
+    bytes.push(b'\n');
+    if let Some(picture) = picture { bytes.extend_from_slice(&picture); }
+    let until = std::time::Instant::now() + Duration::from_secs(3);
+    let mut pending = bytes.as_slice();
+    while !pending.is_empty() {
+        let left = until.checked_duration_since(std::time::Instant::now()).ok_or("Mac reply timed out")?;
+        stream.set_write_timeout(Some(left)).map_err(|e| e.to_string())?;
+        let n = stream.write(pending).map_err(|e| e.to_string())?;
+        if n == 0 { return Err("Mac reply disconnected".into()); }
+        pending = &pending[n..];
     }
     Ok(())
 }
 
-fn mac_request(line: &str, secret: &str) -> Result<(serde_json::Value, Option<Vec<u8>>), String> {
+fn mac_request(line: &str, secret: &str, deadline: std::time::Instant) -> Result<(serde_json::Value, Option<Vec<u8>>), String> {
     use serde_json::{Value, json};
     let request: Value = serde_json::from_str(line).map_err(|_| "not a request".to_string())?;
     let given = request["token"].as_str().unwrap_or_default();
@@ -779,7 +799,7 @@ fn mac_request(line: &str, secret: &str) -> Result<(serde_json::Value, Option<Ve
         Some("view") => granted(session, generation, "mac_view")?,
         Some("input") => {
             granted(session, generation, "mac_input")?;
-            return mac_input(session, generation, args).map(|result| (json!({"result": result}), None));
+            return mac_input(session, generation, args, deadline).map(|result| (json!({"result": result}), None));
         }
         Some("commands") => {
             granted(session, generation, "mac_commands")?;
@@ -923,7 +943,7 @@ fn granted(session: &str, generation: u64, operation: &str) -> Result<(), String
         return Err(not_ticked());
     }
     let state: sill_proto::host_control::State = sill_proto::Client::connect()
-        .and_then(|client| client.call("_sill/host_control.state", serde_json::json!({"session_id": session})))
+        .and_then(|client| client.call_within("_sill/host_control.state", serde_json::json!({"session_id": session}), Duration::from_secs(2)))
         .map_err(|e| format!("the grant could not be checked: {e:#}"))?;
     if !state.active || state.generation != generation {
         return Err("refused: stale Host control generation".into());
@@ -962,7 +982,7 @@ fn locate(target: &crate::mac_screen::Target) -> Result<(serde_json::Value, (f64
 
 /// The actions of one input request, in order, each checked first: the grant, the person's own
 /// input, the frame's target still where it was. A stop says how far it got; nothing is repeated.
-fn mac_input(session: &str, generation: u64, args: &serde_json::Value) -> Result<serde_json::Value, String> {
+fn mac_input(session: &str, generation: u64, args: &serde_json::Value, deadline: std::time::Instant) -> Result<serde_json::Value, String> {
     use crate::mac_input as input;
     use serde_json::json;
     if !input::allowed() {
@@ -994,11 +1014,17 @@ fn mac_input(session: &str, generation: u64, args: &serde_json::Value) -> Result
     let total = actions.len();
     let stop = |done: usize, why: &str| Ok(json!({"done": done, "of": total, "interrupted": why}));
     for (done, action) in actions.iter().enumerate() {
+        if std::time::Instant::now() >= deadline { return stop(done, "input deadline reached"); }
         if done > 0 && granted(session, generation, "mac_input").is_err() {
             return stop(done, "Host control changed or was revoked");
         }
         if input::person_since(began) {
             return stop(done, "the person used the mouse or keyboard");
+        }
+        // Reserve a second for bounded click/drag/key actions and their release events.
+        // Check after grant RPCs too: a delayed reply must never authorize late input.
+        if deadline.saturating_duration_since(std::time::Instant::now()) < Duration::from_secs(1) {
+            return stop(done, "input deadline reached; take a new picture before continuing");
         }
         let aimed = |p: &serde_json::Value| -> Result<input::Point, String> {
             let frame = frame.as_ref().ok_or("an action with a point needs a frame")?;
@@ -1013,6 +1039,9 @@ fn mac_input(session: &str, generation: u64, args: &serde_json::Value) -> Result
             }
             let x = p[0].as_f64().ok_or("a point is [x, y]")?;
             let y = p[1].as_f64().ok_or("a point is [x, y]")?;
+            if deadline.saturating_duration_since(std::time::Instant::now()) < Duration::from_secs(1) {
+                return Err("input deadline reached".into());
+            }
             frame.to_desktop(x, y)
         };
         let outcome: Result<(), String> = (|| {
@@ -1021,9 +1050,9 @@ fn mac_input(session: &str, generation: u64, args: &serde_json::Value) -> Result
             } else if let Some(p) = action.get("click") {
                 let right = action["button"].as_str() == Some("right");
                 let count = action["count"].as_u64().unwrap_or(1) as u32;
-                input::click(aimed(p)?, right, count);
+                input::click(aimed(p)?, right, count, began, deadline)?;
             } else if let Some(ends) = action.get("drag") {
-                input::drag(aimed(&ends[0])?, aimed(&ends[1])?);
+                input::drag(aimed(&ends[0])?, aimed(&ends[1])?, began, deadline)?;
             } else if let Some(p) = action.get("scroll") {
                 let at = aimed(p)?;
                 input::scroll(at, action["dy"].as_f64().unwrap_or(0.0), action["dx"].as_f64().unwrap_or(0.0));
@@ -1031,19 +1060,19 @@ fn mac_input(session: &str, generation: u64, args: &serde_json::Value) -> Result
                 if text.len() > 1024 || text.chars().any(|c| c.is_control() && c != '\n' && c != '\t') {
                     return Err("text is at most 1 KiB, without control characters".into());
                 }
-                input::type_text(text);
+                input::type_text(text, began, deadline)?;
             } else if let Some(combination) = action.get("key").and_then(|k| k.as_str()) {
                 input::key(combination)?;
             } else if let Some(ms) = action.get("wait").and_then(|w| w.as_u64()) {
                 // ends early if the person takes over: the next action's check stops the rest
-                input::wait(ms.min(2000), began);
+                input::wait(ms.min(2000), began, deadline)?;
             } else {
                 return Err("an action is move, click, drag, scroll, type, key or wait".into());
             }
             Ok(())
         })();
         if let Err(said) = outcome {
-            return if done == 0 { Err(said) } else { stop(done, &said) };
+            return stop(done, &said);
         }
         std::thread::sleep(Duration::from_millis(30));
     }
@@ -1101,5 +1130,37 @@ mod grant_tests {
         super::person_answered(s, Some((6, at.map(String::from))), false);
         super::forget_grants();
         assert!(!super::ticked(s, 6, at, "mac_view"));
+    }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn slow_sender_cannot_extend_the_request_deadline() {
+        let (mut peer, stream) = UnixStream::pair().unwrap();
+        let started = std::time::Instant::now();
+        let worker = std::thread::spawn(move || answer_mac(stream, "test-secret"));
+        // Progress more often than the socket timeout still cannot extend the total budget.
+        let sender = std::thread::spawn(move || {
+            for _ in 0..80 {
+                if peer.write_all(b" ").is_err() { break; }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        assert!(worker.join().unwrap().is_err());
+        assert!(started.elapsed() < Duration::from_secs(7));
+        sender.join().unwrap();
+    }
+
+    #[test]
+    fn oversized_request_is_rejected_before_parsing() {
+        let (mut peer, stream) = UnixStream::pair().unwrap();
+        let worker = std::thread::spawn(move || answer_mac(stream, "test-secret"));
+        let _ = peer.write_all(&vec![b' '; MAC_REQUEST_MAX as usize + 1]);
+        assert!(worker.join().unwrap().unwrap_err().contains("too large"));
     }
 }

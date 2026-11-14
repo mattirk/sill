@@ -47,10 +47,11 @@ pub struct Vm {
 /// What a connection from the guest is handed to, on a thread of its own.
 pub type Accept = Arc<dyn Fn(UnixStream) + Send + Sync>;
 
-/// The delegate of a vsock listener: every connection the guest makes is accepted and handed,
-/// as a stream of its own, to the port's [`Accept`].
+/// The delegate of a vsock listener: up to 32 concurrent connections are handed,
+/// as streams of their own, to the port's [`Accept`]; excess connections are refused.
 pub struct AcceptingIvars {
     accept: Accept,
+    active: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 objc2::define_class!(
@@ -69,6 +70,11 @@ objc2::define_class!(
             connection: &VZVirtioSocketConnection,
             _device: &VZVirtioSocketDevice,
         ) -> objc2::runtime::Bool {
+            // Reserve before duplicating or spawning; the guard also releases on spawn failure.
+            let active = self.ivars().active.clone();
+            let Some(permit) = ConnectionPermit::acquire(active) else {
+                return objc2::runtime::Bool::NO;
+            };
             // the connection closes its own descriptor when it goes: keep a copy
             // SAFETY: the connection's descriptor is open while it lives
             let fd = unsafe { libc::dup(connection.fileDescriptor()) };
@@ -80,16 +86,47 @@ objc2::define_class!(
             let accept = self.ivars().accept.clone();
             let spawned = std::thread::Builder::new()
                 .name("sill-vm-accepted".into())
-                .spawn(move || accept(stream))
+                .spawn(move || { let _permit = permit; accept(stream); })
                 .is_ok();
             objc2::runtime::Bool::new(spawned)
         }
     }
 );
 
+struct ConnectionPermit(Arc<std::sync::atomic::AtomicUsize>);
+impl ConnectionPermit {
+    #[allow(deprecated)] // fetch_update supports our Rust 1.90 minimum; try_update is newer.
+    fn acquire(active: Arc<std::sync::atomic::AtomicUsize>) -> Option<Self> {
+        active.fetch_update(std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire, |n| (n < 32).then_some(n + 1)).ok()?;
+        Some(Self(active))
+    }
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+    #[test]
+    fn capacity_is_reclaimed_when_a_worker_or_failed_spawn_drops_its_permit() {
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut held: Vec<_> = (0..32).map(|_| ConnectionPermit::acquire(active.clone()).unwrap()).collect();
+        assert!(ConnectionPermit::acquire(active.clone()).is_none());
+        held.pop();
+        assert!(ConnectionPermit::acquire(active.clone()).is_some());
+        drop(held);
+        assert_eq!(active.load(std::sync::atomic::Ordering::Acquire), 0);
+    }
+}
+
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
 impl Accepting {
     fn new(accept: Accept) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(AcceptingIvars { accept });
+        let this = Self::alloc().set_ivars(AcceptingIvars { accept, active: Arc::new(std::sync::atomic::AtomicUsize::new(0)) });
         // SAFETY: NSObject's init on a freshly allocated object
         unsafe { objc2::msg_send![super(this), init] }
     }

@@ -72,13 +72,15 @@ pub fn serve(hub: Arc<Hub>, session: String, generation: u64, listener: UnixList
                             active.operations.contains(&request.operation),
                             "operation not granted"
                         );
+                        // Activity notices are persisted in the session journal. Arguments,
+                        // results and errors may contain typed text, environment values or output.
+                        // Keep those on the direct reply channel, not in these notices.
                         host_control::note(
                             &hub,
                             &session,
                             format!(
-                                "HOST action on host · generation {generation}: {} {}",
-                                request.operation,
-                                serde_json::to_string(&request.args)?
+                                "HOST action · generation {generation}: {}",
+                                request.operation
                             ),
                         );
                         let result = action(&hub, &session, generation, &request, _gate);
@@ -86,11 +88,11 @@ pub fn serve(hub: Arc<Hub>, session: String, generation: u64, listener: UnixList
                             &hub,
                             &session,
                             match &result {
-                                Ok(v) => {
-                                    format!("HOST action {} completed: {v}", request.operation)
+                                Ok(_) => {
+                                    format!("HOST action {} completed", request.operation)
                                 }
-                                Err(e) => {
-                                    format!("HOST action {} failed: {e:#}", request.operation)
+                                Err(_) => {
+                                    format!("HOST action {} failed", request.operation)
                                 }
                             },
                         );

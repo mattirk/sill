@@ -268,11 +268,18 @@ pub fn person_since(since: Since) -> bool {
 }
 
 /// Sleep `ms` (an agent's wait), ending early if the person uses the mouse or keyboard.
-pub fn wait(ms: u64, since: Since) {
-    let until = Instant::now() + Duration::from_millis(ms);
+pub fn wait(ms: u64, since: Since, deadline: Instant) -> Result<(), String> {
+    let until = (Instant::now() + Duration::from_millis(ms)).min(deadline);
     while Instant::now() < until && !person_since(since) {
         std::thread::sleep(until.saturating_duration_since(Instant::now()).min(Duration::from_millis(50)));
     }
+    check_input(since, deadline)
+}
+
+fn check_input(since: Since, deadline: Instant) -> Result<(), String> {
+    if Instant::now() >= deadline { return Err("input deadline reached".into()); }
+    if person_since(since) { return Err("the person used the mouse or keyboard".into()); }
+    Ok(())
 }
 
 /// Holds the input for one request; the herring shows it while held.
@@ -321,29 +328,41 @@ pub fn move_to(at: Point) {
 }
 
 /// A click (or a double click) at `at`, the button pressed and released.
-pub fn click(at: Point, right: bool, count: u32) {
+pub fn click(at: Point, right: bool, count: u32, since: Since, deadline: Instant) -> Result<(), String> {
+    check_input(since, deadline)?;
     let (down, up, button) = if right { (RIGHT_DOWN, RIGHT_UP, 1) } else { (LEFT_DOWN, LEFT_UP, 0) };
     move_to(at);
     for n in 1..=count.clamp(1, 3) {
+        check_input(since, deadline)?;
         mouse(down, at, button, n as i64);
         std::thread::sleep(Duration::from_millis(15));
         mouse(up, at, button, n as i64);
         std::thread::sleep(Duration::from_millis(40));
     }
+    Ok(())
 }
 
 /// The left button pressed at `from`, moved to `to` in steps, released there.
-pub fn drag(from: Point, to: Point) {
+pub fn drag(from: Point, to: Point, since: Since, deadline: Instant) -> Result<(), String> {
+    check_input(since, deadline)?;
     move_to(from);
     mouse(LEFT_DOWN, from, 0, 1);
     const STEPS: u32 = 12;
+    let mut last = from;
     for i in 1..=STEPS {
+        if let Err(error) = check_input(since, deadline) {
+            // Always release a button we pressed, even when the deadline or person stops us.
+            mouse(LEFT_UP, last, 0, 1);
+            return Err(error);
+        }
         let t = f64::from(i) / f64::from(STEPS);
         let at = Point { x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t };
         mouse(LEFT_DRAGGED, at, 0, 1);
+        last = at;
         std::thread::sleep(Duration::from_millis(12));
     }
     mouse(LEFT_UP, to, 0, 1);
+    Ok(())
 }
 
 /// Scroll by `dy`, `dx` pixels at `at`: positive goes down / right through the content.
@@ -364,12 +383,14 @@ pub fn scroll(at: Point, dy: f64, dx: f64) {
 }
 
 /// Type `text` where the focus is, as Unicode: no clipboard, no keyboard layout.
-pub fn type_text(text: &str) {
+pub fn type_text(text: &str, since: Since, deadline: Instant) -> Result<(), String> {
     let units: Vec<u16> = text.encode_utf16().collect();
     // SAFETY: a private source; key events carrying the text in chunks macOS accepts
     unsafe {
         let source = CGEventSourceCreate(-1);
+        let mut result = Ok(());
         for chunk in units.chunks(16) {
+            if let Err(error) = check_input(since, deadline) { result = Err(error); break; }
             for down in [true, false] {
                 let event = CGEventCreateKeyboardEvent(source, 0, down);
                 if !event.is_null() {
@@ -382,6 +403,7 @@ pub fn type_text(text: &str) {
         if !source.is_null() {
             CFRelease(source);
         }
+        result
     }
 }
 
@@ -542,7 +564,7 @@ mod tests {
         assert!(person_since(began));
         assert!(person_active());
         let started = Instant::now();
-        wait(2000, began);
+        assert!(wait(2000, began, started + Duration::from_secs(5)).is_err());
         assert!(started.elapsed() < Duration::from_millis(500));
         // a later request does not see it as since its own start
         let later = since_now();
@@ -560,5 +582,18 @@ mod tests {
         assert!(parse_key("cmd+hyper+x").is_err());
         assert!(parse_key("f13").is_err());
         assert!(parse_key("").is_err());
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    #[test]
+    fn expired_input_does_not_post_text_or_finish_a_long_wait() {
+        let deadline = Instant::now();
+        let since = since_now();
+        assert!(type_text("must not be posted", since, deadline).unwrap_err().contains("deadline"));
+        assert!(wait(2000, since, deadline).unwrap_err().contains("deadline"));
+        assert!(deadline.elapsed() < Duration::from_millis(500));
     }
 }
