@@ -62,6 +62,12 @@ pub fn session_plan(
     let mut plan = spec.plan()?;
     plan.masked = filesystem.policy_paths.masks.iter().chain(&filesystem.agent_masks).map(|m| m.path.to_path()).collect::<Result<_>>()?;
     plan.direct = filesystem.bindings.iter().map(|b| b.target.to_path()).chain(filesystem.policy_paths.direct.iter().chain(&filesystem.policy_paths.read_only).map(|p| p.to_path())).collect::<Result<_>>()?;
+    // a workspace's clone is bound over its repository (docs/parallel-coding.md §12): what the
+    // upper tree holds below it is hidden from the agent and no change against the host — listing
+    // it offered a revert that went through the bind into the clone
+    for w in &filesystem.workspaces {
+        plan.direct.push(w.source.to_path()?);
+    }
     Ok(plan)
 }
 

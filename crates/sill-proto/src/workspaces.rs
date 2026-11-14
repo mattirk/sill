@@ -33,9 +33,12 @@ pub struct Revision {
 /// An operation on the workspace that stopped part way or that a restart interrupted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WorkspaceOperation {
-    /// `apply`, `rebase`.
+    /// `apply`, `rebase`, `carry` (work from before the pin, docs/parallel-coding.md §12).
     pub kind: String,
-    /// `interrupted` (its effect could not be established; shown, never redone) or `conflict`.
+    /// `interrupted` (its effect could not be established; shown, never redone), `conflict`,
+    /// `waiting` (a carry put off until the workspace's own work is applied or discarded) or
+    /// `notice` (a line for the person until they Apply or Discard). Apply stays offered for the
+    /// last two.
     pub state: String,
     pub detail: String,
 }

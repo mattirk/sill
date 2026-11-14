@@ -199,7 +199,7 @@ fn file_type_of(ft: &std::fs::FileType) -> FileType {
     }
 }
 
-fn is_opaque(dir: &Path) -> bool {
+pub(crate) fn is_opaque(dir: &Path) -> bool {
     let mut buf = [0u8; 8];
     match rustix::fs::lgetxattr(dir, "user.overlay.opaque", &mut buf) {
         Ok(n) => &buf[..n] == b"y",

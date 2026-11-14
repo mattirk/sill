@@ -378,6 +378,30 @@ fn control_loop(reader: BufReader<UnixStream>, mut writer: UnixStream, shared: S
 }
 
 #[cfg(test)]
+mod revert_tests {
+    use super::*;
+
+    /// A folder bound from the host (here: the repository's own `target/`, never an overlay) is
+    /// not the session's to revert: nothing in it is removed.
+    #[test]
+    fn revert_refuses_a_folder_that_is_not_in_the_overlay() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp").join(format!("sill-shim-revert-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        std::fs::write(dir.join("index"), "the clone's index").unwrap();
+        std::fs::write(dir.join("sub/f"), "kept").unwrap();
+        let e = revert(&dir.join("index")).unwrap_err();
+        assert!(format!("{e:#}").contains("not in the session's overlay"), "{e:#}");
+        assert!(dir.join("index").exists());
+        // nor below a directory being removed
+        let (parent, name) = parent_and_name(&dir).unwrap();
+        assert!(remove_at(&parent, &name).is_err());
+        assert!(dir.join("sub/f").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod image_control_tests {
     use super::*;
     use std::io::Read;
@@ -803,13 +827,30 @@ fn type_at(dir: &impl std::os::fd::AsFd, name: &std::ffi::OsStr) -> Option<rusti
     statat(dir, name, AtFlags::SYMLINK_NOFOLLOW).ok().map(|st| FileType::from_raw_mode(st.st_mode as RawMode))
 }
 
-/// Remove `name` in `dir`, a tree or a single entry, never following a link.
+/// overlayfs's `f_type` (linux/magic.h).
+const OVERLAYFS_SUPER_MAGIC: i64 = 0x794c_7630;
+
+/// `dir` is on the session's overlay. A revert only ever undoes the overlay: a directory that is
+/// not on it is a bind of a host folder (a live pin, a workspace's clone, docs/parallel-coding.md
+/// §12), where a revert would write the host itself — it deleted a workspace clone's `.git/index`
+/// through the clone's bind once (2026-11-09).
+fn on_overlay(dir: &impl std::os::fd::AsFd, what: &Path) -> Result<()> {
+    let fs = rustix::fs::fstatfs(dir)?;
+    if fs.f_type as i64 != OVERLAYFS_SUPER_MAGIC {
+        bail!("{}: not in the session's overlay (a folder bound from the host); nothing reverted", what.display());
+    }
+    Ok(())
+}
+
+/// Remove `name` in `dir`, a tree or a single entry, never following a link, nor into a folder
+/// bound from the host.
 fn remove_at(dir: &impl std::os::fd::AsFd, name: &std::ffi::OsStr) -> Result<()> {
     use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, openat, unlinkat};
     match type_at(dir, name) {
         None => Ok(()),
         Some(FileType::Directory) => {
             let sub = openat(dir, name, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())?;
+            on_overlay(&sub, Path::new(name))?;
             let names: Vec<std::ffi::OsString> = Dir::read_from(&sub)?
                 .filter_map(Result::ok)
                 .map(|e| <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(e.file_name().to_bytes()).to_os_string())
@@ -830,6 +871,7 @@ fn revert(path: &Path) -> Result<&'static str> {
     use rustix::fs::{FileType, Mode, OFlags, RawMode, ResolveFlags, fchmod, fstat, mkdirat, openat, openat2, symlinkat};
     let host = host_path(path)?;
     let (dir, name) = parent_and_name(path)?;
+    on_overlay(&dir, path)?;
     let cur = type_at(&dir, &name);
     let Ok(hmd) = host.symlink_metadata() else {
         if cur.is_none() {

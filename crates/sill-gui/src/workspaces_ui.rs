@@ -154,7 +154,9 @@ impl App {
             .align_y(Alignment::Center);
             if let Some(op) = &d.workspace.operation {
                 line = line.push(text(op.detail.clone()).size(style::TINY).color(P.warning));
-            } else {
+            }
+            // a stopped or interrupted operation is seen to first; a carry's line leaves Apply offered
+            if !d.workspace.operation.as_ref().is_some_and(|o| o.state == "conflict" || o.state == "interrupted") {
                 line = line.push(keys::press(
                     button(text("Apply").size(style::SMALL)).padding([3, 10]).style(style::solid(P.accent)),
                     Message::Workspaces(Event::PageApply(id.clone())),

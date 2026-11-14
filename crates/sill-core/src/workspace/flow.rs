@@ -23,14 +23,14 @@ use crate::changes::Git;
 /// The snapshot of what the person already has from this workspace.
 pub const APPLIED: &str = "refs/sill/applied";
 
-const IDENT: [(&str, &str); 4] = [
+pub(super) const IDENT: [(&str, &str); 4] = [
     ("GIT_AUTHOR_NAME", "sill"),
     ("GIT_AUTHOR_EMAIL", "sill@localhost"),
     ("GIT_COMMITTER_NAME", "sill"),
     ("GIT_COMMITTER_EMAIL", "sill@localhost"),
 ];
 
-fn rev(git: &Git, what: &str) -> Result<String> {
+pub(super) fn rev(git: &Git, what: &str) -> Result<String> {
     let mut c = git.cmd();
     c.args(["rev-parse", "--verify", "-q", what]);
     ok(c, what)
@@ -85,14 +85,14 @@ fn worktree_tree(git: &Git, root: &Path) -> Result<String> {
 }
 
 /// A tree entry as git stores one: mode and blob; None where there is no file.
-type Have = Option<(String, String)>;
+pub(super) type Have = Option<(String, String)>;
 
 /// The files at `paths` below `root` as git would store them, their blobs written into `store`'s
 /// own object store: one `hash-object` for all regular files, read with `root`'s attributes so
 /// the person's clean filters run as for their own commits; a link's target is the blob, never
 /// followed; nothing (None) where there is no file or link. A file that goes while being read
 /// counts as gone.
-fn worktree_entries(store: &Git, root: &Path, paths: &[String]) -> Result<Vec<(String, Have)>> {
+pub(super) fn worktree_entries(store: &Git, root: &Path, paths: &[String]) -> Result<Vec<(String, Have)>> {
     use std::os::unix::fs::PermissionsExt;
     let mut out: Vec<(String, Have)> = Vec::with_capacity(paths.len());
     let mut files = Vec::new();
@@ -176,7 +176,7 @@ static INDEXES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new
 
 /// The tree of `base` with `entries` put in place of its own at their paths (None: the path
 /// removed), made through a private index: the repository's index is untouched.
-fn build_tree(git: &Git, base: &str, entries: &[(String, Have)]) -> Result<String> {
+pub(super) fn build_tree(git: &Git, base: &str, entries: &[(String, Have)]) -> Result<String> {
     let n = INDEXES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let index = git.dirs().0.join(format!("sill-index-{}-{n}", std::process::id()));
     let _ = std::fs::remove_file(&index);
@@ -317,13 +317,13 @@ pub fn unapplied(source: &Path, clone: &Path, workspace_branch: &str) -> Result<
 }
 
 /// One entry of `git diff-tree -r -z`: new mode and blob (None when deleted) and the path.
-struct Entry {
-    mode: String,
-    blob: Option<String>,
-    path: String,
+pub(super) struct Entry {
+    pub(super) mode: String,
+    pub(super) blob: Option<String>,
+    pub(super) path: String,
 }
 
-fn diff_tree(git: &Git, from: &str, to: &str) -> Result<Vec<Entry>> {
+pub(super) fn diff_tree(git: &Git, from: &str, to: &str) -> Result<Vec<Entry>> {
     let mut c = git.cmd();
     c.args(["diff-tree", "-r", "-z", "--no-renames", from, to]);
     let out = ok_raw(c, "diff-tree")?;
@@ -347,7 +347,7 @@ fn diff_tree(git: &Git, from: &str, to: &str) -> Result<Vec<Entry>> {
 
 /// A working tree's dirty entries: (index status, worktree status, path), untracked as `??`,
 /// a rename's both paths.
-fn dirty(git: &Git) -> Result<Vec<(char, char, String)>> {
+pub(super) fn dirty(git: &Git) -> Result<Vec<(char, char, String)>> {
     let mut c = git.cmd();
     c.args(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=all"]);
     let out = ok_raw(c, "status")?;
@@ -372,7 +372,7 @@ fn dirty(git: &Git) -> Result<Vec<(char, char, String)>> {
 
 /// Write the tree entry `blob` (mode `mode`, read from `git`) to `path` below `root`, never
 /// following a symlink on the way; a gitlink is skipped.
-fn write_entry(git: &Git, root: &Path, path: &str, mode: &str, blob: &str) -> Result<()> {
+pub(super) fn write_entry(git: &Git, root: &Path, path: &str, mode: &str, blob: &str) -> Result<()> {
     let rel = Path::new(path);
     if mode == "160000" {
         return Ok(());
@@ -400,7 +400,7 @@ fn write_entry(git: &Git, root: &Path, path: &str, mode: &str, blob: &str) -> Re
     crate::safe_fs::write_file_beneath(root, rel, &out.stdout, if mode == "100755" { 0o755 } else { 0o644 })
 }
 
-fn remove_entry(root: &Path, path: &str) -> Result<()> {
+pub(super) fn remove_entry(root: &Path, path: &str) -> Result<()> {
     match std::fs::symlink_metadata(root.join(path)) {
         Ok(_) => crate::safe_fs::remove_file_beneath(root, Path::new(path)),
         Err(_) => Ok(()),

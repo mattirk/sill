@@ -42,6 +42,16 @@ impl Host for Daemon<'_> {
         root()
     }
 
+    /// The layers of the session's last launch (its recorded plan); none before it first ran.
+    fn overlay(&self, session: &str) -> Result<Option<records::Overlay>> {
+        let Some(row) = self.0.with_store(|s| s.session_exact(session))? else { return Ok(None) };
+        if sill_core::session::policy_snapshot(session)?.is_none() {
+            return Ok(None);
+        }
+        let view = self.0.jail_view(session)?;
+        Ok(Some(records::Overlay { layers: view.layers, started: row.created_at }))
+    }
+
     /// The rebase helper: `sill jail run` with the session's next build — its masks, pins, agent
     /// home and its workspaces at their repositories' paths — no network, a throwaway state
     /// directory on the state filesystem, the resolution in a private file. The person only acts

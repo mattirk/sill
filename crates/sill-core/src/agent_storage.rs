@@ -806,6 +806,30 @@ mod tests {
     }
 
     #[test]
+    fn changes_inspection_skips_what_a_workspace_clone_hides() {
+        // the overlay's entries below a workspace's repository are behind the clone's bind: no
+        // change against the host (they were listed, and a revert went through the bind, 2026-11-09)
+        let f = Fixture::new();
+        let mut storage = f.plan("codex", false);
+        let repo = f.home.join("GIT/repo");
+        storage.workspaces.push(WorkspaceBind {
+            source: HostPath::from_path(&repo),
+            clone: HostPath::from_path(&f.root.join("clone")),
+            objects: HostPath::from_path(&repo.join(".git/objects")),
+        });
+        let plan = crate::changes::session_plan(
+            Policy::builtin_default(),
+            f.state.clone(),
+            &f.home,
+            rustix::process::getuid().as_raw(),
+            "fixture",
+            &storage,
+        )
+        .unwrap();
+        assert!(plan.direct.contains(&repo));
+    }
+
+    #[test]
     fn changes_inspection_uses_recorded_masks_without_preparing_or_rescanning_storage() {
         let f = Fixture::new();
         let first = f.home.join("hidden-first");

@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use sill_proto::sessions::HostPath;
 use sill_proto::workspaces as api;
 
-use super::flow;
+use super::{carry, flow};
 use crate::sfp::DomainError;
 
 /// How long discarded work is kept for Undo (§10 item 8).
@@ -54,8 +54,32 @@ pub trait Host {
     fn run_jailed(&self, session: &str, cwd: &Path, argv: &[&str]) -> Result<std::process::Output>;
     /// Where workspaces are made.
     fn root(&self) -> PathBuf;
+    /// The session's overlay as its last jail had it, read while its jail is down: None when it
+    /// never ran (§12 work from before the pin).
+    fn overlay(&self, _session: &str) -> Result<Option<Overlay>> {
+        Ok(None)
+    }
     fn now(&self) -> i64 {
         crate::store::now()
+    }
+}
+
+/// A session's overlay: each layer's host path and upper tree, and when the session began (unix
+/// seconds).
+#[derive(Debug, Clone)]
+pub struct Overlay {
+    pub layers: Vec<(PathBuf, PathBuf)>,
+    pub started: i64,
+}
+
+impl Overlay {
+    /// Where `source` lies in the upper trees: the deepest layer holding it.
+    fn upper_of(&self, source: &Path) -> Option<PathBuf> {
+        self.layers
+            .iter()
+            .filter(|(host, _)| source.starts_with(host))
+            .max_by_key(|(host, _)| host.components().count())
+            .map(|(host, upper)| upper.join(source.strip_prefix(host).expect("below its layer")))
     }
 }
 
@@ -227,10 +251,17 @@ fn settle(conn: &Connection, op: &str, state: &str, detail: &str) -> Result<()> 
     Ok(())
 }
 
+/// A note for the person (a carry taken without a base) has been seen through once they Apply or
+/// Discard.
+fn settle_notices(conn: &Connection, workspace: &str) -> Result<()> {
+    conn.execute("UPDATE workspace_journal SET state='done' WHERE workspace_id=?1 AND state='notice'", [workspace])?;
+    Ok(())
+}
+
 fn shown_operation(conn: &Connection, workspace: &str) -> Result<Option<api::WorkspaceOperation>> {
     Ok(conn
         .query_row(
-            "SELECT kind,state,detail FROM workspace_journal WHERE workspace_id=?1 AND state IN ('interrupted','conflict') ORDER BY started_at DESC LIMIT 1",
+            "SELECT kind,state,detail FROM workspace_journal WHERE workspace_id=?1 AND state IN ('interrupted','conflict','waiting','notice') ORDER BY started_at DESC LIMIT 1",
             [workspace],
             |r| Ok(api::WorkspaceOperation { kind: r.get(0)?, state: r.get(1)?, detail: r.get(2)? }),
         )
@@ -480,6 +511,11 @@ pub fn ensure_for_session<H: Host>(h: &H, session: &str) -> Result<Vec<Layout>> 
     let _g = lock();
     let mut layout = Vec::new();
     let pins = h.session_pins(session)?;
+    // read before any jail of the session runs again: the work it left over the repositories
+    let overlay = h.overlay(session).unwrap_or_else(|e| {
+        eprintln!("sill: workspaces of {session}: the overlay could not be read, nothing carried: {e:#}");
+        None
+    });
     let pinned: Vec<PathBuf> = pins.iter().filter(|p| repository_top(p)).filter_map(|p| p.canonicalize().ok()).collect();
     for r in h.db(|c| of_session(c, session))? {
         if r.state == "open" && !pinned.contains(&r.source) {
@@ -507,6 +543,7 @@ pub fn ensure_for_session<H: Host>(h: &H, session: &str) -> Result<Vec<Layout>> 
                 r.updated_at = h.now();
                 h.db(|c| save(c, &r))?;
             }
+            carry_into(h, &r, overlay.as_ref());
             layout.push(Layout { objects: r.source.join(".git/objects"), source: r.source, clone: r.path });
             continue;
         }
@@ -562,9 +599,98 @@ pub fn ensure_for_session<H: Host>(h: &H, session: &str) -> Result<Vec<Layout>> 
             tx.commit()?;
             Ok(())
         })?;
+        carry_into(h, &r, overlay.as_ref());
         layout.push(Layout { objects: r.source.join(".git/objects"), source: r.source, clone: r.path });
     }
     Ok(layout)
+}
+
+/// Work from before the pin (§12, `carry`): what the session's overlay holds below the workspace's
+/// repository goes into the clone — merged and uncommitted, or a rebase stopped for Resolve —
+/// and leaves the overlay. A workspace with unapplied work of its own that conflicts keeps it in
+/// the overlay until a later start; the shelf says so. Never keeps the session from starting.
+fn carry_into<H: Host>(h: &H, r: &Row, overlay: Option<&Overlay>) {
+    let Some(upper) = overlay.and_then(|o| o.upper_of(&r.source)) else { return };
+    let started = overlay.map_or(0, |o| o.started);
+    let op = key(&format!("carry:{}:{}", r.id, crate::store::new_id()));
+    let outcome = carry_steps(h, r, &upper, started);
+    // each start looks again: what an earlier one said is superseded
+    let _ = h.db(|c| {
+        c.execute("UPDATE workspace_journal SET state='done' WHERE workspace_id=?1 AND kind='carry' AND state IN ('waiting','notice','interrupted')", [&r.id])?;
+        Ok(())
+    });
+    let (state, detail) = match outcome {
+        Ok(None) => return,
+        Ok(Some((state, detail))) => (state, detail),
+        Err(e) => ("waiting", format!("Work the agent did in {} before it was pinned could not be brought into the workspace: {e:#}. It stays in the session's overlay and is tried again at the session's next start.", r.source.display())),
+    };
+    let _ = h.db(|c| {
+        intent(c, &op, &r.id, "carry", &json!({"upper": bytes(&upper)}), h.now())?;
+        settle(c, &op, state, &detail)
+    });
+}
+
+/// [`carry_into`]'s work: the journal state and line to record, None when nothing was there.
+fn carry_steps<H: Host>(h: &H, r: &Row, upper: &Path, started: i64) -> Result<Option<(&'static str, String)>> {
+    let Some(p) = carry::pending(&r.source, &r.path, upper, started)? else { return Ok(None) };
+    let src = r.source.display();
+    if carry::is_empty(&p) {
+        carry::forget(&p)?;
+        return Ok(None);
+    }
+    let how = if p.from_reflog { "" } else { " Its starting point was not in your checkout's history, so the agent's files were taken as they are: look before you apply." };
+    let done = if p.from_reflog { "done" } else { "notice" };
+    match carry::merge(&r.path, &p)? {
+        carry::Merge::Clean { ours, tree } => {
+            let n = carry::write_clean(&r.path, &ours, &tree)?;
+            carry::forget(&p)?;
+            Ok(Some((done, format!("Work the agent did in {src} before it was pinned ({n} files) is in the workspace, uncommitted.{how}"))))
+        }
+        carry::Merge::Conflict(files) => {
+            let git = crate::changes::Git::open(&r.path)?;
+            let own = !flow::dirty(&git)?.is_empty() || flow::unapplied(&r.source, &r.path, &r.branch)?;
+            drop(git);
+            if own {
+                return Ok(Some((
+                    "waiting",
+                    format!(
+                        "Work the agent did in {src} before it was pinned conflicts with the workspace's own work ({}). It stays in the session's overlay and is brought in at the session's next start once the workspace is applied or discarded.",
+                        files.join(", ")
+                    ),
+                )));
+            }
+            let tip = carry::stage_rebase(&r.path, &r.branch, &p)?;
+            let out = h.run_jailed(&r.session_id, &r.source, &["git", "rebase", "--onto", &tip, &p.base]);
+            match out {
+                Ok(o) if o.status.success() => {
+                    carry::uncommit(&r.path, &r.branch, &tip)?;
+                    carry::forget(&p)?;
+                    Ok(Some((done, format!("Work the agent did in {src} before it was pinned is in the workspace, uncommitted.{how}"))))
+                }
+                Ok(_) if rebasing(&r.path) => {
+                    carry::forget(&p)?;
+                    let stopped = conflicted(&r.path);
+                    let branch = super::source_head(&r.source).map(|(b, _)| b).unwrap_or_default();
+                    Ok(Some((
+                        "conflict",
+                        format!(
+                            "Work from before {src} was pinned, carried onto {branch} ({}), stopped: {}",
+                            &tip[..tip.len().min(12)],
+                            if stopped.is_empty() { files.join(", ") } else { stopped.join(", ") }
+                        ),
+                    )))
+                }
+                other => {
+                    carry::unstage(&r.path, &r.branch, &tip)?;
+                    let why = match other {
+                        Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
+                        Err(e) => format!("{e:#}"),
+                    };
+                    bail!("the rebase could not run: {why}")
+                }
+            }
+        }
+    }
 }
 
 /// A session's repositories as the window shows them (§12 gap 1): its workspaces, and the
@@ -862,6 +988,7 @@ pub fn apply<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
             flow::set_applied(&r.path, &done.snapshot)?;
             h.db(|c| {
                 settle(c, &k, "done", "")?;
+                settle_notices(c, &r.id)?;
                 receipts(c)?.finish(&a.operation_id, None, None)
             })?;
             let r = settle_result(h, r)?;
@@ -937,6 +1064,7 @@ pub fn discard<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
             &format!("INSERT INTO workspace_discards({DISCARD_COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)"),
             params![d.id, d.workspace_id, d.session_id, d.name, bytes(&d.source), d.branch, d.snapshot, d.anchor, d.until, d.created_at],
         )?;
+        settle_notices(c, &d.workspace_id)?;
         receipts(c)?.finish(&a.operation_id, None, None)?;
         tx.commit()?;
         Ok(())

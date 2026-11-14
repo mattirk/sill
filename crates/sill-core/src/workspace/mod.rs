@@ -623,6 +623,7 @@ fn read_tree_stop(stderr: &str) -> Stop {
 
 pub mod flow;
 pub mod records;
+mod carry;
 mod seed;
 
 #[cfg(test)]

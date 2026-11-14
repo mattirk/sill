@@ -18,6 +18,7 @@ struct TestHost {
     pins: Mutex<HashMap<String, Vec<PathBuf>>>,
     root: PathBuf,
     now: Mutex<i64>,
+    overlay: Mutex<Option<Overlay>>,
 }
 
 impl Host for TestHost {
@@ -51,6 +52,9 @@ impl Host for TestHost {
     }
     fn root(&self) -> PathBuf {
         self.root.clone()
+    }
+    fn overlay(&self, _session: &str) -> Result<Option<Overlay>> {
+        Ok(self.overlay.lock().unwrap().clone())
     }
     fn now(&self) -> i64 {
         *self.now.lock().unwrap()
@@ -115,6 +119,7 @@ fn fixture(name: &str) -> Fixture {
         pins: Mutex::new(HashMap::new()),
         root: dir.join("workspaces"),
         now: Mutex::new(1_000_000),
+        overlay: Mutex::new(None),
     };
     Fixture { dir, host, source }
 }
@@ -552,4 +557,142 @@ fn the_persons_uncommitted_work_is_counted_as_not_in_the_workspace() {
     // the person's edit on top of it is theirs
     write(&f.source.join("f1.txt"), "agent, and the person\n");
     assert_eq!(only(&f), 1);
+}
+
+// --- work from before the pin (§12, carry) ---
+
+/// Now, in unix seconds.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
+}
+
+/// The session's overlay as a jail over `f.dir` leaves it: its upper tree, the repository's place
+/// in it returned. The agent's files get written there with `agent_wrote`.
+fn overlay(f: &Fixture, started: i64) -> PathBuf {
+    let upper = f.dir.join("upper");
+    std::fs::create_dir_all(&upper).unwrap();
+    *f.host.overlay.lock().unwrap() = Some(Overlay { layers: vec![(f.dir.clone(), upper.clone())], started });
+    upper.join("src")
+}
+
+/// A file the agent wrote at `when` (unix seconds) into the overlay's copy of the repository.
+fn agent_wrote(upper_repo: &Path, rel: &str, text: &str, when: i64) {
+    let p = upper_repo.join(rel);
+    write(&p, text);
+    let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(when as u64);
+    std::fs::File::options().write(true).open(&p).unwrap().set_modified(t).unwrap();
+}
+
+/// A commit in the person's checkout whose reflog entry is dated `when`.
+fn commit_at(dir: &Path, when: i64, message: &str) {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", message])
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_COMMITTER_DATE", format!("@{when} +0000"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+fn operation(f: &Fixture, w: &api::Workspace) -> Option<api::WorkspaceOperation> {
+    get(&f.host, &w.workspace_id).unwrap().workspace.operation
+}
+
+#[test]
+fn work_from_before_the_pin_is_carried_into_a_new_workspace_uncommitted() {
+    let f = fixture("carry");
+    let start = git(&f.source, &["rev-parse", "HEAD"]);
+    let up = overlay(&f, 0);
+    let t = unix_now() + 100;
+    agent_wrote(&up, "f1.txt", "agent\n", t);
+    agent_wrote(&up, "sub/new.txt", "new\n", t);
+    // not carried: the repository's own state, and what it ignores
+    agent_wrote(&up, ".git/index", "the overlay's index", t);
+    agent_wrote(&up, "target/out", "build", t);
+    let w = session(&f, "s1");
+    let clone = clone_of(&w);
+    assert_eq!(read(&clone.join("f1.txt")), "agent\n");
+    assert_eq!(read(&clone.join("sub/new.txt")), "new\n");
+    // uncommitted, on the base
+    assert_eq!(git(&clone, &["rev-parse", "HEAD"]), start);
+    assert_eq!(git(&clone, &["status", "--porcelain"]), "M f1.txt\n?? sub/");
+    // carried entries left the overlay; the rest stays where it was
+    assert!(!up.join("f1.txt").exists() && !up.join("sub").exists());
+    assert_eq!(read(&up.join(".git/index")), "the overlay's index");
+    assert!(up.join("target/out").exists());
+    // nothing for the person to see to: the shelf offers the work as any other
+    assert!(operation(&f, &w).is_none());
+    // the next start finds nothing more
+    ensure_for_session(&f.host, "s1").unwrap();
+    assert_eq!(read(&clone.join("f1.txt")), "agent\n");
+}
+
+#[test]
+fn work_from_before_the_pin_conflicting_with_a_moved_checkout_stops_a_rebase_for_resolve() {
+    let f = fixture("carry-conflict");
+    let up = overlay(&f, 0);
+    let t = unix_now() + 100;
+    // the agent edits f1 from the checkout as it was …
+    agent_wrote(&up, "f1.txt", "agent\n", t);
+    // … and the person commits their own f1 after
+    write(&f.source.join("f1.txt"), "person\n");
+    commit_at(&f.source, t + 100, "person");
+    let theirs = git(&f.source, &["rev-parse", "HEAD"]);
+    let w = session(&f, "s1");
+    let clone = clone_of(&w);
+    let op = operation(&f, &w).expect("a stopped carry");
+    assert_eq!((op.kind.as_str(), op.state.as_str()), ("carry", "conflict"));
+    assert!(op.detail.contains("stopped: f1.txt"), "{}", op.detail);
+    assert!(clone.join(".git/rebase-merge").exists());
+    assert!(read(&clone.join("f1.txt")).contains("<<<<<<<"));
+    assert!(!up.join("f1.txt").exists(), "kept by the clone's rebase now");
+    // the agent resolves as Resolve asks
+    write(&clone.join("f1.txt"), "both\n");
+    git(&clone, &["add", "f1.txt"]);
+    let out = Command::new("git").arg("-C").arg(&clone).args(["-c", "user.name=t", "-c", "user.email=t@t", "rebase", "--continue"]).env("GIT_EDITOR", "true").output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(git(&clone, &["rev-parse", "HEAD^"]), theirs);
+    assert!(operation(&f, &w).is_none(), "settled once the rebase is finished");
+}
+
+#[test]
+fn work_from_before_the_pin_without_a_base_is_taken_as_it_is_and_said() {
+    let f = fixture("carry-nobase");
+    let up = overlay(&f, 0);
+    // written before anything in the checkout's reflog
+    agent_wrote(&up, "f2.txt", "agent\n", 1000);
+    let w = session(&f, "s1");
+    let clone = clone_of(&w);
+    assert_eq!(read(&clone.join("f2.txt")), "agent\n");
+    let op = operation(&f, &w).expect("a note");
+    assert_eq!((op.kind.as_str(), op.state.as_str()), ("carry", "notice"));
+    assert!(op.detail.contains("taken as they are"), "{}", op.detail);
+    // seen through with the Apply
+    apply(&f.host, &apply_req("a1", &w, &rev(&f, &w))).unwrap();
+    assert!(operation(&f, &w).is_none());
+}
+
+#[test]
+fn work_from_before_the_pin_conflicting_with_the_workspaces_own_waits_in_the_overlay() {
+    let f = fixture("carry-wait");
+    let w = session(&f, "s1");
+    let clone = clone_of(&w);
+    // the workspace's own work, not applied
+    write(&clone.join("f1.txt"), "own\n");
+    // the session's overlay holds other work on the same file (the repository was unpinned a while)
+    let up = overlay(&f, 0);
+    agent_wrote(&up, "f1.txt", "agent\n", unix_now() + 100);
+    ensure_for_session(&f.host, "s1").unwrap();
+    assert_eq!(read(&clone.join("f1.txt")), "own\n");
+    assert_eq!(read(&up.join("f1.txt")), "agent\n", "left in the overlay");
+    let op = operation(&f, &w).expect("waiting");
+    assert_eq!((op.kind.as_str(), op.state.as_str()), ("carry", "waiting"));
+    // once the workspace's work is discarded, the next start brings it
+    discard(&f.host, &apply_req("d1", &w, &rev(&f, &w))).unwrap();
+    ensure_for_session(&f.host, "s1").unwrap();
+    assert_eq!(read(&clone.join("f1.txt")), "agent\n");
+    assert!(!up.join("f1.txt").exists());
+    assert!(operation(&f, &w).is_none());
 }

@@ -7350,11 +7350,11 @@
           "type": "string"
         },
         "kind": {
-          "description": "`apply`, `rebase`.",
+          "description": "`apply`, `rebase`, `carry` (work from before the pin, docs/parallel-coding.md §12).",
           "type": "string"
         },
         "state": {
-          "description": "`interrupted` (its effect could not be established; shown, never redone) or `conflict`.",
+          "description": "`interrupted` (its effect could not be established; shown, never redone), `conflict`,\n`waiting` (a carry put off until the workspace's own work is applied or discarded) or\n`notice` (a line for the person until they Apply or Discard). Apply stays offered for the\nlast two.",
           "type": "string"
         }
       },
