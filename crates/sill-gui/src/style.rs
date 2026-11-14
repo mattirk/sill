@@ -340,6 +340,35 @@ pub fn tinted(color: Color) -> impl Fn(&Theme, button::Status) -> button::Style 
     }
 }
 
+/// The send button's arrow: light on the tint, dark on the accent under the pointer.
+pub fn send_arrow(_: &Theme, status: svg::Status) -> svg::Style {
+    svg::Style {
+        color: Some(match status {
+            svg::Status::Hovered => P.bg,
+            svg::Status::Idle => alpha(P.fg, 0.9),
+        }),
+    }
+}
+
+/// The send button: a tint of the accent at rest, the accent itself under the pointer.
+pub fn send(_: &Theme, status: button::Status) -> button::Style {
+    button::Style {
+        background: Some(
+            match status {
+                button::Status::Hovered => P.accent,
+                button::Status::Pressed => mix(P.accent, P.bg, 0.2),
+                button::Status::Disabled => alpha(P.accent, 0.15),
+                button::Status::Active => alpha(P.accent, 0.25),
+            }
+            .into(),
+        ),
+        text_color: P.fg,
+        border: square(Color::TRANSPARENT, 0.0),
+        shadow: Shadow::default(),
+        snap: true,
+    }
+}
+
 /// A filled square button in `color` with background-coloured text (question options, send).
 pub fn solid(color: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_, status| {
@@ -412,14 +441,20 @@ pub fn control(_: &Theme, status: pick_list::Status) -> pick_list::Style {
     }
 }
 
+/// An agent control's menu: a raised surface with a soft shadow, the choice under the pointer
+/// in a tint of the accent.
 pub fn control_menu(_: &Theme) -> menu::Style {
     menu::Style {
         background: P.surface.into(),
         border: square(P.border, 1.0),
-        text_color: P.fg,
+        text_color: alpha(P.fg, 0.85),
         selected_text_color: P.fg,
-        selected_background: alpha(P.accent, 0.25).into(),
-        shadow: Shadow::default(),
+        selected_background: alpha(P.accent, 0.22).into(),
+        shadow: Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.45),
+            offset: iced::Vector::new(0.0, 2.0),
+            blur_radius: 12.0,
+        },
     }
 }
 

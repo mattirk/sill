@@ -174,6 +174,11 @@ pub struct PickList<
     menu_class: <Theme as menu::Catalog>::Class<'a>,
     last_status: Option<Status>,
     menu_height: Length,
+    // sill patch: the menu's own width, padding, text size and distance from the list
+    menu_width: Option<f32>,
+    menu_padding: Option<Padding>,
+    menu_text_size: Option<Pixels>,
+    menu_gap: f32,
 }
 
 impl<'a, T, L, V, Message, Theme, Renderer>
@@ -211,7 +216,35 @@ where
             menu_class: <Theme as Catalog>::default_menu(),
             last_status: None,
             menu_height: Length::Shrink,
+            menu_width: None,
+            menu_padding: None,
+            menu_text_size: None,
+            menu_gap: 0.0,
         }
+    }
+
+    /// sill patch: the menu's width, when at least the list's (else the list's).
+    pub fn menu_width(mut self, width: f32) -> Self {
+        self.menu_width = Some(width);
+        self
+    }
+
+    /// sill patch: each option's padding in the menu (else the list's).
+    pub fn menu_padding<P: Into<Padding>>(mut self, padding: P) -> Self {
+        self.menu_padding = Some(padding.into());
+        self
+    }
+
+    /// sill patch: the options' text size in the menu (else the list's).
+    pub fn menu_text_size(mut self, size: impl Into<Pixels>) -> Self {
+        self.menu_text_size = Some(size.into());
+        self
+    }
+
+    /// sill patch: space between the list and its menu, above or below it.
+    pub fn menu_gap(mut self, gap: f32) -> Self {
+        self.menu_gap = gap;
+        self
     }
 
     /// Sets the placeholder of the [`PickList`].
@@ -720,19 +753,20 @@ where
                 None,
                 &self.menu_class,
             )
-            .width(bounds.width)
-            .padding(self.padding)
+            .width(self.menu_width.map_or(bounds.width, |w| w.max(bounds.width)))
+            .padding(self.menu_padding.unwrap_or(self.padding))
             .font(font)
             .text_shaping(self.text_shaping);
 
-            if let Some(text_size) = self.text_size {
+            if let Some(text_size) = self.menu_text_size.or(self.text_size) {
                 menu = menu.text_size(text_size);
             }
 
+            // sill patch: the gap on both sides of the list, as the menu opens below or above
             Some(menu.overlay(
-                layout.position() + translation,
+                layout.position() + translation - Vector::new(0.0, self.menu_gap),
                 *viewport,
-                bounds.height,
+                bounds.height + 2.0 * self.menu_gap,
                 self.menu_height,
             ))
         } else {

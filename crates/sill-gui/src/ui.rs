@@ -987,6 +987,10 @@ impl App {
             ]);
         }
         composer = outbox(composer, view);
+        // what waits above the prompt is one child, however many rows it has: the prompt keeps
+        // its place in the tree, and with it its focus (a first send's "Sending…" row moved it,
+        // and the cursor left the box)
+        let mut composer = Column::new().push(composer);
         let editor = text_editor(&view.draft)
             .id("prompt")
             .placeholder(placeholder(view))
@@ -997,6 +1001,7 @@ impl App {
             .height(Shrink)
             .max_height(220)
             .style(style::prompt);
+        let sendable = !view.draft.text().trim().is_empty();
         let action: Element<'_, Message> = if view.conversation.busy() {
             stop_button()
         } else {
@@ -1005,11 +1010,18 @@ impl App {
                     svg(icons::send())
                         .width(12)
                         .height(12)
-                        .style(style::icon(alpha(P.fg, 0.9))),
+                        .style(move |theme, status| {
+                            // dark on the accent only when the button lights up: there is a prompt
+                            if sendable {
+                                style::send_arrow(theme, status)
+                            } else {
+                                style::send_arrow(theme, svg::Status::Idle)
+                            }
+                        }),
                 )
                 .padding(4)
-                .style(style::tinted(P.accent)),
-                (!view.draft.text().trim().is_empty()).then_some(Message::Send),
+                .style(style::send),
+                sendable.then_some(Message::Send),
             )
         };
         let shell = button(icons::glyph(
@@ -1047,14 +1059,22 @@ impl App {
         }
         bar = bar.push(action);
         // as in the shelf, the prompt folds away while the terminal is up in its place
-        let input: Element<'_, Message> = match (&view.terminal, view.terminal_shown) {
-            (Some(pane), true) => self.terminal_pane(pane),
-            _ => editor.into(),
+        let terminal = view.terminal.as_ref().filter(|_| view.terminal_shown);
+        let input: Element<'_, Message> = match terminal {
+            Some(pane) => self.terminal_pane(pane),
+            None => editor.into(),
+        };
+        // under the prompt the icons sit low (the prompt's own padding is above them); under the
+        // terminal the bar is a strip of its own, the icons centred in it — the same height
+        let (top, bottom) = if terminal.is_some() {
+            (3.0, 3.0)
+        } else {
+            (4.0, 2.0)
         };
         composer = composer.push(input).push(container(bar).padding(Padding {
-            top: 0.0,
+            top,
             right: 10.0,
-            bottom: 6.0,
+            bottom,
             left: 10.0,
         }));
         column![
@@ -1529,6 +1549,9 @@ const CARET_ROOM: f32 = 19.0;
 /// One ACP control: as wide as its selected label, as the shelf's dropdowns are. iced's pick
 /// list sizes its menu to the control, so a longer choice wraps in the open menu — a dropdown that
 /// sizes the two apart is still to be written.
+/// Room on each side of a choice in an agent control's menu.
+const MENU_SIDE: f32 = 14.0;
+
 fn control<'a>(
     picks: Vec<Pick>,
     selected: Option<Pick>,
@@ -1542,7 +1565,19 @@ fn control<'a>(
     let select = on_select.clone();
     let choices = picks.clone();
     let current = selected.clone();
+    // the menu reads as a menu, not the label's strip: as wide as its longest choice, roomier
+    // rows in a little larger text, set apart from the control
+    let menu_width = picks
+        .iter()
+        .map(|p| text_width(&p.title, style::SMALL))
+        .fold(0.0, f32::max)
+        + 2.0 * MENU_SIDE
+        + 2.0;
     let list = pick_list(picks, selected, move |pick| select(pick))
+        .menu_width(menu_width.max(120.0))
+        .menu_padding([6.0, MENU_SIDE])
+        .menu_text_size(style::SMALL)
+        .menu_gap(6.0)
         .text_size(style::TINY)
         .padding(Padding {
             top: 3.0,
