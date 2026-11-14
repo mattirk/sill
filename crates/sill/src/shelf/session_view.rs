@@ -29,6 +29,9 @@ use vte4::prelude::*;
 
 /// The session's overlay as the shelf sees it: (layers, masked paths), for resolving a path the
 /// agent names to the file it sees.
+/// What gets a checkpoint's answer: the summary and the name the agent gave the session.
+type Checkpointed = Box<dyn FnOnce(Option<String>, Option<String>)>;
+
 /// A jail's overlay layers (host path, upper tree) and its masked paths, as the daemon plans them.
 type JailView = (Vec<(std::path::PathBuf, std::path::PathBuf)>, Vec<std::path::PathBuf>);
 
@@ -109,7 +112,7 @@ pub struct SessionView {
     agent_md: RefCell<String>,
     /// *Summarize now* is running in the daemon (docs/memory.md §2.5): what gets the answer and the
     /// name it gave the session when the `Summarized` event arrives (None: it wrote nothing).
-    checkpoint: RefCell<Option<Box<dyn FnOnce(Option<String>, Option<String>)>>>,
+    checkpoint: RefCell<Option<Checkpointed>>,
     /// After a resume with replay: ignore replayed events until the first turn starts.
     replaying: RefCell<bool>,
     /// Called when a turn ends (the window refreshes the ledger pages).
