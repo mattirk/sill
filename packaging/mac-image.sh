@@ -60,6 +60,11 @@ users:
 package_update: true
 packages: [git, ca-certificates, build-essential, pkg-config, bubblewrap, e2fsprogs, util-linux,
            libpam-systemd, dbus-user-session, openssh-server, sudo, curl, nodejs, npm]
+# what cloud-init does shows on the virtio console (console.log), and the build learns there
+# when the account is ready, so it never tries a login too early
+output: {all: '| tee -a /var/log/cloud-init-output.log /dev/hvc0'}
+runcmd:
+  - [sh, -c, 'echo sill-image-ready > /dev/hvc0']
 EOF
 printf 'instance-id: sill-image-build-%s\nlocal-hostname: sill-box\n' "$(date +%s)" > "$work/seed/meta-data"
 hdiutil makehybrid -quiet -iso -joliet -default-volume-name cidata -o "$work/seed.iso" "$work/seed"
@@ -106,9 +111,17 @@ let_in() {
         sleep 10
     done
 }
-echo 'Waiting for the first boot (packages)'
+echo 'Waiting for the first boot (packages; console: target/mac-image/console.log)'
+# cloud-init's last step marks the console; logins before it would only fail, and OpenSSH holds
+# failed logins against the source
+tries=0
+until grep -q sill-image-ready "$work/console.log" 2>/dev/null; do
+    tries=$((tries + 1))
+    [ $tries -lt 180 ] || { echo 'The first boot did not finish in 30 minutes.' >&2; exit 1; }
+    sleep 10
+done
 let_in
-guest 'cloud-init status --wait >/dev/null; cloud-init status --long | grep -E "^(status|errors)"'
+guest 'cloud-init status --long | grep -E "^(status|errors)"'
 # again, so the account's user manager starts with the session bus the packages brought
 power_off
 boot
