@@ -239,6 +239,7 @@ pub fn handle(hub: &std::sync::Arc<Hub>, conn: &Conn, method: &str, params: serd
                 let p = s.host_processes(&a.session_id)?.into_iter().find(|p| p.id == id).ok_or_else(|| domain("not_found", "host process not found"))?;
                 s.keep_host_process(&p.id, a.keep)?; Ok(())
             })?;
+            super::host_bridge::publish(hub, &a.session_id);
             note(hub, &a.session_id, format!("Host process {}: keep after revocation = {}", a.name, a.keep));
             Ok(json!({}))
         }),

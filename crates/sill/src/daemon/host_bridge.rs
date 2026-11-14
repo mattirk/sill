@@ -180,7 +180,9 @@ fn action(hub: &Arc<Hub>, session: &str, generation: u64, r: &Request) -> Result
                 "argv and an absolute host cwd are required"
             );
             let id = super::sfp::id();
-            let log = sill_core::shim::runtime_dir(session)?.join(format!("host-{id}.log"));
+            let dir = host_dir(session)?;
+            std::fs::create_dir_all(&dir)?;
+            let log = dir.join(format!("{id}.log"));
             let file = std::fs::OpenOptions::new()
                 .create_new(true)
                 .write(true)
@@ -224,6 +226,7 @@ fn action(hub: &Arc<Hub>, session: &str, generation: u64, r: &Request) -> Result
                 return Err(e);
             }
             let owned = saved.unwrap();
+            publish(hub, session);
             let hub = hub.clone();
             let session = session.to_owned();
             let owned_id = id.clone();
@@ -245,6 +248,7 @@ fn action(hub: &Arc<Hub>, session: &str, generation: u64, r: &Request) -> Result
                         code,
                     )
                 });
+                publish(&hub, &session);
                 host_control::note(
                     &hub,
                     &session,
@@ -261,9 +265,7 @@ fn action(hub: &Arc<Hub>, session: &str, generation: u64, r: &Request) -> Result
                     .find(|p| format!("host:{}", p.id) == name)
                     .context("session-owned host process not found")?;
                 use std::io::Seek;
-                let mut file = std::fs::File::open(
-                    sill_core::shim::runtime_dir(session)?.join(format!("host-{}.log", p.id)),
-                )?;
+                let mut file = std::fs::File::open(host_log(session, &p.id)?)?;
                 let length = file.metadata()?.len();
                 file.seek(std::io::SeekFrom::Start(length.saturating_sub(64 * 1024)))?;
                 let mut bytes = Vec::new();
@@ -300,6 +302,7 @@ fn action(hub: &Arc<Hub>, session: &str, generation: u64, r: &Request) -> Result
             anyhow::ensure!(p.ended.is_none(), "process already ended");
             stop_group(&p)?;
             hub.with_store(|s| s.end_host_process(&p.id, "stopped", None))?;
+            publish(hub, session);
             Ok(json!({"stopped":name}))
         }
         "stop_existing" => {
@@ -364,6 +367,44 @@ const KEPT_VIEWS: usize = 8;
 fn views(session: &str) -> Result<PathBuf> {
     Ok(sill_core::shim::runtime_dir(session)?.join("bridge/view"))
 }
+/// The session's host processes as its jail sees them (read-only through the bridge directory):
+/// `processes.json`, the records, and `<id>.log`, each one's captured output. They stay after
+/// revocation, like the records: ownership evidence, not authority.
+fn host_dir(session: &str) -> Result<PathBuf> {
+    Ok(sill_core::shim::runtime_dir(session)?.join("bridge").join(sill_core::jail::BRIDGE_HOST_DIR))
+}
+pub fn host_log(session: &str, id: &str) -> Result<PathBuf> {
+    Ok(host_dir(session)?.join(format!("{id}.log")))
+}
+/// Rewrite the jail-visible record list after any change to the session's host processes.
+pub fn publish(hub: &Hub, session: &str) {
+    let result = (|| -> Result<()> {
+        let processes = hub.with_store(|s| s.host_processes(session))?;
+        let dir = host_dir(session)?;
+        if processes.is_empty() && !dir.is_dir() {
+            return Ok(());
+        }
+        std::fs::create_dir_all(&dir)?;
+        let rows: Vec<Value> = processes
+            .iter()
+            .map(|p| {
+                json!({
+                    "name": format!("host:{}", p.id), "pid": p.pid, "state": p.state, "kept": p.kept,
+                    "exit_code": p.exit_code, "started": p.started, "ended": p.ended,
+                    "argv": p.argv, "cwd": p.cwd, "generation": p.generation, "location": "host",
+                    "log": format!("{}/{}/{}.log", sill_core::jail::BRIDGE_DIR, sill_core::jail::BRIDGE_HOST_DIR, p.id),
+                })
+            })
+            .collect();
+        let tmp = dir.join("processes.json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(&rows)?)?;
+        std::fs::rename(tmp, dir.join("processes.json"))?;
+        Ok(())
+    })();
+    if let Err(e) = result {
+        eprintln!("sill daemon: session {session}: publishing host processes to the jail: {e:#}");
+    }
+}
 pub fn cleanup(hub: &Hub, session: &str) {
     if let Ok(path) = socket(session) {
         let _ = std::fs::remove_file(path);
@@ -395,6 +436,7 @@ pub fn cleanup(hub: &Hub, session: &str) {
             );
         }
     }
+    publish(hub, session);
 }
 
 /// Recovery restores ownership evidence, never authority. Stop unkept survivors; kept ones stay

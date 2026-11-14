@@ -913,9 +913,21 @@ PY
         check("agent reads captured host output", rc == 0 and "bridge-output" in output, output)
         rows = c.call("_sill/procs.list", {"session_id": ctl})["processes"]
         check("process list identifies the host owner and location", any(p["name"] == name and p["location"] == "host" for p in rows))
+        rc, listed = sh(c, ctl, "/.sill/bin/sill-proc list")
+        check("the jail's sill-proc lists the host process, marked as on the host",
+              rc == 0 and name in listed and "on the host" in listed and "running" in listed, listed)
+        rc, tailed = sh(c, ctl, f"/.sill/bin/sill-proc tail {name}")
+        check("…and tails its output", rc == 0 and "bridge-output" in tailed, tailed)
+        rc, refused_stop = sh(c, ctl, f"/.sill/bin/sill-proc stop {name}")
+        check("…but cannot stop it: it points at sill-host", rc != 0 and "sill-host stop" in refused_stop
+              and pathlib.Path(f"/proc/{launched['pid']}").exists(), refused_stop)
+        check("sill-proc tail of a host name of another session finds nothing",
+              sh(c, no_host, f"/.sill/bin/sill-proc tail {name}")[0] != 0)
         hc.call("_sill/host_control.keep", {"session_id": ctl, "name": name, "keep": True})
         hc.call("_sill/host_control.revoke", {"session_id": ctl})
         check("explicitly kept process survives revocation", pathlib.Path(f"/proc/{launched['pid']}").exists())
+        rc, listed = sh(c, ctl, "/.sill/bin/sill-proc list")
+        check("…and stays listed in the jail as kept after revocation", rc == 0 and name in listed and "kept" in listed, listed)
         check("revocation removes agent access", bridge(ctl, "state")[0] != 0)
         generation = activate(hc, ctl, ["stop", "launch"])["generation"]
         check("new activation can deliberately stop a kept owned process", bridge(ctl, "stop", generation, {"name": name})[0] == 0)
@@ -925,6 +937,8 @@ PY
         hc.call("_sill/host_control.revoke", {"session_id": ctl})
         time.sleep(.3)
         check("unkept host process is stopped on revocation", not pathlib.Path(f"/proc/{second['pid']}").exists())
+        rc, listed = sh(c, ctl, "/.sill/bin/sill-proc list")
+        check("…and the jail's list shows it stopped", rc == 0 and second["name"] in listed and "stopped" in listed, listed)
 
         # -- 19. display operations: no display, then a headless Weston/Xwayland as the host display
         generation = activate(hc, ctl, ["view", "input"])["generation"]

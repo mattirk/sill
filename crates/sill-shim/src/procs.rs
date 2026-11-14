@@ -417,7 +417,85 @@ pub fn cli(args: Vec<String>) -> i32 {
     }
 }
 
-const USAGE: &str = "usage: sill-proc start --name NAME [--port PORT] [--cwd DIR] -- COMMAND…\n       sill-proc list | tail NAME [-n LINES] | stop NAME | stop-all | dismiss NAME\n\nA command started here keeps running after your turn ends and after you restart; a background `&` does not.";
+const USAGE: &str = "usage: sill-proc start --name NAME [--port PORT] [--cwd DIR] -- COMMAND…\n       sill-proc list | tail NAME [-n LINES] | stop NAME | stop-all | dismiss NAME\n\nA command started here keeps running after your turn ends and after you restart; a background `&` does not.\nProcesses Host control launched on the host (host:ID) are listed and tailed here too; stopping them needs `sill-host stop`.";
+
+/// The session's host processes as the daemon publishes them into the bridge directory.
+fn host_processes() -> Vec<Value> {
+    // the bridge directory, as host_cli.rs knows it (the shim does not depend on sill-core)
+    std::fs::read("/.sill/bridge/host/processes.json")
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Vec<Value>>(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// A host process's record by its `host:ID` name, with the jail path of its output.
+fn host_process(name: &str) -> Result<Value> {
+    anyhow::ensure!(
+        name.strip_prefix("host:")
+            .is_some_and(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric())),
+        "no process {name}"
+    );
+    host_processes()
+        .into_iter()
+        .find(|p| p["name"].as_str() == Some(name))
+        .with_context(|| format!("no host process {name} (it may belong to a session of its own)"))
+}
+
+/// The last `lines` of a host process's captured output, read from the bridge directory.
+fn host_tail(name: &str, lines: usize) -> Result<String> {
+    let p = host_process(name)?;
+    let log = p["log"].as_str().context("no output record")?;
+    let text = std::fs::read_to_string(log).unwrap_or_default();
+    let all: Vec<&str> = text.lines().collect();
+    Ok(all[all.len().saturating_sub(lines)..].join("\n"))
+}
+
+fn print_process(p: &Value, location: &str) {
+    let state = match &p["state"] {
+        Value::String(s) => s.clone(),
+        Value::Object(o) => o
+            .iter()
+            .map(|(k, v)| format!("{k} {v}"))
+            .next()
+            .unwrap_or_default(),
+        _ => "?".into(),
+    };
+    let state = match (p["exit_code"].as_i64(), state.as_str()) {
+        (Some(code), "exited") => format!("exited {code}"),
+        _ => state,
+    };
+    let up = match p["ended"].as_u64() {
+        Some(ended) => ended.saturating_sub(p["started"].as_u64().unwrap_or(0)),
+        None => now().saturating_sub(p["started"].as_u64().unwrap_or(0)),
+    };
+    let port = p["port"]
+        .as_u64()
+        .map(|x| format!(" port {x}"))
+        .unwrap_or_default();
+    let kept = if p["kept"].as_bool() == Some(true) { " kept" } else { "" };
+    let argv: Vec<String> = p["argv"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    println!(
+        "{:<16} {:<10} pid {:<7} up {}s{}  {}{}{}",
+        p["name"].as_str().unwrap_or(""),
+        state,
+        p["pid"],
+        up,
+        port,
+        location,
+        kept,
+        argv.join(" ")
+    );
+    if let Some(l) = p["last_line"].as_str().filter(|l| !l.is_empty()) {
+        println!("{:<16} {l}", "");
+    }
+}
 
 fn cli_inner(mut args: Vec<String>) -> Result<()> {
     let Some(sub) = args.first().cloned() else {
@@ -465,15 +543,23 @@ fn cli_inner(mut args: Vec<String>) -> Result<()> {
                     .context("-n expects a number")?,
                 _ => 50,
             };
+            if name.starts_with("host:") {
+                println!("{}", host_tail(&name, lines)?);
+                return Ok(());
+            }
             json!({ "op": "tail", "name": name, "lines": lines })
         }
-        "stop" => {
-            json!({ "op": "stop", "name": args.first().cloned().context("stop expects a name")? })
+        "stop" | "dismiss" => {
+            let name = args.first().cloned().with_context(|| format!("{sub} expects a name"))?;
+            if name.starts_with("host:") {
+                host_process(&name)?;
+                bail!(
+                    "{name} runs on the host: `sill-host stop GENERATION '{{\"name\":\"{name}\"}}'` stops it while Host control grants stop; its record stays for the person"
+                );
+            }
+            json!({ "op": sub, "name": name })
         }
         "stop-all" => json!({ "op": "stop_all" }),
-        "dismiss" => {
-            json!({ "op": "dismiss", "name": args.first().cloned().context("dismiss expects a name")? })
-        }
         _ => bail!("{USAGE}"),
     };
     let reply = call(&socket_path(), &op)?;
@@ -490,44 +576,15 @@ fn cli_inner(mut args: Vec<String>) -> Result<()> {
         }
         "list" => {
             let procs = reply["procs"].as_array().cloned().unwrap_or_default();
-            if procs.is_empty() {
+            let host = host_processes();
+            if procs.is_empty() && host.is_empty() {
                 println!("no managed processes");
             }
-            for p in procs {
-                let state = match &p["state"] {
-                    Value::String(s) => s.clone(),
-                    Value::Object(o) => o
-                        .iter()
-                        .map(|(k, v)| format!("{k} {v}"))
-                        .next()
-                        .unwrap_or_default(),
-                    _ => "?".into(),
-                };
-                let up = now().saturating_sub(p["started"].as_u64().unwrap_or(0));
-                let port = p["port"]
-                    .as_u64()
-                    .map(|x| format!(" port {x}"))
-                    .unwrap_or_default();
-                let argv: Vec<String> = p["argv"]
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                println!(
-                    "{:<16} {:<10} pid {:<7} up {}s{}  {}",
-                    p["name"].as_str().unwrap_or(""),
-                    state,
-                    p["pid"],
-                    up,
-                    port,
-                    argv.join(" ")
-                );
-                if let Some(l) = p["last_line"].as_str().filter(|l| !l.is_empty()) {
-                    println!("{:<16} {l}", "");
-                }
+            for p in &procs {
+                print_process(p, "");
+            }
+            for p in &host {
+                print_process(p, "on the host: ");
             }
         }
         "tail" => println!("{}", reply["text"].as_str().unwrap_or("")),

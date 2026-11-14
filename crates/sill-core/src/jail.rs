@@ -41,6 +41,9 @@ pub const PROXY_SOCKET: &str = "/.sill/proxy.sock";
 /// the socket, so a socket made later (by a restarted daemon) shows in a running jail.
 pub const BRIDGE_DIR: &str = "/.sill/bridge";
 pub const BRIDGE_SOCKET: &str = "host.sock";
+/// Under [`BRIDGE_DIR`]: the session's host processes for the jail's `sill-proc` (`processes.json`
+/// and `<id>.log`), kept after revocation; and `view/`, the pictures Host control's `view` took.
+pub const BRIDGE_HOST_DIR: &str = "host";
 /// Loopback port the shim forwards to the proxy socket.
 pub const PROXY_PORT: u16 = 3128;
 

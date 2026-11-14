@@ -815,7 +815,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 let found = hub.with_store(|s| Ok(s.host_processes(&a.session_id)?.iter().any(|p| p.id == id)))?;
                 if !found { return Err(invalid("host process not found")); }
                 use std::io::{Read, Seek};
-                let path = sill_core::shim::runtime_dir(&a.session_id)?.join(format!("host-{id}.log"));
+                let path = super::host_bridge::host_log(&a.session_id, id)?;
                 let mut file = std::fs::File::open(path)?;
                 let size = file.metadata()?.len();
                 file.seek(std::io::SeekFrom::Start(size.saturating_sub(1024 * 1024)))?;
