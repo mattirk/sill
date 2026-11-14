@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
+
+/// Token budgets of one model, as the server runs it. An absent value is the agent's default.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelLimits {
@@ -45,6 +47,7 @@ pub struct Provider {
     /// One of `models`: the model a session starts with unless the person picked another.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
+    /// Token limits by model, each one of `models`. Last: it is a table in the file.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub model_limits: BTreeMap<String, ModelLimits>,
 }
@@ -150,14 +153,6 @@ pub fn dir(home: &Path) -> PathBuf {
     home.join(".config/sill/providers")
 }
 
-// Separate from the strict legacy TOML so an older daemon can still load providers.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SavedLimits {
-    base_url: String,
-    limits: BTreeMap<String, ModelLimits>,
-}
-
 /// Every provider, by id. A file that does not read is an error, as an agent definition is.
 pub fn load(home: &Path) -> Result<BTreeMap<String, Provider>> {
     let dir = dir(home);
@@ -171,18 +166,7 @@ pub fn load(home: &Path) -> Result<BTreeMap<String, Provider>> {
         let path = entry?.path();
         if path.extension().and_then(|x| x.to_str()) != Some("toml") { continue; }
         let text = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        let mut provider: Provider = toml::from_str(&text).with_context(|| format!("invalid model provider {}", path.display()))?;
-        let limits_path = path.with_extension("limits.json");
-        match std::fs::read(&limits_path) {
-            Ok(bytes) => {
-                let saved: SavedLimits = serde_json::from_slice(&bytes).with_context(|| format!("invalid limits {}", limits_path.display()))?;
-                if saved.base_url == provider.base_url {
-                    provider.model_limits = saved.limits.into_iter().filter(|(model, _)| provider.models.contains(model)).collect();
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e).with_context(|| format!("read {}", limits_path.display())),
-        }
+        let provider: Provider = toml::from_str(&text).with_context(|| format!("invalid model provider {}", path.display()))?;
         provider.validate().with_context(|| format!("invalid model provider {}", path.display()))?;
         ensure!(path.file_stem().and_then(|s| s.to_str()) == Some(provider.id.as_str()), "model provider {} is not named after its id {}", path.display(), provider.id);
         out.insert(provider.id.clone(), provider);
@@ -195,11 +179,7 @@ pub fn save(home: &Path, provider: &Provider) -> Result<PathBuf> {
     let dir = dir(home);
     std::fs::create_dir_all(&dir)?;
     let name = format!("{}.toml", provider.id);
-    let limits = SavedLimits { base_url: provider.base_url.clone(), limits: provider.model_limits.clone() };
-    crate::safe_fs::replace_file(&dir, std::ffi::OsStr::new(&format!("{}.limits.json", provider.id)), &serde_json::to_vec(&limits)?)?;
-    let mut legacy = provider.clone();
-    legacy.model_limits.clear();
-    crate::safe_fs::replace_file(&dir, std::ffi::OsStr::new(&name), toml::to_string_pretty(&legacy)?.as_bytes())?;
+    crate::safe_fs::replace_file(&dir, std::ffi::OsStr::new(&name), toml::to_string_pretty(provider)?.as_bytes())?;
     Ok(dir.join(name))
 }
 
@@ -207,11 +187,6 @@ pub fn save(home: &Path, provider: &Provider) -> Result<PathBuf> {
 pub fn remove(home: &Path, id: &str) -> Result<bool> {
     ensure!(valid_id(id), "invalid provider id");
     remove_key(home, id)?;
-    match std::fs::remove_file(dir(home).join(format!("{id}.limits.json"))) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e.into()),
-    }
     match std::fs::remove_file(dir(home).join(format!("{id}.toml"))) {
         Ok(()) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -504,15 +479,15 @@ mod tests {
         );
         save(&home.0, &p).unwrap();
         assert_eq!(load(&home.0).unwrap()["local"], p);
+        // One record, written by hand as it is saved: the limits are a table of the TOML.
         let record = dir(&home.0).join("local.toml");
         let text = std::fs::read_to_string(&record).unwrap();
-        assert!(!text.contains("model_limits"));
-        // Simulate an older daemon editing only the legacy record.
-        std::fs::write(&record, text.replace("Provider local", "Renamed")).unwrap();
-        assert_eq!(load(&home.0).unwrap()["local"].model_limits, p.model_limits);
+        assert!(text.contains("[model_limits.\"qwen/coder\"]\ncontext = 32768\noutput = 4096"), "{text}");
+        assert_eq!(std::fs::read_dir(dir(&home.0)).unwrap().count(), 1);
         std::fs::write(&record, text.replace("192.168.1.20", "192.168.1.21")).unwrap();
-        assert!(load(&home.0).unwrap()["local"].model_limits.is_empty());
-        save(&home.0, &p).unwrap();
+        assert_eq!(load(&home.0).unwrap()["local"].model_limits, p.model_limits);
+        assert!(remove(&home.0, "local").unwrap());
+        assert_eq!(std::fs::read_dir(dir(&home.0)).unwrap().count(), 0);
         let env = Translation::OpenCode.env(&[&p], &|_| false);
         let config: serde_json::Value =
             serde_json::from_str(&env["OPENCODE_CONFIG_CONTENT"]).unwrap();

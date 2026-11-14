@@ -18,7 +18,6 @@ pub struct Capability { pub name: &'static str, pub version: u32, pub doc: &'sta
 /// Every capability this daemon offers. The baseline sfp/1 contract needs none of them; later
 /// compatible additions arrive here (docs/protocol.md, Compatibility and errors).
 pub const CAPABILITIES: &[Capability] = &[
-    Capability { name: "sill.provider_limits", version: 1, doc: "Per-model provider token limits and Ollama active-context detection." },
     Capability { name: "sill.storage", version: 1, doc: "Daemon-host free space and inactive-session build-cache cleanup." },
     Capability { name: "sill.crosscheck", version: 1, doc: "_sill/crosscheck.*: a second opinion on a workspace's work from one Reviewer, a saved agent with its options; a submission may carry the purpose `crosscheck`." },
     Capability { name: "sill.send_now", version: 1, doc: "_sill/submissions.send_now: a queued submission goes next, the active turn stopped." },
@@ -31,6 +30,7 @@ pub const CAPABILITIES: &[Capability] = &[
     Capability { name: "sill.login_browser", version: 1, doc: "Host logins hand their pages to the frontend (`open_url` login progress) instead of opening a browser on the daemon host; _sill/streams.login_callback relays the page's loopback callback from a frontend on another machine; _sill/operations.cancel stops a running login." },
     Capability { name: "sill.jail_processes", version: 1, doc: "_sill/procs.running: what runs in a session's jail now, commands apart from services, seen from outside the agent (docs/jail-processes.md); _sill/procs.stop_command stops one command with its tree." },
     Capability { name: "sill.providers", version: 1, doc: "_sill/providers.*: model providers, records on the daemon host for OpenAI-compatible endpoints. The daemon derives the configuration, the key and the network grant of agents it has a translation for (docs/model-providers.md)." },
+    Capability { name: "sill.provider_limits", version: 1, doc: "Per-model provider token limits and Ollama active-context detection." },
     Capability { name: "sill.host_control", version: 1, doc: "The frontend displays Host control: the session's caption (a line in the control's colour for as long as it is active, with its words when it starts or its scope changes) and the window-level line naming every session with active control. It may activate and revoke (_sill/host_control.activate, revoke); attached to a session, it counts as displaying that session's control, which ends when the last such connection goes." },
 ];
 

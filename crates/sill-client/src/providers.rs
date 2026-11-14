@@ -27,6 +27,14 @@ pub fn save(client: &Client, provider: api::Provider, key: Option<String>, clear
     client.call("_sill/providers.save", api::Save { provider, key: key.map(Secret), clear_key })
 }
 
+/// The context a running Ollama model was loaded with, read on the daemon host.
+pub fn detect_limits(client: &Client, request: api::DetectLimits) -> Result<api::DetectedLimits> {
+    if !client.has_capability(api::LIMITS_CAPABILITY) {
+        bail!("update and restart the daemon for model token-limit detection");
+    }
+    client.call("_sill/providers.detect_limits", request)
+}
+
 pub fn remove(client: &Client, provider_id: &str) -> Result<()> {
     supported(client)?;
     let _: api::Removed = client.call("_sill/providers.remove", api::Key { provider_id: provider_id.into() })?;
@@ -71,11 +79,4 @@ mod tests {
         let long = id_for(&"a-".repeat(80), &[]);
         assert!(long.len() <= 56 && !long.ends_with('-') && !long.starts_with('-'), "{long}");
     }
-}
-
-pub fn detect_limits(client: &Client, request: api::DetectLimits) -> Result<api::DetectedLimits> {
-    if !client.has_capability(api::LIMITS_CAPABILITY) {
-        bail!("update and restart the daemon for model token-limit detection");
-    }
-    client.call("_sill/providers.detect_limits", request)
 }

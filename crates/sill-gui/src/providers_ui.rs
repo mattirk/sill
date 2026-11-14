@@ -773,12 +773,12 @@ mod tests {
     #[ignore = "writes provider token limits PNG for review"]
     fn render_model_limits() {
         let mut form = Form::new();
-        form.editing = Some("rt25-ai-box".into());
+        form.editing = Some("lan-ollama".into());
         form.kind = Kind::Ollama;
         form.ollama = true;
-        form.name = "RT25 AI-box".into();
-        form.address = "http://10.0.0.140:11434/v1".into();
-        let model = "qwen3.8:27b".to_string();
+        form.name = "Ollama (workstation)".into();
+        form.address = "http://192.168.1.20:11434/v1".into();
+        let model = "qwen3-coder:30b".to_string();
         form.know([model.clone()]);
         form.ticked.insert(model.clone());
         form.limits.insert(

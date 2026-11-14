@@ -31,7 +31,7 @@ fn public(p: core::Provider) -> Result<api::Provider> {
 fn request_key(home: &std::path::Path, base_url: &str, key: Option<sill_proto::wire::Secret>, id: Option<&str>) -> Result<Option<String>> {
     if let Some(key) = key { return Ok(Some(key.0)); }
     let Some(id) = id else { return Ok(None); };
-    let key = core::key(home, id)?;
+    let key = core::key(home, id).map_err(invalid)?;
     if key.is_none() { return Ok(None); }
     let providers = core::load(home)?;
     let provider = providers.get(id).ok_or_else(|| Error::invalid_params("unknown provider"))?;
@@ -70,17 +70,17 @@ pub fn handle(conn: &super::Conn, m: &str, p: Value) -> Option<Result<Value>> {
                     )
                     .into());
                 }
-                // Old frontends cannot edit limits, so omission must not erase them.
+                let saved = core::load(&home)?;
+                // An old frontend cannot edit limits, so leaving them out must not erase them:
+                // they stay with the models it kept, at the address they were measured for.
                 if !conn.has_capability(api::LIMITS_CAPABILITY) {
-                    if let Some(saved) = core::load(&home)?.get(&a.provider.id) {
-                        if saved.base_url == a.provider.base_url {
-                            a.provider.model_limits = saved.model_limits.iter()
-                                .filter(|(model, _)| a.provider.models.contains(model))
-                                .map(|(model, limits)| (model.clone(), limits.clone())).collect();
-                        }
+                    if let Some(saved) = saved.get(&a.provider.id).filter(|saved| saved.base_url == a.provider.base_url) {
+                        a.provider.model_limits = saved.model_limits.iter()
+                            .filter(|(model, _)| a.provider.models.contains(model))
+                            .map(|(model, limits)| (model.clone(), limits.clone())).collect();
                     }
                 }
-                if core::load(&home)?.len() >= 64 && !core::load(&home)?.contains_key(&a.provider.id) {
+                if saved.len() >= 64 && !saved.contains_key(&a.provider.id) {
                     return Err(Error::domain("limit_exceeded", "at most 64 model providers").into());
                 }
                 // the key first: a record never names a key that failed to save

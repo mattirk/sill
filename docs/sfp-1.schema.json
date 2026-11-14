@@ -8115,11 +8115,6 @@
   "capabilities": {
     "offered": [
       {
-        "doc": "Per-model provider token limits and Ollama active-context detection.",
-        "name": "sill.provider_limits",
-        "version": 1
-      },
-      {
         "doc": "Daemon-host free space and inactive-session build-cache cleanup.",
         "name": "sill.storage",
         "version": 1
@@ -8177,6 +8172,11 @@
       {
         "doc": "_sill/providers.*: model providers, records on the daemon host for OpenAI-compatible endpoints. The daemon derives the configuration, the key and the network grant of agents it has a translation for (docs/model-providers.md).",
         "name": "sill.providers",
+        "version": 1
+      },
+      {
+        "doc": "Per-model provider token limits and Ollama active-context detection.",
+        "name": "sill.provider_limits",
         "version": 1
       },
       {
@@ -8259,20 +8259,6 @@
     "snapshot_ttl_seconds": 60
   },
   "methods": [
-    {
-      "capabilities": {
-        "sill.provider_limits": 1
-      },
-      "doc": "Read Ollama's active context allocation for one model, from the same host and path prefix as the provider; does not load or modify models.",
-      "kind": "request",
-      "name": "_sill/providers.detect_limits",
-      "params": {
-        "$ref": "#/$defs/ProviderDetectLimits"
-      },
-      "result": {
-        "$ref": "#/$defs/ProviderDetectedLimits"
-      }
-    },
     {
       "capabilities": {
         "sill.storage": 1
@@ -9243,6 +9229,20 @@
       },
       "result": {
         "$ref": "#/$defs/ProviderTested"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.provider_limits": 1
+      },
+      "doc": "Read Ollama's active context allocation for one model, from the same host and path prefix as the provider; does not load or modify models.",
+      "kind": "request",
+      "name": "_sill/providers.detect_limits",
+      "params": {
+        "$ref": "#/$defs/ProviderDetectLimits"
+      },
+      "result": {
+        "$ref": "#/$defs/ProviderDetectedLimits"
       }
     },
     {

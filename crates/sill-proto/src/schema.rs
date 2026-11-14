@@ -60,7 +60,6 @@ const fn notification<P: JsonSchema>(name: &'static str, doc: &'static str) -> M
 
 /// Every method the daemon answers and every notification it sends, in the order of docs/protocol.md.
 pub const METHODS: &[Method] = &[
-    req_needing::<crate::providers::DetectLimits, crate::providers::DetectedLimits>("_sill/providers.detect_limits", "sill.provider_limits", 1, "Read Ollama's active context allocation for one model, from the same host and path prefix as the provider; does not load or modify models."),
     req_needing::<crate::Empty, crate::storage::Space>("_sill/storage.space", "sill.storage", 1, "Read used, total and available bytes on the daemon host home and state filesystems."),
     req_needing::<crate::Empty, crate::storage::Caches>("_sill/storage.caches", "sill.storage", 1, "Scan known session build caches; active sessions cannot be cleared."),
     req_empty_needing::<crate::storage::ClearBuildCache>("_sill/storage.clear_build_cache", "sill.storage", 1, "Detach and remove only the known build cache of an inactive session; read caches again after uncertainty before repeating."),
@@ -139,6 +138,7 @@ pub const METHODS: &[Method] = &[
     req_needing::<crate::providers::Save, crate::providers::Saved>("_sill/providers.save", "sill.providers", 1, "Write a provider record; a key, when given, replaces the saved one. Running sessions of agents that use providers become outdated. Inspect the list after uncertainty before retrying."),
     req_needing::<crate::providers::Key, crate::providers::Removed>("_sill/providers.remove", "sill.providers", 1, "Remove a provider record and its key. A provider already gone is not an error."),
     req_needing::<crate::providers::Test, crate::providers::Tested>("_sill/providers.test", "sill.providers", 1, "Ask an endpoint for its models from the daemon host, with the given key or the one saved for provider_id. Changes nothing; fails with the endpoint's own error."),
+    req_needing::<crate::providers::DetectLimits, crate::providers::DetectedLimits>("_sill/providers.detect_limits", "sill.provider_limits", 1, "Read Ollama's active context allocation for one model, from the same host and path prefix as the provider; does not load or modify models."),
     req::<crate::agent_admin::AgentKey, crate::agent_admin::Installation>("_sill/registry.installed", "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation."),
     req::<crate::agent_admin::EntryKey, crate::Empty>("_sill/registry.uninstall", "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation."),
     req::<crate::agent_admin::EntryKey, crate::agent_admin::Icon>("_sill/registry.icon", "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation."),

@@ -1981,7 +1981,7 @@ fn provider_limits_capabilities_legacy_saves_and_credential_binding() {
     let listed = new.call("_sill/providers.list", json!({})).unwrap();
     assert_eq!(listed["result"]["providers"][0]["provider"]["model_limits"], provider["model_limits"]);
     let text = std::fs::read_to_string(d.dir.join("home/.config/sill/providers/lan.toml")).unwrap();
-    assert!(!text.contains("model_limits"), "old daemons must read the original record shape");
+    assert!(text.contains("[model_limits.qwen3]"), "the limits are part of the one record: {text}");
     for address in ["http://other.example:11434/v1", "https://server.example:11434/v1", "http://server.example:11434/other/v1", "http://server.example:8080/v1"] {
         for method in ["_sill/providers.detect_limits", "_sill/providers.test"] {
             let mut args = detect.clone();
