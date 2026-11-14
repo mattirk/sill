@@ -5,7 +5,9 @@
 //! (`home_env`, `CODEX_HOME`) to a directory made fresh for the login — not the jail's copy: that
 //! one is the agent's to write, and a config planted there (an MCP server command, a hook) would run
 //! on the host through this very process (security.md S4). What the login writes is copied into
-//! the jail's copy afterwards, files only and never through a link, so the host never gets a
+//! the jail's copy afterwards — after the adapter's own helpers have stopped, and never the
+//! databases, logs or temp files a fresh home creates around the login (they would replace the
+//! agent's history) — files only and never through a link, so the host never gets a
 //! `~/.codex` or `~/.gemini`; an agent without `home_env` writes the host file named in
 //! `shared_files`, which is bound in. Either way the session starts again.
 
@@ -151,15 +153,88 @@ pub fn run(agent: &Agent, home: &Path, method: &str, mut report: impl FnMut(Line
         wait_response(&rx, &erx, 2, TIMEOUT, &mut report)?;
         Ok(())
     })();
-    let _ = child.kill();
-    let _ = child.wait();
-    if let (Ok(()), Some(dst)) = (&result, copy_back) {
-        std::fs::create_dir_all(&dst)?;
-        let n = crate::safe_fs::copy_files_beneath(&scratch, &dst)?;
+    stop_agent(&mut child, &crate::registry::tools_dir(home));
+    let copied = match (&result, copy_back) {
+        (Ok(()), Some(dst)) => std::fs::create_dir_all(&dst).map_err(Into::into).and_then(|()| copy_login(&scratch, &dst)).map(Some),
+        _ => Ok(None),
+    };
+    // the scratch holds a credential: gone whatever happened
+    let _ = std::fs::remove_dir_all(&scratch);
+    result?;
+    if let Some(n) = copied? {
         report(Line::Status(format!("{n} login file(s) copied into the session's home")));
     }
-    let _ = std::fs::remove_dir_all(&scratch);
-    result
+    Ok(())
+}
+
+/// End the login agent and the helpers it runs from sill's agent installs (Codex's `codex
+/// app-server`), before the scratch is copied: one still running there deletes files under the
+/// copy. Only helpers whose executable is under `tools`: a browser the login opened is the
+/// person's and stays.
+fn stop_agent(child: &mut std::process::Child, tools: &Path) {
+    let helpers: Vec<i32> = descendants(child.id() as i32).into_iter()
+        .filter(|pid| std::fs::read_link(format!("/proc/{pid}/exe")).is_ok_and(|exe| exe.starts_with(tools)))
+        .collect();
+    let _ = child.kill();
+    let _ = child.wait();
+    let signal = |sig| for pid in &helpers { if let Some(p) = rustix::process::Pid::from_raw(*pid) { let _ = rustix::process::kill_process(p, sig); } };
+    signal(rustix::process::Signal::TERM);
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < deadline && helpers.iter().any(|pid| Path::new(&format!("/proc/{pid}")).exists()) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    signal(rustix::process::Signal::KILL);
+}
+
+/// Every process below `root`, by parent links in `/proc`.
+fn descendants(root: i32) -> Vec<i32> {
+    let parents: Vec<(i32, i32)> = std::fs::read_dir("/proc").into_iter().flatten().flatten().filter_map(|e| {
+        let pid: i32 = e.file_name().to_str()?.parse().ok()?;
+        let stat = std::fs::read_to_string(e.path().join("stat")).ok()?;
+        // `pid (comm) state ppid …`; comm may hold spaces and parentheses
+        let ppid = stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()?;
+        Some((pid, ppid))
+    }).collect();
+    let mut out = vec![];
+    let mut frontier = vec![root];
+    while let Some(parent) = frontier.pop() {
+        for (pid, _) in parents.iter().filter(|(_, ppid)| *ppid == parent) {
+            if !out.contains(pid) { out.push(*pid); frontier.push(*pid); }
+        }
+    }
+    out
+}
+
+/// What a login wrote that is the login: everything in the scratch except what a fresh agent
+/// home creates around it — databases (copied over the agent's own they would replace its history
+/// and state), logs, caches and temp files. A file that vanished meanwhile is skipped.
+fn copy_login(scratch: &Path, dst: &Path) -> Result<usize> {
+    const SKIP_DIRS: &[&str] = &["tmp", ".tmp", "log", "logs", "cache", ".cache", "sessions", "shell_snapshots", "thread-writer-locks", "plugins", "skills"];
+    fn skipped_file(name: &str) -> bool {
+        [".sqlite", ".sqlite-wal", ".sqlite-shm", ".sqlite-journal", ".db", ".db-wal", ".db-shm", ".lock", ".log"].iter().any(|s| name.ends_with(s))
+    }
+    fn walk(base: &Path, dir: &Path, dst: &Path, n: &mut usize) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let gone = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
+        let entries = match std::fs::read_dir(dir) { Ok(e) => e, Err(e) if gone(&e) => return Ok(()), Err(e) => return Err(e.into()) };
+        for e in entries {
+            let e = match e { Ok(e) => e, Err(e) if gone(&e) => continue, Err(e) => return Err(e.into()) };
+            let (p, name) = (e.path(), e.file_name().to_string_lossy().into_owned());
+            let md = match std::fs::symlink_metadata(&p) { Ok(m) => m, Err(e) if gone(&e) => continue, Err(e) => return Err(e.into()) };
+            if md.is_dir() {
+                if !SKIP_DIRS.contains(&name.as_str()) { walk(base, &p, dst, n)?; }
+            } else if md.is_file() && !skipped_file(&name) {
+                let bytes = match std::fs::read(&p) { Ok(b) => b, Err(e) if gone(&e) => continue, Err(e) => return Err(e.into()) };
+                let rel = p.strip_prefix(base).unwrap_or(&p);
+                crate::safe_fs::write_file_beneath(dst, rel, &bytes, md.permissions().mode() & 0o777)?;
+                *n += 1;
+            }
+        }
+        Ok(())
+    }
+    let mut n = 0;
+    walk(scratch, scratch, dst, &mut n)?;
+    Ok(n)
 }
 
 /// The result object of response `id`; notifications on the way are reported.
@@ -226,4 +301,56 @@ fn browser_shim(home: &Path) -> Result<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755))?;
     Ok(dir)
+}
+
+#[cfg(test)]
+mod login_copy_tests {
+    use super::*;
+
+    fn dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("sill-login-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_login_copies_the_credential_and_never_a_fresh_homes_databases() {
+        let (scratch, dst) = (dir("scratch"), dir("dst"));
+        for (f, t) in [(".codex/auth.json", "login"), (".codex/config.toml", "x"), (".codex/state_5.sqlite", "fresh"), (".codex/state_5.sqlite-wal", "fresh"),
+                       (".codex/logs_2.sqlite", "fresh"), (".codex/.tmp/plugins/README.md", "p"), (".codex/tmp/arg0/x", "a"), (".codex/log/codex.log", "l")] {
+            std::fs::create_dir_all(scratch.join(f).parent().unwrap()).unwrap();
+            std::fs::write(scratch.join(f), t).unwrap();
+        }
+        std::fs::create_dir_all(dst.join(".codex")).unwrap();
+        std::fs::write(dst.join(".codex/state_5.sqlite"), "the agent's history").unwrap();
+        assert_eq!(copy_login(&scratch, &dst).unwrap(), 2);
+        assert_eq!(std::fs::read_to_string(dst.join(".codex/auth.json")).unwrap(), "login");
+        assert_eq!(std::fs::read_to_string(dst.join(".codex/state_5.sqlite")).unwrap(), "the agent's history");
+        for gone in [".codex/state_5.sqlite-wal", ".codex/logs_2.sqlite", ".codex/.tmp", ".codex/tmp", ".codex/log"] {
+            assert!(!dst.join(gone).exists(), "{gone} copied");
+        }
+        let _ = std::fs::remove_dir_all(&scratch);
+        let _ = std::fs::remove_dir_all(&dst);
+    }
+
+    #[test]
+    fn stopping_the_login_ends_its_installed_helpers_but_not_other_programs() {
+        // `sleep` stands in for both: once as a helper from the agent's install, once as a program
+        // from elsewhere (the person's browser)
+        let alive = |pid: i32| Path::new(&format!("/proc/{pid}")).exists() && !std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default().contains(") Z ");
+        for (tools, survives) in [(PathBuf::from("/usr"), false), (dir("tools"), true)] {
+            let mut child = Command::new("sh").args(["-c", "sleep 30 & wait"]).spawn().unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let helper = loop {
+                if let Some(pid) = descendants(child.id() as i32).first() { break *pid; }
+                assert!(std::time::Instant::now() < deadline, "helper never started");
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            stop_agent(&mut child, &tools);
+            std::thread::sleep(Duration::from_millis(100));
+            assert_eq!(alive(helper), survives, "tools {}", tools.display());
+            if survives { let _ = rustix::process::kill_process(rustix::process::Pid::from_raw(helper).unwrap(), rustix::process::Signal::KILL); }
+        }
+    }
 }
