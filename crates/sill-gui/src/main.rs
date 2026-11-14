@@ -2531,7 +2531,8 @@ impl App {
             .pending_choose
             .take_if(|id| self.tabs.iter().any(|t| &t.id == id))
         {
-            tasks.push(self.choose(id));
+            let choose = self.choose(id);
+            tasks.push(choose.chain(self.focus_prompt()));
         }
         if self.selected.is_none()
             && let Some(tab) = self.tabs.iter().find(|t| t.running)
