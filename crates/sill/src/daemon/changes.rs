@@ -74,7 +74,7 @@ impl Hub {
         let changes = self.scan_one(session)?;
         let dir = kept_dir(who().0, session)?;
         let mut d = Done::default();
-        for (path, hash) in items {
+        for (path, hash) in with_new_parents(&changes, items) {
             let Some(c) = changes.iter().find(|c| c.path == path) else {
                 d.failed.push((path, "no longer a change of this session".into()));
                 continue;
@@ -371,4 +371,47 @@ fn remove_upper_entry(upper: &Path) -> Result<()> {
         Err(_) => {}
     }
     Ok(())
+}
+
+/// A file kept inside a folder the session created needs that folder on the host first (keep
+/// refuses a missing parent): the session's own new ancestor folders join the keep, and everything
+/// goes shallowest first. Keeping one file in a new folder failed with "No such file or directory".
+fn with_new_parents(changes: &[Change], items: Vec<(PathBuf, Option<String>)>) -> Vec<(PathBuf, Option<String>)> {
+    let mut all = items;
+    let asked: Vec<PathBuf> = all.iter().map(|(p, _)| p.clone()).collect();
+    for path in &asked {
+        for parent in path.ancestors().skip(1) {
+            if parent == std::path::Path::new("/") || std::fs::symlink_metadata(parent).is_ok() {
+                break;
+            }
+            if changes.iter().any(|c| c.path == parent) && !all.iter().any(|(p, _)| p == parent) {
+                all.push((parent.to_path_buf(), None));
+            }
+        }
+    }
+    all.sort_by_key(|(p, _)| p.components().count());
+    all
+}
+
+#[cfg(test)]
+mod keep_parent_tests {
+    use super::*;
+
+    #[test]
+    fn a_file_in_a_new_folder_brings_the_folder_shallowest_first() {
+        let dir = std::env::temp_dir().join(format!("sill-keep-parents-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let change = |p: PathBuf, ft| Change { path: p, upper: PathBuf::from("/upper"), kind: Kind::Added, file_type: ft, size: 0, conflict: false, ignored: false };
+        let (new, deeper) = (dir.join("new"), dir.join("new/deeper"));
+        let file = deeper.join("a.txt");
+        let changes = vec![change(new.clone(), FileType::Dir), change(deeper.clone(), FileType::Dir), change(file.clone(), FileType::File)];
+        let order: Vec<PathBuf> = with_new_parents(&changes, vec![(file.clone(), Some("h".into()))]).into_iter().map(|(p, _)| p).collect();
+        assert_eq!(order, [new.clone(), deeper.clone(), file.clone()]);
+        // a folder already on the host is not touched, nor anything above it
+        std::fs::create_dir_all(&new).unwrap();
+        let order: Vec<PathBuf> = with_new_parents(&changes, vec![(file.clone(), None)]).into_iter().map(|(p, _)| p).collect();
+        assert_eq!(order, [deeper, file]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
