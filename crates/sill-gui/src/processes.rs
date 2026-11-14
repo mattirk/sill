@@ -16,6 +16,7 @@ use iced::widget::{
 use iced::{Alignment, Element, Fill, Font, Task};
 use sill_client::actions::Outcome;
 use sill_client::processes::{self as procs, Bridge, Process};
+use sill_proto::admin::{JailProcess, JailProcesses};
 
 use crate::style::{self, P, alpha};
 use crate::{App, Message, SessionView, blocking, icons, json, keys};
@@ -26,6 +27,8 @@ const NOTICE: std::time::Duration = std::time::Duration::from_secs(if cfg!(test)
 #[derive(Debug, Clone)]
 pub enum Event {
     Poll,
+    /// Stop a command the agent left running in the jail: its root's pid there.
+    StopCommand(String, u32),
     /// A session's list (an error: no jail to ask, so no ports either) and, when a running port
     /// waited for a decision, the expose specs of its launch policy.
     Read(
@@ -33,6 +36,7 @@ pub enum Event {
         u64,
         Result<Vec<Process>, String>,
         Option<Vec<String>>,
+        JailProcesses,
     ),
     /// Show or hide the list.
     Toggle(String),
@@ -55,6 +59,8 @@ pub enum Event {
 #[derive(Default)]
 pub struct Procs {
     pub list: Vec<Process>,
+    /// What runs in the jail now, as the last poll read it (docs/jail-processes.md).
+    pub jail: JailProcesses,
     reading: Option<u64>,
     refresh_pending: bool,
     log_reading: Option<u64>,
@@ -149,7 +155,7 @@ impl App {
     pub(crate) fn processes_event(&mut self, event: Event) -> Task<Message> {
         match event {
             Event::Poll => return self.poll_processes(),
-            Event::Read(id, serial, result, specs) => {
+            Event::Read(id, serial, result, specs, jail) => {
                 let running = self.demo || self.session_running(&id);
                 let Some(view) = self.views.get_mut(&id) else {
                     return Task::none();
@@ -159,6 +165,7 @@ impl App {
                 }
                 if !running {
                     view.processes.read(vec![], None);
+                    view.processes.jail = JailProcesses::default();
                     return Task::none();
                 }
                 if view.processes.refresh_pending {
@@ -167,6 +174,7 @@ impl App {
                     view.processes.refresh_pending = false;
                     return self.poll_one(&id);
                 }
+                view.processes.jail = jail;
                 let expose = view
                     .processes
                     .read(result.unwrap_or_default(), specs.as_deref());
@@ -283,6 +291,16 @@ impl App {
                 };
                 return self.process_action(id, "_sill/procs.stop", names);
             }
+            Event::StopCommand(id, pid) => {
+                let Some(actions) = self.actions.clone() else {
+                    return Task::none();
+                };
+                let session = id.clone();
+                return blocking(
+                    move || actions.call_needing("sill.jail_processes", "_sill/procs.stop_command", json!({"session_id": session, "pid": pid})),
+                    move |outcome| Message::Procs(Event::Done(id, outcome)),
+                );
+            }
             Event::Dismiss(id, name) => {
                 return self.process_action(id, "_sill/procs.dismiss", vec![name]);
             }
@@ -332,6 +350,7 @@ impl App {
         };
         if !running {
             view.processes.read(vec![], None);
+            view.processes.jail = JailProcesses::default();
             return Task::none();
         }
         if view.processes.reading.is_some() {
@@ -360,9 +379,10 @@ impl App {
                         .ok(),
                     _ => None,
                 };
-                (list, specs)
+                let jail = actions.reading(|client| procs::jail(client, &session)).unwrap_or_default();
+                (list, specs, jail)
             },
-            move |(list, specs)| Message::Procs(Event::Read(id, serial, list, specs)),
+            move |(list, specs, jail)| Message::Procs(Event::Read(id, serial, list, specs, jail)),
         )
     }
 
@@ -480,12 +500,44 @@ impl App {
 
 /// The composer bar's indicator: the count of running processes, in the warning colour while an
 /// ended one failed; nothing while the session has none.
+/// Services in the jail that are not managed processes: programs listening on a port.
+fn unmanaged_services(view: &SessionView) -> Vec<&JailProcess> {
+    view.processes.jail.services.iter().filter(|s| s.name.is_none()).collect()
+}
+
+/// A command's name as one would type it: a shell's script, else the program and its arguments.
+pub fn command_name(argv: &[String]) -> String {
+    let said = match argv {
+        [_, flag, script, ..] if flag == "-c" || flag == "-lc" => script.clone(),
+        [program, rest @ ..] => {
+            let base = std::path::Path::new(program).file_name().map_or(program.clone(), |b| b.to_string_lossy().into_owned());
+            std::iter::once(base).chain(rest.iter().cloned()).collect::<Vec<_>>().join(" ")
+        }
+        [] => String::new(),
+    };
+    crate::ui::one_line(&said, 48)
+}
+
+/// How long something has run: 45s, 3m, 1h 05m.
+pub fn elapsed(ms: u64) -> String {
+    let s = ms / 1000;
+    match s {
+        0..60 => format!("{s}s"),
+        60..3600 => format!("{}m", s / 60),
+        _ => format!("{}h {:02}m", s / 3600, s / 60 % 60),
+    }
+}
+
+/// The bar's chip: commands running now and services, each named when there are any; it opens
+/// the panel.
 pub fn indicator(view: &SessionView) -> Option<Element<'_, Message>> {
     let list = &view.processes.list;
-    if list.is_empty() {
+    let commands = view.processes.jail.commands.len();
+    let managed = list.iter().filter(|p| procs::running(p)).count();
+    let services = managed + unmanaged_services(view).len();
+    if list.is_empty() && commands == 0 && services == 0 {
         return None;
     }
-    let running = list.iter().filter(|p| procs::running(p)).count();
     let failed = list.iter().any(procs::failed);
     let color = if failed {
         P.warning
@@ -494,17 +546,29 @@ pub fn indicator(view: &SessionView) -> Option<Element<'_, Message>> {
     } else {
         P.fg_dim
     };
+    let mut said = vec![];
+    if commands > 0 {
+        said.push(format!("{commands} running"));
+    }
+    if services > 0 {
+        said.push(format!("{services} service{}", if services == 1 { "" } else { "s" }));
+    }
+    if said.is_empty() {
+        said.push("ended".into());
+    }
     let content = row![
         icons::glyph("processes", crate::ui::BAR_ICON, color),
-        text(running.to_string()).size(style::TINY).color(color),
+        text(said.join(" · ")).size(style::TINY).color(color),
     ]
-    .spacing(3)
+    .spacing(4)
     .align_y(Alignment::Center);
-    let tip = format!(
-        "{running} managed process{} running{}",
-        if running == 1 { "" } else { "es" },
-        if failed { " · one has failed" } else { "" }
-    );
+    let mut tip: Vec<String> =
+        view.processes.jail.commands.iter().map(|c| format!("running: {}", command_name(&c.argv))).collect();
+    tip.extend(list.iter().filter(|p| procs::running(p)).map(|p| format!("service: {}", p.name)));
+    tip.extend(unmanaged_services(view).iter().map(|s| format!("service: {}", command_name(&s.argv))));
+    if failed {
+        tip.push("a service has failed".into());
+    }
     Some(
         iced::widget::tooltip(
             keys::press(
@@ -514,7 +578,7 @@ pub fn indicator(view: &SessionView) -> Option<Element<'_, Message>> {
                     .style(style::quiet),
                 Message::Procs(Event::Toggle(view.id.clone())),
             ),
-            container(text(tip).size(style::SMALL))
+            container(text(tip.join("\n")).size(style::SMALL))
                 .padding([4, 8])
                 .style(style::fill(P.code_bg)),
             iced::widget::tooltip::Position::Top,
@@ -535,10 +599,8 @@ fn small_button(label: &str, message: Message) -> Element<'_, Message> {
 /// The cards asking about ports, the note on the last exposure or action, and the list when shown.
 pub fn panel(view: &SessionView) -> Element<'_, Message> {
     let state = &view.processes;
-    if state.questions.is_empty()
-        && state.notice.is_none()
-        && !(state.open && !state.list.is_empty())
-    {
+    let anything = !state.list.is_empty() || !state.jail.commands.is_empty() || !unmanaged_services(view).is_empty();
+    if state.questions.is_empty() && state.notice.is_none() && !(state.open && anything) {
         return space().height(0).into();
     }
     let id = &view.id;
@@ -575,7 +637,7 @@ pub fn panel(view: &SessionView) -> Element<'_, Message> {
                 .style(style::card_right(alpha(P.accent, 0.08))),
         ));
     }
-    if state.open && !state.list.is_empty() {
+    if state.open && anything {
         content = content.push(list(view));
     }
     if let Some((_, note, failed)) = &state.notice {
@@ -605,6 +667,69 @@ fn list(view: &SessionView) -> Element<'_, Message> {
         .map_or(0, |d| d.as_secs());
     let mono = Font::with_name(crate::fonts::MONO_FAMILY);
     let mut rows = Column::new().spacing(8);
+    let now_ms = now * 1000;
+    let heading = |label: &'static str| text(label).size(style::TINY).color(P.fg_dim);
+    // what the agent started and is running now: one line each, stoppable
+    let commands = &state.jail.commands;
+    if !commands.is_empty() {
+        rows = rows.push(heading("RUNNING NOW"));
+        for c in commands {
+            let mut said = elapsed(now_ms.saturating_sub(c.started_ms));
+            if c.count > 1 {
+                said.push_str(&format!(" · {} processes", c.count));
+            }
+            rows = rows.push(
+                column![
+                    row![
+                        text(command_name(&c.argv)).size(style::SMALL).font(Font {
+                            weight: iced::font::Weight::Bold,
+                            ..Font::with_name(crate::fonts::SANS_FAMILY)
+                        }),
+                        text(said).size(style::TINY).color(P.fg_dim),
+                        space().width(Fill),
+                        small_button("Stop", Message::Procs(Event::StopCommand(id.clone(), c.pid))),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                    text(crate::ui::one_line(&c.argv.join(" "), 100))
+                        .size(style::TINY)
+                        .font(mono)
+                        .color(P.fg_dim)
+                        .wrapping(text::Wrapping::None),
+                ]
+                .spacing(2),
+            );
+        }
+    }
+    let others = unmanaged_services(view);
+    if !state.list.is_empty() || !others.is_empty() {
+        rows = rows.push(heading("SERVICES"));
+    }
+    for s in others {
+        let mut said = format!("running · {}", elapsed(now_ms.saturating_sub(s.started_ms)));
+        if let Some(port) = s.port {
+            said.push_str(&format!(" · port {port}"));
+        }
+        rows = rows.push(
+            column![
+                row![
+                    text(command_name(&s.argv)).size(style::SMALL).font(Font {
+                        weight: iced::font::Weight::Bold,
+                        ..Font::with_name(crate::fonts::SANS_FAMILY)
+                    }),
+                    text(said).size(style::TINY).color(P.fg_dim),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+                text(crate::ui::one_line(&s.argv.join(" "), 100))
+                    .size(style::TINY)
+                    .font(mono)
+                    .color(P.fg_dim)
+                    .wrapping(text::Wrapping::None),
+            ]
+            .spacing(2),
+        );
+    }
     for p in &state.list {
         let running = procs::running(p);
         let shown = state.log.as_ref().is_some_and(|(n, _)| *n == p.name);
@@ -751,6 +876,7 @@ mod tests {
             7,
             Ok(vec![process("old", "running", Some(3000))]),
             Some(vec![]),
+            Default::default(),
         )));
         let state = &app.views["demo"].processes;
         assert!(state.list.is_empty());
@@ -768,6 +894,7 @@ mod tests {
             7,
             Ok(vec![process("old", "running", Some(3000))]),
             Some(vec!["3000".into()]),
+            Default::default(),
         )));
         let state = &app.views["demo"].processes;
         assert!(state.list.is_empty());
@@ -791,9 +918,50 @@ mod tests {
             7,
             Ok(vec![process("old", "running", Some(3000))]),
             Some(vec![]),
+            Default::default(),
         )));
         assert!(app.views["demo"].processes.list.is_empty());
         assert_eq!(app.views["demo"].processes.reading, None);
+    }
+
+    /// What runs in the jail (docs/jail-processes.md): the chip counts commands and services
+    /// apart, the panel lists them in their own sections, and a command can be stopped.
+    #[test]
+    fn the_jails_commands_and_services_are_shown_apart() {
+        let (mut app, _) = App::new(true, None);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        let jail = JailProcesses {
+            commands: vec![JailProcess {
+                pid: 10,
+                argv: vec!["bash".into(), "-c".into(), "cargo build".into()],
+                started_ms: now - 125_000,
+                count: 3,
+                name: None,
+                port: None,
+            }],
+            services: vec![JailProcess {
+                pid: 30,
+                argv: vec!["/usr/bin/python3".into(), "-m".into(), "http.server".into()],
+                started_ms: now - 5_000,
+                count: 1,
+                name: None,
+                port: Some(8000),
+            }],
+        };
+        app.views.get_mut("demo").unwrap().processes.reading = Some(7);
+        let _ = app.update(Message::Procs(Event::Read("demo".into(), 7, Ok(vec![]), None, jail)));
+        let _ = app.update(Message::Procs(Event::Toggle("demo".into())));
+        let mut ui = crate::tests::simulator(&app, (720.0, 860.0));
+        ui.find("1 running · 1 service").unwrap();
+        ui.find("RUNNING NOW").unwrap();
+        ui.find("cargo build").unwrap();
+        ui.find("2m · 3 processes").unwrap();
+        ui.find("SERVICES").unwrap();
+        ui.find("python3 -m http.server").unwrap();
+        ui.click("Stop").unwrap();
+        assert!(ui.into_messages().any(|m| matches!(m, Message::Procs(Event::StopCommand(id, 10)) if id == "demo")));
+        assert_eq!(command_name(&["/bin/sleep".into(), "300".into()]), "sleep 300");
+        assert_eq!((elapsed(45_000), elapsed(3_900_000)), ("45s".into(), "1h 05m".into()));
     }
 
     #[test]

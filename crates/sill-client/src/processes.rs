@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, Weak};
 use anyhow::{Context, Result};
 use sill_proto::Client;
 pub use sill_proto::admin::Process;
-use sill_proto::admin::{PolicyEntry, PolicyKey, PolicySnapshot, ProcessesList, ProcessesPage};
+use sill_proto::admin::{JailProcesses, PolicyEntry, PolicyKey, PolicySnapshot, ProcessesList, ProcessesPage};
 use sill_proto::sessions::SessionKey;
 
 use crate::actions::Actions;
@@ -39,6 +39,15 @@ pub fn list(client: &Client, session: &str) -> Result<Vec<Process>> {
             return Ok(all);
         }
     }
+}
+
+/// What runs in the session's jail now (docs/jail-processes.md); nothing from a daemon that
+/// cannot say.
+pub fn jail(client: &Client, session: &str) -> Result<JailProcesses> {
+    if !client.has_capability("sill.jail_processes") {
+        return Ok(JailProcesses::default());
+    }
+    Ok(client.call("_sill/procs.running", SessionKey { session_id: session.into() })?)
 }
 
 pub fn running(p: &Process) -> bool {
