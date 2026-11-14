@@ -213,7 +213,7 @@ pub fn resolve(
         config.join("sill"),
         state.join("sill"),
         PathBuf::from("/var/log/journal"),
-    ] {
+    ].into_iter().chain(crate::paths::sill_backups(&state)?) {
         plan.rule(
             &target,
             None,
@@ -523,6 +523,15 @@ impl Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_backups_are_in_the_frozen_mask_plan() {
+        let f = Fixture::new();
+        let backup = f.home.join(".local/state/sill.bak-20261103");
+        std::fs::create_dir_all(&backup).unwrap();
+        let plan = f.plan("claude", false);
+        assert!(plan.policy_paths.masks.iter().any(|m| m.path.to_path().unwrap() == backup));
+    }
+
     struct Fixture {
         root: PathBuf,
         home: PathBuf,

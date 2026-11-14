@@ -433,6 +433,7 @@ impl JailSpec {
             .into_iter()
             // the user's journal is readable by ACL: every session's proxy lines and agent stderr (S15)
             .chain([PathBuf::from("/var/log/journal")])
+            .chain(crate::paths::sill_backups(&state_base)?)
             .chain(self.masks.iter().cloned())
             .filter(|p| p.exists())
             .collect();

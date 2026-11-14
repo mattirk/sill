@@ -225,3 +225,20 @@ Memory and transcripts are read-only snapshots inside the jail.
 4. **Pause the agent during Keep** (S10 remainder): the shim holds the agent's turn (or sill
    waits for idle) while the copy runs, closing the window the hash check only narrows.
 5. S17 (link click-through, decode images in a jail or via a size-capped loader).
+
+## Backup storage — 2026-11-10
+
+Store future local backups beneath `$XDG_STATE_HOME/sill/backups/` (normally
+`~/.local/state/sill/backups/`). The existing whole-state mask covers these backups,
+including backups created after a jail starts. No backup creation routine currently
+exists in this repository; this is the required location for manual backups and future tooling.
+When copying the state directory into a backup under itself, exclude `backups/` from the source.
+
+Legacy sibling paths named `sill.bak-*` under the state base are now enumerated at
+launch and included in the internal masks in both jail views. They participate in
+existing bind-overlap protection. Keep rejects these paths even if they do not yet
+exist. Enumeration errors fail launch rather than silently leave backups exposed.
+Restart jails after deploying this change. A new legacy sibling created after launch
+is not covered by that jail's fixed mount list; use the protected backup location.
+Copies elsewhere are not automatically recognized, and masking cannot retract content
+already read into a conversation. Existing host backups are not relocated by this change.

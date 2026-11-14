@@ -81,7 +81,7 @@ pub fn protected(host: &Path) -> Option<&'static str> {
     if host.starts_with(config.join("sill")) {
         return Some("sill's own configuration");
     }
-    if host.starts_with(state.join("sill")) {
+    if host.starts_with(state.join("sill")) || crate::paths::is_sill_backup(host, &state) {
         return Some("sill's own state");
     }
     let parts: Vec<&std::ffi::OsStr> = host.components().map(|c| c.as_os_str()).collect();
@@ -491,6 +491,15 @@ fn temp_name(host: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use crate::ledger::FileType;
+
+    #[test]
+    fn legacy_backups_cannot_be_kept_even_before_creation() {
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+        let state = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".local/state"));
+        assert_eq!(protected(&state.join("sill.bak-20990101/sill.db")), Some("sill's own state"));
+        assert_eq!(protected(&state.join("sill/backups/20990101/sill.db")), Some("sill's own state"));
+    }
 
     fn change(path: PathBuf, upper: PathBuf, kind: Kind) -> Change {
         Change { path, upper, kind, file_type: FileType::File, size: 0, conflict: false, ignored: false }

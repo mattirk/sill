@@ -43,3 +43,50 @@ pub fn layer_name(mount_point: &Path) -> std::ffi::OsString {
 pub fn is_under(child: &Path, parent: &Path) -> bool {
     child.starts_with(parent)
 }
+
+/// Legacy sibling backups are internal state too. Match a single path component,
+/// including non-UTF-8 suffixes, without interpreting the state base as a glob.
+pub fn is_sill_backup(path: &Path, state_base: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    path.strip_prefix(state_base).ok().and_then(|p| p.components().next())
+        .is_some_and(|c| c.as_os_str().as_bytes().starts_with(b"sill.bak-"))
+}
+
+/// Enumerate legacy backups at launch; unreadable state must not silently omit masks.
+pub fn sill_backups(state_base: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let entries = match std::fs::read_dir(state_base) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(e),
+    };
+    let mut paths = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if is_sill_backup(&path, state_base) { paths.push(path); }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+#[cfg(test)]
+mod backup_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_backup_matching_is_component_scoped() {
+        let base = Path::new("/state");
+        assert!(is_sill_backup(Path::new("/state/sill.bak-20261103/sill.db"), base));
+        assert!(!is_sill_backup(Path::new("/state/other/sill.bak-20261103"), base));
+        assert!(!is_sill_backup(Path::new("/state/sill-backup"), base));
+        assert!(!is_sill_backup(Path::new("/state-other/sill.bak-20261103"), base));
+    }
+
+    #[test]
+    fn enumerates_only_backup_roots() {
+        let base = std::env::temp_dir().join(format!("sill-backup-masks-{}", std::process::id()));
+        std::fs::create_dir_all(base.join("sill.bak-20261103")).unwrap();
+        std::fs::create_dir_all(base.join("other")).unwrap();
+        assert_eq!(sill_backups(&base).unwrap(), vec![base.join("sill.bak-20261103")]);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+}
