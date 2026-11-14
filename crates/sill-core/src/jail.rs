@@ -424,8 +424,30 @@ impl JailSpec {
             }
         }
         for (host, inside) in &self.binds {
-            no_bind_across_mask(inside, &masked)?;
-            push(&mut a, &[&"--bind", host, inside]);
+            if host == inside {
+                // the host's own tree (a pin, a shared file): inside a mask it re-exposes, over a
+                // mask it buries — neither is mounted
+                no_bind_across_mask(inside, &masked)?;
+                push(&mut a, &[&"--bind", host, inside]);
+            } else {
+                // sill's own tree in the host path's place (the session's private scratch, the
+                // agent's sill-owned home): nothing of the host's below it is exposed, so a mask
+                // beneath it is not buried but laid again on top — the masked path stays hidden
+                // inside the bound tree too. Inside a mask it is still refused: the copy was
+                // seeded from the host (2026-11-01: `~/.cache` scratch over a masked
+                // `~/.cache/<other agent's path>` refused every jail on a machine with one).
+                if let Some(m) = masked.iter().find(|m| is_under(inside, m)) {
+                    no_bind_across_mask(inside, std::slice::from_ref(m))?;
+                }
+                push(&mut a, &[&"--bind", host, inside]);
+                for m in masked.iter().filter(|m| is_under(m, inside) && *m != inside) {
+                    if m.is_dir() {
+                        push(&mut a, &[&"--tmpfs", m]);
+                    } else {
+                        push(&mut a, &[&"--ro-bind", &"/dev/null", m]);
+                    }
+                }
+            }
             direct.push(inside.clone());
         }
 
@@ -543,6 +565,36 @@ mod tests {
         assert!(r.contains(&format!("--ro-bind /dev/null {} ", dir.join(".claude.json").display())));
         assert!(!r.contains(".gemini"), "a path that does not exist is not masked");
         assert_eq!(plan.masked.iter().filter(|m| **m == dir.join(".codex")).count(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A sill-owned bind (private scratch, agent home) over a masked path is mounted, the mask laid
+    /// again on top; the host's own tree over a mask is still refused, as is any bind inside one.
+    #[test]
+    fn own_tree_over_a_mask_is_remasked_host_tree_is_refused() {
+        let dir = std::env::temp_dir().join(format!("sill-jail-remask-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("cache/other-agent")).unwrap();
+        std::fs::create_dir_all(dir.join("scratch")).unwrap();
+        let mut s = spec();
+        s.masks = vec![dir.join("cache/other-agent")];
+        s.binds = vec![(dir.join("scratch"), dir.join("cache"))];
+        let r = render(&s.plan().unwrap().argv);
+        let bind = format!("--bind {} {} ", dir.join("scratch").display(), dir.join("cache").display());
+        let remask = format!("--tmpfs {} ", dir.join("cache/other-agent").display());
+        assert!(r.contains(&bind), "the scratch is bound");
+        let (b, m) = (r.find(&bind).unwrap(), r.rfind(&remask).unwrap());
+        assert!(m > b, "the mask is laid again after the bind");
+        // the host's own tree over the same mask: refused
+        let mut s = spec();
+        s.masks = vec![dir.join("cache/other-agent")];
+        s.binds = vec![(dir.join("cache"), dir.join("cache"))];
+        assert!(s.plan().is_err());
+        // sill's own tree inside a mask: refused
+        let mut s = spec();
+        s.masks = vec![dir.join("cache")];
+        s.binds = vec![(dir.join("scratch"), dir.join("cache/other-agent"))];
+        assert!(s.plan().is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
