@@ -2,8 +2,8 @@
 //! for each workspace with work not yet applied — what it would bring, Apply, Discard — and its
 //! diff on request. It never blocks the conversation: the person may go on talking. Also the pin
 //! chips' marks for workspaces and repositories kept live.
-use iced::widget::{Column, button, column, container, row, scrollable, space, text, tooltip};
-use iced::{Alignment, Element, Fill, Length};
+use iced::widget::{Column, button, column, container, row, scrollable, text, tooltip};
+use iced::{Alignment, Element, Fill};
 use sill_client::workspaces as ws;
 
 use crate::style::{self, P, alpha};
@@ -118,65 +118,4 @@ pub(crate) fn chip_mark<'a>(view: &SessionView, path: &sill_proto::sessions::Hos
         );
     }
     (crate::icons::glyph(glyph, 14.0, alpha(P.fg, 0.6)).into(), None)
-}
-
-impl App {
-    /// The Changes page's Workspaces section: every session's workspace with work not yet
-    /// applied, Apply and Discard, then discarded work with Undo (7 days).
-    pub(crate) fn workspace_rows<'a>(&'a self, page: &'a crate::changes_ui::ChangesPage, mut body: Column<'a, Message>) -> Column<'a, Message> {
-        let Some(Ok((listed, details))) = &page.workspaces else { return body };
-        let waiting: Vec<_> = details.iter().filter(|d| ws::pending(d)).collect();
-        if waiting.is_empty() && listed.discarded.is_empty() {
-            return body;
-        }
-        body = body.push(container(text("Workspaces").size(style::SMALL).color(P.fg_dim)).padding([6, 4]));
-        for d in waiting {
-            let id = d.workspace.workspace_id.clone();
-            let name = d.workspace.source.display.clone();
-            let session = self
-                .all_sessions
-                .iter()
-                .find(|s| s.session_id == d.workspace.session_id)
-                .map(|s| s.title.clone())
-                .unwrap_or_else(|| d.workspace.session_id.clone());
-            let state = match d.workspace.state {
-                sill_proto::workspaces::WorkspaceState::Open => "",
-                sill_proto::workspaces::WorkspaceState::Result => " · session ended",
-            };
-            let discard = if page.workspace_armed.as_deref() == Some(id.as_str()) { "Discard?" } else { "Discard" };
-            let mut line = row![
-                crate::icons::glyph("git-branch", 13.0, alpha(P.accent, 0.9)),
-                text(name).size(style::SMALL),
-                text(format!("{} · {session}{state}", ws::describe(&d.summary))).size(style::TINY).color(P.fg_dim),
-                space().width(Length::Fill),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center);
-            if let Some(op) = &d.workspace.operation {
-                line = line.push(text(op.detail.clone()).size(style::TINY).color(P.warning));
-            }
-            // a stopped or interrupted operation is seen to first; a carry's line leaves Apply offered
-            if !d.workspace.operation.as_ref().is_some_and(|o| o.state == "conflict" || o.state == "interrupted") {
-                line = line.push(keys::press(
-                    button(text("Apply").size(style::SMALL)).padding([3, 10]).style(style::solid(P.accent)),
-                    Message::Workspaces(Event::PageApply(id.clone())),
-                ));
-            }
-            line = line.push(quiet_button(discard, Some(Message::Workspaces(Event::PageDiscard(id)))));
-            body = body.push(container(line).padding([3, 4]));
-        }
-        for d in &listed.discarded {
-            let line = row![
-                crate::icons::glyph("git-branch", 13.0, alpha(P.fg, 0.4)),
-                text(d.source.display.clone()).size(style::SMALL).color(P.fg_dim),
-                text(format!("discarded · kept until {}", d.until.get(..10).unwrap_or(&d.until))).size(style::TINY).color(P.fg_dim),
-                space().width(Length::Fill),
-                quiet_button("Undo", Some(Message::Workspaces(Event::PageUndo(d.discard_id.clone())))),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center);
-            body = body.push(container(line).padding([3, 4]));
-        }
-        body.push(space().height(8))
-    }
 }

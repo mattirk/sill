@@ -208,8 +208,17 @@ fn apply_repeatedly_during_the_session() {
     assert_eq!(detail.summary.commits, 1);
     assert_eq!(detail.summary.files, 3);
     assert_eq!(detail.summary.uncommitted, vec!["f2.txt".to_string(), "new.txt".to_string()]);
-    let diff = diff(&f.host, &api::DiffRequest { workspace_id: w.workspace_id.clone(), against: api::Against::Applied }).unwrap();
+    let diff = diff(&f.host, &api::DiffRequest { workspace_id: w.workspace_id.clone(), against: api::Against::Applied, path: None }).unwrap();
     assert!(diff.text.contains("+committed") && diff.text.contains("+uncommitted") && diff.text.contains("+new untracked file"));
+    // path by path, committed and uncommitted alike, each with its own diff
+    let listed: Vec<(std::path::PathBuf, &str, &str, &str)> = detail.files.iter().map(|c| (c.path.to_path().unwrap(), c.status.as_str(), c.added.as_str(), c.removed.as_str())).collect();
+    assert_eq!(listed, [(f.source.join("f1.txt"), "M", "1", "1"), (f.source.join("f2.txt"), "M", "1", "1"), (f.source.join("new.txt"), "A", "1", "0")]);
+    let one = |path: &std::path::Path| super::diff(&f.host, &api::DiffRequest { workspace_id: w.workspace_id.clone(), against: api::Against::Applied, path: Some(HostPath::from_path(path)) });
+    let only = one(&f.source.join("new.txt")).unwrap().text;
+    assert!(only.contains("+new untracked file") && !only.contains("committed"), "{only}");
+    assert!(one(&f.source.join("../elsewhere")).is_err(), "not a path of the repository");
+    assert!(one(std::path::Path::new("/etc/passwd")).is_err());
+    assert!(one(&f.source).is_err(), "the repository itself is the whole diff, asked without a path");
     let done = apply(&f.host, &apply_req("a1", &w, &detail.revision)).unwrap();
     assert_eq!(done.workspace.unwrap().state, api::WorkspaceState::Open, "the workspace goes on");
     assert_eq!(read(&f.source.join("f1.txt")), "committed\n");
@@ -827,7 +836,7 @@ fn a_link_planted_in_the_workspace_reads_nothing_outside_it() {
     std::os::unix::fs::symlink(hidden.join("key"), clone.join("direct")).unwrap();
     let d = get(&f.host, &w.workspace_id).unwrap();
     assert!(!readable(&clone, &oid), "the file behind the link is not in the workspace's store");
-    let text = diff(&f.host, &api::DiffRequest { workspace_id: w.workspace_id.clone(), against: api::Against::Applied }).unwrap().text;
+    let text = diff(&f.host, &api::DiffRequest { workspace_id: w.workspace_id.clone(), against: api::Against::Applied, path: None }).unwrap().text;
     assert!(!text.contains("TOP SECRET"), "{text}");
     // the links themselves are the work: applied as links
     apply(&f.host, &apply_req("a1", &w, &d.revision)).unwrap();

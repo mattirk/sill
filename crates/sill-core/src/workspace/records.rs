@@ -756,9 +756,19 @@ fn revision_now(r: &Row) -> Result<(api::Revision, bool)> {
 }
 
 /// What an Apply would bring: commits and changes since what the person has (`m`).
-fn summary(r: &Row, m: &flow::Mirror) -> Result<api::Summary> {
+fn summary(r: &Row, m: &flow::Mirror) -> Result<(api::Summary, Vec<api::FileChange>)> {
     let s = super::summary_to(&r.path, &r.branch, &m.upstream, &m.tree, Some(&m.now))?;
-    Ok(api::Summary { commits: s.commits, files: s.files, added: s.added.to_string(), removed: s.removed.to_string(), uncommitted: s.uncommitted })
+    let files = s
+        .changed
+        .iter()
+        .map(|f| api::FileChange {
+            path: HostPath::from_path(&r.source.join(&f.path)),
+            status: f.status.to_string(),
+            added: f.added.to_string(),
+            removed: f.removed.to_string(),
+        })
+        .collect();
+    Ok((api::Summary { commits: s.commits, files: s.files, added: s.added.to_string(), removed: s.removed.to_string(), uncommitted: s.uncommitted }, files))
 }
 
 /// A workspace after one look (`detail`).
@@ -797,7 +807,8 @@ fn detail<H: Host>(h: &H, r: Row) -> Result<Settled> {
     let workspace = h.db(|c| record(c, &r))?;
     let Some(m) = l else { return Ok(Settled::Record(workspace)) };
     let (revision, needs_rebase) = revision_now(&r)?;
-    Ok(Settled::Full(api::Detail { workspace, revision, summary: summary(&r, &m)?, needs_rebase, checkout_only: m.checkout_only.len() as u32 }))
+    let (summary, files) = summary(&r, &m)?;
+    Ok(Settled::Full(api::Detail { workspace, revision, summary, needs_rebase, checkout_only: m.checkout_only.len() as u32, files }))
 }
 
 fn changed<H: Host>(h: &H, r: Option<&Row>, operation: Option<&str>, discarded: Option<api::Discarded>) -> Result<api::Changed> {
@@ -879,7 +890,19 @@ pub fn diff<H: Host>(h: &H, a: &api::DiffRequest) -> Result<api::DiffText> {
         }
         api::Against::Base => (r.base.clone(), flow::state_tree(&r.path)?),
     };
-    let (text, truncated) = super::diff_to(&r.path, &against, Some(&now), DIFF_LIMIT)?;
+    let only = match &a.path {
+        None => None,
+        Some(p) => {
+            let invalid = |why: &str| -> anyhow::Error { sill_proto::rpc::Error::invalid_params(why).into() };
+            let p = p.to_path().map_err(|e| invalid(&e.to_string()))?;
+            let rel = p.strip_prefix(&r.source).map_err(|_| invalid("path is not below the workspace's repository"))?.to_path_buf();
+            if rel.as_os_str().is_empty() || rel.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+                return Err(invalid("path is not a file's path inside the repository"));
+            }
+            Some(rel)
+        }
+    };
+    let (text, truncated) = super::diff_to(&r.path, &against, Some(&now), only.as_deref(), DIFF_LIMIT)?;
     Ok(api::DiffText { text, truncated })
 }
 

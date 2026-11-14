@@ -968,13 +968,25 @@ fn public_changes_preserve_exact_paths_page_history_and_bound_mutations() {
     std::fs::write(&file,"fixture contents\n").unwrap();
     let added=c.call("_sill/pins.add",json!({"path":HostPath::from_path(&repo)})).unwrap();assert!(added.get("error").is_none(),"{added}");
     let page=c.call("_sill/changes.list",json!({"limit":1})).unwrap();
-    let entry=&page["result"]["entries"][0];assert_eq!(entry["type"],"live");
+    let entry=&page["result"]["entries"][0];assert_eq!(entry["type"],"live","{page}");
     let mut path:HostPath=serde_json::from_value(entry["path"].clone()).unwrap();assert_eq!(path.to_path().unwrap(),file);
     path.display="/wrong/display/path".into();
     let diff=c.call("_sill/changes.diff",json!({"target":{"type":"live","repo":HostPath::from_path(&repo),"path":path}})).unwrap();
     assert!(diff["result"]["text"].as_str().unwrap().contains("fixture contents"),"{diff}");
     let bad=c.call("_sill/changes.diff",json!({"target":{"type":"live","repo":HostPath::from_path(&repo),"path":path},"offset":"1","fingerprint":"wrong"})).unwrap();assert_eq!(bad["error"]["data"]["code"],"invalid_cursor");
     let bad=c.call("_sill/changes.list",json!({"after":"nonsense"})).unwrap();assert_eq!(bad["error"]["data"]["code"],"invalid_cursor");
+    // A listing is computed once and its pages read that one: what changes between two pages is in the next listing, not in this one.
+    std::fs::write(repo.join("b"),"b\n").unwrap();std::fs::write(repo.join("c"),"c\n").unwrap();
+    let first=c.call("_sill/changes.list",json!({"limit":1})).unwrap();let mut names=vec![first["result"]["entries"][0]["path"]["display"].as_str().unwrap().to_string()];
+    std::fs::write(repo.join("a-later"),"later\n").unwrap();
+    let mut after=first["result"]["next"].clone();assert!(after.is_string(),"{first}");
+    let second_cursor=after.clone();
+    while !after.is_null(){let page=c.call("_sill/changes.list",json!({"limit":1,"after":after})).unwrap();assert!(page.get("error").is_none(),"{page}");names.push(page["result"]["entries"][0]["path"]["display"].as_str().unwrap().to_string());after=page["result"]["next"].clone();}
+    assert_eq!(names.len(),3,"{names:?}");assert!(!names.iter().any(|n|n.ends_with("a-later")),"{names:?}");
+    let whole=c.call("_sill/changes.list",json!({})).unwrap();assert_eq!(whole["result"]["entries"].as_array().unwrap().len(),4);assert!(whole["result"]["next"].is_null());
+    // Read to its end, a listing is no longer held; nor is one the daemon never made.
+    let gone=c.call("_sill/changes.list",json!({"limit":1,"after":second_cursor})).unwrap();assert_eq!(gone["error"]["data"]["code"],"snapshot_expired","{gone}");
+    let gone=c.call("_sill/changes.list",json!({"after":"[\"00\",1]"})).unwrap();assert_eq!(gone["error"]["data"]["code"],"snapshot_expired");
     // History survives exact-byte storage and duplicate timestamps; each next cursor is exclusive.
     let store=sill_core::store::Store::open(&d.dir.join("state/sill/sill.db")).unwrap();
     for ts in [10,10,11] {let mut e=sill_memory::history::Event::new(sill_memory::history::Kind::Kept,&file,ts);e.paths=vec![file.clone()];sill_memory::history::record(store.conn(),&e).unwrap();}

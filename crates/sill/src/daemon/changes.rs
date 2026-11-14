@@ -20,7 +20,9 @@ impl Hub {
     pub(super) fn changes_list(&self) -> Result<ChangesList> {
         let sessions = self.with_store(|s| s.sessions())?;
         let (uid, user) = who();
-        let mut pinned: Vec<PathBuf> = self.pinned_repos()?;
+        // a workspace's clone is not listed here: what it holds is the workspace's, told whole
+        // (committed work too) by `workspaces.list`
+        let mut pinned: Vec<PathBuf> = self.with_store(|st| self.pinned_checkouts(st))?;
         pinned.sort();
         pinned.dedup();
         let live = pinned
@@ -28,6 +30,9 @@ impl Hub {
             .map(|repo| LiveRepo { status: sill_core::changes::git_status(&repo), repo })
             .filter(|l| !l.status.is_empty())
             .collect();
+        let known = hashes::take();
+        let mut hashed = hashes::Hashes::default();
+        let mut row = |c: Change| row(c, &known, &mut hashed);
         let mut out = Vec::new();
         for s in sessions {
             let list: Vec<Change> = self.session_changes(&s, uid, &user).with_context(|| format!("reading changes for session {}", s.id))?.into_iter().filter(|c| !c.ignored).collect();
@@ -42,11 +47,12 @@ impl Hub {
                 id: s.id.clone(),
                 title: s.title.clone(),
                 ghost: s.ghost,
-                changes: changes.into_iter().map(row).collect(),
-                agent_state: agent_state.into_iter().map(row).collect(),
+                changes: changes.into_iter().map(&mut row).collect(),
+                agent_state: agent_state.into_iter().map(&mut row).collect(),
                 kept,
             });
         }
+        hashes::put(hashed);
         Ok(ChangesList { live, sessions: out })
     }
 
@@ -274,13 +280,19 @@ impl Hub {
     /// repositories' place (docs/parallel-coding.md §12).
     fn pinned_repos(&self) -> Result<Vec<PathBuf>> {
         self.with_store(|st| {
-            let mut out = Vec::new();
-            for s in st.sessions()?.into_iter().filter(|s| s.ended_at.is_none()) {
-                out.extend(st.pins(&s.id)?.into_iter().filter(|p| p.join(".git").exists()));
-            }
+            let mut out = self.pinned_checkouts(st)?;
             out.extend(sill_core::workspace::records::all_clones(st.conn())?);
             Ok(out)
         })
+    }
+
+    /// Active sessions' pinned folders that are git repositories: the person's own checkouts.
+    fn pinned_checkouts(&self, st: &sill_core::store::Store) -> Result<Vec<PathBuf>> {
+        let mut out = Vec::new();
+        for s in st.sessions()?.into_iter().filter(|s| s.ended_at.is_none()) {
+            out.extend(st.pins(&s.id)?.into_iter().filter(|p| p.join(".git").exists()));
+        }
+        Ok(out)
     }
 
     /// A live diff or revert is only for a pinned repository, and only below it.
@@ -308,15 +320,103 @@ fn written(c: &Change) -> Option<std::time::SystemTime> {
     std::fs::symlink_metadata(&c.upper).ok()?.modified().ok()
 }
 
-fn row(c: Change) -> ChangeRow {
+fn row(c: Change, known: &hashes::Hashes, hashed: &mut hashes::Hashes) -> ChangeRow {
     let written = written(&c).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64);
-    let hash = (c.file_type == FileType::File && matches!(c.kind, Kind::Added | Kind::Modified)).then(|| keep::sha256_file(&c.upper).ok()).flatten();
+    let hash = (c.file_type == FileType::File && matches!(c.kind, Kind::Added | Kind::Modified)).then(|| hashes::of(&c.upper, known, hashed)).flatten();
     ChangeRow {
         repo: sill_core::changes::repo_root(&c.path).unwrap_or_default(),
         protected: keep::protected(&c.path).map(str::to_string),
         written,
         hash,
         change: c,
+    }
+}
+
+/// The overlay files' hashes from one listing to the next: a file is read again only when it is
+/// not the file that was hashed — another inode, size, or time of last write or change. The
+/// agent cannot set a file's change time, so a write it makes always shows. A file changed in the
+/// clock tick it is hashed in is not remembered (a second write in that tick would carry the same
+/// times): it is read again next time, as git does with its index. What is remembered is what the
+/// last listing listed, so it goes with the changes it is of.
+mod hashes {
+    use std::collections::HashMap;
+    use std::os::unix::fs::MetadataExt;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    /// Device, inode, size, and the times of last write and change in nanoseconds.
+    #[derive(Clone, PartialEq, Eq)]
+    pub struct Stamp(u64, u64, u64, (i64, i64), (i64, i64));
+    pub type Hashes = HashMap<PathBuf, (Stamp, String)>;
+
+    static KNOWN: Mutex<Option<Hashes>> = Mutex::new(None);
+
+    /// What the last listing hashed. Not removed: another listing running now reads it too.
+    pub fn take() -> Hashes {
+        KNOWN.lock().unwrap().clone().unwrap_or_default()
+    }
+
+    pub fn put(hashed: Hashes) {
+        *KNOWN.lock().unwrap() = Some(hashed);
+    }
+
+    fn stamp(m: &std::fs::Metadata) -> Stamp {
+        Stamp(m.dev(), m.ino(), m.size(), (m.mtime(), m.mtime_nsec()), (m.ctime(), m.ctime_nsec()))
+    }
+
+    /// The clock files' times are taken from, as it stands now.
+    fn tick() -> (i64, i64) {
+        let t = rustix::time::clock_gettime(rustix::time::ClockId::RealtimeCoarse);
+        (t.tv_sec, t.tv_nsec)
+    }
+
+    /// `upper`'s SHA-256: the remembered one when the file is still the one hashed.
+    pub fn of(upper: &Path, known: &Hashes, hashed: &mut Hashes) -> Option<String> {
+        let before = stamp(&std::fs::symlink_metadata(upper).ok()?);
+        if let Some((s, hash)) = known.get(upper)
+            && *s == before
+        {
+            hashed.insert(upper.to_path_buf(), (before, hash.clone()));
+            return Some(hash.clone());
+        }
+        let now = tick();
+        let hash = sill_core::keep::sha256_file(upper).ok()?;
+        // settled before the read began: any later write has a later change time
+        if before.4 < now {
+            hashed.insert(upper.to_path_buf(), (before, hash.clone()));
+        }
+        Some(hash)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// A file that is still the one hashed is not read again; one written since is.
+        #[test]
+        fn a_file_is_hashed_again_only_when_it_changed() {
+            let dir = std::env::temp_dir().join(format!("sill-hashes-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let file = dir.join("f");
+            std::fs::write(&file, "one\n").unwrap();
+            let real = sill_core::keep::sha256_file(&file).unwrap();
+            let mut hashed = Hashes::default();
+            assert_eq!(of(&file, &Hashes::default(), &mut hashed), Some(real.clone()));
+            // remembered against the file as it is: that is what is answered, the file unread
+            let known: Hashes = [(file.clone(), (stamp(&std::fs::symlink_metadata(&file).unwrap()), "remembered".to_string()))].into();
+            let mut hashed = Hashes::default();
+            assert_eq!(of(&file, &known, &mut hashed).as_deref(), Some("remembered"));
+            assert!(hashed.contains_key(&file), "and it stays remembered for the next listing");
+            // written since (another size): read again
+            std::fs::write(&file, "another\n").unwrap();
+            let mut hashed = Hashes::default();
+            let now = of(&file, &known, &mut hashed).unwrap();
+            assert_eq!(now, sill_core::keep::sha256_file(&file).unwrap());
+            assert_ne!(now, real);
+            assert!(hashed.get(&file).is_none_or(|(_, h)| *h == now));
+            assert_eq!(of(&dir.join("missing"), &known, &mut hashed), None);
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
     }
 }
 

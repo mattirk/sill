@@ -93,9 +93,10 @@ pub fn all(actions: &Actions) -> anyhow::Result<(api::Listed, Vec<api::Detail>)>
     })
 }
 
-/// What an Apply would bring, as a unified diff.
-pub fn diff(actions: &Actions, workspace_id: &str) -> anyhow::Result<String> {
-    let d: api::DiffText = actions.read("_sill/workspaces.diff", serde_json::json!(api::DiffRequest { workspace_id: workspace_id.into(), against: api::Against::Applied }))?;
+/// What an Apply would bring, as a unified diff: all of it, or `path`'s alone.
+pub fn diff(actions: &Actions, workspace_id: &str, path: Option<&sill_proto::sessions::HostPath>) -> anyhow::Result<String> {
+    let d: api::DiffText =
+        actions.read("_sill/workspaces.diff", serde_json::json!(api::DiffRequest { workspace_id: workspace_id.into(), against: api::Against::Applied, path: path.cloned() }))?;
     Ok(if d.truncated { format!("{}\n… (cut at 4 MiB)", d.text) } else { d.text })
 }
 

@@ -402,6 +402,58 @@ pub fn remove_partial(path: &Path, operation: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// One path of a result: how it differs and by how many lines. A rename is its two paths, one
+/// deleted and one added, so that each path's own diff says the same as its line here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileChange {
+    /// Relative to the repository.
+    pub path: PathBuf,
+    /// `A` added, `M` modified, `D` deleted, `T` type changed.
+    pub status: char,
+    /// Lines; both 0 for a binary file.
+    pub added: u64,
+    pub removed: u64,
+}
+
+/// The paths that differ from tree-ish `from` to `to` (the working tree when None).
+fn changed_files(git: &Git, from: &str, to: Option<&str>) -> Result<Vec<FileChange>> {
+    use std::os::unix::ffi::OsStrExt;
+    let diff = |format: &str| -> Result<Vec<u8>> {
+        let mut c = git.cmd();
+        c.args(["diff", format, "-z", "--no-renames"]).args(Git::DIFF_SAFE).arg(from);
+        if let Some(to) = to {
+            c.arg(to);
+        }
+        c.arg("--");
+        let out = run(c)?;
+        if !out.status.success() {
+            bail!("diff {format}: {}", String::from_utf8_lossy(&out.stderr).trim());
+        }
+        Ok(out.stdout)
+    };
+    let path = |bytes: &[u8]| PathBuf::from(std::ffi::OsStr::from_bytes(bytes));
+    let mut lines: std::collections::BTreeMap<PathBuf, (u64, u64)> = Default::default();
+    for e in diff("--numstat")?.split(|b| *b == 0).filter(|e| !e.is_empty()) {
+        let mut parts = e.splitn(3, |b| *b == b'\t');
+        let count = |part: Option<&[u8]>| part.and_then(|n| std::str::from_utf8(n).ok()).and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
+        let (added, removed) = (count(parts.next()), count(parts.next()));
+        if let Some(p) = parts.next() {
+            lines.insert(path(p), (added, removed));
+        }
+    }
+    let status = diff("--name-status")?;
+    let mut fields = status.split(|b| *b == 0);
+    let mut changed = Vec::new();
+    while let (Some(code), Some(p)) = (fields.next(), fields.next()) {
+        let Some(code) = code.first() else { continue };
+        let p = path(p);
+        let (added, removed) = lines.get(&p).copied().unwrap_or_default();
+        changed.push(FileChange { path: p, status: *code as char, added, removed });
+    }
+    changed.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(changed)
+}
+
 /// What the person judges before Merge or Discard (§6).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Summary {
@@ -409,6 +461,8 @@ pub struct Summary {
     pub files: u32,
     pub added: u64,
     pub removed: u64,
+    /// The paths that differ, sorted: `files`, `added` and `removed` are their count and sums.
+    pub changed: Vec<FileChange>,
     /// Uncommitted paths, untracked included.
     pub uncommitted: Vec<String>,
     /// Ignored paths: outside the result, but deleted with the clone.
@@ -451,24 +505,13 @@ fn summary_to(clone: &Path, branch: &str, commits_from: &str, from: &str, to: Op
     let mut c = git.cmd();
     c.args(["rev-list", "--count"]).arg(format!("{commits_from}..refs/heads/{branch}"));
     let commits = ok(c, "rev-list")?.parse().unwrap_or(0);
-    let mut c = git.cmd();
-    c.args(["diff", "--numstat", "-z"]).args(Git::DIFF_SAFE).arg(from);
-    if let Some(to) = to {
-        c.arg(to);
-    }
-    let numstat = ok(c, "diff --numstat")?;
-    let (mut files, mut added, mut removed) = (0, 0, 0);
-    for e in numstat.split('\0').filter(|e| e.contains('\t')) {
-        let mut parts = e.split('\t');
-        added += parts.next().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
-        removed += parts.next().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
-        files += 1;
-    }
+    let changed = changed_files(&git, from, to)?;
     Ok(Summary {
         commits,
-        files,
-        added,
-        removed,
+        files: changed.len() as u32,
+        added: changed.iter().map(|f| f.added).sum(),
+        removed: changed.iter().map(|f| f.removed).sum(),
+        changed,
         uncommitted: status_paths(&git, false)?,
         ignored: status_paths(&git, true)?,
     })
@@ -557,17 +600,27 @@ pub(crate) fn descends_in(git: &Git, ancestor: &str, tip: &str) -> Result<bool> 
 /// The clone's working tree against `commit` (its base, or a destination it borrows), at most
 /// `limit` bytes; true when cut there.
 pub fn diff(clone: &Path, commit: &str, limit: usize) -> Result<(String, bool)> {
-    diff_to(clone, commit, None, limit)
+    diff_to(clone, commit, None, None, limit)
 }
 
-fn diff_to(clone: &Path, commit: &str, target: Option<&str>, limit: usize) -> Result<(String, bool)> {
+/// `only`: that path's diff alone (relative to the repository; a rename is then its two halves,
+/// as [`FileChange`] lists it).
+fn diff_to(clone: &Path, commit: &str, target: Option<&str>, only: Option<&Path>, limit: usize) -> Result<(String, bool)> {
     let git = Git::open(clone)?;
     let mut c = git.cmd();
-    c.args(["diff"]).args(Git::DIFF_SAFE).arg(commit);
+    c.args(["diff"]).args(Git::DIFF_SAFE);
+    if only.is_some() {
+        c.arg("--no-renames");
+    }
+    c.arg(commit);
     if let Some(target) = target {
         c.arg(target);
     }
     c.arg("--");
+    if let Some(only) = only {
+        // the path itself, never a pattern
+        c.env("GIT_LITERAL_PATHSPECS", "1").arg(only);
+    }
     let out = run(c)?;
     if !out.status.success() {
         bail!("diff: {}", String::from_utf8_lossy(&out.stderr).trim());

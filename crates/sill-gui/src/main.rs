@@ -664,6 +664,9 @@ pub struct App {
     pub menu: Option<menu::Menu>,
     /// The Changes page, while shown in place of the conversation.
     pub changes: Option<changes_ui::ChangesPage>,
+    /// What the Changes page lists, as last read: kept while the page is closed, so opening it
+    /// shows that at once while the new listing is read.
+    pub changes_listing: changes_ui::Listing,
     name_editor: Option<names::Editor>,
     details: Option<details::Page>,
     details_drafts: BTreeMap<String, details::Draft>,
@@ -815,6 +818,7 @@ impl App {
             agent_icons: BTreeMap::new(),
             agent_icons_queued: BTreeSet::new(),
             last_page: Page::Changes,
+            changes_listing: changes_ui::Listing::default(),
             daemon_settings: None,
             pending_choose: None,
             armed_close: None,
@@ -2460,29 +2464,45 @@ impl App {
         use sill_client::changes;
         use sill_proto::changes::Entry;
         let demo = self.demo;
+        // a listing is the window's: one that arrives after the page closed is kept for the next
+        // opening all the same
+        let event = match event {
+            Event::Loaded(loaded) => {
+                let listing = &mut self.changes_listing;
+                match loaded {
+                    Ok((entries, minutes)) => {
+                        listing.auto_revert = minutes;
+                        listing.entries = Some(Ok(entries));
+                    }
+                    Err(error) => listing.entries = Some(Err(error)),
+                }
+                let Some(page) = &mut self.changes else {
+                    return Task::none();
+                };
+                page.loading = false;
+                if let Some(Ok(entries)) = &listing.entries {
+                    page.fresh_entries = true;
+                    let keys: Vec<String> = entries.iter().map(changes::entry_key).collect();
+                    page.open
+                        .retain(|k, _| changes_ui::workspace_of(k).is_some() || keys.contains(k));
+                    if page
+                        .armed
+                        .as_ref()
+                        .is_some_and(|a| !keys.iter().any(|k| a.ends_with(k.as_str())))
+                    {
+                        page.armed = None;
+                    }
+                }
+                return Task::none();
+            }
+            event => event,
+        };
         let Some(page) = &mut self.changes else {
             return Task::none();
         };
+        let listing = &self.changes_listing;
         match event {
-            Event::Loaded(loaded) => {
-                page.loading = false;
-                match loaded {
-                    Ok((entries, minutes)) => {
-                        let keys: Vec<String> = entries.iter().map(changes::entry_key).collect();
-                        page.open.retain(|k, _| keys.contains(k));
-                        if page
-                            .armed
-                            .as_ref()
-                            .is_some_and(|a| !keys.iter().any(|k| a.ends_with(k.as_str())))
-                        {
-                            page.armed = None;
-                        }
-                        page.auto_revert = minutes;
-                        page.entries = Some(Ok(entries));
-                    }
-                    Err(error) => page.entries = Some(Err(error)),
-                }
-            }
+            Event::Loaded(_) => {}
             Event::Refresh => {
                 if page.history {
                     page.history_loading = true;
@@ -2521,7 +2541,7 @@ impl App {
                 if page.open.remove(&key).is_some() {
                     return Task::none();
                 }
-                let Some(entry) = page.entry(&key) else {
+                let Some(entry) = listing.entry(&key) else {
                     return Task::none();
                 };
                 let target = changes::target(entry);
@@ -2540,6 +2560,14 @@ impl App {
                     },
                     move |diff| Message::Changes(Event::DiffLoaded(key, diff)),
                 );
+            }
+            Event::WorkspaceDiff(workspace, path) => {
+                let key = changes_ui::workspace_key(&workspace, &path);
+                if page.open.remove(&key).is_some() {
+                    return Task::none();
+                }
+                page.open.insert(key, None);
+                return self.workspace_file_diff(workspace, path);
             }
             Event::DiffLoaded(key, diff) => {
                 if let Some(slot) = page.open.get_mut(&key) {
@@ -2560,6 +2588,10 @@ impl App {
                     }
                     _ => unreachable!(),
                 };
+                // the listing from before the page was opened is shown, not acted on
+                if !page.fresh_entries {
+                    return Task::none();
+                }
                 // reverting takes a second press
                 if let Some(armed) = armed_as {
                     if page.armed.as_ref() != Some(&armed) {
@@ -2572,7 +2604,7 @@ impl App {
                     page.said = Some("The demo keeps and reverts nothing.".into());
                     return Task::none();
                 }
-                let entries: Vec<&Entry> = keys.iter().filter_map(|k| page.entry(k)).collect();
+                let entries: Vec<&Entry> = keys.iter().filter_map(|k| listing.entry(k)).collect();
                 let Some(first) = entries.first() else {
                     return Task::none();
                 };

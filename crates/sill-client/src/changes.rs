@@ -115,6 +115,79 @@ pub fn groups(entries: &[Entry]) -> Vec<Group> {
     groups
 }
 
+/// One session's part of the page: everything waiting that is its work, together.
+#[derive(Debug, Clone)]
+pub struct SessionSection<'a> {
+    pub session_id: String,
+    /// The title its entries carry (a session with workspaces alone has none here).
+    pub title: Option<String>,
+    pub ghost: bool,
+    /// Its workspaces with work to apply or a stopped operation.
+    pub workspaces: Vec<&'a sill_proto::workspaces::Detail>,
+    /// Its writes outside its pinned folders, by repository.
+    pub writes: Vec<Group>,
+    /// What was kept from it, which can be undone.
+    pub kept: Vec<Entry>,
+}
+
+/// The page, by whose work it is: each session's — workspaces, writes outside its pins, what was
+/// kept — and then the person's own checkouts, the pinned repositories as git sees them.
+#[derive(Debug, Clone)]
+pub struct Sections<'a> {
+    pub sessions: Vec<SessionSection<'a>>,
+    pub checkouts: Vec<Group>,
+}
+
+impl Sections<'_> {
+    /// What waits for the person: workspaces to apply and writes to keep or revert.
+    pub fn waiting(&self) -> (usize, usize) {
+        let workspaces = self.sessions.iter().map(|s| s.workspaces.len()).sum();
+        let writes = self.sessions.iter().flat_map(|s| &s.writes).map(|g| g.entries.len()).sum();
+        (workspaces, writes)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.sessions.is_empty() && self.checkouts.is_empty()
+    }
+}
+
+/// `entries` and the workspaces' `details` as [`Sections`]. Sessions come in `order` (the
+/// window's, newest first); one not in it (deleted since) after those, by its id.
+pub fn sections<'a>(entries: &[Entry], details: &'a [sill_proto::workspaces::Detail], order: &[&str]) -> Sections<'a> {
+    let mut sessions: Vec<SessionSection<'a>> = vec![];
+    fn section<'s, 'a>(sessions: &'s mut Vec<SessionSection<'a>>, id: &str) -> &'s mut SessionSection<'a> {
+        let at = sessions.iter().position(|s| s.session_id == id).unwrap_or_else(|| {
+            sessions.push(SessionSection { session_id: id.into(), title: None, ghost: false, workspaces: vec![], writes: vec![], kept: vec![] });
+            sessions.len() - 1
+        });
+        &mut sessions[at]
+    }
+    for d in details.iter().filter(|d| crate::workspaces::pending(d)) {
+        section(&mut sessions, &d.workspace.session_id).workspaces.push(d);
+    }
+    let mut checkouts = vec![];
+    for group in groups(entries) {
+        match &group.kind {
+            Kind::Live { .. } => checkouts.push(group),
+            Kind::Session { session_id, title, ghost, .. } => {
+                let s = section(&mut sessions, session_id);
+                s.title = Some(title.clone());
+                s.ghost = *ghost;
+                s.writes.push(group);
+            }
+            Kind::Kept { session_id, title } => {
+                let s = section(&mut sessions, session_id);
+                s.title.get_or_insert_with(|| title.clone());
+                s.ghost |= group.entries.iter().any(|e| matches!(e, Entry::Kept { ghost: true, .. }));
+                s.kept = group.entries;
+            }
+        }
+    }
+    let rank = |s: &SessionSection| order.iter().position(|id| *id == s.session_id).unwrap_or(order.len());
+    sessions.sort_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| a.session_id.cmp(&b.session_id)));
+    Sections { sessions, checkouts }
+}
+
 /// A stable identity for an entry, for the page's open diffs and armed buttons.
 pub fn entry_key(entry: &Entry) -> String {
     match entry {
@@ -220,8 +293,17 @@ pub fn keepable(entry: &Entry) -> bool {
     )
 }
 
-/// Every pending entry, page by page.
+/// Every pending entry, page by page. The daemon computes a listing once and its pages read that
+/// one; when it no longer holds it (`snapshot_expired`: many listings were begun meanwhile) the
+/// listing is read again from its start, once.
 pub fn list(client: &Client) -> anyhow::Result<Vec<Entry>> {
+    match list_once(client) {
+        Err(e) if crate::refusal_code(&e).as_deref() == Some("snapshot_expired") => list_once(client),
+        result => result,
+    }
+}
+
+fn list_once(client: &Client) -> anyhow::Result<Vec<Entry>> {
     let mut entries = vec![];
     let mut after = None;
     loop {
@@ -395,6 +477,39 @@ mod tests {
             git_revert(&path("/r"), &path("/r/x")).0,
             "_sill/changes.git-revert"
         );
+    }
+
+    #[test]
+    fn the_page_is_by_session_then_the_persons_checkouts() {
+        let workspace = |id: &str, session: &str, files: u32| -> sill_proto::workspaces::Detail {
+            serde_json::from_value(json!({"workspace": {"workspace_id": id, "name": "repo", "session_id": session, "source": path("/r"),
+                "source_branch": "main", "base": "b0", "branch": format!("sill/{id}"), "path": path(&format!("/ws/{id}")),
+                "state": "open", "operation": null, "limitations": [], "created_at": "t", "updated_at": "t"},
+                "revision": {"tip": "t1", "worktree": "", "destination_branch": "main", "destination_tip": "b0"},
+                "summary": {"commits": 0, "files": files, "added": "1", "removed": "0", "uncommitted": []}, "needs_rebase": false}))
+            .unwrap()
+        };
+        let details = vec![workspace("w1", "s1", 2), workspace("w2", "s2", 0), workspace("w3", "s3", 1)];
+        let entries = vec![
+            serde_json::from_value(json!({"type":"live", "repo": path("/r"), "path": path("/r/x"), "status":"?"})).unwrap(),
+            overlay("s1", "/tmp/a", false, 0),
+            overlay("gone", "/tmp/b", false, 0),
+            serde_json::from_value(json!({"type":"kept", "session_id":"s4", "title":"four", "ghost": false, "keep_id":"k1",
+                "timestamp":"1", "path": path("/tmp/c"), "what":"wrote", "before":"absent", "hash": null}))
+            .unwrap(),
+        ];
+        let page = sections(&entries, &details, &["s4", "s3", "s2", "s1"]);
+        let ids: Vec<&str> = page.sessions.iter().map(|s| s.session_id.as_str()).collect();
+        assert_eq!(ids, ["s4", "s3", "s1", "gone"], "the window's order; s2 has nothing waiting; a deleted session last");
+        let s1 = &page.sessions[2];
+        assert_eq!((s1.workspaces.len(), s1.writes.len(), s1.kept.len()), (1, 1, 0), "a session's workspace and writes are one section");
+        assert_eq!(s1.title.as_deref(), Some("s1 title"));
+        assert_eq!(page.sessions[0].kept.len(), 1);
+        assert_eq!(page.sessions[0].title.as_deref(), Some("four"));
+        assert_eq!(page.sessions[1].title, None, "a workspace alone carries no title");
+        assert_eq!(page.checkouts.len(), 1);
+        assert_eq!(page.waiting(), (2, 2));
+        assert!(sections(&[], &details[1..2], &[]).is_empty());
     }
 
     #[test]

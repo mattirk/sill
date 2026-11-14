@@ -155,6 +155,23 @@ pub struct Detail {
     /// counted.
     #[serde(default)]
     pub checkout_only: u32,
+    /// What an Apply would bring, path by path, committed and uncommitted alike, sorted by path:
+    /// `summary`'s `files`, `added` and `removed` are their count and sums.
+    #[serde(default)]
+    pub files: Vec<FileChange>,
+}
+
+/// One path an Apply would change. A rename is its two paths, one deleted and one added, so each
+/// path's own diff (`workspaces.diff` with `path`) says the same as its entry here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FileChange {
+    /// The path in the repository as the person knows it (below the workspace's `source`).
+    pub path: HostPath,
+    /// `A` added, `M` modified, `D` deleted, `T` type changed.
+    pub status: String,
+    /// Lines, as decimal strings; both `0` for a binary file.
+    pub added: String,
+    pub removed: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -171,6 +188,10 @@ pub enum Against {
 pub struct DiffRequest {
     pub workspace_id: String,
     pub against: Against,
+    /// Only this path's diff: a path below the workspace's `source`, as `FileChange.path` gives
+    /// it. Absent: the whole diff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<HostPath>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DiffText {

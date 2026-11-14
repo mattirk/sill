@@ -810,7 +810,12 @@ a workspace whose folder or repository is gone has none, and a client asks `get`
 missing). `_sill/workspaces.get` (record, current `revision`, what an Apply would bring,
 `needs_rebase`) and
 `_sill/workspaces.diff` (against what the person has — their checkout on the agent's paths — or
-against the base; at most 4 MiB) read.
+against the base; at most 4 MiB) read. A detail's `files` (added 2026-11-10) lists what an Apply
+would bring path by path, committed and uncommitted alike: each an exact `path` below the
+workspace's `source`, a `status` (`A`, `M`, `D`, `T`) and its `added`/`removed` lines (decimal
+strings, `0` for a binary file). `summary.files`, `added` and `removed` are their count and sums.
+A rename is listed as its two paths, one deleted and one added, so that `workspaces.diff` with
+that `path` (added with it: one path's diff alone, matched literally) says what its entry says.
 `_sill/workspaces.prepare` rebases onto a moved checkout in a helper jail built from the session's
 next build (no network), keeping uncommitted changes; a rebase that stops is left for the
 workspace (`conflicts`, `operation` reads `rebase`/`conflict`) and `_sill/workspaces.abort` undoes

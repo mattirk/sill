@@ -1513,6 +1513,14 @@
           "minimum": 0,
           "type": "integer"
         },
+        "files": {
+          "default": [],
+          "description": "What an Apply would bring, path by path, committed and uncommitted alike, sorted by path:\n`summary`'s `files`, `added` and `removed` are their count and sums.",
+          "items": {
+            "$ref": "#/$defs/FileChange"
+          },
+          "type": "array"
+        },
         "needs_rebase": {
           "description": "The checkout moved past what the workspace started from: Apply rebases first (prepare).",
           "type": "boolean"
@@ -1586,6 +1594,17 @@
       "properties": {
         "against": {
           "$ref": "#/$defs/Against"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HostPath"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Only this path's diff: a path below the workspace's `source`, as `FileChange.path` gives\nit. Absent: the whole diff."
         },
         "workspace_id": {
           "type": "string"
@@ -2248,6 +2267,33 @@
         "next_offset",
         "eof",
         "revision"
+      ],
+      "type": "object"
+    },
+    "FileChange": {
+      "description": "One path an Apply would change. A rename is its two paths, one deleted and one added, so each\npath's own diff (`workspaces.diff` with `path`) says the same as its entry here.",
+      "properties": {
+        "added": {
+          "description": "Lines, as decimal strings; both `0` for a binary file.",
+          "type": "string"
+        },
+        "path": {
+          "$ref": "#/$defs/HostPath",
+          "description": "The path in the repository as the person knows it (below the workspace's `source`)."
+        },
+        "removed": {
+          "type": "string"
+        },
+        "status": {
+          "description": "`A` added, `M` modified, `D` deleted, `T` type changed.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "status",
+        "added",
+        "removed"
       ],
       "type": "object"
     },

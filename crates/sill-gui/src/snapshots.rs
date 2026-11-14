@@ -207,8 +207,7 @@ fn render_changes() {
         0,
     )))));
     let key = {
-        let page = app.changes.as_ref().unwrap();
-        let entries = page.entries.as_ref().unwrap().as_ref().unwrap();
+        let entries = app.changes_listing.entries.as_ref().unwrap().as_ref().unwrap();
         sill_client::changes::entry_key(&entries[2])
     };
     let _ = app.update(Message::Changes(crate::changes_ui::Event::Diff(
@@ -729,4 +728,63 @@ fn render_tab_hover() {
     ui.point_at((260.0, 18.0));
     let snapshot = ui.snapshot(&crate::style::theme()).unwrap();
     assert!(snapshot.matches_image(dir().join("tabs-hover")).unwrap());
+}
+
+/// The Changes page by session: three sessions' workspaces of one repository with the files an
+/// Apply would bring (one diff open), a session's writes outside its pins and a keep beside its
+/// workspace, then the person's checkout and a discarded workspace.
+#[test]
+#[ignore = "writes the Changes page PNG for review"]
+fn render_changes_workspaces() {
+    use crate::Message;
+    let (mut app, _) = App::new(true, None);
+    let host = |p: &str| sill_proto::sessions::HostPath::from_path(std::path::Path::new(p));
+    for (id, title, ended) in [("s1", "Changes view grouping", false), ("s2", "Restore previous active tab", true), ("s3", "Session tab layout fix", false)] {
+        let mut s = crate::tests::session_record(id, "claude", ended, false);
+        s.title = title.into();
+        app.all_sessions.push(s);
+    }
+    let _ = app.update(Message::ToggleChanges);
+    let sill = "/home/demo/GIT/sill";
+    let live = |file: &str, status: &str| serde_json::json!({"type":"live", "repo": host(sill), "path": host(&format!("{sill}/{file}")), "status": status});
+    let overlay = |session: &str, title: &str, file: &str, kind: &str| serde_json::json!({"type":"overlay", "session_id": session, "title": title,
+            "ghost": false, "agent_state": false, "path": host(file), "kind": kind, "file_type":"file", "size":"120", "conflict": false, "written": "1793806135",
+            "repo": null, "hash":"h", "protected": null});
+    let entries: Vec<sill_proto::changes::Entry> = [
+        live("crates/sill-gui/src/ui.rs", "M"),
+        live("docs/notes.md", "?"),
+        overlay("s1", "Changes view grouping", "/home/demo/.config/app/settings.toml", "modified"),
+        overlay("s1", "Changes view grouping", "/home/demo/scratch/plan.md", "added"),
+        serde_json::json!({"type":"kept", "session_id":"s3", "title":"Session tab layout fix", "ghost": false, "keep_id":"k1", "timestamp":"1793806135",
+            "path": host("/home/demo/.bashrc"), "what":"wrote", "before":"a file", "hash": null}),
+    ].into_iter().map(|e| serde_json::from_value(e).unwrap()).collect();
+    let ws = |n: &str, session: &str, state: &str| serde_json::json!({"workspace_id": format!("ws-{n}"), "name": "sill", "session_id": session, "source": host(sill),
+        "source_branch": "master", "base": "b0", "branch": format!("sill/sill-ws-{n}"), "path": host(&format!("/ws/sill-ws-{n}")),
+        "state": state, "operation": null, "limitations": [], "created_at": "t", "updated_at": "t"});
+    let detail = |w: &serde_json::Value, commits: u32, files: &[(&str, &str, u32, u32)]| -> sill_proto::workspaces::Detail {
+        let listed: Vec<serde_json::Value> = files.iter().map(|(path, status, added, removed)| serde_json::json!({"path": host(&format!("{sill}/{path}")), "status": status, "added": added.to_string(), "removed": removed.to_string()})).collect();
+        serde_json::from_value(serde_json::json!({"workspace": w, "revision": {"tip": "t1", "worktree": "w", "destination_branch": "master", "destination_tip": "b0"},
+            "summary": {"commits": commits, "files": files.len(), "added": files.iter().map(|f| f.2).sum::<u32>().to_string(), "removed": files.iter().map(|f| f.3).sum::<u32>().to_string(), "uncommitted": []},
+            "needs_rebase": false, "files": listed})).unwrap()
+    };
+    let (w1, w2, w3) = (ws("6379eda6", "s1", "open"), ws("5a385ac0", "s2", "result"), ws("9a1e7978", "s3", "open"));
+    let listed: sill_proto::workspaces::Listed = serde_json::from_value(serde_json::json!({"workspaces": [w1, w2, w3],
+        "discarded": [{"discard_id": "d1", "workspace_id": "ws-old", "name": "sill", "source": host(sill), "until": "2026-11-17T10:00:00Z", "created_at": "t"}], "next": null})).unwrap();
+    let details = vec![
+        detail(&w1, 0, &[("crates/sill-client/src/changes.rs", "M", 96, 4), ("crates/sill-gui/src/changes_ui.rs", "M", 310, 180), ("docs/sill-gui.md", "M", 12, 3)]),
+        detail(&w2, 1, &[("crates/sill-gui/src/main.rs", "M", 38, 6), ("crates/sill-gui/src/tests.rs", "M", 120, 0)]),
+        detail(&w3, 0, &[("crates/sill-gui/src/old_tabs.rs", "D", 0, 64), ("crates/sill-gui/src/tabs.png", "A", 0, 0)]),
+    ];
+    let _ = app.update(Message::Workspaces(crate::workspaces::Event::PageLoaded(Ok((listed, details)))));
+    let _ = app.update(Message::Changes(crate::changes_ui::Event::Loaded(Ok((entries, 1440)))));
+    let _ = app.update(Message::Changes(crate::changes_ui::Event::WorkspaceDiff("ws-6379eda6".into(), host(&format!("{sill}/docs/sill-gui.md")))));
+    let _ = app.update(Message::Changes(crate::changes_ui::Event::DiffLoaded(
+        crate::changes_ui::workspace_key("ws-6379eda6", &host(&format!("{sill}/docs/sill-gui.md"))),
+        Ok(demo::changes_diff()),
+    )));
+    render_size(&app, "15-changes-by-session", (720.0, 1000.0));
+    // opened again: the listing from before, its actions waiting for the new one
+    let _ = app.update(Message::ToggleChanges);
+    let _ = app.update(Message::ToggleChanges);
+    render_size(&app, "16-changes-reopened", (720.0, 1000.0));
 }

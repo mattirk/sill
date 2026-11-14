@@ -66,7 +66,195 @@ fn done(h: &Hub, d: Result<sill_core::wire::Done>) -> Result<Value> {
     h.changes_changed();
     bounded(api::Done::from(d?))
 }
+/// Listings being read page by page: a listing is computed once, at its first page, and the
+/// later pages read that one (the cursor names it and the row to go on from) — the overlays are
+/// not scanned again for each page, and no listing is a mix of two scans. Held until its last page
+/// is read; at most [`listings::HELD`] at a time, the oldest going first, and a cursor of one
+/// that went is `snapshot_expired`: list again.
+mod listings {
+    use super::api;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    pub const HELD: usize = 8;
+    type Rows = Arc<Vec<api::Entry>>;
+    static LISTINGS: Mutex<VecDeque<(String, Rows)>> = Mutex::new(VecDeque::new());
+
+    pub fn token() -> anyhow::Result<String> {
+        use std::io::Read;
+        let mut bytes = [0u8; 16];
+        std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+        Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    }
+
+    /// A cursor's listing and the row it goes on from.
+    pub fn cursor(cursor: &str) -> Option<(String, usize)> {
+        if cursor.len() > 256 {
+            return None;
+        }
+        serde_json::from_str(cursor).ok()
+    }
+
+    pub fn get(token: &str) -> Option<Rows> {
+        LISTINGS.lock().unwrap().iter().find(|(t, _)| t == token).map(|(_, rows)| rows.clone())
+    }
+
+    /// Keep `rows` for the pages still to come.
+    pub fn hold(token: String, rows: Rows) {
+        let mut held = LISTINGS.lock().unwrap();
+        if held.iter().any(|(t, _)| *t == token) {
+            return;
+        }
+        if held.len() == HELD {
+            held.pop_front();
+        }
+        held.push_back((token, rows));
+    }
+
+    pub fn drop(token: &str) {
+        LISTINGS.lock().unwrap().retain(|(t, _)| t != token);
+    }
+
+    /// The rows of one page from row `from`: at most `limit` of them and 3 MiB, and the row the
+    /// next page goes on from.
+    pub fn page(rows: &[api::Entry], from: usize, limit: usize) -> anyhow::Result<(Vec<api::Entry>, usize)> {
+        const BYTES: usize = 3 * 1024 * 1024;
+        let (mut entries, mut bytes, mut at) = (Vec::new(), 0, from.min(rows.len()));
+        while let Some(row) = rows.get(at) {
+            let size = serde_json::to_vec(row)?.len();
+            if size > BYTES {
+                return Err(anyhow::Error::from(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Record, None, "changes entry too large")));
+            }
+            if entries.len() == limit || bytes + size > BYTES {
+                break;
+            }
+            bytes += size;
+            at += 1;
+            entries.push(row.clone());
+        }
+        Ok((entries, at))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use sill_proto::sessions::HostPath;
+
+        fn rows(n: usize) -> Rows {
+            let path = |p: String| HostPath::from_path(std::path::Path::new(&p));
+            Arc::new((0..n).map(|i| api::Entry::Live { repo: path("/r".into()), path: path(format!("/r/{i}")), status: "M".into() }).collect())
+        }
+
+        /// The pages of a listing are cut from the one listing, each going on where the last
+        /// ended; a listing is held while pages remain, the oldest going when too many are.
+        #[test]
+        fn pages_read_the_one_listing_and_only_so_many_are_held() {
+            let listing = rows(5);
+            let (first, at) = page(&listing, 0, 2).unwrap();
+            assert_eq!((first.len(), at), (2, 2));
+            let (rest, at) = page(&listing, at, 128).unwrap();
+            assert_eq!((rest.len(), at), (3, 5), "the end: nothing to go on from");
+            let (none, at) = page(&listing, 99, 2).unwrap();
+            assert_eq!((none.len(), at), (0, 5), "a row past the end is the end");
+            assert_eq!(cursor("[\"ab\",3]"), Some(("ab".to_string(), 3)));
+            assert_eq!(cursor("nonsense"), None);
+            assert_eq!(cursor(&format!("[\"{}\",3]", "a".repeat(300))), None);
+            let tokens: Vec<String> = (0..=HELD).map(|_| token().unwrap()).collect();
+            assert_ne!(tokens[0], tokens[1]);
+            for t in &tokens {
+                hold(t.clone(), listing.clone());
+                hold(t.clone(), listing.clone());
+            }
+            assert!(get(&tokens[0]).is_none(), "the oldest went for the newest");
+            assert!(tokens[1..].iter().all(|t| get(t).is_some()));
+            drop(&tokens[1]);
+            assert!(get(&tokens[1]).is_none(), "read to its end: no longer held");
+            for t in &tokens {
+                drop(t);
+            }
+        }
+    }
+}
+
 impl Hub {
+    /// Every pending entry in the page's order: pinned repositories, each session's writes, what
+    /// was kept.
+    fn changes_rows(&self) -> Result<Vec<api::Entry>> {
+        let list = self.changes_list()?;
+        let mut rows = Vec::new();
+        for r in list.live {
+            for (rel, status) in r.status {
+                let p = HostPath::from_path(&r.repo.join(rel));
+                let key = json!(["live", "", p.bytes_base64, ""]).to_string();
+                rows.push((
+                    key,
+                    api::Entry::Live {
+                        repo: HostPath::from_path(&r.repo),
+                        path: p,
+                        status,
+                    },
+                ));
+            }
+        }
+        for s in list.sessions {
+            for (agent_state, r) in s
+                .changes
+                .into_iter()
+                .map(|r| (false, r))
+                .chain(s.agent_state.into_iter().map(|r| (true, r)))
+            {
+                let p = HostPath::from_path(&r.change.path);
+                let key = json!(["overlay", s.id, p.bytes_base64, ""]).to_string();
+                rows.push((
+                    key,
+                    api::Entry::Overlay {
+                        session_id: s.id.clone(),
+                        title: s.title.clone(),
+                        ghost: s.ghost,
+                        agent_state,
+                        path: p,
+                        kind: match r.change.kind {
+                            sill_core::ledger::Kind::Added => "added",
+                            sill_core::ledger::Kind::Modified => "modified",
+                            sill_core::ledger::Kind::Deleted => "deleted",
+                            sill_core::ledger::Kind::TypeChanged => "type_changed",
+                            sill_core::ledger::Kind::Replaced => "replaced",
+                        }
+                        .into(),
+                        file_type: format!("{:?}", r.change.file_type).to_lowercase(),
+                        size: r.change.size.to_string(),
+                        conflict: r.change.conflict,
+                        written: r.written.map(|v| v.to_string()),
+                        repo: (!r.repo.as_os_str().is_empty())
+                            .then(|| HostPath::from_path(&r.repo)),
+                        hash: r.hash,
+                        protected: r.protected,
+                    },
+                ));
+            }
+            for k in s.kept {
+                let p = HostPath::from_path(&k.path);
+                let key = json!(["kept", s.id, p.bytes_base64, k.id]).to_string();
+                rows.push((
+                    key,
+                    api::Entry::Kept {
+                        session_id: s.id.clone(),
+                        title: s.title.clone(),
+                        ghost: s.ghost,
+                        keep_id: k.id,
+                        timestamp: k.ts.to_string(),
+                        path: p,
+                        what: k.what,
+                        before: k.before,
+                        hash: k.hash,
+                    },
+                ));
+            }
+        }
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(rows.into_iter().map(|(_, row)| row).collect())
+    }
+
     pub(super) fn changes_public(&self, method: &str, params: Value) -> Option<Result<Value>> {
         if !matches!(
             method,
@@ -84,106 +272,21 @@ impl Hub {
             "_sill/changes.list" => {
                 let a: api::List = parse(params)?;
                 let limit = limit(a.limit)?;
-                if a.after.as_ref().is_some_and(|s| {
-                    s.len() > 16384
-                        || serde_json::from_str::<(String, String, String, String)>(s).is_err()
-                }) {
-                    return Err(domain("invalid_cursor", "invalid changes cursor"));
-                }
-                let list = self.changes_list()?;
-                let mut rows = Vec::new();
-                for r in list.live {
-                    for (rel, status) in r.status {
-                        let p = HostPath::from_path(&r.repo.join(rel));
-                        let key = json!(["live", "", p.bytes_base64, ""]).to_string();
-                        rows.push((
-                            key,
-                            api::Entry::Live {
-                                repo: HostPath::from_path(&r.repo),
-                                path: p,
-                                status,
-                            },
-                        ));
+                let (token, rows, from) = match &a.after {
+                    None => (listings::token()?, std::sync::Arc::new(self.changes_rows()?), 0),
+                    Some(cursor) => {
+                        let (token, from) = listings::cursor(cursor).ok_or_else(|| domain("invalid_cursor", "invalid changes cursor"))?;
+                        let rows = listings::get(&token).ok_or_else(|| domain("snapshot_expired", "this listing is no longer held; list again"))?;
+                        (token, rows, from)
                     }
-                }
-                for s in list.sessions {
-                    for (agent_state, r) in s
-                        .changes
-                        .into_iter()
-                        .map(|r| (false, r))
-                        .chain(s.agent_state.into_iter().map(|r| (true, r)))
-                    {
-                        let p = HostPath::from_path(&r.change.path);
-                        let key = json!(["overlay", s.id, p.bytes_base64, ""]).to_string();
-                        rows.push((
-                            key,
-                            api::Entry::Overlay {
-                                session_id: s.id.clone(),
-                                title: s.title.clone(),
-                                ghost: s.ghost,
-                                agent_state,
-                                path: p,
-                                kind: match r.change.kind {
-                                    sill_core::ledger::Kind::Added => "added",
-                                    sill_core::ledger::Kind::Modified => "modified",
-                                    sill_core::ledger::Kind::Deleted => "deleted",
-                                    sill_core::ledger::Kind::TypeChanged => "type_changed",
-                                    sill_core::ledger::Kind::Replaced => "replaced",
-                                }
-                                .into(),
-                                file_type: format!("{:?}", r.change.file_type).to_lowercase(),
-                                size: r.change.size.to_string(),
-                                conflict: r.change.conflict,
-                                written: r.written.map(|v| v.to_string()),
-                                repo: (!r.repo.as_os_str().is_empty())
-                                    .then(|| HostPath::from_path(&r.repo)),
-                                hash: r.hash,
-                                protected: r.protected,
-                            },
-                        ));
-                    }
-                    for k in s.kept {
-                        let p = HostPath::from_path(&k.path);
-                        let key = json!(["kept", s.id, p.bytes_base64, k.id]).to_string();
-                        rows.push((
-                            key,
-                            api::Entry::Kept {
-                                session_id: s.id.clone(),
-                                title: s.title.clone(),
-                                ghost: s.ghost,
-                                keep_id: k.id,
-                                timestamp: k.ts.to_string(),
-                                path: p,
-                                what: k.what,
-                                before: k.before,
-                                hash: k.hash,
-                            },
-                        ));
-                    }
-                }
-                rows.sort_by(|a, b| a.0.cmp(&b.0));
-                let mut rows = rows
-                    .into_iter()
-                    .filter(|(k, _)| a.after.as_ref().is_none_or(|after| k > after))
-                    .peekable();
-                let mut page = api::Page {
-                    entries: vec![],
-                    next: None,
                 };
-                let mut bytes = 0;
-                let mut last = None;
-                while let Some((key, row)) = rows.next() {
-                    let size = serde_json::to_vec(&row)?.len();
-                    if size > 3 * 1024 * 1024 {
-                        return Err(anyhow::Error::from(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Record, None, "changes entry too large")));
-                    }
-                    if page.entries.len() == limit || bytes + size > 3 * 1024 * 1024 {
-                        page.next = last;
-                        break;
-                    }
-                    bytes += size;
-                    last = Some(key);
-                    page.entries.push(row);
+                let (entries, at) = listings::page(&rows, from, limit)?;
+                let mut page = api::Page { entries, next: None };
+                if at < rows.len() {
+                    page.next = Some(json!([token, at]).to_string());
+                    listings::hold(token, rows);
+                } else {
+                    listings::drop(&token);
                 }
                 bounded(page)
             }

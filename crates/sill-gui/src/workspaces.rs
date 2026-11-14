@@ -97,6 +97,15 @@ impl App {
         )
     }
 
+    /// Read what an Apply would bring of one file of a workspace, for the Changes page's row.
+    pub(crate) fn workspace_file_diff(&self, workspace: String, path: sill_proto::sessions::HostPath) -> Task<Message> {
+        let key = crate::changes_ui::workspace_key(&workspace, &path);
+        let Some(actions) = self.actions.clone() else {
+            return Task::done(Message::Changes(crate::changes_ui::Event::DiffLoaded(key, Ok(crate::demo::changes_diff()))));
+        };
+        blocking(move || ws::diff(&actions, &workspace, Some(&path)).map_err(|e| ws::message(&e)), move |diff| Message::Changes(crate::changes_ui::Event::DiffLoaded(key, diff)))
+    }
+
     /// The Changes page's workspaces, read with its changes.
     pub(crate) fn workspaces_page_load(&self) -> Task<Message> {
         let Some(actions) = self.actions.clone() else { return Task::none() };
@@ -105,19 +114,37 @@ impl App {
 
     /// The revision the Changes page shows for a workspace.
     fn page_seen(&self, workspace: &str) -> Option<api::Revision> {
-        let Some(Ok((_, details))) = self.changes.as_ref()?.workspaces.as_ref() else { return None };
-        details.iter().find(|d| d.workspace.workspace_id == workspace).map(|d| d.revision.clone())
+        self.changes_listing.details().iter().find(|d| d.workspace.workspace_id == workspace).map(|d| d.revision.clone())
     }
 
     pub(crate) fn workspaces_event(&mut self, event: Event) -> Task<Message> {
         match event {
             Event::PageLoaded(all) => {
-                if let Some(page) = &mut self.changes {
-                    page.workspaces = Some(all);
-                }
-                Task::none()
+                // an open diff of a file that went closes; one whose workspace moved is read again
+                let before: BTreeMap<String, api::Revision> =
+                    self.changes_listing.details().iter().map(|d| (d.workspace.workspace_id.clone(), d.revision.clone())).collect();
+                self.changes_listing.workspaces = Some(all);
+                let Some(page) = &mut self.changes else { return Task::none() };
+                page.fresh_workspaces = true;
+                let details = self.changes_listing.details();
+                let listed = |open: &str| {
+                    details.iter().find_map(|d| d.files.iter().find(|f| crate::changes_ui::workspace_key(&d.workspace.workspace_id, &f.path) == open).map(|f| (d, f.path.clone())))
+                };
+                page.open.retain(|k, _| crate::changes_ui::workspace_of(k).is_none() || listed(k).is_some());
+                let moved: Vec<(String, sill_proto::sessions::HostPath)> = page
+                    .open
+                    .keys()
+                    .filter_map(|k| listed(k))
+                    .filter(|(d, _)| before.get(&d.workspace.workspace_id) != Some(&d.revision))
+                    .map(|(d, path)| (d.workspace.workspace_id.clone(), path))
+                    .collect();
+                Task::batch(moved.into_iter().map(|(id, path)| self.workspace_file_diff(id, path)))
             }
             Event::PageApply(workspace) => {
+                // the listing from before the page was opened is shown, not acted on
+                if !self.changes.as_ref().is_some_and(|p| p.fresh_workspaces) {
+                    return Task::none();
+                }
                 let (Some(actions), Some(seen)) = (self.actions.clone(), self.page_seen(&workspace)) else { return Task::none() };
                 blocking(
                     move || match ws::apply(&actions, &workspace, &seen) {
@@ -129,6 +156,10 @@ impl App {
                 )
             }
             Event::PageDiscard(workspace) => {
+                // the listing from before the page was opened is shown, not acted on
+                if !self.changes.as_ref().is_some_and(|p| p.fresh_workspaces) {
+                    return Task::none();
+                }
                 let Some(page) = &mut self.changes else { return Task::none() };
                 if page.workspace_armed.as_deref() != Some(workspace.as_str()) {
                     page.workspace_armed = Some(workspace);
@@ -145,6 +176,10 @@ impl App {
                 )
             }
             Event::PageUndo(discard) => {
+                // the listing from before the page was opened is shown, not acted on
+                if !self.changes.as_ref().is_some_and(|p| p.fresh_workspaces) {
+                    return Task::none();
+                }
                 let Some(actions) = self.actions.clone() else { return Task::none() };
                 blocking(
                     move || match ws::undo(&actions, &discard) {
@@ -257,7 +292,7 @@ impl App {
                 blocking(
                     {
                         let workspace = workspace.clone();
-                        move || ws::diff(&actions, &workspace).map_err(|e| ws::message(&e))
+                        move || ws::diff(&actions, &workspace, None).map_err(|e| ws::message(&e))
                     },
                     move |diff| Message::Workspaces(Event::DiffLoaded(session, workspace, diff)),
                 )

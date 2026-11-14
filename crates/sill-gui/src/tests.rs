@@ -2596,8 +2596,7 @@ fn a_held_prompt_can_be_sent_or_discarded() {
 // --- changes ----------------------------------------------------------------------------------
 
 fn changes_key(app: &App, file: &str) -> String {
-    let page = app.changes.as_ref().unwrap();
-    let entries = page.entries.as_ref().unwrap().as_ref().unwrap();
+    let entries = app.changes_listing.entries.as_ref().unwrap().as_ref().unwrap();
     entries
         .iter()
         .find(|e| sill_client::changes::path(e).display.ends_with(file))
@@ -2605,9 +2604,9 @@ fn changes_key(app: &App, file: &str) -> String {
         .unwrap()
 }
 
-/// The herring opens the Changes page: the pinned repository's live changes, the session's writes
-/// (one changed on the host, which cannot be kept) and an earlier keep to undo. A row opens its
-/// diff; reverting takes a second press; Escape goes back.
+/// The herring opens the Changes page: the session's section with its writes (one changed on the
+/// host, which cannot be kept) and an earlier keep to undo, then the person's checkout as git
+/// sees it. A row opens its diff; reverting takes a second press; Escape goes back.
 #[test]
 fn the_changes_page_groups_what_sessions_wrote() {
     use crate::changes_ui::Event;
@@ -2616,17 +2615,18 @@ fn the_changes_page_groups_what_sessions_wrote() {
     settle_task(&mut app, task);
     let mut ui = simulator(&app, (720.0, 860.0));
     for shown in [
-        "5 pending change(s)",
-        "/home/demo/project",
-        "live",
+        "3 writes to keep or revert",
         "witty-willow",
+        "Outside its pinned folders",
         "no git",
         "Keep all",
         "settings.toml",
         "/home/demo/.config/app",
         "changed on the host too",
-        "Kept from witty-willow",
+        "Kept",
         "Undo",
+        "/home/demo/project",
+        "your checkout",
     ] {
         ui.find(shown)
             .unwrap_or_else(|_| panic!("{shown} is not shown"));
@@ -2656,6 +2656,106 @@ fn the_changes_page_groups_what_sessions_wrote() {
     );
 }
 
+fn page_workspace(id: &str, session: &str, files: &[&str]) -> sill_proto::workspaces::Detail {
+    let host = |p: &str| sill_proto::sessions::HostPath::from_path(std::path::Path::new(p));
+    let listed: Vec<serde_json::Value> = files
+        .iter()
+        .map(|f| json!({"path": host(&format!("/home/demo/project/{f}")), "status": "M", "added": "2", "removed": "1"}))
+        .collect();
+    serde_json::from_value(json!({
+        "workspace": {"workspace_id": id, "name": "project", "session_id": session, "source": host("/home/demo/project"),
+            "source_branch": "main", "base": "b0", "branch": format!("sill/{id}"), "path": host(&format!("/ws/{id}")),
+            "state": "open", "operation": null, "limitations": [], "created_at": "t", "updated_at": "t"},
+        "revision": {"tip": "t1", "worktree": "w", "destination_branch": "main", "destination_tip": "b0"},
+        "summary": {"commits": 1, "files": files.len(), "added": "2", "removed": "1", "uncommitted": []},
+        "needs_rebase": false, "files": listed}))
+    .unwrap()
+}
+
+fn page_workspaces(details: Vec<sill_proto::workspaces::Detail>) -> crate::workspaces::All {
+    let listed = serde_json::from_value(json!({
+        "workspaces": details.iter().map(|d| json!(d.workspace)).collect::<Vec<_>>(), "discarded": [], "next": null}))
+    .unwrap();
+    (listed, details)
+}
+
+/// A session's workspace and its writes outside its pins are one section, the workspace with the
+/// files an Apply would bring; a file's row opens what Apply would bring of it, and a workspace
+/// that moved has its open diff read again while one whose file went closes it.
+#[test]
+fn the_changes_page_is_by_session_with_each_workspaces_files() {
+    use crate::changes_ui::{Event, workspace_key};
+    use crate::workspaces::Event as W;
+    let (mut app, _) = App::new(true, None);
+    let task = app.update(Message::ToggleChanges);
+    settle_task(&mut app, task);
+    let all = page_workspaces(vec![page_workspace("w1", "demo", &["src/a.rs", "src/b.rs"])]);
+    let _ = app.update(Message::Workspaces(W::PageLoaded(Ok(all))));
+    let mut ui = simulator(&app, (720.0, 860.0));
+    for shown in ["1 workspace to apply · 3 writes to keep or revert", "workspace", "2 files +2 −1 · 1 commit", "Apply", "Discard", "a.rs", "b.rs", "+2 −1"] {
+        ui.find(shown).unwrap_or_else(|_| panic!("{shown} is not shown"));
+    }
+    assert!(ui.find("Workspaces").is_err(), "no list of workspaces apart from their sessions");
+    ui.click("a.rs").unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    for message in messages {
+        let task = app.update(message);
+        settle_task(&mut app, task);
+    }
+    let host = sill_proto::sessions::HostPath::from_path(std::path::Path::new("/home/demo/project/src/a.rs"));
+    let key = workspace_key("w1", &host);
+    assert!(matches!(app.changes.as_ref().unwrap().open.get(&key), Some(Some(Ok(_)))), "the file's diff is open");
+    // the entries read again: a workspace's open diff is not one of theirs to close
+    let _ = app.update(Message::Changes(Event::Loaded(Ok((demo::changes(), 0)))));
+    assert!(app.changes.as_ref().unwrap().open.contains_key(&key));
+    // the workspace no longer changes that file
+    let all = page_workspaces(vec![page_workspace("w1", "demo", &["src/b.rs"])]);
+    let _ = app.update(Message::Workspaces(W::PageLoaded(Ok(all))));
+    assert!(!app.changes.as_ref().unwrap().open.contains_key(&key), "its diff went with it");
+}
+
+/// The listing is the window's: closing the page keeps it, and opening it again shows it at once
+/// while the new one is read — without its actions, which wait for what is there now. A listing
+/// that arrives after the page closed is kept for the next opening.
+#[test]
+fn reopening_changes_shows_the_last_listing_until_the_new_one_is_read() {
+    use crate::changes_ui::Event;
+    use crate::workspaces::Event as W;
+    let (mut app, _) = App::new(true, None);
+    let task = app.update(Message::ToggleChanges);
+    settle_task(&mut app, task);
+    let all = page_workspaces(vec![page_workspace("w1", "demo", &["src/a.rs"])]);
+    let _ = app.update(Message::Workspaces(W::PageLoaded(Ok(all))));
+    let page = app.changes.as_ref().unwrap();
+    assert!(page.fresh_entries && page.fresh_workspaces);
+    let _ = app.update(Message::ToggleChanges);
+    assert!(app.changes.is_none());
+    // arriving late: still the window's
+    let _ = app.update(Message::Changes(Event::Loaded(Ok((demo::changes()[..3].to_vec(), 0)))));
+    assert_eq!(app.changes_listing.entries.as_ref().unwrap().as_ref().unwrap().len(), 3);
+    // open again, the new listing not read yet (the task is not run)
+    let _ = app.update(Message::ToggleChanges);
+    let page = app.changes.as_ref().unwrap();
+    assert!(page.loading && !page.fresh_entries && !page.fresh_workspaces);
+    let mut ui = simulator(&app, (720.0, 860.0));
+    for shown in ["settings.toml", "a.rs", "Apply"] {
+        ui.find(shown).unwrap_or_else(|_| panic!("{shown} is shown from the last listing"));
+    }
+    assert!(ui.find("Reading changes…").is_err());
+    drop(ui);
+    // nothing acts on the listing from before
+    let key = changes_key(&app, "settings.toml");
+    let _ = app.update(Message::Changes(Event::Revert(key)));
+    assert_eq!(app.changes.as_ref().unwrap().armed, None);
+    let _ = app.update(Message::Workspaces(W::PageDiscard("w1".into())));
+    assert_eq!(app.changes.as_ref().unwrap().workspace_armed, None);
+    // the new one is read: its actions are offered
+    let _ = app.update(Message::Changes(Event::Loaded(Ok((demo::changes(), 0)))));
+    let key = changes_key(&app, "settings.toml");
+    let _ = app.update(Message::Changes(Event::Revert(key.clone())));
+    assert_eq!(app.changes.as_ref().unwrap().armed.as_deref(), Some(key.as_str()));
+}
+
 /// The page's actions are the daemon's requests: keep with the version shown, revert all on a
 /// second press, git's revert for a live file, undo for a keep; the page reads again after each.
 #[test]
@@ -2664,9 +2764,10 @@ fn changes_actions_are_the_public_requests() {
     let (client, mut daemon) = daemon();
     let mut app = live_app(vec![client]);
     app.changes = Some(ChangesPage {
-        entries: Some(Ok(demo::changes())),
+        fresh_entries: true,
         ..ChangesPage::default()
     });
+    app.changes_listing.entries = Some(Ok(demo::changes()));
     let keep = changes_key(&app, "settings.toml");
     let live = changes_key(&app, "README.md");
     let kept = changes_key(&app, ".bashrc");
@@ -2724,9 +2825,9 @@ fn changes_actions_are_the_public_requests() {
     settle_task(&mut app, task);
     let page = app.changes.as_ref().unwrap();
     assert_eq!(page.said.as_deref(), Some("kept: settings.toml"));
-    assert_eq!(page.auto_revert, 1440);
+    assert_eq!(app.changes_listing.auto_revert, 1440);
     // the page read again (empty now); the rest act on the demo's entries
-    app.changes.as_mut().unwrap().entries = Some(Ok(demo::changes()));
+    app.changes_listing.entries = Some(Ok(demo::changes()));
     let all: Vec<String> = ["settings.toml", "plan.md", ".profile"]
         .iter()
         .map(|f| changes_key(&app, f))
@@ -2735,12 +2836,12 @@ fn changes_actions_are_the_public_requests() {
         let task = app.update(Message::Changes(Event::RevertAll(all.clone())));
         settle_task(&mut app, task);
     }
-    app.changes.as_mut().unwrap().entries = Some(Ok(demo::changes()));
+    app.changes_listing.entries = Some(Ok(demo::changes()));
     for _ in 0..2 {
         let task = app.update(Message::Changes(Event::Revert(live.clone())));
         settle_task(&mut app, task);
     }
-    app.changes.as_mut().unwrap().entries = Some(Ok(demo::changes()));
+    app.changes_listing.entries = Some(Ok(demo::changes()));
     let task = app.update(Message::Changes(Event::Undo(kept)));
     settle_task(&mut app, task);
     server.join().unwrap();
