@@ -57,11 +57,20 @@ pub struct Outbox {
 impl Outbox {
     /// A new submission of `text` to `session_id`: the request to make.
     pub fn send(&mut self, session_id: &str, text: String) -> Submit {
+        self.send_with_attachments(session_id, text, vec![])
+    }
+
+    pub fn send_with_attachments(
+        &mut self,
+        session_id: &str,
+        text: String,
+        attachments: Vec<sill_proto::sfp::Attachment>,
+    ) -> Submit {
         let submit = Submit {
             session_id: session_id.into(),
             submission_id: crate::request_id("prompt"),
             text,
-            attachments: vec![],
+            attachments,
         };
         self.pending.push(Pending {
             submit: submit.clone(),
@@ -181,6 +190,25 @@ impl Outbox {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn attachment_retry_preserves_identity_and_bytes() {
+        let mut outbox = Outbox::default();
+        let original = outbox.send_with_attachments(
+            "s",
+            String::new(),
+            vec![sill_proto::sfp::Attachment::Inline {
+                name: "screenshot.png".into(),
+                mime: "image/png".into(),
+                data_base64: "YWJj".into(),
+            }],
+        );
+        assert_eq!(
+            outbox.settle(&original.submission_id, &Outcome::Uncertain("lost".into())),
+            Settled::Uncertain
+        );
+        assert_eq!(outbox.retry(&original.submission_id).unwrap(), original);
+    }
 
     #[test]
     fn a_refused_prompt_keeps_its_text_and_a_lost_one_is_checked_not_resent() {

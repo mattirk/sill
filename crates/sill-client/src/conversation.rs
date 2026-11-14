@@ -392,7 +392,7 @@ pub fn item_text(item: &Item) -> String {
         if let Some(text) = &block.text {
             parts.push(text.clone());
         } else if block.kind == "image" {
-            parts.push("[Image — viewing uploads is not implemented yet]".into());
+            parts.push("[Image]".into());
         }
     }
     parts.join("\n\n")

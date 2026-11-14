@@ -11,6 +11,7 @@ mod icons;
 mod keys;
 mod layout;
 mod login_ui;
+mod media;
 mod menu;
 mod network;
 #[cfg(test)]
@@ -262,6 +263,8 @@ pub enum Message {
     /// A press on the top bar's empty space: the window manager moves the window.
     DragWindow,
     Quit,
+    Media(media::Event),
+    AttachmentPaths(String, Option<Vec<std::path::PathBuf>>),
     /// `>_`: the session's jail shell in place of the prompt, or the prompt again.
     ToggleTerminal,
     ToggleHostTerminal,
@@ -361,6 +364,9 @@ pub struct SessionView {
     pub conversation: Conversation,
     pub rendered: BTreeMap<String, Rendered>,
     pub draft: text_editor::Content,
+    pub attachments: Vec<sill_proto::sfp::Attachment>,
+    pub attachments_busy: bool,
+    pub media: media::Cache,
     pub outbox: Outbox,
     /// A request the person made that did not take effect; shown until the next one.
     pub failed: Option<String>,
@@ -415,6 +421,9 @@ impl SessionView {
             conversation: Conversation::default(),
             rendered: BTreeMap::new(),
             draft: text_editor::Content::new(),
+            attachments: vec![],
+            attachments_busy: false,
+            media: Default::default(),
             outbox: Outbox::default(),
             failed: None,
             open_tools: BTreeSet::new(),
@@ -478,7 +487,11 @@ impl SessionView {
             }
             // a tool row is drawn from its fields, not as Markdown
             Some(item) if item.kind == "tool" => return,
-            Some(item) => item_text(item),
+            Some(item) => {
+                let mut text_item = item.clone();
+                text_item.content.retain(|block| block.kind != "image");
+                item_text(&text_item)
+            }
         };
         match self.rendered.get_mut(id) {
             Some(cached) if cached.source == source => {}
@@ -1219,6 +1232,10 @@ impl App {
 
     fn apply(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::Media(event) => return self.media_event(event),
+            Message::AttachmentPaths(session, paths) => {
+                return self.attachment_paths(session, paths);
+            }
             Message::Lane(session, epoch, update) => {
                 return self.lane_update(session, epoch, update);
             }
@@ -1344,6 +1361,7 @@ impl App {
                         text.push_str("\n\n");
                     }
                     text.push_str(pending.text());
+                    view.attachments.extend(pending.submit.attachments);
                     view.draft = text_editor::Content::with_text(&text);
                     return operation::focus("prompt");
                 }
@@ -2403,6 +2421,7 @@ impl App {
                 )
             })
             .collect();
+        tasks.push(self.load_media(&session));
         if relist {
             tasks.push(self.list());
         }
@@ -2423,6 +2442,18 @@ impl App {
         self.list_error = None;
         self.listed = true;
         self.all_sessions = sessions.clone();
+        // Refreshes may arrive newest-first or in activity order. Existing tab positions are
+        // stable; newly discovered/reopened sessions append, oldest first within the batch.
+        let positions: BTreeMap<String, usize> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| (tab.id.clone(), index))
+            .collect();
+        let created: BTreeMap<&str, u64> = sessions
+            .iter()
+            .map(|s| (s.session_id.as_str(), s.created_at.parse().unwrap_or(0)))
+            .collect();
         let drafts: Vec<_> = self
             .tabs
             .iter()
@@ -2445,6 +2476,15 @@ impl App {
                 self.tabs.push(tab);
             }
         }
+        self.tabs.sort_by(|a, b| {
+            positions
+                .get(&a.id)
+                .copied()
+                .unwrap_or(usize::MAX)
+                .cmp(&positions.get(&b.id).copied().unwrap_or(usize::MAX))
+                .then_with(|| created.get(a.id.as_str()).cmp(&created.get(b.id.as_str())))
+                .then_with(|| a.id.cmp(&b.id))
+        });
         // a session that ended or went: its view goes, and with it its lane and terminal
         let open: BTreeSet<&str> = self.tabs.iter().map(|t| t.id.as_str()).collect();
         self.views.retain(|id, _| open.contains(id.as_str()));
@@ -2585,13 +2625,16 @@ impl App {
         };
         match settled {
             // it never reached the agent: the text goes back where it was typed, if that is free
-            Some((id, Settled::Kept)) if view.draft.text().trim().is_empty() => {
+            Some((id, Settled::Kept))
+                if view.draft.text().trim().is_empty() && view.attachments.is_empty() =>
+            {
                 if let Some(pending) = view.outbox.take(&id) {
                     let reason = match &pending.state {
                         sill_client::outbox::State::Failed(reason) => reason.clone(),
                         _ => String::new(),
                     };
                     view.draft = text_editor::Content::with_text(pending.text());
+                    view.attachments = pending.submit.attachments;
                     view.failed = Some(format!(
                         "Not sent: {reason}. The prompt is back in the composer."
                     ));
@@ -2641,7 +2684,7 @@ impl App {
             return Task::none();
         };
         let text = view.draft.text().trim_end().to_string();
-        if text.trim().is_empty() {
+        if view.attachments_busy || (text.trim().is_empty() && view.attachments.is_empty()) {
             return Task::none();
         }
         view.draft = text_editor::Content::new();
@@ -2660,7 +2703,11 @@ impl App {
             return operation::snap_to_end("conversation").chain(self.focus_prompt());
         }
         let session = view.id.clone();
-        let submit = view.outbox.send(&session, text);
+        let submit = view.outbox.send_with_attachments(
+            &session,
+            text,
+            std::mem::take(&mut view.attachments),
+        );
         let reopen = view.lane.is_none();
         if reopen {
             self.open_lane(&session, lane::Mode::Open);

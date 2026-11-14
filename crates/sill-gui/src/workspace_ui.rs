@@ -411,7 +411,7 @@ impl App {
                     container(markdown::view_with(
                         markdown.items(),
                         crate::ui::markdown_settings(),
-                        &viewer::SillViewer,
+                        &viewer::SillViewer { media: None },
                     ))
                     .padding(16),
                 )

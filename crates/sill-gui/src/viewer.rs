@@ -12,7 +12,9 @@ use crate::Message;
 use crate::selection;
 use crate::style::{self, P};
 
-pub struct SillViewer;
+pub struct SillViewer<'a> {
+    pub media: Option<(&'a str, &'a crate::media::Cache)>,
+}
 
 fn bullet_items(bullet: &Bullet) -> &[Item] {
     match bullet {
@@ -20,7 +22,19 @@ fn bullet_items(bullet: &Bullet) -> &[Item] {
     }
 }
 
-impl<'a> Viewer<'a, Message> for SillViewer {
+impl<'a> Viewer<'a, Message> for SillViewer<'a> {
+    fn image(
+        &self,
+        _settings: Settings,
+        url: &'a Uri,
+        _title: &'a str,
+        _alt: &Text,
+    ) -> Element<'a, Message> {
+        match self.media {
+            Some((session, cache)) => crate::media::picture(cache, session, &url.to_string()),
+            None => text(url.to_string()).into(),
+        }
+    }
     fn on_link_click(url: Uri) -> Message {
         Message::Link(url)
     }
@@ -201,9 +215,9 @@ impl<'a> Viewer<'a, Message> for SillViewer {
     }
 }
 
-impl SillViewer {
+impl<'a> SillViewer<'a> {
     /// A list item's own blocks, a little closer together than the list's.
-    fn items<'a>(&self, settings: Settings, bullet: &'a Bullet) -> Element<'a, Message> {
+    fn items(&self, settings: Settings, bullet: &'a Bullet) -> Element<'a, Message> {
         markdown::view_with(
             bullet_items(bullet),
             Settings {

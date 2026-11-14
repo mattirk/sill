@@ -3125,3 +3125,162 @@ fn host_shell_shortcut_is_configurable() {
         Some(Message::ToggleHostTerminal)
     ));
 }
+
+#[test]
+fn attachment_only_send_keeps_files_on_refusal() {
+    let (client, mut daemon) = daemon();
+    let mut app = live_app(vec![client]);
+    let attachment = sill_proto::sfp::Attachment::Uploaded {
+        upload_id: "document".into(),
+        name: "report.pdf".into(),
+        mime: "application/pdf".into(),
+    };
+    app.views
+        .get_mut("demo")
+        .unwrap()
+        .attachments
+        .push(attachment.clone());
+    let task = app.update(Message::Send);
+    let request = daemon.expect("_sill/sessions.submit");
+    let submit: Submit = serde_json::from_value(request["params"].clone()).unwrap();
+    assert!(submit.text.is_empty());
+    assert_eq!(submit.attachments, vec![attachment.clone()]);
+    daemon.reply(&request, json!({}));
+    settle_task(&mut app, task);
+    assert!(demo_view(&app).attachments.is_empty());
+    let view = app.views.get_mut("demo").unwrap();
+    let submit = view
+        .outbox
+        .send_with_attachments("demo", String::new(), vec![attachment.clone()]);
+    let _ = app.update(Message::Done(
+        "demo".into(),
+        crate::Act::Send(submit.submission_id),
+        sill_client::actions::Outcome::NotSent("offline".into()),
+    ));
+    assert_eq!(demo_view(&app).attachments, vec![attachment]);
+}
+
+#[test]
+fn attachment_completion_stays_with_originating_session() {
+    let (mut app, _) = App::new(true, None);
+    add_session(&mut app, "other");
+    app.selected = Some("other".into());
+    let a = sill_proto::sfp::Attachment::Uploaded {
+        upload_id: "file".into(),
+        name: "notes.txt".into(),
+        mime: "text/plain".into(),
+    };
+    let _ = app.update(Message::Media(crate::media::Event::Attached(
+        "demo".into(),
+        Ok(vec![(a.clone(), None)]),
+    )));
+    assert_eq!(app.views["demo"].attachments, vec![a]);
+    assert!(app.views["other"].attachments.is_empty());
+}
+
+#[test]
+fn generic_attachment_upload_uses_session_and_preserves_file_bytes() {
+    let (client, mut daemon) = daemon();
+    let mut app = live_app(vec![client]);
+    let path = std::env::temp_dir().join(format!(
+        "sill-attachment-{}.txt",
+        sill_client::request_id("test")
+    ));
+    let bytes = b"notes\n\0binary-safe";
+    std::fs::write(&path, bytes).unwrap();
+    let task = app.attachment_paths("demo".into(), Some(vec![path.clone()]));
+    let request = daemon.expect("_sill/uploads.create");
+    let params: sill_proto::sfp::UploadCreate =
+        serde_json::from_value(request["params"].clone()).unwrap();
+    assert_eq!(params.session_id, "demo");
+    assert_eq!(
+        sill_proto::admin::decode_bytes(&params.data_base64).unwrap(),
+        bytes
+    );
+    daemon.reply(&request, json!({"upload_id":params.upload_id}));
+    settle_task(&mut app, task);
+    assert!(
+        matches!(&demo_view(&app).attachments[0], sill_proto::sfp::Attachment::Uploaded { upload_id, .. } if upload_id == &params.upload_id)
+    );
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn markdown_image_is_read_from_session_host_and_decoded() {
+    let (client, mut daemon) = daemon();
+    let mut app = live_app(vec![client]);
+    let source = "![result](/tmp/image%20one.png)";
+    app.views.get_mut("demo").unwrap().rendered.insert(
+        "test-image".into(),
+        crate::Rendered {
+            source: source.into(),
+            markdown: iced::widget::markdown::Content::parse(source),
+        },
+    );
+    let task = app.load_media("demo");
+    let request = daemon.expect("_sill/files.image");
+    let params: sill_proto::admin::SessionImage =
+        serde_json::from_value(request["params"].clone()).unwrap();
+    assert_eq!(params.session_id, "demo");
+    assert_eq!(
+        params.path.to_path().unwrap(),
+        std::path::PathBuf::from("/tmp/image one.png")
+    );
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgba8(2, 2)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    daemon.reply(&request, json!({"bytes_base64":sill_proto::admin::encode_bytes(png.get_ref()),"next_offset":png.get_ref().len().to_string(),"eof":true,"revision":"one"}));
+    settle_task(&mut app, task);
+    assert!(
+        demo_view(&app)
+            .media
+            .values()
+            .any(|v| matches!(v, Some(Ok(_))))
+    );
+}
+
+#[test]
+fn new_tabs_append_and_refreshes_preserve_existing_positions() {
+    let (mut app, _) = App::new(true, None);
+    app.tabs.clear();
+    let mut older = session_record("older", "Older", false, false);
+    older.created_at = "9".into();
+    let mut newer = session_record("newer", "Newer", false, false);
+    newer.created_at = "10".into();
+    let ids = |app: &App| {
+        app.tabs
+            .iter()
+            .map(|t| t.id.as_str().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let _ = app.update(Message::Listed(Ok(vec![newer.clone(), older.clone()])));
+    assert_eq!(ids(&app), ["older", "newer"]);
+    let mut newest = session_record("newest", "Newest", false, false);
+    newest.created_at = "11".into();
+    let _ = app.update(Message::Listed(Ok(vec![
+        newest.clone(),
+        newer.clone(),
+        older.clone(),
+    ])));
+    assert_eq!(ids(&app), ["older", "newer", "newest"]);
+    let _ = app.update(Message::Listed(Ok(vec![
+        older.clone(),
+        newest.clone(),
+        newer.clone(),
+    ])));
+    assert_eq!(ids(&app), ["older", "newer", "newest"]);
+    older.ended_at = Some("12".into());
+    let _ = app.update(Message::Listed(Ok(vec![
+        older.clone(),
+        newest.clone(),
+        newer.clone(),
+    ])));
+    older.ended_at = None;
+    let _ = app.update(Message::Listed(Ok(vec![older, newest, newer])));
+    assert_eq!(
+        ids(&app),
+        ["newer", "newest", "older"],
+        "reopened tabs append too"
+    );
+}

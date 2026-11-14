@@ -731,6 +731,62 @@ impl App {
     }
 
     fn item<'a>(&'a self, view: &'a SessionView, item: &'a Item) -> Element<'a, Message> {
+        let mut body = Column::new();
+        let empty_user = item.kind == "user"
+            && view
+                .rendered
+                .get(&item.item_id)
+                .is_none_or(|r| r.source.trim().is_empty());
+        if !empty_user {
+            body = body.push(self.item_body(view, item));
+        }
+        let mut photos = row![].spacing(6);
+        let mut count = 0;
+        let keys = crate::media::item_keys(item);
+        for key in &keys {
+            if item.kind == "user" {
+                photos = photos.push(crate::media::thumbnail(&view.media, key, 72.0, 52.0));
+                count += 1;
+            } else {
+                body = body.push(crate::media::picture(&view.media, &view.id, key));
+            }
+        }
+        if let Some(submission) = item
+            .submission_id
+            .as_ref()
+            .and_then(|id| view.conversation.submissions.get(id))
+        {
+            for attachment in &submission.attachments {
+                if crate::media::is_image(attachment) {
+                    let key = crate::media::key(attachment);
+                    if !keys.contains(&key) {
+                        photos =
+                            photos.push(crate::media::thumbnail(&view.media, &key, 72.0, 52.0));
+                        count += 1;
+                    }
+                } else {
+                    body = body.push(
+                        text(crate::media::name(attachment))
+                            .size(style::SMALL)
+                            .color(P.fg_dim),
+                    );
+                }
+            }
+        }
+        if count > 0 {
+            body = body.push(
+                container(
+                    scrollable(photos)
+                        .direction(scrollable::Direction::Horizontal(style::bar()))
+                        .style(style::feed_scroll),
+                )
+                .padding([2, 14]),
+            );
+        }
+        body.spacing(6).into()
+    }
+
+    fn item_body<'a>(&'a self, view: &'a SessionView, item: &'a Item) -> Element<'a, Message> {
         if let Some(tool) = &item.tool {
             return self.tool(view, item, tool);
         }
@@ -758,7 +814,9 @@ impl App {
                 Some(rendered) => container(markdown::view_with(
                     rendered.markdown.items(),
                     thought_settings(),
-                    &viewer::SillViewer,
+                    &viewer::SillViewer {
+                        media: Some((&view.id, &view.media)),
+                    },
                 ))
                 .padding([0, 8])
                 .width(Fill)
@@ -796,7 +854,9 @@ impl App {
                 Some(rendered) => container(markdown::view_with(
                     rendered.markdown.items(),
                     markdown_settings(),
-                    &viewer::SillViewer,
+                    &viewer::SillViewer {
+                        media: Some((&view.id, &view.media)),
+                    },
                 ))
                 .padding([0, 8])
                 .width(Fill)
@@ -952,9 +1012,10 @@ impl App {
     /// which stay in reach.
     fn composer_bar<'a>(&'a self, view: &'a SessionView, width: f32) -> Element<'a, Message> {
         /// What the shell's and the send/stop buttons take with their spacing, and a margin.
-        const BUTTONS_ROOM: f32 = 60.0;
+        const BUTTONS_ROOM: f32 = 90.0;
         let has_session = !view.conversation.session_id.is_empty() || self.demo;
-        let sendable = !view.draft.text().trim().is_empty();
+        let sendable = !view.attachments_busy
+            && (!view.draft.text().trim().is_empty() || !view.attachments.is_empty());
         let action: Element<'_, Message> = if view.conversation.busy() {
             stop_button()
         } else {
@@ -1027,7 +1088,14 @@ impl App {
             .width(Shrink);
         // as wide as its controls, up to the room the two buttons leave: past that it scrolls
         let agent_controls = container(agent_controls).max_width((width - BUTTONS_ROOM).max(0.0));
-        row![shell, space().width(Fill), agent_controls, action]
+        let attach = keys::press_maybe(
+            button(text("+").size(style::TEXT))
+                .padding([4, 6])
+                .style(style::quiet),
+            (has_session && !view.attachments_busy)
+                .then_some(Message::Media(crate::media::Event::Choose)),
+        );
+        row![attach, shell, space().width(Fill), agent_controls, action]
             .spacing(4)
             .align_y(Alignment::Center)
             .into()
@@ -1035,6 +1103,49 @@ impl App {
 
     fn composer<'a>(&'a self, view: &'a SessionView) -> Element<'a, Message> {
         let mut composer = Column::new().push(self.network_prompt(view));
+        if !view.attachments.is_empty() {
+            let mut strip = row![].spacing(6).align_y(Alignment::Center);
+            for (index, attachment) in view.attachments.iter().enumerate() {
+                let preview: Element<'_, Message> = if crate::media::is_image(attachment) {
+                    crate::media::thumbnail(&view.media, &crate::media::key(attachment), 44.0, 34.0)
+                } else {
+                    container(
+                        text(one_line(crate::media::name(attachment), 24))
+                            .size(style::TINY)
+                            .color(P.fg_dim),
+                    )
+                    .padding([4, 6])
+                    .into()
+                };
+                let remove = keys::press(
+                    button(text("×").size(style::SMALL).color(P.fg_dim))
+                        .padding([2, 4])
+                        .style(style::quiet),
+                    Message::Media(crate::media::Event::Remove(index)),
+                );
+                let chip = row![preview, remove].align_y(Alignment::Center).spacing(1);
+                strip = if crate::media::is_image(attachment) {
+                    strip.push(chip)
+                } else {
+                    strip.push(tooltip(
+                        chip,
+                        text(crate::media::name(attachment)).size(style::TINY),
+                        tooltip::Position::Top,
+                    ))
+                };
+            }
+            composer = composer.push(
+                container(
+                    scrollable(strip)
+                        .direction(scrollable::Direction::Horizontal(style::bar()))
+                        .style(style::feed_scroll),
+                )
+                .padding([4, 12]),
+            );
+        }
+        if view.attachments_busy {
+            composer = composer.push(text("Preparing attachment…").size(style::SMALL));
+        }
         for submission in view
             .conversation
             .submissions
@@ -1490,9 +1601,17 @@ fn outbox<'a>(mut composer: Column<'a, Message>, view: &'a SessionView) -> Colum
         let mut line = row![
             container(
                 column![
-                    text(one_line(pending.text(), 100))
-                        .size(style::SMALL)
-                        .wrapping(text::Wrapping::None),
+                    text(format!(
+                        "{}{}",
+                        one_line(pending.text(), 100),
+                        if pending.submit.attachments.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" · {} attachment(s)", pending.submit.attachments.len())
+                        }
+                    ))
+                    .size(style::SMALL)
+                    .wrapping(text::Wrapping::None),
                     text(one_line(&said, 110))
                         .size(style::TINY)
                         .color(color)
@@ -1763,6 +1882,14 @@ fn text_width_in_font(content: &str, size: f32, font: Font) -> f32 {
 pub(crate) fn enter_sends(
     key_press: text_editor::KeyPress,
 ) -> Option<text_editor::Binding<Message>> {
+    if matches!(key_press.key.as_ref(), Key::Character(c) if c.eq_ignore_ascii_case("v"))
+        && key_press.modifiers.command()
+        && matches!(key_press.status, text_editor::Status::Focused { .. })
+    {
+        return Some(text_editor::Binding::Custom(Message::Media(
+            crate::media::Event::Paste,
+        )));
+    }
     // the window's shortcuts work from the prompt, and PageUp/PageDown page the conversation
     if let Some(message) = keys::from_text(&key_press.key, key_press.modifiers, true) {
         return Some(text_editor::Binding::Custom(message));
