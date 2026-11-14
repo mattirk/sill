@@ -47,6 +47,9 @@ pub struct SessionView {
     pub on_open_folder: RefCell<Option<Box<dyn Fn(&std::path::Path)>>>,
     /// Pins that were live when the jail started; changed pins need a session restart.
     live_pins: RefCell<Vec<std::path::PathBuf>>,
+    /// Watches on pinned repos' `.git` (commits, index) so the chip numbers follow host activity too.
+    git_monitors: RefCell<Vec<gtk::gio::FileMonitor>>,
+    refresh_pending: std::cell::Cell<bool>,
     pub on_restart: RefCell<Option<Box<dyn Fn(&str)>>>,
 }
 
@@ -124,6 +127,8 @@ impl SessionView {
             on_title: RefCell::new(None),
             on_open_folder: RefCell::new(None),
             live_pins: RefCell::new(Vec::new()),
+            git_monitors: RefCell::new(Vec::new()),
+            refresh_pending: std::cell::Cell::new(false),
             on_restart: RefCell::new(None),
         });
 
@@ -333,12 +338,39 @@ impl SessionView {
         }
     }
 
+    /// Coalesced refresh of the chips (file monitors fire in bursts).
+    fn refresh_pins_soon(self: &Rc<Self>) {
+        if self.refresh_pending.replace(true) {
+            return;
+        }
+        let v = self.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(400), move || {
+            v.refresh_pending.set(false);
+            v.refresh_pins();
+        });
+    }
+
     /// Chips under the session bar, one per pinned folder, with an unpin ×.
     pub fn refresh_pins(self: &Rc<Self>) {
         while let Some(c) = self.pins_row.first_child() {
             self.pins_row.remove(&c);
         }
         let pins = self.store.pins(&self.id()).unwrap_or_default();
+        // watch each pinned repo's .git (index/HEAD/refs change on commit, checkout, host or jail)
+        self.git_monitors.borrow_mut().clear();
+        for p in &pins {
+            let git = p.join(".git");
+            if !git.is_dir() {
+                continue;
+            }
+            for dir in [git.clone(), git.join("refs/heads")] {
+                if let Ok(m) = gtk::gio::File::for_path(&dir).monitor_directory(gtk::gio::FileMonitorFlags::NONE, None::<&gtk::gio::Cancellable>) {
+                    let v = self.clone();
+                    m.connect_changed(move |_, _, _, _| v.refresh_pins_soon());
+                    self.git_monitors.borrow_mut().push(m);
+                }
+            }
+        }
         self.pins_row.set_visible(!pins.is_empty());
         if pins.is_empty() {
             return;

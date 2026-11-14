@@ -245,6 +245,19 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         }
     }
 
+    // back from the host (editor, terminal): refresh the pin chips' git numbers
+    {
+        let s = shelf.clone();
+        window.connect_is_active_notify(move |w| {
+            if w.is_active()
+                && let Some(id) = s.tabs.selected()
+                && let Some(v) = s.views.borrow().get(&id)
+            {
+                v.refresh_pins();
+            }
+        });
+    }
+
     // Escape: back to sessions, or hide
     let esc = gtk::EventControllerKey::new();
     {
