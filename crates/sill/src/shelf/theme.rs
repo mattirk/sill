@@ -284,6 +284,7 @@ pub fn stylesheet(t: &Theme) -> String {
     s.push_str(&super::conversation::CSS.replace("font-family: monospace", &format!("font-family: \"{}\"", f.mono)));
     s.push('\n');
     s.push_str(super::tabs::CSS);
+    s.push_str(super::settings::CSS);
     {
         s.push_str(&format!(
             "\n.sill-tab {{ background: {surface}; }}\n\
@@ -303,6 +304,11 @@ pub fn stylesheet(t: &Theme) -> String {
              button.flat:hover, menubutton.flat > button:hover, menubutton > button.flat:hover {{ background: alpha({fg}, 0.07); }}\n\
              button.suggested-action {{ background: {accent}; color: {accent_fg}; }}\n\
              button.destructive-action {{ background: {error}; color: {bg}; }}\n\
+             switch {{ min-width: 2.2em; min-height: 1.1em; border: none; box-shadow: none; border-radius: 1em; background: alpha({fg}, 0.2); }}\n\
+             switch:checked {{ background: {accent}; }}\n\
+             switch > slider {{ min-width: 0.9em; min-height: 0.9em; margin: 0.1em; border: none; box-shadow: none; border-radius: 1em; background: {knob}; }}\n\
+             switch:checked > slider {{ background: {accent_fg}; }}\n\
+             switch > image {{ opacity: 0; }}\n\
              scrollbar, scrollbar trough {{ background: transparent; border: none; box-shadow: none; }}\n\
              scrollbar slider {{ min-width: 6px; min-height: 6px; margin: 2px; border: none; border-radius: 3px; background: alpha({fg}, 0.28); }}\n\
              scrollbar slider:hover, scrollbar slider:active {{ background: alpha({fg}, 0.5); }}\n\
@@ -314,6 +320,7 @@ pub fn stylesheet(t: &Theme) -> String {
             fg = t.fg,
             accent = t.accent,
             accent_fg = if t.dark { t.bg } else { "#ffffff" },
+            knob = if t.dark { t.fg } else { "#ffffff" },
             error = t.error,
         ));
     }

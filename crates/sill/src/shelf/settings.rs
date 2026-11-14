@@ -1,8 +1,13 @@
 //! Backend page "Settings" (SPEC §3.1): theme, text size, width, default page, hotkey (saved to
 //! ~/.config/sill/sill.toml), plus where things are.
 //!
-//! Adding a parameter: a field in `sill_core::config::Config`, a row here built with [`row`] and
-//! [`choice`] (or another widget), saved through `config::update`, and applied live if it can be.
+//! The page is sections — Appearance, Shelf, Sessions, Instructions, Memory, then Where things
+//! are folded — each a title over a card of rows (label and a short dim line on the left, the
+//! control on the right; wide controls under their label), held to a reading width.
+//!
+//! Adding a parameter: a field in `sill_core::config::Config`, a row here in the section it belongs
+//! to, built with [`row`] or [`wide`] and [`choice`] (or another widget), saved through
+//! `config::update`, and applied live if it can be.
 
 use std::path::PathBuf;
 
@@ -13,13 +18,33 @@ use gtk::prelude::*;
 
 use super::{theme, x11};
 
-pub fn build() -> gtk::Box {
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
+/// Width the page is held to, logical px at text scale 1: the cards stay a column on a wide shelf.
+const MEASURE: f64 = 680.0;
+
+/// The page's own rules: section titles, cards, rows. Colours by libadwaita's names, so they
+/// follow the theme (see `theme::named_colors`).
+pub const CSS: &str = r#"
+.sill-settings-title { color: @accent_color; font-weight: bold; font-size: 0.85em; margin-left: 2px; }
+.sill-settings-card { background: @card_bg_color; }
+.sill-settings-row { padding: 8px 12px; }
+.sill-settings-next { border-top: 1px solid alpha(@view_fg_color, 0.08); }
+.sill-settings-sub { font-size: 0.85em; }
+.sill-settings-card scrolledwindow.frame { background: @view_bg_color; border: 1px solid @borders; }
+.sill-settings dropdown > button { min-height: 0; padding: 3px 8px; }
+.sill-settings-info { font-size: 0.9em; }
+"#;
+
+pub fn build() -> gtk::Widget {
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 18);
+    root.add_css_class("sill-settings");
     root.set_margin_start(16);
     root.set_margin_end(16);
     root.set_margin_top(12);
+    root.set_margin_bottom(16);
 
-    // theme
+    // ---- Appearance: theme, text size, width
+    let (sec, card) = section("Appearance");
+
     let themes = theme::builtin();
     let names: Vec<&str> = themes.iter().map(|t| t.name).collect();
     let current = theme::current().id;
@@ -29,7 +54,7 @@ pub fn build() -> gtk::Box {
             let _ = sill_core::config::update(|c| c.theme = t.id.to_string());
         }
     });
-    root.append(&row("Theme", &dropdown));
+    row(&card, "Theme", None, &dropdown);
 
     // text size: steps from the table; a hand-edited value in between shows as the nearest step
     let scales = sill_core::config::TEXT_SCALES;
@@ -46,8 +71,138 @@ pub fn build() -> gtk::Box {
             let _ = sill_core::config::update(|c| c.text_scale = Some(*zoom));
         }
     });
-    root.append(&row("Text size", &size_dd));
+    row(&card, "Text size", None, &size_dd);
 
+    // width: share of the monitor with the tree open
+    let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.2, 0.8, 0.02);
+    scale.set_value(x11::width_fraction());
+    scale.set_hexpand(true);
+    scale.set_draw_value(true);
+    scale.set_digits(2);
+    scale.connect_value_changed(|s| {
+        x11::set_width_fraction(s.value());
+        let _ = sill_core::config::update(|c| c.width = Some(s.value()));
+    });
+    scale.set_tooltip_text(Some("Fraction of the primary monitor's work area for the shelf with the file tree open (drag the line between them for the tree's share); with the tree closed the shelf is that much narrower. Applies the next time the shelf is shown."));
+    wide(&card, "Width", Some("Share of the monitor, with the file tree open"), &scale);
+    root.append(&sec);
+
+    // ---- Shelf: hotkey, default page, tray
+    let (sec, card) = section("Shelf");
+
+    // show/hide key: click the button, press the combination you want; the outcome on the dim line
+    let current = sill_core::config::load().hotkey.unwrap_or_else(|| super::hotkey::DEFAULT.to_string());
+    let hk = gtk::Button::with_label(&pretty(&current));
+    hk.add_css_class("sill-hotkey");
+    hk.set_tooltip_text(Some("Click, then press the combination you want (Escape cancels). Something with a modifier plus a key is safest; a bare F-key also works."));
+    let hk_msg = row(&card, "Hotkey", Some("Shows or hides the shelf — click, then press the keys"), &hk);
+    let capturing = std::rc::Rc::new(std::cell::Cell::new(false));
+    {
+        let capturing = capturing.clone();
+        let b = hk.clone();
+        hk.connect_clicked(move |_| {
+            capturing.set(true);
+            b.set_label("press keys…");
+            b.add_css_class("sill-capturing");
+        });
+    }
+    {
+        let capturing = capturing.clone();
+        let b = hk.clone();
+        let msg = hk_msg.clone();
+        let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        keys.connect_key_pressed(move |_, key, _, state| {
+            if !capturing.get() {
+                return glib::Propagation::Proceed;
+            }
+            if key == gdk::Key::Escape {
+                capturing.set(false);
+                b.remove_css_class("sill-capturing");
+                b.set_label(&pretty(&sill_core::config::load().hotkey.unwrap_or_else(|| super::hotkey::DEFAULT.to_string())));
+                return glib::Propagation::Stop;
+            }
+            let Some(spec) = spec_from(key, state) else { return glib::Propagation::Stop };
+            capturing.set(false);
+            b.remove_css_class("sill-capturing");
+            let result = super::window::HOTKEY.with(|h| h.borrow().as_ref().map(|hk| hk.rebind(&spec)));
+            match result {
+                Some(Ok(())) => {
+                    let _ = sill_core::config::update(|c| c.hotkey = Some(spec.clone()));
+                    b.set_label(&pretty(&spec));
+                    msg.set_text(&format!("bound to {}", pretty(&spec)));
+                }
+                Some(Err(err)) => {
+                    b.set_label(&pretty(&sill_core::config::load().hotkey.unwrap_or_else(|| super::hotkey::DEFAULT.to_string())));
+                    msg.set_text(&format!("{}: {err:#}", pretty(&spec)));
+                }
+                None => msg.set_text("hotkey grab is not active (no X11?)"),
+            }
+            glib::Propagation::Stop
+        });
+        hk.add_controller(keys);
+    }
+
+    // the page the "sill" button opens
+    let page_ids: Vec<&str> = sill_core::config::PAGES.iter().map(|(id, _)| *id).collect();
+    let page_titles: Vec<&str> = sill_core::config::PAGES.iter().map(|(_, t)| *t).collect();
+    let current_page = sill_core::config::load().default_page().to_string();
+    let page_dd = choice(&page_titles, page_ids.iter().position(|id| *id == current_page), move |i| {
+        if let Some(id) = page_ids.get(i) {
+            let _ = sill_core::config::update(|c| c.default_page = Some(id.to_string()));
+        }
+    });
+    row(&card, "Default page", Some("What the sill button opens"), &page_dd);
+
+    // tray icon: a StatusNotifierItem on the panel (SPEC §4.6); registered at shelf start
+    let tray = switch(sill_core::config::load().tray());
+    tray.set_tooltip_text(Some("A sill icon on the panel's tray: a click shows or hides the shelf, its menu quits. Needs a panel that takes StatusNotifier items (Cinnamon, KDE, XFCE, MATE, LXQt; GNOME with the AppIndicator extension). Takes effect at the next shelf start."));
+    tray.connect_state_set(|_, on| {
+        let _ = sill_core::config::update(|c| c.tray = Some(on));
+        glib::Propagation::Proceed
+    });
+    row(&card, "Tray icon", Some("Takes effect at the next shelf start"), &tray);
+    root.append(&sec);
+
+    // ---- Sessions: pins, desktop, auto-revert, host terminal
+    let (sec, card) = section("Sessions");
+
+    // remember pins: a new session starts with the latest pins (SPEC §3.2 Pins)
+    let pins = switch(sill_core::config::load().remember_pins());
+    pins.set_tooltip_text(Some("A new session starts with the pinned folders and files of the latest session that had any, so the workspace carries over. Off: a new session starts with no pins."));
+    pins.connect_state_set(|_, on| {
+        let _ = sill_core::config::update(|c| c.remember_pins = Some(on));
+        glib::Propagation::Proceed
+    });
+    row(&card, "Remember pins", Some("A new session starts with the latest session's pins"), &pins);
+
+    // desktop access for new sessions (SPEC §4.2): X11 / D-Bus — policy, on, off
+    let home_path = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    let (pol_x11, pol_dbus) = sill_core::policy::Policy::load("default", &home_path).map(|p| (p.jail.x11, p.jail.dbus)).unwrap_or((false, false));
+    let onoff = |b: bool| if b { "on" } else { "off" };
+    let dbox = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    type Get = fn(&sill_core::config::Config) -> Option<bool>;
+    type Set = fn(&mut sill_core::config::Config, Option<bool>);
+    let items: [(&str, bool, Get, Set, &str); 2] = [
+        ("X11", pol_x11, |c| c.desktop_x11, |c, v| c.desktop_x11 = v,
+         "Give new sessions the X11 display: the agent can run and see GUI programs — and, as any X11 client, read keys and drive every window. A session's own menu (its tab glyph) can override this."),
+        ("D-Bus", pol_dbus, |c| c.desktop_dbus, |c, v| c.desktop_dbus = v,
+         "Give new sessions the D-Bus session bus: a full escape (systemd user units, keyring). A session's own menu (its tab glyph) can override this."),
+    ];
+    for (name, pol, get, set, tip) in items {
+        let l = gtk::Label::new(Some(name));
+        l.add_css_class("dim-label");
+        let policy_label = format!("policy ({})", onoff(pol));
+        let labels: Vec<&str> = vec![&policy_label, "on", "off"];
+        let current = get(&sill_core::config::load());
+        let dd = choice(&labels, Some(match current { None => 0, Some(true) => 1, Some(false) => 2 }), move |i| {
+            let _ = sill_core::config::update(|c| set(c, match i { 1 => Some(true), 2 => Some(false), _ => None }));
+        });
+        dd.set_tooltip_text(Some(tip));
+        dbox.append(&l);
+        dbox.append(&dd);
+    }
+    row(&card, "Desktop", Some("For new sessions; a session's own menu can override"), &dbox);
 
     // auto-revert: unkept changes outside git and pins go away after this long
     let choices = sill_core::config::AUTO_REVERT_CHOICES;
@@ -60,44 +215,63 @@ pub fn build() -> gtk::Box {
         }
     });
     ar_dd.set_tooltip_text(Some("What the agent changed outside git and outside pinned folders is reverted this long after its last write, once the session is idle. Keep in Changes stops the clock."));
-    root.append(&row("Auto-revert", &ar_dd));
+    row(&card, "Auto-revert", Some("Unkept changes outside git and pins go back after this long"), &ar_dd);
 
-    // tray icon: a StatusNotifierItem on the panel (SPEC §4.6); registered at shelf start
-    let tray = gtk::Switch::new();
-    tray.set_active(sill_core::config::load().tray());
-    tray.set_halign(gtk::Align::Start);
-    tray.set_valign(gtk::Align::Center);
-    tray.set_tooltip_text(Some("A sill icon on the panel's tray: a click shows or hides the shelf, its menu quits. Needs a panel that takes StatusNotifier items (Cinnamon, KDE, XFCE, MATE, LXQt; GNOME with the AppIndicator extension). Takes effect at the next shelf start."));
-    tray.connect_state_set(|_, on| {
-        let _ = sill_core::config::update(|c| c.tray = Some(on));
-        glib::Propagation::Proceed
+    // host terminal (Ctrl+Shift+H): a command line; empty = the first installed known terminal
+    let term = gtk::Entry::new();
+    term.set_hexpand(true);
+    let cfg = sill_core::config::load();
+    term.set_text(cfg.host_terminal.as_deref().unwrap_or(""));
+    let detected = cfg.host_terminal().unwrap_or_else(|| "none found".into());
+    term.set_placeholder_text(Some(&format!("auto: {detected}")));
+    term.set_tooltip_text(Some(
+        "Opened on the host with Ctrl+Shift+H or from the shell button's right-click menu, in the folder shown in the tree, else the session's first pinned folder, else home. {cwd} in the command line is replaced by that folder; it is the working directory anyway. Empty = the first installed terminal sill knows.",
+    ));
+    term.connect_changed(|e| {
+        let t = e.text().trim().to_string();
+        let _ = sill_core::config::update(|c| c.host_terminal = if t.is_empty() { None } else { Some(t) });
     });
-    root.append(&row("Tray icon", &tray));
+    wide(&card, "Host terminal", Some("Ctrl+Shift+H; empty = the first installed terminal sill knows"), &term);
+    root.append(&sec);
 
-    // remember pins: a new session starts with the latest pins (SPEC §3.2 Pins)
-    let pins = gtk::Switch::new();
-    pins.set_active(sill_core::config::load().remember_pins());
-    pins.set_halign(gtk::Align::Start);
-    pins.set_valign(gtk::Align::Center);
-    pins.set_tooltip_text(Some("A new session starts with the pinned folders and files of the latest session that had any, so the workspace carries over. Off: a new session starts with no pins."));
-    pins.connect_state_set(|_, on| {
-        let _ = sill_core::config::update(|c| c.remember_pins = Some(on));
-        glib::Propagation::Proceed
-    });
-    root.append(&row("Remember pins", &pins));
+    // ---- Instructions (SPEC §3.1): every agent gets them with its first prompt, whatever its type
+    let (sec, card) = section("Instructions");
+    let instr = gtk::TextView::new();
+    instr.set_wrap_mode(gtk::WrapMode::WordChar);
+    instr.set_top_margin(6);
+    instr.set_bottom_margin(6);
+    instr.set_left_margin(8);
+    instr.set_right_margin(8);
+    instr.buffer().set_text(&sill_core::instructions::load_global());
+    let instr_scroll = gtk::ScrolledWindow::builder().child(&instr).min_content_height(96).hexpand(true).build();
+    instr_scroll.add_css_class("frame");
+    instr_scroll.set_tooltip_text(Some(
+        "Standing instructions for every agent, whatever its type, in Markdown: sent with the first prompt after the agent starts and again with the next prompt after an edit — not with every prompt. Sill puts its own line about the jail (managed processes) before them. Stored in ~/.config/sill/instructions.md, which the agent cannot see.",
+    ));
+    let instr_msg = wide(&card, "", Some("For every agent, in Markdown: sent once after it starts and again after an edit"), &instr_scroll);
+    {
+        let msg = instr_msg.clone();
+        instr.buffer().connect_changed(move |b| {
+            let text = b.text(&b.start_iter(), &b.end_iter(), false);
+            match sill_core::instructions::save_global(&text) {
+                Ok(_) => msg.set_text("For every agent, in Markdown: sent once after it starts and again after an edit"),
+                Err(e) => msg.set_text(&format!("save failed: {e:#}")),
+            }
+        });
+    }
+    root.append(&sec);
 
-    // memory (docs/memory.md): a summary at the end of every session
-    let memory = gtk::Switch::new();
-    memory.set_active(sill_core::config::load().memory());
-    memory.set_halign(gtk::Align::Start);
-    memory.set_valign(gtk::Align::Center);
+    // ---- Memory (docs/memory.md): summary, recall, compaction, the actions
+    let (sec, card) = section("Memory");
+
+    let memory = switch(sill_core::config::load().memory());
     memory.set_tooltip_text(Some("When a session's tab is closed, its agent writes a short summary as its last turn (what was asked, done, decided, left open), kept with the session and shown in the Reopen list; sill writes one from the facts when the agent can't be asked. Off: sessions end without a summary, as before."));
     memory.connect_state_set(|_, on| {
         let _ = sill_core::config::update(|c| c.memory = Some(on));
         super::window::refresh_memory(); // written, or removed with memory off
         glib::Propagation::Proceed
     });
-    root.append(&row("Memory", &memory));
+    row(&card, "Memory", Some("A summary when a session's tab closes"), &memory);
 
     // how many earlier sessions a new agent is told about (docs/memory.md §2.3)
     let counts: [(u32, &str); 5] = [(0, "none"), (1, "1 session"), (3, "3 sessions"), (5, "5 sessions"), (10, "10 sessions")];
@@ -110,12 +284,12 @@ pub fn build() -> gtk::Box {
         }
     });
     recall_dd.set_tooltip_text(Some("How many earlier sessions a new agent is told about when it starts: the ones in the same folders, nearest first, else the latest anywhere. Each session can narrow this in its session menu. None: the agent is only told how to search."));
-    root.append(&row("Recall", &recall_dd));
+    row(&card, "Recall", Some("Earlier sessions a new agent is told about"), &recall_dd);
 
     // compaction and retention (docs/memory.md §2.4): three durations, each off at 0
     let durations: [(&str, &str); 7] = [("0", "never"), ("7d", "a week"), ("30d", "a month"), ("90d", "3 months"), ("180d", "6 months"), ("1y", "a year"), ("2y", "two years")];
     let dur_labels: Vec<&str> = durations.iter().map(|(_, l)| *l).collect();
-    let duration_row = |label: &'static str, tip: &'static str, current: i64, set: fn(&mut sill_core::config::Config, Option<String>)| {
+    let duration_row = |label: &'static str, sub: &'static str, tip: &'static str, current: i64, set: fn(&mut sill_core::config::Config, Option<String>)| {
         let nearest = durations
             .iter()
             .enumerate()
@@ -127,29 +301,32 @@ pub fn build() -> gtk::Box {
             }
         });
         dd.set_tooltip_text(Some(tip));
-        row(label, &dd)
+        row(&card, label, Some(sub), &dd);
     };
     let cfg = sill_core::config::load();
-    root.append(&duration_row(
+    duration_row(
         "Compact after",
+        "After the end: thoughts, tool outputs and diffs go",
         "This long after a session ended, its transcript loses the agent's thoughts, tool outputs and diffs; the conversation still reads. Nightly.",
         cfg.compact_after(),
         |c, v| c.compact_after = v,
-    ));
-    root.append(&duration_row(
+    );
+    duration_row(
         "Full text for",
+        "Then the agent's messages go too; summary, notes and prompts stay",
         "This long after the end, the agent's messages go too. The summary, your notes, your prompts and the tool titles stay — what recall and search use.",
         cfg.keep_full_transcripts(),
         |c, v| c.keep_full_transcripts = v,
-    ));
-    root.append(&duration_row(
+    );
+    duration_row(
         "Delete after",
+        "Then the session is deleted outright",
         "This long after the end the session is deleted outright, as the trash can does: row, summary, notes, transcript, kept journal. Never, unless this machine needs an end date.",
         cfg.delete_after(),
         |c, v| c.delete_after = v,
-    ));
+    );
 
-    // compact now / export: the two actions
+    // compact now / export / delete all: the actions, a row of their own
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let compact = gtk::Button::with_label("Compact now");
     compact.set_tooltip_text(Some("Run compaction and retention now, by the durations above."));
@@ -260,175 +437,10 @@ pub fn build() -> gtk::Box {
         });
     });
     actions.append(&delete);
-    root.append(&row("", &actions));
+    plain(&card, &actions);
+    root.append(&sec);
 
-    // host terminal (Ctrl+Shift+H): a command line; empty = the first installed known terminal
-    let term = gtk::Entry::new();
-    term.set_hexpand(true);
-    let cfg = sill_core::config::load();
-    term.set_text(cfg.host_terminal.as_deref().unwrap_or(""));
-    let detected = cfg.host_terminal().unwrap_or_else(|| "none found".into());
-    term.set_placeholder_text(Some(&format!("auto: {detected}")));
-    term.set_tooltip_text(Some(
-        "Opened on the host with Ctrl+Shift+H or from the shell button's right-click menu, in the folder shown in the tree, else the session's first pinned folder, else home. {cwd} in the command line is replaced by that folder; it is the working directory anyway. Empty = the first installed terminal sill knows.",
-    ));
-    term.connect_changed(|e| {
-        let t = e.text().trim().to_string();
-        let _ = sill_core::config::update(|c| c.host_terminal = if t.is_empty() { None } else { Some(t) });
-    });
-    root.append(&row("Host terminal", &term));
-
-    // desktop access for new sessions (SPEC §4.2): X11 / D-Bus — policy, on, off
-    let home_path = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
-    let (pol_x11, pol_dbus) = sill_core::policy::Policy::load("default", &home_path).map(|p| (p.jail.x11, p.jail.dbus)).unwrap_or((false, false));
-    let onoff = |b: bool| if b { "on" } else { "off" };
-    let dbox = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    type Get = fn(&sill_core::config::Config) -> Option<bool>;
-    type Set = fn(&mut sill_core::config::Config, Option<bool>);
-    let items: [(&str, bool, Get, Set, &str); 2] = [
-        ("X11", pol_x11, |c| c.desktop_x11, |c, v| c.desktop_x11 = v,
-         "Give new sessions the X11 display: the agent can run and see GUI programs — and, as any X11 client, read keys and drive every window. A session's own menu (its tab glyph) can override this."),
-        ("D-Bus", pol_dbus, |c| c.desktop_dbus, |c, v| c.desktop_dbus = v,
-         "Give new sessions the D-Bus session bus: a full escape (systemd user units, keyring). A session's own menu (its tab glyph) can override this."),
-    ];
-    for (name, pol, get, set, tip) in items {
-        let l = gtk::Label::new(Some(name));
-        l.add_css_class("dim-label");
-        let policy_label = format!("policy ({})", onoff(pol));
-        let labels: Vec<&str> = vec![&policy_label, "on", "off"];
-        let current = get(&sill_core::config::load());
-        let dd = choice(&labels, Some(match current { None => 0, Some(true) => 1, Some(false) => 2 }), move |i| {
-            let _ = sill_core::config::update(|c| set(c, match i { 1 => Some(true), 2 => Some(false), _ => None }));
-        });
-        dd.set_tooltip_text(Some(tip));
-        dbox.append(&l);
-        dbox.append(&dd);
-    }
-    root.append(&row("Desktop", &dbox));
-
-    // standing instructions (SPEC §3.1): every agent gets them with its first prompt, whatever its type
-    let instr = gtk::TextView::new();
-    instr.set_wrap_mode(gtk::WrapMode::WordChar);
-    instr.set_top_margin(4);
-    instr.set_bottom_margin(4);
-    instr.set_left_margin(6);
-    instr.set_right_margin(6);
-    instr.buffer().set_text(&sill_core::instructions::load_global());
-    let instr_scroll = gtk::ScrolledWindow::builder().child(&instr).min_content_height(96).hexpand(true).build();
-    instr_scroll.add_css_class("frame");
-    instr_scroll.set_tooltip_text(Some(
-        "Standing instructions for every agent, whatever its type, in Markdown: sent with the first prompt after the agent starts and again with the next prompt after an edit — not with every prompt. Sill puts its own line about the jail (managed processes) before them. Stored in ~/.config/sill/instructions.md, which the agent cannot see.",
-    ));
-    let instr_msg = gtk::Label::new(None);
-    instr_msg.add_css_class("dim-label");
-    instr_msg.set_xalign(0.0);
-    {
-        let msg = instr_msg.clone();
-        instr.buffer().connect_changed(move |b| {
-            let text = b.text(&b.start_iter(), &b.end_iter(), false);
-            match sill_core::instructions::save_global(&text) {
-                Ok(_) => msg.set_text(""),
-                Err(e) => msg.set_text(&format!("save failed: {e:#}")),
-            }
-        });
-    }
-    let ibox = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    ibox.set_hexpand(true);
-    ibox.append(&instr_scroll);
-    ibox.append(&instr_msg);
-    root.append(&row("Instructions", &ibox));
-
-    // width
-    let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.2, 0.8, 0.02);
-    scale.set_value(x11::width_fraction());
-    scale.set_hexpand(true);
-    scale.set_draw_value(true);
-    scale.set_digits(2);
-    scale.connect_value_changed(|s| {
-        x11::set_width_fraction(s.value());
-        let _ = sill_core::config::update(|c| c.width = Some(s.value()));
-    });
-    scale.set_tooltip_text(Some("Fraction of the primary monitor's work area for the shelf with the file tree open (drag the line between them for the tree's share); with the tree closed the shelf is that much narrower. Applies the next time the shelf is shown."));
-    root.append(&row("Width", &scale));
-
-    // the page the "sill" button opens
-    let page_ids: Vec<&str> = sill_core::config::PAGES.iter().map(|(id, _)| *id).collect();
-    let page_titles: Vec<&str> = sill_core::config::PAGES.iter().map(|(_, t)| *t).collect();
-    let current_page = sill_core::config::load().default_page().to_string();
-    let page_dd = choice(&page_titles, page_ids.iter().position(|id| *id == current_page), move |i| {
-        if let Some(id) = page_ids.get(i) {
-            let _ = sill_core::config::update(|c| c.default_page = Some(id.to_string()));
-        }
-    });
-    root.append(&row("Default page", &page_dd));
-
-    // show/hide key: click the button, press the combination you want
-    let current = sill_core::config::load().hotkey.unwrap_or_else(|| super::hotkey::DEFAULT.to_string());
-    let hk = gtk::Button::with_label(&pretty(&current));
-    hk.add_css_class("sill-hotkey");
-    hk.set_tooltip_text(Some("Click, then press the combination you want (Escape cancels). Something with a modifier plus a key is safest; a bare F-key also works."));
-    let hk_msg = gtk::Label::new(None);
-    hk_msg.add_css_class("dim-label");
-    hk_msg.set_wrap(true);
-    hk_msg.set_xalign(0.0);
-    let capturing = std::rc::Rc::new(std::cell::Cell::new(false));
-    {
-        let capturing = capturing.clone();
-        let b = hk.clone();
-        hk.connect_clicked(move |_| {
-            capturing.set(true);
-            b.set_label("press keys…");
-            b.add_css_class("sill-capturing");
-        });
-    }
-    {
-        let capturing = capturing.clone();
-        let b = hk.clone();
-        let msg = hk_msg.clone();
-        let keys = gtk::EventControllerKey::new();
-        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
-        keys.connect_key_pressed(move |_, key, _, state| {
-            if !capturing.get() {
-                return glib::Propagation::Proceed;
-            }
-            if key == gdk::Key::Escape {
-                capturing.set(false);
-                b.remove_css_class("sill-capturing");
-                b.set_label(&pretty(&sill_core::config::load().hotkey.unwrap_or_else(|| super::hotkey::DEFAULT.to_string())));
-                return glib::Propagation::Stop;
-            }
-            let Some(spec) = spec_from(key, state) else { return glib::Propagation::Stop };
-            capturing.set(false);
-            b.remove_css_class("sill-capturing");
-            let result = super::window::HOTKEY.with(|h| h.borrow().as_ref().map(|hk| hk.rebind(&spec)));
-            match result {
-                Some(Ok(())) => {
-                    let _ = sill_core::config::update(|c| c.hotkey = Some(spec.clone()));
-                    b.set_label(&pretty(&spec));
-                    msg.set_text(&format!("bound to {}", pretty(&spec)));
-                }
-                Some(Err(err)) => {
-                    b.set_label(&pretty(&sill_core::config::load().hotkey.unwrap_or_else(|| super::hotkey::DEFAULT.to_string())));
-                    msg.set_text(&format!("{}: {err:#}", pretty(&spec)));
-                }
-                None => msg.set_text("hotkey grab is not active (no X11?)"),
-            }
-            glib::Propagation::Stop
-        });
-        hk.add_controller(keys);
-    }
-    let hkbox = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    hkbox.set_hexpand(true);
-    let hkrow = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    hkrow.append(&hk);
-    hkbox.append(&hkrow);
-    hkbox.append(&hk_msg);
-    root.append(&row("Hotkey", &hkbox));
-
-    let sep = gtk::Separator::new(gtk::Orientation::Horizontal);
-    sep.set_margin_top(8);
-    root.append(&sep);
-
+    // ---- Where things are: reference, folded — a title that opens a card
     let home = std::env::var("HOME").unwrap_or_default();
     let info: Vec<(String, String)> = vec![
         ("Config".into(), format!("{home}/.config/sill/sill.toml")),
@@ -446,27 +458,134 @@ pub fn build() -> gtk::Box {
         ),
         ("Keys".into(), "hotkey show/hide · Escape sessions ⇄ backend · Enter send · Shift+Enter newline · Ctrl+T shell · Ctrl+Shift+H host shell · Ctrl+Shift+T / W new / close tab · Ctrl+Shift+F tree · F2 or double-click rename".into()),
     ];
+    let card = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    card.add_css_class("sill-settings-card");
+    card.set_margin_top(6);
     for (k, v) in info {
+        let r = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        r.add_css_class("sill-settings-row");
+        r.add_css_class("sill-settings-info");
+        if card.first_child().is_some() {
+            r.add_css_class("sill-settings-next");
+        }
+        let kl = gtk::Label::new(Some(&k));
+        kl.add_css_class("dim-label");
+        kl.set_xalign(0.0);
+        kl.set_yalign(0.0);
+        kl.set_width_chars(11);
         let vl = gtk::Label::new(Some(&v));
         vl.set_xalign(0.0);
         vl.set_wrap(true);
         vl.set_selectable(true);
         vl.set_hexpand(true);
-        root.append(&row(&k, &vl));
+        r.append(&kl);
+        r.append(&vl);
+        card.append(&r);
     }
-    root
+    let folded = gtk::Expander::new(None);
+    let t = gtk::Label::new(Some("Where things are"));
+    t.add_css_class("sill-settings-title");
+    folded.set_label_widget(Some(&t));
+    folded.set_child(Some(&card));
+    root.append(&folded);
+
+    // held to a reading width, re-measured when the text scale changes
+    let clamp = super::clamp::Clamp::new(&root, (MEASURE * theme::text_scale()) as i32);
+    {
+        let weak = clamp.downgrade();
+        theme::on_change(move |_| {
+            if let Some(c) = weak.upgrade() {
+                c.set_maximum_size((MEASURE * theme::text_scale()) as i32);
+            }
+        });
+    }
+    clamp.upcast()
 }
 
-/// A settings row: heading label of fixed width, then the control.
-fn row(label: &str, w: &impl IsA<gtk::Widget>) -> gtk::Box {
-    let b = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    let l = gtk::Label::new(Some(label));
-    l.add_css_class("heading");
-    l.set_xalign(0.0);
-    l.set_width_chars(10);
-    b.append(&l);
-    b.append(w);
-    b
+/// A section: its title over an empty card. Rows go into the card with [`row`], [`wide`] or
+/// [`plain`]; the whole goes into the page.
+fn section(title: &str) -> (gtk::Box, gtk::Box) {
+    let outer = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let t = gtk::Label::new(Some(title));
+    t.add_css_class("sill-settings-title");
+    t.set_xalign(0.0);
+    outer.append(&t);
+    let card = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    card.add_css_class("sill-settings-card");
+    outer.append(&card);
+    (outer, card)
+}
+
+/// An empty row in a card: padding, a hairline above unless it is the first.
+fn slot(card: &gtk::Box, orientation: gtk::Orientation, spacing: i32) -> gtk::Box {
+    let r = gtk::Box::new(orientation, spacing);
+    r.add_css_class("sill-settings-row");
+    if card.first_child().is_some() {
+        r.add_css_class("sill-settings-next");
+    }
+    card.append(&r);
+    r
+}
+
+/// Label and a dim line under it (hidden while empty; the line is returned so a row can speak
+/// through it — the hotkey's outcome, a save failure).
+fn titles(label: &str, sub: Option<&str>) -> (gtk::Box, gtk::Label) {
+    let col = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    col.set_hexpand(true);
+    col.set_valign(gtk::Align::Center);
+    if !label.is_empty() {
+        let l = gtk::Label::new(Some(label));
+        l.set_xalign(0.0);
+        col.append(&l);
+    }
+    let s = gtk::Label::new(sub);
+    s.add_css_class("dim-label");
+    s.add_css_class("sill-settings-sub");
+    s.set_xalign(0.0);
+    s.set_wrap(true);
+    s.set_visible(sub.is_some_and(|t| !t.is_empty()));
+    s.connect_label_notify(|l| l.set_visible(!l.label().is_empty()));
+    col.append(&s);
+    (col, s)
+}
+
+/// A row with a compact control on the right: label and dim line left, the control right.
+fn row(card: &gtk::Box, label: &str, sub: Option<&str>, w: &impl IsA<gtk::Widget>) -> gtk::Label {
+    let r = slot(card, gtk::Orientation::Horizontal, 12);
+    let (col, s) = titles(label, sub);
+    r.append(&col);
+    w.set_halign(gtk::Align::End);
+    w.set_valign(gtk::Align::Center);
+    r.append(w);
+    s
+}
+
+/// A row whose control takes the width: label and dim line, the control under them.
+fn wide(card: &gtk::Box, label: &str, sub: Option<&str>, w: &impl IsA<gtk::Widget>) -> gtk::Label {
+    let r = slot(card, gtk::Orientation::Vertical, 6);
+    let (col, s) = titles(label, sub);
+    if label.is_empty() && sub.is_none() {
+        col.set_visible(false);
+    }
+    r.append(&col);
+    w.set_hexpand(true);
+    r.append(w);
+    s
+}
+
+/// A row of just the widget (the Memory actions).
+fn plain(card: &gtk::Box, w: &impl IsA<gtk::Widget>) {
+    let r = slot(card, gtk::Orientation::Horizontal, 0);
+    r.append(w);
+}
+
+/// A switch sized like the session menu's (`sill-control`), coloured by the theme (theme.rs).
+fn switch(on: bool) -> gtk::Switch {
+    let s = gtk::Switch::new();
+    s.set_active(on);
+    s.add_css_class("sill-control");
+    s.set_valign(gtk::Align::Center);
+    s
 }
 
 /// A dropdown over fixed options; `on_select` gets the chosen index when the person changes it
@@ -562,8 +681,7 @@ pub fn agent_editor(home: PathBuf, agent: sill_core::agents::Agent) -> gtk::Box 
         b.append(w);
         b
     }
-    let enabled = gtk::Switch::new();
-    enabled.set_active(agent.enabled);
+    let enabled = switch(agent.enabled);
     enabled.set_halign(gtk::Align::Start);
     body.append(&line("Offered", &enabled));
     let command = gtk::Entry::new();

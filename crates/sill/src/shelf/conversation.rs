@@ -1328,9 +1328,8 @@ button.sill-lock:checked { background: transparent; opacity: 0.9; }
 .sill-control > button:hover { background: alpha(@view_fg_color, 0.07); }
 .sill-control > button:hover label { color: @view_fg_color; }
 .sill-control > button arrow { -gtk-icon-size: 0.6em; opacity: 0.45; }
-switch.sill-control { min-width: 2.2em; min-height: 1.1em; opacity: 0.7; }
+switch.sill-control { opacity: 0.7; }
 switch.sill-control:hover, switch.sill-control:checked { opacity: 1; }
-switch.sill-control > slider { min-width: 0.9em; min-height: 0.9em; }
 button.sill-send { min-width: 1.6em; min-height: 1.6em; padding: 0; background: alpha(@accent_bg_color, 0.25); }
 button.sill-send > image { -gtk-icon-size: 1.1em; margin: 0; padding: 0; }
 button.sill-send:hover { background: alpha(@accent_bg_color, 0.45); }
