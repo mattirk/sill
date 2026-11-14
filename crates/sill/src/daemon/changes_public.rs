@@ -178,9 +178,10 @@ mod listings {
 
 impl Hub {
     /// Every pending entry in the page's order: pinned repositories, each session's writes, what
-    /// was kept.
-    fn changes_rows(&self) -> Result<Vec<api::Entry>> {
+    /// was kept; and the sessions that could not be read.
+    fn changes_rows(&self) -> Result<(Vec<api::Entry>, Vec<api::Unreadable>)> {
         let list = self.changes_list()?;
+        let unreadable = list.unreadable;
         let mut rows = Vec::new();
         for r in list.live {
             for (rel, status) in r.status {
@@ -252,7 +253,7 @@ impl Hub {
             }
         }
         rows.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(rows.into_iter().map(|(_, row)| row).collect())
+        Ok((rows.into_iter().map(|(_, row)| row).collect(), unreadable))
     }
 
     pub(super) fn changes_public(&self, method: &str, params: Value) -> Option<Result<Value>> {
@@ -272,8 +273,13 @@ impl Hub {
             "_sill/changes.list" => {
                 let a: api::List = parse(params)?;
                 let limit = limit(a.limit)?;
+                let mut unreadable = vec![];
                 let (token, rows, from) = match &a.after {
-                    None => (listings::token()?, std::sync::Arc::new(self.changes_rows()?), 0),
+                    None => {
+                        let (rows, unread) = self.changes_rows()?;
+                        unreadable = unread;
+                        (listings::token()?, std::sync::Arc::new(rows), 0)
+                    }
                     Some(cursor) => {
                         let (token, from) = listings::cursor(cursor).ok_or_else(|| domain("invalid_cursor", "invalid changes cursor"))?;
                         let rows = listings::get(&token).ok_or_else(|| domain("snapshot_expired", "this listing is no longer held; list again"))?;
@@ -281,7 +287,7 @@ impl Hub {
                     }
                 };
                 let (entries, at) = listings::page(&rows, from, limit)?;
-                let mut page = api::Page { entries, next: None };
+                let mut page = api::Page { entries, next: None, unreadable };
                 if at < rows.len() {
                     page.next = Some(json!([token, at]).to_string());
                     listings::hold(token, rows);

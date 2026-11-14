@@ -12,6 +12,17 @@ pub struct List {
 pub struct Page {
     pub entries: Vec<Entry>,
     pub next: Option<String>,
+    /// Sessions whose writes could not be listed, with why (a launch recorded by an older Sill,
+    /// say); on the first page only. The rest of the listing is whole.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreadable: Vec<Unreadable>,
+}
+/// A session left out of a Changes listing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Unreadable {
+    pub session_id: String,
+    pub title: String,
+    pub why: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]

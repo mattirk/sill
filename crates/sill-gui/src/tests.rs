@@ -2779,7 +2779,7 @@ fn the_changes_page_is_by_session_with_each_workspaces_files() {
     let key = workspace_key("w1", &host);
     assert!(matches!(app.changes.as_ref().unwrap().open.get(&key), Some(Some(Ok(_)))), "the file's diff is open");
     // the entries read again: a workspace's open diff is not one of theirs to close
-    let _ = app.update(Message::Changes(Event::Loaded(Ok((demo::changes(), 0)))));
+    let _ = app.update(Message::Changes(Event::Loaded(Ok((demo::changes(), vec![], 0)))));
     assert!(app.changes.as_ref().unwrap().open.contains_key(&key));
     // the workspace no longer changes that file
     let all = page_workspaces(vec![page_workspace("w1", "demo", &["src/b.rs"])]);
@@ -2804,7 +2804,7 @@ fn reopening_changes_shows_the_last_listing_until_the_new_one_is_read() {
     let _ = app.update(Message::ToggleChanges);
     assert!(app.changes.is_none());
     // arriving late: still the window's
-    let _ = app.update(Message::Changes(Event::Loaded(Ok((demo::changes()[..3].to_vec(), 0)))));
+    let _ = app.update(Message::Changes(Event::Loaded(Ok((demo::changes()[..3].to_vec(), vec![], 0)))));
     assert_eq!(app.changes_listing.entries.as_ref().unwrap().as_ref().unwrap().len(), 3);
     // open again, the new listing not read yet (the task is not run)
     let _ = app.update(Message::ToggleChanges);
@@ -2823,7 +2823,7 @@ fn reopening_changes_shows_the_last_listing_until_the_new_one_is_read() {
     let _ = app.update(Message::Workspaces(W::PageDiscard("w1".into())));
     assert_eq!(app.changes.as_ref().unwrap().workspace_armed.get(), None);
     // the new one is read: its actions are offered
-    let _ = app.update(Message::Changes(Event::Loaded(Ok((demo::changes(), 0)))));
+    let _ = app.update(Message::Changes(Event::Loaded(Ok((demo::changes(), vec![], 0)))));
     let key = changes_key(&app, "settings.toml");
     let _ = app.update(Message::Changes(Event::Revert(key.clone())));
     assert!(app.changes.as_ref().unwrap().armed.is(&crate::changes_ui::Reverting::One(key)));
@@ -4434,4 +4434,28 @@ fn a_long_thought_folds_to_its_last_line() {
     ui.click("So I will fold the thought to one line.").unwrap();
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(matches!(messages.as_slice(), [Message::Session(_, session::Event::ToggleTool(id))] if id == "raw"));
+}
+
+/// A session the daemon could not read (a launch recorded by an older Sill) is a note of its own:
+/// the other sessions' entries are listed, and the page shows no error over them.
+#[test]
+fn an_unreadable_session_is_a_note_not_an_error_over_the_listing() {
+    use crate::changes_ui::Event;
+    let (mut app, _) = App::new(true, None);
+    let task = app.update(Message::ToggleChanges);
+    settle_task(&mut app, task);
+    let unreadable = vec![sill_client::changes::Unreadable {
+        session_id: "bf590a53".into(),
+        title: "Repo review".into(),
+        why: "read launch policy snapshot: missing field `kind`".into(),
+    }];
+    let _ = app.update(Message::Changes(Event::Loaded(Ok((demo::changes(), unreadable.clone(), 0)))));
+    let listing = &app.changes_listing;
+    assert_eq!(listing.entries.as_ref().unwrap().as_ref().unwrap().len(), demo::changes().len());
+    assert_eq!(listing.unreadable, unreadable);
+    let page = app.changes.as_ref().unwrap();
+    let _ = app.changes_view(page);
+    // the next listing without it clears the note
+    let _ = app.update(Message::Changes(Event::Loaded(Ok((demo::changes(), vec![], 0)))));
+    assert!(app.changes_listing.unreadable.is_empty());
 }

@@ -4,7 +4,7 @@
 //! requests and diffs, without a toolkit.
 use serde_json::{Value, json};
 use sill_proto::Client;
-pub use sill_proto::changes::Entry;
+pub use sill_proto::changes::{Entry, Unreadable};
 use sill_proto::changes::{
     Diff, DiffPage, Done, GitRevert, History, HistoryPage, Keep, KeepItem, List, Page, Revert,
     Target, Undo,
@@ -375,14 +375,20 @@ pub fn keepable(entry: &Entry) -> bool {
 /// one; when it no longer holds it (`snapshot_expired`: many listings were begun meanwhile) the
 /// listing is read again from its start, once.
 pub fn list(client: &Client) -> anyhow::Result<Vec<Entry>> {
+    Ok(listing(client)?.0)
+}
+
+/// [`list`], with the sessions whose writes could not be listed.
+pub fn listing(client: &Client) -> anyhow::Result<(Vec<Entry>, Vec<Unreadable>)> {
     match list_once(client) {
         Err(e) if crate::refusal_code(&e).as_deref() == Some("snapshot_expired") => list_once(client),
         result => result,
     }
 }
 
-fn list_once(client: &Client) -> anyhow::Result<Vec<Entry>> {
+fn list_once(client: &Client) -> anyhow::Result<(Vec<Entry>, Vec<Unreadable>)> {
     let mut entries = vec![];
+    let mut unreadable = vec![];
     let mut after = None;
     loop {
         let page: Page = client.call(
@@ -393,10 +399,11 @@ fn list_once(client: &Client) -> anyhow::Result<Vec<Entry>> {
             },
         )?;
         entries.extend(page.entries);
+        unreadable.extend(page.unreadable);
         anyhow::ensure!(entries.len() <= 20_000, "too many changes to show");
         after = page.next;
         if after.is_none() {
-            return Ok(entries);
+            return Ok((entries, unreadable));
         }
     }
 }

@@ -367,6 +367,9 @@ pub struct ChangesList {
     pub live: Vec<LiveRepo>,
     /// Every session with overlay changes or undoable keeps, newest first.
     pub sessions: Vec<SessionChanges>,
+    /// Sessions whose writes could not be listed (`changes::Page::unreadable`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreadable: Vec<crate::changes::Unreadable>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

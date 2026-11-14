@@ -10,19 +10,19 @@ impl App {
     pub(crate) fn changes_load(&self) -> Task<Message> {
         use changes_ui::Event;
         let Some(actions) = self.actions.clone() else {
-            return Task::done(Message::Changes(Event::Loaded(Ok((demo::changes(), 0)))));
+            return Task::done(Message::Changes(Event::Loaded(Ok((demo::changes(), vec![], 0)))));
         };
         let workspaces = self.workspaces_page_load();
         let changes = blocking(
             move || {
-                let entries = actions
-                    .reading(sill_client::changes::list)
+                let (entries, unreadable) = actions
+                    .reading(sill_client::changes::listing)
                     .map_err(|e| format!("{e:#}"))?;
                 // unread settings: no countdown rather than a wrong one
                 let minutes = actions
                     .read::<sill_proto::admin::Settings>("_sill/settings.get", json!({}))
                     .map_or(0, |s| sill_client::changes::auto_revert(&s));
-                Ok((entries, minutes))
+                Ok((entries, unreadable, minutes))
             },
             |loaded| Message::Changes(Event::Loaded(loaded)),
         );
@@ -56,9 +56,10 @@ impl App {
             Event::Loaded(loaded) => {
                 let listing = &mut self.changes_listing;
                 match loaded {
-                    Ok((entries, minutes)) => {
+                    Ok((entries, unreadable, minutes)) => {
                         listing.auto_revert = minutes;
                         listing.entries = Some(Ok(entries));
+                        listing.unreadable = unreadable;
                     }
                     Err(error) => listing.entries = Some(Err(error)),
                 }

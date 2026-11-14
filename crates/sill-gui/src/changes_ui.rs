@@ -31,6 +31,8 @@ use crate::{App, Message, keys};
 pub struct Listing {
     /// Pending entries; `None` before the first answer.
     pub entries: Option<Result<Vec<Entry>, String>>,
+    /// Sessions whose writes could not be listed: each a note, not an error over the page.
+    pub unreadable: Vec<changes::Unreadable>,
     /// Settings → auto-revert, minutes (0 is off).
     pub auto_revert: u64,
     /// Every session's workspaces and the discarded work still undoable (docs/parallel-coding.md
@@ -104,7 +106,8 @@ pub enum Reverting {
 
 #[derive(Debug, Clone)]
 pub enum Event {
-    Loaded(Result<(Vec<Entry>, u64), String>),
+    /// The entries, the sessions whose writes could not be listed, and auto-revert's minutes.
+    Loaded(Result<(Vec<Entry>, Vec<changes::Unreadable>, u64), String>),
     Refresh,
     History(bool),
     HistoryLoaded(Result<sill_proto::changes::HistoryPage, String>, bool),
@@ -365,6 +368,25 @@ impl App {
             .flatten()
             {
                 body = body.push(container(text(error).color(P.error)).padding([4, 4]));
+            }
+            for u in &listing.unreadable {
+                body = body.push(
+                    container(
+                        column![
+                            text(format!("{}: its writes outside a workspace cannot be listed", u.title))
+                                .size(style::SMALL)
+                                .color(P.fg),
+                            text(format!(
+                                "{}. A session launched by an older Sill cannot be read by this one: rebuild it, or delete it once its work is applied.",
+                                u.why
+                            ))
+                            .size(style::TINY)
+                            .color(P.fg_dim),
+                        ]
+                        .spacing(2),
+                    )
+                    .padding([4, 4]),
+                );
             }
             let discarded = listing.discarded();
             if unread {

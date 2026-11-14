@@ -204,6 +204,7 @@ fn render_changes() {
     let _ = app.update(Message::ToggleChanges);
     let _ = app.update(Message::Changes(crate::changes_ui::Event::Loaded(Ok((
         demo::changes(),
+        vec![],
         0,
     )))));
     let key = {
@@ -884,7 +885,7 @@ fn render_changes_workspaces() {
         detail(&w3, 0, &[("crates/sill-gui/src/old_tabs.rs", "D", 0, 64), ("crates/sill-gui/src/tabs.png", "A", 0, 0)]),
     ];
     let _ = app.update(Message::Workspaces(crate::workspaces::Event::PageLoaded(Ok((listed, details)))));
-    let _ = app.update(Message::Changes(crate::changes_ui::Event::Loaded(Ok((entries, 1440)))));
+    let _ = app.update(Message::Changes(crate::changes_ui::Event::Loaded(Ok((entries, vec![], 1440)))));
     let _ = app.update(Message::Changes(crate::changes_ui::Event::WorkspaceDiff("ws-6379eda6".into(), host(&format!("{sill}/docs/sill-gui.md")))));
     let _ = app.update(Message::Changes(crate::changes_ui::Event::DiffLoaded(
         crate::changes_ui::workspace_key("ws-6379eda6", &host(&format!("{sill}/docs/sill-gui.md"))),

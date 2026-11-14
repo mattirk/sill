@@ -34,10 +34,33 @@ impl Hub {
         let mut hashed = hashes::Hashes::default();
         let mut row = |c: Change| row(c, &known, &mut hashed);
         let mut out = Vec::new();
+        let mut unreadable = Vec::new();
         for s in sessions {
             if self.crosscheck_worker(&s.id) { continue; }
-            let list: Vec<Change> = self.session_changes(&s, uid).with_context(|| format!("reading changes for session {}", s.id))?.into_iter().filter(|c| !c.ignored).collect();
             let kept = kept_dir(uid, &s.id).map(|d| keep::undoable(&d)).unwrap_or_default();
+            // one session that cannot be read (a launch recorded by an older Sill) is told on its
+            // own; it does not take every other session's changes with it
+            let list: Vec<Change> = match self.session_changes(&s, uid) {
+                Ok(list) => list.into_iter().filter(|c| !c.ignored).collect(),
+                Err(error) => {
+                    unreadable.push(sill_proto::changes::Unreadable {
+                        session_id: s.id.clone(),
+                        title: s.title.clone(),
+                        why: format!("{error:#}"),
+                    });
+                    if !kept.is_empty() {
+                        out.push(SessionChanges {
+                            id: s.id.clone(),
+                            title: s.title.clone(),
+                            ghost: s.ghost,
+                            changes: vec![],
+                            agent_state: vec![],
+                            kept,
+                        });
+                    }
+                    continue;
+                }
+            };
             if list.is_empty() && kept.is_empty() {
                 continue;
             }
@@ -54,7 +77,7 @@ impl Hub {
             });
         }
         hashes::put(hashed);
-        Ok(ChangesList { live, sessions: out })
+        Ok(ChangesList { live, sessions: out, unreadable })
     }
 
     pub(super) fn changes_diff(&self, of: DiffOf) -> Result<String> {

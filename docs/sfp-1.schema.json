@@ -4410,6 +4410,13 @@
             "string",
             "null"
           ]
+        },
+        "unreadable": {
+          "description": "Sessions whose writes could not be listed, with why (a launch recorded by an older Sill,\nsay); on the first page only. The rest of the listing is whole.",
+          "items": {
+            "$ref": "#/$defs/Unreadable"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -7877,6 +7884,26 @@
         "session_id",
         "keep_ids",
         "force"
+      ],
+      "type": "object"
+    },
+    "Unreadable": {
+      "description": "A session left out of a Changes listing.",
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "why": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "title",
+        "why"
       ],
       "type": "object"
     },

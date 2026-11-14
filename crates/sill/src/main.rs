@@ -1520,6 +1520,9 @@ fn changes_cmd(cmd: ChangesCmd) -> Result<()> {
                     println!("  kept {} {} ({})", k.id, k.path.display(), k.what);
                 }
             }
+            for u in &l.unreadable {
+                println!("{}  {}\n  writes not listed: {}", u.session_id, u.title, u.why);
+            }
             Ok(())
         }
         ChangesCmd::Diff { session: key, path } => {

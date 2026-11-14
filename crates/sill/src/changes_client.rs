@@ -25,6 +25,7 @@ pub fn list(call: Call<'_>) -> Result<wire::ChangesList> {
                 limit: Some(128),
             },
         )?;
+        result.unreadable.extend(page.unreadable);
         for row in page.entries {
             match row {
                 api::Entry::Live { repo, path, status } => {
