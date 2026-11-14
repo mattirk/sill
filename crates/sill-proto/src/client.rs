@@ -14,7 +14,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::rpc::{Error, Incoming, Request};
+use crate::rpc::{Incoming, Request};
 
 type Pending = Arc<Mutex<HashMap<u64, Sender<Result<Value>>>>>;
 
@@ -408,6 +408,7 @@ fn fail_pending(pending: &Pending, message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rpc::Error;
     use std::io::BufRead;
 
     #[test]

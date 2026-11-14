@@ -29,6 +29,7 @@ mod network;
 mod perf;
 mod permissions;
 mod policies;
+mod popup;
 mod processes;
 mod rows;
 mod selection;
@@ -2694,6 +2695,11 @@ impl App {
         }
         // a popup goes first
         if self.menu.take().is_some() {
+            return Task::none();
+        }
+        if let Some(view) = self.current_mut()
+            && std::mem::take(&mut view.permissions.menu)
+        {
             return Task::none();
         }
         if !self.backend_shown() && self.current().is_some_and(|v| v.annotation.is_some()) {

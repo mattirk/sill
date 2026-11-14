@@ -2050,7 +2050,7 @@ fn ended<'a>(said: String) -> Element<'a, Message> {
 }
 
 /// The width `content` takes in the prose face at `size`, laid out the way text widgets do.
-fn text_width(content: &str, size: f32) -> f32 {
+pub(crate) fn text_width(content: &str, size: f32) -> f32 {
     text_width_in_font(content, size, Font::with_name(crate::fonts::SANS_FAMILY))
 }
 

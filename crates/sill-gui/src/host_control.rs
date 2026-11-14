@@ -25,6 +25,8 @@ pub enum Event {
     /// An operation ticked or unticked for the activation.
     Select(String, String, bool),
     Activate(String),
+    /// Tick every operation and activate: the shield's Ctrl+Shift+click.
+    ActivateAll(String),
     /// Record the repository exception for the ticked operations' restrictions.
     Except(String),
     Revoke(String),
@@ -71,6 +73,13 @@ impl App {
                     }
                 }
                 Task::none()
+            }
+            Event::ActivateAll(id) => {
+                let Some(view) = self.views.get_mut(&id) else {
+                    return Task::none();
+                };
+                view.host_control.selected = OPERATIONS.iter().map(|op| op.to_string()).collect();
+                self.host_control_event(Event::Activate(id))
             }
             Event::Activate(id) => {
                 let Some(view) = self.views.get_mut(&id) else {
@@ -551,6 +560,55 @@ mod tests {
         assert!(ui.find("HOST CONTROL active:").is_err(), "the shown session's caption is enough");
         ui.find("ON THE HOST · ACTIVE").unwrap();
         ui.find("Revoke").unwrap();
+    }
+
+    /// The shield menu's Host control choice activates every operation without opening the panel.
+    #[test]
+    fn the_shield_menu_activates_every_operation() {
+        let (client, mut daemon) = hosting_client();
+        let mut app = live_app(vec![client]);
+        app.all_sessions = vec![session_record("demo", "demo", false, false)];
+        let _ = app.update(Message::Perms(crate::permissions::Event::ShieldMenu("demo".into())));
+        assert!(app.views["demo"].permissions.menu && !app.views["demo"].permissions.open);
+        // the selection is a sorted set; the daemon receives every operation in that order
+        let mut all: Vec<&str> = OPERATIONS.to_vec();
+        all.sort_unstable();
+        let fake = std::thread::spawn(move || {
+            let mut listed = false;
+            loop {
+                let request = daemon.next();
+                match request["method"].as_str().unwrap() {
+                    "_sill/host_control.activate" => {
+                        assert_eq!(request["params"], json!({"session_id": "demo", "operations": all}));
+                        daemon.reply(&request, json!({"session_id": "demo", "active": true, "generation": 1,
+                            "operations": all, "displaying": 1, "since": "1", "ended": null}));
+                        if listed {
+                            return;
+                        }
+                        listed = true;
+                    }
+                    "_sill/sessions.list" => {
+                        let session = with_control(session_record("demo", "demo", false, false), &all);
+                        daemon.reply(&request, json!({"sessions": [session], "next": null}));
+                        if listed {
+                            return;
+                        }
+                        listed = true;
+                    }
+                    "_sill/host_control.state" => daemon.refuse(&request, "unavailable", "later"),
+                    "_sill/policy.preview" => daemon.refuse(&request, "unavailable", "later"),
+                    other => panic!("unexpected {other}"),
+                }
+            }
+        });
+        let task = app.update(Message::Perms(crate::permissions::Event::HostControlAll("demo".into())));
+        settle_task(&mut app, task);
+        fake.join().unwrap();
+        let perms = &app.views["demo"].permissions;
+        assert!(!perms.open && !perms.menu, "the menu closes; the panel stays as it was");
+        let state = app.views["demo"].host_control.state.as_ref().unwrap();
+        assert!(state.active && state.operations.len() == OPERATIONS.len());
+        assert_eq!(app.views["demo"].host_control.selected.len(), OPERATIONS.len());
     }
 
     /// A long Host control notice (an inspection's process list) is one line until clicked.

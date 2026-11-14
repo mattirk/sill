@@ -61,6 +61,15 @@ pub enum Event {
     AutoAllow(String, bool),
     /// Apply development permissions: the test desktop and private D-Bus together.
     ApplyDevelopment(String),
+    /// The shield's right press, or a press anywhere while its menu is open: the menu of
+    /// shortcuts opens or closes.
+    ShieldMenu(String),
+    /// The shield menu's first choice: development permissions, then a restart where the
+    /// running jail needs one. The panel is left as it is; the shield's tooltip and caption
+    /// carry the outcome.
+    DevelopmentRestarting(String),
+    /// The shield menu's second choice: Host control with every operation.
+    HostControlAll(String),
     /// Stop and start the jail: for new permissions, or for changed pins (binds are made at
     /// launch, so a pin added to a running session reaches it only this way).
     Restart(String, Change),
@@ -80,6 +89,8 @@ pub struct Views {
 pub enum Change {
     Choice(String, Option<bool>),
     Development,
+    /// Development, followed by a restart where the running jail needs one (the shield menu).
+    DevelopmentRestarting,
     Restore,
     SaveHost(String),
     AutoAllow(bool),
@@ -91,6 +102,8 @@ pub enum Change {
 #[derive(Default)]
 pub struct Perms {
     pub open: bool,
+    /// The shield's right-click menu is open.
+    pub menu: bool,
     pub filesystem_open: bool,
     pub views: Option<Views>,
     pub error: Option<String>,
@@ -205,6 +218,29 @@ impl App {
                 if view.permissions.open {
                     return Task::batch([self.read_permissions(&id), self.read_host_control(&id)]);
                 }
+            }
+            Event::ShieldMenu(id) => {
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.permissions.menu = !view.permissions.menu;
+                }
+            }
+            Event::DevelopmentRestarting(id) => {
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.permissions.menu = false;
+                }
+                let params = json!({"session_id": id});
+                return self.permission_change(
+                    id,
+                    Change::DevelopmentRestarting,
+                    "_sill/permissions.apply_development",
+                    params,
+                );
+            }
+            Event::HostControlAll(id) => {
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.permissions.menu = false;
+                }
+                return self.host_control_event(crate::host_control::Event::ActivateAll(id));
             }
             Event::Read(id, serial, result) => {
                 let Some(view) = self.views.get_mut(&id) else {
@@ -438,6 +474,8 @@ impl App {
                         }
                     }
                     Change::Development => format!("Development permissions on{later}."),
+                    Change::DevelopmentRestarting if restart_required => "Development permissions on; restarting…".into(),
+                    Change::DevelopmentRestarting => "Development permissions on.".into(),
                     Change::Restore => format!("Defaults restored{later}."),
                     Change::SaveHost(host) => format!("{host} saved for new {agent} sessions."),
                     Change::AutoAllow(true) => "Auto-allow on.".into(),
@@ -455,6 +493,10 @@ impl App {
         }
         if matches!(change, Change::Restart | Change::RestartPins) && outcome.is_done() {
             self.reattach(&id);
+        }
+        // the shield menu's development choice goes straight on to the restart it needs
+        if matches!(change, Change::DevelopmentRestarting) && outcome.is_done() && restart_required {
+            return self.permissions_event(Event::Restart(id, Change::Restart));
         }
         let session = id.clone();
         // (tests read the note; its expiry is `NoticeExpired`'s own)
@@ -496,12 +538,38 @@ pub fn indicator<'a>(view: &'a SessionView, session: Option<&Session>) -> Elemen
     if pending {
         tip.push_str(" · changes apply after a restart");
     }
+    tip.push_str(" · right click: shortcuts");
     let shield = keys::press_maybe(
         crate::ui::bar_button(icons::glyph("shield", crate::ui::BAR_ICON, color)).style(style::quiet),
         session.map(|_| Message::Perms(Event::Toggle(view.id.clone()))),
     );
+    // a right press opens the menu of shortcuts, floating over the window as the agent
+    // controls' menus do (`popup.rs`); whether it is open is this view's state
+    let id = view.id.clone();
+    let shield: Element<'a, Message> = if session.is_some() {
+        let choose = id.clone();
+        crate::popup::popup(
+            shield,
+            view.permissions.menu,
+            SHIELD_CHOICES.iter().map(|c| c.to_string()).collect(),
+            move |index| match index {
+                0 => Message::Perms(Event::DevelopmentRestarting(choose.clone())),
+                _ => Message::Perms(Event::HostControlAll(choose.clone())),
+            },
+            Message::Perms(Event::ShieldMenu(id)),
+        )
+        .into()
+    } else {
+        shield
+    };
     crate::ui::bar_tip(container(shield).id("permissions-button"), tip)
 }
+
+/// The shield menu's rows, in order: `DevelopmentRestarting`, then `HostControlAll`.
+pub const SHIELD_CHOICES: [&str; 2] = [
+    "Apply development permissions (restarts)",
+    "Activate host control (every operation)",
+];
 
 /// "Jailed · expanded access" over the composer, in the host terminal's warning treatment but
 /// naming the jail: the agent is still inside it. Pending changes without expanded access
@@ -1284,6 +1352,56 @@ mod tests {
         perms.notice = None;
         let mut ui = simulator(&app, (720.0, 860.0));
         ui.find("Apply development permissions").unwrap();
+    }
+
+    /// The shield menu's development choice opens the panel, applies development permissions and
+    /// restarts the running session in one go; Escape closes the menu.
+    #[test]
+    fn the_shield_menu_applies_development_and_restarts() {
+        let (client, mut daemon) = modes_client();
+        let mut app = live_app(vec![client]);
+        app.all_sessions = vec![session_record("demo", "demo", false, false)];
+        let _ = app.update(Message::Perms(Event::ShieldMenu("demo".into())));
+        assert!(app.views["demo"].permissions.menu);
+        let _ = app.update(Message::Escape);
+        assert!(!app.views["demo"].permissions.menu, "Escape closes the menu");
+        let _ = app.update(Message::Perms(Event::ShieldMenu("demo".into())));
+        let fake = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            loop {
+                let request = daemon.next();
+                let method = request["method"].as_str().unwrap().to_string();
+                match method.as_str() {
+                    "_sill/permissions.apply_development" => {
+                        assert_eq!(request["params"], json!({"session_id": "demo"}));
+                        daemon.reply(&request, json!({"preview": view("preview", false, json!([])), "restart_required": true}));
+                    }
+                    "_sill/sessions.stop" | "_sill/sessions.start" => {
+                        assert_eq!(request["params"], json!({"session_id": "demo"}));
+                        daemon.reply(&request, json!({}));
+                    }
+                    "_sill/sessions.list" => {
+                        daemon.reply(&request, json!({"sessions": [session_record("demo", "demo", false, false)], "next": null}));
+                    }
+                    "_sill/host_control.state" => daemon.refuse(&request, "unavailable", "later"),
+                    "_sill/policy.preview" => daemon.refuse(&request, "unavailable", "later"),
+                    other => panic!("unexpected {other}"),
+                }
+                if method == "_sill/sessions.list" && seen.contains(&"_sill/sessions.start".to_string()) {
+                    return seen;
+                }
+                seen.push(method);
+            }
+        });
+        let task = app.update(Message::Perms(Event::DevelopmentRestarting("demo".into())));
+        settle_task(&mut app, task);
+        let seen = fake.join().unwrap();
+        let order: Vec<&str> = seen.iter().map(String::as_str).filter(|m| m.starts_with("_sill/permissions") || m.starts_with("_sill/sessions.st")).collect();
+        assert_eq!(order, ["_sill/permissions.apply_development", "_sill/sessions.stop", "_sill/sessions.start"]);
+        let perms = &app.views["demo"].permissions;
+        assert!(!perms.open && !perms.menu, "the menu closes; the panel stays as it was");
+        let (_, said, failed) = perms.notice.clone().unwrap();
+        assert!(!failed && said == "Restarted with the new permissions.", "{said}");
     }
 
     /// Pending changes alone do not add a caption above the composer.
