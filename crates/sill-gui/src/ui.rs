@@ -153,29 +153,6 @@ impl App {
         // Keep the conversation at the same tree position when the menu opens/closes.
         // Wrapping it in a stack only while open discards its scroll and selection state.
         let mut layers = stack![window];
-        // The corner chevron borrows the drawer's space without adding a row.
-        if self.workspace.shown && !self.backend_shown() && self.current().is_some() {
-            layers = layers.push(
-                container(keys::press(
-                    button(
-                        container(icons::glyph("chevron-right", 14.0, alpha(P.fg, 0.55)))
-                            .height(22)
-                            .align_y(Alignment::Center),
-                    )
-                    .padding(2)
-                    .style(style::quiet),
-                    Message::Layout(layout::Action::Mode(layout::Mode::Full)),
-                ))
-                .id("expand-full")
-                .align_right(Fill)
-                .align_bottom(Fill)
-                .padding(Padding {
-                    right: 4.0,
-                    bottom: 4.0,
-                    ..Padding::ZERO
-                }),
-            );
-        }
         if let Some(menu) = &self.menu {
             layers = layers.push(self.session_menu(menu));
         }

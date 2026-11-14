@@ -665,3 +665,86 @@ fn source_history_restores_selection_extent_and_respects_preview_and_reload() {
         refreshed
     );
 }
+
+#[test]
+fn folder_picker_pins_only_the_originating_session() {
+    let mut app = app();
+    act(&mut app, Action::PickFolder);
+    let (session, token) = app.workspace.folder_picker.clone().unwrap();
+    assert_eq!(session, "demo");
+    app.selected = Some("b".into());
+    act(&mut app, Action::PickFolder);
+    assert_eq!(
+        app.workspace.folder_picker,
+        Some((session.clone(), token.clone()))
+    );
+    act(
+        &mut app,
+        Action::FolderPicked {
+            session,
+            token,
+            path: Some("/home/demo/project".into()),
+        },
+    );
+    assert!(app.workspace.folder_picker.is_none());
+    // The demo refuses pin requests: its error proves the request reached the original tab.
+    assert!(
+        app.views["demo"]
+            .files
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("Demo pins")
+    );
+    assert!(app.views["b"].files.error.is_none());
+}
+
+#[test]
+fn folder_picker_cancel_and_removed_session_do_nothing() {
+    let mut app = app();
+    act(&mut app, Action::PickFolder);
+    let (session, token) = app.workspace.folder_picker.clone().unwrap();
+    act(
+        &mut app,
+        Action::FolderPicked {
+            session,
+            token,
+            path: None,
+        },
+    );
+    assert!(app.workspace.folder_picker.is_none());
+    assert!(app.views["demo"].files.error.is_none());
+
+    act(&mut app, Action::PickFolder);
+    let (session, token) = app.workspace.folder_picker.clone().unwrap();
+    app.views.remove(&session);
+    act(
+        &mut app,
+        Action::FolderPicked {
+            session,
+            token,
+            path: Some("/home/demo/project".into()),
+        },
+    );
+    assert!(app.workspace.folder_picker.is_none());
+    assert!(app.views["b"].files.error.is_none());
+}
+
+#[test]
+fn folder_picker_ignores_a_replaced_session_view() {
+    let mut app = app();
+    act(&mut app, Action::PickFolder);
+    let (session, token) = app.workspace.folder_picker.clone().unwrap();
+    app.views
+        .insert(session.clone(), SessionView::new(&session));
+    act(
+        &mut app,
+        Action::FolderPicked {
+            session: session.clone(),
+            token,
+            path: Some("/home/demo/project".into()),
+        },
+    );
+    assert!(app.workspace.folder_picker.is_none());
+    assert!(app.views[&session].files.error.is_none());
+}

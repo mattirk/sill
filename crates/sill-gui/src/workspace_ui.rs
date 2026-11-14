@@ -136,7 +136,16 @@ impl App {
             chips = chips.push(text("Loading pins…").size(style::TINY).color(P.fg_dim));
         }
         if !state.roots.iter().any(|r| !r.global) && !loading {
-            chips = chips.push(action("+ Pin a folder or file", Action::ToggleDrawer));
+            chips = chips.push(tip(
+                keys::press_maybe(
+                    button(crate::icons::glyph("folder-plus", 16.0, P.fg_dim))
+                        .padding([3, 8])
+                        .style(style::quiet),
+                    (self.workspace.folder_picker.is_none() && state.pin_pending.is_none())
+                        .then(|| msg(Action::PickFolder)),
+                ),
+                "Pin a folder".into(),
+            ));
         }
         let chips = container(
             scrollable(chips)
@@ -165,14 +174,8 @@ impl App {
     pub(crate) fn file_drawer<'a>(&'a self, view: &'a SessionView) -> Element<'a, Message> {
         let state = &view.files;
         let hovered = self.workspace.hovered.as_deref();
-        // the drawer's close at the left, its one view switch at the right,
-        // showing where it goes — the changes from the tree, the tree from the changes
+        // The view switch shows where it goes: tree or changes.
         let toolbar = row![
-            glyph_action(
-                "chevron-left",
-                "Close the drawer and switch to Shelf",
-                Action::CloseDrawerToShelf
-            ),
             space().width(Fill),
             if state.diff_mode {
                 glyph_action("list-tree", "The file tree", Action::DiffMode(false))

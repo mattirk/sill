@@ -16,7 +16,12 @@ use crate::{App, Message, SessionView, demo};
 #[derive(Debug, Clone)]
 pub enum Action {
     ToggleDrawer,
-    CloseDrawerToShelf,
+    PickFolder,
+    FolderPicked {
+        session: String,
+        token: String,
+        path: Option<std::path::PathBuf>,
+    },
     Refresh,
     Collapse,
     Toggle(HostPath),
@@ -78,6 +83,8 @@ pub struct Workspace {
     /// The tree row under the pointer: its pin button shows on hover.
     pub hovered: Option<String>,
     pub pending_discard: Option<(String, Box<Message>)>,
+    /// The originating session and view identity of the one native dialog in flight.
+    pub folder_picker: Option<(String, String)>,
     serial: u64,
     follow_seen: std::collections::BTreeMap<String, String>,
     /// None in `--demo`: requests are answered with synthetic files at once.
@@ -152,6 +159,7 @@ impl Workspace {
                     shown: false,
                     hovered: None,
                     pending_discard: None,
+                    folder_picker: None,
                     serial: 0,
                     follow_seen: Default::default(),
                     files: None,
@@ -169,6 +177,7 @@ impl Workspace {
                 shown: false,
                 hovered: None,
                 pending_discard: None,
+                folder_picker: None,
                 serial: 0,
                 follow_seen: Default::default(),
                 files: Some(files),
@@ -569,16 +578,51 @@ impl App {
                 }
                 Task::none()
             }
-            Action::CloseDrawerToShelf => {
-                if self.layout.mode == crate::layout::Mode::Shelf {
-                    if self.workspace.shown {
-                        return self.update(Message::Workspace(Action::ToggleDrawer));
-                    }
+            Action::PickFolder => {
+                if self.workspace.folder_picker.is_some() {
                     return Task::none();
                 }
-                self.update(Message::Layout(crate::layout::Action::Mode(
-                    crate::layout::Mode::Shelf,
-                )))
+                let Some(session) = self.selected.clone() else {
+                    return Task::none();
+                };
+                let Some(view) = self.views.get(&session) else {
+                    return Task::none();
+                };
+                if view.files.pin_pending.is_some() {
+                    return Task::none();
+                }
+                let token = view.media_token.clone();
+                self.workspace.folder_picker = Some((session.clone(), token.clone()));
+                Task::perform(
+                    async {
+                        rfd::AsyncFileDialog::new()
+                            .set_title("Pin a folder")
+                            .pick_folder()
+                            .await
+                            .map(|folder| folder.path().to_path_buf())
+                    },
+                    move |path| Message::Workspace(Action::FolderPicked { session, token, path }),
+                )
+            }
+            Action::FolderPicked {
+                session,
+                token,
+                path,
+            } => {
+                if self.workspace.folder_picker.as_ref() != Some(&(session.clone(), token.clone())) {
+                    return Task::none();
+                }
+                self.workspace.folder_picker = None;
+                let Some(view) = self.views.get_mut(&session).filter(|v| v.media_token == token)
+                else {
+                    return Task::none();
+                };
+                let requests = path
+                    .and_then(|path| view.files.pin(HostPath::from_path(&path), true))
+                    .into_iter()
+                    .collect();
+                self.files_send(&session, requests);
+                Task::none()
             }
             Action::ToggleDrawer => {
                 // in Drawer mode, putting the drawer away is Full: the same window without it
@@ -718,7 +762,8 @@ impl App {
                     | Action::Saved { .. }
                     | Action::DiscardEdits
                     | Action::CancelDiscard
-                    | Action::CloseDrawerToShelf
+                    | Action::PickFolder
+                    | Action::FolderPicked { .. }
                     | Action::ToggleDrawer
                     | Action::Reply(_)
                     | Action::Hover(_)
