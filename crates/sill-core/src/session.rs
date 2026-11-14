@@ -23,6 +23,9 @@ pub struct StartOptions {
     pub agent: Option<String>,
     /// Extra read-write binds (host, jail), see [`binds_for`].
     pub binds: Vec<(PathBuf, PathBuf)>,
+    /// Desktop access overriding the policy's `[jail] x11` / `dbus` (`None` = policy), SPEC §4.2.
+    pub x11: Option<bool>,
+    pub dbus: Option<bool>,
 }
 
 /// The binds a session needs beyond the policy's mounts: the agent's sill-owned home paths and the
@@ -377,6 +380,12 @@ fn launch_args(opts: &StartOptions) -> Vec<std::ffi::OsString> {
     if let Some(s) = &opts.shim_bin {
         a.push("--shim".into());
         a.push(s.clone().into());
+    }
+    for (flag, v) in [("--x11", opts.x11), ("--dbus", opts.dbus)] {
+        if let Some(on) = v {
+            a.push(flag.into());
+            a.push(if on { "on" } else { "off" }.into());
+        }
     }
     if let Some(ag) = &opts.agent {
         a.push("--agent".into());

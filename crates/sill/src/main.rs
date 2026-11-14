@@ -216,6 +216,11 @@ struct JailArgs {
     /// user instance is usable; same as SILL_LAUNCHER=direct
     #[arg(long)]
     direct: bool,
+    /// override the policy's desktop access: on | off (SPEC §4.2)
+    #[arg(long)]
+    x11: Option<String>,
+    #[arg(long)]
+    dbus: Option<String>,
 }
 
 #[derive(Args, Clone)]
@@ -632,6 +637,8 @@ fn start_session(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>) -> Re
         env: jail.env.clone(),
         shim_bin,
         agent: None,
+        x11: jail.x11.as_deref().map(|v| v == "on"),
+        dbus: jail.dbus.as_deref().map(|v| v == "on"),
         binds: jail
             .binds
             .iter()
@@ -675,7 +682,13 @@ fn build_spec(a: JailArgs, command: Vec<OsString>) -> Result<JailSpec> {
     let home = home()?;
     let uid = rustix::process::getuid().as_raw();
     let user = std::env::var("USER").unwrap_or_else(|_| uid.to_string());
-    let policy = Policy::load(&a.policy, &home)?;
+    let mut policy = Policy::load(&a.policy, &home)?;
+    if let Some(v) = &a.x11 {
+        policy.jail.x11 = v == "on";
+    }
+    if let Some(v) = &a.dbus {
+        policy.jail.dbus = v == "on";
+    }
     let state_dir = match a.state_dir {
         Some(d) => d,
         None => default_state_dir(uid, &home)?,

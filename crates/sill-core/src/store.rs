@@ -22,6 +22,8 @@ pub struct Session {
     /// The agent controls as last set by the person: mode id and config option values, re-applied
     /// whenever the ACP session is (re)started.
     pub agent_settings: AgentSettings,
+    /// Desktop access override: "" (the global default), "none", "x11", "x11+dbus" (SPEC §4.2).
+    pub desktop: String,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -87,11 +89,17 @@ impl Store {
         // additive migrations
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN auto_allow INTEGER NOT NULL DEFAULT 0", []);
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN agent_settings TEXT NOT NULL DEFAULT '{}'", []);
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN desktop TEXT NOT NULL DEFAULT ''", []);
         Ok(Self { conn })
     }
 
     pub fn set_agent_settings(&self, id: &str, s: &AgentSettings) -> Result<()> {
         self.conn.execute("UPDATE sessions SET agent_settings = ?2 WHERE id = ?1", params![id, serde_json::to_string(s)?])?;
+        Ok(())
+    }
+
+    pub fn set_desktop(&self, id: &str, desktop: &str) -> Result<()> {
+        self.conn.execute("UPDATE sessions SET desktop = ?2 WHERE id = ?1", params![id, desktop])?;
         Ok(())
     }
 
@@ -106,7 +114,7 @@ impl Store {
 
     pub fn sessions(&self) -> Result<Vec<Session>> {
         let mut st = self.conn.prepare(
-            "SELECT id, agent, title, created_at, last_used, acp_session_id, policy, auto_allow, agent_settings FROM sessions ORDER BY last_used DESC",
+            "SELECT id, agent, title, created_at, last_used, acp_session_id, policy, auto_allow, agent_settings, desktop FROM sessions ORDER BY last_used DESC",
         )?;
         let rows = st.query_map([], |r| {
             Ok(Session {
@@ -119,6 +127,7 @@ impl Store {
                 policy: r.get(6)?,
                 auto_allow: r.get::<_, i32>(7)? != 0,
                 agent_settings: serde_json::from_str(&r.get::<_, String>(8)?).unwrap_or_default(),
+                desktop: r.get(9)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -135,6 +144,7 @@ impl Store {
             policy: policy.to_string(),
             auto_allow: false,
             agent_settings: AgentSettings::default(),
+            desktop: String::new(),
         };
         self.conn.execute(
             "INSERT INTO sessions (id, agent, title, created_at, last_used, acp_session_id, policy) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6)",

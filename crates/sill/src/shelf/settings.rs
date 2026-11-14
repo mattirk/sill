@@ -58,17 +58,36 @@ pub fn build() -> gtk::Box {
             let _ = sill_core::config::update(|c| c.auto_revert_minutes = Some(*m));
         }
     });
-    let ar_hint = gtk::Label::new(Some("what the agent changed outside git and outside pinned folders is reverted this long after its last write, once the session is idle; Keep in Changes stops the clock"));
-    ar_hint.add_css_class("dim-label");
-    ar_hint.set_wrap(true);
-    ar_hint.set_xalign(0.0);
-    let arbox = gtk::Box::new(gtk::Orientation::Vertical, 2);
-    arbox.set_hexpand(true);
-    let arrow = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    arrow.append(&ar_dd);
-    arbox.append(&arrow);
-    arbox.append(&ar_hint);
-    root.append(&row("Auto-revert", &arbox));
+    ar_dd.set_tooltip_text(Some("What the agent changed outside git and outside pinned folders is reverted this long after its last write, once the session is idle. Keep in Changes stops the clock."));
+    root.append(&row("Auto-revert", &ar_dd));
+
+    // desktop access for new sessions (SPEC §4.2): X11 / D-Bus — policy, on, off
+    let home_path = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    let (pol_x11, pol_dbus) = sill_core::policy::Policy::load("default", &home_path).map(|p| (p.jail.x11, p.jail.dbus)).unwrap_or((false, false));
+    let onoff = |b: bool| if b { "on" } else { "off" };
+    let dbox = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    type Get = fn(&sill_core::config::Config) -> Option<bool>;
+    type Set = fn(&mut sill_core::config::Config, Option<bool>);
+    let items: [(&str, bool, Get, Set, &str); 2] = [
+        ("X11", pol_x11, |c| c.desktop_x11, |c, v| c.desktop_x11 = v,
+         "Give new sessions the X11 display: the agent can run and see GUI programs — and, as any X11 client, read keys and drive every window. A session's own controls row can override this."),
+        ("D-Bus", pol_dbus, |c| c.desktop_dbus, |c, v| c.desktop_dbus = v,
+         "Give new sessions the D-Bus session bus: a full escape (systemd user units, keyring). A session's own controls row can override this."),
+    ];
+    for (name, pol, get, set, tip) in items {
+        let l = gtk::Label::new(Some(name));
+        l.add_css_class("dim-label");
+        let policy_label = format!("policy ({})", onoff(pol));
+        let labels: Vec<&str> = vec![&policy_label, "on", "off"];
+        let current = get(&sill_core::config::load());
+        let dd = choice(&labels, Some(match current { None => 0, Some(true) => 1, Some(false) => 2 }), move |i| {
+            let _ = sill_core::config::update(|c| set(c, match i { 1 => Some(true), 2 => Some(false), _ => None }));
+        });
+        dd.set_tooltip_text(Some(tip));
+        dbox.append(&l);
+        dbox.append(&dd);
+    }
+    root.append(&row("Desktop", &dbox));
 
     // width
     let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.2, 0.8, 0.02);
@@ -80,13 +99,8 @@ pub fn build() -> gtk::Box {
         x11::set_width_fraction(s.value());
         let _ = sill_core::config::update(|c| c.width = Some(s.value()));
     });
-    let hint = gtk::Label::new(Some("of the work area; applies the next time the shelf is shown"));
-    hint.add_css_class("dim-label");
-    let wbox = gtk::Box::new(gtk::Orientation::Vertical, 2);
-    wbox.set_hexpand(true);
-    wbox.append(&scale);
-    wbox.append(&hint);
-    root.append(&row("Width", &wbox));
+    scale.set_tooltip_text(Some("Fraction of the work area; applies the next time the shelf is shown."));
+    root.append(&row("Width", &scale));
 
     // the page the "sill" button opens
     let page_ids: Vec<&str> = sill_core::config::PAGES.iter().map(|(id, _)| *id).collect();
@@ -103,8 +117,8 @@ pub fn build() -> gtk::Box {
     let current = sill_core::config::load().hotkey.unwrap_or_else(|| super::hotkey::DEFAULT.to_string());
     let hk = gtk::Button::with_label(&pretty(&current));
     hk.add_css_class("sill-hotkey");
-    hk.set_tooltip_text(Some("Click, then press the key combination"));
-    let hk_msg = gtk::Label::new(Some("Click the key and press the combination you want (Escape cancels). Something with a modifier plus a key is safest; a bare F-key also works."));
+    hk.set_tooltip_text(Some("Click, then press the combination you want (Escape cancels). Something with a modifier plus a key is safest; a bare F-key also works."));
+    let hk_msg = gtk::Label::new(None);
     hk_msg.add_css_class("dim-label");
     hk_msg.set_wrap(true);
     hk_msg.set_xalign(0.0);

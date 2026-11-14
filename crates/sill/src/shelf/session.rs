@@ -45,6 +45,8 @@ pub fn start(s: &store::Session, store: &store::Store, fresh: bool) -> Result<Dr
         shim_bin: None,
         agent: Some(s.agent.clone()),
         binds,
+        x11: sill_core::config::desktop_grants(&s.desktop, &sill_core::config::load()).0,
+        dbus: sill_core::config::desktop_grants(&s.desktop, &sill_core::config::load()).1,
     };
     let sock = ensure_started(&opts, &home, &sill_core::session::staged_exe()?)?;
     let mut control = shim::Control::connect(&sock)?;
