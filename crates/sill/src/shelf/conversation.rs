@@ -14,7 +14,6 @@ use std::rc::Rc;
 use futures::channel::oneshot;
 use gtk4 as gtk;
 use gtk::prelude::*;
-use libadwaita as adw;
 use sill_core::acp::{Event, PermissionOption};
 
 use super::{markdown, theme};
@@ -22,8 +21,6 @@ use super::{markdown, theme};
 /// Reading measure of the column in logical px at text scale 1: wide enough that a shelf at the
 /// default width fills it edge to edge (no side margins); only a wide shelf gets centred prose.
 const MEASURE: f64 = 800.0;
-/// Width below which the clamp stops centring and just fills.
-const MEASURE_TIGHT: f64 = 640.0;
 /// Streamed chunks are rendered at most this often (the whole message each time).
 const STREAM_MS: u64 = 80;
 
@@ -107,8 +104,7 @@ impl Conversation {
         column.set_margin_end(12);
         column.set_margin_top(8);
         column.set_margin_bottom(8);
-        let clamp = adw::Clamp::builder().child(&column).build();
-        Self::size_clamp(&clamp);
+        let clamp = super::clamp::Clamp::new(&column, (MEASURE * theme::text_scale()) as i32);
         {
             let weak = clamp.downgrade();
             theme::on_change(move |_| {
@@ -296,10 +292,8 @@ impl Conversation {
     }
 
     /// The measure follows the text size, so it stays the same number of characters.
-    fn size_clamp(clamp: &adw::Clamp) {
-        let k = theme::text_scale();
-        clamp.set_maximum_size((MEASURE * k) as i32);
-        clamp.set_tightening_threshold((MEASURE_TIGHT * k) as i32);
+    fn size_clamp(clamp: &super::clamp::Clamp) {
+        clamp.set_maximum_size((MEASURE * theme::text_scale()) as i32);
     }
 
     /// Set before the transcript is shown: how messages resolve and open their images.

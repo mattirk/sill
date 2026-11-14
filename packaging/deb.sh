@@ -36,7 +36,7 @@ Priority: optional
 Architecture: $DEB_ARCH
 Maintainer: Matti Rita-Kasari <matti@rita-kasari.fi>
 Installed-Size: $SIZE
-Depends: bubblewrap, e2fsprogs, libgtk-4-1, libadwaita-1-0, libvte-2.91-gtk4-0, libgtksourceview-5-0
+Depends: bubblewrap, e2fsprogs, libgtk-4-1, libvte-2.91-gtk4-0, libgtksourceview-5-0
 Recommends: systemd
 Homepage: https://github.com/mattirk/sill-shelf
 Description: agent shelf — AI agents in a jail the host controls

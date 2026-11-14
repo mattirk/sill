@@ -10,8 +10,6 @@ use gtk4 as gtk;
 use gtk::gdk;
 use gtk::glib;
 use gtk::prelude::*;
-use libadwaita as adw;
-use adw::prelude::*;
 use sill_core::agents;
 use sill_core::store::{Session, Store};
 
@@ -28,7 +26,7 @@ thread_local! {
 }
 
 pub struct Shelf {
-    pub window: adw::ApplicationWindow,
+    pub window: gtk::ApplicationWindow,
     store: Rc<Store>,
     stack: gtk::Stack,
     action: gtk::ToggleButton,
@@ -86,7 +84,7 @@ fn launch_terminal(cmdline: &str, cwd: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
+pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     let config = sill_core::config::load();
     super::theme::set_text_scale(config.text_scale()); // applies the theme too
     super::theme::apply(&super::theme::by_id(&config.theme));
@@ -103,7 +101,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         }
     };
 
-    let window = adw::ApplicationWindow::builder()
+    let window = gtk::ApplicationWindow::builder()
         .application(app)
         .title("sill")
         .decorated(false)
@@ -220,7 +218,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
     column.append(&bar);
     column.append(&body);
     column.append(&pane_host);
-    window.set_content(Some(&column));
+    window.set_child(Some(&column));
 
     let shelf = Rc::new(Shelf {
         window: window.clone(),
@@ -1282,8 +1280,8 @@ impl Shelf {
 }
 
 /// What the shelf shows when it cannot run at all: the reason, in a window, instead of a crash.
-fn error_window(app: &adw::Application, text: &str) -> gtk::Window {
-    let w = adw::ApplicationWindow::builder().application(app).title("sill").default_width(560).default_height(160).build();
+fn error_window(app: &gtk::Application, text: &str) -> gtk::Window {
+    let w = gtk::ApplicationWindow::builder().application(app).title("sill").default_width(560).default_height(160).build();
     let l = gtk::Label::new(Some(text));
     l.set_wrap(true);
     l.set_selectable(true);
@@ -1291,7 +1289,7 @@ fn error_window(app: &adw::Application, text: &str) -> gtk::Window {
     l.set_margin_bottom(24);
     l.set_margin_start(24);
     l.set_margin_end(24);
-    w.set_content(Some(&l));
+    w.set_child(Some(&l));
     w.upcast()
 }
 

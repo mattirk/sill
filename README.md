@@ -28,7 +28,7 @@ cargo build
 cargo test
 ```
 
-The shelf needs `libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev libgtksourceview-5-dev`.
+The shelf needs `libgtk-4-dev libvte-2.91-gtk4-dev libgtksourceview-5-dev`.
 
 ## Install
 

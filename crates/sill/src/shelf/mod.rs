@@ -3,6 +3,7 @@
 
 mod agents_page;
 mod changes;
+mod clamp;
 mod conversation;
 mod fonts;
 mod herring;
@@ -45,7 +46,7 @@ pub fn run(cwd: Option<PathBuf>, hidden: bool) -> Result<()> {
         None => std::env::current_dir()?,
     };
     fonts::init(); // before GTK's first font map
-    let app = libadwaita::Application::builder().application_id(APP_ID).build();
+    let app = gtk::Application::builder().application_id(APP_ID).build();
     let cwd_for_activate = cwd.clone();
     app.connect_activate(move |app| {
         if let Some(w) = app.windows().first() {

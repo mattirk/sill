@@ -1,5 +1,6 @@
 //! Colour themes (SPEC §3.1 Settings). A theme is a small palette; everything else derives from it:
-//! libadwaita's named colours are overridden so stock widgets follow, and sill's own CSS and the
+//! the named colours (libadwaita's names, so sill's CSS reads as usual; libadwaita itself is not
+//! used, 2026-11-01) and rules for the stock widgets come from it, and sill's own CSS and the
 //! Markdown text tags use the same values. Every theme is complete — "Adwaita" is sill's copy of
 //! that palette, not the desktop's — so a shelf looks the same on every machine whatever the GTK
 //! theme, icon theme or dark/light preference there (2026-11-01). Built-in: Adwaita Dark, Adwaita
@@ -14,7 +15,6 @@ use std::cell::RefCell;
 
 use gtk4 as gtk;
 use gtk::gdk;
-use libadwaita as adw;
 
 #[derive(Debug, Clone)]
 pub struct Theme {
@@ -185,7 +185,7 @@ pub fn current() -> Theme {
     CURRENT.with(|c| c.borrow().clone())
 }
 
-/// libadwaita's named colours, every one from the palette: stock widgets follow the theme.
+/// The named colours sill's CSS uses (libadwaita's names), every one from the palette.
 fn named_colors(t: &Theme) -> String {
     let mut s = String::new();
     for (name, value) in [
@@ -266,7 +266,11 @@ pub fn stylesheet(t: &Theme) -> String {
              .sill-prompt-box {{ background: {surface}; border-top-color: {border}; }}\n\
              .dim-label {{ color: {dim}; }}\n\
              textview {{ background: transparent; color: {fg}; }}\n\
-             textview text {{ background: transparent; color: {fg}; }}\n",
+             textview text {{ background: transparent; color: {fg}; }}\n\
+             window, .background {{ background: {bg}; color: {fg}; }}\n\
+             popover > contents, tooltip > contents {{ background: {surface}; color: {fg}; border: 1px solid {border}; }}\n\
+             entry {{ background: {surface}; color: {fg}; border-color: {border}; }}\n\
+             list, listview, row, scrolledwindow, viewport {{ background: transparent; color: {fg}; }}\n",
             surface = t.surface,
             bg = t.bg,
             border = t.border,
@@ -289,8 +293,11 @@ pub fn apply(t: &Theme) {
         gtk::style_context_add_provider_for_display(&display, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
         *p.borrow_mut() = Some(css);
     });
-    // the theme decides dark or light; the desktop's preference never does
-    adw::StyleManager::default().set_color_scheme(if t.dark { adw::ColorScheme::ForceDark } else { adw::ColorScheme::ForceLight });
+    // the theme decides dark or light; the desktop's preference never does (GTK's default theme has
+    // a dark variant for the stock widgets sill's rules don't reach)
+    if let Some(s) = gtk::Settings::default() {
+        s.set_gtk_application_prefer_dark_theme(t.dark);
+    }
     CURRENT.with(|c| *c.borrow_mut() = t.clone());
     super::markdown::retheme();
     LISTENERS.with(|l| {
