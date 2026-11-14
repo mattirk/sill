@@ -15,6 +15,7 @@ mod imp {
     pub struct Clamp {
         pub child: RefCell<Option<gtk::Widget>>,
         pub maximum: Cell<i32>,
+        pub expanded: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -39,7 +40,7 @@ mod imp {
 
         fn measure(&self, orientation: gtk::Orientation, for_size: i32) -> (i32, i32, i32, i32) {
             let Some(child) = self.child.borrow().clone() else { return (0, 0, -1, -1) };
-            let max = self.maximum.get();
+            let max = if self.expanded.get() { i32::MAX } else { self.maximum.get() };
             match orientation {
                 // the child's natural width, but never asking for more than the maximum
                 gtk::Orientation::Horizontal => {
@@ -57,7 +58,7 @@ mod imp {
 
         fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
             let Some(child) = self.child.borrow().clone() else { return };
-            let w = width.min(self.maximum.get());
+            let w = if self.expanded.get() { width } else { width.min(self.maximum.get()) };
             let x = (width - w) / 2;
             child.size_allocate(&gtk::Allocation::new(x, 0, w, height), baseline);
         }
@@ -75,6 +76,12 @@ impl Clamp {
         *c.imp().child.borrow_mut() = Some(child.clone().upcast());
         c.imp().maximum.set(maximum);
         c
+    }
+
+    /// Choose between the reading measure and all available width.
+    pub fn set_expanded(&self, expanded: bool) {
+        self.imp().expanded.set(expanded);
+        self.queue_resize();
     }
 
     /// The width the child is held to; wider windows centre it.

@@ -62,6 +62,7 @@ struct ToolGroup {
 pub struct Conversation {
     pub root: gtk::ScrolledWindow,
     column: gtk::Box,
+    clamp: super::clamp::Clamp,
     /// The agent message being streamed, with its accumulated markdown.
     current: RefCell<Option<(gtk::Box, String)>>,
     /// Permission blocks not yet answered, by tool call: the buttons, the label, the reply.
@@ -101,6 +102,10 @@ pub struct Conversation {
 }
 
 impl Conversation {
+    pub fn set_expanded(&self, expanded: bool) {
+        self.clamp.set_expanded(expanded);
+    }
+
     /// Rebuild from the daemon's transcript after reconnect, discarding partial streamed blocks
     /// and unanswered widgets whose reply channels belonged to the previous connection.
     pub fn clear(&self) {
@@ -140,6 +145,7 @@ impl Conversation {
         let conv = Rc::new(Self {
             root,
             column,
+            clamp,
             current: RefCell::new(None),
             open_permissions: Rc::new(RefCell::new(HashMap::new())),
             current_thought: RefCell::new(None),

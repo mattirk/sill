@@ -49,6 +49,9 @@ pub struct Shelf {
     herring: Rc<super::herring::Herring>,
     /// Main pane | tree, sharing the window's width: the handle between them drags the split.
     paned: gtk::Paned,
+    /// Full shelf width, with the drawer temporarily hidden.
+    expanded: std::cell::Cell<bool>,
+    restore_tree: std::cell::Cell<bool>,
     busy: RefCell<std::collections::HashSet<String>>,
     pending_restart: RefCell<std::collections::HashSet<String>>,
     views: RefCell<HashMap<String, Rc<SessionView>>>,
@@ -273,6 +276,8 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
         spinner: spinner.clone(),
         herring: herring.clone(),
         paned: body.clone(),
+        expanded: std::cell::Cell::new(false),
+        restore_tree: std::cell::Cell::new(false),
         busy: RefCell::new(std::collections::HashSet::new()),
         pending_restart: RefCell::new(std::collections::HashSet::new()),
         views: RefCell::new(HashMap::new()),
@@ -451,7 +456,8 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
             let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
             let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
             // Ctrl+Shift+Left/Right walk the tabs, Ctrl+Shift+F toggles the file tree, Ctrl+Shift+T
-            // and W open and close a session tab, Ctrl+Shift+H opens a terminal on the host
+            // and W open and close a session tab, Ctrl+Shift+H opens a terminal on the host,
+            // Ctrl+Shift+E expands the main pane across the shelf, temporarily hiding the drawer
             if ctrl && shift {
                 match key {
                     gdk::Key::Left => {
@@ -470,6 +476,10 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
                             let pinned = s.tabs.selected().and_then(|id| s.store.pins(&id).ok()).and_then(|pins| pins.into_iter().find(|p| super::remote::is_dir(p)));
                             s.toggle_tree(pinned)
                         }
+                        return glib::Propagation::Stop;
+                    }
+                    gdk::Key::E | gdk::Key::e => {
+                        s.set_expanded(!s.expanded.get());
                         return glib::Propagation::Stop;
                     }
                     gdk::Key::T | gdk::Key::t => {
@@ -656,16 +666,40 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
 impl Shelf {
     /// Where the shelf goes: the configured fraction of the primary monitor's work area with the
     /// tree open; the drawer's width less while it is closed, so the main pane never changes
-    /// width — only Settings → Width and the tree move the window (SPEC §3.1).
+    /// width. Expanded mode keeps the full configured width with the tree hidden.
     fn placement(&self, w: &gtk::Window) -> Option<x11::Placement> {
         let mut area = x11::work_area_with(w, x11::width_fraction())?;
-        if !self.tree.root.is_visible() {
+        if !self.expanded.get() && !self.tree.root.is_visible() {
             // the drawer is in logical pixels, the work area in device pixels
             let k = x11::scale_of(w);
             let total = area.width as i32 / k;
             area.width = ((total - x11::drawer_width(total)) * k) as u32;
         }
         Some(area)
+    }
+
+    /// Borrow the drawer's space without shrinking the shelf window; the viewer shares
+    /// the same main pane, so files and code expand along with the conversation.
+    fn set_expanded(&self, expanded: bool) {
+        if self.expanded.replace(expanded) == expanded {
+            return;
+        }
+        if expanded {
+            self.restore_tree.set(self.tree.root.is_visible());
+            self.tree.root.set_visible(false);
+        } else {
+            self.tree.root.set_visible(self.restore_tree.get());
+        }
+        for view in self.views.borrow().values() {
+            view.conv.set_expanded(expanded);
+        }
+        if self.tree.root.is_visible() {
+            let w: gtk::Window = self.window.clone().upcast();
+            if let Some(area) = self.placement(&w) {
+                self.split(area.width as i32 / x11::scale_of(&w));
+            }
+        }
+        self.place();
     }
 
     /// The split for a shelf `total` logical pixels wide with the tree open: the main pane's width.
@@ -676,6 +710,7 @@ impl Shelf {
     /// Show the tree — scoped to one folder (a chip) or global (`None`: the Files button) — or close
     /// it when the chip of the folder it already shows is clicked again.
     fn toggle_tree(&self, scope: Option<PathBuf>) {
+        self.set_expanded(false);
         if self.tree.root.is_visible() && scope.is_some() && self.tree.scope() == scope {
             self.close_tree();
             return;
@@ -1235,6 +1270,7 @@ impl Shelf {
             }
         };
         let view = SessionView::new(s.clone(), self.store.clone());
+        view.conv.set_expanded(self.expanded.get());
         if let Some(n) = &note {
             view.conv.add_note(n);
         }
