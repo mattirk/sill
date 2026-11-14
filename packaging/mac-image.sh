@@ -66,15 +66,30 @@ hdiutil makehybrid -quiet -iso -joliet -default-volume-name cidata -o "$work/see
 
 cargo build -q -p sill-vm
 codesign --force --sign - --entitlements packaging/mac/sill-vm.entitlements target/debug/sill-vm 2>/dev/null
-SILL_VM_HOLD="$PWD/$work/go" target/debug/sill-vm "$work" > "$work/address" 2> "$work/vm.log" &
-vm=$!
-trap 'touch "$work/go"; wait $vm 2>/dev/null || true' EXIT
-while [ ! -s "$work/address" ]; do
-    kill -0 $vm 2>/dev/null || { cat "$work/vm.log" >&2; exit 1; }
-    sleep 1
-done
-address=$(cat "$work/address")
-echo "Guest at $address"
+# Boot the guest, held until `go` exists; the build never reboots it from inside, it powers it
+# off and boots it again from here, as the app does
+vm=
+boot() {
+    rm -f "$work/go" "$work/address"
+    SILL_VM_HOLD="$PWD/$work/go" target/debug/sill-vm "$work" > "$work/address" 2>> "$work/vm.log" &
+    vm=$!
+    while [ ! -s "$work/address" ]; do
+        kill -0 $vm 2>/dev/null || { cat "$work/vm.log" >&2; exit 1; }
+        sleep 1
+    done
+    address=$(cat "$work/address")
+    echo "Guest at $address"
+}
+# a clean power-off, then the VM process ends by itself
+power_off() {
+    guest 'sudo systemctl poweroff' || true
+    touch "$work/go"
+    wait $vm || true
+    vm=
+}
+trap 'touch "$work/go"; [ -z "$vm" ] || wait $vm 2>/dev/null || true' EXIT
+: > "$work/vm.log"
+boot
 guest() {
     # never a password prompt: until cloud-init has put the key in place, a login just fails
     ssh -q -i "$work/key" -o BatchMode=yes -o StrictHostKeyChecking=no \
@@ -95,8 +110,8 @@ echo 'Waiting for the first boot (packages)'
 let_in
 guest 'cloud-init status --wait >/dev/null; cloud-init status --long | grep -E "^(status|errors)"'
 # again, so the account's user manager starts with the session bus the packages brought
-guest 'sudo systemctl reboot' || true
-sleep 5
+power_off
+boot
 let_in
 echo 'Setting up the data disks'
 git archive --format=tar HEAD packaging/mac/guest | guest 'rm -rf guest && mkdir guest && tar -x -C guest'
@@ -113,6 +128,12 @@ guest 'curl -fsSL https://sh.rustup.rs | sh -s -- -y -q --profile minimal >/dev/
 # filesystem is the state disk's
 guest '. ~/.cargo/env && cd src && SILL_STATE_DIR=/mnt/sill-state ./packaging/deploy-server.sh'
 
+# a disk that failed under the guest loses writes quietly: refuse such an image
+if guest 'sudo dmesg | grep -qiE "I/O error|EXT4-fs error"'; then
+    guest 'sudo dmesg | grep -iE "I/O error|EXT4-fs error" | head -5' >&2
+    echo 'The guest saw disk errors; not keeping this image.' >&2
+    exit 1
+fi
 echo 'Cleaning up'
 guest 'rm -rf src .cargo .rustup .cache'
 guest 'sudo apt-get -qq clean && sudo rm -rf /var/lib/apt/lists/*'
@@ -124,9 +145,8 @@ guest 'sudo cloud-init clean --logs --machine-id && rm -f ~/.ssh/authorized_keys
 guest 'sudo mkdir -p /mnt/root && sudo mount --bind / /mnt/root &&
     sudo rm -rf /mnt/root/home/sill && sudo cp -a /home/sill /mnt/root/home/ &&
     sudo umount /mnt/root && sudo rmdir /mnt/root'
-guest 'sudo fstrim -a >/dev/null 2>&1 || true; sudo poweroff' || true
-touch "$work/go"
-wait $vm || true
+guest 'sudo fstrim -a >/dev/null 2>&1 || true'
+power_off
 trap - EXIT
 
 mv "$work/system.raw" "$out/system.raw"
