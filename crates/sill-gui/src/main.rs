@@ -1,10 +1,11 @@
 mod agents_ui;
 mod changes_ui;
 mod control;
-mod demo;
 mod daemon_ui;
+mod demo;
 mod desktop;
 mod details;
+mod editor;
 mod fonts;
 mod forms;
 mod herring;
@@ -21,7 +22,6 @@ mod network;
 mod perf;
 mod policies;
 mod processes;
-mod editor;
 mod rows;
 mod selection;
 mod settings;
@@ -275,6 +275,9 @@ pub enum Message {
     DiscardSend(String),
     /// A press on the top bar's empty space: the window manager moves the window.
     DragWindow,
+    ResizeWindow(iced::window::Direction),
+    DisplayPoll,
+    DisplayGeometry(Option<(desktop::Placement, u32, u32)>),
     Quit,
     Media(media::Event),
     AttachmentPaths(String, String, Option<Vec<std::path::PathBuf>>),
@@ -638,6 +641,8 @@ pub struct App {
     /// working area's height in device pixels (X11): Shelf mode's height, whatever the scale.
     desktop_scale: Option<f32>,
     work_height_px: Option<u32>,
+    display_area: Option<desktop::Placement>,
+    display_settling: u8,
     /// The window, once open, and its X11 id.
     pub window_id: Option<iced::window::Id>,
     pub xid: Option<u64>,
@@ -735,6 +740,8 @@ impl App {
             monitor: None,
             desktop_scale: None,
             work_height_px: None,
+            display_area: None,
+            display_settling: 0,
             window_id: None,
             xid: None,
             visible: !HIDDEN.load(std::sync::atomic::Ordering::Relaxed),
@@ -814,7 +821,11 @@ impl App {
         let lanes = iced::futures::stream::unfold(rx, |rx| async move {
             rx.recv().await.ok().map(|update| (update, rx))
         });
-        let list = Task::batch([app.list(), app.read_daemon_settings(), app.daemon_event(daemon_ui::Event::Check)]);
+        let list = Task::batch([
+            app.list(),
+            app.read_daemon_settings(),
+            app.daemon_event(daemon_ui::Event::Check),
+        ]);
         (
             app,
             Task::batch([
@@ -835,6 +846,16 @@ impl App {
         let xid = self.xid;
         let shelf = (self.layout.mode == layout::Mode::Shelf).then(|| self.settings.shelf_share());
         let left = self.settings.window_x.zip(self.settings.window_y);
+        let shares = (
+            self.settings
+                .window_width_share
+                .unwrap_or(0.5)
+                .clamp(0.05, 1.0),
+            self.settings
+                .window_height_share
+                .unwrap_or(1.0)
+                .clamp(0.05, 1.0),
+        );
         move || {
             let Some(xid) = xid else { return };
             desktop::stamp(xid);
@@ -846,7 +867,13 @@ impl App {
                 }
                 None => {
                     if let Some((x, y)) = left.or_else(desktop::work_origin) {
-                        desktop::pre_place(xid, x, y, None);
+                        let size = desktop::shelf_placement(1.0).map(|p| {
+                            (
+                                (p.width as f32 * shares.0).round() as u32,
+                                (p.height as f32 * shares.1).round() as u32,
+                            )
+                        });
+                        desktop::pre_place(xid, x, y, size);
                     }
                 }
             }
@@ -860,6 +887,7 @@ impl App {
             return Task::none();
         };
         self.visible = true;
+        self.display_settling = 2;
         let xid = self.xid;
         let place = self.placing();
         let again = place.clone();
@@ -1017,21 +1045,34 @@ impl App {
     /// The working size kept for Drawer and Full mode, in the units of Interface scale 100 %:
     /// the window's size on the screen, whatever the scale is when it comes back.
     fn remember_work_size(&mut self) {
-        let scale = self.settings.scale();
-        self.settings.work_width = Some(self.width * scale);
-        self.settings.work_height = Some(self.height * scale);
+        // X11 geometry polling records physical proportions independently of UI scaling.
+        if self.display_area.is_some() {
+            return;
+        }
+        if let Some(m) = self.monitor {
+            self.settings.window_width_share = Some((self.width / m.width).clamp(0.05, 1.0));
+            self.settings.window_height_share = Some((self.height / m.height).clamp(0.05, 1.0));
+        }
     }
 
     /// The working size (Drawer and Full): as the window last had it, else half the monitor.
     fn work_size(&self) -> Option<iced::Size> {
-        let scale = self.settings.scale();
-        let height = self.settings.work_height.map_or(self.height, |h| h / scale);
-        match self.settings.work_width {
-            Some(width) => Some(iced::Size::new(width / scale, height)),
-            None => self
-                .monitor
-                .map(|m| iced::Size::new((m.width * layout::WORK_SHARE).round(), height)),
-        }
+        self.monitor.map(|m| {
+            iced::Size::new(
+                m.width
+                    * self
+                        .settings
+                        .window_width_share
+                        .unwrap_or(layout::WORK_SHARE)
+                        .clamp(0.05, 1.0),
+                m.height
+                    * self
+                        .settings
+                        .window_height_share
+                        .unwrap_or(1.0)
+                        .clamp(0.05, 1.0),
+            )
+        })
     }
 
     /// Shelf mode's height in the window's units: the working area's full height (device pixels
@@ -1102,6 +1143,7 @@ impl App {
             self.layout.before_full = old;
         }
         self.layout.mode = mode;
+        self.display_settling = 2;
         let opening = mode == Mode::Drawer && !self.workspace.shown;
         self.workspace.shown = mode == Mode::Drawer;
         self.save_settings();
@@ -1155,6 +1197,8 @@ impl App {
             subscriptions
                 .push(iced::time::every(Duration::from_secs(15)).map(|_| Message::Refresh));
         }
+        subscriptions
+            .push(iced::time::every(Duration::from_millis(500)).map(|_| Message::DisplayPoll));
         subscriptions.push(iced::keyboard::listen().filter_map(keys::navigation));
         subscriptions.push(iced::window::resize_events().map(|(_, size)| Message::Resized(size)));
         subscriptions.push(self.layout.subscription());
@@ -1320,7 +1364,11 @@ impl App {
                 } else {
                     self.list()
                 };
-                let mut tasks = vec![list, self.read_daemon_settings(), self.daemon_event(daemon_ui::Event::Check)];
+                let mut tasks = vec![
+                    list,
+                    self.read_daemon_settings(),
+                    self.daemon_event(daemon_ui::Event::Check),
+                ];
                 if let Some(p) = self.details.as_ref().filter(|p| !p.pending) {
                     tasks.push(self.details_load(p.id.clone()));
                 }
@@ -1490,6 +1538,61 @@ impl App {
                     view.outbox.take(&id);
                 }
             }
+            Message::ResizeWindow(direction) => {
+                return iced::window::latest()
+                    .and_then(move |id| iced::window::drag_resize(id, direction));
+            }
+            Message::DisplayPoll => {
+                if let Some(xid) = self.xid {
+                    return blocking(
+                        move || desktop::window_geometry(xid),
+                        Message::DisplayGeometry,
+                    );
+                }
+            }
+            Message::DisplayGeometry(Some((area, width, height))) => {
+                if self.display_area != Some(area) {
+                    self.display_area = Some(area);
+                    self.display_settling = 2;
+                    if self.layout.mode != layout::Mode::Shelf {
+                        let w = (area.width as f32
+                            * self
+                                .settings
+                                .window_width_share
+                                .unwrap_or(0.5)
+                                .clamp(0.05, 1.0))
+                        .round() as u32;
+                        let h = (area.height as f32
+                            * self
+                                .settings
+                                .window_height_share
+                                .unwrap_or(1.0)
+                                .clamp(0.05, 1.0))
+                        .round() as u32;
+                        if let Some(xid) = self.xid {
+                            return blocking(
+                                move || desktop::pre_place(xid, area.x, area.y, Some((w, h))),
+                                |_| Message::Nothing,
+                            );
+                        }
+                    } else {
+                        return self.place_window();
+                    }
+                } else if self.display_settling > 0 {
+                    self.display_settling -= 1;
+                } else if self.visible && self.layout.mode != layout::Mode::Shelf {
+                    let w = (width as f32 / area.width as f32).clamp(0.05, 1.0);
+                    let h = (height as f32 / area.height as f32).clamp(0.05, 1.0);
+                    if self.settings.window_width_share != Some(w)
+                        || self.settings.window_height_share != Some(h)
+                    {
+                        self.settings.window_width_share = Some(w);
+                        self.settings.window_height_share = Some(h);
+                        self.save_settings();
+                    }
+                }
+            }
+            Message::DisplayGeometry(None) => {}
             Message::DragWindow => return iced::window::latest().and_then(iced::window::drag),
             // the window goes; the daemon and its sessions go on (the tray icon and the hotkey
             // will bring the window back, docs/sill-gui.md)
@@ -2609,7 +2712,8 @@ impl App {
             .collect();
         if connection_lost {
             if self.daemon.problem.is_none() && !self.daemon.restarting {
-                self.daemon.problem = Some("Checking daemon after a session connection interruption…".into());
+                self.daemon.problem =
+                    Some("Checking daemon after a session connection interruption…".into());
             }
             tasks.push(self.daemon_event(daemon_ui::Event::Check));
         }

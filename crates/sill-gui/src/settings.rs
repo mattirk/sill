@@ -15,6 +15,9 @@ pub struct Settings {
     pub mode: Option<String>,
     /// The working size (Drawer and Full), logical pixels, as the window last had it.
     pub work_width: Option<f32>,
+    /// Window dimensions as fractions of the primary working area.
+    pub window_width_share: Option<f32>,
+    pub window_height_share: Option<f32>,
     pub work_height: Option<f32>,
     /// The drawer's width as last dragged, logical pixels.
     pub drawer_width: Option<f32>,

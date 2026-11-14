@@ -285,3 +285,11 @@ pub fn activate(xid: u64, time: u32) {
         let _ = conn.flush();
     }
 }
+
+/// Primary working area and current client size, all in physical pixels.
+pub fn window_geometry(xid: u64) -> Option<(Placement, u32, u32)> {
+    let area = shelf_placement(1.0)?;
+    let (conn, _) = connect()?;
+    let geometry = conn.get_geometry(xid as u32).ok()?.reply().ok()?;
+    Some((area, geometry.width as u32, geometry.height as u32))
+}

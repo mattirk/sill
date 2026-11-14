@@ -57,11 +57,12 @@ impl App {
                 }
             };
             // a file open takes the chips' row too, as in the shelf
-            let chips: Element<'_, Message> = if self.details.is_some() || view.files.reader.is_some() {
-                space().height(0).into()
-            } else {
-                self.file_chips(view)
-            };
+            let chips: Element<'_, Message> =
+                if self.details.is_some() || view.files.reader.is_some() {
+                    space().height(0).into()
+                } else {
+                    self.file_chips(view)
+                };
             let main = column![chips, body].width(Fill).height(Fill);
             let placement = self.layout.drawer(self.workspace.shown, size.width);
             // the conversation keeps one place in the widget tree wherever the drawer is: moving
@@ -99,6 +100,27 @@ impl App {
             column![page.height(Fill)].height(Fill).into()
         });
         let bar = container(responsive(move |size| self.top_bar(size.width))).height(37);
+        let edge = |direction, horizontal| {
+            mouse_area(
+                container(space())
+                    .width(if horizontal {
+                        Fill
+                    } else {
+                        iced::Length::Fixed(5.0)
+                    })
+                    .height(if horizontal {
+                        iced::Length::Fixed(5.0)
+                    } else {
+                        Fill
+                    }),
+            )
+            .on_press(Message::ResizeWindow(direction))
+            .interaction(if horizontal {
+                iced::mouse::Interaction::ResizingVertically
+            } else {
+                iced::mouse::Interaction::ResizingHorizontally
+            })
+        };
         let window = column![bar, content];
         // Keep the conversation at the same tree position when the menu opens/closes.
         // Wrapping it in a stack only while open discards its scroll and selection state.
@@ -129,6 +151,12 @@ impl App {
         if let Some(menu) = &self.menu {
             layers = layers.push(self.session_menu(menu));
         }
+        // Resize targets overlay the outer pixels; they must not inset the content.
+        layers = layers
+            .push(container(edge(iced::window::Direction::West, false)).align_left(Fill))
+            .push(container(edge(iced::window::Direction::East, false)).align_right(Fill))
+            .push(container(edge(iced::window::Direction::North, true)).align_top(Fill))
+            .push(container(edge(iced::window::Direction::South, true)).align_bottom(Fill));
         keys::configured_shortcuts(layers, &self.settings.shortcuts)
     }
 
@@ -347,8 +375,9 @@ impl App {
             .as_ref()
             .is_some_and(|a| a.activity == Activity::Working);
         let mut label = row![
-
-            text(self.session_name(&tab.id, &tab.title)).size(style::TEXT).color(color),
+            text(self.session_name(&tab.id, &tab.title))
+                .size(style::TEXT)
+                .color(color),
         ]
         .spacing(8)
         .align_y(Alignment::Center);
@@ -356,25 +385,48 @@ impl App {
             label = label.push(mark);
         }
         let agent = keys::press(
-            button(icons::tab_agent(&tab.agent, if working { P.accent } else { color }, working))
-                .padding([4, 4]).style(style::quiet),
+            button(icons::tab_agent(
+                &tab.agent,
+                if working { P.accent } else { color },
+                working,
+            ))
+            .padding([4, 4])
+            .style(style::quiet),
             Message::Details(crate::details::Event::Open(tab.id.clone())),
         );
-        let label: Element<'a, Message> = if let Some(editor) = self.name_editor.as_ref().filter(|e| e.id == tab.id) {
+        let label: Element<'a, Message> = if let Some(editor) =
+            self.name_editor.as_ref().filter(|e| e.id == tab.id)
+        {
             let input = iced::widget::text_input("Session name", &editor.text)
                 .id("session-name")
-                .on_input_maybe((!editor.pending).then_some(|s| Message::Name(crate::names::Event::Input(s))))
-                .on_submit_maybe((!editor.pending).then_some(Message::Name(crate::names::Event::Save)))
+                .on_input_maybe(
+                    (!editor.pending).then_some(|s| Message::Name(crate::names::Event::Input(s))),
+                )
+                .on_submit_maybe(
+                    (!editor.pending).then_some(Message::Name(crate::names::Event::Save)),
+                )
                 .size(style::TEXT)
                 .width((editor.text.chars().count() as f32 * 8.0 + 24.0).clamp(120.0, 320.0));
             let input: Element<'a, Message> = input.into();
             if let Some(error) = &editor.error {
-                tooltip(row![input, text("!").color(P.error)].spacing(4), text(error).size(style::SMALL), tooltip::Position::Bottom).into()
-            } else { input }
+                tooltip(
+                    row![input, text("!").color(P.error)].spacing(4),
+                    text(error).size(style::SMALL),
+                    tooltip::Position::Bottom,
+                )
+                .into()
+            } else {
+                input
+            }
         } else {
             keys::press(
-                button(mouse_area(label).on_press(Message::Choose(tab.id.clone())).on_double_click(Message::Name(crate::names::Event::Begin(tab.id.clone()))))
-                    .padding([4, 12]).style(style::quiet),
+                button(
+                    mouse_area(label)
+                        .on_press(Message::Choose(tab.id.clone()))
+                        .on_double_click(Message::Name(crate::names::Event::Begin(tab.id.clone()))),
+                )
+                .padding([4, 12])
+                .style(style::quiet),
                 Message::Choose(tab.id.clone()),
             )
         };
@@ -453,7 +505,9 @@ impl App {
             && matches!(attention.activity, Activity::Working | Activity::Waiting);
         let indicator = if busy_now && (!self.daemon_trouble() || self.demo) {
             Indicator::Spinner(P.accent)
-        } else { self.daemon_dot() };
+        } else {
+            self.daemon_dot()
+        };
         // the timer, as the shelf's: while the agent works, and whenever the pointer is over the
         // activity — the session's worked time, still while it does not work; it slides out from
         // under the indicator when it appears, as the shelf's revealer does
@@ -489,19 +543,41 @@ impl App {
     }
 
     fn daemon_dot(&self) -> Indicator {
-        if self.demo { Indicator::Dot(alpha(P.fg, 0.35)) }
-        else if self.daemon.stopped && !self.daemon.restarting { Indicator::Dot(alpha(P.error, 0.7)) }
-        else { Indicator::Pulse(if self.daemon_trouble() { P.warning } else { P.success }) }
+        if self.demo {
+            Indicator::Dot(alpha(P.fg, 0.35))
+        } else if self.daemon.stopped && !self.daemon.restarting {
+            Indicator::Dot(alpha(P.error, 0.7))
+        } else {
+            Indicator::Pulse(if self.daemon_trouble() {
+                P.warning
+            } else {
+                P.success
+            })
+        }
     }
 
     fn daemon_indicator<'a>(&'a self, shown: Element<'a, Message>) -> Element<'a, Message> {
-        let shown = tooltip(shown,
-            container(text(if self.demo { "Demo — no daemon".into() } else { self.daemon_label() }).size(style::TINY))
-                .padding([3, 8]).style(style::fill(P.surface)), tooltip::Position::Bottom);
+        let shown = tooltip(
+            shown,
+            container(
+                text(if self.demo {
+                    "Demo — no daemon".into()
+                } else {
+                    self.daemon_label()
+                })
+                .size(style::TINY),
+            )
+            .padding([3, 8])
+            .style(style::fill(P.surface)),
+            tooltip::Position::Bottom,
+        );
         let area = mouse_area(shown).on_enter(Message::ActivityHover(true));
         if !self.demo && self.daemon_trouble() {
-            area.on_press(Message::Daemon(crate::daemon_ui::Event::Open)).into()
-        } else { area.into() }
+            area.on_press(Message::Daemon(crate::daemon_ui::Event::Open))
+                .into()
+        } else {
+            area.into()
+        }
     }
 
     // --- the conversation -----------------------------------------------------------------------
@@ -2186,7 +2262,9 @@ impl canvas::Program<Message> for Busy {
         .then(|| {
             if matches!(self.indicator, Indicator::Pulse(_)) && self.clock.is_none() {
                 canvas::Action::request_redraw_at(Instant::now() + Duration::from_millis(50))
-            } else { canvas::Action::request_redraw() }
+            } else {
+                canvas::Action::request_redraw()
+            }
         })
     }
 
@@ -2229,7 +2307,10 @@ impl canvas::Program<Message> for Busy {
             // the shelf's status square: 8 px, round
             Indicator::Pulse(color) => {
                 let phase = spin_epoch().elapsed().as_secs_f32() * std::f32::consts::TAU / 4.0;
-                frame.fill(&canvas::Path::circle(center, 4.0), alpha(color, 0.3 + 0.15 * (1.0 + phase.sin())));
+                frame.fill(
+                    &canvas::Path::circle(center, 4.0),
+                    alpha(color, 0.3 + 0.15 * (1.0 + phase.sin())),
+                );
             }
             Indicator::Dot(color) => frame.fill(&canvas::Path::circle(center, 4.0), color),
         }

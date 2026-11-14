@@ -2997,9 +2997,9 @@ fn interface_scale_keeps_the_window_and_the_working_size() {
     );
     app.remember_work_size();
     assert!(
-        near(app.settings.work_width.unwrap(), 500.0)
-            && near(app.settings.work_height.unwrap(), 800.0),
-        "kept in 100 % units"
+        near(app.settings.window_width_share.unwrap(), 500.0 / 1440.0)
+            && near(app.settings.window_height_share.unwrap(), 800.0 / 900.0),
+        "kept as monitor proportions"
     );
     let _ = app.update(Message::ScaleStep(0));
     assert!(near(app.width, 500.0) && near(app.height, 800.0));
@@ -3555,4 +3555,26 @@ fn prompt_undo_and_redo_shortcuts() {
         assert!(matches!(crate::ui::reading_keys(press),
             Some(Binding::Custom(Message::Workspace(crate::workspace::Action::History(value)))) if value == redo));
     }
+}
+
+#[test]
+fn display_changes_preserve_proportions_and_manual_resizes_update_them() {
+    let (mut app, _) = App::new(true, None);
+    app.layout.mode = crate::layout::Mode::Drawer;
+    app.visible = true;
+    let area = crate::desktop::Placement { x: 0, y: 0, width: 1920, height: 1080 };
+    let _ = app.update(Message::DisplayGeometry(Some((area, 720, 860))));
+    assert_eq!(app.settings.window_width_share, None);
+    for _ in 0..3 {
+        let _ = app.update(Message::DisplayGeometry(Some((area, 960, 1080))));
+    }
+    assert_eq!(app.settings.window_width_share, Some(0.5));
+    assert_eq!(app.settings.window_height_share, Some(1.0));
+    let _ = app.update(Message::DisplayGeometry(Some((area, 1152, 864))));
+    assert_eq!(app.settings.window_width_share, Some(0.6));
+    assert_eq!(app.settings.window_height_share, Some(0.8));
+    let larger = crate::desktop::Placement { width: 3840, height: 2160, ..area };
+    let _ = app.update(Message::DisplayGeometry(Some((larger, 1152, 864))));
+    assert_eq!(app.settings.window_width_share, Some(0.6));
+    assert_eq!(app.settings.window_height_share, Some(0.8));
 }
