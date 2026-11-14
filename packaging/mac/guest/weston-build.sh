@@ -52,11 +52,13 @@ DESTDIR="$root" meson install -C build --quiet >/dev/null
 rm -rf "$root/usr/local/include" "$root/usr/local/lib/aarch64-linux-gnu/pkgconfig" \
     "$root/usr/local/share/pkgconfig" "$root/usr/local/share/wayland-protocols" \
     "$root/usr/local/share/libweston-16" "$root/usr/local/share/wayland-sessions"
-# the Debian packages its programs and modules load from (theirs, not its own)
+# the Debian packages its programs and modules load from (theirs, not its own); ldd says
+# /lib/…, which Debian 13 merges into /usr/lib, where dpkg knows the files: resolve them first
 find "$root" -type f \( -perm -u+x -o -name '*.so*' \) -print0 \
     | xargs -0 env LD_LIBRARY_PATH="$root/usr/local/lib/aarch64-linux-gnu" ldd 2>/dev/null \
-    | awk '/=> \// { print $3 }' | grep -v "^$root" | sort -u \
+    | awk '/=> \// { print $3 }' | grep -v "^$root" | sort -u | xargs -r realpath | sort -u \
     | xargs -r dpkg -S 2>/dev/null | cut -d: -f1 | sort -u > runtime-packages
+grep -q '^libwayland-server0' runtime-packages || { echo 'weston-build: no runtime packages found' >&2; exit 1; }
 mkdir -p "$out"
 tar -czf "$out/weston.tar.gz" -C "$root" .
 cp runtime-packages "$out/runtime-packages"
