@@ -198,7 +198,9 @@ impl App {
                 .push((format!("The login terminal failed: {why}"), true));
             return Task::none();
         }
-        view.terminal_shown = false;
+        if view.terminal_generation == generation {
+            view.terminal_shown = false;
+        }
         view.login.notes.push((
             "The login terminal closed; the session goes on.".into(),
             false,
@@ -228,7 +230,12 @@ impl App {
         let Some(view) = self.views.get_mut(session) else {
             return Task::none();
         };
-        view.terminal_generation += 1;
+        view.select_shell(false);
+        view.terminal_generation = view.terminal_generation.max(
+            view.parked_terminal
+                .as_ref()
+                .map_or(0, |(_, generation)| *generation),
+        ) + 1;
         let generation = view.terminal_generation;
         let (cols, rows) = view
             .terminal

@@ -3067,3 +3067,61 @@ fn policy_errors_remain_visible_with_the_group_collapsed() {
     ui.find("Import policy").unwrap();
     ui.find("Check").unwrap();
 }
+
+#[test]
+fn host_and_jail_shells_keep_separate_panes_and_route_hidden_events() {
+    let (mut app, _) = App::new(true, None);
+    let _ = app.update(Message::ToggleTerminal);
+    let jail_generation = app.current().unwrap().terminal_generation;
+    assert!(app.current().unwrap().terminal.is_some());
+    let _ = app.update(Message::ToggleHostTerminal);
+    let host_generation = app.current().unwrap().terminal_generation;
+    let id = app.current().unwrap().id.clone();
+    assert!(host_generation > jail_generation);
+    assert!(app.current().unwrap().terminal_host);
+    assert!(app.current().unwrap().parked_terminal.is_some());
+    let _ = app.update(Message::Terminal(
+        id,
+        jail_generation,
+        crate::terminal::Event::Ended,
+    ));
+    assert_eq!(
+        app.current()
+            .unwrap()
+            .parked_terminal
+            .as_ref()
+            .unwrap()
+            .0
+            .status,
+        crate::terminal::Status::Ended
+    );
+    let _ = app.update(Message::ToggleHostTerminal);
+    assert!(!app.current().unwrap().terminal_shown);
+    let _ = app.update(Message::ToggleHostTerminal);
+    assert_eq!(app.current().unwrap().terminal_generation, host_generation);
+    let _ = app.update(Message::ToggleTerminal);
+    assert!(!app.current().unwrap().terminal_host);
+    assert!(
+        app.current().unwrap().terminal_generation > host_generation,
+        "ended jail shell is reopened without reusing host generation"
+    );
+    let _ = app.update(Message::ToggleHostTerminal);
+    assert_eq!(app.current().unwrap().terminal_generation, host_generation);
+}
+
+#[test]
+fn host_shell_shortcut_is_configurable() {
+    use iced::keyboard::{Key, Modifiers};
+    let mut bindings = crate::shortcuts::Bindings::new();
+    let modifiers = Modifiers::CTRL | Modifiers::SHIFT;
+    assert!(matches!(
+        crate::shortcuts::message(&bindings, &Key::Character("h".into()), modifiers),
+        Some(Message::ToggleHostTerminal)
+    ));
+    bindings.insert("host_shell".into(), "Alt+H".into());
+    assert!(crate::shortcuts::message(&bindings, &Key::Character("h".into()), modifiers).is_none());
+    assert!(matches!(
+        crate::shortcuts::message(&bindings, &Key::Character("h".into()), Modifiers::ALT),
+        Some(Message::ToggleHostTerminal)
+    ));
+}

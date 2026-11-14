@@ -258,25 +258,59 @@ pub fn jail_terminal(
     argv: Vec<String>,
     env: BTreeMap<String, String>,
 ) -> impl FnOnce(u16, u16) -> anyhow::Result<Connection> + Send + 'static {
+    named_terminal(connect, Some(session_id), label.into(), argv, env, None)
+}
+
+/// A host shell owned by the daemon, sharing the GTK shelf's per-session label.
+pub fn host_shell(
+    connect: crate::Connector,
+    session_id: String,
+    cwd: Option<sill_proto::sessions::HostPath>,
+) -> impl FnOnce(u16, u16) -> anyhow::Result<Connection> + Send + 'static {
+    named_terminal(
+        connect,
+        None,
+        format!("host:{session_id}"),
+        vec![],
+        [
+            ("SILL_HOST_SHELL".into(), "1".into()),
+            (
+                "GIT_CONFIG_PARAMETERS".into(),
+                "'core.fsmonitor=false' 'core.useBuiltinFSMonitor=false'".into(),
+            ),
+        ]
+        .into(),
+        cwd,
+    )
+}
+
+fn named_terminal(
+    connect: crate::Connector,
+    session_id: Option<String>,
+    label: String,
+    argv: Vec<String>,
+    env: BTreeMap<String, String>,
+    cwd: Option<sill_proto::sessions::HostPath>,
+) -> impl FnOnce(u16, u16) -> anyhow::Result<Connection> + Send + 'static {
     move |cols, rows| {
         let client = connect()?;
         let listed: api::Terminals = client.call(
             "_sill/terminals.list",
             api::List {
-                session_id: Some(session_id.clone()),
+                session_id: session_id.clone(),
             },
         )?;
         let found = listed
             .terminals
             .into_iter()
             .rev()
-            .find(|t| t.label == label && t.state == "running");
+            .find(|t| t.session_id == session_id && t.label == label && t.state == "running");
         let terminal = match found {
             Some(t) => t,
             None => client.call(
                 "_sill/terminals.open",
                 api::Open {
-                    session_id: Some(session_id),
+                    session_id,
                     label: label.into(),
                     argv,
                     // the frontend emulates xterm, whatever the jail's default is
@@ -285,7 +319,7 @@ pub fn jail_terminal(
                         .map(|(k, v)| (k.to_string(), v.to_string()))
                         .chain(env)
                         .collect(),
-                    cwd: None,
+                    cwd,
                     cols,
                     rows,
                 },

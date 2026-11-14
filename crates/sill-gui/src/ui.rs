@@ -980,7 +980,9 @@ impl App {
         let shell = button(icons::glyph(
             "terminal",
             12.0,
-            if view.terminal_shown {
+            if view.terminal_shown && view.terminal_host {
+                P.warning
+            } else if view.terminal_shown {
                 P.accent
             } else {
                 P.fg_dim
@@ -993,11 +995,19 @@ impl App {
             has_session.then_some(Message::ToggleTerminal),
         ))
         .id("terminal-button");
+        let shell = mouse_area(shell);
+        let shell = if has_session {
+            shell.on_right_press(Message::ToggleHostTerminal)
+        } else {
+            shell
+        };
         let shell = tooltip(
             shell,
-            container(text("Terminal in the jail").size(style::SMALL))
-                .padding([4, 8])
-                .style(style::fill(P.code_bg)),
+            container(
+                text("Left-click: jail terminal · Right-click: host terminal").size(style::SMALL),
+            )
+            .padding([4, 8])
+            .style(style::fill(P.code_bg)),
             tooltip::Position::Top,
         );
         // the agent's controls sideways-scrolling between the shell's button and send/stop, which
@@ -1124,7 +1134,7 @@ impl App {
         // as in the shelf, the prompt folds away while the terminal is up in its place
         let terminal = view.terminal.as_ref().filter(|_| view.terminal_shown);
         let input: Element<'_, Message> = match terminal {
-            Some(pane) => self.terminal_pane(pane),
+            Some(pane) => self.terminal_pane(pane, view.terminal_host),
             None => editor.into(),
         };
         // under the prompt the icons sit low (the prompt's own padding is above them); under the
@@ -1151,12 +1161,20 @@ impl App {
 
     /// The jail shell under its caption: a rule and label in the success colour, the counterpart
     /// of the host shell's warning-coloured one (the shelf's `sill-jail-caption`).
-    fn terminal_pane<'a>(&'a self, pane: &'a crate::terminal::Pane) -> Element<'a, Message> {
+    fn terminal_pane<'a>(
+        &'a self,
+        pane: &'a crate::terminal::Pane,
+        host: bool,
+    ) -> Element<'a, Message> {
         use crate::terminal::Status;
         let mut caption = row![
-            text("jail · inside the session")
-                .size(style::TINY)
-                .color(P.success),
+            text(if host {
+                "host · outside the jail · writes are not tracked"
+            } else {
+                "jail · inside the session"
+            })
+            .size(style::TINY)
+            .color(if host { P.warning } else { P.success }),
             space().width(Fill),
         ]
         .spacing(8)

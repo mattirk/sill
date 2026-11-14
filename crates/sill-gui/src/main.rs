@@ -264,6 +264,7 @@ pub enum Message {
     Quit,
     /// `>_`: the session's jail shell in place of the prompt, or the prompt again.
     ToggleTerminal,
+    ToggleHostTerminal,
     Terminal(String, u64, terminal::Event),
     TermAction(terminal::Action),
     TermPaste(Option<String>),
@@ -375,6 +376,8 @@ pub struct SessionView {
     pub heights: rows::Heights,
     pub terminal: Option<terminal::Pane>,
     pub terminal_shown: bool,
+    pub terminal_host: bool,
+    parked_terminal: Option<(terminal::Pane, u64)>,
     terminal_generation: u64,
     /// The agent's login under way, if any (`login_ui`).
     login: login_ui::Login,
@@ -387,6 +390,21 @@ pub struct SessionView {
 }
 
 impl SessionView {
+    fn select_shell(&mut self, host: bool) {
+        if self.terminal_host != host {
+            let old = self
+                .terminal
+                .take()
+                .map(|pane| (pane, self.terminal_generation));
+            if let Some((pane, generation)) = self.parked_terminal.take() {
+                self.terminal = Some(pane);
+                self.terminal_generation = generation;
+            }
+            self.parked_terminal = old;
+            self.terminal_host = host;
+            self.terminal_shown = false;
+        }
+    }
     fn new(id: &str) -> Self {
         Self {
             id: id.into(),
@@ -408,6 +426,8 @@ impl SessionView {
             heights: Default::default(),
             terminal: None,
             terminal_shown: false,
+            terminal_host: false,
+            parked_terminal: None,
             terminal_generation: 0,
             login: login_ui::Login::default(),
             files: FilesState::default(),
@@ -1378,7 +1398,8 @@ impl App {
                 }
                 return self.hide();
             }
-            Message::ToggleTerminal => return self.toggle_terminal(),
+            Message::ToggleTerminal => return self.toggle_shell(false),
+            Message::ToggleHostTerminal => return self.toggle_shell(true),
             Message::ReopenTerminal => return self.open_terminal(),
             Message::EndTerminal => {
                 if let Some(pane) = self.current().and_then(|v| v.terminal.as_ref()) {
@@ -1392,11 +1413,16 @@ impl App {
                     terminal::Event::Failed(why) => Some(Some(why.clone())),
                     _ => None,
                 };
-                if let Some(view) = self.views.get_mut(&session)
-                    && generation == view.terminal_generation
-                    && let Some(pane) = &mut view.terminal
-                {
-                    pane.accept(event);
+                if let Some(view) = self.views.get_mut(&session) {
+                    if generation == view.terminal_generation {
+                        if let Some(pane) = &mut view.terminal {
+                            pane.accept(event);
+                        }
+                    } else if let Some((pane, parked_generation)) = &mut view.parked_terminal {
+                        if generation == *parked_generation {
+                            pane.accept(event);
+                        }
+                    }
                 }
                 if let Some(failed) = closed {
                     return self.login_terminal_closed(&session, generation, failed);
@@ -2790,6 +2816,13 @@ impl App {
         }
     }
 
+    fn toggle_shell(&mut self, host: bool) -> Task<Message> {
+        if let Some(view) = self.current_mut() {
+            view.select_shell(host);
+        }
+        self.toggle_terminal()
+    }
+
     fn toggle_terminal(&mut self) -> Task<Message> {
         let Some(view) = self.current_mut() else {
             return Task::none();
@@ -2820,7 +2853,11 @@ impl App {
         let Some(view) = self.current_mut() else {
             return Task::none();
         };
-        view.terminal_generation += 1;
+        view.terminal_generation = view.terminal_generation.max(
+            view.parked_terminal
+                .as_ref()
+                .map_or(0, |(_, generation)| *generation),
+        ) + 1;
         let generation = view.terminal_generation;
         let (cols, rows) = view
             .terminal
@@ -2829,11 +2866,24 @@ impl App {
         // the old pane goes first, so its stream is closed before another attaches
         view.terminal = None;
         let (pane, events) = match (demo, connect) {
-            (false, Some(connect)) => terminal::Pane::open(
-                cols,
-                rows,
-                sill_client::terminal::jail_shell(connect, view.id.clone()),
-            ),
+            (false, Some(connect)) => terminal::Pane::open(cols, rows, {
+                let id = view.id.clone();
+                let host = view.terminal_host;
+                let cwd = view
+                    .files
+                    .roots
+                    .iter()
+                    .find(|r| r.metadata.as_ref().is_some_and(|m| m.directory))
+                    .map(|r| r.path.clone())
+                    .or_else(|| view.files.home.clone());
+                move |cols, rows| {
+                    if host {
+                        sill_client::terminal::host_shell(connect, id, cwd)(cols, rows)
+                    } else {
+                        sill_client::terminal::jail_shell(connect, id)(cols, rows)
+                    }
+                }
+            }),
             _ => terminal::Pane::open(cols, rows, terminal::demo_shell),
         };
         view.terminal = Some(pane);
