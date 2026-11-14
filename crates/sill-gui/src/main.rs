@@ -368,6 +368,8 @@ pub enum Message {
     /// A reply belongs to the Settings page that issued it, even across navigation.
     SettingsReply(String, settings_ui::Event),
     Agents(agents_ui::Event),
+    /// A registry agent's icon arrived from the daemon (None: it has none).
+    AgentIcon(String, Option<Vec<u8>>),
     /// The daemon's settings, read at the start and with each refresh: the theme, the timer.
     DaemonSettings(u64, Result<sill_proto::admin::Settings, String>),
     /// A tab's ×: end its session (a ghost's needs a second press).
@@ -638,6 +640,10 @@ pub struct App {
     details_drafts: BTreeMap<String, details::Draft>,
     pub settings_page: Option<settings_ui::SettingsPage>,
     pub agents_page: agents_ui::AgentsPage,
+    /// Registry agents' icons (SVG bytes) by agent id, for tabs and the + menu; built-ins have
+    /// their own glyphs.
+    pub agent_icons: BTreeMap<String, Vec<u8>>,
+    agent_icons_queued: BTreeSet<String>,
     /// The herring's page last shown: what it opens next.
     pub last_page: Page,
     /// The daemon's settings as last read.
@@ -775,6 +781,8 @@ impl App {
             details_drafts: BTreeMap::new(),
             settings_page: None,
             agents_page: agents_ui::AgentsPage::default(),
+            agent_icons: BTreeMap::new(),
+            agent_icons_queued: BTreeSet::new(),
             last_page: Page::Changes,
             daemon_settings: None,
             pending_choose: None,
@@ -1896,6 +1904,11 @@ impl App {
             }
             Message::ShowPage(page) => return self.show_page(page),
             Message::Agents(event) => return self.agents_event(event),
+            Message::AgentIcon(id, bytes) => {
+                if let Some(bytes) = bytes {
+                    self.agent_icons.insert(id, bytes);
+                }
+            }
             Message::Settings(event) => return self.settings_event(event),
             Message::SettingsReply(token, event) => {
                 if self
@@ -2595,9 +2608,11 @@ impl App {
                 ]);
             }
             Event::Agents(agents) => {
+                let ids: Vec<String> = agents.as_ref().map(|a| a.iter().map(|d| d.id.clone()).collect()).unwrap_or_default();
                 if let Some(menu) = &mut self.menu {
                     menu.agents = Some(agents);
                 }
+                return self.agent_icons_load(ids);
             }
             Event::RememberPins(on) => {
                 if let Some(menu) = &mut self.menu {
@@ -2821,6 +2836,55 @@ impl App {
         Task::batch(tasks)
     }
 
+    /// A registry agent's icon for the menu and the tabs: the daemon's cached SVG when it has
+    /// arrived, else the built-in glyph (built-ins always).
+    pub fn agent_icon(&self, id: &str) -> iced::widget::svg::Handle {
+        match self.agent_icons.get(id) {
+            Some(bytes) => iced::widget::svg::Handle::from_memory(bytes.clone()),
+            None => icons::for_agent(id),
+        }
+    }
+
+    /// Fetch the registry icons of the non-built-in agents among `ids` that are not known yet,
+    /// one connection for the batch; each arrives as `Message::AgentIcon`.
+    fn agent_icons_load(&mut self, ids: Vec<String>) -> Task<Message> {
+        let wanted: Vec<String> = ids
+            .into_iter()
+            .filter(|id| !icons::is_builtin_agent(id) && !self.agent_icons.contains_key(id) && !self.agent_icons_queued.contains(id))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if wanted.is_empty() {
+            return Task::none();
+        }
+        let Some(connect) = self.connect.clone() else {
+            return Task::none();
+        };
+        self.agent_icons_queued.extend(wanted.iter().cloned());
+        let (tx, rx) = async_channel::bounded(16);
+        std::thread::spawn(move || {
+            let Ok(client) = connect() else {
+                return;
+            };
+            for id in wanted {
+                let bytes = (|| -> anyhow::Result<Option<Vec<u8>>> {
+                    let installed: sill_proto::agent_admin::Installation = client.call("_sill/registry.installed", sill_proto::agent_admin::AgentKey { agent_id: id.clone() })?;
+                    let Some(installed) = installed.installed else { return Ok(None) };
+                    sill_client::agents::icon(&client, sill_proto::agent_admin::EntryKey { entry_id: id.clone(), version: installed.version, source: installed.source })
+                })()
+                .ok()
+                .flatten();
+                if tx.send_blocking(Message::AgentIcon(id, bytes)).is_err() {
+                    break;
+                }
+            }
+        });
+        Task::run(
+            iced::futures::stream::unfold(rx, |rx| async move { rx.recv().await.ok().map(|m| (m, rx)) }),
+            |m| m,
+        )
+    }
+
     fn listed(&mut self, result: Result<Vec<Session>, String>) -> Task<Message> {
         self.list_pending = false;
         if std::mem::take(&mut self.list_again) {
@@ -2838,6 +2902,7 @@ impl App {
         self.list_error = None;
         self.listed = true;
         self.all_sessions = sessions.clone();
+        let icons = self.agent_icons_load(sessions.iter().map(|s| s.agent.clone()).collect::<Vec<_>>());
         // Refreshes may arrive newest-first or in activity order. Existing tab positions are
         // stable; newly discovered/reopened sessions append, oldest first within the batch.
         let positions: BTreeMap<String, usize> = self
@@ -2946,6 +3011,7 @@ impl App {
             let id = tab.id.clone();
             tasks.push(self.choose(id));
         }
+        tasks.push(icons);
         Task::batch(tasks)
     }
 

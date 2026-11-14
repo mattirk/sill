@@ -2298,6 +2298,23 @@ fn the_menu_opens_on_hover_and_closes_when_the_pointer_leaves() {
 }
 
 #[test]
+fn a_registry_agents_icon_reaches_the_menu_and_the_tab_once_it_arrives() {
+    let (mut app, _) = App::new(true, None);
+    // before it arrives: the neutral glyph, no fetch queued for built-ins
+    assert_eq!(app.agent_icons_load(vec!["claude".into(), "codex".into()]).units(), 0);
+    let fallback = app.agent_icon("antigravity-acp");
+    assert_eq!(fallback.id(), crate::icons::for_agent("antigravity-acp").id(), "the neutral glyph until the icon arrives");
+    let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><circle cx="5" cy="5" r="4"/></svg>"#.to_vec();
+    let _ = app.update(Message::AgentIcon("antigravity-acp".into(), Some(svg.clone())));
+    assert_eq!(app.agent_icons.get("antigravity-acp"), Some(&svg));
+    assert_ne!(app.agent_icon("antigravity-acp").id(), fallback.id(), "the registry icon once it arrived");
+    let _ = app.update(Message::AgentIcon("other".into(), None));
+    assert!(!app.agent_icons.contains_key("other"));
+    // the tab texture takes the custom SVG without panicking (a silhouette in the tab colour)
+    let _ = crate::icons::tab_agent("antigravity-acp", Some(&svg), crate::style::P.fg, false);
+}
+
+#[test]
 fn an_agent_without_directory_setup_is_dimmed_in_the_menu_and_opens_the_agents_page() {
     use crate::menu::Event;
     let (mut app, _) = App::new(true, None);

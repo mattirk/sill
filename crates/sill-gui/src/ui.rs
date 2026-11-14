@@ -451,6 +451,7 @@ impl App {
         let agent = keys::press(
             button(icons::tab_agent(
                 &tab.agent,
+                self.agent_icons.get(&tab.agent).map(Vec::as_slice),
                 if working { P.accent } else { color },
                 working,
             ))

@@ -250,27 +250,35 @@ pub fn for_agent(id: &str) -> Handle {
     }
 }
 
+/// Whether an agent id has a built-in glyph; the others get the registry's icon when the daemon
+/// has one (`App::agent_icon`).
+pub fn is_builtin_agent(id: &str) -> bool {
+    matches!(id, "claude" | "codex" | "gemini")
+}
+
 /// The working-tab glyph: only the icon scales, inside a fixed slot.
 pub fn tab_agent<'a>(
     id: &str,
+    custom: Option<&[u8]>,
     color: iced::Color,
     working: bool,
 ) -> iced::Element<'a, crate::Message> {
     iced::Element::new(TabAgent {
-        handle: tab_texture(id, color),
+        handle: tab_texture(id, custom, color),
         working,
     })
 }
 
 // Rasterize once at 8× the display size. Iced's SVG renderer uses nearest-neighbour
 // sampling and rounds raster sizes, which makes a 13 px scaling animation visibly step.
-fn tab_texture(id: &str, color: iced::Color) -> iced::advanced::image::Handle {
+fn tab_texture(id: &str, custom: Option<&[u8]>, color: iced::Color) -> iced::advanced::image::Handle {
     use iced::advanced::image::Handle as Image;
-    type Key = (String, [u32; 4]);
+    type Key = (String, bool, [u32; 4]);
     static CACHE: OnceLock<std::sync::Mutex<std::collections::HashMap<Key, Image>>> =
         OnceLock::new();
     let key = (
         id.to_owned(),
+        custom.is_some(),
         [
             color.r.to_bits(),
             color.g.to_bits(),
@@ -283,13 +291,18 @@ fn tab_texture(id: &str, color: iced::Color) -> iced::advanced::image::Handle {
         .lock()
         .expect("tab icon cache");
     cache.entry(key).or_insert_with(|| {
+        let [r, g, b, a] = color.into_rgba8();
+        // a registry icon: drawn as the others are, a silhouette in the tab's colour
+        if let Some(pixels) = custom.and_then(|bytes| std::str::from_utf8(bytes).ok()).and_then(|svg| crate::tray::rgba(svg, 104)) {
+            let tinted: Vec<u8> = pixels.chunks_exact(4).flat_map(|px| [r, g, b, (u16::from(px[3]) * u16::from(a) / 255) as u8]).collect();
+            return Image::from_rgba(104, 104, tinted);
+        }
         let path = match id {
             "claude" => CLAUDE,
             "codex" => OPENAI,
             "gemini" => GEMINI,
             _ => AGENT,
         };
-        let [r, g, b, a] = color.into_rgba8();
         let svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="rgb({r},{g},{b})" fill-opacity="{}" d="{path}"/></svg>"#, f32::from(a) / 255.0);
         Image::from_rgba(104, 104, crate::tray::rgba(&svg, 104).expect("built-in agent SVG"))
     }).clone()

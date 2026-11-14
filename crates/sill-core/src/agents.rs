@@ -155,6 +155,28 @@ pub fn builtin() -> Vec<Agent> {
             memory_paths: vec!["~/.codex/memories".into()],
         },
         Agent {
+            // what its login wrote on 2026-11-08 (acp_token.json, settings.json under the
+            // Gemini-style directory), plus the skills it writes while working; registry entry
+            // `antigravity-acp`, a binary install, so the command comes from the install
+            id: "antigravity-acp".into(),
+            name: "Google Antigravity".into(),
+            enabled: true,
+            command: vec!["agy_acp_server.par".into(), "--uid=".into()],
+            env: Default::default(),
+            supports_load: true,
+            experimental_acp_v2: false,
+            domains: vec!["*.googleapis.com".into(), "*.google.com".into()],
+            sandbox_off_env: Default::default(),
+            home_paths: Some(vec![HomePath::directory("~/.gemini/antigravity-acp"), HomePath::directory("~/skills")]),
+            login_files: vec![".gemini/antigravity-acp/acp_token.json".into(), ".gemini/antigravity-acp/settings.json".into()],
+            // "Log in with Google" and the Enterprise login open a browser with a localhost callback
+            host_login: vec!["oauth-personal".into(), "oauth-business".into()],
+            home_env: None,
+            home_env_parent: false,
+            icon: None, // the registry's icon, by id
+            memory_paths: vec![],
+        },
+        Agent {
             id: "gemini".into(),
             name: "Gemini CLI".into(),
             enabled: true,

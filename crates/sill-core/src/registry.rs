@@ -221,6 +221,9 @@ pub fn is_tested(id: &str) -> bool {
 /// The built-in sill agent an entry is the package of, if any: it keeps the built-in's jail
 /// settings (home paths, login, domains) and only takes the command.
 pub fn builtin_for(entry: &Entry) -> Option<&'static str> {
+    if entry.id == "antigravity-acp" {
+        return Some("antigravity-acp"); // a binary distribution: no package name to match
+    }
     let pkg = entry.package_name().unwrap_or_default();
     match pkg.as_str() {
         "@agentclientprotocol/claude-agent-acp" | "@zed-industries/claude-code-acp" => Some("claude"),

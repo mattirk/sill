@@ -40,6 +40,8 @@ struct Editor {
     env: iced::widget::text_editor::Content,
     domain_input: String,
     domain_error: Option<String>,
+    path_input: String,
+    path_error: Option<String>,
 }
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Filter {
@@ -77,6 +79,10 @@ pub enum Event {
     DomainInput(String),
     AddDomain,
     RemoveDomain(String),
+    /// The Directories editor: a `~/…` path the agent keeps across its sessions.
+    PathInput(String),
+    AddPath,
+    RemovePath(String),
     Enabled(bool),
     Save,
     Icon(String, Option<Vec<u8>>),
@@ -111,6 +117,89 @@ fn control(label: &str, event: Event) -> Element<'_, Message> {
         msg(event),
     )
 }
+/// A typed path as a `home_paths` entry: `~/…` (a bare name is taken under the home); a trailing
+/// `/` or a last component without a dot is a directory, otherwise a file. The daemon validates
+/// the rest (shared parents, overlaps) on Save.
+fn home_path(input: &str) -> Option<sill_proto::agent_admin::HomePath> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || trimmed.contains("..") || trimmed.contains('\0') {
+        return None;
+    }
+    let rel = trimmed.strip_prefix("~/").or_else(|| trimmed.strip_prefix("$HOME/")).unwrap_or(trimmed.trim_start_matches("./"));
+    if rel.starts_with('/') || rel.starts_with('~') {
+        return None;
+    }
+    let directory = rel.ends_with('/') || !rel.rsplit('/').next().unwrap_or_default().contains('.');
+    let rel = rel.trim_end_matches('/');
+    if rel.is_empty() {
+        return None;
+    }
+    Some(if directory {
+        sill_proto::agent_admin::HomePath::directory(&format!("~/{rel}"))
+    } else {
+        sill_proto::agent_admin::HomePath { path: format!("~/{rel}"), kind: sill_proto::agent_admin::HomePathKind::File, initial_content: None }
+    })
+}
+
+/// The agent's own paths: kept in sill's storage across its sessions (login, settings, skills).
+fn path_controls(editor: &Editor) -> Element<'_, Message> {
+    let mut paths = column![
+        text("Directories").size(style::SMALL),
+        text("Kept across this agent's sessions, in sill's storage. Anything else the agent writes under your home stays with the session. Changes apply to new sessions.")
+            .size(style::SMALL).color(P.fg_dim),
+    ].spacing(4);
+    let declared = editor.definition.home_paths.as_deref().unwrap_or_default();
+    for entry in declared {
+        let label = match entry.kind {
+            sill_proto::agent_admin::HomePathKind::Directory => format!("{}/", entry.path),
+            sill_proto::agent_admin::HomePathKind::File => entry.path.clone(),
+        };
+        paths = paths.push(
+            row![
+                text(label).size(style::TEXT).width(Fill),
+                keys::press(
+                    button(crate::icons::glyph("minus", 13.0, style::alpha(P.fg, 0.7)))
+                        .padding([6, 8])
+                        .style(style::quiet),
+                    msg(Event::RemovePath(entry.path.clone())),
+                ),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
+    }
+    if declared.is_empty() {
+        paths = paths.push(text(if editor.definition.home_paths.is_some() { "None: no persistent state" } else { "Not set up yet" }).size(style::SMALL).color(P.fg_dim));
+    }
+    let candidate = home_path(&editor.path_input);
+    let duplicate = candidate.as_ref().is_some_and(|c| declared.iter().any(|d| d.path == c.path));
+    let can_add = candidate.is_some() && !duplicate;
+    let mut input = text_input("~/skills", &editor.path_input)
+        .on_input(|s| msg(Event::PathInput(s)))
+        .padding(7)
+        .size(style::SMALL);
+    if can_add {
+        input = input.on_submit(msg(Event::AddPath));
+    }
+    paths = paths.push(
+        row![
+            input,
+            keys::press_maybe(
+                button(text("Add").size(style::SMALL)).padding([6, 10]).style(style::quiet),
+                can_add.then(|| msg(Event::AddPath))
+            ),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    );
+    if let Some(error) = &editor.path_error {
+        paths = paths.push(text(error).size(style::SMALL).color(P.error));
+    } else if duplicate {
+        paths = paths.push(text("Already in the list").size(style::SMALL).color(P.fg_dim));
+    }
+    paths.into()
+}
+
 fn domain_controls(editor: &Editor) -> Element<'_, Message> {
     let mut domains = column![
         text("Allowed domains").size(style::SMALL),
@@ -398,6 +487,8 @@ impl App {
                         ),
                         domain_input: String::new(),
                         domain_error: None,
+                        path_input: String::new(),
+                        path_error: None,
                         definition: d,
                     });
                 }
@@ -442,6 +533,35 @@ impl App {
                     e.definition.domains.retain(|d| d != &domain);
                 }
             }
+            Event::PathInput(s) => {
+                if let Some(e) = &mut p.editor {
+                    e.path_input = s;
+                    e.path_error = None;
+                }
+            }
+            Event::AddPath => {
+                if let Some(e) = &mut p.editor {
+                    let Some(path) = home_path(&e.path_input) else {
+                        e.path_error = Some("Use a path under your home, such as ~/skills or ~/.example/config.json".into());
+                        return Task::none();
+                    };
+                    let paths = e.definition.home_paths.get_or_insert_with(Vec::new);
+                    if paths.iter().any(|p| p.path == path.path) {
+                        e.path_error = Some("Already in the list".into());
+                        return Task::none();
+                    }
+                    paths.push(path);
+                    e.path_input.clear();
+                    e.path_error = None;
+                }
+            }
+            Event::RemovePath(path) => {
+                if let Some(e) = &mut p.editor
+                    && let Some(paths) = &mut e.definition.home_paths
+                {
+                    paths.retain(|p| p.path != path);
+                }
+            }
             Event::Enabled(v) => {
                 if let Some(e) = &mut p.editor {
                     e.definition.enabled = v;
@@ -471,6 +591,10 @@ impl App {
                 definition.env = env;
                 if !editor.domain_input.trim().is_empty() {
                     p.note = Some("Add the typed domain or clear it before saving.".into());
+                    return Task::none();
+                }
+                if !editor.path_input.trim().is_empty() {
+                    p.note = Some("Add the typed directory or clear it before saving.".into());
                     return Task::none();
                 }
                 let id = editor.id.clone();
@@ -697,6 +821,7 @@ impl App {
                         .into(),
                     None => crate::icons::tab_agent(
                         r.builtin_agent_id.as_deref().unwrap_or(id),
+                        None,
                         P.fg,
                         false
                     ),
@@ -810,6 +935,7 @@ impl App {
                         .height(100)
                         .padding(7),
                     domain_controls(editor),
+                    path_controls(editor),
                     toggler(editor.definition.enabled)
                         .label("Offer in the new session menu")
                         .on_toggle(|v| msg(Event::Enabled(v))),
@@ -856,6 +982,8 @@ mod tests {
             env: iced::widget::text_editor::Content::with_text("KEEP=yes"),
             domain_input: String::new(),
             domain_error: None,
+            path_input: String::new(),
+            path_error: None,
             definition,
         });
         let _ = app.update(msg(Event::DomainInput("https://example.com/".into())));
@@ -1029,6 +1157,47 @@ mod tests {
         assert!(!app.agents_page.logs.contains_key("codex-acp"));
         let _ = app.update(msg(Event::Latest("codex-acp".into(), true)));
         assert!(app.settings.supported_agents.is_empty());
+    }
+    #[test]
+    fn the_directories_editor_adds_and_removes_home_paths() {
+        use serde_json::json;
+        let (mut app, _) = App::new(true, None);
+        let definition: Definition = serde_json::from_value(json!({
+            "id":"antigravity-acp", "name":"Antigravity", "command":["antigravity-acp"],
+            "home_paths":[{"path":"~/.gemini/antigravity-acp","kind":"directory"}]
+        }))
+        .unwrap();
+        app.agents_page.editor = Some(Editor {
+            id: "antigravity-acp".into(),
+            command: "[\"antigravity-acp\"]".into(),
+            env: iced::widget::text_editor::Content::with_text(""),
+            domain_input: String::new(),
+            domain_error: None,
+            path_input: String::new(),
+            path_error: None,
+            definition,
+        });
+        assert_eq!(home_path("skills").unwrap(), sill_proto::agent_admin::HomePath::directory("~/skills"));
+        assert_eq!(home_path("~/skills/").unwrap(), sill_proto::agent_admin::HomePath::directory("~/skills"));
+        assert_eq!(home_path("~/.agent.json").unwrap().kind, sill_proto::agent_admin::HomePathKind::File);
+        assert!(home_path("/etc/passwd").is_none() && home_path("~/../x").is_none() && home_path("~/").is_none());
+        let _ = app.update(msg(Event::PathInput("/etc".into())));
+        let _ = app.update(msg(Event::AddPath));
+        assert!(app.agents_page.editor.as_ref().unwrap().path_error.is_some());
+        let _ = app.update(msg(Event::PathInput("skills".into())));
+        let _ = app.update(msg(Event::AddPath));
+        let paths = app.agents_page.editor.as_ref().unwrap().definition.home_paths.clone().unwrap();
+        assert_eq!(paths.iter().map(|p| p.path.as_str()).collect::<Vec<_>>(), ["~/.gemini/antigravity-acp", "~/skills"]);
+        let _ = app.update(msg(Event::PathInput("~/skills".into())));
+        let _ = app.update(msg(Event::AddPath));
+        assert_eq!(app.agents_page.editor.as_ref().unwrap().path_error.as_deref(), Some("Already in the list"));
+        let _ = app.update(msg(Event::RemovePath("~/.gemini/antigravity-acp".into())));
+        let paths = app.agents_page.editor.as_ref().unwrap().definition.home_paths.clone().unwrap();
+        assert_eq!(paths.iter().map(|p| p.path.as_str()).collect::<Vec<_>>(), ["~/skills"]);
+        // a typed, unadded path blocks Save
+        let _ = app.update(msg(Event::PathInput("pending".into())));
+        let _ = app.update(msg(Event::Save));
+        assert!(app.agents_page.note.as_ref().unwrap().contains("typed directory"));
     }
     #[test]
     fn directory_setup_saves_the_ticked_proposals_as_home_paths() {

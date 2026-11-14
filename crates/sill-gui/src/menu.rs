@@ -70,7 +70,7 @@ impl App {
                             keys::press(
                                 button(
                                     row![
-                                        svg(icons::for_agent(&agent.id))
+                                        svg(self.agent_icon(&agent.id))
                                             .width(15)
                                             .height(15)
                                             .style(style::icon(alpha(P.fg, 0.5))),
@@ -93,7 +93,7 @@ impl App {
                     let start = keys::press(
                         button(
                             row![
-                                svg(icons::for_agent(&agent.id))
+                                svg(self.agent_icon(&agent.id))
                                     .width(15)
                                     .height(15)
                                     .style(style::icon(P.fg)),
@@ -334,7 +334,7 @@ impl App {
         let main = keys::press(
             button(
                 row![
-                    svg(icons::for_agent(&session.agent))
+                    svg(self.agent_icon(&session.agent))
                         .width(15)
                         .height(15)
                         .style(style::icon(P.fg)),
