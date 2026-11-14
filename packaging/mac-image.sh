@@ -68,12 +68,13 @@ write_files:
     encoding: b64
     content: $(base64 < packaging/mac/guest/dpkg-lean.cfg | tr -d '\n')
 package_update: true
-# the box (docs/server.md, plus Node for registry installs), then Desktop development's test
+# the box (docs/server.md; Node for registry installs comes from nodejs.org below), then
+# Desktop development's test
 # desktop (docs/permission-modes.md): Xwayland, the agent's input, software OpenGL and Vulkan
 # for the programs under test (the VM has no GPU of its own), the jail's private D-Bus, a font;
 # Weston itself is built from source below
 packages: [git, ripgrep, ca-certificates, build-essential, pkg-config, bubblewrap, e2fsprogs, util-linux,
-           libpam-systemd, dbus-user-session, openssh-server, sudo, curl, nodejs, npm,
+           libpam-systemd, dbus-user-session, openssh-server, sudo, curl, xz-utils,
            xwayland, xdotool, libxi6, libxkbcommon-x11-0, libxcb-xkb1,
            libgl1-mesa-dri, libegl1, mesa-vulkan-drivers, dbus,
            fonts-dejavu-core]
@@ -162,6 +163,21 @@ guest 'sudo install -D -m755 guest/packaging/mac/guest/sill-disks /usr/local/lib
     sudo mkdir -p /mnt/sill-state && rm -rf guest &&
     sudo systemctl daemon-reload && sudo systemctl enable sill-disks.service &&
     sudo /usr/local/lib/sill/sill-disks && sudo mount -a && findmnt -n -o SOURCE,TARGET /home && findmnt -n -o SOURCE,TARGET /mnt/sill-state'
+# Node for the registry's agents, newer than Debian's 20 (Kimi Code needs 22.19 or later; the
+# person chose the LTS line, 2026-11-13): nodejs.org's build, pinned by version and checksum,
+# downloaded once into the cache, in /usr/local with its npm and npx
+NODE_VERSION=v24.22.3
+NODE_SHA256=6e51a2ada00f0011cc266f65d98922b403d7ad88f809ca2aa615a5fe1ce6e86c
+node_tar="$cache/node-$NODE_VERSION-linux-arm64.tar.xz"
+if ! { [ -f "$node_tar" ] && echo "$NODE_SHA256  $node_tar" | shasum -a 256 -c -s; }; then
+    echo "Downloading Node $NODE_VERSION"
+    curl -fsSL -o "$node_tar.part" "https://nodejs.org/dist/$NODE_VERSION/node-$NODE_VERSION-linux-arm64.tar.xz"
+    echo "$NODE_SHA256  $node_tar.part" | shasum -a 256 -c -s || { echo 'Node download does not match its checksum.' >&2; exit 1; }
+    mv "$node_tar.part" "$node_tar"
+fi
+guest 'sudo tar -xJ -C /usr/local --strip-components=1 --no-same-owner \
+    --exclude=CHANGELOG.md --exclude=README.md --exclude=LICENSE --exclude="share/doc" --exclude="include" &&
+    node --version && npm --version' < "$node_tar"
 # Weston 16, built once per recipe (packaging/mac/guest/weston-build.sh) and kept in the cache
 # under its hash: CI caches the same file by the same key
 weston_key=$(shasum -a 256 packaging/mac/guest/weston-build.sh | cut -c1-16)

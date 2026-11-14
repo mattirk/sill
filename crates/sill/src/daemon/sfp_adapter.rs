@@ -281,6 +281,20 @@ impl AdapterState {
                 }
                 next.activity = "unknown".into();
                 next.turn_id = None;
+                // an agent that failed, at its start above all, says why in the conversation:
+                // without it the session only seemed to hang (the person, 2026-11-13: Kimi Code
+                // needed a newer Node and exited before it answered)
+                if let Some(error) = error {
+                    let mut said = format!("The agent stopped: {error}");
+                    let tail = agent_stderr_tail(&session.session_id);
+                    if !tail.is_empty() {
+                        said.push_str("\n");
+                        said.push_str(&tail);
+                    }
+                    let mut content = sfp::Content::text(said);
+                    content.extra.insert("severity".into(), serde_json::json!("error"));
+                    out.push(sfp::Event::ItemCreated { item: self.item(id("item"), "notice", vec![content], None) });
+                }
                 // Root reconciles all open/answered questions against their durable records.
             }
             // Private markers and the ACP loop's debug dump of updates it does not handle
@@ -597,6 +611,11 @@ mod tests {
         assert!(matches!(&titled[..], [sfp::Event::SessionUpdated { session: s }] if s.agent_title.as_deref() == Some("Fix the window") && s.title == session.title));
         let notice = adapter.project(&session, &relay::Event::Notice { severity: "warning".into(), title: "Rate limited".into(), description: Some("retrying".into()) }, None);
         assert!(matches!(&notice[0], sfp::Event::ItemCreated { item } if item.kind == "notice" && item.content[0].text.as_deref() == Some("Rate limited\nretrying") && item.content[0].extra["severity"] == "warning"));
+        // an agent that fails says so in the conversation, not only in the journal
+        let ended = adapter.project(&session, &relay::Event::Ended(Some("connection closed".into())), None);
+        assert!(ended.iter().any(|e| matches!(e, sfp::Event::ItemCreated { item } if item.kind == "notice"
+            && item.content[0].text.as_deref().is_some_and(|t| t.starts_with("The agent stopped: connection closed"))
+            && item.content[0].extra["severity"] == "error")));
     }
 
     #[test]
@@ -608,4 +627,29 @@ mod tests {
         adapter.project(&session, &relay::Event::TurnStarted, None);
         assert!(matches!(adapter.project(&session, &relay::Event::Text("new text".into()), None)[0], sfp::Event::ItemCreated { .. }));
     }
+}
+
+/// The last lines the session's agent wrote to its stderr: the shim puts them in the session's
+/// journal as `agent[PID]: …` (sill-shim). Empty where there is no journal to read.
+fn agent_stderr_tail(session_id: &str) -> String {
+    const LINES: usize = 8;
+    if session_id.is_empty() || !session_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return String::new();
+    }
+    let Ok(out) = std::process::Command::new("journalctl")
+        .args(["--user", "--no-pager", "-q", "-o", "cat", "-n", "200", "-t"])
+        .arg(format!("sill-{session_id}"))
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return String::new();
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix("agent[").and_then(|r| r.split_once("]: ")).map(|(_, rest)| rest))
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    lines[lines.len().saturating_sub(LINES)..].join("\n")
 }
