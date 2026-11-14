@@ -98,8 +98,8 @@ impl Widget<Message, Theme, Renderer> for Popup<'_> {
         viewport: &Rectangle,
     ) {
         if let Event::Mouse(mouse::Event::ButtonPressed(button)) = event {
-            // open: the overlay took the presses inside the list, so this one is outside it (or
-            // on the control): close
+            // open: the overlay closes on any press (inside: a choice; outside: dismissed); this
+            // is the fallback should one reach here
             if self.open {
                 shell.publish(self.on_toggle.clone());
                 shell.capture_event();
@@ -163,6 +163,7 @@ impl Widget<Message, Theme, Renderer> for Popup<'_> {
         let bounds = layout.bounds();
         let choices = &self.choices;
         let on_choice = &self.on_choice;
+        let dismiss = self.on_toggle.clone();
         // the list reads as a menu: as wide as its longest choice, in the controls' menu text
         let width = choices
             .iter()
@@ -183,7 +184,9 @@ impl Widget<Message, Theme, Renderer> for Popup<'_> {
         )
         .width(width.max(bounds.width))
         .padding([6.0, SIDE])
-        .text_size(style::SMALL);
+        .text_size(style::SMALL)
+        // a press outside the list closes it, wherever it lands
+        .on_dismiss(move || dismiss.clone());
         Some(menu.overlay(
             layout.position() + translation - Vector::new(0.0, GAP),
             *viewport,

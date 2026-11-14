@@ -15,6 +15,12 @@ once upstream has an equivalent.
   list's menu can be wider, roomier and set apart from a compact list (upstream gives the menu the
   list's own width, padding and text size). sill-gui's agent controls are small labels whose menus
   read as menus (the person's request of 2026-11-05). Unset, upstream's behaviour.
+- `src/overlay/menu.rs` and `src/pick_list.rs`: the overlay menu closes itself — `Menu::closes`
+  clears the caller's open flag on a choice or on a press outside the list, `Menu::on_dismiss`
+  produces a message for such a press — and captures that press. Upstream leaves closing to the
+  pick list's own `update`, which never sees a press that a widget earlier in the tree (the prompt
+  editor) captures first, so the menu stayed open (the person, 2026-11-08). The pick list uses
+  both; sill-gui's `popup.rs` (the shield's right-click menu) uses `on_dismiss`.
 - `src/text_editor.rs`: optional `line_numbers` gutter, supplied with visible logical line
   positions from the renderer. Gutter width tracks the number of digits; source layout, pointer
   hit testing and IME positioning use the same inset. Unwrapped editors pass sideways/Shift-wheel
@@ -23,4 +29,4 @@ once upstream has an equivalent.
   sill's builds (a path dependency's warnings are not capped as a registry crate's are).
 
 Worth proposing upstream: make the cells readable, or the table's scrollbar configurable; a pick
-list's menu width, padding, text size and gap.
+list's menu width, padding, text size and gap; a menu that closes on a press outside it.

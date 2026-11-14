@@ -41,6 +41,9 @@ pub struct Menu<
     text_shaping: text::Shaping,
     font: Option<Renderer::Font>,
     class: &'a <Theme as Catalog>::Class<'b>,
+    // sill patch: the menu closes itself on a choice or a press outside it
+    open: Option<&'a mut bool>,
+    on_dismiss: Option<Box<dyn Fn() -> Message + 'a>>,
 }
 
 impl<'a, 'b, T, Message, Theme, Renderer>
@@ -75,7 +78,24 @@ where
             text_shaping: text::Shaping::default(),
             font: None,
             class,
+            open: None,
+            on_dismiss: None,
         }
+    }
+
+    /// sill patch: the flag the [`Menu`] clears when it closes — on a choice, or on a press
+    /// outside it, which it captures (so an open menu closes wherever the press lands, before
+    /// any widget under the pointer can take the event).
+    pub fn closes(mut self, open: &'a mut bool) -> Self {
+        self.open = Some(open);
+        self
+    }
+
+    /// sill patch: the message produced by a press outside the [`Menu`], for a menu whose open
+    /// state lives outside the widget tree.
+    pub fn on_dismiss(mut self, on_dismiss: impl Fn() -> Message + 'a) -> Self {
+        self.on_dismiss = Some(Box::new(on_dismiss));
+        self
     }
 
     /// Sets the width of the [`Menu`].
@@ -173,6 +193,10 @@ where
     width: f32,
     target_height: f32,
     class: &'a <Theme as Catalog>::Class<'b>,
+    // sill patch
+    open: Option<&'a mut bool>,
+    on_dismiss: Option<Box<dyn Fn() -> Message + 'a>>,
+    chosen: std::rc::Rc<std::cell::Cell<bool>>,
 }
 
 impl<'a, 'b, Message, Theme, Renderer> Overlay<'a, 'b, Message, Theme, Renderer>
@@ -205,7 +229,19 @@ where
             text_line_height,
             text_shaping,
             class,
+            open,
+            on_dismiss,
         } = menu;
+
+        // sill patch: a choice closes the menu; the list's own callback notes it
+        let chosen = std::rc::Rc::new(std::cell::Cell::new(false));
+        let noted = chosen.clone();
+        let mut on_selected = on_selected;
+        let on_selected: Box<dyn FnMut(T) -> Message + 'a> =
+            Box::new(move |option| {
+                noted.set(true);
+                on_selected(option)
+            });
 
         let list = Scrollable::new(List {
             options,
@@ -231,6 +267,9 @@ where
             width,
             target_height,
             class,
+            open,
+            on_dismiss,
+            chosen,
         }
     }
 }
@@ -280,10 +319,31 @@ where
     ) {
         let bounds = layout.bounds();
 
+        // sill patch: a press outside the menu closes it and goes no further
+        if let Event::Mouse(mouse::Event::ButtonPressed(_)) = event
+            && !cursor.is_over(bounds)
+            && (self.open.is_some() || self.on_dismiss.is_some())
+        {
+            if let Some(open) = self.open.as_deref_mut() {
+                *open = false;
+            }
+            if let Some(on_dismiss) = &self.on_dismiss {
+                shell.publish(on_dismiss());
+            }
+            shell.capture_event();
+            return;
+        }
+
         self.list.update(
             self.tree, event, layout, cursor, renderer, clipboard, shell,
             &bounds,
         );
+
+        if self.chosen.get()
+            && let Some(open) = self.open.as_deref_mut()
+        {
+            *open = false;
+        }
     }
 
     fn mouse_interaction(

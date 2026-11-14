@@ -741,18 +741,18 @@ where
 
             let on_select = &self.on_select;
 
+            // sill patch: the menu closes itself on a choice or on a press anywhere outside
+            // it, which it captures: the pick list need not see the press (a widget earlier in
+            // the tree, a text editor say, would take it first and the menu stayed open)
             let mut menu = Menu::new(
                 &mut state.menu,
                 self.options.borrow(),
                 &mut state.hovered_option,
-                |option| {
-                    state.is_open = false;
-
-                    (on_select)(option)
-                },
+                |option| (on_select)(option),
                 None,
                 &self.menu_class,
             )
+            .closes(&mut state.is_open)
             .width(self.menu_width.map_or(bounds.width, |w| w.max(bounds.width)))
             .padding(self.menu_padding.unwrap_or(self.padding))
             .font(font)
@@ -760,6 +760,9 @@ where
 
             if let Some(text_size) = self.menu_text_size.or(self.text_size) {
                 menu = menu.text_size(text_size);
+            }
+            if let Some(on_close) = self.on_close.clone() {
+                menu = menu.on_dismiss(move || on_close.clone());
             }
 
             // sill patch: the gap on both sides of the list, as the menu opens below or above
