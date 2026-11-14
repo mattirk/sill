@@ -351,9 +351,14 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
             let w: gtk::Window = w.clone().upcast();
             let fraction = s.fraction();
             if let Some(area) = x11::work_area_with(&w, fraction) {
-                w.set_default_size(area.width as i32, area.height as i32);
+                // GTK sizes in logical pixels, the work area is in device pixels
+                let k = x11::scale_of(&w);
+                w.set_default_size(area.width as i32 / k, area.height as i32 / k);
                 x11::pre_place(&w, &area);
             }
+            // invisible until the first settled frame: no black frame before GTK's first paint, no
+            // conversation visibly re-measuring and scrolling (the map handler reveals it)
+            x11::set_opacity(&w, 0.0);
         });
     }
     // GTK rewrites the size hints when it presents the surface (dropping ours), and its MapWindow
@@ -375,6 +380,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
                 }
                 x11::activate(&w, 0);
                 s.focus_prompt();
+                s.reveal_when_settled(&w);
             });
         });
     }
@@ -445,6 +451,41 @@ impl Shelf {
             "sessions" => self.focus_prompt(),
             _ => {}
         }
+    }
+
+    /// Show the (opacity 0) window once the selected conversation's height has stopped changing —
+    /// its messages re-measure after a show — or after 300 ms at the latest. No animation: it is
+    /// simply there, at the bottom, at its final size.
+    fn reveal_when_settled(&self, w: &gtk::Window) {
+        let start = std::time::Instant::now();
+        let conv = if self.stack.visible_child_name().as_deref() == Some("sessions") {
+            self.tabs.selected().and_then(|id| self.views.borrow().get(&id).map(|v| v.conv.clone()))
+        } else {
+            None
+        };
+        if let Some(c) = &conv {
+            c.reset_settle();
+        }
+        let frames = std::cell::Cell::new(0u32);
+        w.add_tick_callback(move |w, _| {
+            frames.set(frames.get() + 1);
+            let settled = conv.as_ref().map(|c| c.settled()).unwrap_or(true);
+            let late = start.elapsed() > std::time::Duration::from_millis(300);
+            if settled || late {
+                x11::set_opacity(&w.clone().upcast(), 1.0);
+                if std::env::var_os("SILL_TRACE").is_some() {
+                    eprintln!(
+                        "{} reveal: after {} ms, {} frames ({})",
+                        super::trace_ts(),
+                        start.elapsed().as_millis(),
+                        frames.get(),
+                        if settled { "settled" } else { "timed out" }
+                    );
+                }
+                return glib::ControlFlow::Break;
+            }
+            glib::ControlFlow::Continue
+        });
     }
 
     fn focus_prompt(&self) {
@@ -778,7 +819,8 @@ fn stop_then(id: &str, then: impl FnOnce() + 'static) {
 pub fn show(w: &gtk::Window, time: u32) {
     // the size GTK will realize the surface with (the realize handler refines position and hints)
     if let Some(area) = x11::work_area_with(w, x11::width_fraction()) {
-        w.set_default_size(area.width as i32, area.height as i32);
+        let k = x11::scale_of(w);
+        w.set_default_size(area.width as i32 / k, area.height as i32 / k);
     }
     w.present();
     x11::activate(w, time);

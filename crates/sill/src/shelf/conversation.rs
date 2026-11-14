@@ -78,6 +78,9 @@ pub struct Conversation {
     tick_frames: std::cell::Cell<u32>,
     /// Which follow tick is the live one; an older one still registered stops at its next frame.
     tick_gen: std::cell::Cell<u32>,
+    /// `settled`: the content height last frame, and for how many frames it has not changed.
+    settle_upper: std::cell::Cell<f64>,
+    settle_frames: std::cell::Cell<u32>,
     weak: RefCell<std::rc::Weak<Conversation>>,
     /// Set while we move the adjustment ourselves, so it doesn't count as the person scrolling.
     following: std::cell::Cell<bool>,
@@ -124,6 +127,8 @@ impl Conversation {
             ticking: std::cell::Cell::new(false),
             tick_frames: std::cell::Cell::new(0),
             tick_gen: std::cell::Cell::new(0),
+            settle_upper: std::cell::Cell::new(-1.0),
+            settle_frames: std::cell::Cell::new(0),
             weak: RefCell::new(std::rc::Weak::new()),
             following: std::cell::Cell::new(false),
             last_value: std::cell::Cell::new(0.0),
@@ -196,6 +201,23 @@ impl Conversation {
             });
         }
         conv
+    }
+
+    pub fn reset_settle(&self) {
+        self.settle_upper.set(-1.0);
+        self.settle_frames.set(0);
+    }
+
+    /// Called once per frame while the shelf waits to be revealed: true once the content height has
+    /// held for two frames and, when following, the view is at the bottom.
+    pub fn settled(&self) -> bool {
+        let adj = self.root.vadjustment();
+        let upper = adj.upper();
+        let n = if (upper - self.settle_upper.get()).abs() < 0.5 { self.settle_frames.get() + 1 } else { 0 };
+        self.settle_upper.set(upper);
+        self.settle_frames.set(n);
+        let in_place = !self.stick_to_bottom.get() || adj.value() >= upper - adj.page_size() - 1.0;
+        n >= 2 && in_place && self.root.is_mapped()
     }
 
     /// Move to the bottom without it counting as the person scrolling.
@@ -873,6 +895,8 @@ entry { border-radius: 0; }
 button.sill-md-image { padding: 0; margin: 4px 8px; background: transparent; border: none; box-shadow: none; }
 button.sill-md-image:hover { opacity: 0.85; }
 /* the viewer (left) and the folder tree (right) of a session */
+/* the viewer lies over the conversation: opaque */
+.sill-viewer { background: @window_bg_color; }
 .sill-viewer-bar { padding: 3px 6px 3px 12px; border-bottom: 1px solid alpha(@view_fg_color, 0.12); }
 .sill-viewer-btn { padding: 2px 8px; min-height: 0; min-width: 0; font-size: 90%; }
 .sill-tree-panel { border-left: 1px solid alpha(@view_fg_color, 0.12); }

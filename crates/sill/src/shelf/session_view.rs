@@ -24,8 +24,9 @@ type JailView = (Vec<sill_core::jail::Layer>, Vec<std::path::PathBuf>);
 
 pub struct SessionView {
     pub root: gtk::Box,
-    /// Left of the tree: "chat" (conversation + prompt) or "viewer".
-    left: gtk::Stack,
+    /// The viewer, drawn over the conversation (never swapped out: an unmapped conversation re-measures
+    /// on its return and loses its place).
+    viewer_layer: gtk::Box,
     viewer: Rc<Viewer>,
     tree: Rc<FolderTree>,
     /// The shelf's width depends on the tree being open: the window places itself again.
@@ -329,9 +330,11 @@ impl SessionView {
         chat.append(&conv.root);
         chat.append(&prompt_box);
         let viewer = Viewer::new();
-        let left = gtk::Stack::new();
-        left.add_named(&chat, Some("chat"));
-        left.add_named(&viewer.root, Some("viewer"));
+        let viewer_layer = viewer.root.clone();
+        viewer_layer.set_visible(false);
+        let left = gtk::Overlay::new();
+        left.set_child(Some(&chat));
+        left.add_overlay(&viewer_layer);
         left.set_hexpand(true);
         left.set_vexpand(true);
         let tree = FolderTree::new();
@@ -349,7 +352,7 @@ impl SessionView {
         let auto_allow_initial = session.auto_allow;
         let view = Rc::new(Self {
             root,
-            left,
+            viewer_layer,
             viewer,
             tree,
             on_layout: RefCell::new(None),
@@ -400,7 +403,7 @@ impl SessionView {
             let weak = Rc::downgrade(&view);
             *view.viewer.on_close.borrow_mut() = Some(Box::new(move || {
                 if let Some(v) = weak.upgrade() {
-                    v.left.set_visible_child_name("chat");
+                    v.viewer_layer.set_visible(false);
                     v.focus_prompt();
                 }
             }));
@@ -1321,13 +1324,14 @@ impl SessionView {
             self.close_tree();
         }
         self.viewer.open(path);
-        self.left.set_visible_child_name("viewer");
+        self.viewer_layer.set_visible(true);
+        self.viewer.focus(); // keys go to the viewer, not the prompt underneath
     }
 
     /// Escape inside the session: the viewer steps back (then closes), then the tree closes.
     /// False when there was nothing to step back from (the window's own Escape applies).
     pub fn escape(self: &Rc<Self>) -> bool {
-        if self.left.visible_child_name().as_deref() == Some("viewer") {
+        if self.viewer_layer.is_visible() {
             if !self.viewer.back() {
                 self.viewer.close();
             }

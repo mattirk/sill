@@ -23,6 +23,33 @@ pub fn width_fraction() -> f64 {
     WIDTH.with(|w| w.get())
 }
 
+/// The window's scale (device pixels per logical pixel). Before the window is realized GTK can't
+/// tell, so the first monitor's scale is used.
+pub fn scale_of(window: &gtk::Window) -> i32 {
+    let s = window.scale_factor();
+    if s > 1 {
+        return s;
+    }
+    let display = WidgetExt::display(window);
+    display.monitors().item(0).and_downcast::<gtk::gdk::Monitor>().map(|m| m.scale_factor()).unwrap_or(1).max(1)
+}
+
+/// The compositor's opacity for the window (`_NET_WM_WINDOW_OPACITY`): 0 keeps a mapped window
+/// invisible until its first settled frame, 1 (the property removed) shows it. A compositor without
+/// support ignores it, which only brings back the old behaviour.
+pub fn set_opacity(window: &gtk::Window, opacity: f64) {
+    let Some(xid) = xid(window) else { return };
+    let Ok((conn, _)) = x11rb::connect(None) else { return };
+    let Some(atom) = conn.intern_atom(false, b"_NET_WM_WINDOW_OPACITY").ok().and_then(|c| c.reply().ok()).map(|r| r.atom) else { return };
+    if opacity >= 1.0 {
+        let _ = conn.delete_property(xid, atom);
+    } else {
+        let v = (opacity.clamp(0.0, 1.0) * u32::MAX as f64) as u32;
+        let _ = conn.change_property32(PropMode::REPLACE, xid, atom, AtomEnum::CARDINAL, &[v]);
+    }
+    let _ = conn.flush();
+}
+
 pub struct Placement {
     pub x: i32,
     pub y: i32,

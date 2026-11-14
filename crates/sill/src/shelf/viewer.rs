@@ -186,6 +186,15 @@ impl Viewer {
         }
     }
 
+    /// Keyboard focus into the viewer (its close button: always there, never editable).
+    pub fn focus(&self) {
+        if let Some(bar) = self.root.first_child() {
+            if let Some(close) = bar.last_child() {
+                close.grab_focus();
+            }
+        }
+    }
+
     /// Forget everything and ask the owner to close.
     pub fn close(&self) {
         self.history.borrow_mut().clear();
