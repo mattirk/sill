@@ -57,9 +57,24 @@ users:
     sudo: ALL=(ALL) NOPASSWD:ALL
     ssh_authorized_keys:
       - $(cat "$work/key.pub")
+# lean from the first package on: no recommended extras, no docs or translations
+# (packaging/mac/guest/apt-lean.conf, dpkg-lean.cfg)
+write_files:
+  - path: /etc/apt/apt.conf.d/90sill-lean
+    encoding: b64
+    content: $(base64 < packaging/mac/guest/apt-lean.conf | tr -d '\n')
+  - path: /etc/dpkg/dpkg.cfg.d/90sill-lean
+    encoding: b64
+    content: $(base64 < packaging/mac/guest/dpkg-lean.cfg | tr -d '\n')
 package_update: true
+# the box (docs/server.md, plus Node for registry installs), then Desktop development's test
+# desktop (docs/permission-modes.md): Weston with its own Xwayland, the agent's input, software
+# OpenGL and Vulkan for the programs under test (the VM has no GPU of its own), the jail's
+# private D-Bus, a font
 packages: [git, ca-certificates, build-essential, pkg-config, bubblewrap, e2fsprogs, util-linux,
-           libpam-systemd, dbus-user-session, openssh-server, sudo, curl, nodejs, npm]
+           libpam-systemd, dbus-user-session, openssh-server, sudo, curl, nodejs, npm,
+           weston, xwayland, xdotool, libgl1-mesa-dri, libegl1, mesa-vulkan-drivers, dbus,
+           fonts-dejavu-core]
 # what cloud-init does shows on the virtio console (console.log), and the build learns there
 # when the account is ready, so it never tries a login too early
 output: {all: '| tee -a /var/log/cloud-init-output.log /dev/hvc0'}
@@ -159,6 +174,13 @@ fi
 echo 'Cleaning up'
 guest 'rm -rf src .cargo .rustup .cache'
 guest 'sudo apt-get -qq clean && sudo rm -rf /var/lib/apt/lists/*'
+# what the cloud image brought before the lean settings: docs, manuals and translations
+guest 'sudo find /usr/share/doc -mindepth 1 ! -name copyright ! -type d -delete;
+    sudo find /usr/share/doc -mindepth 1 -type d -empty -delete;
+    sudo rm -rf /usr/share/man/* /usr/share/info/*;
+    sudo find /usr/share/locale -mindepth 1 -maxdepth 1 ! -name locale.alias -exec rm -rf {} +'
+# the test desktop is there (the daemon's probe would say why not)
+guest 'weston --version && command -v Xwayland xdotool >/dev/null'
 # the next boot is a new instance: the app's seed gives the account its key, and the host keys
 # and machine id are made anew
 # the home the build left (the user units' links among it) becomes the image's own /home, which
