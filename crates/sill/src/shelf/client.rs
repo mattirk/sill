@@ -498,13 +498,25 @@ fn deliver(_client: &Arc<Client>, id: &str, tx: &async_channel::Sender<Event>, v
     }
     let request = match &wire { sill_core::wire::Event::PermissionRequest { request, .. } | sill_core::wire::Event::Elicitation { request, .. } => Some(*request), _ => None };
     let question_id = request.and_then(|r|view.question_id(r)).map(str::to_owned);
-    let session_id = id.to_owned();
+    ask(tx.clone(), id.to_owned(), question_id, wire);
+}
+
+/// Show an event to the view; a question's answer goes to the daemon. A refused answer leaves the
+/// question open: the view says why and shows the question again (it only logged it once, and the
+/// session waited for good on a form the person had already answered).
+fn ask(tx: async_channel::Sender<Event>, session_id: String, question_id: Option<String>, wire: sill_core::wire::Event) {
+    let again = wire.clone();
+    let view = tx.clone();
     let event = sill_core::wire::event_into_acp(wire, move |_request, answer| {
         std::thread::spawn(move || {
             let Some(question_id) = question_id else { return };
             let Ok(answer) = futures::executor::block_on(answer) else { return };
-            let input = sill_core::sfp_client::answer(question_id, session_id, answer);
-            if let Err(e) = quick::<serde_json::Value>("_sill/questions.answer", input) { eprintln!("sill: answering the agent: {e:#}"); }
+            let input = sill_core::sfp_client::answer(question_id.clone(), session_id.clone(), answer);
+            if let Err(e) = quick::<serde_json::Value>("_sill/questions.answer", input) {
+                eprintln!("sill: answering the agent: {e:#}");
+                let _ = view.send_blocking(Event::Other(format!("refused: the answer was not accepted ({e:#}); answer again")));
+                ask(view, session_id, Some(question_id), again);
+            }
         });
     });
     if let Some(event) = event { let _ = tx.send_blocking(event); }

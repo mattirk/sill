@@ -511,8 +511,11 @@ fn validate_answer(q:&Question,answer:&Answer) -> Result<()> {
         }
         Answer::Form { values } if q.kind=="form" => {
             if values.keys().any(|key| !q.fields.iter().any(|f| &f.key==key)) { return Err(error("invalid_params", "unknown form field")); }
+            // A field left empty is absent. Which fields are required is the agent's schema to
+            // judge (sill keeps none of it): demanding all of them refused every form with an
+            // optional note, and the session waited for good.
             for field in &q.fields {
-                let value=values.get(&field.key).ok_or_else(|| error("invalid_params", format!("missing form field {}",field.key)))?;
+                let Some(value)=values.get(&field.key) else { continue };
                 let valid=match field.kind.as_str() {
                     "text"=>value.is_string(),"boolean"=>value.is_boolean(),"number"=>value.is_number(),
                     "choice"=>value.as_str().is_some_and(|v| field.choices.iter().any(|c| c.value==v)),
@@ -552,6 +555,22 @@ pub fn timestamp(seconds:i64) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Codex's form (2026-11-03): a choice and an optional note. Left empty, the note is absent;
+    /// the answer stands. A value that is there is still checked.
+    #[test]
+    fn a_form_answer_may_leave_a_field_out_but_not_give_a_wrong_value() {
+        let field=|key:&str,kind:&str,choices:Vec<Choice>| FormField { key:key.into(), title:String::new(), description:String::new(), kind:kind.into(), choices };
+        let choice=|v:&str| Choice { value:v.into(), title:v.into(), description:String::new() };
+        let q=Question { question_id:"q".into(), agent_generation_id:"g".into(), kind:"form".into(), title:"Codex needs your input".into(), description:None, subject:None, tool_item_id:None, options:vec![],
+            fields:vec![field("permission_prompt","choice",vec![choice("Test prompt"),choice("Specific action")]), field("permission_prompt_note","text",vec![])],
+            state:"open".into(), answer_id:None, answer:None, delivery:None, reason:None };
+        let form=|v:serde_json::Value| Answer::Form { values: serde_json::from_value(v).unwrap() };
+        validate_answer(&q,&form(serde_json::json!({"permission_prompt":"Test prompt"}))).unwrap();
+        validate_answer(&q,&form(serde_json::json!({"permission_prompt":"Test prompt","permission_prompt_note":"thanks"}))).unwrap();
+        assert!(validate_answer(&q,&form(serde_json::json!({"permission_prompt":"something else"}))).is_err());
+        assert!(validate_answer(&q,&form(serde_json::json!({"permission_prompt_note":7}))).is_err());
+        assert!(validate_answer(&q,&form(serde_json::json!({"unknown":"x"}))).is_err());
+    }
 
     use super::*;
     #[test]
