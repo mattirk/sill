@@ -506,12 +506,34 @@ impl Shelf {
     }
 
     fn open_session(self: &Rc<Self>, s: Session) {
+        self.open_session_with(s, None);
+    }
+
+    /// Open a session; `note` is shown first in its conversation. A jail built before the policy
+    /// file was last edited is stopped and rebuilt first, so policy edits (x11, dbus, masks…)
+    /// take effect without closing anything by hand.
+    fn open_session_with(self: &Rc<Self>, s: Session, note: Option<String>) {
         let id = s.id.clone();
         if self.tabs.has(&id) {
             self.tabs.select(&id);
             return;
         }
+        let home = session::home().unwrap_or_default();
+        if note.is_none() && sill_core::session::jail_outdated(&id, &s.policy, &home) {
+            let shelf = self.clone();
+            let s2 = s.clone();
+            stop_then(&id, move || {
+                shelf.open_session_with(
+                    s2,
+                    Some("policy changed since this jail was built: rebuilt it with the current policy".into()),
+                )
+            });
+            return;
+        }
         let view = SessionView::new(s.clone(), self.store.clone());
+        if let Some(n) = &note {
+            view.conv.add_note(n);
+        }
         self.pages.add_named(&view.root, Some(&id));
         self.tabs.add(&id, &s.title);
         self.tabs.set_icon(&id, &self.tab_icon(&s.agent));

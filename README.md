@@ -143,6 +143,10 @@ callback can't reach into the jail, but with `CODEX_HOME` pointing at the jail's
 nothing lands on the host; the session then restarts. Claude Code logs in inside sill too (its terminal login in the
 shell pane), as a login of its own, separate from the host's Claude Code or Zed.
 
+**Policy changes.** A jail gets its mounts and desktop access (`x11`, `dbus`) when it is launched. After
+editing the policy, reopen a session's tab (or close and reopen it): a jail older than the policy file is
+rebuilt automatically. Restarting the shelf alone does not touch running sessions.
+
 ## Known limits
 
 - Files not owned by your uid:gid can't be modified in the jail (overlayfs copy-up can't chown to an

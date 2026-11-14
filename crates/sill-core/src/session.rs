@@ -289,6 +289,15 @@ pub fn socket_path(session: &str) -> Result<PathBuf> {
     Ok(shim::runtime_dir(session)?.join("shim.sock"))
 }
 
+/// A running jail was built before its policy file was last changed: mounts and the X11/D-Bus
+/// grants are fixed at launch, so the policy on disk no longer describes it.
+pub fn jail_outdated(session: &str, policy: &str, home: &Path) -> bool {
+    let Ok(sock) = socket_path(session) else { return false };
+    let Ok(started) = std::fs::metadata(&sock).and_then(|m| m.modified()) else { return false };
+    let Some(path) = Policy::resolve_path(policy, home) else { return false };
+    std::fs::metadata(path).and_then(|m| m.modified()).map(|changed| changed > started).unwrap_or(false)
+}
+
 pub fn is_running(session: &str) -> bool {
     socket_path(session).map(|p| shim::Control::connect(&p).is_ok()).unwrap_or(false)
 }

@@ -158,6 +158,14 @@ impl Policy {
     }
 
     /// Resolve a policy by name (search paths) or by path (contains `/` or ends in `.toml`).
+    /// The file a policy name resolves to (None for the built-in default).
+    pub fn resolve_path(name_or_path: &str, home: &Path) -> Option<PathBuf> {
+        if name_or_path.contains('/') || name_or_path.ends_with(".toml") {
+            return Some(PathBuf::from(name_or_path));
+        }
+        search_dirs(home).into_iter().map(|d| d.join(format!("{name_or_path}.toml"))).find(|p| p.is_file())
+    }
+
     pub fn load(name_or_path: &str, home: &Path) -> Result<Self> {
         if name_or_path.contains('/') || name_or_path.ends_with(".toml") {
             let text = std::fs::read_to_string(name_or_path)
