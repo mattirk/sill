@@ -1,4 +1,4 @@
-//! The file tree (SPEC §3.1): a drawer beside the main pane — the shelf widens by `x11::TREE_FRACTION`
+//! The file tree (SPEC §3.1): a drawer beside the main pane, taking its share of the shelf's width (`x11::drawer_width`: 30 % until the handle between the panes is dragged, then the dragged width, remembered)
 //! while it is open and narrows again when it closes. Global (the home directory, the selected
 //! session's pinned folders first, plus every repository a session touched) or scoped to one pinned
 //! folder from its chip, two levels open (dot folders and build output listed but closed, dimmed).
@@ -450,8 +450,12 @@ impl FolderTree {
         let view = gtk::ListView::new(Some(selection.clone()), Some(factory));
         view.add_css_class("sill-files");
         view.set_single_click_activate(true);
-        // never scroll sideways: names ellipsize, the pin column stays put
-        let scroll = gtk::ScrolledWindow::builder().child(&view).vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build();
+        // no sideways scrollbar: names ellipsize, the pin column stays put. External, not Never: with
+        // Never the scrolled window asks for the rows' full natural width, the box gave the drawer
+        // that instead of its share and the main pane took the difference, so Drawer width moved the
+        // window but never the drawer (2026-11-01). External keeps the natural width at the minimum,
+        // so the drawer is exactly the size request the window gives it.
+        let scroll = gtk::ScrolledWindow::builder().child(&view).vexpand(true).hscrollbar_policy(gtk::PolicyType::External).build();
         root.append(&scroll);
         let message = gtk::Label::new(None);
         message.set_xalign(0.0);

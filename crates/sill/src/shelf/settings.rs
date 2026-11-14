@@ -148,7 +148,7 @@ pub fn build() -> gtk::Box {
         x11::set_width_fraction(s.value());
         let _ = sill_core::config::update(|c| c.width = Some(s.value()));
     });
-    scale.set_tooltip_text(Some("Fraction of the primary monitor's work area; the file tree adds its own share while open. Applies the next time the shelf is shown."));
+    scale.set_tooltip_text(Some("Fraction of the primary monitor's work area for the shelf with the file tree open (drag the line between them for the tree's share); with the tree closed the shelf is that much narrower. Applies the next time the shelf is shown."));
     root.append(&row("Width", &scale));
 
     // the page the "sill" button opens

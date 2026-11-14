@@ -12,6 +12,9 @@ pub struct Config {
     pub theme: String,
     /// Fraction of the work area the shelf takes (0.2–0.8).
     pub width: Option<f64>,
+    /// Width of the file tree (the drawer) while it is open, logical pixels, out of the shelf's
+    /// width; set by dragging the handle between the panes. Unset = 30 % of the shelf.
+    pub drawer_width: Option<i32>,
     /// Global show/hide key, GTK accelerator syntax (`<Alt>space`, `<Super>grave`, `F12`).
     pub hotkey: Option<String>,
     /// Backend page the "sill" button opens: `changes` (default), `files`, `agents`, `settings`.

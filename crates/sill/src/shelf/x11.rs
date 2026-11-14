@@ -11,17 +11,30 @@ use x11rb::wrapper::ConnectionExt as _;
 
 /// Fraction of the work area width the shelf takes (settings override).
 pub const WIDTH_FRACTION: f64 = 0.38;
-/// What a session's folder tree adds to the shelf's width while it is open: with the 35 % shelf,
-/// exactly half the screen.
-pub const TREE_FRACTION: f64 = 0.15;
+/// The file tree (the drawer) takes this share of the shelf's width when it opens, until the
+/// handle between the panes has been dragged: then the dragged width, logical pixels, remembered.
+pub const DRAWER_SHARE: f64 = 0.3;
+pub const DRAWER_MIN: i32 = 160;
+/// What the main pane keeps at least when the drawer is open.
+pub const MAIN_MIN: i32 = 240;
 thread_local! {
     static WIDTH: std::cell::Cell<f64> = const { std::cell::Cell::new(WIDTH_FRACTION) };
+    static DRAWER: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
 }
 pub fn set_width_fraction(f: f64) {
     WIDTH.with(|w| w.set(f.clamp(0.2, 0.8)));
 }
 pub fn width_fraction() -> f64 {
     WIDTH.with(|w| w.get())
+}
+pub fn set_drawer_width(px: i32) {
+    DRAWER.with(|w| w.set(Some(px.max(DRAWER_MIN))));
+}
+/// The drawer's width for a shelf `total` wide: the dragged width when there is one, else the
+/// default share — always leaving the main pane its minimum.
+pub fn drawer_width(total: i32) -> i32 {
+    let d = DRAWER.with(|w| w.get()).unwrap_or((total as f64 * DRAWER_SHARE).round() as i32);
+    d.clamp(DRAWER_MIN, (total - MAIN_MIN).max(DRAWER_MIN))
 }
 
 /// The window's scale (device pixels per logical pixel). Before the window is realized GTK can't

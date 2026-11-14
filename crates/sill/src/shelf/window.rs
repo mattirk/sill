@@ -43,6 +43,8 @@ pub struct Shelf {
     status_text: RefCell<String>,
     spinner: Rc<super::spinner::Spinner>,
     herring: Rc<super::herring::Herring>,
+    /// Main pane | tree, sharing the window's width: the handle between them drags the split.
+    paned: gtk::Paned,
     busy: RefCell<std::collections::HashSet<String>>,
     pending_restart: RefCell<std::collections::HashSet<String>>,
     views: RefCell<HashMap<String, Rc<SessionView>>>,
@@ -90,6 +92,9 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     super::theme::apply(&super::theme::by_id(&config.theme));
     if let Some(w) = config.width {
         x11::set_width_fraction(w);
+    }
+    if let Some(w) = config.drawer_width {
+        x11::set_drawer_width(w);
     }
     // a store that will not open (held by another process past the busy timeout, a damaged file)
     // is a window saying so, not a panic the service restarts into forever (SPEC §4.11 #17)
@@ -196,19 +201,27 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
         stack.add_named(&body, Some(name));
     }
 
-    // the main pane (pages) at the configured width, the viewer over it, the tree beside it: only
-    // the tree changes the window's width (Shelf::fraction)
+    // the main pane (pages), the viewer over it, the tree beside it, sharing the configured width:
+    // Settings → Width is the shelf with the tree open; closing the tree takes the drawer's width
+    // off the window, so the main pane is the same width either way (Shelf::placement)
     let main = gtk::Overlay::new();
     main.set_child(Some(&stack));
     viewer.root.set_visible(false);
     main.add_overlay(&viewer.root);
     main.set_hexpand(true);
     main.set_vexpand(true);
-    tree.root.set_visible(false);
-    tree.root.set_hexpand(false);
-    let body = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    body.append(&main);
-    body.append(&tree.root);
+    tree.root.set_visible(true); // open by default (Shelf::split sets the width at realize)
+    tree.root.set_size_request(x11::DRAWER_MIN, -1);
+    // a paned, not a box: the separator (invisible, see the stylesheet) is the drawer's drag handle.
+    // The main pane's width is the invariant (resize end, not start): the split is set to the main
+    // pane's width and the drawer gets whatever the window's new width leaves once it arrives.
+    let body = gtk::Paned::new(gtk::Orientation::Horizontal);
+    body.set_start_child(Some(&main));
+    body.set_end_child(Some(&tree.root));
+    body.set_resize_start_child(false);
+    body.set_shrink_start_child(false);
+    body.set_resize_end_child(true);
+    body.set_shrink_end_child(false);
     body.set_vexpand(true);
     // a terminal pane spans the window: under the tree and the main pane alike
     let pane_host = gtk::Stack::new();
@@ -234,6 +247,7 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
         status_text: RefCell::new(String::new()),
         spinner: spinner.clone(),
         herring: herring.clone(),
+        paned: body.clone(),
         busy: RefCell::new(std::collections::HashSet::new()),
         pending_restart: RefCell::new(std::collections::HashSet::new()),
         views: RefCell::new(HashMap::new()),
@@ -499,17 +513,44 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     }
     window.add_controller(esc);
 
+    // the separator dragged: the drawer's new width is remembered once the drag pauses
+    {
+        let s = shelf.clone();
+        let pending: Rc<std::cell::Cell<Option<glib::SourceId>>> = Rc::new(std::cell::Cell::new(None));
+        body.connect_position_notify(move |p| {
+            if !s.tree.root.is_visible() {
+                return;
+            }
+            let total = p.width();
+            let drawer = total - p.position();
+            if drawer < x11::DRAWER_MIN || drawer == x11::drawer_width(total) {
+                return;
+            }
+            if let Some(id) = pending.take() {
+                id.remove();
+            }
+            let pending2 = pending.clone();
+            pending.set(Some(glib::timeout_add_local_once(std::time::Duration::from_millis(150), move || {
+                pending2.set(None);
+                x11::set_drawer_width(drawer);
+                let _ = sill_core::config::update(|c| c.drawer_width = Some(drawer));
+            })));
+        });
+    }
+
     // geometry before the first frame: on realize the X window exists but isn't mapped yet, so
     // the window manager shows it straight at the left edge, final size, no visible jump
     {
         let s = shelf.clone();
         window.connect_realize(move |w| {
             let w: gtk::Window = w.clone().upcast();
-            let fraction = s.fraction();
-            if let Some(area) = x11::work_area_with(&w, fraction) {
+            if let Some(area) = s.placement(&w) {
                 // GTK sizes in logical pixels, the work area is in device pixels
                 let k = x11::scale_of(&w);
                 w.set_default_size(area.width as i32 / k, area.height as i32 / k);
+                if s.tree.root.is_visible() {
+                    s.split(area.width as i32 / k);
+                }
                 x11::pre_place(&w, &area);
             }
             // invisible until the first settled frame: no black frame before GTK's first paint, no
@@ -524,14 +565,12 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
         let s = shelf.clone();
         window.connect_map(move |w| {
             let w: gtk::Window = w.clone().upcast();
-            let fraction = s.fraction();
-            if let Some(area) = x11::work_area_with(&w, fraction) {
+            if let Some(area) = s.placement(&w) {
                 x11::pre_place(&w, &area);
             }
             let s = s.clone();
             glib::idle_add_local_once(move || {
-                let fraction = s.fraction();
-                if let Some(area) = x11::work_area_with(&w, fraction) {
+                if let Some(area) = s.placement(&w) {
                     x11::place(&w, &area);
                 }
                 x11::activate(&w, 0);
@@ -566,10 +605,23 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
 }
 
 impl Shelf {
-    /// The shelf's width as a fraction of the primary monitor's work area: the configured width,
-    /// plus the tree's share while the tree is open — nothing else moves the window (SPEC §3.1).
-    fn fraction(&self) -> f64 {
-        if self.tree.root.is_visible() { (x11::width_fraction() + x11::TREE_FRACTION).min(0.95) } else { x11::width_fraction() }
+    /// Where the shelf goes: the configured fraction of the primary monitor's work area with the
+    /// tree open; the drawer's width less while it is closed, so the main pane never changes
+    /// width — only Settings → Width and the tree move the window (SPEC §3.1).
+    fn placement(&self, w: &gtk::Window) -> Option<x11::Placement> {
+        let mut area = x11::work_area_with(w, x11::width_fraction())?;
+        if !self.tree.root.is_visible() {
+            // the drawer is in logical pixels, the work area in device pixels
+            let k = x11::scale_of(w);
+            let total = area.width as i32 / k;
+            area.width = ((total - x11::drawer_width(total)) * k) as u32;
+        }
+        Some(area)
+    }
+
+    /// The split for a shelf `total` logical pixels wide with the tree open: the main pane's width.
+    fn split(&self, total: i32) {
+        self.paned.set_position((total - x11::drawer_width(total)).max(x11::MAIN_MIN));
     }
 
     /// Show the tree — scoped to one folder (a chip) or global (`None`: the Files button) — or close
@@ -580,12 +632,12 @@ impl Shelf {
             return;
         }
         self.tree.set_scope(scope);
-        // the tree's share of the work area, in this window's logical pixels
-        let w: gtk::Window = self.window.clone().upcast();
-        if let Some(area) = x11::work_area_with(&w, x11::TREE_FRACTION) {
-            self.tree.root.set_size_request(area.width as i32 / x11::scale_of(&w), -1);
-        }
         self.tree.root.set_visible(true);
+        // the window grows by the drawer's width; the main pane keeps its width, the drawer gets the growth
+        let w: gtk::Window = self.window.clone().upcast();
+        if let Some(area) = self.placement(&w) {
+            self.split(area.width as i32 / x11::scale_of(&w));
+        }
         self.place();
     }
 
@@ -644,7 +696,7 @@ impl Shelf {
             return;
         }
         self.tree.root.set_visible(false);
-        self.place();
+        self.place(); // the drawer's width off the window
         self.focus_prompt();
     }
 
@@ -694,7 +746,7 @@ impl Shelf {
     /// Move/resize the window to the current fraction.
     fn place(&self) {
         let w: gtk::Window = self.window.clone().upcast();
-        if let Some(area) = x11::work_area_with(&w, self.fraction()) {
+        if let Some(area) = self.placement(&w) {
             // GTK's own size first: a mapped toplevel re-sends its remembered size (grown to its
             // minimum) over whatever the X window was just configured to — with the tree open that
             // left the main pane squeezed instead of the window wider

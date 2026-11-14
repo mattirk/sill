@@ -279,7 +279,8 @@ pub fn stylesheet(t: &Theme) -> String {
              button.destructive-action {{ background: {error}; color: {bg}; }}\n\
              scrollbar, scrollbar trough {{ background: transparent; border: none; box-shadow: none; }}\n\
              scrollbar slider {{ min-width: 6px; min-height: 6px; margin: 2px; border: none; border-radius: 3px; background: alpha({fg}, 0.28); }}\n\
-             scrollbar slider:hover, scrollbar slider:active {{ background: alpha({fg}, 0.5); }}\n",
+             scrollbar slider:hover, scrollbar slider:active {{ background: alpha({fg}, 0.5); }}\n\
+             paned > separator {{ min-width: 1px; background: transparent; background-image: none; }}\n",
             surface = t.surface,
             bg = t.bg,
             border = t.border,
