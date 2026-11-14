@@ -1013,11 +1013,9 @@ fn public_network_denials_are_live_bounded_pages() {
     let answer=c.call("_sill/policy.remember_denied",json!({"session_id":session,"host":"host-000.example"})).unwrap();
     assert!(answer.get("error").is_none(),"{answer}");
     assert_eq!(std::fs::read_to_string(runtime.join("denied.answered")).unwrap(),"host-000.example\n");
+    // Allow is session-only and concrete (2026-11-06): wildcards are refused
     let allowed=c.call("_sill/policy.allow_host",json!({"session_id":session,"host":"*.example.test"})).unwrap();
-    assert!(allowed.get("error").is_none(),"{allowed}");
-    assert_eq!(allowed["result"]["live"],false,"a wildcard needs a rebuilt jail: {allowed}");
-    let agent=c.call("_sill/agents.get",json!({"agent_id":"claude"})).unwrap();
-    assert!(agent["result"]["domains"].as_array().unwrap().contains(&json!("*.example.test")),"{agent}");
+    assert_eq!(allowed["error"]["code"],-32602,"{allowed}");
     // a running session gets an exact host at once, as a live grant its proxy reads per
     // connection: the agent goes on without a restart (2026-11-05)
     let _shim=std::os::unix::net::UnixListener::bind(runtime.join("shim.sock")).unwrap();
@@ -1025,7 +1023,7 @@ fn public_network_denials_are_live_bounded_pages() {
     assert_eq!(allowed["result"]["live"],true,"{allowed}");
     assert_eq!(std::fs::read_to_string(runtime.join("session-allowed-hosts")).unwrap(),"api.example.test\n");
     let agent=c.call("_sill/agents.get",json!({"agent_id":"claude"})).unwrap();
-    assert!(agent["result"]["domains"].as_array().unwrap().contains(&json!("api.example.test")),"kept for its next jails: {agent}");
+    assert!(!agent["result"]["domains"].as_array().unwrap().contains(&json!("api.example.test")),"agent defaults unchanged: {agent}");
     for host in ["bad\nname", "../invalid"] {
         assert!(c.call("_sill/policy.allow_host",json!({"session_id":session,"host":host})).unwrap().get("error").is_some());
     }
@@ -1105,7 +1103,7 @@ fn travelling_policy_suggestions_are_session_grants_and_offline_is_not_overridde
     std::fs::write(root.join(".sill/policy.toml"), "[network]\nallow=['packages.example']").unwrap();
     let created = c.call("_sill/sessions.create", json!({"create_id":"policy-suggestions","agent":"claude","policy":"default","pins":[HostPath::from_path(&root)]})).unwrap();
     let id = created["result"]["session_id"].as_str().unwrap();
-    let mut resolution = sill_core::policy_fragments::resolve(&sill_core::policy::Policy::builtin_default(), &[root], &[]).unwrap();
+    let mut resolution = sill_core::policy_fragments::resolve(&sill_core::policy::Policy::builtin_default(), &[root.clone()], &[]).unwrap();
     let snapshot = d.dir.join("state/sill/policy-snapshots").join(id);
     std::fs::create_dir_all(&snapshot).unwrap();
     let runtime = d.dir.join("run/sill").join(id);
@@ -1115,8 +1113,19 @@ fn travelling_policy_suggestions_are_session_grants_and_offline_is_not_overridde
     assert!(denied["result"]["hosts"].as_array().unwrap().contains(&json!("packages.example")), "{denied}");
     let allowed = c.call("_sill/policy.allow_host", json!({"session_id":id,"host":"packages.example"})).unwrap();
     assert_eq!(allowed["result"]["agent_name"], "this session", "{allowed}");
-    assert_eq!(std::fs::read_to_string(runtime.join("session-allowed-hosts")).unwrap(), "packages.example\n");
+    // Not running: the grant waits in the session store for the next build, no live file
+    assert_eq!(allowed["result"]["live"], false, "{allowed}");
+    assert!(!runtime.join("session-allowed-hosts").exists());
+    let preview = c.call("_sill/policy.preview", json!({"session_id":id})).unwrap();
+    assert!(preview["result"]["text"].as_str().unwrap().contains("packages.example"), "{preview}");
     assert!(!d.dir.join("home/.config/sill/agents/claude.toml").exists());
+    // A stopped session resolves its current repository restrictions before approving
+    std::fs::write(root.join(".sill/policy.toml"), "[network]\nmode='none'").unwrap();
+    let offline = c.call("_sill/policy.allow_host", json!({"session_id":id,"host":"other.example"})).unwrap();
+    assert_eq!(offline["error"]["data"]["code"], "permission_denied", "{offline}");
+    // A running session is held to its recorded launch policy
+    std::fs::write(root.join(".sill/policy.toml"), "[network]\nallow=['packages.example']").unwrap();
+    let _shim = std::os::unix::net::UnixListener::bind(runtime.join("shim.sock")).unwrap();
     resolution.policy.network.mode = sill_core::policy::NetMode::None;
     std::fs::write(snapshot.join("latest.json"), serde_json::to_vec(&resolution).unwrap()).unwrap();
     let offline = c.call("_sill/policy.allow_host", json!({"session_id":id,"host":"packages.example"})).unwrap();
