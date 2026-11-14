@@ -1457,12 +1457,23 @@ fn the_herring_opens_changes_and_settings() {
         matches!(page.snapshot, Some(Ok(_))),
         "read at once in the demo"
     );
-    let mut ui = simulator(&app, (720.0, 860.0));
-    ui.find("Timer autoshow").unwrap();
-    ui.find("Shortcuts").unwrap();
-    ui.find("Remember pins").unwrap();
-    ui.find("Compact after").unwrap();
-    drop(ui);
+    for (category, labels) in [
+        ("Interface", vec!["Keyboard shortcuts"]),
+        ("Sessions", vec!["Timer autoshow", "Remember pins"]),
+        ("Memory & history", vec!["Compact after"]),
+    ] {
+        let mut ui = simulator(&app, (720.0, 860.0));
+        ui.click(category).unwrap();
+        let messages: Vec<_> = ui.into_messages().collect();
+        for message in messages {
+            let task = app.update(message);
+            settle_task(&mut app, task);
+        }
+        let mut ui = simulator(&app, (720.0, 860.0));
+        for label in labels {
+            ui.find(label).unwrap();
+        }
+    }
     let flicked = app.herring_flick;
     assert!(flicked.is_some(), "the herring swims when the view changes");
     let _ = app.update(Message::Escape);
@@ -3319,6 +3330,7 @@ fn policy_errors_remain_visible_with_the_group_collapsed() {
     let (mut app, _) = App::new(true, None);
     let mut page = crate::settings_ui::SettingsPage::default();
     page.snapshot = Some(Ok(sill_client::settings::Snapshot::default()));
+    page.category = crate::settings_ui::Category::AgentBehaviour;
     page.policies.status = "Policy validation failed: invalid TOML".into();
     let view = app.settings_view(&page);
     let mut ui =

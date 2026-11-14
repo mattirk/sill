@@ -859,3 +859,67 @@ fn render_box_link() {
     ));
     render(&app, "box-offline");
 }
+
+#[test]
+#[ignore = "writes Settings tab PNGs at narrow and wide widths for review"]
+fn render_settings_tabs() {
+    use crate::settings_ui::Category;
+    let (mut app, _) = App::new(true, None);
+    let task = app.update(crate::Message::ShowPage(crate::Page::Settings));
+    crate::tests::settle_task(&mut app, task);
+    for (name, category) in [
+        ("interface", Category::Interface),
+        ("sessions", Category::Sessions),
+        ("agents", Category::AgentBehaviour),
+        ("memory", Category::MemoryHistory),
+        ("system", Category::System),
+    ] {
+        app.settings_page.as_mut().unwrap().category = category;
+        for width in [320.0, 420.0, 720.0, 1100.0] {
+            let view = app.settings_view(app.settings_page.as_ref().unwrap());
+            let mut ui = iced_test::Simulator::with_size(settings(), (width, 860.0), view);
+            for label in [
+                "Interface",
+                "Sessions",
+                "Agent behaviour",
+                "Memory & history",
+                "System",
+            ] {
+                ui.click(label).unwrap();
+            }
+            std::fs::create_dir_all(dir()).unwrap();
+            ui.point_at((-1.0, -1.0));
+            let prefix = format!("settings-{name}-{width}-");
+            for entry in std::fs::read_dir(dir()).unwrap().flatten() {
+                if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                    std::fs::remove_file(entry.path()).unwrap();
+                }
+            }
+            let snapshot = ui.snapshot(&crate::style::theme()).unwrap();
+            assert!(
+                snapshot
+                    .matches_image(dir().join(format!("settings-{name}-{width}")))
+                    .unwrap()
+            );
+            let clicked: Vec<_> = ui
+                .into_messages()
+                .filter_map(|message| match message {
+                    crate::Message::Settings(crate::settings_ui::Event::Category(category)) => {
+                        Some(category)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                clicked,
+                vec![
+                    Category::Interface,
+                    Category::Sessions,
+                    Category::AgentBehaviour,
+                    Category::MemoryHistory,
+                    Category::System
+                ]
+            );
+        }
+    }
+}

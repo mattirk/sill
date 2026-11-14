@@ -74,7 +74,8 @@ package_update: true
 # Weston itself is built from source below
 packages: [git, ripgrep, ca-certificates, build-essential, pkg-config, bubblewrap, e2fsprogs, util-linux,
            libpam-systemd, dbus-user-session, openssh-server, sudo, curl, nodejs, npm,
-           xwayland, xdotool, libgl1-mesa-dri, libegl1, mesa-vulkan-drivers, dbus,
+           xwayland, xdotool, libxi6, libxkbcommon-x11-0, libxcb-xkb1,
+           libgl1-mesa-dri, libegl1, mesa-vulkan-drivers, dbus,
            fonts-dejavu-core]
 # what cloud-init does shows on the virtio console (console.log), and the build learns there
 # when the account is ready, so it never tries a login too early
