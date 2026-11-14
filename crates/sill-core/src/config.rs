@@ -37,8 +37,9 @@ pub const TEXT_SCALES: &[(f64, &str)] = &[
 
 /// Accepted `text_scale` values; anything outside (or unparsable) falls back to 1.0 (Normal).
 pub const TEXT_SCALE_RANGE: (f64, f64) = (0.5, 1.8);
-/// The shelf's normal text size as a factor of the desktop font: what zoom 1.0 means.
-pub const TEXT_SCALE_BASE: f64 = 1.15;
+/// The shelf's normal text size as a factor of the desktop font: what zoom 1.0 means
+/// (2026-10-30: 1.15 × 1.10 — the former Large, then one more step up).
+pub const TEXT_SCALE_BASE: f64 = 1.265;
 
 impl Config {
     /// The zoom as set (1.0 = Normal), the value the Settings page shows and saves.

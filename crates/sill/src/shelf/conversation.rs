@@ -24,6 +24,8 @@ use super::{markdown, theme};
 const MEASURE: f64 = 800.0;
 /// Width below which the clamp stops centring and just fills.
 const MEASURE_TIGHT: f64 = 640.0;
+/// Streamed chunks are rendered at most this often (the whole message each time).
+const STREAM_MS: u64 = 80;
 
 /// One tool call on screen.
 struct ToolRow {
@@ -33,6 +35,17 @@ struct ToolRow {
     body: gtk::Label,
     status: RefCell<String>,
     group: RefCell<Option<Rc<ToolGroup>>>,
+    /// A delegation's children: the sub-agent's own calls (rows), its text (said), and the count
+    /// on the line; opened together with the body.
+    children: RefCell<Option<Children>>,
+}
+
+struct Children {
+    rows: gtk::Box,
+    said: gtk::Label,
+    count: gtk::Label,
+    rev: gtk::Revealer,
+    n: std::cell::Cell<usize>,
 }
 
 /// Consecutive tool calls folded into one card: a header line (count, latest title, aggregate
@@ -50,6 +63,9 @@ pub struct Conversation {
     /// The agent message being streamed, with its accumulated markdown.
     current: RefCell<Option<(gtk::TextView, String)>>,
     current_thought: RefCell<Option<(gtk::TextView, String)>>,
+    /// A render of the streamed message/thought is scheduled: chunks arrive many times a second
+    /// and every render is the whole message, so they are coalesced (STREAM_MS).
+    render_due: [std::cell::Cell<bool>; 2],
     tool_rows: RefCell<HashMap<String, Rc<ToolRow>>>,
     /// The tool call (or group) the next tool call would join; cleared by any other block.
     last_tool: RefCell<Option<String>>,
@@ -95,6 +111,7 @@ impl Conversation {
             column,
             current: RefCell::new(None),
             current_thought: RefCell::new(None),
+            render_due: [std::cell::Cell::new(false), std::cell::Cell::new(false)],
             tool_rows: RefCell::new(HashMap::new()),
             last_tool: RefCell::new(None),
             status,
@@ -232,24 +249,53 @@ impl Conversation {
     }
 
     fn finish_current(&self) {
+        self.flush_streams();
         self.current.borrow_mut().take();
         self.current_thought.borrow_mut().take();
         self.last_tool.borrow_mut().take();
     }
 
+    /// Render whatever is still pending for the streamed message and thought, now.
+    fn flush_streams(&self) {
+        for which in 0..2 {
+            if self.render_due[which].replace(false) {
+                self.render_stream(which);
+            }
+        }
+    }
+
+    fn render_stream(&self, which: usize) {
+        let slot = if which == 0 { &self.current } else { &self.current_thought };
+        if let Some((tv, md)) = slot.borrow().as_ref() {
+            markdown::render(tv, md);
+            tv.queue_resize(); // the view must re-measure: lazy line validation leaves stale heights behind
+        }
+        self.request_follow();
+    }
+
     fn append_markdown(&self, slot: &RefCell<Option<(gtk::TextView, String)>>, css: &str, chunk: &str) {
+        let which = if css == "sill-thought" { 1 } else { 0 };
         let mut cur = slot.borrow_mut();
-        if cur.is_none() {
+        let fresh = cur.is_none();
+        if fresh {
             let tv = Self::text_view(css);
             self.column.append(&tv);
             *cur = Some((tv, String::new()));
         }
-        let (tv, md) = cur.as_mut().unwrap();
-        md.push_str(chunk);
-        markdown::render(tv, md);
-        tv.queue_resize(); // the view must re-measure: lazy line validation leaves stale heights behind
+        cur.as_mut().unwrap().1.push_str(chunk);
         drop(cur);
-        self.request_follow();
+        if fresh {
+            self.render_stream(which); // the first chunk shows at once
+        } else if !self.render_due[which].replace(true) {
+            let weak = self.weak.borrow().clone();
+            gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(STREAM_MS), move || {
+                if let Some(c) = weak.upgrade()
+                    && c.render_due[which].replace(false)
+                {
+                    c.render_stream(which);
+                }
+            });
+        }
     }
 
     /// A complete agent message (stored transcript).
@@ -282,6 +328,7 @@ impl Conversation {
             Some("Execute") => "$",
             Some("Fetch") => "↓",
             Some("Think") => "…",
+            Some("Delegate") => "⤷", // a sub-agent (sill's own kind, see acp::is_delegation)
             _ => "⚙",
         }
     }
@@ -307,11 +354,91 @@ impl Conversation {
     }
 
     pub fn add_tool_call(&self, id: String, title: &str, status: &str) {
-        self.add_tool_call_full(id, title, status, None, None);
+        self.add_tool_call_full(id, title, status, None, None, None);
     }
 
-    /// One line: glyph, title, status mark; the body (what the call does) opens on click.
-    pub fn add_tool_call_full(&self, id: String, title: &str, status: &str, kind: Option<&str>, detail: Option<&str>) {
+    /// The children slot of a delegation row, made on first use.
+    fn children_of(&self, r: &Rc<ToolRow>) -> Children {
+        let mut slot = r.children.borrow_mut();
+        if slot.is_none() {
+            let col = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            let said = gtk::Label::new(None);
+            said.add_css_class("sill-tool-said");
+            said.set_xalign(0.0);
+            said.set_wrap(true);
+            said.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+            said.set_selectable(true);
+            said.set_visible(false);
+            let rows = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            rows.add_css_class("sill-tool-rows");
+            col.append(&rows);
+            col.append(&said);
+            let rev = gtk::Revealer::builder().child(&col).reveal_child(false).transition_type(gtk::RevealerTransitionType::SlideDown).build();
+            r.row.append(&rev);
+            let count = gtk::Label::new(None);
+            count.add_css_class("dim-label");
+            count.add_css_class("sill-tool-count");
+            // on the line, before the mark
+            if let Some(line) = r.row.first_child() {
+                if let Some(line) = line.downcast_ref::<gtk::Box>() {
+                    line.insert_child_after(&count, Some(&r.title));
+                }
+            }
+            {
+                let rev = rev.clone();
+                let click = gtk::GestureClick::new();
+                click.connect_released(move |_, _, _, _| rev.set_reveal_child(!rev.reveals_child()));
+                if let Some(line) = r.row.first_child() {
+                    line.add_controller(click);
+                }
+            }
+            *slot = Some(Children { rows, said, count, rev, n: std::cell::Cell::new(0) });
+        }
+        let c = slot.as_ref().unwrap();
+        Children { rows: c.rows.clone(), said: c.said.clone(), count: c.count.clone(), rev: c.rev.clone(), n: std::cell::Cell::new(c.n.get()) }
+    }
+
+    /// A permission request answered by the session's auto-allow: the call's line gets a small
+    /// `auto` tag (tooltip: the request) instead of a note with the whole command. Without a row
+    /// (a request before its call, or a cancelled one) a short note is kept.
+    pub fn mark_auto_allowed(&self, tool_call_id: &str, title: &str, cancelled: bool) {
+        let row = self.tool_rows.borrow().get(tool_call_id).cloned();
+        match row {
+            Some(r) if !cancelled => {
+                if r.row.first_child().and_then(|l| l.downcast::<gtk::Box>().ok()).is_some_and(|l| l.css_classes().iter().any(|c| c == "sill-tool-auto")) {
+                    return;
+                }
+                let tag = gtk::Label::new(Some("auto"));
+                tag.add_css_class("sill-tool-auto-tag");
+                tag.set_tooltip_text(Some(&format!("auto-allowed: {title}")));
+                if let Some(line) = r.row.first_child().and_then(|l| l.downcast::<gtk::Box>().ok()) {
+                    line.add_css_class("sill-tool-auto");
+                    line.insert_child_after(&tag, Some(&r.title));
+                }
+            }
+            _ => {
+                let short: String = title.chars().take(90).collect();
+                let more = if title.chars().count() > 90 { "…" } else { "" };
+                self.add_note(&format!("auto-allowed: {short}{more}{}", if cancelled { " (no allow option; cancelled)" } else { "" }));
+            }
+        }
+    }
+
+    /// Text a sub-agent produced goes under its delegation, folded.
+    pub fn add_subagent_text(&self, parent: &str, text: &str) {
+        let row = self.tool_rows.borrow().get(parent).cloned();
+        let Some(r) = row else { return };
+        let c = self.children_of(&r);
+        let cur = c.said.text();
+        c.said.set_text(&format!("{cur}{text}"));
+        c.said.set_visible(true);
+        self.request_follow();
+    }
+
+    /// One line: glyph, title, status mark; the body (what the call does) opens on click. With a
+    /// `parent` (a sub-agent's own call) the row goes under that delegation instead of the column.
+    pub fn add_tool_call_full(&self, id: String, title: &str, status: &str, kind: Option<&str>, detail: Option<&str>, parent: Option<&str>) {
+        self.flush_streams();
         self.current.borrow_mut().take();
         self.current_thought.borrow_mut().take();
         let card = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -321,6 +448,13 @@ impl Conversation {
         let glyph = gtk::Label::new(Some(Self::kind_glyph(kind)));
         glyph.add_css_class("sill-tool-glyph");
         glyph.set_width_chars(1);
+        let delegation = kind == Some("Delegate") || title.starts_with("sub-agent · ");
+        if delegation {
+            // a hand-off stands out from the agent's own steps: accent glyph, accent rule
+            glyph.set_text("⤷");
+            glyph.add_css_class("sill-tool-delegate");
+            card.add_css_class("sill-tool-delegation");
+        }
         let title_l = gtk::Label::new(Some(title));
         title_l.set_xalign(0.0);
         title_l.set_single_line_mode(true);
@@ -361,9 +495,24 @@ impl Conversation {
             body,
             status: RefCell::new(status.to_string()),
             group: RefCell::new(None),
+            children: RefCell::new(None),
         });
-        // consecutive calls fold into one card
-        let prev = self.last_tool.borrow().clone();
+        // a sub-agent's own call: under its delegation, counted on the line
+        let parent_row = parent.and_then(|p| self.tool_rows.borrow().get(p).cloned());
+        if let Some(pr) = parent_row {
+            let c = self.children_of(&pr);
+            c.rows.append(&tr.row);
+            let n = pr.children.borrow().as_ref().map(|c| c.n.get()).unwrap_or(0) + 1;
+            if let Some(cc) = pr.children.borrow().as_ref() {
+                cc.n.set(n);
+            }
+            c.count.set_text(&format!("{n} steps"));
+            self.tool_rows.borrow_mut().insert(id, tr);
+            self.request_follow();
+            return;
+        }
+        // consecutive calls fold into one card; a delegation stands alone (its mark must show)
+        let prev = if delegation { None } else { self.last_tool.borrow().clone() };
         let prev_row = prev.and_then(|pid| self.tool_rows.borrow().get(&pid).cloned()); // borrow ends here
         self.tool_rows.borrow_mut().insert(id.clone(), tr.clone()); // before the header counts it
         match prev_row {
@@ -380,7 +529,7 @@ impl Conversation {
             }
             None => self.column.append(&tr.row),
         }
-        *self.last_tool.borrow_mut() = Some(id);
+        *self.last_tool.borrow_mut() = if delegation { None } else { Some(id) };
         self.request_follow();
     }
 
@@ -453,8 +602,13 @@ impl Conversation {
             Self::set_mark(&r.mark, s);
         }
         if let Some(t) = title {
-            r.title.set_text(t);
-            r.title.set_tooltip_text(Some(t));
+            let t = if r.row.has_css_class("sill-tool-delegation") && !t.starts_with("sub-agent · ") && !t.to_lowercase().contains("sub-agent") {
+                format!("sub-agent · {t}")
+            } else {
+                t.to_string()
+            };
+            r.title.set_text(&t);
+            r.title.set_tooltip_text(Some(&t));
         }
         if let Some(d) = detail {
             // an update's detail (output) is added under what the call already showed
@@ -587,13 +741,14 @@ impl Conversation {
             Event::UserText(t) => self.add_user(&t),
             Event::Text(t) => self.append_markdown(&self.current, "sill-agent", &t),
             Event::Thought(t) => self.append_markdown(&self.current_thought, "sill-thought", &t),
-            Event::ToolCall { id, title, status, kind, detail } => {
-                self.add_tool_call_full(id, &title, &status, Some(&kind), detail.as_deref())
+            Event::ToolCall { id, title, status, kind, detail, parent } => {
+                self.add_tool_call_full(id, &title, &status, Some(&kind), detail.as_deref(), parent.as_deref())
             }
+            Event::SubagentText { parent, text } => self.add_subagent_text(&parent, &text),
             Event::ToolCallUpdate { id, status, title, detail } => {
                 self.update_tool_call_full(&id, status.as_deref(), title.as_deref(), detail.as_deref())
             }
-            Event::PermissionRequest { title, options, reply } => {
+            Event::PermissionRequest { title, options, reply, .. } => {
                 self.status.set_text("waiting for your answer");
                 self.add_permission(&title, options, reply)
             }
@@ -643,6 +798,12 @@ entry { border-radius: 0; }
 .sill-tool-line { padding: 3px 6px; font-size: 90%; color: alpha(@view_fg_color, 0.75); }
 .sill-tool-line:hover { background: alpha(@view_fg_color, 0.04); color: @view_fg_color; }
 .sill-tool-glyph { font-family: monospace; opacity: 0.6; }
+/* a hand-off to a sub-agent */
+.sill-tool-delegation { border-left-color: alpha(@accent_bg_color, 0.7); }
+.sill-tool-delegate { color: @accent_color; opacity: 1; }
+.sill-tool-count { font-size: 85%; }
+.sill-tool-auto-tag { font-size: 75%; opacity: 0.45; padding: 0 5px; border: 1px solid alpha(@view_fg_color, 0.3); }
+.sill-tool-said { font-size: 90%; padding: 4px 10px 6px 28px; color: alpha(@view_fg_color, 0.7); }
 .sill-tool-mark { font-family: monospace; }
 .sill-mark-pending { opacity: 0.4; }
 .sill-mark-running { color: @accent_color; }
@@ -710,7 +871,9 @@ button.sill-action:checked { background: alpha(@view_fg_color, 0.09); border-bot
 .sill-pin { padding: 0 2px; min-height: 0; min-width: 0; opacity: 0.4; -gtk-icon-size: 11px; }
 .sill-pin:hover { opacity: 1; }
 .sill-badge { font-size: 80%; color: alpha(@accent_color, 0.9); font-family: monospace; }
-.sill-controls { font-size: 85%; }
+/* the ACP controls row (mode, model, reasoning, …): small, light and quiet until hovered */
+.sill-controls { font-size: 80%; }
+.sill-controls label { font-weight: normal; }
 .sill-ctl-icon { min-height: 0; min-width: 0; padding: 2px 6px; opacity: 0.6; -gtk-icon-size: 13px; }
 .sill-ctl-icon:hover, .sill-ctl-icon:checked { opacity: 1; }
 /* the lock: same colour in both states, fixed width so open/closed don't shift the row */
@@ -718,10 +881,11 @@ button.sill-lock { min-width: 24px; padding: 2px 0; opacity: 0.6; }
 button.sill-lock:checked { background: transparent; opacity: 0.9; }
 button.sill-lock:hover { opacity: 1; }
 .sill-controls .dim-label { opacity: 0.7; }
-.sill-control { min-height: 0; padding: 0; color: alpha(@view_fg_color, 0.6); }
+.sill-control { min-height: 0; padding: 0; color: alpha(@view_fg_color, 0.5); }
+.sill-control:hover { color: alpha(@view_fg_color, 0.85); }
 .sill-control > button { min-height: 0; padding: 1px 4px; background: transparent; border: none; box-shadow: none; color: inherit; }
 .sill-control > button:hover { background: alpha(@view_fg_color, 0.07); color: @view_fg_color; }
-.sill-control > button arrow { -gtk-icon-size: 10px; opacity: 0.6; }
+.sill-control > button arrow { -gtk-icon-size: 9px; opacity: 0.45; }
 switch.sill-control { min-width: 30px; min-height: 14px; opacity: 0.7; }
 switch.sill-control:hover, switch.sill-control:checked { opacity: 1; }
 switch.sill-control > slider { min-width: 12px; min-height: 12px; }

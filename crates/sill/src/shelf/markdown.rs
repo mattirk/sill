@@ -22,6 +22,9 @@ thread_local! {
     /// Embedded code views per text view: an anchored child only gets its natural width, so they
     /// are sized to the text view by hand once it has one (and again whenever it is shown).
     static CODE_VIEWS: std::cell::RefCell<Vec<(gtk::glib::WeakRef<gtk::TextView>, Vec<gtk::Widget>)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Views holding a table and the width their columns were laid out for (0 = a guess, the
+    /// view had no width yet); re-rendered when the width turns out different (see `size_code_views`).
+    static TABLE_WIDTHS: std::cell::RefCell<Vec<(gtk::glib::WeakRef<gtk::TextView>, i32)>> = const { std::cell::RefCell::new(Vec::new()) };
     static SCHEMES_READY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -49,13 +52,15 @@ fn remember(tv: &gtk::TextView, md: &str) {
 }
 
 /// Give the code views of `tv` its full width. Runs on the frame clock until the width is known,
-/// then stops; `map` re-arms it (tab switch, shelf shown again).
+/// then stops; `map` re-arms it (tab switch, shelf shown again). A message rendered before the view
+/// had a width (replay, first chunk) and holding a table is rendered again then: its columns were
+/// laid out for a guessed width.
 fn size_code_views(tv: &gtk::TextView) {
     let weak = tv.downgrade();
     let frames = std::cell::Cell::new(0);
     tv.add_tick_callback(move |_, _| {
         let Some(tv) = weak.upgrade() else { return gtk::glib::ControlFlow::Break };
-        let w = tv.width() - tv.left_margin() - tv.right_margin();
+        let w = content_width(&tv);
         if w > 40 {
             CODE_VIEWS.with(|c| {
                 if let Some((_, views)) = c.borrow().iter().find(|(t, _)| t.upgrade().as_ref() == Some(&tv)) {
@@ -64,11 +69,35 @@ fn size_code_views(tv: &gtk::TextView) {
                     }
                 }
             });
+            let stale_table = TABLE_WIDTHS.with(|u| {
+                let mut l = u.borrow_mut();
+                l.retain(|(t, _)| t.upgrade().is_some());
+                l.iter().any(|(t, laid)| t.upgrade().as_ref() == Some(&tv) && (w - laid).abs() > 4)
+            });
+            if stale_table {
+                let md = VIEWS.with(|v| v.borrow().iter().find(|(t, _)| t.upgrade().as_ref() == Some(&tv)).map(|(_, md)| md.clone()));
+                if let Some(md) = md {
+                    render(&tv, &md);
+                }
+            }
             return gtk::glib::ControlFlow::Break;
         }
         frames.set(frames.get() + 1);
         if frames.get() > 120 { gtk::glib::ControlFlow::Break } else { gtk::glib::ControlFlow::Continue }
     });
+}
+
+/// The width the view's content may use: the text view's own width, capped by the scrolled window
+/// it sits in. The cap matters: an embedded child's minimum width would otherwise inflate the text
+/// view, the column and finally the window, and nothing could ever shrink back.
+fn content_width(tv: &gtk::TextView) -> i32 {
+    let own = tv.width();
+    let cap = tv
+        .ancestor(gtk::ScrolledWindow::static_type())
+        .map(|sw| sw.width() - 24) // the column's margins
+        .unwrap_or(own);
+    let w = if own > 0 { own.min(cap) } else { cap };
+    w - tv.left_margin() - tv.right_margin()
 }
 
 fn scale(px: f64) -> i32 {
@@ -130,7 +159,11 @@ pub fn install_tags(buffer: &gtk::TextBuffer) {
     {
         let t = tag("cell");
         t.set_pixels_above_lines(scale(3.0));
-        t.set_pixels_below_lines(scale(3.0));
+        t.set_pixels_below_lines(0);
+        // continuation lines of a wrapped row sit tight under their first line
+        let t = tag("cell-cont");
+        t.set_pixels_above_lines(0);
+        t.set_pixels_below_lines(0);
     }
     // list items: hanging indent per depth, the marker in the overhang
     for depth in 0..4 {
@@ -186,6 +219,28 @@ fn code_view(lang: &str, code: &str) -> gtk::Widget {
     view.add_css_class("sill-code");
     view.set_hexpand(true);
     view.upcast()
+}
+
+/// Word-wrap `text` into lines no wider than `width` px in the view's font (a single word wider
+/// than that stays whole on its own line).
+fn wrap_cell(tv: &gtk::TextView, text: &str, width: i32, bold: bool) -> Vec<String> {
+    if measure(tv, text, bold) <= width {
+        return vec![text.to_string()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let candidate = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
+        if line.is_empty() || measure(tv, &candidate, bold) <= width {
+            line = candidate;
+        } else {
+            lines.push(std::mem::replace(&mut line, word.to_string()));
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 /// Width in px of `text` in the view's font (bold when asked), for table columns.
@@ -399,7 +454,54 @@ pub fn render(tv: &gtk::TextView, markdown: &str) {
                                     .unwrap_or(0)
                             })
                             .collect();
-                        let gap = scale(COL_GAP);
+                        let mut gap = scale(COL_GAP);
+                        // wider than the view: narrow the gap, then give the wide columns a share
+                        // of what is left and wrap their cells (tab stops can't wrap by themselves)
+                        let view_w = content_width(tv);
+                        // laid out for this width; a guess (0) when the view isn't allocated yet,
+                        // and the sizing tick renders again as soon as the real width differs
+                        TABLE_WIDTHS.with(|u| {
+                            let mut l = u.borrow_mut();
+                            match l.iter_mut().find(|(t, _)| t.upgrade().as_ref() == Some(tv)) {
+                                Some(e) => e.1 = view_w.max(0),
+                                None => l.push((tv.downgrade(), view_w.max(0))),
+                            }
+                        });
+                        let avail = if view_w > 100 { view_w - scale(16.0) } else { scale(620.0) };
+                        let total = |widths: &[i32], gap: i32| widths.iter().sum::<i32>() + gap * (ncols.saturating_sub(1) as i32);
+                        let mut widths = widths;
+                        if total(&widths, gap) > avail {
+                            gap = scale(12.0);
+                        }
+                        if total(&widths, gap) > avail && ncols > 0 {
+                            // water-filling: a column narrower than the fair share of what is left
+                            // keeps its width; the rest split the remainder equally. Never overshoots.
+                            let mut space = avail - gap * (ncols.saturating_sub(1) as i32);
+                            let mut fixed = vec![false; ncols];
+                            loop {
+                                let open = fixed.iter().filter(|f| !**f).count() as i32;
+                                if open == 0 {
+                                    break;
+                                }
+                                let fair = (space / open).max(scale(40.0));
+                                let mut changed = false;
+                                for i in 0..ncols {
+                                    if !fixed[i] && widths[i] <= fair {
+                                        fixed[i] = true;
+                                        space -= widths[i];
+                                        changed = true;
+                                    }
+                                }
+                                if !changed {
+                                    for i in 0..ncols {
+                                        if !fixed[i] {
+                                            widths[i] = fair;
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
                         // the first column starts at the margin (a tab at x = 0 would skip to the
                         // next stop), the others at their stops
                         let mut tabs = gtk::pango::TabArray::new(ncols.saturating_sub(1) as i32, true);
@@ -433,13 +535,20 @@ pub fn render(tv: &gtk::TextView, markdown: &str) {
                         ttag.set_tabs(Some(&tabs));
                         ttag.set_left_margin(scale(4.0));
                         for (ri, r) in rows.iter().enumerate() {
-                            let cells: Vec<&str> = (0..ncols).map(|i| r.get(i).map(String::as_str).unwrap_or("")).collect();
-                            let line = format!("{}\n", cells.join("\t"));
-                            let mut t = vec![name.clone(), "cell".into()];
-                            if ri == 0 {
-                                t.push("bold".into());
+                            // a row is one line per wrapped fragment; fragment k of every cell on line k
+                            let wrapped: Vec<Vec<String>> = (0..ncols)
+                                .map(|i| wrap_cell(tv, r.get(i).map(String::as_str).unwrap_or(""), widths[i] - scale(4.0), ri == 0))
+                                .collect();
+                            let lines = wrapped.iter().map(Vec::len).max().unwrap_or(1).max(1);
+                            for k in 0..lines {
+                                let cells: Vec<&str> = wrapped.iter().map(|c| c.get(k).map(String::as_str).unwrap_or("")).collect();
+                                let line = format!("{}\n", cells.join("\t"));
+                                let mut t = vec![name.clone(), if k == 0 { "cell".to_string() } else { "cell-cont".to_string() }];
+                                if ri == 0 {
+                                    t.push("bold".into());
+                                }
+                                insert(&line, &t);
                             }
-                            insert(&line, &t);
                             if ri == 0 {
                                 rule("thead-rule");
                             }

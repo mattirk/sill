@@ -18,7 +18,7 @@ use agent_client_protocol::schema::v1::{
 };
 use agent_client_protocol::util::MatchDispatch;
 pub use agent_client_protocol::schema::v1::PermissionOptionKind;
-use agent_client_protocol::schema::v1::{AuthCapabilities, AuthMethod, AuthenticateRequest};
+use agent_client_protocol::schema::v1::{AuthCapabilities, AuthMethod, AuthenticateRequest, Meta};
 use agent_client_protocol::{ActiveSession, Agent, ByteStreams, Client, ErrorCode, SessionMessage};
 use anyhow::{Context, Result, anyhow};
 use futures::AsyncReadExt;
@@ -116,10 +116,13 @@ pub enum Event {
     Text(String),
     Thought(String),
     /// `detail`: what the call does, for the card's body — input fields, content, output.
-    ToolCall { id: String, title: String, kind: String, status: String, detail: Option<String> },
+    /// `parent`: the delegation (Task/Agent call) this call runs under, for a sub-agent's own calls.
+    ToolCall { id: String, title: String, kind: String, status: String, detail: Option<String>, parent: Option<String> },
     ToolCallUpdate { id: String, status: Option<String>, title: Option<String>, detail: Option<String> },
+    /// Text a sub-agent produced (shown under its delegation, not as the agent's own words).
+    SubagentText { parent: String, text: String },
     /// The agent asks for permission; answer with the chosen option id (None = cancel).
-    PermissionRequest { title: String, options: Vec<PermissionOption>, reply: oneshot::Sender<Option<String>> },
+    PermissionRequest { tool_call_id: String, title: String, options: Vec<PermissionOption>, reply: oneshot::Sender<Option<String>> },
     Other(String),
     /// The agent wants a login before it opens a session; answer with [`Command::Authenticate`]
     /// (agent-side method) or run the terminal method and send [`Command::RetrySession`].
@@ -230,7 +233,7 @@ pub fn run_session(
                         AutoPermission::Ask => {
                             let (tx, rx) = oneshot::channel();
                             let _ = events_perm
-                                .send(Event::PermissionRequest { title: title.clone(), options: options.clone(), reply: tx })
+                                .send(Event::PermissionRequest { tool_call_id: req.tool_call.tool_call_id.to_string(), title: title.clone(), options: options.clone(), reply: tx })
                                 .await;
                             rx.await.unwrap_or(None)
                         }
@@ -567,15 +570,23 @@ pub fn run_prompt(
 fn to_event(update: SessionUpdate) -> Event {
     match update {
         SessionUpdate::UserMessageChunk(c) => Event::UserText(text(&c.content)),
-        SessionUpdate::AgentMessageChunk(c) => Event::Text(text(&c.content)),
-        SessionUpdate::AgentThoughtChunk(c) => Event::Thought(text(&c.content)),
-        SessionUpdate::ToolCall(t) => Event::ToolCall {
-            id: t.tool_call_id.to_string(),
-            title: t.title.clone(),
-            kind: format!("{:?}", t.kind),
-            status: format!("{:?}", t.status),
-            detail: tool_detail(t.raw_input.as_ref(), Some(&t.content), t.raw_output.as_ref()),
+        SessionUpdate::AgentMessageChunk(c) => match parent_tool_use(c.meta.as_ref()) {
+            Some(parent) => Event::SubagentText { parent, text: text(&c.content) },
+            None => Event::Text(text(&c.content)),
         },
+        SessionUpdate::AgentThoughtChunk(c) => Event::Thought(text(&c.content)),
+        SessionUpdate::ToolCall(t) => {
+            let delegation = is_delegation(t.name.as_deref(), &t.title, t.raw_input.as_ref(), t.meta.as_ref());
+            Event::ToolCall {
+                id: t.tool_call_id.to_string(),
+                // the title carries the mark so it survives the transcript store, which keeps no kind
+                title: if delegation && !t.title.to_lowercase().contains("sub-agent") { format!("sub-agent · {}", t.title) } else { t.title.clone() },
+                kind: if delegation { "Delegate".to_string() } else { format!("{:?}", t.kind) },
+                status: format!("{:?}", t.status),
+                detail: tool_detail(t.raw_input.as_ref(), Some(&t.content), t.raw_output.as_ref()),
+                parent: parent_tool_use(t.meta.as_ref()),
+            }
+        }
         SessionUpdate::ToolCallUpdate(u) => Event::ToolCallUpdate {
             id: u.tool_call_id.to_string(),
             status: u.fields.status.map(|s| format!("{s:?}")),
@@ -584,6 +595,35 @@ fn to_event(update: SessionUpdate) -> Event {
         },
         other => Event::Other(format!("{other:?}").chars().take(120).collect()),
     }
+}
+
+/// The delegation a notification belongs to: claude-agent-acp puts the Task/Agent call's id in
+/// `_meta.claudeCode.parentToolUseId` on everything a sub-agent does.
+fn parent_tool_use(meta: Option<&Meta>) -> Option<String> {
+    meta?.get("claudeCode")?.get("parentToolUseId")?.as_str().map(str::to_string)
+}
+
+/// Does this tool call hand work to a sub-agent? ACP's stable protocol has no notion of one (the
+/// sub-agents RFD is unstable, SPEC §4.1), so the agent's own tool is recognised: claude-agent-acp's
+/// `_meta.claudeCode.toolName` (`Task`/`Agent`), the tool name (Codex's `spawn_agent`, …) or input
+/// fields that only a delegation has.
+fn is_delegation(name: Option<&str>, title: &str, input: Option<&serde_json::Value>, meta: Option<&Meta>) -> bool {
+    if let Some(tool) = meta.and_then(|m| m.get("claudeCode")).and_then(|c| c.get("toolName")).and_then(|v| v.as_str())
+        && matches!(tool, "Task" | "Agent")
+    {
+        return true;
+    }
+    let name = name.unwrap_or("").to_lowercase();
+    if matches!(name.as_str(), "task" | "agent" | "subagent" | "spawn_agent" | "delegate" | "run_agent") || name.contains("subagent") {
+        return true;
+    }
+    if let Some(serde_json::Value::Object(m)) = input {
+        if m.contains_key("subagent_type") || m.contains_key("agent_type") || (m.contains_key("prompt") && m.contains_key("description")) {
+            return true;
+        }
+    }
+    let t = title.to_lowercase();
+    t.starts_with("task:") || t.starts_with("task(") || t.starts_with("subagent") || t.starts_with("agent(")
 }
 
 /// Text for a tool card's body: the input as `key: value` lines (pretty JSON when nested), the

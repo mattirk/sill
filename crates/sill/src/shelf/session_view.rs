@@ -1144,7 +1144,7 @@ impl SessionView {
                 return;
             }
             Event::PermissionRequest { .. } if self.auto_allow.get() => {
-                let Event::PermissionRequest { title, options, reply } = ev else { unreachable!() };
+                let Event::PermissionRequest { tool_call_id, title, options, reply } = ev else { unreachable!() };
                 use sill_core::acp::PermissionOptionKind as K;
                 let pick = options
                     .iter()
@@ -1152,7 +1152,8 @@ impl SessionView {
                     .or_else(|| options.iter().find(|o| o.kind == K::AllowAlways))
                     .map(|o| o.id.clone());
                 let _ = reply.send(pick.clone());
-                self.conv.add_note(&format!("auto-allowed: {title}{}", if pick.is_none() { " (no allow option; cancelled)" } else { "" }));
+                // a quiet mark on the call's own line, not a note with the whole command
+                self.conv.mark_auto_allowed(&tool_call_id, &title, pick.is_none());
                 return;
             }
             Event::TurnStarted => {
