@@ -1311,11 +1311,14 @@ fn the_herring_opens_changes_and_settings() {
     ui.find("Global pins").unwrap();
     ui.find("Compact after").unwrap();
     drop(ui);
+    let flicked = app.herring_flick;
+    assert!(flicked.is_some(), "the herring swims when the view changes");
     let _ = app.update(Message::Escape);
     assert!(
         app.settings_page.is_none(),
         "Escape: back to the conversation"
     );
+    assert_ne!(app.herring_flick, flicked, "and again on the way back");
     let task = app.update(Message::ToggleChanges);
     settle_task(&mut app, task);
     assert!(

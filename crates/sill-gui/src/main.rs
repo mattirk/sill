@@ -2,6 +2,7 @@ mod changes_ui;
 mod demo;
 mod fonts;
 mod forms;
+mod herring;
 mod icons;
 mod keys;
 mod layout;
@@ -459,6 +460,8 @@ pub struct App {
     pub monitor: Option<iced::Size>,
     /// The pointer is over the top bar's activity (the shelf shows the timer then).
     pub activity_hovered: bool,
+    /// When the view last went between the session and the backend: the herring swims a stroke.
+    pub herring_flick: Option<Instant>,
     /// A selection is being dragged in the conversation: following the tail would pull the text
     /// from under the pointer, so new text does not scroll it until the drag ends.
     pub selecting: bool,
@@ -526,6 +529,7 @@ impl App {
             persist: false,
             monitor: None,
             activity_hovered: false,
+            herring_flick: None,
             selecting: false,
         };
         if demo {
@@ -768,7 +772,23 @@ impl App {
         }
     }
 
+    /// A backend page shows in the session's place.
+    pub fn backend_shown(&self) -> bool {
+        self.changes.is_some() || self.settings_page.is_some()
+    }
+
+    /// Every message: its update, and the herring's stroke when the view went between the
+    /// session and the backend (by the herring, Escape or anything else).
     fn update(&mut self, message: Message) -> Task<Message> {
+        let before = self.backend_shown();
+        let task = self.apply(message);
+        if before != self.backend_shown() {
+            self.herring_flick = Some(Instant::now());
+        }
+        task
+    }
+
+    fn apply(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Lane(session, epoch, update) => {
                 return self.lane_update(session, epoch, update);

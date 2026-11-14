@@ -166,13 +166,8 @@ impl App {
                 // a box just round the mark, its underline as wide as the box (as a tab's)
                 button(
                     column![
-                        container(
-                            svg(icons::herring())
-                                .width(18)
-                                .height(18)
-                                .style(style::icon(P.fg)),
-                        )
-                        .center(Fill),
+                        container(crate::herring::herring(18.0, P.fg, self.herring_flick))
+                            .center(Fill),
                         rule::horizontal(2).style(style::rule_style(if shown {
                             P.accent
                         } else {
