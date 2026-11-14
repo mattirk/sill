@@ -44,6 +44,8 @@ const STROKES: &[(&str, &str)] = &[
     ("sill-chevron-left", "m15 18-6-6 6-6"),
     ("sill-chevron-down", "m6 9 6 6 6-6"),
     ("sill-check", "M20 6 9 17l-5-5"),
+    // resume a held prompt (lucide play)
+    ("sill-play", "m6 3 14 9-14 9z"),
     // the copy button over a code block, a command, a prompt (lucide copy)
     ("sill-copy", "M10 8h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2zM4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"),
     ("sill-file", "M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2zM14 2v5a1 1 0 0 0 1 1h5"),

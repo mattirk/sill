@@ -25,7 +25,7 @@ use sill_proto::sfp::{Answer, Item, Question, Tool};
 
 use crate::layout::{self, Drawer};
 use crate::style::{self, P, alpha};
-use crate::{App, Message, Pick, SessionView, Tab, icons, keys, selection, viewer};
+use crate::{App, Message, Pick, SessionView, Tab, icons, keys, rows, selection, viewer};
 
 const MONO_FONT: Font = Font::with_name(crate::fonts::MONO_FAMILY);
 
@@ -551,53 +551,169 @@ impl App {
                 .height(Fill)
                 .into();
         }
-        let mut feed = Column::new().spacing(12).padding(Padding {
-            top: 10.0,
-            right: 14.0,
-            bottom: 18.0,
-            left: 12.0,
-        });
+        // the layout every row height depends on: the window's width, the drawer beside the
+        // conversation, the reading measure
+        let drawer = match self.layout.drawer(self.workspace.shown, self.width) {
+            Drawer::Beside(width) => width,
+            _ => 0.0,
+        };
+        let layout_key = rows::signature(
+            (
+                self.width.to_bits(),
+                drawer.to_bits(),
+                self.layout.measure().map(f32::to_bits),
+            ),
+            0,
+        );
         let questions: Vec<&Question> = conversation.questions.values().collect();
-        let mut placed = BTreeSet::new();
         let items = conversation.visible_items();
-        for (index, item) in items.iter().enumerate() {
-            feed = feed.push(self.item(view, item));
-            for question in questions
+        let below = |item: &Item| -> Vec<&'a Question> {
+            questions
                 .iter()
+                .copied()
                 .filter(|q| q.tool_item_id.as_deref() == Some(item.item_id.as_str()))
-            {
-                placed.insert(question.question_id.as_str());
-                feed = feed.push(self.question(view, question));
+                .collect()
+        };
+        // the last item of a turn that was stopped or failed: say so under it
+        let turn_end = |index: usize, item: &Item| -> Option<String> {
+            let turn_id = item.turn_id.as_ref()?;
+            if items.get(index + 1).and_then(|next| next.turn_id.as_ref()) == Some(turn_id) {
+                return None;
             }
-            // the last item of a turn that was stopped or failed: say so under it
-            if let Some(turn_id) = &item.turn_id
-                && items.get(index + 1).and_then(|next| next.turn_id.as_ref()) != Some(turn_id)
-                && let Some(end) = conversation.turn_end(turn_id)
-            {
-                feed = feed.push(
-                    container(
-                        selection::text(format!("· {end}"))
-                            .size(style::SMALL)
-                            .style(style::selectable(P.fg_dim)),
+            conversation.turn_end(turn_id).map(|end| end.to_string())
+        };
+        // what each row's height depends on, so a measured height is used only while it holds
+        let signatures: Vec<u64> = items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let source = view.rendered.get(&item.item_id).map(|r| r.source.as_str());
+                let tool = item.tool.as_ref().map(|t| {
+                    (
+                        &t.title,
+                        &t.status,
+                        t.detail.len(),
+                        t.diff.len(),
+                        view.open_tools.contains(&item.item_id),
                     )
-                    .padding([0, 8]),
-                );
+                });
+                let asked: Vec<_> = below(item)
+                    .into_iter()
+                    .map(|q| {
+                        (
+                            &q.question_id,
+                            &q.state,
+                            &q.answer_id,
+                            view.answering.contains(&q.question_id),
+                            view.open_answers.contains(&q.question_id),
+                            format!("{:?}", view.forms.get(&q.question_id)),
+                        )
+                    })
+                    .collect();
+                rows::signature(
+                    (
+                        &item.item_id,
+                        &item.kind,
+                        source,
+                        tool,
+                        asked,
+                        turn_end(index, item),
+                    ),
+                    layout_key,
+                )
+            })
+            .collect();
+        let known: Vec<Option<f32>> = {
+            let heights = view.heights.borrow();
+            items
+                .iter()
+                .zip(&signatures)
+                .map(|(item, signature)| {
+                    heights
+                        .get(&item.item_id)
+                        .filter(|(s, _)| s == signature)
+                        .map(|(_, h)| *h)
+                })
+                .collect()
+        };
+        const SPACING: f32 = 12.0;
+        // until the conversation has scrolled, the window's height stands in for the view's (a
+        // screen of rows to spare on each side covers the difference)
+        let viewport = if view.viewport > 0.0 {
+            view.viewport
+        } else {
+            self.height
+        };
+        let slots = rows::plan(
+            &known,
+            SPACING,
+            view.scroll_offset,
+            viewport,
+            view.follow_tail,
+        );
+        let mut feed = iced::widget::keyed_column(std::iter::empty())
+            .spacing(SPACING)
+            .padding(Padding {
+                top: 10.0,
+                right: 14.0,
+                bottom: 18.0,
+                left: 12.0,
+            });
+        let mut placed = BTreeSet::new();
+        for slot in slots {
+            match slot {
+                rows::Slot::Gap { first, height } => {
+                    let gap_key = format!("gap {}", items[first].item_id);
+                    feed = feed.push(rows::key(&gap_key), space().height(height));
+                }
+                rows::Slot::Row(index) => {
+                    let item = items[index];
+                    let mut row = Column::new().spacing(SPACING).push(self.item(view, item));
+                    for question in below(item) {
+                        row = row.push(self.question(view, question));
+                    }
+                    if let Some(end) = turn_end(index, item) {
+                        row = row.push(
+                            container(
+                                selection::text(format!("· {end}"))
+                                    .size(style::SMALL)
+                                    .style(style::selectable(P.fg_dim)),
+                            )
+                            .padding([0, 8]),
+                        );
+                    }
+                    feed = feed.push(
+                        rows::key(&item.item_id),
+                        rows::measured(row, &item.item_id, signatures[index], &view.heights),
+                    );
+                }
+            }
+        }
+        // questions below items left out are placed by their item; the rest go at the end
+        for item in &items {
+            for question in below(item) {
+                placed.insert(question.question_id.as_str());
             }
         }
         for question in questions
             .iter()
             .filter(|q| !placed.contains(q.question_id.as_str()))
         {
-            feed = feed.push(self.question(view, question));
+            feed = feed.push(
+                rows::key(&format!("question {}", question.question_id)),
+                self.question(view, question),
+            );
         }
         if let Some(error) = view.status.problem() {
-            feed = feed.push(note(error, P.error));
+            feed = feed.push(rows::key("problem"), note(error, P.error));
         }
         if let Some(failed) = &view.failed {
-            feed = feed.push(note(failed, P.error));
+            feed = feed.push(rows::key("failed"), note(failed, P.error));
         }
         let feed: Element<'a, Message> = match self.layout.measure() {
-            Some(measure) => container(feed.max_width(measure)).center_x(Fill).into(),
+            Some(measure) => container(container(feed).max_width(measure))
+                .center_x(Fill)
+                .into(),
             None => feed.into(),
         };
         let scroll = scrollable(feed)
@@ -610,6 +726,7 @@ impl App {
                 Message::Scrolled(
                     viewport.relative_offset().y >= 0.99,
                     viewport.absolute_offset().y,
+                    viewport.bounds().height,
                 )
             });
         // the scrollable stays the stack's first layer whether or not "↓ Latest" is over it:

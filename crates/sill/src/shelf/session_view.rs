@@ -2443,13 +2443,13 @@ impl SessionView {
             label.set_tooltip_text(Some(&format!("{text}\n{}", item["reason"].as_str().unwrap_or("Waiting for the agent to be ready"))));
             row.append(&label);
             if held {
-                let resume = gtk::Button::from_icon_name("media-playback-start-symbolic");
+                let resume = super::icons::glyph_button("sill-play");
                 resume.add_css_class("flat");
                 resume.set_tooltip_text(Some("Resume held prompt"));
                 self.queue_action(&resume, id.to_string(), true);
                 row.append(&resume);
             }
-            let remove = gtk::Button::from_icon_name("window-close-symbolic");
+            let remove = super::icons::glyph_button("sill-x");
             remove.add_css_class("flat");
             if let Some(image) = remove.child().and_downcast::<gtk::Image>() { image.set_pixel_size(10); }
             remove.set_tooltip_text(Some("Cancel this prompt if it has not been dispatched"));

@@ -25,7 +25,7 @@ fn item(id: usize, kind: &str, text: &str) -> Item {
 }
 
 /// The demo app with one session of `n` items: prompts, tool rows and Markdown answers.
-fn long(n: usize) -> App {
+pub(crate) fn long(n: usize) -> App {
     let (mut app, _) = App::new(true, None);
     let mut view = SessionView::new("demo");
     let mut conversation = sill_client::Conversation::new("demo", "demo-subscription", n as u64);
@@ -78,6 +78,33 @@ impl Screen {
             renderer,
             cache: Some(iced_runtime::user_interface::Cache::default()),
         }
+    }
+
+    /// One frame, split: the view built, laid out (`UserInterface::build`), and drawn.
+    fn split(&mut self, app: &App) -> (Duration, Duration, Duration) {
+        let start = Instant::now();
+        let element = app.view();
+        let built = start.elapsed();
+        let start = Instant::now();
+        let mut ui = iced_runtime::UserInterface::build(
+            element,
+            iced::Size::new(720.0, 860.0),
+            self.cache.take().unwrap_or_default(),
+            &mut self.renderer,
+        );
+        let laid = start.elapsed();
+        let start = Instant::now();
+        ui.draw(
+            &mut self.renderer,
+            &crate::style::theme(),
+            &iced::advanced::renderer::Style {
+                text_color: crate::style::P.fg,
+            },
+            iced::mouse::Cursor::Unavailable,
+        );
+        let drawn = start.elapsed();
+        self.cache = Some(ui.into_cache());
+        (built, laid, drawn)
     }
 
     fn frame(&mut self, app: &App) {
@@ -148,6 +175,8 @@ fn cost_of_a_long_conversation() {
         // warm, after each streamed event
         let mut screen = Screen::new();
         let cold = time(|| screen.frame(&app));
+        // as the first scroll message tells it: the view's height, following the tail
+        app.views.get_mut("demo").unwrap().viewport = 700.0;
         let mut warm = Duration::ZERO;
         let frames = 20;
         for k in 0..frames {
@@ -166,6 +195,33 @@ fn cost_of_a_long_conversation() {
             warm += time(|| screen.frame(&app));
         }
         let warm = warm / frames;
+        // scrolled away from the tail: the middle of the conversation
+        {
+            let view = app.views.get_mut("demo").unwrap();
+            view.follow_tail = false;
+            view.scroll_offset = view
+                .heights
+                .borrow()
+                .values()
+                .map(|(_, h)| h + 12.0)
+                .sum::<f32>()
+                / 2.0;
+        }
+        let middle = time(|| screen.frame(&app));
+        println!("{n:>5} items: a frame scrolled to the middle {middle:>9.2?}");
+        let (mut built, mut laid, mut drawn) = (Duration::ZERO, Duration::ZERO, Duration::ZERO);
+        for _ in 0..frames {
+            let (b, l, d) = screen.split(&app);
+            built += b;
+            laid += l;
+            drawn += d;
+        }
+        println!(
+            "{n:>5} items: a warm frame is view {:>9.2?}, layout {:>9.2?}, draw {:>9.2?}",
+            built / frames,
+            laid / frames,
+            drawn / frames
+        );
         let snapshot = time(|| app.views.get_mut("demo").unwrap().rebuild());
         println!(
             "{n:>5} items: per event {now:>9.2?} (before the change {before:>9.2?}); frame cold \

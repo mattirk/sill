@@ -8,6 +8,7 @@ mod layout;
 mod menu;
 #[cfg(test)]
 mod perf;
+mod rows;
 mod selection;
 mod settings;
 #[cfg(test)]
@@ -151,7 +152,8 @@ pub enum Message {
     Selecting(bool),
     DemoTick,
     Tick,
-    Scrolled(bool, f32),
+    /// The conversation scrolled: at its end, its offset, and the height in view.
+    Scrolled(bool, f32, f32),
     Latest,
     Prompt(text_editor::Action),
     Send,
@@ -247,6 +249,10 @@ pub struct SessionView {
     pub answering: BTreeSet<String>,
     pub follow_tail: bool,
     pub scroll_offset: f32,
+    /// The conversation's visible height, once it has scrolled (0 until then).
+    pub viewport: f32,
+    /// Each row's measured height (`rows.rs`): rows far from the view are left out as gaps.
+    pub heights: rows::Heights,
     pub terminal: Option<terminal::Pane>,
     pub terminal_shown: bool,
     terminal_generation: u64,
@@ -276,6 +282,8 @@ impl SessionView {
             answering: BTreeSet::new(),
             follow_tail: true,
             scroll_offset: 0.0,
+            viewport: 0.0,
+            heights: Default::default(),
             terminal: None,
             terminal_shown: false,
             terminal_generation: 0,
@@ -762,10 +770,11 @@ impl App {
                 }
                 return Task::batch(tasks);
             }
-            Message::Scrolled(at_bottom, offset) => {
+            Message::Scrolled(at_bottom, offset, viewport) => {
                 if let Some(view) = self.current_mut() {
                     view.follow_tail = at_bottom;
                     view.scroll_offset = offset;
+                    view.viewport = viewport;
                 }
             }
             Message::Latest => {

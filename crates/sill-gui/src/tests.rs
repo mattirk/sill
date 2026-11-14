@@ -1224,6 +1224,71 @@ fn the_menu_switches_between_the_three_modes() {
     assert!(!app.workspace.shown && app.layout.mode == Mode::Shelf);
 }
 
+/// A long conversation builds only the rows near the view; the rest are gaps of their measured
+/// height, so the conversation is as tall either way and a far row appears when scrolled to.
+#[test]
+fn a_long_conversation_builds_only_what_is_near_the_view() {
+    use iced_test::selector::Candidate;
+    let built = |ui: &mut Frame<'_, '_>, needle: &'static str| -> bool {
+        ui.select(move |candidate| match candidate {
+            Candidate::Text { content, .. } if content.contains(needle) => Some(()),
+            Candidate::Custom { state, .. } => state
+                .downcast_ref::<crate::selection::Selectable>()
+                .filter(|t| t.text().contains(needle))
+                .map(|_| ()),
+            _ => None,
+        })
+        .is_some()
+    };
+    let height = |ui: &mut Frame<'_, '_>| -> Option<f32> {
+        ui.select(|candidate| match candidate {
+            Candidate::Scrollable {
+                id: Some(found),
+                content_bounds,
+                ..
+            } if *found == iced::widget::Id::new("conversation") => Some(content_bounds.height),
+            _ => None,
+        })
+    };
+    let mut app = crate::perf::long(400);
+    let mut live = Live::new((720.0, 600.0));
+    // the first frame measures every row; following the tail, the first rows are then gaps
+    let mut full = None;
+    live.frame(&app, |ui| full = height(ui));
+    {
+        let view = app.views.get_mut("demo").unwrap();
+        view.viewport = 520.0;
+        view.follow_tail = true;
+    }
+    let (mut tail, mut first, mut last) = (None, false, false);
+    live.frame(&app, |ui| {
+        tail = height(ui);
+        first = built(ui, "pattern-1' crates");
+        last = built(ui, "pattern-397' crates");
+    });
+    assert!(last && !first, "only the tail is built");
+    let (full, tail) = (full.unwrap(), tail.unwrap());
+    assert!(full > 20_000.0, "a long conversation: {full}");
+    assert!(
+        (full - tail).abs() < 1.0,
+        "as tall with gaps: {full} vs {tail}"
+    );
+    // scrolled to the top: the first rows are built, the last are a gap
+    {
+        let view = app.views.get_mut("demo").unwrap();
+        view.follow_tail = false;
+        view.scroll_offset = 0.0;
+    }
+    let (mut top, mut first, mut last) = (None, false, false);
+    live.frame(&app, |ui| {
+        top = height(ui);
+        first = built(ui, "pattern-1' crates");
+        last = built(ui, "pattern-397' crates");
+    });
+    assert!(first && !last, "only the top is built");
+    assert!((full - top.unwrap()).abs() < 1.0);
+}
+
 // --- selection ----------------------------------------------------------------------------------
 
 /// What a selection test drives: the Simulator (one view, built once) or a [`Live`] frame (the
