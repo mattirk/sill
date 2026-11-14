@@ -132,7 +132,7 @@ impl App {
         keys::configured_shortcuts(layers, &self.settings.shortcuts)
     }
 
-    /// The drawer's edge: a line to drag, wider than it looks.
+    /// The drawer's edge: flush with the conversation, with a wider drag target inside the drawer.
     fn drawer_grip(&self) -> Element<'_, Message> {
         let line = if self.layout.dragging {
             P.accent
@@ -141,7 +141,7 @@ impl App {
         };
         mouse_area(
             container(rule::vertical(1).style(style::rule_style(line)))
-                .center_x(layout::HANDLE)
+                .align_left(layout::HANDLE)
                 .height(Fill)
                 .style(style::fill(P.bg)),
         )

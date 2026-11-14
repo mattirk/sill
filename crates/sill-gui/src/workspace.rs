@@ -16,6 +16,7 @@ use crate::{App, Message, SessionView, demo};
 #[derive(Debug, Clone)]
 pub enum Action {
     ToggleDrawer,
+    CloseDrawerToShelf,
     Refresh,
     Collapse,
     Toggle(HostPath),
@@ -493,6 +494,17 @@ impl App {
                 }
                 Task::none()
             }
+            Action::CloseDrawerToShelf => {
+                if self.layout.mode == crate::layout::Mode::Shelf {
+                    if self.workspace.shown {
+                        return self.update(Message::Workspace(Action::ToggleDrawer));
+                    }
+                    return Task::none();
+                }
+                self.update(Message::Layout(crate::layout::Action::Mode(
+                    crate::layout::Mode::Shelf,
+                )))
+            }
             Action::ToggleDrawer => {
                 // in Drawer mode, putting the drawer away is Full: the same window without it
                 // (Ctrl+Shift+F brings it back); elsewhere a quick look over the conversation
@@ -593,6 +605,7 @@ impl App {
                     | Action::Saved { .. }
                     | Action::DiscardEdits
                     | Action::CancelDiscard
+                    | Action::CloseDrawerToShelf
                     | Action::ToggleDrawer
                     | Action::Reply(_)
                     | Action::Hover(_)

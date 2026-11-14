@@ -238,7 +238,7 @@ impl App {
                 ),
                 choice(
                     View::Full,
-                    "maximize",
+                    "window-full",
                     "Full",
                     "the conversation across the whole window; Ctrl+Shift+F goes back (Ctrl+Shift+F)"
                 ),

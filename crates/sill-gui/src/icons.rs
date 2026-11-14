@@ -22,8 +22,7 @@ const STOP: &str = "M5 5H19V19H5Z";
 /// The shelf's line glyphs (lucide, ISC; `shelf/icons.rs`), drawn as a 2.2 unit stroke: (name,
 /// 24×24 path data). Looked up by name with [`line`].
 const LINES: &[(&str, &str)] = &[
-    // the + menu's views: drawer shown, the conversation alone, full width (lucide panel-right,
-    // square, maximize-2; sill-gui's own)
+    // The + menu modes: an upright shelf, a divided drawer, and a wide full window.
     (
         "panel-right",
         "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM15 3v18",
@@ -33,7 +32,7 @@ const LINES: &[(&str, &str)] = &[
         "panel",
         "M9 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z",
     ),
-    ("maximize", "M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"),
+    ("window-full", "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"),
     // managed processes (lucide server): the composer bar's indicator
     (
         "processes",

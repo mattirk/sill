@@ -170,8 +170,8 @@ impl App {
         let toolbar = row![
             glyph_action(
                 "chevron-left",
-                "Put the drawer away (Ctrl+Shift+F)",
-                Action::ToggleDrawer
+                "Close the drawer and switch to Shelf",
+                Action::CloseDrawerToShelf
             ),
             space().width(Fill),
             if state.diff_mode {
