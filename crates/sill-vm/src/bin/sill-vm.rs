@@ -2,6 +2,7 @@
 //! and for trying an image by hand. Prints `ready` once the guest's SSH answers; OpenSSH reaches
 //! it through `DIR/ssh.sock` (`ssh -o ProxyCommand='nc -U DIR/ssh.sock' sill@sill-box`). Stops
 //! the guest when `SILL_VM_HOLD` (a path) exists, on Ctrl-C or when the guest powers itself off.
+//! `SILL_VM_SHARE=name=/path,…` shares Mac folders under the virtiofs tag `sill-mac`.
 //! CPUs and memory: `SILL_VM_CPUS`, `SILL_VM_MEMORY_GB` (default: sized for this Mac). The binary
 //! needs the `com.apple.security.virtualization` entitlement
 //! (`packaging/mac/sill-vm.entitlements`).
@@ -43,6 +44,16 @@ fn main() -> anyhow::Result<()> {
     sill_vm::serve_ssh(vm.clone(), &dir.join("ssh.sock"))?;
     vm.wait_for_ssh(Duration::from_secs(180))?;
     say("ssh answers on vsock");
+    // `SILL_VM_SHARE=name=/path,…`: Mac folders for the guest's `sill-mac` virtiofs
+    if let Ok(spec) = std::env::var("SILL_VM_SHARE") {
+        let folders: Vec<sill_vm::Shared> = spec
+            .split(',')
+            .filter_map(|item| item.split_once('='))
+            .map(|(name, path)| sill_vm::Shared { name: name.into(), path: path.into(), read_only: false })
+            .collect();
+        vm.share(&folders)?;
+        say(&format!("sharing {} folder(s)", folders.len()));
+    }
     println!("ready");
 
     let interrupted = Arc::new(AtomicBool::new(false));

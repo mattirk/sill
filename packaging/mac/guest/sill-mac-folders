@@ -1,0 +1,24 @@
+#!/bin/sh
+# The person's Mac folders at their Mac paths inside the VM (docs/sill-stick.md section 9).
+# sill-gui shares each folder under the virtiofs tag sill-mac by a name of its own, then runs this
+# as root with lines of NAME<TAB>PATH on stdin; it mounts the share at /mnt/mac and binds each
+# folder at PATH, so the VM, its jails and the person see one path. Only folders of a Mac user
+# (/Users/…) or of a Mac volume (/Volumes/…): nothing of the guest's own can be covered.
+set -eu
+share=/mnt/mac
+mkdir -p "$share"
+mountpoint -q "$share" || mount -t virtiofs sill-mac "$share"
+tab=$(printf '\t')
+status=0
+while IFS="$tab" read -r name path; do
+    case "$name" in '' | *[!a-z0-9]*) echo "sill-mac-folders: bad name: $name" >&2; status=1; continue ;; esac
+    case "$path" in
+        /Users/?*/* | /Users/?* | /Volumes/?*) ;;
+        *) echo "sill-mac-folders: not a Mac user's folder: $path" >&2; status=1; continue ;;
+    esac
+    case "/$path/" in */../* | */./*) echo "sill-mac-folders: not a plain path: $path" >&2; status=1; continue ;; esac
+    [ -d "$share/$name" ] || { echo "sill-mac-folders: not shared: $path" >&2; status=1; continue; }
+    mkdir -p "$path"
+    mountpoint -q "$path" || mount --bind "$share/$name" "$path"
+done
+exit $status

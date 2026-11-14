@@ -50,6 +50,12 @@ pub enum Action {
         token: String,
         path: Option<std::path::PathBuf>,
     },
+    /// A Mac folder made to appear in the window's own VM, ready to pin there (`local_vm`).
+    MacFolderShared {
+        session: String,
+        token: String,
+        result: Result<std::path::PathBuf, String>,
+    },
     Refresh,
     Collapse,
     Toggle(HostPath),
@@ -316,6 +322,11 @@ impl App {
                 token,
                 path,
             } => self.folder_picked(session, token, path),
+            Action::MacFolderShared {
+                session,
+                token,
+                result,
+            } => self.mac_folder_shared(session, token, result),
             Action::ToggleDrawer => self.toggle_drawer(),
             action => self.selected_files_action(action),
         }

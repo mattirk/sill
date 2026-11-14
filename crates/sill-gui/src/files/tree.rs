@@ -52,6 +52,22 @@ impl App {
         {
             return Task::none();
         }
+        // the Mac's own VM: the folder is the Mac's, put in the VM at its path before it is pinned
+        #[cfg(target_os = "macos")]
+        if let Some(picked) = path.clone()
+            && crate::local_vm::phase().is_some()
+        {
+            return crate::blocking(
+                move || crate::local_vm::expose(&picked),
+                move |result| {
+                    Message::Files(Action::MacFolderShared {
+                        session,
+                        token,
+                        result,
+                    })
+                },
+            );
+        }
         self.drawer.folder_picker = None;
         let Some(view) = self
             .views
@@ -64,6 +80,35 @@ impl App {
             .and_then(|path| view.files.pin(HostPath::from_path(&path), true))
             .into_iter()
             .collect();
+        self.files_send(&session, requests);
+        Task::none()
+    }
+
+    /// A picked Mac folder is in the VM at its path (or could not be put there): pin it as any.
+    pub(super) fn mac_folder_shared(
+        &mut self,
+        session: String,
+        token: String,
+        result: Result<std::path::PathBuf, String>,
+    ) -> Task<Message> {
+        if self.drawer.folder_picker.as_ref() != Some(&(session.clone(), token.clone())) {
+            return Task::none();
+        }
+        self.drawer.folder_picker = None;
+        let Some(view) = self
+            .views
+            .get_mut(&session)
+            .filter(|v| v.media_token == token)
+        else {
+            return Task::none();
+        };
+        let requests = match result {
+            Ok(path) => view.files.pin(HostPath::from_path(&path), true).into_iter().collect(),
+            Err(said) => {
+                view.files.error = Some(said);
+                Vec::new()
+            }
+        };
         self.files_send(&session, requests);
         Task::none()
     }
@@ -140,6 +185,7 @@ impl App {
             | Action::CancelDiscard
             | Action::PickFolder
             | Action::FolderPicked { .. }
+            | Action::MacFolderShared { .. }
             | Action::ToggleDrawer
             | Action::Reply(_)
             | Action::Hover(_)

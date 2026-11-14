@@ -19,6 +19,17 @@ mod apple;
 #[cfg(target_os = "macos")]
 pub use apple::{Vm, serve_ssh};
 
+/// The virtiofs tag the person's Mac folders reach the guest under (`Vm::share`).
+pub const SHARE_TAG: &str = "sill-mac";
+
+/// A folder of this Mac shared with the guest, by `name` under the share.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shared {
+    pub name: String,
+    pub path: PathBuf,
+    pub read_only: bool,
+}
+
 /// The guest's SSH on vsock (systemd's ssh generator binds it when the VM has a vsock device).
 pub const SSH_PORT: u32 = 22;
 

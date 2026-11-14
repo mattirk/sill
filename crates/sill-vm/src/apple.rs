@@ -14,7 +14,7 @@ use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
 use objc2::AnyThread;
 use objc2::rc::Retained;
-use objc2_foundation::{NSArray, NSData, NSError, NSString, NSURL};
+use objc2_foundation::{NSArray, NSData, NSDictionary, NSError, NSString, NSURL};
 use objc2_virtualization::*;
 
 use crate::{Config, State};
@@ -197,6 +197,46 @@ impl Vm {
             Ok(Err(error)) => bail!("port {port} in the VM: {error}"),
             Err(_) => bail!("port {port} in the VM: no answer within {} s", WAIT.as_secs()),
         }
+    }
+
+    /// Share exactly `folders` of this Mac with the guest, from now on (the running guest sees the
+    /// change at once): under the virtiofs tag `sill-mac`, each folder by its name.
+    pub fn share(&self, folders: &[crate::Shared]) -> Result<()> {
+        let names: Vec<Retained<NSString>> =
+            folders.iter().map(|f| NSString::from_str(&f.name)).collect();
+        // SAFETY: the framework's share objects, made before they are handed to the machine
+        let dirs: Vec<Retained<VZSharedDirectory>> = folders
+            .iter()
+            .map(|f| unsafe {
+                VZSharedDirectory::initWithURL_readOnly(VZSharedDirectory::alloc(), &url(&f.path), f.read_only)
+            })
+            .collect();
+        let name_refs: Vec<&NSString> = names.iter().map(|n| &**n).collect();
+        let dir_refs: Vec<&VZSharedDirectory> = dirs.iter().map(|d| &**d).collect();
+        let dictionary = NSDictionary::from_slices(&name_refs, &dir_refs);
+        // SAFETY: as above
+        let share = OnQueue(unsafe {
+            VZMultipleDirectoryShare::initWithDirectories(VZMultipleDirectoryShare::alloc(), &dictionary)
+        });
+        let machine = &self.machine;
+        let mut result = Ok(());
+        let out = OnQueue(&mut result as *mut Result<()>);
+        self.queue.exec_sync(move || {
+            let (share, out) = (&share, &out);
+            // SAFETY: on the machine's queue; `out` outlives this synchronous call
+            unsafe {
+                let devices = machine.0.directorySharingDevices();
+                *out.0 = match devices.firstObject() {
+                    Some(device) => {
+                        let device: Retained<VZVirtioFileSystemDevice> = Retained::cast_unchecked(device);
+                        device.setShare(Some(&share.0));
+                        Ok(())
+                    }
+                    None => Err(anyhow!("the VM has no shared-folder device")),
+                };
+            }
+        });
+        result
     }
 
     /// Wait until the guest's SSH answers on vsock, up to `patience`.
@@ -389,6 +429,12 @@ fn configuration(config: &Config) -> Result<Retained<VZVirtualMachineConfigurati
         machine.setStorageDevices(&NSArray::from_retained_slice(&disks));
         machine.setNetworkDevices(&NSArray::from_retained_slice(&[Retained::into_super(net)]));
         machine.setSerialPorts(&NSArray::from_retained_slice(&[Retained::into_super(console)]));
+        let folders = VZVirtioFileSystemDeviceConfiguration::initWithTag(
+            VZVirtioFileSystemDeviceConfiguration::alloc(),
+            &NSString::from_str(crate::SHARE_TAG),
+        );
+        folders.setShare(Some(&VZMultipleDirectoryShare::new()));
+        machine.setDirectorySharingDevices(&NSArray::from_retained_slice(&[Retained::into_super(folders)]));
         machine.setSocketDevices(&NSArray::from_retained_slice(&[Retained::into_super(
             VZVirtioSocketDeviceConfiguration::new(),
         )]));
