@@ -457,13 +457,15 @@ fn dev_cmd(cmd: DevCmd) -> Result<()> {
                 let st = std::process::Command::new("systemctl").args(["--user", "stop", &unit]).status()?;
                 println!("unit {unit} stopped ({st})");
             }
+            // legacy setsid sessions: bwrap ignores SIGTERM, so kill the whole process group it leads
+            // (setsid made it a session leader; its pgid == its pid), which takes the shim with it
             for (name, file) in [("bwrap", "bwrap.pid"), ("proxy", "proxy.pid")] {
                 if let Ok(pid) = std::fs::read_to_string(rt.join(file)) {
                     if let Ok(pid) = pid.trim().parse::<i32>()
                         && let Some(pid) = rustix::process::Pid::from_raw(pid)
                     {
-                        let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
-                        println!("{name} pid {} signalled", pid.as_raw_nonzero());
+                        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+                        println!("{name} process group {} killed", pid.as_raw_nonzero());
                     }
                     let _ = std::fs::remove_file(rt.join(file));
                 }

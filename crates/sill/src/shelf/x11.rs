@@ -90,6 +90,23 @@ pub fn place(window: &gtk::Window, p: &Placement) {
     let _ = conn.flush();
 }
 
+/// Is this window the X server's active window? GTK's own `is_active` is unreliable at hotkey time:
+/// the WM's key grab takes the focus away for a moment.
+pub fn is_active(window: &gtk::Window) -> bool {
+    let Some(xid) = xid(window) else { return false };
+    let Ok((conn, screen_num)) = x11rb::connect(None) else { return false };
+    let root = conn.setup().roots[screen_num].root;
+    let Some(atom) = conn.intern_atom(false, b"_NET_ACTIVE_WINDOW").ok().and_then(|c| c.reply().ok()).map(|r| r.atom) else {
+        return false;
+    };
+    conn.get_property(false, root, atom, AtomEnum::WINDOW, 0, 1)
+        .ok()
+        .and_then(|c| c.reply().ok())
+        .and_then(|r| r.value32().and_then(|mut v| v.next()))
+        .map(|active| active == xid)
+        .unwrap_or(false)
+}
+
 /// Ask the WM to activate (focus + raise) the window.
 pub fn activate(window: &gtk::Window) {
     let Some(xid) = xid(window) else { return };

@@ -171,7 +171,7 @@ pub fn show(w: &gtk::Window) {
 }
 
 pub fn toggle(w: &gtk::Window) {
-    if w.is_visible() && w.is_active() {
+    if w.is_visible() && (w.is_active() || x11::is_active(w)) {
         w.set_visible(false);
     } else {
         show(w);
