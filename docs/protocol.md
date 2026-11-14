@@ -106,7 +106,9 @@ running jail still has another state, including tunnels that remain open. Choice
 after repository and ghost restrictions at every new build and recorded in the launch snapshot;
 a changed choice or a removed launch host marks the running jail `policy_changed`.
 `_sill/policy.save_host` (Save for future sessions) adds a host pattern, wildcards allowed, to
-the session agent's network defaults and changes no existing session; ghosts refuse it.
+the session agent's network defaults and changes no existing session; ghosts refuse it. An
+added agent default does not set a running session's `policy_changed`; a removed one does
+(2026-11-06).
 
 Without `sill.permission_modes` a connection also cannot submit, resume, send now, answer,
 change controls, start, approve hosts or change pins for a session whose launch (when running)

@@ -620,19 +620,36 @@ fn write_policy_snapshot(dir: &Path, resolution: &crate::policy_fragments::Resol
 
 /// Policy sources, pins or remembered session grants changed since the recorded launch. Compare
 /// source content, including absent fragments and pins, rather than modification times.
-pub fn jail_outdated_with_grants(session: &str, base: &Policy, pins: &[PathBuf], store: &crate::store::Store) -> bool {
+/// `agent_domains` are the agent's network defaults now (part of `base`): one added since the
+/// launch does not make the jail outdated — it only widens, and applies at the next start
+/// (2026-11-06, "Save for future sessions" asked every running session of the agent to restart).
+/// A removed one still does.
+pub fn jail_outdated_with_grants(session: &str, base: &Policy, pins: &[PathBuf], store: &crate::store::Store, agent_domains: &[String]) -> bool {
     let snapshot = policy_snapshot(session);
     if let Ok(Some(launch)) = &snapshot {
         let (Ok(choices), Ok(hosts)) = (store.permission_choices(session), store.network_hosts(session)) else { return true };
         if grants_outdated(launch, &choices, &hosts) { return true; }
     }
-    snapshot_outdated(snapshot, base, pins)
+    snapshot_outdated(snapshot, base, pins, agent_domains)
 }
 
-fn snapshot_outdated(snapshot: Result<Option<crate::policy_fragments::Resolution>>, base: &Policy, pins: &[PathBuf]) -> bool {
+fn snapshot_outdated(snapshot: Result<Option<crate::policy_fragments::Resolution>>, base: &Policy, pins: &[PathBuf], agent_domains: &[String]) -> bool {
     match snapshot {
-        Ok(Some(snapshot)) => crate::policy_fragments::input_fingerprint(base, pins)
-            .map(|current| current != snapshot.fingerprint).unwrap_or(true),
+        Ok(Some(snapshot)) => {
+            let fingerprint = |base: &Policy| crate::policy_fragments::input_fingerprint(base, pins);
+            if fingerprint(base).map(|current| current == snapshot.fingerprint).unwrap_or(false) {
+                return false;
+            }
+            // Only agent defaults added since the launch? Then the base without them is the
+            // launch's. The launch's own allow-list, less its session grants, is what it had.
+            let launched: Vec<&String> = snapshot.policy.network.allow.iter()
+                .filter(|h| !snapshot.session_hosts.contains(h)).collect();
+            let added: Vec<&String> = agent_domains.iter().filter(|d| !launched.contains(d)).collect();
+            if added.is_empty() { return true; }
+            let mut without = base.clone();
+            without.network.allow.retain(|h| !added.contains(&h));
+            fingerprint(&without).map(|current| current != snapshot.fingerprint).unwrap_or(true)
+        }
         // A legacy jail has no evidence that it applied newly introduced fragments.
         Ok(None) => crate::policy_fragments::resolve(base, pins, &[])
             .map(|current| !current.sources.is_empty()).unwrap_or(true),
@@ -963,9 +980,9 @@ mod tests {
         write_policy_snapshot(&tree.snapshots(), &first).unwrap();
         let snapshot = read_policy_snapshot(&tree.snapshots()).unwrap().unwrap();
         assert_eq!(snapshot.fingerprint, first.fingerprint);
-        assert!(!snapshot_outdated(Ok(Some(snapshot.clone())), &base, &[tree.repo()]));
+        assert!(!snapshot_outdated(Ok(Some(snapshot.clone())), &base, &[tree.repo()], &[]));
         tree.fragment("[network]\nmode='none'");
-        assert!(snapshot_outdated(Ok(Some(snapshot)), &base, &[tree.repo()]));
+        assert!(snapshot_outdated(Ok(Some(snapshot)), &base, &[tree.repo()], &[]));
         let second = tree.resolve(&base);
         write_policy_snapshot(&tree.snapshots(), &second).unwrap();
         let latest = read_policy_snapshot(&tree.snapshots()).unwrap().unwrap();
@@ -978,7 +995,31 @@ mod tests {
             old.fingerprint == first.fingerprint && old.sources[0].text.contains("example.com")
         }));
         std::fs::remove_file(tree.repo().join(".sill/policy.toml")).unwrap();
-        assert!(snapshot_outdated(Ok(Some(latest)), &base, &[tree.repo()]));
+        assert!(snapshot_outdated(Ok(Some(latest)), &base, &[tree.repo()], &[]));
+    }
+
+    /// An agent default added after the launch leaves the jail current (it only widens); a
+    /// removed one, or another change alongside an added one, makes it outdated.
+    #[test]
+    fn added_agent_defaults_do_not_outdate_a_running_jail() {
+        let tree = PolicyTestTree::new();
+        let with = |domains: &[&str]| {
+            let mut base = Policy::builtin_default();
+            base.network.allow.extend(domains.iter().map(|d| d.to_string()));
+            base
+        };
+        let launch = tree.resolve(&with(&["api.agent.example"]));
+        // a session grant at launch that is later saved as an agent default stays current too
+        let mut launch = apply_grants(launch, &Default::default(), vec!["saved.example".into()]);
+        launch.fingerprint = tree.resolve(&with(&["api.agent.example"])).fingerprint;
+        let domains = |d: &[&str]| d.iter().map(|d| d.to_string()).collect::<Vec<_>>();
+        let pins = [tree.repo()];
+        let now = ["api.agent.example", "saved.example", "new.example"];
+        assert!(!snapshot_outdated(Ok(Some(launch.clone())), &with(&now), &pins, &domains(&now)), "added");
+        assert!(snapshot_outdated(Ok(Some(launch.clone())), &with(&[]), &pins, &[]), "removed");
+        let mut changed = with(&now);
+        changed.network.quiet.push("other.example".into());
+        assert!(snapshot_outdated(Ok(Some(launch)), &changed, &pins, &domains(&now)), "added and something else");
     }
 
     #[test]
@@ -1014,7 +1055,7 @@ mod tests {
         assert!(read_policy_snapshot(&tree.snapshots()).unwrap().is_none());
         write_policy_snapshot(&tree.snapshots(), &tree.resolve(&base)).unwrap();
         std::fs::write(tree.snapshots().join("latest.json"), "corrupt").unwrap();
-        assert!(snapshot_outdated(read_policy_snapshot(&tree.snapshots()), &base, &[tree.repo()]));
+        assert!(snapshot_outdated(read_policy_snapshot(&tree.snapshots()), &base, &[tree.repo()], &[]));
         std::fs::remove_file(tree.snapshots().join("latest.json")).unwrap();
         std::os::unix::fs::symlink(tree.repo().join(".sill/policy.toml"), tree.snapshots().join("latest.json")).unwrap();
         assert!(read_policy_snapshot(&tree.snapshots()).is_err());
@@ -1024,11 +1065,11 @@ mod tests {
     fn legacy_jail_needs_rebuild_for_valid_or_invalid_repository_fragment() {
         let tree = PolicyTestTree::new();
         let base = Policy::builtin_default();
-        assert!(!snapshot_outdated(Ok(None), &base, &[tree.repo()]));
+        assert!(!snapshot_outdated(Ok(None), &base, &[tree.repo()], &[]));
         tree.fragment("[network]\nmode='none'");
-        assert!(snapshot_outdated(Ok(None), &base, &[tree.repo()]));
+        assert!(snapshot_outdated(Ok(None), &base, &[tree.repo()], &[]));
         tree.fragment("malformed [");
-        assert!(snapshot_outdated(Ok(None), &base, &[tree.repo()]));
+        assert!(snapshot_outdated(Ok(None), &base, &[tree.repo()], &[]));
     }
 
     #[test]
@@ -1041,7 +1082,7 @@ mod tests {
         let snapshot = read_policy_snapshot(&tree.snapshots()).unwrap().unwrap();
         assert!(snapshot.sources[0].ignored);
         assert!(snapshot.sources[0].text.contains("direct"));
-        assert!(!snapshot_outdated(Ok(Some(snapshot)), &base, &[tree.repo()]));
+        assert!(!snapshot_outdated(Ok(Some(snapshot)), &base, &[tree.repo()], &[]));
         assert!(crate::policy_fragments::resolve(&base, &[tree.repo()], &[]).is_err());
     }
 

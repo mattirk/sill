@@ -512,11 +512,15 @@ PY
         env.cli("permissions", "restore", b)
         check("`sill permissions restore` clears it",
               states(c.call("_sill/policy.preview", {"session_id": b}))["public_web"]["requested"] is None)
+        # `wide` runs with nothing pending: an added agent default must not change that
+        current_before = get(wide)["running"] and not get(wide)["policy_changed"]
         env.cli("permissions", "save-host", b, THIRD)
         stub = c.call("_sill/agents.get", {"agent_id": "stub"})
         check("Save for future sessions adds the host to the agent's defaults", THIRD in stub["domains"], json.dumps(stub)[:300])
         check("…written to the throwaway HOME only", THIRD in (env.home / ".config/sill/agents/stub.toml").read_text())
         check("a running session does not gain the saved host", refused(c, b, THIRD))
+        check("a current running session is not asked to restart for an added agent default",
+              current_before and not get(wide)["policy_changed"], json.dumps(get(wide))[:300])
         fresh = create("after-save", env.policy("after-save"))
         check("a new session reaches the saved host", start(fresh) and reaches(c, fresh, THIRD))
 
