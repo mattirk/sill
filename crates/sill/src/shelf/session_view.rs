@@ -1698,6 +1698,11 @@ impl SessionView {
     fn check_denied(self: &Rc<Self>) {
         let Ok(rt) = sill_core::shim::runtime_dir(&self.id()) else { return };
         let Ok(text) = std::fs::read_to_string(rt.join("denied")) else { return };
+        // hosts answered before (any button): the file outlives the tab, the question must not
+        let answered = rt.join("denied.answered");
+        for host in std::fs::read_to_string(&answered).unwrap_or_default().lines() {
+            self.denied_seen.borrow_mut().insert(host.trim().to_string());
+        }
         let home = session::home().unwrap_or_default();
         let quiet = sill_core::policy::Policy::load(&self.session.borrow().policy, &home)
             .map(|p| p.network.quiet)
@@ -1732,11 +1737,23 @@ impl SessionView {
                 .map(|a| a.name.clone())
                 .unwrap_or_else(|| self.session.borrow().agent.clone());
             let mut actions: Vec<(String, Rc<dyn Fn()>)> = Vec::new();
+            let remember = {
+                let (answered, host) = (answered.clone(), host.to_string());
+                move || {
+                    use std::io::Write;
+                    let f = std::fs::OpenOptions::new().create(true).append(true).open(&answered);
+                    if let Err(e) = f.and_then(|mut f| writeln!(f, "{host}")) {
+                        eprintln!("sill: {}: {e}", answered.display());
+                    }
+                }
+            };
             let exact = host.to_string();
             let weak = Rc::downgrade(self);
+            let r = remember.clone();
             actions.push((
                 format!("Allow {host}"),
                 Rc::new(move || {
+                    r();
                     if let Some(v) = weak.upgrade() {
                         v.allow_domain(&exact);
                     }
@@ -1747,16 +1764,18 @@ impl SessionView {
                 let wild = format!("{wild}{}", host.strip_prefix(name).unwrap_or(""));
                 let weak = Rc::downgrade(self);
                 let w = wild.clone();
+                let r = remember.clone();
                 actions.push((
                     format!("Allow {wild}"),
                     Rc::new(move || {
+                        r();
                         if let Some(v) = weak.upgrade() {
                             v.allow_domain(&w);
                         }
                     }),
                 ));
             }
-            actions.push(("Keep blocked".into(), Rc::new(|| {})));
+            actions.push(("Keep blocked".into(), Rc::new(remember)));
             self.conv.add_actions(
                 &format!("{agent_name} tried to reach {host} and the proxy refused it: the host is not on this agent's allow-list."),
                 actions,
@@ -1911,8 +1930,8 @@ impl SessionView {
             return Some(j.clone());
         }
         // the daemon plans it (docs/daemon.md §7 M2); once per jail, so a blocking call here is one
-        // short round trip, not one per image
-        let v: sill_proto::JailView = super::client::call(sill_proto::method::SESSIONS_JAIL_VIEW, sill_proto::Key { key: self.id() }).ok()?;
+        // short round trip, not one per image — on the quick lane, not behind an attach or a scan
+        let v: sill_proto::JailView = super::client::quick(sill_proto::method::SESSIONS_JAIL_VIEW, sill_proto::Key { key: self.id() }).ok()?;
         let j = (v.layers, v.masked);
         *self.jail.borrow_mut() = Some(j.clone());
         Some(j)

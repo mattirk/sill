@@ -829,11 +829,12 @@ impl Conversation {
             let name = opt.name.clone();
             let open = self.open_permissions.clone();
             let call = tool_call_id.to_string();
+            let status = self.status.clone();
             b.connect_clicked(move |_| {
                 if let Some(tx) = reply.borrow_mut().take() {
                     let _ = tx.send(Some(id.clone()));
-                    buttons2.set_sensitive(false);
-                    label2.set_text(&format!("{} → {name}", label2.text()));
+                    answered(&label2, &[buttons2.clone().upcast()], &name);
+                    status.set_text("working…");
                     open.borrow_mut().remove(&call);
                 }
             });
@@ -850,8 +851,7 @@ impl Conversation {
     pub fn resolve_permission(&self, tool_call_id: &str) {
         let Some((buttons, label, reply)) = self.open_permissions.borrow_mut().remove(tool_call_id) else { return };
         reply.borrow_mut().take();
-        buttons.set_sensitive(false);
-        label.set_text(&format!("{} → answered elsewhere", label.text()));
+        answered(&label, &[buttons.upcast()], "answered elsewhere");
     }
 
     /// A question from sill with a few actions (same look as a permission request). Each button
@@ -872,8 +872,7 @@ impl Conversation {
             let buttons2 = buttons.clone();
             let label2 = label.clone();
             b.connect_clicked(move |_| {
-                buttons2.set_sensitive(false);
-                label2.set_text(&format!("{} → {}", label2.text(), text));
+                answered(&label2, &[buttons2.clone().upcast()], &text);
                 act();
             });
             buttons.append(&b);
@@ -905,7 +904,8 @@ impl Conversation {
         frame.append(&label);
         // what each field's widgets answer with, read at Submit
         type Reader = Box<dyn Fn() -> Option<serde_json::Value>>;
-        let mut readers: Vec<(String, Reader)> = Vec::new();
+        let mut readers: Vec<(String, String, Reader)> = Vec::new();
+        let mut blocks: Vec<gtk::Box> = Vec::new();
         for f in fields {
             let block = gtk::Box::new(gtk::Orientation::Vertical, 3);
             block.add_css_class("sill-form-field");
@@ -972,8 +972,9 @@ impl Conversation {
                     })
                 }
             };
-            readers.push((f.key.clone(), reader));
+            readers.push((f.key.clone(), if f.title.is_empty() { f.key.clone() } else { f.title.clone() }, reader));
             frame.append(&block);
+            blocks.push(block);
         }
         let buttons = answer_row();
         let reply = Rc::new(RefCell::new(Some(reply)));
@@ -983,15 +984,24 @@ impl Conversation {
         {
             let reply = reply.clone();
             let readers = readers.clone();
+            let blocks = blocks.clone();
             let buttons2 = buttons.clone();
             let label2 = label.clone();
+            let status = self.status.clone();
             submit.connect_clicked(move |_| {
                 if let Some(tx) = reply.borrow_mut().take() {
-                    let values: std::collections::BTreeMap<String, serde_json::Value> =
-                        readers.iter().filter_map(|(k, r)| r().map(|v| (k.clone(), v))).collect();
+                    let mut shown = Vec::new();
+                    let mut values = std::collections::BTreeMap::new();
+                    for (key, title, read) in readers.iter() {
+                        if let Some(v) = read() {
+                            shown.push(format!("{title}: {}", form_value(&v)));
+                            values.insert(key.clone(), v);
+                        }
+                    }
                     let _ = tx.send(Some(values));
-                    buttons2.set_sensitive(false);
-                    label2.set_text(&format!("{} → answered", label2.text()));
+                    let details: Vec<gtk::Widget> = blocks.iter().map(|b| b.clone().upcast()).chain([buttons2.clone().upcast()]).collect();
+                    answered(&label2, &details, &if shown.is_empty() { "answered".to_string() } else { shown.join(" · ") });
+                    status.set_text("working…");
                 }
             });
         }
@@ -1000,11 +1010,13 @@ impl Conversation {
         {
             let buttons2 = buttons.clone();
             let label2 = label.clone();
+            let status = self.status.clone();
             cancel.connect_clicked(move |_| {
                 if let Some(tx) = reply.borrow_mut().take() {
                     let _ = tx.send(None);
-                    buttons2.set_sensitive(false);
-                    label2.set_text(&format!("{} → cancelled", label2.text()));
+                    let details: Vec<gtk::Widget> = blocks.iter().map(|b| b.clone().upcast()).chain([buttons2.clone().upcast()]).collect();
+                    answered(&label2, &details, "cancelled");
+                    status.set_text("working…");
                 }
             });
         }
@@ -1116,6 +1128,39 @@ fn answer_row() -> gtk::FlowBox {
     f
 }
 
+/// A question answered (here or elsewhere): the question reads "… → answer" and its fields and
+/// buttons fold away — a greyed form looks stuck — so the block shows at once that the click took.
+/// A small toggle under it opens them again, read-only, as they were answered.
+fn answered(label: &gtk::Label, details: &[gtk::Widget], answer: &str) {
+    label.set_text(&format!("{} → {answer}", label.text()));
+    for d in details {
+        d.set_sensitive(false);
+        d.set_visible(false);
+    }
+    let Some(frame) = label.parent().and_downcast::<gtk::Box>() else { return };
+    let toggle = gtk::Button::with_label("▸ show");
+    toggle.add_css_class("flat");
+    toggle.add_css_class("sill-answered-toggle");
+    toggle.set_halign(gtk::Align::Start);
+    let details = details.to_vec();
+    toggle.connect_clicked(move |t| {
+        let open = !details.first().is_some_and(|d| d.is_visible());
+        details.iter().for_each(|d| d.set_visible(open));
+        t.set_label(if open { "▾ hide" } else { "▸ show" });
+    });
+    frame.append(&toggle);
+}
+
+/// A form answer as the person picked it: text bare, choices joined.
+fn form_value(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Bool(b) => if *b { "yes" } else { "no" }.to_string(),
+        serde_json::Value::Array(a) => a.iter().map(form_value).collect::<Vec<_>>().join(", "),
+        other => other.to_string(),
+    }
+}
+
 /// An answer button whose text wraps inside it (agents' option texts can be long).
 fn answer_button(text: &str) -> gtk::Button {
     let l = gtk::Label::new(Some(text));
@@ -1223,6 +1268,7 @@ button.sill-copy > image { -gtk-icon-size: 0.9em; }
 .sill-permission { background: alpha(@warning_bg_color, 0.10); border-radius: 0; padding: 8px 10px;
                    border-left: 2px solid @warning_bg_color; }
 .sill-permission button { border-radius: 0; }
+.sill-answered-toggle { padding: 0 4px; min-height: 0; font-size: 0.85em; opacity: 0.7; }
 .sill-prompt { border-radius: 0; }
 .sill-prompt text { background: transparent; }
 /* "+" menu: a plain list, icon + name, left-aligned */

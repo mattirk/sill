@@ -79,13 +79,19 @@ fn connected() -> Result<Arc<Client>> {
     Ok(c)
 }
 
-/// A second connection for the shelf's own writes (`sessions.set`, pins, notes…): the first one
-/// carries attaches, which the daemon answers in order and which can take seconds while a jail
-/// starts; a write from the main loop must not wait behind one.
-static WRITER: OnceLock<Mutex<Option<Arc<Client>>>> = OnceLock::new();
+/// A connection of its own, made on first use and again when the daemon has closed it. The daemon
+/// answers one connection's requests in order, so what must not wait gets a lane apart from the
+/// first one, which carries attaches (seconds while a jail starts), ends and overlay scans.
+type Lane = OnceLock<Mutex<Option<Arc<Client>>>>;
 
-fn writer() -> Result<Arc<Client>> {
-    let slot = WRITER.get_or_init(|| Mutex::new(None));
+/// The shelf's own writes (`sessions.set`, pins, notes…), from the main loop.
+static WRITER: Lane = OnceLock::new();
+/// Answers to the agent's questions and the view's one blocking read (`sessions.jail_view`): the
+/// person just clicked, or the GTK thread waits — never behind a scan or a delete.
+static QUICK: Lane = OnceLock::new();
+
+fn lane(lane: &'static Lane) -> Result<Arc<Client>> {
+    let slot = lane.get_or_init(|| Mutex::new(None));
     let mut s = slot.lock().unwrap();
     if let Some(c) = s.as_ref() {
         return Ok(c.clone());
@@ -95,21 +101,30 @@ fn writer() -> Result<Arc<Client>> {
     Ok(c)
 }
 
-/// One write; on a connection the daemon has closed, once more on a fresh one.
-fn write<T: DeserializeOwned>(method: &str, params: impl Serialize + Clone) -> Result<T> {
-    let c = writer()?;
+/// One request on a lane; on a connection the daemon has closed, once more on a fresh one.
+fn call_on<T: DeserializeOwned>(l: &'static Lane, method: &str, params: impl Serialize + Clone) -> Result<T> {
+    let c = lane(l)?;
     match c.call(method, params.clone()) {
         Err(e) if Client::is_closed(&e) => {
-            let slot = WRITER.get_or_init(|| Mutex::new(None));
+            let slot = l.get_or_init(|| Mutex::new(None));
             let mut s = slot.lock().unwrap();
             if s.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, &c)) {
                 *s = None;
             }
             drop(s);
-            writer()?.call(method, params)
+            lane(l)?.call(method, params)
         }
         r => r,
     }
+}
+
+fn write<T: DeserializeOwned>(method: &str, params: impl Serialize + Clone) -> Result<T> {
+    call_on(&WRITER, method, params)
+}
+
+/// A request that must not queue (see [`QUICK`]).
+pub fn quick<T: DeserializeOwned>(method: &str, params: impl Serialize + Clone) -> Result<T> {
+    call_on(&QUICK, method, params)
 }
 
 /// One field of a session's row (docs/daemon.md §7 M1c: the daemon is the store's only writer).
@@ -281,7 +296,7 @@ fn dispatch(c: Arc<Client>) {
             std::thread::spawn(move || {
                 let Ok(answer) = futures::executor::block_on(answer) else { return };
                 let Ok(answer) = serde_json::to_value(answer) else { return };
-                if let Err(e) = call::<serde_json::Value>(sill_proto::method::SESSIONS_ANSWER, sill_proto::SessionAnswer { key, request, answer }) {
+                if let Err(e) = quick::<serde_json::Value>(sill_proto::method::SESSIONS_ANSWER, sill_proto::SessionAnswer { key, request, answer }) {
                     eprintln!("sill: answering the agent: {e:#}");
                 }
             });
