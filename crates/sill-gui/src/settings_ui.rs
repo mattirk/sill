@@ -30,6 +30,8 @@ const SHELF_SHARES: &[(f32, &str)] = &[
 ];
 
 pub struct SettingsPage {
+    pub token: String,
+    pub load_token: String,
     pub policies: crate::policies::State,
     pub collapsed: std::collections::BTreeSet<&'static str>,
     pub shortcuts: Option<crate::shortcuts::Bindings>,
@@ -38,6 +40,7 @@ pub struct SettingsPage {
     pub instructions: text_editor::Content,
     /// The instructions were edited since they were read or saved.
     pub edited: bool,
+    pub instructions_saving: Option<String>,
     pub pin_path: String,
     /// What the last action did, or why it did not.
     pub said: Option<String>,
@@ -51,12 +54,15 @@ pub struct SettingsPage {
 impl Default for SettingsPage {
     fn default() -> Self {
         Self {
+            token: sill_client::request_id("settings-page"),
+            load_token: String::new(),
             policies: crate::policies::State::default(),
             collapsed: std::collections::BTreeSet::from(["Keyboard shortcuts", "Policies"]),
             shortcuts: None,
             snapshot: None,
             instructions: text_editor::Content::new(),
             edited: false,
+            instructions_saving: None,
             pin_path: String::new(),
             said: None,
             armed_delete: false,
@@ -70,7 +76,7 @@ impl Default for SettingsPage {
 pub enum Event {
     Policy(crate::policies::Event),
     ToggleSection(&'static str),
-    Loaded(Box<Result<Snapshot, String>>),
+    Loaded(String, Box<Result<Snapshot, String>>),
     Change(SettingChange),
     /// A request done: what to say of it, or why it did not take effect.
     Done(Result<String, String>),
@@ -82,6 +88,7 @@ pub enum Event {
     ResetShortcuts,
     Instructions(text_editor::Action),
     SaveInstructions,
+    InstructionsSaved(String, sill_client::actions::Outcome),
     PinPath(String),
     AddPin,
     RemovePin(HostPath),
@@ -644,8 +651,8 @@ impl App {
                     row![
                         space().width(Fill),
                         quiet_button(
-                            if page.edited { "Save" } else { "Saved" },
-                            page.edited.then(|| event(Event::SaveInstructions)),
+                            if page.instructions_saving.is_some() { "Saving…" } else if page.edited { "Save" } else { "Saved" },
+                            (page.edited && page.instructions_saving.is_none()).then(|| event(Event::SaveInstructions)),
                         ),
                     ],
                 ]

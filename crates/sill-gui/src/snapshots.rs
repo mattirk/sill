@@ -433,11 +433,11 @@ fn render_processes() {
          "exit_code": 101, "last_line": "error: could not compile `demo` (bin \"demo\")"}
     ]))
     .unwrap();
-    let _ = app.update(crate::Message::Procs(Event::Read(
-        "demo".into(),
-        Ok(list),
-        Some(vec![]),
-    )));
+    app.views
+        .get_mut("demo")
+        .unwrap()
+        .processes
+        .read(list, Some(&[]));
     render(&app, "16-process-question");
     let _ = app.update(crate::Message::Procs(Event::NotNow("demo".into(), 5173)));
     let _ = app.update(crate::Message::Procs(Event::Toggle("demo".into())));
@@ -446,10 +446,11 @@ fn render_processes() {
         "demo".into(),
         "build".into(),
     )));
-    let _ = app.update(crate::Message::Procs(Event::LogRead(
-        "demo".into(),
+    app.views.get_mut("demo").unwrap().processes.log = Some((
         "build".into(),
-        Ok("   Compiling demo v0.1.0\nerror[E0308]: mismatched types\n --> src/main.rs:3:5\nerror: could not compile `demo` (bin \"demo\")\n".into()),
-    )));
+        iced::widget::text_editor::Content::with_text(
+            "   Compiling demo v0.1.0\nerror[E0308]: mismatched types\n --> src/main.rs:3:5\nerror: could not compile `demo` (bin \"demo\")\n",
+        ),
+    ));
     render(&app, "18-process-log");
 }

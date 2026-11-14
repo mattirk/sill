@@ -579,9 +579,8 @@ fn stop_removes_queued_prompts_before_stopping() {
 #[test]
 fn a_refused_send_gives_the_prompt_back_and_an_uncertain_one_is_checked() {
     let (first, mut daemon) = daemon();
-    let (second, mut lost) = self::daemon();
     let (third, mut checker) = self::daemon();
-    let mut app = live_app(vec![first, second, third]);
+    let mut app = live_app(vec![first, third]);
 
     type_text(&mut app, "keep me");
     let task = app.update(Message::Send);
@@ -626,10 +625,11 @@ fn a_refused_send_gives_the_prompt_back_and_an_uncertain_one_is_checked() {
         iced::widget::text_editor::Edit::Delete,
     )));
     type_text(&mut app, "did it arrive?");
-    drop(daemon);
     let task = app.update(Message::Send);
-    let request = lost.expect("_sill/sessions.submit");
-    drop(lost);
+    // Read on the existing connection before closing it. Dropping it before Send raced
+    // the client's EOF detection and sometimes never reached the expected next socket.
+    let request = daemon.expect("_sill/sessions.submit");
+    drop(daemon);
     settle_task(&mut app, task);
     let id = request["params"]["submission_id"]
         .as_str()
@@ -3285,7 +3285,6 @@ fn new_tabs_append_and_refreshes_preserve_existing_positions() {
     );
 }
 
-
 #[test]
 fn double_clicking_a_tab_title_starts_name_editing_without_dragging_window() {
     let (app, _) = App::new(true, None);
@@ -3293,10 +3292,17 @@ fn double_clicking_a_tab_title_starts_name_editing_without_dragging_window() {
     ui.click("witty-willow").unwrap();
     ui.click("witty-willow").unwrap();
     let messages: Vec<_> = ui.into_messages().collect();
-    assert!(messages.iter().any(|m| matches!(m, Message::Name(crate::names::Event::Begin(id)) if id == "demo")), "{messages:?}");
-    assert!(!messages.iter().any(|m| matches!(m, Message::DragWindow)), "{messages:?}");
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::Name(crate::names::Event::Begin(id)) if id == "demo")),
+        "{messages:?}"
+    );
+    assert!(
+        !messages.iter().any(|m| matches!(m, Message::DragWindow)),
+        "{messages:?}"
+    );
 }
-
 
 #[test]
 fn renaming_edits_the_session_name_and_summary_title_stays_independent() {
@@ -3310,7 +3316,12 @@ fn renaming_edits_the_session_name_and_summary_title_stays_independent() {
     assert_eq!(editor.text, "velvet-comet");
     let token = editor.token.clone();
     let _ = app.name_event(Event::Input("my-session".into()));
-    let _ = app.name_event(Event::Done(token, "demo".into(), "my-session".into(), Ok(())));
+    let _ = app.name_event(Event::Done(
+        token,
+        "demo".into(),
+        "my-session".into(),
+        Ok(()),
+    ));
     assert!(app.name_editor.is_none());
     assert_eq!(app.all_sessions[0].name.as_deref(), Some("my-session"));
     assert_eq!(app.all_sessions[0].title, "A descriptive summary title");
@@ -3320,4 +3331,204 @@ fn renaming_edits_the_session_name_and_summary_title_stays_independent() {
     let _ = app.update(Message::Escape);
     assert!(app.name_editor.is_none());
     assert_eq!(app.session_name("demo", "fallback"), "my-session");
+}
+
+#[test]
+fn slow_periodic_refreshes_do_not_accumulate_reads() {
+    let (client, mut daemon) = daemon();
+    let mut app = live_app(vec![client]);
+    let session = session_record("demo", "demo", false, false);
+    let (started, waiting) = std::sync::mpsc::channel();
+    let (release, held) = std::sync::mpsc::channel();
+    let fake = std::thread::spawn(move || {
+        let requests = [daemon.next(), daemon.next()];
+        started.send(()).unwrap();
+        held.recv_timeout(Duration::from_secs(5)).unwrap();
+        for request in requests {
+            match request["method"].as_str().unwrap() {
+                "_sill/sessions.list" => {
+                    daemon.reply(&request, json!({"sessions": [session], "next": null}))
+                }
+                "_sill/settings.get" => {
+                    daemon.reply(&request, sill_proto::admin::Settings::default())
+                }
+                other => panic!("unexpected refresh request {other}"),
+            }
+        }
+    });
+    let task = app.update(Message::Refresh);
+    waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+    for _ in 0..20 {
+        let duplicate = app.update(Message::Refresh);
+        settle_task(&mut app, duplicate);
+    }
+    assert!(
+        !app.list_again,
+        "timer ticks must not perpetually invalidate slow reads"
+    );
+    release.send(()).unwrap();
+    settle_task(&mut app, task);
+    fake.join().unwrap();
+    assert!(!app.list_pending && !app.settings_pending);
+    assert_eq!(app.tabs.len(), 1);
+    let _ = app.update(Message::Listed(Err("offline".into())));
+    app.settings_pending = true;
+    let _ = app.update(Message::DaemonSettings(
+        app.settings_revision,
+        Err("offline".into()),
+    ));
+    assert!(
+        !app.list_pending && !app.settings_pending,
+        "failed reads release their guards too"
+    );
+}
+
+#[test]
+fn explicit_relist_skips_obsolete_results_and_preserves_the_view() {
+    let (client, mut daemon) = daemon();
+    let mut app = live_app(vec![client]);
+    type_text(&mut app, "keep this draft");
+    let session = session_record("demo", "reopened", false, false);
+    let fake = std::thread::spawn(move || {
+        let old = daemon.expect("_sill/sessions.list");
+        daemon.reply(&old, json!({"sessions": [], "next": null}));
+        let fresh = daemon.expect("_sill/sessions.list");
+        daemon.reply(&fresh, json!({"sessions": [session], "next": null}));
+    });
+    let task = app.list();
+    let _ = app.list();
+    let _ = app.list();
+    assert!(app.list_again);
+    settle_task(&mut app, task);
+    fake.join().unwrap();
+    assert_eq!(demo_view(&app).draft.text(), "keep this draft");
+    assert_eq!(app.tabs[0].title, "reopened");
+    assert!(!app.list_pending && !app.list_again);
+}
+
+#[test]
+fn failed_instructions_save_keeps_text_and_retry_enabled() {
+    use crate::settings_ui::Event;
+    let (mut app, _) = App::new(true, None);
+    let task = app.show_page(crate::Page::Settings);
+    settle_task(&mut app, task);
+    let _ = app.settings_event(Event::Instructions(
+        iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Paste(Arc::new(
+            "new instructions".into(),
+        ))),
+    ));
+    let before = app.settings_page.as_ref().unwrap().instructions.text();
+    let task = app.settings_event(Event::SaveInstructions);
+    assert!(
+        app.settings_page.as_ref().unwrap().edited,
+        "no success before the reply"
+    );
+    assert!(
+        app.settings_page
+            .as_ref()
+            .unwrap()
+            .instructions_saving
+            .is_some()
+    );
+    settle_task(&mut app, task);
+    let page = app.settings_page.as_ref().unwrap();
+    assert_eq!(page.instructions.text(), before);
+    assert!(page.edited && page.instructions_saving.is_none());
+    assert!(page.said.as_ref().unwrap().contains("Not changed"));
+}
+
+#[test]
+fn settings_replies_cannot_overwrite_a_reopened_page() {
+    use crate::settings_ui::Event;
+    let (mut app, _) = App::new(true, None);
+    let _ = app.show_page(crate::Page::Settings);
+    let old = app.settings_page.as_ref().unwrap().token.clone();
+    let _ = app.show_page(crate::Page::Settings);
+    let new = app.settings_page.as_ref().unwrap().token.clone();
+    assert_ne!(old, new);
+    let stale = sill_client::settings::Snapshot {
+        instructions: "old page's text".into(),
+        ..Default::default()
+    };
+    let _ = app.update(Message::SettingsReply(
+        old,
+        Event::Loaded(String::new(), Box::new(Ok(stale))),
+    ));
+    assert!(app.settings_page.as_ref().unwrap().snapshot.is_none());
+}
+
+#[test]
+fn instructions_edits_during_save_survive_older_snapshots() {
+    use crate::settings_ui::Event;
+    let (mut app, _) = App::new(true, None);
+    let _ = app.show_page(crate::Page::Settings);
+    let page = app.settings_page.as_mut().unwrap();
+    page.instructions = iced::widget::text_editor::Content::with_text("newer text");
+    page.edited = true;
+    page.instructions_saving = Some("saved text".into());
+    let _ = app.settings_event(Event::InstructionsSaved(
+        "saved text".into(),
+        sill_client::actions::Outcome::Done(json!({})),
+    ));
+    let _ = app.settings_event(Event::Loaded(
+        app.settings_page.as_ref().unwrap().load_token.clone(),
+        Box::new(Ok(sill_client::settings::Snapshot {
+            instructions: "saved text".into(),
+            ..Default::default()
+        })),
+    ));
+    let page = app.settings_page.as_ref().unwrap();
+    assert_eq!(page.instructions.text(), "newer text");
+    assert!(page.edited);
+    let _ = app.settings_event(Event::Loaded(
+        app.settings_page.as_ref().unwrap().load_token.clone(),
+        Box::new(Ok(sill_client::settings::Snapshot {
+            instructions: "newer text".into(),
+            ..Default::default()
+        })),
+    ));
+    assert!(!app.settings_page.as_ref().unwrap().edited);
+}
+
+#[test]
+fn an_old_settings_load_cannot_replace_a_post_save_refresh() {
+    use crate::settings_ui::Event;
+    let (mut app, _) = App::new(true, None);
+    let _ = app.show_page(crate::Page::Settings);
+    let page = app.settings_page.as_ref().unwrap().token.clone();
+    let old_load = app.settings_page.as_ref().unwrap().load_token.clone();
+    let fresh = app.settings_load();
+    settle_task(&mut app, fresh);
+    let before = app.settings_page.as_ref().unwrap().instructions.text();
+    let _ = app.update(Message::SettingsReply(
+        page,
+        Event::Loaded(
+            old_load,
+            Box::new(Ok(sill_client::settings::Snapshot {
+                instructions: "stale server value".into(),
+                ..Default::default()
+            })),
+        ),
+    ));
+    assert_eq!(
+        app.settings_page.as_ref().unwrap().instructions.text(),
+        before
+    );
+}
+
+#[test]
+fn background_settings_cannot_undo_a_newer_page_snapshot() {
+    let (mut app, _) = App::new(true, None);
+    let old_revision = app.settings_revision;
+    let task = app.show_page(crate::Page::Settings);
+    settle_task(&mut app, task);
+    let before = app.daemon_settings.clone().unwrap();
+    let _ = app.update(Message::DaemonSettings(
+        old_revision,
+        Ok(sill_proto::admin::Settings {
+            theme: "stale-theme".into(),
+            ..Default::default()
+        }),
+    ));
+    assert_eq!(app.daemon_settings.as_ref().unwrap().theme, before.theme);
 }

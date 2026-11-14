@@ -1023,6 +1023,76 @@ mod link_tests {
         assert_eq!(web("javascript:alert(1)"), None);
     }
 
+    #[test]
+    fn terminal_events_from_a_closed_view_cannot_reach_its_reopened_pane() {
+        let (mut app, _) = crate::App::new(true, None);
+        let old_events = app.open_terminal();
+        let old = app.views["demo"].terminal_generation;
+        app.views
+            .insert("demo".into(), crate::SessionView::new("demo"));
+        let new_events = app.open_terminal();
+        let current = app.views["demo"].terminal_generation;
+        assert_ne!(old, current);
+        let _ = app.update(crate::Message::Terminal("demo".into(), old, Event::Ended));
+        assert_eq!(
+            app.views["demo"].terminal.as_ref().unwrap().status,
+            Status::Opening
+        );
+        let _ = app.update(crate::Message::Terminal(
+            "demo".into(),
+            current,
+            Event::Opened,
+        ));
+        assert_eq!(
+            app.views["demo"].terminal.as_ref().unwrap().status,
+            Status::Running
+        );
+        drop((old_events, new_events));
+    }
+
+    #[test]
+    fn clipboard_completion_is_discarded_after_switching_shells_or_tabs() {
+        let (mut app, _) = crate::App::new(true, None);
+        let first_events = app.open_terminal();
+        let first = app.views["demo"].terminal_generation;
+        // Replacing/switching the shell does not redirect the pending paste.
+        let second_events = app.open_terminal();
+        let second = app.views["demo"].terminal_generation;
+        let _ = app.update(crate::Message::TermPaste(
+            "demo".into(),
+            first,
+            Some("old shell".into()),
+        ));
+        assert_eq!(app.views["demo"].terminal.as_ref().unwrap().pasted, None);
+        // Switching tabs also cannot deliver text into the newly selected terminal.
+        app.views
+            .insert("other".into(), crate::SessionView::new("other"));
+        app.selected = Some("other".into());
+        let other_events = app.open_terminal();
+        let _ = app.update(crate::Message::TermPaste(
+            "demo".into(),
+            second,
+            Some("old tab".into()),
+        ));
+        assert_eq!(app.views["other"].terminal.as_ref().unwrap().pasted, None);
+        app.selected = Some("demo".into());
+        let _ = app.update(crate::Message::TermPaste(
+            "demo".into(),
+            second,
+            Some("current".into()),
+        ));
+        assert_eq!(
+            app.views["demo"]
+                .terminal
+                .as_ref()
+                .unwrap()
+                .pasted
+                .as_deref(),
+            Some("current")
+        );
+        drop((first_events, second_events, other_events));
+    }
+
     /// A paste is said in the pane's strip until the next key, whatever the program shows.
     #[test]
     fn a_paste_is_shown_until_the_next_key() {

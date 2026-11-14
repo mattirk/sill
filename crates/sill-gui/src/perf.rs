@@ -132,6 +132,29 @@ fn time(mut work: impl FnMut()) -> Duration {
     start.elapsed()
 }
 
+/// Image discovery runs after lane updates, including chunks without images. Measure its
+/// transcript scan separately from rendering; no daemon or headless renderer is needed.
+#[test]
+#[ignore = "timing; run with --release"]
+fn image_discovery_without_images() {
+    for n in [250, 1000, 2000, 8000] {
+        let mut app = long(n);
+        app.actions = Some(sill_client::actions::Actions::new(std::sync::Arc::new(
+            || anyhow::bail!("no image fetch expected"),
+        )));
+        let start = Instant::now();
+        for _ in 0..1000 {
+            let task = app.load_media("demo");
+            assert!(task.units() == 0, "no-image transcript does not fetch");
+            let _ = std::hint::black_box(task);
+        }
+        println!(
+            "{n:>5} items: no-image discovery scan {:?} per lane update",
+            start.elapsed() / 1000
+        );
+    }
+}
+
 #[test]
 #[ignore = "timing; run with --release"]
 fn cost_of_a_long_conversation() {

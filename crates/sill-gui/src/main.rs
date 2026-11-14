@@ -1,9 +1,9 @@
 mod agents_ui;
 mod changes_ui;
-mod details;
 mod control;
 mod demo;
 mod desktop;
+mod details;
 mod fonts;
 mod forms;
 mod herring;
@@ -13,8 +13,8 @@ mod keys;
 mod layout;
 mod login_ui;
 mod media;
-mod names;
 mod menu;
+mod names;
 mod network;
 #[cfg(test)]
 mod perf;
@@ -273,13 +273,13 @@ pub enum Message {
     DragWindow,
     Quit,
     Media(media::Event),
-    AttachmentPaths(String, Option<Vec<std::path::PathBuf>>),
+    AttachmentPaths(String, String, Option<Vec<std::path::PathBuf>>),
     /// `>_`: the session's jail shell in place of the prompt, or the prompt again.
     ToggleTerminal,
     ToggleHostTerminal,
     Terminal(String, u64, terminal::Event),
     TermAction(terminal::Action),
-    TermPaste(Option<String>),
+    TermPaste(String, u64, Option<String>),
     /// End the shell itself (hiding the pane only detaches from it).
     EndTerminal,
     ReopenTerminal,
@@ -339,9 +339,11 @@ pub enum Message {
     /// The herring's pages: one shown in the conversation's place.
     ShowPage(Page),
     Settings(settings_ui::Event),
+    /// A reply belongs to the Settings page that issued it, even across navigation.
+    SettingsReply(String, settings_ui::Event),
     Agents(agents_ui::Event),
     /// The daemon's settings, read at the start and with each refresh: the theme, the timer.
-    DaemonSettings(Result<sill_proto::admin::Settings, String>),
+    DaemonSettings(u64, Result<sill_proto::admin::Settings, String>),
     /// A tab's ×: end its session (a ghost's needs a second press).
     CloseTab(String),
     /// A form question: a field edited, the form sent, or declined.
@@ -375,6 +377,7 @@ pub struct SessionView {
     pub draft: text_editor::Content,
     pub attachments: Vec<sill_proto::sfp::Attachment>,
     pub attachments_busy: bool,
+    pub media_token: String,
     pub media: media::Cache,
     pub outbox: Outbox,
     /// A request the person made that did not take effect; shown until the next one.
@@ -434,6 +437,7 @@ impl SessionView {
             draft: text_editor::Content::new(),
             attachments: vec![],
             attachments_busy: false,
+            media_token: sill_client::request_id("media-view"),
             media: Default::default(),
             outbox: Outbox::default(),
             failed: None,
@@ -579,6 +583,7 @@ pub struct App {
     /// Where every lane reports, tagged with its session and epoch.
     lanes: Option<async_channel::Sender<(String, u64, lane::Update)>>,
     next_lane: u64,
+    next_terminal: u64,
     pub tabs: Vec<Tab>,
     /// Every session the daemon has, newest first (the menu's Reopen list).
     pub all_sessions: Vec<Session>,
@@ -589,7 +594,7 @@ pub struct App {
     pub changes: Option<changes_ui::ChangesPage>,
     name_editor: Option<names::Editor>,
     details: Option<details::Page>,
-    details_drafts: BTreeMap<String, String>,
+    details_drafts: BTreeMap<String, details::Draft>,
     pub settings_page: Option<settings_ui::SettingsPage>,
     pub agents_page: agents_ui::AgentsPage,
     /// The herring's page last shown: what it opens next.
@@ -606,6 +611,11 @@ pub struct App {
     /// Trouble reading the daemon's session list.
     pub list_error: Option<String>,
     pub listed: bool,
+    /// One list read at a time; explicit changes request a fresh read after it finishes.
+    list_pending: bool,
+    list_again: bool,
+    settings_pending: bool,
+    settings_revision: u64,
     pub workspace: workspace::Workspace,
     /// Set by each tick while the agent is busy; the spinner's angle comes from it.
     pub now: Instant,
@@ -685,6 +695,7 @@ impl App {
             connect,
             lanes: None,
             next_lane: 0,
+            next_terminal: 0,
             tabs: Vec::new(),
             all_sessions: Vec::new(),
             views: BTreeMap::new(),
@@ -703,6 +714,10 @@ impl App {
             initial,
             list_error: None,
             listed: false,
+            list_pending: false,
+            list_again: false,
+            settings_pending: false,
+            settings_revision: 0,
             workspace,
             now: Instant::now(),
             demo_step: 0,
@@ -1121,7 +1136,8 @@ impl App {
                     .map(|_| Message::Procs(processes::Event::Poll)),
             );
         }
-        if !self.demo && !self.backend_shown() && self.details.is_none() && self.current().is_some() {
+        if !self.demo && !self.backend_shown() && self.details.is_none() && self.current().is_some()
+        {
             subscriptions.push(
                 iced::time::every(Duration::from_secs(2))
                     .with("session-files")
@@ -1159,10 +1175,15 @@ impl App {
     }
 
     /// The session list, read off the GUI thread.
-    fn list(&self) -> Task<Message> {
+    fn list(&mut self) -> Task<Message> {
         let Some(actions) = self.actions.clone() else {
             return Task::none();
         };
+        if self.list_pending {
+            self.list_again = true;
+            return Task::none();
+        }
+        self.list_pending = true;
         blocking(
             move || actions.sessions().map_err(|e| format!("{e:#}")),
             Message::Listed,
@@ -1266,8 +1287,15 @@ impl App {
     fn apply(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Media(event) => return self.media_event(event),
-            Message::AttachmentPaths(session, paths) => {
-                return self.attachment_paths(session, paths);
+            Message::AttachmentPaths(session, token, paths) => {
+                if self
+                    .views
+                    .get(&session)
+                    .is_some_and(|v| v.media_token == token)
+                {
+                    return self.attachment_paths(session, paths);
+                }
+                return Task::none();
             }
             Message::Lane(session, epoch, update) => {
                 return self.lane_update(session, epoch, update);
@@ -1278,8 +1306,17 @@ impl App {
             Message::Details(event) => return self.details_event(event),
             Message::Name(event) => return self.name_event(event),
             Message::Refresh => {
-                let mut tasks = vec![self.list(), self.read_daemon_settings()];
-                if let Some(p) = self.details.as_ref().filter(|p| !p.pending) { tasks.push(self.details_load(p.id.clone())); }
+                // A slow daemon must not accumulate a new thread on each timer tick.
+                // Explicit lifecycle requests still queue a follow-up through list().
+                let list = if self.list_pending {
+                    Task::none()
+                } else {
+                    self.list()
+                };
+                let mut tasks = vec![list, self.read_daemon_settings()];
+                if let Some(p) = self.details.as_ref().filter(|p| !p.pending) {
+                    tasks.push(self.details_load(p.id.clone()));
+                }
                 if self
                     .changes
                     .as_ref()
@@ -1487,6 +1524,12 @@ impl App {
                 }
             }
             Message::TermAction(action) => {
+                let Some((session, generation)) = self
+                    .current()
+                    .map(|view| (view.id.clone(), view.terminal_generation))
+                else {
+                    return Task::none();
+                };
                 let Some(pane) = self.current_mut().and_then(|v| v.terminal.as_mut()) else {
                     return Task::none();
                 };
@@ -1497,18 +1540,25 @@ impl App {
                         }
                     }
                     terminal::Action::Paste => {
-                        return iced::clipboard::read().map(Message::TermPaste);
+                        return iced::clipboard::read().map(move |text| {
+                            Message::TermPaste(session.clone(), generation, text)
+                        });
                     }
                     terminal::Action::PastePrimary => {
-                        return iced::clipboard::read_primary().map(Message::TermPaste);
+                        return iced::clipboard::read_primary().map(move |text| {
+                            Message::TermPaste(session.clone(), generation, text)
+                        });
                     }
                     terminal::Action::Open(url) => terminal::open_link(url),
                     action => pane.perform(action),
                 }
             }
-            Message::TermPaste(text) => {
-                if let (Some(pane), Some(text)) =
-                    (self.current_mut().and_then(|v| v.terminal.as_mut()), text)
+            Message::TermPaste(session, generation, text) => {
+                if let Some(view) = self.current_mut()
+                    && view.id == session
+                    && view.terminal_generation == generation
+                    && let Some(pane) = &mut view.terminal
+                    && let Some(text) = text
                 {
                     pane.paste(&text);
                 }
@@ -1662,7 +1712,20 @@ impl App {
             Message::ShowPage(page) => return self.show_page(page),
             Message::Agents(event) => return self.agents_event(event),
             Message::Settings(event) => return self.settings_event(event),
-            Message::DaemonSettings(Ok(settings)) => {
+            Message::SettingsReply(token, event) => {
+                if self
+                    .settings_page
+                    .as_ref()
+                    .is_some_and(|p| p.token == token)
+                {
+                    return self.settings_event(event);
+                }
+            }
+            Message::DaemonSettings(revision, Ok(settings)) => {
+                self.settings_pending = false;
+                if revision != self.settings_revision {
+                    return Task::none();
+                }
                 style::set_theme(&settings.theme);
                 if let Some(hotkey) = &self.hotkey {
                     // `SILL_GUI_HOTKEY` overrides the shared setting: a second sill-gui beside the
@@ -1689,7 +1752,7 @@ impl App {
                 self.daemon_settings = Some(settings);
                 self.sync_drawer_follow();
             }
-            Message::DaemonSettings(Err(_)) => {}
+            Message::DaemonSettings(_, Err(_)) => self.settings_pending = false,
             Message::Changes(event) => return self.changes_event(event),
             Message::CloseTab(id) => {
                 let ghost = self
@@ -1852,10 +1915,15 @@ impl App {
         }
     }
 
-    fn read_daemon_settings(&self) -> Task<Message> {
+    fn read_daemon_settings(&mut self) -> Task<Message> {
         let Some(actions) = self.actions.clone() else {
             return Task::none();
         };
+        if self.settings_pending {
+            return Task::none();
+        }
+        self.settings_pending = true;
+        let revision = self.settings_revision;
         blocking(
             move || {
                 actions
@@ -1867,11 +1935,17 @@ impl App {
                     })
                     .map_err(|e| format!("{e:#}"))
             },
-            Message::DaemonSettings,
+            move |result| Message::DaemonSettings(revision, result),
         )
     }
 
-    fn settings_load(&self) -> Task<Message> {
+    fn settings_load(&mut self) -> Task<Message> {
+        let Some(page) = self.settings_page.as_mut() else {
+            return Task::none();
+        };
+        let token = page.token.clone();
+        let load = sill_client::request_id("settings-load");
+        page.load_token = load.clone();
         let Some(actions) = self.actions.clone() else {
             // the demo: the defaults, as a daemon that was never configured has them
             let snapshot = sill_client::settings::Snapshot {
@@ -1882,9 +1956,10 @@ impl App {
                 instructions: "Commit after the person has tested a feature.".into(),
                 global_pins: vec![],
             };
-            return Task::done(Message::Settings(settings_ui::Event::Loaded(Box::new(Ok(
-                snapshot,
-            )))));
+            return Task::done(Message::SettingsReply(
+                token,
+                settings_ui::Event::Loaded(load, Box::new(Ok(snapshot))),
+            ));
         };
         blocking(
             move || {
@@ -1892,7 +1967,7 @@ impl App {
                     .reading(sill_client::settings::read)
                     .map_err(|e| format!("{e:#}"))
             },
-            |r| Message::Settings(settings_ui::Event::Loaded(Box::new(r))),
+            move |r| Message::SettingsReply(token, settings_ui::Event::Loaded(load, Box::new(r))),
         )
     }
 
@@ -1902,17 +1977,23 @@ impl App {
         (method, params): sill_client::settings::Request,
         said: fn(&serde_json::Value) -> String,
     ) -> Task<Message> {
+        let Some(token) = self.settings_page.as_ref().map(|p| p.token.clone()) else {
+            return Task::none();
+        };
         let Some(actions) = self.actions.clone() else {
-            return Task::done(Message::Settings(settings_ui::Event::Done(Err(
-                "The demo has no daemon: settings are examples here.".into(),
-            ))));
+            return Task::done(Message::SettingsReply(
+                token,
+                settings_ui::Event::Done(Err(
+                    "The demo has no daemon: settings are examples here.".into(),
+                )),
+            ));
         };
         blocking(
             move || match actions.call(method, params) {
                 sill_client::actions::Outcome::Done(value) => Ok(said(&value)),
                 other => Err(other.problem().unwrap_or("failed").to_string()),
             },
-            |r| Message::Settings(settings_ui::Event::Done(r)),
+            move |r| Message::SettingsReply(token, settings_ui::Event::Done(r)),
         )
     }
 
@@ -1939,13 +2020,22 @@ impl App {
                 }
             }
             Event::Policy(_) => unreachable!(),
-            Event::Loaded(loaded) => {
+            Event::Loaded(load, loaded) => {
+                if page.load_token != load {
+                    return Task::none();
+                }
                 let loaded = *loaded;
                 if let Ok(snapshot) = &loaded {
+                    // An older background settings.get must not undo this page's fresh read.
+                    self.settings_revision += 1;
                     style::set_theme(&snapshot.settings.theme);
                     self.daemon_settings = Some(snapshot.settings.clone());
                     if !page.edited {
                         page.instructions = text_editor::Content::with_text(&snapshot.instructions);
+                    } else if page.instructions_saving.is_none()
+                        && page.instructions.text() == snapshot.instructions
+                    {
+                        page.edited = false;
                     }
                 }
                 page.snapshot = Some(loaded);
@@ -2003,11 +2093,45 @@ impl App {
                 page.instructions.perform(action);
             }
             Event::SaveInstructions => {
+                if page.instructions_saving.is_some() {
+                    return Task::none();
+                }
                 let text = page.instructions.text();
-                page.edited = false;
-                return self.settings_call(settings::set_instructions(&text), |_| {
-                    "Instructions saved: agents get them when they start or next look".into()
+                page.instructions_saving = Some(text.clone());
+                let token = page.token.clone();
+                let actions = self.actions.clone();
+                return blocking(
+                    {
+                        let text = text.clone();
+                        move || match actions {
+                            Some(actions) => {
+                                let (method, params) = settings::set_instructions(&text);
+                                actions.call(method, params)
+                            }
+                            None => Outcome::NotSent(
+                                "The demo has no daemon: settings are examples here.".into(),
+                            ),
+                        }
+                    },
+                    move |outcome| {
+                        Message::SettingsReply(token, Event::InstructionsSaved(text, outcome))
+                    },
+                );
+            }
+            Event::InstructionsSaved(text, outcome) => {
+                if page.instructions_saving.as_ref() != Some(&text) {
+                    return Task::none();
+                }
+                page.instructions_saving = None;
+                page.said = Some(match outcome.problem() {
+                    Some(why) => format!("Not changed: {why}"),
+                    None => {
+                        "Instructions saved: agents get them when they start or next look".into()
+                    }
                 });
+                // Keep edits protected until a read confirms the current text. A failed save,
+                // an old snapshot or new typing during the request must not replace them.
+                return self.settings_load();
             }
             Event::PinPath(value) => page.pin_path = value,
             Event::AddPin => {
@@ -2350,13 +2474,17 @@ impl App {
     /// Escape goes between the session and the backend, as the shelf's sessions ⇄ backend; an
     /// open menu or file closes first, and the session's shell keeps Escape for itself.
     fn escape(&mut self) -> Task<Message> {
-        if self.name_editor.take().is_some() { return Task::none(); }
+        if self.name_editor.take().is_some() {
+            return Task::none();
+        }
         // a popup goes first
         if self.menu.take().is_some() {
             return Task::none();
         }
         self.stash_details();
-        if self.details.take().is_some() { return self.restore_scroll(); }
+        if self.details.take().is_some() {
+            return self.restore_scroll();
+        }
         // the backend's page: back to the session
         if self.changes.take().is_some()
             | self.settings_page.take().is_some()
@@ -2467,7 +2595,9 @@ impl App {
             })
             .collect();
         if finished {
-            if self.details.as_ref().is_some_and(|p| p.id == session) { tasks.push(self.details_load(session.clone())); }
+            if self.details.as_ref().is_some_and(|p| p.id == session) {
+                tasks.push(self.details_load(session.clone()));
+            }
             tasks.push(self.files_refresh(&session));
         }
         tasks.push(self.load_media(&session));
@@ -2481,6 +2611,12 @@ impl App {
     }
 
     fn listed(&mut self, result: Result<Vec<Session>, String>) -> Task<Message> {
+        self.list_pending = false;
+        if std::mem::take(&mut self.list_again) {
+            // A mutation completed after this read began. Do not let its old list remove a
+            // reopened view (and its drafts/resources) before the fresh list arrives.
+            return self.list();
+        }
         let sessions = match result {
             Ok(sessions) => sessions,
             Err(error) => {
@@ -2537,6 +2673,16 @@ impl App {
         // a session that ended or went: its view goes, and with it its lane and terminal
         let open: BTreeSet<&str> = self.tabs.iter().map(|t| t.id.as_str()).collect();
         self.views.retain(|id, _| open.contains(id.as_str()));
+        // A stopped jail has no live processes or exposed ports, even while its tab (or an
+        // externally ended session's unsaved source) remains open. Invalidate in-flight polls.
+        for (id, view) in &mut self.views {
+            if !sessions
+                .iter()
+                .any(|s| s.session_id == *id && s.running && s.ended_at.is_none())
+            {
+                view.processes.read(vec![], None);
+            }
+        }
         if self
             .selected
             .as_ref()
@@ -2952,15 +3098,12 @@ impl App {
     fn open_terminal(&mut self) -> Task<Message> {
         let connect = self.connect.clone();
         let demo = self.demo;
+        self.next_terminal += 1;
+        let generation = self.next_terminal;
         let Some(view) = self.current_mut() else {
             return Task::none();
         };
-        view.terminal_generation = view.terminal_generation.max(
-            view.parked_terminal
-                .as_ref()
-                .map_or(0, |(_, generation)| *generation),
-        ) + 1;
-        let generation = view.terminal_generation;
+        view.terminal_generation = generation;
         let (cols, rows) = view
             .terminal
             .as_ref()

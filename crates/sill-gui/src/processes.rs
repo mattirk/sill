@@ -28,7 +28,12 @@ pub enum Event {
     Poll,
     /// A session's list (an error: no jail to ask, so no ports either) and, when a running port
     /// waited for a decision, the expose specs of its launch policy.
-    Read(String, Result<Vec<Process>, String>, Option<Vec<String>>),
+    Read(
+        String,
+        u64,
+        Result<Vec<Process>, String>,
+        Option<Vec<String>>,
+    ),
     /// Show or hide the list.
     Toggle(String),
     /// Expose a port the person was asked about, or one shown as not exposed.
@@ -36,7 +41,7 @@ pub enum Event {
     NotNow(String, u16),
     /// Show or hide a process's output.
     Log(String, String),
-    LogRead(String, String, Result<String, String>),
+    LogRead(String, String, u64, Result<String, String>),
     LogText(String, text_editor::Action),
     /// Stop one (every running one, with an empty name) or dismiss an ended one.
     Stop(String, String),
@@ -50,7 +55,9 @@ pub enum Event {
 #[derive(Default)]
 pub struct Procs {
     pub list: Vec<Process>,
-    reading: bool,
+    reading: Option<u64>,
+    refresh_pending: bool,
+    log_reading: Option<u64>,
     pub bridges: BTreeMap<u16, Bridge>,
     /// Ports asked about once, and those the person said yes to, this session.
     asked: BTreeSet<u16>,
@@ -84,8 +91,13 @@ impl Procs {
 
     /// The list came back: ports of ended processes close, new ones are exposed or asked about.
     /// What to expose comes back, for the caller to bridge (it holds the connection).
-    fn read(&mut self, list: Vec<Process>, specs: Option<&[String]>) -> Vec<(u16, String)> {
-        self.reading = false;
+    pub(crate) fn read(
+        &mut self,
+        list: Vec<Process>,
+        specs: Option<&[String]>,
+    ) -> Vec<(u16, String)> {
+        self.reading = None;
+        self.refresh_pending = false;
         self.list = list;
         let running = self.running_ports();
         self.bridges
@@ -109,6 +121,7 @@ impl Procs {
             .is_some_and(|(name, _)| !self.list.iter().any(|p| &p.name == name))
         {
             self.log = None;
+            self.log_reading = None;
         }
         expose
     }
@@ -136,10 +149,24 @@ impl App {
     pub(crate) fn processes_event(&mut self, event: Event) -> Task<Message> {
         match event {
             Event::Poll => return self.poll_processes(),
-            Event::Read(id, result, specs) => {
+            Event::Read(id, serial, result, specs) => {
+                let running = self.demo || self.session_running(&id);
                 let Some(view) = self.views.get_mut(&id) else {
                     return Task::none();
                 };
+                if view.processes.reading != Some(serial) {
+                    return Task::none();
+                }
+                if !running {
+                    view.processes.read(vec![], None);
+                    return Task::none();
+                }
+                if view.processes.refresh_pending {
+                    // A completed action supersedes the list this poll started reading.
+                    view.processes.reading = None;
+                    view.processes.refresh_pending = false;
+                    return self.poll_one(&id);
+                }
                 let expose = view
                     .processes
                     .read(result.unwrap_or_default(), specs.as_deref());
@@ -147,10 +174,12 @@ impl App {
                 for (port, name) in expose {
                     tasks.push(self.expose_port(&id, port, &name));
                 }
-                if let Some(view) = self.views.get(&id)
-                    && let Some((name, _)) = &view.processes.log
+                if let Some(name) = self
+                    .views
+                    .get(&id)
+                    .and_then(|view| view.processes.log.as_ref().map(|(name, _)| name.clone()))
                 {
-                    tasks.push(self.read_log(&id, name.clone()));
+                    tasks.push(self.read_log(&id, name));
                 }
                 return Task::batch(tasks);
             }
@@ -159,13 +188,25 @@ impl App {
                     view.processes.open = !view.processes.open;
                     if !view.processes.open {
                         view.processes.log = None;
+                        view.processes.log_reading = None;
                     }
                 }
             }
             Event::Expose(id, port) => {
+                if !self.demo && !self.session_running(&id) {
+                    return Task::none();
+                }
                 let Some(view) = self.views.get_mut(&id) else {
                     return Task::none();
                 };
+                if !view
+                    .processes
+                    .running_ports()
+                    .iter()
+                    .any(|(p, _)| *p == port)
+                {
+                    return Task::none();
+                }
                 view.processes.approved.insert(port);
                 view.processes.questions.retain(|(p, _)| *p != port);
                 let name = view
@@ -187,17 +228,21 @@ impl App {
                 };
                 if view.processes.log.as_ref().is_some_and(|(n, _)| *n == name) {
                     view.processes.log = None;
+                    view.processes.log_reading = None;
                     return Task::none();
                 }
+                view.processes.log_reading = None;
                 view.processes.log =
                     Some((name.clone(), text_editor::Content::with_text("Reading…")));
                 return self.read_log(&id, name);
             }
-            Event::LogRead(id, name, result) => {
+            Event::LogRead(id, name, serial, result) => {
                 if let Some(view) = self.views.get_mut(&id)
+                    && view.processes.log_reading == Some(serial)
                     && let Some((shown, content)) = &mut view.processes.log
                     && *shown == name
                 {
+                    view.processes.log_reading = None;
                     let text =
                         result.unwrap_or_else(|e| format!("The output could not be read: {e}"));
                     let text = if text.trim().is_empty() {
@@ -205,8 +250,9 @@ impl App {
                     } else {
                         text
                     };
+                    let text = text.trim_end();
                     if content.text() != text {
-                        *content = text_editor::Content::with_text(text.trim_end());
+                        *content = text_editor::Content::with_text(text);
                         content
                             .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
                     }
@@ -245,10 +291,13 @@ impl App {
                 if let Some(problem) = outcome.problem() {
                     tasks.push(self.process_note(&id, format!("process: {problem}"), true));
                 }
-                if let Some(view) = self.views.get_mut(&id) {
-                    view.processes.reading = false;
+                if let Some(view) = self.views.get_mut(&id)
+                    && view.processes.reading.is_some()
+                {
+                    view.processes.refresh_pending = true;
+                } else {
+                    tasks.push(self.poll_one(&id));
                 }
-                tasks.push(self.poll_one(&id));
                 return Task::batch(tasks);
             }
             Event::OpenUrl(url) => crate::terminal::open_link(url),
@@ -282,14 +331,15 @@ impl App {
             return Task::none();
         };
         if !running {
-            if !view.processes.list.is_empty() || !view.processes.bridges.is_empty() {
-                view.processes.read(vec![], None);
-            }
+            view.processes.read(vec![], None);
             return Task::none();
         }
-        if std::mem::replace(&mut view.processes.reading, true) {
+        if view.processes.reading.is_some() {
             return Task::none();
         }
+        self.process_serial += 1;
+        let serial = self.process_serial;
+        view.processes.reading = Some(serial);
         let known = view.processes.known();
         let policy = self
             .all_sessions
@@ -312,14 +362,23 @@ impl App {
                 };
                 (list, specs)
             },
-            move |(list, specs)| Message::Procs(Event::Read(id, list, specs)),
+            move |(list, specs)| Message::Procs(Event::Read(id, serial, list, specs)),
         )
     }
 
-    fn read_log(&self, id: &str, name: String) -> Task<Message> {
+    fn read_log(&mut self, id: &str, name: String) -> Task<Message> {
         let Some(actions) = self.actions.clone() else {
             return Task::none();
         };
+        let Some(view) = self.views.get_mut(id) else {
+            return Task::none();
+        };
+        if view.processes.log_reading.is_some() {
+            return Task::none();
+        }
+        self.process_serial += 1;
+        let serial = self.process_serial;
+        view.processes.log_reading = Some(serial);
         let (session, id) = (id.to_string(), id.to_string());
         blocking(
             {
@@ -334,7 +393,7 @@ impl App {
                         .map_err(|e| format!("{e:#}"))
                 }
             },
-            move |result| Message::Procs(Event::LogRead(id, name, result)),
+            move |result| Message::Procs(Event::LogRead(id, name, serial, result)),
         )
     }
 
@@ -365,6 +424,15 @@ impl App {
     }
 
     fn expose_port(&mut self, id: &str, port: u16, name: &str) -> Task<Message> {
+        // A second queued click (or two process rows declaring the same port) reuses the
+        // existing listener instead of moving the URL to a fallback port.
+        if self
+            .views
+            .get(id)
+            .is_none_or(|view| view.processes.bridges.contains_key(&port))
+        {
+            return Task::none();
+        }
         let Some(actions) = self.actions.clone() else {
             return Task::none();
         };
@@ -665,6 +733,156 @@ mod tests {
             exit_code: None,
             last_line: String::new(),
         }
+    }
+
+    #[test]
+    fn a_delayed_process_read_cannot_populate_a_reopened_view() {
+        let (mut app, _) = App::new(true, None);
+        app.views.get_mut("demo").unwrap().processes.reading = Some(7);
+        app.views.insert("demo".into(), SessionView::new("demo"));
+        app.views.get_mut("demo").unwrap().processes.reading = Some(8);
+        let _ = app.update(Message::Procs(Event::Read(
+            "demo".into(),
+            7,
+            Ok(vec![process("old", "running", Some(3000))]),
+            Some(vec![]),
+        )));
+        let state = &app.views["demo"].processes;
+        assert!(state.list.is_empty());
+        assert!(state.questions.is_empty());
+        assert_eq!(state.reading, Some(8));
+    }
+
+    #[test]
+    fn a_delayed_process_read_cannot_expose_a_stopped_sessions_port() {
+        let (mut app, _) = App::new(true, None);
+        app.demo = false;
+        app.views.get_mut("demo").unwrap().processes.reading = Some(7);
+        let _ = app.update(Message::Procs(Event::Read(
+            "demo".into(),
+            7,
+            Ok(vec![process("old", "running", Some(3000))]),
+            Some(vec!["3000".into()]),
+        )));
+        let state = &app.views["demo"].processes;
+        assert!(state.list.is_empty());
+        assert!(state.bridges.is_empty());
+        assert_eq!(state.reading, None);
+    }
+
+    #[test]
+    fn an_action_completion_does_not_clear_an_outstanding_poll() {
+        let (mut app, _) = App::new(true, None);
+        app.views.get_mut("demo").unwrap().processes.reading = Some(7);
+        let _ = app.update(Message::Procs(Event::Done(
+            "demo".into(),
+            Outcome::Done(json!({})),
+        )));
+        assert_eq!(app.views["demo"].processes.reading, Some(7));
+        assert!(app.views["demo"].processes.refresh_pending);
+        // Its pre-action list must not bring the stopped process back into the UI.
+        let _ = app.update(Message::Procs(Event::Read(
+            "demo".into(),
+            7,
+            Ok(vec![process("old", "running", Some(3000))]),
+            Some(vec![]),
+        )));
+        assert!(app.views["demo"].processes.list.is_empty());
+        assert_eq!(app.views["demo"].processes.reading, None);
+    }
+
+    #[test]
+    fn an_old_log_read_cannot_replace_a_reopened_log() {
+        let (mut app, _) = App::new(true, None);
+        let state = &mut app.views.get_mut("demo").unwrap().processes;
+        state.log = Some(("web".into(), text_editor::Content::with_text("current")));
+        state.log_reading = Some(8);
+        let _ = app.update(Message::Procs(Event::LogRead(
+            "demo".into(),
+            "web".into(),
+            7,
+            Ok("old".into()),
+        )));
+        let state = &app.views["demo"].processes;
+        assert_eq!(state.log.as_ref().unwrap().1.text(), "current");
+        assert_eq!(state.log_reading, Some(8));
+        let _ = app.update(Message::Procs(Event::LogRead(
+            "demo".into(),
+            "web".into(),
+            8,
+            Ok("new".into()),
+        )));
+        assert_eq!(
+            app.views["demo"].processes.log.as_ref().unwrap().1.text(),
+            "new"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_log_refresh_preserves_the_reading_position() {
+        let (mut app, _) = App::new(true, None);
+        let state = &mut app.views.get_mut("demo").unwrap().processes;
+        let mut content = text_editor::Content::with_text("first\nlast");
+        content.perform(text_editor::Action::Move(
+            text_editor::Motion::DocumentStart,
+        ));
+        let cursor = content.cursor();
+        state.log = Some(("web".into(), content));
+        state.log_reading = Some(8);
+        let _ = app.update(Message::Procs(Event::LogRead(
+            "demo".into(),
+            "web".into(),
+            8,
+            Ok("first\nlast\n".into()),
+        )));
+        assert_eq!(
+            app.views["demo"].processes.log.as_ref().unwrap().1.cursor(),
+            cursor
+        );
+    }
+
+    #[test]
+    fn repeated_exposure_reuses_the_existing_listener() {
+        let (mut app, _) = App::new(true, None);
+        let (client, _daemon) = crate::tests::daemon();
+        app.actions = Some(sill_client::actions::Actions::new(crate::tests::connector(
+            vec![client],
+        )));
+        let open: procs::Opener = std::sync::Arc::new(|| anyhow::bail!("not in this test"));
+        let bridge = procs::expose(0, open).unwrap();
+        let host_port = bridge.host_port;
+        app.views
+            .get_mut("demo")
+            .unwrap()
+            .processes
+            .bridges
+            .insert(3000, bridge);
+        let _ = app.expose_port("demo", 3000, "web");
+        assert_eq!(
+            app.views["demo"].processes.bridges[&3000].host_port,
+            host_port
+        );
+    }
+
+    #[test]
+    fn listing_a_stopped_session_closes_bridges_and_invalidates_polls() {
+        let (mut app, _) = App::new(true, None);
+        let state = &mut app.views.get_mut("demo").unwrap().processes;
+        let open: procs::Opener = std::sync::Arc::new(|| anyhow::bail!("not in this test"));
+        state.bridges.insert(3000, procs::expose(0, open).unwrap());
+        state.reading = Some(7);
+        let session = serde_json::from_value(json!({
+            "session_id": "demo", "agent": "claude", "title": "demo", "title_kind": "",
+            "created_at": "1", "last_used": "1", "ended_at": null, "running": false,
+            "policy": "default", "auto_allow": false, "desktop": "", "memory_scope": "",
+            "summary": "", "summary_kind": "", "ghost": false, "pins": [], "settings": {},
+            "follows": null, "compacted": "0"
+        }))
+        .unwrap();
+        let _ = app.listed(Ok(vec![session]));
+        let state = &app.views["demo"].processes;
+        assert!(state.bridges.is_empty());
+        assert_eq!(state.reading, None);
     }
 
     #[test]

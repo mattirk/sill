@@ -22,6 +22,8 @@ pub struct Picture {
 pub type Cache = BTreeMap<String, Option<Result<Picture, String>>>;
 #[derive(Debug, Clone)]
 pub enum Event {
+    /// Async work targets the exact view that started it, including after a tab is reopened.
+    Scoped(String, String, Box<Event>),
     Choose,
     Paste,
     Remove(usize),
@@ -172,6 +174,25 @@ fn attach(
         )),
     }
 }
+// Consume uploads/decodes lazily so a compressed multi-image selection cannot retain
+// gigabytes of decoded previews before the UI checks its session cache budget.
+fn collect_attachments(
+    files: impl IntoIterator<Item = Result<(Attachment, Option<Picture>), String>>,
+    budget: usize,
+) -> Result<Vec<(Attachment, Option<Picture>)>, String> {
+    let mut remaining = budget;
+    let mut collected = Vec::new();
+    for file in files {
+        let file = file?;
+        let size = file.1.as_ref().map_or(0, |p| p.rgba.len());
+        remaining = remaining
+            .checked_sub(size)
+            .ok_or("Attachment preview limit reached; remove attachments first.")?;
+        collected.push(file);
+    }
+    Ok(collected)
+}
+
 /// Small attachment preview; controls belong to its surrounding strip.
 pub fn thumbnail<'a>(cache: &Cache, key: &str, width: f32, height: f32) -> Element<'a, Message> {
     let content: Element<'a, Message> = match cache.get(key) {
@@ -258,6 +279,15 @@ pub fn item_keys(item: &sill_proto::sfp::Item) -> Vec<String> {
 impl App {
     pub(crate) fn media_event(&mut self, event: Event) -> Task<Message> {
         match event {
+            Event::Scoped(session, token, event) => {
+                if self
+                    .views
+                    .get(&session)
+                    .is_some_and(|v| v.media_token == token)
+                {
+                    return self.media_event(*event);
+                }
+            }
             Event::Choose | Event::Paste => {
                 let paste = matches!(event, Event::Paste);
                 let Some(view) = self.current_mut() else {
@@ -268,6 +298,7 @@ impl App {
                 }
                 view.attachments_busy = true;
                 let session = view.id.clone();
+                let token = view.media_token.clone();
                 let dest = session.clone();
                 if paste {
                     return crate::blocking(
@@ -299,7 +330,13 @@ impl App {
                                 }
                             })
                         },
-                        move |r| Message::Media(Event::Pasted(dest.clone(), r)),
+                        move |r| {
+                            Message::Media(Event::Scoped(
+                                dest.clone(),
+                                token.clone(),
+                                Box::new(Event::Pasted(dest.clone(), r)),
+                            ))
+                        },
                     );
                 }
                 return Task::perform(
@@ -315,7 +352,7 @@ impl App {
                                     .collect::<Vec<_>>()
                             })
                     },
-                    move |paths| Message::AttachmentPaths(session.clone(), paths),
+                    move |paths| Message::AttachmentPaths(session.clone(), token.clone(), paths),
                 );
             }
             Event::Remove(index) => {
@@ -446,6 +483,7 @@ impl App {
                     .and_then(|p| p.as_ref().ok())
                     .cloned();
                 if let Some(pic) = pic {
+                    let token = self.views[&session].media_token.clone();
                     return crate::blocking(
                         move || {
                             clipboard(|c| {
@@ -457,7 +495,13 @@ impl App {
                                 .map_err(|e| e.to_string())
                             })
                         },
-                        move |r| Message::Media(Event::Copied(session.clone(), r)),
+                        move |r| {
+                            Message::Media(Event::Scoped(
+                                session.clone(),
+                                token.clone(),
+                                Box::new(Event::Copied(session.clone(), r)),
+                            ))
+                        },
                     );
                 }
             }
@@ -474,7 +518,19 @@ impl App {
         session: String,
         paths: Option<Vec<std::path::PathBuf>>,
     ) -> Task<Message> {
+        let Some(view) = self.views.get(&session) else {
+            return Task::none();
+        };
+        let token = view.media_token.clone();
         let actions = self.actions.clone();
+        let used = self.views.get(&session).map_or(0, |v| {
+            v.media
+                .values()
+                .filter_map(|p| p.as_ref()?.as_ref().ok())
+                .map(|p| p.rgba.len())
+                .sum::<usize>()
+        });
+        let budget = (128 * 1024 * 1024usize).saturating_sub(used);
         let dest = session.clone();
         crate::blocking(
             move || {
@@ -498,12 +554,18 @@ impl App {
                     }
                 }
                 let actions = actions.ok_or("No daemon connected")?;
-                paths
-                    .into_iter()
-                    .map(|p| attach(p, &session, &actions))
-                    .collect()
+                collect_attachments(
+                    paths.into_iter().map(|p| attach(p, &session, &actions)),
+                    budget,
+                )
             },
-            move |r| Message::Media(Event::Attached(dest.clone(), r)),
+            move |r| {
+                Message::Media(Event::Scoped(
+                    dest.clone(),
+                    token.clone(),
+                    Box::new(Event::Attached(dest.clone(), r)),
+                ))
+            },
         )
     }
     pub(crate) fn load_media(&mut self, session: &str) -> Task<Message> {
@@ -547,6 +609,7 @@ impl App {
             let session = session.to_string();
             let dest = session.clone();
             let out = key.clone();
+            let token = view.media_token.clone();
             let actions = actions.clone();
             let home = home.clone();
             tasks.push(crate::blocking(
@@ -611,7 +674,13 @@ impl App {
                     };
                     decode(&bytes)
                 },
-                move |r| Message::Media(Event::Loaded(dest.clone(), out.clone(), r)),
+                move |r| {
+                    Message::Media(Event::Scoped(
+                        dest.clone(),
+                        token.clone(),
+                        Box::new(Event::Loaded(dest.clone(), out.clone(), r)),
+                    ))
+                },
             ));
         }
         Task::batch(tasks)
@@ -628,6 +697,57 @@ mod tests {
             .unwrap();
         output.into_inner()
     }
+    #[test]
+    fn late_media_work_cannot_change_a_recreated_session_view() {
+        let (mut app, _) = App::new(true, None);
+        let token = app.views["demo"].media_token.clone();
+        app.views
+            .insert("demo".into(), crate::SessionView::new("demo"));
+        app.views.get_mut("demo").unwrap().attachments_busy = true;
+        let attachment = Attachment::Uploaded {
+            upload_id: "old".into(),
+            name: "old.txt".into(),
+            mime: "text/plain".into(),
+        };
+        let events = [
+            Event::Attached("demo".into(), Ok(vec![(attachment, None)])),
+            Event::Pasted("demo".into(), Ok(Paste::Text("old clipboard".into()))),
+            Event::Loaded("demo".into(), "old.png".into(), decode(&png())),
+            Event::Copied("demo".into(), Err("old error".into())),
+        ];
+        for event in events {
+            let _ = app.media_event(Event::Scoped("demo".into(), token.clone(), Box::new(event)));
+        }
+        let _ = app.update(Message::AttachmentPaths("demo".into(), token, None));
+        let view = &app.views["demo"];
+        assert!(
+            view.attachments_busy,
+            "an old completion cannot finish the new picker"
+        );
+        assert!(view.attachments.is_empty());
+        assert!(view.draft.text().is_empty());
+        assert!(view.media.is_empty());
+        assert!(view.failed.is_none());
+    }
+
+    #[test]
+    fn attachment_batch_stops_decoding_when_preview_budget_is_exhausted() {
+        let mut decoded = 0;
+        let files = (0..64).map(|i| {
+            decoded += 1;
+            make_image(format!("{i}.png"), png(), "image/png")
+        });
+        assert!(
+            collect_attachments(files, 24)
+                .unwrap_err()
+                .contains("preview limit")
+        );
+        assert_eq!(
+            decoded, 2,
+            "remaining files must never be decoded or uploaded"
+        );
+    }
+
     #[test]
     fn png_preview_and_attachment_round_trip() {
         let bytes = png();

@@ -227,16 +227,13 @@ impl App {
         let Some(connect) = self.connect.clone() else {
             return Task::none();
         };
+        self.next_terminal += 1;
+        let generation = self.next_terminal;
         let Some(view) = self.views.get_mut(session) else {
             return Task::none();
         };
         view.select_shell(false);
-        view.terminal_generation = view.terminal_generation.max(
-            view.parked_terminal
-                .as_ref()
-                .map_or(0, |(_, generation)| *generation),
-        ) + 1;
-        let generation = view.terminal_generation;
+        view.terminal_generation = generation;
         let (cols, rows) = view
             .terminal
             .as_ref()
