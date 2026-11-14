@@ -471,7 +471,7 @@ button.sill-action:checked { background: alpha(@view_fg_color, 0.09); border-bot
 .sill-pin:hover { opacity: 1; }
 .sill-badge { font-size: 80%; color: alpha(@accent_color, 0.9); font-family: monospace; }
 .sill-controls { font-size: 85%; }
-.sill-ctl-icon { min-height: 0; min-width: 0; padding: 2px 6px; opacity: 0.6; -gtk-icon-size: 15px; }
+.sill-ctl-icon { min-height: 0; min-width: 0; padding: 2px 6px; opacity: 0.6; -gtk-icon-size: 13px; }
 .sill-ctl-icon:hover, .sill-ctl-icon:checked { opacity: 1; }
 /* the lock: same colour in both states, fixed width so open/closed don't shift the row */
 button.sill-lock { min-width: 24px; padding: 2px 0; opacity: 0.6; }
@@ -479,7 +479,7 @@ button.sill-lock:checked { background: transparent; opacity: 0.9; }
 button.sill-lock:hover { opacity: 1; }
 .sill-controls .dim-label { opacity: 0.7; }
 .sill-control { min-height: 0; padding: 0; color: alpha(@view_fg_color, 0.6); }
-.sill-control > button { min-height: 0; padding: 1px 6px; background: transparent; border: none; box-shadow: none; color: inherit; }
+.sill-control > button { min-height: 0; padding: 1px 4px; background: transparent; border: none; box-shadow: none; color: inherit; }
 .sill-control > button:hover { background: alpha(@view_fg_color, 0.07); color: @view_fg_color; }
 .sill-control > button arrow { -gtk-icon-size: 10px; opacity: 0.6; }
 switch.sill-control { min-width: 30px; min-height: 14px; opacity: 0.7; }

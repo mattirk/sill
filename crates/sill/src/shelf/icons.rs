@@ -25,7 +25,7 @@ const STROKES: &[(&str, &str)] = &[
     ("sill-files", "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"),
     ("sill-settings", "M10 5H3M12 19H3M14 3v4M16 17v4M21 12h-9M21 19h-5M21 5h-7M8 10v4M8 12H3"),
     // a prompt: chevron and underscore, no window chrome
-    ("sill-terminal", "M3 18l7-7-7-7M12 20h9"),
+    ("sill-terminal", "M3 19l7-7-7-7M12 20h9"),
     ("sill-agents", "M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2M14 2h6a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z"),
     ("sill-code", "m16 18 6-6-6-6M8 6l-6 6 6 6"),
     ("sill-link", "M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"),

@@ -101,7 +101,7 @@ impl SessionView {
             .build();
         prompt_scroll.add_css_class("sill-prompt-box");
 
-        let controls_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let controls_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         controls_row.add_css_class("sill-controls");
         controls_row.set_margin_start(8);
         controls_row.set_margin_end(8);
@@ -385,7 +385,7 @@ impl SessionView {
                     v.apply_terminal_theme(t);
                     // drawn glyphs don't follow CSS: redraw them in the new foreground
                     if let Some(b) = v.shell_btn.borrow().as_ref() {
-                        b.set_child(Some(&super::icons::named("sill-terminal", super::icons::fg_for(b, t), 17)));
+                        b.set_child(Some(&super::icons::named("sill-terminal", super::icons::fg_for(b, t), 15)));
                     }
                     v.refresh_pins();
                 }
@@ -627,7 +627,7 @@ impl SessionView {
         attach.set_tooltip_text(Some("Attach a file (coming)"));
         self.controls_row.append(&attach);
         let term = gtk::ToggleButton::new();
-        term.set_child(Some(&super::icons::named("sill-terminal", super::icons::fg_for(&self.controls_row, &theme::current()), 17)));
+        term.set_child(Some(&super::icons::named("sill-terminal", super::icons::fg_for(&self.controls_row, &theme::current()), 15)));
         term.add_css_class("flat");
         term.add_css_class("sill-ctl-icon");
         term.set_tooltip_text(Some("Shell inside this session's jail (Ctrl+`)"));
