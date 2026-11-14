@@ -2034,6 +2034,8 @@ impl App {
                         }
                         return self.update(Message::Files(files::Action::ToggleDrawer));
                     }
+                    // the person's own choice of mode: following changes leaves it be
+                    self.drawer.chosen();
                     let mode = self.layout.after(action);
                     return self.set_mode(mode);
                 }
@@ -3436,6 +3438,8 @@ impl App {
         if load_files {
             tasks.push(self.files_refresh(&id));
         }
+        // its changes opened the drawer and went while another session was shown
+        tasks.push(self.follow_return(&id));
         Task::batch(tasks)
     }
 

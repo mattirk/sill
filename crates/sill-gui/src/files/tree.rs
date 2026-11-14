@@ -134,6 +134,9 @@ impl App {
             Action::Toggle(path) => {
                 // a chip shows the drawer at its folder, without closing it
                 let revealing = !self.drawer.shown;
+                if revealing {
+                    self.drawer.chosen();
+                }
                 self.drawer.shown = true;
                 if revealing && view.files.expanded.contains(files::key(&path)) {
                     vec![]
@@ -144,6 +147,7 @@ impl App {
             Action::More(path) => view.files.more(path).into_iter().collect(),
             Action::Open { path, repo } => vec![view.files.open(path, repo)],
             Action::OpenAndHide { path, repo } => {
+                self.drawer.chosen();
                 self.drawer.shown = false;
                 vec![view.files.open(path, repo)]
             }

@@ -107,7 +107,11 @@ pub struct Drawer {
     /// The originating session and view identity of the one native dialog in flight.
     pub folder_picker: Option<(String, String)>,
     serial: u64,
-    follow_seen: std::collections::BTreeMap<String, String>,
+    /// Each session's followed repository as last seen, and whether it had changes.
+    follow_seen: std::collections::BTreeMap<String, (String, bool)>,
+    /// The session whose changes opened the drawer: it is put away again when they are gone,
+    /// unless the person has shown or hidden it meanwhile.
+    follow_opened: Option<String>,
     navigation: std::collections::BTreeMap<String, links::Navigation>,
     /// None in `--demo`: requests are answered with synthetic files at once.
     files: Option<Files>,
@@ -131,6 +135,7 @@ impl Drawer {
                     navigation: Default::default(),
                     serial: 0,
                     follow_seen: Default::default(),
+                follow_opened: None,
                     files: None,
                 },
                 Task::none(),
@@ -150,6 +155,7 @@ impl Drawer {
                 navigation: Default::default(),
                 serial: 0,
                 follow_seen: Default::default(),
+                follow_opened: None,
                 files: Some(files),
             },
             Task::run(stream, |reply| {
@@ -160,16 +166,18 @@ impl Drawer {
 }
 
 impl Drawer {
-    /// Follow status transitions, so a manual choice lasts until the repository changes.
+    /// Follow status transitions, so a manual choice lasts until the repository changes. Also
+    /// the turn the repository took since it was last seen: `Some(true)` when changes appeared
+    /// in a clean one, `Some(false)` when the last of them went.
     fn follow(
         &mut self,
         session: &str,
         files: &mut files::FilesState,
         enabled: bool,
-    ) -> Vec<Request> {
+    ) -> (Vec<Request>, Option<bool>) {
         if !enabled {
             self.follow_seen.remove(session);
-            return vec![];
+            return (vec![], None);
         }
         // Iced has no separate scoped folder: follow the first session-pinned repository.
         let repo = files
@@ -179,22 +187,30 @@ impl Drawer {
             .find_map(|r| files.repo_of(&r.path));
         let Some(repo) = repo.filter(|r| r.read && r.error.is_none()) else {
             self.follow_seen.remove(session);
-            return vec![];
+            return (vec![], None);
         };
         let state = format!(
             "{:?}:{:?}:{:?}:{:?}",
             repo.root, repo.head, repo.entries, repo.lines
         );
         let dirty = !repo.entries.is_empty();
-        if self.follow_seen.get(session) == Some(&state) {
-            return vec![];
+        if self.follow_seen.get(session).map(|(seen, _)| seen) == Some(&state) {
+            return (vec![], None);
         }
-        self.follow_seen.insert(session.into(), state);
-        if files.diff_mode != dirty {
+        let was = self.follow_seen.insert(session.into(), (state, dirty));
+        // a repository first seen with changes is not one they appeared in
+        let turn = was.filter(|(_, was)| *was != dirty).map(|_| dirty);
+        let requests = if files.diff_mode != dirty {
             files.set_diff_mode(dirty)
         } else {
             vec![]
-        }
+        };
+        (requests, turn)
+    }
+
+    /// The person showed or hid the drawer themselves: it stays as they left it.
+    pub fn chosen(&mut self) {
+        self.follow_opened = None;
     }
 }
 
@@ -204,13 +220,17 @@ impl App {
             .daemon_settings
             .as_ref()
             .is_some_and(|s| s.drawer_follow_changes.unwrap_or(false));
+        if !enabled {
+            self.drawer.follow_opened = None;
+        }
+        // the setting or the snapshot changed, not a repository: no turn to act on
         let requests: Vec<_> = self
             .views
             .iter_mut()
             .map(|(id, view)| {
                 (
                     id.clone(),
-                    self.drawer.follow(id, &mut view.files, enabled),
+                    self.drawer.follow(id, &mut view.files, enabled).0,
                 )
             })
             .collect();
@@ -245,14 +265,17 @@ impl App {
                         request,
                     };
                     let mut effects = view.files.accept(reply);
+                    // the demo's repository never changes: no turn to act on
                     effects.follow.extend(
-                        self.drawer.follow(
-                            session,
-                            &mut view.files,
-                            self.daemon_settings
-                                .as_ref()
-                                .is_some_and(|s| s.drawer_follow_changes.unwrap_or(false)),
-                        ),
+                        self.drawer
+                            .follow(
+                                session,
+                                &mut view.files,
+                                self.daemon_settings
+                                    .as_ref()
+                                    .is_some_and(|s| s.drawer_follow_changes.unwrap_or(false)),
+                            )
+                            .0,
                     );
                     view.sync_reader();
                     queue.extend(effects.follow);
@@ -339,15 +362,14 @@ impl App {
             return Task::none();
         };
         let mut effects = view.files.accept(reply);
-        effects.follow.extend(
-            self.drawer.follow(
-                &session,
-                &mut view.files,
-                self.daemon_settings
-                    .as_ref()
-                    .is_some_and(|s| s.drawer_follow_changes.unwrap_or(false)),
-            ),
+        let (follow, turn) = self.drawer.follow(
+            &session,
+            &mut view.files,
+            self.daemon_settings
+                .as_ref()
+                .is_some_and(|s| s.drawer_follow_changes.unwrap_or(false)),
         );
+        effects.follow.extend(follow);
         view.sync_reader();
         // a background session's reply updates its own state, never the window
         if effects.reveal && active {
@@ -356,7 +378,63 @@ impl App {
         self.files_send(&session, effects.follow);
         // a pin change rebuilds a running jail in the daemon (docs/pins.md): nothing to do here,
         // the session's notice says when it is done
-        self.reader_anchor(&session)
+        Task::batch([self.follow_drawer(&session, turn), self.reader_anchor(&session)])
+    }
+
+    /// "Drawer follows changes": the drawer comes out when changes appear in the shown session's
+    /// repository, from Full too, and goes back where it came from when they are gone. A drawer
+    /// already out stays; the Shelf is left alone (its window would have to grow); a background
+    /// session never moves the window.
+    fn follow_drawer(&mut self, session: &str, turn: Option<bool>) -> Task<Message> {
+        use crate::layout::Mode;
+        let Some(dirty) = turn else {
+            return Task::none();
+        };
+        let shown_session = self.selected.as_deref() == Some(session);
+        if dirty {
+            if !shown_session || self.drawer.shown || self.backend_shown() {
+                return Task::none();
+            }
+            if self.layout.plain {
+                self.drawer.shown = true;
+                self.drawer.follow_opened = Some(session.into());
+                return self.files_refresh(session);
+            }
+            if self.layout.mode != Mode::Full {
+                return Task::none();
+            }
+            self.drawer.follow_opened = Some(session.into());
+            return self.set_mode(Mode::Drawer);
+        }
+        self.follow_return(session)
+    }
+
+    /// Put the drawer back where `session`'s changes found it, once they are gone. While another
+    /// session is shown the return waits: it is made when the person comes back to this one
+    /// (`choose`), unless they have shown or hidden the drawer themselves by then.
+    pub(crate) fn follow_return(&mut self, session: &str) -> Task<Message> {
+        use crate::layout::Mode;
+        if self.drawer.follow_opened.as_deref() != Some(session)
+            || self.selected.as_deref() != Some(session)
+            || self.drawer.follow_seen.get(session).is_some_and(|(_, dirty)| *dirty)
+        {
+            return Task::none();
+        }
+        self.drawer.follow_opened = None;
+        if !self.drawer.shown {
+            return Task::none();
+        }
+        if self.layout.plain {
+            self.drawer.shown = false;
+            if let Some(view) = self.views.get_mut(session) {
+                view.files.inspect_pending = None;
+            }
+            return self.restore_scroll();
+        }
+        if self.layout.mode == Mode::Drawer {
+            return self.set_mode(Mode::Full);
+        }
+        Task::none()
     }
 
     fn toggle_drawer(&mut self) -> Task<Message> {
@@ -367,6 +445,7 @@ impl App {
                 crate::layout::Mode::Full,
             )));
         }
+        self.drawer.chosen();
         self.drawer.shown = !self.drawer.shown;
         let Some(id) = self.selected.clone() else {
             return Task::none();
