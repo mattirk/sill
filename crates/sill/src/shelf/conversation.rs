@@ -1732,7 +1732,8 @@ button.sill-action:checked { background: alpha(@view_fg_color, 0.09); border-bot
 /* the ACP controls row (mode, model, reasoning, …): small, light and quiet until hovered */
 .sill-controls { font-size: 80%; }
 /* Source Sans 3 sits high in its line box: the row's labels go down a touch to read centred */
-.sill-controls label { font-weight: normal; padding-top: 0.15em; }
+.sill-control > button label, .sill-controls .sill-usage,
+.sill-controls .sill-ctl-icon label, .sill-controls .dim-label { font-weight: normal; padding-top: 0.15em; }
 /* Everything in the row is sized in em — buttons, glyphs, gaps — and nothing in px: em follows the
    text scale and the display's font DPI, px only the integer scale factor, so px rows come out
    different on every machine. The glyphs are sill's own textures sized by -gtk-icon-size. */
@@ -1774,7 +1775,7 @@ button.sill-lock:checked { background: transparent; opacity: 0.9; }
 switch.sill-control { opacity: 0.7; }
 switch.sill-control:hover, switch.sill-control:checked { opacity: 1; }
 button.sill-send { min-width: 1.6em; min-height: 1.6em; padding: 0; background: alpha(@accent_bg_color, 0.25); }
-button.sill-send > image { -gtk-icon-size: 1.1em; margin: 0; padding: 0; }
+button.sill-send > image { -gtk-icon-size: 1em; margin: 0; padding: 0; }
 button.sill-send:hover { background: alpha(@accent_bg_color, 0.45); }
 button.sill-send.sill-stop { min-width: 1.6em; min-height: 1.6em; background: alpha(@error_bg_color, 0.25); }
 button.sill-send.sill-stop > image { -gtk-icon-size: 1em; }

@@ -1527,6 +1527,12 @@ impl SessionView {
             *self.lock_btn.borrow_mut() = Some(t.clone());
             right.append(&t);
         }
+        // Keep each control centred on its own natural height, like the drawer toolbar.
+        let mut child = right.first_child();
+        while let Some(w) = child {
+            w.set_valign(gtk::Align::Center);
+            child = w.next_sibling();
+        }
         self.controls_row.append(&right);
         let send = gtk::Button::new();
         send.add_css_class("sill-send");
@@ -1545,6 +1551,11 @@ impl SessionView {
             });
         }
         self.controls_row.append(&send);
+        let mut child = self.controls_row.first_child();
+        while let Some(w) = child {
+            w.set_valign(gtk::Align::Center);
+            child = w.next_sibling();
+        }
         *self.send_btn.borrow_mut() = Some(send);
         self.set_busy(self.busy.get());
         self.rebuilding.set(false);
