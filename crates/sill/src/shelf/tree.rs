@@ -224,7 +224,7 @@ impl FolderTree {
                 let is_dir = path.is_dir();
                 icon.set_from_gicon(&file_icon(&path, is_dir, row.is_expanded()));
                 let fname = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                for c in ["sill-changed", "sill-dim", "sill-pinned", "sill-new"] {
+                for c in ["sill-changed", "sill-below", "sill-dim", "sill-pinned", "sill-new"] {
                     name.remove_css_class(c);
                 }
                 if is_noise(&fname) {
@@ -240,7 +240,9 @@ impl FolderTree {
                 let badge_text = badges.borrow().get(&path).cloned().unwrap_or_default();
                 if badge_text.starts_with('?') {
                     name.add_css_class("sill-new");
-                } else if !badge_text.is_empty() && badge_text != "·" {
+                } else if badge_text == "·" {
+                    name.add_css_class("sill-below"); // a folder with changes somewhere below
+                } else if !badge_text.is_empty() {
                     name.add_css_class("sill-changed");
                 }
                 let is_pinned = pinned.borrow().contains(&path);

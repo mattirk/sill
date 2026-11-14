@@ -995,6 +995,7 @@ button.sill-install:hover { background: alpha(@accent_bg_color, 0.45); }
 .sill-files treeexpander { padding: 1px 0; }
 .sill-file-icon { opacity: 0.7; -gtk-icon-size: 0.95em; }
 .sill-changed { color: @warning_color; }
+.sill-below { color: alpha(@warning_color, 0.8); }
 .sill-new { color: @success_color; }
 .sill-dim { opacity: 0.45; }
 .sill-pinned { color: @accent_color; }

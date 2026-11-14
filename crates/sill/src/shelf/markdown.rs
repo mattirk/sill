@@ -34,11 +34,13 @@ pub struct Ctx {
 
 /// Gap between table columns, logical px at zoom 1.
 const COL_GAP: f64 = 22.0;
+/// Left/right margin of an image in a message (CSS `button.sill-md-image`).
+const IMAGE_MARGIN: i32 = 8;
 /// Inner left/right margin of a prose view; code blocks line up with it (CSS `.sill-code`).
 const PROSE_MARGIN: i32 = 8;
 
-/// A live message: its box, kind class, source, and the width its tables were laid out for
-/// (`None` = no table; `Some(0)` = laid out before the message had a width).
+/// A live message: its box, kind class, source, and the width its tables and images were laid out
+/// for (`None` = neither; `Some(0)` = laid out before the message had a width).
 struct Rendered {
     msg: gtk::glib::WeakRef<gtk::Box>,
     class: String,
@@ -384,7 +386,10 @@ impl<'a> Out<'a> {
         fill_code_view(&view, lang, code);
     }
 
-    /// An image segment: the picture at most the column's width, aspect kept; a click opens it large.
+    /// An image segment: the picture as wide as the column (smaller ones at their own size), aspect
+    /// kept; a click opens it large. The size is set outright from the message's width — GtkPicture's
+    /// own measure asks for the file's pixel size and lets a parent shrink it to nearly nothing —
+    /// and `relayout` renders again when the width changes.
     fn image(&mut self, path: &Path, alt: &str) {
         self.close_text();
         let b = match self.reuse(gtk::Button::static_type()).and_then(|w| w.downcast::<gtk::Button>().ok()) {
@@ -409,14 +414,32 @@ impl<'a> Out<'a> {
             }
         };
         let name = path.to_string_lossy();
+        let Some(pic) = b.child().and_downcast::<gtk::Picture>() else { return };
         if b.widget_name().as_str() != name.as_ref() {
             b.set_widget_name(&name);
-            if let Some(pic) = b.child().and_downcast::<gtk::Picture>() {
-                pic.set_filename(Some(path));
-                pic.set_alternative_text(Some(alt));
-            }
+            pic.set_filename(Some(path));
+            pic.set_alternative_text(Some(alt));
         }
         b.set_tooltip_text(Some(if alt.is_empty() { &name } else { alt }));
+        // the column's width less the button's margins (CSS `.sill-md-image`); 0 before the first
+        // allocation, then the natural measure holds until relayout
+        let avail = self.msg.width() - 2 * IMAGE_MARGIN;
+        let (iw, ih) = pic.paintable().map(|p| (p.intrinsic_width(), p.intrinsic_height())).unwrap_or((0, 0));
+        if avail > 0 && iw > 0 && ih > 0 {
+            let w = avail.min(iw);
+            let h = (w as i64 * ih as i64 / iw as i64) as i32;
+            // a wide image fills the column (its minimum stays 0: a narrower column letterboxes until
+            // relayout), a small one keeps its size at the left
+            if iw > avail {
+                b.set_halign(gtk::Align::Fill);
+                pic.set_size_request(-1, h);
+            } else {
+                b.set_halign(gtk::Align::Start);
+                pic.set_size_request(w, h);
+            }
+        } else {
+            pic.set_size_request(-1, -1);
+        }
     }
 
     fn finish(mut self) {
@@ -654,7 +677,10 @@ pub fn render(msg: &gtk::Box, class: &str, markdown: &str) {
                         let remote = src.starts_with("http://") || src.starts_with("https://");
                         let local = if remote { None } else { out.ctx.as_ref().and_then(|c| (c.resolve)(&src)) };
                         match local {
-                            Some(p) if viewer::is_image(&p) => out.image(&p, &alt),
+                            Some(p) if viewer::is_image(&p) => {
+                                out.image(&p, &alt);
+                                table_width.get_or_insert(msg.width()); // sized for this width: relayout follows
+                            }
                             // remote images aren't fetched (the shelf is outside the proxy): a link
                             _ if remote => {
                                 let label = if alt.is_empty() { "image".to_string() } else { alt };
