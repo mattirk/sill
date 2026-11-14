@@ -58,6 +58,9 @@ pub struct Shelf {
     restore_tree: std::cell::Cell<bool>,
     busy: RefCell<std::collections::HashSet<String>>,
     pending_restart: RefCell<std::collections::HashSet<String>>,
+    /// The prompt being written in a session whose view is closed to be made anew (a pin restarts
+    /// the jail): the new view takes it back when it opens.
+    drafts: RefCell<HashMap<String, super::session_view::Draft>>,
     views: RefCell<HashMap<String, Rc<SessionView>>>,
     /// Sessions whose tab and page are gone while their agent still writes the summary
     /// (`background_view`): the view lives until the turn ends, then `close_view` finishes.
@@ -311,6 +314,7 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
         restore_tree: std::cell::Cell::new(false),
         busy: RefCell::new(std::collections::HashSet::new()),
         pending_restart: RefCell::new(std::collections::HashSet::new()),
+        drafts: RefCell::new(HashMap::new()),
         views: RefCell::new(HashMap::new()),
         backgrounded: RefCell::new(std::collections::HashSet::new()),
         ending: RefCell::new(std::collections::HashSet::new()),
@@ -1354,6 +1358,10 @@ impl Shelf {
             }
         };
         let view = SessionView::new(s.clone(), self.store.clone());
+        let draft = self.drafts.borrow_mut().remove(&id);
+        if let Some(d) = draft {
+            view.restore_draft(d);
+        }
         view.conv.set_expanded(self.expanded.get());
         if let Some(n) = &note {
             view.conv.add_note(n);
@@ -1456,6 +1464,11 @@ impl Shelf {
             return;
         }
         let stored = self.store.sessions().unwrap_or_default().into_iter().find(|s| s.id == id);
+        // what is typed survives the restart: the new view takes it back (open_session_with)
+        let draft = self.views.borrow().get(id).map(|v| v.take_draft());
+        if let Some(d) = draft.filter(|d| !d.is_empty()) {
+            self.drafts.borrow_mut().insert(id.to_string(), d);
+        }
         self.close_view(id);
         let shelf = self.clone();
         stop_then(id, move || {

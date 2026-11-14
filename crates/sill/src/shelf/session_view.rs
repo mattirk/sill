@@ -171,6 +171,18 @@ pub struct SessionView {
     pending_prompt: RefCell<Option<String>>,
 }
 
+/// A prompt being written: its text and attachments (see [`SessionView::take_draft`]).
+pub struct Draft {
+    pub text: String,
+    pub attachments: Vec<Attachment>,
+}
+
+impl Draft {
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty() && self.attachments.is_empty()
+    }
+}
+
 impl SessionView {
     pub fn new(session: Session, store: Rc<Store>) -> Rc<Self> {
         let status = gtk::Label::new(Some("starting…"));
@@ -1992,6 +2004,27 @@ impl SessionView {
         self.attachments.borrow_mut().push(a);
         self.rebuild_attach_strip();
         self.prompt.grab_focus();
+    }
+
+    /// What is typed and attached but not sent: taken out of the view (it is about to be closed and
+    /// made anew, e.g. a pin restarting the session) and given back with [`Self::restore_draft`].
+    pub fn take_draft(&self) -> Draft {
+        let buf = self.prompt.buffer();
+        let text = buf.text(&buf.start_iter(), &buf.end_iter(), true).to_string();
+        Draft { text, attachments: std::mem::take(&mut *self.attachments.borrow_mut()) }
+    }
+
+    /// Put a draft back into a fresh view: the text, cursor at its end, and the attachment chips.
+    pub fn restore_draft(self: &Rc<Self>, draft: Draft) {
+        if !draft.text.is_empty() {
+            let buf = self.prompt.buffer();
+            buf.set_text(&draft.text);
+            buf.place_cursor(&buf.end_iter());
+        }
+        if !draft.attachments.is_empty() {
+            *self.attachments.borrow_mut() = draft.attachments;
+            self.rebuild_attach_strip();
+        }
     }
 
     /// The chips above the prompt: name and a cross to drop one.
