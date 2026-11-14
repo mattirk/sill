@@ -16,15 +16,16 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
-use sill_core::{acp, wire};
+use sill_core::acp;
 
 const JOURNAL_BYTES: usize = 64 * 1024 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The relay's own protocol — the shape of `Input` and `Output`, which carry the wire types.
-/// Both hellos say it; a daemon that finds a relay of another version after a deploy replaces it
-/// (`evict`) instead of leaving the session with a worker it cannot talk to (docs/daemon.md §3.9
-/// item 1). Bump it with any change to the enums below or to the wire types they carry.
+/// The relay's own protocol — the shape of `Input` and `Output` and of the relay types they carry
+/// ([`Event`], [`Command`], [`Answer`] and the `acp` data inside them). Both hellos say it; a
+/// daemon that finds a relay of another version after a deploy replaces it (`evict`) instead of
+/// leaving the session with a worker it cannot talk to (docs/daemon.md §3.9 item 1). Bump it with
+/// any change to those types; a change to the frontend protocol's `wire` types alone needs none.
 pub(crate) const RELAY_PROTOCOL: u32 = 1;
 
 /// The relay answered but will not cooperate: another version, a cursor it no longer retains, an
@@ -40,25 +41,152 @@ impl std::fmt::Display for Refused {
 
 impl std::error::Error for Refused {}
 
+// --- what the relay carries ------------------------------------------------------------------------
+//
+// The conversation between the ACP worker and the main daemon, in the relay's own types: never
+// the frontends' `wire` types (docs/protocol.md §7.1), so a frontend protocol change cannot change
+// these bytes or evict a running relay (and the agent conversation it holds). The runner converts
+// at the daemon's boundary, and its stored state (`daemon_runners`) holds these too.
+
+/// One thing the agent's side said: `acp::Event` with a request number in place of a question's
+/// reply channel, and `Resolved` once the relay delivered the answer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) enum Event {
+    Ready { session_id: String, resumed: bool, controls: acp::Controls },
+    Capabilities { images: bool },
+    Controls(acp::Controls),
+    TurnStarted,
+    UserText(String),
+    Text(String),
+    Thought(String),
+    ToolCall { id: String, title: String, kind: String, status: String, detail: Option<String>, diff: Option<String>, parent: Option<String> },
+    ToolCallUpdate { id: String, status: Option<String>, title: Option<String>, detail: Option<String>, diff: Option<String> },
+    SubagentText { parent: String, text: String },
+    PermissionRequest { request: u64, tool_call_id: String, title: String, options: Vec<acp::PermissionOption> },
+    AutoAnswered { tool_call_id: String, title: String, allowed: bool },
+    Elicitation { request: u64, message: String, fields: Vec<acp::FormField> },
+    Resolved { request: u64 },
+    Other(String),
+    Usage { used: u64, size: u64 },
+    AuthRequired { message: String, methods: Vec<acp::AuthMethodInfo> },
+    Stopped(acp::StopReason),
+    Ended(Option<String>),
+}
+
+/// What the daemon asks of the ACP conversation. `text` is what the agent gets: the daemon has
+/// composed it already (context prefix included).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) enum Command {
+    Prompt { text: String, attachments: Vec<acp::Attachment> },
+    Authenticate(String),
+    RetrySession,
+    SetMode(String),
+    SetConfig(String, acp::ConfigValue),
+    Cancel,
+    Quit,
+}
+
+/// The answer to a question: the chosen permission option or the form's values (None = cancel).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) enum Answer {
+    Permission(Option<String>),
+    Form(Option<BTreeMap<String, serde_json::Value>>),
+}
+
+impl Command {
+    pub fn into_acp(self) -> acp::Command {
+        match self {
+            Command::Prompt { text, attachments } => acp::Command::Prompt(text, attachments),
+            Command::Authenticate(m) => acp::Command::Authenticate(m),
+            Command::RetrySession => acp::Command::RetrySession,
+            Command::SetMode(m) => acp::Command::SetMode(m),
+            Command::SetConfig(o, v) => acp::Command::SetConfig(o, v),
+            Command::Cancel => acp::Command::Cancel,
+            Command::Quit => acp::Command::Quit,
+        }
+    }
+
+    /// A control the daemon restores itself (`context::Context::restore`).
+    pub fn from_acp_control(command: acp::Command) -> Command {
+        match command {
+            acp::Command::SetMode(m) => Command::SetMode(m),
+            acp::Command::SetConfig(k, v) => Command::SetConfig(k, v),
+            _ => unreachable!("control restoration only emits control commands"),
+        }
+    }
+}
+
+/// Where an agent's question waits for its answer, in the relay.
+enum Reply {
+    Permission(futures::channel::oneshot::Sender<Option<String>>),
+    Form(futures::channel::oneshot::Sender<Option<BTreeMap<String, serde_json::Value>>>),
+}
+
+impl Reply {
+    /// Deliver to the live SDK request handler; false for a wrong kind or dropped receiver.
+    /// ACP v1 has no acknowledgement that the remote agent received a response.
+    fn send(self, answer: Answer) -> bool {
+        match (self, answer) {
+            (Reply::Permission(tx), Answer::Permission(a)) => tx.send(a).is_ok(),
+            (Reply::Form(tx), Answer::Form(a)) => tx.send(a).is_ok(),
+            _ => false,
+        }
+    }
+}
+
+/// An event of the session loop as the relay sends it: a question gets `request`, and its reply
+/// channel stays in the relay until the question is answered.
+fn event_from_acp(event: acp::Event, request: u64) -> (Event, Option<Reply>) {
+    use acp::Event as A;
+    let event = match event {
+        A::Ready { session_id, resumed, controls } => Event::Ready { session_id, resumed, controls },
+        A::Capabilities { images } => Event::Capabilities { images },
+        A::Controls(c) => Event::Controls(c),
+        A::TurnStarted => Event::TurnStarted,
+        A::UserText(t) => Event::UserText(t),
+        A::Text(t) => Event::Text(t),
+        A::Thought(t) => Event::Thought(t),
+        A::ToolCall { id, title, kind, status, detail, diff, parent } => Event::ToolCall { id, title, kind, status, detail, diff, parent },
+        A::ToolCallUpdate { id, status, title, detail, diff } => Event::ToolCallUpdate { id, status, title, detail, diff },
+        A::SubagentText { parent, text } => Event::SubagentText { parent, text },
+        A::PermissionRequest { tool_call_id, title, options, reply } => {
+            return (Event::PermissionRequest { request, tool_call_id, title, options }, Some(Reply::Permission(reply)));
+        }
+        A::AutoAnswered { tool_call_id, title, allowed } => Event::AutoAnswered { tool_call_id, title, allowed },
+        A::Elicitation { message, fields, reply } => return (Event::Elicitation { request, message, fields }, Some(Reply::Form(reply))),
+        A::Other(t) => Event::Other(t),
+        A::Usage { used, size } => Event::Usage { used, size },
+        A::AuthRequired { message, methods } => Event::AuthRequired { message, methods },
+        A::Stopped(r) => Event::Stopped(r),
+        A::Ended(e) => Event::Ended(e),
+    };
+    (event, None)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Delivered {
     /// Zero denotes an already-acknowledged open question, replayed as current state.
     pub seq: u64,
-    pub event: wire::Event,
+    pub event: Event,
 }
 
 #[derive(Serialize, Deserialize)]
 enum Input {
     /// `version` is absent from relays before 2026-11-03: it reads as 0, which no relay speaks.
     Hello { since: u64, #[serde(default)] version: u32 },
-    Command { id: u64, command: wire::Command },
-    Answer { request: u64, answer: wire::Answer },
+    Command { id: u64, command: Command },
+    Answer { request: u64, answer: Answer },
     Ack { seq: u64 },
 }
 
 #[derive(Serialize, Deserialize)]
 enum Output {
-    Hello { acknowledged: u64, last: u64, #[serde(default)] version: u32 },
+    Hello {
+        acknowledged: u64, last: u64, #[serde(default)] version: u32,
+        /// Older protocol-1 workers synthesized Cancelled on RPC error and did not check
+        /// question reply receiver liveness. Absence preserves continuity without false proof.
+        #[serde(default)] outcome_evidence: bool,
+    },
     Event(Delivered),
     Accepted { id: u64, error: Option<String> },
     Answered { request: u64, error: Option<String> },
@@ -70,9 +198,9 @@ struct JournalEntry {
 }
 
 struct Pending {
-    event: wire::Event,
+    event: Event,
     seq: u64,
-    reply: wire::Reply,
+    reply: Reply,
 }
 
 #[derive(Default)]
@@ -98,7 +226,7 @@ struct Shared {
 }
 
 impl Shared {
-    fn append_locked(&self, state: &mut State, event: wire::Event) -> u64 {
+    fn append_locked(&self, state: &mut State, event: Event) -> u64 {
         state.next_seq += 1;
         let delivered = Delivered { seq: state.next_seq, event };
         // Counting serialized bytes bounds memory by message size, not just event count. One event
@@ -121,8 +249,8 @@ impl Shared {
         }
         state.next_request += 1;
         let request = state.next_request;
-        let (event, reply) = wire::event_from_acp(event, request);
-        let ended = matches!(event, wire::Event::Ended(_));
+        let (event, reply) = event_from_acp(event, request);
+        let ended = matches!(event, Event::Ended(_));
         let seq = self.append_locked(&mut state, event.clone());
         if let Some(reply) = reply {
             state.pending.insert(request, Pending { event, seq, reply });
@@ -133,21 +261,21 @@ impl Shared {
         }
     }
 
-    fn answer(&self, request: u64, answer: wire::Answer) -> Result<()> {
+    fn answer(&self, request: u64, answer: Answer) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         if state.answered.contains(&request) {
             return Ok(());
         }
         let Some(pending) = state.pending.get(&request) else { bail!("no open question {request}") };
-        if !matches!((&pending.event, &answer), (wire::Event::PermissionRequest { .. }, wire::Answer::Permission(_)) | (wire::Event::Elicitation { .. }, wire::Answer::Form(_))) {
+        if !matches!((&pending.event, &answer), (Event::PermissionRequest { .. }, Answer::Permission(_)) | (Event::Elicitation { .. }, Answer::Form(_))) {
             bail!("the answer is not of the question's kind");
         }
         let pending = state.pending.remove(&request).unwrap();
         if !pending.reply.send(answer) {
-            bail!("the answer is not of the question's kind");
+            bail!("the agent question no longer has a live reply handler");
         }
         state.answered.insert(request);
-        self.append_locked(&mut state, wire::Event::Resolved { request });
+        self.append_locked(&mut state, Event::Resolved { request });
         Ok(())
     }
 
@@ -283,7 +411,7 @@ fn serve(mut stream: UnixStream, shared: Arc<Shared>) -> Result<()> {
         let mut state = shared.state.lock().unwrap();
         if version != RELAY_PROTOCOL {
             // say which version this is, so the daemon knows it is looking at another build's relay
-            write_line(&mut stream, &Output::Hello { acknowledged: state.acknowledged, last: state.next_seq, version: RELAY_PROTOCOL })?;
+            write_line(&mut stream, &Output::Hello { acknowledged: state.acknowledged, last: state.next_seq, version: RELAY_PROTOCOL, outcome_evidence: true })?;
             bail!("a daemon of relay protocol {version} connected; this relay speaks {RELAY_PROTOCOL}");
         }
         if since < state.acknowledged || since > state.next_seq {
@@ -294,7 +422,7 @@ fn serve(mut stream: UnixStream, shared: Arc<Shared>) -> Result<()> {
         }
         state.generation += 1;
         state.subscriber = Some(stream.try_clone()?);
-        write_line(&mut stream, &Output::Hello { acknowledged: state.acknowledged, last: state.next_seq, version: RELAY_PROTOCOL })?;
+        write_line(&mut stream, &Output::Hello { acknowledged: state.acknowledged, last: state.next_seq, version: RELAY_PROTOCOL, outcome_evidence: true })?;
         let pending: Vec<_> = state.pending.values().filter(|p| p.seq <= since).map(|p| Delivered { seq: 0, event: p.event.clone() }).collect();
         shared.changed.notify_all();
         (state.generation, pending)
@@ -350,8 +478,7 @@ fn serve(mut stream: UnixStream, shared: Arc<Shared>) -> Result<()> {
                         } else if state.ended_at.is_some() {
                             Some("the ACP conversation has ended".into())
                         } else {
-                            let (command, _) = wire::command_into_acp(command);
-                            match shared.commands.try_send(command) {
+                            match shared.commands.try_send(command.into_acp()) {
                                 Ok(()) => { state.last_command = id; None }
                                 Err(_) => Some("the ACP conversation has ended".into()),
                             }
@@ -385,9 +512,12 @@ pub(crate) struct Client {
     writer: Mutex<UnixStream>,
     waiters: Waiters,
     closed: AtomicBool,
+    outcome_evidence: bool,
 }
 
 impl Client {
+    pub fn outcome_evidence(&self) -> bool { self.outcome_evidence }
+
     fn write(&self, value: &Input) -> Result<()> {
         if self.closed.load(Ordering::Acquire) {
             bail!("the ACP relay connection closed");
@@ -405,11 +535,11 @@ impl Client {
         result
     }
 
-    pub fn command(&self, id: u64, command: wire::Command) -> Result<()> {
+    pub fn command(&self, id: u64, command: Command) -> Result<()> {
         self.request((false, id), Input::Command { id, command })
     }
 
-    pub fn answer(&self, request: u64, answer: wire::Answer) -> Result<()> {
+    pub fn answer(&self, request: u64, answer: Answer) -> Result<()> {
         self.request((true, request), Input::Answer { request, answer })
     }
 
@@ -445,7 +575,7 @@ pub(super) fn connect(socket: &Path, since: u64) -> Result<(Arc<Client>, mpsc::R
     if first.is_empty() {
         return Err(Refused("the ACP relay closed the connection at Hello (its cursor range, or an older relay)".into()).into());
     }
-    let Ok(Output::Hello { acknowledged, last, version }) = serde_json::from_str::<Output>(&first) else {
+    let Ok(Output::Hello { acknowledged, last, version, outcome_evidence }) = serde_json::from_str::<Output>(&first) else {
         return Err(Refused("the ACP relay did not answer Hello with a Hello".into()).into());
     };
     if version != RELAY_PROTOCOL {
@@ -455,7 +585,7 @@ pub(super) fn connect(socket: &Path, since: u64) -> Result<(Arc<Client>, mpsc::R
         return Err(Refused(format!("the ACP relay no longer retains cursor {since} ({acknowledged}..{last})")).into());
     }
     stream.set_read_timeout(None)?;
-    let client = Arc::new(Client { writer: Mutex::new(stream), waiters: Mutex::new(BTreeMap::new()), closed: AtomicBool::new(false) });
+    let client = Arc::new(Client { writer: Mutex::new(stream), waiters: Mutex::new(BTreeMap::new()), closed: AtomicBool::new(false), outcome_evidence });
     let receive = Arc::downgrade(&client);
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new().name("sill-relay-reader".into()).spawn(move || {
@@ -508,13 +638,13 @@ pub(super) fn stop_unowned(socket: &Path, session: &str, cursor: u64) -> Result<
     };
     // A reserved terminal command id is greater than every persisted normal command, and remains
     // idempotent if a prior deletion attempt was interrupted after sending it.
-    let quit = client.command(u64::MAX, wire::Command::Quit);
+    let quit = client.command(u64::MAX, Command::Quit);
     let deadline = std::time::Instant::now() + IO_TIMEOUT;
     loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         let event = events.recv_timeout(remaining).with_context(|| format!("orphaned ACP worker did not end before deletion (quit: {quit:?})"))?;
         client.ack(event.seq)?;
-        if matches!(event.event, wire::Event::Ended(_)) { break; }
+        if matches!(event.event, Event::Ended(_)) { break; }
     }
     wait_stopped(socket)
 }
@@ -596,7 +726,7 @@ mod tests {
         serde_json::from_str(&line).unwrap()
     }
 
-    fn until(rx: &mpsc::Receiver<Delivered>, client: &Client, cursor: &mut u64, test: impl Fn(&wire::Event) -> bool) -> Delivered {
+    fn until(rx: &mpsc::Receiver<Delivered>, client: &Client, cursor: &mut u64, test: impl Fn(&Event) -> bool) -> Delivered {
         loop {
             let event = rx.recv_timeout(Duration::from_secs(5)).expect("relay event");
             if event.seq > 0 {
@@ -651,30 +781,31 @@ mod tests {
                 Err(error) => panic!("connecting relay: {error:#}"),
             }
         };
+        assert!(client.outcome_evidence());
         let mut cursor = 0;
-        until(&events, &client, &mut cursor, |event| matches!(event, wire::Event::Ready { .. }));
-        let prompt = wire::Command::Prompt { text: "work".into(), attachments: vec![], entry: None };
+        until(&events, &client, &mut cursor, |event| matches!(event, Event::Ready { .. }));
+        let prompt = Command::Prompt { text: "work".into(), attachments: vec![] };
         client.command(1, prompt.clone()).unwrap();
         client.command(1, prompt.clone()).unwrap();
-        until(&events, &client, &mut cursor, |event| matches!(event, wire::Event::Text(text) if text == "before disconnect"));
+        until(&events, &client, &mut cursor, |event| matches!(event, Event::Text(text) if text == "before disconnect"));
         client.close();
         release.send(()).unwrap();
         let (client, events) = connect(&socket, cursor).unwrap();
         // Retrying the main daemon's outbox after reconnect still submits only one prompt.
         client.command(1, prompt).unwrap();
-        let question = until(&events, &client, &mut cursor, |event| matches!(event, wire::Event::PermissionRequest { .. }));
-        let wire::Event::PermissionRequest { request, .. } = question.event else { unreachable!() };
+        let question = until(&events, &client, &mut cursor, |event| matches!(event, Event::PermissionRequest { .. }));
+        let Event::PermissionRequest { request, .. } = question.event else { unreachable!() };
         client.close();
         let (client, events) = connect(&socket, cursor).unwrap();
         let replay = events.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(replay.seq, 0, "an acknowledged pending question is current state");
-        assert!(matches!(replay.event, wire::Event::PermissionRequest { request: id, .. } if id == request));
-        client.answer(request, wire::Answer::Permission(Some("allow".into()))).unwrap();
-        client.answer(request, wire::Answer::Permission(Some("allow".into()))).unwrap();
-        until(&events, &client, &mut cursor, |event| matches!(event, wire::Event::Text(text) if text == "after reconnect"));
-        until(&events, &client, &mut cursor, |event| matches!(event, wire::Event::Stopped(_)));
-        client.command(2, wire::Command::Quit).unwrap();
-        until(&events, &client, &mut cursor, |event| matches!(event, wire::Event::Ended(_)));
+        assert!(matches!(replay.event, Event::PermissionRequest { request: id, .. } if id == request));
+        client.answer(request, Answer::Permission(Some("allow".into()))).unwrap();
+        client.answer(request, Answer::Permission(Some("allow".into()))).unwrap();
+        until(&events, &client, &mut cursor, |event| matches!(event, Event::Text(text) if text == "after reconnect"));
+        until(&events, &client, &mut cursor, |event| matches!(event, Event::Stopped(_)));
+        client.command(2, Command::Quit).unwrap();
+        until(&events, &client, &mut cursor, |event| matches!(event, Event::Ended(_)));
         worker.join().unwrap();
         fake.join().unwrap();
         assert!(!socket.exists());
@@ -687,10 +818,50 @@ mod tests {
         let shared = Shared { state: Mutex::new(State::default()), changed: Condvar::new(), commands };
         let (tx, rx) = futures::channel::oneshot::channel();
         shared.take_event(acp::Event::PermissionRequest { tool_call_id: "tool".into(), title: "work".into(), options: vec![], reply: tx });
-        assert!(shared.answer(1, wire::Answer::Form(None)).is_err());
+        assert!(shared.answer(1, Answer::Form(None)).is_err());
         assert!(shared.state.lock().unwrap().pending.contains_key(&1));
-        shared.answer(1, wire::Answer::Permission(Some("allow".into()))).unwrap();
+        shared.answer(1, Answer::Permission(Some("allow".into()))).unwrap();
         assert_eq!(futures::executor::block_on(rx).unwrap().as_deref(), Some("allow"));
+    }
+
+    #[test]
+    fn missing_outcome_evidence_never_implies_support() {
+        let hello: Output = serde_json::from_str(r#"{"Hello":{"acknowledged":0,"last":0,"version":1}}"#).unwrap();
+        assert!(matches!(hello, Output::Hello { outcome_evidence:false, .. }));
+    }
+
+    #[test]
+    fn a_dropped_question_handler_never_claims_delivery() {
+        let (commands, _) = async_channel::unbounded();
+        let shared = Shared { state: Mutex::new(State::default()), changed: Condvar::new(), commands };
+        let (tx, rx) = futures::channel::oneshot::channel();
+        shared.take_event(acp::Event::PermissionRequest { tool_call_id: "tool".into(), title: "work".into(), options: vec![], reply: tx });
+        drop(rx);
+        assert!(shared.answer(1, Answer::Permission(None)).is_err());
+        let state = shared.state.lock().unwrap();
+        assert!(!state.answered.contains(&1));
+        assert_eq!(state.journal.len(), 1, "no Resolved event can claim a dropped reply was delivered");
+    }
+
+    #[test]
+    fn a_form_answer_is_delivered_once_and_its_resolution_is_replayable() {
+        let (commands, _) = async_channel::unbounded();
+        let shared = Shared { state: Mutex::new(State::default()), changed: Condvar::new(), commands };
+        let (tx, rx) = futures::channel::oneshot::channel();
+        shared.take_event(acp::Event::Elicitation {
+            message: "Choose a name".into(),
+            fields: vec![acp::FormField { key: "name".into(), title: "Name".into(), description: String::new(), kind: acp::FieldKind::Text }],
+            reply: tx,
+        });
+        let values = BTreeMap::from([("name".into(), json!("example"))]);
+        shared.answer(1, Answer::Form(Some(values.clone()))).unwrap();
+        assert_eq!(futures::executor::block_on(rx).unwrap(), Some(values.clone()));
+        // A daemon losing the answer acknowledgement retries the same intent after reconnect.
+        shared.answer(1, Answer::Form(Some(values))).unwrap();
+        let state = shared.state.lock().unwrap();
+        assert!(state.pending.is_empty());
+        assert_eq!(state.journal.len(), 2);
+        assert!(matches!(state.journal.back().unwrap().delivered.event, Event::Resolved { request: 1 }));
     }
 
     #[test]

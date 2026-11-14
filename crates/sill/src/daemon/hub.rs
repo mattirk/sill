@@ -39,7 +39,8 @@ struct EndCtx {
 }
 
 pub struct Hub {
-    store: Mutex<Store>,
+    pub(super) store: Mutex<Store>,
+    pub(super) sfp: Mutex<super::sfp::Subscriptions>,
     started: i64,
     mode: &'static str,
     launcher: &'static Launcher,
@@ -95,6 +96,7 @@ impl Hub {
         eprintln!("sill daemon: {}", launcher.describe());
         let hub = Hub {
             store: Mutex::new(store),
+            sfp: Mutex::new(Default::default()),
             started: sill_core::store::now(),
             mode,
             launcher,
@@ -176,6 +178,8 @@ impl Hub {
 
     /// A connection closed: it is subscribed nowhere any more.
     pub fn disconnect(&self, conn: u64) {
+        let public_ids=self.sfp.lock().unwrap().sessions_for(conn);
+        self.sfp.lock().unwrap().disconnect(conn);
         self.conns.lock().unwrap().retain(|w| w.upgrade().is_some_and(|c| c.id != conn));
         let ids: Vec<String> = {
             let runners = self.runners.lock().unwrap();
@@ -189,7 +193,7 @@ impl Hub {
                 .map(|(id, _)| id.clone())
                 .collect()
         };
-        for id in ids {
+        for id in ids.into_iter().chain(public_ids) {
             self.presence(&id);
         }
     }
@@ -197,8 +201,8 @@ impl Hub {
     /// Tell the session's shim how many frontends are attached (docs/daemon.md §3.6): the agent
     /// stream is the daemon's and never drops while it lives, so the shim's agent-idle rule needs
     /// this to know nobody is watching. On a thread: the shim may be slow, the caller is a request.
-    fn presence(&self, id: &str) {
-        let n = self.runners.lock().unwrap().get(id).filter(|r| r.alive()).map(|r| r.sub_count()).unwrap_or(0);
+    pub(super) fn presence(&self, id: &str) {
+        let n = self.runners.lock().unwrap().get(id).filter(|r| r.alive()).map(|r| r.sub_count()).unwrap_or(0) + self.sfp.lock().unwrap().count(id);
         let id = id.to_string();
         let _ = std::thread::Builder::new().name(format!("sill-presence-{id}")).spawn(move || {
             let Ok(sock) = sill_core::session::socket_path(&id) else { return };
@@ -273,7 +277,7 @@ impl Hub {
         eprintln!("sill daemon: session {} conversation ended", r.id);
     }
 
-    fn runner(&self, id: &str) -> Result<Arc<Runner>, Error> {
+    pub(super) fn runner(&self, id: &str) -> Result<Arc<Runner>, Error> {
         match self.runners.lock().unwrap().get(id) {
             Some(r) if r.alive() => Ok(r.clone()),
             _ => Err(Error::failed("the session is not running")),
@@ -626,7 +630,7 @@ impl Hub {
         Ok(())
     }
 
-    fn ensure_runner(self: &Arc<Self>, id: &str, fresh: bool) -> Result<Arc<Runner>> {
+    pub(super) fn ensure_runner(self: &Arc<Self>, id: &str, fresh: bool) -> Result<Arc<Runner>> {
         if fresh {
             let existing = self.runners.lock().unwrap().get(id).cloned();
             if let Some(r) = existing { r.retire(self)?; }
@@ -1137,6 +1141,7 @@ impl Hub {
                     .ok();
                     refresh_memory();
                 }
+                if let Err(e)=self.sfp_lifecycle(id,None,None){eprintln!("sill daemon: publishing summary: {e:#}");}
                 if let Some(r) = self.runners.lock().unwrap().get(id) {
                     r.notify(&sill_core::wire::Event::Summarized { text, title });
                 }
@@ -1173,6 +1178,7 @@ impl Hub {
             })
             .ok();
         }
+        if let Err(e)=self.sfp_lifecycle(id,Some((delete,reason)),None){eprintln!("sill daemon: publishing session end: {e:#}");}
         if let Some(r) = self.runners.lock().unwrap().get(id) {
             r.notify(&sill_core::wire::Event::SessionEnded { deleted: delete, reason: reason.to_string() });
         }

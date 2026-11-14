@@ -1308,7 +1308,7 @@ fn daemon_cmd(cmd: Option<DaemonCmd>) -> Result<()> {
         Some(DaemonCmd::Status) => {
             let c = sill_proto::Client::connect_or_start()?;
             let s: sill_proto::DaemonStatus = c.call_within(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default(), sill_proto::client::QUICK_TIMEOUT)?;
-            println!("sill daemon {} (protocol {}), pid {}, {}, up since {}", s.version, s.protocol, s.pid, s.mode, sill_memory::datetime(s.started));
+            println!("sill daemon {} ({}), pid {}, {}, up since {}", s.version, sill_proto::initialize::PROTOCOL_ID, s.pid, s.mode, sill_memory::datetime(s.started));
             println!("jails:    {}", s.launcher);
             println!("socket:   {}", s.socket);
             println!("sessions: {} in the store, {} running", s.sessions, s.running);
@@ -1327,10 +1327,7 @@ fn daemon_cmd(cmd: Option<DaemonCmd>) -> Result<()> {
                 println!("asked the daemon to leave; sessions keep running");
                 Ok(())
             }
-            Err(_) => {
-                println!("no daemon running");
-                Ok(())
-            }
+            Err(e) => Err(e.context("could not stop the daemon")),
         },
     }
 }
@@ -1451,14 +1448,19 @@ use std::os::fd::AsRawFd;
 /// ownership of all sessions when the pipe closes.
 fn daemon_stdio() -> Result<()> {
     use std::io::{Read, Write};
-    // A box can intentionally keep an older daemon. Forward its bytes unchanged so the
-    // frontend negotiates its schema; merely opening an SSH pipe must never replace it.
-    let started = match sill_proto::Client::connect_local() {
-        Ok(client) => client,
-        Err(_) => sill_proto::Client::connect_local_or_start()?,
+    // Forward the selected daemon's handshake unchanged. A protocol mismatch must reach
+    // the frontend and never authorize restarting the box's daemon.
+    let path = sill_proto::socket_path()?;
+    let mut socket = match std::os::unix::net::UnixStream::connect(&path) {
+        Ok(socket) => socket,
+        Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) => {
+            let started = sill_proto::Client::connect_local_or_start()?;
+            let socket = std::os::unix::net::UnixStream::connect(&path)?;
+            drop(started);
+            socket
+        }
+        Err(error) => return Err(error.into()),
     };
-    let mut socket = std::os::unix::net::UnixStream::connect(sill_proto::socket_path()?)?;
-    drop(started);
     let mut input = socket.try_clone()?;
     std::thread::Builder::new().name("sill-stdio-input".into()).spawn(move || {
         let _ = std::io::copy(&mut std::io::stdin().lock(), &mut input);

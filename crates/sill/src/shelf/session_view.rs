@@ -9,8 +9,8 @@ use gtk4 as gtk;
 use sill_core::changes;
 use gtk::gdk;
 use gtk::glib;
-use sill_core::acp::{Attachment, AttachmentKind, AuthMethodInfo, ConfigKind, ConfigValue, Controls, Event};
-use sill_core::wire::{self, Command};
+use sill_core::acp::{AuthMethodInfo, ConfigKind, Controls, Event};
+use sill_core::wire::{self, Attachment, AttachmentKind, Command, ConfigValue};
 use super::remote::agents;
 use sill_core::frontend::Request;
 use super::remote;
@@ -570,6 +570,12 @@ impl SessionView {
             });
         }
         prompt.add_controller(keys);
+        {
+            let weak = Rc::downgrade(&view);
+            prompt.buffer().connect_changed(move |_| {
+                if let Some(view) = weak.upgrade() { view.set_busy(view.busy.get()); }
+            });
+        }
 
         view.refresh_pins();
         view.build_controls(&Controls::default());
@@ -1297,14 +1303,12 @@ impl SessionView {
             let weak = Rc::downgrade(self);
             send.connect_clicked(move |_| {
                 let Some(v) = weak.upgrade() else { return };
-                if v.busy.get() {
-                    v.cancel();
-                    return;
-                }
                 let buf = v.prompt.buffer();
                 let text = buf.text(&buf.start_iter(), &buf.end_iter(), false).trim().to_string();
-                if !text.is_empty() && v.send(&text) {
-                    buf.set_text("");
+                if !text.is_empty() {
+                    if v.send(&text) { buf.set_text(""); }
+                } else if v.busy.get() {
+                    v.cancel();
                 }
             });
         }
@@ -1414,16 +1418,18 @@ impl SessionView {
     fn set_busy(&self, busy: bool) {
         self.busy.set(busy);
         if let Some(b) = self.send_btn.borrow().as_ref() {
-            if busy {
+            let buffer = self.prompt.buffer();
+            let has_text = !buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).trim().is_empty();
+            if busy && !has_text {
                 // drawn glyphs (not text on a baseline) sit dead centre and size with the button
                 let t = theme::current();
                 let red = gtk::gdk::RGBA::parse(t.error).unwrap_or_else(|_| super::icons::fg_for(b, &t));
                 b.set_child(Some(&super::icons::scalable("sill-stop", red)));
-                b.set_tooltip_text(Some("Stop the agent"));
+                b.set_tooltip_text(Some("Stop the agent; Enter queues the text you have typed"));
                 b.add_css_class("sill-stop");
             } else {
                 b.set_child(Some(&super::icons::scalable("sill-send", super::icons::fg_for(b, &theme::current()))));
-                b.set_tooltip_text(Some("Send (Enter)"));
+                b.set_tooltip_text(Some(if busy { "Queue prompt (Enter)" } else { "Send (Enter)" }));
                 b.remove_css_class("sill-stop");
             }
         }
@@ -1709,7 +1715,7 @@ impl SessionView {
     fn attach_texture(self: &Rc<Self>, tex: &gdk::Texture) {
         let png = tex.save_to_png_bytes();
         if png.len() > 8 << 20 {
-            self.conv.add_note("image not attached: larger than 8 MB");
+            self.conv.add_note("image not attached: larger than 1 MB");
             return;
         }
         let n = self.attachments.borrow().iter().filter(|a| a.mime.starts_with("image/")).count() + 1;
@@ -1740,15 +1746,16 @@ impl SessionView {
             }
         };
         if let Some(mime) = image_mime {
-            if bytes.len() > 8 << 20 {
-                self.conv.add_note(&format!("{name} not attached: larger than 8 MB"));
+            if bytes.len() > 1 << 20 {
+                self.conv.add_note(&format!("{name} not attached: larger than 1 MB"));
                 return;
             }
             self.add_attachment(Attachment { name, mime: mime.into(), kind: AttachmentKind::Image { data_base64: sill_core::acp::base64(&bytes) } });
             return;
         }
-        match remote::request::<std::path::PathBuf>(Request::Upload { session: self.id(), name: name.clone(), bytes }) {
-            Ok(jail_path) => self.add_attachment(Attachment { name, mime: "application/octet-stream".into(), kind: AttachmentKind::File { jail_path } }),
+        let upload_id = sill_core::sfp_client::new_id();
+        match super::client::quick::<serde_json::Value>("_sill/uploads.create", serde_json::json!({"session_id":self.id(),"upload_id":upload_id,"name":name,"mime":"application/octet-stream","data_base64":sill_core::acp::base64(&bytes)})) {
+            Ok(_) => self.add_attachment(Attachment { name, mime: "application/octet-stream".into(), kind: AttachmentKind::File { jail_path: upload_id.into() } }),
             Err(e) => self.conv.add_note(&format!("could not attach {name}: {e:#}")),
         }
     }
@@ -2020,7 +2027,7 @@ impl SessionView {
         self.checkpoint.borrow().is_some()
     }
 
-    /// Send a prompt; false if the agent is busy or the session is down.
+    /// Submit a prompt; the daemon queues it while the agent is working.
     pub fn send(self: &Rc<Self>, text: &str) -> bool {
         let trace = std::env::var_os("SILL_TRACE").is_some();
         let t0 = std::time::Instant::now();
@@ -2056,7 +2063,7 @@ impl SessionView {
         match d.try_send(Command::Prompt { text: text.to_string(), attachments: attachments.clone(), entry: Some(entry) }) {
             Ok(()) => {
                 self.rebuild_attach_strip();
-                self.conv.add_user_with(text, &names);
+                // The accepted SFP user item renders the prompt for every frontend.
                 lap("add_user");
                 // the transcript entry is the daemon's to write, when it takes the prompt
                 lap("done");
@@ -2079,11 +2086,9 @@ impl SessionView {
 
     fn handle(self: &Rc<Self>, ev: Event) {
         match &ev {
-            Event::Ready { session_id, resumed, controls } => {
+            Event::Ready { resumed, controls, .. } => {
                 self.ready.set(true);
                 self.startup_retried.set(false);
-                // the daemon stored the agent's session id; the view's copy follows
-                self.session.borrow_mut().acp_session_id = Some(session_id.clone());
                 *self.replaying.borrow_mut() = false;
                 self.status.set_text(if *resumed { "resumed" } else { "ready" });
                 self.build_controls(controls);

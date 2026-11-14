@@ -43,10 +43,14 @@ fn stdio_connection_close_leaves_the_daemon_running() {
     let mut fixture = fixture();
     let mut proxy = fixture.command().args(["daemon", "--stdio"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
     let mut input = proxy.stdin.take().unwrap();
-    writeln!(input, "{}", json!({"jsonrpc":"2.0","id":1,"method":"_sill/daemon.status","params":{}})).unwrap();
+    writeln!(input,"{}",json!({"jsonrpc":"2.0","id":0,"method":"_sill/initialize","params":{"protocols":[sill_proto::initialize::PROTOCOL_ID],"client":{"name":"test","version":"1"},"capabilities":{"sill.internal":1}}})).unwrap();
+    writeln!(input, "{}", json!({"jsonrpc":"2.0","id":1,"method":sill_proto::method::DAEMON_STATUS,"params":{}})).unwrap();
     let reader = BufReader::new(proxy.stdout.take().unwrap());
     let (tx, rx) = std::sync::mpsc::channel();
-    let worker = std::thread::spawn(move || { let _ = tx.send(reader.lines().next().unwrap().unwrap()); });
+    let worker = std::thread::spawn(move || { let mut lines=reader.lines();
+        let init:Value=serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+        assert_eq!(init["result"]["protocol"],sill_proto::initialize::PROTOCOL_ID);
+        let _ = tx.send(lines.next().unwrap().unwrap()); });
     let answer: Value = serde_json::from_str(&rx.recv_timeout(Duration::from_secs(5)).unwrap()).unwrap();
     assert_eq!(answer["result"]["pid"], fixture.daemon.id());
     drop(input);
@@ -113,7 +117,6 @@ fn box_bootstrap_installs_daemon_and_shim_before_saving_connection() {
 
 #[test]
 fn stdio_does_not_replace_an_existing_daemon_with_another_protocol() {
-    use std::io::Read;
     let mut fixture = fixture();
     fixture.daemon.kill().unwrap();
     fixture.daemon.wait().unwrap();
@@ -121,22 +124,17 @@ fn stdio_does_not_replace_an_existing_daemon_with_another_protocol() {
     std::fs::remove_file(&path).unwrap();
     let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
     let server = std::thread::spawn(move || {
-        // The bridge's local-only existence check opens one connection without a handshake.
-        let (mut check, _) = listener.accept().unwrap();
-        check.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-        let mut first = [0; 1];
-        assert_eq!(check.read(&mut first).unwrap(), 0, "stdio sent a protocol handshake and could restart the existing daemon");
         let (socket, _) = listener.accept().unwrap();
         socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
         let mut writer = socket.try_clone().unwrap();
         let mut line = String::new();
         BufReader::new(socket).read_line(&mut line).unwrap();
         let req: Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(req["method"], "_sill/daemon.status");
+        assert_eq!(req["method"], "_sill/initialize");
         writeln!(writer, "{}", json!({"jsonrpc":"2.0","id":req["id"],"result":{"protocol":999}})).unwrap();
     });
     let mut proxy = fixture.command().args(["daemon", "--stdio"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
-    writeln!(proxy.stdin.as_mut().unwrap(), "{}", json!({"jsonrpc":"2.0","id":8,"method":"_sill/daemon.status","params":{}})).unwrap();
+    writeln!(proxy.stdin.as_mut().unwrap(), "{}", json!({"jsonrpc":"2.0","id":8,"method":"_sill/initialize","params":{"protocols":["sfp/1-dev.1"],"client":{"name":"test","version":"1"}}})).unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
     let output = proxy.stdout.take().unwrap();
     let reader = std::thread::spawn(move || { let _ = tx.send(BufReader::new(output).lines().next()); });

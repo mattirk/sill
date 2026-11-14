@@ -10,6 +10,7 @@ use std::sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use sill_proto::method;
 
 struct Connection {
     writer: UnixStream,
@@ -23,7 +24,9 @@ impl Connection {
         let stream = UnixStream::connect(socket)?;
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-        Ok(Self { reader: BufReader::new(stream.try_clone()?), writer: stream, next: 1, events: Vec::new() })
+        let mut connection=Self { reader: BufReader::new(stream.try_clone()?), writer: stream, next: 1, events: Vec::new() };
+        connection.call(sill_proto::initialize::METHOD,json!({"protocols":[sill_proto::initialize::PROTOCOL_ID],"client":{"name":"recovery-test","version":"0"},"capabilities":{"sill.internal":1}}));
+        Ok(connection)
     }
 
     fn call(&mut self, method: &str, params: Value) -> Value {
@@ -139,7 +142,7 @@ impl Fixture {
         self.daemon = Some(Self::environment(&self.dir).arg("daemon").stderr(log).spawn().unwrap());
         self.wait("daemon status", || {
             let Ok(mut connection) = Connection::connect(&self.socket()) else { return false };
-            let status = connection.call("_sill/daemon.status", json!({}));
+            let status = connection.call(method::DAEMON_STATUS, json!({}));
             status["pid"] == self.daemon.as_ref().unwrap().id()
         });
         self.wait("recovered conversation", || {
@@ -163,7 +166,7 @@ impl Fixture {
         if crash {
             child.kill().unwrap();
         } else {
-            Connection::connect(&self.socket()).unwrap().call("_sill/daemon.shutdown", json!({}));
+            Connection::connect(&self.socket()).unwrap().call(method::DAEMON_SHUTDOWN, json!({}));
         }
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -206,11 +209,11 @@ fn serve_shim(mut stream: UnixStream, release: Arc<std::sync::Mutex<mpsc::Receiv
     let Some(role) = read(&mut reader) else { return };
     if role["role"] == "control" {
         while let Some(request) = read(&mut reader) {
-            if request["op"] == "status" {
-                send(&mut stream, json!({"ok":true,"running":true,"pid":std::process::id(),"exit":null,"buffered_lines":0}));
-            } else {
-                send(&mut stream, json!({"ok":true}));
-            }
+            let response=if request["op"] == "status" {
+                json!({"ok":true,"running":true,"pid":std::process::id(),"exit":null,"buffered_lines":0})
+            } else { json!({"ok":true}) };
+            // Presence control connections can close after sending during daemon shutdown.
+            if writeln!(stream,"{response}").is_err() {return;}
         }
         return;
     }
@@ -353,16 +356,16 @@ fn exercise_recovery(adopt_checkpoint: bool, lose_worker: bool) {
     fixture.start();
     assert_eq!(observed.recv_timeout(Duration::from_secs(5)).unwrap(), "initialize");
     let mut origin = Connection::connect(&fixture.socket()).unwrap();
-    origin.call("_sill/sessions.attach", json!({"key":fixture.session,"fresh":false}));
+    origin.call(method::SESSIONS_ATTACH, json!({"key":fixture.session,"fresh":false}));
     let mut follower = Connection::connect(&fixture.socket()).unwrap();
-    follower.call("_sill/sessions.attach", json!({"key":fixture.session,"fresh":false}));
-    assert_eq!(origin.events.first().unwrap()["method"], "_sill/session.replay");
-    assert_eq!(follower.events.first().unwrap()["method"], "_sill/session.replay");
-    origin.call("_sill/sessions.command", json!({"key":fixture.session,"command":sill_proto::wire::Command::Prompt {
+    follower.call(method::SESSIONS_ATTACH, json!({"key":fixture.session,"fresh":false}));
+    assert_eq!(origin.events.first().unwrap()["method"], method::SESSION_REPLAY);
+    assert_eq!(follower.events.first().unwrap()["method"], method::SESSION_REPLAY);
+    origin.call(method::SESSIONS_COMMAND, json!({"key":fixture.session,"command":sill_proto::wire::Command::Prompt {
         text: "work".into(), attachments: vec![], entry: Some(sill_proto::wire::Entry::User { text: "work".into(), names: vec![] }),
     }}));
-    origin.call("_sill/daemon.status", json!({}));
-    follower.call("_sill/daemon.status", json!({}));
+    origin.call(method::DAEMON_STATUS, json!({}));
+    follower.call(method::DAEMON_STATUS, json!({}));
     assert!(follower.events.iter().any(|event| event["params"]["event"]["UserText"] == "work"), "the second frontend sees the plain accepted prompt");
     assert!(!origin.events.iter().any(|event| event["params"]["event"].get("UserText").is_some()), "the sending frontend must not receive its optimistic user entry twice");
     let prepared = observed.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -370,8 +373,8 @@ fn exercise_recovery(adopt_checkpoint: bool, lose_worker: bool) {
     assert!(prepared.contains("Keep the recovery test's instructions."));
     assert!(prepared.contains("pinned.txt"));
     assert!(!prepared.contains("global-only.txt"));
-    origin.call("_sill/sessions.detach", json!({"key":fixture.session}));
-    follower.call("_sill/sessions.detach", json!({"key":fixture.session}));
+    origin.call(method::SESSIONS_DETACH, json!({"key":fixture.session}));
+    follower.call(method::SESSIONS_DETACH, json!({"key":fixture.session}));
     drop(origin);
     drop(follower);
     fixture.wait("partial streamed text committed", || fixture.snapshot()["agent_md"] == "before restart ");
@@ -380,22 +383,22 @@ fn exercise_recovery(adopt_checkpoint: bool, lose_worker: bool) {
     fixture.start();
     fixture.wait("unattended permission recovered", || fixture.snapshot()["pending"].as_object().is_some_and(|questions| questions.len() == 1));
     let mut frontend = Connection::connect(&fixture.socket()).unwrap();
-    frontend.call("_sill/sessions.attach", json!({"key":fixture.session,"fresh":false}));
+    frontend.call(method::SESSIONS_ATTACH, json!({"key":fixture.session,"fresh":false}));
     let question = frontend.events.iter().find_map(|event| event["params"]["event"].get("PermissionRequest")).expect("pending permission delivered on attach");
     let request = question["request"].as_u64().unwrap();
-    frontend.call("_sill/sessions.answer", json!({"key":fixture.session,"request":request,"answer":{"Permission":"allow"}}));
+    frontend.call(method::SESSIONS_ANSWER, json!({"key":fixture.session,"request":request,"answer":{"Permission":"allow"}}));
     fixture.wait("first turn complete", || fixture.snapshot()["busy"] == false);
     let user: String = fixture.database().query_row("SELECT text FROM entries WHERE session_id=?1 AND kind='user'", [&fixture.session], |row| row.get(0)).unwrap();
     assert_eq!(user, "work", "the expanded prompt must never replace the plain transcript");
     let (count, text): (i64, String) = fixture.database().query_row("SELECT count(*), group_concat(text,'') FROM entries WHERE session_id=?1 AND kind='agent'", [&fixture.session], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
     assert_eq!((count, text.as_str()), (1, "before restart after restart"));
-    frontend.call("_sill/sessions.detach", json!({"key":fixture.session}));
+    frontend.call(method::SESSIONS_DETACH, json!({"key":fixture.session}));
     drop(frontend);
     if adopt_checkpoint {
-        Connection::connect(&fixture.socket()).unwrap().call("_sill/sessions.checkpoint", json!({"key":fixture.session}));
+        Connection::connect(&fixture.socket()).unwrap().call(method::SESSIONS_CHECKPOINT, json!({"key":fixture.session}));
         fixture.wait("partial checkpoint committed", || fixture.snapshot()["agent_md"].as_str().is_some_and(|text| text.contains("Summary before restart")));
     }
-    let ending = Connection::connect(&fixture.socket()).unwrap().call("_sill/sessions.end", json!({"key":fixture.session,"reason":"close"}));
+    let ending = Connection::connect(&fixture.socket()).unwrap().call(method::SESSIONS_END, json!({"key":fixture.session,"reason":"close"}));
     assert_eq!(ending["pending"], true, "the agent should write the final summary");
     fixture.wait("partial closing summary committed", || fixture.snapshot()["agent_md"].as_str().is_some_and(|text| text.contains("Summary before restart")));
     fixture.stop(false);
@@ -425,4 +428,85 @@ fn exercise_recovery(adopt_checkpoint: bool, lose_worker: bool) {
         assert!(Instant::now() < deadline, "finished worker did not exit; {}", fixture.logs());
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn public_snapshot(connection:&mut Connection, session:&str)->(Value,Vec<Value>) {
+    let attached=connection.call("_sill/sessions.attach",json!({"session_id":session}));
+    assert_eq!(attached["mode"],"snapshot");
+    let lease=&attached["snapshot"];
+    let mut records=vec![];let mut page=Value::Null;
+    loop {
+        let response=connection.call("_sill/sessions.snapshot",json!({"token":lease["token"],"page":page}));
+        assert_eq!(response["at"],lease["at"]);
+        records.extend(response["records"].as_array().unwrap().iter().cloned());
+        page=response["next_page"].clone();
+        if page.is_null(){break;}
+    }
+    (attached,records)
+}
+
+#[test]
+fn sfp_submission_question_and_item_identity_survive_main_daemon_restart() {
+    let (mut fixture,release,observed)=Fixture::new();
+    fixture.start();
+    assert_eq!(observed.recv_timeout(Duration::from_secs(5)).unwrap(),"initialize");
+    let mut client=Connection::connect(&fixture.socket()).unwrap();
+    let (_,initial)=public_snapshot(&mut client,&fixture.session);
+    let generation=initial.iter().find(|r|r["type"]=="session").unwrap()["session"]["agent_generation_id"].clone();
+    let input=json!({"session_id":fixture.session,"submission_id":"recovery-submission","text":"work","attachments":[]});
+    let accepted=client.call("_sill/sessions.submit",input.clone());
+    let repeated=client.call("_sill/sessions.submit",input.clone());
+    assert_eq!(accepted["submission_id"],repeated["submission_id"]);
+    assert_eq!(accepted["accepted_seq"],repeated["accepted_seq"]);
+    let prepared=observed.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(prepared.contains("work") && prepared.contains(sill_core::instructions::BASE));
+    fixture.wait("SFP partial text committed",||fixture.snapshot()["agent_md"]=="before restart ");
+    let (before,records)=public_snapshot(&mut client,&fixture.session);
+    let agent_item=records.iter().find(|r|r["type"]=="item" && r["item"]["kind"]=="agent").unwrap()["item"].clone();
+    assert_eq!(agent_item["content"][0]["text"],"before restart ");
+    let cursor=before["snapshot"]["at"].clone();
+    drop(client);
+    fixture.stop(true);
+    release.send(()).unwrap();
+    fixture.start();
+    fixture.wait("SFP unattended question recovered",||fixture.snapshot()["pending"].as_object().is_some_and(|questions|questions.len()==1));
+    let mut client=Connection::connect(&fixture.socket()).unwrap();
+    let attached=client.call("_sill/sessions.attach",json!({"session_id":fixture.session,"since":cursor}));
+    assert_eq!(attached["mode"],"replay");
+    assert_eq!(attached["after"],cursor);
+    assert!(client.events.is_empty(),"attach response precedes this subscription's notifications");
+    client.call(method::DAEMON_STATUS,json!({})); // drain the replay already queued after attach's reply
+    let replay:Vec<_>=client.events.iter().filter(|e|e["method"]=="_sill/session.event" && e["params"]["subscription_id"]==attached["subscription_id"]).collect();
+    let mut seq=cursor["seq"].as_str().unwrap().parse::<u64>().unwrap();
+    for event in replay {
+        seq+=1;
+        assert_eq!(event["params"]["seq"],seq.to_string(),"replay must be contiguous");
+    }
+    assert_eq!(attached["through"]["seq"],seq.to_string());
+    let (_,after)=public_snapshot(&mut client,&fixture.session);
+    let recovered_session=&after.iter().find(|r|r["type"]=="session").unwrap()["session"];
+    assert_eq!(recovered_session["agent_generation_id"],generation,"adopting the live relay preserves its generation");
+    let recovered_item=&after.iter().find(|r|r["type"]=="item" && r["item"]["item_id"]==agent_item["item_id"]).unwrap()["item"];
+    assert_eq!(recovered_item,&agent_item,"replay must not append the first text twice or reidentify its item");
+    let repeated=client.call("_sill/sessions.submit",input);
+    assert_eq!(repeated["accepted_seq"],accepted["accepted_seq"],"retry after restart retains original acceptance");
+    let question=&after.iter().find(|r|r["type"]=="question" && r["question"]["state"]=="open").unwrap()["question"];
+    let answer=json!({"session_id":fixture.session,"question_id":question["question_id"],"answer_id":"recovery-answer","answer":{"type":"permission","option_id":"allow"}});
+    let answered=client.call("_sill/questions.answer",answer.clone());
+    let retried=client.call("_sill/questions.answer",answer);
+    assert_eq!(answered["answer_id"],"recovery-answer");
+    assert_eq!(retried["answer_id"],answered["answer_id"]);
+    fixture.wait("SFP turn complete",||fixture.snapshot()["busy"]==false);
+    let (_,completed)=public_snapshot(&mut client,&fixture.session);
+    let final_item=&completed.iter().find(|r|r["type"]=="item" && r["item"]["item_id"]==agent_item["item_id"]).unwrap()["item"];
+    assert_eq!(final_item["content"][0]["text"],"before restart after restart");
+    let result=client.call("_sill/submissions.get",json!({"session_id":fixture.session,"submission_id":"recovery-submission"}));
+    assert_eq!(result["outcome"],"completed");
+    assert_eq!(fixture.database().query_row("SELECT count(*) FROM entries WHERE session_id=?1 AND kind='user'",[&fixture.session],|r|r.get::<_,i64>(0)).unwrap(),1);
+    let ending=client.call(method::SESSIONS_END,json!({"key":fixture.session,"reason":"close"}));
+    assert_eq!(ending["pending"],true);
+    fixture.wait("SFP closing summary started",||fixture.snapshot()["agent_md"].as_str().is_some_and(|t|t.contains("Summary before restart")));
+    release.send(()).unwrap();
+    assert_eq!(observed.recv_timeout(Duration::from_secs(5)).unwrap(),"summary-complete");
+    assert_eq!(observed.recv_timeout(Duration::from_secs(5)).unwrap(),"finished");
 }

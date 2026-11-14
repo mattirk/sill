@@ -15,9 +15,11 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, bail};
 use sill_core::acp::{self, Controls};
-use sill_core::wire::{self, Answer, Entry};
+use sill_core::wire::{self, Entry};
 use sill_core::store::Store;
 use super::{context, relay};
+#[path = "runner_sfp.rs"]
+mod sfp_runner;
 
 /// What a summary turn is for (docs/memory.md §2.2, §2.5): the session's end, or a checkpoint
 /// while it goes on. A checkpoint becomes the end's when the tab closes during it.
@@ -50,9 +52,16 @@ pub struct Runner {
 #[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct State {
+    generation_id: String,
+    adapter: super::sfp_adapter::AdapterState,
+    active_submission: Option<String>,
+    /// This daemon sent a cancel during the turn in flight: the evidence an older relay's
+    /// `Cancelled` stop lacks (it uses the same reason for a prompt error).
+    cancel_sent: bool,
+    answer_outbox: BTreeMap<u64, relay::Answer>,
     cursor: u64,
     next_command: u64,
-    outbox: BTreeMap<u64, wire::Command>,
+    outbox: BTreeMap<u64, relay::Command>,
     context: context::Context,
     completed: Option<SummaryDone>,
     #[serde(skip)]
@@ -63,7 +72,7 @@ struct State {
     images: Option<bool>,
     usage: Option<(u64, u64)>,
     /// A login the agent asked for and nobody did yet.
-    auth: Option<wire::Event>,
+    auth: Option<relay::Event>,
     busy: bool,
     /// After a `session/load`, until the first turn: the agent replays the old conversation.
     replaying: bool,
@@ -73,7 +82,7 @@ struct State {
     /// Tool call id → its entry's `seq`, for the updates.
     tool_seqs: HashMap<String, i64>,
     /// Questions waiting for an answer: the event as sent, and where the answer goes.
-    pending: BTreeMap<u64, wire::Event>,
+    pending: BTreeMap<u64, relay::Event>,
     ended: bool,
     /// When the last turn stopped (the daemon's idle timer counts from it too).
     last_turn_end: Option<i64>,
@@ -96,7 +105,8 @@ impl Runner {
     }
 
     pub fn new(id: &str, relay: Arc<relay::Client>, snapshot: serde_json::Value) -> Result<Arc<Runner>> {
-        let state: State = if snapshot.is_null() { State::default() } else { serde_json::from_value(snapshot)? };
+        let mut state: State = if snapshot.is_null() { State::default() } else { serde_json::from_value(snapshot)? };
+        if state.generation_id.is_empty() { state.generation_id = super::sfp::id(); }
         // Subscribers are frontend connections; they are never carried across a daemon restart.
         // Keep retirement durable until the relay's final event is drained: an ended session may
         // outlive the main daemon briefly, and must never replay as a live conversation.
@@ -121,12 +131,14 @@ impl Runner {
         // committing the event and applying the end. Finishing an end is idempotent.
         let completed = self.st.lock().unwrap().completed.clone();
         if let Some(done) = completed { hub.summary_done(&self.id, done); self.summary_applied(&hub); }
-        hub.with_store(|store| { let mut st = self.st.lock().unwrap(); self.drain(store, &mut st) }).ok();
+        if let Err(e)=hub.with_store(|store| self.sfp_recover(store,&hub)) {
+            eprintln!("sill daemon: recovering SFP state {}: {e:#}",self.id);
+        }
         self.resume_summary_cap(&hub);
         while let Ok(delivery) = events.recv() {
             let seq = delivery.seq;
-            let end = matches!(delivery.event, wire::Event::Ended(_));
-            let stopped = matches!(delivery.event, wire::Event::Stopped(_));
+            let end = matches!(delivery.event, relay::Event::Ended(_));
+            let stopped = matches!(delivery.event, relay::Event::Stopped(_));
             let auto = hub.auto_allow(&self.id);
             let done = hub.with_store(|store| {
                 let tx = store.conn().unchecked_transaction()?;
@@ -139,11 +151,15 @@ impl Runner {
                     tx.commit()?;
                     return Ok(None);
                 }
-                let done = self.handle_locked(store, &mut st, delivery.event, auto)?;
+                let public_events = self.sfp_project(store, &mut st, &delivery.event, seq)?;
+                let done = self.handle_locked(store, &mut st, delivery.event.clone(), false)?;
                 if seq > 0 { st.cursor = seq; }
                 if let Some(done) = &done { st.completed = Some(done.clone()); }
                 self.save(store, &st)?;
                 tx.commit()?;
+                hub.sfp_publish(&self.id, &public_events);
+                if auto { self.sfp_auto_answer(store, &hub, &mut st, &delivery.event)?; }
+                self.sfp_dispatch(store, &hub, &mut st)?;
                 Ok(done)
             });
             match done {
@@ -166,14 +182,14 @@ impl Runner {
         if retry { hub.reconnect_runner(&self.id); }
     }
 
-    fn handle_locked(&self, store: &Store, st: &mut State, ev: wire::Event, auto: bool) -> Result<Option<SummaryDone>> {
+    fn handle_locked(&self, store: &Store, st: &mut State, ev: relay::Event, auto: bool) -> Result<Option<SummaryDone>> {
         if st.retired {
             return Ok(None);
         }
         let mut done = None;
         let id = self.id.clone();
         match &ev {
-            wire::Event::Ready { session_id, resumed, controls } => {
+            relay::Event::Ready { session_id, resumed, controls } => {
                 store.set_acp_session_id(&id, session_id)?;
                 st.context.ready(*resumed);
                 self.restore(store, st, controls, true)?;
@@ -181,50 +197,52 @@ impl Runner {
                 st.controls = Some(controls.clone());
                 st.replaying = *resumed;
             }
-            wire::Event::Capabilities { images } => st.images = Some(*images),
-            wire::Event::Controls(c) => { self.restore(store, st, c, false)?; st.controls = Some(c.clone()); },
-            wire::Event::Usage { used, size } => st.usage = Some((*used, *size)),
+            relay::Event::Capabilities { images } => st.images = Some(*images),
+            relay::Event::Controls(c) => { self.restore(store, st, c, false)?; st.controls = Some(c.clone()); },
+            relay::Event::Usage { used, size } => st.usage = Some((*used, *size)),
             // the loop drops a prompt that arrives while it waits for a login (no Stopped follows),
             // so the session is not busy any more — the prompt after the login must not be refused
-            wire::Event::AuthRequired { .. } => st.busy = false,
-            wire::Event::TurnStarted => {
+            relay::Event::AuthRequired { .. } => st.busy = false,
+            relay::Event::TurnStarted => {
+                st.cancel_sent = false;
                 st.replaying = false;
                 st.busy = true;
                 st.turns += 1;
                 st.auth = None;
             }
             // a session/load's replay: what it says is in the store already, and on screen
-            wire::Event::UserText(_)
-            | wire::Event::Text(_)
-            | wire::Event::Thought(_)
-            | wire::Event::ToolCall { .. }
-            | wire::Event::ToolCallUpdate { .. }
-            | wire::Event::SubagentText { .. }
+            relay::Event::UserText(_)
+            | relay::Event::Text(_)
+            | relay::Event::Thought(_)
+            | relay::Event::ToolCall { .. }
+            | relay::Event::ToolCallUpdate { .. }
+            | relay::Event::SubagentText { .. }
                 if st.replaying =>
             {
                 return Ok(None);
             }
             // some agents echo the prompt back during the turn; the frontend shows what it sent
-            wire::Event::UserText(_) => return Ok(None),
-            wire::Event::Text(t) => st.agent_md.push_str(t),
-            wire::Event::ToolCall { id: call, title, status, kind, detail, diff, parent } => {
+            relay::Event::UserText(_) => return Ok(None),
+            relay::Event::Text(t) => st.agent_md.push_str(t),
+            relay::Event::ToolCall { id: call, title, status, kind, detail, diff, parent } => {
                 flush(store, &id, st)?;
                 if let Ok(seq) = store.append_tool(&id, title, status, kind, detail.as_deref(), diff.as_deref()) {
                     store.set_tool_identity(&id, seq, call, parent.as_deref())?;
                     st.tool_seqs.insert(call.clone(), seq);
                 }
             }
-            wire::Event::SubagentText { parent, text } => {
+            relay::Event::SubagentText { parent, text } => {
                 flush(store, &id, st)?;
                 store.append_subagent_text(&id, parent, text)?;
             }
-            wire::Event::ToolCallUpdate { id: call, status, title, detail, diff } => {
+            relay::Event::ToolCallUpdate { id: call, status, title, detail, diff } => {
                 if let Some(seq) = st.tool_seqs.get(call).copied() {
                     store.update_tool(&id, seq, title.as_deref(), status.as_deref(), detail.as_deref(), diff.as_deref())?;
                 }
             }
-            wire::Event::Stopped(_) => {
+            relay::Event::Stopped(_) => {
                 st.busy = false;
+                st.cancel_sent = false;
                 st.last_turn_end = Some(sill_core::store::now());
                 flush(store, &id, st)?;
                 // the summary turn: its text goes to the hub once this event is out
@@ -232,7 +250,7 @@ impl Runner {
                     done = Some(SummaryDone { kind, text: Some(text.trim().to_string()) });
                 }
             }
-            wire::Event::Ended(_) => {
+            relay::Event::Ended(_) => {
                 st.busy = false;
                 st.ended = true;
                 flush(store, &id, st)?;
@@ -246,7 +264,7 @@ impl Runner {
         }
         // the session's auto-allow answers here, attached or not (SPEC §3.3)
         let ev = match ev {
-            wire::Event::PermissionRequest { request, tool_call_id, title, options } if auto => {
+            relay::Event::PermissionRequest { request, tool_call_id, title, options } if auto => {
                 use acp::PermissionOptionKind as K;
                 let pick = options
                     .iter()
@@ -254,24 +272,25 @@ impl Runner {
                     .or_else(|| options.iter().find(|o| o.kind == K::AllowAlways))
                     .map(|o| o.id.clone());
                 let allowed = pick.is_some();
-                self.relay.answer(request, Answer::Permission(pick))?;
-                wire::Event::AutoAnswered { tool_call_id, title, allowed }
+                self.relay.answer(request, relay::Answer::Permission(pick))?;
+                relay::Event::AutoAnswered { tool_call_id, title, allowed }
             }
             other => other,
         };
         match &ev {
-            wire::Event::PermissionRequest { request, .. } | wire::Event::Elicitation { request, .. } => { st.pending.insert(*request, ev.clone()); }
-            wire::Event::Resolved { request } => { st.pending.remove(request); }
-            wire::Event::AuthRequired { .. } => st.auth = Some(ev.clone()),
+            relay::Event::PermissionRequest { request, .. } | relay::Event::Elicitation { request, .. } => { st.pending.insert(*request, ev.clone()); }
+            relay::Event::Resolved { request } => { st.pending.remove(request); }
+            relay::Event::AuthRequired { .. } => st.auth = Some(ev.clone()),
             _ => {}
         }
-        broadcast(&self.id, &mut st.subs, &ev);
+        // the daemon's boundary: frontends get the protocol's event, never the relay's
+        broadcast(&self.id, &mut st.subs, &ev.into());
         Ok(done)
     }
 
     fn restore(&self, store: &Store, st: &mut State, controls: &Controls, initial: bool) -> Result<()> {
         let settings = store.sessions()?.into_iter().find(|s| s.id == self.id).map(|s| s.agent_settings).unwrap_or_default();
-        for command in st.context.restore(controls, &settings, initial) { Self::queue(st, from_acp(command)); }
+        for command in st.context.restore(controls, &settings, initial).into_iter().map(relay::Command::from_acp_control) { Self::queue(st, command); }
         Ok(())
     }
 
@@ -279,17 +298,22 @@ impl Runner {
         hub.with_store(|store| {
             let mut st = self.st.lock().unwrap();
             st.completed = None;
-            if !st.retired { self.save(store, &st)?; }
+            if !st.retired { self.save(store, &st)?; self.sfp_dispatch(store,hub,&mut st)?; }
             Ok(())
         }).ok();
     }
 
-    fn queue(st: &mut State, command: wire::Command) {
+    fn queue(st: &mut State, command: relay::Command) {
         st.next_command += 1;
         st.outbox.insert(st.next_command, command);
     }
 
     fn drain(&self, store: &Store, st: &mut State) -> Result<()> {
+        while let Some((request, answer)) = st.answer_outbox.first_key_value().map(|(id,a)|(*id,a.clone())) {
+            self.relay.answer(request,answer)?;
+            st.answer_outbox.remove(&request);
+            self.save(store,st)?;
+        }
         while let Some((id, command)) = st.outbox.first_key_value().map(|(id, cmd)| (*id, cmd.clone())) {
             self.relay.command(id, command)?;
             st.outbox.remove(&id);
@@ -377,7 +401,7 @@ impl Runner {
             st.summary_gen += 1;
             st.summary_deadline = Some(sill_core::store::now() + SUMMARY_CAP.as_secs() as i64);
             st.summary = Some((kind, String::new(), st.summary_gen));
-            Self::queue(&mut st, wire::Command::Prompt { text: prompt.into(), attachments: vec![], entry: None });
+            Self::queue(&mut st, relay::Command::Prompt { text: prompt.into(), attachments: vec![] });
             store.append(&self.id, "note", note, "")?;
             self.save(store, &st)?;
             tx.commit()?;
@@ -398,7 +422,7 @@ impl Runner {
             let (kind, mut text, _) = st.summary.take().unwrap();
             text.push_str(&st.agent_md);
             let text = text.trim().to_string();
-            Self::queue(&mut st, wire::Command::Cancel);
+            Self::queue(&mut st, relay::Command::Cancel);
             let done = SummaryDone { kind, text: (!text.is_empty()).then(|| format!("{text}\n({why})")) };
             st.completed = Some(done.clone());
             self.save(store, &st)?;
@@ -429,7 +453,7 @@ impl Runner {
         // the gap between the two views of the conversation.
         let entries = store.entries_before(&self.id, None, 60)?;
         let total = store.entry_count(&self.id)?;
-        let replay = sill_proto::rpc::Request::new(None, "_sill/session.replay", serde_json::json!({"key":self.id,"entries":entries,"total":total}));
+        let replay = sill_proto::rpc::Request::new(None, sill_proto::method::SESSION_REPLAY, serde_json::json!({"key":self.id,"entries":entries,"total":total}));
         conn.send(serde_json::to_string(&replay)?);
         let mut evs = Vec::new();
         if let Some(images) = st.images {
@@ -437,13 +461,13 @@ impl Runner {
         }
         if let Some((session_id, resumed)) = st.ready.clone() {
             // the agent has this conversation in its context: resumed, or it has had a turn
-            evs.push(wire::Event::Ready { session_id, resumed: resumed || st.turns > 0, controls: st.controls.clone().unwrap_or_default() });
+            evs.push(wire::Event::Ready { session_id, resumed: resumed || st.turns > 0, controls: st.controls.clone().unwrap_or_default().into() });
         }
         if let Some((used, size)) = st.usage {
             evs.push(wire::Event::Usage { used, size });
         }
         if let Some(a) = st.auth.clone() {
-            evs.push(a);
+            evs.push(a.into());
         }
         if st.busy {
             evs.push(wire::Event::TurnStarted);
@@ -451,7 +475,7 @@ impl Runner {
                 evs.push(wire::Event::Text(st.agent_md.clone()));
             }
         }
-        evs.extend(st.pending.values().cloned());
+        evs.extend(st.pending.values().cloned().map(wire::Event::from));
         let mut one = vec![conn];
         for e in &evs {
             broadcast(&self.id, &mut one, e);
@@ -486,23 +510,25 @@ impl Runner {
         })
     }
 
-    fn commit_command(&self, store: &Store, home: &std::path::Path, st: &mut State, mut cmd: wire::Command) -> Result<Option<String>> {
+    fn commit_command(&self, store: &Store, home: &std::path::Path, st: &mut State, cmd: wire::Command) -> Result<Option<String>> {
+        // what is the daemon's — the transcript entry — stays here; the rest goes to the relay
+        let entry = match &cmd { wire::Command::Prompt { entry, .. } => entry.clone(), _ => None };
+        let mut cmd = relay::Command::from(cmd);
         let before = st.clone();
         let result = (|| -> Result<Option<String>> {
             if st.ended || st.retired { bail!("the session is not running"); }
             let mut prepared = None;
-            let mut entry = None;
-            if let wire::Command::Prompt { text, entry: e, .. } = &mut cmd {
+            if matches!(cmd, relay::Command::Cancel) && st.busy { st.cancel_sent = true; }
+            if let relay::Command::Prompt { text, .. } = &mut cmd {
                 if st.ready.is_none() { bail!("the agent is starting or needs a login"); }
                 if st.busy { bail!("the agent is busy; wait for the turn to end"); }
                 if st.context.restoring() { bail!("the agent is restoring its model settings; send again when it is ready"); }
                 let p = st.context.prepare(store, &self.id, home, text)?;
                 *text = p.text.clone();
                 prepared = Some(p);
-                entry = e.clone();
                 st.busy = true;
             }
-            let remembered = wire::command_into_acp(cmd.clone()).0;
+            let remembered = cmd.clone().into_acp();
             let controls = st.controls.clone();
             st.context.chosen(controls.as_ref(), &remembered);
             // Keep the accepted command and its plain transcript entry together before sending.
@@ -525,10 +551,11 @@ impl Runner {
     }
 
     /// The answer to question `request`: to the agent, and every attached frontend drops its dialog.
-    pub fn answer(&self, request: u64, answer: Answer) -> Result<()> {
+    pub fn answer(&self, request: u64, answer: wire::Answer) -> Result<()> {
+        let answer = relay::Answer::from(answer);
         let mut st = self.st.lock().unwrap();
         let Some(question) = st.pending.get(&request) else { bail!("no open question {request} (answered already?)") };
-        if !matches!((question, &answer), (wire::Event::PermissionRequest { .. }, Answer::Permission(_)) | (wire::Event::Elicitation { .. }, Answer::Form(_))) {
+        if !matches!((question, &answer), (relay::Event::PermissionRequest { .. }, relay::Answer::Permission(_)) | (relay::Event::Elicitation { .. }, relay::Answer::Form(_))) {
             bail!("the answer is not of the question's kind");
         }
         self.relay.answer(request, answer)?;
@@ -552,7 +579,7 @@ impl Runner {
             st.pending.clear();
             // Save retirement and the Quit outbox before sending it. The terminal cursor remains
             // until deletion/retention, allowing another daemon to drain an unacknowledged Ended.
-            Self::queue(&mut st, wire::Command::Quit);
+            Self::queue(&mut st, relay::Command::Quit);
             self.save(store, &st)?;
             self.drain(store, &mut st)
         })
@@ -584,14 +611,6 @@ fn flush(store: &Store, id: &str, st: &mut State) -> Result<()> {
         store.append(id, "agent", &md, "")?;
     }
     Ok(())
-}
-
-fn from_acp(cmd: acp::Command) -> wire::Command {
-    match cmd {
-        acp::Command::SetMode(m) => wire::Command::SetMode(m),
-        acp::Command::SetConfig(k,v) => wire::Command::SetConfig(k,v),
-        _ => unreachable!("control restoration only emits control commands"),
-    }
 }
 
 /// One event to every subscriber; a connection that is gone or stuck is dropped from the list.
@@ -651,11 +670,11 @@ mod tests {
             state.ready = Some(("agent-session".into(), false));
             state.busy = true;
             state.summary = Some((SummaryKind::End, String::new(), 7));
-            runner.handle_locked(&store, &mut state, wire::Event::Text("first summary segment".into()), false).unwrap();
-            runner.handle_locked(&store, &mut state, wire::Event::ToolCall {
+            runner.handle_locked(&store, &mut state, relay::Event::Text("first summary segment".into()), false).unwrap();
+            runner.handle_locked(&store, &mut state, relay::Event::ToolCall {
                 id: "tool-1".into(), title: "inspect".into(), status: "running".into(), kind: "read".into(), detail: None, diff: None, parent: Some("delegation".into()),
             }, false).unwrap();
-            runner.handle_locked(&store, &mut state, wire::Event::PermissionRequest { request: 19, tool_call_id: "tool-1".into(), title: "inspect".into(), options: vec![] }, false).unwrap();
+            runner.handle_locked(&store, &mut state, relay::Event::PermissionRequest { request: 19, tool_call_id: "tool-1".into(), title: "inspect".into(), options: vec![] }, false).unwrap();
             state.cursor = 12;
             runner.save(&store, &state).unwrap();
         }
@@ -667,10 +686,10 @@ mod tests {
             assert!(state.busy);
             assert!(state.pending.contains_key(&19));
             assert!(matches!(&state.summary, Some((SummaryKind::End, text, 7)) if text == "first summary segment"));
-            restored.handle_locked(&store, &mut state, wire::Event::ToolCallUpdate { id: "tool-1".into(), status: Some("completed".into()), title: None, detail: None, diff: None }, false).unwrap();
-            restored.handle_locked(&store, &mut state, wire::Event::Resolved { request: 19 }, false).unwrap();
-            restored.handle_locked(&store, &mut state, wire::Event::Text(" plus second segment".into()), false).unwrap();
-            let done = restored.handle_locked(&store, &mut state, wire::Event::Stopped(acp::StopReason::EndTurn), false).unwrap().unwrap();
+            restored.handle_locked(&store, &mut state, relay::Event::ToolCallUpdate { id: "tool-1".into(), status: Some("completed".into()), title: None, detail: None, diff: None }, false).unwrap();
+            restored.handle_locked(&store, &mut state, relay::Event::Resolved { request: 19 }, false).unwrap();
+            restored.handle_locked(&store, &mut state, relay::Event::Text(" plus second segment".into()), false).unwrap();
+            let done = restored.handle_locked(&store, &mut state, relay::Event::Stopped(acp::StopReason::EndTurn), false).unwrap().unwrap();
             assert_eq!(done.kind, SummaryKind::End);
             assert_eq!(done.text.as_deref(), Some("first summary segment plus second segment"));
             assert!(!state.busy);
@@ -699,7 +718,7 @@ mod tests {
         {
             let mut state = runner.st.lock().unwrap();
             state.busy = true;
-            Runner::queue(&mut state, wire::Command::Prompt { text: "plain".into(), attachments: vec![], entry: None });
+            Runner::queue(&mut state, relay::Command::Prompt { text: "plain".into(), attachments: vec![] });
             runner.save(&store, &state).unwrap();
         }
         drop(runner);

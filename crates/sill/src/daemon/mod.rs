@@ -6,17 +6,21 @@
 //! attached frontend gets a session's state before the answer to its `attach`. The queue is bounded
 //! (decision 15): a frontend that stops reading is dropped and attaches again with its cursor.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
 use std::os::fd::FromRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
 
 use anyhow::{Context, Result, bail};
 use sill_proto::rpc::{Error, Incoming, Response};
 
 mod hub;
+mod adapter;
+mod sfp;
+mod uploads;
+mod sfp_adapter;
 mod runner;
 mod streams;
 mod context;
@@ -40,6 +44,7 @@ enum WriteItem { Line(String), Flush(std::sync::mpsc::Sender<()>) }
 
 pub struct Conn {
     pub id: u64,
+    internal: AtomicBool,
     tx: SyncSender<WriteItem>,
     /// To cut a stuck connection off.
     sock: UnixStream,
@@ -269,16 +274,15 @@ fn bind_direct() -> Result<UnixListener> {
 
 /// One connection: requests answered in order, notifications from the client ignored.
 fn serve(stream: UnixStream, hub: Arc<Hub>) -> Result<()> {
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(sill_proto::initialize::INITIALIZE_TIMEOUT_SECONDS)))?;
     let mut reader = BufReader::new(stream);
-    let mut first = String::new();
-    if reader.read_line(&mut first)? == 0 { return Ok(()); }
+    let Some(first) = sill_proto::initialize::read_frame(&mut reader, sill_proto::initialize::MAX_MESSAGE_BYTES)? else { return Ok(()) };
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&first)
         && let Some(token) = value.get("_sill_stream").and_then(|v| v.as_str())
-    { return streams::claim(token, reader); }
+    { reader.get_ref().set_read_timeout(None)?; return streams::claim(token, reader); }
     let stream = reader.get_ref();
     let (tx, rx) = sync_channel::<WriteItem>(QUEUE);
-    let conn = Arc::new(Conn { id: NEXT_CONN.fetch_add(1, Ordering::Relaxed), tx, sock: stream.try_clone()? });
-    hub.connected(&conn);
+    let conn = Arc::new(Conn { id: NEXT_CONN.fetch_add(1, Ordering::Relaxed), internal: AtomicBool::new(false), tx, sock: stream.try_clone()? });
     let mut writer = stream.try_clone()?;
     std::thread::Builder::new().name(format!("sill-daemon-write-{}", conn.id)).spawn(move || {
         for item in rx {
@@ -296,11 +300,19 @@ fn serve(stream: UnixStream, hub: Arc<Hub>) -> Result<()> {
     r
 }
 
-fn read_loop(reader: BufReader<UnixStream>, first: String, hub: &Arc<Hub>, conn: &Arc<Conn>) -> Result<()> {
-    let mut lines = std::iter::once(Ok(first)).chain(reader.lines());
-    while let Some(line) = lines.next() {
-        let line = match line {
-            Ok(l) => l,
+fn read_loop(mut reader: BufReader<UnixStream>, first: String, hub: &Arc<Hub>, conn: &Arc<Conn>) -> Result<()> {
+    let mut first = Some(first);
+    let mut state = sill_proto::initialize::ConnectionState::default();
+    let handshake_deadline = std::time::Instant::now() + std::time::Duration::from_secs(sill_proto::initialize::INITIALIZE_TIMEOUT_SECONDS);
+    loop {
+        if !state.is_initialized() && std::time::Instant::now() >= handshake_deadline { break; }
+        let frame = match first.take() {
+            Some(line) => Ok(Some(line)),
+            None => sill_proto::initialize::read_frame(&mut reader, sill_proto::initialize::MAX_MESSAGE_BYTES),
+        };
+        let line = match frame {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
             Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => break,
             Err(e) => return Err(e.into()),
         };
@@ -317,6 +329,31 @@ fn read_loop(reader: BufReader<UnixStream>, first: String, hub: &Arc<Hub>, conn:
         let (Some(id), Some(method)) = (msg.id, msg.method.as_deref()) else {
             continue; // a notification, or a stray response
         };
+        if method == sill_proto::initialize::METHOD {
+            let result = serde_json::from_value(msg.params.unwrap_or(serde_json::Value::Null))
+                .map_err(Error::invalid_params)
+                .and_then(|params| state.initialize(params, env!("CARGO_PKG_VERSION")));
+            match result {
+                Ok(initialized) => {
+                    reader.get_ref().set_read_timeout(None)?;
+                    let internal=initialized.capabilities.get(sill_proto::initialize::INTERNAL_CAPABILITY)==Some(&1);
+                    conn.internal.store(internal,Ordering::Release);
+                    conn.reply(&Response::ok(id, serde_json::to_value(initialized)?));
+                    if internal { hub.connected(conn); }
+                }
+                Err(error) => conn.reply(&Response::err(Some(id), error)),
+            }
+            continue;
+        }
+        if let Err(error) = state.require_initialized() {
+            conn.reply(&Response::err(Some(id), error));
+            continue;
+        }
+        if method.starts_with("_sill/internal/") && !conn.internal.load(Ordering::Acquire) {
+            conn.reply(&Response::err(Some(id), Error::domain("unsupported", "method requires the sill.internal capability")));
+            continue;
+        }
+        if hub.sfp_request(conn, id, method, msg.params.clone().unwrap_or(serde_json::Value::Null))? { continue; }
         // debug builds only: how tests/daemon.rs sees the panic hook end the process
         #[cfg(debug_assertions)]
         if method == "_sill/daemon.panic" {

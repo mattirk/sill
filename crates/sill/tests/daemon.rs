@@ -91,7 +91,7 @@ impl Daemon {
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
             if let Ok(mut c) = self.connect()
-                && c.call("_sill/daemon.status", json!({})).is_ok()
+                && c.call(sill_proto::method::DAEMON_STATUS, json!({})).is_ok()
             {
                 return;
             }
@@ -103,7 +103,10 @@ impl Daemon {
     fn connect(&self) -> std::io::Result<Conn> {
         let s = UnixStream::connect(self.socket())?;
         s.set_read_timeout(Some(Duration::from_secs(5)))?;
-        Ok(Conn { reader: BufReader::new(s.try_clone()?), stream: s, next: 1 })
+        let mut conn = Conn { reader: BufReader::new(s.try_clone()?), stream: s, next: 1 };
+        let reply = conn.call(sill_proto::initialize::METHOD, json!({"protocols":[sill_proto::initialize::PROTOCOL_ID], "client":{"name":"test","version":"0"}, "capabilities":{"sill.internal":1}}))?;
+        if reply.get("error").is_some() { return Err(std::io::Error::other(reply.to_string())); }
+        Ok(conn)
     }
 
     /// Exit status once the process is gone, within the deadline.
@@ -235,7 +238,7 @@ impl Conn {
 fn status_names_the_process_and_the_pid_file_matches() {
     let d = Daemon::start();
     let mut c = d.connect().unwrap();
-    let r = c.call("_sill/daemon.status", json!({})).unwrap();
+    let r = c.call(sill_proto::method::DAEMON_STATUS, json!({})).unwrap();
     let status = &r["result"];
     assert_eq!(status["pid"], json!(d.child.id()));
     assert_eq!(status["protocol"], json!(sill_proto::PROTOCOL));
@@ -253,7 +256,7 @@ fn a_second_daemon_on_the_same_store_is_refused() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains(&format!("another sill daemon (pid {})", d.child.id())), "{err}");
     // and the first one still answers
-    d.connect().unwrap().call("_sill/daemon.status", json!({})).unwrap();
+    d.connect().unwrap().call(sill_proto::method::DAEMON_STATUS, json!({})).unwrap();
 }
 
 #[test]
@@ -275,18 +278,18 @@ fn a_malformed_line_gets_a_parse_error_and_the_connection_lives() {
     let r = c.read().unwrap();
     assert_eq!(r["error"]["code"], json!(-32700), "{r}");
     c.send_raw("").unwrap(); // an empty line is skipped, not answered
-    c.call("_sill/daemon.status", json!({})).unwrap();
+    c.call(sill_proto::method::DAEMON_STATUS, json!({})).unwrap();
     // an unknown method is an error, not a dropped connection
     let r = c.call("_sill/no.such", json!({})).unwrap();
     assert!(r.get("error").is_some(), "{r}");
-    c.call("_sill/daemon.status", json!({})).unwrap();
+    c.call(sill_proto::method::DAEMON_STATUS, json!({})).unwrap();
 }
 
 #[test]
 fn shutdown_answers_then_exits_clean() {
     let mut d = Daemon::start();
     let mut c = d.connect().unwrap();
-    let r = c.call("_sill/daemon.shutdown", json!({})).unwrap();
+    let r = c.call(sill_proto::method::DAEMON_SHUTDOWN, json!({})).unwrap();
     assert!(r.get("error").is_none(), "{r}");
     let st = d.wait_exit();
     assert!(st.success(), "{st}");
@@ -308,7 +311,7 @@ fn a_killed_daemon_leaves_a_stale_socket_the_next_one_replaces() {
     let d = Daemon::start_in(dir);
     assert_ne!(d.child.id(), first);
     assert_eq!(d.pid_file(), Some(d.child.id()), "the pid file is the new daemon's");
-    let r = d.connect().unwrap().call("_sill/daemon.status", json!({})).unwrap();
+    let r = d.connect().unwrap().call(sill_proto::method::DAEMON_STATUS, json!({})).unwrap();
     assert_eq!(r["result"]["pid"], json!(d.child.id()));
 }
 
@@ -327,7 +330,7 @@ fn a_panic_ends_the_daemon_with_a_failure_status() {
     let dir = d.dir.clone();
     std::mem::forget(d);
     let d = Daemon::start_in(dir);
-    d.connect().unwrap().call("_sill/daemon.status", json!({})).unwrap();
+    d.connect().unwrap().call(sill_proto::method::DAEMON_STATUS, json!({})).unwrap();
 }
 
 #[cfg(debug_assertions)]
@@ -343,7 +346,7 @@ fn the_watchdog_ends_a_daemon_with_a_stuck_lock() {
     let dir = d.dir.clone();
     std::mem::forget(d);
     let d = Daemon::start_in(dir);
-    d.connect().unwrap().call("_sill/daemon.status", json!({})).unwrap();
+    d.connect().unwrap().call(sill_proto::method::DAEMON_STATUS, json!({})).unwrap();
 }
 
 #[test]
@@ -360,7 +363,7 @@ fn the_unit_hears_ready_watchdog_and_stopping() {
     };
     assert_eq!(next(), "READY=1");
     assert_eq!(next(), "WATCHDOG=1", "a tick within the patience");
-    d.connect().unwrap().call("_sill/daemon.shutdown", json!({})).unwrap();
+    d.connect().unwrap().call(sill_proto::method::DAEMON_SHUTDOWN, json!({})).unwrap();
     assert!(d.wait_exit().success());
     let rest: Vec<String> = std::iter::from_fn(|| {
         let mut buf = [0u8; 256];
@@ -375,9 +378,9 @@ fn the_unit_hears_ready_watchdog_and_stopping() {
 fn a_call_nobody_answers_times_out_with_advice() {
     let (ours, _theirs) = UnixStream::pair().unwrap();
     let c = sill_proto::Client::over(ours).unwrap();
-    let e = c.call_within::<Value>("_sill/daemon.status", json!({}), Duration::from_millis(200)).unwrap_err();
+    let e = c.call_within::<Value>(sill_proto::method::DAEMON_STATUS, json!({}), Duration::from_millis(200)).unwrap_err();
     let msg = format!("{e:#}");
-    assert!(msg.contains("did not answer _sill/daemon.status in 0.2 s") && msg.contains("sill restart"), "{msg}");
+    assert!(msg.contains(&format!("did not answer {} in 0.2 s", sill_proto::method::DAEMON_STATUS)) && msg.contains("sill restart"), "{msg}");
 }
 
 #[test]
@@ -385,7 +388,7 @@ fn the_schema_is_printed_without_a_daemon() {
     let out = Command::new(env!("CARGO_BIN_EXE_sill")).args(["daemon", "schema"]).env("SILL_NO_DAEMON_START", "1").output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(doc["protocol"], json!(sill_proto::PROTOCOL));
+    assert_eq!(doc["protocol"], json!(sill_proto::initialize::PROTOCOL_ID));
     assert!(doc["$defs"]["Event"].is_object() && doc["$defs"]["Command"].is_object());
 }
 
@@ -398,4 +401,52 @@ fn attach_to_an_unknown_session_is_refused_cleanly() {
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("no session no-such-session"), "{err}");
+}
+
+#[test]
+fn initialization_gates_requests_and_recovers_after_an_incompatible_offer() {
+    let d = Daemon::start();
+    let s = UnixStream::connect(d.socket()).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut c = Conn { reader: BufReader::new(s.try_clone().unwrap()), stream: s, next: 1 };
+    let status = c.call(sill_proto::method::DAEMON_STATUS, json!({})).unwrap();
+    assert_eq!(status["error"]["data"]["code"], "not_initialized");
+    let offer = |protocol: &str| json!({"protocols":[protocol], "client":{"name":"test","version":"0"}, "capabilities":{"sill.internal":1}});
+    let denied = c.call(sill_proto::initialize::METHOD, offer("unsupported")).unwrap();
+    assert_eq!(denied["error"]["data"]["code"], "incompatible");
+    let ok = c.call(sill_proto::initialize::METHOD, offer(sill_proto::initialize::PROTOCOL_ID)).unwrap();
+    assert_eq!(ok["result"]["protocol"], sill_proto::initialize::PROTOCOL_ID);
+    let repeated = c.call(sill_proto::initialize::METHOD, offer(sill_proto::initialize::PROTOCOL_ID)).unwrap();
+    assert_eq!(repeated["error"]["data"]["code"], "invalid_state");
+    assert_eq!(c.call(sill_proto::method::DAEMON_STATUS, json!({})).unwrap()["result"]["pid"], d.child.id());
+}
+
+#[test]
+fn public_and_uninitialized_connections_do_not_receive_internal_change_notifications() {
+    let d=Daemon::start();
+    let connect_raw=|| {
+        let socket=UnixStream::connect(d.socket()).unwrap();
+        socket.set_read_timeout(Some(Duration::from_millis(150))).unwrap();
+        Conn{reader:BufReader::new(socket.try_clone().unwrap()),stream:socket,next:1}
+    };
+    let mut uninitialized=connect_raw();
+    // Make the server establish a control connection while leaving it uninitialized.
+    assert_eq!(uninitialized.call(sill_proto::method::DAEMON_STATUS,json!({})).unwrap()["error"]["data"]["code"],"not_initialized");
+    let mut public=connect_raw();
+    public.call(sill_proto::initialize::METHOD,json!({"protocols":[sill_proto::initialize::PROTOCOL_ID],"client":{"name":"external","version":"0"},"capabilities":{}})).unwrap();
+    assert_eq!(public.call(sill_proto::method::DAEMON_STATUS,json!({})).unwrap()["error"]["data"]["code"],"unsupported");
+    let mut internal=d.connect().unwrap();
+    let request_id=internal.next;
+    internal.send_raw(&json!({"jsonrpc":"2.0","id":request_id,"method":sill_proto::method::CHANGES_KEEP,"params":{"session":"missing","items":[]}}).to_string()).unwrap();
+    let mut changed=false;
+    loop {
+        let message=internal.read().unwrap();
+        if message.get("method")==Some(&json!(sill_proto::method::CHANGES_CHANGED)) {changed=true;}
+        if message.get("id")==Some(&json!(request_id)) {break;}
+    }
+    assert!(changed,"internal subscriber receives the change notification");
+    for mut conn in [public,uninitialized] {
+        let error=conn.read().unwrap_err();
+        assert!(matches!(error.kind(),std::io::ErrorKind::WouldBlock|std::io::ErrorKind::TimedOut),"{error}");
+    }
 }
