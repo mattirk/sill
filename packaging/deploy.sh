@@ -71,7 +71,7 @@ fi
 echo "deployed: $PREFIX/bin/sill $(sha256sum "$PREFIX/bin/sill" | cut -c1-12) running as pid ${shelves%% *}"
 
 # what a session cannot see from its jail, into target/host-check/report.txt for the agent to read
-PREFIX="$PREFIX" packaging/check.sh || {
+PREFIX="$PREFIX" SILL_BUILD_DIR="$sill_build_dir" packaging/check.sh || {
     echo "deploy.sh: deployed, but check.sh found $? failure(s): target/host-check/report.txt" >&2
     exit 1
 }

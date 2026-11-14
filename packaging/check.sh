@@ -45,13 +45,24 @@ say ""
 
 # --- installed binaries --------------------------------------------------------------------------
 say "## install"
+# deploy.sh names the build it installed (SILL_BUILD_DIR: target/release, or target/local with
+# --fast); run on its own, the installed binary may be either profile's
+sill_build_dirs=${SILL_BUILD_DIR:-target/release target/local}
 for b in sill sill-shim; do
     if [ ! -x "$PREFIX/bin/$b" ]; then
         fail "$PREFIX/bin/$b installed"
-    elif [ -x "target/release/$b" ] && ! cmp -s "target/release/$b" "$PREFIX/bin/$b"; then
-        fail "$PREFIX/bin/$b is target/release/$b (differs: not deployed since the last build?)"
+        continue
+    fi
+    sill_built="" sill_match=""
+    for d in $sill_build_dirs; do
+        [ -x "$d/$b" ] || continue
+        sill_built="$sill_built $d/$b"
+        if cmp -s "$d/$b" "$PREFIX/bin/$b"; then sill_match="$d/$b"; break; fi
+    done
+    if [ -n "$sill_built" ] && [ -z "$sill_match" ]; then
+        fail "$PREFIX/bin/$b is none of$sill_built (differs: not deployed since the last build?)"
     else
-        pass "$PREFIX/bin/$b $(sha256sum "$PREFIX/bin/$b" | cut -c1-12)"
+        pass "$PREFIX/bin/$b $(sha256sum "$PREFIX/bin/$b" | cut -c1-12)${sill_match:+ = $sill_match}"
     fi
 done
 run "sill --version" "$SILL" --version
