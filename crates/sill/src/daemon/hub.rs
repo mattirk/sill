@@ -63,6 +63,18 @@ pub struct Hub {
     started_at: Mutex<HashMap<String, i64>>,
 }
 
+/// Taken and released before `deadline`, polling: `std::sync::Mutex` has no timed lock.
+pub(super) fn probe<T>(m: &Mutex<T>, deadline: std::time::Instant) -> bool {
+    loop {
+        match m.try_lock() {
+            Ok(_guard) => return true,
+            Err(std::sync::TryLockError::Poisoned(_)) => return true, // the panic hook already left
+            Err(std::sync::TryLockError::WouldBlock) if std::time::Instant::now() >= deadline => return false,
+            Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    }
+}
+
 impl Hub {
     pub fn new(mode: &'static str) -> Result<Hub> {
         let store = Store::open_default()?;
@@ -90,6 +102,36 @@ impl Hub {
 
     pub fn session_count(&self) -> usize {
         self.store.lock().unwrap().sessions().map(|s| s.len()).unwrap_or(0)
+    }
+
+    /// The watchdog's probe (docs/daemon.md §3.7): every lock of the hub and of each runner is
+    /// taken and released within `patience`, or the one that was not is named — a deadlock, or
+    /// a request that has held a lock for far longer than any legitimate work. The order is the
+    /// one the requests use (hub locks before a runner's), so the probe itself cannot deadlock.
+    pub fn health(&self, patience: std::time::Duration) -> std::result::Result<(), &'static str> {
+        let deadline = std::time::Instant::now() + patience;
+        probe(&self.conns, deadline).then_some(()).ok_or("conns")?;
+        probe(&self.children, deadline).then_some(()).ok_or("children")?;
+        probe(&self.ending, deadline).then_some(()).ok_or("ending")?;
+        probe(&self.started_at, deadline).then_some(()).ok_or("started_at")?;
+        probe(&self.runners, deadline).then_some(()).ok_or("runners")?;
+        let runners: Vec<Arc<Runner>> = self.runners.lock().unwrap().values().cloned().collect();
+        for r in runners {
+            r.probe(deadline).then_some(()).ok_or("a runner's state")?;
+        }
+        probe(&self.store, deadline).then_some(()).ok_or("store")?;
+        // held for a whole jail start: last, with what patience is left
+        probe(&self.starting, deadline).then_some(()).ok_or("starting")?;
+        Ok(())
+    }
+
+    /// Debug builds only: how tests/daemon.rs makes the watchdog find a stuck lock.
+    #[cfg(debug_assertions)]
+    pub fn hold_runners_forever(&self) {
+        let _held = self.runners.lock().unwrap();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+        }
     }
 
     /// The store, for one call (the runners write the transcript through it).

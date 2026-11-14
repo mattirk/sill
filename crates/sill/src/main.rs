@@ -1186,7 +1186,7 @@ fn daemon_cmd(cmd: Option<DaemonCmd>) -> Result<()> {
         None => daemon::run(),
         Some(DaemonCmd::Status) => {
             let c = sill_proto::Client::connect_or_start()?;
-            let s: sill_proto::DaemonStatus = c.call(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default())?;
+            let s: sill_proto::DaemonStatus = c.call_within(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default(), sill_proto::client::QUICK_TIMEOUT)?;
             println!("sill daemon {} (protocol {}), pid {}, {}, up since {}", s.version, s.protocol, s.pid, s.mode, sill_memory::datetime(s.started));
             println!("jails:    {}", s.launcher);
             println!("socket:   {}", s.socket);
@@ -1195,7 +1195,7 @@ fn daemon_cmd(cmd: Option<DaemonCmd>) -> Result<()> {
         }
         Some(DaemonCmd::Stop) => match sill_proto::Client::connect() {
             Ok(c) => {
-                let _: serde_json::Value = c.call(sill_proto::method::DAEMON_SHUTDOWN, sill_proto::Empty::default())?;
+                let _: serde_json::Value = c.call_within(sill_proto::method::DAEMON_SHUTDOWN, sill_proto::Empty::default(), sill_proto::client::QUICK_TIMEOUT)?;
                 println!("asked the daemon to leave; sessions keep running");
                 Ok(())
             }

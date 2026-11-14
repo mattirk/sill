@@ -605,6 +605,19 @@ fn stage_autostart(i: &mut Init, home: &Path, exe: &Path) -> Result<PathBuf> {
 }
 
 /// `systemctl --user cat <unit>` succeeds: a system-wide or private copy of the unit exists.
+/// The user manager's loaded text of `unit` differs from the file it came from (`systemctl cat`
+/// prints the path on its first line, then the file).
+fn unit_stale(unit: &str) -> bool {
+    let Ok(out) = std::process::Command::new("systemctl").args(["--user", "cat", unit]).stderr(std::process::Stdio::null()).output() else { return false };
+    if !out.status.success() {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let Some((head, body)) = text.split_once('\n') else { return false };
+    let Some(path) = head.strip_prefix("# ") else { return false };
+    std::fs::read_to_string(path.trim()).is_ok_and(|on_disk| on_disk != body)
+}
+
 fn unit_known(unit: &str) -> bool {
     std::process::Command::new("systemctl")
         .args(["--user", "cat", unit])
@@ -666,6 +679,10 @@ fn user_setup(a: &InitArgs) -> Result<()> {
             i.put_file(&home.join(".config/systemd/user/sill.service"), unit.as_bytes(), 0o644)?;
             i.put_file(&home.join(".config/systemd/user/sill.socket"), SOCKET_DAEMON.as_bytes(), 0o644)?;
             i.run("reload user units", "systemctl", &["--user", "daemon-reload"])?;
+        } else if unit_stale("sill.service") {
+            // the system-wide unit was rewritten by `sudo sill init` (an upgrade: Type=notify, the
+            // watchdog, docs/daemon.md §3.7); this user's manager still runs the old text
+            i.run("reload user units (sill.service changed)", "systemctl", &["--user", "daemon-reload"])?;
         }
         let socket_enabled = std::process::Command::new("systemctl")
             .args(["--user", "is-enabled", "--quiet", "sill.socket"])

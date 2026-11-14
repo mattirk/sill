@@ -67,6 +67,19 @@ for u in sill.socket sill.service sill-shelf.service; do
     fi
 done
 run "sill daemon status" "$SILL" daemon status
+# the unit the user manager runs is the one on disk, with the watchdog (docs/daemon.md §3.7):
+# a rewritten /etc/systemd/user/sill.service needs a `systemctl --user daemon-reload` to land
+if systemctl --user cat sill.service >/dev/null 2>&1; then
+    systemctl --user show sill.service -p Type,NotifyAccess,WatchdogUSec,NRestarts,Result,ExecMainStartTimestamp,ExecMainPID,NeedDaemonReload >"$TMP/unit" 2>&1
+    if grep -q '^NeedDaemonReload=no' "$TMP/unit" && grep -q '^Type=notify' "$TMP/unit" && ! grep -q '^WatchdogUSec=0$' "$TMP/unit"; then
+        pass "sill.service loaded as Type=notify with a watchdog"
+    else
+        fail "sill.service loaded as Type=notify with a watchdog (systemctl --user daemon-reload?)"
+    fi
+    log <"$TMP/unit"
+    # the daemon's own lines since it started: the launcher it found, READY, nothing stuck
+    journalctl --user -u sill.service -n 20 --no-pager -o short 2>&1 | log
+fi
 run "sill session list" "$SILL" session list
 run "sill changes list" "$SILL" changes list
 shelves=$(pgrep -a -f 'sill shelf' || true)

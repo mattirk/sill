@@ -51,7 +51,15 @@ impl Daemon {
 
     /// A daemon in a dir another one used (or still uses).
     fn start_in(dir: PathBuf) -> Daemon {
-        let child = Self::command(&dir).spawn().unwrap();
+        Self::start_env(dir, &[])
+    }
+
+    fn start_env(dir: PathBuf, env: &[(&str, &str)]) -> Daemon {
+        let mut cmd = Self::command(&dir);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let child = cmd.spawn().unwrap();
         let d = Daemon { dir, child };
         d.wait_up();
         d
@@ -237,4 +245,54 @@ fn a_panic_ends_the_daemon_with_a_failure_status() {
     std::mem::forget(d);
     let d = Daemon::start_in(dir);
     d.connect().unwrap().call("_sill/daemon.status", json!({})).unwrap();
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn the_watchdog_ends_a_daemon_with_a_stuck_lock() {
+    let mut d = Daemon::start_env(Daemon::dir(), &[("SILL_WATCHDOG_SECS", "2")]);
+    let mut c = d.connect().unwrap();
+    let _ = c.send_raw(&json!({"jsonrpc": "2.0", "id": 1, "method": "_sill/daemon.deadlock"}).to_string());
+    let st = d.wait_exit();
+    assert_eq!(st.code(), Some(102), "{st}");
+    let log = d.log();
+    assert!(log.contains("the runners lock has been held for 2 s: stuck"), "{log}");
+    let dir = d.dir.clone();
+    std::mem::forget(d);
+    let d = Daemon::start_in(dir);
+    d.connect().unwrap().call("_sill/daemon.status", json!({})).unwrap();
+}
+
+#[test]
+fn the_unit_hears_ready_watchdog_and_stopping() {
+    let dir = Daemon::dir();
+    let notify = dir.join("notify.sock");
+    let manager = std::os::unix::net::UnixDatagram::bind(&notify).unwrap();
+    manager.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut d = Daemon::start_env(dir, &[("NOTIFY_SOCKET", notify.to_str().unwrap()), ("SILL_WATCHDOG_SECS", "2")]);
+    let mut next = || {
+        let mut buf = [0u8; 256];
+        let n = manager.recv(&mut buf).expect("a notification");
+        String::from_utf8_lossy(&buf[..n]).to_string()
+    };
+    assert_eq!(next(), "READY=1");
+    assert_eq!(next(), "WATCHDOG=1", "a tick within the patience");
+    d.connect().unwrap().call("_sill/daemon.shutdown", json!({})).unwrap();
+    assert!(d.wait_exit().success());
+    let rest: Vec<String> = std::iter::from_fn(|| {
+        let mut buf = [0u8; 256];
+        manager.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+        manager.recv(&mut buf).ok().map(|n| String::from_utf8_lossy(&buf[..n]).to_string())
+    })
+    .collect();
+    assert!(rest.contains(&"STOPPING=1".to_string()), "{rest:?}");
+}
+
+#[test]
+fn a_call_nobody_answers_times_out_with_advice() {
+    let (ours, _theirs) = UnixStream::pair().unwrap();
+    let c = sill_proto::Client::over(ours).unwrap();
+    let e = c.call_within::<Value>("_sill/daemon.status", json!({}), Duration::from_millis(200)).unwrap_err();
+    let msg = format!("{e:#}");
+    assert!(msg.contains("did not answer _sill/daemon.status in 0 s") && msg.contains("sill restart"), "{msg}");
 }

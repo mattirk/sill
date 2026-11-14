@@ -362,6 +362,11 @@ impl Runner {
         st.subs.extend(one);
     }
 
+    /// The watchdog's probe of this runner's lock (`Hub::health`).
+    pub fn probe(&self, deadline: std::time::Instant) -> bool {
+        super::hub::probe(&self.st, deadline)
+    }
+
     pub fn detach(&self, conn: u64) {
         self.st.lock().unwrap().subs.retain(|c| c.id != conn);
     }

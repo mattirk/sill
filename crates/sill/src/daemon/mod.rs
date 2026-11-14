@@ -20,6 +20,13 @@ mod hub;
 mod runner;
 pub use hub::Hub;
 
+/// How long a hub lock may stay taken before the watchdog calls it a deadlock: a jail start holds
+/// `starting` for seconds, a big scan the store for a few more; nothing legitimate holds one for
+/// this long. `SILL_WATCHDOG_SECS` overrides it (the tests use 2).
+const LOCK_PATIENCE_SECS: u64 = 30;
+/// The exit status of a daemon that found itself stuck (a panic is 101).
+const EXIT_STUCK: i32 = 102;
+
 /// Lines a connection may have waiting before it counts as stuck (decision 15): a streaming turn
 /// is a few hundred events a second at most.
 const QUEUE: usize = 20_000;
@@ -83,9 +90,32 @@ pub fn run() -> Result<()> {
             }
         })?;
     }
+    {
+        // the watchdog (docs/daemon.md §3.7): a lock nobody can take within the patience is a
+        // deadlock, and a deadlocked daemon is worse than a dead one — it leaves, the unit or the
+        // next client starts a fresh one and the sessions are adopted. While every lock answers,
+        // systemd hears `WATCHDOG=1`; a daemon too wedged to run even this thread is killed by
+        // `WatchdogSec=` in the unit.
+        let hub = hub.clone();
+        let patience = std::env::var("SILL_WATCHDOG_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(LOCK_PATIENCE_SECS);
+        let patience = std::time::Duration::from_secs(patience.max(1));
+        std::thread::Builder::new().name("sill-daemon-watchdog".into()).spawn(move || {
+            loop {
+                std::thread::sleep(patience / 2);
+                match hub.health(patience) {
+                    Ok(()) => notify("WATCHDOG=1"),
+                    Err(lock) => {
+                        eprintln!("sill daemon: the {lock} lock has been held for {} s: stuck; leaving so the next daemon starts clean (sessions keep running)", patience.as_secs());
+                        std::process::exit(EXIT_STUCK);
+                    }
+                }
+            }
+        })?;
+    }
     let dir = sill_proto::runtime_dir()?;
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join("daemon.pid"), std::process::id().to_string())?;
+    notify("READY=1");
     eprintln!("sill daemon: {}, pid {}, {} sessions in the store, protocol {}", mode, std::process::id(), hub.session_count(), sill_proto::PROTOCOL);
     let me = rustix::process::geteuid();
     for conn in listener.incoming() {
@@ -119,6 +149,25 @@ pub fn run() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `sd_notify` without libsystemd: a datagram to `$NOTIFY_SOCKET` (a path, or abstract with a
+/// leading `@`) when the unit is `Type=notify`; nothing otherwise. Never an error: a daemon that
+/// cannot reach its manager still serves.
+fn notify(state: &str) {
+    let Some(addr) = std::env::var_os("NOTIFY_SOCKET") else { return };
+    let addr = addr.to_string_lossy();
+    let Ok(sock) = std::os::unix::net::UnixDatagram::unbound() else { return };
+    let sent = match addr.strip_prefix('@') {
+        Some(abstract_name) => {
+            use std::os::linux::net::SocketAddrExt;
+            std::os::unix::net::SocketAddr::from_abstract_name(abstract_name.as_bytes()).and_then(|a| sock.send_to_addr(state.as_bytes(), &a))
+        }
+        None => sock.send_to(state.as_bytes(), &*addr),
+    };
+    if let Err(e) = sent {
+        eprintln!("sill daemon: notify {}: {e}", state.lines().next().unwrap_or_default());
+    }
 }
 
 /// A panic anywhere in the daemon ends the whole process (docs/daemon.md §3.11): a connection
@@ -239,6 +288,11 @@ fn read_loop(stream: UnixStream, hub: &Arc<Hub>, conn: &Arc<Conn>) -> Result<()>
         if method == "_sill/daemon.panic" {
             panic!("asked to by a client (tests/daemon.rs)");
         }
+        // debug builds only: how tests/daemon.rs sees the watchdog end a stuck daemon
+        #[cfg(debug_assertions)]
+        if method == "_sill/daemon.deadlock" {
+            hub.hold_runners_forever();
+        }
         let reply = match hub.dispatch(conn, method, msg.params.unwrap_or(serde_json::Value::Null)) {
             Ok(v) => Response::ok(id, v),
             Err(e) => Response::err(Some(id), e),
@@ -246,6 +300,7 @@ fn read_loop(stream: UnixStream, hub: &Arc<Hub>, conn: &Arc<Conn>) -> Result<()>
         conn.reply(&reply);
         if method == sill_proto::method::DAEMON_SHUTDOWN {
             eprintln!("sill daemon: shutdown asked, leaving");
+            notify("STOPPING=1");
             std::thread::sleep(std::time::Duration::from_millis(200)); // the writer sends the reply
             std::process::exit(0);
         }

@@ -18,6 +18,12 @@ use crate::rpc::{Error, Incoming, Request};
 
 type Pending = Arc<Mutex<HashMap<u64, Sender<Result<Value, Error>>>>>;
 
+/// The longest any request legitimately takes (an attach that starts a jail and an agent on a
+/// slow disk), with room; past it the daemon is stuck and the person is told so.
+pub const CALL_TIMEOUT: Duration = Duration::from_secs(120);
+/// For `daemon.status` and `shutdown`: answered at once by a daemon that answers at all.
+pub const QUICK_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub struct Client {
     writer: Mutex<UnixStream>,
     next_id: AtomicU64,
@@ -47,7 +53,7 @@ impl Client {
                     // asked to leave and comes back as this binary — the socket unit starts the
                     // installed one on the next connection, else it is started below
                     eprintln!("sill: the daemon speaks protocol {p}, this binary {}: restarting it", crate::PROTOCOL);
-                    let _ = c.call::<Value>(crate::method::DAEMON_SHUTDOWN, crate::Empty::default());
+                    let _ = c.call_within::<Value>(crate::method::DAEMON_SHUTDOWN, crate::Empty::default(), QUICK_TIMEOUT);
                     drop(c);
                     let deadline = Instant::now() + Duration::from_secs(5);
                     while Instant::now() < deadline {
@@ -79,6 +85,12 @@ impl Client {
         // child of a shelf would live — and die — in the shelf's unit); `systemctl --user stop
         // sill-daemon` ends it and sessions stay, they are scopes of their own. Where that fails —
         // no user manager, or a unit of that name still loaded — the daemon is spawned bare.
+        // the installed units exist but gave up (docs/daemon.md §3.7: the start limit after
+        // repeated failures stops sill.socket too): starting a transient daemon beside them would
+        // hide why — the person is sent to the journal instead
+        if let Some(failed) = failed_unit() {
+            bail!("{failed} failed and systemd stopped trying; `journalctl --user -u sill` has why, then `systemctl --user reset-failed sill.socket sill.service && systemctl --user start sill.socket`");
+        }
         let mut why_bare = String::from("no systemd user instance");
         let unit_started = systemd_user_usable() && {
             let _ = std::process::Command::new("systemctl")
@@ -135,7 +147,7 @@ impl Client {
 
     /// The protocol the daemon on this connection speaks (`daemon.status`).
     fn protocol(&self) -> Result<u32> {
-        let s: crate::DaemonStatus = self.call(crate::method::DAEMON_STATUS, crate::Empty::default())?;
+        let s: crate::DaemonStatus = self.call_within(crate::method::DAEMON_STATUS, crate::Empty::default(), QUICK_TIMEOUT)?;
         Ok(s.protocol)
     }
 
@@ -179,8 +191,16 @@ impl Client {
         Ok(Client { writer: Mutex::new(stream), next_id: AtomicU64::new(1), pending, notifications: Mutex::new(nrx) })
     }
 
-    /// One request, its answer.
+    /// One request, its answer — within `CALL_TIMEOUT`: an attach waits for a jail to start and an
+    /// end for the agent's summary, nothing waits longer than this, and a daemon that does not
+    /// answer at all must not hang its client forever (docs/daemon.md §3.7).
     pub fn call<T: DeserializeOwned>(&self, method: &str, params: impl Serialize) -> Result<T> {
+        self.call_within(method, params, CALL_TIMEOUT)
+    }
+
+    /// `call` with a timeout of its own: short for `daemon.status` and `shutdown`, which answer
+    /// at once or not at all.
+    pub fn call_within<T: DeserializeOwned>(&self, method: &str, params: impl Serialize, timeout: Duration) -> Result<T> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = channel();
         self.pending.lock().unwrap().insert(id, tx);
@@ -191,9 +211,30 @@ impl Client {
             line.push('\n');
             w.write_all(line.as_bytes()).context("writing to the daemon")?;
         }
-        let v = rx.recv().context("the daemon went away")?.map_err(|e| anyhow::anyhow!("{method}: {e}"))?;
+        let v = match rx.recv_timeout(timeout) {
+            Ok(v) => v.map_err(|e| anyhow::anyhow!("{method}: {e}"))?,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => bail!("the daemon went away"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                self.pending.lock().unwrap().remove(&id);
+                bail!("the daemon did not answer {method} in {} s: it is stuck; `sill restart` (or `systemctl --user restart sill`) starts a fresh one, sessions survive it", timeout.as_secs())
+            }
+        };
         serde_json::from_value(v).with_context(|| format!("{method}: unexpected answer shape"))
     }
+}
+
+/// The first of `sill.socket`, `sill.service` in the failed state, if any (`is-failed` exits 0
+/// for exactly that; a unit that is not installed is "inactive").
+fn failed_unit() -> Option<&'static str> {
+    ["sill.socket", "sill.service"].into_iter().find(|u| {
+        std::process::Command::new("systemctl")
+            .args(["--user", "is-failed", "--quiet", u])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    })
 }
 
 /// `systemd-run --user` works here: `$XDG_RUNTIME_DIR` set, systemd the init, the user manager answering.
