@@ -461,7 +461,7 @@ fn trim_log(log: &Path) {
 
 // --- the `sill-proc` command ---------------------------------------------------------------------
 
-/// `sill-proc start --name NAME [--port PORT] [--cwd DIR] -- CMD…` | `list` | `tail NAME [-n N]` |
+/// `sill-proc start --name NAME [--port PORT] [--cwd DIR] -- CMD…` | `list [--json]` | `tail NAME [-n N]` |
 /// `stop NAME` | `stop-all` | `dismiss NAME`. Exit code 0 on success, 1 otherwise.
 pub fn cli(args: Vec<String>) -> i32 {
     match cli_inner(args) {
@@ -473,7 +473,7 @@ pub fn cli(args: Vec<String>) -> i32 {
     }
 }
 
-const USAGE: &str = "usage: sill-proc start --name NAME [--port PORT] [--cwd DIR] -- COMMAND…\n       sill-proc list | tail NAME [-n LINES] | stop NAME | stop-all | dismiss NAME\n\nA command started here keeps running after your turn ends and after you restart; a background `&` does not.\nProcesses Host control launched on the host (host:ID) are listed and tailed here too; stopping them needs `sill-host stop`.";
+const USAGE: &str = "usage: sill-proc start --name NAME [--port PORT] [--cwd DIR] -- COMMAND…\n       sill-proc list [--json] | tail NAME [-n LINES] | stop NAME | stop-all | dismiss NAME\n\nA command started here keeps running after your turn ends and after you restart; a background `&` does not.\nProcesses Host control launched on the host (host:ID) are listed and tailed here too; stopping them needs `sill-host stop`.";
 
 /// The session's host processes as the daemon publishes them into the bridge directory.
 fn host_processes() -> Vec<Value> {
@@ -558,6 +558,7 @@ fn cli_inner(mut args: Vec<String>) -> Result<()> {
         bail!("{USAGE}")
     };
     args.remove(0);
+    let mut json_output = false;
     let op = match sub.as_str() {
         "start" => {
             let (mut name, mut port, mut cwd) = (None, None, None);
@@ -588,7 +589,14 @@ fn cli_inner(mut args: Vec<String>) -> Result<()> {
             }
             json!({ "op": "start", "name": name, "argv": rest, "cwd": cwd, "port": port })
         }
-        "list" => json!({ "op": "list" }),
+        "list" => {
+            match args.as_slice() {
+                [] => {}
+                [flag] if flag == "--json" => json_output = true,
+                _ => bail!("list accepts only --json\n{USAGE}"),
+            }
+            json!({ "op": "list" })
+        }
         "tail" => {
             let name = args.first().cloned().context("tail expects a name")?;
             let lines = match args.get(1).map(String::as_str) {
@@ -633,6 +641,10 @@ fn cli_inner(mut args: Vec<String>) -> Result<()> {
         "list" => {
             let procs = reply["procs"].as_array().cloned().unwrap_or_default();
             let host = host_processes();
+            if json_output {
+                println!("{}", json!({ "procs": procs, "host_procs": host }));
+                return Ok(());
+            }
             if procs.is_empty() && host.is_empty() {
                 println!("no managed processes");
             }

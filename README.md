@@ -122,6 +122,9 @@ watcher — is started inside the jail with `sill-proc start --name dev [--port 
 with the session. The controls row shows how many run, with state, last output line, log, Stop. A
 process that declares a port is offered for exposing on this machine's loopback — asked once per
 session, or silently for ports in the policy's `[processes] expose` list. Loopback only.
+For scripts, `sill-proc list --json` prints an object with `procs` (jail processes) and
+`host_procs` (Host control processes) arrays, including when both are empty. Records retain
+the service’s fields; host and jail process states use their respective service formats.
 
 **Standing instructions** reach every agent, whatever its type: Settings → Instructions (Markdown,
 `~/.config/sill/instructions.md`). Sill puts its own facts first — how the overlay and pins work, which
