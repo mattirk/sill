@@ -192,7 +192,10 @@ impl ChangesPage {
             let live: Vec<LiveRepo> = pinned.into_iter().map(|r| (changes::git_status(&r), r)).filter(|(st, _)| !st.is_empty()).map(|(st, r)| (r, st)).collect();
             let mut out = Vec::new();
             for s in sessions {
-                let Ok(policy) = sill_core::policy::Policy::load(&s.policy, &home) else { continue };
+                let Ok(mut policy) = sill_core::policy::Policy::load(&s.policy, &home) else { continue };
+                if s.ghost {
+                    policy.ghostly(&home); // the jail it runs: `direct` as `ro`
+                }
                 let Ok(state_dir) = sill_core::session::state_dir(uid, &s.id) else { continue };
                 if !state_dir.is_dir() {
                     continue;
@@ -511,6 +514,9 @@ impl ChangesPage {
                     let letter = format!("{}{}", c.kind.letter(), if c.conflict { "!" } else { "" });
                     let note = if c.conflict {
                         Some("changed on the host too".to_string())
+                    } else if s.ghost && !collapsed {
+                        // a ghost's hour (docs/memory.md §3.2): everything, the daemon reverts it
+                        revert_due(&c, sill_core::policy::GHOST_IDLE_MINUTES).map(|d| if d.is_zero() { "reverting".to_string() } else { format!("reverts in {}", human_minutes(d)) })
                     } else if !in_git && !collapsed && minutes > 0 && auto_reverts(&c) {
                         revert_due(&c, minutes).map(|d| if d.is_zero() { "reverting".to_string() } else { format!("reverts in {}", human_minutes(d)) })
                     } else {

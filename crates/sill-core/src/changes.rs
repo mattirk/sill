@@ -63,6 +63,25 @@ pub fn scan(policy: &Policy, plan: &jail::JailPlan, session_start: Option<std::t
     Ok(changes)
 }
 
+/// A ghost session's hour (docs/memory.md §3.2): of `changes`, those whose last write (the upper
+/// entry's mtime) is at least `after` before `now` — repositories, ignored build output and
+/// conflicts included, since everything of a ghost reverts. A due directory with a change below it
+/// that is not due yet waits for it: reverting the directory would take the newer write too. The
+/// deepest paths come first, so a directory goes after its contents.
+pub fn ghost_due(changes: &[Change], now: std::time::SystemTime, after: std::time::Duration) -> Vec<Change> {
+    let written = |c: &Change| std::fs::symlink_metadata(&c.upper).ok().and_then(|m| m.modified().ok());
+    let is_due = |c: &Change| written(c).is_some_and(|t| now.duration_since(t).unwrap_or_default() >= after);
+    let fresh: Vec<&Path> = changes.iter().filter(|c| !is_due(c)).map(|c| c.path.as_path()).collect();
+    let mut due: Vec<Change> = changes
+        .iter()
+        .filter(|c| is_due(c))
+        .filter(|c| !fresh.iter().any(|f| *f != c.path && f.starts_with(&c.path)))
+        .cloned()
+        .collect();
+    due.sort_by_key(|c| std::cmp::Reverse(c.path.components().count()));
+    due
+}
+
 static GIT_VIEWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Git on a repository the agent can write — a pin is live, and a kept overlay copy is the agent's
@@ -560,6 +579,51 @@ pub fn home() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ghost hour: due by the upper entry's last write, a directory waits for its newer
+    /// contents, deepest first.
+    #[test]
+    fn ghost_due_by_last_write() {
+        use crate::ledger::{FileType, Kind};
+        let dir = std::env::temp_dir().join(format!("sill-ghost-due-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("old/sub")).unwrap();
+        std::fs::create_dir_all(dir.join("mixed")).unwrap();
+        for f in ["old/sub/a", "mixed/stale", "mixed/fresh", "lone"] {
+            std::fs::write(dir.join(f), "x").unwrap();
+        }
+        let now = std::time::SystemTime::now();
+        let two_h = now - std::time::Duration::from_secs(7200);
+        let set = |p: &str, t: std::time::SystemTime| std::fs::File::open(dir.join(p)).unwrap().set_modified(t).unwrap();
+        for p in ["old/sub/a", "old/sub", "old", "mixed/stale", "mixed", "lone"] {
+            set(p, two_h);
+        }
+        let ch = |p: &str, ft: FileType| Change {
+            path: PathBuf::from("/home/me").join(p),
+            upper: dir.join(p),
+            kind: Kind::Added,
+            file_type: ft,
+            size: 1,
+            conflict: p == "lone",
+            ignored: false,
+        };
+        let all = vec![
+            ch("old", FileType::Dir),
+            ch("old/sub", FileType::Dir),
+            ch("old/sub/a", FileType::File),
+            ch("mixed", FileType::Dir),
+            ch("mixed/stale", FileType::File),
+            ch("mixed/fresh", FileType::File),
+            ch("lone", FileType::File),
+        ];
+        let due: Vec<String> = ghost_due(&all, now, std::time::Duration::from_secs(3600))
+            .iter()
+            .map(|c| c.path.strip_prefix("/home/me").unwrap().display().to_string())
+            .collect();
+        assert_eq!(due, ["old/sub/a", "old/sub", "mixed/stale", "old", "lone"], "mixed waits for mixed/fresh; a conflict reverts too");
+        assert!(ghost_due(&all, now, std::time::Duration::from_secs(3 * 3600)).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use crate::ledger::{FileType, Kind};
 
     #[test]

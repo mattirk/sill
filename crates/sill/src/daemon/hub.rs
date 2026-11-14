@@ -165,6 +165,7 @@ impl Hub {
                 }
             }
         }
+        self.revert_ghosts();
         let uid = rustix::process::getuid().as_raw();
         match sill_core::memory::nightly_if_due(&|id| {
             let _ = sill_core::session::remove_state(uid, id);
@@ -575,6 +576,65 @@ impl Hub {
         refresh_memory();
         eprintln!("sill daemon: session {id} deleted");
         Ok(())
+    }
+
+    /// A ghost's hour (docs/memory.md §3.2), from the minute sweep: in every running ghost that is
+    /// not mid-turn, each write whose last change is an hour old reverts through the jail's shim —
+    /// repositories, build output and conflicts too (`changes::ghost_due`). The attached frontends
+    /// get a note saying how many went.
+    fn revert_ghosts(&self) {
+        let after = std::time::Duration::from_secs(sill_core::policy::GHOST_IDLE_MINUTES as u64 * 60);
+        let ghosts: Vec<sill_core::store::Session> =
+            self.with_store(|s| s.sessions()).unwrap_or_default().into_iter().filter(|s| s.ghost && s.ended_at.is_none()).collect();
+        let uid = rustix::process::getuid().as_raw();
+        let user = std::env::var("USER").unwrap_or_else(|_| uid.to_string());
+        for s in ghosts {
+            let runner = self.runners.lock().unwrap().get(&s.id).filter(|r| r.alive()).cloned();
+            if runner.as_ref().is_some_and(|r| r.busy()) || !sill_core::session::is_running(&s.id) {
+                continue;
+            }
+            let due = match self.ghost_changes(&s, uid, &user) {
+                Ok(changes) => sill_core::changes::ghost_due(&changes, std::time::SystemTime::now(), after),
+                Err(e) => {
+                    eprintln!("sill daemon: ghost {}: scanning its writes: {e:#}", s.id);
+                    continue;
+                }
+            };
+            if due.is_empty() {
+                continue;
+            }
+            let Ok(sock) = sill_core::session::socket_path(&s.id) else { continue };
+            let mut control = match sill_core::shim::Control::connect(&sock) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("sill daemon: ghost {}: {e:#}", s.id);
+                    continue;
+                }
+            };
+            let mut n = 0;
+            for c in &due {
+                match control.revert(&c.path) {
+                    Ok(_) => n += 1,
+                    Err(e) => eprintln!("sill daemon: ghost {}: reverting {}: {e:#}", s.id, c.path.display()),
+                }
+            }
+            eprintln!("sill daemon: ghost {}: reverted {n} of {} path(s) an hour after their last write", s.id, due.len());
+            if n > 0 && let Some(r) = runner {
+                r.notify(&sill_core::wire::Event::Note(format!("ghost: {n} path(s) reverted, an hour after their last write")));
+            }
+        }
+    }
+
+    /// A ghost's writes as the Changes page lists them: its upper trees against the tightened policy.
+    fn ghost_changes(&self, s: &sill_core::store::Session, uid: u32, user: &str) -> Result<Vec<sill_core::ledger::Change>> {
+        let mut policy = Policy::load(&s.policy, &self.home)?;
+        policy.ghostly(&self.home);
+        let registry = sill_core::agents::load(&self.home);
+        let Some(agent) = registry.get(&s.agent) else { bail!("unknown agent {}", s.agent) };
+        let sdir = sill_core::session::state_dir(uid, &s.id)?;
+        let binds = sill_core::session::binds_for(agent, &policy, &sdir, &self.home, &[], true)?;
+        let plan = sill_core::changes::session_plan(policy.clone(), sdir, &self.home, uid, user, binds)?;
+        sill_core::changes::scan(&policy, &plan, None)
     }
 
     /// The row says ghost (a missing row: no).
