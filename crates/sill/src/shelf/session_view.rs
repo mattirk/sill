@@ -219,11 +219,11 @@ impl SessionView {
             *view.on_shell.borrow_mut() = Some(Box::new(move |on| v.show_shell(on)));
         }
         {
+            // the pty is foreign (the shell's pid is in the jail's namespace, VTE can't watch it), so
+            // the shell going away shows up as EOF on the master, not as child-exited. Detach the dead
+            // pty and drop back to the prompt; the next toggle opens a fresh shell.
             let v = view.clone();
-            terminal.connect_child_exited(move |_, status| {
-                v.shell_open.set(false);
-                v.terminal.feed(format!("\r\n[shell exited ({status})]\r\n").as_bytes());
-            });
+            terminal.connect_eof(move |_| v.shell_closed());
         }
         view.connect();
         view
@@ -283,6 +283,14 @@ impl SessionView {
         }
         self.bottom.set_visible_child_name("shell");
         self.terminal.grab_focus();
+    }
+
+    /// The shell's pty hit EOF (exit, Ctrl+D): forget it and show the prompt again.
+    fn shell_closed(self: &Rc<Self>) {
+        self.shell_open.set(false);
+        self.terminal.set_pty(None);
+        self.terminal.reset(true, true);
+        self.show_shell(false);
     }
 
     pub fn toggle_shell(self: &Rc<Self>) {

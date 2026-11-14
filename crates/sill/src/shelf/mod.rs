@@ -199,7 +199,18 @@ pub fn restart(hidden: bool, dev: bool) -> Result<()> {
         }
     }
     drop(app);
-    let exe = std::env::current_exe()?;
+    // --dev means the debug build of the checkout this binary was built from, whichever copy of
+    // `sill` ran this command (the installed one included); without it, this binary itself
+    let mut exe = std::env::current_exe()?;
+    if dev {
+        let candidate = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/sill");
+        if let Ok(c) = candidate.canonicalize()
+            && c.is_file()
+        {
+            exe = c;
+        }
+    }
+    println!("starting {}", exe.display());
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("shelf");
     if hidden {
