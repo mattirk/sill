@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-pub use sill_memory::{Scope, date, first_line, tilde};
+pub use sill_memory::{Scope, brief, date, first_line, tilde};
 
 use crate::store::{Session, Store};
 

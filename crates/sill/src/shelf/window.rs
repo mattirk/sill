@@ -1507,7 +1507,8 @@ impl Shelf {
                 let sub = sess.ended_at.filter(|_| !sess.summary.is_empty()).map(|t| format!("{} · {}", sill_core::memory::date(t), sill_core::memory::first_line(&sess.summary)));
                 let b = row(registry.get(&sess.agent), &sess.title, sub.as_deref());
                 if !sess.summary.is_empty() {
-                    b.set_tooltip_text(Some(&sess.summary));
+                    // the opening paragraphs only: a whole summary as a tooltip covers the menu
+                    b.set_tooltip_text(Some(&sill_core::memory::brief(&sess.summary, 400)));
                 }
                 b.set_hexpand(true);
                 let del = super::icons::glyph_button("sill-trash");

@@ -557,6 +557,32 @@ pub fn first_line(summary: &str) -> &str {
     summary.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("")
 }
 
+/// A summary for a tooltip: whole paragraphs from the top while they fit in `max` characters
+/// (always the first, cut at a word if it alone is too long), then "…" when anything was left
+/// out. Whole summaries run to a dozen paragraphs; a tooltip that long covers the menu.
+pub fn brief(summary: &str, max: usize) -> String {
+    let paras: Vec<&str> = summary.split("\n\n").map(str::trim).filter(|p| !p.is_empty()).collect();
+    let mut out = String::new();
+    for (i, p) in paras.iter().enumerate() {
+        if i > 0 && out.chars().count() + p.chars().count() + 2 > max {
+            out.push_str("\n…");
+            return out;
+        }
+        if i == 0 && p.chars().count() > max {
+            let cut: String = p.chars().take(max).collect();
+            let at = cut.rfind(char::is_whitespace).unwrap_or(cut.len());
+            out.push_str(cut[..at].trim_end());
+            out.push('…');
+            return out;
+        }
+        if i > 0 {
+            out.push_str("\n\n");
+        }
+        out.push_str(p);
+    }
+    out
+}
+
 // --- show and transcript --------------------------------------------------------------------------
 
 /// A session's record as text: the facts, the summary, the notes.
@@ -763,6 +789,17 @@ pub fn cli(args: &[String], conn: &Connection, home: &Path, now: i64, kept: impl
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn brief_keeps_whole_paragraphs() {
+        let s = "First paragraph here.\n\nSecond one, a bit longer than the first.\n\nThird.";
+        assert_eq!(brief(s, 1000), s);
+        assert_eq!(brief(s, 70), "First paragraph here.\n\nSecond one, a bit longer than the first.\n…");
+        assert_eq!(brief(s, 30), "First paragraph here.\n…");
+        // the first paragraph alone too long: cut at a word
+        assert_eq!(brief("one two three four five", 12), "one two…");
+        assert_eq!(brief("  \n\n", 12), "");
+    }
 
     fn store_like() -> Connection {
         let c = Connection::open_in_memory().unwrap();

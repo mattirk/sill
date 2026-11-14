@@ -4,7 +4,7 @@
 //! Markdown text tags use the same values. Every theme is complete — "Adwaita" is sill's copy of
 //! that palette, not the desktop's — so a shelf looks the same on every machine whatever the GTK
 //! theme, icon theme or dark/light preference there (2026-11-01). Built-in: Adwaita Dark, Adwaita
-//! Light, Dracula, Solarized Dark, Solarized Light, Nord. Chosen theme is saved in
+//! Light, Dracula, Solarized Dark, Solarized Light, Nord, Miasma. Chosen theme is saved in
 //! `~/.config/sill/sill.toml`.
 //!
 //! The text scale (`text_scale` in the same file) is applied here too: one `font-size` rule on the
@@ -75,6 +75,15 @@ pub fn builtin() -> Vec<Theme> {
             bg: "#2e3440", surface: "#3b4252", code_bg: "#272c36", fg: "#d8dee9", fg_dim: "#7b88a1",
             accent: "#88c0d0", warning: "#ebcb8b", success: "#a3be8c", error: "#bf616a", link: "#81a1c1",
             border: "#434c5e",
+        },
+        // xero's Miasma (terminal palette from miasma.nvim's extras): muted earth tones — the
+        // gold is the accent, the orange stands in for red (its red is a dark brown that would
+        // not read as an error), the olive "blue" is left out
+        Theme {
+            id: "miasma", name: "Miasma", dark: true,
+            bg: "#222222", surface: "#2b2b28", code_bg: "#1c1c1c", fg: "#c2c2b0", fg_dim: "#787866",
+            accent: "#c9a554", warning: "#b36d43", success: "#5f875f", error: "#bb7744", link: "#d7c483",
+            border: "#363632",
         },
     ]
 }
