@@ -83,7 +83,10 @@ impl App {
                 }
                 line = line.push(tooltip(
                     keys::press_maybe(
-                        button(text("▾").size(style::SMALL)).padding([3, 6]).style(style::solid(P.accent)),
+                        // the caret points up while its menu is open
+                        button(text(if state.menu.as_deref() == Some(id.as_str()) { "▴" } else { "▾" }).size(style::SMALL))
+                            .padding([3, 6])
+                            .style(style::solid(P.accent)),
                         ev(Event::Menu(session.clone(), id.clone())),
                     ),
                     container(text("Other ways to apply").size(style::TINY)).padding(6).style(style::fill(P.surface)),
