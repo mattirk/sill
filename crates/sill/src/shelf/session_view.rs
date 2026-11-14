@@ -165,6 +165,13 @@ impl SessionView {
         view
     }
 
+    /// Update and persist the remembered agent settings.
+    fn remember(&self, f: impl FnOnce(&mut sill_core::store::AgentSettings)) {
+        let mut s = self.session.borrow_mut();
+        f(&mut s.agent_settings);
+        let _ = self.store.set_agent_settings(&s.id, &s.agent_settings);
+    }
+
     fn command(&self, c: Command) {
         if let Some(d) = self.driver.borrow().as_ref() {
             let _ = d.commands.try_send(c);
@@ -198,6 +205,7 @@ impl SessionView {
                 }
                 if let Some(id) = ids.get(d.selected() as usize) {
                     v.command(Command::SetMode(id.clone()));
+                    v.remember(|s| s.mode = Some(id.clone()));
                 }
             });
             self.controls_row.append(&d);
@@ -222,6 +230,10 @@ impl SessionView {
                         }
                         if let Some(id) = ids.get(d.selected() as usize) {
                             v.command(Command::SetConfig(oid.clone(), ConfigValue::Id(id.clone())));
+                            let (o, i) = (oid.clone(), id.clone());
+                            v.remember(move |s| {
+                                s.config.insert(o, i);
+                            });
                         }
                     });
                     self.controls_row.append(&d);
@@ -239,6 +251,10 @@ impl SessionView {
                     sw.connect_state_set(move |_, state| {
                         if !v.rebuilding.get() {
                             v.command(Command::SetConfig(oid.clone(), ConfigValue::Bool(state)));
+                            let o = oid.clone();
+                            v.remember(move |s| {
+                                s.config.insert(o, state.to_string());
+                            });
                         }
                         glib::Propagation::Proceed
                     });
@@ -323,10 +339,8 @@ impl SessionView {
             self.pins_row.remove(&c);
         }
         let pins = self.store.pins(&self.id()).unwrap_or_default();
-        let live = self.live_pins.borrow().clone();
-        let stale = pins != live;
-        self.pins_row.set_visible(!pins.is_empty() || stale);
-        if pins.is_empty() && !stale {
+        self.pins_row.set_visible(!pins.is_empty());
+        if pins.is_empty() {
             return;
         }
         let head = if gtk::IconTheme::for_display(&gtk::gdk::Display::default().expect("display")).has_icon("view-pin-symbolic") {
@@ -382,25 +396,19 @@ impl SessionView {
             x.connect_clicked(move |_| {
                 let _ = v.store.unpin(&v.id(), &p);
                 v.refresh_pins();
+                if let Some(cb) = v.on_restart.borrow().as_ref() {
+                    cb(&v.id()); // pins are mounts: the jail is rebuilt (after the current turn if busy)
+                }
             });
             chip.append(&l);
             chip.append(&x);
             self.pins_row.append(&chip);
         }
-        if stale {
-            // pins are bound into the jail when it starts: offer the restart that makes them live
-            let b = gtk::Button::with_label("restart session to apply");
-            b.add_css_class("flat");
-            b.add_css_class("sill-apply");
-            b.set_tooltip_text(Some("Pinned folders become live (host = jail) when the session's jail is rebuilt; the conversation resumes"));
-            let v = self.clone();
-            b.connect_clicked(move |_| {
-                if let Some(cb) = v.on_restart.borrow().as_ref() {
-                    cb(&v.id());
-                }
-            });
-            self.pins_row.append(&b);
-        }
+    }
+
+    /// Pins the jail was started with, for deciding whether a rebuild is needed.
+    pub fn pins_changed(&self) -> bool {
+        self.store.pins(&self.id()).unwrap_or_default() != *self.live_pins.borrow()
     }
 
     /// Context block prepended to prompts while pins exist (SPEC §3.1 pins).
@@ -489,6 +497,30 @@ impl SessionView {
                 *self.replaying.borrow_mut() = *resumed;
                 self.status.set_text(if *resumed { "resumed" } else { "ready" });
                 self.build_controls(controls);
+                // bring the agent back to the settings the person last chose
+                let remembered = self.session.borrow().agent_settings.clone();
+                if let (Some(mode), Some((current, modes))) = (&remembered.mode, &controls.modes)
+                    && mode != current
+                    && modes.iter().any(|(id, _)| id == mode)
+                {
+                    self.command(Command::SetMode(mode.clone()));
+                }
+                for opt in &controls.options {
+                    let Some(want) = remembered.config.get(&opt.id) else { continue };
+                    match &opt.kind {
+                        ConfigKind::Select(current, values) => {
+                            if want != current && values.iter().any(|(id, _)| id == want) {
+                                self.command(Command::SetConfig(opt.id.clone(), ConfigValue::Id(want.clone())));
+                            }
+                        }
+                        ConfigKind::Boolean(current) => {
+                            let w = want == "true";
+                            if w != *current {
+                                self.command(Command::SetConfig(opt.id.clone(), ConfigValue::Bool(w)));
+                            }
+                        }
+                    }
+                }
                 return;
             }
             Event::Controls(c) => {

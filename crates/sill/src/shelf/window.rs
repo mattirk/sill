@@ -30,6 +30,7 @@ pub struct Shelf {
     status: gtk::Label,
     spinner: gtk::Spinner,
     busy: RefCell<std::collections::HashSet<String>>,
+    pending_restart: RefCell<std::collections::HashSet<String>>,
     views: RefCell<HashMap<String, Rc<SessionView>>>,
     changes: Rc<ChangesPage>,
     files: Rc<FilesPage>,
@@ -151,6 +152,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         status: status.clone(),
         spinner: spinner.clone(),
         busy: RefCell::new(std::collections::HashSet::new()),
+        pending_restart: RefCell::new(std::collections::HashSet::new()),
         views: RefCell::new(HashMap::new()),
         changes: changes.clone(),
         files: files.clone(),
@@ -170,6 +172,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
             if let Some(v) = s.views.borrow().get(sid) {
                 v.refresh_pins();
             }
+            s.restart_session(sid);
         }));
     }
     // dropdown entries
@@ -359,6 +362,11 @@ impl Shelf {
                     shelf.busy.borrow_mut().remove(id);
                 }
                 shelf.sync_spinner();
+                if !busy && shelf.pending_restart.borrow_mut().remove(id) {
+                    let shelf2 = shelf.clone();
+                    let id = id.to_string();
+                    glib::idle_add_local_once(move || shelf2.restart_session(&id));
+                }
             }));
         }
         {
@@ -387,8 +395,20 @@ impl Shelf {
         self.sync_status();
     }
 
-    /// Rebuild a session's jail (pins changed): close the tab, stop the unit, reopen → resume.
+    /// Rebuild a session's jail because its pins changed: close the tab, stop the unit, reopen →
+    /// the conversation resumes. Deferred to the end of the turn while the agent is working.
     fn restart_session(self: &Rc<Self>, id: &str) {
+        let needs = self.views.borrow().get(id).map(|v| v.pins_changed()).unwrap_or(false);
+        if !needs {
+            return;
+        }
+        if self.busy.borrow().contains(id) {
+            self.pending_restart.borrow_mut().insert(id.to_string());
+            if let Some(v) = self.views.borrow().get(id) {
+                v.conv.add_note("pins changed: the session restarts after this turn");
+            }
+            return;
+        }
         let stored = self.store.sessions().unwrap_or_default().into_iter().find(|s| s.id == id);
         self.close_session(id);
         if let Some(s) = stored {

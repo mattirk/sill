@@ -19,6 +19,17 @@ pub struct Session {
     pub policy: String,
     /// Answer the agent's permission requests with "allow once" automatically.
     pub auto_allow: bool,
+    /// The agent controls as last set by the person: mode id and config option values, re-applied
+    /// whenever the ACP session is (re)started.
+    pub agent_settings: AgentSettings,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AgentSettings {
+    pub mode: Option<String>,
+    /// option id → value id (selects) or "true"/"false" (booleans)
+    #[serde(default)]
+    pub config: std::collections::BTreeMap<String, String>,
 }
 
 /// One stored transcript entry.
@@ -75,7 +86,13 @@ impl Store {
         )?;
         // additive migrations
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN auto_allow INTEGER NOT NULL DEFAULT 0", []);
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN agent_settings TEXT NOT NULL DEFAULT '{}'", []);
         Ok(Self { conn })
+    }
+
+    pub fn set_agent_settings(&self, id: &str, s: &AgentSettings) -> Result<()> {
+        self.conn.execute("UPDATE sessions SET agent_settings = ?2 WHERE id = ?1", params![id, serde_json::to_string(s)?])?;
+        Ok(())
     }
 
     pub fn set_auto_allow(&self, id: &str, on: bool) -> Result<()> {
@@ -89,7 +106,7 @@ impl Store {
 
     pub fn sessions(&self) -> Result<Vec<Session>> {
         let mut st = self.conn.prepare(
-            "SELECT id, agent, title, created_at, last_used, acp_session_id, policy, auto_allow FROM sessions ORDER BY last_used DESC",
+            "SELECT id, agent, title, created_at, last_used, acp_session_id, policy, auto_allow, agent_settings FROM sessions ORDER BY last_used DESC",
         )?;
         let rows = st.query_map([], |r| {
             Ok(Session {
@@ -101,6 +118,7 @@ impl Store {
                 acp_session_id: r.get(5)?,
                 policy: r.get(6)?,
                 auto_allow: r.get::<_, i32>(7)? != 0,
+                agent_settings: serde_json::from_str(&r.get::<_, String>(8)?).unwrap_or_default(),
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -116,6 +134,7 @@ impl Store {
             acp_session_id: None,
             policy: policy.to_string(),
             auto_allow: false,
+            agent_settings: AgentSettings::default(),
         };
         self.conn.execute(
             "INSERT INTO sessions (id, agent, title, created_at, last_used, acp_session_id, policy) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6)",
