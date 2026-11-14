@@ -149,7 +149,8 @@ class Client:
         self.next_id = 1
         self.sock = socket.socket(socket.AF_UNIX)
         self.sock.settimeout(120)
-        self.sock.connect(str(path))
+        self.path = str(path)
+        self.sock.connect(self.path)
         self.input = self.sock.makefile("rb")
         offer = {"protocols": [PROTOCOL], "client": {"name": "sfp-python", "version": "0.1"}, "capabilities": {}}
         response = self.call("_sill/initialize", offer)
@@ -209,6 +210,38 @@ class Client:
                 raise RpcError(message["error"])
             self.validate(method, "result", message["result"])
             return message["result"]
+
+    def open_stream(self, token):
+        """Claim once on a fresh transport; an uncertain claim must never be retried."""
+        stream = socket.socket(socket.AF_UNIX)
+        stream.settimeout(120)
+        try:
+            stream.connect(self.path)
+            stream.sendall((json.dumps({"_sill_stream": token}) + "\n").encode())
+            return stream
+        except BaseException:
+            stream.close()
+            raise
+
+    def progress(self, token):
+        """Consume a host job's typed progress. EOF without a terminal event is unknown."""
+        shape = self.schema["streams"]["host_progress"]["event"]
+        schema = {"$schema": "https://json-schema.org/draft/2020-12/schema", "$defs": self.schema["$defs"], **shape}
+        with self.open_stream(token) as stream, stream.makefile("rb") as source:
+            while True:
+                line = source.readline(MAX_FRAME + 1)
+                if not line:
+                    raise EOFError("host job stream ended; outcome unknown, do not automatically retry")
+                if len(line) > MAX_FRAME or not line.endswith(b"\n"):
+                    raise ValueError("oversized or incomplete progress frame")
+                event = json.loads(line)
+                self.validator(schema).validate(event)
+                for field in ("text", "message"):
+                    if field in event and len(event[field].encode()) > self.schema["streams"]["host_progress"]["max_text_bytes"]:
+                        raise ValueError("oversized progress text")
+                yield event
+                if event["type"] in ("completed", "failed"):
+                    return
 
     def event(self):
         message = self.pending.pop(0) if self.pending else self.read()
@@ -301,11 +334,41 @@ def main():
     choice.add_argument("--option")
     choice.add_argument("--form-json", type=json.loads)
     choice.add_argument("--cancel", action="store_true")
+    commands.add_parser("registry")
+    login = commands.add_parser("login")
+    login.add_argument("agent_id")
+    login.add_argument("method_id")
+    install = commands.add_parser("install")
+    install.add_argument("entry_id")
+    install.add_argument("version")
+    install.add_argument("--source", choices=("snapshot", "live"), default="snapshot")
+    install.add_argument("--allow-unreviewed", action="store_true")
     args = parser.parse_args()
     schema = json.loads(args.schema.read_text()) if args.schema else None
     client = Client(args.socket, schema)
     try:
-        if args.command == "list":
+        if args.command == "registry":
+            after = None
+            while True:
+                page = client.call("_sill/registry.list", {"after": after, "limit": 64})
+                for entry in page["entries"]:
+                    print(json.dumps(entry, ensure_ascii=False))
+                after = page["next"]
+                if after is None:
+                    break
+        elif args.command in ("login", "install"):
+            if args.command == "login":
+                method = "_sill/agents.login"
+                params = {"agent_id": args.agent_id, "method_id": args.method_id}
+            else:
+                method = "_sill/registry.install"
+                params = {"entry_id": args.entry_id, "version": args.version, "source": args.source, "allow_unreviewed": args.allow_unreviewed}
+            opened = client.call(method, params)
+            for event in client.progress(opened["token"]):
+                print(json.dumps(event, ensure_ascii=False), flush=True)
+                if event["type"] == "failed":
+                    raise RuntimeError(event["message"])
+        elif args.command == "list":
             after = None
             while True:
                 page = client.call("_sill/sessions.list", {"after": after, "limit": args.limit})

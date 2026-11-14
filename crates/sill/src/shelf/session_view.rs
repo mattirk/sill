@@ -1138,18 +1138,20 @@ impl SessionView {
             .spawn(move || {
                 let r = (|| -> anyhow::Result<()> {
                     use std::io::BufRead;
-                    let token: String = remote::request(Request::HostLogin { agent: agent.id, method })?;
-                    let stream = sill_proto::transport::open_stream(&token)?;
+                    let opened: sill_proto::host::HostStream = super::client::call("_sill/agents.login", sill_proto::host::AgentLogin { agent_id: agent.id, method_id: method })?;
+                    let stream = sill_proto::transport::open_stream(&opened.token)?;
                     struct Close(std::sync::Arc<dyn Fn() + Send + Sync>);
                     impl Drop for Close { fn drop(&mut self) { (self.0)(); } }
                     let _close = Close(stream.interrupt.clone());
                     for line in std::io::BufReader::new(stream.reader).lines() {
-                        let value: serde_json::Value = serde_json::from_str(&line?)?;
-                        if let Some(error) = value.get("error").and_then(|v| v.as_str()) { anyhow::bail!("{error}"); }
-                        if value.get("done").and_then(|v| v.as_bool()) == Some(true) { return Ok(()); }
-                        if let Some(status) = value.get("status").and_then(|v| v.as_str()) { let _ = tx.send_blocking(Ok(status.into())); }
+                        match serde_json::from_str::<sill_proto::host::Progress>(&line?)? {
+                            sill_proto::host::Progress::Failed { message, .. } => anyhow::bail!("{message}"),
+                            sill_proto::host::Progress::Completed { .. } => return Ok(()),
+                            sill_proto::host::Progress::Status { text } | sill_proto::host::Progress::Stderr { text } => { let _ = tx.send_blocking(Ok(text)); }
+                            _ => {}
+                        }
                     }
-                    anyhow::bail!("login stream closed before completion")
+                    anyhow::bail!("login connection closed; outcome unknown. Check login status before retrying")
                 })();
                 let _ = tx.send_blocking(r.map(|_| String::new()).map_err(|e| format!("{e:#}")));
             })

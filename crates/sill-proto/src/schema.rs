@@ -52,6 +52,10 @@ pub const METHODS: &[Method] = &[
     req_empty::<crate::sessions::SessionKey>("_sill/sessions.stop", "Stop the jail, preserving the session. Do not blindly retry after connection loss."),
     req::<crate::sessions::End, crate::sessions::Ending>("_sill/sessions.end", "End a session, possibly waiting for its summary. Do not blindly retry after connection loss."),
     req_empty::<crate::sessions::SessionKey>("_sill/sessions.checkpoint", "Request a summary. Do not blindly retry after connection loss."),
+    req::<crate::host::PortOpen, crate::host::HostStream>("_sill/streams.port", "Connect to a TCP port in a running session jail; close the byte stream to close the connection. Do not blindly retry."),
+    req::<crate::host::AgentLogin, crate::host::HostStream>("_sill/agents.login", "Start host login with tagged progress. Disconnect does not cancel; do not blindly retry."),
+    req::<crate::host::RegistryInstall, crate::host::HostStream>("_sill/registry.install", "Install a daemon registry entry with tagged progress. Disconnect does not cancel; do not blindly retry."),
+    req::<crate::host::RegistryList, crate::host::RegistryPage>("_sill/registry.list", "List the daemon's registry in bounded live pages, including install selectors and trust source."),
     req::<crate::terminals::Open, crate::terminals::Terminal>("_sill/terminals.open", "Open a daemon-owned terminal in a session's jail or on the daemon host. Do not blindly retry after connection loss: list first."),
     req::<crate::terminals::List, crate::terminals::Terminals>("_sill/terminals.list", "Running and recently exited terminals, at most 64."),
     req::<crate::terminals::TerminalKey, crate::terminals::Terminal>("_sill/terminals.get", "Read one terminal, including its exit."),
@@ -138,6 +142,7 @@ pub fn document() -> Value {
             })
         })
         .collect();
+    let progress = g.subschema_for::<crate::host::Progress>().to_value();
     let defs = g.take_definitions(true);
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -147,6 +152,7 @@ pub fn document() -> Value {
         "transport": "JSON-RPC 2.0, one message per line, over the unix socket at $XDG_RUNTIME_DIR/sill/daemon.sock (docs/protocol.md)",
         "methods": methods,
         "$defs": defs,
+        "streams": {"host_progress": {"framing": "ndjson", "event": progress, "max_text_bytes": crate::host::MAX_PROGRESS_TEXT, "max_jobs": crate::host::MAX_JOBS}},
     })
 }
 

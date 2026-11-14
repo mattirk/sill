@@ -28,7 +28,7 @@ pub fn request<T: DeserializeOwned>(r: Request) -> Result<T> {
     type Lane = OnceLock<Mutex<Option<Arc<sill_proto::Client>>>>;
     static DATA: Lane = OnceLock::new();
     static SLOW: Lane = OnceLock::new();
-    let slow = matches!(&r, Request::Install(_) | Request::FetchRegistry | Request::Icon(_) | Request::Find { .. } | Request::Export);
+    let slow = matches!(&r, Request::FetchRegistry | Request::Icon(_) | Request::Find { .. } | Request::Export);
     let cached = cacheable(&r);
     let key = format!("{}:{}", std::env::var("SILL_BOX").unwrap_or_default(), serde_json::to_string(&r)?);
     let cache = RESPONSES.get_or_init(Default::default);
@@ -59,11 +59,7 @@ pub fn request<T: DeserializeOwned>(r: Request) -> Result<T> {
         let mut slot = slot.lock().unwrap();
         if slot.as_ref().is_some_and(|current| Arc::ptr_eq(current, &client)) { *slot = None; }
         drop(slot);
-        // These can create processes or start an install. A lost reply is not permission to run
-        // them twice; the caller reports the interrupted operation instead.
-        if !matches!(&r, Request::OpenPort { .. } | Request::HostLogin { .. } | Request::Install(_)) {
-            result = connect()?.call_within(sill_core::frontend::METHOD, &r, timeout);
-        }
+        result = connect()?.call_within(sill_core::frontend::METHOD, &r, timeout);
     }
     let value = result?;
     if cached {
@@ -165,6 +161,7 @@ pub mod agents {
     pub fn forget_memory(agent: &Agent, _home: &std::path::Path) -> anyhow::Result<usize> { super::request(super::Request::ForgetAgentMemory { id: agent.id.clone() }) }
 }
 pub mod registry {
+    use anyhow::Context;
     pub use sill_core::registry::{Entry, Trust, builtin_for, is_tested, snapshot};
     pub fn merged(_home: &std::path::Path) -> (Vec<Entry>, Option<std::time::SystemTime>) {
         super::request::<(Vec<sill_core::frontend::RegistryEntry>, Option<std::time::SystemTime>)>(super::Request::Registry)
@@ -173,20 +170,30 @@ pub mod registry {
     pub fn fetch(_home: &std::path::Path) -> anyhow::Result<()> { let _: serde_json::Value = super::request(super::Request::FetchRegistry)?; Ok(()) }
     pub fn installed(_home: &std::path::Path, id: &str) -> Option<sill_core::registry::Installed> { super::request(super::Request::Installed { id: id.into() }).ok().flatten() }
     pub fn available(agent: &sill_core::agents::Agent, _home: &std::path::Path) -> Option<std::path::PathBuf> { super::request(super::Request::Available(agent.clone())).ok().flatten() }
-    pub fn install(_home: &std::path::Path, entry: &Entry, log: &mut dyn FnMut(String)) -> anyhow::Result<sill_core::agents::Agent> {
+    pub fn install(home: &std::path::Path, entry: &Entry, log: &mut dyn FnMut(String)) -> anyhow::Result<sill_core::agents::Agent> {
         use std::io::BufRead;
-        let token: String = super::request(super::Request::Install(entry.clone()))?;
-        let stream = sill_proto::transport::open_stream(&token)?;
+        let opened: sill_proto::host::HostStream = super::super::client::call("_sill/registry.install", sill_proto::host::RegistryInstall {
+            entry_id: entry.id.clone(), version: entry.version.clone(),
+            source: match entry.trust { Trust::Snapshot => "snapshot", Trust::Live => "live" }.into(),
+            allow_unreviewed: entry.trust == Trust::Live,
+        })?;
+        let stream = sill_proto::transport::open_stream(&opened.token)?;
         struct Stop(std::sync::Arc<dyn Fn() + Send + Sync>);
         impl Drop for Stop { fn drop(&mut self) { (self.0)(); } }
         let _stop = Stop(stream.interrupt);
         for line in std::io::BufReader::new(stream.reader).lines() {
-            let value: serde_json::Value = serde_json::from_str(&line?)?;
-            if let Some(line) = value.get("line").and_then(|v| v.as_str()) { log(line.into()); }
-            if let Some(error) = value.get("error").and_then(|v| v.as_str()) { anyhow::bail!("{error}") }
-            if let Some(agent) = value.get("agent") { super::invalidate(); return Ok(serde_json::from_value(agent.clone())?) }
+            let event: sill_proto::host::Progress = serde_json::from_str(&line?)?;
+            match event {
+                sill_proto::host::Progress::Output { text } => log(text),
+                sill_proto::host::Progress::Failed { message, .. } => anyhow::bail!("{message}"),
+                sill_proto::host::Progress::Completed { agent_id } => {
+                    super::invalidate();
+                    return super::agents::load(home).remove(&agent_id).context("installed agent not found");
+                }
+                _ => {}
+            }
         }
-        anyhow::bail!("install stream closed before completion")
+        anyhow::bail!("installation connection closed; outcome unknown. Check the agent before retrying")
     }
     pub fn uninstall(_home: &std::path::Path, entry: &Entry) -> anyhow::Result<()> { let _: serde_json::Value = super::request(super::Request::Uninstall(entry.clone()))?; Ok(()) }
     pub fn fetch_icon(_home: &std::path::Path, entry: &Entry) -> Option<std::path::PathBuf> {

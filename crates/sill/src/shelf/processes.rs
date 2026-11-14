@@ -76,9 +76,9 @@ pub fn expose(session: String, jail_port: u16) -> Result<Bridge> {
 
 /// One browser connection ⇄ the shim ⇄ the process inside.
 fn relay(host: std::net::TcpStream, session: &str, port: u16, stopped: &AtomicBool, active: &Mutex<Vec<Weak<Connection>>>) {
-    let token: Result<String> = super::remote::request(sill_core::frontend::Request::OpenPort { session: session.into(), port });
-    let Ok(token) = token else { return };
-    let Ok(stream) = sill_proto::transport::open_stream(&token) else { return };
+    let opened: Result<sill_proto::host::HostStream> = super::client::call("_sill/streams.port", sill_proto::host::PortOpen { session_id: session.into(), port });
+    let Ok(opened) = opened else { return };
+    let Ok(stream) = sill_proto::transport::open_stream(&opened.token) else { return };
     let Ok(mut host_r) = host.try_clone() else { (stream.interrupt)(); return };
     let Ok(socket) = host.try_clone() else { (stream.interrupt)(); return };
     let connection = Arc::new(Connection { socket, interrupt: stream.interrupt.clone() });

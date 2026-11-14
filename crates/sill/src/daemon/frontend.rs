@@ -73,11 +73,6 @@ pub fn dispatch(hub: &Hub, params: Value) -> Result<Value> {
         Request::FetchRegistry => { sill_core::registry::fetch(&home)?; json!(null) },
         Request::Installed { id } => { valid_agent(&id)?; json!(sill_core::registry::installed(&home, &id)) },
         Request::Available(agent) => json!(sill_core::registry::available(&agent, &home)),
-        Request::Install(entry) => {
-            valid_agent(&entry.id)?;
-            let entry = install_entry(&home, &entry)?;
-            json!(super::streams::install(entry, home.clone())?)
-        },
         Request::Uninstall(entry) => { valid_agent(&entry.id)?; sill_core::registry::uninstall(&home, &entry)?; json!(null) },
         Request::Icon(entry) => {
             valid_agent(&entry.id)?;
@@ -176,11 +171,6 @@ pub fn dispatch(hub: &Hub, params: Value) -> Result<Value> {
             let session = session_row(hub, &session)?;
             json!(sill_core::session::policy_of(&session, &home)?.processes)
         },
-        Request::OpenPort { session, port } => { session_row(hub, &session)?; json!(super::streams::port(&session, port)?) },
-        Request::HostLogin { agent, method } => {
-            let agent = sill_core::agents::load(&home).remove(&agent).context("unknown agent")?;
-            json!(super::streams::login(agent, home.clone(), method)?)
-        },
     };
     Ok(value)
 }
@@ -221,17 +211,6 @@ fn resolve_image(hub: &Hub, session: &str, src: &str, home: &Path) -> Result<Opt
 fn valid_agent(id: &str) -> Result<()> {
     if id.is_empty() || !id.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.')) || id == "." || id == ".." { bail!("invalid agent id"); }
     Ok(())
-}
-
-fn install_entry(home: &Path, requested: &sill_core::registry::Entry) -> Result<sill_core::registry::Entry> {
-    for entry in sill_core::registry::merged(home).0 {
-        if entry.id != requested.id { continue }
-        if entry.version == requested.version { return Ok(entry) }
-        if let Some(newer) = entry.newer
-            && newer.version == requested.version
-        { return Ok(*newer) }
-    }
-    bail!("{} {} is no longer in the box’s registry; refresh before installing", requested.id, requested.version)
 }
 
 fn metadata(path: &Path) -> Result<Metadata> {
@@ -280,17 +259,6 @@ fn find_files(bases: &[std::path::PathBuf], q: &str, cap: usize, visits: usize) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn snapshot_install_uses_the_boxes_reviewed_entry() {
-        let entry = sill_core::registry::snapshot().agents.iter().find(|entry| entry.npm_lock.is_some()).unwrap().clone();
-        let mut requested = entry.clone();
-        requested.npm_lock = None;
-        requested.distribution = Default::default();
-        requested.trust = sill_core::registry::Trust::Live;
-        let resolved = install_entry(&std::env::temp_dir().join(format!("sill-install-entry-{}", std::process::id())), &requested).unwrap();
-        assert_eq!(resolved.trust, sill_core::registry::Trust::Snapshot);
-        assert_eq!(serde_json::to_value(resolved).unwrap(), serde_json::to_value(entry).unwrap());
-    }
     /// A search finds by name, by path with a slash, skips noise folders, and says when cut.
     #[test]
     fn find_files_by_name_and_path() {

@@ -15,6 +15,7 @@ pub mod wire;
 pub mod sfp;
 pub mod sessions;
 pub mod terminals;
+pub mod host;
 pub mod transport;
 
 pub use client::Client;

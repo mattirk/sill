@@ -111,6 +111,10 @@ impl Hub {
             conn.reply(&match result { Ok(value)=>Response::ok(request_id,value), Err(error)=>Response::err(Some(request_id),error) });
             return Ok(true);
         }
+        if let Some(result) = super::host::handle(self, method, params.clone()) {
+            conn.reply(&match result { Ok(value)=>Response::ok(request_id,value), Err(error)=>Response::err(Some(request_id),failure(error)) });
+            return Ok(true);
+        }
         if let Some(result) = super::terminals::handle(method, params.clone()) {
             conn.reply(&match result { Ok(value)=>Response::ok(request_id,value), Err(error)=>Response::err(Some(request_id),failure(error)) });
             return Ok(true);

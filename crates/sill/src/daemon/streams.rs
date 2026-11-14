@@ -3,9 +3,8 @@
 //! dropped on the next token and by the daemon's minute sweep, never by a thread of their own.
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufReader, Read, Write};
+use std::io::{BufReader, Read};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
@@ -41,38 +40,8 @@ pub fn port(session: &str, port: u16) -> Result<String> {
     add(Endpoint::Socket(socket))
 }
 
-pub fn login(agent: sill_core::agents::Agent, home: PathBuf, method: String) -> Result<String> {
-    let (reader, mut writer) = UnixStream::pair()?;
-    let token = add(Endpoint::Socket(reader))?;
-    std::thread::Builder::new().name(format!("sill-login-{}", agent.id)).spawn(move || {
-        let result = sill_core::login::run(&agent, &home, &method, |line| {
-            let value = match line {
-                sill_core::login::Line::Status(text) => serde_json::json!({"status":text}),
-                sill_core::login::Line::Stderr(text) => serde_json::json!({"stderr":text}),
-            };
-            let _ = writeln!(writer, "{value}");
-        });
-        let value = match result { Ok(()) => serde_json::json!({"done":true}), Err(e) => serde_json::json!({"error":format!("{e:#}")}) };
-        let _ = writeln!(writer, "{value}");
-    })?;
-    Ok(token)
-}
-
-pub fn install(entry: sill_core::registry::Entry, home: PathBuf) -> Result<String> {
-    let (reader, mut writer) = UnixStream::pair()?;
-    let token = add(Endpoint::Socket(reader))?;
-    std::thread::Builder::new().name(format!("sill-install-{}", entry.id)).spawn(move || {
-        let result = sill_core::registry::install(&home, &entry, &mut |line| {
-            let _ = writeln!(writer, "{}", serde_json::json!({"line":line}));
-        });
-        let result = match result {
-            Ok(agent) => serde_json::json!({"agent":agent}),
-            Err(error) => serde_json::json!({"error":format!("{error:#}")}),
-        };
-        let _ = writeln!(writer, "{result}");
-    })?;
-    Ok(token)
-}
+pub fn socket(socket: UnixStream) -> Result<String> { add(Endpoint::Socket(socket)) }
+pub fn discard(token: &str) { state().lock().unwrap().remove(token); }
 
 pub fn claim(token: &str, mut reader: BufReader<UnixStream>) -> Result<()> {
     let pending = state().lock().unwrap().remove(token).context("unknown or already used stream token")?;

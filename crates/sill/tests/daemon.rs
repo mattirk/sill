@@ -175,6 +175,11 @@ fn attach_terminal(d: &Daemon, c: &mut Conn, id: &str, input: &str) -> UnixStrea
     let mut stream = UnixStream::connect(d.socket()).unwrap();
     stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     stream.write_all(format!("{}\n{input}", json!({"_sill_stream": token})).as_bytes()).unwrap();
+    // The daemon serves connections in parallel: the first holds the token only once it has
+    // output (its input's echo or the replay). Before that, the second could claim it first.
+    let mut first = [0u8; 1];
+    let (peeked, _) = rustix::net::recv(&stream, &mut first[..], rustix::net::RecvFlags::PEEK).unwrap();
+    assert_eq!(peeked, 1, "the first stream got no output");
     let mut second = UnixStream::connect(d.socket()).unwrap();
     second.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     second.write_all(format!("{}\n", json!({"_sill_stream": token})).as_bytes()).unwrap();
@@ -584,4 +589,178 @@ fn public_session_lifecycle_retries_pagination_and_restart() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(c.call("_sill/sessions.start",first).unwrap()["error"]["data"]["code"],"not_found");
+}
+
+/// Mock programs and registry only: no network, installed packages, or real login credentials.
+fn host_fixture() -> Daemon {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = Daemon::dir();
+    let agents = dir.join("home/.config/sill/agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    let script = dir.join("login.sh");
+    std::fs::write(&script, r#"#!/bin/sh
+read init
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"authMethods":[{"id":"browser"}]}}'
+read auth
+sleep 1
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
+"#).unwrap();
+    std::fs::write(agents.join("fixture.toml"), format!("id = 'fixture'\nname = 'Fixture'\ncommand = ['/bin/sh', '{}']\n", script.display())).unwrap();
+    // Fake local installer: one package fails, the other creates only fixture files.
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("npm"), r#"#!/bin/sh
+echo fixture-installer-output
+case "$*" in
+  *fixture-success@1.0.0*)
+    mkdir -p node_modules/fixture-success node_modules/.bin
+    printf '%s' '{"version":"1.0.0","bin":"fixture-success"}' > node_modules/fixture-success/package.json
+    printf '#!/bin/sh\nexit 0\n' > node_modules/.bin/fixture-success
+    chmod +x node_modules/.bin/fixture-success
+    exit 0 ;;
+esac
+exit 23
+"#).unwrap();
+    std::fs::write(bin.join("bwrap"), "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(bin.join("bwrap"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(bin.join("npm"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let registry = dir.join("state/sill/registry");
+    std::fs::create_dir_all(&registry).unwrap();
+    std::fs::write(registry.join("registry.json"), json!({"agents":[{"id":"fixture","name":"Fixture","version":"1.0.0","distribution":{"npx":{"package":"fixture@1.0.0"}}},{"id":"fixture-success","name":"Fixture Success","version":"1.0.0","distribution":{"npx":{"package":"fixture-success@1.0.0"}}}]}).to_string()).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+    Daemon::start_env(dir, &[("PATH", &path)])
+}
+
+fn claim_host(d: &Daemon, reply: &Value) -> BufReader<UnixStream> {
+    let token = reply["result"]["token"].as_str().unwrap_or_else(|| panic!("{reply}"));
+    let mut socket = UnixStream::connect(d.socket()).unwrap();
+    socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    socket.write_all(format!("{}\n", json!({"_sill_stream":token})).as_bytes()).unwrap();
+    BufReader::new(socket)
+}
+
+#[test]
+fn public_host_streams_validate_selectors_and_report_login_and_install_outcomes() {
+    let d = host_fixture();
+    let mut c = d.connect_caps(json!({})).unwrap();
+    let mut after = Value::Null;
+    let mut ids = Vec::new();
+    loop {
+        let page = c.call("_sill/registry.list", json!({"after":after,"limit":1})).unwrap();
+        let entries = page["result"]["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        ids.push(entries[0]["entry_id"].as_str().unwrap().to_string());
+        after = page["result"]["next"].clone();
+        if after.is_null() { break; }
+    }
+    assert!(ids.windows(2).all(|p| p[0] < p[1]));
+    assert!(ids.iter().any(|id| id == "fixture"));
+    let install = json!({"entry_id":"fixture","version":"1.0.0","source":"live"});
+    let denied = c.call("_sill/registry.install", install.clone()).unwrap();
+    assert_eq!(denied["error"]["data"]["code"], "permission_denied");
+    assert!(!d.dir.join("state/sill/tools/fixture").exists());
+    let mut allowed = install;
+    allowed["allow_unreviewed"] = json!(true);
+    let opened = c.call("_sill/registry.install", allowed).unwrap();
+    let events: Vec<Value> = claim_host(&d, &opened).lines().map(|l| serde_json::from_str(&l.unwrap()).unwrap()).collect();
+    assert!(events.iter().any(|e| e["type"] == "output" && e["text"] == "fixture-installer-output"), "{events:?}");
+    assert_eq!(events.last().unwrap()["type"], "failed");
+    assert_eq!(events.last().unwrap()["code"], "operation_failed");
+    let success = c.call("_sill/registry.install", json!({"entry_id":"fixture-success","version":"1.0.0","source":"live","allow_unreviewed":true})).unwrap();
+    let events: Vec<Value> = claim_host(&d, &success).lines().map(|l| serde_json::from_str(&l.unwrap()).unwrap()).collect();
+    assert_eq!(events.last().unwrap(), &json!({"type":"completed","agent_id":"fixture-success"}));
+    assert!(d.dir.join("home/.config/sill/agents/fixture-success.toml").exists());
+    let login = json!({"agent_id":"fixture","method_id":"browser"});
+    let opened = c.call("_sill/agents.login", login.clone()).unwrap();
+    let busy = c.call("_sill/agents.login", login).unwrap();
+    assert_eq!(busy["error"]["data"]["code"], "busy");
+    let events: Vec<Value> = claim_host(&d, &opened).lines().map(|l| serde_json::from_str(&l.unwrap()).unwrap()).collect();
+    assert_eq!(events.last().unwrap(), &json!({"type":"completed","agent_id":"fixture"}));
+    let bad_method = c.call("_sill/agents.login", json!({"agent_id":"fixture","method_id":"unknown"})).unwrap();
+    let events: Vec<Value> = claim_host(&d, &bad_method).lines().map(|l| serde_json::from_str(&l.unwrap()).unwrap()).collect();
+    assert_eq!(events.last().unwrap()["type"], "failed");
+    let bad_port = c.call("_sill/streams.port", json!({"session_id":"abcdef01","port":0})).unwrap();
+    assert_eq!(bad_port["error"]["code"], -32602);
+    let unknown = c.call("_sill/agents.login", json!({"agent_id":"absent-fixture","method_id":"browser"})).unwrap();
+    assert_eq!(unknown["error"]["data"]["code"], "not_found");
+}
+
+#[test]
+#[ignore = "requires Python jsonschema; run explicitly with SILL_SFP_PYTHON"]
+fn independent_python_client_consumes_public_host_streams() {
+    let d = host_fixture();
+    let mut c = d.connect_caps(json!({})).unwrap();
+    let created = c.call("_sill/sessions.create", json!({"create_id":"python-port", "agent":"claude", "policy":"default"})).unwrap();
+    let session = created["result"]["session_id"].as_str().unwrap();
+    let shim = mock_port(&d, session);
+    let output = Command::new(std::env::var("SILL_SFP_PYTHON").unwrap_or_else(|_| "python3".into()))
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/sfp_host_scenario.py"))
+        .arg(d.socket()).arg(session).output().unwrap();
+    assert!(output.status.success(), "{}\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr), d.log());
+    shim.join().unwrap();
+}
+
+fn mock_port(d: &Daemon, session: &str) -> std::thread::JoinHandle<()> {
+    use std::io::Read;
+    use std::os::unix::net::UnixListener;
+    let runtime = d.dir.join("run/sill").join(session);
+    std::fs::create_dir_all(&runtime).unwrap();
+    let listener = UnixListener::bind(runtime.join("shim.sock")).unwrap();
+    std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut reader = BufReader::new(socket.try_clone().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&line).unwrap(), json!({"role":"port","port":8123}));
+        socket.write_all(b"{\"ok\":true}\n").unwrap();
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"\0hello\xff");
+        // The caller's EOF must leave the response direction writable.
+        socket.write_all(b"\xffreply\0").unwrap();
+    })
+}
+
+#[test]
+fn public_port_stream_preserves_bytes_and_half_close() {
+    use std::io::Read;
+    let d = Daemon::start();
+    let mut c = d.connect_caps(json!({})).unwrap();
+    let created = c.call("_sill/sessions.create", json!({"create_id":"port-fixture", "agent":"claude", "policy":"default"})).unwrap();
+    let session = created["result"]["session_id"].as_str().unwrap();
+    let params = json!({"session_id":session,"port":8123});
+    assert_eq!(c.call("_sill/streams.port", params.clone()).unwrap()["error"]["data"]["code"], "invalid_state");
+    let shim = mock_port(&d, session);
+    let opened = c.call("_sill/streams.port", params).unwrap();
+    let mut stream = claim_host(&d, &opened);
+    stream.get_mut().write_all(b"\0hello\xff").unwrap();
+    stream.get_mut().shutdown(std::net::Shutdown::Write).unwrap();
+    let mut bytes = Vec::new();
+    stream.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, b"\xffreply\0");
+    shim.join().unwrap();
+}
+
+#[test]
+fn disconnecting_login_keeps_the_job_until_it_finishes() {
+    let d = host_fixture();
+    let mut c = d.connect_caps(json!({})).unwrap();
+    let login = json!({"agent_id":"fixture","method_id":"browser"});
+    let opened = c.call("_sill/agents.login", login.clone()).unwrap();
+    let stream = claim_host(&d, &opened);
+    stream.get_ref().shutdown(std::net::Shutdown::Both).unwrap();
+    drop(stream);
+    assert_eq!(c.call("_sill/agents.login", login.clone()).unwrap()["error"]["data"]["code"], "busy");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let reply = c.call("_sill/agents.login", login.clone()).unwrap();
+        if reply.get("error").is_none() {
+            let events: Vec<Value> = claim_host(&d, &reply).lines().map(|l| serde_json::from_str(&l.unwrap()).unwrap()).collect();
+            assert_eq!(events.last().unwrap()["type"], "completed");
+            break;
+        }
+        assert!(Instant::now() < deadline, "login slot not released: {reply}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }

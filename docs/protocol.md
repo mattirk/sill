@@ -162,10 +162,65 @@ stream) within 10 s; the daemon serves at most 256 connections at once (control 
 and refuses more; at most 64 stream tokens wait unclaimed, each for 60 s, dropped on the next
 token and by the minute sweep without a thread of their own.
 
+Public host streams are implemented (2026-11-03):
+
+| Method | Request | Result |
+|---|---|---|
+| `_sill/streams.port` | `{session_id, port}` | `{token}` |
+| `_sill/agents.login` | `{agent_id, method_id}` | `{token}` |
+| `_sill/registry.install` | `{entry_id, version, source, allow_unreviewed?}` | `{token}` |
+| `_sill/registry.list` | `{after?, limit?}` | `{entries, next}` |
+
+These methods need no `sill.internal` capability. The former `OpenPort`, `HostLogin`, and
+`Install` dispatcher variants are removed. Other host data operations remain internal until
+specified separately. Login selects a configured agent on the daemon box, never a frontend
+command. The agent validates the method during login; an unsupported method is a streamed failure.
+Install selects the exact ID, version and source (`snapshot` or `live`) from the daemon's current
+registry, retaining its reviewed lockfile/distribution. This selector is not a content hash of a
+live index entry. Missing selectors return `not_found`; unknown sources or malformed identifiers
+return invalid-params; unreviewed entries require `allow_unreviewed: true` (`permission_denied`
+otherwise), and an unavailable platform returns `unsupported`, all before starting a job.
+
+Registry listing uses exclusive entry-ID keyset pagination with 1–128 entries (default 64),
+at most one newer version per entry and a 4 MiB entry payload budget per page. Pages reflect
+live registry contents, so concurrent refresh can change later pages. Records expose name,
+version, source and platform installability, without core configuration records or executable
+commands. The shelf's richer registry presentation still uses its internal data API.
+
+Claim tokens as described in §1: one use, on a new transport within 60 seconds. Port streams
+carry raw bidirectional TCP bytes to a running session jail; no jail is started implicitly.
+Port zero is invalid; an absent session returns `not_found`, a stopped jail or failed connection
+returns `invalid_state`. Closing the stream closes the connection. Input EOF half-closes the
+TCP direction while the other direction can finish. No replay or reattachment is available.
+
+Login/install streams carry UTF-8 newline-delimited tagged JSON, described by
+`streams.host_progress.event` in the exported schema:
+
+- `{type: "status", text}` or `{type: "stderr", text}` for login progress.
+- `{type: "output", text}` for installer output.
+- `{type: "completed", agent_id}` establishes success. Read current agent configuration separately.
+- `{type: "failed", code: "operation_failed", message}` establishes failure; filesystem changes
+  or login side effects may already have occurred. Unknown failure codes never authorize retry.
+
+Each text/message is truncated at a UTF-8 boundary to 16 KiB. At most four login/install jobs
+run concurrently; a second job of the same kind for the same agent/entry returns `busy`, and
+an exhausted job budget returns `limit_exceeded`. Progress writes have a one-second timeout;
+a stalled reader loses its stream while the job continues. A job reserves its slot until it
+finishes, including after disconnect. Login retains its existing agent-response deadlines
+(30 seconds for initialization, ten minutes for authentication); installers have no new overall
+deadline. Cancellation and reconnect/replay are unsupported for these two job streams.
+Closing or never claiming their stream **does not cancel the job**. EOF without a terminal event,
+a lost token/reply, or daemon death leaves the outcome unknown. Do not blindly retry these three
+opening methods after timeout/connection loss; inspect host state before an explicit retry.
+Stream tokens and active jobs are in memory and do not survive daemon restart. Schema/argument
+validation, selector/policy refusal and job/token-limit refusal start no job. A failure after job
+start or a lost reply provides no such guarantee. The Python client's `registry`, `login` and
+`install` commands exercise public selectors and validate every progress event against the schema.
+
 Host/session administration and presentation operations still awaiting public SFP schemas are
 under `_sill/internal/…`, marked `x-sill-internal` in the exported schema. These are temporary
 same-build implementation APIs, not protocol 6 compatibility handlers. The old `_sill/…` names
-are removed when their public replacement is not yet implemented. Public host methods, lossless
+are removed when their public replacement is not yet implemented. Remaining public host methods, lossless
 path contracts, full mutation recovery, retention bounds, and the
 experimental ACP v2 adapter remain implementation work before `sfp/1` can be declared complete.
 
@@ -224,8 +279,8 @@ daemon answers is named here.
 - **Timeouts**: a single Rust client deadline covers outbound queuing, sending and the answer
   (120 s by default, 5 s for `daemon.status` and `daemon.shutdown`). Timeout closes the transport
   so a blocked send cannot strand subsequent calls. Long browser login and registry install progress use streams.
-- **Byte streams**: `_sill/terminals.attach` and the `frontend.request` operations `OpenPort`,
-  `HostLogin` and `Install` return a one-use token. Open the same transport again, write
+- **Byte streams**: `_sill/terminals.attach`, `_sill/streams.port`, `_sill/agents.login`, and
+  `_sill/registry.install` return a one-use token. Open the same transport again, write
   `{"_sill_stream":"TOKEN"}\n`, then exchange raw bytes. Tokens expire after 60 s if unused; at
   most 64 wait at once. Terminal resize and cwd use the control connection and the terminal ID
   (§ public terminals); descriptors never cross the frontend protocol.
@@ -419,7 +474,7 @@ Design SFP for the following semantics now, while retaining ACP v1 support:
 3. Specify byte-stream framing, token ownership/expiry, backpressure, end-of-stream, cancellation,
    reconnection and PTY resize/exit semantics. Socket and SSH clients must observe the same contract.
    *Status 2026-11-03:* terminals are specified and implemented (public terminals above); port,
-   login and install streams are not.
+   login and install streams now have public methods and specified teardown semantics above.
 4. Specify negotiation, extension rules, lifecycle ownership and migration from development
    protocol 6. A running daemon's compatibility must be evaluated independently of its build ID.
    On incompatibility, explain the mismatch and require explicit action before replacing or

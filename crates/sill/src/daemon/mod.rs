@@ -24,6 +24,7 @@ mod sfp_adapter;
 mod runner;
 mod streams;
 mod terminals;
+mod host;
 mod context;
 mod frontend;
 pub mod relay;

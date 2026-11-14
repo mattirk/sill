@@ -111,7 +111,7 @@ fn lane(lane: &'static Lane) -> Result<Arc<Client>> {
 
 /// Actions a lost reply does not show as undone: sent again they could happen twice.
 fn no_blind_retry(method: &str) -> bool {
-    matches!(method, "_sill/sessions.update" | "_sill/sessions.start" | "_sill/sessions.stop" | "_sill/sessions.end" | "_sill/sessions.checkpoint" | "_sill/terminals.open")
+    matches!(method, "_sill/sessions.update" | "_sill/sessions.start" | "_sill/sessions.stop" | "_sill/sessions.end" | "_sill/sessions.checkpoint" | "_sill/terminals.open" | "_sill/streams.port" | "_sill/agents.login" | "_sill/registry.install")
 }
 
 /// One request on a lane; on a connection the daemon has closed, once more on a fresh one.

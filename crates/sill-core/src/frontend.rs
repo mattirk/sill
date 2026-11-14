@@ -32,7 +32,6 @@ pub enum Request {
     FetchRegistry,
     Installed { id: String },
     Available(crate::agents::Agent),
-    Install(crate::registry::Entry),
     Uninstall(crate::registry::Entry),
     Icon(crate::registry::Entry),
     Metadata { path: PathBuf },
@@ -60,8 +59,6 @@ pub enum Request {
     Kept { session: String },
     RefreshSnapshot,
     GitSummary { path: PathBuf },
-    OpenPort { session: String, port: u16 },
-    HostLogin { agent: String, method: String },
     ProcessPolicy { session: String },
 }
 
