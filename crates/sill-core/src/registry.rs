@@ -346,6 +346,26 @@ pub fn fetch_icon(home: &Path, entry: &Entry) -> Option<PathBuf> {
     if ok && std::fs::rename(&tmp, &p).is_ok() { Some(p) } else { let _ = std::fs::remove_file(&tmp); None }
 }
 
+/// An agent's icon by its registry id, whatever version is installed: the cached file when it is
+/// there, else fetched from the first listing of that id that names one (the snapshot's, the
+/// live index's, or its newer version's). An installed version the index has moved past still
+/// has its icon (Kimi Code 2.6.0 against a live 2.6.1 had none, the person, 2026-11-13).
+pub fn icon_by_id(home: &Path, id: &str) -> Option<PathBuf> {
+    let cached = icon_cache_dir(home).join(format!("{id}.svg"));
+    if cached.is_file() {
+        return Some(cached);
+    }
+    merged(home)
+        .0
+        .into_iter()
+        .flat_map(|mut e| {
+            let newer = e.newer.take();
+            std::iter::once(e).chain(newer.map(|n| *n))
+        })
+        .filter(|e| e.id == id && e.icon.is_some())
+        .find_map(|e| fetch_icon(home, &e))
+}
+
 // --- installed state ------------------------------------------------------------------------------
 
 pub fn installed(home: &Path, id: &str) -> Option<Installed> {
@@ -1309,6 +1329,21 @@ mod snapshot_tests {
             }
         }
         assert!(s.agents.iter().any(|a| a.id == "claude-acp" && a.npm_lock.is_some()));
+    }
+
+    #[test]
+    fn an_icon_is_found_by_id_whatever_version_is_listed() {
+        let dir = std::env::temp_dir().join(format!("sill-reg-icon-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = dir.join("home");
+        // listed nowhere and nothing cached: none, and nothing fetched
+        assert_eq!(icon_by_id(&home, "no-such-agent"), None);
+        // cached: there, with no listing of that version or of the agent at all
+        let icons = icon_cache_dir(&home);
+        std::fs::create_dir_all(&icons).unwrap();
+        std::fs::write(icons.join("no-such-agent.svg"), "<svg/>").unwrap();
+        assert_eq!(icon_by_id(&home, "no-such-agent"), Some(icons.join("no-such-agent.svg")));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

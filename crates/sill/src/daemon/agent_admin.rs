@@ -68,8 +68,10 @@ pub fn handle(hub:&Hub,m:&str,p:Value)->Option<Result<Value>>{
             }
             "_sill/registry.icon"=>{
                 use std::io::Read;
-                let a:api::EntryKey=args(p)?;let entry=select(&home,&a)?;
-                let bytes=if let Some(path)=sill_core::registry::fetch_icon(&home,&entry){
+                // by id: the icon is the agent's, not a version's, and the installed version may no
+                // longer be listed
+                let a:api::EntryKey=args(p)?;valid(&a.entry_id)?;
+                let bytes=if let Some(path)=sill_core::registry::icon_by_id(&home,&a.entry_id){
                     let mut bytes=vec![];std::fs::File::open(path)?.take(1024*1024+1).read_to_end(&mut bytes)?;
                     if bytes.len()>1024*1024{return Err(anyhow::Error::from(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Record, Some(1048576), "icon exceeds 1 MiB")));}Some(sill_proto::admin::encode_bytes(&bytes))
                 }else{None};json!(api::Icon{bytes_base64:bytes})
