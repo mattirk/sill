@@ -333,11 +333,63 @@ pub fn band(app: &App) -> Option<Element<'_, Message>> {
     )
 }
 
+/// Keep the audit record available on expansion, but lead with the action people recognize.
+pub(crate) fn notice_summary(message: &str) -> String {
+    if let Some(rest) = message.strip_prefix("HOST action on host · generation ")
+        && let Some((_, action)) = rest.split_once(": ")
+    {
+        let (operation, args) = action.split_once(' ').unwrap_or((action, ""));
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(args)
+            && let Some(argv) = value["argv"].as_array()
+        {
+            let words: Vec<&str> = argv.iter().filter_map(|v| v.as_str()).collect();
+            // Shell scripts are the command, not the shell's JSON invocation.
+            let command = if words.len() == 3 && words[1] == "-c" {
+                words[2].to_owned()
+            } else {
+                words.iter().map(|word| {
+                    if word.chars().all(|c| c.is_ascii_alphanumeric() || "_-./=:".contains(c)) && !word.is_empty() {
+                        (*word).to_owned()
+                    } else {
+                        format!("'{}'", word.replace('\'', "'\\''"))
+                    }
+                }).collect::<Vec<_>>().join(" ")
+            };
+            return format!("HOST · {command}");
+        }
+        return format!("HOST · {}", label(operation));
+    }
+    if let Some(rest) = message.strip_prefix("HOST action ") {
+        if let Some((operation, _)) = rest.split_once(" completed:") {
+            return format!("HOST · {} completed", label(operation));
+        }
+        if let Some((operation, _)) = rest.split_once(" failed:") {
+            return format!("HOST · {} failed — expand for details", label(operation));
+        }
+    }
+    if message.starts_with("HOST process ") {
+        return if message.contains("revocation stop:") {
+            "HOST · Process stopped after control ended".into()
+        } else {
+            "HOST · Process ended — expand for details".into()
+        };
+    }
+    message.to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tests::{live_app, session_record, settle_task, simulator};
     use serde_json::json;
+
+    #[test]
+    fn host_summaries_show_commands_without_audit_metadata() {
+        assert_eq!(notice_summary(r#"HOST action on host · generation 7: commands {"argv":["/bin/sh","-c","echo hello"]}"#), "HOST · echo hello");
+        assert_eq!(notice_summary(r#"HOST action on host · generation 7: launch {"argv":["echo","two words"]}"#), "HOST · echo 'two words'");
+        assert_eq!(notice_summary(r#"HOST action stop completed: {"stopped":"host:123"}"#), "HOST · Process stop completed");
+        assert_eq!(notice_summary("HOST action commands failed: denied"), "HOST · General host commands failed — expand for details");
+    }
 
     /// A client whose daemon answered both frontend-declared capabilities.
     fn hosting_client() -> (sill_proto::Client, crate::tests::Daemon) {
@@ -511,10 +563,10 @@ mod tests {
         assert!(crate::ui::is_long_notice(&long) && !crate::ui::is_long_notice(short));
         // selectable text is not a plain text widget: the fold line and its chevron are
         let mut ui = simulator(&app, (720.0, 860.0));
-        ui.find(format!("{} chars", long.len())).unwrap();
+        ui.find("HOST · Process inspection completed").unwrap();
         ui.find("▸").unwrap();
         assert!(ui.find("▾").is_err(), "folded until clicked");
-        ui.click(format!("{} chars", long.len())).unwrap();
+        ui.click("HOST · Process inspection completed").unwrap();
         let messages: Vec<Message> = ui.into_messages().collect();
         assert!(messages.iter().any(|m| matches!(m, Message::ToggleTool(id) if id == "long")), "{messages:?}");
         for m in messages {

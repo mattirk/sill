@@ -1154,7 +1154,7 @@ impl App {
                     "warning" => P.warning,
                     _ => P.fg_dim,
                 };
-                if is_long_notice(source) {
+                if source.starts_with("HOST action ") || source.starts_with("HOST process ") || is_long_notice(source) {
                     folded_note(&item.item_id, source, color, view.open_tools.contains(&item.item_id))
                 } else {
                     note(source, color)
@@ -2705,14 +2705,14 @@ fn folded_note<'a>(item_id: &str, message: &'a str, color: Color, open: bool) ->
         row![
             text(if open { "▾" } else { "▸" }).size(style::SMALL).color(color).width(14),
             container(
-                text(one_line(message, 160))
+                text(one_line(&crate::host_control::notice_summary(message), 160))
                     .size(style::SMALL)
                     .color(color)
                     .wrapping(text::Wrapping::None),
             )
             .width(Fill)
             .clip(true),
-            text(format!("{} chars", message.len()))
+            text(if message.starts_with("HOST ") { String::new() } else { format!("{} chars", message.len()) })
                 .size(style::TINY)
                 .color(alpha(color, 0.7)),
         ]
