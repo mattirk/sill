@@ -1020,3 +1020,26 @@ fn undone_work_in_a_new_workspace_survives_the_checkouts_gc() {
     apply(&f.host, &apply_req("a1", &w2, &rev(&f, &w2))).unwrap();
     assert_eq!(git(&f.source, &["for-each-ref", "--format=%(refname)", "refs/sill/"]), "");
 }
+
+#[test]
+fn successful_apply_or_discard_clears_interrupted_apply() {
+    for discard_work in [false, true] {
+        let f = fixture(if discard_work { "interrupted-discard" } else { "interrupted-apply" });
+        let w = session(&f, "s1");
+        let clone = clone_of(&w);
+        write(&clone.join("f1.txt"), "agent work\n");
+        commit(&clone, "agent work");
+        // Prevent importing the commit: a real Git failure after the journal intent.
+        let lock = f.source.join(".git").join(format!("{}.lock", crate::workspace::anchor_ref(&w.workspace_id, "incoming")));
+        write(&lock, "locked\n");
+        assert!(apply(&f.host, &apply_req("broken", &w, &rev(&f, &w))).is_err());
+        let shown = f.host.db(|c| shown_operation(c, &w.workspace_id)).unwrap().unwrap();
+        assert_eq!(shown.state, "interrupted");
+        std::fs::remove_file(lock).unwrap();
+        let request = apply_req("recovered", &w, &rev(&f, &w));
+        let done = if discard_work { discard(&f.host, &request) } else { apply(&f.host, &request) }.unwrap();
+        assert!(done.workspace.unwrap().operation.is_none(), "successful recovery clears the warning");
+        assert!(f.host.db(|c| shown_operation(c, &w.workspace_id)).unwrap().is_none());
+        assert_eq!(read(&f.source.join("f1.txt")), if discard_work { "line 1\n" } else { "agent work\n" });
+    }
+}

@@ -8,7 +8,7 @@
 //! side effect. Git work runs outside the store lock ([`Host::db`] is held only around rows).
 //! Receipts are the shared ones (`crate::operations`): an identical retry never repeats work. On
 //! start [`reconcile`] settles unfinished entries from what is on disk; what it cannot establish
-//! stays `interrupted` and is shown, never reset.
+//! stays `interrupted` and is shown. A later successful Apply or Discard settles interrupted Apply entries.
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -255,10 +255,10 @@ fn settle(conn: &Connection, op: &str, state: &str, detail: &str) -> Result<()> 
     Ok(())
 }
 
-/// A note for the person (a carry taken without a base) has been seen through once they Apply or
-/// Discard.
+/// Successful Apply or Discard resolves earlier Apply interruptions and carry notices.
+/// Other unfinished operations keep their own recovery paths.
 fn settle_notices(conn: &Connection, workspace: &str) -> Result<()> {
-    conn.execute("UPDATE workspace_journal SET state='done' WHERE workspace_id=?1 AND state='notice'", [workspace])?;
+    conn.execute("UPDATE workspace_journal SET state='done' WHERE workspace_id=?1 AND (state='notice' OR (kind='apply' AND state='interrupted'))", [workspace])?;
     Ok(())
 }
 
@@ -1139,7 +1139,6 @@ pub fn discard<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
             &format!("INSERT INTO workspace_discards({DISCARD_COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)"),
             params![d.id, d.workspace_id, d.session_id, d.name, bytes(&d.source), d.branch, d.snapshot, d.anchor, d.until, d.created_at],
         )?;
-        settle_notices(c, &d.workspace_id)?;
         intent(c, &key(&a.operation_id), &r.id, "discard", &json!({"snapshot": kept, "anchor": d.anchor}), h.now())?;
         tx.commit()?;
         Ok(())
@@ -1150,6 +1149,7 @@ pub fn discard<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
     )?;
     h.db(|c| {
         settle(c, &key(&a.operation_id), "done", "")?;
+        settle_notices(c, &r.id)?;
         receipts(c)?.finish(&a.operation_id, None, None)
     })?;
     let d = discarded.context("discard snapshot was not retained")?;
