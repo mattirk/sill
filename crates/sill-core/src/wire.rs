@@ -79,7 +79,7 @@ pub enum Event {
     Ended(Option<String>),
     /// The daemon ended the session (`sessions.end`): its row is written — or deleted, when
     /// nothing was asked in it — and its jail is stopping. Frontends drop the session.
-    SessionEnded { deleted: bool },
+    SessionEnded { deleted: bool, reason: String },
     /// A line for the transcript's reader that sill wrote itself (the summary turn's mark).
     Note(String),
     /// A checkpoint summary (`sessions.checkpoint`) is in: the text as stored (None when the agent

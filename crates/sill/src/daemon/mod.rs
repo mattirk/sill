@@ -67,6 +67,16 @@ pub fn run() -> Result<()> {
         None => (bind_direct()?, "started bare by a client (no unit: see daemon.log)"),
     };
     let hub = Arc::new(Hub::new(mode)?);
+    {
+        // the minute sweep: idle sessions end, memory's nightly run (docs/daemon.md §3.6)
+        let hub = hub.clone();
+        std::thread::Builder::new().name("sill-daemon-sweep".into()).spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+                hub.sweep();
+            }
+        })?;
+    }
     let dir = sill_proto::runtime_dir()?;
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join("daemon.pid"), std::process::id().to_string())?;

@@ -66,6 +66,8 @@ struct State {
     pending: BTreeMap<u64, (wire::Event, Reply)>,
     next_request: u64,
     ended: bool,
+    /// When the last turn stopped (the daemon's idle timer counts from it too).
+    last_turn_end: Option<i64>,
     /// Replaced by a newer runner (a fresh start): its events go nowhere and write nothing.
     retired: bool,
     /// The summary turn in flight, if any, and the text it has produced so far (its tool calls
@@ -162,6 +164,7 @@ impl Runner {
             }
             acp::Event::Stopped(_) => {
                 st.busy = false;
+                st.last_turn_end = Some(sill_core::store::now());
                 flush(hub, &id, &mut st);
                 // the summary turn: its text goes to the hub once this event is out
                 if let Some((kind, text, _)) = st.summary.take() {
@@ -220,6 +223,21 @@ impl Runner {
     pub fn agent_idle(&self) -> bool {
         let st = self.st.lock().unwrap();
         st.ready.is_some() && !st.busy && !st.ended && !st.retired
+    }
+
+    /// How many frontends are attached.
+    pub fn sub_count(&self) -> usize {
+        self.st.lock().unwrap().subs.len()
+    }
+
+    /// A turn is running (a summary turn included).
+    pub fn busy(&self) -> bool {
+        self.st.lock().unwrap().busy
+    }
+
+    /// When the last turn stopped, if one did in this runner's life.
+    pub fn last_turn_end(&self) -> Option<i64> {
+        self.st.lock().unwrap().last_turn_end
     }
 
     /// The summary turn running, if any.

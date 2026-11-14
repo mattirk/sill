@@ -55,6 +55,10 @@ enum Request {
     /// Start the agent process. Fails if one is running.
     Spawn { argv: Vec<String>, #[serde(default)] env: BTreeMap<String, String>, cwd: Option<PathBuf> },
     Status,
+    /// How many frontends the daemon has attached to this session (docs/daemon.md §3.6): the agent
+    /// stream is the daemon's and always connected, so this is what "nobody watching" means for
+    /// the idle rule; the stream dropping (a dead daemon) still counts as nobody.
+    Attached { frontends: u32 },
     /// SIGTERM the agent's process group, SIGKILL after `grace_ms`.
     Kill { #[serde(default = "default_grace")] grace_ms: u64 },
     /// Restore a path from the host view (SPEC §4.4 revert).
@@ -141,6 +145,9 @@ struct State {
     relay_generation: u64,
     /// A shelf is attached to the agent stream.
     relay_connected: bool,
+    /// Frontends attached through the daemon, as it last said (None: never told — the stream alone
+    /// decides, as before the daemon).
+    frontends: Option<u32>,
     /// Last agent stdio traffic or shelf (dis)connect.
     last_activity: Option<std::time::Instant>,
 }
@@ -213,7 +220,8 @@ fn main() -> Result<()> {
             }
         });
     }
-    // --agent-idle SECS : stop the agent process after SECS without traffic and without a shelf attached
+    // --agent-idle SECS : stop the agent process after SECS without traffic and with nobody attached
+    // (no agent stream, or the daemon's last `attached` said 0 frontends)
     let mut agent_idle: Option<u64> = None;
     while let Some(i) = args.iter().position(|a| a == "--agent-idle") {
         if i + 1 >= args.len() {
@@ -402,11 +410,18 @@ fn handle_request(req: Request, shared: &Shared, procs: &procs::Procs) -> Reply 
             Ok(pid) => Reply::ok().with("pid", pid),
             Err(e) => Reply::err(format!("{e:#}")),
         },
+        Request::Attached { frontends } => {
+            let mut st = shared.0.lock().unwrap();
+            st.frontends = Some(frontends);
+            st.touch();
+            Reply::ok()
+        }
         Request::Status => {
             let mut st = shared.0.lock().unwrap();
             reap(&mut st);
             Reply::ok()
                 .with("running", st.child.is_some())
+                .with("frontends", st.frontends)
                 .with("pid", st.pid)
                 .with("exit", st.exit)
                 .with("buffered_lines", st.outbox.len() as u64)
@@ -552,8 +567,9 @@ fn kill_agent(shared: &Shared, grace_ms: u64) -> Result<Option<i32>> {
     }
 }
 
-/// Kill the agent after `timeout` of silence with no shelf attached. The jail stays; the shelf resumes
-/// the ACP session with session/load when it comes back (SPEC §4.10 #17).
+/// Kill the agent after `timeout` of silence with nobody attached — no agent stream, or the daemon
+/// said its frontends are gone. The jail stays; the next attach starts the agent again and resumes
+/// the ACP session with session/load (SPEC §4.10 #17).
 fn idle_monitor(shared: Shared, timeout: std::time::Duration) {
     loop {
         std::thread::sleep(std::time::Duration::from_secs(15));
@@ -561,11 +577,11 @@ fn idle_monitor(shared: Shared, timeout: std::time::Duration) {
             let mut st = shared.0.lock().unwrap();
             reap(&mut st);
             st.child.is_some()
-                && !st.relay_connected
+                && (!st.relay_connected || st.frontends == Some(0))
                 && st.last_activity.map(|t| t.elapsed() >= timeout).unwrap_or(false)
         };
         if idle {
-            eprintln!("sill-shim: agent idle for {}s with no shelf attached, stopping it", timeout.as_secs());
+            eprintln!("sill-shim: agent idle for {}s with nobody attached, stopping it", timeout.as_secs());
             if let Err(e) = kill_agent(&shared, 5000) {
                 eprintln!("sill-shim: idle stop: {e:#}");
             }

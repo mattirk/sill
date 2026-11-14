@@ -49,6 +49,9 @@ pub struct Status {
     pub pid: Option<u32>,
     pub exit: Option<i32>,
     pub buffered_lines: u64,
+    /// Frontends attached through the daemon, as it last said (None: never told).
+    #[serde(default)]
+    pub frontends: Option<u32>,
 }
 
 fn connect(socket: &Path, role: &str) -> Result<UnixStream> {
@@ -99,6 +102,13 @@ impl Control {
     pub fn status(&mut self) -> Result<Status> {
         let r = self.call(json!({ "op": "status" }))?;
         Ok(serde_json::from_value(serde_json::Value::Object(r))?)
+    }
+
+    /// Tell the shim how many frontends are attached through the daemon (its idle rule,
+    /// docs/daemon.md §3.6).
+    pub fn attached(&mut self, frontends: u32) -> Result<()> {
+        self.call(json!({ "op": "attached", "frontends": frontends }))?;
+        Ok(())
     }
 
     pub fn kill(&mut self, grace_ms: u64) -> Result<Option<i32>> {

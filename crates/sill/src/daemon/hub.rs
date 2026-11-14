@@ -28,6 +28,8 @@ struct EndCtx {
     memory: bool,
     /// The old summary stays: memory is off, or a reopened session was closed without a turn.
     keep_old: bool,
+    /// Why the end was asked for (`close`, `idle`, `quit`): the `SessionEnded` event carries it.
+    reason: String,
 }
 
 pub struct Hub {
@@ -48,6 +50,10 @@ pub struct Hub {
     starting: Mutex<()>,
     /// Sessions whose end waits for the agent's summary turn (`sessions.end`).
     ending: Mutex<HashMap<String, EndCtx>>,
+    /// When each running jail was started or adopted by this daemon: the idle timer counts from
+    /// the latest of this, the last prompt and the last turn's end, so a session just resumed is
+    /// not ended a minute in.
+    started_at: Mutex<HashMap<String, i64>>,
 }
 
 impl Hub {
@@ -66,6 +72,7 @@ impl Hub {
             runners: Mutex::new(HashMap::new()),
             starting: Mutex::new(()),
             ending: Mutex::new(HashMap::new()),
+            started_at: Mutex::new(HashMap::new()),
         };
         hub.adopt_running();
         Ok(hub)
@@ -87,8 +94,79 @@ impl Hub {
 
     /// A connection closed: it is subscribed nowhere any more.
     pub fn disconnect(&self, conn: u64) {
-        for r in self.runners.lock().unwrap().values() {
-            r.detach(conn);
+        let ids: Vec<String> = {
+            let runners = self.runners.lock().unwrap();
+            runners
+                .iter()
+                .filter(|(_, r)| {
+                    let before = r.sub_count();
+                    r.detach(conn);
+                    r.sub_count() != before
+                })
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        for id in ids {
+            self.presence(&id);
+        }
+    }
+
+    /// Tell the session's shim how many frontends are attached (docs/daemon.md §3.6): the agent
+    /// stream is the daemon's and never drops while it lives, so the shim's agent-idle rule needs
+    /// this to know nobody is watching. On a thread: the shim may be slow, the caller is a request.
+    fn presence(&self, id: &str) {
+        let n = self.runners.lock().unwrap().get(id).filter(|r| r.alive()).map(|r| r.sub_count()).unwrap_or(0);
+        let id = id.to_string();
+        let _ = std::thread::Builder::new().name(format!("sill-presence-{id}")).spawn(move || {
+            let Ok(sock) = sill_core::session::socket_path(&id) else { return };
+            match sill_core::shim::Control::connect(&sock).and_then(|mut c| c.attached(n as u32)) {
+                Ok(()) => {}
+                Err(e) => eprintln!("sill daemon: session {id}: telling the shim {n} attached: {e:#}"),
+            }
+        });
+    }
+
+    /// Once a minute (docs/daemon.md §3.6): the policy's idle timeout ends a running session whose
+    /// person has sent nothing for `idle_timeout_minutes` and whose agent is between turns, as
+    /// closing its tab would (`sessions.end`, reason `idle`; 0 = never) — attached or not, the
+    /// daemon's sessions are its own. Then memory's nightly run when it is due.
+    pub fn sweep(self: &Arc<Self>) {
+        let now = sill_core::store::now();
+        let mut ids: Vec<String> = self.children.lock().unwrap().keys().cloned().collect();
+        ids.extend(self.runners.lock().unwrap().keys().cloned());
+        ids.sort();
+        ids.dedup();
+        let sessions = self.with_store(|s| s.sessions()).unwrap_or_default();
+        for id in ids {
+            let Some(s) = sessions.iter().find(|x| x.id == id) else { continue };
+            if s.ended_at.is_some() || self.ending.lock().unwrap().contains_key(&id) {
+                continue;
+            }
+            let runner = self.runners.lock().unwrap().get(&id).filter(|r| r.alive()).cloned();
+            if runner.as_ref().is_some_and(|r| r.busy()) {
+                continue;
+            }
+            let Ok(policy) = Policy::load(&s.policy, &self.home) else { continue };
+            let limit = policy.limits.idle_timeout_minutes as i64 * 60;
+            if limit <= 0 {
+                continue;
+            }
+            let started = self.started_at.lock().unwrap().get(&id).copied().unwrap_or(now);
+            let since = s.last_used.max(started).max(runner.and_then(|r| r.last_turn_end()).unwrap_or(0));
+            if now - since > limit {
+                eprintln!("sill daemon: session {id} idle for {} minutes, ending it", policy.limits.idle_timeout_minutes);
+                if let Err(e) = self.end_session(&id, "idle") {
+                    eprintln!("sill daemon: ending idle session {id}: {e:#}");
+                }
+            }
+        }
+        let uid = rustix::process::getuid().as_raw();
+        match sill_core::memory::nightly_if_due(&|id| {
+            let _ = sill_core::session::remove_state(uid, id);
+        }) {
+            Ok(Some(done)) => eprintln!("sill daemon: memory nightly: {} compacted, {} trimmed, {} deleted", done.compacted, done.trimmed, done.deleted),
+            Ok(None) => {}
+            Err(e) => eprintln!("sill daemon: memory nightly: {e:#}"),
         }
     }
 
@@ -151,6 +229,7 @@ impl Hub {
                 if let Some(r) = self.runners.lock().unwrap().get(&k.key) {
                     r.detach(conn.id);
                 }
+                self.presence(&k.key);
                 Ok(json!({}))
             }
             method::SESSIONS_COMMAND => {
@@ -159,6 +238,7 @@ impl Hub {
                 let r = self.runner(&c.key)?;
                 if matches!(cmd, sill_core::wire::Command::Quit) {
                     r.detach(conn.id);
+                    self.presence(&c.key);
                     return Ok(json!({}));
                 }
                 r.command(self, cmd).map_err(|e| Error::failed(format!("{e:#}")))?;
@@ -282,8 +362,11 @@ impl Hub {
     /// is none (or `fresh`: the agent started again, for adapters that refuse a second `initialize`).
     fn attach(self: &Arc<Self>, conn: &Arc<Conn>, id: &str, fresh: bool) -> Result<()> {
         let _one_at_a_time = self.starting.lock().unwrap();
-        if !fresh && let Some(r) = self.runners.lock().unwrap().get(id).filter(|r| r.alive()).cloned() {
+        // the guard goes before `presence` locks the runners again
+        let running = self.runners.lock().unwrap().get(id).filter(|r| r.alive()).cloned();
+        if !fresh && let Some(r) = running {
             r.attach(conn.clone());
+            self.presence(id);
             return Ok(());
         }
         let started = self.start_session(id)?;
@@ -324,6 +407,7 @@ impl Hub {
         let hub = self.clone();
         std::thread::Builder::new().name(format!("sill-conv-{id}")).spawn(move || runner.run(hub, ev_rx))?;
         eprintln!("sill daemon: session {id} conversation started{}", if fresh { " (agent restarted)" } else { "" });
+        self.presence(id);
         Ok(())
     }
 
@@ -350,7 +434,8 @@ impl Hub {
             match r.summarizing() {
                 Some(SummaryKind::End) => return Ok(Ending { pending: true, deleted: false }),
                 Some(SummaryKind::Checkpoint) => {
-                    let ctx = self.end_ctx(id)?;
+                    let mut ctx = self.end_ctx(id)?;
+                    ctx.reason = reason.to_string();
                     if r.adopt_checkpoint() {
                         self.ending.lock().unwrap().insert(id.to_string(), ctx);
                         eprintln!("sill daemon: session {id} ends ({reason}): its checkpoint becomes the summary");
@@ -361,11 +446,12 @@ impl Hub {
             }
         }
         let mut ctx = self.end_ctx(id)?;
+        ctx.reason = reason.to_string();
         // nothing was asked: nothing to remember (docs/memory.md §2.1), the row would only crowd
         // every search and recall with "0 prompts"
         if ctx.facts.prompts == 0 {
             eprintln!("sill daemon: session {id} ends ({reason}): nothing was asked, deleting it");
-            self.finish_end(id, None, true);
+            self.finish_end(id, None, true, reason);
             return Ok(Ending { pending: false, deleted: true });
         }
         let saw = runner.as_ref().is_some_and(|r| r.agent_saw_session());
@@ -377,6 +463,7 @@ impl Hub {
             && said
             && saw
             && r.agent_idle()
+            && agent_process_up(id)
         {
             let prompt = sill_core::memory::summary_prompt(&ctx.facts, &self.home);
             match r.ask_summary(self, &prompt, "the session ends: the agent writes its summary for memory", SummaryKind::End) {
@@ -389,7 +476,7 @@ impl Hub {
             }
         }
         eprintln!("sill daemon: session {id} ends ({reason})");
-        self.finish_end(id, Some((ctx, None)), false);
+        self.finish_end(id, Some((ctx, None)), false, reason);
         Ok(Ending { pending: false, deleted: false })
     }
 
@@ -399,7 +486,7 @@ impl Hub {
         let uid = rustix::process::getuid().as_raw();
         let kept_dir = sill_core::session::state_dir(uid, id).map(|d| d.join("kept")).unwrap_or_default();
         let facts = sill_core::memory::collect(&store, &s, &kept_dir);
-        Ok(EndCtx { facts, memory: sill_core::config::load().memory(), keep_old: !s.summary.is_empty() })
+        Ok(EndCtx { facts, memory: sill_core::config::load().memory(), keep_old: !s.summary.is_empty(), reason: String::new() })
     }
 
     /// *Summarize now* (docs/memory.md §2.5): the summary turn, the session going on; the answer
@@ -422,7 +509,8 @@ impl Hub {
                     eprintln!("sill daemon: session {id}: a summary came in with no end waiting for it");
                     return;
                 };
-                self.finish_end(id, Some((ctx, answer)), false);
+                let ctx_reason = ctx.reason.clone();
+                self.finish_end(id, Some((ctx, answer)), false, &ctx_reason);
             }
             SummaryKind::Checkpoint => {
                 let mut title = None;
@@ -450,7 +538,7 @@ impl Hub {
 
     /// Record the end — the row written from `ctx` and the agent's `answer`, or deleted — tell
     /// the attached frontends, and stop the jail on a thread of its own (a stop can take seconds).
-    fn finish_end(self: &Arc<Self>, id: &str, ctx: Option<(EndCtx, Option<String>)>, delete: bool) {
+    fn finish_end(self: &Arc<Self>, id: &str, ctx: Option<(EndCtx, Option<String>)>, delete: bool, reason: &str) {
         if !delete && let Some((ctx, answer)) = ctx {
             self.with_store(|s| match answer {
                 _ if !ctx.memory || ctx.keep_old => s.end_only(id),
@@ -466,7 +554,7 @@ impl Hub {
             .ok();
         }
         if let Some(r) = self.runners.lock().unwrap().get(id) {
-            r.notify(&sill_core::wire::Event::SessionEnded { deleted: delete });
+            r.notify(&sill_core::wire::Event::SessionEnded { deleted: delete, reason: reason.to_string() });
         }
         self.retire_runner(id);
         self.ending.lock().unwrap().remove(id);
@@ -533,6 +621,7 @@ impl Hub {
     fn supervise(&self, id: &str, mut child: std::process::Child) {
         let pid = child.id();
         self.children.lock().unwrap().insert(id.to_string(), pid);
+        self.started_at.lock().unwrap().insert(id.to_string(), sill_core::store::now());
         eprintln!("sill daemon: session {id} started (launch pid {pid})");
         let id = id.to_string();
         let children = self.children.clone();
@@ -558,6 +647,7 @@ impl Hub {
             match pid {
                 Some(pid) if sill_core::launcher::pid_file_alive(&pid_file) => {
                     self.children.lock().unwrap().insert(id.clone(), pid);
+                    self.started_at.lock().unwrap().insert(id.clone(), sill_core::store::now());
                     eprintln!("sill daemon: adopted session {id} (launch pid {pid})");
                     let children = self.children.clone();
                     let _ = std::thread::Builder::new().name(format!("sill-wait-{id}")).spawn(move || {
@@ -578,6 +668,14 @@ impl Hub {
             }
         }
     }
+}
+
+/// The shim still has an agent process: the relay stays up when the shim stops an idle agent, so
+/// the runner alone cannot tell a parked agent from a live one, and a summary asked of a stopped
+/// one would only come back as `Ended`.
+fn agent_process_up(id: &str) -> bool {
+    let Ok(sock) = sill_core::session::socket_path(id) else { return false };
+    sill_core::shim::Control::connect(&sock).and_then(|mut c| c.status()).map(|s| s.running).unwrap_or(false)
 }
 
 /// The jail's read-only memory snapshot follows the store (docs/memory.md §2.3).
