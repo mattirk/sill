@@ -102,8 +102,8 @@ impl SessionView {
         controls_row.add_css_class("sill-controls");
         controls_row.set_margin_start(8);
         controls_row.set_margin_end(8);
-        controls_row.set_margin_top(2);
-        controls_row.set_margin_bottom(6);
+        controls_row.set_margin_top(4);
+        controls_row.set_margin_bottom(4);
         // the person's shell inside the jail (SPEC §3.1): same mounts as the agent, own pty
         let terminal = vte4::Terminal::new();
         terminal.set_size_request(-1, 200);
@@ -245,6 +245,11 @@ impl SessionView {
             theme::on_change(move |t| {
                 if let Some(v) = weak.upgrade() {
                     v.apply_terminal_theme(t);
+                    // drawn glyphs don't follow CSS: redraw them in the new foreground
+                    if let Some(b) = v.shell_btn.borrow().as_ref() {
+                        b.set_child(Some(&super::icons::named("sill-terminal", super::icons::fg_for(b, t), 17)));
+                    }
+                    v.refresh_pins();
                 }
             });
         }
@@ -461,7 +466,7 @@ impl SessionView {
         attach.set_tooltip_text(Some("Attach a file (coming)"));
         self.controls_row.append(&attach);
         let term = gtk::ToggleButton::new();
-        term.set_icon_name("utilities-terminal-symbolic");
+        term.set_child(Some(&super::icons::named("sill-terminal", super::icons::fg_for(&self.controls_row, &theme::current()), 17)));
         term.add_css_class("flat");
         term.add_css_class("sill-ctl-icon");
         term.set_tooltip_text(Some("Shell inside this session's jail (Ctrl+`)"));
@@ -564,16 +569,19 @@ impl SessionView {
             let t = gtk::ToggleButton::new();
             t.add_css_class("flat");
             t.add_css_class("sill-ctl-icon");
+            t.add_css_class("sill-lock");
             t.set_active(self.auto_allow.get());
-            let set_look = |t: &gtk::ToggleButton| {
+            // one fixed-size image for both states, so the glyph swap doesn't move anything
+            let lock = gtk::Image::new();
+            lock.set_pixel_size(13);
+            t.set_child(Some(&lock));
+            let set_look = move |t: &gtk::ToggleButton| {
                 if t.is_active() {
-                    t.set_icon_name("changes-allow-symbolic");
+                    lock.set_icon_name(Some("changes-allow-symbolic"));
                     t.set_tooltip_text(Some("Auto-allow is on: permission requests are answered \"allow once\" (each is still listed)"));
-                    t.add_css_class("sill-unlocked");
                 } else {
-                    t.set_icon_name("changes-prevent-symbolic");
+                    lock.set_icon_name(Some("changes-prevent-symbolic"));
                     t.set_tooltip_text(Some("Auto-allow is off: permission requests wait for your answer"));
-                    t.remove_css_class("sill-unlocked");
                 }
             };
             set_look(&t);
@@ -614,7 +622,10 @@ impl SessionView {
         self.busy.set(busy);
         if let Some(b) = self.send_btn.borrow().as_ref() {
             if busy {
-                b.set_label("■");
+                // a drawn square (an image, not a glyph on a baseline) sits dead centre
+                let sq = gtk::Image::from_icon_name("media-playback-stop-symbolic");
+                sq.set_pixel_size(12);
+                b.set_child(Some(&sq));
                 b.set_tooltip_text(Some("Stop the agent"));
                 b.add_css_class("sill-stop");
             } else {
@@ -669,14 +680,6 @@ impl SessionView {
         if pins.is_empty() {
             return;
         }
-        let head = if gtk::IconTheme::for_display(&gtk::gdk::Display::default().expect("display")).has_icon("view-pin-symbolic") {
-            gtk::Image::from_icon_name("view-pin-symbolic").upcast::<gtk::Widget>()
-        } else {
-            gtk::Label::new(Some("⌖")).upcast::<gtk::Widget>()
-        };
-        head.add_css_class("dim-label");
-        head.set_tooltip_text(Some("pinned folders"));
-        self.pins_row.append(&head);
         let home = std::env::var("HOME").unwrap_or_default();
         let mut summaries: Vec<(std::path::PathBuf, gtk::Box)> = Vec::new();
         for p in pins {

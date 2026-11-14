@@ -422,7 +422,10 @@ popover.sill-menu > contents { padding: 4px; min-width: 180px; }
 .sill-controls { font-size: 85%; }
 .sill-ctl-icon { min-height: 0; min-width: 0; padding: 2px 6px; opacity: 0.6; -gtk-icon-size: 15px; }
 .sill-ctl-icon:hover, .sill-ctl-icon:checked { opacity: 1; }
-.sill-unlocked { color: @warning_color; }
+/* the lock: same colour in both states, fixed width so open/closed don't shift the row */
+button.sill-lock { min-width: 24px; padding: 2px 0; opacity: 0.6; }
+button.sill-lock:checked { background: transparent; opacity: 0.9; }
+button.sill-lock:hover { opacity: 1; }
 .sill-controls .dim-label { opacity: 0.7; }
 .sill-control { min-height: 0; padding: 0; color: alpha(@view_fg_color, 0.6); }
 .sill-control > button { min-height: 0; padding: 1px 6px; background: transparent; border: none; box-shadow: none; color: inherit; }
@@ -431,11 +434,12 @@ popover.sill-menu > contents { padding: 4px; min-width: 180px; }
 switch.sill-control { min-width: 30px; min-height: 14px; opacity: 0.7; }
 switch.sill-control:hover, switch.sill-control:checked { opacity: 1; }
 switch.sill-control > slider { min-width: 12px; min-height: 12px; }
-button.sill-send { min-height: 22px; min-width: 22px; padding: 0 5px; font-size: 170%; line-height: 1;
+button.sill-send { min-height: 22px; min-width: 22px; padding: 0; font-size: 170%; line-height: 1;
                    background: alpha(@accent_bg_color, 0.25); }
 button.sill-send > label { padding: 0; margin: 0; }
 button.sill-send:hover { background: alpha(@accent_bg_color, 0.45); }
-button.sill-send.sill-stop { font-size: 140%; color: @error_color; background: alpha(@error_bg_color, 0.25); }
+button.sill-send.sill-stop { color: @error_color; background: alpha(@error_bg_color, 0.25); }
+button.sill-send.sill-stop > image { margin: 0; padding: 0; }
 button.sill-send.sill-stop:hover { background: alpha(@error_bg_color, 0.45); }
 .sill-terminal { padding: 4px; }
 .sill-hotkey { padding: 4px 14px; font-family: monospace; }

@@ -214,6 +214,9 @@ pub fn ensure_started(opts: &StartOptions, home: &Path, exe: &Path) -> Result<Pa
         .arg(format!("--property=MemoryMax={}", policy.limits.memory_max))
         .arg(format!("--property=TasksMax={}", policy.limits.tasks_max))
         .arg("--property=KillMode=control-group")
+        // a stop must not hang on an interactive shell in the jail (bash ignores SIGTERM): SIGKILL
+        // follows after a short grace; the agent itself was already asked to leave by the shim
+        .arg("--property=TimeoutStopSec=5")
         .args(["--setenv=HOME", "--setenv=USER", "--setenv=TERM", "--setenv=LANG"])
         .arg("--")
         .arg(exe)

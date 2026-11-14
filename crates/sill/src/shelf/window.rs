@@ -68,7 +68,9 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
     action.add_css_class("heading");
     action.add_css_class("flat");
     let popover = gtk::Popover::new();
-    let menu = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    popover.add_css_class("sill-menu");
+    popover.set_has_arrow(false);
+    let menu = gtk::Box::new(gtk::Orientation::Vertical, 0);
     popover.set_child(Some(&menu));
     action.set_popover(Some(&popover));
     bar.append(&action);
@@ -181,17 +183,43 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
             s.restart_session(sid);
         }));
     }
-    // dropdown entries
-    for (label, page) in [("Sessions", "sessions"), ("Changes", "changes"), ("Files", "files"), ("Settings", "settings")] {
-        let b = gtk::Button::with_label(label);
-        b.add_css_class("flat");
+    // dropdown entries: the same quiet rows as the "+" menu, rebuilt on every show so the glyphs
+    // take the current theme's colour
+    {
         let s = shelf.clone();
-        let pop = popover.clone();
-        b.connect_clicked(move |_| {
-            pop.popdown();
-            s.show_page(page);
+        let menu = menu.clone();
+        popover.connect_show(move |pop| {
+            while let Some(c) = menu.first_child() {
+                menu.remove(&c);
+            }
+            let menu_color = menu.color();
+            for (label, icon, page) in [
+                ("Sessions", "sill-sessions", "sessions"),
+                ("Changes", "sill-changes", "changes"),
+                ("Files", "sill-files", "files"),
+                ("Settings", "sill-settings", "settings"),
+            ] {
+                let b = gtk::Button::new();
+                b.add_css_class("flat");
+                b.add_css_class("sill-menu-item");
+                let h = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+                let i = super::icons::named(icon, menu_color, 15);
+                i.add_css_class("sill-menu-icon");
+                let l = gtk::Label::new(Some(label));
+                l.set_xalign(0.0);
+                l.set_hexpand(true);
+                h.append(&i);
+                h.append(&l);
+                b.set_child(Some(&h));
+                let s = s.clone();
+                let pop = pop.clone();
+                b.connect_clicked(move |_| {
+                    pop.popdown();
+                    s.show_page(page);
+                });
+                menu.append(&b);
+            }
         });
-        menu.append(&b);
     }
 
     // "+" entries: one per agent, plus stored sessions that aren't open
@@ -456,19 +484,26 @@ impl Shelf {
             return;
         }
         let stored = self.store.sessions().unwrap_or_default().into_iter().find(|s| s.id == id);
-        self.close_session(id);
-        if let Some(s) = stored {
-            let shelf = self.clone();
-            glib::timeout_add_local_once(std::time::Duration::from_millis(600), move || shelf.open_session(s));
-        }
+        self.close_view(id);
+        let shelf = self.clone();
+        stop_then(id, move || {
+            if let Some(s) = stored {
+                shelf.open_session(s);
+            }
+        });
     }
 
     fn close_session(self: &Rc<Self>, id: &str) {
+        self.close_view(id);
+        stop_then(id, || {});
+    }
+
+    /// Drop the tab and the view; the jail is stopped separately (it can take seconds).
+    fn close_view(self: &Rc<Self>, id: &str) {
         if let Some(v) = self.views.borrow_mut().remove(id) {
             v.quit();
             self.pages.remove(&v.root);
         }
-        let _ = sill_core::session::stop(id);
         self.tabs.remove(id);
         if self.tabs.selected().is_none() {
             self.status.set_text("");
@@ -550,9 +585,12 @@ impl Shelf {
                     let id = sess.id.clone();
                     del.connect_clicked(move |_| {
                         pop.popdown();
-                        let _ = sill_core::session::stop(&id);
-                        let _ = sill_core::session::remove_state(session::uid(), &id);
-                        let _ = s.store.delete(&id);
+                        let s = s.clone();
+                        let id2 = id.clone();
+                        stop_then(&id, move || {
+                            let _ = sill_core::session::remove_state(session::uid(), &id2);
+                            let _ = s.store.delete(&id2);
+                        });
                     });
                 }
                 line.append(&b);
@@ -561,6 +599,25 @@ impl Shelf {
             }
         }
     }
+}
+
+/// Stop a session's jail on a worker thread and run `then` on the main loop when it is gone. A
+/// stop can take a while (the unit's stop timeout when a shell inside ignores SIGTERM), and the
+/// GTK loop must not wait for it.
+fn stop_then(id: &str, then: impl FnOnce() + 'static) {
+    let id = id.to_string();
+    let (tx, rx) = async_channel::bounded::<()>(1);
+    std::thread::Builder::new()
+        .name(format!("sill-stop-{id}"))
+        .spawn(move || {
+            let _ = sill_core::session::stop(&id);
+            let _ = tx.send_blocking(());
+        })
+        .ok();
+    glib::spawn_future_local(async move {
+        let _ = rx.recv().await;
+        then();
+    });
 }
 
 pub fn show(w: &gtk::Window) {

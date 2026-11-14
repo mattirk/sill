@@ -1,11 +1,13 @@
-//! Provider icons for the "+" menu: glyphs from simple-icons (CC0 1.0: Claude, OpenAI, Google
-//! Gemini) plus a neutral placeholder, rendered on demand in the colour of the widget they sit in,
+//! Icons for the menus: provider glyphs from simple-icons (CC0 1.0: Claude, OpenAI, Google Gemini)
+//! plus a neutral placeholder, and line glyphs from lucide (ISC) for the pages. All are rendered on
+//! demand in the colour of the widget they sit in,
 //! so they read light on dark themes and dark on light ones. (GTK's own symbolic recolouring only
 //! covers icons from an icon theme; a texture made here follows the live foreground instead.)
 
 use gtk4 as gtk;
 use gtk::gdk;
 use gtk::glib;
+use gtk::prelude::*;
 
 /// (icon name, 24×24 path data)
 const GLYPHS: &[(&str, &str)] = &[
@@ -16,7 +18,49 @@ const GLYPHS: &[(&str, &str)] = &[
     ("sill-agent-symbolic", "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 2a8 8 0 1 1 0 16 8 8 0 0 1 0-16zm0 5a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"),
 ];
 
+/// Line glyphs for the page menu (lucide, ISC): (name, path data drawn as a 2px stroke)
+const STROKES: &[(&str, &str)] = &[
+    ("sill-sessions", "M3 5h.01M3 12h.01M3 19h.01M8 5h13M8 12h13M8 19h13"),
+    ("sill-changes", "M12 3v14M5 10h14M5 21h14"),
+    ("sill-files", "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"),
+    ("sill-settings", "M10 5H3M12 19H3M14 3v4M16 17v4M21 12h-9M21 19h-5M21 5h-7M8 10v4M8 12H3"),
+    // a prompt: chevron and underscore, no window chrome
+    ("sill-terminal", "M3 18l7-7-7-7M12 20h9"),
+];
+
 pub const PLACEHOLDER: &str = "sill-agent-symbolic";
+
+fn hex(color: gdk::RGBA) -> String {
+    format!(
+        "#{:02x}{:02x}{:02x}",
+        (color.red() * 255.0).round() as u8,
+        (color.green() * 255.0).round() as u8,
+        (color.blue() * 255.0).round() as u8
+    )
+}
+
+fn texture_image(svg: String, px: i32) -> gtk::Image {
+    let i = match gdk::Texture::from_bytes(&glib::Bytes::from_owned(svg.into_bytes())) {
+        Ok(t) => gtk::Image::from_paintable(Some(&t)),
+        Err(_) => gtk::Image::from_icon_name("image-missing-symbolic"),
+    };
+    i.set_pixel_size(px);
+    i
+}
+
+/// A sill line glyph (`sill-sessions`, `sill-files`, …) in colour `color`.
+pub fn named(name: &str, color: gdk::RGBA, px: i32) -> gtk::Image {
+    let Some((_, d)) = STROKES.iter().find(|(n, _)| *n == name) else {
+        return gtk::Image::from_icon_name(name);
+    };
+    let size = px * 4;
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24"><path fill="none" stroke="{stroke}" stroke-opacity="{a}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" d="{d}"/></svg>"##,
+        stroke = hex(color),
+        a = color.alpha()
+    );
+    texture_image(svg, px)
+}
 
 fn glyph(name: &str) -> Option<&'static str> {
     GLYPHS.iter().find(|(n, _)| *n == name).map(|(_, d)| *d)
@@ -35,22 +79,23 @@ pub fn image(agent: Option<&sill_core::agents::Agent>, color: gdk::RGBA, px: i32
         }
     }
     let d = glyph(&name).or_else(|| glyph(PLACEHOLDER)).unwrap_or("");
-    let fill = format!(
-        "#{:02x}{:02x}{:02x}",
-        (color.red() * 255.0).round() as u8,
-        (color.green() * 255.0).round() as u8,
-        (color.blue() * 255.0).round() as u8
-    );
     // rendered at 4× for crisp edges on any scale factor, shown at `px`
     let size = px * 4;
     let svg = format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24"><path fill="{fill}" fill-opacity="{a}" d="{d}"/></svg>"##,
+        fill = hex(color),
         a = color.alpha()
     );
-    let i = match gdk::Texture::from_bytes(&glib::Bytes::from_owned(svg.into_bytes())) {
-        Ok(t) => gtk::Image::from_paintable(Some(&t)),
-        Err(_) => gtk::Image::from_icon_name("image-missing-symbolic"),
-    };
-    i.set_pixel_size(px);
-    i
+    texture_image(svg, px)
+}
+
+/// The colour to draw a glyph in for `widget` right now: the palette's foreground when a theme is
+/// active (the widget's own CSS colour may lag behind a theme switch), else the widget's colour.
+pub fn fg_for(widget: &impl IsA<gtk::Widget>, theme: &super::theme::Theme) -> gdk::RGBA {
+    if !theme.fg.is_empty()
+        && let Ok(c) = gdk::RGBA::parse(theme.fg)
+    {
+        return c;
+    }
+    widget.color()
 }
