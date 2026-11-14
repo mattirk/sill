@@ -195,6 +195,32 @@ pub fn connector() -> Connector {
     })
 }
 
+/// Ctrl-C in the terminal, `kill`, logging out: the guest is shut down cleanly before the
+/// process ends. Without it the VM went with the process at once, and what the guest had not
+/// yet written to its disks was lost (2026-11-12: a commit in a session's workspace came back
+/// as an empty object file after `run-gui.sh` was stopped with Ctrl-C).
+pub fn shut_down_on_signals() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static ASKED: AtomicBool = AtomicBool::new(false);
+    extern "C" fn on_signal(_: libc::c_int) {
+        ASKED.store(true, Ordering::Relaxed);
+    }
+    for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+        // SAFETY: an async-signal-safe handler that only stores a flag
+        unsafe { libc::signal(signal, on_signal as *const () as libc::sighandler_t) };
+    }
+    let _ = std::thread::Builder::new()
+        .name("sill-gui-signals".into())
+        .spawn(|| {
+            while !ASKED.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            eprintln!("sill-gui: shutting the VM down");
+            shut_down();
+            std::process::exit(0);
+        });
+}
+
 /// Shut the VM down at Quit: the guest is asked first and given a little while, then stopped.
 pub fn shut_down() {
     let Some(shared) = SHARED.get() else { return };

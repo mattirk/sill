@@ -138,9 +138,10 @@ fn main() -> iced::Result {
     #[cfg(target_os = "macos")]
     if local_vm::wanted(options.demo) {
         local_vm::begin();
+        local_vm::shut_down_on_signals();
     }
     let above = !options.demo && settings::load().always_on_top();
-    iced::application(
+    let ran = iced::application(
         move || App::new(options.demo, options.session.clone()),
         App::update,
         App::view,
@@ -178,7 +179,11 @@ fn main() -> iced::Result {
         platform_specific: macos::platform_specific(),
         ..iced::window::Settings::default()
     })
-    .run()
+    .run();
+    // however the window ended, its VM is shut down cleanly before the process goes
+    #[cfg(target_os = "macos")]
+    local_vm::shut_down();
+    ran
 }
 
 /// The window's size as made, in its own units (iced makes it this much times Interface scale).

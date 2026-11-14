@@ -1,0 +1,6 @@
+# The Mac app's VM: git writes what it commits to disk before saying so (git 2.36+), so a commit
+# survives the VM being stopped without a shutdown (2026-11-12: a session's commit came back as
+# an empty object file). Every git in the VM reads this, the agents' in their jails too.
+[core]
+	fsync = committed
+	fsyncMethod = fsync
