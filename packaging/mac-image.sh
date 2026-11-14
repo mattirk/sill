@@ -156,6 +156,9 @@ guest 'sudo install -D -m755 guest/packaging/mac/guest/sill-disks /usr/local/lib
     sudo install -m644 guest/packaging/mac/guest/grub.cfg /etc/default/grub.d/sill.cfg &&
     sudo install -m644 guest/packaging/mac/guest/gitconfig /etc/gitconfig &&
     sudo install -m644 guest/packaging/mac/guest/sysctl.conf /etc/sysctl.d/90-sill.conf &&
+    sudo install -m644 guest/packaging/mac/guest/sshd.conf /etc/ssh/sshd_config.d/90-sill.conf &&
+    sudo sshd -t &&
+    sudo install -D -m644 guest/packaging/mac/guest/resolved.conf /etc/systemd/resolved.conf.d/90-sill.conf &&
     sudo install -m600 guest/packaging/mac/guest/network.yaml /etc/netplan/90-sill.yaml &&
     sudo install -m644 guest/packaging/mac/guest/cloud-network.cfg /etc/cloud/cloud.cfg.d/99-sill-network.cfg &&
     sudo rm -f /etc/netplan/50-cloud-init.yaml &&
