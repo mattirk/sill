@@ -1,19 +1,27 @@
-//! The folder tree of a session (SPEC §3.1 pins): a click on a pinned folder's chip widens the shelf
-//! to the right and shows that folder here, two levels open. A click on a file opens it in the
-//! viewer on the left; a click on a folder opens or closes it. Escape (from the viewer, then here)
-//! steps back and finally narrows the shelf again.
+//! The file tree (SPEC §3.1): a drawer beside the main pane — the shelf widens by `x11::TREE_FRACTION`
+//! while it is open and narrows again when it closes. Global (the home directory, the selected
+//! session's pinned folders first, plus every repository a session touched) or scoped to one pinned
+//! folder from its chip, two levels open (dot folders and build output listed but closed, dimmed).
+//! Change badges come from the combined ledger of all sessions and from git status; the pin button on
+//! a folder row makes a live mount (the jail is rebuilt), on a file row a chip only. A click on a file
+//! opens it in the viewer over the main pane.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gtk4 as gtk;
 use gtk::gio;
+use gtk::glib;
 use gtk::prelude::*;
+use sill_core::changes;
+use sill_core::ledger::Change;
+use sill_core::store::Store;
 
-use super::files::{children_of, file_icon};
+use super::{session, theme};
 
-/// Folders below this depth are opened when the tree is shown (0 = the pinned folder itself).
+/// Folders below this depth are opened when a scoped tree is shown (0 = the pinned folder itself).
 const OPEN_DEPTH: u32 = 2;
 /// Opening stops once this many rows are shown (a huge folder must not stall the shelf).
 const OPEN_LIMIT: u32 = 600;
@@ -27,44 +35,92 @@ fn path_of(row: &gtk::TreeListRow) -> Option<PathBuf> {
     row.item().and_downcast::<gtk::StringObject>().map(|s| PathBuf::from(s.string().as_str()))
 }
 
+/// Icon for a tree row: folder (open/closed) or the file's MIME symbolic icon.
+fn file_icon(path: &Path, is_dir: bool, expanded: bool) -> gio::Icon {
+    if is_dir {
+        return gio::ThemedIcon::new(if expanded { "folder-open-symbolic" } else { "folder-symbolic" }).upcast();
+    }
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let (ctype, _) = gio::content_type_guess(Some(name.as_str()), None);
+    gio::content_type_get_symbolic_icon(&ctype)
+}
+
+fn children_of(dir: &Path) -> gio::ListStore {
+    let store = gio::ListStore::new::<gtk::StringObject>();
+    let mut entries: Vec<(bool, String)> = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(Result::ok)
+                .map(|e| (e.path().is_dir(), e.file_name().to_string_lossy().into_owned()))
+                .collect()
+        })
+        .unwrap_or_default();
+    // directories first, dot files last, case-insensitive
+    entries.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then(a.1.starts_with('.').cmp(&b.1.starts_with('.')))
+            .then(a.1.to_lowercase().cmp(&b.1.to_lowercase()))
+    });
+    for (_, name) in entries {
+        store.append(&gtk::StringObject::new(&dir.join(name).to_string_lossy()));
+    }
+    store
+}
+
 pub struct FolderTree {
     pub root: gtk::Box,
     title: gtk::Label,
+    /// Back to the global tree while scoped to one folder.
+    all: gtk::Button,
+    view: gtk::ListView,
     roots: gio::ListStore,
     tree: gtk::TreeListModel,
     selection: gtk::SingleSelection,
-    folder: RefCell<Option<PathBuf>>,
+    /// When set, the tree shows only this folder (opened from a pin chip).
+    scope: RefCell<Option<PathBuf>>,
+    store: Rc<Store>,
+    badges: Rc<RefCell<BTreeMap<PathBuf, String>>>,
+    /// Every session's pending changes: the badges here, and the viewer shows a pending path's diff.
+    pub changes: Rc<RefCell<Vec<Change>>>,
+    pinned: Rc<RefCell<Vec<PathBuf>>>,
+    /// Pinned by some other session than the current one: shown, but the button pins here.
+    elsewhere: Rc<RefCell<Vec<PathBuf>>>,
+    message: gtk::Label,
+    /// Session that receives pins (the selected tab), set by the window.
+    pub pin_target: RefCell<Option<String>>,
     pub on_open: RefCell<Option<Box<dyn Fn(&Path)>>>,
     pub on_close: RefCell<Option<Box<dyn Fn()>>>,
-    pub on_pin: RefCell<Option<Box<dyn Fn(&Path)>>>,
-    /// "Open in Files": the full explorer and editor on the backend page.
-    pub on_files: RefCell<Option<Box<dyn Fn(&Path)>>>,
+    /// A pin of this session changed: the window refreshes its chips and, for a folder, its jail.
+    pub on_pin: RefCell<Option<Box<dyn Fn(&str)>>>,
 }
 
 impl FolderTree {
-    pub fn new() -> Rc<Self> {
+    pub fn new(store: Rc<Store>) -> Rc<Self> {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.add_css_class("sill-tree-panel");
         let bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         bar.add_css_class("sill-viewer-bar");
-        let title = gtk::Label::new(None);
+        let title = gtk::Label::new(Some("Files"));
         title.set_xalign(0.0);
         title.set_hexpand(true);
         title.set_ellipsize(gtk::pango::EllipsizeMode::Start);
         title.add_css_class("dim-label");
-        let files = gtk::Button::from_icon_name("document-edit-symbolic");
-        files.add_css_class("flat");
-        files.add_css_class("sill-viewer-btn");
-        files.set_tooltip_text(Some("Open in Files (edit)"));
+        let all = gtk::Button::with_label("all");
+        all.add_css_class("flat");
+        all.add_css_class("sill-viewer-btn");
+        all.set_tooltip_text(Some("Show everything: home, pinned folders, touched repositories"));
+        all.set_visible(false);
         let close = gtk::Button::from_icon_name("window-close-symbolic");
         close.add_css_class("flat");
         close.add_css_class("sill-viewer-btn");
         close.set_tooltip_text(Some("Close the tree (Escape)"));
         bar.append(&title);
-        bar.append(&files);
+        bar.append(&all);
         bar.append(&close);
         root.append(&bar);
 
+        let badges: Rc<RefCell<BTreeMap<PathBuf, String>>> = Rc::new(RefCell::new(BTreeMap::new()));
+        let pinned: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
+        let elsewhere: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
         let roots = gio::ListStore::new::<gtk::StringObject>();
         let tree = gtk::TreeListModel::new(roots.clone(), false, false, |item| {
             let path = PathBuf::from(item.downcast_ref::<gtk::StringObject>()?.string().as_str());
@@ -86,18 +142,23 @@ impl FolderTree {
             name.set_xalign(0.0);
             name.set_hexpand(true);
             name.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-            let pin = gtk::Button::from_icon_name("view-pin-symbolic");
+            let badge = gtk::Label::new(None);
+            badge.add_css_class("sill-badge");
+            let pin = gtk::Button::new();
             pin.add_css_class("flat");
             pin.add_css_class("sill-pin");
-            pin.set_tooltip_text(Some("Pin this file: a chip opens it full width"));
             b.append(&icon);
             b.append(&name);
+            b.append(&badge);
             b.append(&pin);
             expander.set_child(Some(&b));
             item.set_child(Some(&expander));
         });
         let tree_rc: Rc<RefCell<Option<std::rc::Weak<FolderTree>>>> = Rc::new(RefCell::new(None));
         {
+            let badges = badges.clone();
+            let pinned = pinned.clone();
+            let elsewhere = elsewhere.clone();
             let tree_rc = tree_rc.clone();
             factory.connect_bind(move |_, item| {
                 let Some(item) = item.downcast_ref::<gtk::ListItem>() else { return };
@@ -106,9 +167,10 @@ impl FolderTree {
                 expander.set_list_row(Some(&row));
                 let Some(path) = path_of(&row) else { return };
                 let Some(b) = expander.child().and_downcast::<gtk::Box>() else { return };
-                let (Some(icon), Some(name), Some(pin)) = (
+                let (Some(icon), Some(name), Some(badge), Some(pin)) = (
                     b.first_child().and_downcast::<gtk::Image>(),
                     b.first_child().and_then(|w| w.next_sibling()).and_downcast::<gtk::Label>(),
+                    b.first_child().and_then(|w| w.next_sibling()).and_then(|w| w.next_sibling()).and_downcast::<gtk::Label>(),
                     b.last_child().and_downcast::<gtk::Button>(),
                 ) else {
                     return;
@@ -116,26 +178,72 @@ impl FolderTree {
                 let is_dir = path.is_dir();
                 icon.set_from_gicon(&file_icon(&path, is_dir, row.is_expanded()));
                 let fname = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                name.set_text(&fname);
+                for c in ["sill-changed", "sill-dim", "sill-pinned", "sill-new"] {
+                    name.remove_css_class(c);
+                }
                 if is_noise(&fname) {
                     name.add_css_class("sill-dim");
-                } else {
-                    name.remove_css_class("sill-dim");
                 }
-                // pinning a file: files only (folders are pinned from the Files page: that rebuilds the jail)
-                pin.set_visible(!is_dir);
+                // a root shows where it is; everything below just its name
+                let label = if row.depth() == 0 {
+                    path.display().to_string().replacen(&std::env::var("HOME").unwrap_or_default(), "~", 1)
+                } else {
+                    fname.clone()
+                };
+                name.set_text(&label);
+                let badge_text = badges.borrow().get(&path).cloned().unwrap_or_default();
+                if badge_text.starts_with('?') {
+                    name.add_css_class("sill-new");
+                } else if !badge_text.is_empty() && badge_text != "·" {
+                    name.add_css_class("sill-changed");
+                }
+                let is_pinned = pinned.borrow().contains(&path);
+                if is_pinned {
+                    name.add_css_class("sill-pinned");
+                }
+                let is_repo = is_dir && path.join(".git").exists();
+                let mut parts: Vec<String> = Vec::new();
+                if !badge_text.is_empty() {
+                    parts.push(badge_text);
+                }
+                if is_repo {
+                    parts.push("git".into());
+                }
+                let is_elsewhere = !is_pinned && elsewhere.borrow().contains(&path);
+                if is_pinned {
+                    parts.push("⌖".into());
+                } else if is_elsewhere {
+                    parts.push("⌖ other".into());
+                }
+                badge.set_text(&parts.join(" "));
+                badge.set_tooltip_text(match (is_repo, is_pinned, is_elsewhere) {
+                    (true, true, _) => Some("git repository · pinned to the current session"),
+                    (true, false, true) => Some("git repository · pinned by another session, not this one"),
+                    (true, false, false) => Some("git repository"),
+                    (false, true, _) => Some("pinned to the current session"),
+                    (false, false, true) => Some("pinned by another session, not this one"),
+                    _ => None,
+                });
+                // folders: a live mount (the jail is rebuilt); files: a chip that opens the file
+                pin.set_child(Some(&super::icons::scalable(
+                    if is_pinned { "sill-minus" } else { "sill-plus" },
+                    super::icons::fg_for(&pin, &theme::current()),
+                )));
+                pin.set_tooltip_text(Some(match (is_pinned, is_dir) {
+                    (true, _) => "Unpin from the current session",
+                    (false, true) => "Pin to the current session: bound live into its jail",
+                    (false, false) => "Pin this file: a chip that opens it",
+                }));
                 let weak = tree_rc.borrow().clone();
                 let p = path.clone();
                 let id = pin.connect_clicked(move |_| {
-                    if let Some(t) = weak.as_ref().and_then(|w| w.upgrade())
-                        && let Some(cb) = t.on_pin.borrow().as_ref()
-                    {
-                        cb(&p);
+                    if let Some(t) = weak.as_ref().and_then(|w| w.upgrade()) {
+                        t.toggle_pin(&p);
                     }
                 });
                 // one handler per bind
                 unsafe {
-                    if let Some(old) = pin.steal_data::<gtk::glib::SignalHandlerId>("sill-pin-handler") {
+                    if let Some(old) = pin.steal_data::<glib::SignalHandlerId>("sill-pin-handler") {
                         pin.disconnect(old);
                     }
                     pin.set_data("sill-pin-handler", id);
@@ -145,25 +253,41 @@ impl FolderTree {
         let view = gtk::ListView::new(Some(selection.clone()), Some(factory));
         view.add_css_class("sill-files");
         view.set_single_click_activate(true);
+        // never scroll sideways: names ellipsize, the pin column stays put
         let scroll = gtk::ScrolledWindow::builder().child(&view).vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build();
         root.append(&scroll);
+        let message = gtk::Label::new(None);
+        message.set_xalign(0.0);
+        message.add_css_class("dim-label");
+        message.add_css_class("sill-menu-caption");
+        message.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+        message.set_visible(false);
+        root.append(&message);
 
         let t = Rc::new(Self {
             root,
             title,
+            all: all.clone(),
+            view,
             roots,
             tree,
             selection,
-            folder: RefCell::new(None),
+            scope: RefCell::new(None),
+            store,
+            badges,
+            changes: Rc::new(RefCell::new(Vec::new())),
+            pinned,
+            elsewhere,
+            message,
+            pin_target: RefCell::new(None),
             on_open: RefCell::new(None),
             on_close: RefCell::new(None),
             on_pin: RefCell::new(None),
-            on_files: RefCell::new(None),
         });
         *tree_rc.borrow_mut() = Some(Rc::downgrade(&t));
         {
             let weak = Rc::downgrade(&t);
-            view.connect_activate(move |_, pos| {
+            t.view.connect_activate(move |_, pos| {
                 let Some(t) = weak.upgrade() else { return };
                 let Some(row) = t.tree.row(pos) else { return };
                 let Some(path) = path_of(&row) else { return };
@@ -187,31 +311,190 @@ impl FolderTree {
         }
         {
             let weak = Rc::downgrade(&t);
-            files.connect_clicked(move |_| {
-                if let Some(t) = weak.upgrade()
-                    && let Some(p) = t.folder.borrow().clone()
-                    && let Some(cb) = t.on_files.borrow().as_ref()
-                {
-                    cb(&p);
+            all.connect_clicked(move |_| {
+                if let Some(t) = weak.upgrade() {
+                    t.set_scope(None);
                 }
             });
         }
         t
     }
 
-    pub fn folder(&self) -> Option<PathBuf> {
-        self.folder.borrow().clone()
+    pub fn scope(&self) -> Option<PathBuf> {
+        self.scope.borrow().clone()
     }
 
-    /// Show `folder`, opened two levels deep (build output and dot folders stay closed).
-    pub fn set_folder(&self, folder: &Path) {
+    /// Limit the tree to one folder (from a pin chip), or show everything again.
+    pub fn set_scope(self: &Rc<Self>, path: Option<PathBuf>) {
         let home = std::env::var("HOME").unwrap_or_default();
-        self.title.set_text(&folder.display().to_string().replacen(&home, "~", 1));
-        self.title.set_tooltip_text(Some(&folder.display().to_string()));
-        *self.folder.borrow_mut() = Some(folder.to_path_buf());
-        self.roots.remove_all();
-        self.roots.append(&gtk::StringObject::new(&folder.to_string_lossy()));
-        self.selection.set_selected(gtk::INVALID_LIST_POSITION);
+        match &path {
+            Some(p) => {
+                self.title.set_text(&p.display().to_string().replacen(&home, "~", 1));
+                self.title.set_tooltip_text(Some(&p.display().to_string()));
+            }
+            None => {
+                self.title.set_text("Files");
+                self.title.set_tooltip_text(None);
+            }
+        }
+        self.all.set_visible(path.is_some());
+        *self.scope.borrow_mut() = path;
+        self.refresh();
+    }
+
+    fn say(&self, what: &str) {
+        self.message.set_text(what);
+        self.message.set_visible(!what.is_empty());
+    }
+
+    fn toggle_pin(self: &Rc<Self>, path: &Path) {
+        let Some(sid) = self.pin_target.borrow().clone() else {
+            self.say("no session selected to pin to");
+            return;
+        };
+        let was = self.pinned.borrow().contains(&path.to_path_buf());
+        let r = if was { self.store.unpin(&sid, path) } else { self.store.pin(&sid, path) };
+        match r {
+            Ok(()) => {
+                self.say(&format!("{} {}", if was { "unpinned" } else { "pinned" }, path.display()));
+                if let Some(cb) = self.on_pin.borrow().as_ref() {
+                    cb(&sid);
+                }
+                self.refresh();
+            }
+            Err(e) => self.say(&format!("pin failed: {e}")),
+        }
+    }
+
+    /// Rescan every session's ledger and git status off the main thread, then rebuild badges and roots.
+    pub fn refresh(self: &Rc<Self>) {
+        let _ = self.store.prune_pins(); // pins of deleted sessions would otherwise haunt the tree
+        let sessions = self.store.sessions().unwrap_or_default();
+        let home = session::home().unwrap_or_default();
+        let uid = session::uid();
+        let user = std::env::var("USER").unwrap_or_default();
+        let target = self.pin_target.borrow().clone();
+        let target_pins: Vec<PathBuf> = target.as_ref().and_then(|t| self.store.pins(t).ok()).unwrap_or_default();
+        // the selected session's pins first, then everyone else's
+        let mut pins: Vec<PathBuf> = target_pins.clone();
+        let elsewhere: Vec<PathBuf> = sessions
+            .iter()
+            .filter(|s| Some(&s.id) != target.as_ref())
+            .flat_map(|s| self.store.pins(&s.id).unwrap_or_default())
+            .filter(|p| !target_pins.contains(p))
+            .collect();
+        for p in &elsewhere {
+            if !pins.contains(p) {
+                pins.push(p.clone());
+            }
+        }
+        *self.elsewhere.borrow_mut() = elsewhere;
+        *self.pinned.borrow_mut() = target_pins;
+        let (tx, rx) = async_channel::bounded::<Vec<Change>>(1);
+        std::thread::spawn(move || {
+            let mut all = Vec::new();
+            for s in sessions {
+                let Ok(policy) = sill_core::policy::Policy::load(&s.policy, &home) else { continue };
+                let Ok(state_dir) = sill_core::session::state_dir(uid, &s.id) else { continue };
+                if !state_dir.is_dir() {
+                    continue;
+                }
+                let binds = match Store::open_default() {
+                    Ok(st) => session::binds_of(&s, &policy, &home, &st),
+                    Err(_) => vec![],
+                };
+                let Ok(plan) = changes::session_plan(policy.clone(), state_dir, &home, uid, &user, binds) else { continue };
+                all.extend(changes::scan(&policy, &plan, None).unwrap_or_default());
+            }
+            let _ = tx.send_blocking(all);
+        });
+        let t = self.clone();
+        glib::spawn_future_local(async move {
+            if let Ok(all) = rx.recv().await {
+                t.apply(all, pins);
+            }
+        });
+    }
+
+    fn apply(self: &Rc<Self>, all: Vec<Change>, pins: Vec<PathBuf>) {
+        let home = session::home().unwrap_or_default();
+        let mut badges: BTreeMap<PathBuf, String> = BTreeMap::new();
+        // git working-tree status of every repo in view (pins, repos with session changes, the scope's
+        // repo): M/A/D/R from `git status`, `?` for untracked; the session ledger's letters win below
+        let mut repos: Vec<PathBuf> = pins.iter().filter(|p| p.join(".git").exists()).cloned().collect();
+        for c in &all {
+            if let Some(r) = changes::repo_root(&c.path)
+                && !repos.contains(&r)
+            {
+                repos.push(r);
+            }
+        }
+        let scope = self.scope.borrow().clone();
+        if let Some(s) = &scope
+            && let Some(r) = changes::repo_root(&s.join("x"))
+            && !repos.contains(&r)
+        {
+            repos.push(r);
+        }
+        for repo in &repos {
+            for (rel, st) in changes::git_status(repo) {
+                let path = repo.join(rel);
+                badges.insert(path.clone(), st);
+                let mut d = path.parent();
+                while let Some(dir) = d {
+                    if dir == repo.as_path() {
+                        break;
+                    }
+                    badges.entry(dir.to_path_buf()).or_insert_with(|| "·".into());
+                    d = dir.parent();
+                }
+            }
+        }
+        // folders only as roots: a pinned file is a chip, not a tree
+        let mut roots: Vec<PathBuf> = match &scope {
+            Some(s) => vec![s.clone()],
+            None => pins.into_iter().filter(|p| p.is_dir()).collect(),
+        };
+        for c in all.iter().filter(|c| !c.ignored) {
+            badges.insert(c.path.clone(), format!("{}{}", c.kind.letter(), if c.conflict { "!" } else { "" }));
+            let mut p = c.path.parent();
+            while let Some(d) = p {
+                badges.entry(d.to_path_buf()).or_insert_with(|| "·".into());
+                p = d.parent();
+            }
+            if scope.is_none()
+                && let Some(r) = changes::repo_root(&c.path)
+                && !roots.contains(&r)
+            {
+                roots.push(r);
+            }
+        }
+        roots.dedup();
+        if scope.is_none() && !roots.contains(&home) {
+            roots.push(home);
+        }
+        *self.badges.borrow_mut() = badges;
+        *self.changes.borrow_mut() = all;
+        // keep the tree if the roots didn't change (expansion state survives)
+        let current: Vec<String> = (0..self.roots.n_items())
+            .filter_map(|i| self.roots.item(i).and_downcast::<gtk::StringObject>().map(|o| o.string().to_string()))
+            .collect();
+        let wanted: Vec<String> = roots.iter().map(|r| r.to_string_lossy().into_owned()).collect();
+        if current != wanted {
+            self.roots.remove_all();
+            for r in &wanted {
+                self.roots.append(&gtk::StringObject::new(r));
+            }
+            self.selection.set_selected(gtk::INVALID_LIST_POSITION);
+            if scope.is_some() {
+                self.open_levels();
+            }
+        }
+        self.view.queue_draw();
+    }
+
+    /// A scoped tree starts two levels open (build output and dot folders stay closed).
+    fn open_levels(&self) {
         let mut i = 0;
         while i < self.tree.n_items() && self.tree.n_items() < OPEN_LIMIT {
             if let Some(row) = self.tree.row(i)

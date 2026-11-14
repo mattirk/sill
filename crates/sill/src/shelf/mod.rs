@@ -4,7 +4,6 @@
 mod agents_page;
 mod changes;
 mod conversation;
-mod files;
 mod hotkey;
 mod icons;
 mod markdown;

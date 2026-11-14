@@ -3,7 +3,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gtk4 as gtk;
@@ -17,7 +17,8 @@ use sill_core::store::{Session, Store};
 
 use super::agents_page::AgentsPage;
 use super::changes::ChangesPage;
-use super::files::FilesPage;
+use super::tree::FolderTree;
+use super::viewer::Viewer;
 use super::session_view::SessionView;
 use super::tabs::TabStrip;
 use super::{session, settings, theme, x11};
@@ -48,7 +49,9 @@ pub struct Shelf {
     views: RefCell<HashMap<String, Rc<SessionView>>>,
     changes: Rc<ChangesPage>,
     agents: Rc<AgentsPage>,
-    files: Rc<FilesPage>,
+    /// The file tree (a drawer beside the main pane) and the viewer (over it), SPEC §3.1.
+    tree: Rc<FolderTree>,
+    viewer: Rc<Viewer>,
 }
 
 pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
@@ -135,13 +138,13 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
     stack.set_vexpand(true);
     stack.add_named(&pages, Some("sessions"));
     let changes = ChangesPage::new(store.clone());
-    let files = FilesPage::new(store.clone());
+    let tree = FolderTree::new(store.clone());
+    let viewer = Viewer::new(tree.changes.clone());
     let agents_page = AgentsPage::new();
     let settings_page = settings::build();
     // backend pages: the page tabs in the bar say where you are, "sill" or Escape goes back
     for (name, body) in [
         ("changes", changes.root.clone().upcast::<gtk::Widget>()),
-        ("files", files.root.clone().upcast::<gtk::Widget>()),
         ("agents", agents_page.root.clone().upcast::<gtk::Widget>()),
         ("settings", settings_page.clone().upcast::<gtk::Widget>()),
     ] {
@@ -149,9 +152,23 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         stack.add_named(&body, Some(name));
     }
 
+    // the main pane (pages) at the configured width, the viewer over it, the tree beside it: only
+    // the tree changes the window's width (Shelf::fraction)
+    let main = gtk::Overlay::new();
+    main.set_child(Some(&stack));
+    viewer.root.set_visible(false);
+    main.add_overlay(&viewer.root);
+    main.set_hexpand(true);
+    main.set_vexpand(true);
+    tree.root.set_visible(false);
+    tree.root.set_hexpand(false);
+    let body = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    body.append(&main);
+    body.append(&tree.root);
+    body.set_vexpand(true);
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
     column.append(&bar);
-    column.append(&stack);
+    column.append(&body);
     window.set_content(Some(&column));
 
     let shelf = Rc::new(Shelf {
@@ -172,7 +189,8 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         views: RefCell::new(HashMap::new()),
         changes: changes.clone(),
         agents: agents_page.clone(),
-        files: files.clone(),
+        tree: tree.clone(),
+        viewer: viewer.clone(),
     });
     {
         // auto-revert (SPEC §4.4): the Changes page sweeps once a minute; a session that is mid-turn
@@ -202,24 +220,44 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
     }
 
     {
-        // Files: open it, or step back to the session when it is already open
+        // Files: the global tree beside the main pane; again (or Escape) closes it
         let s = shelf.clone();
         files_btn.connect_clicked(move |_| {
-            if s.stack.visible_child_name().as_deref() == Some("files") {
-                s.show_page("sessions");
+            if s.tree.root.is_visible() {
+                s.close_tree();
             } else {
-                s.show_page("files");
+                s.toggle_tree(None);
             }
         });
     }
     {
         let s = shelf.clone();
-        *files.on_pin.borrow_mut() = Some(Box::new(move |sid| {
-            if let Some(v) = s.views.borrow().get(sid) {
+        *tree.on_pin.borrow_mut() = Some(Box::new(move |sid| {
+            let view = s.views.borrow().get(sid).cloned();
+            if let Some(v) = view {
                 v.refresh_pins();
             }
-            s.restart_session(sid);
+            s.restart_session(sid); // a folder pin is a mount; a file pin leaves the jail alone
         }));
+        let s = shelf.clone();
+        *tree.on_open.borrow_mut() = Some(Box::new(move |p| s.open_file(p, false)));
+        let s = shelf.clone();
+        *tree.on_close.borrow_mut() = Some(Box::new(move || s.close_tree()));
+        let s = shelf.clone();
+        *viewer.on_close.borrow_mut() = Some(Box::new(move || {
+            s.viewer.root.set_visible(false);
+            s.focus_prompt();
+        }));
+    }
+    {
+        // a monitor plugged in or out: the primary's work area may be another one now
+        let s = shelf.clone();
+        let w = window.clone();
+        WidgetExt::display(&window).monitors().connect_items_changed(move |_, _, _, _| {
+            if w.is_mapped() {
+                s.place();
+            }
+        });
     }
     // the page tabs (built once, glyphs redrawn with the theme) and the "sill" toggle
     shelf.build_page_tabs(&page_tabs_box);
@@ -250,9 +288,11 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         let s = shelf.clone();
         *tabs.on_select.borrow_mut() = Some(Box::new(move |id| {
             s.pages.set_visible_child_name(id);
-            *s.files.pin_target.borrow_mut() = Some(id.to_string());
+            *s.tree.pin_target.borrow_mut() = Some(id.to_string());
+            if s.tree.root.is_visible() {
+                s.tree.refresh(); // pinned-here badges follow the selected session
+            }
             s.sync_status();
-            s.place();
             s.focus_prompt();
         }));
     }
@@ -328,10 +368,13 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         let s = shelf.clone();
         esc.connect_key_pressed(move |_, key, _, _| {
             if key == gdk::Key::Escape {
-                if s.stack.visible_child_name().as_deref() == Some("sessions")
-                    && let Some(v) = s.tabs.selected().and_then(|id| s.views.borrow().get(&id).cloned())
-                    && v.escape()
-                {
+                // the viewer steps back (then closes), then the tree closes, then the pages
+                if s.viewer.root.is_visible() {
+                    s.viewer.escape();
+                    return glib::Propagation::Stop;
+                }
+                if s.tree.root.is_visible() {
+                    s.close_tree();
                     return glib::Propagation::Stop;
                 }
                 if s.stack.visible_child_name().as_deref() != Some("sessions") {
@@ -414,21 +457,57 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
 }
 
 impl Shelf {
-    /// The shelf's width as a fraction of the work area: the Files page takes at least half; a
-    /// session with its folder tree open adds the tree's share (SPEC §3.1).
+    /// The shelf's width as a fraction of the primary monitor's work area: the configured width,
+    /// plus the tree's share while the tree is open — nothing else moves the window (SPEC §3.1).
     fn fraction(&self) -> f64 {
-        if self.stack.visible_child_name().as_deref() == Some("files") {
-            return x11::width_fraction().max(0.5);
+        if self.tree.root.is_visible() { (x11::width_fraction() + x11::TREE_FRACTION).min(0.95) } else { x11::width_fraction() }
+    }
+
+    /// Show the tree — scoped to one folder (a chip) or global (`None`: the Files button) — or close
+    /// it when the chip of the folder it already shows is clicked again.
+    fn toggle_tree(&self, scope: Option<PathBuf>) {
+        if self.tree.root.is_visible() && scope.is_some() && self.tree.scope() == scope {
+            self.close_tree();
+            return;
         }
-        let tree = self.stack.visible_child_name().as_deref() == Some("sessions")
-            && self.tabs.selected().and_then(|id| self.views.borrow().get(&id).map(|v| v.tree_open())).unwrap_or(false);
-        if tree { (x11::width_fraction() + x11::TREE_FRACTION).min(0.9) } else { x11::width_fraction() }
+        self.tree.set_scope(scope);
+        // the tree's share of the work area, in this window's logical pixels
+        let w: gtk::Window = self.window.clone().upcast();
+        if let Some(area) = x11::work_area_with(&w, x11::TREE_FRACTION) {
+            self.tree.root.set_size_request(area.width as i32 / x11::scale_of(&w), -1);
+        }
+        self.tree.root.set_visible(true);
+        self.place();
+    }
+
+    fn close_tree(&self) {
+        if !self.tree.root.is_visible() {
+            return;
+        }
+        self.tree.root.set_visible(false);
+        self.place();
+        self.focus_prompt();
+    }
+
+    /// A file in the viewer, over the main pane. `full`: a pinned file, the whole shelf — the tree closes.
+    fn open_file(&self, path: &Path, full: bool) {
+        if full {
+            self.close_tree();
+        }
+        self.viewer.open(path);
+        self.viewer.root.set_visible(true);
+        self.viewer.focus(); // keys go to the viewer, not the prompt underneath
     }
 
     /// Move/resize the window to the current fraction.
     fn place(&self) {
         let w: gtk::Window = self.window.clone().upcast();
         if let Some(area) = x11::work_area_with(&w, self.fraction()) {
+            // GTK's own size first: a mapped toplevel re-sends its remembered size (grown to its
+            // minimum) over whatever the X window was just configured to — with the tree open that
+            // left the main pane squeezed instead of the window wider
+            let k = x11::scale_of(&w);
+            w.set_default_size(area.width as i32 / k, area.height as i32 / k);
             x11::place(&w, &area);
         }
     }
@@ -450,7 +529,6 @@ impl Shelf {
         self.place();
         match name {
             "changes" => self.changes.refresh(),
-            "files" => self.files.refresh(),
             "agents" => self.agents.refresh(),
             "sessions" => self.focus_prompt(),
             _ => {}
@@ -757,6 +835,9 @@ impl Shelf {
                 if shelf.stack.visible_child_name().as_deref() == Some("changes") {
                     shelf.changes.refresh();
                 }
+                if shelf.tree.root.is_visible() {
+                    shelf.tree.refresh(); // badges
+                }
             }));
         }
         {
@@ -785,19 +866,10 @@ impl Shelf {
             *view.on_restart.borrow_mut() = Some(Box::new(move |id| shelf.restart_session(id)));
         }
         {
-            let shelf = Rc::downgrade(self);
-            *view.on_layout.borrow_mut() = Some(Box::new(move || {
-                if let Some(s) = shelf.upgrade() {
-                    s.place();
-                }
-            }));
-        }
-        {
             let shelf = self.clone();
-            *view.on_open_folder.borrow_mut() = Some(Box::new(move |p| {
-                shelf.files.set_scope(Some(p.to_path_buf()));
-                shelf.show_page("files");
-            }));
+            *view.on_open_folder.borrow_mut() = Some(Box::new(move |p| shelf.toggle_tree(Some(p.to_path_buf()))));
+            let shelf = self.clone();
+            *view.on_open_file.borrow_mut() = Some(Box::new(move |p, full| shelf.open_file(p, full)));
         }
         {
             // the top-bar status mirrors the selected view's status

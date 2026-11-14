@@ -1,13 +1,19 @@
-//! The file viewer of a session (SPEC §3.1 viewer): opens on the left, in place of the conversation —
-//! from a file in the folder tree, a pinned file, or an image in an agent message. Text with syntax
-//! highlighting, Markdown rendered (with a source toggle), images fitted to the view. Read-only:
-//! editing is the Files page's job. Escape steps back through what was opened, then closes.
+//! The file viewer (SPEC §3.1): opens over the main pane, at the shelf's own width — from a file in
+//! the tree, a pinned file's chip, or an image in an agent message. Text with syntax highlighting,
+//! Markdown rendered by the conversation's renderer, images fitted to the view; an *Edit* toggle makes
+//! a text file editable in place (Ctrl+S writes the host file). A path with a pending session change
+//! shows its diff instead: keep or revert it in Changes first. Escape steps back through what was
+//! opened, then closes.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 
 use gtk4 as gtk;
+use gtk::gdk;
+use gtk::glib;
+use sill_core::changes;
+use sill_core::ledger::Change;
 use sourceview5::prelude::*;
 
 use super::{markdown, theme};
@@ -16,6 +22,9 @@ use super::{markdown, theme};
 pub const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"];
 /// Larger files are not read at all.
 const MAX_BYTES: u64 = 20_000_000;
+/// GtkSourceView can't cope with minified/one-line files (highlighting + wrapping of a megabyte-long
+/// line): those are shown as a truncated, plain, read-only preview instead.
+const PREVIEW: usize = 200_000;
 
 pub fn is_image(path: &Path) -> bool {
     path.extension().map(|e| e.to_string_lossy().to_lowercase()).is_some_and(|e| IMAGE_EXTENSIONS.contains(&e.as_str()))
@@ -28,13 +37,22 @@ pub fn is_markdown(path: &Path) -> bool {
 pub struct Viewer {
     pub root: gtk::Box,
     title: gtk::Label,
-    /// Markdown: show the source instead of the rendering.
-    source: gtk::ToggleButton,
+    /// Make the shown text editable (a Markdown file: its source).
+    edit: gtk::ToggleButton,
     stack: gtk::Stack,
     text: sourceview5::Buffer,
+    text_view: sourceview5::View,
     md: gtk::Box,
     picture: gtk::Picture,
     info: gtk::Label,
+    message: gtk::Label,
+    /// Every session's pending changes (shared with the tree): a pending path shows its diff.
+    changes: Rc<RefCell<Vec<Change>>>,
+    /// The shown file can be edited (a writable text file, not a diff or a preview).
+    editable: Cell<bool>,
+    dirty: Cell<bool>,
+    /// Escape with unsaved edits asks once; the next Escape discards.
+    discard_armed: Cell<bool>,
     /// What was opened, the shown one last; Escape walks back through it.
     history: RefCell<Vec<PathBuf>>,
     weak: RefCell<Weak<Viewer>>,
@@ -43,7 +61,7 @@ pub struct Viewer {
 }
 
 impl Viewer {
-    pub fn new() -> Rc<Self> {
+    pub fn new(changes: Rc<RefCell<Vec<Change>>>) -> Rc<Self> {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.add_css_class("sill-viewer");
         let bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -53,20 +71,20 @@ impl Viewer {
         title.set_hexpand(true);
         title.set_ellipsize(gtk::pango::EllipsizeMode::Start);
         title.add_css_class("dim-label");
-        let source = gtk::ToggleButton::with_label("Source");
-        source.add_css_class("flat");
-        source.add_css_class("sill-viewer-btn");
-        source.set_tooltip_text(Some("Show the Markdown source"));
+        let edit = gtk::ToggleButton::with_label("Edit");
+        edit.add_css_class("flat");
+        edit.add_css_class("sill-viewer-btn");
+        edit.set_tooltip_text(Some("Edit the file in place (Ctrl+S saves to the host)"));
         let close = gtk::Button::from_icon_name("window-close-symbolic");
         close.add_css_class("flat");
         close.add_css_class("sill-viewer-btn");
         close.set_tooltip_text(Some("Close (Escape steps back)"));
         bar.append(&title);
-        bar.append(&source);
+        bar.append(&edit);
         bar.append(&close);
         root.append(&bar);
 
-        // text: read-only source view in the theme's scheme
+        // text: a source view in the theme's scheme, read-only until Edit
         let text = sourceview5::Buffer::new(None);
         text.set_highlight_matching_brackets(false);
         let text_view = sourceview5::View::with_buffer(&text);
@@ -74,6 +92,7 @@ impl Viewer {
         text_view.set_cursor_visible(false);
         text_view.set_monospace(true);
         text_view.set_show_line_numbers(true);
+        text_view.set_tab_width(4);
         text_view.set_wrap_mode(gtk::WrapMode::WordChar);
         text_view.set_left_margin(6);
         text_view.set_top_margin(6);
@@ -108,16 +127,33 @@ impl Viewer {
         stack.add_named(&info, Some("info"));
         stack.set_vexpand(true);
         root.append(&stack);
+        let message = gtk::Label::new(None);
+        message.set_xalign(0.0);
+        message.add_css_class("dim-label");
+        message.add_css_class("sill-menu-caption");
+        message.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+        message.set_visible(false);
+        root.append(&message);
 
+        // style schemes generated from the palettes, then follow the theme
+        if let Some(dir) = theme::write_source_schemes() {
+            sourceview5::StyleSchemeManager::default().append_search_path(&dir.to_string_lossy());
+        }
         let v = Rc::new(Self {
             root,
             title,
-            source: source.clone(),
+            edit: edit.clone(),
             stack,
-            text,
+            text: text.clone(),
+            text_view: text_view.clone(),
             md,
             picture,
             info,
+            message,
+            changes,
+            editable: Cell::new(false),
+            dirty: Cell::new(false),
+            discard_armed: Cell::new(false),
             history: RefCell::new(Vec::new()),
             weak: RefCell::new(Weak::new()),
             on_close: RefCell::new(None),
@@ -133,13 +169,53 @@ impl Viewer {
         }
         {
             let weak = Rc::downgrade(&v);
-            source.connect_toggled(move |_| {
-                if let Some(v) = weak.upgrade()
-                    && let Some(p) = v.history.borrow().last().cloned()
-                {
-                    v.show(&p);
+            edit.connect_toggled(move |t| {
+                let Some(v) = weak.upgrade() else { return };
+                let on = t.is_active();
+                v.text_view.set_editable(on && v.editable.get());
+                v.text_view.set_cursor_visible(on);
+                v.text_view.set_highlight_current_line(on);
+                let Some(p) = v.history.borrow().last().cloned() else { return };
+                if is_markdown(&p) {
+                    if on {
+                        v.stack.set_visible_child_name("text");
+                        v.text_view.grab_focus();
+                    } else {
+                        v.render_markdown(&p); // back from editing: show what the editor holds
+                        v.stack.set_visible_child_name("markdown");
+                    }
+                } else if on {
+                    v.text_view.grab_focus();
                 }
             });
+        }
+        {
+            let weak = Rc::downgrade(&v);
+            text.connect_changed(move |_| {
+                if let Some(v) = weak.upgrade()
+                    && v.edit.is_active()
+                    && v.editable.get()
+                    && !v.dirty.get()
+                {
+                    v.dirty.set(true);
+                    v.update_title();
+                }
+            });
+        }
+        {
+            let weak = Rc::downgrade(&v);
+            let keys = gtk::EventControllerKey::new();
+            keys.connect_key_pressed(move |_, key, _, state| {
+                if key == gdk::Key::s
+                    && state.contains(gdk::ModifierType::CONTROL_MASK)
+                    && let Some(v) = weak.upgrade()
+                {
+                    v.save();
+                    return glib::Propagation::Stop;
+                }
+                glib::Propagation::Proceed
+            });
+            text_view.add_controller(keys);
         }
         {
             let weak = Rc::downgrade(&v);
@@ -161,59 +237,139 @@ impl Viewer {
 
     /// Open a file on top of what is shown (Escape comes back to it).
     pub fn open(&self, path: &Path) {
+        self.drop_edits();
         let mut h = self.history.borrow_mut();
         if h.last().map(|l| l.as_path()) != Some(path) {
             h.push(path.to_path_buf());
         }
         drop(h);
-        self.source.set_active(false);
         self.show(path);
     }
 
-    /// One step back. False when nothing is left to show (the owner closes the viewer).
-    pub fn back(&self) -> bool {
+    /// Escape: with unsaved edits, ask once and discard on the second; else one step back, and when
+    /// nothing is left to show, close.
+    pub fn escape(&self) {
+        if self.dirty.get() && !self.discard_armed.get() {
+            self.discard_armed.set(true);
+            self.say("unsaved changes: Ctrl+S saves, Escape again discards them");
+            return;
+        }
+        self.drop_edits();
         let mut h = self.history.borrow_mut();
         h.pop();
         let prev = h.last().cloned();
         drop(h);
         match prev {
-            Some(p) => {
-                self.source.set_active(false);
-                self.show(&p);
-                true
-            }
-            None => false,
+            Some(p) => self.show(&p),
+            None => self.close(),
         }
     }
 
     /// Keyboard focus into the viewer (its close button: always there, never editable).
     pub fn focus(&self) {
-        if let Some(bar) = self.root.first_child() {
-            if let Some(close) = bar.last_child() {
-                close.grab_focus();
-            }
+        if self.edit.is_active() {
+            self.text_view.grab_focus();
+            return;
+        }
+        if let Some(bar) = self.root.first_child()
+            && let Some(close) = bar.last_child()
+        {
+            close.grab_focus();
         }
     }
 
     /// Forget everything and ask the owner to close.
     pub fn close(&self) {
+        self.drop_edits();
         self.history.borrow_mut().clear();
         if let Some(cb) = self.on_close.borrow().as_ref() {
             cb();
         }
     }
 
-    fn show(&self, path: &Path) {
-        let home = std::env::var("HOME").unwrap_or_default();
-        self.title.set_text(&path.display().to_string().replacen(&home, "~", 1));
-        self.title.set_tooltip_text(Some(&path.display().to_string()));
-        self.source.set_visible(is_markdown(path));
-        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-        if !path.is_file() {
-            return self.say(&format!("{} is not a file (or is gone)", path.display()));
+    fn drop_edits(&self) {
+        if self.dirty.get()
+            && let Some(p) = self.history.borrow().last()
+        {
+            self.say(&format!("unsaved changes in {} discarded", p.display()));
         }
+        self.dirty.set(false);
+        self.discard_armed.set(false);
+        self.edit.set_active(false);
+    }
+
+    fn save(&self) {
+        let Some(path) = self.history.borrow().last().cloned() else { return };
+        if !self.editable.get() || !self.edit.is_active() {
+            return;
+        }
+        let text = self.text.text(&self.text.start_iter(), &self.text.end_iter(), true).to_string();
+        match std::fs::write(&path, text) {
+            Ok(()) => {
+                self.dirty.set(false);
+                self.discard_armed.set(false);
+                self.update_title();
+                self.say(&format!("saved {}", path.display()));
+            }
+            Err(e) => self.say(&format!("save failed: {e}")),
+        }
+    }
+
+    fn update_title(&self) {
+        let Some(path) = self.history.borrow().last().cloned() else { return };
+        let home = std::env::var("HOME").unwrap_or_default();
+        let shown = path.display().to_string().replacen(&home, "~", 1);
+        self.title.set_text(&if self.dirty.get() { format!("{shown}  ● unsaved (Ctrl+S)") } else { shown });
+        self.title.set_tooltip_text(Some(&path.display().to_string()));
+    }
+
+    /// Render the editor's text as Markdown (images relative to the file, links open in the viewer).
+    fn render_markdown(&self, path: &Path) {
+        let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        let weak = self.weak.borrow().clone();
+        markdown::set_context(
+            &self.md,
+            Rc::new(markdown::Ctx {
+                resolve: Box::new(move |src| {
+                    let p = Path::new(src);
+                    let p = if p.is_absolute() { p.to_path_buf() } else { dir.join(p) };
+                    p.is_file().then_some(p)
+                }),
+                open: Some(Box::new(move |p| {
+                    if let Some(v) = weak.upgrade() {
+                        v.open(p);
+                    }
+                })),
+            }),
+        );
+        let text = self.text.text(&self.text.start_iter(), &self.text.end_iter(), true);
+        markdown::render(&self.md, "sill-agent", &text);
+    }
+
+    fn show(&self, path: &Path) {
+        self.say("");
+        self.editable.set(false);
+        self.edit.set_visible(false);
+        self.text_view.set_wrap_mode(gtk::WrapMode::WordChar);
+        self.update_title();
+        if !path.is_file() {
+            return self.say_only(&format!("{} is not a file (or is gone)", path.display()));
+        }
+        // pending session change: the diff, not the host file (keep or revert it in Changes first)
+        let pending = self.changes.borrow().iter().find(|c| c.path == path).cloned();
+        if let Some(c) = pending {
+            let text = changes::unified_diff(&c).unwrap_or_else(|e| format!("diff: {e:#}"));
+            self.text.set_language(sourceview5::LanguageManager::default().language("diff").as_ref());
+            self.text.set_highlight_syntax(true);
+            self.text.set_text(&text);
+            self.stack.set_visible_child_name("text");
+            self.say(&format!("pending change ({}) of a session: keep or revert it in Changes before editing", c.kind.letter()));
+            return;
+        }
+        let meta = std::fs::metadata(path);
+        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
         if size > MAX_BYTES {
-            return self.say(&format!("{} MB: too large to show", size / 1_000_000));
+            return self.say_only(&format!("{} MB: too large to show", size / 1_000_000));
         }
         if is_image(path) {
             self.picture.set_filename(Some(path));
@@ -222,40 +378,41 @@ impl Viewer {
         }
         let bytes = std::fs::read(path).unwrap_or_default();
         if bytes.iter().take(8192).any(|b| *b == 0) {
-            return self.say(&format!("binary file, {} KB", size.div_ceil(1000)));
+            return self.say_only(&format!("binary file, {} KB", size.div_ceil(1000)));
         }
-        let text = String::from_utf8_lossy(&bytes).into_owned();
-        if is_markdown(path) && !self.source.is_active() {
-            let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
-            let weak = self.weak.borrow().clone();
-            markdown::set_context(
-                &self.md,
-                Rc::new(markdown::Ctx {
-                    // images in the file: relative to the file, as any Markdown viewer does
-                    resolve: Box::new(move |src| {
-                        let p = Path::new(src);
-                        let p = if p.is_absolute() { p.to_path_buf() } else { dir.join(p) };
-                        p.is_file().then_some(p)
-                    }),
-                    open: Some(Box::new(move |p| {
-                        if let Some(v) = weak.upgrade() {
-                            v.open(p);
-                        }
-                    })),
-                }),
-            );
-            self.stack.set_visible_child_name("markdown");
-            markdown::render(&self.md, "sill-agent", &text);
+        let longest = bytes.split(|b| *b == b'\n').map(|l| l.len()).max().unwrap_or(0);
+        if size as usize > 1_500_000 || longest > 20_000 {
+            let cut = bytes.len().min(PREVIEW);
+            self.text.set_language(None);
+            self.text.set_highlight_syntax(false);
+            self.text_view.set_wrap_mode(gtk::WrapMode::Char);
+            self.text.set_text(&String::from_utf8_lossy(&bytes[..cut]));
+            self.stack.set_visible_child_name("text");
+            self.say(&format!("{} KB, longest line {} chars: first {} KB shown read-only", size / 1000, longest, PREVIEW / 1000));
             return;
         }
+        let text = String::from_utf8_lossy(&bytes).into_owned();
         let lang = sourceview5::LanguageManager::default().guess_language(Some(path), None);
         self.text.set_language(lang.as_ref());
         self.text.set_highlight_syntax(true);
         self.text.set_text(&text);
-        self.stack.set_visible_child_name("text");
+        self.editable.set(meta.map(|m| !m.permissions().readonly()).unwrap_or(false));
+        self.edit.set_visible(self.editable.get());
+        self.dirty.set(false);
+        if is_markdown(path) && !self.edit.is_active() {
+            self.render_markdown(path);
+            self.stack.set_visible_child_name("markdown");
+        } else {
+            self.stack.set_visible_child_name("text");
+        }
     }
 
     fn say(&self, what: &str) {
+        self.message.set_text(what);
+        self.message.set_visible(!what.is_empty());
+    }
+
+    fn say_only(&self, what: &str) {
         self.info.set_text(what);
         self.stack.set_visible_child_name("info");
     }

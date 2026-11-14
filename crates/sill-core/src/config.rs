@@ -52,7 +52,7 @@ pub const AUTO_REVERT_CHOICES: &[(u32, &str)] =
 pub const AUTO_REVERT_DEFAULT: u32 = 1440;
 
 /// The backend pages, in tab order: (id, title).
-pub const PAGES: &[(&str, &str)] = &[("changes", "Changes"), ("files", "Files"), ("agents", "Agents"), ("settings", "Settings")];
+pub const PAGES: &[(&str, &str)] = &[("changes", "Changes"), ("agents", "Agents"), ("settings", "Settings")];
 
 /// Text sizes the Settings page offers: (factor, label). Hand-edited values in between are kept.
 pub const TEXT_SCALES: &[(f64, &str)] = &[

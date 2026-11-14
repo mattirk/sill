@@ -4,7 +4,7 @@ A shelf for AI agents on your own Linux machine: an ACP client, a jail the host 
 of every change the agent makes. See [SPEC.md](SPEC.md) for the design; this file is the practical side.
 
 Status: **M2** (2026-10-28). Sessions with tabs, persistence and resume; folder pins per session (live,
-host = jail); the `sill ▾` dropdown with the global Changes page (keep / revert / conflicts), the Files page,
+host = jail); the `sill ▾` dropdown with the global Changes page (keep / revert / conflicts), the file tree,
 Settings. Next: M3 — a terminal inside the session's jail, policies UI, more agents.
 
 ## Layout
@@ -68,7 +68,9 @@ $S dev status
 $S dev prompt "Create hello.txt with one line: hi"           # Claude Code runs inside the jail
 $S jail changes --state-dir /tmp/s1                          # A/M/D list against the host
 $S jail changes --state-dir /tmp/s1 --diff ~/some/repo/hello.txt
-$S jail keep    --state-dir /tmp/s1 ~/some/repo/hello.txt    # copy to the host
+$S jail keep    --state-dir /tmp/s1 ~/some/repo/hello.txt    # copy to the host (its previous version is saved)
+$S jail kept    --state-dir /tmp/s1                          # what was kept and can still be undone
+$S jail unkeep  --state-dir /tmp/s1 ~/some/repo/hello.txt    # put the host's previous version back
 $S dev revert ~/some/repo/other.txt                          # restore from the host, inside the jail
 $S dev stop
 ```
@@ -95,8 +97,10 @@ sill restart --dev                         # run the build in target/ instead of
 
 - **`sill`** (top left) flips between the sessions and the backend: the session tabs give way to page tabs
   (Changes · Files · Agents · Settings), opening on the default page (Changes; Settings → Default page).
-  `sill` again returns to the session; Escape does the same flip either way. The folder button opens Files
-  and, pressed again, returns to the session.
+  `sill` again returns to the session; Escape does the same flip either way. The folder button opens the
+  file tree beside the session (the shelf widens for it; again or Escape closes it); a pinned folder's
+  chip opens the tree scoped to that folder. A file opens in the viewer over the session: read, or
+  *Edit* and Ctrl+S.
 - **Sessions** are tabs: `+` picks the agent (Claude Code, Codex, Gemini; `~/.config/sill/agents/*.toml`
   adds more, with an `icon` name; sill ships provider glyphs `sill-claude-symbolic`, `sill-openai-symbolic`,
   `sill-gemini-symbolic` and a neutral placeholder for anything else) or reopens a stored one. Each session has its own jail (`sill-<id>.service`, upper trees under

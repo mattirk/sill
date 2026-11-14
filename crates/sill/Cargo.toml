@@ -21,7 +21,7 @@ serde_json.workspace = true
 gtk4 = { version = "0.11", features = ["v4_18"] }
 libadwaita = { version = "0.9", features = ["v1_7"] }
 gdk4-x11 = { version = "0.11", features = ["v4_18"] }
-x11rb = "0.14"
+x11rb = { version = "0.14", features = ["randr"] }
 pulldown-cmark = { version = "0.13", default-features = false }
 async-channel = "2"
 futures = "0.3"

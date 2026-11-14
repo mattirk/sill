@@ -63,15 +63,38 @@ fn xid(window: &gtk::Window) -> Option<u32> {
     Some(x11.xid() as u32)
 }
 
-/// Work area of the current desktop (`_NET_WORKAREA`, panels excluded), falling back to the first
-/// monitor's geometry. With an explicit width fraction (the Files page widens the shelf to at least half).
+/// The primary monitor (RandR; the first one when none is marked primary), in device pixels.
+fn primary_monitor() -> Option<(i32, i32, u32, u32)> {
+    use x11rb::protocol::randr::ConnectionExt as _;
+    let (conn, screen_num) = x11rb::connect(None).ok()?;
+    let root = conn.setup().roots[screen_num].root;
+    let reply = conn.randr_get_monitors(root, true).ok()?.reply().ok()?;
+    let m = reply.monitors.iter().find(|m| m.primary).or_else(|| reply.monitors.first())?;
+    Some((m.x as i32, m.y as i32, m.width as u32, m.height as u32))
+}
+
+/// The primary monitor's work area — its geometry cut down to `_NET_WORKAREA` (panels excluded;
+/// that property spans the whole virtual screen, so on its own it made the shelf a fraction of all
+/// monitors together) — with the shelf's width as `fraction` of it. Falls back to GDK's first
+/// monitor (logical pixels, scaled up) without RandR.
 pub fn work_area_with(window: &gtk::Window, fraction: f64) -> Option<Placement> {
-    let (x, y, w, h) = net_workarea().or_else(|| {
+    let (mx, my, mw, mh) = primary_monitor().or_else(|| {
         let display = WidgetExt::display(window);
         let m = display.monitors().item(0)?.downcast::<gtk::gdk::Monitor>().ok()?;
         let g = m.geometry();
-        Some((g.x(), g.y(), g.width() as u32, g.height() as u32))
+        let k = m.scale_factor().max(1);
+        Some((g.x() * k, g.y() * k, (g.width() * k) as u32, (g.height() * k) as u32))
     })?;
+    let (x, y, w, h) = match net_workarea() {
+        Some((wx, wy, ww, wh)) => {
+            let x0 = mx.max(wx);
+            let y0 = my.max(wy);
+            let x1 = (mx + mw as i32).min(wx + ww as i32);
+            let y1 = (my + mh as i32).min(wy + wh as i32);
+            if x1 > x0 && y1 > y0 { (x0, y0, (x1 - x0) as u32, (y1 - y0) as u32) } else { (mx, my, mw, mh) }
+        }
+        None => (mx, my, mw, mh),
+    };
     let width = (w as f64 * fraction).round() as u32;
     Some(Placement { x, y, width, height: h })
 }
