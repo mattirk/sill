@@ -42,7 +42,7 @@ const STROKES: &[(&str, &str)] = &[
 /// Filled glyphs for the send button (lucide send-horizontal, a plain square for stop).
 const FILLED: &[(&str, &str)] = &[
     ("sill-send", "M3.714 3.048a.498.498 0 0 0-.683.627l2.843 7.627a2 2 0 0 1 0 1.396l-2.842 7.627a.498.498 0 0 0 .682.627l18-8.5a.5.5 0 0 0 0-.904z"),
-    ("sill-stop", "M4.5 4.5h15v15h-15z"), // 15/24 of the box: the square reads as a stop, not a dot
+    ("sill-stop", "M3.75 3.75h16.5v16.5h-16.5z"), // a slightly larger stop square
 ];
 
 pub const PLACEHOLDER: &str = "sill-agent-symbolic";

@@ -240,7 +240,7 @@ impl FolderTree {
                 let badge_text = badges.borrow().get(&path).cloned().unwrap_or_default();
                 if badge_text.starts_with('?') {
                     name.add_css_class("sill-new");
-                } else if badge_text == "·" {
+                } else if badge_text == "•" {
                     name.add_css_class("sill-below"); // a folder with changes somewhere below
                 } else if !badge_text.is_empty() {
                     name.add_css_class("sill-changed");
@@ -501,7 +501,7 @@ impl FolderTree {
                     if dir == repo.as_path() {
                         break;
                     }
-                    badges.entry(dir.to_path_buf()).or_insert_with(|| "·".into());
+                    badges.entry(dir.to_path_buf()).or_insert_with(|| "•".into());
                     d = dir.parent();
                 }
             }
@@ -515,7 +515,7 @@ impl FolderTree {
             badges.insert(c.path.clone(), format!("{}{}", c.kind.letter(), if c.conflict { "!" } else { "" }));
             let mut p = c.path.parent();
             while let Some(d) = p {
-                badges.entry(d.to_path_buf()).or_insert_with(|| "·".into());
+                badges.entry(d.to_path_buf()).or_insert_with(|| "•".into());
                 p = d.parent();
             }
             if scope.is_none()

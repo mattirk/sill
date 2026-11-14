@@ -1118,6 +1118,7 @@ impl SessionView {
         self.controls_row.append(&right);
         let send = gtk::Button::new();
         send.add_css_class("sill-send");
+        send.set_valign(gtk::Align::Center); // its own square, not the row's height
         {
             let v = self.clone();
             send.connect_clicked(move |_| {

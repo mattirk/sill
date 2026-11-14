@@ -1026,7 +1026,7 @@ button.sill-install:hover { background: alpha(@accent_bg_color, 0.45); }
 .sill-files treeexpander { padding: 1px 0; }
 .sill-file-icon { opacity: 0.7; -gtk-icon-size: 0.95em; }
 .sill-changed { color: @warning_color; }
-.sill-below { color: alpha(@warning_color, 0.8); }
+.sill-below { color: @warning_color; }
 .sill-new { color: @success_color; }
 .sill-dim { opacity: 0.45; }
 .sill-pinned { color: @accent_color; }
@@ -1067,10 +1067,10 @@ button.sill-lock:checked { background: transparent; opacity: 0.9; }
 switch.sill-control { min-width: 2.2em; min-height: 1.1em; opacity: 0.7; }
 switch.sill-control:hover, switch.sill-control:checked { opacity: 1; }
 switch.sill-control > slider { min-width: 0.9em; min-height: 0.9em; }
-button.sill-send { min-width: 2em; min-height: 2em; padding: 0; background: alpha(@accent_bg_color, 0.25); }
+button.sill-send { min-width: 1.6em; min-height: 1.6em; padding: 0; background: alpha(@accent_bg_color, 0.25); }
 button.sill-send > image { -gtk-icon-size: 1.1em; margin: 0; padding: 0; }
 button.sill-send:hover { background: alpha(@accent_bg_color, 0.45); }
-button.sill-send.sill-stop { background: alpha(@error_bg_color, 0.25); }
+button.sill-send.sill-stop { min-width: 1.6em; min-height: 1.6em; background: alpha(@error_bg_color, 0.25); }
 button.sill-send.sill-stop > image { -gtk-icon-size: 1em; }
 button.sill-send.sill-stop:hover { background: alpha(@error_bg_color, 0.45); }
 .sill-terminal { padding: 4px; }
