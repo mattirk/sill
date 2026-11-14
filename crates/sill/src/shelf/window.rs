@@ -252,6 +252,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
             s.pages.set_visible_child_name(id);
             *s.files.pin_target.borrow_mut() = Some(id.to_string());
             s.sync_status();
+            s.place();
             s.focus_prompt();
         }));
     }
@@ -323,6 +324,12 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         let s = shelf.clone();
         esc.connect_key_pressed(move |_, key, _, _| {
             if key == gdk::Key::Escape {
+                if s.stack.visible_child_name().as_deref() == Some("sessions")
+                    && let Some(v) = s.tabs.selected().and_then(|id| s.views.borrow().get(&id).cloned())
+                    && v.escape()
+                {
+                    return glib::Propagation::Stop;
+                }
                 if s.stack.visible_child_name().as_deref() != Some("sessions") {
                     s.show_page("sessions");
                 } else {
@@ -342,11 +349,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         let s = shelf.clone();
         window.connect_realize(move |w| {
             let w: gtk::Window = w.clone().upcast();
-            let fraction = if s.stack.visible_child_name().as_deref() == Some("files") {
-                x11::width_fraction().max(0.5)
-            } else {
-                x11::width_fraction()
-            };
+            let fraction = s.fraction();
             if let Some(area) = x11::work_area_with(&w, fraction) {
                 w.set_default_size(area.width as i32, area.height as i32);
                 x11::pre_place(&w, &area);
@@ -360,21 +363,13 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         let s = shelf.clone();
         window.connect_map(move |w| {
             let w: gtk::Window = w.clone().upcast();
-            let fraction = if s.stack.visible_child_name().as_deref() == Some("files") {
-                x11::width_fraction().max(0.5)
-            } else {
-                x11::width_fraction()
-            };
+            let fraction = s.fraction();
             if let Some(area) = x11::work_area_with(&w, fraction) {
                 x11::pre_place(&w, &area);
             }
             let s = s.clone();
             glib::idle_add_local_once(move || {
-                let fraction = if s.stack.visible_child_name().as_deref() == Some("files") {
-                    x11::width_fraction().max(0.5)
-                } else {
-                    x11::width_fraction()
-                };
+                let fraction = s.fraction();
                 if let Some(area) = x11::work_area_with(&w, fraction) {
                     x11::place(&w, &area);
                 }
@@ -409,6 +404,25 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
 }
 
 impl Shelf {
+    /// The shelf's width as a fraction of the work area: the Files page takes at least half; a
+    /// session with its folder tree open adds the tree's share (SPEC §3.1).
+    fn fraction(&self) -> f64 {
+        if self.stack.visible_child_name().as_deref() == Some("files") {
+            return x11::width_fraction().max(0.5);
+        }
+        let tree = self.stack.visible_child_name().as_deref() == Some("sessions")
+            && self.tabs.selected().and_then(|id| self.views.borrow().get(&id).map(|v| v.tree_open())).unwrap_or(false);
+        if tree { (x11::width_fraction() + x11::TREE_FRACTION).min(0.9) } else { x11::width_fraction() }
+    }
+
+    /// Move/resize the window to the current fraction.
+    fn place(&self) {
+        let w: gtk::Window = self.window.clone().upcast();
+        if let Some(area) = x11::work_area_with(&w, self.fraction()) {
+            x11::place(&w, &area);
+        }
+    }
+
     fn show_page(&self, name: &str) {
         self.stack.set_visible_child_name(name);
         let backend = name != "sessions";
@@ -423,12 +437,7 @@ impl Shelf {
         self.syncing.set(true);
         self.action.set_active(backend);
         self.syncing.set(false);
-        // the Files page (tree + editor) needs room: half the work area while it is open
-        let w: gtk::Window = self.window.clone().upcast();
-        let fraction = if name == "files" { x11::width_fraction().max(0.5) } else { x11::width_fraction() };
-        if let Some(area) = x11::work_area_with(&w, fraction) {
-            x11::place(&w, &area);
-        }
+        self.place();
         match name {
             "changes" => self.changes.refresh(),
             "files" => self.files.refresh(),
@@ -581,6 +590,14 @@ impl Shelf {
         {
             let shelf = self.clone();
             *view.on_restart.borrow_mut() = Some(Box::new(move |id| shelf.restart_session(id)));
+        }
+        {
+            let shelf = Rc::downgrade(self);
+            *view.on_layout.borrow_mut() = Some(Box::new(move || {
+                if let Some(s) = shelf.upgrade() {
+                    s.place();
+                }
+            }));
         }
         {
             let shelf = self.clone();

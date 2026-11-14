@@ -11,6 +11,8 @@ use x11rb::wrapper::ConnectionExt as _;
 
 /// Fraction of the work area width the shelf takes (settings override).
 pub const WIDTH_FRACTION: f64 = 0.38;
+/// What a session's folder tree adds to the shelf's width while it is open.
+pub const TREE_FRACTION: f64 = 0.16;
 thread_local! {
     static WIDTH: std::cell::Cell<f64> = const { std::cell::Cell::new(WIDTH_FRACTION) };
 }

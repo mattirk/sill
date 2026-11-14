@@ -13,6 +13,8 @@ mod session_view;
 mod settings;
 mod tabs;
 mod theme;
+mod tree;
+mod viewer;
 mod window;
 mod x11;
 

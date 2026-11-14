@@ -63,6 +63,8 @@ pub struct Conversation {
     /// The agent message being streamed, with its accumulated markdown.
     current: RefCell<Option<(gtk::Box, String)>>,
     current_thought: RefCell<Option<(gtk::Box, String)>>,
+    /// Image context for every message (paths as the agent sees them; a click opens the viewer).
+    md_ctx: RefCell<Option<Rc<markdown::Ctx>>>,
     /// A render of the streamed message/thought is scheduled: chunks arrive many times a second
     /// and every render is the whole message, so they are coalesced (STREAM_MS).
     render_due: [std::cell::Cell<bool>; 2],
@@ -113,6 +115,7 @@ impl Conversation {
             column,
             current: RefCell::new(None),
             current_thought: RefCell::new(None),
+            md_ctx: RefCell::new(None),
             render_due: [std::cell::Cell::new(false), std::cell::Cell::new(false)],
             tool_rows: RefCell::new(HashMap::new()),
             last_tool: RefCell::new(None),
@@ -251,10 +254,18 @@ impl Conversation {
         clamp.set_tightening_threshold((MEASURE_TIGHT * k) as i32);
     }
 
-    /// An empty message: a vertical box the Markdown renderer fills with prose and code segments.
-    fn message_box() -> gtk::Box {
+    /// Set before the transcript is shown: how messages resolve and open their images.
+    pub fn set_md_context(&self, ctx: Rc<markdown::Ctx>) {
+        *self.md_ctx.borrow_mut() = Some(ctx);
+    }
+
+    /// An empty message: a vertical box the Markdown renderer fills with prose, code and image segments.
+    fn message_box(&self) -> gtk::Box {
         let b = gtk::Box::new(gtk::Orientation::Vertical, 0);
         b.add_css_class("sill-msg");
+        if let Some(ctx) = self.md_ctx.borrow().clone() {
+            markdown::set_context(&b, ctx);
+        }
         b
     }
 
@@ -318,7 +329,7 @@ impl Conversation {
         let mut cur = slot.borrow_mut();
         let fresh = cur.is_none();
         if fresh {
-            let msg = Self::message_box();
+            let msg = self.message_box();
             self.column.append(&msg);
             *cur = Some((msg, String::new()));
         }
@@ -350,7 +361,7 @@ impl Conversation {
     /// A complete message: in the column first, so the renderer measures with the real font.
     fn add_message_block(&self, class: &str, md: &str) {
         self.finish_current();
-        let msg = Self::message_box();
+        let msg = self.message_box();
         self.column.append(&msg);
         markdown::render(&msg, class, md);
         msg.queue_resize();
@@ -858,6 +869,16 @@ entry { border-radius: 0; }
              border-radius: 0; padding: 10px 14px; }
 .sill-user text { background: transparent; }
 .sill-user-attach { font-size: 85%; }
+/* an image in a message: no button chrome, a click opens it in the viewer */
+button.sill-md-image { padding: 0; margin: 4px 8px; background: transparent; border: none; box-shadow: none; }
+button.sill-md-image:hover { opacity: 0.85; }
+/* the viewer (left) and the folder tree (right) of a session */
+.sill-viewer-bar { padding: 3px 6px 3px 12px; border-bottom: 1px solid alpha(@view_fg_color, 0.12); }
+.sill-viewer-btn { padding: 2px 8px; min-height: 0; min-width: 0; font-size: 90%; }
+.sill-tree-panel { border-left: 1px solid alpha(@view_fg_color, 0.12); }
+.sill-tree-panel .sill-pin { opacity: 0; }
+.sill-tree-panel row:hover .sill-pin { opacity: 0.6; }
+.sill-tree-panel row:hover .sill-pin:hover { opacity: 1; }
 /* attachments waiting above the prompt: small chips with a remove cross */
 .sill-attach-strip { padding: 4px 8px 0 8px; }
 .sill-attach-chip { background: alpha(@view_fg_color, 0.08); padding: 1px 2px 1px 8px; font-size: 85%; }

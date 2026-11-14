@@ -13,11 +13,24 @@ use sill_core::agents;
 use sill_core::store::{Session, Store};
 
 use super::conversation::Conversation;
-use super::{session, theme};
+use super::tree::FolderTree;
+use super::viewer::{self, Viewer};
+use super::{markdown, session, theme, x11};
 use vte4::prelude::*;
+
+/// The session's overlay as the shelf sees it: (layers, masked paths), for resolving a path the
+/// agent names to the file it sees.
+type JailView = (Vec<sill_core::jail::Layer>, Vec<std::path::PathBuf>);
 
 pub struct SessionView {
     pub root: gtk::Box,
+    /// Left of the tree: "chat" (conversation + prompt) or "viewer".
+    left: gtk::Stack,
+    viewer: Rc<Viewer>,
+    tree: Rc<FolderTree>,
+    /// The shelf's width depends on the tree being open: the window places itself again.
+    pub on_layout: RefCell<Option<Box<dyn Fn()>>>,
+    jail: RefCell<Option<JailView>>,
     prompt: gtk::TextView,
     /// What goes with the next prompt (SPEC §3.2 attachments) and the strip showing it.
     attachments: RefCell<Vec<Attachment>>,
@@ -310,14 +323,37 @@ impl SessionView {
         pins_row.set_margin_bottom(4);
         pins_row.set_visible(false);
 
+        // left: the conversation with its prompt, or the viewer in its place; right: a pinned
+        // folder's tree (hidden until a folder chip is clicked; the shelf widens for it)
+        let chat = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        chat.append(&conv.root);
+        chat.append(&prompt_box);
+        let viewer = Viewer::new();
+        let left = gtk::Stack::new();
+        left.add_named(&chat, Some("chat"));
+        left.add_named(&viewer.root, Some("viewer"));
+        left.set_hexpand(true);
+        left.set_vexpand(true);
+        let tree = FolderTree::new();
+        tree.root.set_visible(false);
+        tree.root.set_hexpand(false);
+        let body = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        body.append(&left);
+        body.append(&tree.root);
+        body.set_vexpand(true);
+
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.append(&pins_row);
-        root.append(&conv.root);
-        root.append(&prompt_box);
+        root.append(&body);
 
         let auto_allow_initial = session.auto_allow;
         let view = Rc::new(Self {
             root,
+            left,
+            viewer,
+            tree,
+            on_layout: RefCell::new(None),
+            jail: RefCell::new(None),
             prompt: prompt.clone(),
             attachments: RefCell::new(Vec::new()),
             attach_strip,
@@ -358,6 +394,58 @@ impl SessionView {
             refresh_pending: std::cell::Cell::new(false),
             on_restart: RefCell::new(None),
         });
+
+        // the viewer, the tree, and how messages find their images — before the transcript is shown
+        {
+            let weak = Rc::downgrade(&view);
+            *view.viewer.on_close.borrow_mut() = Some(Box::new(move || {
+                if let Some(v) = weak.upgrade() {
+                    v.left.set_visible_child_name("chat");
+                    v.focus_prompt();
+                }
+            }));
+        }
+        {
+            let weak = Rc::downgrade(&view);
+            *view.tree.on_open.borrow_mut() = Some(Box::new(move |p| {
+                if let Some(v) = weak.upgrade() {
+                    v.open_viewer(p, false);
+                }
+            }));
+            let weak = Rc::downgrade(&view);
+            *view.tree.on_close.borrow_mut() = Some(Box::new(move || {
+                if let Some(v) = weak.upgrade() {
+                    v.close_tree();
+                }
+            }));
+            let weak = Rc::downgrade(&view);
+            *view.tree.on_pin.borrow_mut() = Some(Box::new(move |p| {
+                if let Some(v) = weak.upgrade() {
+                    let _ = v.store.pin(&v.id(), p); // a file pin: a chip only, the jail stays as it is
+                    v.refresh_pins();
+                }
+            }));
+            let weak = Rc::downgrade(&view);
+            *view.tree.on_files.borrow_mut() = Some(Box::new(move |p| {
+                if let Some(v) = weak.upgrade()
+                    && let Some(cb) = v.on_open_folder.borrow().as_ref()
+                {
+                    cb(p);
+                }
+            }));
+        }
+        {
+            let resolve_weak = Rc::downgrade(&view);
+            let open_weak = Rc::downgrade(&view);
+            view.conv.set_md_context(Rc::new(markdown::Ctx {
+                resolve: Box::new(move |src| resolve_weak.upgrade()?.resolve_jail_path(src)),
+                open: Some(Box::new(move |p| {
+                    if let Some(v) = open_weak.upgrade() {
+                        v.open_viewer(p, false);
+                    }
+                })),
+            }));
+        }
 
         // stored transcript
         if let Ok(entries) = view.store.entries(&view.session.borrow().id) {
@@ -938,13 +1026,20 @@ impl SessionView {
             l.set_child(Some(&lbox));
             l.add_css_class("flat");
             l.add_css_class("sill-chip-open");
-            l.set_tooltip_text(Some("Open in Files · +lines −lines vs HEAD, ?untracked files"));
+            let is_dir = p.is_dir();
+            l.set_tooltip_text(Some(if is_dir {
+                "Show the folder's tree · +lines −lines vs HEAD, ?untracked files"
+            } else {
+                "Open the file (Escape returns)"
+            }));
             {
                 let v = self.clone();
                 let p = p.clone();
                 l.connect_clicked(move |_| {
-                    if let Some(cb) = v.on_open_folder.borrow().as_ref() {
-                        cb(&p);
+                    if p.is_dir() {
+                        v.toggle_tree(&p);
+                    } else {
+                        v.open_viewer(&p, true);
                     }
                 });
             }
@@ -955,8 +1050,15 @@ impl SessionView {
             x.connect_clicked(move |_| {
                 let _ = v.store.unpin(&v.id(), &p);
                 v.refresh_pins();
-                if let Some(cb) = v.on_restart.borrow().as_ref() {
-                    cb(&v.id()); // pins are mounts: the jail is rebuilt (after the current turn if busy)
+                if v.tree.folder().as_deref() == Some(p.as_path()) {
+                    v.close_tree();
+                }
+                // a folder pin is a mount: the jail is rebuilt (after the current turn if busy);
+                // a file pin is only a chip
+                if v.pins_changed()
+                    && let Some(cb) = v.on_restart.borrow().as_ref()
+                {
+                    cb(&v.id());
                 }
             });
             chip.append(&l);
@@ -1177,19 +1279,158 @@ impl SessionView {
         }
     }
 
-    /// Pins the jail was started with, for deciding whether a rebuild is needed.
+    pub fn tree_open(&self) -> bool {
+        self.tree.root.is_visible()
+    }
+
+    /// A folder chip: show that folder's tree (the shelf widens), or close it when it is the one shown.
+    fn toggle_tree(self: &Rc<Self>, folder: &std::path::Path) {
+        if self.tree_open() && self.tree.folder().as_deref() == Some(folder) {
+            self.close_tree();
+            return;
+        }
+        self.tree.set_folder(folder);
+        // the tree's share of the work area, in this window's logical pixels
+        if let Some(w) = self.root.root().and_downcast::<gtk::Window>()
+            && let Some(area) = x11::work_area_with(&w, x11::TREE_FRACTION)
+        {
+            self.tree.root.set_size_request(area.width as i32 / self.root.scale_factor().max(1), -1);
+        }
+        self.tree.root.set_visible(true);
+        self.relayout_window();
+    }
+
+    fn close_tree(self: &Rc<Self>) {
+        if !self.tree_open() {
+            return;
+        }
+        self.tree.root.set_visible(false);
+        self.relayout_window();
+        self.focus_prompt();
+    }
+
+    fn relayout_window(&self) {
+        if let Some(cb) = self.on_layout.borrow().as_ref() {
+            cb();
+        }
+    }
+
+    /// Show a file on the left. `full`: the whole shelf (a pinned file), so the tree closes.
+    pub fn open_viewer(self: &Rc<Self>, path: &std::path::Path, full: bool) {
+        if full {
+            self.close_tree();
+        }
+        self.viewer.open(path);
+        self.left.set_visible_child_name("viewer");
+    }
+
+    /// Escape inside the session: the viewer steps back (then closes), then the tree closes.
+    /// False when there was nothing to step back from (the window's own Escape applies).
+    pub fn escape(self: &Rc<Self>) -> bool {
+        if self.left.visible_child_name().as_deref() == Some("viewer") {
+            if !self.viewer.back() {
+                self.viewer.close();
+            }
+            return true;
+        }
+        if self.tree_open() {
+            self.close_tree();
+            return true;
+        }
+        false
+    }
+
+    /// The session's overlay, planned once per jail.
+    fn jail_view(&self) -> Option<JailView> {
+        if let Some(j) = self.jail.borrow().as_ref() {
+            return Some(j.clone());
+        }
+        let s = self.session.borrow().clone();
+        let home = session::home().ok()?;
+        let policy = sill_core::policy::Policy::load(&s.policy, &home).ok()?;
+        let sdir = sill_core::session::state_dir(session::uid(), &s.id).ok()?;
+        let binds = session::binds_of(&s, &policy, &home, &self.store);
+        let user = std::env::var("USER").unwrap_or_default();
+        let plan = sill_core::changes::session_plan(policy, sdir, &home, session::uid(), &user, binds).ok()?;
+        let j = (plan.layers, plan.masked);
+        *self.jail.borrow_mut() = Some(j.clone());
+        Some(j)
+    }
+
+    /// An image path as the agent wrote it → the file it sees in its jail: relative to home, `..`
+    /// folded lexically; nothing under a masked path; a pinned folder is the host's own; otherwise
+    /// the session's overlay copy when it has one (a regular file — a whiteout means deleted), else
+    /// the host file. Images only.
+    fn resolve_jail_path(&self, src: &str) -> Option<std::path::PathBuf> {
+        use std::os::unix::fs::FileTypeExt;
+        use std::path::{Component, PathBuf};
+        let src = src.strip_prefix("file://").unwrap_or(src);
+        if src.contains("://") {
+            return None;
+        }
+        let home = session::home().ok()?;
+        let raw = PathBuf::from(src);
+        let raw = if raw.is_absolute() { raw } else { home.join(raw) };
+        let mut p = PathBuf::from("/");
+        for c in raw.components() {
+            match c {
+                Component::ParentDir => {
+                    p.pop();
+                }
+                Component::Normal(n) => p.push(n),
+                _ => {}
+            }
+        }
+        if !viewer::is_image(&p) {
+            return None;
+        }
+        if self.store.pins(&self.id()).unwrap_or_default().iter().any(|pin| pin.is_dir() && p.starts_with(pin)) {
+            return p.is_file().then_some(p);
+        }
+        let (layers, masked) = self.jail_view()?;
+        if masked.iter().any(|m| p.starts_with(m)) {
+            return None;
+        }
+        for l in &layers {
+            if let Ok(rel) = p.strip_prefix(&l.host) {
+                let upper = l.upper.join(rel);
+                if let Ok(md) = upper.symlink_metadata() {
+                    if md.file_type().is_char_device() {
+                        return None; // deleted in the jail
+                    }
+                    if md.is_file() {
+                        return Some(upper);
+                    }
+                }
+            }
+        }
+        p.is_file().then_some(p)
+    }
+
+    /// Have the pins changed since the jail started? Only folder pins are mounts; a pinned file never
+    /// needs a new jail.
     pub fn pins_changed(&self) -> bool {
-        self.force_restart.get() || self.store.pins(&self.id()).unwrap_or_default() != *self.live_pins.borrow()
+        let dirs = |v: &[std::path::PathBuf]| v.iter().filter(|p| p.is_dir()).cloned().collect::<Vec<_>>();
+        self.force_restart.get() || dirs(&self.store.pins(&self.id()).unwrap_or_default()) != dirs(&self.live_pins.borrow())
     }
 
     /// Context block prepended to prompts while pins exist (SPEC §3.1 pins).
     fn pin_prefix(&self) -> String {
         let pins = self.store.pins(&self.id()).unwrap_or_default();
-        if pins.is_empty() {
-            return String::new();
+        let (dirs, files): (Vec<_>, Vec<_>) = pins.iter().partition(|p| p.is_dir());
+        let mut out = String::new();
+        if !dirs.is_empty() {
+            let list: Vec<String> = dirs.iter().map(|p| p.display().to_string()).collect();
+            out.push_str(&format!("[Pinned folders — focus your work there unless told otherwise: {}]\n", list.join(", ")));
         }
-        let list: Vec<String> = pins.iter().map(|p| p.display().to_string()).collect();
-        format!("[Pinned folders — focus your work there unless told otherwise: {}]\n\n", list.join(", "))
+        if !files.is_empty() {
+            let list: Vec<String> = files.iter().map(|p| p.display().to_string()).collect();
+            out.push_str(&format!("[Pinned files — the person keeps these at hand: {}]\n", list.join(", ")));
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out
     }
 
     pub fn focus_prompt(&self) {
@@ -1203,6 +1444,7 @@ impl SessionView {
     fn connect(self: &Rc<Self>, fresh: bool) {
         let s = self.session.borrow().clone();
         *self.live_pins.borrow_mut() = self.store.pins(&s.id).unwrap_or_default();
+        self.jail.borrow_mut().take(); // the overlay is planned again with the current pins
         self.ready.set(false);
         match session::start(&s, &self.store, fresh) {
             Ok(d) => {
