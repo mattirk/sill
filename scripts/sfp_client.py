@@ -138,7 +138,7 @@ class View:
 
 
 class Client:
-    def __init__(self, path, schema=None):
+    def __init__(self, path, schema=None, capabilities=None, name="sfp-python"):
         try:
             from jsonschema import Draft202012Validator
         except ImportError as error:
@@ -152,8 +152,10 @@ class Client:
         self.path = str(path)
         self.sock.connect(self.path)
         self.input = self.sock.makefile("rb")
-        offer = {"protocols": [PROTOCOL], "client": {"name": "sfp-python", "version": "0.1"}, "capabilities": {}}
+        offer = {"protocols": [PROTOCOL], "client": {"name": name, "version": "0.1"},
+                 "capabilities": dict(capabilities or {})}
         response = self.call("_sill/initialize", offer)
+        self.capabilities = response.get("capabilities", {})
         if response["protocol"] != PROTOCOL:
             raise ValueError("daemon selected an unoffered protocol")
         self.max_frame = min(MAX_FRAME, response["limits"]["max_message_bytes"])

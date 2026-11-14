@@ -40,7 +40,9 @@ try:
         raise AssertionError("removed internal method still exists")
     except RpcError as e:
         assert e.error["code"] == -32601, e.error
-    assert c.schema["capabilities"]["offered"] == []
+    # the internal capability is gone; the public ones are named features (send_now, permission modes)
+    offered = {cap["name"] for cap in c.schema["capabilities"]["offered"]}
+    assert "sill.internal" not in offered and "sill.permission_modes" in offered, offered
     assert all(not m["name"].startswith("_sill/internal/") for m in c.schema["methods"])
     home = c.call("_sill/files.home", {})
     raw = base64.b64decode(home["bytes_base64"]) + b"/conformance-\xff"

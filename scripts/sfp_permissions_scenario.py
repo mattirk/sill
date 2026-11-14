@@ -48,7 +48,9 @@ if sys.argv[1] == "--binary":
         environment = os.environ.copy()
         for name in ("SILL_SESSION", "SILL_BOX", "INVOCATION_ID", "NOTIFY_SOCKET", "LISTEN_PID", "LISTEN_FDS"):
             environment.pop(name, None)
-        for name, child in (("XDG_CONFIG_HOME", "config"), ("XDG_STATE_HOME", "state"), ("XDG_RUNTIME_DIR", "run")):
+        # HOME too: agent definitions and Save for future sessions use $HOME/.config/sill/agents,
+        # which would otherwise be the person's own (this scenario saves a host for `claude`)
+        for name, child in (("XDG_CONFIG_HOME", "config"), ("XDG_STATE_HOME", "state"), ("XDG_RUNTIME_DIR", "run"), ("HOME", "home")):
             (root / child).mkdir(mode=0o700)
             environment[name] = str(root / child)
         environment["SILL_LAUNCHER"] = "direct"
