@@ -101,6 +101,10 @@ pub struct Tool {
     pub detail: String,
     pub diff: String,
     pub parent_item_id: Option<String>,
+    /// A shell call's command line as the agent declared it in the call's input, for a call of
+    /// kind `execute`; null for every other call and when the agent declared none. It is the
+    /// command itself, where `title` is display text an agent words as it likes.
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

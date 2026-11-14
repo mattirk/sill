@@ -43,6 +43,7 @@ pub(crate) fn long(n: usize) -> App {
         if i % 4 == 1 {
             next.tool = Some(Tool {
                 title: format!("rg -n 'pattern-{i}' crates"),
+                command: Some(format!("rg -n 'pattern-{i}' crates")),
                 kind: "execute".into(),
                 status: "completed".into(),
                 detail: "crates/sill-gui/src/ui.rs:1: match\n".repeat(3),

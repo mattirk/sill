@@ -246,8 +246,9 @@ pub enum Event {
     /// `detail`: what the call does, for the card's body — input fields, content, output.
     /// `diff`: a file edit as a unified diff (the call's `Diff` content blocks), shown live.
     /// `parent`: the delegation (Task/Agent call) this call runs under, for a sub-agent's own calls.
-    ToolCall { id: String, title: String, kind: String, status: String, detail: Option<String>, diff: Option<String>, parent: Option<String> },
-    ToolCallUpdate { id: String, status: Option<String>, title: Option<String>, detail: Option<String>, diff: Option<String> },
+    /// `command` is what the agent declared as the call's command ([`input_command`]), when it did.
+    ToolCall { id: String, title: String, kind: String, status: String, detail: Option<String>, diff: Option<String>, parent: Option<String>, command: Option<String> },
+    ToolCallUpdate { id: String, status: Option<String>, title: Option<String>, detail: Option<String>, diff: Option<String>, command: Option<String> },
     /// Text a sub-agent produced (shown under its delegation, not as the agent's own words).
     SubagentText { parent: String, text: String },
     /// An image block in the agent's own message (`parent` names a sub-agent's tool call).
@@ -956,6 +957,7 @@ fn to_event(update: SessionUpdate) -> Event {
                 detail: tool_detail(t.raw_input.as_ref(), Some(&t.content), t.raw_output.as_ref()),
                 diff: tool_diff(Some(&t.content)),
                 parent: parent_tool_use(t.meta.as_ref()),
+                command: input_command(t.raw_input.as_ref()),
             }
         }
         SessionUpdate::ToolCallUpdate(u) => Event::ToolCallUpdate {
@@ -964,6 +966,7 @@ fn to_event(update: SessionUpdate) -> Event {
             title: u.fields.title.clone(),
             detail: tool_detail(u.fields.raw_input.as_ref(), u.fields.content.as_deref(), u.fields.raw_output.as_ref()),
             diff: tool_diff(u.fields.content.as_deref()),
+            command: input_command(u.fields.raw_input.as_ref()),
         },
         SessionUpdate::Plan(p) => Event::Plan(p.entries.iter().map(|e| PlanEntry { content: e.content.clone(), status: acp_string(&e.status), priority: acp_string(&e.priority) }).collect()),
         SessionUpdate::AvailableCommandsUpdate(u) => Event::Commands(u.available_commands.iter().map(|c| AgentCommand {
@@ -996,6 +999,15 @@ fn parent_tool_use(meta: Option<&Meta>) -> Option<String> {
 /// sub-agents RFD is unstable, SPEC §4.1), so the agent's own tool is recognised: claude-agent-acp's
 /// `_meta.claudeCode.toolName` (`Task`/`Agent`), the tool name (Codex's `spawn_agent`, …) or input
 /// fields that only a delegation has.
+/// The command a tool call's input declares: the text of its `command` field (ACP `rawInput`),
+/// as Claude's and Codex's adapters send it for a shell call. Only what the agent declared: a
+/// call's title is display text and is never read as a command. Whether the call is a shell
+/// call is its kind's to say; the daemon pairs the two (`sfp::Tool::command`).
+pub fn input_command(input: Option<&serde_json::Value>) -> Option<String> {
+    let command = input?.get("command")?.as_str()?;
+    (!command.trim().is_empty()).then(|| command.to_owned())
+}
+
 fn is_delegation(name: Option<&str>, title: &str, input: Option<&serde_json::Value>, meta: Option<&Meta>) -> bool {
     if let Some(tool) = meta.and_then(|m| m.get("claudeCode")).and_then(|c| c.get("toolName")).and_then(|v| v.as_str())
         && matches!(tool, "Task" | "Agent")
@@ -1120,6 +1132,27 @@ mod tests {
     use super::*;
 
     fn update(json: serde_json::Value) -> Event { to_event(serde_json::from_value(json).unwrap()) }
+
+    /// A shell call's command travels apart from its title: it is the `command` the agent
+    /// declared in the call's input. Claude's adapter reports a Bash call first while its input
+    /// streams (no command yet, titled "Terminal") and refines it; Codex declares it at once.
+    #[test]
+    fn a_tool_calls_declared_command_travels_apart_from_its_title() {
+        use serde_json::json;
+        let started = update(json!({"sessionUpdate":"tool_call","toolCallId":"t1","title":"Terminal","kind":"execute","status":"pending","rawInput":{}}));
+        assert!(matches!(&started, Event::ToolCall { command: None, title, kind, .. } if title == "Terminal" && kind == "Execute"), "{started:?}");
+        let refined = update(json!({"sessionUpdate":"tool_call_update","toolCallId":"t1","title":"List the files","kind":"execute","rawInput":{"command":"ls; pwd","description":"List the files"}}));
+        assert!(matches!(&refined, Event::ToolCallUpdate { command: Some(c), title: Some(t), .. } if c == "ls; pwd" && t == "List the files"), "{refined:?}");
+        let codex = update(json!({"sessionUpdate":"tool_call","toolCallId":"t2","title":"git status","kind":"execute","status":"in_progress","rawInput":{"command":"git status","cwd":"/tmp"}}));
+        assert!(matches!(&codex, Event::ToolCall { command: Some(c), .. } if c == "git status"), "{codex:?}");
+        let finished = update(json!({"sessionUpdate":"tool_call_update","toolCallId":"t2","status":"completed"}));
+        assert!(matches!(&finished, Event::ToolCallUpdate { command: None, .. }), "{finished:?}");
+        // only text is a command line: an argument list, a blank and a bare string declare none
+        assert_eq!(input_command(Some(&json!({"command":["bash","-lc","ls"]}))), None);
+        assert_eq!(input_command(Some(&json!({"command":"  "}))), None);
+        assert_eq!(input_command(Some(&json!("ls"))), None);
+        assert_eq!(input_command(None), None);
+    }
 
     #[test]
     fn plans_commands_titles_and_notices_are_typed_not_dumped() {

@@ -157,7 +157,7 @@ impl AdapterState {
             native.item.content.push(sfp::Content{block_id,kind:"message_metadata".into(),text:None,extra:BTreeMap::from([("metadata".into(),metadata.clone())])});
         }
         if category=="tool" {
-            let tool=sfp::Tool{title:text_field(&native.fields,"title",""),kind:text_field(&native.fields,"kind","other"),status:text_field(&native.fields,"status","pending"),detail:serde_json::json!({"input":native.fields.get("rawInput"),"output":native.fields.get("rawOutput")}).to_string(),diff:native.fields.get("content").and_then(Value::as_array).map(|content|content.iter().filter(|c|c["type"]=="diff").map(Value::to_string).collect::<Vec<_>>().join("\n")).unwrap_or_default(),parent_item_id:None};
+            let tool=sfp::Tool{title:text_field(&native.fields,"title",""),kind:text_field(&native.fields,"kind","other"),status:text_field(&native.fields,"status","pending"),detail:serde_json::json!({"input":native.fields.get("rawInput"),"output":native.fields.get("rawOutput")}).to_string(),diff:native.fields.get("content").and_then(Value::as_array).map(|content|content.iter().filter(|c|c["type"]=="diff").map(Value::to_string).collect::<Vec<_>>().join("\n")).unwrap_or_default(),parent_item_id:None,command:shell_command(&text_field(&native.fields,"kind","other"),acp::input_command(native.fields.get("rawInput")).as_deref())};
             self.tools.insert(source.into(),(native.item.item_id.clone(),tool.clone()));native.item.tool=Some(tool);
         }
         if new {out.push(sfp::Event::ItemCreated{item:native.item.clone()});}
@@ -248,6 +248,18 @@ mod tests {
         let ended=feed(&mut a,&mut s,json!({"sessionUpdate":"state_update","state":"idle","stopReason":"cancelled"}));
         assert!(ended.iter().any(|e|matches!(e,sfp::Event::TurnUpdated{turn:t}if t.turn_id==turn&&t.outcome=="cancelled")));
         assert!(feed(&mut a,&mut s,json!({"sessionUpdate":"state_update","state":"idle","stopReason":"cancelled"})).is_empty());
+    }
+    /// As in the v1 adapter: a shell call's command is the `command` its input declares.
+    #[test]
+    fn a_native_shell_calls_command_comes_from_its_declared_input(){
+        let mut a=AdapterState::default();let mut s=session();
+        let command=|a:&AdapterState,id:&str|a.v2.items[id].item.tool.as_ref().unwrap().command.clone();
+        feed(&mut a,&mut s,json!({"sessionUpdate":"tool_call_update","toolCallId":"sh","title":"Terminal","kind":"execute","status":"pending","rawInput":{}}));
+        assert_eq!(command(&a,"tool:sh"),None);
+        feed(&mut a,&mut s,json!({"sessionUpdate":"tool_call_update","toolCallId":"sh","title":"List the files","rawInput":{"command":"ls; pwd"}}));
+        assert_eq!(command(&a,"tool:sh").as_deref(),Some("ls; pwd"));
+        feed(&mut a,&mut s,json!({"sessionUpdate":"tool_call_update","toolCallId":"ed","title":"View","kind":"read","rawInput":{"command":"view"}}));
+        assert_eq!(command(&a,"tool:ed"),None,"another kind's `command` is not a shell command");
     }
     #[test]
     fn tools_clear_fields_and_permissions_keep_subject_without_tool_identity(){

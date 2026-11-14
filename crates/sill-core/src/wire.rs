@@ -190,8 +190,8 @@ pub fn event_into_acp(ev: Event, answer: impl FnOnce(u64, futures::channel::ones
             Event::UserText(t) => A::UserText(t),
             Event::Text(t) => A::Text(t),
             Event::Thought(t) => A::Thought(t),
-            Event::ToolCall { id, title, kind, status, detail, diff, parent } => A::ToolCall { id, title, kind, status, detail, diff, parent },
-            Event::ToolCallUpdate { id, status, title, detail, diff } => A::ToolCallUpdate { id, status, title, detail, diff },
+            Event::ToolCall { id, title, kind, status, detail, diff, parent } => A::ToolCall { id, title, kind, status, detail, diff, parent, command: None },
+            Event::ToolCallUpdate { id, status, title, detail, diff } => A::ToolCallUpdate { id, status, title, detail, diff, command: None },
             Event::SubagentText { parent, text } => A::SubagentText { parent, text },
             Event::PermissionRequest { request, tool_call_id, title, options } => {
                 let (tx, rx) = futures::channel::oneshot::channel::<Option<String>>();

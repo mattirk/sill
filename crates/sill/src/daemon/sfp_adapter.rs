@@ -167,10 +167,10 @@ impl AdapterState {
                 }
                 out.push(sfp::Event::ItemCreated { item: self.item(id("item"), "agent", vec![block], None) });
             }
-            relay::Event::ToolCall { id: source, title, kind, status, detail, diff, parent } => {
+            relay::Event::ToolCall { id: source, title, kind, status, detail, diff, parent, command } => {
                 self.text_item = None;
                 self.thought_item = None;
-                let tool = sfp::Tool { title: title.clone(), kind: kind.clone(), status: status.clone(), detail: detail.clone().unwrap_or_default(), diff: diff.clone().unwrap_or_default(), parent_item_id: parent.as_ref().and_then(|p| self.tools.get(p)).map(|(id, _)| id.clone()) };
+                let tool = sfp::Tool { title: title.clone(), kind: kind.clone(), status: status.clone(), detail: detail.clone().unwrap_or_default(), diff: diff.clone().unwrap_or_default(), parent_item_id: parent.as_ref().and_then(|p| self.tools.get(p)).map(|(id, _)| id.clone()), command: shell_command(kind, command.as_deref()) };
                 if let Some((item_id, current)) = self.tools.get_mut(source) {
                     *current = tool.clone();
                     out.push(sfp::Event::ItemPatched { item_id: item_id.clone(), set: sfp::ItemPatch { tool: Some(tool), ..Default::default() } });
@@ -180,17 +180,19 @@ impl AdapterState {
                     out.push(sfp::Event::ItemCreated { item: self.item(item_id, "tool", vec![], Some(tool)) });
                 }
             }
-            relay::Event::ToolCallUpdate { id: source, status, title, detail, diff } => {
+            relay::Event::ToolCallUpdate { id: source, status, title, detail, diff, command } => {
                 if let Some((item_id, tool)) = self.tools.get_mut(source) {
                     if let Some(v) = status { tool.status = v.clone(); }
                     if let Some(v) = title { tool.title = v.clone(); }
                     if let Some(v) = detail { tool.detail = v.clone(); }
                     if let Some(v) = diff { tool.diff = v.clone(); }
+                    // an update that declares no command leaves the one already known
+                    if let Some(v) = shell_command(&tool.kind, command.as_deref()) { tool.command = Some(v); }
                     out.push(sfp::Event::ItemPatched { item_id: item_id.clone(), set: sfp::ItemPatch { tool: Some(tool.clone()), ..Default::default() } });
                 } else {
                     // Some agents first mention a call through an update. Establish an item
                     // before any patch and preserve only fields the agent actually supplied.
-                    let tool = sfp::Tool { title: title.clone().unwrap_or_default(), kind: "unknown".into(), status: status.clone().unwrap_or_else(|| "unknown".into()), detail: detail.clone().unwrap_or_default(), diff: diff.clone().unwrap_or_default(), parent_item_id: None };
+                    let tool = sfp::Tool { title: title.clone().unwrap_or_default(), kind: "unknown".into(), status: status.clone().unwrap_or_else(|| "unknown".into()), detail: detail.clone().unwrap_or_default(), diff: diff.clone().unwrap_or_default(), parent_item_id: None, command: None };
                     let item_id = id("item");
                     self.tools.insert(source.clone(), (item_id.clone(), tool.clone()));
                     out.push(sfp::Event::ItemCreated { item: self.item(item_id, "tool", vec![], Some(tool)) });
@@ -362,6 +364,15 @@ impl AdapterState {
 
 }
 
+/// A shell call's command (`sfp::Tool::command`): what the agent declared as the call's command
+/// (`acp::input_command`), for a call it reported as kind `execute`. Both are the agent's own
+/// statements about the call. The title is never read for it: that is display text, and an
+/// agent that words it differently tomorrow changes nothing here. Other kinds have inputs with
+/// a `command` of their own meaning (an editor's `view`), so the kind decides.
+pub(crate) fn shell_command(kind: &str, declared: Option<&str>) -> Option<String> {
+    kind.eq_ignore_ascii_case("execute").then(|| declared.map(str::to_owned)).flatten()
+}
+
 fn permission_kind(kind: &acp::PermissionOptionKind) -> String {
     match kind {
         acp::PermissionOptionKind::AllowOnce => "allow_once", acp::PermissionOptionKind::AllowAlways => "allow_always",
@@ -428,6 +439,34 @@ mod tests {
         // same bytes, same name: a repeat is deduplicated by the store
         let again = adapter.project(&session, &relay::Event::Image { mime: "image/png".into(), data_base64: acp::base64(b"png"), parent: None }, None);
         assert_eq!(created(&again).content[0].extra["upload_id"], upload_id.as_str());
+    }
+    /// `Tool::command` is what the agent declared for a call it reported as `execute`, and
+    /// nothing else: not a title that reads like a command, not another kind's `command`.
+    #[test]
+    fn a_shell_calls_command_is_what_the_agent_declared_never_its_title() {
+        let session = session();
+        let mut adapter = AdapterState::default();
+        adapter.project(&session, &relay::Event::TurnStarted, None);
+        let call = |id: &str, kind: &str, title: &str, command: Option<&str>| relay::Event::ToolCall { id: id.into(), title: title.into(), kind: kind.into(), status: "Pending".into(), detail: None, diff: None, parent: None, command: command.map(Into::into) };
+        let update = |id: &str, status: Option<&str>, title: Option<&str>, command: Option<&str>| relay::Event::ToolCallUpdate { id: id.into(), status: status.map(Into::into), title: title.map(Into::into), detail: None, diff: None, command: command.map(Into::into) };
+        let patched = |events: &[sfp::Event]| events.iter().find_map(|e| match e { sfp::Event::ItemPatched { set, .. } => set.tool.clone(), _ => None }).expect("a patched tool");
+        // Claude: the call appears while its input streams, then the command arrives
+        let started = adapter.project(&session, &call("bash", "Execute", "Terminal", None), None);
+        assert_eq!(created(&started).tool.as_ref().unwrap().command, None);
+        let refined = adapter.project(&session, &update("bash", None, Some("ls; pwd"), Some("ls; pwd")), None);
+        assert_eq!(patched(&refined).command.as_deref(), Some("ls; pwd"));
+        // an update that declares nothing leaves it, and a reworded title does not touch it
+        let done = adapter.project(&session, &update("bash", Some("Completed"), Some("List the files"), None), None);
+        assert_eq!((patched(&done).command.as_deref(), patched(&done).title.as_str()), (Some("ls; pwd"), "List the files"));
+        // Codex: declared with the call
+        let codex = adapter.project(&session, &call("exec", "Execute", "git status", Some("git status")), None);
+        assert_eq!(created(&codex).tool.as_ref().unwrap().command.as_deref(), Some("git status"));
+        // a title that reads like a command is not one
+        let titled = adapter.project(&session, &call("titled", "Execute", "git status; ls", None), None);
+        assert_eq!(created(&titled).tool.as_ref().unwrap().command, None);
+        // another kind's `command` means something else (an editor's "view")
+        let editor = adapter.project(&session, &call("editor", "Read", "View a.rs", Some("view")), None);
+        assert_eq!(created(&editor).tool.as_ref().unwrap().command, None);
     }
     #[test]
     fn oversized_or_invalid_agent_images_are_omitted_with_a_reason() {

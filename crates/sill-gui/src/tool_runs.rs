@@ -1,12 +1,16 @@
 //! Consecutive tool calls shown as one block, grouped by what they run (docs/sill-gui.md, *Tool
 //! runs*). A run is an unbroken sequence of tool calls in one turn: anything else — the agent's
 //! text, a thought, the person's prompt, a question under a call — ends it, so nothing moves past
-//! what the agent said or was asked. Within a run the calls are grouped by their program (`sed`,
-//! `grep`) or, for calls that are not commands, by their kind (`read`, `edit`); the groups are in
-//! the order their first call came, so a new call never moves a group already shown.
+//! what the agent said or was asked. Within a run the calls are grouped by the program their
+//! command runs (`sed`, `grep`) or, for calls that declare no command, by their kind (`read`,
+//! `edit`); the groups are in the order their first call came, so a new call never moves a group
+//! already shown. A command is what the agent declared the call runs (`Tool::command`), never
+//! what its title looks like.
 use std::ops::Range;
 
 use sill_proto::sfp::{Item, Tool};
+
+use crate::shell::Step;
 
 /// The feed's rows over `items`: each range one row, a run of tool calls when it holds more than
 /// one item. `stands_alone` names items that must keep their own row (a call with a question
@@ -95,21 +99,43 @@ pub fn groups<'a>(run: &[&'a Item]) -> Vec<Group<'a>> {
     groups
 }
 
-/// A call's name and the rest of its title. A command is named by the program it runs: past
-/// leading `cd …` steps and variable assignments, inside a shell's `-c` script, as the
-/// program's file name. Other calls are named by their kind (`read`, `search`), or by their
-/// title's first word when the kind says nothing (`other`).
+/// A shell call's command: what the agent declared it runs (`Tool::command`, which the daemon
+/// fills from the call's input for calls of kind `execute`). Never the title: that is display
+/// text, and an agent may word it as it likes.
+fn shell(tool: &Tool) -> Option<&str> {
+    tool.command
+        .as_deref()
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+}
+
+/// What a call's row shows, line by line. A shell call that ran several commands has one line
+/// for each, with the operator that ends it (`crate::shell`); every other call has one line:
+/// its command whole, or its title.
+pub fn lines(tool: &Tool) -> Vec<Step<'_>> {
+    let whole = |text| vec![Step { text, operator: "" }];
+    match shell(tool) {
+        Some(command) => match crate::shell::steps(command) {
+            Some(steps) if steps.len() > 1 => steps,
+            _ => whole(command),
+        },
+        None => whole(tool.title.trim()),
+    }
+}
+
+/// A call's name, and the text that goes beside the name. A shell call is named by the program
+/// its command runs ([`program`]), and has no name when it declared no command: the name column
+/// holds programs, and nothing says which one a title stands for. Every other call is named by
+/// its kind (`read`, `search`), or by its title's first word when the kind says nothing
+/// (`other`).
 pub fn classify(tool: &Tool) -> (String, String) {
-    let title = tool.title.trim();
     let kind = tool.kind.to_ascii_lowercase();
+    if let Some(command) = shell(tool) {
+        return program(command).unwrap_or((String::new(), command.to_owned()));
+    }
+    let title = tool.title.trim();
     match kind.as_str() {
-        "execute" => {
-            let command = unquoted(title, '`');
-            match program(command) {
-                Some((name, rest)) => (name, rest.trim().to_owned()),
-                None => (kind, title.to_owned()),
-            }
-        }
+        "execute" => (String::new(), title.to_owned()),
         "" | "other" => match first_word(title) {
             Some((word, rest)) => (word.to_owned(), rest.trim().to_owned()),
             None => ("other".into(), String::new()),
@@ -125,32 +151,37 @@ pub fn classify(tool: &Tool) -> (String, String) {
     }
 }
 
-/// The program a command line runs and what follows it.
-fn program(command: &str) -> Option<(String, &str)> {
-    let mut command = command.trim_start();
-    loop {
-        let (word, rest) = first_word(command)?;
-        if is_assignment(word) {
-            command = rest.trim_start();
-            continue;
+/// The program a command line runs, and the text beside it. The program is that of the first
+/// command that runs one: past `cd …` steps, comments and lone assignments, past the
+/// assignments before a command, inside a shell's `-c` script, as the program's file name.
+/// The text is the command without its name only when it starts with exactly that name
+/// (`sed -n 1p a` beside `sed` is `-n 1p a`); otherwise it is the whole command, so the name
+/// and the text together always hold all of it.
+fn program(command: &str) -> Option<(String, String)> {
+    let whole = [Step {
+        text: command.trim(),
+        operator: "",
+    }];
+    let steps = crate::shell::steps(command);
+    let steps = steps.as_deref().unwrap_or(&whole);
+    steps.iter().enumerate().find_map(|(index, step)| {
+        if step.text.starts_with('#') {
+            return None;
         }
-        if word == "cd" {
-            // the step after `cd …`, when there is one; a lone `cd` is the program
-            match [" && ", ";", "\n"]
-                .iter()
-                .filter_map(|sep| rest.find(sep).map(|at| at + sep.len()))
-                .min()
-            {
-                Some(next) if !rest[next..].trim().is_empty() => {
-                    command = rest[next..].trim_start();
-                    continue;
-                }
-                _ => return Some(("cd".into(), rest)),
+        let mut rest = step.text;
+        let (word, after) = loop {
+            let (word, after) = first_word(rest)?;
+            if !is_assignment(word) {
+                break (word, after);
             }
+            rest = after;
+        };
+        if word == "cd" && index + 1 < steps.len() {
+            return None;
         }
         let name = word.rsplit('/').next().unwrap_or(word);
         if matches!(name, "sh" | "bash" | "zsh" | "dash")
-            && let Some((flags, script)) = first_word(rest)
+            && let Some((flags, script)) = first_word(after)
             && flags.starts_with('-')
             && flags.contains('c')
         {
@@ -159,11 +190,14 @@ fn program(command: &str) -> Option<(String, &str)> {
                 Some(quote @ ('\'' | '"')) => unquoted(script, quote),
                 _ => script,
             };
-            command = script.trim_start();
-            continue;
+            if let Some((inner, _)) = program(script) {
+                return Some((inner, step.text.to_owned()));
+            }
         }
-        return Some((name.to_owned(), rest));
-    }
+        let plain = name == word && std::ptr::eq(rest, step.text);
+        let beside = if plain { after.trim() } else { step.text };
+        Some((name.to_owned(), beside.to_owned()))
+    })
 }
 
 /// `text` without the `quote` it starts with and the last one it has.
@@ -209,59 +243,154 @@ mod tests {
             detail: String::new(),
             diff: String::new(),
             parent_item_id: None,
+            command: None,
         }
     }
 
-    fn named(kind: &str, title: &str) -> (String, String) {
-        classify(&tool(kind, title))
+    /// A shell call as Claude's and Codex's adapters report one: the command declared, and the
+    /// same text as the title.
+    fn shell_call(command: &str) -> Tool {
+        Tool {
+            command: Some(command.into()),
+            ..tool("execute", command)
+        }
+    }
+
+    fn pair(name: &str, beside: &str) -> (String, String) {
+        (name.to_owned(), beside.to_owned())
     }
 
     #[test]
     fn a_command_is_named_by_the_program_it_runs() {
-        let pair = |a: &str, b: &str| (a.to_owned(), b.to_owned());
+        let named = |command: &str| classify(&shell_call(command));
         assert_eq!(
-            named("execute", "sed -n 960,1257p crates/x.rs"),
+            named("sed -n 960,1257p crates/x.rs"),
             pair("sed", "-n 960,1257p crates/x.rs")
         );
-        assert_eq!(named("Execute", "`git status`"), pair("git", "status"));
+        assert_eq!(named("git status"), pair("git", "status"));
+        assert_eq!(named("cd crates"), pair("cd", "crates"));
+        assert_eq!(named("ls"), pair("ls", ""));
+        // past the steps that only lead to it
         assert_eq!(
-            named("execute", "cd /home/me/GIT/sill && grep -rn foo crates"),
+            named("cd /home/me/GIT/sill && grep -rn foo crates"),
             pair("grep", "-rn foo crates")
         );
+        assert_eq!(named("# look first\nls -la"), pair("ls", "-la"));
+        assert_eq!(named("X=1; make"), pair("make", ""));
+        // the first of several
         assert_eq!(
-            named("execute", "RUST_LOG=debug cargo test -p sill-gui"),
-            pair("cargo", "test -p sill-gui")
+            named("sed -n 1,2p a && grep x b; cat c"),
+            pair("sed", "-n 1,2p a")
+        );
+        // a loop is not divided, and is named by what it starts with
+        assert_eq!(
+            named("for f in a b; do cat $f; done"),
+            pair("for", "f in a b; do cat $f; done")
+        );
+    }
+
+    /// The name and the text beside it hold the whole command: the text loses the name only
+    /// where the command starts with exactly that name.
+    #[test]
+    fn the_text_beside_a_name_is_the_whole_command_unless_it_starts_with_the_name() {
+        let named = |command: &str| classify(&shell_call(command));
+        assert_eq!(
+            named("RUST_LOG=debug cargo test -p sill-gui"),
+            pair("cargo", "RUST_LOG=debug cargo test -p sill-gui")
         );
         assert_eq!(
-            named(
-                "execute",
+            named("./scripts/check.sh --all"),
+            pair("check.sh", "./scripts/check.sh --all")
+        );
+        assert_eq!(
+            named("/usr/bin/bash -lc 'cat crates/a.rs\ncat crates/b.rs'"),
+            pair(
+                "cat",
                 "/usr/bin/bash -lc 'cat crates/a.rs\ncat crates/b.rs'"
-            ),
-            pair("cat", "crates/a.rs\ncat crates/b.rs")
+            )
         );
         assert_eq!(
-            named("execute", "./scripts/check.sh --all"),
-            pair("check.sh", "--all")
+            named("/usr/bin/bash -lc \"rg -n 'a|b' docs | head\nsed -n 1p x\""),
+            pair(
+                "rg",
+                "/usr/bin/bash -lc \"rg -n 'a|b' docs | head\nsed -n 1p x\""
+            )
         );
-        assert_eq!(named("execute", "cd crates"), pair("cd", "crates"));
-        assert_eq!(named("execute", "Terminal"), pair("Terminal", ""));
+    }
+
+    /// Only a declared command is read as one. A shell call without it — an agent that
+    /// declares none, a call whose input still streams, a record from before the field — has
+    /// no name and is shown by its title, whatever the title looks like.
+    #[test]
+    fn a_title_is_never_read_as_a_command() {
+        assert_eq!(
+            classify(&tool("execute", "sed -n 1,2p a && grep x b")),
+            pair("", "sed -n 1,2p a && grep x b")
+        );
+        assert_eq!(classify(&tool("Execute", "Terminal")), pair("", "Terminal"));
+        assert_eq!(
+            lines(&tool("execute", "sed -n 1,2p a && grep x b")),
+            vec![Step {
+                text: "sed -n 1,2p a && grep x b",
+                operator: ""
+            }]
+        );
+        // a title that became a description changes nothing while the command is declared
+        let described = Tool {
+            title: "Show the first lines; then search".into(),
+            ..shell_call("sed -n 1,2p a && grep x b")
+        };
+        assert_eq!(classify(&described), pair("sed", "-n 1,2p a"));
+        assert_eq!(lines(&described).len(), 2);
     }
 
     #[test]
     fn other_calls_are_named_by_their_kind() {
-        let pair = |a: &str, b: &str| (a.to_owned(), b.to_owned());
         assert_eq!(
-            named("Read", "Read file '/home/me/a.rs'"),
+            classify(&tool("Read", "Read file '/home/me/a.rs'")),
             pair("read", "file '/home/me/a.rs'")
         );
         assert_eq!(
-            named("search", "grep -n foo src"),
+            classify(&tool("search", "grep -n foo src")),
             pair("search", "grep -n foo src")
         );
         assert_eq!(
-            named("other", "mcp__docs__batch {…}"),
+            classify(&tool("other", "mcp__docs__batch {…}")),
             pair("mcp__docs__batch", "{…}")
         );
+    }
+
+    #[test]
+    fn a_call_that_ran_several_commands_has_a_line_for_each() {
+        let call = shell_call("git for-each-ref | head -20; echo \"--- remotes:\"; git remote -v");
+        let shown: Vec<(&str, &str)> = lines(&call)
+            .iter()
+            .map(|step| (step.text, step.operator))
+            .collect();
+        assert_eq!(
+            shown,
+            vec![
+                ("git for-each-ref | head -20", ";"),
+                ("echo \"--- remotes:\"", ";"),
+                ("git remote -v", ""),
+            ]
+        );
+        // one command, and what is not divided, stay one line: the command whole
+        for whole in [
+            "sed -i 's/a/b/; s/c/d/' file",
+            "ls;",
+            "python3 - <<'PY'\nprint(1); print(2)\nPY",
+            "/usr/bin/bash -lc 'cat a\ncat b'",
+        ] {
+            assert_eq!(
+                lines(&shell_call(whole)),
+                vec![Step {
+                    text: whole,
+                    operator: ""
+                }],
+                "{whole}"
+            );
+        }
     }
 
     fn item(id: &str, turn: &str, tool: Option<Tool>) -> Item {
@@ -279,7 +408,7 @@ mod tests {
 
     #[test]
     fn a_run_is_consecutive_calls_in_one_turn() {
-        let call = |id: &str, turn: &str| item(id, turn, Some(tool("execute", "ls")));
+        let call = |id: &str, turn: &str| item(id, turn, Some(shell_call("ls")));
         let items = [
             call("a", "t1"),
             call("b", "t1"),
@@ -297,12 +426,13 @@ mod tests {
 
     #[test]
     fn groups_keep_the_order_their_first_call_came_in() {
-        let call = |id: &str, title: &str| item(id, "t", Some(tool("execute", title)));
+        let call = |id: &str, command: &str| item(id, "t", Some(shell_call(command)));
         let items = [
             call("1", "sed -n 1,2p a"),
             call("2", "grep x a"),
             call("3", "sed -n 3,4p b"),
             item("4", "t", Some(tool("read", "Read b"))),
+            item("5", "t", Some(tool("execute", "Terminal"))),
         ];
         let refs: Vec<&Item> = items.iter().collect();
         let groups = groups(&refs);
@@ -310,7 +440,7 @@ mod tests {
             .iter()
             .map(|g| (g.name.as_str(), g.members.len()))
             .collect();
-        assert_eq!(shape, vec![("sed", 2), ("grep", 1), ("read", 1)]);
+        assert_eq!(shape, vec![("sed", 2), ("grep", 1), ("read", 1), ("", 1)]);
         assert_eq!(groups[0].latest(), "-n 3,4p b");
     }
 
@@ -321,7 +451,7 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(i, status)| {
-                    let mut t = tool("execute", "ls");
+                    let mut t = shell_call("ls");
                     t.status = (*status).into();
                     item(&i.to_string(), "t", Some(t))
                 })

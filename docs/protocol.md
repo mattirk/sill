@@ -7,6 +7,11 @@ stable `sfp/1`. Clients and daemon upgrade together. A mismatch requires explici
 a failed handshake never authorizes restarting a daemon. Private relay protocol 2
 requires a coordinated cutover from older development workers.
 
+Since 2026-11-10 a tool item carries the shell command its agent declared
+([`tool.command`](#tool-calls-and-their-command)), a compatible addition recorded in the schema.
+The command travels from the agent through the relay, so the private relay protocol is now 3:
+the first daemon with it replaces each running session's relay, restarting that session's agent.
+
 The 2026-11-07 agent-directory cutover changes `home_paths` to typed records and removes
 `state_dirs`, `seed_files` and `shared_files`. The development schema baseline is deliberately
 re-recorded with the daemon and clients updated together; it is not a stable-SFP compatibility
@@ -215,6 +220,23 @@ jail sees (`~/.local/state/sill/keys/<agent>/<method>`), and the relay reads it 
 `{"api-key": {"apiKey": key}}`). It is never journaled or logged. When the agent asks again (a new
 agent process), a saved key for an offered method answers it without `authentication` being set;
 refused once, the login card shows with the agent's reason. `agents.reset` removes saved keys.
+
+### Tool calls and their command
+
+A tool item's `tool` has `title`, `kind`, `status`, `detail`, `diff`, `parent_item_id` and
+`command` (added 2026-11-10). `title` is display text, worded by the agent as it likes: today
+the command line for a shell call, tomorrow perhaps a description. `command` is the command
+itself: the text of the `command` field in the call's input (ACP `rawInput`), for a call the
+agent reported as kind `execute`. Both are the agent's own statements about the call; the daemon
+never derives a command from a title. It is null for every other kind (whose inputs may have a
+`command` of another meaning, such as an editor's `view`), when the agent declared none, while
+a call's input still streams (Claude's adapter then titles the call "Terminal" and declares the
+command in its next update), and in records from before the field. Claude's and Codex's
+adapters declare it for every shell call (checked 2026-11-10 against `claude-agent-acp` 0.101.0
+and stored Codex calls). The text is passed on unchanged and unclipped, as `title` is. A client
+that wants to show, group or divide commands reads `command` and treats its absence as "not
+known", not as a reason to parse the title. The field needs no capability: a client that
+ignores it loses nothing it had.
 
 ACP v1 updates beyond text and tools are projected too: `plan` becomes a `plan` item per turn
 (one `plan_entry` block per step with `status` and `priority`; later plans patch its content),

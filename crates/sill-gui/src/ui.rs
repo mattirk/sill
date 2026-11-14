@@ -680,7 +680,14 @@ impl App {
                         .iter()
                         .map(|item| {
                             let tool = item.tool.as_ref().map(|t| {
-                                (&t.title, &t.kind, &t.status, t.detail.len(), t.diff.len())
+                                (
+                                    &t.title,
+                                    &t.command,
+                                    &t.kind,
+                                    &t.status,
+                                    t.detail.len(),
+                                    t.diff.len(),
+                                )
                             });
                             (
                                 &item.item_id,
@@ -697,6 +704,7 @@ impl App {
                 let tool = item.tool.as_ref().map(|t| {
                     (
                         &t.title,
+                        &t.command,
                         &t.status,
                         t.detail.len(),
                         t.diff.len(),
@@ -1039,31 +1047,30 @@ impl App {
         )
     }
 
-    /// A tool call's line and, opened, its output; the rule beside it is its row's or its run's.
+    /// A tool call's row and, opened, its output; the rule beside it is its row's or its run's.
+    /// The row is one line, or for a shell call that ran several commands a line for each
+    /// (`tool_runs::lines`) with the kind glyph and the status mark on the first: still one
+    /// call, with one status and one output.
     fn tool_call<'a>(
         &'a self,
         view: &'a SessionView,
         item: &'a Item,
         tool: &'a Tool,
     ) -> Column<'a, Message> {
-        let line = button(
-            row![
-                kind_mark(&tool.kind),
-                container(
-                    text(one_line(&tool.title, 140))
-                        .size(style::SMALL)
-                        .wrapping(text::Wrapping::None),
-                )
-                .width(Fill)
-                .clip(true),
-                status_mark(&tool.status),
-            ]
-            .spacing(6)
-            .align_y(Alignment::Center),
-        )
-        .padding([3, 6])
-        .width(Fill)
-        .style(style::row_button);
+        let mut rows = Column::new();
+        for (index, step) in crate::tool_runs::lines(tool).iter().enumerate() {
+            let line = step_line(step, false);
+            let cells = if index == 0 {
+                row![kind_mark(&tool.kind), line, status_mark(&tool.status)]
+            } else {
+                row![space().width(KIND_MARK), line]
+            };
+            rows = rows.push(cells.spacing(6).align_y(Alignment::Center));
+        }
+        let line = button(rows)
+            .padding([3, 6])
+            .width(Fill)
+            .style(style::row_button);
         let line = keys::press(line, Message::ToggleTool(item.item_id.clone()));
         let body = Column::new().push(line);
         if view.open_tools.contains(&item.item_id) {
@@ -1075,7 +1082,8 @@ impl App {
 
     /// A run of tool calls (`tool_runs`) as one ruled block: a line for each group of calls that
     /// ran the same thing — kind glyph, how many, the name, the latest call's arguments, the
-    /// group's status — in columns. A group of one is its call and opens to its output; a larger
+    /// group's status — in columns. A group of one is its call and opens to its output; when
+    /// that call ran several commands it has a line for each, from the name's column. A larger
     /// group opens to its calls, indented under the name, each opening to its own output.
     fn tool_run<'a>(&'a self, view: &'a SessionView, run: Vec<&'a Item>) -> Element<'a, Message> {
         let groups = crate::tool_runs::groups(&run);
@@ -1089,6 +1097,13 @@ impl App {
             .iter()
             .map(|name| text_width(name, style::SMALL))
             .fold(0.0_f32, f32::max);
+        // the glyph and the count: what stands before the name's column
+        let lead = KIND_MARK
+            + if count_width > 0.0 {
+                6.0 + count_width
+            } else {
+                0.0
+            };
         let quiet = alpha(P.fg, 0.45);
         let mut block = Column::new();
         for (group, name) in groups.iter().zip(names) {
@@ -1116,37 +1131,60 @@ impl App {
                         .align_x(iced::alignment::Horizontal::Right),
                 );
             }
-            // the latest call's arguments; a group opened to its calls shows them there instead
-            let latest = if open && !single {
-                String::new()
+            let lines = if single {
+                crate::tool_runs::lines(first_tool)
             } else {
-                one_line(&group.latest(), 140)
+                Vec::new()
             };
-            cells = cells
-                .push(
-                    text(name)
-                        .size(style::SMALL)
-                        .width(name_width)
-                        .wrapping(text::Wrapping::None),
-                )
-                .push(
-                    container(
-                        text(latest)
+            let content: Element<'a, Message> = if let [head, more @ ..] = lines.as_slice()
+                && !more.is_empty()
+            {
+                let head = cells
+                    .push(step_line(head, true))
+                    .push(status_mark(group.status()));
+                more.iter()
+                    .fold(Column::new().push(head), |rows, step| {
+                        rows.push(
+                            row![space().width(lead), step_line(step, true)]
+                                .spacing(6)
+                                .align_y(Alignment::Center),
+                        )
+                    })
+                    .into()
+            } else {
+                // the latest call's arguments; a group opened to its calls shows them there
+                let latest = if open && !single {
+                    String::new()
+                } else {
+                    one_line(&group.latest(), 140)
+                };
+                cells
+                    .push(
+                        text(name)
                             .size(style::SMALL)
-                            .color(quiet)
+                            .width(name_width)
                             .wrapping(text::Wrapping::None),
                     )
-                    .width(Fill)
-                    .clip(true),
-                )
-                .push(status_mark(group.status()));
+                    .push(
+                        container(
+                            text(latest)
+                                .size(style::SMALL)
+                                .color(quiet)
+                                .wrapping(text::Wrapping::None),
+                        )
+                        .width(Fill)
+                        .clip(true),
+                    )
+                    .push(status_mark(group.status()))
+                    .into()
+            };
             let toggle = if single {
                 Message::ToggleTool(first.item_id.clone())
             } else {
                 Message::ToggleGroup(first.item_id.clone())
             };
             block = block.push(keys::press(
-                button(cells)
+                button(content)
                     .padding([3, 6])
                     .width(Fill)
                     .style(style::row_button),
@@ -1156,17 +1194,10 @@ impl App {
                 block = tool_output(block, first_tool);
             } else if open {
                 // each call's glyph under the group's name
-                let indent = KIND_MARK
-                    + 6.0
-                    + if count_width > 0.0 {
-                        count_width + 6.0
-                    } else {
-                        0.0
-                    };
                 for (item, tool) in &group.members {
                     block = block.push(container(self.tool_call(view, item, tool)).padding(
                         Padding {
-                            left: indent,
+                            left: lead + 6.0,
                             ..Padding::ZERO
                         },
                     ));
@@ -2514,6 +2545,45 @@ fn kind_mark<'a>(kind: &str) -> Element<'a, Message> {
         .color(alpha(P.fg, 0.6))
         .width(KIND_MARK)
         .into()
+}
+
+/// One line of a call's row: a command, or a call's whole text, with the operator that ends a
+/// command dimmed after it. In a run's own lines (`arguments_quiet`) the command's first word
+/// reads as the names in the column above it and the rest as their arguments.
+fn step_line<'a>(step: &crate::shell::Step<'_>, arguments_quiet: bool) -> Element<'a, Message> {
+    let quiet = alpha(P.fg, 0.45);
+    let part = |content: &str| {
+        text(content.to_owned())
+            .size(style::SMALL)
+            .wrapping(text::Wrapping::None)
+    };
+    let shown = one_line(step.text, 140);
+    let gap = || space().width(word_gap());
+    let mut line = row![];
+    match shown.split_once(' ') {
+        Some((word, arguments)) if arguments_quiet => {
+            line = line
+                .push(part(word))
+                .push(gap())
+                .push(part(arguments.trim_start()).color(quiet));
+        }
+        _ => line = line.push(part(&shown)),
+    }
+    // the operator where it was written: against the command, or a blank after it
+    let operator = step.operator.trim_start();
+    if !operator.is_empty() {
+        if operator.len() < step.operator.len() {
+            line = line.push(gap());
+        }
+        line = line.push(part(operator).color(quiet));
+    }
+    container(line).width(Fill).clip(true).into()
+}
+
+/// The width of the space between two words of a tool line.
+fn word_gap() -> f32 {
+    static GAP: OnceLock<f32> = OnceLock::new();
+    *GAP.get_or_init(|| text_width("a a", style::SMALL) - text_width("aa", style::SMALL))
 }
 
 /// An opened tool call's output and diff under its line, or that it had none.

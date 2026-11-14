@@ -75,6 +75,8 @@ fn tool(title: &str, kind: &str, status: &str, detail: &str, diff: &str) -> Tool
         detail: detail.into(),
         diff: diff.into(),
         parent_item_id: None,
+        // as the adapters report a shell call: its command declared, and the same text its title
+        command: (kind == "execute").then(|| title.into()),
     }
 }
 

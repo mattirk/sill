@@ -262,7 +262,7 @@ impl Runner {
                 // A failed RPC alone is not a foreground-idle observation.
                 st.busy=true;
             }
-            relay::Event::ToolCall { id: call, title, status, kind, detail, diff, parent } => {
+            relay::Event::ToolCall { id: call, title, status, kind, detail, diff, parent, .. } => {
                 flush(store, &id, st)?;
                 if let Ok(seq) = store.append_tool(&id, title, status, kind, detail.as_deref(), diff.as_deref()) {
                     store.set_tool_identity(&id, seq, call, parent.as_deref())?;
@@ -273,7 +273,7 @@ impl Runner {
                 flush(store, &id, st)?;
                 store.append_subagent_text(&id, parent, text)?;
             }
-            relay::Event::ToolCallUpdate { id: call, status, title, detail, diff } => {
+            relay::Event::ToolCallUpdate { id: call, status, title, detail, diff, .. } => {
                 if let Some(seq) = st.tool_seqs.get(call).copied() {
                     store.update_tool(&id, seq, title.as_deref(), status.as_deref(), detail.as_deref(), diff.as_deref())?;
                 }
@@ -665,7 +665,7 @@ mod tests {
             state.summary = Some((SummaryKind::End, String::new(), 7));
             runner.handle_locked(&store, &mut state, relay::Event::Text("first summary segment".into()), false).unwrap();
             runner.handle_locked(&store, &mut state, relay::Event::ToolCall {
-                id: "tool-1".into(), title: "inspect".into(), status: "running".into(), kind: "read".into(), detail: None, diff: None, parent: Some("delegation".into()),
+                id: "tool-1".into(), title: "inspect".into(), status: "running".into(), kind: "read".into(), detail: None, diff: None, parent: Some("delegation".into()), command: None,
             }, false).unwrap();
             runner.handle_locked(&store, &mut state, relay::Event::PermissionRequest { request: 19, tool_call_id: "tool-1".into(), title: "inspect".into(), options: vec![] }, false).unwrap();
             state.cursor = 12;
@@ -679,7 +679,7 @@ mod tests {
             assert!(state.busy);
             assert!(state.pending.contains_key(&19));
             assert!(matches!(&state.summary, Some((SummaryKind::End, text, 7)) if text == "first summary segment"));
-            restored.handle_locked(&store, &mut state, relay::Event::ToolCallUpdate { id: "tool-1".into(), status: Some("completed".into()), title: None, detail: None, diff: None }, false).unwrap();
+            restored.handle_locked(&store, &mut state, relay::Event::ToolCallUpdate { id: "tool-1".into(), status: Some("completed".into()), title: None, detail: None, diff: None, command: None }, false).unwrap();
             restored.handle_locked(&store, &mut state, relay::Event::Resolved { request: 19 }, false).unwrap();
             restored.handle_locked(&store, &mut state, relay::Event::Text(" plus second segment".into()), false).unwrap();
             let done = restored.handle_locked(&store, &mut state, relay::Event::Stopped(acp::StopReason::EndTurn), false).unwrap().unwrap();

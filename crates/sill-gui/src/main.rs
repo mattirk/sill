@@ -36,6 +36,7 @@ mod rows;
 mod selection;
 mod settings;
 mod settings_ui;
+mod shell;
 mod shortcuts;
 #[cfg(test)]
 mod snapshots;

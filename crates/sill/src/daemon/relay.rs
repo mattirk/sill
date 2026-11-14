@@ -35,7 +35,7 @@ const QUIT_PATIENCE: Duration = Duration::from_secs(10);
 /// daemon that finds a relay of another version after a deploy replaces it (`evict`) instead of
 /// leaving the session with a worker it cannot talk to (docs/daemon.md §3.9 item 1). Bump it with
 /// any change to those types; a change to the frontend protocol's `wire` types alone needs none.
-pub(crate) const RELAY_PROTOCOL: u32 = 2;
+pub(crate) const RELAY_PROTOCOL: u32 = 3;
 
 /// The relay answered but will not cooperate: another version, a cursor it no longer retains, an
 /// answer that is not a Hello. Not a transport failure — the socket answers — so the hub evicts it.
@@ -74,8 +74,8 @@ pub(crate) enum Event {
     UserText(String),
     Text(String),
     Thought(String),
-    ToolCall { id: String, title: String, kind: String, status: String, detail: Option<String>, diff: Option<String>, parent: Option<String> },
-    ToolCallUpdate { id: String, status: Option<String>, title: Option<String>, detail: Option<String>, diff: Option<String> },
+    ToolCall { id: String, title: String, kind: String, status: String, detail: Option<String>, diff: Option<String>, parent: Option<String>, command: Option<String> },
+    ToolCallUpdate { id: String, status: Option<String>, title: Option<String>, detail: Option<String>, diff: Option<String>, command: Option<String> },
     SubagentText { parent: String, text: String },
     Image { mime: String, data_base64: String, parent: Option<String> },
     PermissionRequest { request: u64, tool_call_id: String, title: String, options: Vec<acp::PermissionOption> },
@@ -176,8 +176,8 @@ fn event_from_acp(event: acp::Event, request: u64) -> (Event, Option<Reply>) {
         A::UserText(t) => Event::UserText(t),
         A::Text(t) => Event::Text(t),
         A::Thought(t) => Event::Thought(t),
-        A::ToolCall { id, title, kind, status, detail, diff, parent } => Event::ToolCall { id, title, kind, status, detail, diff, parent },
-        A::ToolCallUpdate { id, status, title, detail, diff } => Event::ToolCallUpdate { id, status, title, detail, diff },
+        A::ToolCall { id, title, kind, status, detail, diff, parent, command } => Event::ToolCall { id, title, kind, status, detail, diff, parent, command },
+        A::ToolCallUpdate { id, status, title, detail, diff, command } => Event::ToolCallUpdate { id, status, title, detail, diff, command },
         A::SubagentText { parent, text } => Event::SubagentText { parent, text },
         A::Image { mime, data_base64, parent } => Event::Image { mime, data_base64, parent },
         A::AgentImages(_) => Event::Other("_sill_frontend_only_agent_images".into()),
