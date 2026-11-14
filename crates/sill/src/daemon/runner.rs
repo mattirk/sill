@@ -155,11 +155,16 @@ impl Runner {
             // some agents echo the prompt back during the turn; the frontend shows what it sent
             acp::Event::UserText(_) => return None,
             acp::Event::Text(t) => st.agent_md.push_str(t),
-            acp::Event::ToolCall { id: call, title, status, kind, detail, diff, .. } => {
+            acp::Event::ToolCall { id: call, title, status, kind, detail, diff, parent } => {
                 flush(hub, &id, &mut st);
                 if let Ok(seq) = hub.with_store(|s| s.append_tool(&id, title, status, kind, detail.as_deref(), diff.as_deref())) {
+                    hub.with_store(|s| s.set_tool_identity(&id, seq, call, parent.as_deref())).ok();
                     st.tool_seqs.insert(call.clone(), seq);
                 }
+            }
+            acp::Event::SubagentText { parent, text } => {
+                flush(hub, &id, &mut st);
+                hub.with_store(|s| s.append_subagent_text(&id, parent, text)).ok();
             }
             acp::Event::ToolCallUpdate { id: call, status, title, detail, diff } => {
                 if let Some(seq) = st.tool_seqs.get(call).copied() {

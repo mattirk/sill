@@ -62,6 +62,8 @@ pub struct Entry {
     pub tool_kind: String,
     pub detail: String,
     pub diff: String,
+    pub call_id: String,
+    pub parent: String,
 }
 
 pub struct Store {
@@ -129,6 +131,8 @@ impl Store {
         let _ = conn.execute("ALTER TABLE entries ADD COLUMN tool_kind TEXT NOT NULL DEFAULT ''", []);
         let _ = conn.execute("ALTER TABLE entries ADD COLUMN detail TEXT NOT NULL DEFAULT ''", []);
         let _ = conn.execute("ALTER TABLE entries ADD COLUMN diff TEXT NOT NULL DEFAULT ''", []);
+        let _ = conn.execute("ALTER TABLE entries ADD COLUMN call_id TEXT NOT NULL DEFAULT ''", []);
+        let _ = conn.execute("ALTER TABLE entries ADD COLUMN parent TEXT NOT NULL DEFAULT ''", []);
         // memory M0 (2026-11-01): when a session ended and what came of it
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN ended_at INTEGER", []);
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN summary TEXT NOT NULL DEFAULT ''", []);
@@ -466,6 +470,18 @@ impl Store {
         Ok(seq)
     }
 
+    /// Keep adapter identities so a reopened conversation can rebuild delegation trees.
+    pub fn set_tool_identity(&self, session_id: &str, seq: i64, call_id: &str, parent: Option<&str>) -> Result<()> {
+        self.conn.execute("UPDATE entries SET call_id = ?3, parent = ?4 WHERE session_id = ?1 AND seq = ?2",
+            params![session_id, seq, call_id, parent.unwrap_or("")])?;
+        Ok(())
+    }
+
+    pub fn append_subagent_text(&self, session_id: &str, parent: &str, text: &str) -> Result<()> {
+        let seq = self.append(session_id, "subagent", text, parent)?;
+        self.set_tool_identity(session_id, seq, "", Some(parent))
+    }
+
     /// Update a stored `tool` entry (tool-call updates arrive after the call): title and status
     /// replace, a detail (output) is added under what is there, a diff replaces the diff.
     pub fn update_tool(&self, session_id: &str, seq: i64, title: Option<&str>, status: Option<&str>, detail: Option<&str>, diff: Option<&str>) -> Result<()> {
@@ -496,7 +512,7 @@ impl Store {
     }
 
     pub fn entries(&self, session_id: &str) -> Result<Vec<Entry>> {
-        let mut st = self.conn.prepare("SELECT seq, ts, kind, text, extra, tool_kind, detail, diff FROM entries WHERE session_id = ?1 ORDER BY seq")?;
+        let mut st = self.conn.prepare("SELECT seq, ts, kind, text, extra, tool_kind, detail, diff, call_id, parent FROM entries WHERE session_id = ?1 ORDER BY seq")?;
         let rows = st.query_map(params![session_id], Self::entry_row)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
@@ -505,11 +521,30 @@ impl Store {
     /// conversation is rendered from the end and earlier chunks on demand (SPEC §3.1 history).
     pub fn entries_before(&self, session_id: &str, before: Option<i64>, limit: usize) -> Result<Vec<Entry>> {
         let mut st = self.conn.prepare(
-            "SELECT seq, ts, kind, text, extra, tool_kind, detail, diff FROM entries WHERE session_id = ?1 AND seq < ?2 ORDER BY seq DESC LIMIT ?3",
+            "SELECT seq, ts, kind, text, extra, tool_kind, detail, diff, call_id, parent FROM entries WHERE session_id = ?1 AND seq < ?2 ORDER BY seq DESC LIMIT ?3",
         )?;
         let rows = st.query_map(params![session_id, before.unwrap_or(i64::MAX), limit as i64], Self::entry_row)?;
         let mut v = rows.collect::<std::result::Result<Vec<_>, _>>()?;
         v.reverse();
+        // A page must include the delegations its children refer to. Otherwise the UI would
+        // drop their text or render their calls as root steps at a history boundary.
+        loop {
+            let Some(first) = v.first().map(|e| e.seq) else { break };
+            let mut start = first;
+            for e in &v {
+                if !e.parent.is_empty() {
+                    let parent_seq: Option<i64> = self.conn.query_row(
+                        "SELECT MIN(seq) FROM entries WHERE session_id = ?1 AND call_id = ?2",
+                        params![session_id, e.parent], |r| r.get(0))?;
+                    if let Some(seq) = parent_seq { start = start.min(seq); }
+                }
+            }
+            if start == first { break; }
+            let mut st = self.conn.prepare("SELECT seq, ts, kind, text, extra, tool_kind, detail, diff, call_id, parent FROM entries WHERE session_id = ?1 AND seq >= ?2 AND seq < ?3 ORDER BY seq")?;
+            let mut prefix = st.query_map(params![session_id, start, first], Self::entry_row)?.collect::<std::result::Result<Vec<_>, _>>()?;
+            prefix.append(&mut v);
+            v = prefix;
+        }
         Ok(v)
     }
 
@@ -528,6 +563,8 @@ impl Store {
             tool_kind: r.get(5)?,
             detail: r.get(6)?,
             diff: r.get(7)?,
+            call_id: r.get(8)?,
+            parent: r.get(9)?,
         })
     }
 }
@@ -554,6 +591,28 @@ mod tests {
         assert!(store.global_pins().unwrap().is_empty());
         assert_eq!(store.jail_pins("s1").unwrap(), vec![g.to_path_buf(), own.to_path_buf()]); // the session pin stays
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delegation_survives_reopen_and_history_boundary() {
+        let dir = std::env::temp_dir().join(format!("sill-delegation-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.db");
+        {
+            let store = Store::open(&path).unwrap();
+            let seq = store.append_tool("s", "Research", "InProgress", "Delegate", None, None).unwrap();
+            store.set_tool_identity("s", seq, "task-1", None).unwrap();
+            let seq = store.append_tool("s", "Read", "Completed", "Read", None, None).unwrap();
+            store.set_tool_identity("s", seq, "read-1", Some("task-1")).unwrap();
+            store.append_subagent_text("s", "task-1", "Found it").unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let entries = store.entries_before("s", None, 1).unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].call_id, "task-1");
+        assert_eq!(entries[1].parent, "task-1");
+        assert_eq!((entries[2].kind.as_str(), entries[2].parent.as_str(), entries[2].text.as_str()), ("subagent", "task-1", "Found it"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

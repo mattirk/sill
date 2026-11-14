@@ -1437,13 +1437,14 @@ impl SessionView {
                 "user" => self.conv.add_user_with(&e.text, &e.extra.lines().filter(|l| !l.is_empty()).map(str::to_string).collect::<Vec<_>>()),
                 "agent" => self.conv.add_agent_block(&e.text),
                 "thought" => self.conv.add_thought_block(&e.text),
+                "subagent" => self.conv.add_subagent_text(&e.parent, &e.text),
                 "tool" => self.conv.add_tool_call_full(
-                    format!("stored-{}", e.seq),
+                    if e.call_id.is_empty() { format!("stored-{}", e.seq) } else { e.call_id.clone() },
                     &e.text,
                     &e.extra,
                     (!e.tool_kind.is_empty()).then_some(e.tool_kind.as_str()),
                     (!e.detail.is_empty()).then_some(e.detail.as_str()),
-                    None,
+                    (!e.parent.is_empty()).then_some(e.parent.as_str()),
                     (!e.diff.is_empty()).then_some(e.diff.as_str()),
                 ),
                 _ => self.conv.add_note(&e.text),
@@ -2403,7 +2404,7 @@ impl SessionView {
                     cb(&self.id(), true);
                 }
             }
-            Event::UserText(_) | Event::Text(_) | Event::Thought(_) | Event::ToolCall { .. } | Event::ToolCallUpdate { .. }
+            Event::UserText(_) | Event::Text(_) | Event::Thought(_) | Event::ToolCall { .. } | Event::ToolCallUpdate { .. } | Event::SubagentText { .. }
                 if replaying =>
             {
                 return; // the stored transcript is already on screen

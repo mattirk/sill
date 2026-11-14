@@ -739,7 +739,7 @@ fn is_delegation(name: Option<&str>, title: &str, input: Option<&serde_json::Val
         return true;
     }
     let name = name.unwrap_or("").to_lowercase();
-    if matches!(name.as_str(), "task" | "agent" | "subagent" | "spawn_agent" | "delegate" | "run_agent") || name.contains("subagent") {
+    if matches!(name.as_str(), "task" | "agent" | "subagent" | "spawn_agent" | "spawnagent" | "delegate" | "run_agent") || name.contains("subagent") {
         return true;
     }
     if let Some(serde_json::Value::Object(m)) = input {
@@ -748,7 +748,7 @@ fn is_delegation(name: Option<&str>, title: &str, input: Option<&serde_json::Val
         }
     }
     let t = title.to_lowercase();
-    t.starts_with("task:") || t.starts_with("task(") || t.starts_with("subagent") || t.starts_with("agent(")
+    matches!(t.as_str(), "spawnagent" | "spawn_agent") || t.starts_with("start subagent ") || t.starts_with("complete subagent ") || t.starts_with("interact with subagent ") || t.starts_with("interrupt subagent ") || t.starts_with("task:") || t.starts_with("task(") || t.starts_with("subagent") || t.starts_with("agent(")
 }
 
 /// A file edit as a unified diff: every `Diff` content block (path, old text → new text; a new file
@@ -844,6 +844,19 @@ fn kind_name(block: &ContentBlock) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delegation_adapter_spellings() {
+        for title in ["spawnAgent", "Start subagent researcher", "Complete subagent researcher"] {
+            assert!(is_delegation(None, title, None, None), "{title}");
+        }
+        assert!(is_delegation(Some("spawn_agent"), "Research", None, None));
+        let meta = serde_json::from_value(serde_json::json!({"claudeCode": {"toolName": "Agent"}})).unwrap();
+        assert!(is_delegation(None, "Research", None, Some(&meta)));
+        assert!(!is_delegation(None, "Read src/main.rs", None, None));
+        let meta = serde_json::from_value(serde_json::json!({"claudeCode": {"parentToolUseId": "task-1"}})).unwrap();
+        assert_eq!(parent_tool_use(Some(&meta)).as_deref(), Some("task-1"));
+    }
 
     /// Claude's AskUserQuestion as the adapter sends it: a titled choice per question, an "Other"
     /// text each, a multi-select as an array of titled items.

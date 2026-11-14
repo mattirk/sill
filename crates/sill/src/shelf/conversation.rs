@@ -410,6 +410,12 @@ impl Conversation {
     }
 
     fn append_markdown(&self, slot: &RefCell<Option<(gtk::Box, String)>>, css: &str, chunk: &str) {
+        if chunk.is_empty() {
+            return;
+        }
+        // Only adjacent calls belong in one group. Once prose or thinking follows it,
+        // the next call must start below that output rather than join the old card.
+        self.last_tool.borrow_mut().take();
         let which = if css == "sill-thought" { 1 } else { 0 };
         let mut cur = slot.borrow_mut();
         let fresh = cur.is_none();
