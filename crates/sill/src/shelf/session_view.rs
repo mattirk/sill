@@ -52,6 +52,10 @@ pub struct SessionView {
     ready: std::cell::Cell<bool>,
     /// The launcher-mode note was shown in this view (once per tab, SPEC §4.7).
     mode_noted: std::cell::Cell<bool>,
+    /// The standing block (sill's own line, the person's instructions; `sill_core::instructions`)
+    /// the current agent process has been sent: `None` after a (re)start so the next prompt carries
+    /// it, compared on every send so an edited file reaches the agent with the next prompt.
+    sent_standing: RefCell<Option<String>>,
     /// The connection died before `Ready` and the agent was restarted once already.
     startup_retried: std::cell::Cell<bool>,
     /// The jail must be rebuilt at the next restart even if the pins are unchanged (new login file).
@@ -382,6 +386,7 @@ impl SessionView {
             login_pending: login_pending.clone(),
             ready: std::cell::Cell::new(false),
             mode_noted: std::cell::Cell::new(false),
+            sent_standing: RefCell::new(None),
             startup_retried: std::cell::Cell::new(false),
             force_restart: std::cell::Cell::new(false),
             shell_btn: RefCell::new(None),
@@ -1839,10 +1844,15 @@ impl SessionView {
             let list: Vec<String> = files.iter().map(|p| p.display().to_string()).collect();
             out.push_str(&format!("[Pinned files — the person keeps these at hand: {}]\n", list.join(", ")));
         }
-        if !dirs.is_empty() {
-            // managed processes (docs/tasks.md §2.4): where a dev server would be started
-            out.push_str("[A command that must keep running after your turn (a dev server, a watcher): `sill-proc start --name NAME [--port PORT] -- COMMAND…`; `sill-proc list|tail NAME|stop NAME`. A background `&` dies with you.]\n");
-        }
+        out
+    }
+
+    /// What goes before the person's text: the standing block when this agent process has not had
+    /// this version of it (SPEC §3.1 instructions), then the pins, then a blank line. The caller
+    /// commits the standing block to [`Self::sent_standing`] once the prompt was accepted.
+    fn context_prefix(&self, standing: Option<&str>) -> String {
+        let mut out = standing.unwrap_or_default().to_string();
+        out.push_str(&self.pin_prefix());
         if !out.is_empty() {
             out.push('\n');
         }
@@ -1894,6 +1904,7 @@ impl SessionView {
         *self.live_pins.borrow_mut() = self.store.pins(&s.id).unwrap_or_default();
         self.jail.borrow_mut().take(); // the overlay is planned again with the current pins
         self.ready.set(false);
+        self.sent_standing.borrow_mut().take(); // a new agent process: the standing block goes again
         match session::start(&s, &self.store, fresh) {
             Ok(d) => {
                 self.start_proc_polling();
@@ -1935,12 +1946,17 @@ impl SessionView {
             self.conv.add_note("session is not running");
             return false;
         };
-        let outgoing = format!("{}{}", self.pin_prefix(), text);
+        let standing = sill_core::instructions::standing_block(&sill_core::instructions::load_global());
+        let standing_due = self.sent_standing.borrow().as_deref() != Some(standing.as_str());
+        let outgoing = format!("{}{}", self.context_prefix(standing_due.then_some(standing.as_str())), text);
         lap("prefix");
         let attachments = std::mem::take(&mut *self.attachments.borrow_mut());
         let names: Vec<String> = attachments.iter().map(|a| a.name.clone()).collect();
         match d.try_send(Command::Prompt(outgoing, attachments.clone())) {
             Ok(()) => {
+                if standing_due {
+                    *self.sent_standing.borrow_mut() = Some(standing);
+                }
                 self.rebuild_attach_strip();
                 self.conv.add_user_with(text, &names);
                 lap("add_user");
@@ -1986,6 +2002,11 @@ impl SessionView {
                 let _ = self.store.set_acp_session_id(&self.id(), session_id);
                 self.session.borrow_mut().acp_session_id = Some(session_id.clone());
                 *self.replaying.borrow_mut() = *resumed;
+                if !*resumed {
+                    // a fresh ACP session (also after a login's retry): its context has no standing
+                    // block yet, whatever this agent process was sent before
+                    self.sent_standing.borrow_mut().take();
+                }
                 self.status.set_text(if *resumed { "resumed" } else { "ready" });
                 self.build_controls(controls);
                 // bring the agent back to the settings the person last chose in this session

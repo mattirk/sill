@@ -17,6 +17,7 @@
 //! The same binary is `sill-proc` inside the jail (docs/tasks.md §2.4): run under that name (or
 //! as `sill-shim proc …`) it is the client of the managed-process service in [`procs`].
 
+mod forward;
 mod procs;
 
 use std::collections::{BTreeMap, VecDeque};
@@ -169,7 +170,7 @@ fn main() -> Result<()> {
         let (addr, path) = spec.split_once('=').context("--forward expects ADDR=PATH")?;
         let (addr, path) = (addr.to_string(), PathBuf::from(path));
         std::thread::spawn(move || {
-            if let Err(e) = forward_tcp_to_unix(&addr, path) {
+            if let Err(e) = forward::serve(&addr, path) {
                 eprintln!("sill-shim: forwarder: {e:#}");
             }
         });
@@ -630,30 +631,6 @@ fn port_relay(mut reader: BufReader<UnixStream>, mut writer: UnixStream, port: u
     let _ = std::io::copy(&mut tcp_r, &mut writer);
     let _ = writer.shutdown(std::net::Shutdown::Write);
     let _ = t.join();
-    Ok(())
-}
-
-// --- proxy forwarder -----------------------------------------------------------------------------
-
-/// The jail's network namespace can't reach the host's loopback; a Unix socket path crosses it.
-fn forward_tcp_to_unix(listen: &str, socket: PathBuf) -> Result<()> {
-    let l = std::net::TcpListener::bind(listen).with_context(|| format!("listen on {listen}"))?;
-    for conn in l.incoming() {
-        let Ok(conn) = conn else { continue };
-        let socket = socket.clone();
-        std::thread::spawn(move || {
-            let Ok(unix) = UnixStream::connect(&socket) else { return };
-            let (mut a, mut b) = (conn, unix);
-            let (Ok(mut a2), Ok(mut b2)) = (a.try_clone(), b.try_clone()) else { return };
-            let t = std::thread::spawn(move || {
-                let _ = std::io::copy(&mut a2, &mut b2);
-                let _ = b2.shutdown(std::net::Shutdown::Write);
-            });
-            let _ = std::io::copy(&mut b, &mut a);
-            let _ = a.shutdown(std::net::Shutdown::Write);
-            let _ = t.join();
-        });
-    }
     Ok(())
 }
 

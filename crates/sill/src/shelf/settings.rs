@@ -106,6 +106,38 @@ pub fn build() -> gtk::Box {
     }
     root.append(&row("Desktop", &dbox));
 
+    // standing instructions (SPEC §3.1): every agent gets them with its first prompt, whatever its type
+    let instr = gtk::TextView::new();
+    instr.set_wrap_mode(gtk::WrapMode::WordChar);
+    instr.set_top_margin(4);
+    instr.set_bottom_margin(4);
+    instr.set_left_margin(6);
+    instr.set_right_margin(6);
+    instr.buffer().set_text(&sill_core::instructions::load_global());
+    let instr_scroll = gtk::ScrolledWindow::builder().child(&instr).min_content_height(96).hexpand(true).build();
+    instr_scroll.add_css_class("frame");
+    instr_scroll.set_tooltip_text(Some(
+        "Standing instructions for every agent, whatever its type, in Markdown: sent with the first prompt after the agent starts and again with the next prompt after an edit — not with every prompt. Sill puts its own line about the jail (managed processes) before them. Stored in ~/.config/sill/instructions.md, which the agent cannot see.",
+    ));
+    let instr_msg = gtk::Label::new(None);
+    instr_msg.add_css_class("dim-label");
+    instr_msg.set_xalign(0.0);
+    {
+        let msg = instr_msg.clone();
+        instr.buffer().connect_changed(move |b| {
+            let text = b.text(&b.start_iter(), &b.end_iter(), false);
+            match sill_core::instructions::save_global(&text) {
+                Ok(_) => msg.set_text(""),
+                Err(e) => msg.set_text(&format!("save failed: {e:#}")),
+            }
+        });
+    }
+    let ibox = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    ibox.set_hexpand(true);
+    ibox.append(&instr_scroll);
+    ibox.append(&instr_msg);
+    root.append(&row("Instructions", &ibox));
+
     // width
     let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.2, 0.8, 0.02);
     scale.set_value(x11::width_fraction());
@@ -200,6 +232,7 @@ pub fn build() -> gtk::Box {
     let home = std::env::var("HOME").unwrap_or_default();
     let info: Vec<(String, String)> = vec![
         ("Config".into(), format!("{home}/.config/sill/sill.toml")),
+        ("Instructions".into(), format!("{home}/.config/sill/instructions.md — the box above; per agent type and per session come later")),
         ("Policy".into(), "default — /etc/sill/policies/default.toml, then ~/.config/sill/policies/, then built-in".into()),
         ("Agents".into(), "the Agents page: install from the ACP registry, the gear edits command, environment, domains (~/.config/sill/agents/*.toml)".into()),
         ("Sessions".into(), format!("{home}/.local/state/sill/sill.db; jails under /var/lib/sill/<uid>/sessions/")),

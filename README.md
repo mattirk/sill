@@ -208,6 +208,14 @@ Dismiss. A process that declares a port is offered for exposing on this machine'
 once per session, or silently for ports in the policy's `[processes] expose` list — and the list
 shows the URL. Loopback only; nothing on the LAN.
 
+## Instructions
+
+Standing instructions reach every agent, whatever its type: Settings → Instructions (Markdown,
+`~/.config/sill/instructions.md`, masked inside the jail). They go with the first prompt after the
+agent starts and again with the next prompt after an edit — not with every prompt. Sill puts its own
+line first (how to keep a process running, above); yours follow. Per agent type and per session come
+later and append, not replace.
+
 ## Keys
 
 | Key | What |

@@ -141,11 +141,16 @@ impl Config {
     }
 }
 
-pub fn path() -> Result<PathBuf> {
-    let base = std::env::var("XDG_CONFIG_HOME")
+/// `~/.config/sill` (`$XDG_CONFIG_HOME/sill`): the settings file and the person's instructions.
+pub fn dir() -> PathBuf {
+    std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config"));
-    Ok(base.join("sill").join("sill.toml"))
+        .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config"))
+        .join("sill")
+}
+
+pub fn path() -> Result<PathBuf> {
+    Ok(dir().join("sill.toml"))
 }
 
 pub fn load() -> Config {
