@@ -8,7 +8,7 @@ use std::rc::Rc;
 use gtk4 as gtk;
 use gtk::gdk;
 use gtk::glib;
-use sill_core::acp::{AuthMethodInfo, Command, ConfigKind, ConfigValue, Controls, Event};
+use sill_core::acp::{Attachment, AttachmentKind, AuthMethodInfo, Command, ConfigKind, ConfigValue, Controls, Event};
 use sill_core::agents;
 use sill_core::store::{Session, Store};
 
@@ -19,6 +19,11 @@ use vte4::prelude::*;
 pub struct SessionView {
     pub root: gtk::Box,
     prompt: gtk::TextView,
+    /// What goes with the next prompt (SPEC §3.2 attachments) and the strip showing it.
+    attachments: RefCell<Vec<Attachment>>,
+    attach_strip: gtk::Box,
+    /// The agent accepts image blocks (from `initialize`).
+    images_ok: std::cell::Cell<bool>,
     /// Bottom slot: "prompt" or "shell" (SPEC §3.1 switcher).
     bottom: gtk::Stack,
     terminal: vte4::Terminal,
@@ -291,6 +296,10 @@ impl SessionView {
         let prompt_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
         prompt_box.add_css_class("sill-prompt-box");
         prompt_scroll.remove_css_class("sill-prompt-box");
+        let attach_strip = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        attach_strip.add_css_class("sill-attach-strip");
+        attach_strip.set_visible(false);
+        prompt_box.append(&attach_strip);
         prompt_box.append(&bottom);
         prompt_box.append(&controls_row);
 
@@ -310,6 +319,9 @@ impl SessionView {
         let view = Rc::new(Self {
             root,
             prompt: prompt.clone(),
+            attachments: RefCell::new(Vec::new()),
+            attach_strip,
+            images_ok: std::cell::Cell::new(true),
             bottom,
             terminal: terminal.clone(),
             term_scroll: term_scroll.clone(),
@@ -351,7 +363,7 @@ impl SessionView {
         if let Ok(entries) = view.store.entries(&view.session.borrow().id) {
             for e in entries {
                 match e.kind.as_str() {
-                    "user" => view.conv.add_user(&e.text),
+                    "user" => view.conv.add_user_with(&e.text, &e.extra.lines().filter(|l| !l.is_empty()).map(str::to_string).collect::<Vec<_>>()),
                     "agent" => view.conv.add_agent_block(&e.text),
                     "thought" => view.conv.add_thought_block(&e.text),
                     "tool" => view.conv.add_tool_call(format!("stored-{}", e.seq), &e.text, &e.extra),
@@ -366,6 +378,20 @@ impl SessionView {
             let v = view.clone();
             let prompt = prompt.clone();
             keys.connect_key_pressed(move |_, key, _, state| {
+                // Ctrl+V with an image on the clipboard: attach it (text pastes as usual)
+                if (key == gdk::Key::v || key == gdk::Key::V) && state.contains(gdk::ModifierType::CONTROL_MASK) {
+                    let cb = prompt.clipboard();
+                    if cb.formats().contains_type(gdk::Texture::static_type()) {
+                        let v2 = v.clone();
+                        cb.read_texture_async(None::<&gtk::gio::Cancellable>, move |res| {
+                            if let Ok(Some(tex)) = res {
+                                v2.attach_texture(&tex);
+                            }
+                        });
+                        return glib::Propagation::Stop;
+                    }
+                    return glib::Propagation::Proceed;
+                }
                 if (key == gdk::Key::Return || key == gdk::Key::KP_Enter) && !state.contains(gdk::ModifierType::SHIFT_MASK) {
                     let buf = prompt.buffer();
                     let text = buf.text(&buf.start_iter(), &buf.end_iter(), false).trim().to_string();
@@ -629,7 +655,22 @@ impl SessionView {
         let attach = gtk::Button::from_icon_name("list-add-symbolic");
         attach.add_css_class("flat");
         attach.add_css_class("sill-ctl-icon");
-        attach.set_tooltip_text(Some("Attach a file (coming)"));
+        attach.set_tooltip_text(Some("Attach a file or image to the next prompt (Ctrl+V pastes a screenshot)"));
+        {
+            let v = self.clone();
+            attach.connect_clicked(move |b| {
+                let dialog = gtk::FileDialog::builder().title("Attach to the prompt").modal(true).build();
+                let parent = b.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+                let v = v.clone();
+                dialog.open(parent.as_ref(), None::<&gtk::gio::Cancellable>, move |res| {
+                    if let Ok(f) = res
+                        && let Some(path) = f.path()
+                    {
+                        v.attach_path(&path);
+                    }
+                });
+            });
+        }
         self.controls_row.append(&attach);
         let term = gtk::ToggleButton::new();
         term.set_child(Some(&super::icons::named("sill-terminal", super::icons::fg_for(&self.controls_row, &theme::current()), 15)));
@@ -650,9 +691,15 @@ impl SessionView {
         let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         spacer.set_hexpand(true);
         self.controls_row.append(&spacer);
+        // the agent's and sill's controls: their dropdowns ellipsize (`compact_dropdown`), so on a
+        // narrow shelf the row truncates long names instead of setting the window's minimum width
+        let right = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        right.set_halign(gtk::Align::End);
+        right.set_valign(gtk::Align::Center);
         let dropdown = |names: &[String], current: usize| {
             let refs: Vec<&str> = names.iter().map(String::as_str).collect();
             let d = gtk::DropDown::from_strings(&refs);
+            compact_dropdown(&d);
             d.add_css_class("sill-control");
             d.set_selected(current as u32);
             d
@@ -673,7 +720,7 @@ impl SessionView {
                     v.remember(|s| s.mode = Some(id.clone()));
                 }
             });
-            self.controls_row.append(&d);
+            right.append(&d);
         }
         for opt in &c.options {
             // the mode set already covers a "mode"-category option (Claude Code sends both)
@@ -701,7 +748,7 @@ impl SessionView {
                             });
                         }
                     });
-                    self.controls_row.append(&d);
+                    right.append(&d);
                 }
                 ConfigKind::Boolean(on) => {
                     let b = gtk::Box::new(gtk::Orientation::Horizontal, 4);
@@ -725,7 +772,7 @@ impl SessionView {
                     });
                     b.append(&l);
                     b.append(&sw);
-                    self.controls_row.append(&b);
+                    right.append(&b);
                 }
             }
         }
@@ -735,6 +782,7 @@ impl SessionView {
             let choices = sill_core::config::DESKTOP_CHOICES;
             let labels: Vec<&str> = choices.iter().map(|(_, l)| *l).collect();
             let d = gtk::DropDown::from_strings(&labels);
+            compact_dropdown(&d);
             d.add_css_class("sill-control");
             d.set_tooltip_text(Some("Desktop access of this session's jail. X11 lets the agent run and see GUI programs — and, as any X11 client, read keys and drive every window; D-Bus hands it the session bus. Changing it restarts the session."));
             let current = self.session.borrow().desktop.clone();
@@ -758,7 +806,7 @@ impl SessionView {
                     cb(&v.id());
                 }
             });
-            self.controls_row.append(&d);
+            right.append(&d);
         }
         // sill's own: auto-allow permission requests (the agent's "auto" modes still ask over ACP).
         // An open lock = requests are answered "allow once" by sill; closed = they wait for you.
@@ -790,8 +838,9 @@ impl SessionView {
                 let _ = v.store.set_auto_allow(&v.id(), state);
                 v.session.borrow_mut().auto_allow = state;
             });
-            self.controls_row.append(&t);
+            right.append(&t);
         }
+        self.controls_row.append(&right);
         let send = gtk::Button::new();
         send.add_css_class("sill-send");
         {
@@ -1029,6 +1078,105 @@ impl SessionView {
         }
     }
 
+    /// A pasted image: PNG, inline. Refused above 8 MB (the agent would choke on it anyway).
+    fn attach_texture(self: &Rc<Self>, tex: &gdk::Texture) {
+        let png = tex.save_to_png_bytes();
+        if png.len() > 8 << 20 {
+            self.conv.add_note("image not attached: larger than 8 MB");
+            return;
+        }
+        let n = self.attachments.borrow().iter().filter(|a| a.mime.starts_with("image/")).count() + 1;
+        self.add_attachment(Attachment {
+            name: format!("screenshot-{n}.png ({}×{})", tex.width(), tex.height()),
+            mime: "image/png".into(),
+            kind: AttachmentKind::Image { data_base64: sill_core::acp::base64(&png) },
+        });
+    }
+
+    /// A chosen file: an image goes inline; anything else is copied into the session's upload
+    /// directory (private `~/.cache`, visible in the jail) and sent as a link to that path.
+    fn attach_path(self: &Rc<Self>, path: &std::path::Path) {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let image_mime = match ext.as_str() {
+            "png" => Some("image/png"),
+            "jpg" | "jpeg" => Some("image/jpeg"),
+            "gif" => Some("image/gif"),
+            "webp" => Some("image/webp"),
+            _ => None,
+        };
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.conv.add_note(&format!("could not read {}: {e}", path.display()));
+                return;
+            }
+        };
+        if let Some(mime) = image_mime {
+            if bytes.len() > 8 << 20 {
+                self.conv.add_note(&format!("{name} not attached: larger than 8 MB"));
+                return;
+            }
+            self.add_attachment(Attachment { name, mime: mime.into(), kind: AttachmentKind::Image { data_base64: sill_core::acp::base64(&bytes) } });
+            return;
+        }
+        let home = session::home().unwrap_or_default();
+        let s = self.session.borrow().clone();
+        let Ok(policy) = sill_core::policy::Policy::load(&s.policy, &home) else { return };
+        let Ok(sdir) = sill_core::session::state_dir(session::uid(), &s.id) else { return };
+        let Some((host_dir, jail_dir)) = sill_core::session::uploads_dir(&policy, &sdir, &home) else {
+            self.conv.add_note("files can't be attached: this policy keeps no private ~/.cache for the session");
+            return;
+        };
+        if let Err(e) = std::fs::create_dir_all(&host_dir).and_then(|_| std::fs::write(host_dir.join(&name), &bytes)) {
+            self.conv.add_note(&format!("could not copy {name} into the session: {e}"));
+            return;
+        }
+        self.add_attachment(Attachment { name: name.clone(), mime: "application/octet-stream".into(), kind: AttachmentKind::File { jail_path: jail_dir.join(&name) } });
+    }
+
+    fn add_attachment(self: &Rc<Self>, a: Attachment) {
+        if matches!(a.kind, AttachmentKind::Image { .. }) && !self.images_ok.get() {
+            self.conv.add_note("this agent reports no image support; the image is sent anyway");
+        }
+        self.attachments.borrow_mut().push(a);
+        self.rebuild_attach_strip();
+        self.prompt.grab_focus();
+    }
+
+    /// The chips above the prompt: name and a cross to drop one.
+    fn rebuild_attach_strip(self: &Rc<Self>) {
+        while let Some(w) = self.attach_strip.first_child() {
+            self.attach_strip.remove(&w);
+        }
+        let list = self.attachments.borrow().clone();
+        self.attach_strip.set_visible(!list.is_empty());
+        for (i, a) in list.iter().enumerate() {
+            let chip = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+            chip.add_css_class("sill-attach-chip");
+            let glyph = gtk::Label::new(Some(if a.mime.starts_with("image/") { "▣" } else { "▤" }));
+            glyph.add_css_class("dim-label");
+            let l = gtk::Label::new(Some(&a.name));
+            l.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+            l.set_max_width_chars(32);
+            let x = gtk::Button::from_icon_name("window-close-symbolic");
+            x.set_tooltip_text(Some("Remove"));
+            let v = self.clone();
+            x.connect_clicked(move |_| {
+                let mut l = v.attachments.borrow_mut();
+                if i < l.len() {
+                    l.remove(i);
+                }
+                drop(l);
+                v.rebuild_attach_strip();
+            });
+            chip.append(&glyph);
+            chip.append(&l);
+            chip.append(&x);
+            self.attach_strip.append(&chip);
+        }
+    }
+
     /// Pins the jail was started with, for deciding whether a rebuild is needed.
     pub fn pins_changed(&self) -> bool {
         self.force_restart.get() || self.store.pins(&self.id()).unwrap_or_default() != *self.live_pins.borrow()
@@ -1098,12 +1246,15 @@ impl SessionView {
         };
         let outgoing = format!("{}{}", self.pin_prefix(), text);
         lap("prefix");
-        match d.try_send(Command::Prompt(outgoing)) {
+        let attachments = std::mem::take(&mut *self.attachments.borrow_mut());
+        let names: Vec<String> = attachments.iter().map(|a| a.name.clone()).collect();
+        match d.try_send(Command::Prompt(outgoing, attachments.clone())) {
             Ok(()) => {
-                self.conv.add_user(text);
+                self.rebuild_attach_strip();
+                self.conv.add_user_with(text, &names);
                 lap("add_user");
                 let id = self.id();
-                let _ = self.store.append(&id, "user", text, "");
+                let _ = self.store.append(&id, "user", text, &names.join("\n"));
                 let _ = self.store.touch(&id);
                 lap("store append+touch");
                 // first prompt names the session (keywords), unless it has nothing to say
@@ -1120,6 +1271,8 @@ impl SessionView {
                 true
             }
             Err(_) => {
+                *self.attachments.borrow_mut() = attachments; // keep them for the retry
+                self.rebuild_attach_strip();
                 self.conv.add_note("the agent is busy; wait for the turn to end");
                 false
             }
@@ -1187,6 +1340,7 @@ impl SessionView {
                 self.conv.mark_auto_allowed(&tool_call_id, &title, pick.is_none());
                 return;
             }
+            Event::Capabilities { images } => self.images_ok.set(*images),
             Event::TurnStarted => {
                 *self.replaying.borrow_mut() = false;
                 self.set_busy(true);
@@ -1339,4 +1493,53 @@ fn git_summary(dir: &std::path::Path) -> Option<(u64, u64, u64)> {
     let out = std::process::Command::new("git").arg("-C").arg(dir).args(["ls-files", "--others", "--exclude-standard"]).output().ok()?;
     let untracked = String::from_utf8_lossy(&out.stdout).lines().count() as u64;
     Some((add, del, untracked))
+}
+
+/// Let a dropdown shrink: its button shows the selection in a label that ellipsizes, so a tight row
+/// truncates a long name ("Default (recom…") instead of widening the window. The popup keeps full
+/// names and the check mark on the selected one.
+fn compact_dropdown(d: &gtk::DropDown) {
+    fn text_of(item: &gtk::ListItem) -> String {
+        item.item().and_downcast::<gtk::StringObject>().map(|s| s.string().to_string()).unwrap_or_default()
+    }
+    let button = gtk::SignalListItemFactory::new();
+    button.connect_setup(|_, obj| {
+        let Some(item) = obj.downcast_ref::<gtk::ListItem>() else { return };
+        let l = gtk::Label::new(None);
+        l.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        l.set_xalign(0.0);
+        item.set_child(Some(&l));
+    });
+    button.connect_bind(|_, obj| {
+        let Some(item) = obj.downcast_ref::<gtk::ListItem>() else { return };
+        if let Some(l) = item.child().and_downcast::<gtk::Label>() {
+            l.set_text(&text_of(item));
+        }
+    });
+    let list = gtk::SignalListItemFactory::new();
+    list.connect_setup(|_, obj| {
+        let Some(item) = obj.downcast_ref::<gtk::ListItem>() else { return };
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let l = gtk::Label::new(None);
+        l.set_xalign(0.0);
+        l.set_hexpand(true);
+        let check = gtk::Image::from_icon_name("object-select-symbolic");
+        row.append(&l);
+        row.append(&check);
+        item.set_child(Some(&row));
+        let c = check.clone();
+        item.connect_selected_notify(move |item| c.set_opacity(if item.is_selected() { 1.0 } else { 0.0 }));
+    });
+    list.connect_bind(|_, obj| {
+        let Some(item) = obj.downcast_ref::<gtk::ListItem>() else { return };
+        let Some(row) = item.child().and_downcast::<gtk::Box>() else { return };
+        if let Some(l) = row.first_child().and_downcast::<gtk::Label>() {
+            l.set_text(&text_of(item));
+        }
+        if let Some(c) = row.last_child() {
+            c.set_opacity(if item.is_selected() { 1.0 } else { 0.0 });
+        }
+    });
+    d.set_factory(Some(&button));
+    d.set_list_factory(Some(&list));
 }

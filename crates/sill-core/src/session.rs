@@ -258,6 +258,19 @@ pub fn binds_for(
     Ok(out)
 }
 
+/// Where the shelf puts files attached to a prompt: inside the session's private `~/.cache`
+/// scratch (SPEC §3.2 attachments), so the jail sees them at the returned jail path and they go
+/// with the session. `None` when the policy keeps no private `~/.cache`.
+pub fn uploads_dir(policy: &Policy, state_dir: &Path, home: &Path) -> Option<(PathBuf, PathBuf)> {
+    use crate::paths::{expand_home, layer_name};
+    let cache = expand_home("~/.cache", home);
+    if !policy.paths.private.iter().any(|p| expand_home(p, home) == cache) {
+        return None;
+    }
+    let host = state_dir.join("private").join(layer_name(&cache)).join("sill").join("uploads");
+    Some((host, cache.join("sill").join("uploads")))
+}
+
 /// Where a session's upper trees live on the state filesystem (SPEC §4.9); created 0700 for the user.
 pub fn state_dir(uid: u32, session: &str) -> Result<PathBuf> {
     let state_fs = Path::new(crate::jail::STATE_FS);

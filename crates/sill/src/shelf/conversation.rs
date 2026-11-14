@@ -61,8 +61,8 @@ pub struct Conversation {
     pub root: gtk::ScrolledWindow,
     column: gtk::Box,
     /// The agent message being streamed, with its accumulated markdown.
-    current: RefCell<Option<(gtk::TextView, String)>>,
-    current_thought: RefCell<Option<(gtk::TextView, String)>>,
+    current: RefCell<Option<(gtk::Box, String)>>,
+    current_thought: RefCell<Option<(gtk::Box, String)>>,
     /// A render of the streamed message/thought is scheduled: chunks arrive many times a second
     /// and every render is the whole message, so they are coalesced (STREAM_MS).
     render_due: [std::cell::Cell<bool>; 2],
@@ -74,6 +74,8 @@ pub struct Conversation {
     stick_to_bottom: std::cell::Cell<bool>,
     ticking: std::cell::Cell<bool>,
     tick_frames: std::cell::Cell<u32>,
+    /// Which follow tick is the live one; an older one still registered stops at its next frame.
+    tick_gen: std::cell::Cell<u32>,
     weak: RefCell<std::rc::Weak<Conversation>>,
     /// Set while we move the adjustment ourselves, so it doesn't count as the person scrolling.
     following: std::cell::Cell<bool>,
@@ -118,6 +120,7 @@ impl Conversation {
             stick_to_bottom: std::cell::Cell::new(true),
             ticking: std::cell::Cell::new(false),
             tick_frames: std::cell::Cell::new(0),
+            tick_gen: std::cell::Cell::new(0),
             weak: RefCell::new(std::rc::Weak::new()),
             following: std::cell::Cell::new(false),
             last_value: std::cell::Cell::new(0.0),
@@ -130,7 +133,33 @@ impl Conversation {
         // distance, so a touchpad's first few pixels aren't yanked back — and reaching the bottom
         // re-engages it.
         *conv.weak.borrow_mut() = Rc::downgrade(&conv);
+        {
+            // the column's width changed (shelf resized, a scrollbar came or went): tables are laid
+            // out for a width, so they follow — on idle, never inside the allocation reporting it
+            let last = std::cell::Cell::new(0.0f64);
+            conv.root.hadjustment().connect_changed(move |a| {
+                let w = a.page_size();
+                if (w - last.get()).abs() > 2.0 {
+                    last.set(w);
+                    gtk::glib::idle_add_local_once(markdown::relayout);
+                }
+            });
+        }
         let adj = conv.root.vadjustment();
+        {
+            // shown again (shelf re-opened, tab switched back): a follow tick armed while hidden may
+            // never have run to its end and left `ticking` set, which would block every later follow
+            // — the view then stops short of the end. Start a fresh one.
+            let weak = Rc::downgrade(&conv);
+            conv.root.connect_map(move |_| {
+                if let Some(c) = weak.upgrade() {
+                    c.ticking.set(false);
+                    if c.stick_to_bottom.get() {
+                        c.request_follow();
+                    }
+                }
+            });
+        }
         {
             let c = conv.clone();
             adj.connect_changed(move |_| {
@@ -192,8 +221,13 @@ impl Conversation {
         let weak = self.weak.borrow().clone();
         self.ticking.set(true);
         self.tick_frames.set(0);
+        let generation = self.tick_gen.get().wrapping_add(1);
+        self.tick_gen.set(generation);
         self.root.add_tick_callback(move |_, _| {
             let Some(c) = weak.upgrade() else { return gtk::glib::ControlFlow::Break };
+            if c.tick_gen.get() != generation {
+                return gtk::glib::ControlFlow::Break; // superseded: the live tick owns `ticking`
+            }
             if !c.stick_to_bottom.get() {
                 c.ticking.set(false);
                 return gtk::glib::ControlFlow::Break;
@@ -217,34 +251,40 @@ impl Conversation {
         clamp.set_tightening_threshold((MEASURE_TIGHT * k) as i32);
     }
 
-    fn text_view(css: &str) -> gtk::TextView {
-        let tv = gtk::TextView::builder()
-            .editable(false)
-            .cursor_visible(false)
-            .wrap_mode(gtk::WrapMode::WordChar)
-            .left_margin(8)
-            .right_margin(8)
-            .top_margin(6)
-            .bottom_margin(6)
-            .pixels_inside_wrap(3) // a little leading: prose, not a terminal
-            .pixels_below_lines(2)
-            .build();
-        tv.add_css_class(css);
-        markdown::install_tags(&tv.buffer());
-        tv
+    /// An empty message: a vertical box the Markdown renderer fills with prose and code segments.
+    fn message_box() -> gtk::Box {
+        let b = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        b.add_css_class("sill-msg");
+        b
     }
 
     pub fn add_user(&self, text: &str) {
+        self.add_user_with(text, &[]);
+    }
+
+    /// A user turn; `attachments` are the names of what went with it, shown as a dim line under it.
+    pub fn add_user_with(&self, text: &str, attachments: &[String]) {
         self.finish_current();
+        let block = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        block.add_css_class("sill-user");
+        block.set_margin_top(6);
         let l = gtk::Label::new(Some(text));
-        l.add_css_class("sill-user");
         l.set_wrap(true);
         l.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         l.set_selectable(true);
         l.set_xalign(0.0);
         l.set_halign(gtk::Align::Fill);
-        l.set_margin_top(6);
-        self.column.append(&l);
+        block.append(&l);
+        if !attachments.is_empty() {
+            let a = gtk::Label::new(Some(&format!("⌁ {}", attachments.join(" · "))));
+            a.add_css_class("dim-label");
+            a.add_css_class("sill-user-attach");
+            a.set_xalign(0.0);
+            a.set_wrap(true);
+            a.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+            block.append(&a);
+        }
+        self.column.append(&block);
         self.scroll_to_end();
     }
 
@@ -265,22 +305,22 @@ impl Conversation {
     }
 
     fn render_stream(&self, which: usize) {
-        let slot = if which == 0 { &self.current } else { &self.current_thought };
-        if let Some((tv, md)) = slot.borrow().as_ref() {
-            markdown::render(tv, md);
-            tv.queue_resize(); // the view must re-measure: lazy line validation leaves stale heights behind
+        let (slot, class) = if which == 0 { (&self.current, "sill-agent") } else { (&self.current_thought, "sill-thought") };
+        if let Some((msg, md)) = slot.borrow().as_ref() {
+            markdown::render(msg, class, md);
+            msg.queue_resize(); // re-measure: lazy line validation leaves stale heights behind
         }
         self.request_follow();
     }
 
-    fn append_markdown(&self, slot: &RefCell<Option<(gtk::TextView, String)>>, css: &str, chunk: &str) {
+    fn append_markdown(&self, slot: &RefCell<Option<(gtk::Box, String)>>, css: &str, chunk: &str) {
         let which = if css == "sill-thought" { 1 } else { 0 };
         let mut cur = slot.borrow_mut();
         let fresh = cur.is_none();
         if fresh {
-            let tv = Self::text_view(css);
-            self.column.append(&tv);
-            *cur = Some((tv, String::new()));
+            let msg = Self::message_box();
+            self.column.append(&msg);
+            *cur = Some((msg, String::new()));
         }
         cur.as_mut().unwrap().1.push_str(chunk);
         drop(cur);
@@ -300,20 +340,20 @@ impl Conversation {
 
     /// A complete agent message (stored transcript).
     pub fn add_agent_block(&self, md: &str) {
-        self.finish_current();
-        let tv = Self::text_view("sill-agent");
-        markdown::render(&tv, md);
-        tv.queue_resize(); // the view must re-measure: lazy line validation leaves stale heights behind
-        self.column.append(&tv);
-        self.request_follow();
+        self.add_message_block("sill-agent", md);
     }
 
     pub fn add_thought_block(&self, md: &str) {
+        self.add_message_block("sill-thought", md);
+    }
+
+    /// A complete message: in the column first, so the renderer measures with the real font.
+    fn add_message_block(&self, class: &str, md: &str) {
         self.finish_current();
-        let tv = Self::text_view("sill-thought");
-        markdown::render(&tv, md);
-        tv.queue_resize(); // the view must re-measure: lazy line validation leaves stale heights behind
-        self.column.append(&tv);
+        let msg = Self::message_box();
+        self.column.append(&msg);
+        markdown::render(&msg, class, md);
+        msg.queue_resize();
         self.request_follow();
     }
 
@@ -632,11 +672,12 @@ impl Conversation {
         let label = gtk::Label::new(Some(title));
         label.set_xalign(0.0);
         label.set_wrap(true);
+        label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         frame.append(&label);
-        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let buttons = answer_row();
         let reply = Rc::new(RefCell::new(Some(reply)));
         for opt in options {
-            let b = gtk::Button::with_label(&opt.name);
+            let b = answer_button(&opt.name);
             match opt.kind {
                 sill_core::acp::PermissionOptionKind::AllowOnce | sill_core::acp::PermissionOptionKind::AllowAlways => {
                     b.add_css_class("suggested-action")
@@ -671,11 +712,12 @@ impl Conversation {
         let label = gtk::Label::new(Some(message));
         label.set_xalign(0.0);
         label.set_wrap(true);
+        label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         label.set_selectable(true);
         frame.append(&label);
-        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let buttons = answer_row();
         for (text, act) in actions {
-            let b = gtk::Button::with_label(&text);
+            let b = answer_button(&text);
             let buttons2 = buttons.clone();
             let label2 = label.clone();
             b.connect_clicked(move |_| {
@@ -699,10 +741,11 @@ impl Conversation {
         let label = gtk::Label::new(Some(&text));
         label.set_xalign(0.0);
         label.set_wrap(true);
+        label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         frame.append(&label);
-        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let buttons = answer_row();
         for m in methods {
-            let b = gtk::Button::with_label(&m.name);
+            let b = answer_button(&m.name);
             b.set_tooltip_text(m.description.as_deref());
             b.add_css_class("suggested-action");
             let pick = pick.clone();
@@ -726,6 +769,7 @@ impl Conversation {
         l.add_css_class("dim-label");
         l.set_xalign(0.0);
         l.set_wrap(true);
+        l.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         self.column.append(&l);
         self.request_follow();
     }
@@ -752,7 +796,7 @@ impl Conversation {
                 self.status.set_text("waiting for your answer");
                 self.add_permission(&title, options, reply)
             }
-            Event::Other(_) => {}
+            Event::Other(_) | Event::Capabilities { .. } => {}
             Event::Stopped(reason) => {
                 self.finish_current();
                 self.status.set_text(&format!("idle · last turn: {reason:?}"));
@@ -771,6 +815,31 @@ impl Conversation {
     }
 }
 
+/// A row of answer buttons (permission, actions, login) that wraps onto more lines rather than
+/// widening the column.
+fn answer_row() -> gtk::FlowBox {
+    let f = gtk::FlowBox::new();
+    f.set_selection_mode(gtk::SelectionMode::None);
+    f.set_homogeneous(false);
+    f.set_column_spacing(6);
+    f.set_row_spacing(6);
+    f.set_max_children_per_line(8);
+    f.set_halign(gtk::Align::Start);
+    f
+}
+
+/// An answer button whose text wraps inside it (agents' option texts can be long).
+fn answer_button(text: &str) -> gtk::Button {
+    let l = gtk::Label::new(Some(text));
+    l.set_wrap(true);
+    l.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    l.set_max_width_chars(40);
+    l.set_justify(gtk::Justification::Center);
+    let b = gtk::Button::new();
+    b.set_child(Some(&l));
+    b
+}
+
 pub const CSS: &str = r#"
 /* flat and square: no bubbles, no rounded corners, hierarchy by tone and a thin left rule */
 window, .background { border-radius: 0; }
@@ -783,15 +852,23 @@ popover > contents { border-radius: 0; }
 button { border-radius: 0; }
 entry { border-radius: 0; }
 
-/* a user turn: plain text behind an accent rule, no bubble */
-.sill-user { background: transparent; border-radius: 0; padding: 4px 6px; border-left: 2px solid alpha(@accent_bg_color, 0.9); }
+/* a user turn: a framed box on the code background behind the accent rule, so your own words stand out */
+/* the tint is the box; no frame: a border meeting the rule at the corners is drawn as a mitred joint */
+.sill-user { background: @sill_code_bg; border: none; border-left: 3px solid alpha(@accent_bg_color, 0.9);
+             border-radius: 0; padding: 10px 14px; }
 .sill-user text { background: transparent; }
+.sill-user-attach { font-size: 85%; }
+/* attachments waiting above the prompt: small chips with a remove cross */
+.sill-attach-strip { padding: 4px 8px 0 8px; }
+.sill-attach-chip { background: alpha(@view_fg_color, 0.08); padding: 1px 2px 1px 8px; font-size: 85%; }
+.sill-attach-chip button { min-height: 0; min-width: 0; padding: 0 4px; opacity: 0.5; background: transparent; border: none; box-shadow: none; }
+.sill-attach-chip button:hover { opacity: 1; }
 .sill-agent { background: transparent; border-radius: 0; }
 .sill-agent text { background: transparent; }
 .sill-thought { background: transparent; color: alpha(@view_fg_color, 0.55); font-size: 90%; }
 .sill-thought text { background: transparent; }
 /* a fenced code block: the theme's source scheme, a quiet frame */
-.sill-code { font-size: 92%; margin: 2px 0; }
+.sill-code { font-size: 92%; margin: 2px 8px; }
 .sill-code, .sill-code text { background: @sill_code_bg; }
 /* a tool call: one quiet line; the body opens under it */
 .sill-tool { background: transparent; border-radius: 0; padding: 0; border-left: 2px solid alpha(@view_fg_color, 0.18); }

@@ -1,11 +1,19 @@
-//! Markdown → GtkTextView with tags (SPEC §4.5): headings, emphasis, inline code, lists with hanging
-//! indents, links, block quotes, hairline rules, task markers; tables as real columns (Pango tab stops
-//! measured with the view's own font); fenced code blocks as embedded GtkSourceView widgets with
-//! syntax highlighting in the theme's scheme. No HTML, no images (shown as their alt text).
+//! Markdown → a message of segments (SPEC §4.5): prose in text views with tags (headings, emphasis,
+//! inline code, lists with hanging indents, links, block quotes, hairline rules, task markers, tables
+//! as real columns on Pango tab stops measured with the view's own font), and each fenced code block
+//! as a GtkSourceView *between* the prose views, highlighted in the theme's scheme. No HTML, no
+//! images (shown as their alt text).
 //!
-//! Re-rendering the whole message on every streamed chunk is fine: messages are small and the parser
-//! is fast. A theme or zoom change re-renders every live view too, so colours, schemes and tab stops
-//! follow (the source is kept per view for that).
+//! Code is a sibling, never a child anchored inside the text: an anchored child only ever gets a
+//! fixed size, and a fixed size outlives every resize — it held the column wider than the viewport
+//! and everything in it ran past the right edge (2026-10-30). Siblings take the column's width like
+//! everything else.
+//!
+//! Re-rendering the whole message on every streamed chunk is fine: messages are small, the parser
+//! is fast, and the segment widgets are reused by position. A theme or zoom change renders every live
+//! message again; a width change renders the ones holding a table (`relayout`).
+
+use std::cell::RefCell;
 
 use gtk4 as gtk;
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
@@ -15,89 +23,63 @@ use super::theme;
 
 /// Gap between table columns, logical px at zoom 1.
 const COL_GAP: f64 = 22.0;
+/// Inner left/right margin of a prose view; code blocks line up with it (CSS `.sill-code`).
+const PROSE_MARGIN: i32 = 8;
+
+/// A live message: its box, kind class, source, and the width its tables were laid out for
+/// (`None` = no table; `Some(0)` = laid out before the message had a width).
+struct Rendered {
+    msg: gtk::glib::WeakRef<gtk::Box>,
+    class: String,
+    md: String,
+    table_width: Option<i32>,
+}
 
 thread_local! {
-    /// Every live view and the source it shows, so a theme or zoom change can render it again.
-    static VIEWS: std::cell::RefCell<Vec<(gtk::glib::WeakRef<gtk::TextView>, String)>> = const { std::cell::RefCell::new(Vec::new()) };
-    /// Embedded code views per text view: an anchored child only gets its natural width, so they
-    /// are sized to the text view by hand once it has one (and again whenever it is shown).
-    static CODE_VIEWS: std::cell::RefCell<Vec<(gtk::glib::WeakRef<gtk::TextView>, Vec<gtk::Widget>)>> = const { std::cell::RefCell::new(Vec::new()) };
-    /// Views holding a table and the width their columns were laid out for (0 = a guess, the
-    /// view had no width yet); re-rendered when the width turns out different (see `size_code_views`).
-    static TABLE_WIDTHS: std::cell::RefCell<Vec<(gtk::glib::WeakRef<gtk::TextView>, i32)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static MESSAGES: RefCell<Vec<Rendered>> = const { RefCell::new(Vec::new()) };
     static SCHEMES_READY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Render every live view again with the current theme and zoom.
+fn live() -> Vec<(gtk::Box, String, String, Option<i32>)> {
+    MESSAGES.with(|m| {
+        let mut l = m.borrow_mut();
+        l.retain(|r| r.msg.upgrade().is_some());
+        l.iter().filter_map(|r| r.msg.upgrade().map(|b| (b, r.class.clone(), r.md.clone(), r.table_width))).collect()
+    })
+}
+
+/// Render every live message again with the current theme and zoom.
 pub fn retheme() {
-    let list: Vec<(gtk::TextView, String)> = VIEWS.with(|v| {
-        let mut l = v.borrow_mut();
-        l.retain(|(w, _)| w.upgrade().is_some());
-        l.iter().filter_map(|(w, md)| w.upgrade().map(|tv| (tv, md.clone()))).collect()
-    });
-    for (tv, md) in list {
-        render(&tv, &md);
+    for (msg, class, md, _) in live() {
+        render(&msg, &class, &md);
     }
 }
 
-fn remember(tv: &gtk::TextView, md: &str) {
-    VIEWS.with(|v| {
-        let mut l = v.borrow_mut();
-        if let Some(e) = l.iter_mut().find(|(w, _)| w.upgrade().as_ref() == Some(tv)) {
-            e.1 = md.to_string();
-        } else {
-            l.push((tv.downgrade(), md.to_string()));
+/// The conversation's width changed (shelf resized, a scrollbar came or went): lay tables out again
+/// where the width they were laid out for no longer holds. Call it outside an allocation.
+pub fn relayout() {
+    for (msg, class, md, laid) in live() {
+        let now = msg.width();
+        if let Some(laid) = laid
+            && now > 0
+            && (now - laid).abs() > 4
+        {
+            render(&msg, &class, &md);
         }
-    });
+    }
 }
 
-/// Give the code views of `tv` its full width. Runs on the frame clock until the width is known,
-/// then stops; `map` re-arms it (tab switch, shelf shown again). A message rendered before the view
-/// had a width (replay, first chunk) and holding a table is rendered again then: its columns were
-/// laid out for a guessed width.
-fn size_code_views(tv: &gtk::TextView) {
-    let weak = tv.downgrade();
-    let frames = std::cell::Cell::new(0);
-    tv.add_tick_callback(move |_, _| {
-        let Some(tv) = weak.upgrade() else { return gtk::glib::ControlFlow::Break };
-        let w = content_width(&tv);
-        if w > 40 {
-            CODE_VIEWS.with(|c| {
-                if let Some((_, views)) = c.borrow().iter().find(|(t, _)| t.upgrade().as_ref() == Some(&tv)) {
-                    for v in views {
-                        v.set_size_request(w, -1);
-                    }
-                }
-            });
-            let stale_table = TABLE_WIDTHS.with(|u| {
-                let mut l = u.borrow_mut();
-                l.retain(|(t, _)| t.upgrade().is_some());
-                l.iter().any(|(t, laid)| t.upgrade().as_ref() == Some(&tv) && (w - laid).abs() > 4)
-            });
-            if stale_table {
-                let md = VIEWS.with(|v| v.borrow().iter().find(|(t, _)| t.upgrade().as_ref() == Some(&tv)).map(|(_, md)| md.clone()));
-                if let Some(md) = md {
-                    render(&tv, &md);
-                }
+fn remember(msg: &gtk::Box, class: &str, md: &str, table_width: Option<i32>) {
+    MESSAGES.with(|m| {
+        let mut l = m.borrow_mut();
+        match l.iter_mut().find(|r| r.msg.upgrade().as_ref() == Some(msg)) {
+            Some(r) => {
+                r.md = md.to_string();
+                r.table_width = table_width;
             }
-            return gtk::glib::ControlFlow::Break;
+            None => l.push(Rendered { msg: msg.downgrade(), class: class.to_string(), md: md.to_string(), table_width }),
         }
-        frames.set(frames.get() + 1);
-        if frames.get() > 120 { gtk::glib::ControlFlow::Break } else { gtk::glib::ControlFlow::Continue }
     });
-}
-
-/// The width the view's content may use: the text view's own width, capped by the scrolled window
-/// it sits in. The cap matters: an embedded child's minimum width would otherwise inflate the text
-/// view, the column and finally the window, and nothing could ever shrink back.
-fn content_width(tv: &gtk::TextView) -> i32 {
-    let own = tv.width();
-    let cap = tv
-        .ancestor(gtk::ScrolledWindow::static_type())
-        .map(|sw| sw.width() - 24) // the column's margins
-        .unwrap_or(own);
-    let w = if own > 0 { own.min(cap) } else { cap };
-    w - tv.left_margin() - tv.right_margin()
 }
 
 fn scale(px: f64) -> i32 {
@@ -157,6 +139,16 @@ pub fn install_tags(buffer: &gtk::TextBuffer) {
         }
     }
     {
+        // a table too narrow for columns: each row a record, its first cell as the title
+        let t = tag("table-title");
+        t.set_weight(700);
+        t.set_pixels_above_lines(scale(6.0));
+        let t = tag("table-field");
+        t.set_left_margin(scale(16.0));
+        let t = tag("table-key");
+        t.set_foreground(colors.dim.as_deref());
+    }
+    {
         let t = tag("cell");
         t.set_pixels_above_lines(scale(3.0));
         t.set_pixels_below_lines(0);
@@ -189,24 +181,30 @@ fn ensure_schemes() {
     });
 }
 
-/// A highlighted, read-only code view for a fenced block.
-fn code_view(lang: &str, code: &str) -> gtk::Widget {
-    ensure_schemes();
+/// A prose segment: wrapped, read-only, with the Markdown tags; `class` is the message kind
+/// (`sill-agent`, `sill-thought`).
+fn prose_view(class: &str) -> gtk::TextView {
+    let tv = gtk::TextView::builder()
+        .editable(false)
+        .cursor_visible(false)
+        .wrap_mode(gtk::WrapMode::WordChar)
+        .left_margin(PROSE_MARGIN)
+        .right_margin(PROSE_MARGIN)
+        .top_margin(6)
+        .bottom_margin(6)
+        .pixels_inside_wrap(3) // a little leading: prose, not a terminal
+        .pixels_below_lines(2)
+        .build();
+    tv.add_css_class(class);
+    install_tags(&tv.buffer());
+    tv
+}
+
+/// A code segment: read-only, wrapped at the column, highlighted.
+fn code_view() -> sourceview5::View {
     let buffer = sourceview5::Buffer::new(None);
-    let lm = sourceview5::LanguageManager::default();
-    let lang = lang.split_whitespace().next().unwrap_or("");
-    let language = if lang.is_empty() {
-        None
-    } else {
-        lm.language(lang).or_else(|| lm.guess_language(Some(&format!("x.{lang}")), None))
-    };
-    buffer.set_language(language.as_ref());
     buffer.set_highlight_syntax(true);
     buffer.set_highlight_matching_brackets(false);
-    if let Some(s) = sourceview5::StyleSchemeManager::default().scheme(&theme::source_scheme(&theme::current())) {
-        buffer.set_style_scheme(Some(&s));
-    }
-    buffer.set_text(code.trim_end_matches('\n'));
     let view = sourceview5::View::with_buffer(&buffer);
     view.set_editable(false);
     view.set_cursor_visible(false);
@@ -217,8 +215,171 @@ fn code_view(lang: &str, code: &str) -> gtk::Widget {
     view.set_top_margin(scale(6.0));
     view.set_bottom_margin(scale(6.0));
     view.add_css_class("sill-code");
-    view.set_hexpand(true);
-    view.upcast()
+    view
+}
+
+/// Fill a code segment: the fence's language, the theme's scheme, the text (left alone when the
+/// same, so a streamed message doesn't redraw finished blocks).
+fn fill_code_view(view: &sourceview5::View, lang: &str, code: &str) {
+    ensure_schemes();
+    let Ok(buffer) = view.buffer().downcast::<sourceview5::Buffer>() else { return };
+    let lm = sourceview5::LanguageManager::default();
+    let lang = lang.split_whitespace().next().unwrap_or("");
+    let language = if lang.is_empty() { None } else { lm.language(lang).or_else(|| lm.guess_language(Some(&format!("x.{lang}")), None)) };
+    if buffer.language().map(|l| l.id()) != language.as_ref().map(|l| l.id()) {
+        buffer.set_language(language.as_ref());
+    }
+    if let Some(s) = sourceview5::StyleSchemeManager::default().scheme(&theme::source_scheme(&theme::current())) {
+        buffer.set_style_scheme(Some(&s));
+    }
+    let code = code.trim_end_matches('\n');
+    if buffer.text(&buffer.start_iter(), &buffer.end_iter(), true) != code {
+        buffer.set_text(code);
+    }
+}
+
+fn trim_trailing_newlines(buffer: &gtk::TextBuffer) {
+    let mut end = buffer.end_iter();
+    while end.offset() > 0 {
+        let prev = buffer.iter_at_offset(end.offset() - 1);
+        if buffer.text(&prev, &end, true) == "\n" {
+            buffer.delete(&mut prev.clone(), &mut end);
+            end = buffer.end_iter();
+        } else {
+            break;
+        }
+    }
+}
+
+/// Where a render writes: the message's segments in order. The widgets already there are reused by
+/// position while their kind matches; from the first mismatch on they are replaced.
+struct Out<'a> {
+    msg: &'a gtk::Box,
+    class: &'a str,
+    /// The next existing child to reuse.
+    next: Option<gtk::Widget>,
+    /// The prose view being written, if any (none at the start and right after a code block).
+    cur: Option<gtk::TextView>,
+}
+
+impl<'a> Out<'a> {
+    fn new(msg: &'a gtk::Box, class: &'a str) -> Self {
+        Out { msg, class, next: msg.first_child(), cur: None }
+    }
+
+    fn drop_rest(&mut self) {
+        let mut c = self.next.take();
+        while let Some(w) = c {
+            c = w.next_sibling();
+            self.msg.remove(&w);
+        }
+    }
+
+    /// The next existing child when it is exactly of type `ty`; otherwise drop it and the rest.
+    fn reuse(&mut self, ty: gtk::glib::Type) -> Option<gtk::Widget> {
+        let w = self.next.clone()?;
+        if w.type_() == ty {
+            self.next = w.next_sibling();
+            Some(w)
+        } else {
+            self.drop_rest();
+            None
+        }
+    }
+
+    /// The prose view to write into, starting one when there is none.
+    fn text(&mut self) -> gtk::TextView {
+        if let Some(tv) = &self.cur {
+            return tv.clone();
+        }
+        let tv = match self.reuse(gtk::TextView::static_type()).and_then(|w| w.downcast::<gtk::TextView>().ok()) {
+            Some(tv) => {
+                install_tags(&tv.buffer());
+                tv.buffer().set_text("");
+                tv
+            }
+            None => {
+                let tv = prose_view(self.class);
+                self.msg.append(&tv);
+                tv
+            }
+        };
+        self.cur = Some(tv.clone());
+        tv
+    }
+
+    fn close_text(&mut self) {
+        if let Some(tv) = self.cur.take() {
+            trim_trailing_newlines(&tv.buffer());
+        }
+    }
+
+    fn code(&mut self, lang: &str, code: &str) {
+        self.close_text();
+        let view = match self.reuse(sourceview5::View::static_type()).and_then(|w| w.downcast::<sourceview5::View>().ok()) {
+            Some(v) => v,
+            None => {
+                let v = code_view();
+                self.msg.append(&v);
+                v
+            }
+        };
+        fill_code_view(&view, lang, code);
+    }
+
+    fn finish(mut self) {
+        self.close_text();
+        self.drop_rest();
+    }
+
+    fn at_line_start(&self) -> bool {
+        match &self.cur {
+            None => true,
+            Some(tv) => {
+                let b = tv.buffer();
+                let end = b.end_iter();
+                end.offset() == 0 || b.text(&b.iter_at_offset(end.offset() - 1), &end, true) == "\n"
+            }
+        }
+    }
+
+    fn offset(&mut self) -> i32 {
+        self.text().buffer().end_iter().offset()
+    }
+
+    fn insert(&mut self, text: &str, tags: &[String]) {
+        let buffer = self.text().buffer();
+        let mut end = buffer.end_iter();
+        let start_off = end.offset();
+        buffer.insert(&mut end, text);
+        if !tags.is_empty() {
+            let start = buffer.iter_at_offset(start_off);
+            let end = buffer.end_iter();
+            for t in tags {
+                buffer.apply_tag_by_name(t, &start, &end);
+            }
+        }
+    }
+
+    /// Separate a new block from what came before in the same prose view (a fresh view needs none).
+    fn block_start(&mut self, need_newline: &mut bool) {
+        if let Some(tv) = self.cur.clone() {
+            if !self.at_line_start() {
+                self.insert("\n", &[]);
+            }
+            if *need_newline && tv.buffer().char_count() > 0 {
+                self.insert("\n", &[]);
+            }
+        }
+        *need_newline = false;
+    }
+
+    fn rule(&mut self, tag: &str) {
+        if !self.at_line_start() {
+            self.insert("\n", &[]);
+        }
+        self.insert(" \n", &[tag.to_string()]); // a space: an empty line gets no paragraph background
+    }
 }
 
 /// Word-wrap `text` into lines no wider than `width` px in the view's font (a single word wider
@@ -254,17 +415,11 @@ fn measure(tv: &gtk::TextView, text: &str, bold: bool) -> i32 {
     layout.pixel_size().0
 }
 
-/// Replace the view's content with the rendered markdown.
-pub fn render(tv: &gtk::TextView, markdown: &str) {
-    let first = VIEWS.with(|v| !v.borrow().iter().any(|(w, _)| w.upgrade().as_ref() == Some(tv)));
-    remember(tv, markdown);
-    if first {
-        tv.connect_map(size_code_views);
-    }
-    let mut code_views: Vec<gtk::Widget> = Vec::new();
-    let buffer = tv.buffer();
-    install_tags(&buffer);
-    buffer.set_text("");
+/// Render `markdown` into the message box `msg` (a vertical box in the conversation column; it must
+/// be in the window already, so measuring uses the right font). `class` is the message kind.
+pub fn render(msg: &gtk::Box, class: &str, markdown: &str) {
+    let mut out = Out::new(msg, class);
+    let mut table_width: Option<i32> = None;
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TABLES);
@@ -274,7 +429,7 @@ pub fn render(tv: &gtk::TextView, markdown: &str) {
     let mut tags: Vec<String> = Vec::new();
     let mut list_stack: Vec<Option<u64>> = Vec::new(); // None = bullet, Some(n) = next number
     let mut need_newline = false; // a block ended; separate the next block with a blank line
-    // fenced code: collected, then embedded as a widget at the end tag
+    // fenced code: collected, then written as its own segment at the end tag
     let mut code: Option<(String, String)> = None; // (lang, text)
     // tables: collected as rows of cells, laid out with tab stops at the end tag
     let mut table: Option<(Vec<Alignment>, Vec<Vec<String>>)> = None;
@@ -282,51 +437,16 @@ pub fn render(tv: &gtk::TextView, markdown: &str) {
     let mut table_index = 0usize;
     let mut item_marker: Option<(i32, i32)> = None; // the last list marker's offsets, replaced by a task box
 
-    let insert = |text: &str, tags: &[String]| {
-        let mut end = buffer.end_iter();
-        let start_off = end.offset();
-        buffer.insert(&mut end, text);
-        if !tags.is_empty() {
-            let start = buffer.iter_at_offset(start_off);
-            let end = buffer.end_iter();
-            for t in tags {
-                buffer.apply_tag_by_name(t, &start, &end);
-            }
-        }
-    };
-    let at_line_start = || {
-        let end = buffer.end_iter();
-        end.offset() == 0 || buffer.text(&buffer.iter_at_offset(end.offset() - 1), &end, true) == "\n"
-    };
-    let block_start = |need_newline: &mut bool| {
-        if !at_line_start() {
-            let mut end = buffer.end_iter();
-            buffer.insert(&mut end, "\n");
-        }
-        if *need_newline && buffer.char_count() > 0 {
-            let mut end = buffer.end_iter();
-            buffer.insert(&mut end, "\n");
-        }
-        *need_newline = false;
-    };
-    let rule = |tag: &str| {
-        if !at_line_start() {
-            let mut end = buffer.end_iter();
-            buffer.insert(&mut end, "\n");
-        }
-        insert(" \n", &[tag.to_string()]); // a space: an empty line gets no paragraph background
-    };
-
     for ev in parser {
         match ev {
             Event::Start(tag) => match tag {
                 Tag::Paragraph => {
                     if list_stack.is_empty() {
-                        block_start(&mut need_newline);
+                        out.block_start(&mut need_newline);
                     }
                 }
                 Tag::Heading { level, .. } => {
-                    block_start(&mut need_newline);
+                    out.block_start(&mut need_newline);
                     tags.push(
                         match level {
                             HeadingLevel::H1 => "h1",
@@ -338,11 +458,11 @@ pub fn render(tv: &gtk::TextView, markdown: &str) {
                     );
                 }
                 Tag::BlockQuote(_) => {
-                    block_start(&mut need_newline);
+                    out.block_start(&mut need_newline);
                     tags.push("quote".into());
                 }
                 Tag::CodeBlock(kind) => {
-                    block_start(&mut need_newline);
+                    out.block_start(&mut need_newline);
                     let lang = match kind {
                         CodeBlockKind::Fenced(l) => l.to_string(),
                         CodeBlockKind::Indented => String::new(),
@@ -351,13 +471,13 @@ pub fn render(tv: &gtk::TextView, markdown: &str) {
                 }
                 Tag::List(start) => {
                     if list_stack.is_empty() {
-                        block_start(&mut need_newline);
+                        out.block_start(&mut need_newline);
                     }
                     list_stack.push(start);
                 }
                 Tag::Item => {
-                    if !at_line_start() {
-                        insert("\n", &[]);
+                    if !out.at_line_start() {
+                        out.insert("\n", &[]);
                     }
                     let depth = list_stack.len().saturating_sub(1).min(3);
                     let (marker, tag) = match list_stack.last_mut() {
@@ -369,17 +489,17 @@ pub fn render(tv: &gtk::TextView, markdown: &str) {
                         _ => ("•\u{2009} ".to_string(), format!("li{depth}")),
                     };
                     tags.push(tag);
-                    let start = buffer.end_iter().offset();
-                    insert(&marker, &tags);
-                    item_marker = Some((start, buffer.end_iter().offset()));
+                    let start = out.offset();
+                    out.insert(&marker, &tags);
+                    item_marker = Some((start, out.offset()));
                 }
                 Tag::Emphasis => tags.push("italic".into()),
                 Tag::Strong => tags.push("bold".into()),
                 Tag::Strikethrough => tags.push("strike".into()),
                 Tag::Link { .. } => tags.push("link".into()),
-                Tag::Image { .. } => insert("[image: ", &[]),
+                Tag::Image { .. } => out.insert("[image: ", &[]),
                 Tag::Table(aligns) => {
-                    block_start(&mut need_newline);
+                    out.block_start(&mut need_newline);
                     table = Some((aligns, Vec::new()));
                 }
                 Tag::TableHead | Tag::TableRow => {
@@ -399,14 +519,14 @@ pub fn render(tv: &gtk::TextView, markdown: &str) {
             },
             Event::End(tag) => match tag {
                 TagEnd::Paragraph => {
-                    insert("\n", &[]);
+                    out.insert("\n", &[]);
                     if list_stack.is_empty() {
                         need_newline = true;
                     }
                 }
                 TagEnd::Heading(_) => {
                     tags.pop();
-                    insert("\n", &[]);
+                    out.insert("\n", &[]);
                 }
                 TagEnd::BlockQuote(_) => {
                     tags.pop();
@@ -414,12 +534,7 @@ pub fn render(tv: &gtk::TextView, markdown: &str) {
                 }
                 TagEnd::CodeBlock => {
                     if let Some((lang, text)) = code.take() {
-                        let mut end = buffer.end_iter();
-                        let anchor = buffer.create_child_anchor(&mut end);
-                        let view = code_view(&lang, &text);
-                        tv.add_child_at_anchor(&view, &anchor);
-                        code_views.push(view);
-                        insert("\n", &[]);
+                        out.code(&lang, &text);
                     }
                     need_newline = true;
                 }
@@ -431,25 +546,27 @@ pub fn render(tv: &gtk::TextView, markdown: &str) {
                 }
                 TagEnd::Item => {
                     tags.pop();
-                    if !at_line_start() {
-                        insert("\n", &[]);
+                    if !out.at_line_start() {
+                        out.insert("\n", &[]);
                     }
                 }
                 TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link => {
                     tags.pop();
                 }
-                TagEnd::Image => insert("]", &[]),
+                TagEnd::Image => out.insert("]", &[]),
                 TagEnd::TableHead | TagEnd::TableRow => {}
                 TagEnd::TableCell => in_table_cell = false,
                 TagEnd::Table => {
                     if let Some((aligns, rows)) = table.take() {
+                        let tv = out.text();
+                        let buffer = tv.buffer();
                         let ncols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
                         // column widths in the view's font; the header is bold
                         let widths: Vec<i32> = (0..ncols)
                             .map(|i| {
                                 rows.iter()
                                     .enumerate()
-                                    .map(|(ri, r)| measure(tv, r.get(i).map(String::as_str).unwrap_or(""), ri == 0))
+                                    .map(|(ri, r)| measure(&tv, r.get(i).map(String::as_str).unwrap_or(""), ri == 0))
                                     .max()
                                     .unwrap_or(0)
                             })
@@ -457,25 +574,43 @@ pub fn render(tv: &gtk::TextView, markdown: &str) {
                         let mut gap = scale(COL_GAP);
                         // wider than the view: narrow the gap, then give the wide columns a share
                         // of what is left and wrap their cells (tab stops can't wrap by themselves)
-                        let view_w = content_width(tv);
-                        // laid out for this width; a guess (0) when the view isn't allocated yet,
-                        // and the sizing tick renders again as soon as the real width differs
-                        TABLE_WIDTHS.with(|u| {
-                            let mut l = u.borrow_mut();
-                            match l.iter_mut().find(|(t, _)| t.upgrade().as_ref() == Some(tv)) {
-                                Some(e) => e.1 = view_w.max(0),
-                                None => l.push((tv.downgrade(), view_w.max(0))),
-                            }
-                        });
+                        // laid out for the message's width; 0 = not allocated yet (a guess),
+                        // and `relayout` renders again once the real width is known
+                        let laid = match out.msg.width() {
+                            w if w > 0 => w,
+                            _ => out.msg.parent().map(|p| p.width()).unwrap_or(0),
+                        };
+                        table_width = Some(laid);
+                        let view_w = laid - 2 * PROSE_MARGIN;
                         let avail = if view_w > 100 { view_w - scale(16.0) } else { scale(620.0) };
                         let total = |widths: &[i32], gap: i32| widths.iter().sum::<i32>() + gap * (ncols.saturating_sub(1) as i32);
                         let mut widths = widths;
+                        let mut stacked = false;
                         if total(&widths, gap) > avail {
                             gap = scale(12.0);
                         }
                         if total(&widths, gap) > avail && ncols > 0 {
-                            // water-filling: a column narrower than the fair share of what is left
-                            // keeps its width; the rest split the remainder equally. Never overshoots.
+                            // the narrowest a column can be: its longest word (a word can't wrap,
+                            // and one that overruns its tab stop throws the rest of the row onto
+                            // the next line), plus the slack wrap_cell keeps
+                            let mins: Vec<i32> = (0..ncols)
+                                .map(|i| {
+                                    rows.iter()
+                                        .enumerate()
+                                        .map(|(ri, r)| {
+                                            r.get(i).map(|c| c.split_whitespace().map(|w| measure(&tv, w, ri == 0)).max().unwrap_or(0)).unwrap_or(0)
+                                        })
+                                        .max()
+                                        .unwrap_or(0)
+                                        + scale(4.0)
+                                })
+                                .collect();
+                            // even the longest words don't fit side by side: no column layout
+                            // works at this width
+                            stacked = mins.iter().sum::<i32>() + gap * (ncols.saturating_sub(1) as i32) > avail;
+                            // water-filling: a column that fits in the fair share of what is left
+                            // keeps its width, one whose longest word doesn't gets that word's
+                            // width; the rest split the remainder equally
                             let mut space = avail - gap * (ncols.saturating_sub(1) as i32);
                             let mut fixed = vec![false; ncols];
                             loop {
@@ -483,12 +618,20 @@ pub fn render(tv: &gtk::TextView, markdown: &str) {
                                 if open == 0 {
                                     break;
                                 }
-                                let fair = (space / open).max(scale(40.0));
+                                let fair = space / open;
                                 let mut changed = false;
                                 for i in 0..ncols {
-                                    if !fixed[i] && widths[i] <= fair {
+                                    if fixed[i] {
+                                        continue;
+                                    }
+                                    if widths[i] <= fair {
                                         fixed[i] = true;
                                         space -= widths[i];
+                                        changed = true;
+                                    } else if mins[i] >= fair {
+                                        fixed[i] = true;
+                                        widths[i] = mins[i];
+                                        space -= mins[i];
                                         changed = true;
                                     }
                                 }
@@ -502,55 +645,77 @@ pub fn render(tv: &gtk::TextView, markdown: &str) {
                                 }
                             }
                         }
-                        // the first column starts at the margin (a tab at x = 0 would skip to the
-                        // next stop), the others at their stops
-                        let mut tabs = gtk::pango::TabArray::new(ncols.saturating_sub(1) as i32, true);
-                        let mut x = widths.first().copied().unwrap_or(0) + gap;
-                        for (i, w) in widths.iter().enumerate().skip(1) {
-                            let align = match aligns.get(i) {
-                                Some(Alignment::Right) => gtk::pango::TabAlign::Right,
-                                Some(Alignment::Center) => gtk::pango::TabAlign::Center,
-                                _ => gtk::pango::TabAlign::Left,
-                            };
-                            // a right/centre stop sits at the column's far edge/middle
-                            let pos = match align {
-                                gtk::pango::TabAlign::Right => x + w,
-                                gtk::pango::TabAlign::Center => x + w / 2,
-                                _ => x,
-                            };
-                            tabs.set_tab((i - 1) as i32, align, pos);
-                            x += w + gap;
-                        }
-                        // one tag per table (named, so re-renders reuse it instead of piling up)
-                        let name = format!("table{table_index}");
-                        table_index += 1;
-                        let ttag = match buffer.tag_table().lookup(&name) {
-                            Some(t) => t,
-                            None => {
-                                let t = gtk::TextTag::new(Some(&name));
-                                buffer.tag_table().add(&t);
-                                t
-                            }
-                        };
-                        ttag.set_tabs(Some(&tabs));
-                        ttag.set_left_margin(scale(4.0));
-                        for (ri, r) in rows.iter().enumerate() {
-                            // a row is one line per wrapped fragment; fragment k of every cell on line k
-                            let wrapped: Vec<Vec<String>> = (0..ncols)
-                                .map(|i| wrap_cell(tv, r.get(i).map(String::as_str).unwrap_or(""), widths[i] - scale(4.0), ri == 0))
-                                .collect();
-                            let lines = wrapped.iter().map(Vec::len).max().unwrap_or(1).max(1);
-                            for k in 0..lines {
-                                let cells: Vec<&str> = wrapped.iter().map(|c| c.get(k).map(String::as_str).unwrap_or("")).collect();
-                                let line = format!("{}\n", cells.join("\t"));
-                                let mut t = vec![name.clone(), if k == 0 { "cell".to_string() } else { "cell-cont".to_string() }];
-                                if ri == 0 {
-                                    t.push("bold".into());
+                        if stacked {
+                            // one record per row: the first cell as its title, then a
+                            // "Header: value" line per non-empty cell; columns come back through
+                            // `relayout` once the view is wide enough
+                            let head = rows.first().cloned().unwrap_or_default();
+                            for r in rows.iter().skip(1) {
+                                out.insert(&format!("{}\n", r.first().map(String::as_str).unwrap_or("")), &["table-title".to_string()]);
+                                for i in 1..ncols {
+                                    let val = r.get(i).map(String::as_str).unwrap_or("");
+                                    if val.is_empty() {
+                                        continue;
+                                    }
+                                    let key = head.get(i).map(String::as_str).unwrap_or("");
+                                    let field = vec!["table-field".to_string()];
+                                    let mut keyed = field.clone();
+                                    keyed.push("table-key".into());
+                                    out.insert(&format!("{key}: "), &keyed);
+                                    out.insert(&format!("{val}\n"), &field);
                                 }
-                                insert(&line, &t);
                             }
-                            if ri == 0 {
-                                rule("thead-rule");
+                        } else {
+                            // the first column starts at the margin (a tab at x = 0 would skip to the
+                            // next stop), the others at their stops
+                            let mut tabs = gtk::pango::TabArray::new(ncols.saturating_sub(1) as i32, true);
+                            let mut x = widths.first().copied().unwrap_or(0) + gap;
+                            for (i, w) in widths.iter().enumerate().skip(1) {
+                                let align = match aligns.get(i) {
+                                    Some(Alignment::Right) => gtk::pango::TabAlign::Right,
+                                    Some(Alignment::Center) => gtk::pango::TabAlign::Center,
+                                    _ => gtk::pango::TabAlign::Left,
+                                };
+                                // a right/centre stop sits at the column's far edge/middle
+                                let pos = match align {
+                                    gtk::pango::TabAlign::Right => x + w,
+                                    gtk::pango::TabAlign::Center => x + w / 2,
+                                    _ => x,
+                                };
+                                tabs.set_tab((i - 1) as i32, align, pos);
+                                x += w + gap;
+                            }
+                            // one tag per table (named, so re-renders reuse it instead of piling up)
+                            let name = format!("table{table_index}");
+                            table_index += 1;
+                            let ttag = match buffer.tag_table().lookup(&name) {
+                                Some(t) => t,
+                                None => {
+                                    let t = gtk::TextTag::new(Some(&name));
+                                    buffer.tag_table().add(&t);
+                                    t
+                                }
+                            };
+                            ttag.set_tabs(Some(&tabs));
+                            ttag.set_left_margin(scale(4.0));
+                            for (ri, r) in rows.iter().enumerate() {
+                                // a row is one line per wrapped fragment; fragment k of every cell on line k
+                                let wrapped: Vec<Vec<String>> = (0..ncols)
+                                    .map(|i| wrap_cell(&tv, r.get(i).map(String::as_str).unwrap_or(""), widths[i] - scale(4.0), ri == 0))
+                                    .collect();
+                                let lines = wrapped.iter().map(Vec::len).max().unwrap_or(1).max(1);
+                                for k in 0..lines {
+                                    let cells: Vec<&str> = wrapped.iter().map(|c| c.get(k).map(String::as_str).unwrap_or("")).collect();
+                                    let line = format!("{}\n", cells.join("\t"));
+                                    let mut t = vec![name.clone(), if k == 0 { "cell".to_string() } else { "cell-cont".to_string() }];
+                                    if ri == 0 {
+                                        t.push("bold".into());
+                                    }
+                                    out.insert(&line, &t);
+                                }
+                                if ri == 0 {
+                                    out.rule("thead-rule");
+                                }
                             }
                         }
                     }
@@ -566,7 +731,7 @@ pub fn render(tv: &gtk::TextView, markdown: &str) {
                         cell.push_str(&t);
                     }
                 } else {
-                    insert(&t, &tags);
+                    out.insert(&t, &tags);
                 }
             }
             Event::Code(c) => {
@@ -577,47 +742,30 @@ pub fn render(tv: &gtk::TextView, markdown: &str) {
                 } else {
                     let mut t = tags.clone();
                     t.push("code".into());
-                    insert(&c, &t);
+                    out.insert(&c, &t);
                 }
             }
-            Event::SoftBreak => insert(" ", &tags),
-            Event::HardBreak => insert("\n", &tags),
+            Event::SoftBreak => out.insert(" ", &tags),
+            Event::HardBreak => out.insert("\n", &tags),
             Event::Rule => {
-                block_start(&mut need_newline);
-                rule("rule");
-                insert("\n", &[]); // a blank line after, as before it
+                out.block_start(&mut need_newline);
+                out.rule("rule");
+                out.insert("\n", &[]); // a blank line after, as before it
                 need_newline = true;
             }
             Event::TaskListMarker(done) => {
                 if let Some((a, b)) = item_marker.take()
-                    && b == buffer.end_iter().offset()
+                    && b == out.offset()
                 {
+                    let buffer = out.text().buffer();
                     buffer.delete(&mut buffer.iter_at_offset(a), &mut buffer.iter_at_offset(b));
                 }
-                insert(if done { "☑ " } else { "☐ " }, &tags)
+                out.insert(if done { "☑ " } else { "☐ " }, &tags)
             }
-            Event::Html(h) | Event::InlineHtml(h) => insert(&h, &["code".to_string()]),
+            Event::Html(h) | Event::InlineHtml(h) => out.insert(&h, &["code".to_string()]),
             Event::FootnoteReference(_) | Event::InlineMath(_) | Event::DisplayMath(_) => {}
         }
     }
-    CODE_VIEWS.with(|c| {
-        let mut l = c.borrow_mut();
-        l.retain(|(w, _)| w.upgrade().is_some());
-        match l.iter_mut().find(|(w, _)| w.upgrade().as_ref() == Some(tv)) {
-            Some(e) => e.1 = code_views,
-            None => l.push((tv.downgrade(), code_views)),
-        }
-    });
-    size_code_views(tv);
-    // trim trailing newlines
-    let mut end = buffer.end_iter();
-    while end.offset() > 0 {
-        let prev = buffer.iter_at_offset(end.offset() - 1);
-        if buffer.text(&prev, &end, true) == "\n" {
-            buffer.delete(&mut prev.clone(), &mut end);
-            end = buffer.end_iter();
-        } else {
-            break;
-        }
-    }
+    out.finish();
+    remember(msg, class, markdown, table_width);
 }

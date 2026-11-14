@@ -14,7 +14,8 @@ use agent_client_protocol::schema::v1::{
     RequestPermissionRequest,
     RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigOptionValue, SessionConfigSelectOptions, SessionModeState,
-    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, ToolCallContent,
+    ImageContent, ResourceLink, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason,
+    ToolCallContent,
 };
 use agent_client_protocol::util::MatchDispatch;
 pub use agent_client_protocol::schema::v1::PermissionOptionKind;
@@ -107,6 +108,8 @@ fn controls_from(modes: Option<&SessionModeState>, options: Option<&[SessionConf
 pub enum Event {
     /// The ACP session is up: (agent session id, resumed with history replay?).
     Ready { session_id: String, resumed: bool, controls: Controls },
+    /// What the agent accepts in a prompt (from `initialize`), before Ready.
+    Capabilities { images: bool },
     /// Modes / config options changed (by us or by the agent).
     Controls(Controls),
     /// A prompt turn started.
@@ -159,9 +162,39 @@ impl From<&AuthMethod> for AuthMethodInfo {
     }
 }
 
+/// Something sent along with a prompt (SPEC §3.2 attachments): a pasted screenshot, a chosen file.
+#[derive(Debug, Clone)]
+pub struct Attachment {
+    pub name: String,
+    pub mime: String,
+    pub kind: AttachmentKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum AttachmentKind {
+    /// Sent inline as an ACP image block (base64).
+    Image { data_base64: String },
+    /// Copied where the jail can read it; sent as a resource link plus a line of text naming the path.
+    File { jail_path: std::path::PathBuf },
+}
+
+/// Standard base64 (no external crate for 20 lines).
+pub fn base64(bytes: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = (chunk[0] as u32) << 16 | (chunk.get(1).copied().unwrap_or(0) as u32) << 8 | chunk.get(2).copied().unwrap_or(0) as u32;
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
 #[derive(Debug)]
 pub enum Command {
-    Prompt(String),
+    Prompt(String, Vec<Attachment>),
     /// Run an agent-side auth method (`authenticate`), then open the session again.
     Authenticate(String),
     /// Open the session again (after a terminal login ran outside the protocol).
@@ -257,6 +290,7 @@ pub fn run_session(
                     .block_task()
                     .await?;
                 let can_load = init.agent_capabilities.load_session;
+                let _ = events_loop.send(Event::Capabilities { images: init.agent_capabilities.prompt_capabilities.image }).await;
                 let auth_methods: Vec<AuthMethodInfo> = init.auth_methods.iter().map(AuthMethodInfo::from).collect();
 
                 // Open the session and drive it until Quit. A session refused for want of a login is
@@ -446,15 +480,31 @@ async fn drive(
                 }
             }
             Next::Cmd(Some(Command::RetrySession)) => {}
-            Next::Cmd(Some(Command::Prompt(text))) => {
+            Next::Cmd(Some(Command::Prompt(text, attachments))) => {
                 if in_turn {
                     let _ = events_loop.send(Event::Other("busy: prompt dropped".into())).await;
                     continue;
                 }
                 let sid = session.session_id().clone();
                 let conn = session.connection().clone();
+                // the text first, then the attachments: images inline, files as a resource link
+                // plus a line naming the path for agents that don't follow links
+                let mut blocks: Vec<ContentBlock> = Vec::new();
+                let mut text = text;
+                for a in &attachments {
+                    if let AttachmentKind::File { jail_path } = &a.kind {
+                        text.push_str(&format!("\n\nAttached file: {}", jail_path.display()));
+                    }
+                }
+                blocks.push(text.into());
+                for a in attachments {
+                    blocks.push(match a.kind {
+                        AttachmentKind::Image { data_base64 } => ContentBlock::Image(ImageContent::new(data_base64, a.mime)),
+                        AttachmentKind::File { jail_path } => ContentBlock::ResourceLink(ResourceLink::new(a.name, format!("file://{}", jail_path.display()))),
+                    });
+                }
                 pending = Some(Box::pin(async move {
-                    conn.send_request(PromptRequest::new(sid, vec![text.into()])).block_task().await
+                    conn.send_request(PromptRequest::new(sid, blocks)).block_task().await
                 }));
                 in_turn = true;
                 let _ = events_loop.send(Event::TurnStarted).await;
@@ -549,7 +599,7 @@ pub fn run_prompt(
 ) -> Result<()> {
     let (cmd_tx, cmd_rx) = async_channel::bounded(2);
     let (ev_tx, ev_rx) = async_channel::unbounded();
-    cmd_tx.send_blocking(Command::Prompt(prompt.to_string()))?;
+    cmd_tx.send_blocking(Command::Prompt(prompt.to_string(), vec![]))?;
     let opts = SessionOptions { cwd: cwd.to_path_buf(), auto, resume: None };
     let worker = std::thread::spawn(move || run_session(stream, opts, cmd_rx, ev_tx));
     while let Ok(ev) = ev_rx.recv_blocking() {
