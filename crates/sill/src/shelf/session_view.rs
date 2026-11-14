@@ -787,12 +787,20 @@ impl SessionView {
         self.host_term.grab_focus();
     }
 
+    /// A pane's pty is done with: clear the screen and leave the dead pty attached until the next
+    /// open replaces it. Never `set_pty(None)`: VTE 0.84's `Widget::set_pty` takes the new pty's
+    /// impl without a null check, so detaching while a pty is set is a segfault in the main loop
+    /// (seen 2026-11-03 when the daemon died under an open host pane and the bridge tick closed
+    /// it). A dead master costs one fd; VTE already stopped reading it at EOF.
+    fn drop_pty(term: &vte4::Terminal) {
+        term.reset(true, true);
+    }
+
     /// The host shell exited: forget it and show the prompt again.
     fn host_shell_closed(self: &Rc<Self>) {
         self.host_open.set(false);
         self.host_bridge.borrow_mut().take();
-        self.host_term.set_pty(None);
-        self.host_term.reset(true, true);
+        Self::drop_pty(&self.host_term);
         self.show_host_shell(false);
     }
 
@@ -831,8 +839,7 @@ impl SessionView {
     fn shell_closed(self: &Rc<Self>) {
         self.shell_open.set(false);
         self.shell_bridge.borrow_mut().take();
-        self.terminal.set_pty(None);
-        self.terminal.reset(true, true);
+        Self::drop_pty(&self.terminal);
         self.show_shell(false);
         if self.login_pending.replace(false) {
             self.status.set_text("retrying");
@@ -983,7 +990,6 @@ impl SessionView {
         argv.extend(args);
         let mut e = agent.env.clone();
         e.extend(env);
-        self.terminal.set_pty(None);
         match self.open_pty(&argv, &e) {
             Ok(()) => {
                 self.shell_open.set(true);
