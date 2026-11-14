@@ -34,8 +34,11 @@ unsafe extern "C" {
     fn CGEventKeyboardSetUnicodeString(event: *const c_void, length: usize, text: *const u16);
     fn CGEventPost(tap: u32, event: *const c_void);
     fn CGEventSourceSecondsSinceLastEventType(state: i32, kind: u32) -> f64;
-    fn CGPreflightPostEventAccess() -> bool;
-    fn CGRequestPostEventAccess() -> bool;
+}
+#[link(name = "ApplicationServices", kind = "framework")]
+unsafe extern "C" {
+    fn AXIsProcessTrusted() -> bool;
+    fn AXIsProcessTrustedWithOptions(options: *const c_void) -> bool;
 }
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
@@ -59,16 +62,30 @@ const OPTION: u64 = 0x80000;
 const COMMAND: u64 = 0x100000;
 const FUNCTION: u64 = 0x800000;
 
-/// macOS lets Sill post mouse and keyboard events. Asks without a prompt.
+/// macOS trusts Sill with Accessibility, which posting mouse and keyboard events needs. Asks
+/// without a prompt.
 pub fn allowed() -> bool {
     // SAFETY: no arguments, no side effects
-    unsafe { CGPreflightPostEventAccess() }
+    unsafe { AXIsProcessTrusted() }
 }
 
-/// Ask macOS for the consent: its prompt, or its settings, for the person.
+/// Ask macOS for the consent: its prompt ("Sill would like to control this computer using
+/// accessibility features", with a button to System Settings). Core Graphics's own request
+/// showed nothing (the person, 2026-11-12); the Accessibility API's check with its prompt
+/// option is what shows it.
 pub fn ask() -> bool {
-    // SAFETY: no arguments; macOS shows its own dialog
-    unsafe { CGRequestPostEventAccess() }
+    // SAFETY: an NSDictionary (toll-free a CFDictionary) of the prompt option, alive across the call
+    unsafe {
+        let key: *mut objc2::runtime::AnyObject = objc2::msg_send![
+            objc2::class!(NSString),
+            stringWithUTF8String: c"AXTrustedCheckOptionPrompt".as_ptr()
+        ];
+        let yes: *mut objc2::runtime::AnyObject =
+            objc2::msg_send![objc2::class!(NSNumber), numberWithBool: true];
+        let options: *mut objc2::runtime::AnyObject =
+            objc2::msg_send![objc2::class!(NSDictionary), dictionaryWithObject: yes, forKey: key];
+        AXIsProcessTrustedWithOptions(options as *const c_void)
+    }
 }
 
 pub const NOT_ALLOWED: &str = "macOS does not allow Sill to control the mouse and keyboard: the person turns Sill on in System Settings → Privacy & Security → Accessibility";

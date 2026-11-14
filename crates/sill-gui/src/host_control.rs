@@ -88,10 +88,19 @@ impl App {
         match event {
             Event::Select(id, operation, on) => {
                 if let Some(view) = self.views.get_mut(&id) {
+                    let selected = &mut view.host_control.selected;
                     if on {
-                        view.host_control.selected.insert(operation);
+                        // Mac control is aimed in pictures: it brings Mac viewing along
+                        if operation == "mac_input" {
+                            selected.insert("mac_view".into());
+                        }
+                        selected.insert(operation);
                     } else {
-                        view.host_control.selected.remove(&operation);
+                        // and goes when viewing goes
+                        if operation == "mac_view" {
+                            selected.remove("mac_input");
+                        }
+                        selected.remove(&operation);
                     }
                 }
                 Task::none()
@@ -428,6 +437,19 @@ pub(crate) fn notice_summary(message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mac_control_brings_mac_viewing_along_and_goes_with_it() {
+        let (mut app, _) = crate::App::with(true, None, None);
+        let select = |app: &mut crate::App, op: &str, on: bool| {
+            let _ = app.update(crate::Message::HostControl(super::Event::Select("demo".into(), op.into(), on)));
+        };
+        select(&mut app, "mac_input", true);
+        let selected = &app.views["demo"].host_control.selected;
+        assert!(selected.contains("mac_input") && selected.contains("mac_view"));
+        select(&mut app, "mac_view", false);
+        assert!(app.views["demo"].host_control.selected.is_empty());
+    }
+
     use super::*;
     use crate::tests::{live_app, session_record, settle_task, simulator};
     use serde_json::json;
