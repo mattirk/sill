@@ -154,6 +154,10 @@ pub struct FolderTree {
     /// A pin of this session changed: the window refreshes its chips and, for a folder, its jail.
     pub on_pin: RefCell<Option<Box<dyn Fn(&str)>>>,
     listed: Listed,
+    /// The rows on screen and what decorates one from the current badges: after a refresh every
+    /// bound row is decorated again.
+    bound: Rc<RefCell<Vec<gtk::ListItem>>>,
+    decorate: Rc<dyn Fn(&gtk::ListItem)>,
     /// Watches on every listed directory and on the repositories' `.git`: the tree follows what
     /// happens on disk (the agent's writes, hand edits, commits) while it is shown.
     monitors: RefCell<BTreeMap<PathBuf, gio::FileMonitor>>,
@@ -237,14 +241,17 @@ impl FolderTree {
             expander.set_child(Some(&b));
             item.set_child(Some(&expander));
         });
-        {
+        // what a row shows for its path (icon, name and its colour, badge, pin) from the current
+        // badges: at bind, and again for every bound row after a refresh — a badge that changed must
+        // show without the row being made anew (closing and opening the folder was the only way)
+        let bound: Rc<RefCell<Vec<gtk::ListItem>>> = Rc::new(RefCell::new(Vec::new()));
+        let decorate: Rc<dyn Fn(&gtk::ListItem)> = {
             let badges = badges.clone();
             let pending = pending.clone();
             let pinned = pinned.clone();
             let elsewhere = elsewhere.clone();
             let tree_rc = tree_rc.clone();
-            factory.connect_bind(move |_, item| {
-                let Some(item) = item.downcast_ref::<gtk::ListItem>() else { return };
+            Rc::new(move |item: &gtk::ListItem| {
                 let Some(row) = item.item().and_downcast::<gtk::TreeListRow>() else { return };
                 let Some(expander) = item.child().and_downcast::<gtk::TreeExpander>() else { return };
                 expander.set_list_row(Some(&row));
@@ -350,6 +357,21 @@ impl FolderTree {
                     }
                     pin.set_data("sill-pin-handler", id);
                 }
+            })
+        };
+        {
+            let decorate = decorate.clone();
+            let on_bind = bound.clone();
+            factory.connect_bind(move |_, item| {
+                let Some(item) = item.downcast_ref::<gtk::ListItem>() else { return };
+                on_bind.borrow_mut().push(item.clone());
+                decorate(item);
+            });
+            let bound = bound.clone();
+            factory.connect_unbind(move |_, item| {
+                if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
+                    bound.borrow_mut().retain(|i| i != item);
+                }
             });
         }
         let view = gtk::ListView::new(Some(selection.clone()), Some(factory));
@@ -387,6 +409,8 @@ impl FolderTree {
             on_close: RefCell::new(None),
             on_pin: RefCell::new(None),
             listed,
+            bound,
+            decorate,
             monitors: RefCell::new(BTreeMap::new()),
             refresh_pending: std::cell::Cell::new(false),
         });
@@ -625,6 +649,10 @@ impl FolderTree {
             if scope.is_some() {
                 self.open_levels();
             }
+        }
+        // every row on screen shows its badge as it is now
+        for item in self.bound.borrow().clone() {
+            (self.decorate)(&item);
         }
         self.view.queue_draw();
         // follow the disk: the listed directories, and each repository's .git (commits, checkouts)

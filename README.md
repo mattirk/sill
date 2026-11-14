@@ -187,3 +187,15 @@ rebuilt automatically. Restarting the shelf alone does not touch running session
   longer supported for Gemini Code Assist for individuals". Use a Gemini API key (`GEMINI_API_KEY` in its
   environment, then *Gemini API key*), or install Antigravity from the Agents page.
 - No terminal in the jail, no policies UI, no focus keeper yet (M3).
+
+## Keys
+
+| Key | What |
+|---|---|
+| Alt+Space (Settings → Hotkey) | show / hide the shelf |
+| Ctrl+Shift+Left / Right | previous / next session tab |
+| Ctrl+Shift+F | the file tree: the session's first pinned folder, else everything |
+| Ctrl+T | the shell inside the session's jail |
+| Ctrl+Shift+T | a shell on the host, in the same pane, marked `host · outside the jail` |
+| Escape | the viewer steps back, then the tree closes, then back to the sessions |
+| F2 | rename the selected tab |
