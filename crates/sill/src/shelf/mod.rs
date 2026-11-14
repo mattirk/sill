@@ -10,6 +10,7 @@ mod fonts;
 mod herring;
 mod hotkey;
 mod icons;
+mod login_input;
 mod markdown;
 mod processes;
 mod remote;

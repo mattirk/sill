@@ -275,58 +275,53 @@ impl SessionView {
             // During a login the pane runs a line prompt that echoes keystrokes but shows nothing of
             // a pasted block (a bracketed paste arrives as one chunk): then the text is typed in,
             // one character at a time, so the person sees the code land.
-            // While a login code is still being typed in, Enter waits for its last character: an
-            // Enter pressed early submitted a truncated code ("invalid code") and the rest of it
-            // landed after. A second paste during the typing is ignored for the same reason.
-            let typing = Rc::new(std::cell::Cell::new(false));
-            let enter_after = Rc::new(std::cell::Cell::new(false));
-            // During a login, the Enter that sent the code: another one right after reaches the
-            // prompt while the agent is still exchanging the code, and can spoil that attempt.
-            let code_sent = Rc::new(std::cell::Cell::new(None::<std::time::Instant>));
+            // During a login the rules around a pasted code are `login_input`'s: Enter waits for
+            // the code's last character, and a second Enter right after it is held.
+            let entry = Rc::new(RefCell::new(super::login_input::CodeEntry::default()));
             let paste_into = {
                 let login_pending = login_pending.clone();
                 let show_toast = show_toast.clone();
-                let (typing, enter_after, code_sent) = (typing.clone(), enter_after.clone(), code_sent.clone());
+                let entry = entry.clone();
                 move |t: &vte4::Terminal| {
                     let t = t.clone();
                     let in_login = login_pending.get();
                     let show_toast = show_toast.clone();
-                    if in_login && typing.get() {
+                    if in_login && !entry.borrow_mut().begin() {
                         show_toast("still typing the pasted code");
                         return;
                     }
-                    let (typing, enter_after, code_sent) = (typing.clone(), enter_after.clone(), code_sent.clone());
+                    let entry = entry.clone();
                     t.clipboard().read_text_async(None::<&gtk::gio::Cancellable>, move |res| {
-                        let Ok(Some(text)) = res else { return };
-                        if text.is_empty() {
-                            return;
-                        }
+                        let text = res.ok().flatten().map(|t| t.to_string()).unwrap_or_default();
                         if !in_login {
-                            t.paste_text(&text);
+                            if !text.is_empty() {
+                                t.paste_text(&text);
+                            }
                             return;
                         }
                         // a login code: typed in one character at a time (a bracketed block is
                         // swallowed silently by the prompt) and acknowledged, not shown
-                        let chars: Vec<String> = text.trim().chars().filter(|c| !c.is_control()).map(|c| c.to_string()).collect();
-                        typing.set(true);
-                        enter_after.set(false);
-                        let i = std::cell::Cell::new(0usize);
+                        if entry.borrow_mut().paste(&text) == 0 {
+                            return;
+                        }
                         glib::timeout_add_local(std::time::Duration::from_millis(4), move || {
-                            let n = i.get();
-                            if n >= chars.len() {
-                                typing.set(false);
-                                if enter_after.replace(false) {
-                                    t.feed_child(b"\r");
-                                    code_sent.set(Some(std::time::Instant::now()));
-                                    show_toast(&format!("pasted {} characters and sent", chars.len()));
-                                } else {
-                                    show_toast(&format!("pasted {} characters — press Enter", chars.len()));
+                            let step = entry.borrow_mut().step(std::time::Instant::now());
+                            match step {
+                                super::login_input::Step::Type(c) => {
+                                    t.feed_child(c.encode_utf8(&mut [0; 4]).as_bytes());
+                                    glib::ControlFlow::Continue
                                 }
-                                return glib::ControlFlow::Break;
+                                super::login_input::Step::Done { typed, sent } => {
+                                    if sent {
+                                        t.feed_child(b"\r");
+                                        show_toast(&format!("pasted {typed} characters and sent"));
+                                    } else {
+                                        show_toast(&format!("pasted {typed} characters — press Enter"));
+                                    }
+                                    glib::ControlFlow::Break
+                                }
+                                super::login_input::Step::Idle => glib::ControlFlow::Break,
                             }
-                            t.feed_child(chars[n].as_bytes());
-                            i.set(n + 1);
-                            glib::ControlFlow::Continue
                         });
                     });
                 }
@@ -340,16 +335,11 @@ impl SessionView {
                 let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
                 let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
                 let k = key.to_lower();
-                if typing.get() {
-                    // the pasted code is still landing: Enter goes after it, other keys wait
-                    if key == gdk::Key::Return || key == gdk::Key::KP_Enter { enter_after.set(true); }
-                    return glib::Propagation::Stop;
-                }
-                if (key == gdk::Key::Return || key == gdk::Key::KP_Enter) && login_keys.get() {
-                    if code_sent.get().is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(2)) {
+                if login_keys.get() {
+                    let pressed = if key == gdk::Key::Return || key == gdk::Key::KP_Enter { super::login_input::Key::Enter } else { super::login_input::Key::Other };
+                    if entry.borrow_mut().key(pressed, std::time::Instant::now()) == super::login_input::KeyAction::Hold {
                         return glib::Propagation::Stop;
                     }
-                    code_sent.set(Some(std::time::Instant::now()));
                 }
                 if ctrl && (k == gdk::Key::v || (shift && key == gdk::Key::Insert)) {
                     paste(&t);
