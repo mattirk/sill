@@ -39,6 +39,10 @@ const OUTBOX_LIMIT: usize = 64 << 20;
 #[derive(Deserialize)]
 struct Hello {
     role: String,
+    /// `{"role":"port","port":N}`: relay the connection to `127.0.0.1:N` in the jail, for a port a
+    /// running managed process declared (docs/tasks.md §2.5).
+    #[serde(default)]
+    port: Option<u16>,
 }
 
 #[derive(Deserialize)]
@@ -248,6 +252,7 @@ fn handle_connection(conn: UnixStream, shared: Shared, procs: procs::Procs) -> R
     let hello: Hello = serde_json::from_str(hello.trim()).context("hello line")?;
     match hello.role.as_str() {
         "control" => control_loop(reader, conn, shared, procs),
+        "port" => port_relay(reader, conn, hello.port.context("port role without a port")?, procs),
         "agent" => agent_relay(reader, conn, shared),
         other => bail!("unknown role {other}"),
     }
@@ -596,6 +601,35 @@ fn agent_relay(reader: BufReader<UnixStream>, writer: UnixStream, shared: Shared
         shared.1.notify_all();
     }
     let _ = out_thread.join();
+    Ok(())
+}
+
+// --- exposed ports --------------------------------------------------------------------------------
+
+/// The shelf's side of an exposed port: one line says yes or no, then bytes both ways between the
+/// connection and `127.0.0.1:port` inside. Only a port a running managed process declared.
+fn port_relay(mut reader: BufReader<UnixStream>, mut writer: UnixStream, port: u16, procs: procs::Procs) -> Result<()> {
+    let declared = procs.list().iter().any(|p| p.port == Some(port) && p.state == procs::ProcState::Running);
+    if !declared {
+        writer.write_all(format!("{}\n", serde_json::to_string(&Reply::err(format!("no running managed process declared port {port}")))?).as_bytes())?;
+        return Ok(());
+    }
+    let tcp = match std::net::TcpStream::connect(("127.0.0.1", port)) {
+        Ok(t) => t,
+        Err(e) => {
+            writer.write_all(format!("{}\n", serde_json::to_string(&Reply::err(format!("port {port} inside the jail: {e}")))?).as_bytes())?;
+            return Ok(());
+        }
+    };
+    writer.write_all(format!("{}\n", serde_json::to_string(&Reply::ok())?).as_bytes())?;
+    let (mut tcp_r, mut tcp_w) = (tcp.try_clone()?, tcp);
+    let t = std::thread::spawn(move || {
+        let _ = std::io::copy(&mut reader, &mut tcp_w);
+        let _ = tcp_w.shutdown(std::net::Shutdown::Write);
+    });
+    let _ = std::io::copy(&mut tcp_r, &mut writer);
+    let _ = writer.shutdown(std::net::Shutdown::Write);
+    let _ = t.join();
     Ok(())
 }
 

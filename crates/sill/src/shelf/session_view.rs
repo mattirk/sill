@@ -66,6 +66,17 @@ pub struct SessionView {
     usage_lbl: RefCell<Option<gtk::Label>>,
     /// History not shown yet: the first shown entry's seq, and the "show earlier" row at the top.
     earlier: RefCell<Option<(i64, gtk::Box, gtk::Button)>>,
+    /// Managed processes (docs/tasks.md §2.4, §2.5): the shim's list as last polled, the ports
+    /// bridged to the host's loopback, the ports the person was asked about / said yes to, the
+    /// indicator in the controls row and the poll timer.
+    procs: RefCell<Vec<sill_core::shim::Proc>>,
+    bridges: RefCell<HashMap<u16, super::processes::Bridge>>,
+    port_asked: RefCell<std::collections::HashSet<u16>>,
+    port_approved: RefCell<std::collections::HashSet<u16>>,
+    proc_btn: RefCell<Option<gtk::Button>>,
+    proc_tick: RefCell<Option<glib::SourceId>>,
+    /// A log to show in the shelf's viewer: (title, source).
+    pub on_open_log: RefCell<Option<Box<dyn Fn(&str, sill_core::session::LogSource)>>>,
     pins_row: gtk::Box,
     /// Agent controls (mode, model, effort, toggles) + send button, under the prompt.
     controls_row: gtk::Box,
@@ -379,6 +390,13 @@ impl SessionView {
             usage: std::cell::Cell::new(None),
             usage_lbl: RefCell::new(None),
             earlier: RefCell::new(None),
+            procs: RefCell::new(Vec::new()),
+            bridges: RefCell::new(HashMap::new()),
+            port_asked: RefCell::new(Default::default()),
+            port_approved: RefCell::new(Default::default()),
+            proc_btn: RefCell::new(None),
+            proc_tick: RefCell::new(None),
+            on_open_log: RefCell::new(None),
             pins_row,
             controls_row,
             rebuilding: std::cell::Cell::new(false),
@@ -1189,6 +1207,25 @@ impl SessionView {
                 }
             }
         }
+        // managed processes: how many run (warning colour when one failed); the list on click
+        {
+            let b = gtk::Button::new();
+            b.add_css_class("flat");
+            b.add_css_class("sill-ctl-icon");
+            b.add_css_class("sill-procs");
+            b.set_visible(false);
+            let menu = gtk::Popover::new();
+            menu.add_css_class("sill-menu");
+            menu.set_has_arrow(false);
+            menu.set_parent(&b);
+            let v = self.clone();
+            menu.connect_show(move |pop| v.fill_proc_menu(pop));
+            let m = menu.clone();
+            b.connect_clicked(move |_| m.popup());
+            right.append(&b);
+            *self.proc_btn.borrow_mut() = Some(b);
+            self.show_procs();
+        }
         // context used, when the agent reports it
         {
             let l = gtk::Label::new(None);
@@ -1859,6 +1896,7 @@ impl SessionView {
         self.ready.set(false);
         match session::start(&s, &self.store, fresh) {
             Ok(d) => {
+                self.start_proc_polling();
                 if !self.mode_noted.replace(true)
                     && let Some(n) = session::mode_note()
                 {
@@ -2028,6 +2066,7 @@ impl SessionView {
                 let id = self.id();
                 let v = self.clone();
                 glib::idle_add_local_once(move || v.after_turn(&id));
+                self.poll_procs();
             }
             Event::AuthRequired { message, methods } => {
                 self.status.set_text("login needed");
@@ -2126,6 +2165,250 @@ impl SessionView {
         if let Some(d) = self.driver.borrow().as_ref() {
             let _ = d.commands.try_send(Command::Quit);
         }
+        if let Some(id) = self.proc_tick.borrow_mut().take() {
+            id.remove();
+        }
+        self.bridges.borrow_mut().clear();
+    }
+
+    // --- managed processes (docs/tasks.md §2.4, §2.5) -------------------------------------------
+
+    /// Ask the shim for its process list every few seconds while the view lives (cheap: one line
+    /// over a unix socket); also right after a turn.
+    fn start_proc_polling(self: &Rc<Self>) {
+        if self.proc_tick.borrow().is_some() {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        let id = glib::timeout_add_seconds_local(3, move || match weak.upgrade() {
+            Some(v) => {
+                v.poll_procs();
+                glib::ControlFlow::Continue
+            }
+            None => glib::ControlFlow::Break,
+        });
+        *self.proc_tick.borrow_mut() = Some(id);
+        self.poll_procs();
+    }
+
+    fn poll_procs(self: &Rc<Self>) {
+        let Ok(sock) = sill_core::session::socket_path(&self.id()) else { return };
+        let (tx, rx) = async_channel::bounded::<Option<Vec<sill_core::shim::Proc>>>(1);
+        std::thread::spawn(move || {
+            let list = sill_core::shim::Control::connect(&sock).and_then(|mut c| c.proc_list()).ok();
+            let _ = tx.send_blocking(list);
+        });
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            if let Ok(list) = rx.recv().await
+                && let Some(v) = weak.upgrade()
+            {
+                v.procs_updated(list);
+            }
+        });
+    }
+
+    /// The list came back (`None`: no shim to ask — the jail is down, so are its ports).
+    fn procs_updated(self: &Rc<Self>, list: Option<Vec<sill_core::shim::Proc>>) {
+        let list = list.unwrap_or_default();
+        // ports: bridges for running processes that declared one and may be exposed; the rest go
+        let running_ports: Vec<(u16, String)> = list.iter().filter(|p| p.running()).filter_map(|p| p.port.map(|port| (port, p.name.clone()))).collect();
+        self.bridges.borrow_mut().retain(|port, _| running_ports.iter().any(|(p, _)| p == port));
+        let allowed = {
+            let s = self.session.borrow();
+            let home = session::home().unwrap_or_default();
+            sill_core::policy::Policy::load(&s.policy, &home).map(|p| p.processes).unwrap_or_default()
+        };
+        for (port, name) in running_ports {
+            if self.bridges.borrow().contains_key(&port) {
+                continue;
+            }
+            if allowed.allows(port) || self.port_approved.borrow().contains(&port) {
+                self.expose_port(port, &name);
+            } else if self.port_asked.borrow_mut().insert(port) {
+                let v = self.clone();
+                let n = name.clone();
+                self.conv.add_actions(
+                    &format!("{name} listens on port {port} inside the jail. Expose it on this machine, loopback only (http://127.0.0.1:{port})?"),
+                    vec![
+                        ("Expose".into(), Rc::new(move || {
+                            v.port_approved.borrow_mut().insert(port);
+                            v.expose_port(port, &n);
+                        })),
+                        ("Not now".into(), Rc::new(|| {})),
+                    ],
+                );
+            }
+        }
+        *self.procs.borrow_mut() = list;
+        self.show_procs();
+    }
+
+    fn expose_port(self: &Rc<Self>, port: u16, name: &str) {
+        let Ok(sock) = sill_core::session::socket_path(&self.id()) else { return };
+        match super::processes::expose(sock, port) {
+            Ok(b) => {
+                let note = if b.host_port == port {
+                    format!("{name}: port {port} is open on this machine at {}", b.url())
+                } else {
+                    format!("{name}: port {port} is open on this machine at {} ({port} was taken)", b.url())
+                };
+                self.conv.add_note(&note);
+                self.bridges.borrow_mut().insert(port, b);
+            }
+            Err(e) => self.conv.add_note(&format!("{name}: port {port} could not be exposed: {e:#}")),
+        }
+        self.show_procs();
+    }
+
+    /// The indicator: the count of running processes; warning colour while an ended one failed.
+    fn show_procs(&self) {
+        let Some(b) = self.proc_btn.borrow().clone() else { return };
+        let procs = self.procs.borrow();
+        let running = procs.iter().filter(|p| p.running()).count();
+        let failed = procs.iter().any(|p| p.failed());
+        if procs.is_empty() {
+            b.set_visible(false);
+            return;
+        }
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+        row.append(&super::icons::glyph_image("sill-processes"));
+        row.append(&gtk::Label::new(Some(&running.to_string())));
+        b.set_child(Some(&row));
+        if failed {
+            b.add_css_class("sill-procs-fail");
+        } else {
+            b.remove_css_class("sill-procs-fail");
+        }
+        b.set_tooltip_text(Some(&format!("{running} managed process(es) running{}", if failed { " · one has failed" } else { "" })));
+        b.set_visible(true);
+    }
+
+    /// The list: name, state and uptime, the last output line, the URL when exposed; Log, Stop /
+    /// Dismiss per row, Stop all below.
+    fn fill_proc_menu(self: &Rc<Self>, pop: &gtk::Popover) {
+        let col = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let procs = self.procs.borrow().clone();
+        for p in &procs {
+            let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
+            row.add_css_class("sill-proc-row");
+            let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            let name = gtk::Label::new(Some(&p.name));
+            name.add_css_class("sill-proc-name");
+            name.set_xalign(0.0);
+            let state = match (p.running(), p.exit_code(), p.state.as_str()) {
+                (true, _, _) => format!("running · {}", super::processes::uptime(now.saturating_sub(p.started))),
+                (_, Some(0), _) => "exited".to_string(),
+                (_, Some(c), _) => format!("failed ({c})"),
+                _ => "stopped".to_string(),
+            };
+            let st = gtk::Label::new(Some(&state));
+            st.add_css_class("sill-proc-state");
+            st.set_hexpand(true);
+            st.set_xalign(0.0);
+            line.append(&name);
+            line.append(&st);
+            let log = gtk::Button::with_label("Log");
+            log.add_css_class("flat");
+            log.add_css_class("sill-change-btn");
+            {
+                let v = self.clone();
+                let n = p.name.clone();
+                let pop = pop.clone();
+                log.connect_clicked(move |_| {
+                    pop.popdown();
+                    if let Ok(socket) = sill_core::session::socket_path(&v.id())
+                        && let Some(cb) = v.on_open_log.borrow().as_ref()
+                    {
+                        cb(&format!("{n} · process"), sill_core::session::LogSource::Proc { socket, name: n.clone() });
+                    }
+                });
+            }
+            line.append(&log);
+            let act = gtk::Button::with_label(if p.running() { "Stop" } else { "Dismiss" });
+            act.add_css_class("flat");
+            act.add_css_class("sill-change-btn");
+            {
+                let v = self.clone();
+                let n = p.name.clone();
+                let running = p.running();
+                let pop = pop.clone();
+                act.connect_clicked(move |_| {
+                    pop.popdown();
+                    v.proc_action(&n, running);
+                });
+            }
+            line.append(&act);
+            row.append(&line);
+            let cmd = gtk::Label::new(Some(&p.argv.join(" ")));
+            cmd.add_css_class("sill-proc-last");
+            cmd.set_xalign(0.0);
+            cmd.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            cmd.set_max_width_chars(60);
+            row.append(&cmd);
+            if !p.last_line.is_empty() {
+                let last = gtk::Label::new(Some(&p.last_line));
+                last.add_css_class("sill-proc-last");
+                last.set_xalign(0.0);
+                last.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                last.set_max_width_chars(60);
+                row.append(&last);
+            }
+            if let Some(port) = p.port {
+                let bridged = self.bridges.borrow().get(&port).map(|b| b.url());
+                match bridged {
+                    Some(url) => {
+                        let link = gtk::LinkButton::with_label(&url, &url);
+                        link.set_halign(gtk::Align::Start);
+                        row.append(&link);
+                    }
+                    None if p.running() => {
+                        let l = gtk::Label::new(Some(&format!("port {port} inside the jail, not exposed")));
+                        l.add_css_class("sill-proc-last");
+                        l.set_xalign(0.0);
+                        row.append(&l);
+                    }
+                    None => {}
+                }
+            }
+            col.append(&row);
+        }
+        if procs.iter().filter(|p| p.running()).count() > 1 {
+            let all = gtk::Button::with_label("Stop all");
+            all.add_css_class("flat");
+            all.add_css_class("sill-menu-item");
+            let v = self.clone();
+            let pop = pop.clone();
+            all.connect_clicked(move |_| {
+                pop.popdown();
+                v.proc_action("", true);
+            });
+            col.append(&all);
+        }
+        pop.set_child(Some(&col));
+    }
+
+    /// Stop one (or all, with an empty name) or dismiss an ended one; the list is polled again after.
+    fn proc_action(self: &Rc<Self>, name: &str, stop: bool) {
+        let Ok(sock) = sill_core::session::socket_path(&self.id()) else { return };
+        let name = name.to_string();
+        let (tx, rx) = async_channel::bounded::<Result<(), String>>(1);
+        std::thread::spawn(move || {
+            let r = sill_core::shim::Control::connect(&sock).and_then(|mut c| match (stop, name.is_empty()) {
+                (true, true) => c.proc_stop_all().map(|_| ()),
+                (true, false) => c.proc_stop(&name),
+                (false, _) => c.proc_dismiss(&name),
+            });
+            let _ = tx.send_blocking(r.map_err(|e| format!("{e:#}")));
+        });
+        let v = self.clone();
+        glib::spawn_future_local(async move {
+            if let Ok(Err(e)) = rx.recv().await {
+                v.conv.add_note(&format!("process: {e}"));
+            }
+            v.poll_procs();
+        });
     }
 }
 

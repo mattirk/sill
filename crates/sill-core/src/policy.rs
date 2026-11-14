@@ -23,6 +23,27 @@ pub struct Policy {
     pub limits: Limits,
     #[serde(default)]
     pub jail: JailOptions,
+    #[serde(default)]
+    pub processes: Processes,
+}
+
+/// Managed processes (docs/tasks.md §2.4, §2.5).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct Processes {
+    /// Ports a managed process may be exposed on the host's loopback without asking: `"3000"`,
+    /// `"3000-3999"`. Anything else is asked once per session in the conversation.
+    #[serde(default)]
+    pub expose: Vec<String>,
+}
+
+impl Processes {
+    pub fn allows(&self, port: u16) -> bool {
+        self.expose.iter().any(|spec| match spec.split_once('-') {
+            Some((a, b)) => matches!((a.trim().parse::<u16>(), b.trim().parse::<u16>()), (Ok(a), Ok(b)) if a <= port && port <= b),
+            None => spec.trim().parse::<u16>().ok() == Some(port),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

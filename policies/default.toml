@@ -80,3 +80,8 @@ x11 = false
 dbus = false
 [jail.env]
 # extra environment for every process in the jail, e.g. TZ = "Europe/Helsinki"
+
+[processes]
+# Managed processes (`sill-proc start --name dev --port 3000 -- …`): ports exposed on this machine's
+# loopback without asking; any other port is asked once per session. e.g. expose = ["3000-3999"]
+expose = []

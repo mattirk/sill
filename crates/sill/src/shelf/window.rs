@@ -1077,6 +1077,12 @@ impl Shelf {
             view.connect_pane(move || shelf.sync_pane());
             let shelf = self.clone();
             *view.on_host_terminal.borrow_mut() = Some(Box::new(move |window| shelf.open_host_terminal(window)));
+            let shelf = self.clone();
+            *view.on_open_log.borrow_mut() = Some(Box::new(move |title, src| {
+                shelf.viewer.open_log(title, src);
+                shelf.viewer.root.set_visible(true);
+                shelf.viewer.focus();
+            }));
         }
         {
             // the top-bar status mirrors the selected view's status

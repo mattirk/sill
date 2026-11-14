@@ -1152,6 +1152,13 @@ button.sill-lock:checked { background: transparent; opacity: 0.9; }
 /* context used, of the model's window; warning colour from 80 % */
 .sill-usage { font-size: 80%; font-family: monospace; color: alpha(@view_fg_color, 0.45); padding: 0 0.4em; }
 .sill-usage.sill-usage-high { color: @warning_color; }
+/* managed processes: the indicator and its list */
+.sill-procs { font-size: 80%; color: alpha(@view_fg_color, 0.6); padding: 0 0.3em; }
+.sill-procs.sill-procs-fail { color: @warning_color; }
+.sill-proc-row { padding: 6px 10px; }
+.sill-proc-name { font-weight: bold; }
+.sill-proc-state { font-size: 85%; opacity: 0.7; font-family: monospace; }
+.sill-proc-last { font-size: 85%; opacity: 0.6; font-family: monospace; }
 /* the "show earlier" row above a long session's history */
 .sill-earlier { font-size: 85%; opacity: 0.6; padding: 2px 12px; min-height: 0; }
 .sill-earlier:hover { opacity: 1; }

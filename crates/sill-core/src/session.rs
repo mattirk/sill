@@ -311,6 +311,8 @@ pub fn unit_name(session: &str) -> String {
 pub enum LogSource {
     Journal(String),
     Files(Vec<PathBuf>),
+    /// A managed process's output, read from the shim (docs/tasks.md §2.4).
+    Proc { socket: PathBuf, name: String },
 }
 
 pub fn log_source(session: &str) -> LogSource {
@@ -354,6 +356,11 @@ pub fn read_log(src: &LogSource, lines: usize) -> String {
             }
             if out.is_empty() { "no log yet".to_string() } else { out }
         }
+        LogSource::Proc { socket, name } => match shim::Control::connect(socket).and_then(|mut c| c.proc_tail(name, lines)) {
+            Ok(t) if t.is_empty() => "no output yet".to_string(),
+            Ok(t) => t,
+            Err(e) => format!("{e:#}"),
+        },
     }
 }
 

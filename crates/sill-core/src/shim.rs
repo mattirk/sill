@@ -193,6 +193,21 @@ pub fn agent_stream(socket: &Path) -> Result<UnixStream> {
     connect(socket, "agent")
 }
 
+/// A byte stream to `127.0.0.1:port` inside the jail, relayed by the shim — only for a port a
+/// running managed process declared (docs/tasks.md §2.5). The shim answers one line first.
+pub fn port_stream(socket: &Path, port: u16) -> Result<UnixStream> {
+    let mut s = UnixStream::connect(socket).with_context(|| format!("connect to {}", socket.display()))?;
+    s.write_all(format!("{}\n", json!({ "role": "port", "port": port })).as_bytes())?;
+    let mut reader = BufReader::new(s.try_clone()?);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    let reply: serde_json::Value = serde_json::from_str(line.trim()).context("shim reply")?;
+    if reply["ok"].as_bool() != Some(true) {
+        bail!("shim: {}", reply["error"].as_str().unwrap_or("port refused"));
+    }
+    Ok(s)
+}
+
 /// Where a session's sockets live on the host.
 pub fn runtime_dir(session: &str) -> Result<PathBuf> {
     let base = std::env::var("XDG_RUNTIME_DIR")

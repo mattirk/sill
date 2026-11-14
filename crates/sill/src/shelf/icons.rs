@@ -25,6 +25,8 @@ const STROKES: &[(&str, &str)] = &[
     ("sill-changes", "M12 3v14M5 10h14M5 21h14"),
     ("sill-files", "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"),
     // the tree's folders: closed is `sill-files`, open is lucide's folder-open
+    // managed processes (lucide server): the controls row's indicator
+    ("sill-processes", "M2 2h20v8h-20zM2 14h20v8h-20zM6 6L6.01 6M6 18L6.01 18"),
     ("sill-folder-open", "m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"),
     // the glyphs that used to come from the desktop's icon theme (2026-11-01): close, refresh,
     // delete, the Changes page's folds, the ✓ of a choice, and the tree's file kinds
