@@ -310,6 +310,8 @@ pub enum Event {
     Summarized { text: Option<String>, title: Option<String> },
     /// A prompt with what went with it (`UserText` stays for prompts without attachments).
     UserMessage { text: String, attachments: Vec<UserAttachment> },
+    /// Images in the agent's message, by session upload (SFP `image` blocks that were kept).
+    AgentImages(Vec<UserAttachment>),
     /// The agent's whole current plan; each replaces the turn's last.
     Plan(Vec<PlanEntry>),
     /// The slash commands the agent offers now.

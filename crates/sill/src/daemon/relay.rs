@@ -68,6 +68,7 @@ pub(crate) enum Event {
     ToolCall { id: String, title: String, kind: String, status: String, detail: Option<String>, diff: Option<String>, parent: Option<String> },
     ToolCallUpdate { id: String, status: Option<String>, title: Option<String>, detail: Option<String>, diff: Option<String> },
     SubagentText { parent: String, text: String },
+    Image { mime: String, data_base64: String, parent: Option<String> },
     PermissionRequest { request: u64, tool_call_id: String, title: String, options: Vec<acp::PermissionOption> },
     AutoAnswered { tool_call_id: String, title: String, allowed: bool },
     Elicitation { request: u64, message: String, fields: Vec<acp::FormField> },
@@ -169,6 +170,8 @@ fn event_from_acp(event: acp::Event, request: u64) -> (Event, Option<Reply>) {
         A::ToolCall { id, title, kind, status, detail, diff, parent } => Event::ToolCall { id, title, kind, status, detail, diff, parent },
         A::ToolCallUpdate { id, status, title, detail, diff } => Event::ToolCallUpdate { id, status, title, detail, diff },
         A::SubagentText { parent, text } => Event::SubagentText { parent, text },
+        A::Image { mime, data_base64, parent } => Event::Image { mime, data_base64, parent },
+        A::AgentImages(_) => Event::Other("_sill_frontend_only_agent_images".into()),
         A::PermissionRequest { tool_call_id, title, options, reply } => {
             return (Event::PermissionRequest { request, tool_call_id, title, options }, Some(Reply::Permission(reply)));
         }

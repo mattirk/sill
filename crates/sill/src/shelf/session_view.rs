@@ -1516,6 +1516,10 @@ impl SessionView {
                 "user" if !e.attachments.is_empty() => self.conv.add_user_full(&e.text, &e.attachments),
                 "user" => self.conv.add_user_with(&e.text, &e.extra.lines().filter(|l| !l.is_empty()).map(str::to_string).collect::<Vec<_>>()),
                 "plan" => self.conv.set_plan_text(&e.text),
+                "agent" | "subagent" if !e.attachments.is_empty() => {
+                    if !e.text.is_empty() { self.conv.add_agent_block(&e.text); }
+                    self.conv.add_agent_images(&e.attachments);
+                }
                 "agent" => self.conv.add_agent_block(&e.text),
                 "thought" => self.conv.add_thought_block(&e.text),
                 "subagent" => self.conv.add_subagent_text(&e.parent, &e.text),

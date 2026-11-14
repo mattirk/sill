@@ -7,6 +7,12 @@ use sill_core::{acp, store::Store};
 use sill_proto::{rpc::Error, sfp::{Upload, UploadCreate, UploadCreated, UploadGet}};
 
 pub const MAX_UPLOAD_BYTES: usize = 1024 * 1024;
+/// Images the agent produced: stored under this reserved prefix with a budget of their own, so
+/// agent output can never fill the space a person's uploads use (and the reverse).
+pub const AGENT_PREFIX: &str = "sill-agent-";
+pub const AGENT_IMAGE_BYTES: usize = 2 * 1024 * 1024;
+const AGENT_MEDIA_OBJECTS: i64 = 4096;
+const AGENT_MEDIA_BYTES: i64 = 256 * 1024 * 1024;
 /// The image types models accept as image blocks; other images (SVG, TIFF, HEIC…) go as files.
 const IMAGE_BLOCK_MIMES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
 fn domain(code: &str, message: &str) -> anyhow::Error { Error::domain(code, message).into() }
@@ -23,7 +29,7 @@ fn session(store: &Store, id: &str) -> Result<sill_core::store::Session> {
 }
 
 pub(super) fn create(store: &Store, request: UploadCreate) -> Result<UploadCreated> {
-    if request.upload_id.starts_with("sill-inline-") { return Err(Error::invalid_params("sill-inline- is reserved for inline attachments").into()); }
+    if request.upload_id.starts_with("sill-inline-") || request.upload_id.starts_with(AGENT_PREFIX) { return Err(Error::invalid_params("sill-inline- and sill-agent- upload IDs are reserved").into()); }
     create_owned(store, request)
 }
 fn create_owned(store: &Store, request: UploadCreate) -> Result<UploadCreated> {
@@ -47,7 +53,7 @@ fn create_owned(store: &Store, request: UploadCreate) -> Result<UploadCreated> {
     if let Some((name,mime,old_bytes)) = old {
         if name != request.name || mime != request.mime || bytes != old_bytes { return Err(domain("id_conflict", "upload ID already identifies different input")); }
     } else {
-        let (count,total):(i64,i64)=store.conn().query_row("SELECT count(*),coalesce(sum(length(bytes)),0) FROM sfp_uploads WHERE session_id=?1",[&request.session_id],|r|Ok((r.get(0)?,r.get(1)?)))?;
+        let (count,total):(i64,i64)=store.conn().query_row("SELECT count(*),coalesce(sum(length(bytes)),0) FROM sfp_uploads WHERE session_id=?1 AND upload_id NOT LIKE 'sill-agent-%'",[&request.session_id],|r|Ok((r.get(0)?,r.get(1)?)))?;
         if count>=4096 || total.saturating_add(bytes.len() as i64)>256*1024*1024 {return Err(anyhow::Error::from(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Capacity, None, "session uploads exceed 4096 objects or 256 MiB")));}
         store.conn().execute("INSERT INTO sfp_uploads(session_id,upload_id,name,mime,bytes) VALUES (?1,?2,?3,?4,?5)",
             params![request.session_id,request.upload_id,request.name,request.mime,bytes])?;
@@ -73,6 +79,24 @@ pub(super) fn from_inline(store: &Store, session_id: &str, submission_id: &str, 
     let name = if name.is_empty() || name == "." || name == ".." { "image".to_string() } else { name };
     create_owned(store, UploadCreate { session_id: session_id.into(), upload_id: upload_id.clone(), name: name.clone(), mime: mime.into(), data_base64: data_base64.into() })?;
     Ok((upload_id, name))
+}
+
+/// Keep agent images (content-addressed, so a repeat is free). Returns the IDs refused because
+/// the session's agent-media budget is full; their blocks then say `omitted: capacity`.
+pub(super) fn keep_agent_media(store: &Store, session_id: &str, media: Vec<super::sfp_adapter::AgentMedia>) -> Result<std::collections::BTreeSet<String>> {
+    let mut refused = std::collections::BTreeSet::new();
+    if media.is_empty() { return Ok(refused); }
+    initialize(store)?;
+    for m in media {
+        let exists: bool = store.conn().query_row("SELECT count(*) FROM sfp_uploads WHERE session_id=?1 AND upload_id=?2", params![session_id, m.upload_id], |r| r.get::<_, i64>(0))? > 0;
+        if exists { continue; }
+        let (count, total): (i64, i64) = store.conn().query_row("SELECT count(*),coalesce(sum(length(bytes)),0) FROM sfp_uploads WHERE session_id=?1 AND upload_id LIKE 'sill-agent-%'", [session_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        if count >= AGENT_MEDIA_OBJECTS || total.saturating_add(m.bytes.len() as i64) > AGENT_MEDIA_BYTES { refused.insert(m.upload_id); continue; }
+        let ext = match m.mime.as_str() { "image/png" => ".png", "image/jpeg" => ".jpg", "image/gif" => ".gif", "image/webp" => ".webp", "image/svg+xml" => ".svg", _ => "" };
+        store.conn().execute("INSERT INTO sfp_uploads(session_id,upload_id,name,mime,bytes) VALUES (?1,?2,?3,?4,?5)",
+            params![session_id, m.upload_id, format!("agent-image{ext}"), m.mime, m.bytes])?;
+    }
+    Ok(refused)
 }
 
 fn image_block(mime: &str, images: bool) -> bool { images && IMAGE_BLOCK_MIMES.contains(&mime) }
@@ -119,8 +143,10 @@ pub(super) fn resolve(store: &Store, session_id: &str, upload_id: &str, images: 
     Ok(acp::Attachment{name,mime,kind:acp::AttachmentKind::File{jail_path:jail.join(file)}})
 }
 
-pub(super) fn decode(text: &str) -> Result<Vec<u8>> {
-    if text.len() > MAX_UPLOAD_BYTES.div_ceil(3)*4 { return Err(anyhow::Error::from(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Request, Some(1048576), "upload exceeds 1 MiB decoded limit"))); }
+pub(super) fn decode(text: &str) -> Result<Vec<u8>> { decode_limited(text, MAX_UPLOAD_BYTES) }
+pub(super) fn decode_limited(text: &str, max: usize) -> Result<Vec<u8>> {
+    let too_large = || anyhow::Error::from(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Request, Some(max as u64), format!("upload exceeds the {max}-byte decoded limit")));
+    if text.len() > max.div_ceil(3)*4 { return Err(too_large()); }
     if text.len()%4 != 0 { return Err(Error::invalid_params("base64 must use canonical padding").into()); }
     let value=|b:u8|->Result<u8> { match b { b'A'..=b'Z'=>Ok(b-b'A'), b'a'..=b'z'=>Ok(b-b'a'+26), b'0'..=b'9'=>Ok(b-b'0'+52), b'+'=>Ok(62), b'/'=>Ok(63), _=>Err(Error::invalid_params("invalid base64").into()) } };
     let mut out=Vec::with_capacity(text.len()/4*3);
@@ -138,7 +164,7 @@ pub(super) fn decode(text: &str) -> Result<Vec<u8>> {
             } else { out.push((d<<6)|value(c[3])?); }
         }
     }
-    if out.len()>MAX_UPLOAD_BYTES { return Err(anyhow::Error::from(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Request, Some(1048576), "upload exceeds 1 MiB decoded limit"))); }
+    if out.len()>max { return Err(too_large()); }
     Ok(out)
 }
 
@@ -211,6 +237,29 @@ mod tests {
         let error=create(&store,request).unwrap_err();
         assert_eq!(error.downcast_ref::<Error>().unwrap().data.as_ref().unwrap()["code"],"limit_exceeded");
         assert_eq!(store.conn().query_row("SELECT count(*) FROM sfp_uploads",[],|r|r.get::<_,i64>(0)).unwrap(),4096);
+        drop(store);std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn agent_images_have_their_own_budget_and_reserved_ids() {
+        use super::super::sfp_adapter::AgentMedia;
+        let root=std::env::temp_dir().join(format!("sill-agent-media-test-{}",super::super::sfp::id()));
+        let store=Store::open(&root.join("store.db")).unwrap();let session=store.create("test","default").unwrap();
+        let media=|id:&str|AgentMedia{upload_id:format!("{AGENT_PREFIX}{id}"),mime:"image/png".into(),bytes:b"png".to_vec()};
+        assert!(keep_agent_media(&store,&session.id,vec![media("a"),media("a")]).unwrap().is_empty());
+        let kept=get(&store,UploadGet{session_id:session.id.clone(),upload_id:format!("{AGENT_PREFIX}a")}).unwrap();
+        assert_eq!((kept.name.as_str(),kept.mime.as_str(),kept.data_base64.as_str()),("agent-image.png","image/png","cG5n"));
+        // a full person's quota leaves agent images alone, and the reverse
+        store.conn().execute("WITH RECURSIVE ids(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM ids WHERE n<4096) INSERT INTO sfp_uploads SELECT ?1,'filled-'||n,'empty','text/plain',x'' FROM ids",[&session.id]).unwrap();
+        assert!(keep_agent_media(&store,&session.id,vec![media("b")]).unwrap().is_empty());
+        store.conn().execute("DELETE FROM sfp_uploads WHERE upload_id LIKE 'filled-%'",[]).unwrap();
+        store.conn().execute("WITH RECURSIVE ids(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM ids WHERE n<4094) INSERT INTO sfp_uploads SELECT ?1,'sill-agent-filled-'||n,'empty','image/png',x'' FROM ids",[&session.id]).unwrap();
+        let refused=keep_agent_media(&store,&session.id,vec![media("a"),media("c")]).unwrap();
+        assert_eq!(refused.into_iter().collect::<Vec<_>>(),vec![format!("{AGENT_PREFIX}c")],"a kept image stays kept; a new one is refused");
+        let person=UploadCreate{session_id:session.id.clone(),upload_id:"mine".into(),name:"notes.txt".into(),mime:"text/plain".into(),data_base64:"YQ==".into()};
+        create(&store,person.clone()).unwrap();
+        let mut forged=person;forged.upload_id=format!("{AGENT_PREFIX}x");
+        assert!(create(&store,forged).is_err(),"clients cannot create agent media");
         drop(store);std::fs::remove_dir_all(root).unwrap();
     }
 

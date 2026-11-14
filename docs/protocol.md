@@ -22,6 +22,13 @@ and canonical records remain usable, except obsolete source receipts require a c
 Legacy inline-upload references are not preserved for retries; start new sessions at cutover.
 Active transcript recording remains because summaries and memory still consume it.
 
+**Backup and restore (settled for sfp/1, 2026-11-03).** Retry identities belong to a daemon
+store, and a restored backup is the same store: session IDs, creation and operation receipts
+(including deletion tombstones), submission and answer identities, and upload IDs all carry
+over unchanged, so a retry after restore resolves exactly as it would have before. Restoring
+over a live store, or merging two stores, is refused rather than reconciled. A backup format
+is not part of sfp/1; this states only what any restore must preserve.
+
 For deployment, stop sessions using the old build, then upgrade daemon and clients together
 on each machine. Back up state before any reset. Preserve configuration, agent definitions,
 credentials and pins; a database also contains pins, notes and Changes/undo records, so deleting
@@ -108,6 +115,25 @@ displays with `_sill/uploads.get`. Pre-baseline attachment identities are not mi
 An uploaded PNG, JPEG, GIF or WebP reaches the agent as an image block when the agent advertised
 image support; any other upload, and every upload to an agent without it, is a staged file.
 
+**Content blocks (settled for sfp/1, 2026-11-03).** An item's `content` is a list of blocks with
+`block_id`, `type`, optional `text` and further type-specific fields. The types are `text`,
+`thought`, `plan_entry`, `image`, `message_metadata` and `extension`, and the list is open: a
+client shows a block of a type it does not know by its `text` when present and otherwise skips
+it, never failing reconstruction, and preserves its fields. A new block type is a compatible
+addition. Conversation records never carry binary data.
+
+An `image` block is an image the agent showed in its message (or, with native ACP v2, in tool
+content). It always has `mime`, then exactly one of `upload_id` (a session upload: fetch the
+bytes with `_sill/uploads.get`) or `omitted` with the reason no bytes were kept: `too_large`
+(above 2 MiB decoded), `invalid` (undecodable data or MIME type) or `capacity` (the session's
+agent-image budget was full). Clients show a placeholder for `omitted`. A sub-agent's image carries
+`parent_item_id` like its text. Agent images are content-addressed under the reserved
+`sill-agent-` prefix (the same bytes and MIME type are one upload), are written in the same
+transaction as the event that first references them, and are removed with the session. They
+have their own budget of 4096 objects and 256 MiB per session, separate from the person's
+uploads, so neither can fill the other's. Clients cannot create `sill-agent-` uploads, but may
+attach one to a submission like any upload. ACP v1 tool-call images are not yet projected.
+
 Inline upload IDs now hash the complete submission identity and index under the reserved
 `sill-inline-` prefix. Public upload creation rejects that prefix; retries of previously accepted
 submissions deterministically use the same hashed references. Session uploads are bounded at 4096 objects and
@@ -163,6 +189,14 @@ input returns the original identity across disconnect/restart; changed input ret
 text is excluded from retry identity. Deleting a session clears its identity from the receipt;
 a subsequent retry returns `gone`, never creates another session. Receipts retain only SHA-256
 fingerprints of the key and input and the live session ID.
+
+**Retry fingerprint (settled for sfp/1, 2026-11-03).** The input fingerprint is SHA-256 over
+`sfp-request/1`, a newline and the canonical JSON of the request: object members at their
+default (null, false, 0, empty string, array or object) are dropped recursively, keys are
+sorted and array positions kept. A field added to `sessions.create` within sfp/1 must
+therefore have a default meaning "absent": an old client that omits it, retrying an old ID,
+still matches the receipt. The change from the earlier whole-struct hash means a development
+receipt written before 2026-11-03 returns `id_conflict` on an identical retry.
 
 **Receipt retention (settled for sfp/1, 2026-11-03):** creation receipts never expire;
 there is no retry window. The daemon-store ledger retains at most 65,536 entries, including

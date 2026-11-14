@@ -19,10 +19,14 @@ struct NativeItem {
     #[serde(default)]
     metadata_block: Option<String>,
 }
-fn blocks(values: &[Value]) -> Vec<sfp::Content> {
+fn blocks(values: &[Value], media: &mut Vec<AgentMedia>) -> Vec<sfp::Content> {
     values.iter().map(|value| {
         // Tool content wraps ordinary content; keep other content types intact.
         let value=if value["type"]=="content" {value.get("content").unwrap_or(value)} else {value};
+        // Image bytes become a session upload; the conversation record only names them.
+        if value["type"]=="image" && let Some(data)=value.get("data").and_then(Value::as_str) {
+            return image_block(value.get("mimeType").and_then(Value::as_str).unwrap_or_default(),data,media);
+        }
         let mut extra=value.as_object().cloned().unwrap_or_default();
         let kind=extra.remove("type").and_then(|v|v.as_str().map(str::to_owned)).unwrap_or_else(||"unknown".into());
         let text=extra.remove("text").and_then(|v|v.as_str().map(str::to_owned));
@@ -137,7 +141,7 @@ impl AdapterState {
         native.item.content.retain(|b|Some(&b.block_id)!=metadata_block.as_ref());
         if chunk {
             if let Some(content)=object.get("content") {
-                native.item.content.extend(blocks(std::slice::from_ref(content)));
+                native.item.content.extend(blocks(std::slice::from_ref(content),&mut self.media));
                 let current=native.fields.entry("content").or_insert_with(||Value::Array(vec![]));
                 if !current.is_array(){*current=Value::Array(vec![]);}
                 current.as_array_mut().unwrap().push(content.clone());
@@ -145,7 +149,7 @@ impl AdapterState {
         } else {
             let old_content=native.fields.get("content").cloned();
             patch(&mut native.fields,object);
-            if object.contains_key("content")&&old_content!=native.fields.get("content").cloned(){native.item.content=blocks(native.fields.get("content").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default());}
+            if object.contains_key("content")&&old_content!=native.fields.get("content").cloned(){native.item.content=blocks(native.fields.get("content").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default(),&mut self.media);}
         }
         if let Some(metadata)=native.fields.get("_meta").filter(|v|v.as_object().is_some_and(|o|!o.is_empty())) {
             let block_id=metadata_block.unwrap_or_else(||id("block"));

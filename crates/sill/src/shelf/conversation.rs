@@ -373,11 +373,22 @@ impl Conversation {
     pub fn add_user_full(&self, text: &str, attachments: &[UserAttachment]) {
         let names: Vec<String> = attachments.iter().map(|a| a.name.clone()).collect();
         self.add_user_with(text, &names);
+        self.add_images(attachments, "sill-user-images");
+    }
+
+    /// Images the agent showed (SFP `image` blocks, fetched as session uploads).
+    pub fn add_agent_images(&self, images: &[UserAttachment]) {
+        self.finish_current();
+        self.add_images(images, "sill-agent-images");
+    }
+
+    /// A row of image thumbnails, each loaded off the main thread; a click opens the file.
+    fn add_images(&self, attachments: &[UserAttachment], css: &str) {
         let images: Vec<&UserAttachment> = attachments.iter().filter(|a| a.mime.starts_with("image/")).collect();
         let Some(loader) = self.image_loader.borrow().clone() else { return };
         if images.is_empty() { return; }
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        row.add_css_class("sill-user-images");
+        row.add_css_class(css);
         for a in images {
             let b = gtk::Button::new();
             b.add_css_class("sill-md-image");
@@ -1439,6 +1450,8 @@ impl Conversation {
             Event::TurnStarted => self.status.set_text("working…"),
             Event::UserText(t) => self.add_user(&t),
             Event::UserMessage { text, attachments } => self.add_user_full(&text, &attachments),
+            Event::AgentImages(images) => self.add_agent_images(&images),
+            Event::Image { .. } => {} // daemon side: reaches a view as AgentImages
             Event::Plan(entries) => self.set_plan(&entries),
             Event::Notice { severity, title, description } => {
                 let text = match description { Some(d) if !d.is_empty() => format!("{title}\n{d}"), _ => title };

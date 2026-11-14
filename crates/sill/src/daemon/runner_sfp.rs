@@ -112,7 +112,7 @@ impl Runner {
         if let Some(source)=&source { if journal.source_seen(&self.id,source)? { return Ok(out); } }
         // ACP v1 session/load replay has no durable source identities. Existing history stays;
         // do not invent mappings from matching text or create duplicate history.
-        if st.replaying && matches!(event,relay::Event::Text(_)|relay::Event::Thought(_)|relay::Event::UserText(_)|relay::Event::ToolCall{..}|relay::Event::ToolCallUpdate{..}|relay::Event::SubagentText{..}) {
+        if st.replaying && matches!(event,relay::Event::Text(_)|relay::Event::Thought(_)|relay::Event::UserText(_)|relay::Event::ToolCall{..}|relay::Event::ToolCallUpdate{..}|relay::Event::SubagentText{..}|relay::Event::Image{..}) {
             out.extend(journal.append(&self.id,source,&[])?); return Ok(out);
         }
         let question=match event { relay::Event::Resolved{request}=>st.adapter.question_id(*request).map(|id|journal.question(&self.id,id)).transpose()?, _=>None };
@@ -123,6 +123,9 @@ impl Runner {
             if next.question_ids.is_empty() && next.turn_id.is_none() {next.activity="idle".into();}
             vec![p::Event::SessionUpdated{session:next}]
         } else {st.adapter.project(&session,event,question.as_ref())};
+        // Agent image bytes commit with the events that reference them, in this transaction.
+        let refused=super::super::uploads::keep_agent_media(store,&self.id,st.adapter.take_media())?;
+        super::super::sfp_adapter::mark_omitted(&mut events,&refused);
         let interrupted=matches!(event,relay::Event::Stopped(acp::StopReason::Other(reason)) if reason=="_sill_prompt_error")
             || matches!(event,relay::Event::AuthRequired{..}) && (st.ready.is_some() || st.active_submission.is_some())
             || matches!(event,relay::Event::Ended(_) | relay::Event::V2PromptFailed{..});

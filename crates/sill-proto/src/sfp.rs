@@ -79,7 +79,8 @@ pub struct Usage { pub used: String, pub size: String }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Content {
     pub block_id: String,
-    /// text, thought, or a future display type. Preserve unknown display data.
+    /// text, thought, plan_entry, image (`mime` + `upload_id` or `omitted`), message_metadata,
+    /// extension, or a future display type. Show unknown types by `text` or skip them; never fail.
     #[serde(rename = "type")]
     pub kind: String,
     pub text: Option<String>,

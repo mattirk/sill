@@ -809,6 +809,32 @@ fn update_active_time(previous: &SessionState, next: &mut SessionState, now: u64
     if working && next.active_since_ms.is_none() { next.active_since_ms = Some(now); }
 }
 
+/// The retry identity of a request record that may gain optional fields within sfp/1.
+///
+/// Object members at their default (null, false, 0, "", [] or {}) are dropped, recursively,
+/// and keys are sorted, so a field added later with a default that means "absent" leaves every
+/// earlier fingerprint unchanged. Array elements keep their positions. The `sfp-request/1`
+/// prefix versions this form; changing it would orphan every durable receipt.
+pub fn canonical_fingerprint(value:&serde_json::Value)->String {
+    fn prune(value:&serde_json::Value)->Option<serde_json::Value> {
+        use serde_json::Value;
+        match value {
+            Value::Null|Value::Bool(false) => None,
+            Value::Number(n) if n.as_f64()==Some(0.0) => None,
+            Value::String(s) if s.is_empty() => None,
+            Value::Array(a) if a.is_empty() => None,
+            Value::Array(a) => Some(Value::Array(a.iter().map(|v|prune(v).unwrap_or(Value::Null)).collect())),
+            Value::Object(o) => {
+                let kept:std::collections::BTreeMap<_,_>=o.iter().filter_map(|(k,v)|Some((k.clone(),prune(v)?))).collect();
+                (!kept.is_empty()).then(||Value::Object(kept.into_iter().collect()))
+            }
+            other => Some(other.clone()),
+        }
+    }
+    let canonical=prune(value).unwrap_or(serde_json::Value::Null);
+    create_fingerprint(&format!("sfp-request/1\n{canonical}"))
+}
+
 /// A create retry retains only the input fingerprint, never pins or ghost configuration.
 pub fn create_fingerprint(input:&str)->String {
     use sha2::{Digest,Sha256};

@@ -49,7 +49,7 @@ fn create(store: &Store, mut a: api::Create) -> Result<api::SessionKey> {
     for p in &mut a.pins {
         p.display.clear();
     }
-    let input = sill_core::sfp::create_fingerprint(&serde_json::to_string(&a)?);
+    let input = sill_core::sfp::canonical_fingerprint(&serde_json::to_value(&a)?);
     store.conn().execute_batch(
         "CREATE TABLE IF NOT EXISTS sfp_creates (create_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, session_id TEXT);
         CREATE TRIGGER IF NOT EXISTS sfp_create_deleted AFTER DELETE ON sessions BEGIN
@@ -274,6 +274,24 @@ impl Hub {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn create_fingerprint_survives_new_optional_fields() {
+        // A later sfp/1 build may add a create option; an old client leaves it out and an
+        // identical retry must still match the receipt written before the field existed.
+        let input = api::Create { create_id: "id".into(), agent: "test".into(), policy: "default".into(), ..Default::default() };
+        let today = sill_core::sfp::canonical_fingerprint(&serde_json::to_value(&input).unwrap());
+        let mut later = serde_json::to_value(&input).unwrap();
+        later["worktree"] = serde_json::json!(false);
+        later["kind"] = serde_json::json!("");
+        later["lineage"] = serde_json::json!({"parent": null, "grants": []});
+        assert_eq!(sill_core::sfp::canonical_fingerprint(&later), today);
+        later["worktree"] = serde_json::json!(true);
+        assert_ne!(sill_core::sfp::canonical_fingerprint(&later), today, "a set field is input");
+        let mut reordered = serde_json::Map::new();
+        for (k, v) in serde_json::to_value(&input).unwrap().as_object().unwrap().iter().rev() { reordered.insert(k.clone(), v.clone()); }
+        assert_eq!(sill_core::sfp::canonical_fingerprint(&serde_json::Value::Object(reordered)), today);
+    }
+
     #[test]
     fn full_create_ledger_preserves_retries_conflicts_and_tombstones_after_reopen() {
         let dir = std::env::temp_dir().join(format!("sill-create-capacity-{}", crate::daemon::sfp::id()));

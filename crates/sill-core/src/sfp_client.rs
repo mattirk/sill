@@ -184,6 +184,7 @@ impl View {
     /// What went with a user item: its submission's attachments. Data appears only in records
     /// from before attachments became uploads; otherwise a frontend fetches by upload ID.
     fn attachments_of(&self, item: &Item) -> Vec<wire::UserAttachment> {
+        if item.kind == "agent" { return agent_images(item); }
         if item.kind != "user" { return vec![]; }
         let Some(submission) = item.submission_id.as_ref().and_then(|id| self.submissions.get(id)) else { return vec![] };
         submission.attachments.iter().map(|a| match a {
@@ -233,6 +234,14 @@ fn plan_entries(item: &Item) -> Vec<wire::PlanEntry> {
 pub fn plan_text(entries: &[wire::PlanEntry]) -> String {
     entries.iter().map(|e| format!("{} {}", match e.status.as_str() { "completed" => "✓", "in_progress" => "◐", _ => "○" }, e.content)).collect::<Vec<_>>().join("\n")
 }
+/// Kept agent images: SFP `image` blocks name a session upload; omitted ones carry no bytes.
+fn agent_images(item: &Item) -> Vec<wire::UserAttachment> {
+    item.content.iter().filter(|b| b.kind == "image").filter_map(|b| {
+        let upload_id = b.extra.get("upload_id")?.as_str()?;
+        let mime = b.extra.get("mime").and_then(|v| v.as_str()).unwrap_or("image/png");
+        Some(wire::UserAttachment { name: "agent image".into(), mime: mime.into(), upload_id: Some(upload_id.into()), data_base64: None })
+    }).collect()
+}
 fn render_item(item: &Item, attachments: &[wire::UserAttachment]) -> Vec<wire::Event> {
     if is_diagnostic_note(item) { return vec![]; }
     if item.kind == "plan" { return vec![wire::Event::Plan(plan_entries(item))]; }
@@ -241,12 +250,20 @@ fn render_item(item: &Item, attachments: &[wire::UserAttachment]) -> Vec<wire::E
         return vec![wire::Event::UserMessage { text, attachments: attachments.to_vec() }];
     }
     if let Some(tool) = &item.tool { return vec![wire::Event::ToolCall { id: item.item_id.clone(), title: tool.title.clone(), kind: tool.kind.clone(), status: tool.status.clone(), detail: Some(tool.detail.clone()), diff: Some(tool.diff.clone()), parent: tool.parent_item_id.clone() }]; }
-    item.content.iter().filter_map(|block| block.text.as_ref().map(|text|(block,text))).map(|(block,text)| match item.kind.as_str() {
+    let mut out: Vec<wire::Event> = item.content.iter().filter_map(|block| block.text.as_ref().map(|text|(block,text))).map(|(block,text)| match item.kind.as_str() {
         "user" => wire::Event::UserText(text.clone()),
         "agent" => match block.extra.get("parent_item_id").and_then(|v|v.as_str()) { Some(parent)=>wire::Event::SubagentText {parent:parent.into(),text:text.clone()},None=>wire::Event::Text(text.clone()) },
         "thought" => wire::Event::Thought(text.clone()),
         _ => wire::Event::Note(text.clone()),
-    }).collect()
+    }).collect();
+    if item.kind == "agent" {
+        let images = agent_images(item);
+        if !images.is_empty() { out.push(wire::Event::AgentImages(images)); }
+        for block in item.content.iter().filter(|b| b.kind == "image") {
+            if let Some(reason) = block.extra.get("omitted").and_then(|v| v.as_str()) { out.push(wire::Event::Note(format!("The agent showed an image that was not kept ({reason})"))); }
+        }
+    }
+    out
 }
 fn render_session(session: &SessionState, previous: Option<&SessionState>) -> Vec<wire::Event> {
     let mut out = Vec::new();

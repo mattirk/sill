@@ -28,6 +28,51 @@ pub(crate) struct AdapterState {
     plan_item: Option<String>,
     /// Update kinds the ACP loop dumped instead of rendering, logged once each.
     unhandled: std::collections::BTreeSet<String>,
+    /// Image bytes the last `project` referenced; the runner keeps them in the same transaction.
+    #[serde(skip)]
+    media: Vec<AgentMedia>,
+}
+
+/// Agent image bytes named by content, waiting to become a session upload.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AgentMedia { pub upload_id: String, pub mime: String, pub bytes: Vec<u8> }
+
+/// An agent image as an SFP `image` block: `mime` always, then `upload_id` (bytes fetched with
+/// `_sill/uploads.get`) or `omitted` with the reason it was not kept. Never the bytes themselves.
+pub(crate) fn image_block(mime: &str, data_base64: &str, media: &mut Vec<AgentMedia>) -> sfp::Content {
+    let mut extra = BTreeMap::new();
+    let valid_mime = !mime.is_empty() && mime.len() <= 256 && !mime.chars().any(char::is_control);
+    extra.insert("mime".into(), serde_json::json!(if valid_mime { mime } else { "application/octet-stream" }));
+    let omitted = if !valid_mime { Some("invalid") } else {
+        match super::uploads::decode_limited(data_base64, super::uploads::AGENT_IMAGE_BYTES) {
+            Ok(bytes) => {
+                let upload_id = format!("{}{}", super::uploads::AGENT_PREFIX, sill_core::sfp::create_fingerprint(&format!("{mime}\n{data_base64}")));
+                extra.insert("upload_id".into(), serde_json::json!(upload_id));
+                if !media.iter().any(|m| m.upload_id == upload_id) { media.push(AgentMedia { upload_id, mime: mime.into(), bytes }); }
+                None
+            }
+            Err(e) if e.downcast_ref::<sill_proto::rpc::Error>().is_some_and(|e| e.data.as_ref().is_some_and(|d| d["code"] == "limit_exceeded")) => Some("too_large"),
+            Err(_) => Some("invalid"),
+        }
+    };
+    if let Some(reason) = omitted { extra.insert("omitted".into(), serde_json::json!(reason)); }
+    sfp::Content { block_id: id("block"), kind: "image".into(), text: None, extra }
+}
+
+/// Image blocks whose bytes the upload store refused (its agent budget is full) say so.
+pub(crate) fn mark_omitted(events: &mut [sfp::Event], refused: &std::collections::BTreeSet<String>) {
+    if refused.is_empty() { return; }
+    let blocks = events.iter_mut().flat_map(|event| match event {
+        sfp::Event::ItemCreated { item } => Some(&mut item.content),
+        sfp::Event::ItemPatched { set, .. } => set.content.as_mut(),
+        _ => None,
+    }).flatten();
+    for block in blocks {
+        if block.kind == "image" && block.extra.get("upload_id").and_then(|v| v.as_str()).is_some_and(|id| refused.contains(id)) {
+            block.extra.remove("upload_id");
+            block.extra.insert("omitted".into(), serde_json::json!("capacity"));
+        }
+    }
 }
 
 fn id(prefix: &str) -> String {
@@ -40,6 +85,7 @@ impl AdapterState {
         self.questions.iter().find_map(|(request, public)| (public == question).then_some(*request))
     }
     pub fn turn_id(&self) -> Option<&str> { self.turn.as_ref().map(|t| t.turn_id.as_str()) }
+    pub fn take_media(&mut self) -> Vec<AgentMedia> { std::mem::take(&mut self.media) }
 
     /// `existing_question` is the durable current record for `Resolved`, preserving the winner.
     /// The journal stamps new items' creation sequence when it appends each event.
@@ -104,12 +150,23 @@ impl AdapterState {
                 // user items; never guess an identity by comparing echoed text.
             }
             relay::Event::Text(_) | relay::Event::Thought(_) | relay::Event::ToolCall { .. }
-                | relay::Event::ToolCallUpdate { .. } | relay::Event::SubagentText { .. } if self.replaying => {
+                | relay::Event::ToolCallUpdate { .. } | relay::Event::SubagentText { .. } | relay::Event::Image { .. } if self.replaying => {
                 // ACP v1 session/load has no stable message identities. Existing stored items
                 // remain authoritative; replay cannot be merged by text or source call IDs.
             }
             relay::Event::Text(text) => self.append_text("agent", text, &mut out),
             relay::Event::Thought(text) => self.append_text("thought", text, &mut out),
+            relay::Event::Image { mime, data_base64, parent } => {
+                // An image is its own item between text items: text after it starts a new one.
+                self.text_item = None;
+                self.thought_item = None;
+                let mut block = image_block(mime, data_base64, &mut self.media);
+                if let Some(parent) = parent {
+                    self.subagent_items.remove(parent);
+                    if let Some((parent_id, _)) = self.tools.get(parent) { block.extra.insert("parent_item_id".into(), serde_json::json!(parent_id)); }
+                }
+                out.push(sfp::Event::ItemCreated { item: self.item(id("item"), "agent", vec![block], None) });
+            }
             relay::Event::ToolCall { id: source, title, kind, status, detail, diff, parent } => {
                 self.text_item = None;
                 self.thought_item = None;
@@ -346,6 +403,56 @@ mod tests {
     use super::*;
     fn session() -> sfp::SessionState {
         sfp::SessionState { session_id: "s".into(), agent_generation_id: "generation-one".into(), lifecycle: "open".into(), title:None, summary:None, end_reason:None, deleted:false, activity: "idle".into(), turn_id: None, question_ids: vec![], background: None, capabilities: BTreeMap::new(), controls: None, authentication: None, usage: None, agent_title: None, commands: vec![], active_ms:0, active_since_ms:None }
+    }
+    fn created(events: &[sfp::Event]) -> &sfp::Item {
+        events.iter().find_map(|e| match e { sfp::Event::ItemCreated { item } => Some(item), _ => None }).expect("an item")
+    }
+    #[test]
+    fn agent_images_are_named_by_content_and_their_bytes_leave_the_record() {
+        let session = session();
+        let mut adapter = AdapterState::default();
+        adapter.project(&session, &relay::Event::TurnStarted, None);
+        let text = adapter.project(&session, &relay::Event::Text("before".into()), None);
+        let image = adapter.project(&session, &relay::Event::Image { mime: "image/png".into(), data_base64: acp::base64(b"png"), parent: None }, None);
+        let item = created(&image);
+        assert_ne!(item.item_id, created(&text).item_id, "an image is its own item");
+        let block = &item.content[0];
+        assert_eq!((block.kind.as_str(), block.text.as_deref()), ("image", None));
+        let upload_id = block.extra["upload_id"].as_str().unwrap().to_owned();
+        assert!(upload_id.starts_with("sill-agent-") && upload_id.len() <= 128);
+        assert!(!serde_json::to_string(&image).unwrap().contains(&acp::base64(b"png")), "no bytes in conversation events");
+        assert_eq!(adapter.take_media(), vec![AgentMedia { upload_id: upload_id.clone(), mime: "image/png".into(), bytes: b"png".to_vec() }]);
+        assert!(adapter.take_media().is_empty());
+        let after = adapter.project(&session, &relay::Event::Text("after".into()), None);
+        assert!(matches!(&after[0], sfp::Event::ItemCreated { .. }), "text after an image starts a new item");
+        // same bytes, same name: a repeat is deduplicated by the store
+        let again = adapter.project(&session, &relay::Event::Image { mime: "image/png".into(), data_base64: acp::base64(b"png"), parent: None }, None);
+        assert_eq!(created(&again).content[0].extra["upload_id"], upload_id.as_str());
+    }
+    #[test]
+    fn oversized_or_invalid_agent_images_are_omitted_with_a_reason() {
+        let mut media = vec![];
+        let big = image_block("image/png", &acp::base64(&vec![0; super::super::uploads::AGENT_IMAGE_BYTES + 1]), &mut media);
+        assert_eq!(big.extra["omitted"], "too_large");
+        assert_eq!(image_block("image/png", "not base64!", &mut media).extra["omitted"], "invalid");
+        assert!(media.is_empty() && !big.extra.contains_key("upload_id"));
+        let mut events = vec![sfp::Event::ItemCreated { item: AdapterState::default().item("i".into(), "agent", vec![image_block("image/png", "YQ==", &mut media)], None) }];
+        mark_omitted(&mut events, &media.iter().map(|m| m.upload_id.clone()).collect());
+        let block = &created(&events).content[0];
+        assert_eq!(block.extra["omitted"], "capacity");
+        assert!(!block.extra.contains_key("upload_id"));
+    }
+    #[test]
+    fn native_image_content_becomes_an_image_block_without_bytes() {
+        let session = session();
+        let mut adapter = AdapterState::default();
+        let update = serde_json::json!({"sessionUpdate":"agent_message_chunk","messageId":"m","content":{"type":"image","mimeType":"image/webp","data":"YWJj"}});
+        let events = adapter.project(&session, &relay::Event::V2Update { update }, None);
+        let block = &created(&events).content[0];
+        assert_eq!(block.kind, "image");
+        assert_eq!(block.extra["mime"], "image/webp");
+        assert!(block.extra.get("data").is_none() && block.extra.contains_key("upload_id"));
+        assert_eq!(adapter.take_media()[0].bytes, b"abc");
     }
     #[test]
     fn restart_retains_item_and_question_identity_but_replacement_does_not() {

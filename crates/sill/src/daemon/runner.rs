@@ -230,6 +230,7 @@ impl Runner {
             | relay::Event::ToolCall { .. }
             | relay::Event::ToolCallUpdate { .. }
             | relay::Event::SubagentText { .. }
+            | relay::Event::Image { .. }
                 if st.replaying =>
             {
                 return Ok(None);
@@ -237,6 +238,8 @@ impl Runner {
             // some agents echo the prompt back during the turn; the frontend shows what it sent
             relay::Event::UserText(_) => return Ok(None),
             relay::Event::Text(t) => st.agent_md.push_str(t),
+            // the transcript (summaries, memory) notes an image without its bytes
+            relay::Event::Image { parent: None, .. } => st.agent_md.push_str("[image]"),
             relay::Event::V2Update { update } => {
                 let native_turn=st.adapter.v2_last_turn().map(str::to_owned);
                 let unflushed=native_turn.is_some() && native_turn!=st.native_flushed_turn;

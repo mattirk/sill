@@ -101,6 +101,7 @@ pub fn facts_block(policy: &Policy, home: &Path) -> String {
         (false, false) => "No X11, no D-Bus: nothing graphical, no desktop services (a program that asks for a bus is refused; none is started).",
     };
     lines.push(desktop.into());
+    lines.push("The person reads your replies as rendered Markdown: to show an image file, write `![what it shows](/absolute/path.png)` with its path here; a bare path is only text.".into());
     let net = match policy.network.mode {
         NetMode::None => "No network.".to_string(),
         NetMode::All => "Network: any host, through sill's proxy (host-local addresses refused unless the policy lists them).".to_string(),
@@ -225,6 +226,7 @@ x11 = true
         let none: Policy = toml::from_str("name = \"n\"\n[network]\nmode = \"none\"").unwrap();
         let f = facts_block(&none, &home);
         assert!(f.contains("No network.") && f.contains("No X11, no D-Bus") && !f.contains("Hidden"));
+        assert!(f.contains("![what it shows](/absolute/path.png)"), "agents are told how to show an image");
         // the long lists are cut
         let many: Vec<String> = (0..12).map(|i| format!("~/m{i}")).collect();
         assert_eq!(some(&many, 10), format!("{} and 2 more", many[..10].join(", ")));

@@ -250,6 +250,11 @@ pub enum Event {
     ToolCallUpdate { id: String, status: Option<String>, title: Option<String>, detail: Option<String>, diff: Option<String> },
     /// Text a sub-agent produced (shown under its delegation, not as the agent's own words).
     SubagentText { parent: String, text: String },
+    /// An image block in the agent's own message (`parent` names a sub-agent's tool call).
+    /// The daemon keeps the bytes as a session upload; they never enter a conversation record.
+    Image { mime: String, data_base64: String, parent: Option<String> },
+    /// Frontend only: kept agent images by session upload, as `sfp_client` renders them.
+    AgentImages(Vec<UserAttachment>),
     /// The agent asks for permission; answer with the chosen option id (None = cancel).
     PermissionRequest { tool_call_id: String, title: String, options: Vec<PermissionOption>, reply: oneshot::Sender<Option<String>> },
     /// The daemon answered a permission request itself (the session's auto-allow, docs/daemon.md
@@ -926,9 +931,10 @@ pub fn is_diagnostic(text: &str) -> bool {
 fn to_event(update: SessionUpdate) -> Event {
     match update {
         SessionUpdate::UserMessageChunk(c) => Event::UserText(text(&c.content)),
-        SessionUpdate::AgentMessageChunk(c) => match parent_tool_use(c.meta.as_ref()) {
-            Some(parent) => Event::SubagentText { parent, text: text(&c.content) },
-            None => Event::Text(text(&c.content)),
+        SessionUpdate::AgentMessageChunk(c) => match (parent_tool_use(c.meta.as_ref()), c.content) {
+            (parent, ContentBlock::Image(i)) => Event::Image { mime: i.mime_type, data_base64: i.data, parent },
+            (Some(parent), content) => Event::SubagentText { parent, text: text(&content) },
+            (None, content) => Event::Text(text(&content)),
         },
         SessionUpdate::AgentThoughtChunk(c) => Event::Thought(text(&c.content)),
         SessionUpdate::UsageUpdate(u) => Event::Usage { used: u.used, size: u.size },
