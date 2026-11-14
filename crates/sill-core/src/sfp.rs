@@ -99,7 +99,7 @@ impl<'a> Journal<'a> {
                 title:Some(row.title), summary:(!row.summary.is_empty()).then_some(row.summary), end_reason:None, deleted:false,
                 activity: "unknown".into(), turn_id: None, question_ids: vec![], background: None,
                 capabilities: BTreeMap::from([("steering".into(), false)]),
-                controls:None, authentication:None, usage:None, agent_title:None, commands:vec![], active_ms:0, active_since_ms:None,
+                controls:None, authentication:None, usage:None, agent_title:None, commands:vec![], active_ms:0, active_since_ms:None, summarizing:None,
             };
             self.store.conn().execute("INSERT OR IGNORE INTO sfp_sessions(session_id,state) VALUES (?1,?2)", params![session_id, serde_json::to_string(&state)?])?;
             // The memory transcript (`entries`) stays memory's: it is never imported into

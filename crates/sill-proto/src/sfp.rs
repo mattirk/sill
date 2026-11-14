@@ -37,6 +37,10 @@ pub struct SessionState {
     /// Slash commands the agent offers now; empty when it offers none or never said.
     #[serde(default)]
     pub commands: Vec<AgentCommand>,
+    /// The turn running is sill's own summary turn: `checkpoint` (Summarize now) or `end` (the
+    /// session's closing summary); None for the agent's ordinary work and when nothing runs.
+    #[serde(default)]
+    pub summarizing: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

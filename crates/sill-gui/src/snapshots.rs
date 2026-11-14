@@ -707,6 +707,34 @@ fn render_tabs() {
     }
 }
 
+/// Three running tabs: the agent working (accent), writing sill's summary (success green) and
+/// idle; the status-bar spinner follows the selected one, here the summarizing tab.
+#[test]
+#[ignore = "writes the summarizing-tab PNG for review"]
+fn render_tab_summarizing() {
+    let (mut app, _) = App::new(true, None);
+    app.demo = false;
+    let agent = app.tabs[0].agent.clone();
+    let template = app.views.remove("demo").unwrap();
+    app.tabs.clear();
+    for (id, summarizing, activity) in [("working", None, "working"), ("summarizing", Some("checkpoint"), "working"), ("idle", None, "idle")] {
+        app.tabs.push(crate::Tab { id: id.into(), title: id.into(), agent: agent.clone(), running: true });
+        let mut view = crate::SessionView::new(id);
+        view.conversation = template.conversation.clone();
+        let session = view.conversation.session.as_mut().unwrap();
+        session.summarizing = summarizing.map(str::to_owned);
+        session.activity = activity.into();
+        if activity == "idle" {
+            session.turn_id = None;
+            session.active_since_ms = None;
+        }
+        view.status = template.status.clone();
+        app.views.insert(id.into(), view);
+    }
+    app.selected = Some("summarizing".into());
+    render_size(&app, "tabs-summarizing", (720.0, 860.0));
+}
+
 #[test]
 #[ignore = "writes a hovered-tab PNG for review"]
 fn render_tab_hover() {

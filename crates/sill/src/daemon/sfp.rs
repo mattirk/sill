@@ -74,7 +74,7 @@ impl Hub {
             let tx=store.conn().unchecked_transaction()?;
             let mut session=journal.ensure(session_id,&id())?;
             session.title=Some(row.title);session.summary=(!row.summary.is_empty()).then_some(row.summary);
-            if let Some((deleted,reason))=ended {session.lifecycle="ended".into();session.activity="idle".into();session.end_reason=Some(reason.into());session.deleted=deleted;}
+            if let Some((deleted,reason))=ended {session.lifecycle="ended".into();session.activity="idle".into();session.summarizing=None;session.end_reason=Some(reason.into());session.deleted=deleted;}
             let mut events=vec![];
             if ended.is_some() {
                 let records=journal.active_records(session_id)?;

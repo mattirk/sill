@@ -5821,6 +5821,14 @@
         "session_id": {
           "type": "string"
         },
+        "summarizing": {
+          "default": null,
+          "description": "The turn running is sill's own summary turn: `checkpoint` (Summarize now) or `end` (the\nsession's closing summary); None for the agent's ordinary work and when nothing runs.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "summary": {
           "type": [
             "string",

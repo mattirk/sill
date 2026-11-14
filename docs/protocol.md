@@ -659,6 +659,13 @@ The journal accumulates only `working` activity in an open session; waiting for 
 idle, unknown, and ended states stop the clock. Snapshots preserve the total across
 frontend reconnects. Older state defaults to zero; past work is not reconstructed.
 
+Session state's `summarizing` (2026-11-10) is `checkpoint` while the turn running is sill's
+*Summarize now* turn, `end` while it is the session's closing summary (a checkpoint becomes `end`
+when the tab closes during it), and null otherwise: the agent's own work, or nothing running.
+Activity stays `working` during a summary turn; the field only tells the work apart. The daemon
+writes it in the same transaction that starts, stops, changes or drops the summary turn, re-seeds
+it from the runner at recovery, and clears it when the session ends. Older state reads as null.
+
 
 ### Public host data and memory details (development implementation)
 

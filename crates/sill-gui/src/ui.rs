@@ -418,8 +418,9 @@ impl App {
         .into()
     }
 
-    /// A tab: the agent glyph pulses in accent while working; question/problem marks follow
-    /// the title. Dimmer when the session is not running.
+    /// A tab: the agent glyph pulses in accent while working, in success green while the
+    /// work is sill's summary turn; question/problem marks follow the title. Dimmer when the
+    /// session is not running.
     fn tab<'a>(&'a self, tab: &'a Tab, width: f32) -> Element<'a, Message> {
         let active = self.selected.as_deref() == Some(tab.id.as_str());
         let view = self.views.get(&tab.id);
@@ -433,6 +434,7 @@ impl App {
         let working = attention
             .as_ref()
             .is_some_and(|a| a.activity == Activity::Working);
+        let pulse = attention.as_ref().map_or(P.accent, work_color);
         // A tab is as wide as its content, up to `width`: the agent glyph, the title, the mark
         // and the close button, which follows the title. What must give way is the title, cut
         // with a fade; under [`TAB_CLOSE_FROM`] an unselected tab drops its close button too
@@ -476,7 +478,7 @@ impl App {
             button(icons::tab_agent(
                 &tab.agent,
                 self.agent_icons.get(&tab.agent).map(Vec::as_slice),
-                if working { P.accent } else { color },
+                if working { pulse } else { color },
                 working,
             ))
             .padding([4, 4])
@@ -586,7 +588,7 @@ impl App {
         let busy_now = trouble.is_none()
             && matches!(attention.activity, Activity::Working | Activity::Waiting);
         let indicator = if busy_now && (!self.daemon_trouble() || self.demo) {
-            Indicator::Spinner(P.accent)
+            Indicator::Spinner(work_color(&attention))
         } else {
             self.daemon_dot()
         };
@@ -2920,4 +2922,11 @@ mod timer_tests {
         assert!(clock_width(35999000) < clock_width(36000000));
         assert!(clock_width(360000000) > clock_width(36000000));
     }
+}
+
+/// The colour of a session's work: accent for the agent's own, success green while it writes
+/// sill's summary (a checkpoint or the closing one) — warning and error are taken by trouble,
+/// and link is accent in some themes (2026-11-10).
+fn work_color(attention: &Attention) -> Color {
+    if attention.summarizing { P.success } else { P.accent }
 }

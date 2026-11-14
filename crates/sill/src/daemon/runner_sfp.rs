@@ -89,8 +89,24 @@ impl Runner {
         let mut seeded=session.clone();
         if seeded.controls.is_none() && let Some(c)=&st.controls { seeded.controls=Some(super::super::sfp_adapter::session_controls(c)); }
         if !seeded.capabilities.contains_key("images") && let Some(images)=st.images { seeded.capabilities.insert("images".into(),images); }
+        // the runner's summary turn is the truth: a daemon that stopped mid-change says it right
+        seeded.summarizing=Self::summarizing_wire(st);
         if seeded!=session { events.extend(journal.append(&self.id,None,&[p::Event::SessionUpdated{session:seeded}])?); }
         Ok(events)
+    }
+    fn summarizing_wire(st:&State)->Option<String> {
+        st.summary.as_ref().map(|(kind,_,_)|kind.wire().to_string())
+    }
+    /// The session state's `summarizing` brought to the runner's summary turn: one
+    /// `session.updated` when they differ, none when they agree. Called wherever the summary
+    /// turn starts, stops, changes kind or is dropped, in the same transaction.
+    pub(super) fn sfp_summarizing(&self,store:&Store,st:&State)->Result<Vec<p::StoredEvent>> {
+        let want=Self::summarizing_wire(st);
+        let journal=Journal::new(store)?;
+        let session=journal.ensure(&self.id,&st.generation_id)?;
+        if session.summarizing==want {return Ok(vec![]);}
+        let mut next=session;next.summarizing=want;
+        journal.append(&self.id,None,&[p::Event::SessionUpdated{session:next}])
     }
     pub(super) fn sfp_recover(&self,store:&Store,hub:&Hub)->Result<()> {
         let mut st=self.st.lock().unwrap();

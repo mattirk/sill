@@ -499,7 +499,7 @@ mod tests {
     #[test]
     fn offered_commands_reach_the_view_when_they_change() {
         let mut view=View {session_id:"s".into(),subscription_id:"sub".into(),..Default::default()};
-        let mut session=SessionState { session_id:"s".into(),agent_generation_id:"g".into(),lifecycle:"open".into(),title:None,summary:None,end_reason:None,deleted:false,activity:"idle".into(),turn_id:None,question_ids:vec![],background:None,capabilities:BTreeMap::new(),controls:None,authentication:None,usage:None,agent_title:None,commands:vec![], active_ms:0, active_since_ms:None };
+        let mut session=SessionState { session_id:"s".into(),agent_generation_id:"g".into(),lifecycle:"open".into(),title:None,summary:None,end_reason:None,deleted:false,activity:"idle".into(),turn_id:None,question_ids:vec![],background:None,capabilities:BTreeMap::new(),controls:None,authentication:None,usage:None,agent_title:None,commands:vec![], active_ms:0, active_since_ms:None, summarizing:None };
         let quiet=view.accept(notification("1",Event::SessionUpdated {session:session.clone()})).unwrap();
         assert!(!quiet.iter().any(|e|matches!(e,wire::Event::Commands(_))));
         session.commands=vec![AgentCommand {name:"review".into(),description:"Review".into(),hint:Some("what".into())}];
@@ -510,7 +510,7 @@ mod tests {
     #[test]
     fn a_login_that_is_no_longer_needed_closes_its_card() {
         let mut view=View {session_id:"s".into(),subscription_id:"sub".into(),..Default::default()};
-        let mut session=SessionState { session_id:"s".into(),agent_generation_id:"g".into(),lifecycle:"open".into(),title:None,summary:None,end_reason:None,deleted:false,activity:"waiting".into(),turn_id:None,question_ids:vec![],background:None,capabilities:BTreeMap::new(),controls:None,authentication:Some(Authentication {message:"Authentication required".into(),methods:vec![]}),usage:None,agent_title:None,commands:vec![],active_ms:0,active_since_ms:None };
+        let mut session=SessionState { session_id:"s".into(),agent_generation_id:"g".into(),lifecycle:"open".into(),title:None,summary:None,end_reason:None,deleted:false,activity:"waiting".into(),turn_id:None,question_ids:vec![],background:None,capabilities:BTreeMap::new(),controls:None,authentication:Some(Authentication {message:"Authentication required".into(),methods:vec![]}),usage:None,agent_title:None,commands:vec![],active_ms:0,active_since_ms:None, summarizing:None };
         let asked=view.accept(notification("1",Event::SessionUpdated {session:session.clone()})).unwrap();
         assert!(asked.iter().any(|e|matches!(e,wire::Event::AuthRequired {..})));
         session.agent_generation_id="restarted".into(); session.activity="unknown".into();

@@ -207,7 +207,7 @@ impl AdapterState {
 mod tests {
     use super::*;
     use serde_json::json;
-    fn session()->sfp::SessionState {sfp::SessionState {session_id:"s".into(),agent_generation_id:"g1".into(),lifecycle:"open".into(),title:None,summary:None,end_reason:None,deleted:false,activity:"idle".into(),turn_id:None,question_ids:vec![],background:None,capabilities:BTreeMap::new(),controls:None,authentication:None,usage:None,agent_title:None,commands:vec![],active_ms:0,active_since_ms:None}}
+    fn session()->sfp::SessionState {sfp::SessionState {session_id:"s".into(),agent_generation_id:"g1".into(),lifecycle:"open".into(),title:None,summary:None,end_reason:None,deleted:false,activity:"idle".into(),turn_id:None,question_ids:vec![],background:None,capabilities:BTreeMap::new(),controls:None,authentication:None,usage:None,agent_title:None,commands:vec![],active_ms:0,active_since_ms:None, summarizing:None}}
     fn feed(a:&mut AdapterState,s:&mut sfp::SessionState,v:Value)->Vec<sfp::Event>{
         let events=a.project(s,&relay::Event::V2Update{update:v},None);
         for event in &events {if let sfp::Event::SessionUpdated{session}=event{*s=session.clone();}}

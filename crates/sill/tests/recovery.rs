@@ -525,6 +525,12 @@ fn a_relay_that_cannot_be_stopped_never_keeps_the_jail_running() {
     let _ = listener.join();
 }
 
+/// The session state's `summarizing`, as the daemon's journal holds it for frontends.
+fn summarizing(fixture: &Fixture) -> Value {
+    let state: String = fixture.database().query_row("SELECT state FROM sfp_sessions WHERE session_id=?1", [&fixture.session], |row| row.get(0)).unwrap();
+    serde_json::from_str::<Value>(&state).unwrap()["summarizing"].clone()
+}
+
 fn exercise_recovery(adopt_checkpoint: bool, lose_worker: bool) {
     let (mut fixture, release, observed) = Fixture::new();
     fixture.start();
@@ -573,10 +579,13 @@ fn exercise_recovery(adopt_checkpoint: bool, lose_worker: bool) {
     if adopt_checkpoint {
         Connection::connect(&fixture.socket()).unwrap().call("_sill/sessions.checkpoint", json!({"session_id":fixture.session}));
         fixture.wait("partial checkpoint committed", || fixture.snapshot()["agent_md"].as_str().is_some_and(|text| text.contains("Summary before restart")));
+        assert_eq!(summarizing(&fixture), json!("checkpoint"), "the session says its turn is a checkpoint");
     }
     let ending = Connection::connect(&fixture.socket()).unwrap().call("_sill/sessions.end", json!({"session_id":fixture.session,"reason":"close"}));
     assert_eq!(ending["pending"], true, "the agent should write the final summary");
     fixture.wait("partial closing summary committed", || fixture.snapshot()["agent_md"].as_str().is_some_and(|text| text.contains("Summary before restart")));
+    // an adopted checkpoint is the closing summary from then on
+    assert_eq!(summarizing(&fixture), json!("end"));
     fixture.stop(false);
     release.send(()).unwrap(); // the summary completes with nobody attached, including no daemon
     assert_eq!(observed.recv_timeout(Duration::from_secs(5)).unwrap(), "summary-complete");
@@ -599,6 +608,7 @@ fn exercise_recovery(adopt_checkpoint: bool, lose_worker: bool) {
     }
     let count: i64 = fixture.database().query_row("SELECT count(*) FROM entries WHERE session_id=?1 AND kind='agent'", [&fixture.session], |row| row.get(0)).unwrap();
     assert_eq!(count, if lose_worker { 1 } else { 2 }, "neither turn nor summary may be appended twice");
+    assert_eq!(summarizing(&fixture), Value::Null, "the summary turn is over, also after the restart");
     assert_eq!(observed.recv_timeout(Duration::from_secs(5)).unwrap(), "finished");
     let deadline = Instant::now() + Duration::from_secs(10);
     while fixture.relay.try_wait().unwrap().is_none() {

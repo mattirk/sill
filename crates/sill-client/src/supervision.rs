@@ -42,6 +42,9 @@ pub struct Attention {
     /// The time the agent has worked in this session, at `now_ms`, whether or not it works now
     /// (the timer, shown when the status is hovered).
     pub worked_ms: Option<u64>,
+    /// The work running is sill's summary turn (`SessionState::summarizing`), not the agent's
+    /// own: shown in its own colour.
+    pub summarizing: bool,
 }
 
 impl Attention {
@@ -89,6 +92,7 @@ impl Attention {
             link: status.problem().map(str::to_owned),
             working_ms,
             worked_ms,
+            summarizing: session.is_some_and(|s| s.summarizing.is_some()),
         }
     }
 
@@ -122,6 +126,7 @@ impl Attention {
             return format!("The last turn failed: {failed}");
         }
         match self.activity {
+            Activity::Working if self.summarizing => "Summarizing".into(),
             Activity::Working => "Working".into(),
             Activity::Waiting => "Waiting".into(),
             Activity::Idle => "Idle".into(),
@@ -182,6 +187,14 @@ mod tests {
         let attention = Attention::of(&view, &Outbox::default(), &Status::Live, 12_500);
         assert_eq!(attention.level(), Level::Working);
         assert_eq!(attention.working_ms.map(clock).as_deref(), Some("0:03"));
+        assert!(!attention.summarizing);
+        assert_eq!(attention.summary(), "Working");
+        // sill's summary turn is work too, told apart
+        view.session.as_mut().unwrap().summarizing = Some("checkpoint".into());
+        let attention = Attention::of(&view, &Outbox::default(), &Status::Live, 12_500);
+        assert_eq!((attention.level(), attention.summarizing), (Level::Working, true));
+        assert_eq!(attention.summary(), "Summarizing");
+        view.session.as_mut().unwrap().summarizing = None;
 
         let mut failed = Item {
             item_id: "i".into(),

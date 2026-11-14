@@ -413,7 +413,7 @@ pub(crate) fn session_controls(controls: &acp::Controls) -> sfp::SessionControls
 mod tests {
     use super::*;
     fn session() -> sfp::SessionState {
-        sfp::SessionState { session_id: "s".into(), agent_generation_id: "generation-one".into(), lifecycle: "open".into(), title:None, summary:None, end_reason:None, deleted:false, activity: "idle".into(), turn_id: None, question_ids: vec![], background: None, capabilities: BTreeMap::new(), controls: None, authentication: None, usage: None, agent_title: None, commands: vec![], active_ms:0, active_since_ms:None }
+        sfp::SessionState { session_id: "s".into(), agent_generation_id: "generation-one".into(), lifecycle: "open".into(), title:None, summary:None, end_reason:None, deleted:false, activity: "idle".into(), turn_id: None, question_ids: vec![], background: None, capabilities: BTreeMap::new(), controls: None, authentication: None, usage: None, agent_title: None, commands: vec![], active_ms:0, active_since_ms:None, summarizing:None }
     }
     fn created(events: &[sfp::Event]) -> &sfp::Item {
         events.iter().find_map(|e| match e { sfp::Event::ItemCreated { item } => Some(item), _ => None }).expect("an item")

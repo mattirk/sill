@@ -30,6 +30,13 @@ pub enum SummaryKind {
     Checkpoint,
 }
 
+impl SummaryKind {
+    /// Its name in the session state's `summarizing` (docs/protocol.md).
+    pub fn wire(self) -> &'static str {
+        match self { SummaryKind::End => "end", SummaryKind::Checkpoint => "checkpoint" }
+    }
+}
+
 /// How long the agent gets for its summary before the turn is cut short.
 pub const SUMMARY_CAP: std::time::Duration = std::time::Duration::from_secs(90);
 
@@ -154,7 +161,7 @@ impl Runner {
                 // a login the person already gave an API key for is answered with it, no card;
                 // once per request — refused, the card shows with the agent's reason
                 let saved_key = if st.key_tried { None } else { self.saved_key_for(store, &hub, &delivery.event) };
-                let public_events = match saved_key {
+                let mut public_events = match saved_key {
                     Some((method, key_file)) => {
                         st.key_tried = true;
                         Self::queue(&mut st, relay::Command::AuthenticateKey { method, key_file });
@@ -165,6 +172,8 @@ impl Runner {
                 stopped = matches!(delivery.event, relay::Event::Stopped(_))
                     || matches!(&delivery.event,relay::Event::V2Update{..}) && public_events.iter().any(|event|matches!(&event.event,sill_proto::sfp::Event::TurnUpdated{turn} if turn.outcome!="pending"));
                 let done = self.handle_locked(store, &mut st, delivery.event.clone(), false)?;
+                // the summary turn stopped, or its agent went: the session says so with the event
+                public_events.extend(self.sfp_summarizing(store, &st)?);
                 if seq > 0 { st.cursor = seq; }
                 if let Some(done) = &done { st.completed = Some(done.clone()); }
                 self.save(store, &st)?;
@@ -423,14 +432,15 @@ impl Runner {
         if !matches!(st.summary, Some((SummaryKind::Checkpoint, _, _))) { return Ok(false); }
         let transaction = store.conn().unchecked_transaction()?;
         st.summary.as_mut().unwrap().0 = SummaryKind::End;
-        let result = (|| -> Result<()> {
+        let result = (|| -> Result<Vec<sill_proto::sfp::StoredEvent>> {
             store.conn().execute("INSERT INTO daemon_ends(id,context) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET context=excluded.context", rusqlite::params![self.id, end_context])?;
+            let events = self.sfp_summarizing(store, &st)?;
             self.save(store, &st)?;
             transaction.commit()?;
-            Ok(())
+            Ok(events)
         })();
         if result.is_err() { st.summary.as_mut().unwrap().0 = SummaryKind::Checkpoint; }
-        result.map(|()| true)
+        result.map(|events| { hub.sfp_publish(&self.id, &events); true })
         })
     }
 
@@ -454,7 +464,7 @@ impl Runner {
             Self::queue(&mut st, relay::Command::Prompt { text: prompt.into(), attachments: vec![] });
             store.append(&self.id, "note", note, "")?;
             let journal = sill_core::sfp::Journal::new(store)?;
-            let events = journal.append(&self.id, None, &[sill_proto::sfp::Event::ItemCreated {
+            let mut events = journal.append(&self.id, None, &[sill_proto::sfp::Event::ItemCreated {
                 item: sill_proto::sfp::Item {
                     item_id: super::sfp::id(), created_seq: String::new(),
                     turn_id: None, submission_id: None,
@@ -462,6 +472,7 @@ impl Runner {
                     content: vec![sill_proto::sfp::Content::text(note)], tool: None,
                 },
             }])?;
+            events.extend(self.sfp_summarizing(store, &st)?);
             self.save(store, &st)?;
             tx.commit()?;
             hub.sfp_publish(&self.id, &events);
@@ -484,7 +495,9 @@ impl Runner {
             Self::queue(&mut st, relay::Command::Cancel);
             let done = SummaryDone { kind, text: (!text.is_empty()).then(|| format!("{text}\n({why})")) };
             st.completed = Some(done.clone());
+            let events = self.sfp_summarizing(store, &st)?;
             self.save(store, &st)?;
+            hub.sfp_publish(&self.id, &events);
             self.drain(store, &mut st)?;
             Ok(Some(done))
         });
@@ -564,6 +577,8 @@ impl Runner {
             st.completed = None;
             st.outbox.clear();
             st.pending.clear();
+            let events = self.sfp_summarizing(store, &st)?;
+            hub.sfp_publish(&self.id, &events);
             // Save retirement and the Quit outbox before sending it. The terminal cursor remains
             // until deletion/retention, allowing another daemon to drain an unacknowledged Ended.
             Self::queue(&mut st, relay::Command::Quit);
