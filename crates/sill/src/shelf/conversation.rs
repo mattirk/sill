@@ -1131,6 +1131,9 @@ button.sill-md-image:hover { opacity: 0.85; }
 .sill-viewer-bar { padding: 3px 6px 3px 12px; border-bottom: 1px solid alpha(@view_fg_color, 0.12); }
 .sill-viewer-btn { padding: 2px 8px; min-height: 0; min-width: 0; font-size: 90%; }
 .sill-tree-panel { border-left: 1px solid alpha(@view_fg_color, 0.12); }
+/* the drawer's search box: as quiet as the bar's buttons, a plain field until it holds text */
+.sill-tree-search, .sill-tree-search:focus-within { min-height: 0; padding: 0 4px; font-size: 90%; background: transparent; border: none; box-shadow: none; outline: none; }
+.sill-tree-search > text, .sill-tree-search > text:focus { outline: none; box-shadow: none; }
 .sill-tree-panel .sill-pin { opacity: 0; }
 .sill-tree-panel row:hover .sill-pin { opacity: 0.6; }
 .sill-tree-panel row:hover .sill-pin:hover { opacity: 1; }

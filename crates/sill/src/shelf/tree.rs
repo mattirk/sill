@@ -27,6 +27,68 @@ const OPEN_DEPTH: u32 = 1;
 const OPEN_LIMIT: u32 = 600;
 
 /// Build output and tool state: listed, never opened by default, dimmed.
+/// What a repository has checked out, for its root row: the branch name, or the short hash when
+/// HEAD is detached (the flag says which). Read from `.git/HEAD` (through a worktree's `gitdir:` file when `.git` is
+/// one) — no git process, so it is cheap enough for every bind; the tree watches `.git`, so a
+/// checkout re-decorates the row.
+fn head_label(repo: &Path) -> Option<(String, bool)> {
+    let dot = repo.join(".git");
+    let gitdir = if dot.is_file() {
+        let text = std::fs::read_to_string(&dot).ok()?;
+        let rel = text.strip_prefix("gitdir:")?.trim();
+        let p = Path::new(rel);
+        if p.is_absolute() { p.to_path_buf() } else { repo.join(p) }
+    } else {
+        dot
+    };
+    let head = std::fs::read_to_string(gitdir.join("HEAD")).ok()?;
+    let head = head.trim();
+    Some(match head.strip_prefix("ref:") {
+        Some(r) => (r.trim().strip_prefix("refs/heads/").unwrap_or(r.trim()).to_string(), false),
+        None => (head.chars().take(7).collect(), true),
+    })
+}
+
+/// A search shows at most this many results and looks at this many entries (a home full of
+/// photos must not stall the walk for seconds; the message says when it was cut).
+const SEARCH_CAP: usize = 200;
+const SEARCH_VISITS: usize = 50_000;
+
+/// Files and folders below `bases` whose name — or path below the base, when `q` has a `/` —
+/// contains `q` (already lower-cased). Breadth-first so the shallow hits come first, noise folders
+/// and links skipped, results sorted by path; `(found, cut)` where `cut` says a limit stopped it.
+fn find_files(bases: &[PathBuf], q: &str, cap: usize, visits: usize) -> (Vec<PathBuf>, bool) {
+    let by_path = q.contains('/');
+    let mut found: Vec<PathBuf> = Vec::new();
+    let mut seen = 0usize;
+    let mut cut = false;
+    'bases: for base in bases {
+        let mut queue: std::collections::VecDeque<PathBuf> = std::collections::VecDeque::from([base.clone()]);
+        while let Some(dir) = queue.pop_front() {
+            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            for e in rd.flatten() {
+                seen += 1;
+                if seen > visits || found.len() >= cap {
+                    cut = true;
+                    break 'bases;
+                }
+                let name = e.file_name().to_string_lossy().into_owned();
+                let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false); // a link is neither followed nor listed as a dir
+                let path = e.path();
+                let hay = if by_path { path.strip_prefix(base).map(|r| r.to_string_lossy().to_lowercase()).unwrap_or_default() } else { name.to_lowercase() };
+                if hay.contains(q) {
+                    found.push(path.clone());
+                }
+                if is_dir && !is_noise(&name) {
+                    queue.push_back(path);
+                }
+            }
+        }
+    }
+    found.sort();
+    (found, cut)
+}
+
 fn is_noise(name: &str) -> bool {
     name.starts_with('.') || matches!(name, "target" | "node_modules" | "__pycache__" | "build" | "dist")
 }
@@ -48,11 +110,17 @@ fn section_of(row: &gtk::TreeListRow) -> Option<String> {
     s.string().strip_prefix(SECTION).map(str::to_owned)
 }
 
-/// The glyph for a tree row: folder (open/closed), else the file's kind by its extension — sill's
-/// own glyphs, so every machine shows the same tree (no icon theme, no MIME database).
-fn row_glyph(path: &Path, is_dir: bool, expanded: bool) -> &'static str {
+/// The glyph for a tree row: folder (open/closed; a root — a pinned folder — carries a mark, since
+/// it shows its name alone), else the file's kind by its extension — sill's own glyphs, so every
+/// machine shows the same tree (no icon theme, no MIME database).
+fn row_glyph(path: &Path, is_dir: bool, expanded: bool, root: bool) -> &'static str {
     if is_dir {
-        return if expanded { "sill-folder-open" } else { "sill-files" };
+        return match (root, expanded) {
+            (true, true) => "sill-folder-root-open",
+            (true, false) => "sill-folder-root",
+            (false, true) => "sill-folder-open",
+            (false, false) => "sill-files",
+        };
     }
     let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
     match ext.as_str() {
@@ -184,7 +252,13 @@ fn sync_children(dir: &Path, store: &gio::ListStore, ghosts: &[String]) {
 
 pub struct FolderTree {
     pub root: gtk::Box,
-    title: gtk::Label,
+    /// The bar's search box: a name (or a path fragment with `/`) finds files below the shown
+    /// roots; empty = the tree.
+    search: gtk::SearchEntry,
+    /// What the box holds, lower-cased; non-empty = the rows are search results, not the tree.
+    query: RefCell<String>,
+    /// Each search bumps this; a walk that finishes for an older query is dropped.
+    search_seq: std::cell::Cell<u32>,
     /// Back to the global tree while scoped to one folder.
     all: gtk::Button,
     view: gtk::ListView,
@@ -236,11 +310,9 @@ impl FolderTree {
         root.add_css_class("sill-tree-panel");
         let bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         bar.add_css_class("sill-viewer-bar");
-        let title = gtk::Label::new(Some("Files"));
-        title.set_xalign(0.0);
-        title.set_hexpand(true);
-        title.set_ellipsize(gtk::pango::EllipsizeMode::Start);
-        title.add_css_class("dim-label");
+        let search = gtk::SearchEntry::new();
+        search.set_hexpand(true);
+        search.add_css_class("sill-tree-search");
         let all = gtk::Button::with_label("all");
         all.add_css_class("flat");
         all.add_css_class("sill-viewer-btn");
@@ -250,7 +322,7 @@ impl FolderTree {
         close.add_css_class("flat");
         close.add_css_class("sill-viewer-btn");
         close.set_tooltip_text(Some("Close the tree (Ctrl+Shift+F)"));
-        bar.append(&title);
+        bar.append(&search);
         bar.append(&all);
         bar.append(&close);
         root.append(&bar);
@@ -384,10 +456,14 @@ impl FolderTree {
                 pin.set_visible(!home_caption);
                 let is_dir = is_real_dir(&path);
                 let link = is_link(&path);
+                // while a search is on, the top rows are its results, not roots: they read as the
+                // path below the searched folder (the scope, else ~) and wear no root mark
+                let searching = tree_rc.borrow().as_ref().and_then(|w| w.upgrade()).is_some_and(|t| !t.query.borrow().is_empty());
+                let is_root = row.depth() == 0 && !home_caption && !searching;
                 // every row's icon is a sill glyph in the foreground colour (rows are rebound on a
                 // theme change, so they follow it); a link shows as one, whatever it points at
                 let fg = super::icons::fg_for(&icon, &theme::current());
-                let glyph = if link { "sill-link" } else { row_glyph(&path, is_dir, row.is_expanded()) };
+                let glyph = if link { "sill-link" } else { row_glyph(&path, is_dir, row.is_expanded(), is_root) };
                 icon.set_paintable(super::icons::stroke_texture(glyph, fg).as_ref());
                 let fname = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 for c in ["sill-changed", "sill-pending", "sill-below", "sill-dim", "sill-pinned", "sill-new"] {
@@ -396,11 +472,18 @@ impl FolderTree {
                 if is_noise(&fname) {
                     name.add_css_class("sill-dim");
                 }
-                // a root shows where it is; everything below just its name
+                // every row shows its name alone — a root too, since the branch took the room the
+                // path had; its glyph marks it as a root and the tooltip has the whole path
                 let label = if home_caption {
                     "Home".to_string()
-                } else if row.depth() == 0 {
-                    path.display().to_string().replacen(&*home.to_string_lossy(), "~", 1)
+                } else if searching && row.depth() == 0 {
+                    let base = tree_rc.borrow().as_ref().and_then(|w| w.upgrade()).and_then(|t| t.scope.borrow().clone());
+                    match base.as_ref().and_then(|b| path.strip_prefix(b).ok()) {
+                        Some(rel) => rel.display().to_string(),
+                        None => path.display().to_string().replacen(&*home.to_string_lossy(), "~", 1),
+                    }
+                } else if fname.is_empty() {
+                    path.display().to_string()
                 } else {
                     fname.clone()
                 };
@@ -437,19 +520,32 @@ impl FolderTree {
                     }
                     None => {}
                 }
+                if is_root {
+                    let shown = path.display().to_string().replacen(&*home.to_string_lossy(), "~", 1);
+                    let tip = match name.tooltip_text() {
+                        Some(t) => format!("{shown}\n{t}"),
+                        None => shown,
+                    };
+                    name.set_tooltip_text(Some(&tip));
+                }
                 let is_pinned = pinned.borrow().contains(&path);
                 if is_pinned {
                     name.add_css_class("sill-pinned");
                 }
                 let is_repo = is_dir && path.join(".git").exists();
-                // a repository root: `git`, then its main language (what most of the tracked code is)
+                // a repository root: `git <branch>` (the short hash when detached), then its main
+                // language (what most of the tracked code is)
                 let lang = if is_repo { langs.borrow().get(&path).map(|(mark, about, _)| (mark.clone(), about.clone())) } else { None };
+                let head = if is_repo { head_label(&path) } else { None };
                 let mut parts: Vec<String> = Vec::new();
                 if !badge_text.is_empty() {
                     parts.push(badge_text);
                 }
                 if is_repo {
                     parts.push("git".into());
+                    if let Some((h, _)) = &head {
+                        parts.push(h.clone());
+                    }
                 }
                 // the language: its logo in the badge's colour, the text mark when it has none
                 let logo_tex = lang.as_ref().and_then(|(mark, _)| {
@@ -478,7 +574,11 @@ impl FolderTree {
                 badge.set_text(&parts.join(" "));
                 let mut tip: Vec<String> = Vec::new();
                 if is_repo {
-                    tip.push("git repository".into());
+                    tip.push(match &head {
+                        Some((h, true)) => format!("git repository · detached at {h}"),
+                        Some((h, false)) => format!("git repository · on {h}"),
+                        None => "git repository".into(),
+                    });
                 }
                 if let Some((_, about)) = lang {
                     tip.push(about);
@@ -545,7 +645,9 @@ impl FolderTree {
 
         let t = Rc::new(Self {
             root,
-            title,
+            search: search.clone(),
+            query: RefCell::new(String::new()),
+            search_seq: std::cell::Cell::new(0),
             all: all.clone(),
             view,
             roots,
@@ -574,6 +676,16 @@ impl FolderTree {
             again: std::cell::Cell::new(false),
         });
         *tree_rc.borrow_mut() = Some(Rc::downgrade(&t));
+        {
+            // typing searches (the entry debounces); Escape clears and the tree is back
+            let weak = Rc::downgrade(&t);
+            search.connect_search_changed(move |e| {
+                if let Some(t) = weak.upgrade() {
+                    t.search(e.text().as_str());
+                }
+            });
+            search.connect_stop_search(|e| e.set_text(""));
+        }
         {
             let weak = Rc::downgrade(&t);
             t.view.connect_activate(move |_, pos| {
@@ -635,21 +747,60 @@ impl FolderTree {
 
     /// Limit the tree to one folder (from a pin chip), or show everything again.
     pub fn set_scope(self: &Rc<Self>, path: Option<PathBuf>) {
-        let home = std::env::var("HOME").unwrap_or_default();
-        match &path {
-            Some(p) => {
-                self.title.set_text(&p.display().to_string().replacen(&home, "~", 1));
-                self.title.set_tooltip_text(Some(&p.display().to_string()));
-            }
-            None => {
-                self.title.set_text("Files");
-                self.title.set_tooltip_text(None);
-            }
-        }
+        // a new scope ends a search: the box is cleared, which refreshes by itself when it held text
+        self.search.set_text("");
         self.all.set_visible(path.is_some());
         *self.scope.borrow_mut() = path;
         self.homed.set(true);
         self.refresh();
+    }
+
+    /// Search below the shown roots (the scope, or every root of the global view) for `text`:
+    /// a case-insensitive part of the name, or of the path below the root when the text has a `/`.
+    /// The walk runs off the main thread and lands only if the box still says the same; an empty
+    /// text puts the tree back.
+    fn search(self: &Rc<Self>, text: &str) {
+        let q = text.trim().to_lowercase();
+        let seq = self.search_seq.get().wrapping_add(1);
+        self.search_seq.set(seq);
+        let was = std::mem::replace(&mut *self.query.borrow_mut(), q.clone());
+        if q.is_empty() {
+            if !was.is_empty() {
+                self.say("");
+                // the roots differ from the results, so the refresh rebuilds them
+                self.refresh();
+            }
+            return;
+        }
+        let bases: Vec<PathBuf> = match self.scope.borrow().clone() {
+            Some(s) => vec![s],
+            None => (0..self.roots.n_items())
+                .filter_map(|i| self.roots.item(i).and_downcast::<gtk::StringObject>())
+                .filter_map(|o| (!o.string().starts_with(SECTION)).then(|| PathBuf::from(o.string().as_str())))
+                .collect(),
+        };
+        let (tx, rx) = async_channel::bounded::<(Vec<PathBuf>, bool)>(1);
+        std::thread::spawn(move || {
+            let _ = tx.send_blocking(find_files(&bases, &q, SEARCH_CAP, SEARCH_VISITS));
+        });
+        let t = self.clone();
+        glib::spawn_future_local(async move {
+            let Ok((found, cut)) = rx.recv().await else { return };
+            if t.search_seq.get() != seq {
+                return;
+            }
+            t.roots.remove_all();
+            for p in &found {
+                t.roots.append(&gtk::StringObject::new(&p.to_string_lossy()));
+            }
+            t.selection.set_selected(gtk::INVALID_LIST_POSITION);
+            t.say(&match (found.len(), cut) {
+                (0, false) => "no file matches".to_string(),
+                (0, true) => "no file matches in what was looked at (the walk was cut short)".to_string(),
+                (n, false) => format!("{n} match{}", if n == 1 { "" } else { "es" }),
+                (n, true) => format!("first {n} matches; type more to narrow"),
+            });
+        });
     }
 
     fn say(&self, what: &str) {
@@ -847,11 +998,11 @@ impl FolderTree {
                 w
             }
         };
-        // the title says, on hover, when the badges were last read and where they come from
+        // the search box says, on hover, what it searches and when the badges were last read
         let when = glib::DateTime::now_local().ok().and_then(|d| d.format("%H:%M:%S").ok()).map(|s| s.to_string()).unwrap_or_default();
         let from_sessions = all.iter().filter(|c| !c.ignored).count();
-        self.title.set_tooltip_text(Some(&format!(
-            "badges read {when}: {from_git} from git status in {} repositor{}, {from_sessions} from sessions' overlays",
+        self.search.set_tooltip_text(Some(&format!(
+            "Find a file below the shown folders by name (a / in the text matches the path). Badges read {when}: {from_git} from git status in {} repositor{}, {from_sessions} from sessions' overlays",
             repos.len(),
             if repos.len() == 1 { "y" } else { "ies" }
         )));
@@ -864,11 +1015,12 @@ impl FolderTree {
             let g = ghosts(&self.badges.borrow(), &dir);
             sync_children(&dir, &store, &g);
         }
-        // keep the tree if the roots didn't change (expansion state survives)
+        // keep the tree if the roots didn't change (expansion state survives); search results stay
+        // what they are — the badges on them are fresh, which is what the refresh was for
         let current: Vec<String> = (0..self.roots.n_items())
             .filter_map(|i| self.roots.item(i).and_downcast::<gtk::StringObject>().map(|o| o.string().to_string()))
             .collect();
-        if current != wanted {
+        if current != wanted && self.query.borrow().is_empty() {
             self.roots.remove_all();
             for r in &wanted {
                 self.roots.append(&gtk::StringObject::new(r));
@@ -994,6 +1146,46 @@ mod tests {
             .filter_map(|i| store.item(i).and_downcast::<gtk::StringObject>())
             .filter_map(|o| Path::new(o.string().as_str()).file_name().map(|n| n.to_string_lossy().into_owned()))
             .collect()
+    }
+
+    /// A search finds by name, by path with a slash, skips noise folders, and says when cut.
+    #[test]
+    fn find_files_by_name_and_path() {
+        let d = std::env::temp_dir().join(format!("sill-find-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        for f in ["src/main.rs", "src/shelf/tree.rs", "docs/Tree.md", "target/debug/tree.d", "node_modules/x/tree.js"] {
+            let p = d.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "").unwrap();
+        }
+        let (found, cut) = find_files(&[d.clone()], "tree", 100, 10_000);
+        let rel: Vec<String> = found.iter().map(|p| p.strip_prefix(&d).unwrap().display().to_string()).collect();
+        assert_eq!(rel, vec!["docs/Tree.md", "src/shelf/tree.rs"], "noise folders skipped, case folded");
+        assert!(!cut);
+        let (found, _) = find_files(&[d.clone()], "shelf/tr", 100, 10_000);
+        assert_eq!(found, vec![d.join("src/shelf/tree.rs")]);
+        let (found, cut) = find_files(&[d.clone()], "", 2, 10_000);
+        assert_eq!(found.len(), 2);
+        assert!(cut);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// The root row's checkout label: a branch by name, a detached HEAD by its short hash, a
+    /// worktree through its gitdir file.
+    #[test]
+    fn head_label_reads_the_checkout() {
+        let d = std::env::temp_dir().join(format!("sill-head-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("repo/.git")).unwrap();
+        std::fs::write(d.join("repo/.git/HEAD"), "ref: refs/heads/feature/x\n").unwrap();
+        assert_eq!(head_label(&d.join("repo")), Some(("feature/x".to_string(), false)));
+        std::fs::write(d.join("repo/.git/HEAD"), "a8cf233deadbeef0123456789abcdef012345678\n").unwrap();
+        assert_eq!(head_label(&d.join("repo")), Some(("a8cf233".to_string(), true)));
+        std::fs::create_dir_all(d.join("wt")).unwrap();
+        std::fs::write(d.join("wt/.git"), format!("gitdir: {}\n", d.join("repo/.git").display())).unwrap();
+        assert_eq!(head_label(&d.join("wt")), Some(("a8cf233".to_string(), true)));
+        assert_eq!(head_label(&d.join("none")), None);
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     /// A refresh lists what appeared and drops what went, keeping the other rows in place.
