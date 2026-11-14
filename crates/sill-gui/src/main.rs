@@ -1422,6 +1422,9 @@ impl App {
                 view.prune_draft_media();
             }
         }
+        if let Some(session) = self.selected.clone() {
+            task = Task::batch([task, self.reader_anchor(&session)]);
+        }
         // the tray moves while any session's agent works
         let busy = self.views.values().any(|v| v.conversation.busy());
         if busy != self.tray_busy {
@@ -1503,7 +1506,12 @@ impl App {
                     return iced::clipboard::write(reader.content.text());
                 }
             }
-            Message::Link(url) => return iced::clipboard::write(url),
+            Message::Link(url) => {
+                if url.starts_with("https://") || url.starts_with("http://") {
+                    terminal::open_link(url);
+                }
+                return Task::none();
+            }
             Message::Selecting(held) => self.selecting = held,
             Message::DemoTick => return self.demo_tick(),
             Message::Tick => self.now = Instant::now(),

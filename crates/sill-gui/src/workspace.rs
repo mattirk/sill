@@ -16,6 +16,23 @@ use crate::{App, Message, SessionView, demo};
 #[derive(Debug, Clone)]
 pub enum Action {
     ToggleDrawer,
+    Link {
+        session: String,
+        source: HostPath,
+        target: String,
+    },
+    Navigate {
+        session: String,
+        path: HostPath,
+        fragment: String,
+        history: bool,
+    },
+    Back(bool),
+    AnchorOffset {
+        session: String,
+        key: String,
+        y: f32,
+    },
     PickFolder,
     FolderPicked {
         session: String,
@@ -78,6 +95,13 @@ pub struct ReaderView {
     pub notice: Option<String>,
 }
 
+#[derive(Default)]
+struct Navigation {
+    back: Vec<HostPath>,
+    forward: Vec<HostPath>,
+    anchor: Option<(String, String)>,
+}
+
 pub struct Workspace {
     pub shown: bool,
     /// The tree row under the pointer: its pin button shows on hover.
@@ -87,6 +111,7 @@ pub struct Workspace {
     pub folder_picker: Option<(String, String)>,
     serial: u64,
     follow_seen: std::collections::BTreeMap<String, String>,
+    navigation: std::collections::BTreeMap<String, Navigation>,
     /// None in `--demo`: requests are answered with synthetic files at once.
     files: Option<Files>,
 }
@@ -160,6 +185,7 @@ impl Workspace {
                     hovered: None,
                     pending_discard: None,
                     folder_picker: None,
+                    navigation: Default::default(),
                     serial: 0,
                     follow_seen: Default::default(),
                     files: None,
@@ -178,6 +204,7 @@ impl Workspace {
                 hovered: None,
                 pending_discard: None,
                 folder_picker: None,
+                navigation: Default::default(),
                 serial: 0,
                 follow_seen: Default::default(),
                 files: Some(files),
@@ -282,6 +309,16 @@ impl App {
                 })
                 .map(|(id, _)| id.clone()),
             Message::CloseTab(id) => Some(id.clone()),
+            Message::Workspace(Action::Navigate { session, path, .. })
+                if self
+                    .views
+                    .get(session)
+                    .and_then(|v| v.files.reader.as_ref())
+                    .is_none_or(|f| files::key(&f.path) != files::key(path)) =>
+            {
+                Some(session.clone())
+            }
+            Message::Workspace(Action::Back(_)) => self.selected.clone(),
             Message::Workspace(
                 Action::Open { .. }
                 | Action::OpenAndHide { .. }
@@ -464,6 +501,131 @@ impl App {
 
     pub fn workspace_action(&mut self, action: Action) -> Task<Message> {
         match action {
+            Action::Link {
+                session,
+                source,
+                target,
+            } => {
+                if !self
+                    .views
+                    .get(&session)
+                    .and_then(|v| v.files.reader.as_ref())
+                    .is_some_and(|f| files::key(&f.path) == files::key(&source))
+                {
+                    return Task::none();
+                }
+                match resolve_link(&source, &target) {
+                    Ok(LinkTarget::Web(url)) => {
+                        crate::terminal::open_link(url);
+                        Task::none()
+                    }
+                    Ok(LinkTarget::File(path, fragment)) => {
+                        self.update(Message::Workspace(Action::Navigate {
+                            session,
+                            path,
+                            fragment,
+                            history: true,
+                        }))
+                    }
+                    Err(error) => {
+                        if let Some(view) = self.views.get_mut(&session) {
+                            if let Some(reader) = &mut view.reader {
+                                reader.notice = Some(error);
+                            }
+                        }
+                        Task::none()
+                    }
+                }
+            }
+            Action::Back(forward) => {
+                let Some(session) = self.selected.clone() else {
+                    return Task::none();
+                };
+                let nav = self
+                    .workspace
+                    .navigation
+                    .entry(session.clone())
+                    .or_default();
+                let path = if forward {
+                    nav.forward.pop()
+                } else {
+                    nav.back.pop()
+                };
+                let Some(path) = path else {
+                    return Task::none();
+                };
+                if let Some(file) = self
+                    .views
+                    .get(&session)
+                    .and_then(|v| v.files.reader.as_ref())
+                {
+                    if forward {
+                        nav.back.push(file.path.clone());
+                    } else {
+                        nav.forward.push(file.path.clone());
+                    }
+                }
+                self.workspace_action(Action::Navigate {
+                    session,
+                    path,
+                    fragment: String::new(),
+                    history: false,
+                })
+            }
+            Action::Navigate {
+                session,
+                path,
+                fragment,
+                history,
+            } => {
+                let Some(view) = self.views.get_mut(&session) else {
+                    return Task::none();
+                };
+                let same = view
+                    .files
+                    .reader
+                    .as_ref()
+                    .is_some_and(|f| files::key(&f.path) == files::key(&path));
+                let nav = self
+                    .workspace
+                    .navigation
+                    .entry(session.clone())
+                    .or_default();
+                nav.anchor = Some((files::key(&path).into(), fragment));
+                if !same {
+                    if history {
+                        if let Some(file) = &view.files.reader {
+                            nav.back.push(file.path.clone());
+                        }
+                        nav.forward.clear();
+                    }
+                    let request = view.files.open(path, None);
+                    view.sync_reader();
+                    self.files_send(&session, vec![request]);
+                    self.reader_anchor(&session)
+                } else {
+                    self.reader_anchor(&session)
+                }
+            }
+            Action::AnchorOffset { session, key, y } => {
+                if self.selected.as_deref() == Some(&session)
+                    && self
+                        .views
+                        .get(&session)
+                        .and_then(|v| v.reader.as_ref())
+                        .is_some_and(|r| r.key == key)
+                {
+                    iced::widget::operation::scroll_to(
+                        "markdown-reader",
+                        iced::widget::scrollable::AbsoluteOffset {
+                            x: None,
+                            y: Some(y),
+                        },
+                    )
+                } else {
+                    Task::none()
+                }
+            }
             Action::SaveFile => self.save_file(),
             Action::Saved {
                 session,
@@ -566,7 +728,7 @@ impl App {
                         crate::permissions::Change::RestartPins,
                     )));
                 }
-                Task::none()
+                self.reader_anchor(&session)
             }
             Action::Hover(key) => {
                 self.workspace.hovered = Some(key);
@@ -601,7 +763,13 @@ impl App {
                             .await
                             .map(|folder| folder.path().to_path_buf())
                     },
-                    move |path| Message::Workspace(Action::FolderPicked { session, token, path }),
+                    move |path| {
+                        Message::Workspace(Action::FolderPicked {
+                            session,
+                            token,
+                            path,
+                        })
+                    },
                 )
             }
             Action::FolderPicked {
@@ -609,11 +777,15 @@ impl App {
                 token,
                 path,
             } => {
-                if self.workspace.folder_picker.as_ref() != Some(&(session.clone(), token.clone())) {
+                if self.workspace.folder_picker.as_ref() != Some(&(session.clone(), token.clone()))
+                {
                     return Task::none();
                 }
                 self.workspace.folder_picker = None;
-                let Some(view) = self.views.get_mut(&session).filter(|v| v.media_token == token)
+                let Some(view) = self
+                    .views
+                    .get_mut(&session)
+                    .filter(|v| v.media_token == token)
                 else {
                     return Task::none();
                 };
@@ -758,7 +930,11 @@ impl App {
                         view.files.error = None;
                         vec![]
                     }
-                    Action::SaveFile
+                    Action::Link { .. }
+                    | Action::Navigate { .. }
+                    | Action::Back(_)
+                    | Action::AnchorOffset { .. }
+                    | Action::SaveFile
                     | Action::Saved { .. }
                     | Action::DiscardEdits
                     | Action::CancelDiscard
@@ -783,3 +959,184 @@ impl App {
 #[cfg(test)]
 #[path = "workspace_tests.rs"]
 mod tests;
+
+#[derive(Debug)]
+enum LinkTarget {
+    Web(String),
+    File(HostPath, String),
+}
+
+fn resolve_link(source: &HostPath, target: &str) -> Result<LinkTarget, String> {
+    if target.starts_with("https://") || target.starts_with("http://") {
+        return Ok(LinkTarget::Web(target.into()));
+    }
+    if target.starts_with("//") || target.split('/').next().unwrap_or("").contains(':') {
+        return Err(format!("Unsupported link: {target}"));
+    }
+    let (path, fragment) = target.split_once('#').unwrap_or((target, ""));
+    let path = path.split_once('?').map_or(path, |(path, _)| path);
+    use std::os::unix::ffi::OsStringExt;
+    let decoded = percent_encoding::percent_decode_str(path).collect::<Vec<_>>();
+    if decoded.contains(&0) {
+        return Err("Link contains a NUL byte".into());
+    }
+    let source = source.to_path().map_err(|e| e.to_string())?;
+    let path = if path.is_empty() {
+        source.clone()
+    } else {
+        source
+            .parent()
+            .ok_or("Document has no parent directory")?
+            .join(std::ffi::OsString::from_vec(decoded))
+    };
+    // Normalize lexically: the daemon resolves and reads host paths, never this GUI process.
+    let mut normalized = std::path::PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::CurDir => {}
+            part => normalized.push(part.as_os_str()),
+        }
+    }
+    let fragment = percent_encoding::percent_decode_str(fragment)
+        .decode_utf8()
+        .map_err(|_| "Heading link is not UTF-8")?
+        .into_owned();
+    Ok(LinkTarget::File(HostPath::from_path(&normalized), fragment))
+}
+
+fn heading_index(items: &[markdown::Item], fragment: &str) -> Option<usize> {
+    let mut used = std::collections::BTreeSet::new();
+    for (index, item) in items.iter().enumerate() {
+        if let markdown::Item::Heading(_, text) = item {
+            let text = text
+                .spans(crate::ui::markdown_settings().style)
+                .iter()
+                .map(|span| span.text.as_ref())
+                .collect::<String>();
+            let slug: String = text
+                .to_lowercase()
+                .chars()
+                .filter_map(|c| {
+                    if c.is_alphanumeric() || c == '_' || c == '-' {
+                        Some(c)
+                    } else if c.is_whitespace() {
+                        Some('-')
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let mut anchor = slug.clone();
+            let mut suffix = 0;
+            while used.contains(&anchor) {
+                suffix += 1;
+                anchor = format!("{slug}-{suffix}");
+            }
+            used.insert(anchor.clone());
+            if anchor == fragment {
+                return Some(index);
+            }
+        }
+    }
+    None
+}
+
+impl App {
+    pub(crate) fn reader_anchor(&mut self, session: &str) -> Task<Message> {
+        if self.selected.as_deref() != Some(session) {
+            return Task::none();
+        }
+        let Some(nav) = self.workspace.navigation.get_mut(session) else {
+            return Task::none();
+        };
+        let Some((key, fragment)) = nav.anchor.as_ref() else {
+            return Task::none();
+        };
+        let Some(view) = self.views.get_mut(session) else {
+            return Task::none();
+        };
+        let Some(file) = &view.files.reader else {
+            return Task::none();
+        };
+        if files::key(&file.path) != key || file.pending.is_some() {
+            return Task::none();
+        }
+        let Some(reader) = &mut view.reader else {
+            return Task::none();
+        };
+        let Some(markdown) = &reader.markdown else {
+            return Task::none();
+        };
+        let key = key.clone();
+        let fragment = fragment.clone();
+        nav.anchor = None;
+        if fragment.is_empty() {
+            return iced::widget::operation::scroll_to(
+                "markdown-reader",
+                iced::widget::scrollable::AbsoluteOffset {
+                    x: None,
+                    y: Some(0.0),
+                },
+            );
+        }
+        let Some(index) = heading_index(markdown.items(), &fragment) else {
+            reader.notice = Some(format!("Heading not found: #{fragment}"));
+            return Task::none();
+        };
+        iced_runtime::task::widget(FindHeading {
+            target: iced::advanced::widget::Id::from(format!("markdown-heading-{index}")),
+            session: session.into(),
+            key,
+            origin: 0.0,
+            y: None,
+        })
+    }
+}
+
+struct FindHeading {
+    target: iced::advanced::widget::Id,
+    session: String,
+    key: String,
+    origin: f32,
+    y: Option<f32>,
+}
+impl iced::advanced::widget::operation::Operation<Message> for FindHeading {
+    fn traverse(
+        &mut self,
+        operate: &mut dyn FnMut(&mut dyn iced::advanced::widget::operation::Operation<Message>),
+    ) {
+        operate(self);
+    }
+    fn scrollable(
+        &mut self,
+        id: Option<&iced::advanced::widget::Id>,
+        _bounds: iced::Rectangle,
+        content: iced::Rectangle,
+        _translation: iced::Vector,
+        _state: &mut dyn iced::advanced::widget::operation::Scrollable,
+    ) {
+        if id == Some(&iced::advanced::widget::Id::from("markdown-reader")) {
+            self.origin = content.y;
+        }
+    }
+    fn container(&mut self, id: Option<&iced::advanced::widget::Id>, bounds: iced::Rectangle) {
+        if id == Some(&self.target) {
+            self.y = Some((bounds.y - self.origin).max(0.0));
+        }
+    }
+    fn finish(&self) -> iced::advanced::widget::operation::Outcome<Message> {
+        match self.y {
+            Some(y) => iced::advanced::widget::operation::Outcome::Some(Message::Workspace(
+                Action::AnchorOffset {
+                    session: self.session.clone(),
+                    key: self.key.clone(),
+                    y,
+                },
+            )),
+            None => iced::advanced::widget::operation::Outcome::None,
+        }
+    }
+}

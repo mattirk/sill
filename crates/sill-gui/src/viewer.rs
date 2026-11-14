@@ -58,9 +58,18 @@ impl<'a> Viewer<'a, Message> for SillViewer<'a> {
         container(
             selection::rich_text(text.spans(settings.style))
                 .on_link_click(Message::Link)
+                .on_link_copy(Message::Copy)
                 .size(size)
                 .style(style::selectable_inherited),
         )
+        .id(format!(
+            "{}-heading-{index}",
+            if self.media.is_none() {
+                "markdown"
+            } else {
+                "conversation"
+            }
+        ))
         .padding(padding::top(if index > 0 {
             settings.text_size / 2.0
         } else {
@@ -88,6 +97,7 @@ impl<'a> Viewer<'a, Message> for SillViewer<'a> {
         selection::rich_text(spans)
             .size(settings.text_size)
             .on_link_click(Message::Link)
+            .on_link_copy(Message::Copy)
             .style(style::selectable_inherited)
             .into()
     }
@@ -153,6 +163,7 @@ impl<'a> Viewer<'a, Message> for SillViewer<'a> {
                 container(column(lines.iter().map(|line| {
                     selection::rich_text(line.spans(settings.style))
                         .on_link_click(Message::Link)
+                        .on_link_copy(Message::Copy)
                         .font(Font::with_name(crate::fonts::MONO_FAMILY))
                         .size(settings.code_size)
                         .style(style::selectable_inherited)

@@ -3791,3 +3791,38 @@ fn mode_changes_in_flight_are_serialized() {
     let _ = app.update(Message::SwitchPlaced(Some((displays, Some(drawer)))));
     assert_eq!(app.switching, None);
 }
+
+#[test]
+fn markdown_link_click_navigates_and_secondary_click_copies() {
+    let (mut app, _) = App::new(true, None);
+    let source = sill_proto::sessions::HostPath::from_path(std::path::Path::new(
+        "/home/demo/project/README.md",
+    ));
+    let _ = app.update(Message::Workspace(crate::workspace::Action::Open {
+        path: source.clone(),
+        repo: None,
+    }));
+    let view = app.views.get_mut("demo").unwrap();
+    let file = view.files.reader.as_mut().unwrap();
+    file.text = "A [document link](docs/next.md#heading).".into();
+    file.revision += 1;
+    view.sync_reader();
+    let mut ui = simulator(&app, (1000.0, 860.0));
+    let at = aim_at(&mut ui, "A document link", "document");
+    ui.aim(at);
+    ui.send(vec![iced::Event::Mouse(iced::mouse::Event::ButtonPressed(
+        iced::mouse::Button::Right,
+    ))]);
+    assert_eq!(copies(ui.into_messages()), ["docs/next.md#heading"]);
+    let mut ui = simulator(&app, (1000.0, 860.0));
+    let at = aim_at(&mut ui, "A document link", "document");
+    ui.aim(at);
+    ui.send(vec![
+        iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
+        iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+            iced::mouse::Button::Left,
+        )),
+    ]);
+    assert!(ui.into_messages().any(|m| matches!(m, Message::Workspace(crate::workspace::Action::Link { session, source: from, target })
+        if session == "demo" && from.display == source.display && target == "docs/next.md#heading")));
+}

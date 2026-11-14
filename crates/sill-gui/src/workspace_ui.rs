@@ -309,6 +309,11 @@ impl App {
         ]
         .spacing(2)
         .align_y(Alignment::Center);
+        if !is_diff {
+            heading = heading
+                .push(action("Back", Action::Back(false)))
+                .push(action("Forward", Action::Back(true)));
+        }
         if is_diff {
             heading = heading.push(action(
                 "Open file",
@@ -444,11 +449,25 @@ impl App {
         } else if let Some(markdown) = &rendering.markdown {
             selection::area(
                 scrollable(
-                    container(markdown::view_with(
-                        markdown.items(),
-                        crate::ui::markdown_settings(),
-                        &viewer::SillViewer { media: None },
-                    ))
+                    container(
+                        markdown::view_with(
+                            markdown.items(),
+                            crate::ui::markdown_settings(),
+                            &viewer::SillViewer { media: None },
+                        )
+                        .map({
+                            let session = view.id.clone();
+                            let source = file.path.clone();
+                            move |message| match message {
+                                Message::Link(target) => msg(Action::Link {
+                                    session: session.clone(),
+                                    source: source.clone(),
+                                    target,
+                                }),
+                                other => other,
+                            }
+                        }),
+                    )
                     .padding(16),
                 )
                 .direction(scrollable::Direction::Vertical(style::bar()))

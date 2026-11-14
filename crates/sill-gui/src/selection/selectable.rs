@@ -39,6 +39,7 @@ where
     align_x: Alignment,
     style: StyleFn<'a, Theme>,
     on_link_click: Option<Box<dyn Fn(Link) -> Message + 'a>>,
+    on_link_copy: Option<Box<dyn Fn(Link) -> Message + 'a>>,
 }
 
 /// Selectable plain text.
@@ -69,6 +70,7 @@ where
             align_x: Alignment::Default,
             style: Box::new(iced_selection::text::default),
             on_link_click: None,
+            on_link_copy: None,
         }
     }
 
@@ -101,6 +103,12 @@ where
 
     pub fn on_link_click(mut self, on_link_click: impl Fn(Link) -> Message + 'a) -> Self {
         self.on_link_click = Some(Box::new(on_link_click));
+        self
+    }
+
+    /// Copy a link with the secondary pointer button.
+    pub fn on_link_copy(mut self, on_link_copy: impl Fn(Link) -> Message + 'a) -> Self {
+        self.on_link_copy = Some(Box::new(on_link_copy));
         self
     }
 
@@ -351,6 +359,15 @@ where
             .filter(|span| self.spans().get(*span).is_some_and(|s| s.link.is_some()));
 
         match event {
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
+                if let Some(span) = state.hovered_link
+                    && let Some(link) = self.spans().get(span).and_then(|s| s.link.clone())
+                    && let Some(copy) = &self.on_link_copy
+                {
+                    shell.publish(copy(link));
+                    shell.capture_event();
+                }
+            }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
             | Event::Touch(touch::Event::FingerPressed { .. }) => {
                 if state.hovered_link.is_some() {
