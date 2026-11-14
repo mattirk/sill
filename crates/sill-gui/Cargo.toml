@@ -1,0 +1,23 @@
+[package]
+name = "sill-gui"
+description = "Experimental Iced frontend for the Sill public protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+gpu = ["iced/wgpu"]
+
+[dependencies]
+sill-proto.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+iced = { version = "=0.14.0", default-features = false, features = ["tiny-skia", "x11", "wayland", "markdown", "highlighter", "advanced", "tokio"] }
+iced_selection = { version = "=0.5.0", features = ["markdown"] }
+async-channel = "2"
+
+[dev-dependencies]
+serde.workspace = true

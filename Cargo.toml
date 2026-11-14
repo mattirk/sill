@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/sill-core", "crates/sill-memory", "crates/sill-proto", "crates/sill-shim", "crates/sill"]
+members = ["crates/sill-core", "crates/sill-memory", "crates/sill-proto", "crates/sill-shim", "crates/sill", "crates/sill-gui"]
 
 [workspace.package]
 version = "0.0.1"
