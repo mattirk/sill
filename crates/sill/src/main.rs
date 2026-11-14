@@ -83,6 +83,8 @@ enum Cmd {
     },
     /// Switch the shelf's colour theme: adwaita | dracula | solarized-dark | solarized-light | nord
     Theme { name: String },
+    /// Set the show/hide key, GTK accelerator syntax: "<Alt>space", "<Super>grave", "F12"
+    Hotkey { spec: String },
     /// Show a policy as sill reads it
     Policy {
         /// name (searched in ~/.config/sill/policies, /etc/sill/policies, built-in) or path
@@ -215,6 +217,7 @@ fn main() -> Result<()> {
         Cmd::Toggle => shelf::toggle(),
         Cmd::Restart { hidden, dev } => shelf::restart(hidden, dev),
         Cmd::Theme { name } => shelf::set_theme(&name),
+        Cmd::Hotkey { spec } => shelf::set_hotkey(&spec),
         Cmd::Proxy { fd, socket, policy } => {
             let policy = Policy::load(&policy, &home()?)?;
             let listener = match socket {

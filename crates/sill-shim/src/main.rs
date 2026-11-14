@@ -50,6 +50,25 @@ enum Request {
     ReadFile { path: PathBuf },
     /// Write a file in the jail (merged view, recorded by the overlay).
     WriteFile { path: PathBuf, content: String },
+    /// Open a pty inside the jail and run `argv` on it (the person's shell, SPEC §3.1). The reply
+    /// line carries the pty master as an SCM_RIGHTS fd, so the client must read it with recvmsg.
+    OpenPty {
+        argv: Vec<String>,
+        #[serde(default)]
+        env: BTreeMap<String, String>,
+        cwd: Option<PathBuf>,
+        #[serde(default = "default_cols")]
+        cols: u16,
+        #[serde(default = "default_rows")]
+        rows: u16,
+    },
+}
+
+fn default_cols() -> u16 {
+    100
+}
+fn default_rows() -> u16 {
+    30
 }
 
 fn default_grace() -> u64 {
@@ -194,15 +213,90 @@ fn control_loop(reader: BufReader<UnixStream>, mut writer: UnixStream, shared: S
         if line.trim().is_empty() {
             continue;
         }
-        let reply = match serde_json::from_str::<Request>(&line) {
-            Ok(req) => handle_request(req, &shared),
-            Err(e) => Reply::err(format!("bad request: {e}")),
+        let req = match serde_json::from_str::<Request>(&line) {
+            Ok(req) => req,
+            Err(e) => {
+                let mut out = serde_json::to_string(&Reply::err(format!("bad request: {e}")))?;
+                out.push('\n');
+                writer.write_all(out.as_bytes())?;
+                continue;
+            }
         };
+        if let Request::OpenPty { argv, env, cwd, cols, rows } = req {
+            match open_pty(argv, env, cwd, cols, rows) {
+                Ok((master, pid)) => {
+                    let mut out = serde_json::to_string(&Reply::ok().with("pid", pid))?;
+                    out.push('\n');
+                    send_with_fd(&writer, out.as_bytes(), &master)?;
+                }
+                Err(e) => {
+                    let mut out = serde_json::to_string(&Reply::err(format!("{e:#}")))?;
+                    out.push('\n');
+                    writer.write_all(out.as_bytes())?;
+                }
+            }
+            continue;
+        }
+        let reply = handle_request(req, &shared);
         let mut out = serde_json::to_string(&reply)?;
         out.push('\n');
         writer.write_all(out.as_bytes())?;
     }
     Ok(())
+}
+
+/// Reply line + the pty master fd in one message (SCM_RIGHTS rides on the first byte).
+fn send_with_fd(sock: &UnixStream, bytes: &[u8], fd: &std::os::fd::OwnedFd) -> Result<()> {
+    use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags, sendmsg};
+    use std::os::fd::AsFd;
+    let fds = [fd.as_fd()];
+    let mut space = [std::mem::MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+    let mut control = SendAncillaryBuffer::new(&mut space);
+    control.push(SendAncillaryMessage::ScmRights(&fds));
+    sendmsg(sock, &[std::io::IoSlice::new(bytes)], &mut control, SendFlags::empty())?;
+    Ok(())
+}
+
+/// A pty with `argv` on it: the child gets a new session, the slave as its controlling tty and as
+/// stdin/stdout/stderr. Returns (master, pid).
+fn open_pty(argv: Vec<String>, env: BTreeMap<String, String>, cwd: Option<PathBuf>, cols: u16, rows: u16) -> Result<(std::os::fd::OwnedFd, u32)> {
+    use rustix::pty::{OpenptFlags, grantpt, ioctl_tiocgptpeer, openpt, unlockpt};
+    use rustix::termios::{Winsize, tcsetwinsize};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let Some((prog, rest)) = argv.split_first() else { bail!("empty argv") };
+    let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC).context("openpt")?;
+    grantpt(&master)?;
+    unlockpt(&master)?;
+    let slave = ioctl_tiocgptpeer(&master, OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC).context("pty peer")?;
+    let _ = tcsetwinsize(&slave, Winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 });
+    let slave_raw = slave.as_raw_fd();
+    let mut cmd = Command::new(prog);
+    cmd.args(rest).envs(&env).env("TERM", "xterm-256color");
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
+    // SAFETY: only async-signal-safe calls between fork and exec.
+    unsafe {
+        cmd.pre_exec(move || {
+            rustix::process::setsid()?;
+            let slave = std::os::fd::BorrowedFd::borrow_raw(slave_raw);
+            rustix::process::ioctl_tiocsctty(slave)?;
+            for target in 0..3 {
+                let mut t = OwnedFd::from_raw_fd(target);
+                rustix::io::dup2(slave, &mut t)?;
+                std::mem::forget(t);
+            }
+            Ok(())
+        });
+    }
+    let child = cmd.spawn().with_context(|| format!("spawn {prog} on pty"))?;
+    let pid = child.id();
+    drop(slave);
+    std::thread::spawn(move || {
+        let mut child = child;
+        let _ = child.wait();
+    });
+    Ok((master, pid))
 }
 
 fn handle_request(req: Request, shared: &Shared) -> Reply {
@@ -236,6 +330,7 @@ fn handle_request(req: Request, shared: &Shared) -> Reply {
             Ok(()) => Reply::ok(),
             Err(e) => Reply::err(format!("{e:#}")),
         },
+        Request::OpenPty { .. } => Reply::err("handled by the control loop"),
     }
 }
 

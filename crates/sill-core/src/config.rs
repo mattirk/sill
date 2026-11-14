@@ -12,6 +12,8 @@ pub struct Config {
     pub theme: String,
     /// Fraction of the work area the shelf takes (0.2–0.8).
     pub width: Option<f64>,
+    /// Global show/hide key, GTK accelerator syntax (`<Alt>space`, `<Super>grave`, `F12`).
+    pub hotkey: Option<String>,
 }
 
 pub fn path() -> Result<PathBuf> {

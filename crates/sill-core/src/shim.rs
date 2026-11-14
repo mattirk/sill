@@ -77,6 +77,45 @@ impl Control {
         Ok(r.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string())
     }
 
+    /// Open a pty in the jail running `argv`; returns the master fd and the child's pid.
+    pub fn open_pty(
+        &mut self,
+        argv: &[String],
+        env: &BTreeMap<String, String>,
+        cwd: Option<&Path>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(std::os::fd::OwnedFd, u32)> {
+        use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, recvmsg};
+        let req = json!({ "op": "open_pty", "argv": argv, "env": env, "cwd": cwd, "cols": cols, "rows": rows });
+        let mut line = serde_json::to_string(&req)?;
+        line.push('\n');
+        self.writer.write_all(line.as_bytes())?;
+        // the reply rides with the fd: read it with recvmsg on the raw socket (nothing is buffered:
+        // every earlier reply was exactly one line, consumed whole)
+        let mut buf = [0u8; 4096];
+        let mut space = [std::mem::MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+        let mut control = RecvAncillaryBuffer::new(&mut space);
+        let r = recvmsg(&self.writer, &mut [std::io::IoSliceMut::new(&mut buf)], &mut control, RecvFlags::empty())?;
+        let text = String::from_utf8_lossy(&buf[..r.bytes]).to_string();
+        let reply: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(text.lines().next().unwrap_or("").trim()).context("shim reply")?;
+        if reply.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+            bail!("shim: {}", reply.get("error").and_then(|v| v.as_str()).unwrap_or("open_pty failed"));
+        }
+        let mut fd = None;
+        for msg in control.drain() {
+            if let RecvAncillaryMessage::ScmRights(fds) = msg {
+                for f in fds {
+                    fd = Some(f);
+                }
+            }
+        }
+        let fd = fd.context("no pty fd in the shim's reply")?;
+        let pid = reply.get("pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        Ok((fd, pid))
+    }
+
     pub fn write_file(&mut self, path: &Path, content: &str) -> Result<()> {
         self.call(json!({ "op": "write_file", "path": path, "content": content }))?;
         Ok(())

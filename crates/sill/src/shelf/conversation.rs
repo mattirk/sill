@@ -72,9 +72,11 @@ impl Conversation {
         let adj = conv.root.vadjustment();
         {
             let c = conv.clone();
-            adj.connect_changed(move |adj| {
+            adj.connect_changed(move |_| {
+                // `changed` arrives inside the viewport's allocation; a set_value there is clamped
+                // away when the allocation finishes. Follow from the next frames instead.
                 if c.stick_to_bottom.get() {
-                    c.follow(adj);
+                    c.request_follow();
                 }
             });
         }
@@ -373,6 +375,9 @@ entry { border-radius: 0; }
 .sill-pin:hover { opacity: 1; }
 .sill-badge { font-size: 80%; color: alpha(@accent_color, 0.9); font-family: monospace; }
 .sill-controls { font-size: 85%; }
+.sill-ctl-icon { min-height: 0; min-width: 0; padding: 2px 6px; opacity: 0.6; -gtk-icon-size: 15px; }
+.sill-ctl-icon:hover, .sill-ctl-icon:checked { opacity: 1; }
+.sill-unlocked { color: @warning_color; }
 .sill-controls .dim-label { opacity: 0.7; }
 .sill-control { min-height: 0; padding: 0; color: alpha(@view_fg_color, 0.6); }
 .sill-control > button { min-height: 0; padding: 1px 6px; background: transparent; border: none; box-shadow: none; color: inherit; }
@@ -387,6 +392,9 @@ button.sill-send > label { padding: 0; margin: 0; }
 button.sill-send:hover { background: alpha(@accent_bg_color, 0.45); }
 button.sill-send.sill-stop { font-size: 140%; color: @error_color; background: alpha(@error_bg_color, 0.25); }
 button.sill-send.sill-stop:hover { background: alpha(@error_bg_color, 0.45); }
+.sill-terminal { padding: 4px; }
+.sill-hotkey { padding: 4px 14px; font-family: monospace; }
+.sill-capturing { background: alpha(@accent_bg_color, 0.3); }
 .sill-prompt-box { border-radius: 0; border: none; border-top: 1px solid alpha(@view_fg_color, 0.15);
                    background: alpha(@view_fg_color, 0.035); }
 "#;

@@ -4,6 +4,7 @@
 mod changes;
 mod conversation;
 mod files;
+mod hotkey;
 mod markdown;
 mod session;
 mod session_view;
@@ -85,6 +86,23 @@ pub fn run(cwd: Option<PathBuf>, hidden: bool) -> Result<()> {
         }
     });
     app.add_action(&set_theme);
+    // `sill hotkey SPEC`: rebind the show/hide key in the running shelf
+    let set_hotkey = gio::SimpleAction::new("set-hotkey", Some(gtk::glib::VariantTy::STRING));
+    set_hotkey.connect_activate(|_, param| {
+        if let Some(spec) = param.and_then(|p| p.str()) {
+            let r = window::HOTKEY.with(|h| h.borrow().as_ref().map(|hk| hk.rebind(spec)));
+            match r {
+                Some(Ok(())) => {
+                    let mut c = sill_core::config::load();
+                    c.hotkey = Some(spec.to_string());
+                    let _ = sill_core::config::save(&c);
+                }
+                Some(Err(e)) => eprintln!("sill: hotkey {spec}: {e:#}"),
+                None => eprintln!("sill: hotkey grab not active"),
+            }
+        }
+    });
+    app.add_action(&set_hotkey);
     let quit = gio::SimpleAction::new("quit", None);
     {
         let app = app.clone();
@@ -212,6 +230,20 @@ pub fn restart(hidden: bool, dev: bool) -> Result<()> {
     }
     cmd.spawn()?;
     println!("shelf restarted");
+    Ok(())
+}
+
+/// `sill hotkey SPEC`: rebind the running shelf's show/hide key (and save it).
+pub fn set_hotkey(spec: &str) -> Result<()> {
+    hotkey::validate(spec)?;
+    let app = gio::Application::new(Some(APP_ID), gio::ApplicationFlags::empty());
+    app.register(None::<&gio::Cancellable>)?;
+    if !app.is_remote() {
+        let mut c = sill_core::config::load();
+        c.hotkey = Some(spec.to_string());
+        return sill_core::config::save(&c);
+    }
+    app.activate_action("set-hotkey", Some(&spec.to_variant()));
     Ok(())
 }
 

@@ -78,7 +78,11 @@ sill restart --dev                         # run the build in target/ instead of
   grouped by session and repo: diff, Keep, Revert, Keep all; conflicts — edited on the host meanwhile —
   marked `!` and left out of Keep all), *Files* (tree of touched repos with badges), *Settings*. Escape
   goes back, then hides.
-- Enter sends, Shift+Enter newline. Permissions are answered with the buttons in the conversation.
+- Enter sends, Shift+Enter newline. Permissions are answered with the buttons in the conversation; the
+  lock icon in the controls row is auto-allow (open = sill answers "allow once" for you).
+- **Shell**: the terminal icon (or Ctrl+`) swaps the prompt for a terminal running *inside the session's
+  jail* — same mounts, pins and proxy the agent has, so `git status`, builds and tests show the agent's
+  view. It starts in the first pinned folder, keeps running while hidden, and dies with the session.
 
 Per-user setup (done): `~/.config/autostart/sill.desktop`, Cinnamon shortcut
 `custom0` = `/usr/local/bin/sill toggle`. Binaries are installed system-wide by

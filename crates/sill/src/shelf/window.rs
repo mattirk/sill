@@ -21,6 +21,10 @@ use super::session_view::SessionView;
 use super::tabs::TabStrip;
 use super::{session, settings, x11};
 
+thread_local! {
+    pub static HOTKEY: RefCell<Option<Rc<super::hotkey::Hotkey>>> = const { RefCell::new(None) };
+}
+
 pub struct Shelf {
     pub window: adw::ApplicationWindow,
     store: Rc<Store>,
@@ -222,13 +226,22 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
     {
         let s = shelf.clone();
         let f2 = gtk::EventControllerKey::new();
-        f2.connect_key_pressed(move |_, key, _, _| {
+        f2.connect_key_pressed(move |_, key, _, state| {
             if key == gdk::Key::F2 {
                 s.tabs.edit_selected();
                 return glib::Propagation::Stop;
             }
+            if key == gdk::Key::t && state.contains(gdk::ModifierType::CONTROL_MASK) {
+                if let Some(id) = s.tabs.selected()
+                    && let Some(v) = s.views.borrow().get(&id)
+                {
+                    v.toggle_shell();
+                }
+                return glib::Propagation::Stop;
+            }
             glib::Propagation::Proceed
         });
+        f2.set_propagation_phase(gtk::PropagationPhase::Capture); // works from inside the terminal too
         window.add_controller(f2);
     }
 
@@ -295,6 +308,24 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
                 s.focus_prompt();
             });
         });
+    }
+    // global show/hide key, grabbed on the X server (configurable in Settings)
+    {
+        let mut spec = config.hotkey.clone().unwrap_or_else(|| super::hotkey::DEFAULT.to_string());
+        if let Err(e) = super::hotkey::validate(&spec) {
+            eprintln!("sill: saved hotkey {spec:?} rejected ({e}); using {}", super::hotkey::DEFAULT);
+            spec = super::hotkey::DEFAULT.to_string();
+        }
+        let w = window.clone().upcast::<gtk::Window>();
+        match super::hotkey::Hotkey::start(&spec, move || toggle(&w)) {
+            Ok((hk, err)) => {
+                if let Some(e) = err {
+                    eprintln!("sill: hotkey {spec}: {e}");
+                }
+                HOTKEY.with(|h| *h.borrow_mut() = Some(Rc::new(hk)));
+            }
+            Err(e) => eprintln!("sill: hotkey: {e:#}"),
+        }
     }
     // keep the Rc alive as long as the window
     unsafe {
