@@ -20,6 +20,9 @@ pub struct InitArgs {
     /// per-user setup (no root): sill-gui autostart, hotkey hint
     #[arg(long)]
     pub user: bool,
+    /// Install only the daemon and runtime; require systemd for account setup
+    #[arg(long)]
+    pub headless: bool,
     /// use an existing partition (a mount point) as the state filesystem instead of an image; it is
     /// bind-mounted at /var/lib/sill
     #[arg(long)]
@@ -132,9 +135,12 @@ pub fn run(a: InitArgs) -> Result<()> {
     check_prefix(&a.prefix)?;
     // 1. checks: reported, not fixed
     checks(&mut i);
+    if a.headless && !i.problems.is_empty() {
+        bail!("headless prerequisites failed; resolve the problems above before installation");
+    }
     // 2. files
     if !a.no_copy {
-        install_files(&mut i, &a.prefix, has_systemd)?;
+        install_files(&mut i, &a.prefix, has_systemd, a.headless)?;
     } else {
         i.skip("binaries, policy, icons, units (--no-copy)".to_string());
     }
@@ -148,6 +154,13 @@ pub fn run(a: InitArgs) -> Result<()> {
         i.skip("cgroup delegation: the systemd user instance limits sessions (--delegate-cgroup forces it)".to_string());
     }
     summary(&i)?;
+    if a.headless && !i.problems.is_empty() {
+        bail!("headless installation incomplete; resolve the problems above");
+    }
+    if a.headless {
+        println!("per user, once: sill init --user --headless");
+        return Ok(());
+    }
     println!("per user, once: sill init --user   (sill-gui autostart; then bind `sill toggle` to a key)");
     Ok(())
 }
@@ -288,12 +301,13 @@ fn check_prefix(prefix: &Path) -> Result<()> {
 
 // --- 2. files -----------------------------------------------------------------------------------
 
-fn install_files(i: &mut Init, prefix: &Path, has_systemd: bool) -> Result<()> {
+fn install_files(i: &mut Init, prefix: &Path, has_systemd: bool, headless: bool) -> Result<()> {
     let bin = prefix.join("bin");
     let me = std::env::current_exe()?.canonicalize()?;
     let src_dir = me.parent().context("executable has no parent")?.to_path_buf();
     // sill-gui is the desktop window: beside sill on a desktop, absent from a headless box
     for name in ["sill", "sill-shim", "sill-gui"] {
+        if headless && name == "sill-gui" { continue; }
         let src = src_dir.join(name);
         let dst = bin.join(name);
         if !src.is_file() {
@@ -313,7 +327,7 @@ fn install_files(i: &mut Init, prefix: &Path, has_systemd: bool) -> Result<()> {
     }
     install_policy(i, Path::new("/etc/sill/policies"))?;
     // icons and the desktop file
-    {
+    if !headless {
     let share = prefix.join("share");
     i.put_file(&share.join("sill/sill.svg"), ICON.as_bytes(), 0o644)?;
     i.put_file(&share.join("icons/hicolor/scalable/apps/sill.svg"), ICON.as_bytes(), 0o644)?;
@@ -324,8 +338,10 @@ fn install_files(i: &mut Init, prefix: &Path, has_systemd: bool) -> Result<()> {
     }
     // sill-gui as a systemd user service (per user: sill init --user enables it)
     if has_systemd {
+        if !headless {
         let unit = UNIT_GUI.replace("/usr/local/bin/sill", &bin.join("sill").display().to_string());
         i.put_file(Path::new("/etc/systemd/user/sill-gui.service"), unit.as_bytes(), 0o644)?;
+        }
         // the daemon: socket-activated (docs/daemon.md §3.1); per user `sill init --user` enables the socket
         let unit = UNIT_DAEMON.replace("/usr/local/bin/sill", &bin.join("sill").display().to_string());
         i.put_file(Path::new("/etc/systemd/user/sill.service"), unit.as_bytes(), 0o644)?;
@@ -666,24 +682,29 @@ fn user_setup(a: &InitArgs) -> Result<()> {
         return Ok(());
     }
     let exe = std::env::current_exe()?;
+    if a.headless && systemd.is_err() {
+        bail!("headless account setup requires a reachable systemd user manager; log in directly over SSH with libpam-systemd installed");
+    }
     if systemd.is_ok() {
         let mut staged: Option<PathBuf> = None;
-        if !unit_known("sill-gui.service") {
-            // no system-wide unit (cargo install, tarball without root): a private copy
-            let run = stage_once(&mut i, &mut staged, &home, &exe)?;
-            let unit = UNIT_GUI.replace("/usr/local/bin/sill", &run.display().to_string());
-            i.put_file(&home.join(".config/systemd/user/sill-gui.service"), unit.as_bytes(), 0o644)?;
-            i.run("reload user units", "systemctl", &["--user", "daemon-reload"])?;
-        }
-        let enabled = std::process::Command::new("systemctl")
-            .args(["--user", "is-enabled", "--quiet", "sill-gui.service"])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if enabled {
-            i.skip("sill-gui.service already enabled".to_string());
-        } else {
-            i.run("start sill-gui with the session", "systemctl", &["--user", "enable", "--now", "sill-gui.service"])?;
+        if !a.headless {
+            if !unit_known("sill-gui.service") {
+                // no system-wide unit (cargo install, tarball without root): a private copy
+                let run = stage_once(&mut i, &mut staged, &home, &exe)?;
+                let unit = UNIT_GUI.replace("/usr/local/bin/sill", &run.display().to_string());
+                i.put_file(&home.join(".config/systemd/user/sill-gui.service"), unit.as_bytes(), 0o644)?;
+                i.run("reload user units", "systemctl", &["--user", "daemon-reload"])?;
+            }
+            let enabled = std::process::Command::new("systemctl")
+                .args(["--user", "is-enabled", "--quiet", "sill-gui.service"])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if enabled {
+                i.skip("sill-gui.service already enabled".to_string());
+            } else {
+                i.run("start sill-gui with the session", "systemctl", &["--user", "enable", "--now", "sill-gui.service"])?;
+            }
         }
         // the daemon's socket (docs/daemon.md §3.1): the first client starts sill.service
         if !unit_known("sill.socket") {
@@ -724,6 +745,7 @@ fn user_setup(a: &InitArgs) -> Result<()> {
         i.put_file(&home.join(".config/autostart/sill.desktop"), entry.as_bytes(), 0o644)?;
     }
     summary(&i)?;
+    if a.headless { return Ok(()); }
     let on_path = which("sill").and_then(|p| p.canonicalize().ok()) == exe.canonicalize().ok();
     println!(
         "hotkey: bind `{} toggle` to a key in your desktop's keyboard shortcuts (Alt+Space is the usual choice; \
@@ -743,6 +765,18 @@ mod tests {
 
     fn read(p: &Path) -> String {
         std::fs::read_to_string(p).unwrap_or_default()
+    }
+
+    #[test]
+    fn headless_install_plan_excludes_desktop_artifacts() {
+        let mut plan = Init { dry: true, did: vec![], skipped: vec![], problems: vec![] };
+        install_files(&mut plan, Path::new("/usr/local"), true, true).unwrap();
+        let actions = [plan.did, plan.skipped].concat().join("\n");
+        assert!(actions.contains("/etc/systemd/user/sill.service"));
+        assert!(actions.contains("/etc/systemd/user/sill.socket"));
+        assert!(!actions.contains("sill-gui"));
+        assert!(!actions.contains(".desktop"));
+        assert!(!actions.contains(".svg"));
     }
 
     #[test]
@@ -813,6 +847,7 @@ pub fn autostart(value: Option<&str>) -> Result<()> {
         // Reuse the installer so private units and non-systemd desktops follow the same path.
         let args = InitArgs {
             dry_run: false, prefix: "/usr/local".into(), user: true,
+            headless: !std::env::current_exe()?.with_file_name("sill-gui").is_file(),
             state_dir: None, state_size: "32G".into(), delegate_cgroup: false,
             cgroup_only: false, no_copy: false,
         };

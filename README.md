@@ -359,3 +359,6 @@ scale only (Settings, or Ctrl+Plus / Ctrl+- / Ctrl+0). `docs/design.md` says why
 
 The session and layout shortcuts are editable in Settings → Shortcuts; the hotkey has its own field;
 Escape, Enter and Ctrl+Q are fixed.
+
+For a Debian server without a GUI, clone the repository on the server and run
+`packaging/deploy-server.sh`; see [server installation](docs/server.md).
