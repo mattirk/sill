@@ -59,8 +59,10 @@ hidden_mounts = ["/boot", "/boot/efi"]
 # Changes; nothing is kept without a click.
 # Recorded, but not hashed per turn:
 # Inside git repositories the repo's own .gitignore decides what is build output; these patterns cover
-# the rest (home-level tool caches and the like).
-ledger_ignore = ["target/", "node_modules/", "__pycache__/", ".venv/", "build/", ".cargo/registry/", ".cargo/.global-cache", ".cargo/.package-cache", ".rustup/"]
+# the rest (home-level tool caches and the like), and the shells' and REPLs' histories: written by every
+# terminal in a session, they stay in its overlay and never show in Changes.
+ledger_ignore = ["target/", "node_modules/", "__pycache__/", ".venv/", "build/", ".cargo/registry/", ".cargo/.global-cache", ".cargo/.package-cache", ".rustup/",
+    ".bash_history", ".zsh_history", ".local/share/fish/fish_history", ".python_history", ".node_repl_history", ".lesshst", ".sqlite_history", ".psql_history"]
 
 [limits]
 cpu_weight = 20
