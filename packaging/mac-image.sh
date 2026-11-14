@@ -98,7 +98,7 @@ guest 'sudo install -D -m755 guest/packaging/mac/guest/sill-disks /usr/local/lib
     sudo sh -c "cat guest/packaging/mac/guest/fstab >> /etc/fstab" &&
     sudo mkdir -p /mnt/sill-state && rm -rf guest &&
     sudo systemctl daemon-reload && sudo systemctl enable sill-disks.service &&
-    sudo /usr/local/lib/sill/sill-disks && sudo mount -a && findmnt -n -o SOURCE,TARGET /home /mnt/sill-state'
+    sudo /usr/local/lib/sill/sill-disks && sudo mount -a && findmnt -n -o SOURCE,TARGET /home && findmnt -n -o SOURCE,TARGET /mnt/sill-state'
 echo 'Building and installing sill in the guest'
 git archive --format=tar HEAD | guest 'rm -rf src && mkdir src && tar -x -C src'
 guest 'curl -fsSL https://sh.rustup.rs | sh -s -- -y -q --profile minimal >/dev/null'
