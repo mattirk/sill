@@ -571,14 +571,14 @@ impl Runner {
             if let relay::Command::Prompt { text, .. } = &mut cmd {
                 if st.ready.is_none() { bail!("the agent is starting or needs a login"); }
                 if st.busy { bail!("the agent is busy; wait for the turn to end"); }
-                if st.context.restoring() { bail!("the agent is restoring its model settings; send again when it is ready"); }
+                if st.context.restoring() { bail!("the agent is still confirming its settings; send again when it is ready"); }
                 let p = st.context.prepare(store, &self.id, home, text)?;
                 *text = p.text.clone();
                 prepared = Some(p);
                 st.busy = true;
                 st.adapter.prompt_purpose(None);
             }
-            if st.context.restoring() && matches!(cmd, relay::Command::SetMode(_) | relay::Command::SetConfig(..)) {
+            if st.context.locking() && matches!(cmd, relay::Command::SetMode(_) | relay::Command::SetConfig(..)) {
                 bail!("the agent is still confirming settings; wait for the controls to refresh");
             }
             let remembered = cmd.clone().into_acp();

@@ -3,6 +3,20 @@ use super::*;
 use sill_core::sfp::{Journal, Source};
 use sill_proto::{sfp as p, rpc::Error};
 
+/// Show a person's unconfirmed picks over the agent's reported controls, where it offers them.
+fn overlay(controls: &mut p::SessionControls, picked: &sill_core::store::AgentSettings) {
+    if let Some(mode) = &picked.mode && controls.modes.iter().any(|m| m.value == *mode) {
+        controls.current_mode = Some(mode.clone());
+    }
+    for option in &mut controls.options {
+        let Some(want) = picked.config.get(&option.option_id) else { continue };
+        match &mut option.value {
+            p::ControlValue::Id { value } => if option.choices.iter().any(|c| c.value == *want) { *value = want.clone(); },
+            p::ControlValue::Boolean { value } => if let Ok(want) = want.parse() { *value = want; },
+        }
+    }
+}
+
 impl Runner {
     /// Publish pending state without changing the last confirmed controls. On timeout show the
     /// latest reported values, even if restoration never succeeded.
@@ -14,7 +28,8 @@ impl Runner {
             session.controls = st.controls.as_ref().map(super::super::sfp_adapter::session_controls);
         }
         if let Some(controls) = &mut session.controls {
-            controls.status = if st.context.restoring() { "restoring" } else if st.context.controls_error.is_some() { "failed" } else if st.ready.is_none() { "loading" } else { "ready" }.into();
+            if let Some(picked) = st.context.optimistic() { overlay(controls, picked); }
+            controls.status = if st.context.locking() { "restoring" } else if st.context.controls_error.is_some() { "failed" } else if st.ready.is_none() { "loading" } else { "ready" }.into();
             controls.error = st.context.controls_error.clone();
         }
         if before == session { return Ok(vec![]); }
@@ -106,7 +121,7 @@ impl Runner {
         if seeded.controls.is_none() && let Some(c)=&st.controls { seeded.controls=Some(super::super::sfp_adapter::session_controls(c)); }
         if !seeded.capabilities.contains_key("images") && let Some(images)=st.images { seeded.capabilities.insert("images".into(),images); }
         if let Some(controls) = &mut seeded.controls {
-            controls.status = if st.context.restoring() { "restoring" } else if st.ready.is_none() { "loading" } else if st.context.controls_error.is_some() { "failed" } else { "ready" }.into();
+            controls.status = if st.context.locking() { "restoring" } else if st.ready.is_none() { "loading" } else if st.context.controls_error.is_some() { "failed" } else { "ready" }.into();
             controls.error = st.context.controls_error.clone();
         }
         // the runner's summary turn is the truth: a daemon that stopped mid-change says it right
@@ -184,11 +199,13 @@ impl Runner {
                 if matches!(event, relay::Event::Ended(_)) && st.context.controls_error.is_some() {
                     next.controls = st.controls.as_ref().map(super::super::sfp_adapter::session_controls);
                 }
-                if st.context.restoring() {
+                if st.context.locking() {
                     next.controls = session.controls.clone().or_else(|| Some(super::super::sfp_adapter::session_controls(&Controls::default())));
                 }
                 if let Some(controls) = &mut next.controls {
-                    controls.status = if st.context.restoring() { "restoring" } else if st.context.controls_error.is_some() { "failed" } else if st.ready.is_none() && !matches!(event, relay::Event::Ready {..} | relay::Event::V2Ready {..}) { "loading" } else { "ready" }.into();
+                    // a person's unconfirmed picks stay on screen over what the agent reports
+                    if let Some(picked) = st.context.optimistic() { overlay(controls, picked); }
+                    controls.status = if st.context.locking() { "restoring" } else if st.context.controls_error.is_some() { "failed" } else if st.ready.is_none() && !matches!(event, relay::Event::Ready {..} | relay::Event::V2Ready {..}) { "loading" } else { "ready" }.into();
                     controls.error = st.context.controls_error.clone();
                 }
             }
@@ -485,6 +502,29 @@ mod tests {
         assert_eq!(c.status, "failed");
         assert!(c.error.unwrap().contains("mode rejected"));
         assert!(!st.context.restoring(), "explicit rejection must not wait for the timeout");
+    }
+
+    #[test]
+    fn a_pick_is_published_at_once_and_reverts_when_the_agent_refuses_it() {
+        let f = Fixture::new();
+        let j = Journal::new(&f.store).unwrap();
+        let mut st = f.runner.st.lock().unwrap();
+        let reported = acp::Controls { modes: Some(("ask".into(), vec![("auto".into(), "Auto".into()), ("ask".into(), "Ask".into())])), options: vec![] };
+        f.runner.sfp_project(&f.store, &mut st, &relay::Event::Ready { session_id: "agent".into(), resumed: false, controls: reported.clone() }, 1).unwrap();
+        st.ready = Some(("agent".into(), false));
+        st.controls = Some(reported.clone());
+        st.context.chosen(Some(&reported), &acp::Command::SetMode("auto".into()));
+        f.runner.sfp_controls_state(&f.store, &st).unwrap();
+        let c = j.session(&f.runner.id).unwrap().controls.unwrap();
+        assert_eq!((c.current_mode.as_deref(), c.status.as_str()), (Some("auto"), "ready"), "shown before the agent answers, controls usable");
+        // an update that is not the acknowledgement does not put the old value back
+        f.runner.sfp_project(&f.store, &mut st, &relay::Event::Controls(reported.clone()), 2).unwrap();
+        let c = j.session(&f.runner.id).unwrap().controls.unwrap();
+        assert_eq!((c.current_mode.as_deref(), c.status.as_str()), (Some("auto"), "ready"));
+        assert!(st.context.restoring());
+        f.runner.sfp_project(&f.store, &mut st, &relay::Event::ControlFailed("set mode failed".into()), 3).unwrap();
+        let c = j.session(&f.runner.id).unwrap().controls.unwrap();
+        assert_eq!((c.current_mode.as_deref(), c.status.as_str()), (Some("ask"), "failed"), "a refused pick shows the agent's value again");
     }
 
     #[test]
