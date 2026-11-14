@@ -168,6 +168,11 @@ pub struct Directory {
     pub next: Option<HostPath>,
     pub pending: Option<u64>,
     pub error: Option<String>,
+    /// A listing has come back once: a reload keeps showing it, without "Loading…", until the
+    /// new one is there (the 15 s refresh flickered the tree otherwise).
+    pub listed: bool,
+    /// What is awaited is the listing again, not its first or next page.
+    pub reloading: bool,
 }
 
 #[derive(Debug, Default)]
@@ -187,6 +192,8 @@ pub struct Repo {
     pub counts_pending: Option<u64>,
     pub pending: Option<u64>,
     pub error: Option<String>,
+    /// Read once (a repository or not): a reread keeps showing what was there.
+    pub read: bool,
 }
 
 /// The file open in the reader, without its rendering.
@@ -376,10 +383,11 @@ impl FilesState {
         }
         match &request {
             Request::Roots => self.roots_pending = Some(serial),
-            Request::Directory { path, .. } => {
+            Request::Directory { path, after, .. } => {
                 self.paths.insert(key(path).to_string(), path.clone());
                 let dir = self.directories.entry(key(path).to_string()).or_default();
                 dir.pending = Some(serial);
+                dir.reloading = after.is_none() && dir.listed;
                 dir.error = None;
             }
             Request::File { .. } => {
@@ -604,6 +612,8 @@ impl FilesState {
             Request::Directory { path, after, .. } => {
                 let dir = self.directories.entry(key(&path).to_string()).or_default();
                 dir.pending = None;
+                dir.reloading = false;
+                dir.listed = true;
                 match reply.result {
                     Ok(Data::Directory(page)) => {
                         if after.is_none() {
@@ -639,6 +649,7 @@ impl FilesState {
             Request::Repo(path) => {
                 let repo = self.repos.entry(key(&path).to_string()).or_default();
                 repo.pending = None;
+                repo.read = true;
                 match reply.result {
                     Ok(Data::Repo {
                         root,

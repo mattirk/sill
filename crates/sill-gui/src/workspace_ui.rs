@@ -121,10 +121,12 @@ impl App {
                 root.path.display.clone(),
             ));
         }
-        if state.roots_pending.is_some() {
+        // the first load only: the 15 s refresh keeps the chips as they are until it answers
+        let loading = state.roots_pending.is_some() && !state.initialized;
+        if loading {
             chips = chips.push(text("Loading pins…").size(style::TINY).color(P.fg_dim));
         }
-        if !state.roots.iter().any(|r| !r.global) && state.roots_pending.is_none() {
+        if !state.roots.iter().any(|r| !r.global) && !loading {
             chips = chips.push(action("+ Pin a folder or file", Action::ToggleDrawer));
         }
         let chips = container(
@@ -562,7 +564,7 @@ fn diff_list<'a>(mut body: Column<'a, Message>, state: &'a State) -> Column<'a, 
             body = body.push(note(error, P.error));
         }
         let Some(base) = &repo.root else {
-            if repo.pending.is_some() {
+            if repo.pending.is_some() && !repo.read {
                 body = body.push(note("Reading the repository…", P.fg_dim));
             }
             continue;
@@ -596,7 +598,7 @@ fn diff_list<'a>(mut body: Column<'a, Message>, state: &'a State) -> Column<'a, 
              ?untracked files"
                 .into(),
         ));
-        if repo.entries.is_empty() && repo.pending.is_none() {
+        if repo.entries.is_empty() {
             body = body.push(note("Nothing differs from HEAD.", P.fg_dim));
         }
         let open = state.reader.as_ref().filter(|r| r.repo.is_some());
@@ -615,7 +617,7 @@ fn diff_list<'a>(mut body: Column<'a, Message>, state: &'a State) -> Column<'a, 
             ));
         }
     }
-    if !any && !state.repos.values().any(|r| r.pending.is_some()) {
+    if !any && !state.repos.values().any(|r| r.pending.is_some() && !r.read) {
         body = body.push(note(
             "No pinned git repository here: pin a repository's folder (+ on its row) to see its diff.",
             P.fg_dim,
@@ -761,7 +763,8 @@ fn children<'a>(
                 body = children(body, state, hovered, &entry.path, depth + 1);
             }
         }
-        if dir.pending.is_some() {
+        // a reload (the 15 s refresh) shows the listing as it was until the new one comes
+        if dir.pending.is_some() && !dir.reloading {
             body = body.push(caption("Loading…"));
         } else if let Some(error) = &dir.error {
             body = body.push(container(text(error).size(style::TINY).color(P.error)).padding(8));

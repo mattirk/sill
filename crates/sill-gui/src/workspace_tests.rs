@@ -109,6 +109,45 @@ fn refresh_and_session_switch_keep_expansion_and_the_open_file() {
     );
 }
 
+/// The 15 s refresh reloads every open folder and pin: until it answers, the drawer shows what it
+/// showed, without "Loading…" rows or notes coming and going (a visible flicker, 2026-11-05).
+#[test]
+fn a_reload_keeps_the_tree_as_it_was_until_it_answers() {
+    let mut app = app();
+    let folder = path("/home/demo/project/src");
+    act(&mut app, Action::Toggle(folder.clone()));
+    let listed = files(&app, "demo").directories[key(&folder)].entries.len();
+    assert!(listed > 0);
+    let requests = app.views.get_mut("demo").unwrap().files.refresh();
+    let mut awaited = vec![];
+    for request in requests {
+        awaited.push(pending(&mut app, "demo", request));
+    }
+    let state = files(&app, "demo");
+    let dir = &state.directories[key(&folder)];
+    assert!(
+        dir.pending.is_some() && dir.reloading,
+        "a reload, not a first load"
+    );
+    assert_eq!(dir.entries.len(), listed, "the old listing stays meanwhile");
+    assert!(state.roots_pending.is_some() && state.initialized);
+    for (serial, request) in awaited {
+        let result = crate::demo::files(&request);
+        reply(&mut app, "demo", serial, request, result);
+    }
+    let dir = &files(&app, "demo").directories[key(&folder)];
+    assert!(dir.pending.is_none() && !dir.reloading);
+    // a folder's first listing is not a reload: it says it is loading
+    let fresh = path("/home/demo/project/docs");
+    let first = Request::Directory {
+        path: fresh.clone(),
+        after: None,
+        pages: 1,
+    };
+    let _ = pending(&mut app, "demo", first);
+    assert!(!files(&app, "demo").directories[key(&fresh)].reloading);
+}
+
 #[test]
 fn late_file_reply_cannot_replace_a_newer_file_or_reopen_a_closed_viewer() {
     let mut app = app();
