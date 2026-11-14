@@ -1066,6 +1066,12 @@ impl App {
         if let Some(failed) = &view.failed {
             feed = feed.push(rows::key("failed"), note(failed, P.error));
         }
+        if self.vm_shown() && view.status.problem().into_iter().chain(view.failed.as_deref()).any(crate::vm_ui::storage_error) {
+            feed = feed.push(rows::key("storage"), column![
+                text("The VM has run out of storage. Check free space and clear unused build caches in Settings → System → Virtual machine.").size(style::SMALL).color(P.warning),
+                crate::settings_ui::quiet_button("Open VM storage", Some(Message::Vm(crate::vm_ui::Event::OpenStorage))),
+            ].spacing(6));
+        }
         let feed: Element<'a, Message> = match self.layout.measure() {
             Some(measure) => container(container(feed).max_width(measure))
                 .center_x(Fill)

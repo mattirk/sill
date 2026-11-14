@@ -324,7 +324,12 @@ impl App {
             Stage::Working => line.push(text(cc::elapsed(run, now_secs())).size(style::TINY).color(P.fg_dim)),
             Stage::Done => line.push(start("Review again", false)),
             Stage::Stale => line.push(start("Review again", true)),
-            Stage::Failed => line.push(start("Try again", true)),
+            Stage::Failed => {
+                let line = line.push(start("Try again", true));
+                if self.vm_shown() && crate::vm_ui::storage_error(&run.detail) {
+                    line.push(crate::settings_ui::quiet_button("Open VM storage", Some(Message::Vm(crate::vm_ui::Event::OpenStorage))))
+                } else { line }
+            },
         };
         // the one way out, as plain as the cross that closes a session's tab
         line.push(keys::press(

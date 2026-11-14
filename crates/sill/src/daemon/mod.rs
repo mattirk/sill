@@ -32,6 +32,7 @@ mod host_mac;
 mod context;
 mod frontend;
 mod admin;
+mod storage;
 mod discovery;
 mod memory_api;
 mod agent_admin;

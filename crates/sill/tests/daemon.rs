@@ -1932,3 +1932,30 @@ fn public_crosscheck_runs_a_whole_review_against_a_scripted_reviewer() {
     wait(&mut c, "the discarded work's worker's end", &|_| workers().len() == 4 && workers().iter().all(|(_, ended)| *ended) && leftovers() == 0);
     let _ = HostPath::from_path(&source);
 }
+
+#[test]
+fn storage_cleanup_refuses_a_live_launcher_and_requires_capability() {
+    let d = Daemon::start();
+    let mut baseline = d.connect().unwrap();
+    let reply = baseline.call("_sill/storage.caches", json!({})).unwrap();
+    assert_eq!(reply["error"]["data"]["code"], "unsupported");
+    let mut c = d.connect_caps(json!({"sill.storage": 1})).unwrap();
+    let reply = c.call("_sill/sessions.create", json!({"create_id": "storage-active", "agent": "claude", "policy": "default"})).unwrap();
+    let id = reply["result"]["session_id"].as_str().unwrap();
+    // A launcher still booting need not have a shim socket. It must still be protected.
+    let mut launcher = Command::new("python3")
+        .args(["-c", "import time; time.sleep(30)", "launch", "--session", id])
+        .spawn().unwrap();
+    let rt = d.dir.join("run/sill").join(id);
+    std::fs::create_dir_all(&rt).unwrap();
+    std::fs::write(rt.join("launch.pid"), launcher.id().to_string()).unwrap();
+    let reply = c.call("_sill/storage.clear_build_cache", json!({"session_id": id})).unwrap();
+    assert!(reply["error"]["message"].as_str().unwrap().contains("running"), "{reply}");
+    assert!(launcher.try_wait().unwrap().is_none(), "cleanup must not stop a session");
+    launcher.kill().unwrap();
+    launcher.wait().unwrap();
+    let reply = c.call("_sill/storage.clear_build_cache", json!({"session_id": "../escape"})).unwrap();
+    assert!(reply.get("error").is_some());
+    let reply = c.call("_sill/storage.clear_build_cache", json!({"session_id": id, "path": "/tmp"})).unwrap();
+    assert_eq!(reply["error"]["code"], -32602);
+}

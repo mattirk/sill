@@ -21,6 +21,7 @@ pub mod host_control;
 pub mod workspaces;
 pub mod crosscheck;
 pub mod admin;
+pub mod storage;
 pub mod memory;
 pub mod transport;
 pub mod boxlink;

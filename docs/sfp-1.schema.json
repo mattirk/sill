@@ -612,6 +612,56 @@
       ],
       "type": "object"
     },
+    "BuildCache": {
+      "properties": {
+        "active": {
+          "type": "boolean"
+        },
+        "bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "$ref": "#/$defs/HostPath",
+          "description": "Exact daemon-host path, for review; never accepted as deletion input."
+        },
+        "problem": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "title",
+        "bytes",
+        "active",
+        "path"
+      ],
+      "type": "object"
+    },
+    "Caches": {
+      "properties": {
+        "caches": {
+          "items": {
+            "$ref": "#/$defs/BuildCache"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "caches"
+      ],
+      "type": "object"
+    },
     "CancelTurn": {
       "properties": {
         "session_id": {
@@ -852,6 +902,18 @@
         "value",
         "title",
         "description"
+      ],
+      "type": "object"
+    },
+    "ClearBuildCache": {
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id"
       ],
       "type": "object"
     },
@@ -2060,6 +2122,32 @@
         "at",
         "version",
         "proposals"
+      ],
+      "type": "object"
+    },
+    "DiskSpace": {
+      "properties": {
+        "available": {
+          "description": "Bytes available to this user (excludes reserved filesystem blocks).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "used": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total",
+        "used",
+        "available"
       ],
       "type": "object"
     },
@@ -6910,6 +6998,21 @@
       ],
       "type": "object"
     },
+    "Space": {
+      "properties": {
+        "home": {
+          "$ref": "#/$defs/DiskSpace"
+        },
+        "state": {
+          "$ref": "#/$defs/DiskSpace"
+        }
+      },
+      "required": [
+        "home",
+        "state"
+      ],
+      "type": "object"
+    },
     "StaleAnswerDetails": {
       "description": "`stale_answer`: the question as currently resolved. Always present.",
       "properties": {
@@ -7937,6 +8040,11 @@
   "capabilities": {
     "offered": [
       {
+        "doc": "Daemon-host free space and inactive-session build-cache cleanup.",
+        "name": "sill.storage",
+        "version": 1
+      },
+      {
         "doc": "_sill/crosscheck.*: a second opinion on a workspace's work from one Reviewer, a saved agent with its options; a submission may carry the purpose `crosscheck`.",
         "name": "sill.crosscheck",
         "version": 1
@@ -8071,6 +8179,48 @@
     "snapshot_ttl_seconds": 60
   },
   "methods": [
+    {
+      "capabilities": {
+        "sill.storage": 1
+      },
+      "doc": "Read used, total and available bytes on the daemon host home and state filesystems.",
+      "kind": "request",
+      "name": "_sill/storage.space",
+      "params": {
+        "$ref": "#/$defs/Empty"
+      },
+      "result": {
+        "$ref": "#/$defs/Space"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.storage": 1
+      },
+      "doc": "Scan known session build caches; active sessions cannot be cleared.",
+      "kind": "request",
+      "name": "_sill/storage.caches",
+      "params": {
+        "$ref": "#/$defs/Empty"
+      },
+      "result": {
+        "$ref": "#/$defs/Caches"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.storage": 1
+      },
+      "doc": "Detach and remove only the known build cache of an inactive session; read caches again after uncertainty before repeating.",
+      "kind": "request",
+      "name": "_sill/storage.clear_build_cache",
+      "params": {
+        "$ref": "#/$defs/ClearBuildCache"
+      },
+      "result": {
+        "type": "object"
+      }
+    },
     {
       "capabilities": {
         "sill.crosscheck": 1

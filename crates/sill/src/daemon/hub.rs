@@ -72,14 +72,14 @@ pub struct Hub {
     pub(super) home: PathBuf,
     /// Session id → pid of its `sill launch`, for every jail this daemon started or adopted; the
     /// wait threads take an entry out when its process ends.
-    children: Arc<Mutex<HashMap<String, u32>>>,
+    pub(super) children: Arc<Mutex<HashMap<String, u32>>>,
     /// Session id → the conversation the daemon runs for it (docs/daemon.md §3.3).
     // Release this registry lock before locking runner state: prompt dispatch reads membership
     // while holding its own state lock, and reads peer status from the durable store.
     runners: Mutex<HashMap<String, Arc<Runner>>>,
     /// Starting a conversation (jail, agent, ACP) is one at a time: two attaches of one session
     /// must not start two agents.
-    starting: Mutex<()>,
+    pub(super) starting: Mutex<()>,
     /// Sessions whose end waits for the agent's summary turn (`sessions.end`).
     ending: Mutex<HashMap<String, EndCtx>>,
     /// Every open frontend connection, for what is everyone's news (`changes.changed`).
@@ -444,6 +444,7 @@ impl Hub {
             return result.map_err(super::sfp::failure);
         }
         if let Some(result) = self.changes_public(m, params.clone()) { return result.map_err(super::sfp::failure); }
+        if let Some(result) = super::storage::handle(self, conn, m, params.clone()) { return result.map_err(super::sfp::failure); }
         if let Some(result) = super::agent_admin::handle(self, m, params.clone()) { return result.map_err(super::sfp::failure); }
         if let Some(result) = super::providers::handle(m, params.clone()) { return result.map_err(super::sfp::failure); }
         if let Some(result) = super::host_control::handle(self, conn, m, params.clone()) {

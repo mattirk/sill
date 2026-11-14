@@ -1017,3 +1017,21 @@ A submission may carry the `purpose` `crosscheck`: the request to fix a review's
 a frontend writes for the person (`sill_proto::crosscheck::fix_request`). Unlike `commit`, a
 frontend folds only that prompt to its first line; the turn it starts is the agent's ordinary work.
 
+
+### VM storage administration (`sill.storage`, version 1)
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `_sill/storage.space` | `{}` | Used, total and user-available bytes on the daemon host's home and state filesystems. |
+| `_sill/storage.caches` | `{}` | Known private build-cache paths, allocated bytes, session identity and active status; scan failures are reported per cache. |
+| `_sill/storage.clear_build_cache` | `session_id` | `{}`; rechecks inactivity while serialized with startup, then detaches the known cache before removal. |
+
+Cleanup accepts a session ID, never a caller-supplied path. It clears only
+`private/home%sill%.cache/sill-dev/target` within that session's state directory.
+Running jails (including launchers still starting or stopping) are refused. Symlinks
+in parent directories and mount traversal are refused; links within the target are
+unlinked without following them. Source, overlays, workspaces and toolchains are
+outside the cleanup scope. `target.sill-clearing` is a detached cache left by an
+interrupted cleanup; it is included in scans and removed first on the next clear.
+If a new target also exists, clear again after reviewing the refreshed scan.
+After a timeout or lost reply, scan before deciding whether to repeat a clear.
