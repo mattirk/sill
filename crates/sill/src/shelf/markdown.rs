@@ -220,11 +220,11 @@ fn ensure_schemes() {
 /// doesn't request again when they come in (4.18 did), so every message showed as a sliver. GTK's
 /// validation runs from idles above the default priority; a low-priority idle lands after them. Once
 /// on map (a transcript replayed before the shelf is shown) and after every render (streaming).
-fn settle_height(tv: &gtk::TextView) {
-    let weak = tv.downgrade();
+pub(super) fn settle_height(w: &impl IsA<gtk::Widget>) {
+    let weak = w.upcast_ref::<gtk::Widget>().downgrade();
     gtk::glib::idle_add_local_full(gtk::glib::Priority::LOW, move || {
-        if let Some(tv) = weak.upgrade() {
-            tv.queue_resize();
+        if let Some(w) = weak.upgrade() {
+            w.queue_resize();
         }
         gtk::glib::ControlFlow::Break
     });
@@ -288,7 +288,7 @@ pub fn code_view() -> sourceview5::View {
     view.set_top_margin(scale(6.0));
     view.set_bottom_margin(scale(6.0));
     view.add_css_class("sill-code");
-    view.connect_map(|v| settle_height(v.upcast_ref()));
+    view.connect_map(|v| settle_height(v));
     view
 }
 

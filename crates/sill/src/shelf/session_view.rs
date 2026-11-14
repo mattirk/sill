@@ -193,12 +193,16 @@ impl SessionView {
         // the text view lays its lines out lazily, after the scrolled window has already measured
         // it, so a wrap that adds a line left the box a line short until the next relayout and
         // the new line clipped; the validated height lands in the vadjustment's upper, so a change
-        // there asks for a fresh measure in the same frame
+        // there asks for a fresh measure in the same frame — and once more from a low-priority
+        // idle, after GTK's own validation idles: a resize queued from inside layout is dropped
+        // on 4.24 (markdown::settle_height), which left the box a few pixels short, the first
+        // line scrolled up against its top edge
         {
             let sw = prompt_scroll.downgrade();
             prompt.vadjustment().unwrap().connect_upper_notify(move |_| {
                 if let Some(sw) = sw.upgrade() {
                     sw.queue_resize();
+                    super::markdown::settle_height(&sw);
                 }
             });
         }
