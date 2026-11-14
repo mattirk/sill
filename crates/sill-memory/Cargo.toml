@@ -4,6 +4,7 @@ description = "sill: memory queries (docs/memory.md) — search, show, transcrip
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 rust-version.workspace = true
 
 [dependencies]

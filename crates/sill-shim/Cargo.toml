@@ -4,6 +4,7 @@ description = "sill: supervisor that runs inside the jail (SPEC §4.3)"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 rust-version.workspace = true
 
 [dependencies]

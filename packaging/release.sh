@@ -30,7 +30,7 @@ install -m 644 packaging/sill.desktop "dist/$NAME/"
 install -m 644 packaging/icons/sill.svg "dist/$NAME/icons/"
 install -m 644 packaging/systemd/*.mount packaging/systemd/*.service "dist/$NAME/systemd/"
 install -m 644 packaging/systemd/user/sill-gui.service "dist/$NAME/systemd/user/"
-install -m 644 README.md "dist/$NAME/"
+install -m 644 README.md LICENSE "dist/$NAME/"
 cat > "dist/$NAME/INSTALL" <<'TXT'
 sill — install from this tarball
 

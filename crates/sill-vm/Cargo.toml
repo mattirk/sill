@@ -4,6 +4,7 @@ description = "sill: the local Linux VM a desktop without the daemon runs its bo
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 rust-version.workspace = true
 
 [dependencies]

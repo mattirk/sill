@@ -33,7 +33,7 @@ sed 's|@PREFIX@|/usr|' packaging/sill.desktop > "$PKG/usr/share/applications/sil
 chmod 644 "$PKG/etc/systemd/user/sill-gui.service" "$PKG/usr/share/applications/sill.desktop"
 install -m 644 packaging/icons/sill.svg "$PKG/usr/share/sill/sill.svg"
 install -m 644 packaging/icons/sill.svg "$PKG/usr/share/icons/hicolor/scalable/apps/sill.svg"
-install -m 644 README.md SPEC.md "$PKG/usr/share/doc/sill/"
+install -m 644 README.md LICENSE "$PKG/usr/share/doc/sill/"
 SIZE=$(du -sk "$PKG" --exclude=DEBIAN | cut -f1)
 # Depends: the binaries link only libc (ldd), the desktop libraries are dlopen'd (winit, x11rb, wgpu),
 # so the list is by hand from `strings target/release/sill-gui | grep -o 'lib.*\.so\.[0-9]*'`:

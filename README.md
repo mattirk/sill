@@ -67,4 +67,5 @@ Also: `policies/` (the default policy) and `packaging/` (install, release and Ma
 
 ## License
 
-Apache-2.0.
+Apache-2.0; see [LICENSE](LICENSE). The patched copy of `iced_widget` under `vendor/` is MIT, and
+the fonts in `crates/sill-gui/fonts/` are under the SIL Open Font License; their notices are beside them.

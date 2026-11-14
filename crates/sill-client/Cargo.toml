@@ -4,6 +4,7 @@ description = "Toolkit-independent Sill frontend core: SFP view reconstruction, 
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 rust-version.workspace = true
 
 # No GUI toolkit, no async runtime, nothing Linux-only: a frontend on any desktop builds on this
