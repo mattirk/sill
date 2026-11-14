@@ -1027,10 +1027,15 @@ button.sill-install:hover { background: alpha(@accent_bg_color, 0.45); }
 .sill-badge.sill-badge-kept { color: alpha(@success_color, 0.75); }
 .sill-diff-frame { border-top: 1px solid alpha(@view_fg_color, 0.12); }
 .sill-diff { font-size: 90%; }
-.sill-files > row { padding: 1px 4px; min-height: 0; }
+.sill-files > row { padding: 0 4px; min-height: 0; }
 .sill-files > row:selected { background: alpha(@accent_bg_color, 0.25); }
-.sill-files treeexpander { padding: 1px 0; }
+.sill-files treeexpander { padding: 0; }
+/* the row's own height comes from its content, so the indents (and their lines) run edge to edge */
+.sill-tree-row { padding: 2px 0; }
+/* one faint guide line per level, under the parent's icon (20 px per level, the line 7 px in) */
+.sill-files treeexpander > indent { min-width: 13px; min-height: 0; margin-left: 7px; border-left: 1px solid alpha(@view_fg_color, 0.14); }
 .sill-file-icon { opacity: 0.7; -gtk-icon-size: 0.95em; }
+.sill-badge-logo { -gtk-icon-size: 0.85em; margin-left: 2px; }
 .sill-changed { color: @warning_color; }
 .sill-below { color: @warning_color; }
 .sill-new { color: @success_color; }

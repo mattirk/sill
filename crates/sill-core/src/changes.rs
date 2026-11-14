@@ -293,56 +293,58 @@ pub fn git_diff(repo: &Path, rel: &Path) -> String {
     }
 }
 
-/// Programming languages by file extension: (extension, name, the short mark a badge shows).
-const LANGUAGES: &[(&str, &str, &str)] = &[
-    ("rs", "Rust", "Rs"),
-    ("py", "Python", "Py"),
-    ("js", "JavaScript", "JS"),
-    ("jsx", "JavaScript", "JS"),
-    ("mjs", "JavaScript", "JS"),
-    ("ts", "TypeScript", "TS"),
-    ("tsx", "TypeScript", "TS"),
-    ("go", "Go", "Go"),
-    ("c", "C", "C"),
-    ("h", "C", "C"),
-    ("cpp", "C++", "C++"),
-    ("cc", "C++", "C++"),
-    ("cxx", "C++", "C++"),
-    ("hpp", "C++", "C++"),
-    ("java", "Java", "Java"),
-    ("kt", "Kotlin", "Kt"),
-    ("kts", "Kotlin", "Kt"),
-    ("rb", "Ruby", "Rb"),
-    ("sh", "Shell", "Sh"),
-    ("bash", "Shell", "Sh"),
-    ("zsh", "Shell", "Sh"),
-    ("swift", "Swift", "Sw"),
-    ("cs", "C#", "C#"),
-    ("php", "PHP", "PHP"),
-    ("lua", "Lua", "Lua"),
-    ("dart", "Dart", "Dart"),
-    ("ex", "Elixir", "Ex"),
-    ("exs", "Elixir", "Ex"),
-    ("erl", "Erlang", "Erl"),
-    ("hs", "Haskell", "Hs"),
-    ("scala", "Scala", "Sc"),
-    ("zig", "Zig", "Zig"),
-    ("nim", "Nim", "Nim"),
-    ("ml", "OCaml", "ML"),
-    ("clj", "Clojure", "Clj"),
-    ("r", "R", "R"),
-    ("jl", "Julia", "Jl"),
-    ("m", "Objective-C", "ObjC"),
-    ("vue", "Vue", "Vue"),
-    ("svelte", "Svelte", "Sv"),
-    ("html", "HTML", "HTML"),
-    ("css", "CSS", "CSS"),
-    ("scss", "CSS", "CSS"),
-    ("sql", "SQL", "SQL"),
-    ("pl", "Perl", "Pl"),
-    ("cu", "CUDA", "CU"),
-    ("glsl", "GLSL", "GL"),
-    ("wgsl", "WGSL", "WG"),
+/// Programming languages by file extension: (extension, name, the short mark a badge shows, the
+/// colour of the mark — the usual one for the language, lightened where it would sink into a dark
+/// background).
+const LANGUAGES: &[(&str, &str, &str, &str)] = &[
+    ("rs", "Rust", "Rs", "#dea584"),
+    ("py", "Python", "Py", "#5b9bd5"),
+    ("js", "JavaScript", "JS", "#e8d44d"),
+    ("jsx", "JavaScript", "JS", "#e8d44d"),
+    ("mjs", "JavaScript", "JS", "#e8d44d"),
+    ("ts", "TypeScript", "TS", "#4a8fd6"),
+    ("tsx", "TypeScript", "TS", "#4a8fd6"),
+    ("go", "Go", "Go", "#00add8"),
+    ("c", "C", "C", "#9a9a9a"),
+    ("h", "C", "C", "#9a9a9a"),
+    ("cpp", "C++", "C++", "#f34b7d"),
+    ("cc", "C++", "C++", "#f34b7d"),
+    ("cxx", "C++", "C++", "#f34b7d"),
+    ("hpp", "C++", "C++", "#f34b7d"),
+    ("java", "Java", "Java", "#c98a3a"),
+    ("kt", "Kotlin", "Kt", "#a97bff"),
+    ("kts", "Kotlin", "Kt", "#a97bff"),
+    ("rb", "Ruby", "Rb", "#d9534f"),
+    ("sh", "Shell", "Sh", "#89e051"),
+    ("bash", "Shell", "Sh", "#89e051"),
+    ("zsh", "Shell", "Sh", "#89e051"),
+    ("swift", "Swift", "Sw", "#f05138"),
+    ("cs", "C#", "C#", "#5cb85c"),
+    ("php", "PHP", "PHP", "#7a88cf"),
+    ("lua", "Lua", "Lua", "#5a6fd6"),
+    ("dart", "Dart", "Dart", "#00b4ab"),
+    ("ex", "Elixir", "Ex", "#a074c4"),
+    ("exs", "Elixir", "Ex", "#a074c4"),
+    ("erl", "Erlang", "Erl", "#b83998"),
+    ("hs", "Haskell", "Hs", "#8f7bc7"),
+    ("scala", "Scala", "Sc", "#c22d40"),
+    ("zig", "Zig", "Zig", "#ec915c"),
+    ("nim", "Nim", "Nim", "#ffc200"),
+    ("ml", "OCaml", "ML", "#ef7a08"),
+    ("clj", "Clojure", "Clj", "#db5855"),
+    ("r", "R", "R", "#198ce7"),
+    ("jl", "Julia", "Jl", "#a270ba"),
+    ("m", "Objective-C", "ObjC", "#438eff"),
+    ("vue", "Vue", "Vue", "#41b883"),
+    ("svelte", "Svelte", "Sv", "#ff3e00"),
+    ("html", "HTML", "HTML", "#e34c26"),
+    ("css", "CSS", "CSS", "#9b6bd6"),
+    ("scss", "CSS", "CSS", "#9b6bd6"),
+    ("sql", "SQL", "SQL", "#e38c00"),
+    ("pl", "Perl", "Pl", "#39457e"),
+    ("cu", "CUDA", "CU", "#8f8f8f"),
+    ("glsl", "GLSL", "GL", "#5686a5"),
+    ("wgsl", "WGSL", "WG", "#8f8f8f"),
 ];
 
 /// A repository's main language and its share of the tracked code.
@@ -350,7 +352,20 @@ const LANGUAGES: &[(&str, &str, &str)] = &[
 pub struct Language {
     pub name: &'static str,
     pub mark: &'static str,
+    /// `#rrggbb`
+    pub color: &'static str,
     pub percent: u8,
+}
+
+/// The language behind a badge mark (`Rs` → `Rust`).
+pub fn language_name_of_mark(mark: &str) -> Option<&'static str> {
+    LANGUAGES.iter().find(|(_, _, m, _)| *m == mark).map(|(_, name, _, _)| *name)
+}
+
+/// The language a file is written in, by its extension: (name, mark, colour).
+pub fn file_language(path: &Path) -> Option<(&'static str, &'static str, &'static str)> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    LANGUAGES.iter().find(|(e, _, _, _)| *e == ext).map(|(_, name, mark, color)| (*name, *mark, *color))
 }
 
 /// The language most of a repository is written in, by the size of its tracked files per extension
@@ -368,7 +383,7 @@ pub fn repo_language(repo: &Path) -> Option<Language> {
         let Ok(size) = size.trim().parse::<u64>() else { continue };
         let Some(ext) = Path::new(path).extension().and_then(|e| e.to_str()) else { continue };
         let ext = ext.to_ascii_lowercase();
-        if let Some((_, name, _)) = LANGUAGES.iter().find(|(e, _, _)| *e == ext) {
+        if let Some((_, name, _, _)) = LANGUAGES.iter().find(|(e, _, _, _)| *e == ext) {
             *by_name.entry(name).or_default() += size;
         }
     }
@@ -377,8 +392,8 @@ pub fn repo_language(repo: &Path) -> Option<Language> {
     if total == 0 {
         return None;
     }
-    let mark = LANGUAGES.iter().find(|(_, n, _)| *n == name)?.2;
-    Some(Language { name, mark, percent: (size * 100 / total) as u8 })
+    let (_, _, mark, color) = LANGUAGES.iter().find(|(_, n, _, _)| *n == name)?;
+    Some(Language { name, mark, color, percent: (size * 100 / total) as u8 })
 }
 
 /// The lines of a tracked file that differ from HEAD, as 1-based `[start, end)` ranges in the

@@ -99,7 +99,7 @@ impl Badge {
     fn text(&self) -> &str {
         match self {
             Badge::Git(s) | Badge::Session { mark: s, .. } => s,
-            Badge::Below => "•",
+            Badge::Below => "",
         }
     }
 
@@ -252,7 +252,11 @@ impl FolderTree {
             let expander = gtk::TreeExpander::new();
             expander.set_indent_for_icon(false);
             expander.set_indent_for_depth(true);
+            // no arrows: a click on the row opens a folder, the icon says open or closed, and the
+            // indents draw a guide line per level (CSS `.sill-files treeexpander > indent`)
+            expander.set_hide_expander(true);
             let b = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            b.add_css_class("sill-tree-row");
             let icon = gtk::Image::new();
             icon.add_css_class("sill-file-icon");
             let name = gtk::Label::new(None);
@@ -261,6 +265,10 @@ impl FolderTree {
             name.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
             let badge = gtk::Label::new(None);
             badge.add_css_class("sill-badge");
+            // a repository root: its main language's logo, in the badge's colour (text mark without one)
+            let logo = gtk::Image::new();
+            logo.add_css_class("sill-badge-logo");
+            logo.set_visible(false);
             let pin = gtk::Button::new();
             pin.add_css_class("flat");
             pin.add_css_class("sill-pin");
@@ -274,6 +282,7 @@ impl FolderTree {
             b.append(&icon);
             b.append(&name);
             b.append(&badge);
+            b.append(&logo);
             b.append(&pin);
             expander.set_child(Some(&b));
             item.set_child(Some(&expander));
@@ -293,10 +302,11 @@ impl FolderTree {
                 expander.set_list_row(Some(&row));
                 let Some(path) = path_of(&row) else { return };
                 let Some(b) = expander.child().and_downcast::<gtk::Box>() else { return };
-                let (Some(icon), Some(name), Some(badge), Some(pin)) = (
+                let (Some(icon), Some(name), Some(badge), Some(logo), Some(pin)) = (
                     b.first_child().and_downcast::<gtk::Image>(),
                     b.first_child().and_then(|w| w.next_sibling()).and_downcast::<gtk::Label>(),
                     b.first_child().and_then(|w| w.next_sibling()).and_then(|w| w.next_sibling()).and_downcast::<gtk::Label>(),
+                    b.first_child().and_then(|w| w.next_sibling()).and_then(|w| w.next_sibling()).and_then(|w| w.next_sibling()).and_downcast::<gtk::Image>(),
                     b.last_child().and_downcast::<gtk::Button>(),
                 ) else {
                     return;
@@ -359,15 +369,30 @@ impl FolderTree {
                 if is_repo {
                     parts.push("git".into());
                 }
-                if let Some((mark, _)) = &lang {
-                    parts.push(mark.clone());
+                // the language: its logo in the badge's colour, the text mark when it has none
+                let logo_tex = lang.as_ref().and_then(|(mark, _)| {
+                    let name = changes::language_name_of_mark(mark)?;
+                    let mut color = super::icons::fg_for(&badge, &theme::current());
+                    if let Ok(accent) = gtk::gdk::RGBA::parse(theme::current().accent) {
+                        color = accent;
+                    }
+                    color.set_alpha(0.9);
+                    super::icons::language_texture(name, color)
+                });
+                match &logo_tex {
+                    Some(tex) => {
+                        logo.set_paintable(Some(tex));
+                        logo.set_visible(true);
+                    }
+                    None => {
+                        logo.set_visible(false);
+                        if let Some((mark, _)) = &lang {
+                            parts.push(mark.clone());
+                        }
+                    }
                 }
+                // pinned: the name's colour says so (the tooltip names another session's pin)
                 let is_elsewhere = !is_pinned && elsewhere.borrow().contains(&path);
-                if is_pinned {
-                    parts.push("⌖".into());
-                } else if is_elsewhere {
-                    parts.push("⌖ other".into());
-                }
                 badge.set_text(&parts.join(" "));
                 let mut tip: Vec<String> = Vec::new();
                 if is_repo {

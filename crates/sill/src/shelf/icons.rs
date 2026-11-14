@@ -1,5 +1,6 @@
 //! Icons for the menus: provider glyphs from simple-icons (CC0 1.0: Claude, OpenAI, Google Gemini)
-//! plus a neutral placeholder, and line glyphs from lucide (ISC) for the pages. All are rendered on
+//! plus a neutral placeholder, line glyphs from lucide (ISC) for the pages, and the programming
+//! languages' logos ([`super::lang_icons`], simple-icons too) for the file tree. All are rendered on
 //! demand in the colour of the widget they sit in,
 //! so they read light on dark themes and dark on light ones. (GTK's own symbolic recolouring only
 //! covers icons from an icon theme; a texture made here follows the live foreground instead.)
@@ -111,6 +112,23 @@ pub fn scalable(name: &str, color: gdk::RGBA) -> gtk::Image {
     image.set_halign(gtk::Align::Center);
     image.set_valign(gtk::Align::Center);
     image
+}
+
+/// A programming language's logo in colour `color`, made once per language and colour and shared
+/// by every row; `None` for a language without one. Sized by the image's CSS icon size like
+/// [`scalable`].
+pub fn language_texture(name: &str, color: gdk::RGBA) -> Option<gdk::Texture> {
+    thread_local! {
+        static CACHE: std::cell::RefCell<std::collections::HashMap<String, gdk::Texture>> = Default::default();
+    }
+    let key = format!("{name} {}", hex(color));
+    if let Some(t) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        return Some(t);
+    }
+    let (_, d) = super::lang_icons::LANG_GLYPHS.iter().find(|(n, _)| *n == name)?;
+    let t = gdk::Texture::from_bytes(&glib::Bytes::from_owned(fill_svg(d, color, 96).into_bytes())).ok()?;
+    CACHE.with(|c| c.borrow_mut().insert(key, t.clone()));
+    Some(t)
 }
 
 /// A sill line glyph (`sill-sessions`, `sill-files`, …) in colour `color`.

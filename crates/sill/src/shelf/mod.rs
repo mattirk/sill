@@ -6,6 +6,7 @@ mod changes;
 mod conversation;
 mod hotkey;
 mod icons;
+mod lang_icons;
 mod markdown;
 mod session;
 mod session_view;
