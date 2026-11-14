@@ -98,7 +98,7 @@ pub fn facts_block(policy: &Policy, home: &Path) -> String {
         (true, true) => "X11 and the D-Bus session bus are available.",
         (true, false) => "X11 is available (GUI programs run and show); no D-Bus session bus.",
         (false, true) => "The D-Bus session bus is available; no X11.",
-        (false, false) => "No X11, no D-Bus: nothing graphical, no desktop services.",
+        (false, false) => "No X11, no D-Bus: nothing graphical, no desktop services (a program that asks for a bus is refused; none is started).",
     };
     lines.push(desktop.into());
     let net = match policy.network.mode {

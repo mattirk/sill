@@ -340,6 +340,13 @@ impl JailSpec {
             if Path::new(&bus).exists() {
                 push(&mut a, &[&"--bind", &bus, &bus, &"--setenv", &"DBUS_SESSION_BUS_ADDRESS", &format!("unix:path={bus}")]);
             }
+        } else {
+            // no bus means no bus: with the variable unset, the first program that wants one
+            // (libsecret, a GTK accessibility bridge) autolaunches a private dbus-daemon plus a
+            // keyring inside the jail — harmless, but a bus the facts say is not there, and two
+            // processes that live until the jail ends. `disabled:` is refused by libdbus and GDBus
+            // without spawning anything. The system bus is under the jail's own tmpfs /run anyway.
+            push(&mut a, &[&"--setenv", &"DBUS_SESSION_BUS_ADDRESS", &"disabled:", &"--setenv", &"DBUS_SYSTEM_BUS_ADDRESS", &"disabled:"]);
         }
         for r in &ro_binds {
             push(&mut a, &[&"--ro-bind", r, r]);
@@ -580,6 +587,18 @@ mod tests {
 
     /// The memory snapshot's directory is bound read-only where `sill-memory` looks, when given
     /// and present; its host path is masked like the rest of sill's state.
+    #[test]
+    /// Without D-Bus the jail gets a dead address, not an unset one: nothing autolaunches a bus.
+    #[test]
+    fn no_dbus_is_a_dead_address_not_an_autolaunch() {
+        let mut s = spec();
+        s.policy.jail.dbus = false;
+        let r = render(&s.plan().unwrap().argv);
+        assert!(r.contains("--setenv DBUS_SESSION_BUS_ADDRESS disabled:"), "{r}");
+        assert!(r.contains("--setenv DBUS_SYSTEM_BUS_ADDRESS disabled:"), "{r}");
+        assert!(!r.contains("unix:path="), "{r}");
+    }
+
     #[test]
     fn memory_snapshot_is_bound_read_only() {
         let dir = std::env::temp_dir().join(format!("sill-jail-memory-{}", std::process::id()));

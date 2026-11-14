@@ -54,6 +54,8 @@ pub fn open_pty(session: Option<&str>, argv: &[String], env: &BTreeMap<String, S
         host_pty(argv, env, cwd, cols, rows)?
     };
     let token = add(Endpoint::Pty(fd.try_clone()?), Some((fd, pid, session.is_none())))?;
+    // who opened what: a shell in a jail and one on the host look the same from inside the jail
+    eprintln!("sill daemon: terminal opened {} (pid {pid}, {})", match session { Some(s) => format!("in session {s}"), None => "on the host".into() }, argv[0]);
     Ok(Opened { token, pid })
 }
 
@@ -83,7 +85,10 @@ fn host_pty(argv: &[String], env: &BTreeMap<String, String>, cwd: Option<&Path>,
     }); }
     let mut child = command.spawn()?;
     let pid = child.id();
-    std::thread::Builder::new().name(format!("sill-host-pty-{pid}")).spawn(move || { let _ = child.wait(); })?;
+    std::thread::Builder::new().name(format!("sill-host-pty-{pid}")).spawn(move || {
+        let st = child.wait();
+        eprintln!("sill daemon: host terminal pid {pid} ended ({})", st.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string()));
+    })?;
     Ok((File::from(master), pid))
 }
 

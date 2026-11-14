@@ -1100,7 +1100,7 @@ impl SessionView {
         term.set_child(Some(&super::icons::scalable("sill-terminal", fg)));
         term.add_css_class("flat");
         term.add_css_class("sill-ctl-icon");
-        term.set_tooltip_text(Some("Shell inside this session's jail (Ctrl+`) · right-click: a terminal on the host"));
+        term.set_tooltip_text(Some("Shell inside this session's jail (Ctrl+T) · right-click: a terminal on the host (Ctrl+Shift+H)"));
         term.set_active(self.bottom.visible_child_name().as_deref() == Some("shell"));
         *self.shell_btn.borrow_mut() = Some(term.clone());
         {
