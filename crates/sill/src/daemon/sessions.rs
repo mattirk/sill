@@ -108,6 +108,7 @@ pub(super) fn create(store: &Store, mut a: api::Create) -> Result<api::SessionKe
             pins,
             memory_scope: a.memory_scope,
             follows: a.follows,
+            remember_pins: a.remember_pins,
             ghost: a.ghost,
         },
     )?;
@@ -302,6 +303,38 @@ impl Hub {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn remember_pins_inherits_session_pins_only_and_preserves_retries() {
+        let dir = std::env::temp_dir().join(format!("sill-remember-pins-{}", crate::daemon::sfp::id()));
+        let store = Store::open(&dir.join("store.db")).unwrap();
+        store.global_pin(std::path::Path::new("/shortcut")).unwrap();
+        let input = |id: &str| api::Create {
+            create_id: id.into(), agent: "test".into(), policy: "default".into(),
+            workspaces: Some(false), ..Default::default()
+        };
+        let source = create(&store, input("source")).unwrap();
+        store.pin(&source.session_id, std::path::Path::new("/remembered")).unwrap();
+        let empty = create(&store, input("off")).unwrap();
+        assert!(store.pins(&empty.session_id).unwrap().is_empty());
+        let mut remembered = input("on");
+        remembered.remember_pins = true;
+        let inherited = create(&store, remembered.clone()).unwrap();
+        assert_eq!(store.pins(&inherited.session_id).unwrap(), vec![std::path::PathBuf::from("/remembered")]);
+        let mut explicit = input("explicit");
+        explicit.remember_pins = true;
+        explicit.pins = vec![api::HostPath::from_path(std::path::Path::new("/explicit"))];
+        let own = create(&store, explicit).unwrap();
+        assert_eq!(store.pins(&own.session_id).unwrap(), vec![std::path::PathBuf::from("/explicit")]);
+        assert_eq!(create(&store, remembered).unwrap().session_id, inherited.session_id);
+        let mut ghost = input("ghost");
+        ghost.remember_pins = true;
+        ghost.ghost = true;
+        let ghost = create(&store, ghost).unwrap();
+        assert!(store.pins(&ghost.session_id).unwrap().is_empty());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn create_fingerprint_survives_new_optional_fields() {
         // A later sfp/1 build may add a create option; an old client leaves it out and an

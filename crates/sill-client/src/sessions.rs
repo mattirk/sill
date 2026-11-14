@@ -9,14 +9,15 @@ use sill_proto::sessions::{Change, Create, End, Session, SessionKey, Update};
 /// One request: the method and its parameters.
 pub type Request = (&'static str, Value);
 
-/// A new session with no inherited pins. The legacy remember argument is ignored.
+/// A new session of `agent` with the default policy. Remember pins asks the daemon
+/// for the latest session's pins; a ghost never takes them.
 /// `workspaces` chooses live or workspace (docs/parallel-coding.md §12); None follows Settings.
-pub fn create(agent: &str, ghost: bool, _remember_pins: bool, workspaces: Option<bool>) -> Request {
+pub fn create(agent: &str, ghost: bool, remember_pins: bool, workspaces: Option<bool>) -> Request {
     let create = Create {
         create_id: crate::request_id("create"),
         agent: agent.into(),
         policy: "default".into(),
-        remember_pins: false,
+        remember_pins: remember_pins && !ghost,
         ghost,
         workspaces: workspaces.filter(|_| !ghost),
         ..Create::default()
@@ -181,6 +182,8 @@ mod tests {
             "a ghost never takes remembered pins"
         );
         assert!(create.create_id.starts_with("gui-create-"));
+        assert_eq!(super::create("codex", false, true, None).1["remember_pins"], true);
+        assert_eq!(super::create("codex", false, false, None).1["remember_pins"], false);
         let from = session("old", true, false);
         let (_, params) = new_here(&from);
         let create: Create = serde_json::from_value(params).unwrap();

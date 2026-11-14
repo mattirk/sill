@@ -1449,6 +1449,7 @@ fn the_herring_opens_changes_and_settings() {
     let mut ui = simulator(&app, (720.0, 860.0));
     ui.find("Timer autoshow").unwrap();
     ui.find("Shortcuts").unwrap();
+    ui.find("Remember pins").unwrap();
     ui.find("Compact after").unwrap();
     drop(ui);
     let flicked = app.herring_flick;
@@ -3115,7 +3116,7 @@ fn session_hotkeys_create_with_current_agent_and_close_current_session() {
     let server = std::thread::spawn(move || {
         let req = daemon.expect("_sill/sessions.create");
         assert_eq!(req["params"]["agent"], "codex");
-        assert_eq!(req["params"]["remember_pins"], false);
+        assert_eq!(req["params"]["remember_pins"], true);
         daemon.reply(&req, json!({"session_id":"fresh"}));
         let req = daemon.expect("_sill/sessions.list");
         daemon.reply(
