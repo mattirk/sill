@@ -1130,7 +1130,7 @@ impl Shelf {
         }
         {
             let shelf = self.clone();
-            *view.on_restart.borrow_mut() = Some(Box::new(move |id| shelf.restart_session(id)));
+            *view.on_restart.borrow_mut() = Some(Rc::new(move |id| shelf.restart_session(id)));
         }
         {
             let shelf = self.clone();

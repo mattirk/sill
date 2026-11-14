@@ -135,7 +135,10 @@ pub struct SessionView {
     denied_monitor: RefCell<Option<gtk::gio::FileMonitor>>,
     denied_seen: RefCell<std::collections::HashSet<String>>,
     refresh_pending: std::cell::Cell<bool>,
-    pub on_restart: RefCell<Option<Box<dyn Fn(&str)>>>,
+    /// Rebuild this session's jail (the window: now, or after the turn). Behind an `Rc` and called
+    /// through [`Self::request_restart`]: the callback may close this very view, whose `quit` takes
+    /// the callbacks — a call made while the cell is borrowed is a crash (2026-11-01).
+    pub on_restart: RefCell<Option<Rc<dyn Fn(&str)>>>,
     /// A start is under way on a worker thread (`connect`); a second call meanwhile runs once more
     /// after it (`Some(fresh)`); a prompt typed meanwhile waits here and goes when the agent is up.
     connecting: std::cell::Cell<bool>,
@@ -979,9 +982,7 @@ impl SessionView {
                         v.conv.add_note("logged in; the session starts again with the new login");
                         v.status.set_text("logged in");
                         v.force_restart.set(true);
-                        if let Some(cb) = v.on_restart.borrow().as_ref() {
-                            cb(&v.id());
-                        }
+                        v.request_restart();
                         break;
                     }
                     Err(e) => {
@@ -1541,10 +1542,8 @@ impl SessionView {
                 v.refresh_pins();
                 // a folder pin is a mount: the jail is rebuilt (after the current turn if busy);
                 // a file pin is only a chip
-                if v.pins_changed()
-                    && let Some(cb) = v.on_restart.borrow().as_ref()
-                {
-                    cb(&v.id());
+                if v.pins_changed() {
+                    v.request_restart();
                 }
             });
             chip.append(&l);
@@ -1699,9 +1698,7 @@ impl SessionView {
             Ok(_) => {
                 self.conv.add_note(&format!("{pattern} allowed for {}; the session restarts", agent.name));
                 self.force_restart.set(true);
-                if let Some(cb) = self.on_restart.borrow().as_ref() {
-                    cb(&self.id());
-                }
+                self.request_restart();
             }
             Err(e) => self.conv.add_note(&format!("could not save: {e:#}")),
         }
@@ -1962,7 +1959,14 @@ impl SessionView {
     /// A jail property changed: rebuild the jail (the window waits for the turn to end).
     fn restart_for_jail(self: &Rc<Self>) {
         self.force_restart.set(true);
-        if let Some(cb) = self.on_restart.borrow().as_ref() {
+        self.request_restart();
+    }
+
+    /// Call the window's restart callback with the cell released first: it may close this view
+    /// synchronously (idle session), and `quit` then takes the callbacks.
+    fn request_restart(&self) {
+        let cb = self.on_restart.borrow().clone();
+        if let Some(cb) = cb {
             cb(&self.id());
         }
     }
