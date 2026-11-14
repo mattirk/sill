@@ -143,7 +143,10 @@ pub fn builtin() -> Vec<Agent> {
             supports_load: true,
             experimental_acp_v2: false,
             domains: vec!["api.openai.com".into(), "*.openai.com".into(), "chatgpt.com".into(), "*.chatgpt.com".into()],
-            sandbox_off_env: Default::default(),
+            // Codex wraps every command in a bubblewrap of its own, which the jail's user
+            // namespace rule refuses (bwrap: ENOSPC); codex-acp's "Full access" mode runs them
+            // without it, the jail being the boundary (2026-11-12)
+            sandbox_off_env: BTreeMap::from([("INITIAL_AGENT_MODE".into(), "agent-full-access".into())]),
             home_paths: Some(vec![HomePath::directory("~/.codex")]),
             login_files: vec![".codex/auth.json".into()],
             // no host login is shared into jails: Codex in sill logs in on its own (the host-side
