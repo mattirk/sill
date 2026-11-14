@@ -627,6 +627,55 @@ pub fn transcript(conn: &Connection, s: &SessionInfo, grep: Option<&str>) -> Res
     Ok(out)
 }
 
+/// One session as a Markdown file (docs/memory.md §2.5 Export): the facts, the summary, the notes,
+/// then the conversation as it stands (compacted or not) — the person's data in a form that
+/// outlives sill.
+pub fn export_markdown(conn: &Connection, s: &SessionInfo, kept: &[(PathBuf, String)], home: &Path) -> Result<String> {
+    let mut out = format!("# {}\n\n", s.title);
+    out.push_str(&format!("- session `{}`, agent {}\n- started {}", s.id, s.agent, datetime(s.created_at)));
+    match s.ended_at {
+        Some(t) => out.push_str(&format!(", ended {} ({})\n", datetime(t), duration(t - s.created_at))),
+        None => out.push_str(", still open\n"),
+    }
+    if !s.pins.is_empty() {
+        out.push_str(&format!("- pinned: {}\n", s.pins.iter().map(|p| format!("`{}`", tilde(p, home))).collect::<Vec<_>>().join(", ")));
+    }
+    if !kept.is_empty() {
+        out.push_str(&format!("- kept to the host: {}\n", kept.iter().map(|(p, w)| format!("{w} `{}`", tilde(p, home))).collect::<Vec<_>>().join(", ")));
+    }
+    out.push_str(&format!("- {} prompts, {} tool calls; times UTC\n", count_kind(conn, &s.id, "user"), count_kind(conn, &s.id, "tool")));
+    if !s.summary.trim().is_empty() {
+        out.push_str(&format!("\n## Summary ({})\n\n{}\n", if s.summary_kind == "agent" { "by the agent" } else { "by sill, from the facts" }, s.summary.trim_end()));
+    }
+    let notes = notes(conn, &s.id)?;
+    if !notes.is_empty() {
+        out.push_str("\n## Notes\n");
+        for (ts, kind, text) in notes {
+            out.push_str(&format!("\n**{kind}, {}**\n\n{}\n", date(ts), text.trim_end()));
+        }
+    }
+    out.push_str("\n## Conversation\n");
+    let mut st = conn.prepare("SELECT ts, kind, text FROM entries WHERE session_id = ?1 AND kind IN ('user', 'agent', 'tool') ORDER BY seq")?;
+    let rows = st.query_map(params![s.id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
+    for row in rows {
+        let (ts, kind, text) = row?;
+        let at = &datetime(ts)[11..];
+        match kind.as_str() {
+            "tool" => out.push_str(&format!("\n*{at} tool: {}*\n", text.lines().next().unwrap_or(""))),
+            "user" => out.push_str(&format!("\n### {at} person\n\n{}\n", text.trim())),
+            _ => out.push_str(&format!("\n### {at} agent\n\n{}\n", text.trim())),
+        }
+    }
+    Ok(out)
+}
+
+/// A file name for a session's export: date, id, the title's words.
+pub fn export_name(s: &SessionInfo) -> String {
+    let slug: String = s.title.to_lowercase().chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect();
+    let slug = slug.split('-').filter(|w| !w.is_empty()).take(6).collect::<Vec<_>>().join("-");
+    format!("{}-{}-{}.md", date(s.ended_at.unwrap_or(s.last_used)), &s.id[..s.id.len().min(8)], slug)
+}
+
 /// One search hit as two lines: the session, then what matched.
 pub fn hit_lines(h: &Hit, home: &Path) -> String {
     let s = &h.session;

@@ -153,6 +153,10 @@ enum MemoryCmd {
     Recall { id: Vec<String> },
     /// Write the jail's read-only snapshot anew (the shelf does this when a session ends)
     Refresh,
+    /// Compaction and retention now, by the settings (the shelf runs this nightly)
+    Compact,
+    /// One Markdown file per session into a folder: facts, summary, notes, the conversation
+    Export { dir: PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -355,6 +359,22 @@ fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
             let scope = sill_memory::Scope::resolve(&full.memory_scope, !pins.is_empty());
             println!("scope: {}{}", scope.id(), if full.memory_scope.is_empty() { " (the default)" } else { "" });
             println!("{}", if block.is_empty() { "(nothing: memory is off)" } else { block.as_str() });
+        }
+        MemoryCmd::Compact => {
+            let uid = rustix::process::getuid().as_raw();
+            let done = sill_core::memory::compact_all(&store, sill_core::store::now(), &|id| {
+                let _ = sill_core::session::remove_state(uid, id);
+            })?;
+            if done != sill_core::memory::Compaction::default() {
+                store.vacuum()?;
+            }
+            drop(store);
+            sill_core::memory::refresh_snapshot()?;
+            println!("{} compacted, {} trimmed to summary and prompts, {} deleted", done.compacted, done.trimmed, done.deleted);
+        }
+        MemoryCmd::Export { dir } => {
+            let n = sill_core::memory::export_all(&store, &dir, &home)?;
+            println!("{n} sessions written to {}", dir.display());
         }
         MemoryCmd::Refresh => {
             drop(store);

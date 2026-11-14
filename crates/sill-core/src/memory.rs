@@ -141,6 +141,120 @@ pub fn refresh_snapshot() -> Result<()> {
     Ok(())
 }
 
+/// What one nightly run did (docs/memory.md §2.4).
+#[derive(Debug, Default, PartialEq)]
+pub struct Compaction {
+    pub compacted: usize,
+    pub trimmed: usize,
+    pub deleted: usize,
+}
+
+/// Compaction and retention over the ended sessions, by the settings, as of `now`: level 1 after
+/// `compact_after`, level 2 after `keep_full_transcripts`, deletion after `delete_after` (each
+/// step off at 0). Open sessions (no `ended_at`) are never touched. `remove_state` takes a deleted
+/// session's state on the host (the kept journal, its agent home) — the caller knows the uid.
+pub fn compact_all(store: &Store, now: i64, remove_state: &dyn Fn(&str)) -> Result<Compaction> {
+    let cfg = crate::config::load();
+    let (after1, after2, delete) = (cfg.compact_after(), cfg.keep_full_transcripts(), cfg.delete_after());
+    let mut done = Compaction::default();
+    for s in store.sessions()? {
+        let Some(ended) = s.ended_at else { continue };
+        let age = now - ended;
+        if delete > 0 && age > delete {
+            remove_state(&s.id);
+            store.delete(&s.id)?;
+            done.deleted += 1;
+            continue;
+        }
+        let level = if after2 > 0 && age > after2 { 2 } else if after1 > 0 && age > after1 { 1 } else { 0 };
+        if level > s.compacted {
+            store.compact(&s.id, level)?;
+            if level == 2 { done.trimmed += 1 } else { done.compacted += 1 }
+        }
+    }
+    Ok(done)
+}
+
+const NIGHTLY_KEY: &str = "memory_nightly";
+
+/// The nightly run, if a day has passed since the last (own connection: callable off the GTK
+/// thread): compaction and retention, a vacuum when anything went, the snapshot anew. None when it
+/// was not due or memory is off.
+pub fn nightly_if_due(remove_state: &dyn Fn(&str)) -> Result<Option<Compaction>> {
+    if !crate::config::load().memory() {
+        return Ok(None);
+    }
+    let store = Store::open(&crate::store::default_path()?)?;
+    let now = crate::store::now();
+    let last: i64 = store.meta(NIGHTLY_KEY).and_then(|v| v.parse().ok()).unwrap_or(0);
+    if now - last < 86_400 {
+        return Ok(None);
+    }
+    store.set_meta(NIGHTLY_KEY, &now.to_string())?;
+    let done = compact_all(&store, now, remove_state)?;
+    if done != Compaction::default() {
+        store.vacuum()?;
+    }
+    drop(store);
+    refresh_snapshot()?;
+    Ok(Some(done))
+}
+
+/// Export (docs/memory.md §2.5): one Markdown file per session into `dir`; how many were written.
+pub fn export_all(store: &Store, dir: &Path, home: &Path) -> Result<usize> {
+    std::fs::create_dir_all(dir)?;
+    let mut n = 0;
+    for s in sill_memory::sessions(store.conn())? {
+        let text = sill_memory::export_markdown(store.conn(), &s, &kept_of(&s.id), home)?;
+        std::fs::write(dir.join(sill_memory::export_name(&s)), text)?;
+        n += 1;
+    }
+    Ok(n)
+}
+
+#[cfg(test)]
+mod compaction_tests {
+    use super::*;
+
+    #[test]
+    fn compaction_steps_and_retention() {
+        let dir = std::env::temp_dir().join(format!("sill-memory-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("s.db")).unwrap();
+        let s = store.create("claude", "default").unwrap();
+        store.append(&s.id, "user", "fix the proxy", "").unwrap();
+        store.append(&s.id, "thought", "hmm", "").unwrap();
+        store.append(&s.id, "agent", "done, the proxy is fixed", "").unwrap();
+        let seq = store.append_tool(&s.id, "Edit proxy.rs", "Completed", "Edit", Some("body"), Some("--- a\n+++ b\n")).unwrap();
+        store.end(&s.id, "the proxy was fixed", "agent").unwrap();
+        let ended = store.sessions().unwrap()[0].ended_at.unwrap();
+        // level 1: thoughts and details go, the agent's text and the tool title stay
+        store.compact(&s.id, 1).unwrap();
+        let e = store.entries(&s.id).unwrap();
+        assert!(e.iter().all(|x| x.kind != "thought"));
+        let tool = e.iter().find(|x| x.seq == seq).unwrap();
+        assert_eq!((tool.text.as_str(), tool.detail.as_str(), tool.diff.as_str()), ("Edit proxy.rs", "", ""));
+        assert!(e.iter().any(|x| x.kind == "agent"));
+        assert_eq!(store.sessions().unwrap()[0].compacted, 1);
+        // level 2: the agent's text goes, prompts and summary remain and are still searchable
+        store.compact(&s.id, 2).unwrap();
+        let e = store.entries(&s.id).unwrap();
+        assert!(e.iter().all(|x| x.kind != "agent"));
+        assert!(e.iter().any(|x| x.kind == "user"));
+        let home = Path::new("/home/x");
+        let hits = sill_memory::search(store.conn(), &sill_memory::Query::parse("proxy", home), ended, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        // compact_all honours the settings' zero = off and never touches an open session
+        let open = store.create("claude", "default").unwrap();
+        store.append(&open.id, "thought", "still here", "").unwrap();
+        let removed = std::cell::RefCell::new(Vec::new());
+        let done = compact_all(&store, ended + 400 * 86_400, &|id| removed.borrow_mut().push(id.to_string())).unwrap();
+        assert_eq!(done.deleted, 0, "delete_after is off by default");
+        assert_eq!(store.entries(&open.id).unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// The recall block for session `s` with `pins` (docs/memory.md §2.3): the ended sessions its scope
 /// picks, `n` at most, with how to search the rest — empty with memory off.
 pub fn recall(store: &Store, s: &Session, pins: &[PathBuf], home: &Path, n: usize) -> String {

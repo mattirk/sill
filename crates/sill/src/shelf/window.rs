@@ -47,6 +47,9 @@ pub struct Shelf {
     /// Main pane | tree, sharing the window's width: the handle between them drags the split.
     paned: gtk::Paned,
     busy: RefCell<std::collections::HashSet<String>>,
+    /// When each tab was opened in this shelf run: the idle-timeout end counts from the later of
+    /// this and the last prompt, so a reopened or restarted-into session is not closed a minute in.
+    opened: RefCell<HashMap<String, i64>>,
     pending_restart: RefCell<std::collections::HashSet<String>>,
     views: RefCell<HashMap<String, Rc<SessionView>>>,
     changes: Rc<ChangesPage>,
@@ -252,6 +255,7 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
         herring: herring.clone(),
         paned: body.clone(),
         busy: RefCell::new(std::collections::HashSet::new()),
+        opened: RefCell::new(HashMap::new()),
         pending_restart: RefCell::new(std::collections::HashSet::new()),
         views: RefCell::new(HashMap::new()),
         changes: changes.clone(),
@@ -266,8 +270,13 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
         let weak = Rc::downgrade(&shelf);
         changes.set_busy_probe(move |id| weak.upgrade().map(|s| s.busy.borrow().contains(id)).unwrap_or(true));
         let c = changes.clone();
+        let weak = Rc::downgrade(&shelf);
         gtk::glib::timeout_add_seconds_local(60, move || {
             c.sweep();
+            if let Some(s) = weak.upgrade() {
+                s.end_idle_sessions();
+                nightly_memory();
+            }
             gtk::glib::ControlFlow::Continue
         });
     }
@@ -1105,6 +1114,7 @@ impl Shelf {
             self.tabs.select(&id);
             return;
         }
+        self.opened.borrow_mut().insert(id.clone(), sill_core::store::now());
         let home = session::home().unwrap_or_default();
         if note.is_none() && sill_core::session::jail_outdated(&id, &s.policy, &home) {
             let shelf = self.clone();
@@ -1280,6 +1290,29 @@ impl Shelf {
             view.ask_summary(&prompt, Box::new(finish));
         } else {
             finish(None);
+        }
+    }
+
+    /// The policy's idle timeout (docs/memory.md §2.1, §7 M2): a session whose person has sent
+    /// nothing for `idle_timeout_minutes` and whose agent is between turns ends as its tab would
+    /// be closed — its agent (long stopped by the shim's own idle limit, or still up) writes the
+    /// summary, the row goes to the Reopen list. 0 in the policy = never. Called once a minute.
+    fn end_idle_sessions(self: &Rc<Self>) {
+        let now = sill_core::store::now();
+        let Ok(home) = session::home() else { return };
+        let sessions = self.store.sessions().unwrap_or_default();
+        for id in self.tabs.ids() {
+            let Some(s) = sessions.iter().find(|x| x.id == id) else { continue };
+            if self.busy.borrow().contains(&id) || self.views.borrow().get(&id).is_some_and(|v| v.summary_pending()) {
+                continue;
+            }
+            let Ok(policy) = sill_core::policy::Policy::load(&s.policy, &home) else { continue };
+            let limit = policy.limits.idle_timeout_minutes as i64 * 60;
+            let since = s.last_used.max(self.opened.borrow().get(&id).copied().unwrap_or(now));
+            if limit > 0 && now - since > limit {
+                self.set_status(&format!("“{}” ended: idle for {} minutes", s.title, policy.limits.idle_timeout_minutes));
+                self.close_session(&id);
+            }
         }
     }
 
@@ -1534,6 +1567,21 @@ pub fn refresh_memory() {
     std::thread::spawn(|| {
         if let Err(e) = sill_core::memory::refresh_snapshot() {
             eprintln!("memory snapshot: {e:#}");
+        }
+    });
+}
+
+/// Memory's nightly run off the GTK thread (docs/memory.md §2.4): compaction, retention and a
+/// vacuum once a day; a no-op the other 1439 minutes. Deleted sessions' state goes with them.
+pub fn nightly_memory() {
+    std::thread::spawn(|| {
+        let uid = session::uid();
+        match sill_core::memory::nightly_if_due(&|id| {
+            let _ = sill_core::session::remove_state(uid, id);
+        }) {
+            Ok(Some(done)) => eprintln!("memory nightly: {} compacted, {} trimmed, {} deleted", done.compacted, done.trimmed, done.deleted),
+            Ok(None) => {}
+            Err(e) => eprintln!("memory nightly: {e:#}"),
         }
     });
 }

@@ -87,6 +87,117 @@ pub fn build() -> gtk::Box {
     });
     root.append(&row("Memory", &memory));
 
+    // how many earlier sessions a new agent is told about (docs/memory.md §2.3)
+    let counts: [(u32, &str); 5] = [(0, "none"), (1, "1 session"), (3, "3 sessions"), (5, "5 sessions"), (10, "10 sessions")];
+    let labels: Vec<&str> = counts.iter().map(|(_, l)| *l).collect();
+    let current = sill_core::config::load().memory_recall() as u32;
+    let nearest = counts.iter().enumerate().min_by_key(|(_, (n, _))| (*n as i64 - current as i64).abs()).map(|(i, _)| i);
+    let recall_dd = choice(&labels, nearest, move |i| {
+        if let Some((n, _)) = counts.get(i) {
+            let _ = sill_core::config::update(|c| c.memory_recall = Some(*n));
+        }
+    });
+    recall_dd.set_tooltip_text(Some("How many earlier sessions a new agent is told about when it starts: the ones in the same folders, nearest first, else the latest anywhere. Each session can narrow this in its session menu. None: the agent is only told how to search."));
+    root.append(&row("Recall", &recall_dd));
+
+    // compaction and retention (docs/memory.md §2.4): three durations, each off at 0
+    let durations: [(&str, &str); 7] = [("0", "never"), ("7d", "a week"), ("30d", "a month"), ("90d", "3 months"), ("180d", "6 months"), ("1y", "a year"), ("2y", "two years")];
+    let dur_labels: Vec<&str> = durations.iter().map(|(_, l)| *l).collect();
+    let duration_row = |label: &'static str, tip: &'static str, current: i64, set: fn(&mut sill_core::config::Config, Option<String>)| {
+        let nearest = durations
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, (d, _))| (sill_memory::parse_age(d).unwrap_or(0) - current).abs())
+            .map(|(i, _)| i);
+        let dd = choice(&dur_labels, nearest, move |i| {
+            if let Some((d, _)) = durations.get(i) {
+                let _ = sill_core::config::update(|c| set(c, Some(d.to_string())));
+            }
+        });
+        dd.set_tooltip_text(Some(tip));
+        row(label, &dd)
+    };
+    let cfg = sill_core::config::load();
+    root.append(&duration_row(
+        "Compact after",
+        "This long after a session ended, its transcript loses the agent's thoughts, tool outputs and diffs; the conversation still reads. Nightly.",
+        cfg.compact_after(),
+        |c, v| c.compact_after = v,
+    ));
+    root.append(&duration_row(
+        "Full text for",
+        "This long after the end, the agent's messages go too. The summary, your notes, your prompts and the tool titles stay — what recall and search use.",
+        cfg.keep_full_transcripts(),
+        |c, v| c.keep_full_transcripts = v,
+    ));
+    root.append(&duration_row(
+        "Delete after",
+        "This long after the end the session is deleted outright, as the trash can does: row, summary, notes, transcript, kept journal. Never, unless this machine needs an end date.",
+        cfg.delete_after(),
+        |c, v| c.delete_after = v,
+    ));
+
+    // compact now / export: the two actions
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let compact = gtk::Button::with_label("Compact now");
+    compact.set_tooltip_text(Some("Run compaction and retention now, by the durations above."));
+    compact.connect_clicked(|b| {
+        let b = b.clone();
+        b.set_sensitive(false);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let uid = rustix::process::getuid().as_raw();
+            let r = (|| -> anyhow::Result<sill_core::memory::Compaction> {
+                let store = sill_core::store::Store::open_default()?;
+                let done = sill_core::memory::compact_all(&store, sill_core::store::now(), &|id| {
+                    let _ = sill_core::session::remove_state(uid, id);
+                })?;
+                store.vacuum()?;
+                drop(store);
+                sill_core::memory::refresh_snapshot()?;
+                Ok(done)
+            })();
+            let _ = tx.send(r);
+        });
+        glib::timeout_add_local(std::time::Duration::from_millis(200), move || match rx.try_recv() {
+            Ok(r) => {
+                b.set_sensitive(true);
+                b.set_label(&match r {
+                    Ok(d) => format!("Compacted: {} / {} trimmed / {} deleted", d.compacted, d.trimmed, d.deleted),
+                    Err(e) => format!("Compaction failed: {e}"),
+                });
+                glib::ControlFlow::Break
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+            Err(_) => {
+                b.set_sensitive(true);
+                glib::ControlFlow::Break
+            }
+        });
+    });
+    actions.append(&compact);
+    let export = gtk::Button::with_label("Export…");
+    export.set_tooltip_text(Some("Write every session as a Markdown file — facts, summary, notes, the conversation — into a folder you pick: your data in a form that outlives sill."));
+    export.connect_clicked(|b| {
+        let dialog = gtk::FileDialog::builder().title("Export memory to a folder").modal(true).build();
+        let parent = b.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+        let b = b.clone();
+        dialog.select_folder(parent.as_ref(), None::<&gtk::gio::Cancellable>, move |res| {
+            let Ok(f) = res else { return };
+            let Some(dir) = f.path() else { return };
+            let r = sill_core::store::Store::open_default().and_then(|store| {
+                let home = std::env::var("HOME").map(std::path::PathBuf::from).unwrap_or_default();
+                sill_core::memory::export_all(&store, &dir, &home)
+            });
+            b.set_label(&match r {
+                Ok(n) => format!("Exported {n} sessions"),
+                Err(e) => format!("Export failed: {e}"),
+            });
+        });
+    });
+    actions.append(&export);
+    root.append(&row("", &actions));
+
     // host terminal (Ctrl+Shift+H): a command line; empty = the first installed known terminal
     let term = gtk::Entry::new();
     term.set_hexpand(true);

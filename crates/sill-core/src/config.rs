@@ -46,6 +46,15 @@ pub struct Config {
     /// How many earlier sessions a new agent is told about (docs/memory.md §2.3); unset = 3, 0 =
     /// none (search still works).
     pub memory_recall: Option<u32>,
+    /// Compaction (docs/memory.md §2.4): this long after a session ended, its transcript loses the
+    /// agent's thoughts, tool details and diffs (`30d`, `12h`, `2y`; unset = 30d, `0` = never).
+    pub compact_after: Option<String>,
+    /// This long after the end, the agent's text goes too: summary, notes, the person's prompts and
+    /// the metadata remain (unset = 365d, `0` = never).
+    pub keep_full_transcripts: Option<String>,
+    /// Retention: this long after the end the session is deleted outright, as Delete does (unset
+    /// or `0` = never — the point of memory is to keep).
+    pub delete_after: Option<String>,
 }
 
 /// Terminals the shelf knows, in preference order: (program, command line). Programs that start
@@ -131,6 +140,16 @@ impl Config {
         self.memory.unwrap_or(true)
     }
 
+    /// The compaction durations in seconds; 0 = that step never runs.
+    pub fn compact_after(&self) -> i64 {
+        age(self.compact_after.as_deref(), 30 * 86_400)
+    }
+    pub fn keep_full_transcripts(&self) -> i64 {
+        age(self.keep_full_transcripts.as_deref(), 365 * 86_400)
+    }
+    pub fn delete_after(&self) -> i64 {
+        age(self.delete_after.as_deref(), 0)
+    }
     pub fn memory_recall(&self) -> usize {
         self.memory_recall.unwrap_or(3).min(20) as usize
     }
@@ -187,6 +206,11 @@ pub fn load() -> Config {
 }
 
 /// Load, change one thing, save. The shape every setting edit takes.
+/// A duration setting (`30d`, `2y`, `0`): seconds, or `default` when unset or unreadable.
+fn age(s: Option<&str>, default: i64) -> i64 {
+    s.map(str::trim).filter(|s| !s.is_empty()).and_then(sill_memory::parse_age).unwrap_or(default).max(0)
+}
+
 pub fn update(f: impl FnOnce(&mut Config)) -> Result<()> {
     let mut c = load();
     f(&mut c);

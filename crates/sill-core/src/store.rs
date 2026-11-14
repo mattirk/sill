@@ -35,6 +35,9 @@ pub struct Session {
     pub memory_scope: String,
     /// The ended session this one was opened from with *New here*: its summary leads the recall.
     pub follows: String,
+    /// Compaction (docs/memory.md §2.4): 0 = the whole transcript; 1 = thoughts, tool details and
+    /// diffs dropped; 2 = the agent's text too — summary, notes, prompts and tool titles remain.
+    pub compacted: i64,
 }
 
 /// The agent controls as set by the person (SPEC §3.2): mode id and config option values. Kept twice:
@@ -135,6 +138,9 @@ impl Store {
         // memory M1: recall scope, New here, and the searchable text kept by triggers
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN memory_scope TEXT NOT NULL DEFAULT ''", []);
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN follows TEXT NOT NULL DEFAULT ''", []);
+        // memory M2: compaction level per session, and when the nightly run last went
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN compacted INTEGER NOT NULL DEFAULT 0", []);
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")?;
         sill_memory::install(&conn).context("memory index")?;
         Ok(Self { conn })
     }
@@ -182,7 +188,7 @@ impl Store {
 
     pub fn sessions(&self) -> Result<Vec<Session>> {
         let mut st = self.conn.prepare(
-            "SELECT id, agent, title, created_at, last_used, acp_session_id, policy, auto_allow, agent_settings, desktop, ended_at, summary, summary_kind, memory_scope, follows FROM sessions ORDER BY last_used DESC",
+            "SELECT id, agent, title, created_at, last_used, acp_session_id, policy, auto_allow, agent_settings, desktop, ended_at, summary, summary_kind, memory_scope, follows, compacted FROM sessions ORDER BY last_used DESC",
         )?;
         let rows = st.query_map([], |r| {
             Ok(Session {
@@ -201,6 +207,7 @@ impl Store {
                 summary_kind: r.get(12)?,
                 memory_scope: r.get(13)?,
                 follows: r.get(14)?,
+                compacted: r.get(15)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -223,6 +230,7 @@ impl Store {
             summary_kind: String::new(),
             memory_scope: String::new(),
             follows: String::new(),
+            compacted: 0,
         };
         self.conn.execute(
             "INSERT INTO sessions (id, agent, title, created_at, last_used, acp_session_id, policy, agent_settings) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7)",
@@ -256,6 +264,39 @@ impl Store {
     /// without a turn keeps the summary it had).
     pub fn end_only(&self, id: &str) -> Result<()> {
         self.conn.execute("UPDATE sessions SET ended_at = ?2 WHERE id = ?1", params![id, now()])?;
+        Ok(())
+    }
+
+    /// Compaction (docs/memory.md §2.4). Level 1: the agent's thoughts go, tool calls keep title
+    /// and status and lose detail and diff — the transcript still reads. Level 2: the agent's text
+    /// goes too; summary, notes, the person's prompts and tool titles remain, which is what recall
+    /// and search use. A lower level than the session has changes nothing.
+    pub fn compact(&self, id: &str, level: i64) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        if level >= 1 {
+            tx.execute("DELETE FROM entries WHERE session_id = ?1 AND kind = 'thought'", params![id])?;
+            tx.execute("UPDATE entries SET detail = '', diff = '' WHERE session_id = ?1 AND kind = 'tool' AND (detail <> '' OR diff <> '')", params![id])?;
+        }
+        if level >= 2 {
+            tx.execute("DELETE FROM entries WHERE session_id = ?1 AND kind = 'agent'", params![id])?;
+        }
+        tx.execute("UPDATE sessions SET compacted = MAX(compacted, ?2) WHERE id = ?1", params![id, level.min(2)])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Give the space of deleted rows back to the filesystem (after a compaction run).
+    pub fn vacuum(&self) -> Result<()> {
+        self.conn.execute_batch("VACUUM")?;
+        Ok(())
+    }
+
+    /// A small key/value the shelf keeps about itself (when the nightly memory run last went).
+    pub fn meta(&self, key: &str) -> Option<String> {
+        self.conn.query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| r.get(0)).ok()
+    }
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute("INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT (key) DO UPDATE SET value = excluded.value", params![key, value])?;
         Ok(())
     }
 
