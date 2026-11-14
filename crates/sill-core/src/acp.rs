@@ -16,18 +16,18 @@ use agent_client_protocol::schema::v1::{
     RequestPermissionRequest,
     RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigOptionValue, SessionConfigSelectOptions, SessionModeState,
-    ImageContent, ResourceLink, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason,
+    ImageContent, ResourceLink, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest,
     ToolCallContent,
 };
 use agent_client_protocol::util::MatchDispatch;
-pub use agent_client_protocol::schema::v1::PermissionOptionKind;
+pub use agent_client_protocol::schema::v1::{PermissionOptionKind, StopReason};
 use agent_client_protocol::schema::v1::{AuthCapabilities, AuthMethod, AuthenticateRequest, Meta};
 use agent_client_protocol::{ActiveSession, Agent, ByteStreams, Client, ErrorCode, SessionMessage};
 use anyhow::{Context, Result, anyhow};
 use futures::AsyncReadExt;
 use futures::channel::oneshot;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PermissionOption {
     pub id: String,
     pub name: String,
@@ -35,14 +35,14 @@ pub struct PermissionOption {
 }
 
 /// The agent's adjustable session settings (SPEC: modes + config options), as the UI shows them.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Controls {
     /// (current mode id, [(id, name)])
     pub modes: Option<(String, Vec<(String, String)>)>,
     pub options: Vec<ConfigOption>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConfigOption {
     pub id: String,
     pub name: String,
@@ -51,14 +51,14 @@ pub struct ConfigOption {
     pub kind: ConfigKind,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ConfigKind {
     /// (current value id, [(value id, name)])
     Select(String, Vec<(String, String)>),
     Boolean(bool),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ConfigValue {
     Id(String),
     Bool(bool),
@@ -107,7 +107,7 @@ fn controls_from(modes: Option<&SessionModeState>, options: Option<&[SessionConf
 
 /// One field of a form the agent asks the person to fill (ACP `elicitation/create`, form mode —
 /// Claude's AskUserQuestion arrives this way: one choice field per question plus an "Other" text).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FormField {
     pub key: String,
     pub title: String,
@@ -115,7 +115,7 @@ pub struct FormField {
     pub kind: FieldKind,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum FieldKind {
     /// One of these: (value, title, description).
     Choice(Vec<(String, String, String)>),
@@ -189,6 +189,10 @@ pub enum Event {
     SubagentText { parent: String, text: String },
     /// The agent asks for permission; answer with the chosen option id (None = cancel).
     PermissionRequest { tool_call_id: String, title: String, options: Vec<PermissionOption>, reply: oneshot::Sender<Option<String>> },
+    /// The daemon answered a permission request itself (the session's auto-allow, docs/daemon.md
+    /// §3.3): `allowed` false when no allow option was offered and it was refused. Never sent by
+    /// [`run_session`]; a frontend marks the call's line with it.
+    AutoAnswered { tool_call_id: String, title: String, allowed: bool },
     /// The agent asks the person to fill a form (a multiple-choice question, say); answer with the
     /// values by field key — strings, arrays of strings, booleans, numbers — or None to cancel.
     Elicitation { message: String, fields: Vec<FormField>, reply: oneshot::Sender<Option<std::collections::BTreeMap<String, serde_json::Value>>> },
@@ -206,7 +210,7 @@ pub enum Event {
 }
 
 /// One way to log in, as the agent advertises it in `initialize`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AuthMethodInfo {
     pub id: String,
     pub name: String,
@@ -232,14 +236,14 @@ impl From<&AuthMethod> for AuthMethodInfo {
 }
 
 /// Something sent along with a prompt (SPEC §3.2 attachments): a pasted screenshot, a chosen file.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Attachment {
     pub name: String,
     pub mime: String,
     pub kind: AttachmentKind,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum AttachmentKind {
     /// Sent inline as an ACP image block (base64).
     Image { data_base64: String },

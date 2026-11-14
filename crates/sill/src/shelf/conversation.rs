@@ -1067,7 +1067,7 @@ impl Conversation {
                 self.status.set_text("waiting for your answer");
                 self.add_form(&message, fields, reply)
             }
-            Event::Other(_) | Event::Capabilities { .. } => {}
+            Event::Other(_) | Event::Capabilities { .. } | Event::AutoAnswered { .. } => {}
             Event::Stopped(reason) => {
                 self.finish_current();
                 self.status.set_text(&format!("idle · last turn: {reason:?}"));

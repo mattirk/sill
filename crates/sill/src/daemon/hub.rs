@@ -1,6 +1,6 @@
-//! The daemon's state and its methods: one store, the claimed launcher, the sessions it supervises,
-//! a dispatch by method name. Transport-free on purpose — `serve` hands it a method and a value and
-//! writes back what it says.
+//! The daemon's state and its methods: one store, the launcher, the sessions it supervises and the
+//! conversations it runs (`runner`), a dispatch by method name. `serve` hands it the connection, a
+//! method and a value and writes back what it says; events go to the connection's queue.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -14,7 +14,12 @@ use sill_core::policy::Policy;
 use sill_core::session::StartOptions;
 use sill_core::store::Store;
 use sill_proto::rpc::Error;
-use sill_proto::{DaemonStatus, Key, LogRequest, MemorySearch, MemorySession, Session, Started, Text, Transcript, method};
+use sill_proto::{
+    Attach, DaemonStatus, Key, LogRequest, MemorySearch, MemorySession, Session, SessionAnswer, SessionCommand, Started, Text, Transcript, method,
+};
+
+use super::Conn;
+use super::runner::Runner;
 
 pub struct Hub {
     store: Mutex<Store>,
@@ -27,6 +32,11 @@ pub struct Hub {
     /// Session id → pid of its `sill launch`, for every jail this daemon started or adopted; the
     /// wait threads take an entry out when its process ends.
     children: Arc<Mutex<HashMap<String, u32>>>,
+    /// Session id → the conversation the daemon runs for it (docs/daemon.md §3.3).
+    runners: Mutex<HashMap<String, Arc<Runner>>>,
+    /// Starting a conversation (jail, agent, ACP) is one at a time: two attaches of one session
+    /// must not start two agents.
+    starting: Mutex<()>,
 }
 
 impl Hub {
@@ -42,6 +52,8 @@ impl Hub {
             exe: sill_core::session::staged_exe()?,
             home: sill_core::changes::home()?,
             children: Arc::default(),
+            runners: Mutex::new(HashMap::new()),
+            starting: Mutex::new(()),
         };
         hub.adopt_running();
         Ok(hub)
@@ -51,7 +63,40 @@ impl Hub {
         self.store.lock().unwrap().sessions().map(|s| s.len()).unwrap_or(0)
     }
 
-    pub fn dispatch(&self, m: &str, params: Value) -> Result<Value, Error> {
+    /// The store, for one call (the runners write the transcript through it).
+    pub fn with_store<T>(&self, f: impl FnOnce(&Store) -> Result<T>) -> Result<T> {
+        f(&self.store.lock().unwrap())
+    }
+
+    /// The session answers permission requests itself (its auto-allow, read at the moment asked).
+    pub fn auto_allow(&self, id: &str) -> bool {
+        self.store.lock().unwrap().sessions().ok().and_then(|v| v.into_iter().find(|s| s.id == id)).is_some_and(|s| s.auto_allow)
+    }
+
+    /// A connection closed: it is subscribed nowhere any more.
+    pub fn disconnect(&self, conn: u64) {
+        for r in self.runners.lock().unwrap().values() {
+            r.detach(conn);
+        }
+    }
+
+    /// A conversation's loop ended: forget it unless a newer one took its place.
+    pub fn runner_ended(&self, r: &Arc<Runner>) {
+        let mut runners = self.runners.lock().unwrap();
+        if runners.get(&r.id).is_some_and(|cur| Arc::ptr_eq(cur, r)) {
+            runners.remove(&r.id);
+        }
+        eprintln!("sill daemon: session {} conversation ended", r.id);
+    }
+
+    fn runner(&self, id: &str) -> Result<Arc<Runner>, Error> {
+        match self.runners.lock().unwrap().get(id) {
+            Some(r) if r.alive() => Ok(r.clone()),
+            _ => Err(Error::failed("the session is not running")),
+        }
+    }
+
+    pub fn dispatch(self: &Arc<Self>, conn: &Arc<Conn>, m: &str, params: Value) -> Result<Value, Error> {
         match m {
             method::DAEMON_STATUS => to_value(self.status()?),
             method::DAEMON_SHUTDOWN => Ok(json!({})),
@@ -71,7 +116,39 @@ impl Hub {
             }
             method::SESSIONS_STOP => {
                 let k: Key = args(params)?;
+                if let Some(r) = self.runners.lock().unwrap().remove(&k.key) {
+                    r.retire();
+                }
                 sill_core::session::stop(&k.key).map_err(|e| Error::failed(format!("{e:#}")))?;
+                Ok(json!({}))
+            }
+            method::SESSIONS_ATTACH => {
+                let a: Attach = args(params)?;
+                self.attach(conn, &a.key, a.fresh).map_err(|e| Error::failed(format!("{e:#}")))?;
+                Ok(json!({}))
+            }
+            method::SESSIONS_DETACH => {
+                let k: Key = args(params)?;
+                if let Some(r) = self.runners.lock().unwrap().get(&k.key) {
+                    r.detach(conn.id);
+                }
+                Ok(json!({}))
+            }
+            method::SESSIONS_COMMAND => {
+                let c: SessionCommand = args(params)?;
+                let cmd: sill_core::wire::Command = serde_json::from_value(c.command).map_err(Error::invalid_params)?;
+                let r = self.runner(&c.key)?;
+                if matches!(cmd, sill_core::wire::Command::Quit) {
+                    r.detach(conn.id);
+                    return Ok(json!({}));
+                }
+                r.command(self, cmd).map_err(|e| Error::failed(format!("{e:#}")))?;
+                Ok(json!({}))
+            }
+            method::SESSIONS_ANSWER => {
+                let a: SessionAnswer = args(params)?;
+                let answer: sill_core::wire::Answer = serde_json::from_value(a.answer).map_err(Error::invalid_params)?;
+                self.runner(&a.key)?.answer(a.request, answer).map_err(|e| Error::failed(format!("{e:#}")))?;
                 Ok(json!({}))
             }
             method::SESSIONS_LOG => {
@@ -180,6 +257,55 @@ impl Hub {
                 })
             })
             .collect()
+    }
+
+    /// Attach `conn` to the session's conversation, starting jail, agent and ACP client when there
+    /// is none (or `fresh`: the agent started again, for adapters that refuse a second `initialize`).
+    fn attach(self: &Arc<Self>, conn: &Arc<Conn>, id: &str, fresh: bool) -> Result<()> {
+        let _one_at_a_time = self.starting.lock().unwrap();
+        if !fresh && let Some(r) = self.runners.lock().unwrap().get(id).filter(|r| r.alive()).cloned() {
+            r.attach(conn.clone());
+            return Ok(());
+        }
+        let started = self.start_session(id)?;
+        let (s, agent) = {
+            let store = self.store.lock().unwrap();
+            let Some(s) = store.sessions()?.into_iter().find(|x| x.id == id) else { bail!("no session {id}") };
+            let registry = sill_core::agents::load(&self.home);
+            let Some(agent) = registry.get(&s.agent).cloned() else { bail!("unknown agent {}", s.agent) };
+            (s, agent)
+        };
+        let mut control = sill_core::shim::Control::connect(&started.socket)?;
+        if fresh && control.status()?.running {
+            control.kill(3000)?;
+        }
+        if !control.status()?.running {
+            let mut env = agent.env.clone();
+            env.extend(agent.sandbox_off_env.clone());
+            control.spawn(&agent.command, &env, Some(&self.home))?;
+        }
+        let stream = sill_core::shim::agent_stream(&started.socket)?;
+        // a control channel: a reconnect re-applies the remembered settings as one command each, and
+        // none of them may be dropped for want of room
+        let (cmd_tx, cmd_rx) = async_channel::unbounded();
+        let (ev_tx, ev_rx) = async_channel::unbounded();
+        let runner = Runner::new(id, cmd_tx, conn.clone());
+        if let Some(old) = self.runners.lock().unwrap().insert(id.to_string(), runner.clone()) {
+            old.retire();
+        }
+        let sopts = sill_core::acp::SessionOptions {
+            cwd: self.home.clone(),
+            auto: sill_core::acp::AutoPermission::Ask,
+            resume: if agent.supports_load { s.acp_session_id.clone() } else { None },
+        };
+        std::thread::Builder::new().name(format!("sill-acp-{id}")).spawn(move || {
+            // run_session sends Event::Ended itself, error included
+            let _ = sill_core::acp::run_session(stream, sopts, cmd_rx, ev_tx);
+        })?;
+        let hub = self.clone();
+        std::thread::Builder::new().name(format!("sill-conv-{id}")).spawn(move || runner.run(hub, ev_rx))?;
+        eprintln!("sill daemon: session {id} conversation started{}", if fresh { " (agent restarted)" } else { "" });
+        Ok(())
     }
 
     /// Start a stored session's jail from its row — pins, policy, desktop grants, the agent's binds

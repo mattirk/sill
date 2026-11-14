@@ -15,7 +15,7 @@ pub mod rpc;
 pub use client::Client;
 
 /// Bumped when a method or a type changes shape; the daemon reports its own in [`DaemonStatus`].
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 
 /// Method names. Groups follow the table in docs/daemon.md §3.3.
 pub mod method {
@@ -29,6 +29,18 @@ pub mod method {
     pub const SESSIONS_STOP: &str = "_sill/sessions.stop";
     /// The tail of a session's log: `LogRequest` → `Text`.
     pub const SESSIONS_LOG: &str = "_sill/sessions.log";
+    /// Start the session's jail and agent if needed and subscribe this connection to its
+    /// conversation: `Attach` → `{}`; `SESSION_EVENT` notifications follow, the session's current
+    /// state first (docs/daemon.md §3.3).
+    pub const SESSIONS_ATTACH: &str = "_sill/sessions.attach";
+    /// Unsubscribe: `Key` → `{}`. The agent stays the daemon's.
+    pub const SESSIONS_DETACH: &str = "_sill/sessions.detach";
+    /// A command to a running session (prompt, cancel, mode, option, login): `SessionCommand` → `{}`.
+    pub const SESSIONS_COMMAND: &str = "_sill/sessions.command";
+    /// The answer to an agent's question (permission, form): `SessionAnswer` → `{}`.
+    pub const SESSIONS_ANSWER: &str = "_sill/sessions.answer";
+    /// Notification, daemon → attached frontends: `SessionEvent`.
+    pub const SESSION_EVENT: &str = "_sill/session.event";
     pub const MEMORY_LIST: &str = "_sill/memory.list";
     pub const MEMORY_SHOW: &str = "_sill/memory.show";
     pub const MEMORY_SEARCH: &str = "_sill/memory.search";
@@ -140,6 +152,37 @@ pub struct Started {
 pub struct LogRequest {
     pub key: String,
     pub lines: usize,
+}
+
+/// `_sill/sessions.attach`. `fresh`: an agent still running in the jail is started again instead
+/// of being reattached (adapters that refuse a second `initialize`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Attach {
+    pub key: String,
+    #[serde(default)]
+    pub fresh: bool,
+}
+
+/// `_sill/sessions.command`: `command` is a `sill_core::wire::Command` as JSON.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionCommand {
+    pub key: String,
+    pub command: serde_json::Value,
+}
+
+/// `_sill/sessions.answer`: `answer` is a `sill_core::wire::Answer` as JSON.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionAnswer {
+    pub key: String,
+    pub request: u64,
+    pub answer: serde_json::Value,
+}
+
+/// `_sill/session.event`: `event` is a `sill_core::wire::Event` as JSON.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionEvent {
+    pub key: String,
+    pub event: serde_json::Value,
 }
 
 /// A result that is text the way the CLI prints it (`memory.show`, `memory.search`, `memory.transcript`).

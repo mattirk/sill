@@ -9,7 +9,8 @@ use gtk4 as gtk;
 use sill_core::changes;
 use gtk::gdk;
 use gtk::glib;
-use sill_core::acp::{Attachment, AttachmentKind, AuthMethodInfo, Command, ConfigKind, ConfigValue, Controls, Event};
+use sill_core::acp::{Attachment, AttachmentKind, AuthMethodInfo, ConfigKind, ConfigValue, Controls, Event};
+use sill_core::wire::{self, Command};
 use sill_core::agents;
 use sill_core::store::{Entry, Session, Store};
 
@@ -117,8 +118,6 @@ pub struct SessionView {
     /// at Ready: together, whether the agent has anything to summarize (docs/memory.md decision 13).
     turns_this_run: std::cell::Cell<usize>,
     resumed: std::cell::Cell<bool>,
-    /// Stored entry `seq` per live tool-call id, so title/status updates reach the transcript too.
-    tool_seqs: RefCell<HashMap<String, i64>>,
     /// After a resume with replay: ignore replayed events until the first turn starts.
     replaying: RefCell<bool>,
     /// Called when a turn ends (the window refreshes the ledger pages).
@@ -493,7 +492,6 @@ impl SessionView {
             summary_text: RefCell::new(String::new()),
             turns_this_run: std::cell::Cell::new(0),
             resumed: std::cell::Cell::new(false),
-            tool_seqs: RefCell::new(HashMap::new()),
             replaying: RefCell::new(false),
             on_busy: RefCell::new(None),
             on_turn_end: RefCell::new(None),
@@ -2207,12 +2205,12 @@ impl SessionView {
             then(None);
             return;
         };
-        if !self.agent_idle() || self.summarizing.borrow().is_some() || d.try_send(Command::Prompt(prompt.to_string(), vec![])).is_err() {
+        let ask = Command::Prompt { text: prompt.to_string(), attachments: vec![], entry: Some(wire::Entry::Note(note.to_string())) };
+        if !self.agent_idle() || self.summarizing.borrow().is_some() || d.try_send(ask).is_err() {
             then(None);
             return;
         }
         self.conv.add_note(note);
-        let _ = self.store.append(&self.id(), "note", note, "");
         self.checkpoint.set(checkpoint);
         *self.summarizing.borrow_mut() = Some(then);
         let weak = Rc::downgrade(self);
@@ -2294,7 +2292,8 @@ impl SessionView {
         lap("prefix");
         let attachments = std::mem::take(&mut *self.attachments.borrow_mut());
         let names: Vec<String> = attachments.iter().map(|a| a.name.clone()).collect();
-        match d.try_send(Command::Prompt(outgoing, attachments.clone())) {
+        let entry = wire::Entry::User { text: text.to_string(), names: names.clone() };
+        match d.try_send(Command::Prompt { text: outgoing, attachments: attachments.clone(), entry: Some(entry) }) {
             Ok(()) => {
                 if standing_due {
                     *self.sent_standing.borrow_mut() = Some(standing);
@@ -2302,11 +2301,8 @@ impl SessionView {
                 self.rebuild_attach_strip();
                 self.conv.add_user_with(text, &names);
                 lap("add_user");
-                let id = self.id();
-                let _ = self.store.append(&id, "user", text, &names.join("\n"));
-                let _ = self.store.touch(&id);
+                // the transcript entry is the daemon's to write, when it takes the prompt
                 self.turns_this_run.set(self.turns_this_run.get() + 1);
-                lap("store append+touch");
                 lap("done");
                 true
             }
@@ -2319,14 +2315,12 @@ impl SessionView {
         }
     }
 
+    /// The agent's text so far is closed (a tool call or the end of the turn): the daemon writes it
+    /// to the transcript; the view keeps it only for a summary turn, whose text survives its tool calls.
     fn flush_agent(&self) {
         let md = std::mem::take(&mut *self.agent_md.borrow_mut());
-        if !md.trim().is_empty() {
-            let _ = self.store.append(&self.id(), "agent", &md, "");
-            // the summary turn's text survives its tool calls
-            if self.summarizing.borrow().is_some() {
-                self.summary_text.borrow_mut().push_str(&md);
-            }
+        if !md.trim().is_empty() && self.summarizing.borrow().is_some() {
+            self.summary_text.borrow_mut().push_str(&md);
         }
     }
 
@@ -2336,7 +2330,7 @@ impl SessionView {
             Event::Ready { session_id, resumed, controls } => {
                 self.ready.set(true);
                 self.startup_retried.set(false);
-                let _ = self.store.set_acp_session_id(&self.id(), session_id);
+                // the daemon stored the agent's session id; the view's copy follows
                 self.session.borrow_mut().acp_session_id = Some(session_id.clone());
                 *self.replaying.borrow_mut() = *resumed;
                 self.resumed.set(*resumed);
@@ -2377,6 +2371,16 @@ impl SessionView {
                 self.conv.mark_auto_allowed(&tool_call_id, &title, pick.is_none());
                 return;
             }
+            // the daemon answered it (the session auto-allows): a quiet mark on the call's own line
+            Event::AutoAnswered { tool_call_id, title, allowed } => {
+                self.conv.mark_auto_allowed(tool_call_id, title, !*allowed);
+                return;
+            }
+            // a command the daemon refused (a turn running, the session gone)
+            Event::Other(t) if t.starts_with("refused: ") => {
+                self.conv.add_note(&t["refused: ".len()..]);
+                return;
+            }
             Event::Capabilities { images } => self.images_ok.set(*images),
             Event::Usage { used, size } => {
                 self.usage.set(Some((*used, *size)));
@@ -2399,19 +2403,14 @@ impl SessionView {
             // turn; the shelf already shows what it sent, so outside a replay it is dropped
             Event::UserText(_) => return,
             Event::Text(t) => self.agent_md.borrow_mut().push_str(t),
-            Event::ToolCall { id, title, status, kind, detail, diff, .. } => {
+            // the daemon writes tool calls and their updates to the transcript
+            Event::ToolCall { diff, .. } => {
                 self.flush_agent();
-                if let Ok(seq) = self.store.append_tool(&self.id(), title, status, kind, detail.as_deref(), diff.as_deref()) {
-                    self.tool_seqs.borrow_mut().insert(id.clone(), seq);
-                }
                 if diff.is_some() {
                     self.disk_changed();
                 }
             }
-            Event::ToolCallUpdate { id, status, title, detail, diff } => {
-                if let Some(seq) = self.tool_seqs.borrow().get(id) {
-                    let _ = self.store.update_tool(&self.id(), *seq, title.as_deref(), status.as_deref(), detail.as_deref(), diff.as_deref());
-                }
+            Event::ToolCallUpdate { diff, .. } => {
                 if diff.is_some() {
                     self.disk_changed();
                 }

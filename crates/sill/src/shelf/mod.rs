@@ -215,6 +215,46 @@ fn quit_running_shelf() -> Result<()> {
     Ok(())
 }
 
+/// The daemon goes with the shelf (docs/daemon.md §3.1, §3.6): sessions stay — each is a scope of
+/// its own — and the next daemon adopts them. Nothing starts it here: the new shelf's first call
+/// does, from the shelf's own binary (the dev build for `--dev`, the installed one otherwise), so a
+/// shelf never talks to a daemon of another build. With the installed units, `--dev` also stops
+/// `sill.socket` (a dev daemon binds the same path itself) and a plain restart starts it again.
+fn restart_daemon(dev: bool) {
+    let systemctl = |args: &[&str]| {
+        std::process::Command::new("systemctl")
+            .arg("--user")
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    let socket_unit = systemctl(&["cat", "sill.socket"]);
+    if socket_unit {
+        systemctl(&["stop", "sill.service"]);
+        if dev {
+            systemctl(&["stop", "sill.socket"]);
+        }
+    }
+    // a daemon a client started (transient unit sill-daemon, or bare): ask it to leave
+    if let Ok(c) = sill_proto::Client::connect() {
+        let _ = c.call::<serde_json::Value>(sill_proto::method::DAEMON_SHUTDOWN, sill_proto::Empty::default());
+    }
+    systemctl(&["stop", "sill-daemon.service"]);
+    for _ in 0..40 {
+        if sill_proto::Client::connect().is_err() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if socket_unit && !dev {
+        systemctl(&["start", "sill.socket"]);
+    }
+}
+
 /// `sill restart`: with the `sill-shelf` user service installed this stops the unit, quits any other
 /// shelf (a `--dev` one, a hand-started one — the unit's new instance would only hand off to it and
 /// exit, leaving the old build on screen) and starts the unit again (the installed binary); `--dev`
@@ -238,6 +278,7 @@ pub fn restart(hidden: bool, dev: bool, detached: bool) -> Result<()> {
         let _ = std::process::Command::new("systemctl").args(["--user", "stop", "sill-shelf.service"]).status();
     }
     quit_running_shelf()?;
+    restart_daemon(dev);
     if unit_known && !dev {
         let st = std::process::Command::new("systemctl").args(["--user", "start", "sill-shelf.service"]).status()?;
         if !st.success() {

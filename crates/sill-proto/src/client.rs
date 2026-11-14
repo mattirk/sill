@@ -51,26 +51,27 @@ impl Client {
         std::fs::create_dir_all(&dir)?;
         let _ = std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700));
         let exe = std::env::current_exe()?;
-        if systemd_user_usable() {
-            // `sill-daemon.service`, transient, its log in the journal; `systemctl --user stop
-            // sill-daemon` ends it and sessions stay (they are scopes of their own)
+        // `sill-daemon.service`, transient, its log in the journal and its cgroup its own (a bare
+        // child of a shelf would live — and die — in the shelf's unit); `systemctl --user stop
+        // sill-daemon` ends it and sessions stay, they are scopes of their own. Where that fails —
+        // no user manager, or a unit of that name still loaded — the daemon is spawned bare.
+        let unit_started = systemd_user_usable() && {
             let _ = std::process::Command::new("systemctl")
                 .args(["--user", "reset-failed", "--quiet", "sill-daemon.service"])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status();
-            let st = std::process::Command::new("systemd-run")
+            std::process::Command::new("systemd-run")
                 .args(["--user", "--unit", "sill-daemon", "--collect", "--quiet", "-p", "Slice=app.slice"])
                 .args(["--setenv=HOME", "--setenv=USER", "--setenv=TERM", "--setenv=LANG"])
                 .arg("--")
                 .arg(&exe)
                 .arg("daemon")
                 .status()
-                .context("systemd-run")?;
-            if !st.success() {
-                bail!("systemd-run --user for the daemon failed ({st}); journalctl --user -u sill-daemon");
-            }
-        } else {
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+        if !unit_started {
             let log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("daemon.log"))?;
             let mut cmd = std::process::Command::new(&exe);
             cmd.arg("daemon").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(log);

@@ -1,21 +1,59 @@
-//! `sill daemon` (docs/daemon.md): sill-core behind a socket. M0: the socket, the connection loop
-//! and the read-only methods — status, sessions, memory, settings. Sessions are still the shelf's;
-//! they move here in M1 together with the ACP clients.
+//! `sill daemon` (docs/daemon.md): sill-core behind a socket — the session processes (M1a), the ACP
+//! client of every running session and its transcript (M1b, `runner`), and the read-only methods.
 //!
-//! One thread per connection, a line in, a line out (`sill_proto::rpc`). The transport is plain
-//! JSON-RPC over ndjson — the frames the ACP SDK's agent role writes, so M1 can put the SDK on this
-//! socket for `session/*` traffic without changing a client.
+//! One reader thread per connection, a line in, a line out (`sill_proto::rpc`), and one writer
+//! thread draining the connection's queue: replies and the sessions' events share it, so an
+//! attached frontend gets a session's state before the answer to its `attach`. The queue is bounded
+//! (decision 15): a frontend that stops reading is dropped and attaches again with its cursor.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::fd::FromRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
 
 use anyhow::{Context, Result, bail};
 use sill_proto::rpc::{Error, Incoming, Response};
 
 mod hub;
+mod runner;
 pub use hub::Hub;
+
+/// Lines a connection may have waiting before it counts as stuck (decision 15): a streaming turn
+/// is a few hundred events a second at most.
+const QUEUE: usize = 20_000;
+
+/// One frontend connection, as the hub and the runners see it: where its lines go.
+pub struct Conn {
+    pub id: u64,
+    tx: SyncSender<String>,
+    /// To cut a stuck connection off.
+    sock: UnixStream,
+}
+
+impl Conn {
+    /// Queue one line; false when the connection is gone or stuck (it is cut off then).
+    pub fn send(&self, line: String) -> bool {
+        match self.tx.try_send(line) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => {
+                eprintln!("sill daemon: connection {} is not reading; dropping it", self.id);
+                let _ = self.sock.shutdown(std::net::Shutdown::Both);
+                false
+            }
+            Err(TrySendError::Disconnected(_)) => false,
+        }
+    }
+
+    fn reply(&self, r: &Response) {
+        if let Ok(line) = serde_json::to_string(r) {
+            self.send(line);
+        }
+    }
+}
+
+static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
 
 /// Run until `_sill/daemon.shutdown` or a fatal socket error. The listener is systemd's when the
 /// unit passed one (`LISTEN_FDS`), ours otherwise (direct mode: spawned by the first client).
@@ -94,9 +132,26 @@ fn bind_direct() -> Result<UnixListener> {
     Ok(l)
 }
 
-/// One connection: requests answered in order, notifications from the client ignored for now.
+/// One connection: requests answered in order, notifications from the client ignored.
 fn serve(stream: UnixStream, hub: Arc<Hub>) -> Result<()> {
+    let (tx, rx) = sync_channel::<String>(QUEUE);
+    let conn = Arc::new(Conn { id: NEXT_CONN.fetch_add(1, Ordering::Relaxed), tx, sock: stream.try_clone()? });
     let mut writer = stream.try_clone()?;
+    std::thread::Builder::new().name(format!("sill-daemon-write-{}", conn.id)).spawn(move || {
+        for mut line in rx {
+            line.push('\n');
+            if writer.write_all(line.as_bytes()).is_err() {
+                let _ = writer.shutdown(std::net::Shutdown::Both);
+                break;
+            }
+        }
+    })?;
+    let r = read_loop(stream, &hub, &conn);
+    hub.disconnect(conn.id);
+    r
+}
+
+fn read_loop(stream: UnixStream, hub: &Arc<Hub>, conn: &Arc<Conn>) -> Result<()> {
     let mut lines = BufReader::new(stream).lines();
     while let Some(line) = lines.next() {
         let line = match line {
@@ -110,30 +165,23 @@ fn serve(stream: UnixStream, hub: Arc<Hub>) -> Result<()> {
         let msg: Incoming = match serde_json::from_str(&line) {
             Ok(m) => m,
             Err(e) => {
-                write(&mut writer, &Response::err(None, Error::new(Error::PARSE, e.to_string())))?;
+                conn.reply(&Response::err(None, Error::new(Error::PARSE, e.to_string())));
                 continue;
             }
         };
         let (Some(id), Some(method)) = (msg.id, msg.method.as_deref()) else {
             continue; // a notification, or a stray response
         };
-        let reply = match hub.dispatch(method, msg.params.unwrap_or(serde_json::Value::Null)) {
+        let reply = match hub.dispatch(conn, method, msg.params.unwrap_or(serde_json::Value::Null)) {
             Ok(v) => Response::ok(id, v),
             Err(e) => Response::err(Some(id), e),
         };
-        write(&mut writer, &reply)?;
+        conn.reply(&reply);
         if method == sill_proto::method::DAEMON_SHUTDOWN {
             eprintln!("sill daemon: shutdown asked, leaving");
-            let _ = writer.flush();
+            std::thread::sleep(std::time::Duration::from_millis(200)); // the writer sends the reply
             std::process::exit(0);
         }
     }
-    Ok(())
-}
-
-fn write(w: &mut UnixStream, r: &Response) -> Result<()> {
-    let mut line = serde_json::to_string(r)?;
-    line.push('\n');
-    w.write_all(line.as_bytes())?;
     Ok(())
 }

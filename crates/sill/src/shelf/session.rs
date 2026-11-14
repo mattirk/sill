@@ -1,14 +1,17 @@
-//! Shelf-side session driver: have the daemon start the session's jail (docs/daemon.md §3.4), start
-//! the agent through the shim, run the ACP loop on a thread, hand events to the GTK main loop.
+//! Shelf-side session driver: attach the view to the session's conversation, which the daemon runs
+//! (docs/daemon.md §3.3) — jail, agent, ACP client and transcript are the daemon's — and hand its
+//! events to the GTK main loop as the `acp::Event`s the view renders; the view's commands go back
+//! over the socket.
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
-use sill_core::acp::{self, AutoPermission, Command, Event, SessionOptions};
+use anyhow::{Context, Result};
+use sill_core::acp::Event;
 use sill_core::agents;
 use sill_core::session::state_dir;
 use sill_core::shim;
 use sill_core::store;
+use sill_core::wire::Command;
 
 pub struct Driver {
     pub commands: async_channel::Sender<Command>,
@@ -26,40 +29,28 @@ pub fn uid() -> u32 {
     rustix::process::getuid().as_raw()
 }
 
-/// Start (or reconnect to) a stored session. The daemon starts the jail from the stored row — its
-/// pins, policy and desktop grants (`_pins` is what the caller believes they are; the daemon reads
-/// the store) — and answers with the shim socket. `fresh`: an agent still running in the jail is
-/// stopped and started again instead of being reattached (for adapters that refuse a second
-/// `initialize`, Codex's "Already initialized"). Blocking — the daemon call, the control calls —
-/// so the view runs it on a worker thread (SPEC §4.11 #13).
+/// Attach to a stored session's conversation; the daemon starts its jail and agent from the
+/// stored row when they are not running. `fresh`: an agent still running in the jail is started
+/// again instead of being reattached (adapters that refuse a second `initialize`, Codex's "Already
+/// initialized"). Blocking — the daemon may be starting the jail — so the view runs it on a worker
+/// thread (SPEC §4.11 #13). A command the daemon refuses (a turn running, the session gone) comes
+/// back as an `Event::Other("refused: …")` the view shows as a note.
 pub fn start(s: &store::Session, _pins: Vec<PathBuf>, fresh: bool) -> Result<Driver> {
-    let home = home()?;
-    let registry = agents::load(&home);
-    let Some(agent) = registry.get(&s.agent) else { bail!("unknown agent {}", s.agent) };
-    let started: sill_proto::Started = super::client::call(sill_proto::method::SESSIONS_START, sill_proto::Key { key: s.id.clone() })?;
-    let sock = started.socket;
-    let mut control = shim::Control::connect(&sock)?;
-    if fresh && control.status()?.running {
-        control.kill(3000)?;
-    }
-    if !control.status()?.running {
-        let mut env = agent.env.clone();
-        env.extend(agent.sandbox_off_env.clone());
-        control.spawn(&agent.command, &env, Some(&home))?;
-    }
-    let stream = shim::agent_stream(&sock)?;
-    // a control channel: a reconnect re-applies the remembered settings as one command each, and none
-    // of them may be dropped for want of room
-    let (cmd_tx, cmd_rx) = async_channel::unbounded();
     let (ev_tx, ev_rx) = async_channel::unbounded();
-    let sopts = SessionOptions {
-        cwd: home,
-        auto: AutoPermission::Ask,
-        resume: if agent.supports_load { s.acp_session_id.clone() } else { None },
-    };
-    std::thread::Builder::new().name(format!("sill-acp-{}", s.id)).spawn(move || {
-        // run_session sends Event::Ended itself, error included
-        let _ = acp::run_session(stream, sopts, cmd_rx, ev_tx);
+    super::client::attach(&s.id, fresh, ev_tx.clone())?;
+    let (cmd_tx, cmd_rx) = async_channel::unbounded::<Command>();
+    let id = s.id.clone();
+    std::thread::Builder::new().name(format!("sill-cmd-{id}")).spawn(move || {
+        while let Ok(c) = cmd_rx.recv_blocking() {
+            if matches!(c, Command::Quit) {
+                break;
+            }
+            if let Err(e) = super::client::command(&id, &c) {
+                let _ = ev_tx.send_blocking(Event::Other(format!("refused: {e:#}")));
+            }
+        }
+        // the tab closed (Quit) or the view dropped its driver: the agent stays the daemon's
+        super::client::detach(&id);
     })?;
     Ok(Driver { commands: cmd_tx, events: ev_rx, note: mode_note() })
 }
