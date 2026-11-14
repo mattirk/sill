@@ -313,6 +313,15 @@ impl FolderTree {
         let search = gtk::SearchEntry::new();
         search.set_hexpand(true);
         search.add_css_class("sill-tree-search");
+        // the entry's magnifier and clear cross are the desktop's themed icons, a different size
+        // on every machine: swap them for sill's glyphs, sized in em by the CSS like the bar's buttons
+        let mut child = search.first_child();
+        while let Some(w) = child {
+            if let Ok(image) = w.clone().downcast::<gtk::Image>() {
+                super::icons::adopt_glyph(&image, if image.prev_sibling().is_none() { "sill-search" } else { "sill-x" });
+            }
+            child = w.next_sibling();
+        }
         let all = gtk::Button::with_label("all");
         all.add_css_class("flat");
         all.add_css_class("sill-viewer-btn");
