@@ -111,11 +111,26 @@ pub struct PermissionsChanged {
     /// The running jail does not have the new state; a restart builds it.
     pub restart_required: bool,
 }
+/// A host approved for this session alone (Allow), remembered across builds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionHostGrant {
+    pub host: String,
+    /// In this view's resolved allow-list. False when the view's limits leave it out (offline,
+    /// or no additional hosts allowed): it stays remembered and applies again when they go.
+    pub applied: bool,
+    /// Why it is not applied; empty when it is.
+    #[serde(default)]
+    pub reason: String,
+}
 /// Policy inspection always identifies its view; previews are never evidence of enforcement.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PolicyView {
     #[serde(default)]
     pub permissions: Vec<PermissionState>,
+    /// The session's remembered host approvals as this view resolves them. A launch snapshot
+    /// lists those its build consulted; hosts approved later reach the running proxy live.
+    #[serde(default)]
+    pub session_hosts: Vec<SessionHostGrant>,
     pub view: String,
     pub session_id: String,
     pub name: String,

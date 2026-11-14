@@ -94,6 +94,9 @@ pub struct Suggestion {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Resolution {
+    /// Pins used by this launch, independent of later store edits.
+    #[serde(default, with = "paths_bytes")]
+    pub launch_pins: Vec<PathBuf>,
     /// Base path rules stay here; the additional paths below complete the effective rules.
     pub policy: Policy,
     #[serde(with = "paths_bytes")]
@@ -110,6 +113,12 @@ pub struct Resolution {
     /// Session-only host approvals included in this build's allow-list.
     #[serde(default)]
     pub session_hosts: Vec<String>,
+    /// Remembered session approvals this build's limits leave out (offline, or no additional
+    /// hosts allowed), and why. They stay remembered and apply again when the limit goes.
+    #[serde(default)]
+    pub blocked_session_hosts: Vec<String>,
+    #[serde(default)]
+    pub session_hosts_reason: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -312,6 +321,7 @@ pub fn resolve(base: &Policy, pins: &[PathBuf], ignore_roots: &[PathBuf]) -> Res
         }
     }
     let mut out = Resolution {
+        launch_pins: pins.to_vec(),
         policy: base.clone(),
         fragment_ro: vec![],
         fragment_masks: vec![],
@@ -320,6 +330,8 @@ pub fn resolve(base: &Policy, pins: &[PathBuf], ignore_roots: &[PathBuf]) -> Res
         fingerprint: input.fingerprint,
         session_permissions: vec![],
         session_hosts: vec![],
+        blocked_session_hosts: vec![],
+        session_hosts_reason: String::new(),
     };
     for (root, value) in input.roots.into_iter().zip(input.values) {
         let path = root.join(FRAGMENT);

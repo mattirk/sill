@@ -274,7 +274,7 @@ impl Hub {
         let registry = sill_core::agents::load(&self.home);
         let Some(agent) = registry.get(&s.agent) else { bail!("unknown agent {}", s.agent) };
         let sdir = sill_core::session::state_dir(uid, &s.id)?;
-        let pins = self.with_store(|st| st.jail_pins(&s.id)).unwrap_or_default();
+        let pins = sill_core::session::launch_pins(&s.id)?;
         let binds = sill_core::session::binds_for(agent, &policy, &sdir, &self.home, &pins, s.ghost)?;
         let plan = sill_core::changes::session_plan(policy, sdir, &self.home, uid, &user, binds)?;
         Ok(sill_proto::JailView { layers: plan.layers.into_iter().map(|l| (l.host, l.upper)).collect(), masked: plan.masked })

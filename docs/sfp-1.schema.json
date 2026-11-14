@@ -3581,6 +3581,14 @@
           },
           "type": "array"
         },
+        "session_hosts": {
+          "default": [],
+          "description": "The session's remembered host approvals as this view resolves them. A launch snapshot\nlists those its build consulted; hosts approved later reach the running proxy live.",
+          "items": {
+            "$ref": "#/$defs/SessionHostGrant"
+          },
+          "type": "array"
+        },
         "session_id": {
           "type": "string"
         },
@@ -4592,6 +4600,28 @@
         "subscription_id",
         "seq",
         "event"
+      ],
+      "type": "object"
+    },
+    "SessionHostGrant": {
+      "description": "A host approved for this session alone (Allow), remembered across builds.",
+      "properties": {
+        "applied": {
+          "description": "In this view's resolved allow-list. False when the view's limits leave it out (offline,\nor no additional hosts allowed): it stays remembered and applies again when they go.",
+          "type": "boolean"
+        },
+        "host": {
+          "type": "string"
+        },
+        "reason": {
+          "default": "",
+          "description": "Why it is not applied; empty when it is.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "applied"
       ],
       "type": "object"
     },

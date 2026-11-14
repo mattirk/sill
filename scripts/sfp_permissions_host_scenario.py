@@ -352,6 +352,8 @@ PY
         check("reopened A has its approved host again", restart(a) and reaches(c, a, OTHER))
         snapshot = c.call("_sill/policy.snapshot", {"session_id": a})["snapshot"]
         check("A's launch snapshot records the session host", snapshot is not None and OTHER in snapshot["text"])
+        check("…and lists it as an applied session grant",
+              {"host": OTHER, "applied": True, "reason": ""} in snapshot["session_hosts"], json.dumps(snapshot["session_hosts"]))
         check("B still refused after A's reopen", refused(c, b, OTHER))
 
         # -- 6. public web as a session choice --------------------------------------------------
@@ -382,6 +384,10 @@ PY
         check("A keeps its launch state until rebuilt", reaches(c, a, OTHER))
         check("after the rebuild the remembered host is blocked by the new ceiling",
               restart(a) and refused(c, a, OTHER))
+        hosts = c.call("_sill/policy.preview", {"session_id": a})["session_hosts"]
+        check("the preview lists the remembered host as blocked, with the reason",
+              len(hosts) == 1 and hosts[0]["host"] == OTHER and not hosts[0]["applied"]
+              and "allow_additional_hosts" in hosts[0]["reason"], json.dumps(hosts))
         check("Allow is refused under the ceiling",
               code(c.call, "_sill/policy.allow_host", {"session_id": a, "host": THIRD}) is not None)
         check("public web is refused under the ceiling",
@@ -513,6 +519,38 @@ PY
         check("a running session does not gain the saved host", refused(c, b, THIRD))
         fresh = create("after-save", env.policy("after-save"))
         check("a new session reaches the saved host", start(fresh) and reaches(c, fresh, THIRD))
+
+        # -- 13. a jail that cannot start is a failed start, not a running session ---------------
+        c.close()
+        gtk.close()
+        env.stop_daemon()
+        fake = env.root / "fake-bin"
+        fake.mkdir()
+        (fake / "bwrap").write_text("#!/bin/sh\necho 'bwrap: fixture refuses' >&2\nexit 1\n")
+        (fake / "bwrap").chmod(0o755)
+        path = env.environment["PATH"]
+        env.environment["PATH"] = f"{fake}:{path}"
+        env.start_daemon()
+        c = env.client()
+        gtk = env.client(modes=False, name="gtk-like")
+        broken = create("broken", env.policy("broken"))
+        started_at = time.monotonic()
+        failure = None
+        try:
+            c.call("_sill/sessions.start", {"session_id": broken})
+        except RpcError as error:
+            failure = str(error)
+        check("starting a jail that cannot start reports the failure", failure is not None and "could not start" in failure,
+              failure or "start succeeded")
+        info(f"failed start after {time.monotonic() - started_at:.1f} s: {failure}")
+        check("…and the session is not running, with no scope left", not get(broken)["running"] and not scope_active(broken))
+        c.close()
+        gtk.close()
+        env.stop_daemon()
+        env.environment["PATH"] = path
+        env.start_daemon()
+        c = env.client()
+        gtk = env.client(modes=False, name="gtk-like")
     finally:
         for sid in created:
             for method in ("_sill/sessions.stop", "_sill/sessions.delete"):

@@ -219,8 +219,15 @@ fn policy_view(view: &str, session_id: &str, name: &str, r: sill_core::policy_fr
         requested: state.requested, blocked: state.blocked, source: state.source.into(),
         effective: state.effective, available: state.available, reason: state.reason,
     }).collect();
+    let session_hosts = r.session_hosts.iter()
+        .map(|host| api::SessionHostGrant { host: host.clone(), applied: true, reason: String::new() })
+        .chain(r.blocked_session_hosts.iter().map(|host| api::SessionHostGrant {
+            host: host.clone(), applied: false, reason: r.session_hosts_reason.clone(),
+        }))
+        .collect();
     Ok(api::PolicyView {
         permissions,
+        session_hosts,
         view: view.into(), session_id: session_id.into(), name: name.into(),
         text: Some(toml::to_string_pretty(&r.policy)?),
         fragment_ro: r.fragment_ro.iter().map(|p| HostPath::from_path(p)).collect(),
@@ -322,7 +329,7 @@ fn preview(hub: &Hub, session_id: &str) -> Result<api::PolicyView> {
         Ok(resolved) => policy_view("preview", session_id, &row.policy, resolved)?,
         Err(e) => api::PolicyView {
             view: "preview".into(), session_id: session_id.into(), name: row.policy,
-            permissions: vec![], text: None, fragment_ro: vec![], fragment_masks: vec![], sources: vec![],
+            permissions: vec![], session_hosts: vec![], text: None, fragment_ro: vec![], fragment_masks: vec![], sources: vec![],
             suggestions: vec![], fingerprint: None, diagnostics: vec![format!("{e:#}")],
         },
     })

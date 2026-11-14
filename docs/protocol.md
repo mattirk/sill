@@ -83,14 +83,18 @@ identifies `capability`, `allowed`, `default_enabled`, `requested`, `blocked`, `
 `effective`, `available` and `reason`. `requested` is the session's remembered choice (null
 follows the policy default); `blocked` means that choice could not take effect within the view's
 limits, explained by `reason`; `source` is `session` when an applied choice decides the state.
+`session_hosts` lists the session's remembered host approvals as the view resolves them: `applied`,
+or left out by the view's limits with a `reason` (offline, or `network.allow_additional_hosts =
+false`); they stay remembered and apply again when the limit goes (2026-11-06, additive). A
+launch snapshot lists those its build consulted; hosts approved later reach the running proxy live.
 Preview is prospective; snapshot effective state describes the recorded launch policy, not a
 live Host control activation. Availability describes the current daemon's backend support.
 Unavailable capabilities cannot be activated by selecting a policy. Host control never gains
 authority from policy inspection or import.
 
 Session permission changes need `sill.permission_modes: 1` (2026-11-06). The shared client
-offers it only from programs that display permission state (currently the CLI), never on behalf
-of every frontend. `_sill/permissions.set` remembers a contained capability choice for one
+offers it only from programs that display permission state (the CLI's `policy`/`permissions`
+commands and, since its Permissions panel, sill-gui), never on behalf of every frontend. `_sill/permissions.set` remembers a contained capability choice for one
 session: `enabled: true` is refused with `permission_denied` when the resolved policy, a
 repository fragment, an offline rule, `network.allow_additional_hosts = false` or a missing
 backend would block it; `false` always applies; `null` returns to the policy default. Ghost
@@ -721,6 +725,16 @@ in its change field. The daemon trims names and accepts 1–80 characters withou
 characters. A name change does not alter `title`; it updates a known summary-signature footer.
 Older sessions without a preserved name return null. The exported schema includes this additive
 extension; clients default absent name fields to null.
+
+### A failed jail start is an error (2026-11-06)
+
+`_sill/sessions.start` (and every start through attach or submit) succeeds only once the jail's
+shim answers a status request. Before, an accepted connection to the shim socket counted, but
+the launcher binds that socket on the host before bubblewrap runs: a jail that failed at once
+was reported started (`fresh: true`, `running: true`) while the launcher retried and gave up, and
+the next call failed with a reset connection. Now such a start fails with
+`the jail could not start; see journalctl --user -t sill-<id>` after the launcher's retries
+(about 3 s), leaving no scope. No schema change.
 
 ### Raw desktop controls retired (2026-11-06)
 

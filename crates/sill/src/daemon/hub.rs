@@ -708,7 +708,7 @@ impl Hub {
         if !sdir.is_dir() {
             return Ok(vec![]);
         }
-        let pins = self.with_store(|st| st.jail_pins(&s.id)).unwrap_or_default();
+        let pins = sill_core::session::launch_pins(&s.id)?;
         let binds = sill_core::session::binds_for(agent, &policy, &sdir, &self.home, &pins, s.ghost)?;
         let plan = sill_core::changes::session_plan(policy.clone(), sdir, &self.home, uid, user, binds)?;
         sill_core::changes::scan(&policy, &plan, None)

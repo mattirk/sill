@@ -64,6 +64,13 @@ fn connect(socket: &Path, role: &str) -> Result<UnixStream> {
 /// loop at startup; a shim that doesn't answer must not freeze the UI.
 const CONTROL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// The jail's shim answers on its control socket. A connection alone is no proof: the launcher
+/// binds the socket on the host before bubblewrap runs, so it accepts (into its backlog) while a
+/// jail that cannot start is being retried; only the shim inside answers a request.
+pub fn answers(socket: &Path) -> bool {
+    Control::connect(socket).and_then(|mut c| c.status()).is_ok()
+}
+
 impl Control {
     pub fn connect(socket: &Path) -> Result<Self> {
         let s = connect(socket, "control")?;

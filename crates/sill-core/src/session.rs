@@ -503,6 +503,13 @@ pub fn apply_grants(mut resolution: crate::policy_fragments::Resolution, choices
     if policy.network.mode != crate::policy::NetMode::None && policy.network.allow_additional_hosts {
         policy.network.allow.extend(hosts.iter().cloned());
         resolution.session_hosts = hosts;
+    } else if !hosts.is_empty() {
+        resolution.session_hosts_reason = if policy.network.mode == crate::policy::NetMode::None {
+            "offline: the policy or a repository restriction allows no network".into()
+        } else {
+            "the policy allows no additional hosts (network.allow_additional_hosts = false)".into()
+        };
+        resolution.blocked_session_hosts = hosts;
     }
     resolution
 }
@@ -537,6 +544,12 @@ fn snapshot_dir(session: &str) -> Result<PathBuf> {
 }
 
 const MAX_POLICY_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
+
+/// Never infer mounted pins from mutable settings. Legacy snapshots have no pin evidence;
+/// leaving their overlay writes visible is safer than hiding recoverable work.
+pub fn launch_pins(session: &str) -> Result<Vec<PathBuf>> {
+    Ok(policy_snapshot(session)?.map(|s| s.launch_pins).unwrap_or_default())
+}
 
 pub fn policy_snapshot(session: &str) -> Result<Option<crate::policy_fragments::Resolution>> {
     match read_policy_snapshot(&snapshot_dir(session)?)? {
@@ -744,7 +757,7 @@ pub fn ensure_started(opts: &StartOptions, home: &Path, exe: &Path) -> Result<St
     static LAUNCHING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _launching = LAUNCHING.lock().unwrap_or_else(|e| e.into_inner());
     let sock = socket_path(&opts.session)?;
-    if shim::Control::connect(&sock).is_ok() {
+    if shim::answers(&sock) {
         return Ok(Started { socket: sock, child: None });
     }
     let base = session_base_policy(&opts.policy, home, opts.ghost, opts.agent.as_deref())?;
@@ -803,8 +816,12 @@ pub fn ensure_started(opts: &StartOptions, home: &Path, exe: &Path) -> Result<St
     }
     cmd.current_dir(&opts.cwd);
     let mut child = crate::launcher::spawn_child(cmd, log)?;
-    for _ in 0..50 {
-        if shim::Control::connect(&sock).is_ok() {
+    // until the shim answers: a jail that fails at once makes the launcher retry and then exit,
+    // which is a failed start, not a running session (2026-11-06: a start reported success
+    // while every bubblewrap attempt failed)
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if shim::answers(&sock) {
             let recorded = if opts.ghost {
                 write_policy_snapshot(&rt.join("policy-snapshot"), &resolution)
             } else { record_policy_snapshot(&opts.session, &resolution) };
@@ -818,13 +835,16 @@ pub fn ensure_started(opts: &StartOptions, home: &Path, exe: &Path) -> Result<St
             return Ok(Started { socket: sock, child: Some(child) });
         }
         if let Ok(Some(st)) = child.try_wait() {
-            bail!("session ended before its shim socket appeared ({st}); see {}", log_hint(&opts.session));
+            // the launcher reports a jail that failed and exits itself: its own status says little
+            let status = if st.success() { String::new() } else { format!(" ({st})") };
+            bail!("the jail could not start{status}; see {}", log_hint(&opts.session));
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
+    let _ = stop(&opts.session);
     let _ = child.kill();
     let _ = child.wait();
-    bail!("session started but the shim socket did not appear in 5 s; see {}", log_hint(&opts.session))
+    bail!("the jail did not answer within 10 s; see {}", log_hint(&opts.session))
 }
 
 /// Where to look when a session misbehaves.
@@ -914,6 +934,24 @@ mod tests {
     }
     impl Drop for PolicyTestTree {
         fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+
+    #[test]
+    fn launch_pins_survive_edits_without_policy_fragments() {
+        let tree = PolicyTestTree::new();
+        let base = Policy::builtin_default();
+        let first = tree.resolve(&base);
+        assert!(first.sources.is_empty());
+        write_policy_snapshot(&tree.snapshots(), &first).unwrap();
+        let changed = crate::policy_fragments::resolve(&base, &[], &[]).unwrap();
+        assert!(changed.launch_pins.is_empty());
+        let saved = read_policy_snapshot(&tree.snapshots()).unwrap().unwrap();
+        assert_eq!(saved.launch_pins, vec![tree.repo()]);
+        // Old jails have no evidence of mounted pins; never substitute today's settings.
+        let mut legacy = serde_json::to_value(saved).unwrap();
+        legacy.as_object_mut().unwrap().remove("launch_pins");
+        let legacy: crate::policy_fragments::Resolution = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.launch_pins.is_empty());
     }
 
     #[test]

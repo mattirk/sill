@@ -20,6 +20,7 @@ mod names;
 mod network;
 #[cfg(test)]
 mod perf;
+mod permissions;
 mod policies;
 mod processes;
 mod rows;
@@ -103,6 +104,9 @@ fn main() -> iced::Result {
         }
     }
     HIDDEN.store(options.hidden, std::sync::atomic::Ordering::Relaxed);
+    // this window shows session permission state (its Permissions panel), so it may change
+    // choices and operate sessions using Desktop development capabilities (docs/protocol.md)
+    sill_proto::client::declare_capability(permissions::CAPABILITY);
     fonts::install();
     let above = !options.demo && settings::load().always_on_top();
     iced::application(
@@ -243,6 +247,8 @@ pub enum Message {
     FilesPoll,
     /// Managed processes and exposed ports (`processes.rs`).
     Procs(processes::Event),
+    /// The session's Permissions panel (`permissions.rs`).
+    Perms(permissions::Event),
     NetworkRead(String, Result<sill_proto::admin::NetworkDenied, String>),
     NetworkAnswer(String, String, bool),
     NetworkDone(String, network::Choice, Outcome),
@@ -414,6 +420,8 @@ pub struct SessionView {
     pub forms: BTreeMap<String, forms::Form>,
     /// Its managed processes and the ports exposed from them (`processes.rs`).
     pub processes: processes::Procs,
+    /// Its permission state and panel (`permissions.rs`).
+    pub permissions: permissions::Perms,
 }
 
 impl SessionView {
@@ -466,6 +474,7 @@ impl SessionView {
             seen_failure: None,
             forms: BTreeMap::new(),
             processes: processes::Procs::default(),
+            permissions: permissions::Perms::default(),
         }
     }
 
@@ -584,6 +593,7 @@ pub struct App {
     network: network::State,
     /// Numbers the notes on exposed ports, so a later one outlives an earlier one's expiry.
     process_serial: u64,
+    permission_serial: u64,
     pub demo: bool,
     daemon: daemon_ui::State,
     connect: Option<Connector>,
@@ -701,6 +711,7 @@ impl App {
             daemon: daemon_ui::State::default(),
             network: network::State::default(),
             process_serial: 0,
+            permission_serial: 0,
             demo,
             actions: connect.clone().map(Actions::new),
             connect,
@@ -1369,6 +1380,9 @@ impl App {
                     self.read_daemon_settings(),
                     self.daemon_event(daemon_ui::Event::Check),
                 ];
+                if let Some(id) = self.selected.clone() {
+                    tasks.push(self.read_permissions(&id));
+                }
                 if let Some(p) = self.details.as_ref().filter(|p| !p.pending) {
                     tasks.push(self.details_load(p.id.clone()));
                 }
@@ -1413,6 +1427,7 @@ impl App {
                 }
             }
             Message::Procs(event) => return self.processes_event(event),
+            Message::Perms(event) => return self.permissions_event(event),
             Message::NetworkRead(id, result) => self.network.read(id, result),
             Message::NetworkAnswer(id, host, allow) => return self.answer_network(id, host, allow),
             Message::NetworkDone(id, choice, outcome) => {
@@ -2892,7 +2907,7 @@ impl App {
         if again {
             return Task::none();
         }
-        let mut tasks = vec![self.restore_scroll()];
+        let mut tasks = vec![self.restore_scroll(), self.read_permissions(&id)];
         if load_files {
             tasks.push(self.files_refresh(&id));
         }

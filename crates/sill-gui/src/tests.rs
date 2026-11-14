@@ -28,13 +28,22 @@ impl Daemon {
         serde_json::from_str(&line).expect("a request")
     }
 
+    /// The next request, which must be `method`. The window's background read of a session's
+    /// permissions (`permissions.rs`: its preview first) may come in between: it is refused,
+    /// which ends that read, unless the test expects it.
     pub fn expect(&mut self, method: &str) -> Value {
-        let mut line = String::new();
-        self.reader.read_line(&mut line).unwrap();
-        let request: Value =
-            serde_json::from_str(&line).unwrap_or_else(|_| panic!("no request; expected {method}"));
-        assert_eq!(request["method"], method, "{request}");
-        request
+        loop {
+            let mut line = String::new();
+            self.reader.read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line)
+                .unwrap_or_else(|_| panic!("no request; expected {method}"));
+            if request["method"] == "_sill/policy.preview" && method != "_sill/policy.preview" {
+                self.refuse(&request, "unavailable", "not in this test");
+                continue;
+            }
+            assert_eq!(request["method"], method, "{request}");
+            return request;
+        }
     }
 
     pub fn reply(&mut self, request: &Value, result: impl serde::Serialize) {
@@ -85,7 +94,7 @@ pub fn connector(clients: Vec<Client>) -> sill_client::Connector {
 }
 
 /// The demo's session as a live client would have it: its requests go to `clients`.
-fn live_app(clients: Vec<Client>) -> App {
+pub(crate) fn live_app(clients: Vec<Client>) -> App {
     let (mut app, _) = App::new(true, None);
     app.demo = false;
     app.actions = Some(Actions::new(connector(clients)));
@@ -178,7 +187,7 @@ fn add_session(app: &mut App, id: &str) {
     app.views.insert(id.into(), view);
 }
 
-fn simulator(app: &App, size: (f32, f32)) -> iced_test::Simulator<'_, Message> {
+pub(crate) fn simulator(app: &App, size: (f32, f32)) -> iced_test::Simulator<'_, Message> {
     iced_test::Simulator::with_size(crate::snapshots::settings(), size, app.view())
 }
 
@@ -2206,7 +2215,7 @@ fn escape_toggles_session_and_backend() {
 
 // --- sessions, forms, held prompts ---------------------------------------------------------------
 
-fn session_record(
+pub(crate) fn session_record(
     id: &str,
     title: &str,
     ended: bool,
@@ -3342,7 +3351,16 @@ fn slow_periodic_refreshes_do_not_accumulate_reads() {
     let (started, waiting) = std::sync::mpsc::channel();
     let (release, held) = std::sync::mpsc::channel();
     let fake = std::thread::spawn(move || {
-        let requests = [daemon.next(), daemon.next()];
+        // the list and the settings; the selected session's permission read is refused
+        let mut requests = vec![];
+        while requests.len() < 2 {
+            let request = daemon.next();
+            if request["method"] == "_sill/policy.preview" {
+                daemon.refuse(&request, "unavailable", "not in this test");
+            } else {
+                requests.push(request);
+            }
+        }
         started.send(()).unwrap();
         held.recv_timeout(Duration::from_secs(5)).unwrap();
         for request in requests {

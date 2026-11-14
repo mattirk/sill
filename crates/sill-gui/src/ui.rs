@@ -1100,7 +1100,7 @@ impl App {
     /// which stay in reach.
     fn composer_bar<'a>(&'a self, view: &'a SessionView, width: f32) -> Element<'a, Message> {
         /// What the shell's and the send/stop buttons take with their spacing, and a margin.
-        const BUTTONS_ROOM: f32 = 90.0;
+        const BUTTONS_ROOM: f32 = 116.0;
         let has_session = !view.conversation.session_id.is_empty() || self.demo;
         let sendable = !view.attachments_busy
             && (!view.draft.text().trim().is_empty() || !view.attachments.is_empty());
@@ -1186,14 +1186,25 @@ impl App {
             ),
             "Attach files or images",
         );
-        row![attach, shell, space().width(Fill), agent_controls, action]
+        let session = self
+            .all_sessions
+            .iter()
+            .find(|s| s.session_id == view.id && has_session);
+        let permissions = crate::permissions::indicator(view, session);
+        row![attach, shell, permissions, space().width(Fill), agent_controls, action]
             .spacing(4)
             .align_y(Alignment::Center)
             .into()
     }
 
     fn composer<'a>(&'a self, view: &'a SessionView) -> Element<'a, Message> {
-        let mut composer = Column::new()
+        let session = self.all_sessions.iter().find(|s| s.session_id == view.id);
+        let mut composer = Column::new();
+        if let Some(caption) = crate::permissions::caption(view, session) {
+            composer = composer.push(caption);
+        }
+        let mut composer = composer
+            .push(crate::permissions::panel(view, session))
             .push(crate::processes::panel(view))
             .push(self.network_prompt(view));
         if !view.attachments.is_empty() {
