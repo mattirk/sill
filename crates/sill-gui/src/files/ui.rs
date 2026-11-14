@@ -73,8 +73,10 @@ impl App {
                 }
             };
             let glyph = crate::icons::for_path(name(&root.path), directory, false);
+            // a workspace or a repository kept live has its own mark (docs/parallel-coding.md §12)
+            let (mark, said) = crate::workspaces_ui::chip_mark(view, &root.path, glyph);
             let mut label = row![
-                crate::icons::glyph(glyph, 14.0, style::alpha(P.fg, 0.6)),
+                mark,
                 text(short(name(&root.path), 24)).size(style::TEXT),
             ]
             .spacing(6)
@@ -122,7 +124,10 @@ impl App {
             ));
             chips = chips.push(tip(
                 container(chip).style(style::fill(style::alpha(P.fg, 0.07))),
-                root.path.display.clone(),
+                match said {
+                    Some(said) => format!("{}\n{said}", root.path.display),
+                    None => root.path.display.clone(),
+                },
             ));
         }
         // the first load only: the 15 s refresh keeps the chips as they are until it answers

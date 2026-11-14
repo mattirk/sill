@@ -34,6 +34,11 @@ pub struct ChangesPage {
     pub armed: Option<String>,
     /// What the last action did.
     pub said: Option<String>,
+    /// Every session's workspaces and the discarded work still undoable (docs/parallel-coding.md
+    /// §12); `None` before the first answer.
+    pub workspaces: Option<Result<crate::workspaces::All, String>>,
+    /// A workspace's Discard pressed once.
+    pub workspace_armed: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -149,6 +154,9 @@ impl App {
         if let Some(said) = &page.said {
             body =
                 body.push(container(text(said).size(style::SMALL).color(P.fg_dim)).padding([4, 4]));
+        }
+        if !page.history {
+            body = self.workspace_rows(page, body);
         }
         if page.history {
             body = self.history_rows(page, body);

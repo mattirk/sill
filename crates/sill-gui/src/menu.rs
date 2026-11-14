@@ -40,7 +40,9 @@ pub enum Event {
     RememberPins(bool),
     Filter(String),
     More,
-    New { agent: String, ghost: bool },
+    /// `workspaces`: the button beside the ghost chose live or workspace (docs/parallel-coding.md
+    /// §12); None follows Settings → Automatic workspaces.
+    New { agent: String, ghost: bool, workspaces: Option<bool> },
     /// An agent without directory setup: open the Agents page to finish it.
     Setup(String),
     Reopen(String),
@@ -108,7 +110,29 @@ impl App {
                         event(Event::New {
                             agent: agent.id.clone(),
                             ghost: false,
+                            workspaces: None,
                         }),
+                    );
+                    // the other kind of session than Settings → Automatic workspaces makes
+                    let automatic = self.daemon_settings.as_ref().and_then(|s| s.automatic_workspaces).unwrap_or(false);
+                    let (glyph, said) = if automatic {
+                        ("folder-open", format!("{} live — its pinned repositories are your checkouts: its edits reach them at once, no Apply", agent.name))
+                    } else {
+                        ("git-branch", format!("{} in workspaces — its own copy of each pinned repository; you Apply its work to your checkout", agent.name))
+                    };
+                    let other = tooltip(
+                        keys::press(
+                            button(crate::icons::glyph(glyph, 15.0, alpha(P.fg, 0.6)))
+                                .padding([6, 8])
+                                .style(style::quiet),
+                            event(Event::New {
+                                agent: agent.id.clone(),
+                                ghost: false,
+                                workspaces: Some(!automatic),
+                            }),
+                        ),
+                        tip(said),
+                        tooltip::Position::Left,
                     );
                     let ghost = tooltip(
                         keys::press(
@@ -123,6 +147,7 @@ impl App {
                             event(Event::New {
                                 agent: agent.id.clone(),
                                 ghost: true,
+                                workspaces: None,
                             }),
                         ),
                         tip(format!(
@@ -131,7 +156,7 @@ impl App {
                         )),
                         tooltip::Position::Left,
                     );
-                    panel = panel.push(row![start, ghost].align_y(Alignment::Center));
+                    panel = panel.push(row![start, other, ghost].align_y(Alignment::Center));
                 }
             }
         }

@@ -596,6 +596,13 @@ impl App {
                         change(SettingChange::RememberPins { value: Some(v) })
                     }),
                 ),
+                setting(
+                    "Automatic workspaces",
+                    Some("New sessions work in their own copy of each pinned repository; you Apply their work. The button beside the ghost in + makes a live session"),
+                    switch(s.automatic_workspaces.unwrap_or(false), move |v| {
+                        change(SettingChange::AutomaticWorkspaces { value: Some(v) })
+                    }),
+                ),
                 wide(
                     "Global pins",
                     Some(

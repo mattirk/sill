@@ -198,11 +198,13 @@ fn apply_repeatedly_during_the_session() {
     write(&clone.join("f1.txt"), "committed\n");
     git(&clone, &["commit", "-qam", "agent"]);
     write(&clone.join("f2.txt"), "uncommitted\n");
+    write(&clone.join("new.txt"), "new untracked file\n");
     let detail = get(&f.host, &w.workspace_id).unwrap();
     assert_eq!(detail.summary.commits, 1);
-    assert_eq!(detail.summary.uncommitted, vec!["f2.txt".to_string()]);
+    assert_eq!(detail.summary.files, 3);
+    assert_eq!(detail.summary.uncommitted, vec!["f2.txt".to_string(), "new.txt".to_string()]);
     let diff = diff(&f.host, &api::DiffRequest { workspace_id: w.workspace_id.clone(), against: api::Against::Applied }).unwrap();
-    assert!(diff.text.contains("+committed") && diff.text.contains("+uncommitted"));
+    assert!(diff.text.contains("+committed") && diff.text.contains("+uncommitted") && diff.text.contains("+new untracked file"));
     let done = apply(&f.host, &apply_req("a1", &w, &detail.revision)).unwrap();
     assert_eq!(done.workspace.unwrap().state, api::WorkspaceState::Open, "the workspace goes on");
     assert_eq!(read(&f.source.join("f1.txt")), "committed\n");
@@ -211,6 +213,9 @@ fn apply_repeatedly_during_the_session() {
     // nothing left to bring; then more work, applied again
     let after = get(&f.host, &w.workspace_id).unwrap();
     assert_eq!((after.summary.commits, after.summary.files), (0, 0));
+    assert!(!after.summary.uncommitted.is_empty(), "applied files remain dirty in the workspace");
+    write(&clone.join("new.txt"), "new untracked file, edited\n");
+    assert_eq!(get(&f.host, &w.workspace_id).unwrap().summary.files, 1);
     write(&clone.join("f2.txt"), "uncommitted, again\n");
     apply(&f.host, &apply_req("a2", &w, &rev(&f, &w))).unwrap();
     assert_eq!(read(&f.source.join("f2.txt")), "uncommitted, again\n");

@@ -368,12 +368,20 @@ fn status_paths(git: &Git, ignored: bool) -> Result<Vec<String>> {
 
 /// The clone's result against `base`.
 pub fn summary(clone: &Path, branch: &str, base: &str) -> Result<Summary> {
+    summary_to(clone, branch, base, None)
+}
+
+/// Count changes against a full snapshot when supplied, including untracked files.
+fn summary_to(clone: &Path, branch: &str, base: &str, target: Option<&str>) -> Result<Summary> {
     let git = Git::open(clone)?;
     let mut c = git.cmd();
     c.args(["rev-list", "--count"]).arg(format!("{base}..refs/heads/{branch}"));
     let commits = ok(c, "rev-list")?.parse().unwrap_or(0);
     let mut c = git.cmd();
     c.args(["diff", "--numstat", "-z"]).args(Git::DIFF_SAFE).arg(base);
+    if let Some(target) = target {
+        c.arg(target);
+    }
     let numstat = ok(c, "diff --numstat")?;
     let (mut files, mut added, mut removed) = (0, 0, 0);
     for e in numstat.split('\0').filter(|e| e.contains('\t')) {
@@ -469,9 +477,17 @@ pub fn descends(clone: &Path, ancestor: &str, tip: &str) -> Result<bool> {
 /// The clone's working tree against `commit` (its base, or a destination it borrows), at most
 /// `limit` bytes; true when cut there.
 pub fn diff(clone: &Path, commit: &str, limit: usize) -> Result<(String, bool)> {
+    diff_to(clone, commit, None, limit)
+}
+
+fn diff_to(clone: &Path, commit: &str, target: Option<&str>, limit: usize) -> Result<(String, bool)> {
     let git = Git::open(clone)?;
     let mut c = git.cmd();
-    c.args(["diff"]).args(Git::DIFF_SAFE).arg(commit).arg("--");
+    c.args(["diff"]).args(Git::DIFF_SAFE).arg(commit);
+    if let Some(target) = target {
+        c.arg(target);
+    }
+    c.arg("--");
     let out = run(c)?;
     if !out.status.success() {
         bail!("diff: {}", String::from_utf8_lossy(&out.stderr).trim());

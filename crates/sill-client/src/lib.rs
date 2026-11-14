@@ -33,6 +33,7 @@ pub mod sessions;
 pub mod settings;
 pub mod supervision;
 pub mod terminal;
+pub mod workspaces;
 
 use std::sync::Arc;
 

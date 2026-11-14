@@ -108,6 +108,12 @@ pub struct Drawer {
 }
 
 impl Drawer {
+    /// A workspace session's repositories for the file worker to read in their workspaces
+    /// (docs/parallel-coding.md §12); true when that changed, so the drawer reads again.
+    pub(crate) fn set_aliases(&self, session: &str, pairs: Vec<(std::path::PathBuf, std::path::PathBuf)>) -> bool {
+        self.files.as_ref().is_some_and(|f| f.set_aliases(session, pairs))
+    }
+
     pub fn new(connect: Option<Connector>) -> (Self, Task<Message>) {
         let Some(connect) = connect else {
             return (
@@ -267,7 +273,8 @@ impl App {
             .map(|v| v.files.refresh())
             .unwrap_or_default();
         self.files_send(session, requests);
-        Task::none()
+        // its workspaces with it: what the shelf offers, the chips' marks, what the drawer reads
+        self.workspaces_load(session)
     }
 
     pub fn files_action(&mut self, action: Action) -> Task<Message> {

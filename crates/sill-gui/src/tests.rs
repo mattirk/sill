@@ -38,8 +38,9 @@ impl Daemon {
             let request: Value = serde_json::from_str(&line)
                 .unwrap_or_else(|_| panic!("no request; expected {method}"));
             // reads that go out beside the one under test (the panel reads Host control's state
-            // with its policy views, concurrently)
-            let incidental = ["_sill/policy.preview", "_sill/host_control.state"];
+            // with its policy views, concurrently; a session's workspaces are read with its files
+            // and the Changes page)
+            let incidental = ["_sill/policy.preview", "_sill/host_control.state", "_sill/workspaces.session", "_sill/workspaces.list"];
             if incidental.contains(&request["method"].as_str().unwrap_or("")) && request["method"] != method {
                 self.refuse(&request, "unavailable", "not in this test");
                 continue;
@@ -2361,7 +2362,7 @@ fn the_menu_lists_agents_and_sessions_to_reopen() {
     ui.click("Codex").unwrap();
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(
-        matches!(&messages[..], [Message::Menu(Event::Reopen(id)), Message::Menu(Event::New { agent, ghost: false })] if id == "old1" && agent == "codex"),
+        matches!(&messages[..], [Message::Menu(Event::Reopen(id)), Message::Menu(Event::New { agent, ghost: false, workspaces: None })] if id == "old1" && agent == "codex"),
         "{messages:?}"
     );
     let _ = app.update(Message::Menu(Event::Filter("session 6".into())));
@@ -2408,6 +2409,7 @@ fn the_menu_starts_a_session_and_opens_it() {
     let task = app.update(Message::Menu(Event::New {
         agent: "codex".into(),
         ghost: true,
+        workspaces: None,
     }));
     settle_task(&mut app, task);
     assert_eq!(app.selected.as_deref(), Some("fresh"), "opened once listed");
@@ -2622,11 +2624,15 @@ fn changes_actions_are_the_public_requests() {
     let kept = changes_key(&app, ".bashrc");
     let server = std::thread::spawn(move || {
         let reload = |daemon: &mut Daemon| {
-            for _ in 0..2 {
+            // the changes, the settings and the page's workspaces (docs/parallel-coding.md §12)
+            for _ in 0..3 {
                 let request = daemon.next();
                 match request["method"].as_str() {
                     Some("_sill/changes.list") => {
                         daemon.reply(&request, json!({"entries": [], "next": null}))
+                    }
+                    Some("_sill/workspaces.list") => {
+                        daemon.reply(&request, json!({"workspaces": [], "discarded": [], "next": null}))
                     }
                     Some("_sill/settings.get") => daemon.reply(
                         &request,

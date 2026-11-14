@@ -120,21 +120,110 @@ const NEW_FILE_MAX: u64 = 1_000_000;
 /// Dropping it lets the worker finish its current request and leave.
 pub struct Files {
     requests: mpsc::Sender<(String, u64, Request)>,
+    aliases: Aliases,
+}
+
+/// A workspace session's repositories as the file worker reads them (docs/parallel-coding.md §12):
+/// per session, (the repository's path, its workspace folder). Requests for paths under the
+/// repository read the workspace instead, and the paths in replies are given back under the
+/// repository, so the tree, the reader, the chips and links show the agent's copy at the path the
+/// person and the jail know.
+#[derive(Clone, Default)]
+pub struct Aliases(std::sync::Arc<std::sync::Mutex<BTreeMap<String, Vec<AliasPair>>>>);
+
+/// (a repository's path, its workspace folder).
+pub type AliasPair = (std::path::PathBuf, std::path::PathBuf);
+
+impl Aliases {
+    pub fn set(&self, session: &str, pairs: Vec<(std::path::PathBuf, std::path::PathBuf)>) -> bool {
+        let mut all = self.0.lock().unwrap();
+        let changed = all.get(session).map_or(!pairs.is_empty(), |old| *old != pairs);
+        if pairs.is_empty() {
+            all.remove(session);
+        } else {
+            all.insert(session.into(), pairs);
+        }
+        changed
+    }
+
+    fn of(&self, session: &str) -> Vec<(std::path::PathBuf, std::path::PathBuf)> {
+        self.0.lock().unwrap().get(session).cloned().unwrap_or_default()
+    }
+}
+
+/// `path` under one pair's first path, moved under its second; `forward` false the other way.
+fn alias(path: &HostPath, pairs: &[(std::path::PathBuf, std::path::PathBuf)], forward: bool) -> HostPath {
+    let Ok(p) = path.to_path() else { return path.clone() };
+    for (repository, workspace) in pairs {
+        let (from, to) = if forward { (repository, workspace) } else { (workspace, repository) };
+        if let Ok(rel) = p.strip_prefix(from) {
+            return HostPath::from_path(&if rel.as_os_str().is_empty() { to.clone() } else { to.join(rel) });
+        }
+    }
+    path.clone()
+}
+
+/// The request as the worker runs it: paths under an aliased repository in its workspace. A pin
+/// stays the repository's own.
+fn aliased(request: &Request, pairs: &[(std::path::PathBuf, std::path::PathBuf)]) -> Request {
+    let to = |p: &HostPath| alias(p, pairs, true);
+    match request {
+        Request::Directory { path, after, pages } => Request::Directory { path: to(path), after: after.as_ref().map(to), pages: *pages },
+        Request::Inspect(path) => Request::Inspect(to(path)),
+        Request::File { path, repo } => Request::File { path: to(path), repo: repo.as_ref().map(to) },
+        Request::Repo(path) => Request::Repo(to(path)),
+        Request::Counts { pin, entries } => Request::Counts {
+            pin: to(pin),
+            entries: entries.iter().map(|e| discovery::StatusEntry { path: to(&e.path), status: e.status.clone() }).collect(),
+        },
+        Request::Roots | Request::Pin { .. } => request.clone(),
+    }
+}
+
+/// A reply's paths back under the repository; counts keyed as the original request keyed them.
+fn unaliased(data: Data, original: &Request, pairs: &[(std::path::PathBuf, std::path::PathBuf)]) -> Data {
+    let back = |p: &HostPath| alias(p, pairs, false);
+    match data {
+        Data::Directory(page) => Data::Directory(admin::FilesPage {
+            entries: page.entries.into_iter().map(|e| admin::FileEntry { path: back(&e.path), metadata: e.metadata }).collect(),
+            next: page.next.as_ref().map(back),
+        }),
+        Data::Repo { root, head, entries, summary, lines } => Data::Repo {
+            root: root.as_ref().map(back),
+            head,
+            entries: entries.into_iter().map(|e| discovery::StatusEntry { path: back(&e.path), status: e.status }).collect(),
+            summary,
+            lines,
+        },
+        Data::Counts(counts) => {
+            let Request::Counts { entries, .. } = original else { return Data::Counts(counts) };
+            let keys: BTreeMap<String, String> = entries
+                .iter()
+                .map(|e| (key(&alias(&e.path, pairs, true)).to_string(), key(&e.path).to_string()))
+                .collect();
+            Data::Counts(counts.into_iter().map(|(k, v)| (keys.get(&k).cloned().unwrap_or(k), v)).collect())
+        }
+        other => other,
+    }
 }
 
 impl Files {
     pub fn start(connect: Connector, sink: impl Fn(Reply) -> bool + Send + 'static) -> Self {
         let (requests, receiver) = mpsc::channel::<(String, u64, Request)>();
+        let aliases = Aliases::default();
+        let table = aliases.clone();
         std::thread::Builder::new()
             .name("sill-files".into())
             .spawn(move || {
                 let mut client: Option<Client> = None;
                 while let Ok((session, serial, request)) = receiver.recv() {
+                    let pairs = table.of(&session);
                     let result = (|| {
                         if client.as_ref().is_none_or(|c| !c.is_open()) {
                             client = Some(connect()?);
                         }
-                        execute(client.as_ref().unwrap(), &session, &request)
+                        let run = aliased(&request, &pairs);
+                        Ok::<_, anyhow::Error>(unaliased(execute(client.as_ref().unwrap(), &session, &run)?, &request, &pairs))
                     })();
                     if result.as_ref().is_err_and(crate::connection_lost) {
                         client = None;
@@ -151,7 +240,12 @@ impl Files {
                 }
             })
             .expect("start the file worker");
-        Self { requests }
+        Self { requests, aliases }
+    }
+
+    /// A session's workspaces for the worker to read (see [`Aliases`]); true when they changed.
+    pub fn set_aliases(&self, session: &str, pairs: Vec<(std::path::PathBuf, std::path::PathBuf)>) -> bool {
+        self.aliases.set(session, pairs)
     }
 
     /// False when the worker has gone.

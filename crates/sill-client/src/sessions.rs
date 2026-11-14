@@ -11,13 +11,15 @@ pub type Request = (&'static str, Value);
 
 /// A new session of `agent` with the default policy. `remember_pins` (Settings → Remember pins)
 /// asks the daemon to start it with the latest session's pins; a ghost never takes them.
-pub fn create(agent: &str, ghost: bool, remember_pins: bool) -> Request {
+/// `workspaces` chooses live or workspace (docs/parallel-coding.md §12); None follows Settings.
+pub fn create(agent: &str, ghost: bool, remember_pins: bool, workspaces: Option<bool>) -> Request {
     let create = Create {
         create_id: crate::request_id("create"),
         agent: agent.into(),
         policy: "default".into(),
         remember_pins: remember_pins && !ghost,
         ghost,
+        workspaces: workspaces.filter(|_| !ghost),
         ..Create::default()
     };
     ("_sill/sessions.create", json!(create))
@@ -172,7 +174,7 @@ mod tests {
 
     #[test]
     fn requests_have_the_shapes_the_daemon_accepts() {
-        let (method, params) = create("codex", true, true);
+        let (method, params) = create("codex", true, true, None);
         assert_eq!(method, "_sill/sessions.create");
         let create: Create = serde_json::from_value(params.clone()).unwrap();
         assert!(

@@ -525,3 +525,37 @@ fn render_source_gutter() {
     ))));
     render_size(&app, "source-gutter-edited", (720.0, 860.0));
 }
+
+/// Workspaces (docs/parallel-coding.md §12): the pin chips' marks — a workspace and a repository
+/// kept live with a warning — and the shelf above the prompt once the turn has ended, then with
+/// its diff open and Discard armed.
+#[test]
+#[ignore = "writes the workspace shelf PNGs for review"]
+fn render_workspaces() {
+    use crate::Message;
+    let (mut app, _) = App::new(true, None);
+    for _ in 0..=demo::CHUNKS.len() {
+        let _ = app.update(Message::DemoTick);
+    }
+    let _ = app.update(Message::Answer { question_id: "demo-question".into(), option_id: "allow".into() });
+    let host = |p: &str| sill_proto::sessions::HostPath::from_path(std::path::Path::new(p));
+    let ws = serde_json::json!({"workspace_id": "ws-1", "name": "project", "session_id": "demo", "source": host("/home/demo/project"),
+        "source_branch": "main", "base": "b0", "branch": "sill/project-ws-1", "path": host("/ws/project-ws-1"),
+        "state": "open", "operation": null, "limitations": [], "created_at": "t", "updated_at": "t"});
+    let detail = serde_json::json!({"workspace": ws, "revision": {"tip": "t1", "worktree": "w", "destination_branch": "main", "destination_tip": "b0"},
+        "summary": {"commits": 1, "files": 3, "added": "40", "removed": "12", "uncommitted": ["src/a.rs"]}, "needs_rebase": false});
+    let view = app.views.get_mut("demo").unwrap();
+    assert!(!view.conversation.busy(), "the turn has ended");
+    view.workspaces.loaded = Some(sill_client::workspaces::Loaded {
+        view: serde_json::from_value(serde_json::json!({"workspaces_mode": true, "workspaces": [ws],
+            "live": [{"source": host("/home/demo/vendored"), "reason": "submodules", "message": "Live: Repositories with submodules are not supported yet."}]})).unwrap(),
+        details: vec![serde_json::from_value(detail).unwrap()],
+    });
+    let dir = sill_proto::admin::FileMetadata { file: false, directory: true, symlink: false, target: None, length: "0".into(), readonly: false };
+    view.files.roots.push(sill_client::files::Root { path: host("/home/demo/vendored"), global: false, metadata: Some(dir), error: None });
+    render(&app, "workspaces-1-shelf");
+    let view = app.views.get_mut("demo").unwrap();
+    view.workspaces.diff = Some(("ws-1".into(), Ok("diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,2 +1,3 @@\n fn main() {\n-    old();\n+    new();\n+    more();\n }\n".into())));
+    view.workspaces.armed = Some("ws-1".into());
+    render(&app, "workspaces-2-diff");
+}

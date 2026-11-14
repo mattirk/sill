@@ -555,7 +555,8 @@ fn revision_now(r: &Row) -> Result<(api::Revision, bool)> {
 /// What an Apply would bring: commits and changes since what the person has.
 fn summary(r: &Row) -> Result<api::Summary> {
     let applied = flow::applied(&r.path)?;
-    let s = super::summary(&r.path, &r.branch, &applied)?;
+    let now = flow::snapshot(&r.path, "sill: summary")?;
+    let s = super::summary_to(&r.path, &r.branch, &applied, Some(&now))?;
     Ok(api::Summary { commits: s.commits, files: s.files, added: s.added.to_string(), removed: s.removed.to_string(), uncommitted: s.uncommitted })
 }
 
@@ -628,7 +629,8 @@ pub fn diff<H: Host>(h: &H, a: &api::DiffRequest) -> Result<api::DiffText> {
         api::Against::Applied => flow::applied(&r.path)?,
         api::Against::Base => r.base.clone(),
     };
-    let (text, truncated) = super::diff(&r.path, &against, DIFF_LIMIT)?;
+    let now = flow::snapshot(&r.path, "sill: diff")?;
+    let (text, truncated) = super::diff_to(&r.path, &against, Some(&now), DIFF_LIMIT)?;
     Ok(api::DiffText { text, truncated })
 }
 

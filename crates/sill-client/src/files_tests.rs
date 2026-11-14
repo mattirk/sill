@@ -384,3 +384,42 @@ fn folders_list_as_the_frontend_lists_them() {
         ]
     );
 }
+
+/// A workspace session's repository reads its workspace, with every path given back under the
+/// repository (docs/parallel-coding.md §12): what the tree, reader and chips use.
+#[test]
+fn aliased_paths_read_the_workspace_and_answer_under_the_repository() {
+    let pairs = vec![(std::path::PathBuf::from("/home/me/repo"), std::path::PathBuf::from("/ws/repo-1"))];
+    let run = aliased(&Request::Directory { path: path_of("/home/me/repo/src"), after: Some(path_of("/home/me/repo/src/a")), pages: 1 }, &pairs);
+    let Request::Directory { path, after, .. } = &run else { panic!() };
+    assert_eq!(path.to_path().unwrap(), std::path::Path::new("/ws/repo-1/src"));
+    assert_eq!(after.as_ref().unwrap().to_path().unwrap(), std::path::Path::new("/ws/repo-1/src/a"));
+    // the repository itself, and paths elsewhere untouched
+    let Request::Repo(p) = aliased(&Request::Repo(path_of("/home/me/repo")), &pairs) else { panic!() };
+    assert_eq!(p.to_path().unwrap(), std::path::Path::new("/ws/repo-1"));
+    let Request::Inspect(p) = aliased(&Request::Inspect(path_of("/home/me/repository")), &pairs) else { panic!() };
+    assert_eq!(p.to_path().unwrap(), std::path::Path::new("/home/me/repository"));
+    let Request::Pin { path, .. } = aliased(&Request::Pin { path: path_of("/home/me/repo"), on: true }, &pairs) else { panic!() };
+    assert_eq!(path.to_path().unwrap(), std::path::Path::new("/home/me/repo"), "pins stay the repository's");
+    // replies come back under the repository, displayed so
+    let page = admin::FilesPage { entries: vec![admin::FileEntry { path: path_of("/ws/repo-1/src/b.rs"), metadata: metadata(false) }], next: None };
+    let Data::Directory(back) = unaliased(Data::Directory(page), &run, &pairs) else { panic!() };
+    assert_eq!(back.entries[0].path.to_path().unwrap(), std::path::Path::new("/home/me/repo/src/b.rs"));
+    assert_eq!(back.entries[0].path.display, "/home/me/repo/src/b.rs");
+    let repo = Data::Repo { root: Some(path_of("/ws/repo-1")), head: "main".into(), entries: vec![discovery::StatusEntry { path: path_of("/ws/repo-1/x"), status: "M".into() }], summary: String::new(), lines: None };
+    let Data::Repo { root, entries, .. } = unaliased(repo, &Request::Repo(path_of("/home/me/repo")), &pairs) else { panic!() };
+    assert_eq!(root.unwrap().to_path().unwrap(), std::path::Path::new("/home/me/repo"));
+    assert_eq!(entries[0].path.to_path().unwrap(), std::path::Path::new("/home/me/repo/x"));
+    // counts keyed as the original request keyed them
+    let original = Request::Counts { pin: path_of("/home/me/repo"), entries: vec![discovery::StatusEntry { path: path_of("/home/me/repo/x"), status: "M".into() }] };
+    let clone_key = key(&path_of("/ws/repo-1/x")).to_string();
+    let Data::Counts(counts) = unaliased(Data::Counts(vec![(clone_key, Some((1, 2)))]), &original, &pairs) else { panic!() };
+    assert_eq!(counts[0].0, key(&path_of("/home/me/repo/x")));
+    // the table: set, changed or not, cleared
+    let table = Aliases::default();
+    assert!(table.set("s", pairs.clone()));
+    assert!(!table.set("s", pairs.clone()));
+    assert_eq!(table.of("s"), pairs);
+    assert!(table.set("s", vec![]));
+    assert!(table.of("s").is_empty());
+}

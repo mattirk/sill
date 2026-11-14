@@ -149,6 +149,15 @@ const LINES: &[(&str, &str)] = &[
         "M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6",
     ),
     ("plus", "M5 12h14M12 5v14"),
+    // a workspace (docs/parallel-coding.md §12) and a repository kept live with a reason
+    (
+        "git-branch",
+        "M6 3v12M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9a9 9 0 0 1-9 9",
+    ),
+    (
+        "alert",
+        "m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3ZM12 9v4M12 17h.01",
+    ),
     ("minus", "M5 12h14"),
     (
         "lock",

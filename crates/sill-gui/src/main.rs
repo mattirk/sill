@@ -47,6 +47,8 @@ mod tests;
 mod tray;
 mod ui;
 mod viewer;
+mod workspaces;
+mod workspaces_ui;
 mod files;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -377,6 +379,8 @@ pub enum Message {
     /// The herring: the Changes page, or back to the conversation.
     ToggleChanges,
     Changes(changes_ui::Event),
+    /// A session's workspaces (docs/parallel-coding.md §12).
+    Workspaces(workspaces::Event),
     /// The herring's pages: one shown in the conversation's place.
     ShowPage(Page),
     Settings(settings_ui::Event),
@@ -457,6 +461,8 @@ pub struct SessionView {
     /// Its test desktop's live view (`desktop_view.rs`).
     pub desktop: desktop_view::View,
     pub host_control: host_control::View,
+    /// Its workspaces, the shelf's offers and the chips' marks (`workspaces.rs`).
+    pub workspaces: workspaces::State,
 }
 
 impl SessionView {
@@ -514,6 +520,7 @@ impl SessionView {
             permissions: permissions::Perms::default(),
             desktop: desktop_view::View::default(),
             host_control: host_control::View::default(),
+            workspaces: workspaces::State::default(),
         }
     }
 
@@ -1882,6 +1889,7 @@ impl App {
                     Some(agent) => self.menu_event(menu::Event::New {
                         agent,
                         ghost: false,
+                        workspaces: None,
                     }),
                     None if self.menu.is_some() => Task::none(),
                     None => self.menu_event(menu::Event::Toggle),
@@ -1975,6 +1983,7 @@ impl App {
             }
             Message::DaemonSettings(_, Err(_)) => self.settings_pending = false,
             Message::Changes(event) => return self.changes_event(event),
+            Message::Workspaces(event) => return self.workspaces_event(event),
             Message::CloseTab(id) => {
                 let ghost = self
                     .all_sessions
@@ -2074,7 +2083,8 @@ impl App {
         let Some(actions) = self.actions.clone() else {
             return Task::done(Message::Changes(Event::Loaded(Ok((demo::changes(), 0)))));
         };
-        blocking(
+        let workspaces = self.workspaces_page_load();
+        let changes = blocking(
             move || {
                 let entries = actions
                     .reading(sill_client::changes::list)
@@ -2086,7 +2096,8 @@ impl App {
                 Ok((entries, minutes))
             },
             |loaded| Message::Changes(Event::Loaded(loaded)),
-        )
+        );
+        Task::batch([changes, workspaces])
     }
 
     fn history_load(&self, before: Option<String>) -> Task<Message> {
@@ -2652,7 +2663,7 @@ impl App {
                     menu.expanded = true;
                 }
             }
-            Event::New { agent, ghost } => {
+            Event::New { agent, ghost, workspaces } => {
                 let remember = self
                     .menu
                     .take()
@@ -2666,7 +2677,7 @@ impl App {
                 if self.demo {
                     return Task::none();
                 }
-                let (method, params) = sill_client::sessions::create(&agent, ghost, remember);
+                let (method, params) = sill_client::sessions::create(&agent, ghost, remember, workspaces);
                 return self.act("", Act::Create, method, params);
             }
             Event::Reopen(id) => {

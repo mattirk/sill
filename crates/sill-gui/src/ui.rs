@@ -1462,12 +1462,14 @@ impl App {
             bottom,
             left: 10.0,
         }));
-        column![
-            rule::horizontal(1).style(style::rule_style(P.border)),
-            container(composer)
-                .width(Fill)
-                .style(style::fill(P.surface)),
-        ]
+        // what the agent's workspaces would bring, above the prompt once its turn ends
+        let mut column = Column::new();
+        if let Some(shelf) = self.workspace_shelf(view) {
+            column = column.push(rule::horizontal(1).style(style::rule_style(P.border))).push(shelf);
+        }
+        column
+            .push(rule::horizontal(1).style(style::rule_style(P.border)))
+            .push(container(composer).width(Fill).style(style::fill(P.surface)))
         .into()
     }
 
