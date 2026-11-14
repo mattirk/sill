@@ -34,9 +34,9 @@ const fn rgb(hex: u32) -> Color {
 }
 
 /// The themes, by id; the daemon's `theme` setting picks one. Miasma is the one sill is developed
-/// in (the person, 2026-11-05). Sill Dark and Light (2026-11-09) are Miasma's backgrounds with
+/// in (the person, 2026-11-05). sill Dark and Light (2026-11-09) are Miasma's backgrounds with
 /// Iceberg's highlight colours (accent, link, warning, success, error); Miasma has no light
-/// variant, so Sill Light's backgrounds are light tones in Miasma's warm olive-grey.
+/// variant, so sill Light's backgrounds are light tones in Miasma's warm olive-grey.
 pub const THEMES: &[(&str, Palette)] = &[
     (
         "adwaita",

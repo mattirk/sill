@@ -60,8 +60,8 @@ pub const THEMES: &[(&str, &str)] = &[
     ("gruvbox-light", "Gruvbox Light"),
     ("iceberg-dark", "Iceberg Dark"),
     ("iceberg-light", "Iceberg Light"),
-    ("sill-dark", "Sill Dark"),
-    ("sill-light", "Sill Light"),
+    ("sill-dark", "sill Dark"),
+    ("sill-light", "sill Light"),
 ];
 
 /// Everything the page shows.

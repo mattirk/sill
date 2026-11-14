@@ -381,7 +381,7 @@ fn render_iceberg() {
 }
 
 #[test]
-#[ignore = "writes the demo conversation in Sill Dark and Light for review"]
+#[ignore = "writes the demo conversation in sill Dark and Light for review"]
 fn render_sill() {
     let (mut app, _) = App::new(true, None);
     for _ in 0..=demo::CHUNKS.len() {
