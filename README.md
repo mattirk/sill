@@ -24,7 +24,8 @@ Three ideas carry the whole thing:
   (`~/.claude`, `~/.codex`, …) are sill-owned copies; your host's are never seen by an agent.
 - **Pins.** A pinned folder is bound live into the jail: what the agent writes there is on the host at
   once, commits included, and you review with `git` as usual. Pins are the session's workspace and are
-  named in every prompt as the place to work.
+  named in every prompt as the place to work. Settings → *Remember pins* starts every new session with
+  the latest session's pins, so the workspace carries over.
 - **Changes.** Everything the agent wrote *outside* pins is listed, with diffs, per session and repo:
   Keep (copied to the host, the previous version saved so it can be undone), Revert, Keep all. Files you
   edited on the host meanwhile are marked as conflicts and left out of Keep all.

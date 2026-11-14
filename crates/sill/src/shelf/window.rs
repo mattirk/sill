@@ -489,7 +489,7 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
         match sessions.into_iter().next() {
             Some(s) => shelf.open_session(s),
             None => {
-                if let Ok(s) = store.create("claude", "default") {
+                if let Ok(s) = create_session(&store, "claude", "default") {
                     shelf.open_session(s);
                 }
             }
@@ -756,7 +756,7 @@ impl Shelf {
             .selected()
             .and_then(|id| self.views.borrow().get(&id).map(|v| v.session.borrow().agent.clone()))
             .unwrap_or_else(|| "claude".into());
-        match self.store.create(&agent, "default") {
+        match create_session(&self.store, &agent, "default") {
             Ok(s) => self.open_session(s),
             Err(e) => self.set_status(&format!("new session: {e:#}")),
         }
@@ -1490,7 +1490,7 @@ impl Shelf {
             let id = id.clone();
             b.connect_clicked(move |_| {
                 pop.popdown();
-                if let Ok(sess) = s.store.create(&id, "default") {
+                if let Ok(sess) = create_session(&s.store, &id, "default") {
                     s.open_session(sess);
                 }
             });
@@ -1684,6 +1684,20 @@ impl Shelf {
         let note = format!("new here, after “{}” ({}): its summary goes to the agent first", from.title, from.ended_at.map(sill_core::memory::date).unwrap_or_default());
         self.open_session_with(s, Some(note));
     }
+}
+
+/// A new session, with the pins of the latest session that had any when Settings → Remember pins
+/// is on (the sessions come newest first) — the same workspace without pinning it again. *New
+/// here* copies its own source's pins and does not come this way.
+fn create_session(store: &Store, agent: &str, policy: &str) -> anyhow::Result<Session> {
+    let s = store.create(agent, policy)?;
+    if sill_core::config::load().remember_pins() {
+        let from = store.sessions().unwrap_or_default().into_iter().filter(|x| x.id != s.id).find_map(|x| store.pins(&x.id).ok().filter(|p| !p.is_empty()));
+        for p in from.unwrap_or_default() {
+            let _ = store.pin(&s.id, &p);
+        }
+    }
+    Ok(s)
 }
 
 /// Write the jail's memory snapshot anew off the GTK thread (docs/memory.md §2.3): when a session

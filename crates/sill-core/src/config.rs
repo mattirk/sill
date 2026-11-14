@@ -40,6 +40,9 @@ pub struct Config {
     /// A tray icon (StatusNotifierItem) while the shelf runs: click shows or hides it, the menu
     /// quits. Unset = on; the panel must speak the protocol (SPEC §4.6).
     pub tray: Option<bool>,
+    /// A new session starts with the pins of the latest session that had any (SPEC §3.2 Pins):
+    /// the workspace carries over instead of being pinned again. Unset = off.
+    pub remember_pins: Option<bool>,
     /// Memory (docs/memory.md): when a session's tab closes, its agent is asked for a summary as its
     /// last turn (sill writes one from the facts when it can't be), kept with the session. Unset = on.
     pub memory: Option<bool>,
@@ -156,6 +159,10 @@ impl Config {
 
     pub fn tray(&self) -> bool {
         self.tray.unwrap_or(true)
+    }
+
+    pub fn remember_pins(&self) -> bool {
+        self.remember_pins.unwrap_or(false)
     }
 
     /// Minutes before an unkept change outside git is reverted; 0 = never.

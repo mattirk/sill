@@ -74,6 +74,18 @@ pub fn build() -> gtk::Box {
     });
     root.append(&row("Tray icon", &tray));
 
+    // remember pins: a new session starts with the latest pins (SPEC §3.2 Pins)
+    let pins = gtk::Switch::new();
+    pins.set_active(sill_core::config::load().remember_pins());
+    pins.set_halign(gtk::Align::Start);
+    pins.set_valign(gtk::Align::Center);
+    pins.set_tooltip_text(Some("A new session starts with the pinned folders and files of the latest session that had any, so the workspace carries over. Off: a new session starts with no pins."));
+    pins.connect_state_set(|_, on| {
+        let _ = sill_core::config::update(|c| c.remember_pins = Some(on));
+        glib::Propagation::Proceed
+    });
+    root.append(&row("Remember pins", &pins));
+
     // memory (docs/memory.md): a summary at the end of every session
     let memory = gtk::Switch::new();
     memory.set_active(sill_core::config::load().memory());
