@@ -1743,8 +1743,9 @@ fn tab_reaches_every_control_in_reading_order_and_enter_presses_it() {
             .unwrap_or_else(|| panic!("{what} not reached: {names:?}"))
     };
     assert_eq!(names[0], "choose demo", "{names:?}");
-    assert_eq!(names[1], "ToggleText", "{names:?}");
-    assert!(names[2].starts_with("files ToggleDrawer"), "{names:?}");
+    assert_eq!(names[1], "Menu(Toggle)", "{names:?}");
+    assert_eq!(names[2], "ToggleText", "{names:?}");
+    assert!(names[3].starts_with("files ToggleDrawer"), "{names:?}");
     let order = [
         at("files Toggle("),
         at("ToggleTool(\"tool\")"),
@@ -1919,4 +1920,232 @@ fn escape_steps_back() {
     assert!(app.workspace.shown);
     let _ = app.update(Message::Escape);
     assert!(!app.workspace.shown, "then the drawer");
+}
+
+// --- sessions, forms, held prompts ---------------------------------------------------------------
+
+fn session_record(
+    id: &str,
+    title: &str,
+    ended: bool,
+    ghost: bool,
+) -> sill_proto::sessions::Session {
+    serde_json::from_value(json!({
+        "session_id": id, "agent": "claude", "title": title, "title_kind": "",
+        "created_at": "1", "last_used": "1", "ended_at": ended.then_some("1793806135"),
+        "policy": "default", "auto_allow": false, "desktop": "", "memory_scope": "",
+        "summary": if ended { "made the arrow smaller" } else { "" }, "summary_kind": "",
+        "ghost": ghost, "running": !ended, "pins": [], "settings": {}, "follows": null,
+        "compacted": "0"
+    }))
+    .unwrap()
+}
+
+/// The menu shows the agents with their ghost buttons, then the sessions to reopen — the first
+/// five and "N more…" — and its rows ask for what they say.
+#[test]
+fn the_menu_lists_agents_and_sessions_to_reopen() {
+    use crate::menu::Event;
+    let (mut app, _) = App::new(true, None);
+    let _ = app.update(Message::Menu(Event::Toggle));
+    app.all_sessions = (0..7)
+        .map(|i| {
+            session_record(
+                &format!("old{i}"),
+                &format!("Ended session {i}"),
+                true,
+                false,
+            )
+        })
+        .collect();
+    let mut ui = simulator(&app, (720.0, 860.0));
+    ui.find("Claude Code").unwrap();
+    ui.find("Codex").unwrap();
+    ui.find("Reopen").unwrap();
+    ui.find("2 more…").unwrap();
+    assert!(ui.find("Ended session 6").is_err(), "only the first five");
+    ui.click("Ended session 1").unwrap();
+    ui.click("Codex").unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        matches!(&messages[..], [Message::Menu(Event::Reopen(id)), Message::Menu(Event::New { agent, ghost: false })] if id == "old1" && agent == "codex"),
+        "{messages:?}"
+    );
+    let _ = app.update(Message::Menu(Event::Filter("session 6".into())));
+    let mut ui = simulator(&app, (720.0, 860.0));
+    ui.find("Ended session 6").unwrap();
+    assert!(ui.find("Ended session 1").is_err(), "filtered out");
+}
+
+/// Starting from the menu creates the session with a fresh identity and opens it once the list
+/// shows it; deleting asks for a second press.
+#[test]
+fn the_menu_starts_a_session_and_opens_it() {
+    use crate::menu::Event;
+    let (client, mut daemon) = daemon();
+    let mut app = live_app(vec![client]);
+    let server = std::thread::spawn(move || {
+        let create = daemon.expect("_sill/sessions.create");
+        let params = &create["params"];
+        assert_eq!(
+            (params["agent"].as_str(), params["ghost"].as_bool()),
+            (Some("codex"), Some(true))
+        );
+        assert_eq!(params["policy"], "default");
+        assert!(
+            params["create_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("gui-create-")
+        );
+        daemon.reply(&create, json!({"session_id": "fresh"}));
+        let list = daemon.expect("_sill/sessions.list");
+        daemon.reply(
+            &list,
+            json!({"sessions": [session_record("fresh", "new one", false, true),
+                                session_record("demo", "witty-willow", false, false)],
+                   "next": null}),
+        );
+        let delete = daemon.expect("_sill/sessions.delete");
+        assert_eq!(delete["params"], json!({"session_id": "old"}));
+        daemon.reply(&delete, json!({}));
+        let list = daemon.expect("_sill/sessions.list");
+        daemon.reply(&list, json!({"sessions": [], "next": null}));
+    });
+    let task = app.update(Message::Menu(Event::New {
+        agent: "codex".into(),
+        ghost: true,
+    }));
+    settle_task(&mut app, task);
+    assert_eq!(app.selected.as_deref(), Some("fresh"), "opened once listed");
+    app.menu = Some(crate::menu::Menu::default());
+    let first = app.update(Message::Menu(Event::Delete("old".into())));
+    settle_task(&mut app, first);
+    assert_eq!(app.menu.as_ref().unwrap().armed.as_deref(), Some("old"));
+    let second = app.update(Message::Menu(Event::Delete("old".into())));
+    settle_task(&mut app, second);
+    server.join().unwrap();
+}
+
+/// The selected tab's × ends its session; a ghost's asks once first, since closing deletes it.
+#[test]
+fn closing_a_tab_ends_its_session_and_a_ghost_asks_first() {
+    let (client, mut daemon) = daemon();
+    let mut app = live_app(vec![client]);
+    app.all_sessions = vec![session_record("demo", "witty-willow", false, true)];
+    let mut ui = simulator(&app, (720.0, 860.0));
+    ui.click("×").unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        matches!(&messages[..], [Message::CloseTab(id)] if id == "demo"),
+        "{messages:?}"
+    );
+    let _ = app.update(Message::CloseTab("demo".into()));
+    assert_eq!(app.armed_close.as_deref(), Some("demo"));
+    let mut ui = simulator(&app, (720.0, 860.0));
+    ui.find("Close?").unwrap();
+    drop(ui);
+    let server = std::thread::spawn(move || {
+        let end = daemon.expect("_sill/sessions.end");
+        assert_eq!(
+            end["params"],
+            json!({"session_id": "demo", "reason": "close"})
+        );
+        daemon.reply(&end, json!({"pending": false, "deleted": true}));
+        let list = daemon.expect("_sill/sessions.list");
+        daemon.reply(&list, json!({"sessions": [], "next": null}));
+    });
+    let task = app.update(Message::CloseTab("demo".into()));
+    settle_task(&mut app, task);
+    assert!(
+        app.tabs.is_empty() && app.selected.is_none(),
+        "the ended session's tab went"
+    );
+    server.join().unwrap();
+}
+
+/// A form question is answered in place: its fields, then Submit with the values as the shelf
+/// encodes them; Decline cancels.
+#[test]
+fn a_form_question_is_answered_with_its_values() {
+    let (client, mut daemon) = daemon();
+    let mut app = live_app(vec![client]);
+    let view = app.views.get_mut("demo").unwrap();
+    let question: Question = serde_json::from_value(json!({
+        "question_id":"form", "agent_generation_id":"demo-generation", "kind":"form",
+        "title":"Deploy where?", "options":[], "state":"open",
+        "fields":[
+            {"key":"env", "title":"Environment", "description":"", "kind":"choice",
+             "choices":[{"value":"stage","title":"Staging","description":""},
+                        {"value":"prod","title":"Production","description":""}]},
+            {"key":"why", "title":"Why", "description":"", "kind":"text", "choices":[]}
+        ]
+    }))
+    .unwrap();
+    let next = event(&view.conversation, Event::QuestionUpdated { question });
+    assert!(view.accept(next));
+    let mut ui = simulator(&app, (720.0, 860.0));
+    ui.find("Deploy where?").unwrap();
+    ui.click("Production").unwrap();
+    for message in ui.into_messages().collect::<Vec<_>>() {
+        let _ = app.update(message);
+    }
+    let _ = app.update(Message::FormEdit(
+        "form".into(),
+        crate::forms::Edit::Text {
+            key: "why".into(),
+            text: "release day".into(),
+        },
+    ));
+    let mut ui = simulator(&app, (720.0, 860.0));
+    ui.click("Submit").unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        matches!(&messages[..], [Message::SubmitForm(q)] if q == "form"),
+        "{messages:?}"
+    );
+    let task = app.update(Message::SubmitForm("form".into()));
+    let answer = daemon.expect("_sill/questions.answer");
+    assert_eq!(
+        answer["params"]["answer"],
+        json!({"type":"form", "values":{"env":"prod", "why":"release day"}})
+    );
+    serde_json::from_value::<AnswerQuestion>(answer["params"].clone()).unwrap();
+    daemon.reply(&answer, json!({}));
+    settle_task(&mut app, task);
+}
+
+/// A held prompt shows above the composer with Send and Discard, which resume or cancel it.
+#[test]
+fn a_held_prompt_can_be_sent_or_discarded() {
+    let (client, mut daemon) = daemon();
+    let mut app = live_app(vec![client]);
+    let view = app.views.get_mut("demo").unwrap();
+    let submission: Submission = serde_json::from_value(json!({
+        "submission_id":"held1", "session_id":"demo", "accepted_seq":"4",
+        "agent_generation_id":"demo-generation", "text":"the prompt from before", "attachments":[],
+        "acceptance":"accepted", "delivery":"queued", "held":true,
+        "hold_reason":{"code":"restart", "message":"the agent restarted"},
+        "insertion":"pending", "outcome":"pending"
+    }))
+    .unwrap();
+    let next = event(&view.conversation, Event::SubmissionUpdated { submission });
+    assert!(view.accept(next));
+    let mut ui = simulator(&app, (720.0, 860.0));
+    ui.find("Held: the agent restarted").unwrap();
+    ui.click("Send").unwrap();
+    ui.click("Discard").unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        matches!(&messages[..], [Message::ResumeHeld(a), Message::DiscardHeld(b)] if a == "held1" && b == "held1"),
+        "{messages:?}"
+    );
+    let task = app.update(Message::ResumeHeld("held1".into()));
+    let resume = daemon.expect("_sill/submissions.resume");
+    assert_eq!(
+        resume["params"],
+        json!({"session_id":"demo", "submission_id":"held1"})
+    );
+    daemon.reply(&resume, json!({}));
+    settle_task(&mut app, task);
 }

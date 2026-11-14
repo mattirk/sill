@@ -82,7 +82,11 @@ impl App {
             }
             screen.into()
         });
-        column![self.top_bar(), content].into()
+        let window = column![self.top_bar(), content];
+        match &self.menu {
+            Some(menu) => iced::widget::stack![window, self.session_menu(menu)].into(),
+            None => window.into(),
+        }
     }
 
     /// No session selected: why, and what to do.
@@ -143,6 +147,23 @@ impl App {
                             scrollable::Scrollbar::default()
                         ))
                         .style(style::feed_scroll),
+                    tooltip(
+                        keys::press(
+                            button(
+                                svg(icons::plus())
+                                    .width(15)
+                                    .height(15)
+                                    .style(style::icon(alpha(P.fg, 0.75))),
+                            )
+                            .padding([4, 8])
+                            .style(style::quiet),
+                            Message::Menu(crate::menu::Event::Toggle),
+                        ),
+                        container(text("New session, or reopen one").size(style::TINY))
+                            .padding([3, 8])
+                            .style(style::fill(P.surface)),
+                        tooltip::Position::Bottom,
+                    ),
                     self.activity(),
                     select,
                     keys::press(
@@ -204,6 +225,40 @@ impl App {
             button(label).padding([4, 12]).style(style::quiet),
             Message::Choose(tab.id.clone()),
         );
+        // the selected tab's ×: closing ends the session (a ghost's asks once: it deletes it)
+        let label: Element<'a, Message> = if active && !self.demo {
+            let armed = self.armed_close.as_deref() == Some(tab.id.as_str());
+            row![
+                label,
+                tooltip(
+                    keys::press(
+                        button(
+                            text(if armed { "Close?" } else { "×" })
+                                .size(style::SMALL)
+                                .color(if armed { P.error } else { alpha(P.fg, 0.55) }),
+                        )
+                        .padding([2, 6])
+                        .style(style::quiet),
+                        Message::CloseTab(tab.id.clone()),
+                    ),
+                    container(
+                        text(if armed {
+                            "A ghost: closing deletes it and its unkept changes — press again"
+                        } else {
+                            "Close: ends the session (it can be reopened from +)"
+                        })
+                        .size(style::TINY),
+                    )
+                    .padding([3, 8])
+                    .style(style::fill(P.surface)),
+                    tooltip::Position::Bottom,
+                ),
+            ]
+            .align_y(Alignment::Center)
+            .into()
+        } else {
+            label
+        };
         let underline = rule::horizontal(2).style(style::rule_style(if active {
             P.accent
         } else {
@@ -657,15 +712,7 @@ impl App {
                 }
                 card = card.push(options.wrap().vertical_spacing(8));
             } else {
-                for field in &question.fields {
-                    card = card
-                        .push(text(format!("{} · {}", field.title, field.kind)).size(style::SMALL));
-                }
-                card = card.push(
-                    text("Forms are answered in the shelf for now.")
-                        .size(style::TINY)
-                        .color(P.fg_dim),
-                );
+                card = card.push(form(view, question));
             }
         } else {
             let open = view.open_answers.contains(&question.question_id);
@@ -750,7 +797,15 @@ impl App {
             .conversation
             .submissions
             .values()
-            .filter(|s| s.delivery == "queued")
+            .filter(|s| s.held && s.outcome == "pending")
+        {
+            composer = composer.push(held(submission));
+        }
+        for submission in view
+            .conversation
+            .submissions
+            .values()
+            .filter(|s| s.delivery == "queued" && !(s.held && s.outcome == "pending"))
         {
             composer = composer.push(
                 row![
@@ -973,6 +1028,180 @@ fn option_style(
     } else {
         style::solid(P.fg_dim)
     }
+}
+
+/// A form question's fields — choices as marks to press, text and numbers as fields — with
+/// Submit and Decline. Values are encoded as the shelf sends them (`forms.rs`).
+fn form<'a>(view: &'a SessionView, question: &'a Question) -> Element<'a, Message> {
+    let entries = view.forms.get(&question.question_id);
+    let sending = view.answering.contains(&question.question_id);
+    let id = || question.question_id.clone();
+    let mut fields = Column::new().spacing(10);
+    for field in &question.fields {
+        let entry = entries.and_then(|e| e.get(&field.key));
+        let mut block = Column::new().spacing(4);
+        block = block.push(text(crate::forms::title(field)).size(style::SMALL));
+        if !field.description.is_empty() {
+            block = block.push(
+                selection::text(&field.description)
+                    .size(style::TINY)
+                    .style(style::selectable(P.fg_dim)),
+            );
+        }
+        let edit = |edit: crate::forms::Edit| Message::FormEdit(id(), edit);
+        let input: Element<'a, Message> = match field.kind.as_str() {
+            "choice" | "choices" => {
+                let single = field.kind == "choice";
+                let mut choices = Column::new().spacing(2);
+                for choice in &field.choices {
+                    let picked = entry.is_some_and(|e| e.picked.contains(&choice.value));
+                    let mark = match (single, picked) {
+                        (true, true) => "◉",
+                        (true, false) => "○",
+                        (false, true) => "☑",
+                        (false, false) => "☐",
+                    };
+                    let label = if choice.title.is_empty() {
+                        &choice.value
+                    } else {
+                        &choice.title
+                    };
+                    choices = choices.push(keys::press(
+                        button(
+                            row![
+                                text(mark).size(style::SMALL).color(if picked {
+                                    P.accent
+                                } else {
+                                    P.fg_dim
+                                }),
+                                text(label).size(style::SMALL),
+                            ]
+                            .spacing(8),
+                        )
+                        .padding([2, 6])
+                        .style(style::row_button),
+                        edit(crate::forms::Edit::Pick {
+                            key: field.key.clone(),
+                            value: choice.value.clone(),
+                        }),
+                    ));
+                }
+                choices.into()
+            }
+            "boolean" => {
+                let on = entry.is_some_and(|e| e.on);
+                keys::press(
+                    button(
+                        row![
+                            text(if on { "☑" } else { "☐" })
+                                .size(style::SMALL)
+                                .color(if on { P.accent } else { P.fg_dim }),
+                            text("yes").size(style::SMALL),
+                        ]
+                        .spacing(8),
+                    )
+                    .padding([2, 6])
+                    .style(style::row_button),
+                    edit(crate::forms::Edit::Toggle {
+                        key: field.key.clone(),
+                    }),
+                )
+            }
+            "text" | "number" => {
+                let key = field.key.clone();
+                iced::widget::text_input(
+                    if field.kind == "number" {
+                        "a number"
+                    } else {
+                        "optional"
+                    },
+                    entry.map_or("", |e| e.text.as_str()),
+                )
+                .size(style::SMALL)
+                .padding(6)
+                .on_input(move |value| {
+                    Message::FormEdit(
+                        id(),
+                        crate::forms::Edit::Text {
+                            key: key.clone(),
+                            text: value,
+                        },
+                    )
+                })
+                .into()
+            }
+            other => text(format!("A {other} field cannot be answered here."))
+                .size(style::TINY)
+                .color(P.fg_dim)
+                .into(),
+        };
+        block = block.push(input);
+        fields = fields.push(block);
+    }
+    let answerable = crate::forms::answerable(question);
+    let buttons = row![
+        keys::press_maybe(
+            button(text("Submit").size(style::TEXT))
+                .padding([6, 12])
+                .style(style::solid(P.accent)),
+            (answerable && !sending).then(|| Message::SubmitForm(id())),
+        ),
+        keys::press_maybe(
+            button(text("Decline").size(style::TEXT))
+                .padding([6, 12])
+                .style(style::solid(P.fg_dim)),
+            (!sending).then(|| Message::DeclineForm(id())),
+        ),
+    ]
+    .spacing(8);
+    column![fields, buttons].spacing(12).into()
+}
+
+/// A prompt the daemon holds until the person decides (after a restart or a failure): send it
+/// after all, or drop it.
+fn held(submission: &sill_proto::sfp::Submission) -> Element<'_, Message> {
+    let why = submission.hold_reason.as_ref().map_or_else(
+        || "held until you decide".to_string(),
+        |r| r.message.clone(),
+    );
+    let small = |label: &'static str, message: Message| {
+        keys::press(
+            button(text(label).size(style::TINY))
+                .padding([1, 6])
+                .style(style::quiet),
+            message,
+        )
+    };
+    container(
+        row![
+            container(
+                column![
+                    text(one_line(&submission.text, 100))
+                        .size(style::SMALL)
+                        .wrapping(text::Wrapping::None),
+                    text(one_line(&format!("Held: {why}"), 110))
+                        .size(style::TINY)
+                        .color(P.warning)
+                        .wrapping(text::Wrapping::None),
+                ]
+                .spacing(2)
+            )
+            .width(Fill)
+            .clip(true),
+            small(
+                "Send",
+                Message::ResumeHeld(submission.submission_id.clone())
+            ),
+            small(
+                "Discard",
+                Message::DiscardHeld(submission.submission_id.clone())
+            ),
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center),
+    )
+    .padding([3, 12])
+    .into()
 }
 
 /// Prompts on their way, or that did not arrive: what happened, and what can be done.

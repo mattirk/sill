@@ -124,6 +124,19 @@ impl Actions {
         }
     }
 
+    /// A read made of several requests (`read` repeats it once on a fresh connection when the
+    /// old one turned out closed).
+    pub fn reading<T>(&self, read: impl Fn(&Client) -> anyhow::Result<T>) -> anyhow::Result<T> {
+        let client = self.client()?;
+        match read(&client) {
+            Err(e) if connection_lost(&e) => {
+                self.forget(&client);
+                read(&*self.client()?)
+            }
+            result => result,
+        }
+    }
+
     /// The sessions the daemon has, newest first.
     pub fn sessions(&self) -> anyhow::Result<Vec<sill_proto::sessions::Session>> {
         let client = self.client()?;

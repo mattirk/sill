@@ -135,3 +135,61 @@ fn render_files() {
     }
     render_size(&app, "11-strip", (1000.0, 860.0));
 }
+
+#[test]
+#[ignore = "writes the menu and form PNGs for review"]
+fn render_lifecycle() {
+    use crate::Message;
+    let (mut app, _) = App::new(true, None);
+    let _ = app.update(Message::Menu(crate::menu::Event::Toggle));
+    app.all_sessions = (0..3)
+        .map(|i| {
+            let titles = [
+                "Travelling policies",
+                "Drawer layout and flicker",
+                "Compact prompt queue",
+            ];
+            let title = titles[i];
+            serde_json::from_value(serde_json::json!({
+                "session_id": format!("s{i}"), "agent": if i == 1 { "codex" } else { "claude" },
+                "title": title,
+                "title_kind": "", "created_at": "1", "last_used": "1", "ended_at": "1793806135",
+                "policy": "default", "auto_allow": false, "desktop": "", "memory_scope": "",
+                "summary": "a summary", "summary_kind": "", "ghost": false, "running": false,
+                "pins": [], "settings": {}, "follows": null, "compacted": "0"
+            }))
+            .unwrap()
+        })
+        .collect();
+    render(&app, "12-menu");
+    let _ = app.update(Message::Menu(crate::menu::Event::Toggle));
+    let view = app.views.get_mut("demo").unwrap();
+    let question: sill_proto::sfp::Question = serde_json::from_value(serde_json::json!({
+        "question_id":"form", "agent_generation_id":"demo-generation", "kind":"form",
+        "title":"Where should this deploy?", "options":[], "state":"open",
+        "fields":[
+            {"key":"env", "title":"Environment", "description":"The stage the release goes to.",
+             "kind":"choice", "choices":[{"value":"stage","title":"Staging","description":""},
+                                         {"value":"prod","title":"Production","description":""}]},
+            {"key":"notify", "title":"Tell the team", "description":"", "kind":"boolean", "choices":[]},
+            {"key":"why", "title":"Why now", "description":"", "kind":"text", "choices":[]}
+        ]
+    }))
+    .unwrap();
+    let event = sill_proto::sfp::SessionEvent {
+        session_id: "demo".into(),
+        subscription_id: "demo-subscription".into(),
+        seq: (view.conversation.seq + 1).to_string(),
+        event: sill_proto::sfp::Event::QuestionUpdated { question },
+    };
+    view.accept(event);
+    let _ = app.update(Message::FormEdit(
+        "form".into(),
+        crate::forms::Edit::Pick {
+            key: "env".into(),
+            value: "stage".into(),
+        },
+    ));
+    let _ = app.update(Message::Latest);
+    render(&app, "13-form");
+}

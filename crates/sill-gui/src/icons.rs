@@ -11,6 +11,10 @@ const OPENAI: &str = "M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.
 const GEMINI: &str = "M11.04 19.32Q12 21.51 12 24q0-2.49.93-4.68.96-2.19 2.58-3.81t3.81-2.55Q21.51 12 24 12q-2.49 0-4.68-.93a12.3 12.3 0 0 1-3.81-2.58 12.3 12.3 0 0 1-2.58-3.81Q12 2.49 12 0q0 2.49-.96 4.68-.93 2.19-2.55 3.81a12.3 12.3 0 0 1-3.81 2.58Q2.49 12 0 12q2.49 0 4.68.96 2.19.93 3.81 2.55t2.55 3.81";
 /// "Some agent": a ring with a dot.
 const AGENT: &str = "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 2a8 8 0 1 1 0 16 8 8 0 0 1 0-16zm0 5a3 3 0 1 0 0 6 3 3 0 0 0 0-6z";
+/// A ghost: a dome with a wavy hem and two eyes (a ghost session leaves nothing behind).
+const GHOST: &str = "M12 2.5a7 7 0 0 0-7 7V21l2.4-1.8 2.3 1.8 2.3-1.8 2.3 1.8 2.3-1.8L19 21V9.5a7 7 0 0 0-7-7zM9.5 8a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3zm5 0a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3z";
+/// A plus, for the new-session menu.
+const PLUS: &str = "M11 4h2v7h7v2h-7v7h-2v-7H4v-2h7z";
 /// The send arrow and the stop square, on the shelf's 24-unit grid.
 const SEND: &str = "M5 4.5 20 12 5 19.5 7.5 12Z";
 const STOP: &str = "M6 6H18V18H6Z";
@@ -34,6 +38,8 @@ macro_rules! icon {
 }
 
 icon!(herring, HERRING);
+icon!(ghost, GHOST);
+icon!(plus, PLUS);
 icon!(send, SEND);
 icon!(stop, STOP);
 icon!(claude, CLAUDE);

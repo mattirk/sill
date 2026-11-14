@@ -1,7 +1,9 @@
 mod demo;
 mod fonts;
+mod forms;
 mod icons;
 mod keys;
+mod menu;
 #[cfg(test)]
 mod perf;
 mod selection;
@@ -114,6 +116,11 @@ impl std::fmt::Display for Pick {
 /// What a request the person made was, for its outcome.
 #[derive(Debug, Clone)]
 pub enum Act {
+    Create,
+    Reopen(String),
+    End(String),
+    Delete,
+    Resume,
     Send(String),
     Check(String),
     Stop,
@@ -186,6 +193,17 @@ pub enum Message {
     Escape,
     /// PageDown (true) or PageUp in the conversation or the open file.
     Page(bool),
+    /// The `+` menu: start, reopen, delete sessions.
+    Menu(menu::Event),
+    /// A tab's ×: end its session (a ghost's needs a second press).
+    CloseTab(String),
+    /// A form question: a field edited, the form sent, or declined.
+    FormEdit(String, forms::Edit),
+    SubmitForm(String),
+    DeclineForm(String),
+    /// A held prompt: send it after all, or drop it.
+    ResumeHeld(String),
+    DiscardHeld(String),
     Noop,
 }
 
@@ -222,6 +240,8 @@ pub struct SessionView {
     pub reader: Option<workspace::ReaderView>,
     /// The failed turn the person has looked at, so its mark goes.
     seen_failure: Option<String>,
+    /// What the person has entered in open form questions.
+    pub forms: BTreeMap<String, forms::Form>,
 }
 
 impl SessionView {
@@ -248,6 +268,7 @@ impl SessionView {
             files: FilesState::default(),
             reader: None,
             seen_failure: None,
+            forms: BTreeMap::new(),
         }
     }
 
@@ -366,7 +387,15 @@ pub struct App {
     lanes: Option<async_channel::Sender<(String, u64, lane::Update)>>,
     next_lane: u64,
     pub tabs: Vec<Tab>,
+    /// Every session the daemon has, newest first (the menu's Reopen list).
+    pub all_sessions: Vec<Session>,
     pub views: BTreeMap<String, SessionView>,
+    /// The `+` menu, while open.
+    pub menu: Option<menu::Menu>,
+    /// A session just created or reopened: chosen once the list shows it.
+    pending_choose: Option<String>,
+    /// A ghost's tab whose × was pressed once.
+    pub armed_close: Option<String>,
     pub selected: Option<String>,
     /// `--session`, chosen when the first list arrives.
     initial: Option<String>,
@@ -423,7 +452,11 @@ impl App {
             lanes: None,
             next_lane: 0,
             tabs: Vec::new(),
+            all_sessions: Vec::new(),
             views: BTreeMap::new(),
+            menu: None,
+            pending_choose: None,
+            armed_close: None,
             selected: None,
             initial,
             list_error: None,
@@ -806,6 +839,86 @@ impl App {
                 return self.choose(id);
             }
             Message::Escape => return self.escape(),
+            Message::Menu(event) => return self.menu_event(event),
+            Message::CloseTab(id) => {
+                let ghost = self
+                    .all_sessions
+                    .iter()
+                    .any(|s| s.session_id == id && s.ghost);
+                if self.demo {
+                    return Task::none();
+                }
+                if ghost && self.armed_close.as_deref() != Some(id.as_str()) {
+                    self.armed_close = Some(id);
+                    return Task::none();
+                }
+                self.armed_close = None;
+                let (method, params) = sill_client::sessions::end(&id);
+                return self.act(&id, Act::End(id.clone()), method, params);
+            }
+            Message::FormEdit(question_id, edit) => {
+                if let Some(view) = self.current_mut()
+                    && let Some(question) = view.conversation.questions.get(&question_id)
+                {
+                    let form = view.forms.entry(question_id).or_default();
+                    forms::apply(form, question, edit);
+                }
+            }
+            Message::SubmitForm(question_id) => {
+                let Some(view) = self.current_mut() else {
+                    return Task::none();
+                };
+                let Some(question) = view.conversation.questions.get(&question_id) else {
+                    return Task::none();
+                };
+                let form = view.forms.get(&question_id).cloned().unwrap_or_default();
+                match forms::values(&form, question) {
+                    Ok(values) => return self.answer_with(question_id, Answer::Form { values }),
+                    Err(problem) => {
+                        view.failed = Some(format!("The form cannot be sent: {problem}"))
+                    }
+                }
+            }
+            Message::DeclineForm(question_id) => {
+                return self.answer_with(question_id, Answer::Cancel);
+            }
+            Message::ResumeHeld(submission_id) | Message::DiscardHeld(submission_id)
+                if self.demo =>
+            {
+                let _ = submission_id;
+            }
+            Message::ResumeHeld(submission_id) => {
+                let Some(view) = self.current() else {
+                    return Task::none();
+                };
+                let key = SubmissionKey {
+                    session_id: view.id.clone(),
+                    submission_id,
+                };
+                let session = view.id.clone();
+                return self.act(
+                    &session,
+                    Act::Resume,
+                    "_sill/submissions.resume",
+                    json!(key),
+                );
+            }
+            Message::DiscardHeld(submission_id) => {
+                let Some(view) = self.current() else {
+                    return Task::none();
+                };
+                let key = SubmissionKey {
+                    session_id: view.id.clone(),
+                    submission_id,
+                };
+                let session = view.id.clone();
+                return self.act(
+                    &session,
+                    Act::Unqueue,
+                    "_sill/submissions.cancel",
+                    json!(key),
+                );
+            }
             Message::Page(down) => {
                 let reading = self.current().is_some_and(|v| v.files.reader.is_some());
                 let ids: &[&'static str] = if reading {
@@ -820,9 +933,126 @@ impl App {
         Task::none()
     }
 
+    fn menu_event(&mut self, event: menu::Event) -> Task<Message> {
+        use menu::Event;
+        match event {
+            Event::Toggle => {
+                if self.menu.take().is_some() {
+                    return Task::none();
+                }
+                self.menu = Some(menu::Menu::default());
+                let Some(actions) = self.actions.clone() else {
+                    // the demo has two agents and nothing to reopen
+                    let demo = ["claude", "codex"]
+                        .iter()
+                        .map(|id| {
+                            serde_json::from_value(json!({
+                                "id": id, "name": if *id == "claude" { "Claude Code" } else { "Codex" },
+                                "command": []
+                            }))
+                            .expect("a demo agent")
+                        })
+                        .collect();
+                    self.menu.as_mut().unwrap().agents = Some(Ok(demo));
+                    return Task::none();
+                };
+                let settings = actions.clone();
+                return Task::batch([
+                    blocking(
+                        move || {
+                            actions
+                                .reading(sill_client::sessions::startable)
+                                .map_err(|e| format!("{e:#}"))
+                        },
+                        |agents| Message::Menu(Event::Agents(agents)),
+                    ),
+                    blocking(
+                        move || {
+                            settings
+                                .read::<sill_proto::admin::Settings>(
+                                    "_sill/settings.get",
+                                    json!({}),
+                                )
+                                .ok()
+                                .and_then(|s| s.remember_pins)
+                                .unwrap_or(false)
+                        },
+                        |on| Message::Menu(Event::RememberPins(on)),
+                    ),
+                    self.list(),
+                ]);
+            }
+            Event::Agents(agents) => {
+                if let Some(menu) = &mut self.menu {
+                    menu.agents = Some(agents);
+                }
+            }
+            Event::RememberPins(on) => {
+                if let Some(menu) = &mut self.menu {
+                    menu.remember_pins = on;
+                }
+            }
+            Event::Filter(value) => {
+                if let Some(menu) = &mut self.menu {
+                    menu.filter = value;
+                }
+            }
+            Event::More => {
+                if let Some(menu) = &mut self.menu {
+                    menu.expanded = true;
+                }
+            }
+            Event::New { agent, ghost } => {
+                let remember = self.menu.take().is_some_and(|m| m.remember_pins);
+                if self.demo {
+                    return Task::none();
+                }
+                let (method, params) = sill_client::sessions::create(&agent, ghost, remember);
+                return self.act("", Act::Create, method, params);
+            }
+            Event::Reopen(id) => {
+                self.menu = None;
+                let ended = self
+                    .all_sessions
+                    .iter()
+                    .any(|s| s.session_id == id && s.ended_at.is_some());
+                if !ended {
+                    return self.choose(id);
+                }
+                let (method, params) = sill_client::sessions::reopen(&id);
+                return self.act(&id, Act::Reopen(id.clone()), method, params);
+            }
+            Event::NewHere(id) => {
+                self.menu = None;
+                let Some(from) = self.all_sessions.iter().find(|s| s.session_id == id) else {
+                    return Task::none();
+                };
+                let (method, params) = sill_client::sessions::new_here(from);
+                return self.act("", Act::Create, method, params);
+            }
+            Event::Delete(id) => {
+                let Some(menu) = &mut self.menu else {
+                    return Task::none();
+                };
+                if menu.armed.as_deref() != Some(id.as_str()) {
+                    menu.armed = Some(id);
+                    return Task::none();
+                }
+                menu.armed = None;
+                let (method, params) = sill_client::sessions::delete(&id);
+                return self.act(&id, Act::Delete, method, params);
+            }
+        }
+        Task::none()
+    }
+
     /// Escape steps back, as in the shelf: the open file closes, then the transcript, then the
     /// drawer; with nothing left to close, the prompt takes the keyboard.
     fn escape(&mut self) -> Task<Message> {
+        if self.menu.take().is_some() {
+            return Task::none();
+        }
+        self.armed_close = None;
         let drawer = self.workspace.shown;
         let Some(view) = self.current_mut() else {
             return Task::none();
@@ -938,6 +1168,7 @@ impl App {
         };
         self.list_error = None;
         self.listed = true;
+        self.all_sessions = sessions.clone();
         self.tabs = sessions
             .iter()
             .filter(|s| s.ended_at.is_none())
@@ -985,6 +1216,12 @@ impl App {
                 (None, _) => self.list_error = Some(format!("ambiguous session {key}")),
             }
         }
+        if let Some(id) = self
+            .pending_choose
+            .take_if(|id| self.tabs.iter().any(|t| &t.id == id))
+        {
+            tasks.push(self.choose(id));
+        }
         if self.selected.is_none()
             && let Some(tab) = self.tabs.iter().find(|t| t.running)
         {
@@ -1026,6 +1263,30 @@ impl App {
 
     fn done(&mut self, session: String, act: Act, outcome: Outcome) -> Task<Message> {
         trace(|| format!("{session} {act:?} → {outcome:?}"));
+        let lifecycle = match &act {
+            Act::Create => Some("Starting the session"),
+            Act::Reopen(_) => Some("Reopening the session"),
+            Act::End(_) => Some("Closing the session"),
+            Act::Delete => Some("Deleting the session"),
+            _ => None,
+        };
+        if let Some(what) = lifecycle {
+            match (&act, &outcome) {
+                (Act::Create, Outcome::Done(value)) => {
+                    self.pending_choose = sill_client::sessions::created(value);
+                }
+                (Act::Reopen(id), Outcome::Done(_)) => self.pending_choose = Some(id.clone()),
+                (_, Outcome::Done(_)) => {}
+                (_, other) => {
+                    let problem = format!("{what}: {}", other.problem().unwrap_or_default());
+                    match self.current_mut() {
+                        Some(view) => view.failed = Some(problem),
+                        None => self.list_error = Some(problem),
+                    }
+                }
+            }
+            return self.list();
+        }
         let Some(view) = self.views.get_mut(&session) else {
             return Task::none();
         };
@@ -1059,6 +1320,8 @@ impl App {
             None => {
                 if let Some(problem) = outcome.problem() {
                     let what = match act {
+                        Act::Resume => "Sending the held prompt",
+                        Act::Create | Act::Reopen(_) | Act::End(_) | Act::Delete => unreachable!(),
                         Act::Stop => "Stopping the turn",
                         Act::Answer(_) => "Answering the question",
                         Act::Unqueue => "Removing the queued prompt",
@@ -1185,6 +1448,16 @@ impl App {
             }
             return operation::snap_to_end("conversation");
         }
+        let _ = view;
+        self.answer_with(question_id, Answer::Permission { option_id })
+    }
+
+    /// One answer to a question of the selected session; a second press while it is on its way
+    /// sends nothing.
+    fn answer_with(&mut self, question_id: String, answer: Answer) -> Task<Message> {
+        let Some(view) = self.current_mut() else {
+            return Task::none();
+        };
         if !view.answering.insert(question_id.clone()) {
             return Task::none();
         }
@@ -1193,7 +1466,7 @@ impl App {
             session_id: view.id.clone(),
             question_id: question_id.clone(),
             answer_id: sill_client::request_id("answer"),
-            answer: Answer::Permission { option_id },
+            answer,
         };
         let session = view.id.clone();
         self.act(
