@@ -36,7 +36,7 @@ pub struct SessionView {
     term_scroll: gtk::ScrolledWindow,
     /// The shell's pty is opened on first use and kept while hidden.
     shell_open: std::cell::Cell<bool>,
-    /// The person's shell on the host (Ctrl+Shift+T): the same pane, under a warning-coloured
+    /// The person's shell on the host (Ctrl+Shift+H): the same pane, under a warning-coloured
     /// caption — a host process, outside the jail, unrecorded.
     host_term: vte4::Terminal,
     host_scroll: gtk::ScrolledWindow,
@@ -89,10 +89,10 @@ pub struct SessionView {
     pub on_open_folder: RefCell<Option<Box<dyn Fn(&std::path::Path)>>>,
     /// A file to show in the shelf's viewer (a file chip, an image in a message); `full` = a pinned
     /// file, shown over the whole shelf with the tree closed.
-    pub on_open_file: RefCell<Option<Box<dyn Fn(&std::path::Path, bool)>>>,
+    pub on_open_file: RefCell<Option<Box<dyn Fn(&std::path::Path)>>>,
     /// Shell toggle in the controls row (M3 wires the terminal pane to it).
     pub on_shell: RefCell<Option<Box<dyn Fn(bool)>>>,
-    /// The shell button's right-click "terminal on the host": the window opens it (Ctrl+Shift+T) —
+    /// The shell button's right-click "terminal on the host": the window opens it (Ctrl+Shift+H) —
     /// the pane here, or (`true`) a separate window with the configured terminal.
     pub on_host_terminal: RefCell<Option<Box<dyn Fn(bool)>>>,
     /// Pins that were live when the jail started; changed pins need a session restart.
@@ -386,7 +386,7 @@ impl SessionView {
                 resolve: Box::new(move |src| resolve_weak.upgrade()?.resolve_jail_path(src)),
                 open: Some(Box::new(move |p| {
                     if let Some(v) = open_weak.upgrade() {
-                        v.open_file(p, false);
+                        v.open_file(p);
                     }
                 })),
             }));
@@ -586,7 +586,7 @@ impl SessionView {
         (term, scroll)
     }
 
-    /// Ctrl+Shift+T: the host shell pane, or back to the prompt when it is shown.
+    /// Ctrl+Shift+H: the host shell pane, or back to the prompt when it is shown.
     pub fn toggle_host_shell(self: &Rc<Self>, cwd: Option<std::path::PathBuf>) {
         let on = self.bottom.visible_child_name().as_deref() != Some("host");
         self.show_host_shell(on, cwd);
@@ -708,7 +708,7 @@ impl SessionView {
             }
             b
         };
-        let open = item("Host shell here    Ctrl+Shift+T");
+        let open = item("Host shell here    Ctrl+Shift+H");
         open.set_tooltip_text(Some("The host's shell in this pane — a host process, outside the jail: nothing it does is recorded"));
         {
             let v = self.clone();
@@ -1318,7 +1318,7 @@ impl SessionView {
                             cb(&p);
                         }
                     } else {
-                        v.open_file(&p, true);
+                        v.open_file(&p);
                     }
                 });
             }
@@ -1580,10 +1580,16 @@ impl SessionView {
     }
 
     /// A file for the shelf's viewer.
-    fn open_file(&self, path: &std::path::Path, full: bool) {
+    fn open_file(&self, path: &std::path::Path) {
         if let Some(cb) = self.on_open_file.borrow().as_ref() {
-            cb(path, full);
+            cb(path);
         }
+    }
+
+    /// `f(true)` when a terminal pane (jail or host shell) takes the bottom slot, `f(false)` when
+    /// the prompt is back.
+    pub fn connect_pane(&self, f: impl Fn(bool) + 'static) {
+        self.bottom.connect_visible_child_name_notify(move |b| f(b.visible_child_name().as_deref() != Some("prompt")));
     }
 
     /// The session's overlay, planned once per jail.

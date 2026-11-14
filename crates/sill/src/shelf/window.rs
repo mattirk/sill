@@ -52,6 +52,9 @@ pub struct Shelf {
     /// The file tree (a drawer beside the main pane) and the viewer (over it), SPEC §3.1.
     tree: Rc<FolderTree>,
     viewer: Rc<Viewer>,
+    /// The tree's scope while a terminal pane has its width: the drawer closes when the selected
+    /// session shows a shell and opens again, as it was, when the prompt is back.
+    tree_lent: RefCell<Option<Option<PathBuf>>>,
 }
 
 /// Start the host terminal detached from the shelf: `{cwd}` in the command line is the directory,
@@ -217,6 +220,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         agents: agents_page.clone(),
         tree: tree.clone(),
         viewer: viewer.clone(),
+        tree_lent: RefCell::new(None),
     });
     {
         // auto-revert (SPEC §4.4): the Changes page sweeps once a minute; a session that is mid-turn
@@ -246,7 +250,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
     }
 
     {
-        // Files: the global tree beside the main pane; again (or Escape) closes it
+        // Files: the global tree beside the main pane; again (or Ctrl+Shift+F) closes it
         let s = shelf.clone();
         files_btn.connect_clicked(move |_| {
             if s.tree.root.is_visible() {
@@ -266,7 +270,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
             s.restart_session(sid); // a folder pin is a mount; a file pin leaves the jail alone
         }));
         let s = shelf.clone();
-        *tree.on_open.borrow_mut() = Some(Box::new(move |p| s.open_file(p, false)));
+        *tree.on_open.borrow_mut() = Some(Box::new(move |p| s.open_file(p)));
         let s = shelf.clone();
         *tree.on_close.borrow_mut() = Some(Box::new(move || s.close_tree()));
         let s = shelf.clone();
@@ -362,8 +366,8 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
             }
             let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
             let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
-            // Ctrl+Shift+Left/Right walk the tabs, Ctrl+Shift+F toggles the file tree,
-            // Ctrl+Shift+T opens a terminal on the host
+            // Ctrl+Shift+Left/Right walk the tabs, Ctrl+Shift+F toggles the file tree, Ctrl+Shift+T
+            // and W open and close a session tab, Ctrl+Shift+H opens a terminal on the host
             if ctrl && shift {
                 match key {
                     gdk::Key::Left => {
@@ -385,6 +389,16 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
                         return glib::Propagation::Stop;
                     }
                     gdk::Key::T | gdk::Key::t => {
+                        s.new_session_like_selected();
+                        return glib::Propagation::Stop;
+                    }
+                    gdk::Key::W | gdk::Key::w => {
+                        if let Some(id) = s.tabs.selected() {
+                            s.close_session(&id);
+                        }
+                        return glib::Propagation::Stop;
+                    }
+                    gdk::Key::H | gdk::Key::h => {
                         s.open_host_terminal(false);
                         return glib::Propagation::Stop;
                     }
@@ -443,13 +457,9 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         let s = shelf.clone();
         esc.connect_key_pressed(move |_, key, _, _| {
             if key == gdk::Key::Escape {
-                // the viewer steps back (then closes), then the tree closes, then the pages
+                // the viewer steps back (then closes), then the pages; the tree is Ctrl+Shift+F's
                 if s.viewer.root.is_visible() {
                     s.viewer.escape();
-                    return glib::Propagation::Stop;
-                }
-                if s.tree.root.is_visible() {
-                    s.close_tree();
                     return glib::Propagation::Stop;
                 }
                 if s.stack.visible_child_name().as_deref() != Some("sessions") {
@@ -564,7 +574,7 @@ impl Shelf {
         self.viewer.focus();
     }
 
-    /// A shell on the host (Ctrl+Shift+T, the shell button's right-click), in the folder the person
+    /// A shell on the host (Ctrl+Shift+H, the shell button's right-click), in the folder the person
     /// is looking at: the tree's selection, else the session's first pinned folder, else home. In the
     /// selected session's bottom slot — the same pane as the jail shell, marked as host — or, with
     /// `window`, the configured terminal in a window of its own. A host process by design — outside
@@ -609,16 +619,48 @@ impl Shelf {
         if !self.tree.root.is_visible() {
             return;
         }
-        self.tree.root.set_visible(false);
-        self.place();
+        self.hide_tree();
         self.focus_prompt();
     }
 
-    /// A file in the viewer, over the main pane. `full`: a pinned file, the whole shelf — the tree closes.
-    fn open_file(&self, path: &Path, full: bool) {
-        if full {
-            self.close_tree();
+    fn hide_tree(&self) {
+        self.tree.root.set_visible(false);
+        self.place();
+    }
+
+    /// The selected session's bottom slot changed: a terminal pane takes the whole width — the tree
+    /// closes while it shows and comes back, as it was, with the prompt (`tree_lent`).
+    fn pane_shown(&self, id: &str, shown: bool) {
+        if self.tabs.selected().as_deref() != Some(id) {
+            return;
         }
+        if shown {
+            if self.tree.root.is_visible() {
+                *self.tree_lent.borrow_mut() = Some(self.tree.scope());
+                self.hide_tree();
+            }
+        } else if let Some(scope) = self.tree_lent.borrow_mut().take()
+            && !self.tree.root.is_visible()
+        {
+            self.toggle_tree(scope);
+        }
+    }
+
+    /// A new session with the selected session's agent (Ctrl+Shift+T); claude when none is selected.
+    fn new_session_like_selected(self: &Rc<Self>) {
+        let agent = self
+            .tabs
+            .selected()
+            .and_then(|id| self.views.borrow().get(&id).map(|v| v.session.borrow().agent.clone()))
+            .unwrap_or_else(|| "claude".into());
+        match self.store.create(&agent, "default") {
+            Ok(s) => self.open_session(s),
+            Err(e) => self.set_status(&format!("new session: {e:#}")),
+        }
+    }
+
+    /// A file in the viewer, over the main pane; the tree stays as it is.
+    fn open_file(&self, path: &Path) {
         self.viewer.open(path);
         self.viewer.root.set_visible(true);
         self.viewer.focus(); // keys go to the viewer, not the prompt underneath
@@ -1015,7 +1057,10 @@ impl Shelf {
             let shelf = self.clone();
             *view.on_open_folder.borrow_mut() = Some(Box::new(move |p| shelf.toggle_tree(Some(p.to_path_buf()))));
             let shelf = self.clone();
-            *view.on_open_file.borrow_mut() = Some(Box::new(move |p, full| shelf.open_file(p, full)));
+            *view.on_open_file.borrow_mut() = Some(Box::new(move |p| shelf.open_file(p)));
+            let shelf = self.clone();
+            let vid = id.clone();
+            view.connect_pane(move |shown| shelf.pane_shown(&vid, shown));
             let shelf = self.clone();
             *view.on_host_terminal.borrow_mut() = Some(Box::new(move |window| shelf.open_host_terminal(window)));
         }
@@ -1128,7 +1173,36 @@ impl Shelf {
             let head = gtk::Label::new(Some("Reopen"));
             head.add_css_class("sill-menu-caption");
             head.set_xalign(0.0);
-            menu.append(&head);
+            head.set_hexpand(true);
+            // delete every stored session: one click arms it, the next does it
+            let all = gtk::Button::with_label("delete all");
+            all.add_css_class("flat");
+            all.add_css_class("sill-menu-delete-all");
+            all.set_tooltip_text(Some("Delete every session listed here, with their recorded changes (click twice)"));
+            {
+                let s = self.clone();
+                let pop = pop.clone();
+                let ids: Vec<String> = stored.iter().map(|x| x.id.clone()).collect();
+                all.connect_clicked(move |b| {
+                    if !b.has_css_class("sill-armed") {
+                        b.add_css_class("sill-armed");
+                        b.set_label(&format!("delete {}?", ids.len()));
+                        return;
+                    }
+                    pop.popdown();
+                    for id in ids.clone() {
+                        let s = s.clone();
+                        stop_then(&id.clone(), move || {
+                            let _ = sill_core::session::remove_state(session::uid(), &id);
+                            let _ = s.store.delete(&id);
+                        });
+                    }
+                });
+            }
+            let head_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            head_row.append(&head);
+            head_row.append(&all);
+            menu.append(&head_row);
             for sess in stored {
                 let line = gtk::Box::new(gtk::Orientation::Horizontal, 0);
                 let b = row(registry.get(&sess.agent), &sess.title);

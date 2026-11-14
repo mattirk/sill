@@ -194,8 +194,9 @@ rebuilt automatically. Restarting the shelf alone does not touch running session
 |---|---|
 | Alt+Space (Settings → Hotkey) | show / hide the shelf |
 | Ctrl+Shift+Left / Right | previous / next session tab |
-| Ctrl+Shift+F | the file tree: the session's first pinned folder, else everything |
+| Ctrl+Shift+T / Ctrl+Shift+W | a new session tab with the same agent / close the tab |
+| Ctrl+Shift+F | the file tree: the session's first pinned folder, else everything; again closes it |
 | Ctrl+T | the shell inside the session's jail |
-| Ctrl+Shift+T | a shell on the host, in the same pane, marked `host · outside the jail` |
-| Escape | the viewer steps back, then the tree closes, then back to the sessions |
+| Ctrl+Shift+H | a shell on the host, in the same pane, marked `host · outside the jail` |
+| Escape | the viewer steps back, then back to the sessions |
 | F2 | rename the selected tab |

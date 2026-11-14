@@ -61,7 +61,7 @@ pub fn build() -> gtk::Box {
     ar_dd.set_tooltip_text(Some("What the agent changed outside git and outside pinned folders is reverted this long after its last write, once the session is idle. Keep in Changes stops the clock."));
     root.append(&row("Auto-revert", &ar_dd));
 
-    // host terminal (Ctrl+Shift+T): a command line; empty = the first installed known terminal
+    // host terminal (Ctrl+Shift+H): a command line; empty = the first installed known terminal
     let term = gtk::Entry::new();
     term.set_hexpand(true);
     let cfg = sill_core::config::load();
@@ -69,7 +69,7 @@ pub fn build() -> gtk::Box {
     let detected = cfg.host_terminal().unwrap_or_else(|| "none found".into());
     term.set_placeholder_text(Some(&format!("auto: {detected}")));
     term.set_tooltip_text(Some(
-        "Opened on the host with Ctrl+Shift+T or from the shell button's right-click menu, in the folder shown in the tree, else the session's first pinned folder, else home. {cwd} in the command line is replaced by that folder; it is the working directory anyway. Empty = the first installed terminal sill knows.",
+        "Opened on the host with Ctrl+Shift+H or from the shell button's right-click menu, in the folder shown in the tree, else the session's first pinned folder, else home. {cwd} in the command line is replaced by that folder; it is the working directory anyway. Empty = the first installed terminal sill knows.",
     ));
     term.connect_changed(|e| {
         let t = e.text().trim().to_string();
@@ -210,7 +210,7 @@ pub fn build() -> gtk::Box {
                 sill_core::launcher::Mode::Direct => "pids and logs under $XDG_RUNTIME_DIR/sill/<id>/ ({bwrap,launch}.pid, {jail,proxy}.log)".to_string(),
             },
         ),
-        ("Keys".into(), "hotkey show/hide · Escape sessions ⇄ backend · Enter send · Shift+Enter newline · Ctrl+T shell · F2 or double-click rename".into()),
+        ("Keys".into(), "hotkey show/hide · Escape sessions ⇄ backend · Enter send · Shift+Enter newline · Ctrl+T shell · Ctrl+Shift+H host shell · Ctrl+Shift+T / W new / close tab · Ctrl+Shift+F tree · F2 or double-click rename".into()),
     ];
     for (k, v) in info {
         let vl = gtk::Label::new(Some(&v));

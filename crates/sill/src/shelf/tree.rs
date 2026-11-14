@@ -212,7 +212,7 @@ impl FolderTree {
         let close = gtk::Button::from_icon_name("window-close-symbolic");
         close.add_css_class("flat");
         close.add_css_class("sill-viewer-btn");
-        close.set_tooltip_text(Some("Close the tree (Escape)"));
+        close.set_tooltip_text(Some("Close the tree (Ctrl+Shift+F)"));
         bar.append(&title);
         bar.append(&all);
         bar.append(&close);
