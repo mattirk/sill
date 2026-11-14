@@ -23,6 +23,14 @@ use crate::mounts::{self, Mount};
 use crate::paths::{expand_pattern, is_under, layer_name};
 use crate::policy::{NetMode, Policy};
 
+/// Mask at the first inaccessible directory, not below it: bwrap cannot create or
+/// resolve a destination through a root-only ancestor (e.g. Docker storage).
+fn reachable_mount_mask(path: &Path, denied: impl Fn(&Path) -> bool) -> PathBuf {
+    let mut ancestors: Vec<_> = path.ancestors().collect();
+    ancestors.reverse();
+    ancestors.into_iter().find(|p| denied(p)).unwrap_or(path).to_path_buf()
+}
+
 /// Directories that are never overlaid: the jail gets fresh ones.
 const FRESH: &[&str] = &["proc", "dev", "tmp", "run"];
 /// Read-only bind instead of overlay.
@@ -420,13 +428,20 @@ impl JailSpec {
                 continue;
             }
             if host_binds.iter().any(|h| is_under(&m.mount_point, h)) {
-                host_masks.push(m.mount_point.clone());
+                host_masks.push(reachable_mount_mask(&m.mount_point, |path| {
+                    matches!(rustix::fs::access(path, rustix::fs::Access::READ_OK | rustix::fs::Access::EXEC_OK),
+                        Err(rustix::io::Errno::ACCESS) | Err(rustix::io::Errno::PERM))
+                }));
             }
         }
         host_masks.sort();
         host_masks.dedup();
+        let mut masked_roots: Vec<PathBuf> = Vec::new();
         for m in &host_masks {
+            // A parent mask already hides its mounts; do not recreate children inside it.
+            if masked_roots.iter().any(|parent| is_under(m, parent)) { continue; }
             push(&mut a, &[&"--tmpfs", &host_view(m)]);
+            masked_roots.push(m.clone());
         }
         if self.unsafe_state {
             // the agent must not reach its own upper trees
@@ -1339,6 +1354,15 @@ git -C "$S" fsck --full
         assert!(no_bind_across_mask(Path::new("/home/me/.sshx"), &masked).is_ok());
         assert!(no_bind_across_mask(Path::new("/home/me/proj"), &masked).is_ok());
         assert!(no_bind_across_mask(Path::new("/home/me/.config/x"), &masked).is_err());
+    }
+
+    #[test]
+    fn docker_mount_mask_stops_before_unsearchable_parent() {
+        let mount = Path::new("/var/lib/docker/rootfs/overlayfs/container");
+        assert_eq!(reachable_mount_mask(mount, |p| p == Path::new("/var/lib/docker")),
+                   Path::new("/var/lib/docker"));
+        assert_eq!(reachable_mount_mask(mount, |_| false), mount);
+        assert_eq!(reachable_mount_mask(mount, |p| p == mount), mount);
     }
 
     #[test]
