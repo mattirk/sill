@@ -703,8 +703,8 @@ pub fn dropdown<'a>(view: &'a SessionView, session: &'a Session) -> Element<'a, 
     if let Some((_, note, true)) = &perms.notice {
         basic = basic.push(text(note).size(style::TINY).color(P.error));
     }
-    container(basic.width(DROPDOWN))
-        .padding([6, 12])
+    container(basic.width(DROPDOWN + 2.0 * ROW_INSET))
+        .padding([4, 4])
         .style(|theme| {
             let menu = style::control_menu(theme);
             container::Style {
@@ -717,6 +717,8 @@ pub fn dropdown<'a>(view: &'a SessionView, session: &'a Session) -> Element<'a, 
         .into()
 }
 
+/// Room inside a dropdown row's highlight, on each side of its name and switch.
+const ROW_INSET: f32 = 8.0;
 /// The dropdown's width: a name and its switch.
 const DROPDOWN: f32 = 170.0;
 
@@ -789,7 +791,16 @@ fn basic_switch<'a>(
     .spacing(12)
     .align_y(Alignment::Center);
     tip(
-        keys::press_maybe(button(line).width(Fill).height(ROW).padding([0, 0]).style(style::quiet), flip),
+        // the hover's highlight is the row: the name and the switch inset in it alike, the line
+        // centred in its height
+        keys::press_maybe(
+            button(container(line).height(Fill).align_y(Alignment::Center))
+                .width(Fill)
+                .height(ROW + 4.0)
+                .padding([0.0, ROW_INSET])
+                .style(style::quiet),
+            flip,
+        ),
         said,
     )
 }
