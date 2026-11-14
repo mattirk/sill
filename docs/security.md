@@ -67,6 +67,15 @@ Verified in code and, where marked ⊙, confirmed from inside a running jail:
 is the only way the shelf runs git. Still open from this pass: S7–S20, of which S8 (host shell cwd
 in a pin), S9 (viewer/tree follow links) and S10 (`expected_hash`, Keep-all filter) are next.
 
+2026-11-01, later: the §4.11 leftovers closed in seven commits — #8 (other agents' credentials
+masked, homes 0700), #7/#9 (proxy decides on the name before DNS, one port per pattern, connection
+cap, head cap, accept survives; S14's reserved ranges, S19's proxy items), #10 (shim revert and
+diffs never through a link; S11, S9's save half via `safe_fs::replace_file`), #16 (keep re-stats the
+host), #13 (session start, git status, keep/revert off the GTK thread), #15 (weak closures in the
+session view), #17 (store busy timeout and atomic seq, ledger EACCES, hotkey HUP, store-open error
+window). Open from this file: S7, S8, S9 (viewer/tree reads), S10, S12, S13, S15–S18, S19's
+fstab/image items.
+
 ## Proposed top three (as written before the fixes)
 
 Chosen by reach × likelihood under threat (a), the agent that is already running. S1, S2 and S4 share
