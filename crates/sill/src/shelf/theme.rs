@@ -270,12 +270,24 @@ pub fn stylesheet(t: &Theme) -> String {
              window, .background {{ background: {bg}; color: {fg}; }}\n\
              popover > contents, tooltip > contents {{ background: {surface}; color: {fg}; border: 1px solid {border}; }}\n\
              entry {{ background: {surface}; color: {fg}; border-color: {border}; }}\n\
-             list, listview, row, scrolledwindow, viewport {{ background: transparent; color: {fg}; }}\n",
+             list, listview, row, scrolledwindow, viewport {{ background: transparent; color: {fg}; }}\n\
+             button {{ border: none; box-shadow: none; text-shadow: none; -gtk-icon-shadow: none; background-image: none; background-color: alpha({fg}, 0.08); }}\n\
+             button:hover {{ background-color: alpha({fg}, 0.14); }}\n\
+             button.flat, menubutton.flat > button, menubutton > button.flat {{ background: transparent; }}\n\
+             button.flat:hover, menubutton.flat > button:hover, menubutton > button.flat:hover {{ background: alpha({fg}, 0.07); }}\n\
+             button.suggested-action {{ background: {accent}; color: {accent_fg}; }}\n\
+             button.destructive-action {{ background: {error}; color: {bg}; }}\n\
+             scrollbar, scrollbar trough {{ background: transparent; border: none; box-shadow: none; }}\n\
+             scrollbar slider {{ min-width: 6px; min-height: 6px; margin: 2px; border: none; border-radius: 3px; background: alpha({fg}, 0.28); }}\n\
+             scrollbar slider:hover, scrollbar slider:active {{ background: alpha({fg}, 0.5); }}\n",
             surface = t.surface,
             bg = t.bg,
             border = t.border,
             dim = t.fg_dim,
             fg = t.fg,
+            accent = t.accent,
+            accent_fg = if t.dark { t.bg } else { "#ffffff" },
+            error = t.error,
         ));
     }
     s
