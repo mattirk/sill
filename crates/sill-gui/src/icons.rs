@@ -37,6 +37,11 @@ const LINES: &[(&str, &str)] = &[
         "processes",
         "M2 2h20v8h-20zM2 14h20v8h-20zM6 6L6.01 6M6 18L6.01 18",
     ),
+    // commands the agent has running in the jail (lucide activity), beside `processes`
+    (
+        "running",
+        "M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2",
+    ),
     (
         "sessions",
         "M3 5h.01M3 12h.01M3 19h.01M8 5h13M8 12h13M8 19h13",

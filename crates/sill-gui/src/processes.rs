@@ -528,8 +528,8 @@ pub fn elapsed(ms: u64) -> String {
     }
 }
 
-/// The bar's chip: commands running now and services, each named when there are any; it opens
-/// the panel.
+/// The bar's chip: how many commands run now and how many services, each behind its own icon;
+/// the tooltip names them, and it opens the panel.
 pub fn indicator(view: &SessionView) -> Option<Element<'_, Message>> {
     let list = &view.processes.list;
     let commands = view.processes.jail.commands.len();
@@ -546,22 +546,20 @@ pub fn indicator(view: &SessionView) -> Option<Element<'_, Message>> {
     } else {
         P.fg_dim
     };
-    let mut said = vec![];
+    // a count behind each kind's own icon: commands running now, then services (the only one
+    // shown when no command runs, so ended managed processes keep their place)
+    let counted = |icon: &'static str, n: usize| {
+        row![icons::glyph(icon, crate::ui::BAR_ICON, color), text(n.to_string()).size(style::TINY).color(color)]
+            .spacing(3)
+            .align_y(Alignment::Center)
+    };
+    let mut content = iced::widget::Row::new().spacing(8).align_y(Alignment::Center);
     if commands > 0 {
-        said.push(format!("{commands} running"));
+        content = content.push(counted("running", commands));
     }
-    if services > 0 {
-        said.push(format!("{services} service{}", if services == 1 { "" } else { "s" }));
+    if services > 0 || commands == 0 {
+        content = content.push(counted("processes", services));
     }
-    if said.is_empty() {
-        said.push("ended".into());
-    }
-    let content = row![
-        icons::glyph("processes", crate::ui::BAR_ICON, color),
-        text(said.join(" · ")).size(style::TINY).color(color),
-    ]
-    .spacing(4)
-    .align_y(Alignment::Center);
     let mut tip: Vec<String> =
         view.processes.jail.commands.iter().map(|c| format!("running: {}", command_name(&c.argv))).collect();
     tip.extend(list.iter().filter(|p| procs::running(p)).map(|p| format!("service: {}", p.name)));
@@ -952,7 +950,6 @@ mod tests {
         let _ = app.update(Message::Procs(Event::Read("demo".into(), 7, Ok(vec![]), None, jail)));
         let _ = app.update(Message::Procs(Event::Toggle("demo".into())));
         let mut ui = crate::tests::simulator(&app, (720.0, 860.0));
-        ui.find("1 running · 1 service").unwrap();
         ui.find("RUNNING NOW").unwrap();
         ui.find("cargo build").unwrap();
         ui.find("2m · 3 processes").unwrap();
