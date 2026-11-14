@@ -83,6 +83,10 @@ impl App {
                     view.desktop.unchanged = 0;
                     return self.capture_desktop(&id);
                 }
+                // the conversation was out of the tree meanwhile: back to its place, not its top
+                if self.selected.as_deref() == Some(id.as_str()) {
+                    return self.restore_scroll();
+                }
             }
             Event::Tick => {
                 if let Some(id) = self.selected.clone()
@@ -326,6 +330,24 @@ mod tests {
         };
         daemon.reply(&request, serde_json::to_value(answer).unwrap());
         (initializing.join().unwrap(), daemon)
+    }
+
+    /// Closing the view puts the conversation back where it was (the feed left the widget tree
+    /// while the desktop showed, which would otherwise start it from the top).
+    #[test]
+    fn closing_the_view_restores_the_conversation_s_place() {
+        let (mut app, _) = App::new(true, None);
+        app.all_sessions = vec![session_record("demo", "demo", false, false)];
+        with_desktop(&mut app, true);
+        {
+            let view = app.views.get_mut("demo").unwrap();
+            view.follow_tail = false;
+            view.scroll_offset = 1234.0;
+            view.desktop.shown = true;
+        }
+        let task = app.update(Message::Desktop(Event::Toggle("demo".into())));
+        assert!(!app.views["demo"].desktop.shown);
+        assert!(iced_runtime::task::into_stream(task).is_some(), "a scroll back to the saved offset");
     }
 
     /// The monitor is in the composer bar only while the running jail has a test desktop.

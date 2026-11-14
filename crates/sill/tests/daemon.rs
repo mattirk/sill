@@ -1151,6 +1151,53 @@ fn travelling_policy_suggestions_are_session_grants_and_offline_is_not_overridde
 }
 
 #[test]
+fn development_permissions_apply_together_or_not_at_all() {
+    let d = Daemon::start();
+    let mut gtk = d.connect().unwrap();
+    let mut modes = d.connect_caps(json!({"sill.permission_modes":1})).unwrap();
+    let policies = d.dir.join("home/development-policies");
+    std::fs::create_dir_all(&policies).unwrap();
+    let mut create = |name: &str, text: &str, ghost: bool| {
+        let path = policies.join(format!("{name}.toml"));
+        std::fs::write(&path, format!("name='{name}'\n{text}")).unwrap();
+        let created = modes.call("_sill/sessions.create", json!({"create_id":name,"agent":"claude","policy":path.to_str().unwrap(),"ghost":ghost})).unwrap();
+        created["result"]["session_id"].as_str().unwrap().to_string()
+    };
+    let plain = create("plain", "[network]\nmode='allow'", false);
+    let half = create("half", "[permissions]\nprivate_bus='forbidden'", false);
+    let ghost = create("ghost", "", true);
+    let state = |view: &Value, capability: &str| view["permissions"].as_array().unwrap().iter()
+        .find(|p| p["capability"] == capability).cloned().unwrap();
+    let apply = |c: &mut Conn, session: &str| c.call("_sill/permissions.apply_development", json!({"session_id":session})).unwrap();
+
+    let refused = apply(&mut gtk, &plain);
+    assert_eq!(refused["error"]["data"]["details"]["capability"], "sill.permission_modes", "{refused}");
+    let preview = modes.call("_sill/policy.preview", json!({"session_id":plain})).unwrap();
+    let available = ["test_desktop", "private_bus"].iter().all(|c| state(&preview["result"], c)["available"] == true);
+    let applied = apply(&mut modes, &plain);
+    if available {
+        for capability in ["test_desktop", "private_bus"] {
+            let s = state(&applied["result"]["preview"], capability);
+            assert_eq!((s["requested"].clone(), s["source"].clone(), s["effective"].clone()), (json!(true), json!("session"), json!(true)), "{s}");
+        }
+        let restored = modes.call("_sill/permissions.restore_defaults", json!({"session_id":plain})).unwrap();
+        assert_eq!(state(&restored["result"]["preview"], "test_desktop")["requested"], Value::Null);
+    } else {
+        // this machine lacks Weston or dbus-daemon: the group is refused as a whole, nothing recorded
+        assert_eq!(applied["error"]["data"]["code"], "permission_denied", "{applied}");
+        let preview = modes.call("_sill/policy.preview", json!({"session_id":plain})).unwrap();
+        assert!(["test_desktop", "private_bus"].iter().all(|c| state(&preview["result"], c)["requested"].is_null()));
+    }
+    // a forbidden half refuses the group, naming it, and the other half is not recorded either
+    let refused = apply(&mut modes, &half);
+    assert_eq!(refused["error"]["data"]["code"], "permission_denied", "{refused}");
+    assert!(refused["error"]["message"].as_str().unwrap().contains("private_bus"), "{refused}");
+    let preview = modes.call("_sill/policy.preview", json!({"session_id":half})).unwrap();
+    assert_eq!(state(&preview["result"], "test_desktop")["requested"], Value::Null, "{preview}");
+    assert_eq!(apply(&mut modes, &ghost)["error"]["data"]["code"], "permission_denied");
+}
+
+#[test]
 fn session_permission_choices_restore_defaults_and_frontend_gate() {
     let d = Daemon::start();
     let mut gtk = d.connect().unwrap();

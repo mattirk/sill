@@ -6260,7 +6260,7 @@
         "version": 1
       },
       {
-        "doc": "The frontend shows session permission state: it may change session capability choices and operate sessions using Desktop development or Host control capabilities.",
+        "doc": "The frontend shows session permission state: it may change session capability choices (_sill/permissions.set, apply_development, restore_defaults) and operate sessions using Desktop development or Host control capabilities.",
         "name": "sill.permission_modes",
         "version": 1
       },
@@ -6581,6 +6581,20 @@
       "name": "_sill/permissions.set",
       "params": {
         "$ref": "#/$defs/PermissionChoice"
+      },
+      "result": {
+        "$ref": "#/$defs/PermissionsChanged"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.permission_modes": 1
+      },
+      "doc": "Apply development permissions: remember the test desktop and the private bus as session choices together; refused as a whole, recording nothing, when a limit or a missing backend blocks either.",
+      "kind": "request",
+      "name": "_sill/permissions.apply_development",
+      "params": {
+        "$ref": "#/$defs/SessionKey"
       },
       "result": {
         "$ref": "#/$defs/PermissionsChanged"

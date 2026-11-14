@@ -58,6 +58,8 @@ pub enum Event {
     Restore(String),
     SaveHost(String, String),
     AutoAllow(String, bool),
+    /// Apply development permissions: the test desktop and private D-Bus together.
+    ApplyDevelopment(String),
     Restart(String),
     Done(String, Change, Outcome),
     NoticeExpired(String, u64),
@@ -74,6 +76,7 @@ pub struct Views {
 #[derive(Debug, Clone)]
 pub enum Change {
     Choice(String, Option<bool>),
+    Development,
     Restore,
     SaveHost(String),
     AutoAllow(bool),
@@ -234,6 +237,15 @@ impl App {
                     id,
                     Change::Restore,
                     "_sill/permissions.restore_defaults",
+                    params,
+                );
+            }
+            Event::ApplyDevelopment(id) => {
+                let params = json!({"session_id": id});
+                return self.permission_change(
+                    id,
+                    Change::Development,
+                    "_sill/permissions.apply_development",
                     params,
                 );
             }
@@ -416,6 +428,7 @@ impl App {
                             None => format!("{name} follows the policy{later}."),
                         }
                     }
+                    Change::Development => format!("Development permissions on{later}."),
                     Change::Restore => format!("Defaults restored{later}."),
                     Change::SaveHost(host) => format!("{host} saved for new {agent} sessions."),
                     Change::AutoAllow(true) => "Auto-allow on.".into(),
@@ -520,6 +533,9 @@ fn small<'a>(label: &'a str, message: Option<Message>) -> Element<'a, Message> {
         message,
     )
 }
+
+/// What Apply development permissions turns on together (sill-core's DEVELOPMENT_CAPABILITIES).
+const DEVELOPMENT: [&str; 2] = ["test_desktop", "private_bus"];
 
 /// Fixed slots, so nothing moves when a state changes: the switch and Restart now are always
 /// there (or a gap their size).
@@ -775,6 +791,33 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>) -> Element
         views.preview.permissions.iter().any(|p| p.requested.is_some())
             || !views.preview.session_hosts.is_empty()
     });
+    // Apply development permissions: the test desktop and private D-Bus together, for the next
+    // build. Greyed, with the reason on hover, where either cannot be turned on or both are on.
+    let (development, development_tip) = match &perms.views {
+        Some(views) => {
+            let states: Vec<_> = DEVELOPMENT.iter().map(|c| state(&views.preview, c)).collect();
+            let unusable: Vec<String> = DEVELOPMENT
+                .iter()
+                .zip(&states)
+                .filter(|(_, s)| !s.is_some_and(|s| s.available && s.allowed))
+                .map(|(c, s)| {
+                    let name = ROWS.iter().find(|(r, _, _)| r == c).map_or(*c, |(_, n, _)| n);
+                    match s {
+                        Some(s) => format!("{name}: {}", s.reason),
+                        None => format!("{name}: unknown here"),
+                    }
+                })
+                .collect();
+            if !unusable.is_empty() {
+                (false, unusable.join("\n"))
+            } else if states.iter().all(|s| s.is_some_and(|s| s.effective)) {
+                (false, "The test desktop and the private D-Bus are already on for the next build.".into())
+            } else {
+                (true, "Turns on the test desktop and the private D-Bus together for this session. GPU rendering stays a separate choice; Host control is never included.".into())
+            }
+        }
+        None => (false, String::new()),
+    };
     let pending = perms.restart_pending(running) || session.policy_changed;
     // one line for the last change's note, else the restart that is waiting
     let (said, color): (String, _) = match &perms.notice {
@@ -809,6 +852,13 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>) -> Element
                     (can_change && restorable).then(|| Message::Perms(Event::Restore(id.into()))),
                 ),
                 "Removes this session's added permissions and approved hosts. The policy and pins stay.".into(),
+            ),
+            tip(
+                small(
+                    "Apply development permissions",
+                    (can_change && development).then(|| Message::Perms(Event::ApplyDevelopment(id.into()))),
+                ),
+                development_tip,
             ),
             container(
                 text(said)
@@ -1045,6 +1095,60 @@ mod tests {
         assert_eq!(seen.len(), 3, "{seen:?}");
         let (_, said, failed) = app.views["demo"].permissions.notice.clone().unwrap();
         assert!(!failed && said == "Auto-allow on.", "{said}");
+    }
+
+    /// Apply development permissions sends its one request; its button is live only where both
+    /// halves can be turned on.
+    #[test]
+    fn apply_development_permissions_sends_one_request_when_both_halves_can_be_on() {
+        let (client, mut daemon) = modes_client();
+        let mut app = live_app(vec![client]);
+        app.all_sessions = vec![session_record("demo", "demo", false, false)];
+        let mut preview = view("preview", false, json!([]));
+        for (i, capability) in ["test_desktop", "private_bus"].iter().enumerate() {
+            preview["permissions"][i] = json!({"capability": capability, "allowed": true,
+                "default_enabled": false, "requested": null, "blocked": false, "source": "policy",
+                "effective": false, "available": true, "reason": "off; explicit permission required to widen access"});
+        }
+        let preview: PolicyView = serde_json::from_value(preview).unwrap();
+        {
+            let perms = &mut app.views.get_mut("demo").unwrap().permissions;
+            perms.open = true;
+            perms.views = Some(Views { launch: None, preview: preview.clone(), agent_name: None });
+        }
+        {
+            let mut ui = simulator(&app, (720.0, 860.0));
+            ui.find("Apply development permissions").unwrap();
+        }
+        let fake = std::thread::spawn(move || {
+            loop {
+                let request = daemon.next();
+                match request["method"].as_str().unwrap() {
+                    "_sill/permissions.apply_development" => {
+                        assert_eq!(request["params"], json!({"session_id": "demo"}));
+                        daemon.reply(&request, json!({"preview": view("preview", false, json!([])), "restart_required": true}));
+                        return;
+                    }
+                    "_sill/sessions.list" => daemon.reply(&request, json!({"sessions": [session_record("demo", "demo", false, false)], "next": null})),
+                    "_sill/policy.preview" => daemon.refuse(&request, "unavailable", "later"),
+                    other => panic!("unexpected {other}"),
+                }
+            }
+        });
+        let task = app.update(Message::Perms(Event::ApplyDevelopment("demo".into())));
+        settle_task(&mut app, task);
+        fake.join().unwrap();
+        let (_, said, failed) = app.views["demo"].permissions.notice.clone().unwrap();
+        assert!(!failed && said == "Development permissions on; applies after a restart.", "{said}");
+        // with one half unavailable the button is there but dead, and says why on hover
+        let mut unavailable = preview.clone();
+        unavailable.permissions[1].available = false;
+        unavailable.permissions[1].reason = "dbus-daemon is not installed (the private bus needs the dbus package)".into();
+        let perms = &mut app.views.get_mut("demo").unwrap().permissions;
+        perms.views = Some(Views { launch: None, preview: unavailable, agent_name: None });
+        perms.notice = None;
+        let mut ui = simulator(&app, (720.0, 860.0));
+        ui.find("Apply development permissions").unwrap();
     }
 
     /// A change waiting for a restart shows over the composer even with nothing expanded yet:

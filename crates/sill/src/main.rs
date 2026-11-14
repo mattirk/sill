@@ -203,6 +203,8 @@ enum PermissionsCmd {
         #[arg(value_parser = ["on", "off", "default"])]
         value: String,
     },
+    /// Apply development permissions: the test desktop and the private bus together, or nothing
+    Development { session: String },
     /// Restore defaults: remove the session's added capability and host grants; policy and pins stay
     Restore { session: String },
     /// Save for future sessions: add a host pattern to the session agent's network defaults
@@ -740,6 +742,10 @@ fn permissions_cmd(cmd: PermissionsCmd) -> Result<()> {
             let key = policy_session_key(&c, &session)?;
             let enabled = match value.as_str() { "on" => Some(true), "off" => Some(false), _ => None };
             print_changed(c.call("_sill/permissions.set", api::PermissionChoice { session_id: key, capability, enabled })?);
+        }
+        PermissionsCmd::Development { session } => {
+            let key = policy_session_key(&c, &session)?;
+            print_changed(c.call("_sill/permissions.apply_development", SessionKey { session_id: key })?);
         }
         PermissionsCmd::Restore { session } => {
             let key = policy_session_key(&c, &session)?;

@@ -100,7 +100,11 @@ commands and, since its Permissions panel, sill-gui), never on behalf of every f
 session: `enabled: true` is refused with `permission_denied` when the resolved policy, a
 repository fragment, an offline rule, `network.allow_additional_hosts = false` or a missing
 backend would block it; `false` always applies; `null` returns to the policy default. Ghost
-sessions and `host_control` refuse every choice. `_sill/permissions.restore_defaults` (Restore
+sessions and `host_control` refuse every choice. `_sill/permissions.apply_development` (Apply
+development permissions, 2026-11-07) remembers the test desktop and the private bus as session
+choices together, resolving both against the next build first: refused as a whole with
+`permission_denied` naming the blocked capability and its reason, recording nothing, when either
+is blocked; the same ghost rule applies. `_sill/permissions.restore_defaults` (Restore
 defaults) removes the session's added capability choices and host grants and keeps its policy
 and pins; on a running jail it also stops hosts approved during this run from matching new
 proxy connections. Both return the next-build `preview` and `restart_required`: true when a

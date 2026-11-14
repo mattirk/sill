@@ -794,6 +794,35 @@ PY
         ghost_bus = create("ghost-bus", env.policy("ghost-bus", permissions='private_bus = "on"'), ghost=True)
         check("a ghost refuses a private bus",
               not states(c.call("_sill/policy.preview", {"session_id": ghost_bus}))["private_bus"]["allowed"])
+
+        # -- 16. Apply development permissions: the test desktop and the private bus together -----
+        dev = create("development", env.policy("development"))
+        start(dev)
+        check("a GTK-like client cannot apply development permissions",
+              code(gtk.call, "_sill/permissions.apply_development", {"session_id": dev}) == "unsupported")
+        changed = c.call("_sill/permissions.apply_development", {"session_id": dev})
+        st = states(changed["preview"])
+        check("applied together: both are session choices for the next build, restart required",
+              all(st[k]["requested"] and st[k]["source"] == "session" and st[k]["effective"] for k in ("test_desktop", "private_bus"))
+              and changed["restart_required"], json.dumps({k: st[k] for k in ("test_desktop", "private_bus")})[:400])
+        both = sh(c, dev, 'echo "[$WAYLAND_DISPLAY] [$DBUS_SESSION_BUS_ADDRESS]"')[1] if restart(dev) else "no restart"
+        check("after the restart the session has its desktop and its bus",
+              both == f"[wayland-0] [unix:path=/run/user/{os.getuid()}/bus]", both)
+        st = states(c.call("_sill/permissions.restore_defaults", {"session_id": dev})["preview"])
+        check("Restore defaults takes both away again for the next build",
+              all(st[k]["requested"] is None and not st[k]["effective"] for k in ("test_desktop", "private_bus")))
+        half = create("half-forbidden", env.policy("half-forbidden", permissions='private_bus = "forbidden"'))
+        try:
+            c.call("_sill/permissions.apply_development", {"session_id": half})
+            refusal = None
+        except RpcError as error:
+            refusal = str(error)
+        st = states(c.call("_sill/policy.preview", {"session_id": half}))
+        check("a forbidden half refuses the group as a whole, naming it, and records nothing",
+              refusal is not None and "private_bus" in refusal and st["test_desktop"]["requested"] is None,
+              f"{refusal} {json.dumps(st['test_desktop'])}")
+        check("a ghost refuses development permissions",
+              code(c.call, "_sill/permissions.apply_development", {"session_id": ghost_bus}) == "permission_denied")
     finally:
         for sid in created:
             for method in ("_sill/sessions.stop", "_sill/sessions.delete"):

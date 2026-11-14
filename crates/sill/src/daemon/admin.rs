@@ -369,7 +369,7 @@ pub(super) fn frontend_gate(hub: &Hub, conn: &super::Conn, method: &str, params:
         error
     };
     match method {
-        "_sill/permissions.set" | "_sill/permissions.restore_defaults" | "_sill/policy.save_host" =>
+        "_sill/permissions.set" | "_sill/permissions.apply_development" | "_sill/permissions.restore_defaults" | "_sill/policy.save_host" =>
             return Err(missing("permission changes need a frontend that shows permission state".into())),
         "_sill/sessions.submit" | "_sill/sessions.start" | "_sill/sessions.control" | "_sill/submissions.resume"
         | "_sill/submissions.send_now" | "_sill/questions.answer" | "_sill/policy.start" | "_sill/policy.allow_host"
@@ -410,6 +410,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             | "_sill/policy.allow_host"
             | "_sill/policy.save_host"
             | "_sill/permissions.set"
+            | "_sill/permissions.apply_development"
             | "_sill/permissions.restore_defaults"
             | "_sill/files.home"
             | "_sill/files.metadata"
@@ -579,6 +580,36 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 }
             }
             hub.with_store(|store| store.set_permission_choice(&a.session_id, &a.capability, a.enabled))?;
+            bounded(permissions_changed(hub, &a.session_id, false)?)
+        }
+        "_sill/permissions.apply_development" => {
+            // Apply development permissions: the test desktop and the private bus as one choice,
+            // all or nothing; what each one would say alone is the refusal's reason.
+            let a: sill_proto::sessions::SessionKey = args(p)?;
+            let (row, pins) = session_with_pins(hub, &a.session_id)?;
+            if row.ghost { return Err(domain("permission_denied", "ghost sessions support Default only")); }
+            let group = sill_core::permissions::DEVELOPMENT_CAPABILITIES;
+            let restrictions = sill_core::session::next_build_restrictions(&row, &sill_core::changes::home()?, &pins, &[])?;
+            let mut choices = hub.with_store(|store| store.permission_choices(&a.session_id))?;
+            for capability in group {
+                choices.insert(capability.to_string(), true);
+            }
+            let candidate = sill_core::session::apply_grants(restrictions, &choices, vec![]);
+            let blocked: Vec<String> = candidate
+                .session_permissions
+                .iter()
+                .filter(|c| group.contains(&c.capability.as_str()))
+                .filter_map(|c| c.blocked.as_ref().map(|reason| format!("{}: {reason}", c.capability)))
+                .collect();
+            if !blocked.is_empty() {
+                return Err(domain("permission_denied", format!("development permissions not applied; {}", blocked.join("; "))));
+            }
+            hub.with_store(|store| {
+                for capability in group {
+                    store.set_permission_choice(&a.session_id, capability, Some(true))?;
+                }
+                Ok(())
+            })?;
             bounded(permissions_changed(hub, &a.session_id, false)?)
         }
         "_sill/permissions.restore_defaults" => {

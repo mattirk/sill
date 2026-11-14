@@ -26,6 +26,9 @@ pub struct Permissions {
 /// Capabilities that make a session Desktop development or Host control rather than Default.
 /// Frontends without permission-mode support cannot operate such a session.
 pub const MODE_CAPABILITIES: [&str; 4] = ["test_desktop", "private_bus", "gpu", "host_control"];
+/// What Apply development permissions turns on together: the test desktop and the private bus.
+/// GPU rendering stays an explicit additional choice; Host control is never part of a group.
+pub const DEVELOPMENT_CAPABILITIES: [&str; 2] = ["test_desktop", "private_bus"];
 
 /// Whether this machine can enforce `capability`: the public web proxy always; the test desktop
 /// when a usable Weston with Xwayland is installed (`desktop::probe`); the private bus when
