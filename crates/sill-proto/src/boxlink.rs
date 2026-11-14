@@ -276,7 +276,7 @@ pub fn disconnect(host: &str) -> Result<()> {
 /// A key or agent logs in to `host` without asking, on a connection of its own. False means every
 /// rebuilt master needs the person.
 pub fn unattended(host: &str) -> Result<bool> {
-    let mut command = Command::new("ssh");
+    let mut command = crate::transport::ssh_program(host);
     command.args(["-T", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ConnectTimeout=10", "--", host, "true"])
         .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     let mut child = command.spawn().context("starting ssh")?;
@@ -298,7 +298,7 @@ pub(crate) fn control_path() -> Result<String> {
 
 fn control(host: &str) -> Result<Command> {
     crate::transport::validate_host(host)?;
-    let mut command = Command::new("ssh");
+    let mut command = crate::transport::ssh_program(host);
     command.arg("-o").arg(control_path()?);
     Ok(command)
 }

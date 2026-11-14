@@ -74,7 +74,16 @@ pub fn start(asked: async_channel::Sender<Asked>) -> Option<Tray> {
         return None;
     }
     let toggle = MenuItem::new("Show / hide sill", true, None);
-    let quit = MenuItem::new("Quit the window (sessions go on)", true, None);
+    // with the window's own VM, quitting ends it, and the sessions in it
+    let quit = MenuItem::new(
+        if crate::local_vm::phase().is_some() {
+            "Quit Sill"
+        } else {
+            "Quit the window (sessions go on)"
+        },
+        true,
+        None,
+    );
     let menu = Menu::new();
     if let Err(e) = menu.append_items(&[&toggle, &PredefinedMenuItem::separator(), &quit]) {
         eprintln!("sill-gui: no menu bar icon: {e}");

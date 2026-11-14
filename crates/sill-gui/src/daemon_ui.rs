@@ -267,7 +267,7 @@ impl App {
             let mut details = column![
                 detail_row(
                     "Connection",
-                    std::env::var("SILL_BOX").unwrap_or_else(|_| "Local".into())
+                    sill_proto::transport::selected_name().unwrap_or_else(|| "Local".into())
                 ),
                 detail_row("GUI version", env!("CARGO_PKG_VERSION").into()),
             ]

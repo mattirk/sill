@@ -1845,7 +1845,7 @@ fn box_cmd(cmd: BoxCmd) -> Result<()> {
             let c = sill_proto::Client::ssh(&host, &binary)
                 .context("checking the box over SSH; verify SSH access and the remote sill binary path")?;
             let status: sill_proto::DaemonStatus = c.call(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default())?;
-            transport::save(&name, BoxTarget { host: host.clone(), binary })?;
+            transport::save(&name, BoxTarget { host: host.clone(), binary, ssh_config: None })?;
             println!("{name}: sill {}, protocol {}, {} sessions", status.version, status.protocol, status.sessions);
             if !sill_proto::boxlink::unattended(&host).unwrap_or(true) {
                 println!("{name}: SSH cannot log in to {host} without asking (no agent or unencrypted key accepts it). Sill keeps one shared connection open; after a sleep, a reboot of the box or a longer network loss the window shows Sign in to reconnect.");

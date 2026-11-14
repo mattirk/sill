@@ -12,6 +12,9 @@ mod requirements;
 pub use requirements::{Problem, check};
 
 #[cfg(target_os = "macos")]
+pub mod setup;
+
+#[cfg(target_os = "macos")]
 mod apple;
 #[cfg(target_os = "macos")]
 pub use apple::{Vm, serve_ssh};

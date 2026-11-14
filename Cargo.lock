@@ -4238,6 +4238,7 @@ dependencies = [
  "serde_json",
  "sill-client",
  "sill-proto",
+ "sill-vm",
  "toml",
  "tray-icon",
  "unicode-segmentation",

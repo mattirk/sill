@@ -11,6 +11,39 @@ pub struct BoxTarget {
     pub host: String,
     #[serde(default = "default_binary")]
     pub binary: String,
+    /// An SSH config file of the box's own (`ssh -F`), in place of the person's: the Mac's own VM,
+    /// reached over a local socket with a key sill made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_config: Option<PathBuf>,
+}
+
+/// The box this process talks to, chosen by the process itself rather than by `SILL_BOX` (the Mac
+/// window's own VM), with the name it shows.
+static CHOSEN: std::sync::OnceLock<(String, BoxTarget)> = std::sync::OnceLock::new();
+
+/// This process talks to `target` (named `name`) from now on; once.
+pub fn choose(name: &str, target: BoxTarget) {
+    let _ = CHOSEN.set((name.to_string(), target));
+}
+
+/// The name of the box this process talks to, `None` for the local daemon.
+pub fn selected_name() -> Option<String> {
+    if let Some((name, _)) = CHOSEN.get() {
+        return Some(name.clone());
+    }
+    std::env::var("SILL_BOX").ok().filter(|name| !name.is_empty() && name != "local")
+}
+
+/// `ssh`, with the chosen box's own config file when `host` is that box.
+pub(crate) fn ssh_program(host: &str) -> Command {
+    let mut command = Command::new("ssh");
+    if let Some((_, target)) = CHOSEN.get()
+        && target.host == host
+        && let Some(config) = &target.ssh_config
+    {
+        command.arg("-F").arg(config);
+    }
+    command
 }
 
 fn default_binary() -> String { "sill".into() }
@@ -31,6 +64,9 @@ pub fn list() -> Result<BTreeMap<String, BoxTarget>> {
 }
 
 pub fn selected() -> Result<Option<BoxTarget>> {
+    if let Some((_, target)) = CHOSEN.get() {
+        return Ok(Some(target.clone()));
+    }
     let Some(name) = std::env::var_os("SILL_BOX") else { return Ok(None) };
     let name = name.to_str().context("SILL_BOX is not UTF-8")?;
     if name.is_empty() || name == "local" { return Ok(None); }
@@ -95,7 +131,7 @@ pub fn binary_command(binary: &str) -> Result<String> {
 /// prompt, and it gives up on a dead network within a minute.
 pub fn ssh_base(host: &str) -> Result<Command> {
     validate_host(host)?;
-    let mut command = Command::new("ssh");
+    let mut command = ssh_program(host);
     command.args(["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "ControlMaster=no"])
         .arg("-o").arg(crate::boxlink::control_path()?).arg("--").arg(host);
     Ok(command)

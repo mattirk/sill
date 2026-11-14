@@ -24,6 +24,8 @@ mod keys;
 mod layout;
 mod login_ui;
 #[cfg(target_os = "macos")]
+mod local_vm;
+#[cfg(target_os = "macos")]
 mod macos;
 mod media;
 mod menu;
@@ -131,6 +133,11 @@ fn main() -> iced::Result {
     sill_proto::client::declare_capability(permissions::CAPABILITY);
     sill_proto::client::declare_capability(host_control::CAPABILITY);
     fonts::install();
+    // the Mac's daemon runs in a VM of the window's own
+    #[cfg(target_os = "macos")]
+    if local_vm::wanted(options.demo) {
+        local_vm::begin();
+    }
     let above = !options.demo && settings::load().always_on_top();
     iced::application(
         move || App::new(options.demo, options.session.clone()),
@@ -817,7 +824,15 @@ fn blocking<T: Send + 'static>(
 
 impl App {
     fn new(demo: bool, initial: Option<String>) -> (Self, Task<Message>) {
-        Self::with(demo, initial, (!demo).then(sill_client::connect))
+        #[cfg(target_os = "macos")]
+        let connect = if local_vm::phase().is_some() {
+            local_vm::connector()
+        } else {
+            sill_client::connect()
+        };
+        #[cfg(not(target_os = "macos"))]
+        let connect = sill_client::connect();
+        Self::with(demo, initial, (!demo).then_some(connect))
     }
 
     /// The app on `connect`'s daemon (none in `--demo`).
@@ -1953,6 +1968,10 @@ impl App {
                 }
                 self.flush_geometry(self.layout.mode, None);
                 self.save_settings();
+                // the window's own VM goes with it, the guest asked to shut down first
+                #[cfg(target_os = "macos")]
+                return self.hide().chain(blocking(local_vm::shut_down, |_| Message::Nothing)).chain(iced::exit());
+                #[cfg(not(target_os = "macos"))]
                 return self.hide().chain(iced::exit());
             }
             Message::Nothing => {}

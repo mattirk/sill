@@ -224,6 +224,19 @@ impl App {
 
     /// No session selected: why, and what to do.
     fn empty(&self) -> Element<'_, Message> {
+        // the Mac's own VM while it starts, or what keeps it from starting
+        #[cfg(target_os = "macos")]
+        if !self.listed && let Some((said, trouble)) = crate::local_vm::waiting_text() {
+            return container(center(
+                text(said)
+                    .size(style::TEXT)
+                    .color(if trouble { P.error } else { P.fg_dim })
+                    .align_x(iced::alignment::Horizontal::Center),
+            ))
+            .padding(24)
+            .height(Fill)
+            .into();
+        }
         let hint = if let Some(error) = &self.list_error {
             format!("The daemon cannot be reached: {error}")
         } else if !self.listed {
