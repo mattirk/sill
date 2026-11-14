@@ -18,6 +18,10 @@ use sill_proto::rpc::{Error, Incoming, Response};
 
 mod hub;
 mod runner;
+mod streams;
+mod context;
+mod frontend;
+pub mod relay;
 pub use hub::Hub;
 
 /// How long a hub lock may stay taken before the watchdog calls it a deadlock: a jail start holds
@@ -32,9 +36,11 @@ const EXIT_STUCK: i32 = 102;
 const QUEUE: usize = 20_000;
 
 /// One frontend connection, as the hub and the runners see it: where its lines go.
+enum WriteItem { Line(String), Flush(std::sync::mpsc::Sender<()>) }
+
 pub struct Conn {
     pub id: u64,
-    tx: SyncSender<String>,
+    tx: SyncSender<WriteItem>,
     /// To cut a stuck connection off.
     sock: UnixStream,
 }
@@ -42,7 +48,7 @@ pub struct Conn {
 impl Conn {
     /// Queue one line; false when the connection is gone or stuck (it is cut off then).
     pub fn send(&self, line: String) -> bool {
-        match self.tx.try_send(line) {
+        match self.tx.try_send(WriteItem::Line(line)) {
             Ok(()) => true,
             Err(TrySendError::Full(_)) => {
                 eprintln!("sill daemon: connection {} is not reading; dropping it", self.id);
@@ -57,6 +63,15 @@ impl Conn {
         if let Ok(line) = serde_json::to_string(r) {
             self.send(line);
         }
+    }
+}
+
+impl Conn {
+    fn drain(&self) -> Result<()> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.tx.try_send(WriteItem::Flush(tx)).map_err(|_| anyhow::anyhow!("connection writer unavailable"))?;
+        rx.recv_timeout(std::time::Duration::from_secs(5)).context("draining shutdown response")?;
+        Ok(())
     }
 }
 
@@ -80,6 +95,7 @@ pub fn run() -> Result<()> {
         None => (bind_direct()?, "started bare by a client (no unit: see daemon.log)"),
     };
     let hub = Arc::new(Hub::new(mode)?);
+    hub.recover();
     {
         // the minute sweep: idle sessions end, memory's nightly run (docs/daemon.md §3.6)
         let hub = hub.clone();
@@ -244,26 +260,35 @@ fn bind_direct() -> Result<UnixListener> {
 
 /// One connection: requests answered in order, notifications from the client ignored.
 fn serve(stream: UnixStream, hub: Arc<Hub>) -> Result<()> {
-    let (tx, rx) = sync_channel::<String>(QUEUE);
+    let mut reader = BufReader::new(stream);
+    let mut first = String::new();
+    if reader.read_line(&mut first)? == 0 { return Ok(()); }
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&first)
+        && let Some(token) = value.get("_sill_stream").and_then(|v| v.as_str())
+    { return streams::claim(token, reader); }
+    let stream = reader.get_ref();
+    let (tx, rx) = sync_channel::<WriteItem>(QUEUE);
     let conn = Arc::new(Conn { id: NEXT_CONN.fetch_add(1, Ordering::Relaxed), tx, sock: stream.try_clone()? });
     hub.connected(&conn);
     let mut writer = stream.try_clone()?;
     std::thread::Builder::new().name(format!("sill-daemon-write-{}", conn.id)).spawn(move || {
-        for mut line in rx {
-            line.push('\n');
-            if writer.write_all(line.as_bytes()).is_err() {
-                let _ = writer.shutdown(std::net::Shutdown::Both);
-                break;
+        for item in rx {
+            match item {
+                WriteItem::Line(mut line) => {
+                    line.push('\n');
+                    if writer.write_all(line.as_bytes()).is_err() { let _ = writer.shutdown(std::net::Shutdown::Both); break; }
+                }
+                WriteItem::Flush(done) => { if writer.flush().is_ok() { let _ = done.send(()); } }
             }
         }
     })?;
-    let r = read_loop(stream, &hub, &conn);
+    let r = read_loop(reader, first, &hub, &conn);
     hub.disconnect(conn.id);
     r
 }
 
-fn read_loop(stream: UnixStream, hub: &Arc<Hub>, conn: &Arc<Conn>) -> Result<()> {
-    let mut lines = BufReader::new(stream).lines();
+fn read_loop(reader: BufReader<UnixStream>, first: String, hub: &Arc<Hub>, conn: &Arc<Conn>) -> Result<()> {
+    let mut lines = std::iter::once(Ok(first)).chain(reader.lines());
     while let Some(line) = lines.next() {
         let line = match line {
             Ok(l) => l,
@@ -305,7 +330,7 @@ fn read_loop(stream: UnixStream, hub: &Arc<Hub>, conn: &Arc<Conn>) -> Result<()>
             if let Ok(dir) = sill_proto::runtime_dir() {
                 let _ = std::fs::remove_file(dir.join("daemon.pid"));
             }
-            std::thread::sleep(std::time::Duration::from_millis(200)); // the writer sends the reply
+            if let Err(e) = conn.drain() { eprintln!("sill daemon: {e:#}"); }
             std::process::exit(0);
         }
     }

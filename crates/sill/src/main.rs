@@ -19,12 +19,16 @@ use sill_core::shim;
 
 mod daemon;
 mod init;
+#[cfg(feature = "shelf")]
 mod shelf;
 mod tui;
 
 #[derive(Parser)]
 #[command(name = "sill", version, about = "agent shelf")]
 struct Cli {
+    /// Connect to a saved Linux box instead of the local daemon (see `sill box add`).
+    #[arg(long = "box", global = true)]
+    box_name: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -78,8 +82,16 @@ enum Cmd {
     },
     /// The daemon (docs/daemon.md): run it (what sill.service does), or ask the running one
     Daemon {
+        /// Relay stdin/stdout to the persistent local daemon (for SSH and other byte pipes).
+        #[arg(long)]
+        stdio: bool,
         #[command(subcommand)]
         cmd: Option<DaemonCmd>,
+    },
+    /// Linux boxes reached through the system SSH client.
+    Box {
+        #[command(subcommand)]
+        cmd: BoxCmd,
     },
     /// Set the machine up (root): checks, binaries, policy, state filesystem, cgroup delegation;
     /// `--user` sets up the shelf autostart for this account instead (SPEC §4.12)
@@ -96,6 +108,7 @@ enum Cmd {
         policy: String,
     },
     /// Open the shelf (GTK); single instance per desktop session
+    #[cfg(feature = "shelf")]
     Shelf {
         /// working directory of the main session (default: current directory)
         #[arg(long)]
@@ -105,6 +118,7 @@ enum Cmd {
         hidden: bool,
     },
     /// Show/hide the running shelf (bind this to a hotkey)
+    #[cfg(feature = "shelf")]
     Toggle,
     /// Restart the shelf: `systemctl --user restart sill-shelf` when the service is installed
     Restart {
@@ -119,8 +133,10 @@ enum Cmd {
         detached: bool,
     },
     /// Switch the shelf's colour theme: adwaita | adwaita-light | dracula | solarized-dark | solarized-light | nord
+    #[cfg(feature = "shelf")]
     Theme { name: String },
     /// Set the show/hide key, GTK accelerator syntax: "<Alt>space", "<Super>grave", "F12"
+    #[cfg(feature = "shelf")]
     Hotkey { spec: String },
     /// Log an agent in on this machine (browser flows that cannot run inside the jail, e.g. Codex
     /// with ChatGPT); the login file is bound into the agent's jails from then on
@@ -167,6 +183,24 @@ enum Cmd {
 }
 
 #[derive(Subcommand)]
+enum BoxCmd {
+    /// Verify a box and save it. --install pushes a GTK-free sill binary first.
+    Add {
+        host: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, default_value = "sill")]
+        binary: String,
+        #[arg(long, value_name = "HEADLESS_SILL")]
+        install: Option<PathBuf>,
+    },
+    List,
+    Remove { name: String },
+    /// Open the shelf on a saved box, or show its status in a headless build.
+    Connect { name: String },
+}
+
+#[derive(Subcommand)]
 enum PinCmd {
     /// List the global pins
     List,
@@ -178,6 +212,14 @@ enum PinCmd {
 
 #[derive(Subcommand)]
 enum DaemonCmd {
+    #[command(hide = true)]
+    Relay {
+        #[arg(long)] session: String,
+        #[arg(long)] socket: PathBuf,
+        #[arg(long)] agent_socket: PathBuf,
+        #[arg(long)] cwd: PathBuf,
+        #[arg(long)] resume: Option<String>,
+    },
     /// Version, mode, uptime and sessions of the running daemon (starts one when none runs)
     Status,
     /// Ask the running daemon to leave; sessions are not touched
@@ -440,6 +482,34 @@ struct RunArgs {
 }
 
 fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
+    if sill_proto::transport::selected()?.is_some() {
+        use sill_core::frontend::{Request, ExportFile};
+        let c = sill_proto::Client::connect_or_start()?;
+        match &cmd {
+            MemoryCmd::Recall { id } => {
+                let text: String = c.call(sill_core::frontend::METHOD, Request::Recall { key: id.join(" ") })?;
+                print!("{text}");
+                return Ok(());
+            }
+            MemoryCmd::Export { dir } => {
+                let files: Vec<ExportFile> = c.call(sill_core::frontend::METHOD, Request::Export)?;
+                std::fs::create_dir_all(dir)?;
+                for file in &files {
+                    let name = Path::new(&file.name);
+                    if name.components().count() != 1 || !matches!(name.components().next(), Some(std::path::Component::Normal(_))) { bail!("box returned an invalid export filename"); }
+                    std::fs::write(dir.join(name), &file.text)?;
+                }
+                println!("{} sessions written to {}", files.len(), dir.display());
+                return Ok(());
+            }
+            MemoryCmd::Refresh => {
+                c.call::<serde_json::Value>(sill_core::frontend::METHOD, Request::RefreshSnapshot)?;
+                println!("the box's memory snapshot refreshed");
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
     let home = home()?;
     // the readers go through the daemon (docs/daemon.md decision 13), and so does compaction (the
     // daemon is the store's only writer, M1c); recall, export and refresh read the store below
@@ -518,8 +588,18 @@ fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(name) = &cli.box_name {
+        // SAFETY: argument parsing is single-threaded; no worker exists yet.
+        unsafe { std::env::set_var("SILL_BOX", name); }
+    }
     match cli.cmd {
         Cmd::Policy { name } => {
+            if sill_proto::transport::selected()?.is_some() {
+                let c = sill_proto::Client::connect_or_start()?;
+                let text: String = c.call(sill_core::frontend::METHOD, sill_core::frontend::Request::PolicyText { name })?;
+                print!("{text}");
+                return Ok(());
+            }
             let p = Policy::load(&name, &home()?)?;
             print!("{}", toml::to_string_pretty(&p)?);
             Ok(())
@@ -529,7 +609,11 @@ fn main() -> Result<()> {
         Cmd::Pin { cmd } => pin_cmd(cmd.unwrap_or(PinCmd::List)),
         Cmd::Changes { cmd } => changes_cmd(cmd.unwrap_or(ChangesCmd::List)),
         Cmd::Attach { key, fresh, verbose } => tui::line_mode(&key, fresh, verbose),
-        Cmd::Daemon { cmd } => daemon_cmd(cmd),
+        Cmd::Daemon { cmd, stdio } => {
+            if stdio && cmd.is_some() { bail!("--stdio cannot be combined with a daemon subcommand"); }
+            if stdio { daemon_stdio() } else { daemon_cmd(cmd) }
+        },
+        Cmd::Box { cmd } => box_cmd(cmd),
         Cmd::Registry { cmd: RegistryCmd::Snapshot { out } } => {
             let out = out.unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sill-core/registry/snapshot.json"));
             sill_core::registry::build_snapshot(&out, &mut |line| eprintln!("{line}"))
@@ -538,11 +622,30 @@ fn main() -> Result<()> {
         Cmd::Dev { cmd } => dev_cmd(cmd),
         Cmd::Launch { session, jail, shim, agent, child, cgroup_root } => launch(&session, jail, shim, agent.as_deref(), child, cgroup_root),
         Cmd::Init(a) => init::run(a),
+        #[cfg(feature = "shelf")]
         Cmd::Shelf { cwd, hidden } => shelf::run(cwd, hidden),
+        #[cfg(feature = "shelf")]
         Cmd::Toggle => shelf::toggle(),
-        Cmd::Restart { hidden, dev, detached } => shelf::restart(hidden, dev, detached),
+        #[cfg(feature = "shelf")]
+        Cmd::Restart { hidden, dev, detached } => {
+            if sill_proto::transport::selected()?.is_some() { restart_box_daemon() }
+            else { shelf::restart(hidden, dev, detached) }
+        },
+        #[cfg(feature = "shelf")]
         Cmd::Theme { name } => shelf::set_theme(&name),
+        #[cfg(feature = "shelf")]
         Cmd::Hotkey { spec } => shelf::set_hotkey(&spec),
+        #[cfg(not(feature = "shelf"))]
+        Cmd::Restart { .. } => {
+            if sill_proto::transport::selected()?.is_some() { return restart_box_daemon(); }
+            if let Ok(c) = sill_proto::Client::connect() {
+                let _: serde_json::Value = c.call_within(sill_proto::method::DAEMON_SHUTDOWN, sill_proto::Empty::default(), sill_proto::client::QUICK_TIMEOUT)?;
+                drop(c);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            let _ = sill_proto::Client::connect_or_start()?;
+            Ok(())
+        }
         Cmd::Login { agent, method } => {
             let home = home()?;
             let registry = sill_core::agents::load(&home);
@@ -1200,6 +1303,7 @@ fn session_cmd(cmd: SessionCmd) -> Result<()> {
 
 fn daemon_cmd(cmd: Option<DaemonCmd>) -> Result<()> {
     match cmd {
+        Some(DaemonCmd::Relay { session, socket, agent_socket, cwd, resume }) => daemon::relay::run(&session, &socket, &agent_socket, &cwd, resume),
         None => daemon::run(),
         Some(DaemonCmd::Status) => {
             let c = sill_proto::Client::connect_or_start()?;
@@ -1211,7 +1315,10 @@ fn daemon_cmd(cmd: Option<DaemonCmd>) -> Result<()> {
             Ok(())
         }
         Some(DaemonCmd::Schema) => {
-            println!("{}", serde_json::to_string_pretty(&sill_proto::schema::document())?);
+            let schema = if sill_proto::transport::selected()?.is_some() {
+                sill_proto::Client::connect()?.call::<serde_json::Value>(sill_proto::method::DAEMON_SCHEMA, sill_proto::Empty::default())?
+            } else { sill_proto::schema::document() };
+            println!("{}", serde_json::to_string_pretty(&schema)?);
             Ok(())
         }
         Some(DaemonCmd::Stop) => match sill_proto::Client::connect() {
@@ -1338,3 +1445,89 @@ fn default_state_dir(uid: u32, home: &Path) -> Result<PathBuf> {
 }
 
 use std::os::fd::AsRawFd;
+
+
+/// A transport endpoint, not a daemon per SSH connection: the existing per-user daemon keeps
+/// ownership of all sessions when the pipe closes.
+fn daemon_stdio() -> Result<()> {
+    use std::io::{Read, Write};
+    // A box can intentionally keep an older daemon. Forward its bytes unchanged so the
+    // frontend negotiates its schema; merely opening an SSH pipe must never replace it.
+    let started = match sill_proto::Client::connect_local() {
+        Ok(client) => client,
+        Err(_) => sill_proto::Client::connect_local_or_start()?,
+    };
+    let mut socket = std::os::unix::net::UnixStream::connect(sill_proto::socket_path()?)?;
+    drop(started);
+    let mut input = socket.try_clone()?;
+    std::thread::Builder::new().name("sill-stdio-input".into()).spawn(move || {
+        let _ = std::io::copy(&mut std::io::stdin().lock(), &mut input);
+        let _ = input.shutdown(std::net::Shutdown::Write);
+    })?;
+    let mut output = std::io::stdout().lock();
+    let mut bytes = [0u8; 32 * 1024];
+    loop {
+        let count = socket.read(&mut bytes)?;
+        if count == 0 { break; }
+        output.write_all(&bytes[..count])?;
+        output.flush()?;
+    }
+    Ok(())
+}
+
+fn box_cmd(cmd: BoxCmd) -> Result<()> {
+    use sill_proto::transport::{self, BoxTarget};
+    match cmd {
+        BoxCmd::List => {
+            println!("local\tthis machine");
+            for (name, target) in transport::list()? { println!("{name}\t{}\t{}", target.host, target.binary); }
+        }
+        BoxCmd::Remove { name } => transport::remove(&name)?,
+        BoxCmd::Add { host, name, mut binary, install } => {
+            let name = name.unwrap_or_else(|| host.rsplit('@').next().unwrap_or(&host).to_string());
+            transport::validate_name(&name)?;
+            if let Some(source) = install {
+                transport::install(&host, &source)?;
+                binary = "~/.local/bin/sill".into();
+            }
+            let c = sill_proto::Client::ssh(&host, &binary)
+                .context("checking the box; if sill is missing, use `--install PATH` with a GTK-free sill binary")?;
+            let status: sill_proto::DaemonStatus = c.call(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default())?;
+            transport::save(&name, BoxTarget { host, binary })?;
+            println!("{name}: sill {}, protocol {}, {} sessions", status.version, status.protocol, status.sessions);
+        }
+        BoxCmd::Connect { name } => {
+            let all = transport::list()?;
+            if name != "local" && !all.contains_key(&name) { bail!("unknown sill box {name:?}"); }
+            // SAFETY: command dispatch is still single-threaded.
+            unsafe { std::env::set_var("SILL_BOX", name); }
+            #[cfg(feature = "shelf")]
+            return shelf::run(None, false);
+            #[cfg(not(feature = "shelf"))]
+            return daemon_cmd(Some(DaemonCmd::Status));
+        }
+    }
+    Ok(())
+}
+
+
+/// A selected remote daemon restarts on its own host; local systemd units and shelf processes
+/// must never be stopped because `--box NAME` was passed to a command.
+fn restart_box_daemon() -> Result<()> {
+    let old = sill_proto::Client::connect()?;
+    let status: sill_proto::DaemonStatus = old.call(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default())?;
+    old.call_within::<serde_json::Value>(sill_proto::method::DAEMON_SHUTDOWN, sill_proto::Empty::default(), sill_proto::client::QUICK_TIMEOUT)?;
+    drop(old);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if let Ok(client) = sill_proto::Client::connect_or_start()
+            && let Ok(next) = client.call::<sill_proto::DaemonStatus>(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default())
+            && next.pid != status.pid
+        {
+            println!("box daemon restarted (pid {}); sessions keep running", next.pid);
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline { bail!("the box daemon did not restart within 10 s; inspect its journal or daemon.log on the box"); }
+    }
+}

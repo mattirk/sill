@@ -11,6 +11,10 @@ rust-version.workspace = true
 name = "sill"
 path = "src/main.rs"
 
+[features]
+default = ["shelf"]
+shelf = ["dep:gtk4", "dep:gdk4-x11", "dep:x11rb", "dep:pulldown-cmark", "dep:sourceview5", "dep:vte4", "dep:shell-words", "dep:yeslogic-fontconfig-sys"]
+
 [dependencies]
 sill-core.workspace = true
 sill-memory.workspace = true
@@ -21,13 +25,14 @@ rustix.workspace = true
 toml.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-gtk4 = { version = "0.11", features = ["v4_18"] }
-gdk4-x11 = { version = "0.11", features = ["v4_18"] }
-x11rb = { version = "0.14", features = ["randr"] }
-pulldown-cmark = { version = "0.13", default-features = false }
+rusqlite.workspace = true
+gtk4 = { version = "0.11", features = ["v4_18"], optional = true }
+gdk4-x11 = { version = "0.11", features = ["v4_18"], optional = true }
+x11rb = { version = "0.14", features = ["randr"], optional = true }
+pulldown-cmark = { version = "0.13", default-features = false, optional = true }
 async-channel = "2"
 futures = "0.3"
-sourceview5 = "0.11"
-vte4 = { version = "0.10", features = ["v0_70"] }
-shell-words = "1"
-yeslogic-fontconfig-sys = "6"
+sourceview5 = { version = "0.11", optional = true }
+vte4 = { version = "0.10", features = ["v0_70"], optional = true }
+shell-words = { version = "1", optional = true }
+yeslogic-fontconfig-sys = { version = "6", optional = true }

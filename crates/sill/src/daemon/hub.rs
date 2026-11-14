@@ -28,6 +28,7 @@ mod changes;
 
 /// What an end that waits for the agent's summary needs once the answer is in (the facts as they
 /// were when the end was asked for; the row's summary is replaced only when memory is on).
+#[derive(serde::Serialize, serde::Deserialize)]
 struct EndCtx {
     facts: sill_core::memory::Facts,
     memory: bool,
@@ -44,7 +45,7 @@ pub struct Hub {
     launcher: &'static Launcher,
     /// The copy of this binary that sessions are started from (`session::staged_exe`).
     exe: PathBuf,
-    home: PathBuf,
+    pub(super) home: PathBuf,
     /// Session id → pid of its `sill launch`, for every jail this daemon started or adopted; the
     /// wait threads take an entry out when its process ends.
     children: Arc<Mutex<HashMap<String, u32>>>,
@@ -78,6 +79,18 @@ pub(super) fn probe<T>(m: &Mutex<T>, deadline: std::time::Instant) -> bool {
 impl Hub {
     pub fn new(mode: &'static str) -> Result<Hub> {
         let store = Store::open_default()?;
+        store.conn().execute_batch("CREATE TABLE IF NOT EXISTS daemon_ends (id TEXT PRIMARY KEY, context TEXT NOT NULL); CREATE TABLE IF NOT EXISTS daemon_runners (id TEXT PRIMARY KEY, state TEXT NOT NULL);
+            CREATE TRIGGER IF NOT EXISTS daemon_state_cleanup AFTER DELETE ON sessions BEGIN
+                DELETE FROM daemon_runners WHERE id=OLD.id;
+                DELETE FROM daemon_ends WHERE id=OLD.id;
+            END")?;
+        let ending = {
+            let mut stmt = store.conn().prepare("SELECT id,context FROM daemon_ends")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            let mut ending = HashMap::new();
+            for row in rows { let (id, ctx) = row?; ending.insert(id, serde_json::from_str(&ctx)?); }
+            ending
+        };
         let launcher = sill_core::launcher::current();
         eprintln!("sill daemon: {}", launcher.describe());
         let hub = Hub {
@@ -90,7 +103,7 @@ impl Hub {
             children: Arc::default(),
             runners: Mutex::new(HashMap::new()),
             starting: Mutex::new(()),
-            ending: Mutex::new(HashMap::new()),
+            ending: Mutex::new(ending),
             started_at: Mutex::new(HashMap::new()),
             conns: Mutex::new(Vec::new()),
         };
@@ -209,11 +222,11 @@ impl Hub {
         let sessions = self.with_store(|s| s.sessions()).unwrap_or_default();
         for id in ids {
             let Some(s) = sessions.iter().find(|x| x.id == id) else { continue };
-            if s.ended_at.is_some() || self.ending.lock().unwrap().contains_key(&id) {
+            if s.ended_at.is_some() || self.ending.lock().unwrap().contains_key(&id) || self.persisted_end(&id).ok().flatten().is_some() {
                 continue;
             }
             let runner = self.runners.lock().unwrap().get(&id).filter(|r| r.alive()).cloned();
-            if runner.as_ref().is_some_and(|r| r.busy()) {
+            if runner.as_ref().is_none_or(|r| r.busy()) {
                 continue;
             }
             let Ok(mut policy) = Policy::load(&s.policy, &self.home) else { continue };
@@ -265,6 +278,8 @@ impl Hub {
         match m {
             method::DAEMON_STATUS => to_value(self.status()?),
             method::DAEMON_SHUTDOWN => Ok(json!({})),
+            method::DAEMON_SCHEMA => Ok(sill_proto::schema::document()),
+            sill_core::frontend::METHOD => super::frontend::dispatch(self, params).map_err(|e| Error::failed(format!("{e:#}"))),
             method::SESSIONS_LIST => to_value(self.sessions()?),
             method::SESSIONS_GET => {
                 let k: Key = args(params)?;
@@ -441,7 +456,7 @@ impl Hub {
                     self.presence(&c.key);
                     return Ok(json!({}));
                 }
-                r.command(self, cmd).map_err(|e| Error::failed(format!("{e:#}")))?;
+                r.command(self, conn.id, cmd).map_err(|e| Error::failed(format!("{e:#}")))?;
                 Ok(json!({}))
             }
             method::SESSIONS_ANSWER => {
@@ -562,57 +577,135 @@ impl Hub {
             .collect()
     }
 
-    /// Attach `conn` to the session's conversation, starting jail, agent and ACP client when there
-    /// is none (or `fresh`: the agent started again, for adapters that refuse a second `initialize`).
+    /// Reconnect the ACP owner even when nobody has a window open. The relay retains the SDK's
+    /// live prompt future and reply channels across the main daemon's restart.
+    pub fn recover(self: &Arc<Self>) {
+        let mut ids: Vec<String> = self.children.lock().unwrap().keys().cloned().collect();
+        if let Ok(dir) = sill_proto::runtime_dir() && let Ok(entries) = std::fs::read_dir(dir) {
+            for e in entries.flatten() {
+                if e.path().join("relay.sock").exists() {
+                    ids.push(e.file_name().to_string_lossy().into_owned());
+                }
+            }
+        }
+        ids.sort(); ids.dedup();
+        for id in ids {
+            if let Err(e) = self.ensure_runner(&id, false) {
+                eprintln!("sill daemon: recovering session {id}: {e:#}; its turn state remains unknown");
+            }
+        }
+    }
+
     fn attach(self: &Arc<Self>, conn: &Arc<Conn>, id: &str, fresh: bool) -> Result<()> {
-        let _one_at_a_time = self.starting.lock().unwrap();
-        // the guard goes before `presence` locks the runners again
-        let running = self.runners.lock().unwrap().get(id).filter(|r| r.alive()).cloned();
-        if !fresh && let Some(r) = running {
-            r.attach(conn.clone());
-            self.presence(id);
-            return Ok(());
-        }
-        let started = self.start_session(id)?;
-        let (s, agent) = {
-            let store = self.store.lock().unwrap();
-            let Some(s) = store.sessions()?.into_iter().find(|x| x.id == id) else { bail!("no session {id}") };
-            let registry = sill_core::agents::load(&self.home);
-            let Some(agent) = registry.get(&s.agent).cloned() else { bail!("unknown agent {}", s.agent) };
-            (s, agent)
-        };
-        let mut control = sill_core::shim::Control::connect(&started.socket)?;
-        if fresh && control.status()?.running {
-            control.kill(3000)?;
-        }
-        if !control.status()?.running {
-            let mut env = agent.env.clone();
-            env.extend(agent.sandbox_off_env.clone());
-            control.spawn(&agent.command, &env, Some(&self.home))?;
-        }
-        let stream = sill_core::shim::agent_stream(&started.socket)?;
-        // a control channel: a reconnect re-applies the remembered settings as one command each, and
-        // none of them may be dropped for want of room
-        let (cmd_tx, cmd_rx) = async_channel::unbounded();
-        let (ev_tx, ev_rx) = async_channel::unbounded();
-        let runner = Runner::new(id, cmd_tx, conn.clone());
-        if let Some(old) = self.runners.lock().unwrap().insert(id.to_string(), runner.clone()) {
-            old.retire();
-        }
-        let sopts = sill_core::acp::SessionOptions {
-            cwd: self.home.clone(),
-            auto: sill_core::acp::AutoPermission::Ask,
-            resume: if agent.supports_load { s.acp_session_id.clone() } else { None },
-        };
-        std::thread::Builder::new().name(format!("sill-acp-{id}")).spawn(move || {
-            // run_session sends Event::Ended itself, error included
-            let _ = sill_core::acp::run_session(stream, sopts, cmd_rx, ev_tx);
-        })?;
-        let hub = self.clone();
-        std::thread::Builder::new().name(format!("sill-conv-{id}")).spawn(move || runner.run(hub, ev_rx))?;
-        eprintln!("sill daemon: session {id} conversation started{}", if fresh { " (agent restarted)" } else { "" });
+        let r = self.ensure_runner(id, fresh)?;
+        self.with_store(|store| r.attach(conn.clone(), store))?;
         self.presence(id);
         Ok(())
+    }
+
+    fn ensure_runner(self: &Arc<Self>, id: &str, fresh: bool) -> Result<Arc<Runner>> {
+        if fresh {
+            let existing = self.runners.lock().unwrap().get(id).cloned();
+            if let Some(r) = existing { r.retire(self)?; }
+            else if sill_proto::runtime_dir()?.join(id).join("relay.sock").exists() {
+                if let Ok(r) = self.ensure_runner(id, false) { r.retire(self)?; }
+            }
+        }
+        let _one_at_a_time = self.starting.lock().unwrap();
+        let running = self.runners.lock().unwrap().get(id).filter(|r| r.alive()).cloned();
+        if !fresh && let Some(r) = running { return Ok(r); }
+        if fresh { self.retire_runner(id); }
+        let dir = sill_proto::runtime_dir()?.join(id);
+        let socket = dir.join("relay.sock");
+        let mut snapshot = self.with_store(|s| Runner::load(id, s))?;
+        if fresh {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while socket.exists() {
+                if std::os::unix::net::UnixStream::connect(&socket).is_err() { break; }
+                if std::time::Instant::now() >= deadline { bail!("previous ACP relay has not stopped; refusing a second connection"); }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+        }
+        let existing = if fresh { None } else {
+            match super::relay::connect(&socket, Runner::cursor(&snapshot)) {
+                Ok(connection) => Some(connection),
+                Err(e) if std::os::unix::net::UnixStream::connect(&socket).is_ok() => return Err(e.context("existing ACP relay did not accept recovery; refusing to replace it")),
+                Err(_) => None,
+            }
+        };
+        let (relay, events) = match existing {
+            Some(connection) => connection,
+            None => {
+                // Losing the worker is a different stream epoch: the SDK future that was writing
+                // an ending summary is gone. Finish the persisted intent mechanically instead of
+                // silently dropping it or asking a second, unrelated summary turn.
+                if let Some(ctx) = self.persisted_end(id)? {
+                    let reason = ctx.reason.clone();
+                    self.finish_end(id, Some((ctx, None)), false, &reason);
+                    bail!("session {id} ended with sill's summary after its ACP relay was lost");
+                }
+                if self.with_store(|store| Ok(store.sessions()?.into_iter().any(|session| session.id == id && session.ended_at.is_some())))? {
+                    bail!("session {id} has ended");
+                }
+                let started = self.start_session(id)?;
+                let (s, agent) = self.with_store(|store| {
+                    let s = store.sessions()?.into_iter().find(|s| s.id == id).context("session missing")?;
+                    let agent = sill_core::agents::load(&self.home).get(&s.agent).cloned().context("unknown agent")?;
+                    Ok((s, agent))
+                })?;
+                let mut control = sill_core::shim::Control::connect(&started.socket)?;
+                if fresh && control.status()?.running { control.kill(3000)?; }
+                if !control.status()?.running {
+                    let mut env = agent.env.clone(); env.extend(agent.sandbox_off_env.clone());
+                    control.spawn(&agent.command, &env, Some(&self.home))?;
+                }
+                // A new relay is a new stream epoch. Its cursor starts at zero; old transient
+                // snapshots cannot describe its initialization, but pending end intent stays.
+                self.with_store(|s| { s.conn().execute("DELETE FROM daemon_runners WHERE id=?1", [id])?; Ok(()) })?;
+                snapshot = serde_json::Value::Null;
+                std::fs::create_dir_all(&dir)?;
+                let _ = std::fs::remove_file(&socket);
+                let log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("relay.log"))?;
+                let mut cmd = std::process::Command::new(&self.exe);
+                cmd.args(["daemon", "relay", "--session", id, "--socket"]).arg(&socket)
+                    .arg("--agent-socket").arg(&started.socket).arg("--cwd").arg(&self.home)
+                    .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(log)
+                    .env_remove("SILL_SESSION").env_remove("NOTIFY_SOCKET").env_remove("LISTEN_PID").env_remove("LISTEN_FDS");
+                if agent.supports_load && let Some(resume) = s.acp_session_id { cmd.arg("--resume").arg(resume); }
+                use std::os::unix::process::CommandExt;
+                unsafe { cmd.pre_exec(|| { rustix::process::setsid().map_err(std::io::Error::from)?; Ok(()) }); }
+                let mut child = cmd.spawn()?;
+                std::thread::spawn(move || { let _ = child.wait(); });
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    match super::relay::connect(&socket, 0) {
+                        Ok(connection) => break connection,
+                        Err(e) if std::time::Instant::now() >= deadline => return Err(e.context("starting ACP relay")),
+                        Err(_) => std::thread::sleep(std::time::Duration::from_millis(25)),
+                    }
+                }
+            }
+        };
+        let runner = Runner::new(id, relay, snapshot)?;
+        self.runners.lock().unwrap().insert(id.into(), runner.clone());
+        let hub = self.clone(); let r = runner.clone();
+        std::thread::Builder::new().name(format!("sill-conv-{id}")).spawn(move || r.run(hub, events))?;
+        self.presence(id);
+        Ok(runner)
+    }
+
+    fn remember_end(&self, id: &str, ctx: EndCtx) -> Result<()> {
+        self.with_store(|s| { s.conn().execute("INSERT INTO daemon_ends(id,context) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET context=excluded.context", rusqlite::params![id, serde_json::to_string(&ctx)?])?; Ok(()) })?;
+        self.ending.lock().unwrap().insert(id.into(), ctx);
+        Ok(())
+    }
+
+    fn persisted_end(&self, id: &str) -> Result<Option<EndCtx>> {
+        use rusqlite::OptionalExtension;
+        self.with_store(|store| {
+            let context: Option<String> = store.conn().query_row("SELECT context FROM daemon_ends WHERE id=?1", [id], |row| row.get(0)).optional()?;
+            context.map(|context| serde_json::from_str(&context).map_err(anyhow::Error::from)).transpose()
+        })
     }
 
     /// A store write on a session that exists (the id checked first: a write to a missing row
@@ -708,6 +801,12 @@ impl Hub {
             bail!("not a session id");
         }
         let ghost = self.is_ghost(id);
+        let had_runner = self.runners.lock().unwrap().contains_key(id);
+        let relay_socket = sill_proto::runtime_dir()?.join(id).join("relay.sock");
+        if !had_runner {
+            let snapshot = self.with_store(|store| Runner::load(id, store))?;
+            super::relay::stop_unowned(&relay_socket, Runner::cursor(&snapshot))?;
+        }
         // the history (SPEC §3.6): the pinned repositories' range and the deletion itself, before
         // the row goes; a ghost leaves neither
         if !ghost && let Some(s) = self.with_store(|st| st.sessions()).ok().and_then(|v| v.into_iter().find(|s| s.id == id)) {
@@ -720,6 +819,7 @@ impl Hub {
             }
         }
         self.retire_runner(id);
+        if had_runner { super::relay::wait_stopped(&relay_socket)?; }
         self.ending.lock().unwrap().remove(id);
         if let Err(e) = sill_core::session::stop(id) {
             eprintln!("sill daemon: stopping session {id} for deletion: {e:#}");
@@ -734,6 +834,8 @@ impl Hub {
             if ghost {
                 s.conn().execute_batch("PRAGMA secure_delete = ON")?;
             }
+            s.conn().execute("DELETE FROM daemon_runners WHERE id=?1", [id])?;
+            s.conn().execute("DELETE FROM daemon_ends WHERE id=?1", [id])?;
             let r = s.delete(id).and_then(|_| s.prune_pins().map(|_| ()));
             if ghost {
                 let _ = s.conn().execute_batch("PRAGMA secure_delete = OFF");
@@ -865,8 +967,13 @@ impl Hub {
 
     /// The session's conversation is over as far as the daemon is concerned: no more events out.
     fn retire_runner(&self, id: &str) {
-        if let Some(r) = self.runners.lock().unwrap().remove(id) {
-            r.retire();
+        let runner = self.runners.lock().unwrap().remove(id);
+        if let Some(runner) = runner {
+            if let Err(error) = runner.retire(self) {
+                eprintln!("sill daemon: retiring session {id}: {error:#}");
+            }
+        } else if let Err(error) = self.with_store(|store| Runner::mark_terminal(store, id)) {
+            eprintln!("sill daemon: saving terminal state of session {id}: {error:#}");
         }
     }
 
@@ -888,8 +995,10 @@ impl Hub {
                 Some(SummaryKind::Checkpoint) => {
                     let mut ctx = self.end_ctx(id)?;
                     ctx.reason = reason.to_string();
-                    if r.adopt_checkpoint() {
-                        self.ending.lock().unwrap().insert(id.to_string(), ctx);
+                    if r.adopt_checkpoint(self, &serde_json::to_string(&ctx)?)? {
+                        // The SQL intent is committed with the runner's new summary kind. Do
+                        // not insert the map afterwards: completion could already have removed
+                        // it, leaving a stale entry that prevents future idle sweeps.
                         eprintln!("sill daemon: session {id} ends ({reason}): its checkpoint becomes the summary");
                         return Ok(Ending { pending: true, deleted: false });
                     }
@@ -924,9 +1033,9 @@ impl Hub {
             && agent_process_up(id)
         {
             let prompt = sill_core::memory::summary_prompt(&ctx.facts, &self.home);
+            self.remember_end(id, ctx)?;
             match r.ask_summary(self, &prompt, "the session ends: the agent writes its summary for memory", SummaryKind::End) {
                 Ok(()) => {
-                    self.ending.lock().unwrap().insert(id.to_string(), ctx);
                     eprintln!("sill daemon: session {id} ends ({reason}): the agent writes its summary");
                     return Ok(Ending { pending: true, deleted: false });
                 }
@@ -934,7 +1043,7 @@ impl Hub {
             }
         }
         eprintln!("sill daemon: session {id} ends ({reason})");
-        self.finish_end(id, Some((ctx, None)), false, reason);
+        self.finish_end(id, Some((self.end_ctx(id)?, None)), false, reason);
         Ok(Ending { pending: false, deleted: false })
     }
 
@@ -965,7 +1074,7 @@ impl Hub {
         let answer = done.text.map(|a| a.trim().to_string()).filter(|a| !a.is_empty());
         match done.kind {
             SummaryKind::End => {
-                let ctx = self.ending.lock().unwrap().remove(id);
+                let ctx = self.ending.lock().unwrap().remove(id).or_else(|| self.persisted_end(id).ok().flatten());
                 let Some(ctx) = ctx else {
                     eprintln!("sill daemon: session {id}: a summary came in with no end waiting for it");
                     return;
@@ -1031,6 +1140,10 @@ impl Hub {
         }
         self.retire_runner(id);
         self.ending.lock().unwrap().remove(id);
+        // The terminal runner cursor survives until session deletion/retention. The relay may
+        // still be delivering Ended when this daemon stops; deleting its cursor now strands that
+        // worker with an already-acknowledged stream and nothing to reconnect from.
+        self.with_store(|s| { s.conn().execute("DELETE FROM daemon_ends WHERE id=?1", [id])?; Ok(()) }).ok();
         let hub = self.clone();
         let id = id.to_string();
         let _ = std::thread::Builder::new().name(format!("sill-end-{id}")).spawn(move || {
@@ -1107,6 +1220,23 @@ impl Hub {
             let st = child.wait();
             eprintln!("sill daemon: session {id} ended ({})", st.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string()));
             forget(&children, &id, pid);
+        });
+    }
+
+    pub fn reconnect_runner(self: &Arc<Self>, id: &str) {
+        let hub = self.clone(); let id = id.to_string();
+        std::thread::spawn(move || {
+            let mut wait = std::time::Duration::from_millis(100);
+            loop {
+                std::thread::sleep(wait);
+                let open = hub.with_store(|s| Ok(s.sessions()?.into_iter().any(|s| s.id == id && s.ended_at.is_none()))).unwrap_or(false);
+                if !open { return; }
+                match hub.ensure_runner(&id, false) {
+                    Ok(_) => return,
+                    Err(e) => eprintln!("sill daemon: reconnecting session {id}: {e:#}"),
+                }
+                wait = (wait * 2).min(std::time::Duration::from_secs(10));
+            }
         });
     }
 

@@ -159,7 +159,7 @@ impl Hub {
         let registry = sill_core::agents::load(&self.home);
         let sessions: Vec<Session> = self.with_store(|s| s.sessions()).unwrap_or_default().into_iter().filter(|s| !s.ghost).collect();
         for s in sessions {
-            if self.runners.lock().unwrap().get(&s.id).is_some_and(|r| r.alive() && r.busy()) {
+            if self.children.lock().unwrap().contains_key(&s.id) && self.runners.lock().unwrap().get(&s.id).is_none_or(|r| !r.alive() || r.busy()) {
                 continue;
             }
             let state_dirs = registry.get(&s.agent).map(|a| sill_core::session::state_paths(a, &self.home)).unwrap_or_default();
@@ -267,7 +267,7 @@ impl Hub {
 
     /// How the session's jail lays the host out (its overlay layers and the masked paths): what a
     /// frontend needs to show a file as the agent sees it — an image the agent names, say.
-    pub(super) fn jail_view(&self, id: &str) -> Result<sill_proto::JailView> {
+    pub(in crate::daemon) fn jail_view(&self, id: &str) -> Result<sill_proto::JailView> {
         let Some(s) = self.with_store(|st| st.sessions())?.into_iter().find(|s| s.id == id) else { bail!("no session {id}") };
         let (uid, user) = who();
         let policy = sill_core::session::policy_of(&s, &self.home)?;

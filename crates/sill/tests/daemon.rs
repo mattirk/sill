@@ -33,6 +33,7 @@ impl Daemon {
         c.arg("daemon")
             .env("XDG_RUNTIME_DIR", dir.join("run"))
             .env("XDG_STATE_HOME", dir.join("state"))
+            .env("XDG_CONFIG_HOME", dir.join("config"))
             .env("HOME", dir.join("home"))
             .env("SILL_LAUNCHER", "direct")
             .env_remove("SILL_SESSION")
@@ -107,6 +108,78 @@ impl Daemon {
             std::thread::sleep(Duration::from_millis(50));
         }
     }
+}
+
+#[test]
+fn frontend_reads_the_daemons_host_and_refuses_links() {
+    let d = Daemon::start();
+    let mut c = d.connect().unwrap();
+    let request = |c: &mut Conn, request| c.call(sill_core::frontend::METHOD, serde_json::to_value(request).unwrap()).unwrap();
+    use sill_core::frontend::Request;
+    let file = d.dir.join("home/remote.txt");
+    std::fs::write(&file, "on the box").unwrap();
+    assert_eq!(request(&mut c, Request::Home)["result"], json!(d.dir.join("home")));
+    assert_eq!(request(&mut c, Request::Read { path: file.clone() })["result"], json!(b"on the box".as_slice()));
+    request(&mut c, Request::Write { path: file.clone(), bytes: b"edited from frontend".to_vec() });
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "edited from frontend");
+    std::os::unix::fs::symlink(&file, d.dir.join("home/link")).unwrap();
+    let link = d.dir.join("home/link");
+    assert!(request(&mut c, Request::Read { path: link.clone() }).get("error").is_some());
+    assert!(request(&mut c, Request::Write { path: link, bytes: b"bad".to_vec() }).get("error").is_some());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "edited from frontend");
+    let entries = request(&mut c, Request::List { path: d.dir.join("home") });
+    assert!(entries["result"].as_array().unwrap().iter().any(|e| e["metadata"]["symlink"] == true));
+}
+
+#[test]
+fn frontend_store_and_settings_are_daemon_owned() {
+    let d = Daemon::start();
+    let mut c = d.connect().unwrap();
+    use sill_core::frontend::Request;
+    let request = |c: &mut Conn, request| c.call(sill_core::frontend::METHOD, serde_json::to_value(request).unwrap()).unwrap();
+    assert_eq!(request(&mut c, Request::Sessions)["result"], json!([]));
+    let mut config = sill_core::config::Config::default();
+    config.memory_recall = Some(7);
+    assert!(request(&mut c, Request::SetConfig(config)).get("error").is_none());
+    assert_eq!(request(&mut c, Request::Config)["result"]["memory_recall"], json!(7));
+    request(&mut c, Request::PatchConfig { fields: [("tray".into(), json!(false))].into() });
+    request(&mut c, Request::PatchConfig { fields: [("theme".into(), json!("nord"))].into() });
+    let settings = request(&mut c, Request::Config);
+    assert_eq!(settings["result"]["memory_recall"], json!(7), "changing presentation preserves memory settings");
+    assert_eq!(settings["result"]["tray"], json!(false));
+    assert_eq!(settings["result"]["theme"], json!("nord"));
+    assert!(request(&mut c, Request::PatchConfig { fields: [("unknown".into(), json!(true))].into() }).get("error").is_some());
+    assert!(request(&mut c, Request::SetInstructions { text: "remember the box".into() }).get("error").is_none());
+    assert_eq!(request(&mut c, Request::Instructions)["result"], json!("remember the box"));
+    assert!(request(&mut c, Request::Upload { session: "abcdef01".into(), name: "../bad".into(), bytes: vec![] }).get("error").is_some());
+}
+
+#[test]
+fn a_terminal_is_a_one_use_byte_stream_with_resize() {
+    use sill_core::frontend::Request;
+    let d = Daemon::start();
+    let mut c = d.connect().unwrap();
+    let open = c.call(sill_core::frontend::METHOD, serde_json::to_value(Request::OpenPty {
+        session: None,
+        argv: vec!["/bin/sh".into(), "-c".into(), "read line; stty size; printf 'stream:%s\\n' \"$line\"".into()],
+        env: Default::default(), cwd: Some(d.dir.join("home")), cols: 80, rows: 24,
+    }).unwrap()).unwrap();
+    let token = open["result"]["token"].as_str().expect("pty token").to_string();
+    let resize = c.call(sill_core::frontend::METHOD, serde_json::to_value(Request::ResizePty { token: token.clone(), cols: 92, rows: 41 }).unwrap()).unwrap();
+    assert!(resize.get("error").is_none(), "{resize}");
+    let mut stream = UnixStream::connect(d.socket()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    // Token and first keystrokes may arrive in one read; the daemon must retain buffered bytes.
+    stream.write_all(format!("{}\nhello\n", json!({"_sill_stream":token})).as_bytes()).unwrap();
+    let mut output = String::new();
+    std::io::Read::read_to_string(&mut stream, &mut output).unwrap();
+    assert!(output.contains("41 92"), "{output:?}");
+    assert!(output.contains("stream:hello"), "{output:?}");
+    let mut second = UnixStream::connect(d.socket()).unwrap();
+    second.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    second.write_all(format!("{}\n", json!({"_sill_stream":token})).as_bytes()).unwrap();
+    let mut byte = [0];
+    assert_eq!(std::io::Read::read(&mut second, &mut byte).unwrap(), 0, "token cannot be reused");
 }
 
 impl Drop for Daemon {
@@ -271,7 +344,7 @@ fn the_unit_hears_ready_watchdog_and_stopping() {
     let manager = std::os::unix::net::UnixDatagram::bind(&notify).unwrap();
     manager.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let mut d = Daemon::start_env(dir, &[("NOTIFY_SOCKET", notify.to_str().unwrap()), ("SILL_WATCHDOG_SECS", "2")]);
-    let mut next = || {
+    let next = || {
         let mut buf = [0u8; 256];
         let n = manager.recv(&mut buf).expect("a notification");
         String::from_utf8_lossy(&buf[..n]).to_string()
@@ -295,7 +368,7 @@ fn a_call_nobody_answers_times_out_with_advice() {
     let c = sill_proto::Client::over(ours).unwrap();
     let e = c.call_within::<Value>("_sill/daemon.status", json!({}), Duration::from_millis(200)).unwrap_err();
     let msg = format!("{e:#}");
-    assert!(msg.contains("did not answer _sill/daemon.status in 0 s") && msg.contains("sill restart"), "{msg}");
+    assert!(msg.contains("did not answer _sill/daemon.status in 0.2 s") && msg.contains("sill restart"), "{msg}");
 }
 
 #[test]

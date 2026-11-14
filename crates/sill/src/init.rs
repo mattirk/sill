@@ -42,10 +42,13 @@ pub struct InitArgs {
 const UNIT_SETUP: &str = include_str!("../../../packaging/systemd/sill-state-setup.service");
 const UNIT_MOUNT: &str = include_str!("../../../packaging/systemd/var-lib-sill.mount");
 const UNIT_PERMS: &str = include_str!("../../../packaging/systemd/sill-state-perms.service");
+#[cfg(feature = "shelf")]
 const UNIT_SHELF: &str = include_str!("../../../packaging/systemd/user/sill-shelf.service");
 const UNIT_DAEMON: &str = include_str!("../../../packaging/systemd/user/sill.service");
 const SOCKET_DAEMON: &str = include_str!("../../../packaging/systemd/user/sill.socket");
+#[cfg(feature = "shelf")]
 const DESKTOP: &str = include_str!("../../../packaging/sill.desktop");
+#[cfg(feature = "shelf")]
 const ICON: &str = include_str!("../../../packaging/icons/sill.svg");
 
 const IMAGE: &str = "/var/lib/sill.img";
@@ -148,7 +151,10 @@ pub fn run(a: InitArgs) -> Result<()> {
         i.skip("cgroup delegation: the systemd user instance limits sessions (--delegate-cgroup forces it)".to_string());
     }
     summary(&i)?;
+    #[cfg(feature = "shelf")]
     println!("per user, once: sill init --user   (shelf autostart; then bind `sill toggle` to a key)");
+    #[cfg(not(feature = "shelf"))]
+    println!("per user, once: sill init --user   (enable the daemon socket)");
     Ok(())
 }
 
@@ -307,6 +313,8 @@ fn install_files(i: &mut Init, prefix: &Path, has_systemd: bool) -> Result<()> {
         i.put_file(&dst, &content, 0o755)?;
     }
     install_policy(i, Path::new("/etc/sill/policies"))?;
+    #[cfg(feature = "shelf")]
+    {
     // icons and the desktop file
     let share = prefix.join("share");
     i.put_file(&share.join("sill/sill.svg"), ICON.as_bytes(), 0o644)?;
@@ -315,10 +323,14 @@ fn install_files(i: &mut Init, prefix: &Path, has_systemd: bool) -> Result<()> {
     if i.put_file(&share.join("applications/sill.desktop"), desktop.as_bytes(), 0o644)? && !i.dry {
         let _ = std::process::Command::new("update-desktop-database").arg("-q").arg(share.join("applications")).status();
     }
+    }
     // the shelf as a systemd user service (per user: sill init --user enables it)
     if has_systemd {
-        let unit = UNIT_SHELF.replace("/usr/local/bin/sill", &bin.join("sill").display().to_string());
-        i.put_file(Path::new("/etc/systemd/user/sill-shelf.service"), unit.as_bytes(), 0o644)?;
+        #[cfg(feature = "shelf")]
+        {
+            let unit = UNIT_SHELF.replace("/usr/local/bin/sill", &bin.join("sill").display().to_string());
+            i.put_file(Path::new("/etc/systemd/user/sill-shelf.service"), unit.as_bytes(), 0o644)?;
+        }
         // the daemon: socket-activated (docs/daemon.md §3.1); per user `sill init --user` enables the socket
         let unit = UNIT_DAEMON.replace("/usr/local/bin/sill", &bin.join("sill").display().to_string());
         i.put_file(Path::new("/etc/systemd/user/sill.service"), unit.as_bytes(), 0o644)?;
@@ -647,12 +659,15 @@ fn user_setup(a: &InitArgs) -> Result<()> {
         if a.dry_run { " (dry run)" } else { "" },
         match &systemd {
             Ok(()) => "systemd user instance reachable: units".to_string(),
-            Err(e) => format!("no systemd user instance ({e}): autostart file, daemon spawned by its first client"),
+            Err(e) if cfg!(feature = "shelf") => format!("no systemd user instance ({e}): autostart file, daemon spawned by its first client"),
+            Err(e) => format!("no systemd user instance ({e}): daemon spawned by its first client"),
         }
     );
     let exe = std::env::current_exe()?;
     if systemd.is_ok() {
         let mut staged: Option<PathBuf> = None;
+        #[cfg(feature = "shelf")]
+        {
         if !unit_known("sill-shelf.service") {
             // no system-wide unit (cargo install, tarball without root): a private copy
             let run = stage_once(&mut i, &mut staged, &home, &exe)?;
@@ -669,6 +684,7 @@ fn user_setup(a: &InitArgs) -> Result<()> {
             i.skip("sill-shelf.service already enabled".to_string());
         } else {
             i.run("start the shelf with the session", "systemctl", &["--user", "enable", "--now", "sill-shelf.service"])?;
+        }
         }
         // the daemon's socket (docs/daemon.md §3.1): the first client starts sill.service
         if !unit_known("sill.socket") {
@@ -700,6 +716,8 @@ fn user_setup(a: &InitArgs) -> Result<()> {
             }
         }
     } else {
+        #[cfg(feature = "shelf")]
+        {
         let run = stage_autostart(&mut i, &home, &exe)?;
         let entry = format!(
             "[Desktop Entry]\nType=Application\nName=sill\nComment=agent shelf (hidden; `sill toggle` shows it)\n\
@@ -707,14 +725,20 @@ fn user_setup(a: &InitArgs) -> Result<()> {
             run.display()
         );
         i.put_file(&home.join(".config/autostart/sill.desktop"), entry.as_bytes(), 0o644)?;
+        }
+        #[cfg(not(feature = "shelf"))]
+        i.skip("the daemon starts when a client connects (no user manager)");
     }
     summary(&i)?;
+    #[cfg(feature = "shelf")]
+    {
     let on_path = which("sill").and_then(|p| p.canonicalize().ok()) == exe.canonicalize().ok();
     println!(
         "hotkey: bind `{} toggle` to a key in your desktop's keyboard shortcuts (Alt+Space is the usual choice; \
          the shelf's own grab, Settings → Hotkey, works on X11)",
         if on_path { "sill".to_string() } else { exe.display().to_string() }
     );
+    }
     Ok(())
 }
 
