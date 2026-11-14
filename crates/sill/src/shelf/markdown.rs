@@ -14,12 +14,23 @@
 //! message again; a width change renders the ones holding a table (`relayout`).
 
 use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use gtk4 as gtk;
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use sourceview5::prelude::*;
 
-use super::theme;
+use super::{theme, viewer};
+
+/// Where a message's images come from and what a click on one does. A conversation resolves paths as
+/// the agent sees them inside its jail; the file viewer resolves them relative to the file.
+pub struct Ctx {
+    /// An image source (`![alt](src)`) → a readable local file, or `None` (not found, not allowed).
+    pub resolve: Box<dyn Fn(&str) -> Option<PathBuf>>,
+    /// Click on an image: show it large. `None` = images aren't clickable.
+    pub open: Option<Box<dyn Fn(&Path)>>,
+}
 
 /// Gap between table columns, logical px at zoom 1.
 const COL_GAP: f64 = 22.0;
@@ -33,6 +44,7 @@ struct Rendered {
     class: String,
     md: String,
     table_width: Option<i32>,
+    ctx: Option<Rc<Ctx>>,
 }
 
 thread_local! {
@@ -74,12 +86,28 @@ fn remember(msg: &gtk::Box, class: &str, md: &str, table_width: Option<i32>) {
         let mut l = m.borrow_mut();
         match l.iter_mut().find(|r| r.msg.upgrade().as_ref() == Some(msg)) {
             Some(r) => {
+                r.class = class.to_string();
                 r.md = md.to_string();
                 r.table_width = table_width;
             }
-            None => l.push(Rendered { msg: msg.downgrade(), class: class.to_string(), md: md.to_string(), table_width }),
+            None => l.push(Rendered { msg: msg.downgrade(), class: class.to_string(), md: md.to_string(), table_width, ctx: None }),
         }
     });
+}
+
+/// Give a message its image context (before its first render; without one, images show as text).
+pub fn set_context(msg: &gtk::Box, ctx: Rc<Ctx>) {
+    MESSAGES.with(|m| {
+        let mut l = m.borrow_mut();
+        match l.iter_mut().find(|r| r.msg.upgrade().as_ref() == Some(msg)) {
+            Some(r) => r.ctx = Some(ctx),
+            None => l.push(Rendered { msg: msg.downgrade(), class: String::new(), md: String::new(), table_width: None, ctx: Some(ctx) }),
+        }
+    });
+}
+
+fn context_of(msg: &gtk::Box) -> Option<Rc<Ctx>> {
+    MESSAGES.with(|m| m.borrow().iter().find(|r| r.msg.upgrade().as_ref() == Some(msg)).and_then(|r| r.ctx.clone()))
 }
 
 fn scale(px: f64) -> i32 {
@@ -260,11 +288,12 @@ struct Out<'a> {
     next: Option<gtk::Widget>,
     /// The prose view being written, if any (none at the start and right after a code block).
     cur: Option<gtk::TextView>,
+    ctx: Option<Rc<Ctx>>,
 }
 
 impl<'a> Out<'a> {
     fn new(msg: &'a gtk::Box, class: &'a str) -> Self {
-        Out { msg, class, next: msg.first_child(), cur: None }
+        Out { msg, class, next: msg.first_child(), cur: None, ctx: context_of(msg) }
     }
 
     fn drop_rest(&mut self) {
@@ -327,6 +356,41 @@ impl<'a> Out<'a> {
         fill_code_view(&view, lang, code);
     }
 
+    /// An image segment: the picture at most the column's width, aspect kept; a click opens it large.
+    fn image(&mut self, path: &Path, alt: &str) {
+        self.close_text();
+        let b = match self.reuse(gtk::Button::static_type()).and_then(|w| w.downcast::<gtk::Button>().ok()) {
+            Some(b) => b,
+            None => {
+                let b = gtk::Button::new();
+                b.add_css_class("sill-md-image");
+                b.set_halign(gtk::Align::Start);
+                let pic = gtk::Picture::new();
+                pic.set_can_shrink(true);
+                pic.set_content_fit(gtk::ContentFit::Contain);
+                b.set_child(Some(&pic));
+                if let Some(ctx) = self.ctx.clone() {
+                    b.connect_clicked(move |b| {
+                        if let Some(open) = &ctx.open {
+                            open(Path::new(b.widget_name().as_str()));
+                        }
+                    });
+                }
+                self.msg.append(&b);
+                b
+            }
+        };
+        let name = path.to_string_lossy();
+        if b.widget_name().as_str() != name.as_ref() {
+            b.set_widget_name(&name);
+            if let Some(pic) = b.child().and_downcast::<gtk::Picture>() {
+                pic.set_filename(Some(path));
+                pic.set_alternative_text(Some(alt));
+            }
+        }
+        b.set_tooltip_text(Some(if alt.is_empty() { &name } else { alt }));
+    }
+
     fn finish(mut self) {
         self.close_text();
         self.drop_rest();
@@ -348,6 +412,9 @@ impl<'a> Out<'a> {
     }
 
     fn insert(&mut self, text: &str, tags: &[String]) {
+        if self.cur.is_none() && text.chars().all(|c| c == '\n') {
+            return; // line breaks right after a code block or image start nothing
+        }
         let buffer = self.text().buffer();
         let mut end = buffer.end_iter();
         let start_off = end.offset();
@@ -436,6 +503,7 @@ pub fn render(msg: &gtk::Box, class: &str, markdown: &str) {
     let mut in_table_cell = false;
     let mut table_index = 0usize;
     let mut item_marker: Option<(i32, i32)> = None; // the last list marker's offsets, replaced by a task box
+    let mut image: Option<(String, String)> = None; // (source, alt text so far)
 
     for ev in parser {
         match ev {
@@ -497,7 +565,7 @@ pub fn render(msg: &gtk::Box, class: &str, markdown: &str) {
                 Tag::Strong => tags.push("bold".into()),
                 Tag::Strikethrough => tags.push("strike".into()),
                 Tag::Link { .. } => tags.push("link".into()),
-                Tag::Image { .. } => out.insert("[image: ", &[]),
+                Tag::Image { dest_url, .. } => image = Some((dest_url.to_string(), String::new())),
                 Tag::Table(aligns) => {
                     out.block_start(&mut need_newline);
                     table = Some((aligns, Vec::new()));
@@ -553,7 +621,28 @@ pub fn render(msg: &gtk::Box, class: &str, markdown: &str) {
                 TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link => {
                     tags.pop();
                 }
-                TagEnd::Image => out.insert("]", &[]),
+                TagEnd::Image => {
+                    if let Some((src, alt)) = image.take() {
+                        let remote = src.starts_with("http://") || src.starts_with("https://");
+                        let local = if remote { None } else { out.ctx.as_ref().and_then(|c| (c.resolve)(&src)) };
+                        match local {
+                            Some(p) if viewer::is_image(&p) => out.image(&p, &alt),
+                            // remote images aren't fetched (the shelf is outside the proxy): a link
+                            _ if remote => {
+                                let label = if alt.is_empty() { "image".to_string() } else { alt };
+                                out.insert(&format!("{label} "), &tags);
+                                let mut t = tags.clone();
+                                t.push("link".into());
+                                out.insert(&src, &t);
+                            }
+                            _ => {
+                                let mut t = tags.clone();
+                                t.push("code".into());
+                                out.insert(&format!("[image not found: {src}]"), &t);
+                            }
+                        }
+                    }
+                }
                 TagEnd::TableHead | TagEnd::TableRow => {}
                 TagEnd::TableCell => in_table_cell = false,
                 TagEnd::Table => {
@@ -724,7 +813,9 @@ pub fn render(msg: &gtk::Box, class: &str, markdown: &str) {
                 _ => {}
             },
             Event::Text(t) => {
-                if let Some((_, c)) = code.as_mut() {
+                if let Some((_, alt)) = image.as_mut() {
+                    alt.push_str(&t);
+                } else if let Some((_, c)) = code.as_mut() {
                     c.push_str(&t);
                 } else if in_table_cell {
                     if let Some(cell) = table.as_mut().and_then(|(_, t)| t.last_mut()).and_then(|r| r.last_mut()) {

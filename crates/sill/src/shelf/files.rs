@@ -30,6 +30,10 @@ pub struct FilesPage {
     editor: sourceview5::View,
     buffer: sourceview5::Buffer,
     header: gtk::Label,
+    /// Markdown files: rendered by default ("rendered"), the editor on demand ("source").
+    content: gtk::Stack,
+    md: gtk::Box,
+    md_toggle: gtk::ToggleButton,
     message: gtk::Label,
     store: Rc<Store>,
     roots_model: gio::ListStore,
@@ -46,7 +50,7 @@ pub struct FilesPage {
 }
 
 /// Icon for a tree row: folder (open/closed) or the file's MIME symbolic icon.
-fn file_icon(path: &Path, is_dir: bool, expanded: bool) -> gio::Icon {
+pub(super) fn file_icon(path: &Path, is_dir: bool, expanded: bool) -> gio::Icon {
     if is_dir {
         return gio::ThemedIcon::new(if expanded { "folder-open-symbolic" } else { "folder-symbolic" }).upcast();
     }
@@ -55,7 +59,7 @@ fn file_icon(path: &Path, is_dir: bool, expanded: bool) -> gio::Icon {
     gio::content_type_get_symbolic_icon(&ctype)
 }
 
-fn children_of(dir: &Path) -> gio::ListStore {
+pub(super) fn children_of(dir: &Path) -> gio::ListStore {
     let store = gio::ListStore::new::<gtk::StringObject>();
     let mut entries: Vec<(bool, String)> = std::fs::read_dir(dir)
         .map(|rd| {
@@ -185,7 +189,7 @@ impl FilesPage {
                     (false, false, true) => Some("pinned by another session, not this one"),
                     _ => None,
                 });
-                pin.set_visible(is_dir);
+                pin.set_visible(true); // folders: a live mount; files: a chip that opens the file
                 pin.set_child(Some(&super::icons::scalable(
                     if pinned { "sill-minus" } else { "sill-plus" },
                     super::icons::fg_for(&pin, &theme::current()),
@@ -263,9 +267,29 @@ impl FilesPage {
         message.set_xalign(0.0);
         message.add_css_class("dim-label");
         message.set_margin_start(8);
+        // Markdown: rendered by the conversation's renderer, the editor one click away
+        let md = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        md.add_css_class("sill-msg");
+        md.set_margin_start(12);
+        md.set_margin_end(12);
+        md.set_margin_top(6);
+        let md_scroll = gtk::ScrolledWindow::builder().child(&md).vexpand(true).hexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build();
+        let content = gtk::Stack::new();
+        content.add_named(&editor_scroll, Some("source"));
+        content.add_named(&md_scroll, Some("rendered"));
+        content.set_vexpand(true);
+        let md_toggle = gtk::ToggleButton::with_label("Edit");
+        md_toggle.add_css_class("flat");
+        md_toggle.add_css_class("sill-viewer-btn");
+        md_toggle.set_tooltip_text(Some("Edit the Markdown source"));
+        md_toggle.set_visible(false);
+        header.set_hexpand(true);
+        let header_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        header_row.append(&header);
+        header_row.append(&md_toggle);
         let right = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        right.append(&header);
-        right.append(&editor_scroll);
+        right.append(&header_row);
+        right.append(&content);
         right.append(&message);
 
         let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
@@ -285,6 +309,9 @@ impl FilesPage {
             editor,
             buffer,
             header,
+            content,
+            md,
+            md_toggle: md_toggle.clone(),
             message,
             store,
             roots_model,
@@ -298,6 +325,17 @@ impl FilesPage {
             on_pin: RefCell::new(None),
         });
         *page_for_bind.borrow_mut() = Some(Rc::downgrade(&page));
+        {
+            let weak = Rc::downgrade(&page);
+            md_toggle.connect_toggled(move |t| {
+                if let Some(p) = weak.upgrade() {
+                    if !t.is_active() {
+                        p.render_markdown(); // back from editing: show what the editor holds
+                    }
+                    p.content.set_visible_child_name(if t.is_active() { "source" } else { "rendered" });
+                }
+            });
+        }
         {
             let p = page.clone();
             scope_clear.connect_clicked(move |_| p.set_scope(None));
@@ -364,7 +402,28 @@ impl FilesPage {
         }
     }
 
+    /// Render the editor's text as Markdown (images relative to the file).
+    fn render_markdown(&self) {
+        let dir = self.open.borrow().as_ref().and_then(|p| p.parent().map(Path::to_path_buf)).unwrap_or_default();
+        super::markdown::set_context(
+            &self.md,
+            Rc::new(super::markdown::Ctx {
+                resolve: Box::new(move |src| {
+                    let p = Path::new(src);
+                    let p = if p.is_absolute() { p.to_path_buf() } else { dir.join(p) };
+                    p.is_file().then_some(p)
+                }),
+                open: None,
+            }),
+        );
+        let text = self.buffer.text(&self.buffer.start_iter(), &self.buffer.end_iter(), true);
+        super::markdown::render(&self.md, "sill-agent", &text);
+    }
+
     fn show_file(self: &Rc<Self>, path: &Path) {
+        // start in the editor; a Markdown file switches to its rendering at the end
+        self.md_toggle.set_visible(false);
+        self.content.set_visible_child_name("source");
         if self.dirty.get()
             && let Some(open) = self.open.borrow().as_ref()
         {
@@ -432,6 +491,12 @@ impl FilesPage {
         self.dirty.set(false);
         self.update_header();
         self.message.set_text("");
+        if super::viewer::is_markdown(path) {
+            self.md_toggle.set_visible(true);
+            self.md_toggle.set_active(false);
+            self.render_markdown();
+            self.content.set_visible_child_name("rendered");
+        }
     }
 
     fn save(&self) {
