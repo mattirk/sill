@@ -10,6 +10,14 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelLimits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<u32>,
+}
 
 /// The API an endpoint speaks. One value now; an agent that speaks another format would be
 /// offered only the providers it can talk to.
@@ -37,6 +45,8 @@ pub struct Provider {
     /// One of `models`: the model a session starts with unless the person picked another.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_limits: BTreeMap<String, ModelLimits>,
 }
 
 /// Where a base URL points.
@@ -107,6 +117,22 @@ impl Provider {
         if let Some(default) = &self.default_model {
             ensure!(self.models.contains(default), "the default model {default} is not among the provider's models");
         }
+        for (model, limits) in &self.model_limits {
+            ensure!(
+                self.models.contains(model),
+                "limits for {model} must belong to an offered model"
+            );
+            ensure!(
+                limits.context != Some(0) && limits.output != Some(0),
+                "token limits must be positive whole numbers"
+            );
+            if let (Some(context), Some(output)) = (limits.context, limits.output) {
+                ensure!(
+                    output < context,
+                    "output limit must be smaller than context for {model}"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -124,6 +150,14 @@ pub fn dir(home: &Path) -> PathBuf {
     home.join(".config/sill/providers")
 }
 
+// Separate from the strict legacy TOML so an older daemon can still load providers.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SavedLimits {
+    base_url: String,
+    limits: BTreeMap<String, ModelLimits>,
+}
+
 /// Every provider, by id. A file that does not read is an error, as an agent definition is.
 pub fn load(home: &Path) -> Result<BTreeMap<String, Provider>> {
     let dir = dir(home);
@@ -137,7 +171,18 @@ pub fn load(home: &Path) -> Result<BTreeMap<String, Provider>> {
         let path = entry?.path();
         if path.extension().and_then(|x| x.to_str()) != Some("toml") { continue; }
         let text = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        let provider: Provider = toml::from_str(&text).with_context(|| format!("invalid model provider {}", path.display()))?;
+        let mut provider: Provider = toml::from_str(&text).with_context(|| format!("invalid model provider {}", path.display()))?;
+        let limits_path = path.with_extension("limits.json");
+        match std::fs::read(&limits_path) {
+            Ok(bytes) => {
+                let saved: SavedLimits = serde_json::from_slice(&bytes).with_context(|| format!("invalid limits {}", limits_path.display()))?;
+                if saved.base_url == provider.base_url {
+                    provider.model_limits = saved.limits.into_iter().filter(|(model, _)| provider.models.contains(model)).collect();
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("read {}", limits_path.display())),
+        }
         provider.validate().with_context(|| format!("invalid model provider {}", path.display()))?;
         ensure!(path.file_stem().and_then(|s| s.to_str()) == Some(provider.id.as_str()), "model provider {} is not named after its id {}", path.display(), provider.id);
         out.insert(provider.id.clone(), provider);
@@ -150,7 +195,11 @@ pub fn save(home: &Path, provider: &Provider) -> Result<PathBuf> {
     let dir = dir(home);
     std::fs::create_dir_all(&dir)?;
     let name = format!("{}.toml", provider.id);
-    crate::safe_fs::replace_file(&dir, std::ffi::OsStr::new(&name), toml::to_string_pretty(provider)?.as_bytes())?;
+    let limits = SavedLimits { base_url: provider.base_url.clone(), limits: provider.model_limits.clone() };
+    crate::safe_fs::replace_file(&dir, std::ffi::OsStr::new(&format!("{}.limits.json", provider.id)), &serde_json::to_vec(&limits)?)?;
+    let mut legacy = provider.clone();
+    legacy.model_limits.clear();
+    crate::safe_fs::replace_file(&dir, std::ffi::OsStr::new(&name), toml::to_string_pretty(&legacy)?.as_bytes())?;
     Ok(dir.join(name))
 }
 
@@ -158,6 +207,11 @@ pub fn save(home: &Path, provider: &Provider) -> Result<PathBuf> {
 pub fn remove(home: &Path, id: &str) -> Result<bool> {
     ensure!(valid_id(id), "invalid provider id");
     remove_key(home, id)?;
+    match std::fs::remove_file(dir(home).join(format!("{id}.limits.json"))) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
     match std::fs::remove_file(dir(home).join(format!("{id}.toml"))) {
         Ok(()) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -256,7 +310,15 @@ impl Translation {
                     if has_key(p) {
                         options["apiKey"] = format!("{{env:{}}}", p.key_env()).into();
                     }
-                    let models: serde_json::Map<String, serde_json::Value> = p.models.iter().map(|m| (m.clone(), serde_json::json!({}))).collect();
+                    let models: serde_json::Map<String, serde_json::Value> = p.models.iter().map(|m| {
+                            let mut model = serde_json::json!({});
+                            if let Some(limits) = p.model_limits.get(m) {
+                                model["limit"] =
+                                    serde_json::to_value(limits).expect("token limits serialize");
+                            }
+                            (m.clone(), model)
+                        })
+                        .collect();
                     entries.insert(self.provider_id(p), serde_json::json!({ "npm": "@ai-sdk/openai-compatible", "name": p.name, "options": options, "models": models }));
                 }
                 let mut config = serde_json::json!({ "provider": entries });
@@ -310,14 +372,21 @@ pub fn agent_endpoints(home: &Path, agent_id: &str) -> Result<Vec<String>> {
 /// host, where sessions reach it from. curl, as the registry download uses; the key goes in on
 /// stdin, never on the command line.
 pub fn list_models(base_url: &str, key: Option<&str>) -> Result<Vec<String>> {
+    parse_models(&request(
+        &format!("{}/models", base_url.trim_end_matches('/')),
+        key,
+    )?)
+}
+
+fn request(url: &str, key: Option<&str>) -> Result<String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
-    endpoint(base_url)?;
+    endpoint(url)?;
     if let Some(key) = key {
         ensure!(valid_key(key), "a key is at most 4096 characters without spaces or control characters");
     }
     let quoted = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
-    let mut config = format!("url = {}\n", quoted(&format!("{}/models", base_url.trim_end_matches('/'))));
+    let mut config = format!("url = {}\n", quoted(url));
     if let Some(key) = key {
         config.push_str(&format!("header = {}\n", quoted(&format!("Authorization: Bearer {key}"))));
     }
@@ -336,7 +405,41 @@ pub fn list_models(base_url: &str, key: Option<&str>) -> Result<Vec<String>> {
         let said: String = body.trim().chars().take(300).collect();
         bail!("the endpoint answered {status}{}", if said.is_empty() { String::new() } else { format!(": {said}") });
     }
-    parse_models(body)
+    Ok(body.to_string())
+}
+
+/// The native Ollama endpoint under the same path prefix and authority as /v1.
+fn ollama_ps_url(base_url: &str) -> Result<String> {
+    endpoint(base_url)?;
+    let base = base_url.trim_end_matches('/');
+    let prefix = base
+        .strip_suffix("/v1")
+        .context("Ollama detection needs an API address ending in /v1")?;
+    Ok(format!("{prefix}/api/ps"))
+}
+pub fn detect_context(base_url: &str, key: Option<&str>, model: &str) -> Result<u32> {
+    ensure!(valid_text(model, 256), "invalid model id");
+    parse_active_context(&request(&ollama_ps_url(base_url)?, key)?, model)
+}
+fn parse_active_context(body: &str, model: &str) -> Result<u32> {
+    let data: serde_json::Value =
+        serde_json::from_str(body).context("the server did not return Ollama model information")?;
+    let models = data["models"]
+        .as_array()
+        .context("this endpoint does not report Ollama's running models; enter limits manually")?;
+    let canonical = |id: &str| {
+        if id.rsplit('/').next().unwrap_or(id).contains(':') { id.to_string() }
+        else { format!("{id}:latest") }
+    };
+    let wanted = canonical(model);
+    let active = models.iter().find(|m| ["name", "model"].iter().any(|field|
+        m[*field].as_str().is_some_and(|name| canonical(name) == wanted)))
+        .context("this model is not loaded on the server; load it there and detect again, or enter its configured context manually")?;
+    active["context_length"]
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|n| *n > 0)
+        .context("the server did not report an active context size; enter it manually")
 }
 
 /// `{"data":[{"id":…}]}`, the OpenAI shape; a bare list of the same objects is read too.
@@ -372,7 +475,91 @@ mod tests {
     }
 
     fn provider(id: &str, url: &str) -> Provider {
-        Provider { id: id.into(), name: format!("Provider {id}"), api: Api::Openai, base_url: url.into(), models: vec!["qwen/coder".into(), "small".into()], default_model: None }
+        Provider { id: id.into(), name: format!("Provider {id}"), api: Api::Openai, base_url: url.into(), models: vec!["qwen/coder".into(), "small".into()], default_model: None,
+            model_limits: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn active_context_treats_only_untagged_models_as_latest() {
+        let body = r#"{"models":[{"name":"qwen3:latest","context_length":32768},{"model":"registry:5000/team/qwen3:latest","context_length":16384}]}"#;
+        assert_eq!(parse_active_context(body, "qwen3").unwrap(), 32768);
+        assert_eq!(parse_active_context(body, "qwen3:latest").unwrap(), 32768);
+        assert_eq!(parse_active_context(body, "registry:5000/team/qwen3").unwrap(), 16384);
+        assert!(parse_active_context(body, "qwen3:27b").is_err());
+        assert!(parse_active_context(body, "other").is_err());
+        assert_eq!(parse_active_context(r#"{"models":[{"name":"qwen3","context_length":8192}]}"#, "qwen3:latest").unwrap(), 8192);
+    }
+
+    #[test]
+    fn limits_round_trip_and_reach_opencode_without_affecting_other_models() {
+        let home = Home::new("limits");
+        let mut p = provider("local", "http://192.168.1.20:11434/v1");
+        p.model_limits.insert(
+            "qwen/coder".into(),
+            ModelLimits {
+                context: Some(32768),
+                output: Some(4096),
+            },
+        );
+        save(&home.0, &p).unwrap();
+        assert_eq!(load(&home.0).unwrap()["local"], p);
+        let record = dir(&home.0).join("local.toml");
+        let text = std::fs::read_to_string(&record).unwrap();
+        assert!(!text.contains("model_limits"));
+        // Simulate an older daemon editing only the legacy record.
+        std::fs::write(&record, text.replace("Provider local", "Renamed")).unwrap();
+        assert_eq!(load(&home.0).unwrap()["local"].model_limits, p.model_limits);
+        std::fs::write(&record, text.replace("192.168.1.20", "192.168.1.21")).unwrap();
+        assert!(load(&home.0).unwrap()["local"].model_limits.is_empty());
+        save(&home.0, &p).unwrap();
+        let env = Translation::OpenCode.env(&[&p], &|_| false);
+        let config: serde_json::Value =
+            serde_json::from_str(&env["OPENCODE_CONFIG_CONTENT"]).unwrap();
+        assert_eq!(
+            config["provider"]["sill-local"]["models"]["qwen/coder"]["limit"],
+            serde_json::json!({"context":32768,"output":4096})
+        );
+        assert_eq!(
+            config["provider"]["sill-local"]["models"]["small"],
+            serde_json::json!({})
+        );
+        p.model_limits.get_mut("qwen/coder").unwrap().output = Some(32768);
+        assert!(p.validate().is_err());
+        p.model_limits.get_mut("qwen/coder").unwrap().output = Some(0);
+        assert!(p.validate().is_err());
+        p.model_limits.clear();
+        p.model_limits
+            .insert("not-offered".into(), ModelLimits::default());
+        assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn detection_uses_active_allocation_and_preserves_the_endpoint_prefix() {
+        assert_eq!(
+            ollama_ps_url("https://host.example/ollama/v1/").unwrap(),
+            "https://host.example/ollama/api/ps"
+        );
+        assert!(ollama_ps_url("http://localhost:11434/v1").is_err());
+        assert!(ollama_ps_url("https://host.example/wrong").is_err());
+        let body = r#"{"models":[{"name":"qwen:27b","context_length":32768,"model_info":{"context_length":262144}},{"name":"other","context_length":4096}]}"#;
+        assert_eq!(parse_active_context(body, "qwen:27b").unwrap(), 32768);
+        assert!(parse_active_context(body, "unloaded").is_err());
+        assert!(
+            parse_active_context(
+                r#"{"models":[{"name":"qwen:27b","context_length":0}]}"#,
+                "qwen:27b"
+            )
+            .is_err()
+        );
+        assert!(
+            parse_active_context(
+                r#"{"models":[{"name":"qwen:27b","context_length":4294967296}]}"#,
+                "qwen:27b"
+            )
+            .is_err()
+        );
+        assert!(parse_active_context(r#"{"data":[{"id":"qwen:27b"}]}"#, "qwen:27b").is_err());
     }
 
     #[test]

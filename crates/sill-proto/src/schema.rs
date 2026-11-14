@@ -60,6 +60,7 @@ const fn notification<P: JsonSchema>(name: &'static str, doc: &'static str) -> M
 
 /// Every method the daemon answers and every notification it sends, in the order of docs/protocol.md.
 pub const METHODS: &[Method] = &[
+    req_needing::<crate::providers::DetectLimits, crate::providers::DetectedLimits>("_sill/providers.detect_limits", "sill.provider_limits", 1, "Read Ollama's active context allocation for one model, from the same host and path prefix as the provider; does not load or modify models."),
     req_needing::<crate::Empty, crate::storage::Space>("_sill/storage.space", "sill.storage", 1, "Read used, total and available bytes on the daemon host home and state filesystems."),
     req_needing::<crate::Empty, crate::storage::Caches>("_sill/storage.caches", "sill.storage", 1, "Scan known session build caches; active sessions cannot be cleared."),
     req_empty_needing::<crate::storage::ClearBuildCache>("_sill/storage.clear_build_cache", "sill.storage", 1, "Detach and remove only the known build cache of an inactive session; read caches again after uncertainty before repeating."),

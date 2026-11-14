@@ -27,8 +27,24 @@ fn public(p: core::Provider) -> Result<api::Provider> {
     Ok(serde_json::from_value(json!(p))?)
 }
 
-pub fn handle(m: &str, p: Value) -> Option<Result<Value>> {
-    if !matches!(m, "_sill/providers.list" | "_sill/providers.save" | "_sill/providers.remove" | "_sill/providers.test") { return None; }
+// A saved credential belongs to its saved API root, not an arbitrary edited address.
+fn request_key(home: &std::path::Path, base_url: &str, key: Option<sill_proto::wire::Secret>, id: Option<&str>) -> Result<Option<String>> {
+    if let Some(key) = key { return Ok(Some(key.0)); }
+    let Some(id) = id else { return Ok(None); };
+    let key = core::key(home, id)?;
+    if key.is_none() { return Ok(None); }
+    let providers = core::load(home)?;
+    let provider = providers.get(id).ok_or_else(|| Error::invalid_params("unknown provider"))?;
+    if provider.base_url.trim_end_matches('/') != base_url.trim_end_matches('/') {
+        return Err(Error::invalid_params("The address changed; enter a key explicitly or save the new address before testing or detecting context").into());
+    }
+    Ok(key)
+}
+
+pub fn handle(conn: &super::Conn, m: &str, p: Value) -> Option<Result<Value>> {
+    if !matches!(m, "_sill/providers.list" | "_sill/providers.save" | "_sill/providers.remove" | "_sill/providers.test"
+            | "_sill/providers.detect_limits"
+    ) { return None; }
     Some((|| {
         let home = sill_core::changes::home()?;
         Ok(match m {
@@ -43,8 +59,27 @@ pub fn handle(m: &str, p: Value) -> Option<Result<Value>> {
                 json!(api::Listed { providers, agents })
             }
             "_sill/providers.save" => {
-                let a: Save = args(p)?;
+                let mut a: Save = args(p)?;
                 a.provider.validate().map_err(invalid)?;
+                if !a.provider.model_limits.is_empty()
+                    && !conn.has_capability(api::LIMITS_CAPABILITY)
+                {
+                    return Err(Error::needs_capability(
+                        api::LIMITS_CAPABILITY,
+                        "Model token limits need sill.provider_limits",
+                    )
+                    .into());
+                }
+                // Old frontends cannot edit limits, so omission must not erase them.
+                if !conn.has_capability(api::LIMITS_CAPABILITY) {
+                    if let Some(saved) = core::load(&home)?.get(&a.provider.id) {
+                        if saved.base_url == a.provider.base_url {
+                            a.provider.model_limits = saved.model_limits.iter()
+                                .filter(|(model, _)| a.provider.models.contains(model))
+                                .map(|(model, limits)| (model.clone(), limits.clone())).collect();
+                        }
+                    }
+                }
                 if core::load(&home)?.len() >= 64 && !core::load(&home)?.contains_key(&a.provider.id) {
                     return Err(Error::domain("limit_exceeded", "at most 64 model providers").into());
                 }
@@ -61,14 +96,24 @@ pub fn handle(m: &str, p: Value) -> Option<Result<Value>> {
                 let a: api::Key = args(p)?;
                 json!(api::Removed { removed: core::remove(&home, &a.provider_id).map_err(invalid)? })
             }
+            "_sill/providers.detect_limits" => {
+                if !conn.has_capability(api::LIMITS_CAPABILITY) {
+                    return Err(Error::needs_capability(
+                        api::LIMITS_CAPABILITY,
+                        "Update the frontend for model token limits",
+                    )
+                    .into());
+                }
+                let a: api::DetectLimits = args(p)?;
+                let key = request_key(&home, &a.base_url, a.key, a.provider_id.as_deref())?;
+                let context = core::detect_context(&a.base_url, key.as_deref(), &a.model)
+                    .map_err(|e| Error::domain("operation_failed", format!("{e:#}")))?;
+                json!(api::DetectedLimits { context })
+            }
             "_sill/providers.test" => {
                 let a: api::Test = args(p)?;
                 let endpoint = core::endpoint(&a.base_url).map_err(invalid)?.pattern();
-                let key = match (a.key, &a.provider_id) {
-                    (Some(key), _) => Some(key.0),
-                    (None, Some(id)) => core::key(&home, id).map_err(invalid)?,
-                    (None, None) => None,
-                };
+                let key = request_key(&home, &a.base_url, a.key, a.provider_id.as_deref())?;
                 let models = core::list_models(&a.base_url, key.as_deref()).map_err(|e| anyhow::Error::from(Error::domain("operation_failed", format!("{e:#}"))))?;
                 json!(api::Tested { models, endpoint })
             }
@@ -83,7 +128,16 @@ mod tests {
 
     #[test]
     fn the_public_record_and_the_stored_one_are_the_same_shape() {
-        let stored = core::Provider { id: "lan".into(), name: "LAN".into(), api: core::Api::Openai, base_url: "http://192.168.1.20:11434/v1".into(), models: vec!["a".into()], default_model: Some("a".into()) };
+        let stored = core::Provider { id: "lan".into(), name: "LAN".into(), api: core::Api::Openai, base_url: "http://192.168.1.20:11434/v1".into(), models: vec!["a".into()], default_model: Some("a".into()),
+            model_limits: [(
+                "a".into(),
+                core::ModelLimits {
+                    context: Some(32768),
+                    output: Some(4096),
+                },
+            )]
+            .into(),
+        };
         let back: core::Provider = serde_json::from_value(json!(public(stored.clone()).unwrap())).unwrap();
         assert_eq!(back, stored);
     }

@@ -5206,6 +5206,13 @@
           "description": "1–64 lowercase letters, digits and `-`.",
           "type": "string"
         },
+        "model_limits": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ProviderModelLimits"
+          },
+          "description": "Optional per-model token budgets. Only models in `models` may have entries.",
+          "type": "object"
+        },
         "models": {
           "default": [],
           "description": "Model ids offered to agents, as the endpoint names them.",
@@ -5235,6 +5242,53 @@
           "type": "string"
         }
       ]
+    },
+    "ProviderDetectLimits": {
+      "additionalProperties": false,
+      "description": "Read Ollama's active context allocation without loading or changing a model.",
+      "properties": {
+        "base_url": {
+          "type": "string"
+        },
+        "key": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Secret"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "provider_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "base_url",
+        "model"
+      ],
+      "type": "object"
+    },
+    "ProviderDetectedLimits": {
+      "properties": {
+        "context": {
+          "description": "Active allocation from /api/ps, not the model's theoretical maximum.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "context"
+      ],
+      "type": "object"
     },
     "ProviderEntry": {
       "properties": {
@@ -5267,6 +5321,27 @@
       "required": [
         "provider_id"
       ],
+      "type": "object"
+    },
+    "ProviderModelLimits": {
+      "properties": {
+        "context": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "output": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
       "type": "object"
     },
     "ProviderRemoved": {
@@ -8040,6 +8115,11 @@
   "capabilities": {
     "offered": [
       {
+        "doc": "Per-model provider token limits and Ollama active-context detection.",
+        "name": "sill.provider_limits",
+        "version": 1
+      },
+      {
         "doc": "Daemon-host free space and inactive-session build-cache cleanup.",
         "name": "sill.storage",
         "version": 1
@@ -8179,6 +8259,20 @@
     "snapshot_ttl_seconds": 60
   },
   "methods": [
+    {
+      "capabilities": {
+        "sill.provider_limits": 1
+      },
+      "doc": "Read Ollama's active context allocation for one model, from the same host and path prefix as the provider; does not load or modify models.",
+      "kind": "request",
+      "name": "_sill/providers.detect_limits",
+      "params": {
+        "$ref": "#/$defs/ProviderDetectLimits"
+      },
+      "result": {
+        "$ref": "#/$defs/ProviderDetectedLimits"
+      }
+    },
     {
       "capabilities": {
         "sill.storage": 1

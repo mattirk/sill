@@ -446,7 +446,7 @@ impl Hub {
         if let Some(result) = self.changes_public(m, params.clone()) { return result.map_err(super::sfp::failure); }
         if let Some(result) = super::storage::handle(self, conn, m, params.clone()) { return result.map_err(super::sfp::failure); }
         if let Some(result) = super::agent_admin::handle(self, m, params.clone()) { return result.map_err(super::sfp::failure); }
-        if let Some(result) = super::providers::handle(m, params.clone()) { return result.map_err(super::sfp::failure); }
+        if let Some(result) = super::providers::handle(conn, m, params.clone()) { return result.map_err(super::sfp::failure); }
         if let Some(result) = super::host_control::handle(self, conn, m, params.clone()) {
             return result.map_err(|e| {
                 if let Some(e) = e.downcast_ref::<Error>() { return e.clone(); }

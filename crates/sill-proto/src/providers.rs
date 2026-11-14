@@ -5,6 +5,16 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub const CAPABILITY: &str = "sill.providers";
+pub const LIMITS_CAPABILITY: &str = "sill.provider_limits";
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(rename = "ProviderModelLimits")]
+pub struct ModelLimits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<u32>,
+}
 
 /// The API an endpoint speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -31,6 +41,9 @@ pub struct Provider {
     /// One of `models`: what a session starts with unless the person picked another.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
+    /// Optional per-model token budgets. Only models in `models` may have entries.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub model_limits: std::collections::BTreeMap<String, ModelLimits>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -102,4 +115,23 @@ pub struct Tested {
     /// The endpoint's model ids, sorted; at most 2000.
     pub models: Vec<String>,
     pub endpoint: String,
+}
+
+/// Read Ollama's active context allocation without loading or changing a model.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(rename = "ProviderDetectLimits")]
+#[serde(deny_unknown_fields)]
+pub struct DetectLimits {
+    pub base_url: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<crate::wire::Secret>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(rename = "ProviderDetectedLimits")]
+pub struct DetectedLimits {
+    /// Active allocation from /api/ps, not the model's theoretical maximum.
+    pub context: u32,
 }

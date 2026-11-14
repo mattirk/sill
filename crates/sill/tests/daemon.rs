@@ -1959,3 +1959,92 @@ fn storage_cleanup_refuses_a_live_launcher_and_requires_capability() {
     let reply = c.call("_sill/storage.clear_build_cache", json!({"session_id": id, "path": "/tmp"})).unwrap();
     assert_eq!(reply["error"]["code"], -32602);
 }
+
+#[test]
+fn provider_limits_capabilities_legacy_saves_and_credential_binding() {
+    let d = Daemon::start();
+    let mut old = d.connect_caps(json!({"sill.providers":1})).unwrap();
+    let mut new = d.connect_caps(json!({"sill.providers":1,"sill.provider_limits":1})).unwrap();
+    let provider = json!({"id":"lan","name":"LAN","api":"openai","base_url":"http://server.example:11434/v1","models":["qwen3"],"model_limits":{"qwen3":{"context":32768,"output":4096}}});
+    let denied = old.call("_sill/providers.save", json!({"provider":provider})).unwrap();
+    assert!(denied.get("error").is_some(), "{denied}");
+    let detect = json!({"base_url":"http://server.example:11434/v1","provider_id":"lan","model":"qwen3"});
+    let denied = old.call("_sill/providers.detect_limits", detect.clone()).unwrap();
+    assert!(denied.get("error").is_some(), "{denied}");
+    let saved = new.call("_sill/providers.save", json!({"provider":provider,"key":"test-secret"})).unwrap();
+    assert!(saved.get("result").is_some(), "{saved}");
+    let mut legacy = provider.clone();
+    legacy.as_object_mut().unwrap().remove("model_limits");
+    legacy["name"] = json!("Renamed");
+    let saved = old.call("_sill/providers.save", json!({"provider":legacy})).unwrap();
+    assert!(saved.get("result").is_some(), "{saved}");
+    let listed = new.call("_sill/providers.list", json!({})).unwrap();
+    assert_eq!(listed["result"]["providers"][0]["provider"]["model_limits"], provider["model_limits"]);
+    let text = std::fs::read_to_string(d.dir.join("home/.config/sill/providers/lan.toml")).unwrap();
+    assert!(!text.contains("model_limits"), "old daemons must read the original record shape");
+    for address in ["http://other.example:11434/v1", "https://server.example:11434/v1", "http://server.example:11434/other/v1", "http://server.example:8080/v1"] {
+        for method in ["_sill/providers.detect_limits", "_sill/providers.test"] {
+            let mut args = detect.clone();
+            args["base_url"] = json!(address);
+            if method.ends_with(".test") { args.as_object_mut().unwrap().remove("model"); }
+            let refused = new.call(method, args).unwrap();
+            assert!(refused["error"]["message"].as_str().unwrap().contains("address changed"), "{refused}");
+        }
+    }
+}
+
+// Run only on a host that can reach a real, already-loaded Ollama model.
+#[test]
+#[ignore = "requires SILL_TEST_OLLAMA_URL and SILL_TEST_OLLAMA_MODEL"]
+fn provider_limits_live_ollama_rpc() {
+    let url = std::env::var("SILL_TEST_OLLAMA_URL").unwrap();
+    let model = std::env::var("SILL_TEST_OLLAMA_MODEL").unwrap();
+    let direct = sill_core::providers::detect_context(&url, None, &model).unwrap();
+    let d = Daemon::start();
+    let mut c = d.connect_caps(json!({"sill.providers":1,"sill.provider_limits":1})).unwrap();
+    let result = c.call("_sill/providers.detect_limits", json!({"base_url":url,"model":model})).unwrap();
+    assert_eq!(result["result"]["context"], direct, "{result}");
+    let saved = c.call("_sill/providers.save", json!({"provider":{"id":"live","name":"Live","api":"openai","base_url":url,"models":[model.clone()],"model_limits":{model.clone():{"context":direct}}}})).unwrap();
+    assert!(saved.get("result").is_some(), "{saved}");
+    let env = sill_core::providers::agent_env(&d.dir.join("home"), "opencode").unwrap();
+    let config: Value = serde_json::from_str(&env["OPENCODE_CONFIG_CONTENT"]).unwrap();
+    assert_eq!(config["provider"]["sill-live"]["models"][&model]["limit"]["context"], direct);
+}
+
+#[test]
+fn provider_limits_detection_rpc_saves_the_active_allocation() {
+    use std::os::unix::fs::PermissionsExt;
+    // Stub only curl's transport: exercise RPC, saved credentials, parsing, save and launch config.
+    // This is not evidence of a real Ollama/OpenCode run.
+    let dir = Daemon::dir();
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let curl = bin.join("curl");
+    std::fs::write(&curl, r##"#!/bin/sh
+config=$(cat)
+case "$config" in
+  *'url = "http://server.example:11434/api/ps"'*'Authorization: Bearer test-secret'*) ;;
+  *) exit 2 ;;
+esac
+printf '%s\n200' '{"models":[{"name":"qwen3:latest","context_length":32768}]}'
+"##).unwrap();
+    std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let d = Daemon::start_env(dir, &[("PATH", &path)]);
+    let mut c = d.connect_caps(json!({"sill.providers":1,"sill.provider_limits":1})).unwrap();
+    let mut provider = json!({"id":"lan","name":"LAN","api":"openai","base_url":"http://server.example:11434/v1","models":["qwen3"]});
+    let saved = c.call("_sill/providers.save", json!({"provider":provider,"key":"test-secret"})).unwrap();
+    assert!(saved.get("result").is_some(), "{saved}");
+    let result = c.call("_sill/providers.detect_limits", json!({"base_url":provider["base_url"],"provider_id":"lan","model":"qwen3"})).unwrap();
+    assert_eq!(result["result"]["context"], 32768, "{result}");
+    provider["model_limits"] = json!({"qwen3":{"context":result["result"]["context"],"output":4096}});
+    let saved = c.call("_sill/providers.save", json!({"provider":provider})).unwrap();
+    assert!(saved.get("result").is_some(), "{saved}");
+    let env = sill_core::providers::agent_env(&d.dir.join("home"), "opencode").unwrap();
+    let config: Value = serde_json::from_str(&env["OPENCODE_CONFIG_CONTENT"]).unwrap();
+    assert_eq!(config["provider"]["sill-lan"]["models"]["qwen3"]["limit"], json!({"context":32768,"output":4096}));
+    provider["model_limits"] = json!({});
+    let saved = c.call("_sill/providers.save", json!({"provider":provider})).unwrap();
+    assert!(saved.get("result").is_some(), "{saved}");
+    assert!(sill_core::providers::load(&d.dir.join("home")).unwrap()["lan"].model_limits.is_empty());
+}

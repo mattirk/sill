@@ -21,6 +21,9 @@ pub fn load(client: &Client) -> Result<Option<api::Listed>> {
 
 pub fn save(client: &Client, provider: api::Provider, key: Option<String>, clear_key: bool) -> Result<api::Saved> {
     supported(client)?;
+    if !provider.model_limits.is_empty() && !client.has_capability(api::LIMITS_CAPABILITY) {
+        bail!("update and restart the daemon to save model token limits");
+    }
     client.call("_sill/providers.save", api::Save { provider, key: key.map(Secret), clear_key })
 }
 
@@ -68,4 +71,11 @@ mod tests {
         let long = id_for(&"a-".repeat(80), &[]);
         assert!(long.len() <= 56 && !long.ends_with('-') && !long.starts_with('-'), "{long}");
     }
+}
+
+pub fn detect_limits(client: &Client, request: api::DetectLimits) -> Result<api::DetectedLimits> {
+    if !client.has_capability(api::LIMITS_CAPABILITY) {
+        bail!("update and restart the daemon for model token-limit detection");
+    }
+    client.call("_sill/providers.detect_limits", request)
 }

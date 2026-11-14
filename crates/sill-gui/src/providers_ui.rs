@@ -9,7 +9,7 @@ use iced::widget::{button, checkbox, column, container, pick_list, row, text, te
 use iced::{Alignment, Element, Fill, Task};
 use sill_client::providers;
 use sill_proto::providers as api;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// How many unticked models the form lists at once; the filter narrows the rest.
 const SHOWN_MODELS: usize = 24;
@@ -27,6 +27,7 @@ pub struct Providers {
     /// A Remove waiting for its second press.
     armed: Option<String>,
     busy: bool,
+    serial: u64,
 }
 
 /// What the form fills in. Presets of one type of endpoint, not types of their own.
@@ -66,10 +67,51 @@ impl std::fmt::Display for Kind {
     }
 }
 
+// A hint, not a probe: custom ports can be identified explicitly in the form.
+fn likely_ollama(address: &str) -> bool {
+    address.trim_end_matches('/').ends_with("/v1")
+        && address.split("://").nth(1).and_then(|s| s.split('/').next())
+            .is_some_and(|authority| authority.ends_with(":11434"))
+}
+
+#[derive(Default)]
+struct LimitInputs {
+    context: String,
+    output: String,
+}
+impl LimitInputs {
+    fn value(&self) -> Result<api::ModelLimits, &'static str> {
+        let parse = |s: &str| {
+            if s.trim().is_empty() {
+                return Ok(None);
+            }
+            s.trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|n| *n > 0)
+                .map(Some)
+                .ok_or(
+                    "Limits must be positive whole token counts, or blank for the agent default.",
+                )
+        };
+        let context = parse(&self.context)?;
+        let output = parse(&self.output)?;
+        if let (Some(context), Some(output)) = (context, output) {
+            if output >= context {
+                return Err("Output must be smaller than context.");
+            }
+        }
+        Ok(api::ModelLimits { context, output })
+    }
+}
+
 struct Form {
     /// The id of the provider being edited; a new one gets its id from its name.
     editing: Option<String>,
     kind: Kind,
+    ollama: bool,
+    ollama_choice: Option<bool>,
+    limits_model: Option<String>,
     name: String,
     address: String,
     key: String,
@@ -81,6 +123,9 @@ struct Form {
     /// Narrows the list; Add takes it as a model id the endpoint did not list.
     model_input: String,
     default_model: Option<String>,
+    limits: BTreeMap<String, LimitInputs>,
+    detecting: Option<(u64, String)>,
+    detected: BTreeMap<String, Result<u32, String>>,
     testing: bool,
     saving: bool,
     status: Option<Result<String, String>>,
@@ -91,6 +136,9 @@ impl Form {
         Form {
             editing: None,
             kind,
+            ollama: false,
+            ollama_choice: None,
+            limits_model: None,
             name: kind.name().into(),
             address: kind.address().into(),
             key: String::new(),
@@ -100,6 +148,9 @@ impl Form {
             ticked: BTreeSet::new(),
             model_input: String::new(),
             default_model: None,
+            limits: BTreeMap::new(),
+            detecting: None,
+            detected: BTreeMap::new(),
             testing: false,
             saving: false,
             status: None,
@@ -110,12 +161,27 @@ impl Form {
         Form {
             editing: Some(p.id.clone()),
             kind: Kind::Other,
+            ollama: likely_ollama(&p.base_url),
+            ollama_choice: None,
             name: p.name.clone(),
             address: p.base_url.clone(),
             had_key: entry.has_key,
             models: p.models.clone(),
             ticked: p.models.iter().cloned().collect(),
             default_model: p.default_model.clone(),
+            limits: p
+                .model_limits
+                .iter()
+                .map(|(m, l)| {
+                    (
+                        m.clone(),
+                        LimitInputs {
+                            context: l.context.map(|n| n.to_string()).unwrap_or_default(),
+                            output: l.output.map(|n| n.to_string()).unwrap_or_default(),
+                        },
+                    )
+                })
+                .collect(),
             ..Form::new()
         }
     }
@@ -124,8 +190,16 @@ impl Form {
         self.models.sort();
         self.models.dedup();
     }
+    fn selected_limits_model(&self) -> Option<&String> {
+        self.limits_model.as_ref().filter(|m| self.ticked.contains(*m)).or_else(|| self.ticked.first())
+    }
     fn can_save(&self) -> bool {
-        !self.saving && !self.name.trim().is_empty() && !self.address.trim().is_empty() && !self.ticked.is_empty()
+        !self.saving && self.detecting.is_none()
+            && !self.name.trim().is_empty() && !self.address.trim().is_empty() && !self.ticked.is_empty()
+            && self
+                .ticked
+                .iter()
+                .all(|m| self.limits.get(m).is_none_or(|l| l.value().is_ok()))
     }
     /// The record the form describes, with an id not among `taken` for a new one.
     fn provider(&self, taken: &[&str]) -> api::Provider {
@@ -136,6 +210,17 @@ impl Form {
             base_url: self.address.trim().into(),
             models: self.ticked.iter().cloned().collect(),
             default_model: self.default_model.clone().filter(|m| self.ticked.contains(m)),
+            model_limits: self
+                .limits
+                .iter()
+                .filter(|(m, _)| self.ticked.contains(*m))
+                .filter_map(|(m, l)| {
+                    l.value()
+                        .ok()
+                        .filter(|l| l.context.is_some() || l.output.is_some())
+                        .map(|l| (m.clone(), l))
+                })
+                .collect(),
         }
     }
 }
@@ -153,6 +238,13 @@ pub enum Event {
     Address(String),
     Key(String),
     ClearKey(bool),
+    Ollama(bool),
+    LimitsModel(String),
+    Context(String, String),
+    Output(String, String),
+    Detect(String),
+    Detected(u64, String, Result<api::DetectedLimits, String>),
+    UseDetected(String),
     Test,
     Tested(Result<api::Tested, String>),
     Tick(String, bool),
@@ -270,7 +362,7 @@ fn form_view(form: &Form) -> Element<'_, Message> {
     );
     body = body.push(dim("The API's root, usually ending in /v1. A server on this machine or your network goes by its network address: localhost inside a session is the session's own jail."));
     if form.kind == Kind::Ollama {
-        body = body.push(dim("Ollama: raise the context size on the server (16k–32k to start); with its default, tool calls fail."));
+        body = body.push(dim("Ollama's active context is set on the server. Detect it below, or enter it manually; the model's advertised maximum may be larger than its active allocation."));
     }
     let key_hint = if form.had_key { "Saved: leave empty to keep it" } else { "Empty for a server that wants none" };
     let mut key = row![
@@ -308,6 +400,69 @@ fn form_view(form: &Form) -> Element<'_, Message> {
             move |v| msg(Event::Tick(model.clone(), v))
         }));
     }
+    if let Some(model) = form.selected_limits_model() {
+        models = models.push(row![
+            labelled("Limits for"),
+            pick_list(form.ticked.iter().cloned().collect::<Vec<_>>(), Some(model.clone()), |m| msg(Event::LimitsModel(m))).text_size(style::SMALL),
+        ].spacing(8).align_y(Alignment::Center));
+        let empty = String::new();
+        let fields = form.limits.get(model);
+        let model_context = model.clone();
+        let model_output = model.clone();
+        let mut limits = column![
+            text(format!("{model} · token limits")).size(style::SMALL),
+            row![
+                text("Context").size(style::SMALL),
+                text_input(
+                    "Agent default",
+                    fields.map(|l| &l.context).unwrap_or(&empty)
+                )
+                .on_input(move |v| msg(Event::Context(model_context.clone(), v)))
+                .size(style::SMALL)
+                .padding(7),
+                text("Output").size(style::SMALL),
+                text_input("Agent default", fields.map(|l| &l.output).unwrap_or(&empty))
+                    .on_input(move |v| msg(Event::Output(model_output.clone(), v)))
+                    .size(style::SMALL)
+                    .padding(7),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(5);
+        if let Some(Err(why)) = fields.map(|l| l.value()) {
+            limits = limits.push(text(why).size(style::SMALL).color(P.error));
+        }
+        let detecting = form.detecting.as_ref().is_some_and(|(_, m)| m == model);
+        limits = limits.push(checkbox(form.ollama).label("Ollama server (enable context detection)")
+            .text_size(style::SMALL).on_toggle(|on| msg(Event::Ollama(on))));
+        if form.ollama {
+            limits = limits.push(control(if detecting { "Detecting…" } else { "Detect Ollama context" },
+                (!form.saving && form.detecting.is_none() && !form.address.trim().is_empty()).then(|| Event::Detect(model.clone()))));
+        }
+        if let Some(result) = form.detected.get(model) {
+            limits = match result {
+                Ok(n) => limits.push(
+                    row![
+                        dim(format!(
+                            "Server is using {n} tokens. Output limit is not reported."
+                        )),
+                        control(
+                            "Use detected context",
+                            Some(Event::UseDetected(model.clone()))
+                        ),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                ),
+                Err(why) => limits.push(text(why).size(style::SMALL).color(P.warning)),
+            };
+        }
+        models = models.push(container(limits).padding([6, 0]));
+    }
+    if !form.ticked.is_empty() {
+        models = models.push(dim("Context is the total token budget; output reserves room for the answer. Blank uses the agent's default. Matching the server's active limit lets the agent compact earlier. Detection reads Ollama only and does not load models or alter the server."));
+    }
     if hidden > 0 {
         models = models.push(dim(format!("{hidden} more: type below to narrow the list")));
     }
@@ -331,6 +486,9 @@ fn form_view(form: &Form) -> Element<'_, Message> {
                 .spacing(8)
                 .align_y(Alignment::Center),
         );
+    }
+    if let Some(model) = form.ticked.iter().find(|m| form.limits.get(*m).is_some_and(|l| l.value().is_err())) {
+        body = body.push(text(format!("Fix token limits for {model} before saving.")).size(style::SMALL).color(P.error));
     }
     body = body.push(dim("Saving allows sessions of agents that use providers to reach this address, and nothing else on its host. The key is given to those agents in their environment."));
     body = body.push(
@@ -422,11 +580,28 @@ impl App {
                             form.address = kind.address().into();
                         }
                         form.kind = kind;
+                        form.ollama_choice = Some(kind == Kind::Ollama);
+                        form.ollama = kind == Kind::Ollama;
+                        form.detecting = None;
+                        form.detected.clear();
                     }
                     Event::Name(s) => form.name = s,
-                    Event::Address(s) => (form.address, form.status) = (s, None),
-                    Event::Key(s) => (form.key, form.clear_key) = (s, false),
-                    Event::ClearKey(v) => form.clear_key = v,
+                    Event::Address(s) => {
+                        form.ollama = form.ollama_choice.unwrap_or_else(|| likely_ollama(&s));
+                        (form.address, form.status) = (s, None);
+                        form.detecting = None;
+                        form.detected.clear();
+                    }
+                    Event::Key(s) => {
+                        (form.key, form.clear_key) = (s, false);
+                        form.detecting = None;
+                        form.detected.clear();
+                    }
+                    Event::ClearKey(v) => {
+                        form.clear_key = v;
+                        form.detecting = None;
+                        form.detected.clear();
+                    }
                     Event::Tick(model, on) => {
                         if on {
                             form.ticked.insert(model);
@@ -443,6 +618,56 @@ impl App {
                         }
                     }
                     Event::Default(model) => form.default_model = Some(model).filter(|m| m != AGENT_CHOOSES),
+                    Event::Ollama(on) => {
+                        form.ollama_choice = Some(on);
+                        form.ollama = on;
+                        form.detecting = None;
+                        form.detected.clear();
+                    }
+                    Event::LimitsModel(model) => form.limits_model = Some(model),
+                    Event::Context(model, v) => form.limits.entry(model).or_default().context = v,
+                    Event::Output(model, v) => form.limits.entry(model).or_default().output = v,
+                    Event::UseDetected(model) => {
+                        if let Some(Ok(n)) = form.detected.get(&model) {
+                            form.limits.entry(model).or_default().context = n.to_string();
+                        }
+                    }
+                    Event::Detect(model) => {
+                        if !form.ollama || form.detecting.is_some() || form.saving || !form.ticked.contains(&model)
+                        {
+                            return Task::none();
+                        }
+                        let Some(connect) = connect else {
+                            return Task::none();
+                        };
+                        p.serial += 1;
+                        let serial = p.serial;
+                        form.detecting = Some((serial, model.clone()));
+                        form.detected.remove(&model);
+                        let request = api::DetectLimits {
+                            base_url: form.address.trim().into(),
+                            model: model.clone(),
+                            key: Some(form.key.clone())
+                                .filter(|k| !k.is_empty())
+                                .map(sill_proto::wire::Secret),
+                            provider_id: form.editing.clone().filter(|_| !form.clear_key),
+                        };
+                        return crate::blocking(
+                            move || {
+                                let client = connect().map_err(|e| format!("{e:#}"))?;
+                                providers::detect_limits(&client, request)
+                                    .map_err(|e| format!("{e:#}"))
+                            },
+                            move |r| msg(Event::Detected(serial, model.clone(), r)),
+                        );
+                    }
+                    Event::Detected(serial, model, result) => {
+                        if form.detecting.as_ref() != Some(&(serial, model.clone())) {
+                            return Task::none();
+                        }
+                        form.detecting = None;
+                        form.detected.insert(model, result.map(|r| r.context));
+                    }
                     Event::Test => {
                         let Some(connect) = connect else { return Task::none() };
                         (form.testing, form.status) = (true, None);
@@ -500,13 +725,169 @@ mod tests {
 
     fn entry(id: &str, key: bool) -> api::Entry {
         api::Entry {
-            provider: api::Provider { id: id.into(), name: format!("Name {id}"), api: api::Api::Openai, base_url: "https://x.example/v1".into(), models: vec!["a".into(), "b".into()], default_model: Some("b".into()) },
+            provider: api::Provider { id: id.into(), name: format!("Name {id}"), api: api::Api::Openai, base_url: "https://x.example/v1".into(), models: vec!["a".into(), "b".into()], default_model: Some("b".into()),
+                model_limits: BTreeMap::new(),
+            },
             has_key: key,
             endpoint: "x.example:443".into(),
         }
     }
     fn listed(agents: &[&str]) -> Event {
         Event::Loaded(Ok(Some(api::Listed { providers: vec![entry("one", true)], agents: agents.iter().map(|a| a.to_string()).collect() })))
+    }
+
+    #[test]
+    fn detection_requires_ollama_and_limit_editor_selects_one_model() {
+        let (mut app, _) = App::new(true, None);
+        let _ = app.providers_event(listed(&["opencode"]));
+        let _ = app.providers_event(Event::Edit("one".into()));
+        assert!(!app.agents_page.providers.form.as_ref().unwrap().ollama);
+        let _ = app.providers_event(Event::Address("https://openrouter.ai/api/v1".into()));
+        assert!(!app.agents_page.providers.form.as_ref().unwrap().ollama);
+        let _ = app.providers_event(Event::Address("http://server.example:1234/v1".into()));
+        assert!(!app.agents_page.providers.form.as_ref().unwrap().ollama);
+        let _ = app.providers_event(Event::Ollama(true));
+        assert!(app.agents_page.providers.form.as_ref().unwrap().ollama, "custom ports need explicit opt-in");
+        let _ = app.providers_event(Event::Address("http://server.example:11434/v1".into()));
+        assert!(app.agents_page.providers.form.as_ref().unwrap().ollama);
+        let _ = app.providers_event(Event::Address("http://custom.example:12345/v1".into()));
+        assert!(app.agents_page.providers.form.as_ref().unwrap().ollama);
+        let _ = app.providers_event(Event::Ollama(false));
+        let _ = app.providers_event(Event::Address("http://server.example:11434/v1".into()));
+        assert!(!app.agents_page.providers.form.as_ref().unwrap().ollama);
+        let mut saved = entry("lan", false);
+        saved.provider.base_url = "http://server.example:11434/v1".into();
+        assert!(Form::of(&saved).ollama, "editing an Ollama address keeps detection available");
+        let _ = app.providers_event(Event::Context("a".into(), "32768".into()));
+        let _ = app.providers_event(Event::LimitsModel("b".into()));
+        let _ = app.providers_event(Event::Context("b".into(), "16384".into()));
+        let form = app.agents_page.providers.form.as_ref().unwrap();
+        assert_eq!(form.selected_limits_model().map(String::as_str), Some("b"));
+        assert_eq!(form.provider(&[]).model_limits["a"].context, Some(32768));
+        assert_eq!(form.provider(&[]).model_limits["b"].context, Some(16384));
+        let _ = app.providers_event(Event::Tick("b".into(), false));
+        assert_eq!(app.agents_page.providers.form.as_ref().unwrap().selected_limits_model().map(String::as_str), Some("a"));
+    }
+
+    #[test]
+    #[ignore = "writes provider token limits PNG for review"]
+    fn render_model_limits() {
+        let mut form = Form::new();
+        form.editing = Some("rt25-ai-box".into());
+        form.kind = Kind::Ollama;
+        form.ollama = true;
+        form.name = "RT25 AI-box".into();
+        form.address = "http://10.0.0.140:11434/v1".into();
+        let model = "qwen3.8:27b".to_string();
+        form.know([model.clone()]);
+        form.ticked.insert(model.clone());
+        form.limits.insert(
+            model.clone(),
+            LimitInputs {
+                context: "32768".into(),
+                output: "4096".into(),
+            },
+        );
+        form.detected.insert(model, Ok(32768));
+        let mut ui = iced_test::Simulator::with_size(
+            crate::snapshots::settings(),
+            (680.0, 1000.0),
+            form_view(&form),
+        );
+        let image = ui.snapshot(&crate::style::theme()).unwrap();
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/sill-gui-snapshots");
+        std::fs::create_dir_all(&dir).unwrap();
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("provider-limits-")
+            {
+                std::fs::remove_file(entry.path()).unwrap();
+            }
+        }
+        assert!(image.matches_image(dir.join("provider-limits")).unwrap());
+    }
+
+    #[test]
+    fn model_limits_are_validated_preserved_and_omitted_when_unticked() {
+        let (mut app, _) = App::new(true, None);
+        let _ = app.providers_event(listed(&["opencode"]));
+        let _ = app.providers_event(Event::Edit("one".into()));
+        let _ = app.providers_event(Event::Context("a".into(), "32768".into()));
+        let _ = app.providers_event(Event::Output("a".into(), "4096".into()));
+        let form = app.agents_page.providers.form.as_ref().unwrap();
+        assert!(form.can_save());
+        let record = form.provider(&[]);
+        assert_eq!(
+            record.model_limits["a"],
+            api::ModelLimits {
+                context: Some(32768),
+                output: Some(4096)
+            }
+        );
+        let form = Form::of(&api::Entry {
+            provider: record,
+            has_key: false,
+            endpoint: "x.example:443".into(),
+        });
+        assert_eq!(form.limits["a"].context, "32768");
+        let _ = app.providers_event(Event::Output("a".into(), "32768".into()));
+        assert!(!app.agents_page.providers.form.as_ref().unwrap().can_save());
+        let _ = app.providers_event(Event::Tick("a".into(), false));
+        let form = app.agents_page.providers.form.as_ref().unwrap();
+        assert!(form.can_save());
+        assert!(form.provider(&[]).model_limits.is_empty());
+        assert!(
+            LimitInputs {
+                context: "invalid".into(),
+                output: String::new()
+            }
+            .value()
+            .is_err()
+        );
+        assert!(
+            LimitInputs {
+                context: "0".into(),
+                output: String::new()
+            }
+            .value()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn detection_is_a_suggestion_and_stale_results_are_ignored() {
+        let (mut app, _) = App::new(true, None);
+        let _ = app.providers_event(listed(&["opencode"]));
+        let _ = app.providers_event(Event::Edit("one".into()));
+        let _ = app.providers_event(Event::Context("a".into(), "16384".into()));
+        app.agents_page.providers.form.as_mut().unwrap().detecting = Some((1, "a".into()));
+        let _ = app.providers_event(Event::Detected(
+            1,
+            "a".into(),
+            Ok(api::DetectedLimits { context: 32768 }),
+        ));
+        assert_eq!(
+            app.agents_page.providers.form.as_ref().unwrap().limits["a"].context,
+            "16384"
+        );
+        let _ = app.providers_event(Event::UseDetected("a".into()));
+        assert_eq!(
+            app.agents_page.providers.form.as_ref().unwrap().limits["a"].context,
+            "32768"
+        );
+        app.agents_page.providers.form.as_mut().unwrap().detecting = Some((2, "a".into()));
+        let _ = app.providers_event(Event::Address("http://new.example/v1".into()));
+        let _ = app.providers_event(Event::Detected(
+            2,
+            "a".into(),
+            Ok(api::DetectedLimits { context: 65536 }),
+        ));
+        let form = app.agents_page.providers.form.as_ref().unwrap();
+        assert!(form.detected.is_empty());
+        assert_eq!(form.limits["a"].context, "32768");
     }
 
     #[test]

@@ -1035,3 +1035,17 @@ outside the cleanup scope. `target.sill-clearing` is a detached cache left by an
 interrupted cleanup; it is included in scans and removed first on the next clear.
 If a new target also exists, clear again after reviewing the refreshed scan.
 After a timeout or lost reply, scan before deciding whether to repeat a clear.
+
+### Model token limits (`sill.provider_limits`, version 1)
+
+Provider records may carry `model_limits`, keyed by an offered model ID, with optional
+positive integer `context` and `output` budgets. When both are given, output must be smaller
+than context. Absent values retain agent defaults. Saving nonempty limits needs this capability.
+OpenCode receives these as each model's `limit.context` and `limit.output`.
+
+`_sill/providers.detect_limits` accepts `base_url`, `model`, optional `key`, and optional
+`provider_id` (to reuse its saved key). It reads `/api/ps` under the same host and path prefix
+as an Ollama `/v1` endpoint, and returns `context` from the matching running model's
+`context_length`. It never loads a model or changes the server. An unloaded model, missing
+active size, or unsupported endpoint is an error, not a guessed limit. No output limit is
+inferred. The frontend offers the detected context for review before applying it to the form.
