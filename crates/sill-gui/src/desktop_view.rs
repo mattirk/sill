@@ -306,8 +306,7 @@ mod tests {
             "requested": null, "blocked": false, "source": "policy", "effective": effective,
             "available": true, "reason": ""});
         let view: sill_proto::admin::PolicyView = serde_json::from_value(json!({"view": "launch",
-            "session_id": "demo", "name": "default", "text": null, "fragment_ro": [],
-            "fragment_masks": [], "sources": [], "suggestions": [], "fingerprint": null,
+            "session_id": "demo", "name": "default", "text": null, "fingerprint": null,
             "diagnostics": [], "permissions": [state], "session_hosts": []})).unwrap();
         app.views.get_mut("demo").unwrap().permissions.views =
             Some(crate::permissions::Views { preview: view.clone(), launch: Some(view), agent_name: None });

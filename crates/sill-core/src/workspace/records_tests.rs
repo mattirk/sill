@@ -482,7 +482,7 @@ fn a_store_gives_the_jail_its_workspaces_and_keeps_policy_pins() {
     let r = f.host.db(|c| load(c, &w.workspace_id)).unwrap().unwrap();
     save(store.conn(), &r).unwrap();
     store.pin("s1", &f.source).unwrap();
-    // the source stays a pin (its repository's policy fragments apply); the jail binds the clone there
+    // the source stays a pin; the jail binds the clone there
     assert!(store.jail_pins("s1").unwrap().contains(&f.source));
     let binds = store.workspace_mask("s1").unwrap();
     assert_eq!(binds.len(), 1);

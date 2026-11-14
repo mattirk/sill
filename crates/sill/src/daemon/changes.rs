@@ -257,8 +257,7 @@ impl Hub {
         let launch = sill_core::session::policy_snapshot(&s.id)?.context("launch not recorded; rebuild the session")?;
         let filesystem = launch.filesystem.context("filesystem plan not recorded; rebuild the session")?;
         let sdir = sill_core::session::state_dir_path(uid, &s.id)?;
-        let mut plan = sill_core::changes::session_plan(launch.policy, sdir, &self.home, uid, &user, &filesystem)?;
-        plan.masked.extend(launch.fragment_masks);
+        let plan = sill_core::changes::session_plan(launch.policy, sdir, &self.home, uid, &user, &filesystem)?;
         Ok(sill_proto::JailView { layers: plan.layers.into_iter().map(|l| (l.host, l.upper)).collect(), masked: plan.masked })
     }
 

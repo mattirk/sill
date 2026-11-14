@@ -32,8 +32,6 @@ pub fn session_plan(
     policy.paths.direct.clear();
     policy.paths.ro.clear();
     let spec = JailSpec {
-        fragment_ro: vec![],
-        fragment_masks: vec![],
         policy,
         home: home.to_path_buf(),
         user: user.to_string(),

@@ -147,7 +147,7 @@ fn render_lifecycle() {
     app.all_sessions = (0..3)
         .map(|i| {
             let titles = [
-                "Travelling policies",
+                "Permission modes",
                 "Drawer layout and flicker",
                 "Compact prompt queue",
             ];

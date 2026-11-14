@@ -12,7 +12,7 @@ is the practical side. The [roadmap](ROADMAP.md) links ideas, proposed features,
 Status (2026-11-08): M0–M2 done and in daily use — sessions, pins, Changes, the file tree, a shell inside
 the jail, managed processes, the ACP agent registry, standing instructions, tray icon, memory
 (remember, recall, search), ghost sessions, permission modes (test desktop, private D-Bus, Host control),
-policies that travel with a repository, and the foundations of remote use. The window is **sill-gui**
+and the foundations of remote use. The window is **sill-gui**
 (Iced, [docs/sill-gui.md](docs/sill-gui.md)) — the only frontend since 2026-11-07, when the GTK shelf was
 removed. Direction and open work: the [roadmap](ROADMAP.md).
 
@@ -114,7 +114,7 @@ default: **Desktop development** (a Weston test desktop the agent can see and dr
 the window, plus a private D-Bus — *Apply development permissions* turns both on and restarts), and
 **Host control**, an explicit, activation-scoped grant of real host operations (display, processes,
 commands) with a red caption while it lasts; revoked by you, by the session ending or by the window
-closing. Policies that travel with a repository (`.sill/policy.toml` fragments) can only tighten.
+closing.
 
 **Managed processes.** A command the agent needs to keep running after its turn — a dev server, a
 watcher — is started inside the jail with `sill-proc start --name dev [--port 3000] -- npm run dev`
@@ -230,7 +230,7 @@ sill session new [--agent A] [--pin P] [--ghost] | list | end <id>
 sill changes list | diff | keep | revert | history | undo
 sill pin list | add <path> | remove <path>  # global pins
 sill memory …                              # see Memory above
-sill policy show | preview | snapshot | check | import | start
+sill policy show | preview | snapshot | check | import
 sill permissions show | set | development | restore | save-host
 sill host-control activate | revoke | keep | state
 sill registry … · sill login <agent> · sill box add | list | remove | connect · sill attach
@@ -305,7 +305,7 @@ running `sill`). Signed sums, `sill.io` and the apt repository come later.
 | `policies/default.toml` | the built-in policy, also installed to `/etc/sill/policies/` |
 | `packaging/systemd/` | state-filesystem units (`/var/lib/sill.img` → `/var/lib/sill`), sill-gui's user service |
 | `packaging/release.sh`, `packaging/deb.sh` | the release tarball + `SHA256SUMS`, the `.deb`; `packaging/sill.desktop`, `packaging/icons/` |
-| `docs/` | the window (`sill-gui.md`), the daemon and protocol (`daemon.md`, `protocol.md`, `sfp-operations.md`), `permission-modes.md`, `agent-directories.md`, `travelling-policies.md`, `pins.md`, `login.md`, `memory.md`, `security.md`, `design.md`; proposals and history (`proposed-features.md`, `tasks.md`, `crosscheck.md`, `session-overview.md`, `parallel-coding.md`, `work-items.md`, `development-history.md`) |
+| `docs/` | the window (`sill-gui.md`), the daemon and protocol (`daemon.md`, `protocol.md`, `sfp-operations.md`), `permission-modes.md`, `agent-directories.md`, `policy-inspection.md`, `pins.md`, `login.md`, `memory.md`, `security.md`, `design.md`; proposals and history (`proposed-features.md`, `tasks.md`, `crosscheck.md`, `session-overview.md`, `parallel-coding.md`, `work-items.md`, `development-history.md`) |
 
 ## State filesystem
 

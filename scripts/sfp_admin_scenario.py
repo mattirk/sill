@@ -56,11 +56,9 @@ try:
     policies = c.call("_sill/policy.list", {"limit": 1})
     assert len(policies["names"]) <= 1
     session = c.call("_sill/sessions.create", {"create_id": "memory-spool", "agent": "claude", "policy": "default"})["session_id"]
-    # Travelling policy administration uses transferred text and exact daemon-host roots.
+    # Policy administration uses transferred text: nothing is read from a path the client names.
     assert c.call("_sill/policy.check", {"text": "name='shared'"})["valid"]
     assert not c.call("_sill/policy.check", {"text": "name='bad'\nunknown=true"})["valid"]
-    assert c.call("_sill/policy.check", {"text": "[network]\nallow=['packages.example']", "fragment": True, "root": home})["valid"]
-    assert not c.call("_sill/policy.check", {"text": "[paths]\ndirect=['.']", "fragment": True, "root": home})["valid"]
     installed = c.call("_sill/policy.import", {"name": "shared", "text": "name='shared'\n[network]\nmode='none'"})
     assert c.call("_sill/policy.get", {"name": "shared"}) == installed
     try:
@@ -75,8 +73,8 @@ try:
     assert preview["text"] and preview["fingerprint"]
     assert c.call("_sill/policy.snapshot", {"session_id": session})["snapshot"] is None
     try:
-        c.call("_sill/policy.start", {"session_id": "missing", "ignore_roots": []})
-        raise AssertionError("unknown session start accepted")
+        c.call("_sill/policy.preview", {"session_id": "missing"})
+        raise AssertionError("unknown session previewed")
     except RpcError as error:
         assert error.code == "not_found", error
     c.call("_sill/memory.notes.add", {"session_id": session, "text": "immutable original note"})

@@ -410,26 +410,6 @@ impl Plan {
         self.workspaces = binds.to_vec();
         Ok(())
     }
-    pub fn add_fragments(&mut self, ro: &[PathBuf], masks: &[PathBuf]) {
-        for path in ro {
-            self.rule(
-                path,
-                Some(path),
-                "read_only",
-                "repository fragment",
-                "Repository restriction applied after writable bindings.",
-            );
-        }
-        for path in masks {
-            self.rule(
-                path,
-                None,
-                "mask",
-                "repository fragment",
-                "Repository restriction applied after writable bindings.",
-            );
-        }
-    }
     pub fn binds(&self) -> Result<Vec<(PathBuf, PathBuf)>> {
         self.bindings
             .iter()

@@ -193,10 +193,6 @@ enum HostControlCmd {
         session: String,
         #[arg(required = true, value_delimiter = ',')]
         operations: Vec<String>,
-        /// When these operations can bypass a pinned repository's restrictions (listed first),
-        /// record your exception for this one activation; the jail keeps the restrictions
-        #[arg(long)]
-        accept_repository_exception: bool,
     },
     /// End the session's activation
     Revoke { session: String },
@@ -228,28 +224,19 @@ enum PermissionsCmd {
 
 #[derive(Subcommand)]
 enum PolicyCmd {
-    /// Show an installed base policy, without repository fragments
+    /// Show an installed policy
     Show { #[arg(default_value = "default")] name: String },
     /// Preview a session's next-build rules and diagnostics
     Preview { session: String },
     /// Inspect a session's recorded launch rules
     Snapshot { session: String },
-    /// Validate client-local text; --root identifies a daemon-host repository
-    Check {
-        file: PathBuf,
-        #[arg(long)] fragment: bool,
-        #[arg(long, requires = "fragment")] root: Option<PathBuf>,
-    },
+    /// Validate a complete client-local policy without installing it
+    Check { file: PathBuf },
     /// Install a complete client-local policy on the daemon host
     Import {
         file: PathBuf,
         #[arg(long = "as")] name: Option<String>,
         #[arg(long)] replace: bool,
-    },
-    /// Start a jail with explicit fragment exceptions for one build
-    Start {
-        session: String,
-        #[arg(long = "ignore-fragment")] ignore_roots: Vec<PathBuf>,
     },
 }
 
@@ -669,7 +656,7 @@ fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
 }
 
 fn policy_cmd(cmd: Option<PolicyCmd>) -> Result<()> {
-    use sill_proto::{admin as api, sessions::{HostPath, SessionKey}};
+    use sill_proto::{admin as api, sessions::SessionKey};
     let cmd = cmd.unwrap_or(PolicyCmd::Show { name: "default".into() });
     if let PolicyCmd::Show { name } = &cmd {
         if sill_proto::transport::selected()?.is_none() {
@@ -678,9 +665,8 @@ fn policy_cmd(cmd: Option<PolicyCmd>) -> Result<()> {
             return Ok(());
         }
     }
-    if std::env::var_os("SILL_SESSION").is_some()
-        && matches!(&cmd, PolicyCmd::Import { .. } | PolicyCmd::Start { .. }) {
-        bail!("policy import and fragment exceptions are host administrative actions");
+    if std::env::var_os("SILL_SESSION").is_some() && matches!(&cmd, PolicyCmd::Import { .. }) {
+        bail!("policy import is a host administrative action");
     }
     sill_proto::client::declare_capability("sill.permission_modes");
     let c = sill_proto::Client::connect_or_start()?;
@@ -701,13 +687,9 @@ fn policy_cmd(cmd: Option<PolicyCmd>) -> Result<()> {
             if let Some(view) = result.snapshot { print_policy_view(&view); }
             else { println!("No launch policy snapshot was recorded for this session."); }
         }
-        PolicyCmd::Check { file, fragment, root } => {
+        PolicyCmd::Check { file } => {
             let text = read_policy_input(&file)?;
-            if fragment && root.is_none() { bail!("fragment checks require --root with an absolute daemon-host repository path"); }
-            if root.as_ref().is_some_and(|p| !p.is_absolute()) { bail!("--root must be an absolute daemon-host path"); }
-            let result: api::PolicyChecked = c.call("_sill/policy.check", api::PolicyCheck {
-                text, fragment, root: root.as_ref().map(|p| HostPath::from_path(p)),
-            })?;
+            let result: api::PolicyChecked = c.call("_sill/policy.check", api::PolicyCheck { text })?;
             for diagnostic in result.diagnostics { eprintln!("{diagnostic}"); }
             if !result.valid { bail!("policy check failed"); }
             println!("Policy check passed.");
@@ -718,14 +700,6 @@ fn policy_cmd(cmd: Option<PolicyCmd>) -> Result<()> {
             let result: api::PolicyEntry = c.call("_sill/policy.import", api::PolicyImport { name, text, replace })?;
             println!("Imported policy {} on the daemon host.", result.name);
         }
-        PolicyCmd::Start { session, ignore_roots } => {
-            if ignore_roots.iter().any(|p| !p.is_absolute()) { bail!("--ignore-fragment requires absolute daemon-host repository roots"); }
-            let key = policy_session_key(&c, &session)?;
-            let result: sill_proto::sessions::Started = c.call("_sill/policy.start", api::PolicyStart {
-                session_id: key, ignore_roots: ignore_roots.iter().map(|p| HostPath::from_path(p)).collect(),
-            })?;
-            println!("{}: {}", result.session_id, if result.fresh { "started" } else { "already running" });
-        }
     }
     Ok(())
 }
@@ -734,12 +708,6 @@ fn host_control_cmd(cmd: HostControlCmd) -> Result<()> {
     if std::env::var_os("SILL_SESSION").is_some() {
         bail!("Host control is a host administrative action");
     }
-    let conflict_lines = |conflicts: &[&api::Conflict]| {
-        for c in conflicts {
-            println!("  {}: {}", c.source.display, c.detail);
-            println!("    {} Bypassed by: {}.", c.consequence, c.operations.join(", "));
-        }
-    };
     let print = |s: &api::State| {
         if s.active {
             println!("Host control active (generation {}): {}", s.generation, s.operations.join(", "));
@@ -752,19 +720,6 @@ fn host_control_cmd(cmd: HostControlCmd) -> Result<()> {
         }
         if let Some(forbidden) = &s.forbidden {
             println!("{forbidden}");
-        }
-        if let Some(error) = &s.conflicts_error {
-            println!("repository restrictions could not be read: {error}");
-        }
-        if !s.conflicts.is_empty() {
-            println!("repository restrictions host operations can bypass:");
-            conflict_lines(&s.conflicts.iter().collect::<Vec<_>>());
-        }
-        if let Some(e) = &s.exception {
-            match e.generation {
-                Some(g) => println!("generation {g} runs under a repository exception ({})", e.operations.join(", ")),
-                None => println!("repository exception recorded for the next activation ({})", e.operations.join(", ")),
-            }
         }
     };
     match cmd {
@@ -788,7 +743,7 @@ fn host_control_cmd(cmd: HostControlCmd) -> Result<()> {
             let key = policy_session_key(&c, &session)?;
             print(&c.call("_sill/host_control.revoke", SessionKey { session_id: key })?);
         }
-        HostControlCmd::Activate { session, operations, accept_repository_exception } => {
+        HostControlCmd::Activate { session, operations } => {
             // this command is the displaying frontend: it shows the state and keeps the connection,
             // and the activation, for as long as it runs
             sill_proto::client::declare_capability(api::CAPABILITY);
@@ -798,20 +753,6 @@ fn host_control_cmd(cmd: HostControlCmd) -> Result<()> {
             let before: api::State = c.call("_sill/host_control.state", SessionKey { session_id: key.clone() })?;
             if let Some(forbidden) = &before.forbidden {
                 bail!("{forbidden}");
-            }
-            let met: Vec<&api::Conflict> = before.conflicts.iter().filter(|c| c.applies(&operations)).collect();
-            if !met.is_empty() {
-                println!("These operations can bypass a pinned repository's restrictions:");
-                conflict_lines(&met);
-                if !accept_repository_exception {
-                    bail!("not activated; to record an exception for this one activation, run again with --accept-repository-exception");
-                }
-                let _: api::State = c.call("_sill/host_control.exception", api::RecordException {
-                    session_id: key.clone(),
-                    operations: operations.clone(),
-                    acknowledged: met.iter().map(|c| c.key()).collect(),
-                })?;
-                println!("Repository exception recorded for this activation; the jail keeps the restrictions.");
             }
             let state: api::State = c.call("_sill/host_control.activate", api::Activate { session_id: key.clone(), operations })?;
             print(&state);
@@ -919,12 +860,6 @@ fn print_policy_view(view: &sill_proto::admin::PolicyView) {
             permission.requested.map_or("policy".into(), |enabled| enabled.to_string()),
             permission.effective, permission.available, permission.source, permission.reason);
     }
-    for source in &view.sources {
-        println!("# fragment {}{}", source.path.display, if source.ignored { " (ignored for this build)" } else { "" });
-    }
-    for path in &view.fragment_ro { println!("# fragment read-only: {}", path.display); }
-    for path in &view.fragment_masks { println!("# fragment masked: {}", path.display); }
-    for suggestion in &view.suggestions { println!("# suggested host (approval required): {} from {}", suggestion.host, suggestion.source.display); }
     for diagnostic in &view.diagnostics { eprintln!("{diagnostic}"); }
 }
 
@@ -1502,7 +1437,6 @@ fn start_session(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>) -> Re
         session: session.to_string(),
         policy: jail.policy.clone(),
         pins: vec![],
-        ignore_fragments: vec![],
         cwd: match jail.cwd { Some(c) => c, None => std::env::current_dir()? },
         state_dir: jail.state_dir.clone(),
         unsafe_state: jail.unsafe_state,
@@ -1756,7 +1690,7 @@ fn build_spec(a: JailArgs, command: Vec<OsString>) -> Result<JailSpec> {
     let home = home()?;
     let uid = rustix::process::getuid().as_raw();
     let user = std::env::var("USER").unwrap_or_else(|_| uid.to_string());
-    let resolution = a.resolved_policy.as_ref().map(|path| -> Result<sill_core::policy_fragments::Resolution> {
+    let resolution = a.resolved_policy.as_ref().map(|path| -> Result<sill_core::session::Resolution> {
         Ok(serde_json::from_slice(&std::fs::read(path)?)?)
     }).transpose()?;
     let policy = match &resolution {
@@ -1792,8 +1726,6 @@ fn build_spec(a: JailArgs, command: Vec<OsString>) -> Result<JailSpec> {
         binds.push((PathBuf::from(h), PathBuf::from(j)));
     }
     let mut spec = JailSpec {
-        fragment_ro: resolution.as_ref().map(|r| r.fragment_ro.clone()).unwrap_or_default(),
-        fragment_masks: resolution.as_ref().map(|r| r.fragment_masks.clone()).unwrap_or_default(),
         policy,
         home,
         user,

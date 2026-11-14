@@ -82,10 +82,6 @@ pub struct JailSpec {
     pub policy_paths: Option<crate::agent_storage::PolicyPaths>,
     /// Targets of validated private agent bindings.
     pub agent_binds: Vec<(PathBuf, crate::agents::HomePathKind)>,
-    /// Repository-fragment restrictions, applied after writable pins and other binds.
-    /// Kept separate from base-policy paths so a writable pin can contain a fragment mask.
-    pub fragment_ro: Vec<PathBuf>,
-    pub fragment_masks: Vec<PathBuf>,
     /// The memory snapshot's directory (docs/memory.md §2.3), bound read-only at
     /// `sill_memory::JAIL_DIR` for the jail's `sill-memory`; None = no memory in this jail.
     pub memory_dir: Option<PathBuf>,
@@ -570,7 +566,6 @@ impl JailSpec {
         a.extend(self.extra_args.iter().cloned());
         masked.extend(agent_masked);
         mount_fds.extend(self.apply_workspace_binds(&mut a, &masked, &mut direct, &mut warnings)?);
-        mount_fds.extend(self.apply_fragment_paths(&mut a, &mut masked)?);
         // bwrap's root tmpfs is writable by default; make it read-only now that every mount is in place
         push(&mut a, &[&"--remount-ro", &"/"]);
         push(&mut a, &[&"--chdir", &self.cwd]);
@@ -584,9 +579,8 @@ impl JailSpec {
     }
 
     /// A workspace session (docs/parallel-coding.md §12): each clone bound read-write at its
-    /// repository's own path, after the pins (an ancestor pin is laid first) and before the
-    /// repository's fragment rules, which then apply to the clone. The person's checkout is hidden
-    /// in the read-only host view too. Its object store is borrowed read-only at
+    /// repository's own path, after the pins (an ancestor pin is laid first). The person's
+    /// checkout is hidden in the read-only host view too. Its object store is borrowed read-only at
     /// `/.sill/borrowed/<n>`, and the jail sees the clone's `objects/info/alternates` naming that
     /// path (from memory, read-only), while on the host it names the real store: one clone, valid
     /// in both views. Every directory is opened without following symlinks and bound from that
@@ -622,125 +616,6 @@ impl JailSpec {
             fds.extend([clone_fd, store, memfd]);
         }
         Ok(fds)
-    }
-
-    /// Where a host path really comes from inside this jail: under a workspace's repository, the
-    /// same path in its clone.
-    fn backing(&self, path: &Path) -> PathBuf {
-        self.workspace_mask
-            .iter()
-            .find_map(|(source, clone, _)| path.strip_prefix(source).ok().map(|rel| clone.join(rel)))
-            .unwrap_or_else(|| path.to_path_buf())
-    }
-
-    /// Apply repository restrictions last: a writable pin must never cover a mask or undo a
-    /// read-only rule. The base policy's earlier masks remain authoritative too.
-    fn apply_fragment_paths(&self, args: &mut Vec<OsString>, masked: &mut Vec<PathBuf>) -> Result<Vec<Arc<OwnedFd>>> {
-        if self.fragment_ro.is_empty() && self.fragment_masks.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut mount_fds = Vec::new();
-        let restrictions: Vec<&PathBuf> = self.fragment_ro.iter().chain(&self.fragment_masks).collect();
-        let overlaps = |a: &Path, b: &Path| is_under(a, b) || is_under(b, a);
-        for path in &restrictions {
-            if !path.is_absolute() || path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-                bail!("fragment restriction must be an absolute normalized path: {}", path.display());
-            }
-            // A symlink introduced after resolution must not redirect a restriction elsewhere.
-            let canonical = path.canonicalize().with_context(|| format!("fragment path disappeared: {}", path.display()))?;
-            if canonical != **path {
-                bail!("fragment restriction changed or contains a symlink: {}", path.display());
-            }
-        }
-        let check_bind = |host: &Path, inside: &Path| -> Result<()> {
-            let source = host.canonicalize().unwrap_or_else(|_| host.to_path_buf());
-            if source == inside && host == inside {
-                return Ok(()); // ordinary identity pins are covered by the final restrictions
-            }
-            if restrictions.iter().any(|p| overlaps(&source, p) || overlaps(inside, p)) {
-                bail!("bind {} -> {} overlaps a repository restriction at an alternate path; this mapping is unsupported",
-                    host.display(), inside.display());
-            }
-            Ok(())
-        };
-        for (host, inside) in &self.binds {
-            check_bind(host, inside)?;
-        }
-        for pat in self.policy.paths.direct.iter().chain(&self.policy.paths.ro) {
-            for path in expand_pattern(pat, &self.home) {
-                check_bind(&path, &path)?;
-            }
-        }
-        if let Some(dir) = &self.memory_dir {
-            check_bind(dir, Path::new(sill_memory::JAIL_DIR))?;
-        }
-        if let Some(dir) = &self.bridge_dir {
-            check_bind(dir, Path::new(BRIDGE_DIR))?;
-        }
-        if let Some(sock) = &self.proxy_socket {
-            check_bind(sock, Path::new(PROXY_SOCKET))?;
-        }
-        // The launcher currently adds only read-only binary binds. Do not permit opaque fd or
-        // overlay arguments to smuggle another alias of a restricted repository into the jail.
-        let mut extra = self.extra_args.as_slice();
-        while !extra.is_empty() {
-            if extra.len() < 3 || extra[0] != "--ro-bind" {
-                bail!("unsupported extra mount arguments with repository path restrictions");
-            }
-            check_bind(Path::new(&extra[1]), Path::new(&extra[2]))?;
-            extra = &extra[3..];
-        }
-        let mut readonly = self.fragment_ro.clone();
-        readonly.sort();
-        readonly.dedup();
-        for path in &readonly {
-            // A late bind must never unhide an earlier policy mask, including protected state.
-            if let Some(m) = masked.iter().find(|m| is_under(path, m)) {
-                bail!("fragment read-only path {} is inside masked {}", path.display(), m.display());
-            }
-            if self.policy.paths.hidden_mounts.iter().map(|p| crate::paths::expand_home(p, &self.home)).any(|p| overlaps(path, &p)) {
-                bail!("fragment read-only path {} overlaps a hidden mount", path.display());
-            }
-            // Binding a broad root also replaces any nested writable pin mounts. Read-only bind
-            // semantics are recursive in bubblewrap; applying parent then child stays read-only.
-            // Open without following any symlink and retain the exact source inode. Reopening
-            // a path in bubblewrap after planning could otherwise bind an unrelated host secret
-            // substituted by a concurrent writer. Keep descriptor numbers away from shim fd 3.
-            // inside a workspace the rule applies to the clone, which is what the jail has there
-            let source = rustix::fs::openat2(rustix::fs::CWD, self.backing(path),
-                rustix::fs::OFlags::PATH | rustix::fs::OFlags::CLOEXEC,
-                rustix::fs::Mode::empty(), rustix::fs::ResolveFlags::NO_SYMLINKS)
-                .with_context(|| format!("open fragment read-only source {}", path.display()))?;
-            let source = Arc::new(rustix::io::fcntl_dupfd_cloexec(&source, 64)?);
-            args.extend([OsString::from("--ro-bind-fd"), source.as_raw_fd().to_string().into(), path.as_os_str().to_owned()]);
-            mount_fds.push(source);
-        }
-        let mut final_masks: Vec<PathBuf> = masked.iter()
-            .filter(|m| readonly.iter().any(|r| is_under(m, r)))
-            .cloned().chain(self.fragment_masks.iter().cloned()).collect();
-        final_masks.sort();
-        final_masks.dedup();
-        // A parent mask hides all children; attempting to create child mount points beneath an
-        // already read-only /dev/null mask would be both unnecessary and invalid.
-        let mut applied = Vec::<PathBuf>::new();
-        for path in final_masks {
-            if applied.iter().any(|p| is_under(&path, p)) {
-                continue;
-            }
-            let is_dir = path.is_dir();
-            for target in [path.clone(), host_view(&path)] {
-                if is_dir {
-                    args.extend([OsString::from("--tmpfs"), target.into_os_string()]);
-                } else {
-                    args.extend([OsString::from("--ro-bind"), OsString::from("/dev/null"), target.into_os_string()]);
-                }
-            }
-            if !masked.contains(&path) {
-                masked.push(path.clone());
-            }
-            applied.push(path);
-        }
-        Ok(mount_fds)
     }
 
     fn layer_for(&self, host: &Path) -> Layer {
@@ -846,8 +721,6 @@ mod tests {
             policy_paths: None,
             agent_binds: vec![],
             masks: vec![],
-            fragment_ro: vec![],
-            fragment_masks: vec![],
             memory_dir: None,
             bridge_dir: None,
             workspace_mask: vec![],
@@ -857,143 +730,18 @@ mod tests {
         }
     }
 
-    struct FragmentTree(PathBuf);
-    impl FragmentTree {
+    /// A scratch directory of a test's own, removed with it.
+    struct TempTree(PathBuf);
+    impl TempTree {
         fn new() -> Self {
             static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-            let p = std::env::temp_dir().join(format!("sill-fragment-mount-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
-            std::fs::create_dir_all(p.join("repo/nested")).unwrap();
-            std::fs::create_dir_all(p.join("repo/secrets")).unwrap();
-            std::fs::write(p.join("repo/secrets/key"), "secret").unwrap();
+            let p = std::env::temp_dir().join(format!("sill-jail-tree-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+            std::fs::create_dir_all(&p).unwrap();
             Self(p.canonicalize().unwrap())
         }
-        fn repo(&self) -> PathBuf { self.0.join("repo") }
     }
-    impl Drop for FragmentTree {
+    impl Drop for TempTree {
         fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
-    }
-
-    #[test]
-    fn fragment_restrictions_follow_writable_nested_pins_and_extra_mounts() {
-        let tree = FragmentTree::new();
-        let repo = tree.repo();
-        let child = repo.join("nested");
-        let secret = repo.join("secrets");
-        let mut s = spec();
-        s.binds = vec![(repo.clone(), repo.clone()), (child.clone(), child.clone())];
-        s.extra_args = vec!["--ro-bind".into(), "/bin/true".into(), "/.sill/test".into()];
-        s.fragment_ro = vec![repo.clone()];
-        s.fragment_masks = vec![secret.clone()];
-        let plan = s.plan().unwrap();
-        let find = |flag: &str, dest: &Path| plan.argv.windows(3).rposition(|a| a[0] == flag && a[2] == dest).unwrap();
-        let ro = find("--ro-bind-fd", &repo);
-        assert!(ro > find("--bind", &child));
-        assert!(ro > find("--ro-bind", Path::new("/.sill/test")));
-        let mask = plan.argv.windows(2).position(|a| a[0] == "--tmpfs" && a[1] == secret).unwrap();
-        assert!(mask > ro);
-        assert!(plan.argv.windows(2).any(|a| a[0] == "--tmpfs" && a[1] == host_view(&secret)));
-        assert!(plan.masked.contains(&secret));
-    }
-
-    #[test]
-    fn late_fragment_readonly_bind_restores_base_masks_in_both_views() {
-        let tree = FragmentTree::new();
-        let repo = tree.repo();
-        let secret = repo.join("secrets");
-        let mut s = spec();
-        s.masks = vec![secret.clone()];
-        s.fragment_ro = vec![repo.clone()];
-        let a = s.plan().unwrap().argv;
-        let ro = a.windows(3).position(|a| a[0] == "--ro-bind-fd" && a[2] == repo).unwrap();
-        for target in [&secret, &host_view(&secret)] {
-            let mask = a.windows(2).rposition(|a| a[0] == "--tmpfs" && a[1] == *target).unwrap();
-            assert!(mask > ro, "base mask must be restored after the broad read-only bind");
-        }
-        s.fragment_ro = vec![secret.join("key")];
-        assert!(s.plan().unwrap_err().to_string().contains("inside masked"));
-    }
-
-    #[test]
-    fn fragment_readonly_source_is_anchored_if_replaced_after_planning() {
-        use std::os::unix::fs::MetadataExt;
-        let tree = FragmentTree::new();
-        let repo = tree.repo();
-        let protected = tree.0.join("protected");
-        std::fs::create_dir(&protected).unwrap();
-        std::fs::write(protected.join("key"), "not the repository").unwrap();
-        let inode = std::fs::metadata(&repo).unwrap().ino();
-        let mut s = spec();
-        s.fragment_ro = vec![repo.clone()];
-        s.masks = vec![protected.clone()];
-        let plan = s.plan().unwrap();
-        assert_eq!(plan.mount_fds.len(), 1);
-        let fd = &plan.mount_fds[0];
-        assert!(rustix::io::fcntl_getfd(fd.as_ref()).unwrap().contains(rustix::io::FdFlags::CLOEXEC));
-        assert!(fd.as_raw_fd() >= 64);
-        std::fs::rename(&repo, tree.0.join("original")).unwrap();
-        std::os::unix::fs::symlink(&protected, &repo).unwrap();
-        assert_eq!(rustix::fs::fstat(fd.as_ref()).unwrap().st_ino, inode);
-        assert_ne!(rustix::fs::fstat(fd.as_ref()).unwrap().st_ino, std::fs::metadata(&repo).unwrap().ino());
-        assert!(!plan.argv.windows(3).any(|a| a[0] == "--ro-bind" && a[1] == repo));
-    }
-
-    #[test]
-    fn fragment_restrictions_reject_alternate_bind_sources_and_destinations() {
-        let tree = FragmentTree::new();
-        let repo = tree.repo();
-        let secret = repo.join("secrets");
-        for (host, inside) in [
-            (repo.clone(), tree.0.join("alias")),
-            (secret.join("key"), tree.0.join("alias")),
-            (tree.0.join("source"), repo.clone()),
-            (tree.0.join("source"), secret.join("key")),
-        ] {
-            let mut s = spec();
-            s.fragment_masks = vec![secret.clone()];
-            s.binds = vec![(host.clone(), inside.clone())];
-            assert!(s.plan().unwrap_err().to_string().contains("alternate path"));
-            s.binds.clear();
-            s.extra_args = vec!["--ro-bind".into(), host.into_os_string(), inside.into_os_string()];
-            assert!(s.plan().unwrap_err().to_string().contains("alternate path"));
-        }
-        let mut s = spec();
-        s.fragment_masks = vec![secret];
-        s.extra_args = vec!["--args".into(), "10".into()];
-        assert!(s.plan().unwrap_err().to_string().contains("unsupported extra mount"));
-    }
-
-    #[test]
-    fn fragment_paths_reject_symlinks_missing_paths_and_hidden_mount_overlap() {
-        let tree = FragmentTree::new();
-        let repo = tree.repo();
-        let mut s = spec();
-        std::os::unix::fs::symlink(repo.join("secrets"), repo.join("link")).unwrap();
-        s.fragment_masks = vec![repo.join("link")];
-        assert!(s.plan().unwrap_err().to_string().contains("symlink"));
-        s.fragment_masks = vec![repo.join("missing")];
-        assert!(s.plan().unwrap_err().to_string().contains("disappeared"));
-        s.fragment_masks.clear();
-        s.fragment_ro = vec![repo.clone()];
-        s.policy.paths.hidden_mounts.push(repo.join("nested").to_str().unwrap().into());
-        assert!(s.plan().unwrap_err().to_string().contains("hidden mount"));
-    }
-
-    #[test]
-    fn fragment_parent_mask_covers_child_masks_and_file_masks_cover_both_views() {
-        let tree = FragmentTree::new();
-        let repo = tree.repo();
-        let secret = repo.join("secrets");
-        let key = secret.join("key");
-        let mut s = spec();
-        s.fragment_masks = vec![key.clone(), secret.clone()];
-        let plan = s.plan().unwrap();
-        assert!(plan.masked.contains(&secret));
-        assert!(!plan.masked.contains(&key));
-        s.fragment_masks = vec![key.clone()];
-        let a = s.plan().unwrap().argv;
-        for target in [&key, &host_view(&key)] {
-            assert!(a.windows(3).any(|a| a[0] == "--ro-bind" && a[1] == "/dev/null" && a[2] == *target));
-        }
     }
 
     #[test]
@@ -1096,7 +844,7 @@ mod tests {
     #[test]
     fn declared_agent_masks_cover_both_views_and_bind_a_held_private_source() {
         use crate::agents::HomePathKind::{Directory, File};
-        let tree = FragmentTree::new();
+        let tree = TempTree::new();
         let original = tree.0.join("home/.codex");
         let source = tree.0.join("private/.codex");
         std::fs::create_dir_all(&original).unwrap();
@@ -1133,7 +881,7 @@ mod tests {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target")
             .join(format!("agent-storage-jail-{:032x}", rand::random::<u128>()));
         std::fs::create_dir_all(&root).unwrap();
-        let tree = FragmentTree(root.canonicalize().unwrap());
+        let tree = TempTree(root.canonicalize().unwrap());
         let home = tree.0.join("home");
         let put = |path: PathBuf, value: &str| {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1183,8 +931,7 @@ if test "$2" = codex; then test "$(cat "$1/.codex/saved")" = saved-settings; fi
 
     /// A workspace session (docs/parallel-coding.md §12): after an ancestor pin, the clone is bound
     /// at the repository's path, the checkout hidden in the host view, its object store borrowed at
-    /// `/.sill/borrowed/0` and the jail's alternates file written from memory; then the
-    /// repository's fragment rules, and `/` read-only last.
+    /// `/.sill/borrowed/0` and the jail's alternates file written from memory; `/` read-only last.
     #[test]
     fn a_workspace_clone_takes_the_repositorys_place() {
         let dir = std::env::temp_dir().join(format!("sill-jail-ws-{}", std::process::id()));
@@ -1192,12 +939,10 @@ if test "$2" = codex; then test "$(cat "$1/.codex/saved")" = saved-settings; fi
         let (projects, source, clone) = (dir.join("projects"), dir.join("projects/src"), dir.join("ws/clone"));
         let objects = source.join(".git/objects");
         std::fs::create_dir_all(&objects).unwrap();
-        std::fs::create_dir_all(clone.join("sub")).unwrap();
-        std::fs::create_dir_all(source.join("sub")).unwrap();
+        std::fs::create_dir_all(&clone).unwrap();
         let mut s = spec();
         s.binds = vec![(projects.clone(), projects.clone())];
         s.workspace_mask = vec![(source.clone(), clone.clone(), objects.clone())];
-        s.fragment_ro = vec![source.join("sub")];
         let plan = s.plan().unwrap();
         let r = render(&plan.argv);
         let at = |needle: String| r.find(&needle).unwrap_or_else(|| panic!("{needle} not in {r}"));
@@ -1205,16 +950,14 @@ if test "$2" = codex; then test "$(cat "$1/.codex/saved")" = saved-settings; fi
         let bound = at(format!(" {} --tmpfs {} ", source.display(), host_view(&source).display()));
         let store = at(" /.sill/borrowed/0 ".into());
         let alternates = at(format!(" {} ", source.join(".git/objects/info/alternates").display()));
-        let fragment = r.rfind(&format!(" {} ", source.join("sub").display())).unwrap();
         let root = at("--remount-ro / ".into());
-        assert!(pin < bound && bound < store && store < alternates && alternates < fragment && fragment < root, "{r}");
+        assert!(pin < bound && bound < store && store < alternates && alternates < root, "{r}");
         assert!(r.contains("--bind-fd ") && r.contains("--ro-bind-data "));
         assert!(plan.direct.contains(&source), "writes there are the clone's, not the overlay's");
-        // the clone, the store, the alternates data, the fragment rule: all by descriptor
-        assert_eq!(plan.mount_fds.len(), 4);
+        // the clone, the store, the alternates data: all by descriptor
+        assert_eq!(plan.mount_fds.len(), 3);
         // a store outside the checkout is refused
         s.workspace_mask = vec![(source.clone(), clone.clone(), dir.join("elsewhere"))];
-        s.fragment_ro = vec![];
         assert!(s.plan().is_err());
         // a repository the policy already hides stays hidden, with a warning
         s.workspace_mask = vec![(source.clone(), clone.clone(), objects.clone())];
@@ -1236,7 +979,7 @@ if test "$2" = codex; then test "$(cat "$1/.codex/saved")" = saved-settings; fi
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target")
             .join(format!("workspace-jail-{:032x}", rand::random::<u128>()));
         std::fs::create_dir_all(&root).unwrap();
-        let tree = FragmentTree(root.canonicalize().unwrap());
+        let tree = TempTree(root.canonicalize().unwrap());
         let home = tree.0.join("home");
         let projects = home.join("projects");
         let source = projects.join("src");

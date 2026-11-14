@@ -57,7 +57,7 @@ fn unavailable_reason(capability: &str) -> String {
 pub struct SessionChoice {
     pub capability: String,
     pub enabled: bool,
-    /// The policy default before this choice, after repository and ghost restrictions.
+    /// The policy default before this choice, after ghost restrictions.
     pub policy_default: bool,
     /// Why the choice did not take effect; never forced past a limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -167,7 +167,7 @@ impl Permissions {
         None
     }
 
-    /// Apply remembered session choices after repository and ghost restrictions. Turning a
+    /// Apply remembered session choices after ghost restrictions. Turning a
     /// capability off always applies; turning one on applies only within the limits above.
     pub fn apply_session(&mut self, network: &mut Network, choices: &BTreeMap<String, bool>) -> Vec<SessionChoice> {
         let mut applied = Vec::new();
@@ -292,12 +292,11 @@ mod tests {
     }
 
     #[test]
-    fn repository_offline_and_ghost_restrictions_win() {
-        let mut p = Policy::parse("name='test'\n[permissions]\npublic_web='on'").unwrap();
-        p.network.mode = NetMode::None;
+    fn offline_and_ghost_restrictions_win() {
+        let mut p = Policy::parse("name='test'\n[network]\nmode='none'\n[permissions]\npublic_web='on'").unwrap();
         let state = &p.permissions.states(&p.network, &[])[3];
         assert!(!state.allowed && !state.effective);
-        // Repository restrictions override the requested default without changing its provenance.
+        // Offline overrides the requested default without changing its provenance.
         assert!(p.permissions.validate_launch(&p.network).is_ok());
         p.ghostly(std::path::Path::new("/nonexistent"));
         assert!(

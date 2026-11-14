@@ -67,7 +67,7 @@ impl Host for Daemon<'_> {
             let row = s.session_exact(session)?.ok_or_else(|| anyhow::anyhow!("no session {session}"))?;
             Ok((row, s.jail_pins(session)?, s.workspace_mask_all(session)?))
         })?;
-        let resolved = sill_core::session::next_build(&row, &hub.home, &pins, &[], &binds)?;
+        let resolved = sill_core::session::next_build(&row, &hub.home, &pins, &binds)?;
         if let Some(plan) = &resolved.filesystem {
             plan.prepare()?;
         }

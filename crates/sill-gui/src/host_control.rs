@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use iced::widget::{column, container, row, rule, space, text};
 use iced::{Alignment, Element, Fill, Task};
 use sill_client::actions::Outcome;
-use sill_proto::host_control::{Conflict, OPERATIONS, State, describe};
+use sill_proto::host_control::{OPERATIONS, State, describe};
 use sill_proto::sessions::Session;
 
 use crate::style::{self, P, alpha};
@@ -27,11 +27,9 @@ pub enum Event {
     Activate(String),
     /// Tick every operation and activate: the shield's Ctrl+Shift+click.
     ActivateAll(String),
-    /// Record the repository exception for the ticked operations' restrictions.
-    Except(String),
     Revoke(String),
     Done(String, u64, Result<State, String>),
-    /// The state read with the Permissions panel: its ban, restrictions and exception.
+    /// The state read with the Permissions panel: the activation and the policy's ban.
     Read(String, Result<State, String>),
 }
 
@@ -93,18 +91,6 @@ impl App {
                 let params = json!({"session_id": id, "operations": operations});
                 self.host_control_request(id, "_sill/host_control.activate", params)
             }
-            Event::Except(id) => {
-                let Some(view) = self.views.get(&id) else {
-                    return Task::none();
-                };
-                let operations: Vec<String> = view.host_control.selected.iter().cloned().collect();
-                let acknowledged: Vec<_> = met(&view.host_control).iter().map(|c| c.key()).collect();
-                if acknowledged.is_empty() {
-                    return Task::none();
-                }
-                let params = json!({"session_id": id, "operations": operations, "acknowledged": acknowledged});
-                self.host_control_request(id, "_sill/host_control.exception", params)
-            }
             Event::Read(id, result) => {
                 if let Some(view) = self.views.get_mut(&id)
                     && !view.host_control.busy
@@ -145,7 +131,7 @@ impl App {
         }
     }
 
-    /// Read the session's Host control state: its ban, restrictions and exception.
+    /// Read the session's Host control state: the activation and the policy's ban.
     pub(crate) fn read_host_control(&self, id: &str) -> Task<Message> {
         let Some(actions) = self.actions.clone() else {
             return Task::none();
@@ -218,73 +204,10 @@ pub fn rows<'a>(view: &'a SessionView, session: &'a Session, can_change: bool) -
         .collect()
 }
 
-/// The repository restrictions the ticked operations can bypass.
-pub fn met(hc: &View) -> Vec<&Conflict> {
-    let selected: Vec<String> = hc.selected.iter().cloned().collect();
-    hc.state.as_ref().map(|s| s.conflicts.iter().filter(|c| c.applies(&selected)).collect()).unwrap_or_default()
-}
-
-/// Whether the recorded exception (waiting for the next activation) covers the ticked
-/// operations and the restrictions they meet.
-fn covered(hc: &View) -> bool {
-    let met = met(hc);
-    met.is_empty()
-        || hc.state.as_ref().and_then(|s| s.exception.as_ref()).is_some_and(|e| {
-            e.generation.is_none()
-                && hc.selected.iter().all(|op| e.operations.contains(op))
-                && met.iter().all(|c| e.conflicts.iter().any(|a| a.key() == c.key()))
-        })
-}
-
-/// Under the host column's rows: a base-policy ban, or the pinned repositories' restrictions the
-/// ticked operations can bypass, with the separate step that records the person's exception for
-/// one activation (docs/permission-modes.md, "Repository restrictions and Host control").
-pub fn restrictions<'a>(view: &'a SessionView, can_change: bool) -> Option<Element<'a, Message>> {
-    let hc = &view.host_control;
-    let state = hc.state.as_ref()?;
-    let id = view.id.as_str();
-    if let Some(forbidden) = &state.forbidden {
-        return Some(text(format!("{forbidden}.")).size(style::TINY).color(P.error).into());
-    }
-    if let Some(error) = &state.conflicts_error {
-        return Some(text(format!("Repository restrictions could not be read: {error}")).size(style::TINY).color(P.error).into());
-    }
-    let met = met(hc);
-    let in_use = state.active.then(|| state.exception.as_ref().filter(|e| e.generation == Some(state.generation))).flatten();
-    if met.is_empty() && in_use.is_none() {
-        return None;
-    }
-    let mut block = column![text("REPOSITORY RESTRICTIONS").size(style::TINY).color(P.warning)].spacing(3);
-    if met.is_empty() {
-        block = block.push(text("The ticked operations meet none.").size(style::TINY).color(alpha(P.fg, 0.7)));
-    }
-    for c in &met {
-        block = block.push(
-            column![
-                text(format!("{} · {}", c.source.display, c.detail)).size(style::TINY).color(P.fg),
-                text(format!("{} Bypassed by: {}.", c.consequence, c.operations.join(", "))).size(style::TINY).color(alpha(P.fg, 0.7)),
-            ]
-            .spacing(1),
-        );
-    }
-    let said = if let Some(e) = in_use {
-        format!("Generation {} runs under a repository exception ({}). The jail keeps the restrictions.", state.generation, e.operations.join(", "))
-    } else if covered(hc) {
-        "Exception recorded for the next activation. The jail keeps the restrictions.".into()
-    } else {
-        "Host code is not bound by these. Activating needs your exception for this one activation first.".into()
-    };
-    block = block.push(text(said).size(style::TINY).color(P.warning));
-    if !met.is_empty() && !covered(hc) {
-        block = block.push(crate::permissions::tip(
-            crate::permissions::small(
-                "Record exception",
-                (can_change && !hc.busy).then(|| Message::HostControl(Event::Except(id.into()))),
-            ),
-            "Records that you accept these operations bypassing the listed restrictions, for the next activation only. It activates nothing; revocation, a scope change, the session stopping or this window closing ends it. The repository's rules stay in force inside the jail.".into(),
-        ));
-    }
-    Some(container(block).padding([6, 0]).into())
+/// Under the host column's rows: the session policy's ban, when it forbids Host control.
+pub fn ban<'a>(view: &'a SessionView) -> Option<Element<'a, Message>> {
+    let forbidden = view.host_control.state.as_ref()?.forbidden.as_ref()?;
+    Some(text(format!("{forbidden}.")).size(style::TINY).color(P.error).into())
 }
 
 /// What the host column says over its rows, and whether it is the warning colour.
@@ -300,18 +223,14 @@ pub fn buttons<'a>(view: &'a SessionView, session: &'a Session, can_change: bool
     let brief: BTreeSet<String> = session.host_control.as_ref().map(|b| b.operations.iter().cloned().collect()).unwrap_or_default();
     let is_active = session.host_control.is_some();
     let selection_differs = hc.selected != brief;
-    let forbidden = hc.state.as_ref().and_then(|s| s.forbidden.clone().or_else(|| s.conflicts_error.clone()));
-    let needs_exception = !covered(hc);
+    let forbidden = hc.state.as_ref().and_then(|s| s.forbidden.clone());
     let can_activate = can_change
         && !hc.busy
         && !hc.selected.is_empty()
         && (!is_active || selection_differs)
-        && forbidden.is_none()
-        && !needs_exception;
+        && forbidden.is_none();
     let activate_tip = if let Some(forbidden) = forbidden {
         forbidden
-    } else if needs_exception && (!is_active || selection_differs) {
-        "These operations can bypass a pinned repository's restrictions: record your exception first (above).".to_string()
     } else if is_active && !selection_differs {
         "Active with exactly these operations.".to_string()
     } else if is_active {
@@ -368,11 +287,7 @@ pub fn caption<'a>(session: &Session) -> Option<Element<'a, Message>> {
         column![
             rule::horizontal(1).style(style::rule_style(P.error)),
             container(
-                text(format!(
-                    "{CAPTION}{} · {}",
-                    if brief.exception { " · under a repository exception" } else { "" },
-                    brief.operations.join(", ")
-                ))
+                text(format!("{CAPTION} · {}", brief.operations.join(", ")))
                     .size(style::TINY)
                     .color(P.error)
                     .width(Fill)
@@ -448,70 +363,33 @@ mod tests {
         session.host_control = Some(sill_proto::host_control::Brief {
             generation: 1,
             operations: operations.iter().map(|s| s.to_string()).collect(),
-            exception: false,
         });
         session
     }
 
-    /// A pinned repository's restriction the ticked operations meet: Activate waits for the
-    /// separate Record exception step, which sends exactly what the state listed.
+    /// A policy that forbids Host control: the ban shows under the host column and Activate
+    /// stays closed whatever is ticked.
     #[test]
-    fn a_repository_restriction_needs_the_recorded_exception_before_activating() {
-        let (client, mut daemon) = hosting_client();
+    fn a_policy_ban_shows_and_keeps_activate_closed() {
+        let (client, _daemon) = hosting_client();
         let mut app = live_app(vec![client]);
         app.all_sessions = vec![session_record("demo", "demo", false, false)];
         app.views.get_mut("demo").unwrap().permissions.open = true;
-        let source = sill_proto::sessions::HostPath::from_path(std::path::Path::new("/repo/.sill/policy.toml"));
-        let conflict = json!({"source": source, "sha256": "abc", "restriction": "offline", "detail": "network.mode = none",
-            "consequence": "Host code has the host's network; the repository asks for none.", "operations": ["input", "launch", "commands"]});
-        let state = |exception: serde_json::Value| -> State {
-            serde_json::from_value(json!({"session_id": "demo", "active": false, "generation": 0, "operations": [],
-                "displaying": 0, "since": null, "ended": null, "conflicts": [conflict], "exception": exception})).unwrap()
-        };
-        let task = app.update(Message::HostControl(Event::Read("demo".into(), Ok(state(json!(null))))));
-        settle_task(&mut app, task);
-        // inspection meets nothing: no block, Activate open
-        let task = app.update(Message::HostControl(Event::Select("demo".into(), "inspect".into(), true)));
-        settle_task(&mut app, task);
-        {
-            let mut ui = simulator(&app, (900.0, 1100.0));
-            assert!(ui.find("REPOSITORY RESTRICTIONS").is_err());
-            assert!(ui.find("Record exception").is_err());
-        }
-        assert!(covered(&app.views["demo"].host_control));
-        // launch meets the offline rule: listed, Activate waits for the exception
         let task = app.update(Message::HostControl(Event::Select("demo".into(), "launch".into(), true)));
         settle_task(&mut app, task);
-        assert!(!covered(&app.views["demo"].host_control));
-        {
-            let mut ui = simulator(&app, (900.0, 1100.0));
-            ui.find("REPOSITORY RESTRICTIONS").unwrap();
-            ui.find("/repo/.sill/policy.toml · network.mode = none").unwrap();
-            ui.find("Record exception").unwrap();
-        }
-        let fake = std::thread::spawn(move || {
-            let request = daemon.expect("_sill/host_control.exception");
-            assert_eq!(request["params"], json!({"session_id": "demo", "operations": ["inspect", "launch"],
-                "acknowledged": [{"source": source, "sha256": "abc", "restriction": "offline"}]}));
-            daemon.reply(&request, json!({"session_id": "demo", "active": false, "generation": 0, "operations": [],
-                "displaying": 0, "since": null, "ended": null, "conflicts": [conflict],
-                "exception": {"operations": ["inspect", "launch"], "conflicts": [conflict], "at": "1"}}));
-            let request = daemon.next();
-            assert_eq!(request["method"], "_sill/sessions.list");
-            daemon.reply(&request, json!({"sessions": [session_record("demo", "demo", false, false)], "next": null}));
-        });
-        let task = app.update(Message::HostControl(Event::Except("demo".into())));
+        let activates = |app: &App| {
+            let mut ui = simulator(app, (900.0, 1100.0));
+            ui.click("Activate host control").unwrap();
+            ui.into_messages().any(|m| matches!(m, Message::HostControl(Event::Activate(_))))
+        };
+        assert!(activates(&app), "open before the ban is known");
+        let state: State = serde_json::from_value(json!({"session_id": "demo", "active": false, "generation": 0,
+            "operations": [], "displaying": 0, "since": null, "ended": null,
+            "forbidden": "Host control is forbidden by the session's policy"})).unwrap();
+        let task = app.update(Message::HostControl(Event::Read("demo".into(), Ok(state))));
         settle_task(&mut app, task);
-        fake.join().unwrap();
-        assert!(covered(&app.views["demo"].host_control), "the recorded exception covers the ticked scope");
-        let mut ui = simulator(&app, (900.0, 1100.0));
-        ui.find("Exception recorded for the next activation. The jail keeps the restrictions.").unwrap();
-        assert!(ui.find("Record exception").is_err());
-        drop(ui);
-        // ticking more than it was recorded for needs a fresh one
-        let task = app.update(Message::HostControl(Event::Select("demo".into(), "commands".into(), true)));
-        settle_task(&mut app, task);
-        assert!(!covered(&app.views["demo"].host_control));
+        simulator(&app, (900.0, 1100.0)).find("Host control is forbidden by the session's policy.").unwrap();
+        assert!(!activates(&app));
     }
 
     /// The group activates with exactly the ticked operations; the answer and the refreshed

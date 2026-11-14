@@ -72,12 +72,6 @@ pub struct PolicyEntry {
     pub name: String,
     pub text: String,
 }
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PolicyStart {
-    pub session_id: String,
-    pub ignore_roots: Vec<HostPath>,
-}
 /// Capability defaults and ceilings, evaluated against this view's resolved policy.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PermissionState {
@@ -168,10 +162,6 @@ pub struct PolicyView {
     pub session_id: String,
     pub name: String,
     pub text: Option<String>,
-    pub fragment_ro: Vec<HostPath>,
-    pub fragment_masks: Vec<HostPath>,
-    pub sources: Vec<PolicySource>,
-    pub suggestions: Vec<PolicySuggestion>,
     pub fingerprint: Option<String>,
     pub diagnostics: Vec<String>,
 }
@@ -189,20 +179,6 @@ pub struct PathRule {
     pub reason: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct PolicySource {
-    pub root: HostPath,
-    pub path: HostPath,
-    pub text: String,
-    pub sha256: String,
-    pub ignored: bool,
-    pub error: Option<String>,
-}
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct PolicySuggestion {
-    pub host: String,
-    pub source: HostPath,
-}
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PolicySnapshot {
     /// Older or never-started sessions may have no retained launch snapshot.
     pub snapshot: Option<PolicyView>,
@@ -210,11 +186,8 @@ pub struct PolicySnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyCheck {
-    /// Text is transferred from the client; paths in a fragment identify the daemon host.
+    /// A complete policy's text, transferred from the client.
     pub text: String,
-    #[serde(default)]
-    pub fragment: bool,
-    pub root: Option<HostPath>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PolicyChecked {

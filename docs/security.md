@@ -242,3 +242,41 @@ Restart jails after deploying this change. A new legacy sibling created after la
 is not covered by that jail's fixed mount list; use the protected backup location.
 Copies elsewhere are not automatically recognized, and masking cannot retract content
 already read into a conversation. Existing host backups are not relocated by this change.
+
+## Policy path rules inside a pinned folder — 2026-11-10
+
+Found while testing the removal of repository policy fragments
+([history](development-history.md#repository-policy-fragments-removed-2026-11-10)). A
+fragment's `paths.mask` and `paths.ro` were laid after the pins and the workspace clones, in
+both views: the only route by which a rule for a path *inside a pinned folder* was enforced.
+Nothing on the machine used it, and it is gone. The policy's own `paths.mask` and `paths.ro`
+do not replace it. Probed in real jails of a throwaway daemon on the host, with the build
+before the removal and the one after, with the same results:
+
+| A policy rule for a path inside a pinned folder | What happens |
+|---|---|
+| `mask`, the folder pinned live | **The jail is refused**: "not mounted — it would cover the masked …" (S2's rule: a pin never buries a mask). Safe; the folder cannot be pinned live with that policy. |
+| `mask`, the folder a workspace session's repository | **Not enforced.** The clone is bound in the repository's place after the masks and the mask is not laid again. The clone holds the checkout's ignored files (parallel-coding.md, "Folders: warm from the checkout"), so an ignored, masked `.env` was read inside the jail. In the read-only host view the checkout is hidden as a whole. |
+| `ro`, the folder pinned live | **Not enforced.** The read-only bind comes before the pin's bind, which covers it: a write inside the jail reached the host file. |
+
+Not probed, following from the same mount order: a `ro` path inside a workspace repository (the
+clone's bind covers it; the write lands in the clone), and a path the *default* policy masks
+that lies inside a pinned workspace repository — a home directory kept in Git and pinned would
+show the clone's copies of whatever its `.gitignore` ignores under `~/.ssh` and the like.
+
+By S2's own reasoning the workspace case is a gap rather than a choice: a tree of sill's own
+bound in a host path's place gets the masks beneath it laid again on top, and inside a mask it
+is refused because "the copy was seeded from the host"; a workspace clone is seeded from the
+host too and gets neither.
+
+No fix is made here; the choice is the person's
+([work items](work-items.md#open-follow-ups)):
+
+1. **Enforce.** After the pins and the workspace clones, lay the policy's masks again (in both
+   views) and bind its `ro` paths last, by descriptor, onto the clone where there is one. This
+   is what the removed fragment pass did (`apply_fragment_paths` in `jail.rs`, in the history
+   before the removal); a live pin could then hold a masked path instead of being refused.
+2. **Refuse.** A repository that contains a masked path gets no workspace (as its live pin is
+   refused), and a `ro` path inside a pin fails the build with a diagnostic.
+3. Leaving masked paths out of workspace seeding alone would cover ignored files only, not
+   tracked ones.

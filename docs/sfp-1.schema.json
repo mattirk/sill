@@ -1,26 +1,5 @@
 {
   "$defs": {
-    "Acknowledged": {
-      "additionalProperties": false,
-      "description": "A restriction as the person acknowledges it: the fragment, its content, the rule.",
-      "properties": {
-        "restriction": {
-          "type": "string"
-        },
-        "sha256": {
-          "type": "string"
-        },
-        "source": {
-          "$ref": "#/$defs/HostPath"
-        }
-      },
-      "required": [
-        "source",
-        "sha256",
-        "restriction"
-      ],
-      "type": "object"
-    },
     "Activate": {
       "additionalProperties": false,
       "description": "Activate Host control for a session with exactly these operations, or change an active\none's scope to them. Each call that takes effect is a new generation.",
@@ -561,10 +540,6 @@
     "Brief": {
       "description": "Active Host control on a session record, for a window-level indication of every such session.",
       "properties": {
-        "exception": {
-          "description": "The activation runs under a repository exception.",
-          "type": "boolean"
-        },
         "generation": {
           "format": "uint64",
           "minimum": 0,
@@ -880,47 +855,6 @@
           "type": "object"
         }
       ]
-    },
-    "Conflict": {
-      "description": "One repository restriction host operations can bypass.",
-      "properties": {
-        "consequence": {
-          "description": "What host code can do despite it.",
-          "type": "string"
-        },
-        "detail": {
-          "description": "The rule as the fragment states it.",
-          "type": "string"
-        },
-        "operations": {
-          "description": "The operations that bypass it.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "restriction": {
-          "description": "host_control_forbidden, offline, public_web_forbidden, read_only_paths, masked_paths,\nresource_limits or port_exposure.",
-          "type": "string"
-        },
-        "sha256": {
-          "description": "Its content's SHA-256: an exception names the content the person read.",
-          "type": "string"
-        },
-        "source": {
-          "$ref": "#/$defs/HostPath",
-          "description": "The fragment file."
-        }
-      },
-      "required": [
-        "source",
-        "sha256",
-        "restriction",
-        "detail",
-        "consequence",
-        "operations"
-      ],
-      "type": "object"
     },
     "Content": {
       "additionalProperties": true,
@@ -1774,9 +1708,6 @@
         },
         {
           "$ref": "#/$defs/UnsupportedDetails"
-        },
-        {
-          "$ref": "#/$defs/ExceptionRequiredDetails"
         }
       ],
       "description": "`details` by code. Only the codes listed in [`detail_codes`] carry details; for those, the\nrecord shape is fixed by sfp/1 and may only gain optional fields. Clients ignore unknown fields."
@@ -2199,58 +2130,6 @@
           "type": "object"
         }
       ]
-    },
-    "Exception": {
-      "description": "A repository exception: the person's acknowledgement that host operations may bypass these\nrestrictions, for one activation only.",
-      "properties": {
-        "at": {
-          "description": "Unix seconds, decimal.",
-          "type": "string"
-        },
-        "conflicts": {
-          "items": {
-            "$ref": "#/$defs/Conflict"
-          },
-          "type": "array"
-        },
-        "generation": {
-          "description": "The activation generation it was consumed by; none while it waits for the activation.",
-          "format": "uint64",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "operations": {
-          "description": "The operations it was recorded for; the activation's are a subset.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "operations",
-        "conflicts",
-        "at"
-      ],
-      "type": "object"
-    },
-    "ExceptionRequiredDetails": {
-      "description": "`exception_required`: the repository restrictions the requested Host control operations can\nbypass, as `_sill/host_control.state` lists them. Always present.",
-      "properties": {
-        "conflicts": {
-          "items": {
-            "$ref": "#/$defs/Conflict"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "conflicts"
-      ],
-      "type": "object"
     },
     "FileBytes": {
       "properties": {
@@ -4253,22 +4132,8 @@
     "PolicyCheck": {
       "additionalProperties": false,
       "properties": {
-        "fragment": {
-          "default": false,
-          "type": "boolean"
-        },
-        "root": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/HostPath"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "text": {
-          "description": "Text is transferred from the client; paths in a fragment identify the daemon host.",
+          "description": "A complete policy's text, transferred from the client.",
           "type": "string"
         }
       },
@@ -4358,73 +4223,6 @@
       },
       "type": "object"
     },
-    "PolicySource": {
-      "properties": {
-        "error": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "ignored": {
-          "type": "boolean"
-        },
-        "path": {
-          "$ref": "#/$defs/HostPath"
-        },
-        "root": {
-          "$ref": "#/$defs/HostPath"
-        },
-        "sha256": {
-          "type": "string"
-        },
-        "text": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "root",
-        "path",
-        "text",
-        "sha256",
-        "ignored"
-      ],
-      "type": "object"
-    },
-    "PolicyStart": {
-      "additionalProperties": false,
-      "properties": {
-        "ignore_roots": {
-          "items": {
-            "$ref": "#/$defs/HostPath"
-          },
-          "type": "array"
-        },
-        "session_id": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "session_id",
-        "ignore_roots"
-      ],
-      "type": "object"
-    },
-    "PolicySuggestion": {
-      "properties": {
-        "host": {
-          "type": "string"
-        },
-        "source": {
-          "$ref": "#/$defs/HostPath"
-        }
-      },
-      "required": [
-        "host",
-        "source"
-      ],
-      "type": "object"
-    },
     "PolicyView": {
       "description": "Policy inspection always identifies its view; previews are never evidence of enforcement.",
       "properties": {
@@ -4451,18 +4249,6 @@
             "null"
           ]
         },
-        "fragment_masks": {
-          "items": {
-            "$ref": "#/$defs/HostPath"
-          },
-          "type": "array"
-        },
-        "fragment_ro": {
-          "items": {
-            "$ref": "#/$defs/HostPath"
-          },
-          "type": "array"
-        },
         "name": {
           "type": "string"
         },
@@ -4484,18 +4270,6 @@
         "session_id": {
           "type": "string"
         },
-        "sources": {
-          "items": {
-            "$ref": "#/$defs/PolicySource"
-          },
-          "type": "array"
-        },
-        "suggestions": {
-          "items": {
-            "$ref": "#/$defs/PolicySuggestion"
-          },
-          "type": "array"
-        },
         "text": {
           "type": [
             "string",
@@ -4510,10 +4284,6 @@
         "view",
         "session_id",
         "name",
-        "fragment_ro",
-        "fragment_masks",
-        "sources",
-        "suggestions",
         "diagnostics"
       ],
       "type": "object"
@@ -5031,33 +4801,6 @@
           "type": "object"
         }
       ]
-    },
-    "RecordException": {
-      "additionalProperties": false,
-      "description": "Record a repository exception for the session's next activation with (a subset of) these\noperations. `acknowledged` must name exactly the restrictions they meet now, as `state` lists\nthem: a changed fragment needs a fresh look. It activates nothing.",
-      "properties": {
-        "acknowledged": {
-          "items": {
-            "$ref": "#/$defs/Acknowledged"
-          },
-          "type": "array"
-        },
-        "operations": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "session_id": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "session_id",
-        "operations",
-        "acknowledged"
-      ],
-      "type": "object"
     },
     "RecordFragment": {
       "properties": {
@@ -6452,21 +6195,6 @@
         "active": {
           "type": "boolean"
         },
-        "conflicts": {
-          "default": [],
-          "description": "Repository restrictions host operations can bypass, from the fragments of the session's\npinned repositories as they are now. An activation whose operations meet one needs a\nrecorded exception first ([`RecordException`]); the jail keeps enforcing them.",
-          "items": {
-            "$ref": "#/$defs/Conflict"
-          },
-          "type": "array"
-        },
-        "conflicts_error": {
-          "description": "Why the restrictions could not be read (a fragment that does not parse): activation is\nrefused until they can.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "displaying": {
           "description": "Connections displaying this session's control; the activation ends when the last goes.",
           "format": "uint32",
@@ -6484,19 +6212,8 @@
           ],
           "description": "Why and when the last activation ended, until the next one."
         },
-        "exception": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Exception"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "The repository exception: recorded for the next activation (no generation yet), or the one\nthe active generation runs under."
-        },
         "forbidden": {
-          "description": "The base policy's ban, when it forbids Host control: no exception can lift it.",
+          "description": "The session policy's ban, when it forbids Host control.",
           "type": [
             "string",
             "null"
@@ -7518,16 +7235,9 @@
       "snapshot_expired",
       "limit_exceeded",
       "permission_denied",
-      "operation_failed",
-      "exception_required"
+      "operation_failed"
     ],
     "details": {
-      "exception_required": {
-        "required": true,
-        "shape": {
-          "$ref": "#/$defs/ExceptionRequiredDetails"
-        }
-      },
       "incompatible": {
         "required": true,
         "shape": {
@@ -7848,25 +7558,11 @@
       "capabilities": {
         "sill.host_control": 1
       },
-      "doc": "Activate Host control for a running session with exactly these operations, or change an active one's scope: a new generation each time. Refused for ghosts, a base policy that forbids it, a stopped session, and (exception_required) operations that meet repository restrictions without a recorded exception; never a saved choice.",
+      "doc": "Activate Host control for a running session with exactly these operations, or change an active one's scope: a new generation each time. Refused for ghosts, a policy that forbids it and a stopped session; never a saved choice.",
       "kind": "request",
       "name": "_sill/host_control.activate",
       "params": {
         "$ref": "#/$defs/Activate"
-      },
-      "result": {
-        "$ref": "#/$defs/State"
-      }
-    },
-    {
-      "capabilities": {
-        "sill.host_control": 1
-      },
-      "doc": "Record the person's repository exception for the session's next Host control activation: the restrictions of pinned repositories' fragments that these operations can bypass, named exactly as state lists them. Activates nothing; consumed by the next activation, gone with revocation, a scope change, the session stopping or this connection leaving. A base-policy ban has no exception.",
-      "kind": "request",
-      "name": "_sill/host_control.exception",
-      "params": {
-        "$ref": "#/$defs/RecordException"
       },
       "result": {
         "$ref": "#/$defs/State"
@@ -7904,7 +7600,7 @@
       "capabilities": {
         "sill.permission_modes": 1
       },
-      "doc": "A session's Host control state: active, generation, operations, displaying frontends, the last end, a base-policy ban, the repository restrictions host operations can bypass and the exception. Session records carry the active brief for every client.",
+      "doc": "A session's Host control state: active, generation, operations, displaying frontends, the last end and the policy's ban. Session records carry the active brief for every client.",
       "kind": "request",
       "name": "_sill/host_control.state",
       "params": {
@@ -8600,19 +8296,7 @@
     },
     {
       "capabilities": {},
-      "doc": "Start a session with explicit fragment-root exceptions for one jail build only; never blindly retry after uncertainty.",
-      "kind": "request",
-      "name": "_sill/policy.start",
-      "params": {
-        "$ref": "#/$defs/PolicyStart"
-      },
-      "result": {
-        "$ref": "#/$defs/Started"
-      }
-    },
-    {
-      "capabilities": {},
-      "doc": "Preview next-build session rules and fragment diagnostics; this view is not enforced by a running jail.",
+      "doc": "Preview next-build session rules and diagnostics; this view is not enforced by a running jail.",
       "kind": "request",
       "name": "_sill/policy.preview",
       "params": {
@@ -8624,7 +8308,7 @@
     },
     {
       "capabilities": {},
-      "doc": "Inspect retained launch rules and fragment sources; null means no snapshot was recorded.",
+      "doc": "Inspect retained launch rules; null means no snapshot was recorded.",
       "kind": "request",
       "name": "_sill/policy.snapshot",
       "params": {
@@ -8636,7 +8320,7 @@
     },
     {
       "capabilities": {},
-      "doc": "Validate at most 1 MiB of transferred complete-policy or fragment text without installation or grants.",
+      "doc": "Validate at most 1 MiB of transferred complete-policy text without installation or grants.",
       "kind": "request",
       "name": "_sill/policy.check",
       "params": {

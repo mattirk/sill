@@ -1058,7 +1058,7 @@ fn public_network_denials_are_live_bounded_pages() {
 }
 
 #[test]
-fn travelling_policy_check_import_and_explicit_replacement() {
+fn policy_check_import_and_explicit_replacement() {
     let d = Daemon::start();
     let mut c = d.connect().unwrap();
     let text = "name = 'shared'\n[network]\nmode = 'none'\n";
@@ -1082,62 +1082,76 @@ fn travelling_policy_check_import_and_explicit_replacement() {
     assert_eq!(invalid_name["error"]["code"], -32602, "{invalid_name}");
     let oversized = c.call("_sill/policy.check", json!({"text":"x".repeat(1024*1024+1)})).unwrap();
     assert_eq!(oversized["error"]["data"]["code"], "limit_exceeded", "{oversized}");
+    // a check is of a complete policy and nothing else: a request for another kind is refused, not answered as one
+    let other = c.call("_sill/policy.check", json!({"text":text,"fragment":true})).unwrap();
+    assert_eq!(other["error"]["code"], -32602, "{other}");
 }
 
 #[test]
-fn travelling_policy_preview_retains_launch_view_when_fragment_changes() {
+fn policy_preview_follows_today_and_the_launch_snapshot_stays() {
     use sill_proto::sessions::HostPath;
     let d = Daemon::start();
     let mut c = d.connect().unwrap();
     let root = d.dir.join("home/repo");
-    std::fs::create_dir_all(root.join(".sill")).unwrap();
-    std::fs::write(root.join("secret"), "secret").unwrap();
-    std::fs::write(root.join(".sill/policy.toml"), "[paths]\nro = ['secret']\n[network]\nallow = ['packages.example']\n").unwrap();
-    let pin = c.call("_sill/pins.add", json!({"path":HostPath::from_path(&root)})).unwrap();
-    assert!(pin.get("error").is_none(), "{pin}");
-    let created = c.call("_sill/sessions.create", json!({"create_id":"policy-preview","agent":"claude","policy":"default"})).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    let policy = d.dir.join("home/preview.toml");
+    std::fs::write(&policy, "name='preview'\n[network]\nmode='allow'\nallow=['launch.example']\n").unwrap();
+    let created = c.call("_sill/sessions.create", json!({"create_id":"policy-preview","agent":"claude","policy":policy.to_str().unwrap(),"pins":[HostPath::from_path(&root)]})).unwrap();
     let id = created["result"]["session_id"].as_str().unwrap();
     let key = json!({"session_id":id});
     let empty = c.call("_sill/policy.snapshot", key.clone()).unwrap();
     assert!(empty["result"]["snapshot"].is_null(), "{empty}");
     let preview = c.call("_sill/policy.preview", key.clone()).unwrap();
-    assert_eq!(preview["result"]["sources"].as_array().unwrap().len(), 1, "{preview}");
-    assert_eq!(preview["result"]["suggestions"][0]["host"], "packages.example");
-    let base = sill_core::policy::Policy::builtin_default();
-    let resolution = sill_core::policy_fragments::resolve(&base, &[root.clone()], &[]).unwrap();
+    assert_eq!(preview["result"]["view"], "preview", "{preview}");
+    assert!(preview["result"]["diagnostics"].as_array().unwrap().is_empty(), "{preview}");
+    assert!(preview["result"]["text"].as_str().unwrap().contains("launch.example"), "{preview}");
+    let pinned = preview["result"]["filesystem"]["rules"].as_array().unwrap().iter()
+        .any(|rule| rule["behavior"] == "pin" && rule["target"]["display"] == root.to_str().unwrap());
+    assert!(pinned, "{preview}");
+    let base = sill_core::policy::Policy::load(policy.to_str().unwrap(), &d.dir.join("home")).unwrap();
+    let resolution = sill_core::session::resolve(&base, &[root.clone()]).unwrap();
     // A fixture snapshot tests the public read boundary; no jail is launched in this test.
     let snapshots = d.dir.join("state/sill/policy-snapshots").join(id);
     std::fs::create_dir_all(&snapshots).unwrap();
     std::fs::write(snapshots.join("latest.json"), serde_json::to_vec(&resolution).unwrap()).unwrap();
-    std::fs::write(root.join(".sill/policy.toml"), "[paths]\ndirect = ['secret']\n").unwrap();
+    // the policy changes: the preview is the next build's, the snapshot what was launched
+    std::fs::write(&policy, "name='preview'\n[network]\nmode='allow'\nallow=['next.example']\n").unwrap();
+    let next = c.call("_sill/policy.preview", key.clone()).unwrap();
+    assert!(next["result"]["text"].as_str().unwrap().contains("next.example"), "{next}");
+    assert_ne!(next["result"]["fingerprint"], preview["result"]["fingerprint"]);
+    let retained = c.call("_sill/policy.snapshot", key.clone()).unwrap();
+    assert_eq!(retained["result"]["snapshot"]["view"], "launch", "{retained}");
+    assert!(retained["result"]["snapshot"]["text"].as_str().unwrap().contains("launch.example"), "{retained}");
+    assert_eq!(retained["result"]["snapshot"]["fingerprint"], resolution.fingerprint.as_str());
+    // a policy that no longer parses, or a pinned folder that is gone: diagnostics and no rules,
+    // while the launch stays readable
+    std::fs::write(&policy, "name='preview'\nunknown = true\n").unwrap();
     let invalid = c.call("_sill/policy.preview", key.clone()).unwrap();
     assert!(invalid["result"]["text"].is_null(), "{invalid}");
-    assert!(!invalid["result"]["diagnostics"].as_array().unwrap().is_empty());
+    assert!(!invalid["result"]["diagnostics"].as_array().unwrap().is_empty(), "{invalid}");
+    std::fs::write(&policy, "name='preview'\n").unwrap();
+    std::fs::remove_dir(&root).unwrap();
+    let unpinned = c.call("_sill/policy.preview", key.clone()).unwrap();
+    assert!(unpinned["result"]["diagnostics"][0].as_str().unwrap().contains("resolve pinned path"), "{unpinned}");
     let retained = c.call("_sill/policy.snapshot", key).unwrap();
-    assert_eq!(retained["result"]["snapshot"]["view"], "launch");
-    assert_eq!(retained["result"]["snapshot"]["suggestions"][0]["host"], "packages.example");
-    let checked = c.call("_sill/policy.check", json!({"text":"[paths]\nmask=['../escape']","fragment":true,"root":HostPath::from_path(&root)})).unwrap();
-    assert_eq!(checked["result"]["valid"], false, "{checked}");
+    assert_eq!(retained["result"]["snapshot"]["view"], "launch", "{retained}");
 }
 
 #[test]
-fn travelling_policy_suggestions_are_session_grants_and_offline_is_not_overridden() {
-    use sill_proto::sessions::HostPath;
+fn session_host_grants_wait_for_the_next_build_and_offline_is_not_overridden() {
     let d = Daemon::start();
     let mut c = d.connect().unwrap();
-    let root = d.dir.join("home/repo");
-    std::fs::create_dir_all(root.join(".sill")).unwrap();
-    std::fs::write(root.join(".sill/policy.toml"), "[network]\nallow=['packages.example']").unwrap();
-    let created = c.call("_sill/sessions.create", json!({"create_id":"policy-suggestions","agent":"claude","policy":"default","pins":[HostPath::from_path(&root)]})).unwrap();
+    let policy = d.dir.join("home/grants.toml");
+    let online = "name='grants'\n[network]\nmode='allow'\n";
+    std::fs::write(&policy, online).unwrap();
+    let created = c.call("_sill/sessions.create", json!({"create_id":"host-grants","agent":"claude","policy":policy.to_str().unwrap()})).unwrap();
     let id = created["result"]["session_id"].as_str().unwrap();
-    let mut resolution = sill_core::policy_fragments::resolve(&sill_core::policy::Policy::builtin_default(), &[root.clone()], &[]).unwrap();
+    let mut resolution = sill_core::session::resolve(&sill_core::policy::Policy::parse(online).unwrap(), &[]).unwrap();
     let snapshot = d.dir.join("state/sill/policy-snapshots").join(id);
     std::fs::create_dir_all(&snapshot).unwrap();
     let runtime = d.dir.join("run/sill").join(id);
     std::fs::create_dir_all(&runtime).unwrap();
     std::fs::write(snapshot.join("latest.json"), serde_json::to_vec(&resolution).unwrap()).unwrap();
-    let denied = c.call("_sill/policy.denied", json!({"session_id":id})).unwrap();
-    assert!(denied["result"]["hosts"].as_array().unwrap().contains(&json!("packages.example")), "{denied}");
     let allowed = c.call("_sill/policy.allow_host", json!({"session_id":id,"host":"packages.example"})).unwrap();
     assert_eq!(allowed["result"]["agent_name"], "this session", "{allowed}");
     // Not running: the grant waits in the session store for the next build, no live file
@@ -1145,13 +1159,18 @@ fn travelling_policy_suggestions_are_session_grants_and_offline_is_not_overridde
     assert!(!runtime.join("session-allowed-hosts").exists());
     let preview = c.call("_sill/policy.preview", json!({"session_id":id})).unwrap();
     assert!(preview["result"]["text"].as_str().unwrap().contains("packages.example"), "{preview}");
+    assert_eq!(preview["result"]["session_hosts"], json!([{"host":"packages.example","applied":true,"reason":""}]), "{preview}");
     assert!(!d.dir.join("home/.config/sill/agents/claude.toml").exists());
-    // A stopped session resolves its current repository restrictions before approving
-    std::fs::write(root.join(".sill/policy.toml"), "[network]\nmode='none'").unwrap();
+    // A stopped session resolves its policy as it is now before approving
+    std::fs::write(&policy, "name='grants'\n[network]\nmode='none'\n").unwrap();
     let offline = c.call("_sill/policy.allow_host", json!({"session_id":id,"host":"other.example"})).unwrap();
     assert_eq!(offline["error"]["data"]["code"], "permission_denied", "{offline}");
+    // …and its next build leaves the remembered host out, saying why, without forgetting it
+    let preview = c.call("_sill/policy.preview", json!({"session_id":id})).unwrap();
+    let hosts = &preview["result"]["session_hosts"];
+    assert!(hosts[0]["host"] == "packages.example" && hosts[0]["applied"] == false && hosts[0]["reason"].as_str().unwrap().contains("offline"), "{preview}");
     // A running session is held to its recorded launch policy
-    std::fs::write(root.join(".sill/policy.toml"), "[network]\nallow=['packages.example']").unwrap();
+    std::fs::write(&policy, online).unwrap();
     let _shim = std::os::unix::net::UnixListener::bind(runtime.join("shim.sock")).unwrap();
     resolution.policy.network.mode = sill_core::policy::NetMode::None;
     std::fs::write(snapshot.join("latest.json"), serde_json::to_vec(&resolution).unwrap()).unwrap();
@@ -1203,6 +1222,10 @@ fn host_control_is_an_activation_a_displaying_frontend_holds() {
     let state = modes.call("_sill/host_control.state", json!({"session_id":stopped})).unwrap();
     assert_eq!((state["result"]["active"].clone(), state["result"]["generation"].clone(), state["result"]["displaying"].clone()),
         (json!(false), json!(0), json!(0)), "{state}");
+    // …with the policy's ban where there is one, so a frontend can say so before anyone tries
+    assert!(state["result"].get("forbidden").is_none(), "{state}");
+    let banned = modes.call("_sill/host_control.state", json!({"session_id":forbidden})).unwrap();
+    assert!(banned["result"]["forbidden"].as_str().unwrap().contains("forbidden by the session's policy"), "{banned}");
     let record = plain.call("_sill/sessions.get", json!({"session_id":stopped})).unwrap();
     assert!(record["result"].get("host_control").is_none(), "{record}");
     // revoking needs the capability too; revoking nothing is nothing
@@ -1210,86 +1233,6 @@ fn host_control_is_an_activation_a_displaying_frontend_holds() {
     let revoked = host.call("_sill/host_control.revoke", json!({"session_id":stopped})).unwrap();
     assert_eq!(revoked["result"]["active"], false, "{revoked}");
     assert_eq!(host.call("_sill/host_control.state", json!({"session_id":"nope"})).unwrap()["error"]["data"]["code"], "not_found");
-}
-
-/// docs/permission-modes.md "Repository restrictions and Host control": a pinned repository's
-/// fragment conditions activation on the person's separate exception, named exactly; a base ban
-/// has none; an exception is withdrawn with the connection that recorded it.
-#[test]
-fn host_control_repository_exceptions_are_separate_exact_and_short_lived() {
-    use sill_proto::sessions::HostPath;
-    let d = Daemon::start();
-    let mut modes = d.connect_caps(json!({"sill.permission_modes":1})).unwrap();
-    let mut host = d.connect_caps(json!({"sill.permission_modes":1,"sill.host_control":1})).unwrap();
-    let root = d.dir.join("home/offline-repo");
-    std::fs::create_dir_all(root.join(".sill")).unwrap();
-    std::fs::write(root.join(".sill/policy.toml"), "[network]\nmode='none'\n").unwrap();
-    assert!(modes.call("_sill/pins.add", json!({"path":HostPath::from_path(&root)})).unwrap().get("error").is_none());
-    let created = modes.call("_sill/sessions.create", json!({"create_id":"repo-exception","agent":"claude","policy":"default"})).unwrap();
-    let session = created["result"]["session_id"].as_str().unwrap().to_string();
-    let key = json!({"session_id":session});
-    let state = |c: &mut Conn| c.call("_sill/host_control.state", key.clone()).unwrap()["result"].clone();
-    let record = |c: &mut Conn, operations: Value, acknowledged: Value|
-        c.call("_sill/host_control.exception", json!({"session_id":session,"operations":operations,"acknowledged":acknowledged})).unwrap();
-
-    // the state names the restriction, its source and content, and the operations that bypass it
-    let s = state(&mut modes);
-    assert!(s.get("forbidden").is_none(), "{s}");
-    let conflicts = s["conflicts"].as_array().unwrap().clone();
-    assert_eq!(conflicts.len(), 1, "{s}");
-    assert_eq!(conflicts[0]["restriction"], "offline");
-    assert_eq!(conflicts[0]["operations"], json!(["input", "launch", "commands"]));
-    assert_eq!(conflicts[0]["source"]["display"], root.join(".sill/policy.toml").to_str().unwrap());
-    let ack = json!([{"source":conflicts[0]["source"],"sha256":conflicts[0]["sha256"],"restriction":"offline"}]);
-
-    // only a frontend that displays Host control records one; only for what the operations meet;
-    // only naming exactly what they meet
-    assert_eq!(record(&mut modes, json!(["launch"]), ack.clone())["error"]["data"]["code"], "unsupported");
-    let none = record(&mut host, json!(["inspect", "stop"]), ack.clone());
-    assert_eq!(none["error"]["data"]["code"], "invalid_state", "{none}");
-    assert!(none["error"]["message"].as_str().unwrap().contains("no exception is needed"), "{none}");
-    let wrong = record(&mut host, json!(["launch"]), json!([]));
-    assert_eq!(wrong["error"]["data"]["code"], "invalid_state", "{wrong}");
-    assert!(wrong["error"]["message"].as_str().unwrap().contains("read the state"), "{wrong}");
-    let recorded = record(&mut host, json!(["launch", "inspect"]), ack.clone());
-    assert_eq!(recorded["result"]["exception"]["operations"], json!(["inspect", "launch"]), "{recorded}");
-    assert!(recorded["result"]["exception"].get("generation").is_none(), "waits for the activation: {recorded}");
-    assert!(recorded["result"]["active"] == false, "recording activates nothing: {recorded}");
-    let record_now = modes.call("_sill/sessions.get", key.clone()).unwrap();
-    assert!(record_now["result"].get("host_control").is_none(), "{record_now}");
-
-    // the fragment changed: the old acknowledgement no longer names what the operations meet
-    std::fs::write(root.join(".sill/policy.toml"), "[network]\nmode='none'\n[paths]\nmask=['.sill']\n").unwrap();
-    let stale = record(&mut host, json!(["launch"]), ack.clone());
-    assert_eq!(stale["error"]["data"]["code"], "invalid_state", "{stale}");
-    let s = state(&mut modes);
-    let restrictions: Vec<&str> = s["conflicts"].as_array().unwrap().iter().map(|c| c["restriction"].as_str().unwrap()).collect();
-    assert_eq!(restrictions, ["offline", "masked_paths"], "{s}");
-    let masked = s["conflicts"].as_array().unwrap().iter().find(|c| c["restriction"] == "masked_paths").unwrap().clone();
-    assert_eq!(masked["operations"], json!(["view", "input", "launch", "commands"]));
-    // viewing meets the mask alone
-    let view_ack = json!([{"source":masked["source"],"sha256":masked["sha256"],"restriction":"masked_paths"}]);
-    assert!(record(&mut host, json!(["view"]), view_ack)["result"]["exception"]["conflicts"][0]["restriction"] == "masked_paths");
-
-    // the connection that recorded it leaves: it is withdrawn, nobody else can use it
-    drop(host);
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while state(&mut modes).get("exception").is_some() && std::time::Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    assert!(state(&mut modes).get("exception").is_none(), "{}", state(&mut modes));
-
-    // a base-policy ban has no exception, and says so
-    let policies = d.dir.join("home/exception-policies");
-    std::fs::create_dir_all(&policies).unwrap();
-    std::fs::write(policies.join("banned.toml"), "name='banned'\n[permissions]\nhost_control='forbidden'\n").unwrap();
-    let created = modes.call("_sill/sessions.create", json!({"create_id":"banned","agent":"claude","policy":policies.join("banned.toml").to_str().unwrap()})).unwrap();
-    let banned = created["result"]["session_id"].as_str().unwrap().to_string();
-    let s = modes.call("_sill/host_control.state", json!({"session_id":banned})).unwrap()["result"].clone();
-    assert!(s["forbidden"].as_str().unwrap().contains("no repository exception"), "{s}");
-    let mut host = d.connect_caps(json!({"sill.permission_modes":1,"sill.host_control":1})).unwrap();
-    let refused = host.call("_sill/host_control.exception", json!({"session_id":banned,"operations":["launch"],"acknowledged":ack})).unwrap();
-    assert_eq!(refused["error"]["data"]["code"], "permission_denied", "{refused}");
 }
 
 #[test]
@@ -1419,7 +1362,7 @@ fn session_permission_choices_restore_defaults_and_frontend_gate() {
 }
 
 #[test]
-fn travelling_policy_cli_shows_the_default_and_blocks_jailed_import() {
+fn policy_cli_shows_the_default_and_blocks_jailed_import() {
     let d = Daemon::start();
     let run = |args: &[&str], jailed: bool| {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_sill"));
@@ -1439,7 +1382,7 @@ fn travelling_policy_cli_shows_the_default_and_blocks_jailed_import() {
     assert_eq!(old.stdout, explicit.stdout);
     let denied = run(&["policy", "import", "/does-not-exist"], true);
     assert!(!denied.status.success());
-    assert!(String::from_utf8_lossy(&denied.stderr).contains("host administrative actions"));
+    assert!(String::from_utf8_lossy(&denied.stderr).contains("host administrative action"));
 }
 
 #[test]

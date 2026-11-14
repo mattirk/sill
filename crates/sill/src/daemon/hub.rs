@@ -798,9 +798,7 @@ impl Hub {
         let launch = sill_core::session::policy_snapshot(&s.id)?.context("launch not recorded; rebuild the session")?;
         let filesystem = launch.filesystem.context("filesystem plan not recorded; rebuild the session")?;
         let policy = launch.policy;
-        let mut plan = sill_core::changes::session_plan(policy.clone(), sdir, &self.home, uid, user, &filesystem)?;
-        plan.masked.extend(launch.fragment_masks);
-        plan.direct.extend(launch.fragment_ro);
+        let plan = sill_core::changes::session_plan(policy.clone(), sdir, &self.home, uid, user, &filesystem)?;
         sill_core::changes::scan(&policy, &plan, None)
     }
 
@@ -1226,10 +1224,6 @@ impl Hub {
     /// Start a stored session's jail from its row — pins, policy, the agent's binds
     /// — or find it running (what the frontend built in-process before the daemon).
     fn start_session(&self, id: &str) -> Result<Started> {
-        self.start_session_ignoring(id, &[])
-    }
-
-    pub(super) fn start_session_ignoring(&self, id: &str, ignore_roots: &[PathBuf]) -> Result<Started> {
         self.sync_credentials_for(Some(id))?;
         if !sill_core::session::valid_id(id) {
             bail!("not a session id");
@@ -1244,7 +1238,6 @@ impl Hub {
         // Reuse a live jail before computing a new launch plan. Recovery must not
         // require the state mount or installed policy just to reconnect its shim.
         if sill_core::session::is_running(id) {
-            if !ignore_roots.is_empty() { bail!("jail already running; stop it before ignoring a fragment for a new build"); }
             return Ok(Started { socket: sill_core::shim::runtime_dir(id)?.join("shim.sock"), fresh: false });
         }
         // a workspace session's workspaces, made or kept, before its jail (docs/parallel-coding.md §12)
@@ -1258,7 +1251,7 @@ impl Hub {
         let Some(agent) = registry.get(&s.agent) else { bail!("unknown agent {}", s.agent) };
         // Diagnose unavailable capabilities before preparing host state or launch bindings.
         // ensure_started resolves and validates again at the actual enforcement boundary.
-        let resolved = sill_core::session::next_build(&s, &self.home, &pins, ignore_roots, &workspace)?;
+        let resolved = sill_core::session::next_build(&s, &self.home, &pins, &workspace)?;
         resolved.policy.permissions.validate_launch(&resolved.policy.network)?;
         let uid = rustix::process::getuid().as_raw();
         let sdir = sill_core::session::state_dir(uid, id)?;
@@ -1268,7 +1261,6 @@ impl Hub {
             session: id.to_string(),
             policy: s.policy.clone(),
             pins: if s.ghost { vec![] } else { pins.clone() },
-            ignore_fragments: ignore_roots.to_vec(),
             cwd: self.home.clone(),
             state_dir: Some(sdir),
             unsafe_state: false,

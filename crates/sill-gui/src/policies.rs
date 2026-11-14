@@ -255,7 +255,7 @@ impl App {
                 }).map_err(|e| format!("{e:#}")),
                 Event::Inspect(name) => actions.read::<api::PolicyEntry>("_sill/policy.get", serde_json::json!({"name": name}))
                     .map(Reply::Entry).map_err(|e| format!("{e:#}")),
-                Event::Check => actions.read::<api::PolicyChecked>("_sill/policy.check", serde_json::to_value(api::PolicyCheck { text, fragment: false, root: None }).unwrap())
+                Event::Check => actions.read::<api::PolicyChecked>("_sill/policy.check", serde_json::to_value(api::PolicyCheck { text }).unwrap())
                     .map(Reply::Checked).map_err(|e| format!("{e:#}")),
                 Event::Import => match actions.call("_sill/policy.import", serde_json::to_value(api::PolicyImport { name, text, replace }).unwrap()) {
                     sill_client::actions::Outcome::Done(v) => serde_json::from_value(v).map(Reply::Imported).map_err(|e| format!("Import response unreadable; refresh and inspect before retrying: {e}")),

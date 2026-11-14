@@ -56,14 +56,19 @@ def info(text):
 
 # --- environment -----------------------------------------------------------------------------
 
-def policy_text(name, mode="allow", allow=(ALLOWED,), extra_network="", permissions=""):
+def policy_text(name, mode="allow", allow=(ALLOWED,), extra_network="", permissions="", masks=()):
     """A complete policy from the shipped default: its masks, hidden mounts and limits are kept
-    (a policy without `hidden_mounts` cannot overlay a vfat /boot), the network replaced."""
+    (a policy without `hidden_mounts` cannot overlay a vfat /boot), the network replaced, `masks`
+    added to the paths it hides."""
     text = (REPO / "policies/default.toml").read_text()
     text = re.sub(r'^name = "default"', f'name = "{name}"', text, count=1, flags=re.M)
     text = re.sub(r'^mode = "allow".*$', f'mode = "{mode}"', text, count=1, flags=re.M)
     text = re.sub(r'^allow = \[.*?^\]', "allow = " + json.dumps(list(allow)) + "\n" + extra_network,
                   text, count=1, flags=re.M | re.S)
+    if masks:
+        text, added = re.subn(r'^mask = \[', lambda m: "mask = [\n  " + "".join(json.dumps(str(p)) + ", " for p in masks),
+                              text, count=1, flags=re.M)
+        assert added == 1, "the shipped default policy has no paths.mask list"
     if permissions:
         text += "\n[permissions]\n" + permissions + "\n"
     return text
@@ -420,45 +425,51 @@ PY
         check("public web is refused under the ceiling",
               code(c.call, "_sill/permissions.set", {"session_id": a, "capability": "public_web", "enabled": True}) == "permission_denied")
 
-        # -- 8. repository restrictions ---------------------------------------------------------
-        offline_repo = env.root / "repo-offline"
-        (offline_repo / ".sill").mkdir(parents=True)
-        (offline_repo / ".sill/policy.toml").write_text("[network]\nmode = 'none'\n")
-        r = create("offline", env.policy("offline"), pins=[offline_repo])
-        check("a session pinned to an offline repository starts", start(r))
-        check("offline fragment: the allow-list is refused too", not reaches(c, r, ALLOWED))
-        check("offline fragment: Allow is refused",
+        # -- 8. an offline policy, and network.mode = "all" -------------------------------------
+        pinned = env.root / "pinned"
+        pinned.mkdir()
+        r = create("offline", env.policy("offline", mode="none"), pins=[pinned])
+        check("a session with an offline policy starts", start(r))
+        check("offline: the allow-list is refused too", not reaches(c, r, ALLOWED))
+        check("offline: Allow is refused",
               code(c.call, "_sill/policy.allow_host", {"session_id": r, "host": OTHER}) is not None)
-        check("offline fragment: public web is refused",
+        check("offline: public web is refused",
               code(c.call, "_sill/permissions.set", {"session_id": r, "capability": "public_web", "enabled": True}) == "permission_denied")
-        c.call("_sill/sessions.stop", {"session_id": r})
-        time.sleep(1)
-        c.call("_sill/policy.start", {"session_id": r, "ignore_roots": [host_path(offline_repo)]})
-        sh(c, r, "true")
-        check("an explicit one-build exception lifts the fragment", reaches(c, r, ALLOWED))
-        check("the exception expires at the next ordinary build", restart(r) and not reaches(c, r, ALLOWED))
-
-        narrow_repo = env.root / "repo-narrow"
-        (narrow_repo / ".sill").mkdir(parents=True)
-        (narrow_repo / ".sill/policy.toml").write_text("[permissions]\npublic_web = 'forbidden'\n")
-        n = create("narrow", env.policy("narrow", mode="all"), pins=[narrow_repo])
-        check("network.mode=all with a public-web prohibition starts", start(n))
-        check("the prohibition narrows `all` to the allow-list", reaches(c, n, ALLOWED) and refused(c, n, OTHER))
+        check("its pinned folder is writable in the jail, on the host at once",
+              sh(c, r, f"echo pinned > {shlex.quote(str(pinned))}/written && echo ok")[1] == "ok"
+              and read(pinned / "written") == "pinned\n")
         wide = create("wide", env.policy("wide", mode="all"))
-        check("the same policy without the fragment is public", start(wide) and reaches(c, wide, OTHER))
+        check("network.mode=all is public", start(wide) and reaches(c, wide, OTHER))
 
-        # a remembered grant meets a fragment added later: blocked while it applies, never dropped
+        # a remembered grant meets a policy that goes offline later: blocked while it applies, never dropped
         k = create("kept", env.policy("kept"))
         start(k)
         c.call("_sill/policy.allow_host", {"session_id": k, "host": OTHER})
-        c.call("_sill/sessions.pin", {"session_id": k, "path": host_path(offline_repo)})
-        check("a later offline fragment blocks the remembered host at the next build",
+        env.policy("kept", mode="none")
+        check("a policy gone offline blocks the remembered host at the next build",
               restart(k) and refused_or_offline(c, k, OTHER))
+        hosts = c.call("_sill/policy.preview", {"session_id": k})["session_hosts"]
+        check("…and the preview lists it as blocked by the offline policy, still remembered",
+              len(hosts) == 1 and hosts[0]["host"] == OTHER and not hosts[0]["applied"] and "offline" in hosts[0]["reason"],
+              json.dumps(hosts))
         restored = c.call("_sill/permissions.restore_defaults", {"session_id": r})
         check("Restore defaults keeps the session's pins",
-              [p["display"] for p in get(r)["pins"]] == [str(offline_repo)], json.dumps(get(r)["pins"]))
-        c.call("_sill/sessions.unpin", {"session_id": k, "path": host_path(offline_repo)})
-        check("without the fragment the remembered host is back", restart(k) and reaches(c, k, OTHER))
+              [p["display"] for p in get(r)["pins"]] == [str(pinned)], json.dumps(get(r)["pins"]))
+        env.policy("kept")
+        check("online again, the remembered host is back", restart(k) and reaches(c, k, OTHER))
+
+        # a folder pinned to a running session is bound at its next build, and unbound after an unpin
+        later = env.root / "pinned-later"
+        later.mkdir()
+        write = lambda name: sh(c, k, f"echo {name} > {shlex.quote(str(later))}/{name} && echo ok")[1] == "ok"
+        c.call("_sill/sessions.pin", {"session_id": k, "path": host_path(later)})
+        check("pinning a folder marks the running jail outdated", get(k)["policy_changed"])
+        check("…until the rebuild binds it: a write there is on the host at once",
+              restart(k) and not get(k)["policy_changed"] and write("bound") and read(later / "bound") == "bound\n")
+        c.call("_sill/sessions.unpin", {"session_id": k, "path": host_path(later)})
+        check("unpinning marks it outdated again", get(k)["policy_changed"])
+        check("…and after the rebuild a write there stays in the session",
+              restart(k) and not get(k)["policy_changed"] and write("overlaid") and not (later / "overlaid").exists())
 
         # -- 9. ghosts ---------------------------------------------------------------------------
         g = create("ghost", env.policy("ghost", mode="all"), ghost=True)
@@ -894,6 +905,16 @@ PY
         start(no_host)
         check("a forbidding policy refuses activation",
               code(hc.call, "_sill/host_control.activate", {"session_id": no_host, "operations": ["launch"]}) == "permission_denied")
+        check("…and its state names the ban; a session without one has none",
+              "forbidden by the session's policy" in (hc_state(no_host).get("forbidden") or "")
+              and hc_state(ctl).get("forbidden") is None, json.dumps(hc_state(no_host)))
+        listed = env.cli("host-control", "state", no_host, check=False)
+        check("the CLI shows the ban",
+              listed.returncode == 0 and "forbidden by the session's policy" in listed.stdout, listed.stdout + listed.stderr)
+        refused_cli = env.cli("host-control", "activate", no_host, "launch", check=False)
+        check("…and refuses to activate against it",
+              refused_cli.returncode != 0 and "forbidden by the session's policy" in refused_cli.stderr,
+              refused_cli.stdout + refused_cli.stderr)
         check("a ghost refuses activation",
               code(hc.call, "_sill/host_control.activate", {"session_id": ghost_bus, "operations": ["launch"]}) == "permission_denied")
         # -- 18. The jailed host bridge, generations, scope and process disposition ---------------
@@ -1050,87 +1071,35 @@ PY
         check("revocation removes the pictures", not host_png.parent.exists())
         hc.close()
 
-        # -- 20. repository restrictions and Host control: a separate, exact, one-activation exception
-        repo = env.root / "offline-repo"
-        (repo / ".sill").mkdir(parents=True)
-        (repo / ".sill/policy.toml").write_text("[network]\nmode = 'none'\n")
-        off = create("repo-exception", env.policy("repo-exception"), pins=[repo])
-        check("a session pinned to an offline repository starts", start(off))
-        hc = Client(env.socket, capabilities=HOST, name="host-control")
-        st = hc_state(off)
-        conflicts = st.get("conflicts", [])
-        check("the state lists the repository's offline rule with the operations that bypass it",
-              [x["restriction"] for x in conflicts] == ["offline"] and conflicts[0]["operations"] == ["input", "launch", "commands"]
-              and st.get("forbidden") is None, json.dumps(st))
-        check("activation for an operation that bypasses it is refused until an exception is recorded",
-              code(hc.call, "_sill/host_control.activate", {"session_id": off, "operations": ["launch"]}) == "exception_required")
-        check("…leaving no activation", not hc_state(off)["active"])
-        generation = activate(hc, off, ["inspect"])["generation"]
-        check("operations that bypass nothing activate without one", hc_state(off)["active"] and hc_state(off).get("exception") is None)
-        listed = env.cli("host-control", "state", off, check=False)
-        check("the CLI lists the restriction with its source and what bypasses it",
-              listed.returncode == 0 and "network.mode = none" in listed.stdout and "Bypassed by: input, launch, commands" in listed.stdout,
-              listed.stdout + listed.stderr)
-        refused_cli = env.cli("host-control", "activate", off, "launch", check=False)
-        check("the CLI refuses without --accept-repository-exception, listing the restriction",
-              refused_cli.returncode != 0 and "--accept-repository-exception" in refused_cli.stderr and "network.mode = none" in refused_cli.stdout,
-              refused_cli.stdout + refused_cli.stderr)
-        hc.call("_sill/host_control.revoke", {"session_id": off})
-        ack = [{"source": conflicts[0]["source"], "sha256": conflicts[0]["sha256"], "restriction": "offline"}]
-        recorded = hc.call("_sill/host_control.exception", {"session_id": off, "operations": ["launch"], "acknowledged": ack})
-        check("recording the exception activates nothing", not recorded["active"] and recorded["exception"].get("generation") is None,
-              json.dumps(recorded))
-        other = Client(env.socket, capabilities=HOST, name="host-control-2")
-        check("another frontend cannot use that exception",
-              code(other.call, "_sill/host_control.activate", {"session_id": off, "operations": ["launch"]}) == "exception_required")
-        other.close()
-        st = activate(hc, off, ["launch"])
-        check("the activation consumes it, bound to its generation",
-              st["active"] and (st.get("exception") or {}).get("generation") == st["generation"], json.dumps(st))
-        check("the session record shows the activation runs under an exception",
-              (get(off).get("host_control") or {}).get("exception") is True, json.dumps(get(off).get("host_control")))
-        check("the jail keeps the repository's restriction (still offline)", refused_or_offline(c, off, ALLOWED))
-        rc, text = bridge(off, "launch", st["generation"], {"argv": ["/bin/sh", "-c", "echo exception-host"], "cwd": "/tmp"})
-        check("the granted host operation works under it", rc == 0, text)
-        check("a scope change needs a fresh exception",
-              code(hc.call, "_sill/host_control.activate", {"session_id": off, "operations": ["launch", "commands"]}) == "exception_required")
-        check("…and the refused change leaves the running generation working",
-              hc_state(off)["generation"] == st["generation"] and bridge(off, "state")[0] == 0)
-        hc.call("_sill/host_control.revoke", {"session_id": off})
-        check("revocation ends the exception",
-              hc_state(off).get("exception") is None
-              and code(hc.call, "_sill/host_control.activate", {"session_id": off, "operations": ["launch"]}) == "exception_required")
-        hc.call("_sill/host_control.exception", {"session_id": off, "operations": ["launch"], "acknowledged": ack})
-        (repo / ".sill/policy.toml").write_text("[network]\nmode = 'none'\n[limits]\ntasks_max = 64\n")
-        check("a fragment changed after recording: the exception no longer covers it",
-              code(hc.call, "_sill/host_control.activate", {"session_id": off, "operations": ["launch"]}) == "exception_required")
-        hc.close()
-        c.call("_sill/sessions.stop", {"session_id": off})
-
-        # -- 21. hostile combinations (docs/permission-modes.md, implementation step 5) -----------
-        # One session with every grant at once (test desktop, private bus, public web, a masked
-        # repository, Host control active under an exception) next to a running Default session.
+        # -- 20. hostile combinations (docs/permission-modes.md, implementation step 5) -----------
+        # One session with every grant at once (test desktop, private bus, public web, a pinned
+        # folder, a file its policy masks, Host control active) next to a running Default session.
         uid = os.getuid()
         plain = env.client(modes=False, name="plain")
         hc = Client(env.socket, capabilities=HOST, name="host-control")
-        masked_repo = env.root / "repo-masked"
-        (masked_repo / ".sill").mkdir(parents=True)
-        (masked_repo / "secret").write_text("masked-secret-text\n")
-        (masked_repo / ".sill/policy.toml").write_text("[paths]\nmask = ['secret']\n")
-        combo = create("combo", env.policy("combo"), pins=[masked_repo])
+        vault = env.root / "vault"
+        vault.mkdir()
+        (vault / "secret").write_text("masked-secret-text\n")
+        (vault / "beside").write_text("beside the mask\n")
+        workdir = env.root / "combo-pinned"
+        workdir.mkdir()
+        # a mask is never buried: a pin that would cover one is refused, the jail does not start
+        crossing = create("pin-over-mask", env.policy("pin-over-mask", masks=[vault / "secret"]), pins=[vault])
+        failure = None
+        try:
+            c.call("_sill/sessions.start", {"session_id": crossing})
+        except RpcError as error:
+            failure = str(error)
+        check("a pin that would cover a masked path is refused, naming the mask",
+              failure is not None and "would cover the masked" in failure and str(vault / "secret") in failure
+              and not get(crossing)["running"], failure or "start succeeded")
+        combo = create("combo", env.policy("combo", masks=[vault / "secret"]), pins=[workdir])
         default = create("plain-default", env.policy("plain-default"))
         check("a session for every grant at once and a Default session start", start(combo) and start(default))
         c.call("_sill/permissions.apply_development", {"session_id": combo})
         c.call("_sill/permissions.set", {"session_id": combo, "capability": "public_web", "enabled": True})
         check("…with the test desktop, the private bus and public web after a restart",
               restart(combo) and sh(c, combo, 'echo "[$WAYLAND_DISPLAY]"')[1] == "[wayland-0]" and reaches(c, combo, THIRD))
-
-        def activate_excepted(sid, ops):
-            met = [x for x in hc_state(sid).get("conflicts", []) if set(ops) & set(x["operations"])]
-            if met:
-                hc.call("_sill/host_control.exception", {"session_id": sid, "operations": ops, "acknowledged": [
-                    {"source": x["source"], "sha256": x["sha256"], "restriction": x["restriction"]} for x in met]})
-            return activate(hc, sid, ops)["generation"]
 
         def sleepers(n):
             return [pid for pid in os.listdir("/proc") if pid.isdigit() and read(f"/proc/{pid}/cmdline") == f"/bin/sleep\0{n}\0"]
@@ -1139,22 +1108,26 @@ PY
             return [pid for pid in os.listdir("/proc") if pid.isdigit() and comm(pid) == name
                     and f"sill-{sid}.scope" in read(f"/proc/{pid}/cgroup")]
 
-        generation = activate_excepted(combo, ["launch", "inspect", "stop"])
-        check("Host control is active on it under the masked repository's exception",
-              (get(combo).get("host_control") or {}).get("exception") is True)
+        generation = activate(hc, combo, ["launch", "inspect", "stop"])["generation"]
+        check("Host control is active on it",
+              (get(combo).get("host_control") or {}).get("operations") == ["inspect", "launch", "stop"],
+              json.dumps(get(combo).get("host_control")))
+        check("its pinned folder is writable, and the file beside the masked one is readable",
+              sh(c, combo, f"echo written > {shlex.quote(str(workdir))}/written && cat {shlex.quote(str(vault))}/beside")[1] == "beside the mask"
+              and read(workdir / "written") == "written\n")
         hits = Fixture.hits
 
         # the expanded session attacks: production Sill, other sessions, the real desktop, host
         # services, the masked file, and local addresses in every spelling through the proxy
         status, out = sh(c, combo, f"""
-            repo={shlex.quote(str(masked_repo))}
+            vault={shlex.quote(str(vault))}
             for p in /run/user/{uid}/sill {env.socket} {env.run} /var/lib/sill \
                      /run/user/{uid}/systemd/private /run/systemd/private /run/dbus/system_bus_socket; do
                 [ -e "$p" ] && echo "VISIBLE $p"
             done
             # masks cover the read-only host view too: present there, empty
             ls -A /.sill/host/var/lib/sill 2>/dev/null | grep -q . && echo "VISIBLE /.sill/host/var/lib/sill (not empty)"
-            cat "/.sill/host$repo/secret" 2>/dev/null
+            cat "/.sill/host$vault/secret" 2>/dev/null
             [ "$(ls /tmp/.X11-unix | wc -l)" = 1 ] || echo "X-SOCKETS $(ls /tmp/.X11-unix)"
             DISPLAY=:0 timeout 5 xdotool getdisplaygeometry >/dev/null 2>&1 && echo REAL-DISPLAY
             DISPLAY=:0 timeout 5 xdotool key a >/dev/null 2>&1 && echo REAL-INPUT
@@ -1164,13 +1137,13 @@ PY
             timeout 10 dbus-send --system --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.ListNames >/dev/null 2>&1 && echo SYSTEM-BUS
             timeout 10 sudo -n true >/dev/null 2>&1 && echo SUDO
             timeout 10 flatpak-spawn --host true >/dev/null 2>&1 && echo FLATPAK-SPAWN
-            cat "$repo/secret" 2>/dev/null
-            ln -s "$repo/secret" /tmp/via-link 2>/dev/null; cat /tmp/via-link 2>/dev/null
-            ln "$repo/secret" /tmp/via-hardlink 2>/dev/null && cat /tmp/via-hardlink 2>/dev/null
-            cat "/proc/self/root$repo/secret" "/proc/1/root$repo/secret" 2>/dev/null
-            mv "$repo/secret" "$repo/moved" 2>/dev/null && cat "$repo/moved" 2>/dev/null
-            cp "$repo/secret" /tmp/copied 2>/dev/null && cat /tmp/copied 2>/dev/null
-            grep -rs masked-secret-text "$repo" /tmp 2>/dev/null
+            cat "$vault/secret" 2>/dev/null
+            ln -s "$vault/secret" /tmp/via-link 2>/dev/null; cat /tmp/via-link 2>/dev/null
+            ln "$vault/secret" /tmp/via-hardlink 2>/dev/null && cat /tmp/via-hardlink 2>/dev/null
+            cat "/proc/self/root$vault/secret" "/proc/1/root$vault/secret" 2>/dev/null
+            mv "$vault/secret" "$vault/moved" 2>/dev/null && cat "$vault/moved" 2>/dev/null
+            cp "$vault/secret" /tmp/copied 2>/dev/null && cat /tmp/copied 2>/dev/null
+            grep -rs masked-secret-text "$vault" /tmp 2>/dev/null
             python3 - <<'PY'
 import os, socket
 proxy = int(os.environ["HTTP_PROXY"].rstrip("/").rsplit(":", 1)[1])
@@ -1250,7 +1223,6 @@ PY
         # a frontend without the capabilities changes nothing, through any entry point
         attempts = {
             "_sill/host_control.activate": {"session_id": combo, "operations": ["commands"]},
-            "_sill/host_control.exception": {"session_id": combo, "operations": ["commands"], "acknowledged": []},
             "_sill/host_control.keep": {"session_id": combo, "name": "host:x", "keep": True},
             "_sill/host_control.revoke": {"session_id": combo},
             "_sill/host_control.state": {"session_id": combo},
@@ -1289,7 +1261,7 @@ EOF
               f"{survivors} {[(p['name'], p['state']) for p in raced]}")
 
         # an orderly daemon stop revokes; nothing is restored; a kept process stays and is listed
-        generation = activate_excepted(combo, ["launch", "inspect", "stop"])
+        generation = activate(hc, combo, ["launch", "inspect", "stop"])["generation"]
         kept = json.loads(bridge(combo, "launch", generation, {"argv": ["/bin/sleep", "3072"], "cwd": "/tmp"})[1])
         unkept = json.loads(bridge(combo, "launch", generation, {"argv": ["/bin/sleep", "3073"], "cwd": "/tmp"})[1])
         hc.call("_sill/host_control.keep", {"session_id": combo, "name": kept["name"], "keep": True})
@@ -1302,15 +1274,14 @@ EOF
         c = env.client()
         hc = Client(env.socket, capabilities=HOST, name="host-control")
         st = hc_state(combo)
-        check("after the restart nothing is restored: inactive, the exception gone", not st["active"] and st.get("exception") is None,
-              json.dumps(st)[:300])
+        check("after the restart nothing is restored: inactive", not st["active"], json.dumps(st)[:300])
         check("…the agent's bridge is closed", bridge(combo, "state")[0] != 0)
         rc, listed = sh(c, combo, "/.sill/bin/sill-proc list")
         check("…the kept process stays listed in the jail as kept", kept["name"] in listed and "kept" in listed, listed)
         check("…and the jail kept its desktop and bus", sh(c, combo, f'[ -S /run/user/{uid}/bus ] && [ -S /tmp/.X11-unix/X* ] && echo both')[1] == "both")
 
         # a daemon crash (SIGKILL) with an active activation: recovery stops the unkept, restores nothing
-        generation = activate_excepted(combo, ["launch", "stop"])
+        generation = activate(hc, combo, ["launch", "stop"])["generation"]
         crash = json.loads(bridge(combo, "launch", generation, {"argv": ["/bin/sleep", "3074"], "cwd": "/tmp"})[1])
         for client in (c, hc):
             client.close()
@@ -1351,7 +1322,7 @@ EOF
         check("…and the jail itself keeps running", sh(c, combo, "echo up")[1] == "up" and bool(daemons))
 
         # the launcher (the proxy's owner) killed: the whole session ends; Host control with it
-        generation = activate_excepted(combo, ["launch", "stop"])
+        generation = activate(hc, combo, ["launch", "stop"])["generation"]
         orphan = json.loads(bridge(combo, "launch", generation, {"argv": ["/bin/sleep", "3075"], "cwd": "/tmp"})[1])
         launchers = [pid for pid in in_scope(combo, "sill") if "launch" in read(f"/proc/{pid}/cmdline").split("\0")]
         for pid in launchers:

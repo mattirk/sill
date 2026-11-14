@@ -931,8 +931,8 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>, narrow: bo
     for row in crate::host_control::rows(view, session, can_change) {
         host = host.push(slot(row));
     }
-    if let Some(block) = crate::host_control::restrictions(view, can_change) {
-        host = host.push(block);
+    if let Some(ban) = crate::host_control::ban(view) {
+        host = host.push(ban);
     }
     let host_buttons = crate::host_control::buttons(view, session, can_change);
 
@@ -1092,7 +1092,6 @@ mod tests {
 
     fn view(kind: &str, public_web: bool, hosts: Value) -> Value {
         json!({"filesystem": {"rules": [], "unused": []},"view": kind, "session_id": "demo", "name": "default", "text": null,
-               "fragment_ro": [], "fragment_masks": [], "sources": [], "suggestions": [],
                "fingerprint": null, "diagnostics": [],
                "permissions": [grant("test_desktop", false, "policy"), grant("private_bus", false, "policy"),
                                grant("gpu", false, "policy"),

@@ -90,7 +90,7 @@ it is dispatched, not when it is accepted: a queued prompt appears where the age
 returns `agent_name: "this session"` and `live: true` when a running proxy can use the grant
 on new connections. Grants persist with the session, enter policy previews and subsequent
 launch snapshots, and are deleted with it. Wildcards are refused. Offline policies and
-`network.allow_additional_hosts = false` reject approval; repository restrictions are resolved
+`network.allow_additional_hosts = false` reject approval; the policy is resolved
 again before a new launch. Agent-wide endpoint defaults are never changed by Allow.
 Policy previews and retained launch snapshots include a `permissions` array. Each record
 identifies `capability`, `allowed`, `default_enabled`, `requested`, `blocked`, `source`,
@@ -111,8 +111,8 @@ authority from policy inspection or import.
 Session permission changes need `sill.permission_modes: 1` (2026-11-06). The shared client
 offers it only from programs that display permission state (the CLI's `policy`/`permissions`
 commands and, since its Permissions panel, sill-gui), never on behalf of every frontend. `_sill/permissions.set` remembers a contained capability choice for one
-session: `enabled: true` is refused with `permission_denied` when the resolved policy, a
-repository fragment, an offline rule, `network.allow_additional_hosts = false` or a missing
+session: `enabled: true` is refused with `permission_denied` when the resolved policy,
+an offline rule, `network.allow_additional_hosts = false` or a missing
 backend would block it; `false` always applies; `null` returns to the policy default. Ghost
 sessions and `host_control` refuse every choice. `_sill/permissions.apply_development` (Apply
 development permissions, 2026-11-07) remembers the test desktop and the private bus as session
@@ -123,7 +123,7 @@ defaults) removes the session's added capability choices and host grants and kee
 and pins; on a running jail it also stops hosts approved during this run from matching new
 proxy connections. Both return the next-build `preview` and `restart_required`: true when a
 running jail still has another state, including tunnels that remain open. Choices are applied
-after repository and ghost restrictions at every new build and recorded in the launch snapshot;
+after ghost restrictions at every new build and recorded in the launch snapshot;
 a changed choice or a removed launch host marks the running jail `policy_changed`.
 `_sill/policy.save_host` (Save for future sessions) adds a host pattern, wildcards allowed, to
 the session agent's network defaults and changes no existing session; ghosts refuse it. An
@@ -476,8 +476,9 @@ This milestone remains `sfp/1-dev.3`. **What stands between it and stable `sfp/1
   re-records [`sfp-1.schema.json`](sfp-1.schema.json) and moves this document's development notes to
   [protocol-history.md](protocol-history.md).
   Acceptance and the conformance rerun are complete as recorded below; only the coordinated
-  cutover remains for that baseline. The travelling-policy addition below now needs its own
-  host/desktop acceptance before promotion.
+  cutover remains for that baseline. The policy inspection and import addition below (what
+  remains of travelling policies since 2026-11-10) needs its own host/desktop acceptance before
+  promotion.
 - **Not SFP release work:** the native ACP v2 adapter's own validation (a third-party v2
   agent, upstream draft extensions, history replay after relay replacement; see
   [sfp-operations.md](sfp-operations.md#experimental-native-acp-v2)). The adapter is opt-in and
@@ -494,8 +495,8 @@ passed, including lifecycle/restart/question recovery and loopback OpenSSH termi
 reconnection. The headless workspace and Python client unit suites passed too.
 See verification and remaining cutover work.
 The coordinated identity/relay/schema/documentation cutover remains pending; the current
-identity is still `sfp/1-dev.3`. The subsequent travelling-policy addition has its own
-acceptance work before stable promotion.
+identity is still `sfp/1-dev.3`. The subsequent policy inspection and import addition has its
+own acceptance work before stable promotion.
 
 Snapshot capture still copies under the store lock; canonical history
 and idempotency identities remain proportional to retained sessions, and native v2 reconstruction
@@ -517,7 +518,14 @@ an added optional field or variant belongs to; that pairing remains a review rul
 cutover, the identity check holds the baseline at `sfp/1-dev.3`. A deliberate pre-freeze
 break is recorded by deleting the file and rerunning the test. One such break: on 2026-11-07 the
 document was re-recorded after the GTK-only settings keys (`width`, `drawer_width`, `text_scale`,
-`host_terminal`) left the settings type with the GTK shelf.
+`host_terminal`) left the settings type with the GTK shelf. Another: on 2026-11-10 it was
+re-recorded when repository policy fragments were removed
+([history](development-history.md#repository-policy-fragments-removed-2026-11-10)). Gone:
+the methods `_sill/policy.start` and `_sill/host_control.exception`; `fragment_ro`,
+`fragment_masks`, `sources` and `suggestions` of the policy view; `fragment` and `root` of
+`_sill/policy.check`; `conflicts`, `conflicts_error` and `exception` of the Host control state
+and `exception` of a session record's Host control brief; the error code `exception_required`
+with its details.
 
 ### Snapshot benchmark and disposition (2026-11-03)
 
@@ -653,7 +661,6 @@ clients branch on `data.code`, not English text. Domain codes:
 | `invalid_cursor`, `snapshot_expired` | Invalid resume position or expired snapshot lease. |
 | `limit_exceeded`, `permission_denied` | Advertised bound exceeded or daemon policy refused the operation. |
 | `operation_failed` | A durable host operation (login, install) recorded a failure. |
-| `exception_required` | Host control operations that can bypass a pinned repository's restrictions need the person's recorded exception first (`_sill/host_control.exception`). Added 2026-11-07. |
 
 **Error details (settled for sfp/1, 2026-11-03).** Only these codes carry `details`; every other
 code carries none in sfp/1. The exported schema lists them under `errors.details`, each with its
@@ -666,7 +673,6 @@ details of unlisted or unknown codes.
 | `stale_answer` | `{question}`: the question record as resolved. | Always |
 | `limit_exceeded` | `{scope, maximum?}`: `scope` is `request` (send less), `result` (ask for a smaller page), `record` (one stored record is too large for this method; paging cannot help) or `capacity` (a daemon resource is full; release one or wait, an unchanged repeat fails again). `maximum` is the bound as a number in the unit the message names, where one exists. | Always |
 | `unsupported` | `{capability}`: the capability the connection did not negotiate. | Only when a capability is missing; refusals about the target (platform, policy, agent) carry none |
-| `exception_required` | `{conflicts}`: the restrictions the requested operations can bypass, as `_sill/host_control.state` lists them. | Always |
 
 A detail shape may gain optional fields within sfp/1 and clients ignore unknown fields. Adding
 details to another code is a compatible addition under the extension rule above.
@@ -772,20 +778,20 @@ Daemon and frontend binaries must be rebuilt together for this development ident
 handshake does not automatically stop or replace an existing daemon. No application installation,
 running-daemon replacement or repository commit is part of this source change.
 
-### Travelling policies (development addition, 2026-11-04)
+### Policy inspection and import (development addition, 2026-11-04)
 
-Repository fragments are restrictive inputs to a new jail build. All pinned folder roots,
-including global pins, contribute `.sill/policy.toml`; suggestions never grant access on
-read. The resolver freezes launch inputs, including agent endpoints. Read-only and masked
-fragment paths are represented separately from base-policy paths in inspection responses.
+Added with travelling policies; repository policy fragments, their one-build exception
+(`_sill/policy.start`) and their host suggestions were removed on 2026-11-10
+([history](development-history.md#repository-policy-fragments-removed-2026-11-10)). A jail is
+built from its session's policy alone. The resolver freezes launch inputs, including agent
+endpoints.
 
 | Method | Behavior |
 |---|---|
-| `_sill/policy.preview` | Session key; resolve current policy and fragments for the next build. Invalid inputs return diagnostics and no resolved text. |
+| `_sill/policy.preview` | Session key; resolve the session's policy, pins and remembered grants for the next build. Invalid inputs (a policy that does not parse, a pinned folder that is gone) return diagnostics and no resolved text. |
 | `_sill/policy.snapshot` | Session key; return the recorded last successful launch, or null for an older/never-launched jail. |
-| `_sill/policy.check` | Validate transferred text as a complete policy or fragment; fragment roots identify daemon-host paths. |
+| `_sill/policy.check` | Validate transferred text as a complete policy. |
 | `_sill/policy.import` | Install transferred complete-policy text under a name; existing user policies require explicit replacement. |
-| `_sill/policy.start` | Start a stopped, non-ended session with explicit ignored fragment roots for this build only. |
 
 Preview and launch views also contain `filesystem`: path rules with target/backing `HostPath`,
 behavior, source and explanation, plus a bounded metadata-only list of stored but unused paths.
@@ -797,22 +803,19 @@ Permissions panel exposes these rules in a collapsed Filesystem section; the CLI
 `policy preview` and `policy snapshot`.
 
 All are host administrative APIs, unavailable through jailed-agent tooling. CLI file input
-is read on the frontend and transferred as text, capped at 1 MiB; fragment files are capped
-at 64 KiB, with at most 128 pins and 1 MiB aggregate source inputs. Inspection results are
-bounded at 4 MiB. Paths use the existing byte-exact `HostPath` type. Sources include their
-text, hash, ignored status and any read error. Views identify base/preview/launch semantics;
-preview does not imply enforcement. No mutation is blindly retried after an uncertain reply.
+is read on the frontend and transferred as text, capped at 1 MiB. Inspection results are
+bounded at 4 MiB. Paths use the existing byte-exact `HostPath` type. Views identify
+base/preview/launch semantics and carry a `fingerprint` of the build's inputs (the base policy
+and the pinned folders); preview does not imply enforcement. No mutation is blindly retried
+after an uncertain reply.
 
-Suggested concrete hosts appear through the existing denied-host controls. Approving an
-exact suggested host records a session grant, without modifying agent-wide domains; the
+Every denied-host approval is a session grant, without modifying agent-wide domains; the
 proxy reloads those grants for new connections. Offline launch policies reject grants.
-Every other denied-host approval is session-only as well; only `_sill/policy.save_host`
-changes agent-wide defaults. Import conflicts
-return `conflict`; invalid fragment/build errors retain their source diagnostics.
+Only `_sill/policy.save_host` changes agent-wide defaults. Import conflicts
+return `conflict`; build errors retain their diagnostics.
 
-The recorded development schema is refreshed for these additive methods. Identity remains
-`sfp/1-dev.3`; this is not the stable `sfp/1` cutover. See
-[travelling policies](travelling-policies.md) for command examples, implementation limits
+Identity remains `sfp/1-dev.3`; this is not the stable `sfp/1` cutover. See
+[policy inspection](policy-inspection.md) for command examples, implementation limits
 and remaining human acceptance.
 
 
@@ -892,13 +895,14 @@ never a saved choice (docs/permission-modes.md, Host control):
 
 Operations: `view`, `input`, `inspect`, `launch`, `stop`, `stop_existing`, `commands`. `activate`
 sets the scope exactly and is a new `generation` every time it takes effect, on a running session
-only; it is refused with `permission_denied` for a ghost or a policy (or repository fragment)
+only; it is refused with `permission_denied` for a ghost or a policy
 forbidding Host control, `invalid_state` for a stopped or ended session, `unsupported` (with the
 missing capability in `details`) from a connection without `sill.host_control` or without
 `sill.permission_modes`. The state says `active`, `generation`, `operations`, `displaying` (the
 connections showing this session's control: the activator while it lives, and every
-`sill.host_control` connection attached to the session), `since`, and `ended` (why and when the
-last activation ended). The activation ends with `revoke`, when the last displaying connection
+`sill.host_control` connection attached to the session), `since`, `ended` (why and when the
+last activation ended) and, when the session's policy forbids Host control, `forbidden` with the
+reason. The activation ends with `revoke`, when the last displaying connection
 closes or detaches, when the session stops, ends or is deleted, or when its jail is found gone;
 a daemon restart never restores one. Each activation, scope change and revocation is a `notice`
 item in the session's conversation. Session records carry `host_control: {generation, operations}`

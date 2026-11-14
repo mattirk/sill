@@ -1,4 +1,0 @@
-# Pin this fixture folder itself, then build a new jail to exercise these rules.
-[paths]
-ro = ["readonly"]
-mask = ["hidden.txt"]

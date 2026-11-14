@@ -213,7 +213,7 @@ fn valid_policy_name(name: &str) -> Result<()> {
     }
     Ok(())
 }
-fn policy_view(view: &str, session_id: &str, name: &str, r: sill_core::policy_fragments::Resolution) -> Result<api::PolicyView> {
+fn policy_view(view: &str, session_id: &str, name: &str, r: sill_core::session::Resolution) -> Result<api::PolicyView> {
     let permissions = r.policy.permissions.states(&r.policy.network, &r.session_permissions).into_iter().map(|state| api::PermissionState {
         capability: state.capability.into(), allowed: state.allowed, default_enabled: state.default_enabled,
         requested: state.requested, blocked: state.blocked, source: state.source.into(),
@@ -231,13 +231,6 @@ fn policy_view(view: &str, session_id: &str, name: &str, r: sill_core::policy_fr
         session_hosts,
         view: view.into(), session_id: session_id.into(), name: name.into(),
         text: Some(toml::to_string_pretty(&r.policy)?),
-        fragment_ro: r.fragment_ro.iter().map(|p| HostPath::from_path(p)).collect(),
-        fragment_masks: r.fragment_masks.iter().map(|p| HostPath::from_path(p)).collect(),
-        sources: r.sources.into_iter().map(|s| api::PolicySource {
-            root: HostPath::from_path(&s.root), path: HostPath::from_path(&s.path),
-            text: s.text, sha256: s.sha256, ignored: s.ignored, error: s.error,
-        }).collect(),
-        suggestions: r.suggestions.into_iter().map(|s| api::PolicySuggestion { host: s.host, source: HostPath::from_path(&s.source) }).collect(),
         fingerprint: Some(r.fingerprint), diagnostics: vec![],
     })
 }
@@ -324,7 +317,7 @@ fn write_session_hosts(session_id: &str, hosts: &std::collections::BTreeSet<Stri
     let _ = fs::remove_file(temporary);
     result
 }
-pub(super) fn session_with_pins(hub: &Hub, id: &str) -> Result<(sill_core::store::Session, Vec<PathBuf>)> {
+fn session_with_pins(hub: &Hub, id: &str) -> Result<(sill_core::store::Session, Vec<PathBuf>)> {
     hub.with_store(|store| {
         let row = store.session_exact(id)?.ok_or_else(|| domain("not_found", "session not found"))?;
         let pins = store.jail_pins(id)?;
@@ -334,13 +327,13 @@ pub(super) fn session_with_pins(hub: &Hub, id: &str) -> Result<(sill_core::store
 fn preview(hub: &Hub, session_id: &str) -> Result<api::PolicyView> {
     let (row, pins) = session_with_pins(hub, session_id)?;
     let workspace = hub.with_store(|store| store.workspace_mask(session_id))?;
-    Ok(match sill_core::session::next_build(&row, &sill_core::changes::home()?, &pins, &[], &workspace) {
+    Ok(match sill_core::session::next_build(&row, &sill_core::changes::home()?, &pins, &workspace) {
         Ok(resolved) => policy_view("preview", session_id, &row.policy, resolved)?,
         Err(e) => api::PolicyView {
             filesystem: None,
             view: "preview".into(), session_id: session_id.into(), name: row.policy,
-            permissions: vec![], session_hosts: vec![], text: None, fragment_ro: vec![], fragment_masks: vec![], sources: vec![],
-            suggestions: vec![], fingerprint: None, diagnostics: vec![format!("{e:#}")],
+            permissions: vec![], session_hosts: vec![], text: None,
+            fingerprint: None, diagnostics: vec![format!("{e:#}")],
         },
     })
 }
@@ -378,7 +371,7 @@ pub(super) fn frontend_gate(hub: &Hub, conn: &super::Conn, method: &str, params:
         | "_sill/host_control.activate" | "_sill/host_control.revoke" =>
             return Err(missing("permission changes need a frontend that shows permission state".into())),
         "_sill/sessions.submit" | "_sill/sessions.start" | "_sill/sessions.control" | "_sill/submissions.resume"
-        | "_sill/submissions.send_now" | "_sill/questions.answer" | "_sill/policy.start" | "_sill/policy.allow_host"
+        | "_sill/submissions.send_now" | "_sill/questions.answer" | "_sill/policy.allow_host"
         | "_sill/sessions.pin" | "_sill/sessions.unpin" => {}
         _ => return Ok(()),
     }
@@ -396,7 +389,7 @@ fn session_uses_modes(hub: &Hub, id: &str) -> Result<bool> {
         if let Some(launch) = sill_core::session::policy_snapshot(id)? { return Ok(launch.policy.permissions.uses_modes()); }
     }
     let (pins, workspace) = hub.with_store(|store| Ok((store.jail_pins(id)?, store.workspace_mask(id)?)))?;
-    Ok(sill_core::session::next_build(&row, &sill_core::changes::home()?, &pins, &[], &workspace)?.policy.permissions.uses_modes())
+    Ok(sill_core::session::next_build(&row, &sill_core::changes::home()?, &pins, &workspace)?.policy.permissions.uses_modes())
 }
 
 pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> {
@@ -429,7 +422,6 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             | "_sill/settings.instructions.set"
             | "_sill/policy.get"
             | "_sill/policy.list"
-            | "_sill/policy.start"
             | "_sill/policy.preview"
             | "_sill/policy.snapshot"
             | "_sill/policy.check"
@@ -533,7 +525,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                     Some(snapshot) => snapshot.policy,
                     None => {
                         let pins = hub.with_store(|store| store.jail_pins(&a.session_id))?;
-                        sill_core::session::next_build_restrictions(&row, &home, &pins, &[])?.policy
+                        sill_core::session::next_build_base(&row, &home, &pins)?.policy
                     }
                 };
                 if policy.network.mode == sill_core::policy::NetMode::None {
@@ -577,10 +569,10 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             }
             if a.enabled == Some(true) {
                 // Refuse widening the current limits would block, rather than remembering it.
-                let restrictions = sill_core::session::next_build_restrictions(&row, &sill_core::changes::home()?, &pins, &[])?;
+                let base = sill_core::session::next_build_base(&row, &sill_core::changes::home()?, &pins)?;
                 let mut choices = hub.with_store(|store| store.permission_choices(&a.session_id))?;
                 choices.insert(a.capability.clone(), true);
-                let candidate = sill_core::session::apply_grants(restrictions, &choices, vec![]);
+                let candidate = sill_core::session::apply_grants(base, &choices, vec![]);
                 if let Some(reason) = candidate.session_permissions.iter().find(|c| c.capability == a.capability).and_then(|c| c.blocked.as_ref()) {
                     return Err(domain("permission_denied", format!("{}: {reason}", a.capability)));
                 }
@@ -595,12 +587,12 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             let (row, pins) = session_with_pins(hub, &a.session_id)?;
             if row.ghost { return Err(domain("permission_denied", "ghost sessions support Default only")); }
             let group = sill_core::permissions::DEVELOPMENT_CAPABILITIES;
-            let restrictions = sill_core::session::next_build_restrictions(&row, &sill_core::changes::home()?, &pins, &[])?;
+            let base = sill_core::session::next_build_base(&row, &sill_core::changes::home()?, &pins)?;
             let mut choices = hub.with_store(|store| store.permission_choices(&a.session_id))?;
             for capability in group {
                 choices.insert(capability.to_string(), true);
             }
-            let candidate = sill_core::session::apply_grants(restrictions, &choices, vec![]);
+            let candidate = sill_core::session::apply_grants(base, &choices, vec![]);
             let blocked: Vec<String> = candidate
                 .session_permissions
                 .iter()
@@ -717,19 +709,6 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 text: toml::to_string_pretty(&policy)?,
             })
         }
-        "_sill/policy.start" => {
-            let a: api::PolicyStart = args(p)?;
-            session(hub, &a.session_id)?;
-            if a.ignore_roots.len() > 128 { return Err(invalid("at most 128 ignored roots")); }
-            let roots = a.ignore_roots.iter().map(path).collect::<Result<Vec<_>>>()?;
-            let row = hub.with_store(|s| s.session_exact(&a.session_id))?.ok_or_else(|| domain("not_found", "session not found"))?;
-            if row.ended_at.is_some() { return Err(domain("invalid_state", "session has ended; reopen explicitly")); }
-            if !roots.is_empty() && sill_core::session::is_running(&a.session_id) {
-                return Err(domain("invalid_state", "jail is running; stop it before requesting a one-build exception"));
-            }
-            let started = hub.start_session_ignoring(&a.session_id, &roots)?;
-            bounded(sill_proto::sessions::Started { session_id: a.session_id, fresh: started.fresh })
-        }
         "_sill/policy.preview" => {
             let a: sill_proto::sessions::SessionKey = args(p)?;
             session(hub, &a.session_id)?;
@@ -745,13 +724,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
         "_sill/policy.check" => {
             let a: api::PolicyCheck = args(p)?;
             policy_text_bound(&a.text)?;
-            let checked = if a.fragment {
-                let root = a.root.as_ref().ok_or_else(|| invalid("fragment check requires a daemon-host root"))?;
-                sill_core::policy_fragments::check_fragment(&a.text, &path(root)?)
-            } else {
-                if a.root.is_some() { return Err(invalid("root is only valid for fragment checks")); }
-                sill_core::policy::Policy::parse(&a.text).map(|_| ())
-            };
+            let checked = sill_core::policy::Policy::parse(&a.text).map(|_| ());
             bounded(api::PolicyChecked { valid: checked.is_ok(), diagnostics: checked.err().map(|e| vec![format!("{e:#}")]).unwrap_or_default() })
         }
         "_sill/policy.import" => {
@@ -925,16 +898,6 @@ fn denied(hub: &Hub, a: api::DeniedList) -> Result<api::NetworkDenied> {
             .ok_or_else(|| domain("not_found", "session not found"))?)
     })?;
     let home = sill_core::changes::home()?;
-    if let Some(snapshot) = sill_core::session::policy_snapshot(&a.session_id)? {
-        if snapshot.policy.network.mode != sill_core::policy::NetMode::None {
-            let approved: std::collections::BTreeSet<_> = hub.with_store(|store| store.network_hosts(&a.session_id))?.into_iter().collect();
-            for suggestion in snapshot.suggestions {
-                if !approved.contains(&suggestion.host) {
-                    add(0, suggestion.host);
-                }
-            }
-        }
-    }
     let quiet = sill_core::policy::Policy::load(&row.policy, &home)
         .map(|p| p.network.quiet)
         .unwrap_or_else(|_| sill_core::policy::quiet_default());
