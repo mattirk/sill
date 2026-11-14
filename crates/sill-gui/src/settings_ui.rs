@@ -85,7 +85,7 @@ pub struct SettingsPage {
     /// What the last action did, or why it did not.
     pub said: Option<String>,
     /// Delete all ended sessions was pressed once.
-    pub armed_delete: bool,
+    pub armed_delete: crate::armed::Armed<()>,
     pub where_open: bool,
     /// The hotkey as typed, before it is applied.
     pub hotkey: Option<String>,
@@ -114,7 +114,7 @@ impl Default for SettingsPage {
             instructions_saving: None,
             pin_path: String::new(),
             said: None,
-            armed_delete: false,
+            armed_delete: Default::default(),
             where_open: false,
             hotkey: None,
         }
@@ -838,13 +838,13 @@ impl App {
                 quiet_button("Compact now", Some(event(Event::Compact))),
                 keys::press(
                     button(
-                        text(if page.armed_delete {
+                        text(if page.armed_delete.is(&()) {
                             "Delete every ended session?"
                         } else {
                             "Delete all…"
                         })
                         .size(style::TEXT)
-                        .color(if page.armed_delete {
+                        .color(if page.armed_delete.is(&()) {
                             P.error
                         } else {
                             P.fg

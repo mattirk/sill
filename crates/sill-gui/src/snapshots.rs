@@ -57,12 +57,12 @@ fn render_views() {
         let _ = app.update(Message::DemoTick);
     }
     render(&app, "2-question");
-    let _ = app.update(Message::Answer {
+    let _ = app.update(crate::tests::in_session(&app, crate::session::Event::Answer {
         question_id: "demo-question".into(),
         option_id: "allow".into(),
-    });
-    let _ = app.update(Message::ToggleTool("edit".into()));
-    let _ = app.update(Message::ToggleTool("tool".into()));
+    }));
+    let _ = app.update(crate::tests::in_session(&app, crate::session::Event::ToggleTool("edit".into())));
+    let _ = app.update(crate::tests::in_session(&app, crate::session::Event::ToggleTool("tool".into())));
     render(&app, "3-answered");
     // the jail shell in the prompt's place: the pretend shell lists its files
     // the task carries the pane's events; dropping it would hang the shell up
@@ -185,13 +185,13 @@ fn render_lifecycle() {
         event: sill_proto::sfp::Event::QuestionUpdated { question },
     };
     view.accept(event);
-    let _ = app.update(Message::FormEdit(
+    let _ = app.update(crate::tests::in_session(&app, crate::session::Event::FormEdit(
         "form".into(),
         crate::forms::Edit::Pick {
             key: "env".into(),
             value: "stage".into(),
         },
-    ));
+    )));
     let _ = app.update(Message::Latest);
     render(&app, "13-form");
 }
@@ -557,7 +557,7 @@ fn render_workspaces() {
     for _ in 0..=demo::CHUNKS.len() {
         let _ = app.update(Message::DemoTick);
     }
-    let _ = app.update(Message::Answer { question_id: "demo-question".into(), option_id: "allow".into() });
+    let _ = app.update(crate::tests::in_session(&app, crate::session::Event::Answer { question_id: "demo-question".into(), option_id: "allow".into() }));
     let host = |p: &str| sill_proto::sessions::HostPath::from_path(std::path::Path::new(p));
     let ws = serde_json::json!({"workspace_id": "ws-1", "name": "project", "session_id": "demo", "source": host("/home/demo/project"),
         "source_branch": "main", "base": "b0", "branch": "sill/project-ws-1", "path": host("/ws/project-ws-1"),
@@ -580,13 +580,14 @@ fn render_workspaces() {
     let view = app.views.get_mut("demo").unwrap();
     view.workspaces.menu = None;
     view.workspaces.diff = Some(("ws-1".into(), Ok("diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,2 +1,3 @@\n fn main() {\n-    old();\n+    new();\n+    more();\n }\n".into())));
-    view.workspaces.armed = Some("ws-1".into());
+    let seen = view.workspaces.loaded.as_ref().unwrap().details[0].revision.clone();
+    view.workspaces.armed.press(("ws-1".into(), seen));
     render(&app, "workspaces-2-diff");
     // the person's checkout holds uncommitted work the workspace does not have: the chip's dot,
     // the drawer's line
     let view = app.views.get_mut("demo").unwrap();
     view.workspaces.diff = None;
-    view.workspaces.armed = None;
+    view.workspaces.armed.clear();
     view.workspaces.loaded.as_mut().unwrap().details[0].checkout_only = 11;
     let _ = app.update(Message::Layout(crate::layout::Action::Mode(crate::layout::Mode::Drawer)));
     let _ = app.update(Message::Files(crate::files::Action::DiffMode(true)));
@@ -606,7 +607,7 @@ fn render_crosscheck() {
     for _ in 0..=demo::CHUNKS.len() {
         let _ = app.update(Message::DemoTick);
     }
-    let _ = app.update(Message::Answer { question_id: "demo-question".into(), option_id: "allow".into() });
+    let _ = app.update(crate::tests::in_session(&app, crate::session::Event::Answer { question_id: "demo-question".into(), option_id: "allow".into() }));
     let host = |p: &str| sill_proto::sessions::HostPath::from_path(std::path::Path::new(p));
     let ws = serde_json::json!({"workspace_id": "ws-1", "name": "sill", "session_id": "demo", "source": host("/home/demo/sill"),
         "source_branch": "main", "base": "b0", "branch": "sill/sill-ws-1", "path": host("/ws/sill-ws-1"),
@@ -754,9 +755,9 @@ fn render_tool_runs() {
     view.conversation
         .insert_item(other("tool-98", "execute", "Terminal", "pending"));
     render(&app, "12-tool-run");
-    let _ = app.update(Message::ToggleGroup("tool-02".into()));
+    let _ = app.update(crate::tests::in_session(&app, crate::session::Event::ToggleGroup("tool-02".into())));
     render(&app, "13-tool-run-open");
-    let _ = app.update(Message::ToggleTool("tool-05".into()));
+    let _ = app.update(crate::tests::in_session(&app, crate::session::Event::ToggleTool("tool-05".into())));
     render(&app, "14-tool-run-call-open");
 }
 

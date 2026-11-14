@@ -22,6 +22,7 @@ use sill_proto::changes::HistoryEvent;
 use sill_proto::sessions::HostPath;
 use sill_proto::workspaces as api;
 
+use crate::armed::Armed;
 use crate::style::{self, P, alpha};
 use crate::{App, Message, keys};
 
@@ -77,14 +78,28 @@ pub struct ChangesPage {
     /// Open rows' diffs by entry key ([`workspace_key`] for a workspace's file); `None` while
     /// reading.
     pub open: BTreeMap<String, Option<Result<String, String>>>,
-    /// A revert pressed once: the entry's key, or `all ` and its group's first key.
-    pub armed: Option<String>,
+    /// A revert pressed once.
+    pub armed: Armed<Reverting>,
     /// What the last action did.
     pub said: Option<String>,
-    /// A workspace's Discard pressed once.
-    pub workspace_armed: Option<String>,
-    /// A workspace's Apply onto another branch pressed once, and that branch.
-    pub workspace_apply_armed: Option<(String, String)>,
+    /// A workspace's Discard pressed once, and the revision the page showed then.
+    pub workspace_armed: Armed<(String, api::Revision)>,
+    /// A workspace's Apply onto another branch pressed once, and the revision the page showed
+    /// then.
+    pub workspace_apply_armed: Armed<(String, api::Revision)>,
+    /// An Apply onto another branch the person confirmed: the workspace and that branch. It
+    /// lasts until the Apply ends, and goes with it to the session when the agent commits first.
+    pub workspace_apply_onto: Option<(String, String)>,
+}
+
+/// What a revert pressed once is of.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Reverting {
+    /// One entry, by its key.
+    One(String),
+    /// Every entry of a group: the keys it held when pressed, so a group that changed since is
+    /// asked about again.
+    All(Vec<String>),
 }
 
 #[derive(Debug, Clone)]
@@ -488,14 +503,17 @@ impl App {
         if !d.workspace.operation.as_ref().is_some_and(|o| o.state == "conflict" || o.state == "interrupted") {
             let onto = sill_client::workspaces::other_branch(d)
                 .map(|(_, now)| now)
-                .filter(|now| page.workspace_apply_armed.as_ref().is_some_and(|(w, b)| *w == id && b == now));
+                .filter(|now| {
+                    page.workspace_apply_armed.get().is_some_and(|(w, seen)| *w == id && *seen == d.revision)
+                        || page.workspace_apply_onto.as_ref().is_some_and(|(w, b)| *w == id && b == now)
+                });
             let label = onto.map_or("Apply".to_string(), |now| format!("Apply onto {now}?"));
             header = header.push(keys::press_maybe(
                 button(text(label).size(style::SMALL)).padding([2, 10]).style(style::solid(P.accent)),
                 fresh.then(|| Message::Workspaces(W::PageApply(id.clone()))),
             ));
         }
-        let armed = page.workspace_armed.as_deref() == Some(id.as_str());
+        let armed = page.workspace_armed.get().is_some_and(|(w, seen)| *w == id && *seen == d.revision);
         header = header.push(keys::press_maybe(
             button(
                 text(if armed { "Discard?" } else { "Discard" })
@@ -554,7 +572,7 @@ impl App {
             .filter(|e| changes::keepable(e))
             .map(changes::entry_key)
             .collect();
-        let armed = page.armed.as_deref() == all.first().map(|k| format!("all {k}")).as_deref();
+        let armed = page.armed.get().is_some_and(|a| matches!(a, Reverting::All(keys) if *keys == all));
         let header = row![
             crate::icons::glyph("file", 13.0, alpha(P.fg, 0.6)),
             text("Outside its pinned folders").size(style::SMALL),
@@ -657,7 +675,7 @@ impl App {
         now: i64,
     ) -> Column<'a, Message> {
         let key = changes::entry_key(entry);
-        let armed = page.armed.as_deref() == Some(key.as_str());
+        let armed = page.armed.get().is_some_and(|a| matches!(a, Reverting::One(k) if *k == key));
         let fresh = page.fresh_entries;
         let auto_revert = self.changes_listing.auto_revert;
         let (letter, color) = match entry {

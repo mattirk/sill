@@ -10,9 +10,14 @@ use sill_client::conversation::item_text;
 use sill_client::outbox::State;
 use sill_proto::{Client, sfp::*};
 
-use crate::{App, Message, SessionView, Tab, demo};
+use crate::{App, Message, SessionView, Tab, demo, session};
 
 // --- harness ------------------------------------------------------------------------------------
+
+/// `event` as the selected session's view sends it.
+pub fn in_session(app: &App, event: session::Event) -> Message {
+    session::message(app.selected.as_deref().expect("a selected session"), event)
+}
 
 /// The daemon's end of a socket pair: read the app's requests, answer or refuse them.
 pub struct Daemon {
@@ -164,9 +169,9 @@ pub(crate) fn settle_task(app: &mut App, task: Task<Message>) {
 
 fn type_text(app: &mut App, text: &str) {
     use iced::widget::text_editor::{Action, Edit};
-    let _ = app.update(Message::Prompt(Action::Edit(Edit::Paste(Arc::new(
+    let _ = app.update(in_session(&app, session::Event::Prompt(Action::Edit(Edit::Paste(Arc::new(
         text.to_string(),
-    )))));
+    ))))));
 }
 
 fn demo_view(app: &App) -> &SessionView {
@@ -438,10 +443,10 @@ fn actions_send_the_protocol_requests() {
     let (client, mut daemon) = daemon();
     let mut app = live_app(vec![client]);
     // an empty composer sends nothing
-    let task = app.update(Message::Send);
+    let task = app.update(in_session(&app, session::Event::Send));
     settle_task(&mut app, task);
     type_text(&mut app, "hello agent\nsecond line");
-    let task = app.update(Message::Send);
+    let task = app.update(in_session(&app, session::Event::Send));
     assert!(
         demo_view(&app).draft.text().trim().is_empty(),
         "the composer clears on send"
@@ -462,7 +467,7 @@ fn actions_send_the_protocol_requests() {
     settle_task(&mut app, task);
     assert!(demo_view(&app).outbox.pending().is_empty(), "accepted");
 
-    let task = app.update(Message::Stop);
+    let task = app.update(in_session(&app, session::Event::Stop));
     let request = daemon.expect("_sill/sessions.cancel");
     assert_eq!(
         request["params"],
@@ -471,14 +476,14 @@ fn actions_send_the_protocol_requests() {
     daemon.reply(&request, json!({"requested": true}));
     settle_task(&mut app, task);
 
-    let task = app.update(Message::Answer {
+    let task = app.update(in_session(&app, session::Event::Answer {
         question_id: "q1".into(),
         option_id: "allow".into(),
-    });
-    let again = app.update(Message::Answer {
+    }));
+    let again = app.update(in_session(&app, session::Event::Answer {
         question_id: "q1".into(),
         option_id: "allow".into(),
-    });
+    }));
     let request = daemon.expect("_sill/questions.answer");
     assert_eq!(
         request["params"]["answer"],
@@ -500,7 +505,7 @@ fn actions_send_the_protocol_requests() {
         title: value.into(),
         boolean,
     };
-    let task = app.update(Message::SetMode(pick("plan", None)));
+    let task = app.update(in_session(&app, session::Event::SetMode(pick("plan", None))));
     let request = daemon.expect("_sill/sessions.control");
     assert_eq!(
         request["params"]["control"],
@@ -509,7 +514,7 @@ fn actions_send_the_protocol_requests() {
     );
     daemon.reply(&request, json!({}));
     settle_task(&mut app, task);
-    let task = app.update(Message::SetOption("web".into(), pick("true", Some(true))));
+    let task = app.update(in_session(&app, session::Event::SetOption("web".into(), pick("true", Some(true)))));
     let request = daemon.expect("_sill/sessions.control");
     assert_eq!(
         request["params"]["control"],
@@ -518,7 +523,7 @@ fn actions_send_the_protocol_requests() {
     daemon.reply(&request, json!({}));
     settle_task(&mut app, task);
 
-    let task = app.update(Message::Unqueue("s1".into()));
+    let task = app.update(in_session(&app, session::Event::Unqueue("s1".into())));
     let request = daemon.expect("_sill/submissions.cancel");
     assert_eq!(
         request["params"],
@@ -535,7 +540,7 @@ fn actions_send_the_protocol_requests() {
 fn send_now_needs_the_capability() {
     let (older, _quiet) = daemon();
     let mut app = live_app(vec![older]);
-    let task = app.update(Message::SendNow("s1".into()));
+    let task = app.update(in_session(&app, session::Event::SendNow("s1".into())));
     settle_task(&mut app, task);
     let failed = demo_view(&app).failed.clone().expect("refused here");
     assert!(failed.contains("sill.send_now"), "{failed}");
@@ -562,7 +567,7 @@ fn send_now_needs_the_capability() {
     daemon.reply(&request, serde_json::to_value(answer).unwrap());
     let client = initializing.join().unwrap();
     let mut app = live_app(vec![client]);
-    let task = app.update(Message::SendNow("s1".into()));
+    let task = app.update(in_session(&app, session::Event::SendNow("s1".into())));
     let request = daemon.expect("_sill/submissions.send_now");
     assert_eq!(
         request["params"],
@@ -588,7 +593,7 @@ fn stop_removes_queued_prompts_before_stopping() {
     .unwrap();
     let next = event(&view.conversation, Event::SubmissionUpdated { submission });
     view.accept(next);
-    let task = app.update(Message::Stop);
+    let task = app.update(in_session(&app, session::Event::Stop));
     let first = daemon.expect("_sill/submissions.cancel");
     assert_eq!(first["params"]["submission_id"], "waiting");
     daemon.reply(&first, json!({}));
@@ -607,7 +612,7 @@ fn a_refused_send_gives_the_prompt_back_and_an_uncertain_one_is_checked() {
     let mut app = live_app(vec![first, third]);
 
     type_text(&mut app, "keep me");
-    let task = app.update(Message::Send);
+    let task = app.update(in_session(&app, session::Event::Send));
     let request = daemon.expect("_sill/sessions.submit");
     daemon.refuse(&request, "invalid_state", "the session has ended");
     settle_task(&mut app, task);
@@ -622,7 +627,7 @@ fn a_refused_send_gives_the_prompt_back_and_an_uncertain_one_is_checked() {
     assert!(view.outbox.pending().is_empty());
 
     // typed again before the refusal came back: the new text stays, the old prompt waits
-    let task = app.update(Message::Send);
+    let task = app.update(in_session(&app, session::Event::Send));
     let request = daemon.expect("_sill/sessions.submit");
     assert_eq!(request["params"]["text"], "keep me");
     let id = request["params"]["submission_id"]
@@ -638,18 +643,18 @@ fn a_refused_send_gives_the_prompt_back_and_an_uncertain_one_is_checked() {
         view.outbox.get(&id).unwrap().state,
         State::Failed(_)
     ));
-    let _ = app.update(Message::EditSend(id));
+    let _ = app.update(in_session(&app, session::Event::EditSend(id)));
     assert_eq!(demo_view(&app).draft.text().trim_end(), "newer\n\nkeep me");
 
     // the connection goes with the request in hand: uncertain, not resent
-    let _ = app.update(Message::Prompt(
+    let _ = app.update(in_session(&app, session::Event::Prompt(
         iced::widget::text_editor::Action::SelectAll,
-    ));
-    let _ = app.update(Message::Prompt(iced::widget::text_editor::Action::Edit(
-        iced::widget::text_editor::Edit::Delete,
     )));
+    let _ = app.update(in_session(&app, session::Event::Prompt(iced::widget::text_editor::Action::Edit(
+        iced::widget::text_editor::Edit::Delete,
+    ))));
     type_text(&mut app, "did it arrive?");
-    let task = app.update(Message::Send);
+    let task = app.update(in_session(&app, session::Event::Send));
     // Read on the existing connection before closing it. Dropping it before Send raced
     // the client's EOF detection and sometimes never reached the expected next socket.
     let request = daemon.expect("_sill/sessions.submit");
@@ -665,7 +670,7 @@ fn a_refused_send_gives_the_prompt_back_and_an_uncertain_one_is_checked() {
     ));
     assert!(demo_view(&app).draft.text().trim().is_empty());
     // checking asks for it by identity; never received, it comes back to the composer
-    let task = app.update(Message::CheckSend(id.clone()));
+    let task = app.update(in_session(&app, session::Event::CheckSend(id.clone())));
     let request = checker.expect("_sill/submissions.get");
     assert_eq!(request["params"]["submission_id"], id.as_str());
     checker.refuse(&request, "not_found", "submission not found");
@@ -690,7 +695,7 @@ fn a_draft_stays_with_its_session() {
         "not drawn in the other tab"
     );
     drop(ui);
-    let _ = app.update(Message::Send);
+    let _ = app.update(in_session(&app, session::Event::Send));
     assert!(
         app.views["other"].outbox.pending().is_empty(),
         "nothing to send there"
@@ -805,12 +810,12 @@ fn enter_sends_and_shift_enter_is_a_new_line() {
         status: Status::Focused { is_hovered: false },
     };
     assert!(matches!(
-        crate::ui::enter_sends(press(Modifiers::empty())),
-        Some(Binding::Custom(Message::Send))
+        crate::ui::enter_sends("demo", press(Modifiers::empty())),
+        Some(Binding::Custom(Message::Session(_, session::Event::Send)))
     ));
     assert!(matches!(
-        crate::ui::enter_sends(press(Modifiers::SHIFT)),
-        Some(Binding::Custom(Message::PromptNewline))
+        crate::ui::enter_sends("demo", press(Modifiers::SHIFT)),
+        Some(Binding::Custom(Message::Session(_, session::Event::PromptNewline)))
     ));
 }
 
@@ -826,7 +831,7 @@ fn clicking_an_option_answers_the_question() {
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(
         messages.iter().any(|m| matches!(m,
-            Message::Answer { question_id, option_id } if question_id == "demo-question" && option_id == "allow")),
+            Message::Session(_, session::Event::Answer { question_id, option_id }) if question_id == "demo-question" && option_id == "allow")),
         "{messages:?}"
     );
 }
@@ -1135,7 +1140,7 @@ fn the_terminal_button_opens_the_shell_and_takes_the_keys() {
     ui.click(iced::widget::Id::new("terminal-button")).unwrap();
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(
-        matches!(messages.as_slice(), [Message::ToggleTerminal]),
+        matches!(messages.as_slice(), [Message::Session(id, session::Event::ToggleTerminal)] if id == "demo"),
         "{messages:?}"
     );
     // the task carries the pane's events; dropping it would hang the shell up
@@ -1154,7 +1159,7 @@ fn the_terminal_button_opens_the_shell_and_takes_the_keys() {
     let typed: Vec<u8> = ui
         .into_messages()
         .filter_map(|m| match m {
-            Message::TermAction(crate::terminal::Action::Input(bytes)) => Some(bytes),
+            Message::Session(_, session::Event::TermAction(crate::terminal::Action::Input(bytes))) => Some(bytes),
             _ => None,
         })
         .flatten()
@@ -2041,7 +2046,7 @@ fn a_button_keeps_its_press_and_a_click_clears_the_selection() {
     assert!(
         messages
             .iter()
-            .any(|m| matches!(m, Message::ToggleTool(id) if id == "tool")),
+            .any(|m| matches!(m, Message::Session(_, session::Event::ToggleTool(id)) if id == "tool")),
         "{messages:?}"
     );
     assert!(copies(messages).is_empty());
@@ -2141,7 +2146,8 @@ fn tab_reaches_every_control_in_reading_order_and_enter_presses_it() {
             Some(Message::Files(action)) => {
                 format!("files {action:?}").chars().take(24).collect()
             }
-            Some(Message::Answer { option_id, .. }) => format!("answer {option_id}"),
+            Some(Message::Session(_, session::Event::Answer { option_id, .. })) => format!("answer {option_id}"),
+            Some(Message::Session(_, event)) => format!("{event:?}").chars().take(24).collect(),
             Some(other) => format!("{other:?}").chars().take(24).collect(),
             None => "-".into(),
         })
@@ -2184,11 +2190,11 @@ fn space_presses_and_arrows_step_a_dropdown() {
     assert!(
         stepped
             .iter()
-            .any(|m| matches!(m, Some(Message::SetMode(pick)) if pick.value == "plan")),
+            .any(|m| matches!(m, Some(Message::Session(_, session::Event::SetMode(pick))) if pick.value == "plan")),
         "the mode dropdown takes Down: {stepped:?}"
     );
     assert!(
-        stepped.iter().any(|m| matches!(m, Some(Message::SetOption(option, pick)) if option == "model" && pick.value == "brisk")),
+        stepped.iter().any(|m| matches!(m, Some(Message::Session(_, session::Event::SetOption(option, pick))) if option == "model" && pick.value == "brisk")),
         "{stepped:?}"
     );
 }
@@ -2312,17 +2318,17 @@ fn session_shortcuts_work_from_the_prompt() {
         status: Status::Focused { is_hovered: false },
     };
     assert!(matches!(
-        crate::ui::enter_sends(typed(named(Named::ArrowLeft), JUMP | Modifiers::SHIFT)),
+        crate::ui::enter_sends("demo", typed(named(Named::ArrowLeft), JUMP | Modifiers::SHIFT)),
         Some(Binding::Select(iced::widget::text_editor::Motion::WordLeft))
     ));
     assert!(matches!(
-        crate::ui::enter_sends(typed(named(Named::PageUp), Modifiers::empty())),
+        crate::ui::enter_sends("demo", typed(named(Named::PageUp), Modifiers::empty())),
         Some(Binding::Custom(Message::Page(false)))
     ));
     // Tab is the prompt's: it indents in a list and moves the keyboard on anywhere else
     assert!(matches!(
-        crate::ui::enter_sends(typed(named(Named::Tab), Modifiers::empty())),
-        Some(Binding::Custom(Message::PromptIndent(false)))
+        crate::ui::enter_sends("demo", typed(named(Named::Tab), Modifiers::empty())),
+        Some(Binding::Custom(Message::Session(_, session::Event::PromptIndent(false))))
     ));
 }
 
@@ -2533,7 +2539,7 @@ fn the_menu_starts_a_session_and_opens_it() {
     app.menu = Some(crate::menu::Menu::default());
     let first = app.update(Message::Menu(Event::Delete("old".into())));
     settle_task(&mut app, first);
-    assert_eq!(app.menu.as_ref().unwrap().armed.as_deref(), Some("old"));
+    assert!(app.menu.as_ref().unwrap().armed.is(&"old".to_string()));
     let second = app.update(Message::Menu(Event::Delete("old".into())));
     settle_task(&mut app, second);
     server.join().unwrap();
@@ -2553,7 +2559,7 @@ fn closing_a_tab_ends_its_session_and_a_ghost_asks_first() {
         "{messages:?}"
     );
     let _ = app.update(Message::CloseTab("demo".into()));
-    assert_eq!(app.armed_close.as_deref(), Some("demo"));
+    assert!(app.armed_close.is(&"demo".to_string()));
     let mut ui = simulator(&app, (720.0, 860.0));
     ui.click(iced::widget::Id::new("close-tab")).unwrap();
     let messages: Vec<Message> = ui.into_messages().collect();
@@ -2603,21 +2609,21 @@ fn a_form_question_is_answered_with_its_values() {
     for message in ui.into_messages().collect::<Vec<_>>() {
         let _ = app.update(message);
     }
-    let _ = app.update(Message::FormEdit(
+    let _ = app.update(in_session(&app, session::Event::FormEdit(
         "form".into(),
         crate::forms::Edit::Text {
             key: "why".into(),
             text: "release day".into(),
         },
-    ));
+    )));
     let mut ui = simulator(&app, (720.0, 860.0));
     ui.click("Submit").unwrap();
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(
-        matches!(&messages[..], [Message::SubmitForm(q)] if q == "form"),
+        matches!(&messages[..], [Message::Session(_, session::Event::SubmitForm(q))] if q == "form"),
         "{messages:?}"
     );
-    let task = app.update(Message::SubmitForm("form".into()));
+    let task = app.update(in_session(&app, session::Event::SubmitForm("form".into())));
     let answer = daemon.expect("_sill/questions.answer");
     assert_eq!(
         answer["params"]["answer"],
@@ -2650,10 +2656,10 @@ fn a_held_prompt_can_be_sent_or_discarded() {
     ui.click("Discard").unwrap();
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(
-        matches!(&messages[..], [Message::ResumeHeld(a), Message::DiscardHeld(b)] if a == "held1" && b == "held1"),
+        matches!(&messages[..], [Message::Session(_, session::Event::ResumeHeld(a)), Message::Session(_, session::Event::DiscardHeld(b))] if a == "held1" && b == "held1"),
         "{messages:?}"
     );
-    let task = app.update(Message::ResumeHeld("held1".into()));
+    let task = app.update(in_session(&app, session::Event::ResumeHeld("held1".into())));
     let resume = daemon.expect("_sill/submissions.resume");
     assert_eq!(
         resume["params"],
@@ -2712,10 +2718,7 @@ fn the_changes_page_groups_what_sessions_wrote() {
     drop(ui);
     let key = changes_key(&app, "settings.toml");
     let _ = app.update(Message::Changes(Event::Revert(key.clone())));
-    assert_eq!(
-        app.changes.as_ref().unwrap().armed.as_deref(),
-        Some(key.as_str())
-    );
+    assert!(app.changes.as_ref().unwrap().armed.is(&crate::changes_ui::Reverting::One(key.clone())));
     let mut ui = simulator(&app, (720.0, 860.0));
     ui.find("Revert?").unwrap();
     drop(ui);
@@ -2816,14 +2819,91 @@ fn reopening_changes_shows_the_last_listing_until_the_new_one_is_read() {
     // nothing acts on the listing from before
     let key = changes_key(&app, "settings.toml");
     let _ = app.update(Message::Changes(Event::Revert(key)));
-    assert_eq!(app.changes.as_ref().unwrap().armed, None);
+    assert_eq!(app.changes.as_ref().unwrap().armed.get(), None);
     let _ = app.update(Message::Workspaces(W::PageDiscard("w1".into())));
-    assert_eq!(app.changes.as_ref().unwrap().workspace_armed, None);
+    assert_eq!(app.changes.as_ref().unwrap().workspace_armed.get(), None);
     // the new one is read: its actions are offered
     let _ = app.update(Message::Changes(Event::Loaded(Ok((demo::changes(), 0)))));
     let key = changes_key(&app, "settings.toml");
     let _ = app.update(Message::Changes(Event::Revert(key.clone())));
-    assert_eq!(app.changes.as_ref().unwrap().armed.as_deref(), Some(key.as_str()));
+    assert!(app.changes.as_ref().unwrap().armed.is(&crate::changes_ui::Reverting::One(key)));
+}
+
+/// The second press confirms what the page showed at the first. A workspace that was read again
+/// between the two with other work in it is asked about again, and so is one on another branch.
+#[test]
+fn a_workspace_that_changed_between_the_two_presses_is_asked_about_again_on_changes() {
+    use crate::workspaces::Event as W;
+    let (mut app, _) = App::new(true, None);
+    let task = app.update(Message::ToggleChanges);
+    settle_task(&mut app, task);
+    let at = |tip: &str, branch: &str| {
+        let mut detail = page_workspace("w1", "demo", &["src/a.rs"]);
+        detail.revision.tip = tip.into();
+        detail.revision.destination_branch = branch.into();
+        page_workspaces(vec![detail])
+    };
+    let armed_for = |app: &App, tip: &str| {
+        let page = app.changes.as_ref().unwrap();
+        page.workspace_armed.get().is_some_and(|(w, seen)| w == "w1" && seen.tip == tip)
+    };
+    let _ = app.update(Message::Workspaces(W::PageLoaded(Ok(at("t1", "main")))));
+    let _ = app.update(Message::Workspaces(W::PageDiscard("w1".into())));
+    assert!(armed_for(&app, "t1"));
+    simulator(&app, (720.0, 860.0)).find("Discard?").unwrap();
+    // read again with other work in it: the button no longer asks for the second press
+    let _ = app.update(Message::Workspaces(W::PageLoaded(Ok(at("t2", "main")))));
+    assert!(simulator(&app, (720.0, 860.0)).find("Discard?").is_err());
+    let _ = app.update(Message::Workspaces(W::PageDiscard("w1".into())));
+    assert!(armed_for(&app, "t2"), "armed again, for what the page shows now");
+    simulator(&app, (720.0, 860.0)).find("Discard?").unwrap();
+    let _ = app.update(Message::Workspaces(W::PageDiscard("w1".into())));
+    assert_eq!(app.changes.as_ref().unwrap().workspace_armed.get(), None, "the second press of the same work confirms");
+    // an Apply onto another branch
+    let _ = app.update(Message::Workspaces(W::PageLoaded(Ok(at("t3", "feature")))));
+    let _ = app.update(Message::Workspaces(W::PageApply("w1".into())));
+    simulator(&app, (720.0, 860.0)).find("Apply onto feature?").unwrap();
+    let _ = app.update(Message::Workspaces(W::PageLoaded(Ok(at("t4", "feature")))));
+    assert!(simulator(&app, (720.0, 860.0)).find("Apply onto feature?").is_err());
+    let _ = app.update(Message::Workspaces(W::PageApply("w1".into())));
+    let page = app.changes.as_ref().unwrap();
+    assert!(page.workspace_apply_armed.get().is_some_and(|(_, seen)| seen.tip == "t4"));
+    assert_eq!(page.workspace_apply_onto, None, "not confirmed: asked again");
+    let _ = app.update(Message::Workspaces(W::PageApply("w1".into())));
+    let page = app.changes.as_ref().unwrap();
+    assert_eq!(page.workspace_apply_armed.get(), None);
+    assert_eq!(page.workspace_apply_onto, Some(("w1".to_string(), "feature".to_string())));
+}
+
+/// Revert all confirms the group the person was shown: a second press for a group that holds
+/// other entries than at the first is asked about again.
+#[test]
+fn revert_all_of_a_group_that_changed_is_asked_about_again() {
+    use crate::changes_ui::{Event, Reverting};
+    let (mut app, _) = App::new(true, None);
+    let task = app.update(Message::ToggleChanges);
+    settle_task(&mut app, task);
+    let mut ui = simulator(&app, (720.0, 860.0));
+    ui.click("Revert all").unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    let [Message::Changes(Event::RevertAll(all))] = &messages[..] else {
+        panic!("{messages:?}")
+    };
+    assert_eq!(all.len(), 3);
+    // the group as it was with one entry fewer, then as it is shown now
+    let fewer = all[..2].to_vec();
+    let _ = app.update(Message::Changes(Event::RevertAll(fewer.clone())));
+    assert!(app.changes.as_ref().unwrap().armed.is(&Reverting::All(fewer)));
+    assert!(simulator(&app, (720.0, 860.0)).find("Revert all?").is_err(), "not armed for the group shown");
+    let _ = app.update(Message::Changes(Event::RevertAll(all.clone())));
+    let page = app.changes.as_ref().unwrap();
+    assert!(page.armed.is(&Reverting::All(all.clone())), "armed again, for the group shown now");
+    assert_eq!(page.said, None, "nothing was reverted");
+    simulator(&app, (720.0, 860.0)).find("Revert all?").unwrap();
+    let _ = app.update(Message::Changes(Event::RevertAll(all.clone())));
+    let page = app.changes.as_ref().unwrap();
+    assert_eq!(page.armed.get(), None);
+    assert_eq!(page.said.as_deref(), Some("The demo keeps and reverts nothing."));
 }
 
 /// The page's actions are the daemon's requests: keep with the version shown, revert all on a
@@ -2917,6 +2997,32 @@ fn changes_actions_are_the_public_requests() {
     server.join().unwrap();
 }
 
+/// A session's event is that session's, whichever is selected when it is handled: a Send from
+/// one session's composer that arrives after the person went to another sends the first one's
+/// draft and leaves the other's alone.
+#[test]
+fn a_send_goes_to_the_session_it_was_pressed_in() {
+    let (client, mut daemon) = daemon();
+    let mut app = live_app(vec![client]);
+    add_session(&mut app, "other");
+    app.views.get_mut("demo").unwrap().draft = crate::editor::Editor::with_text("from demo");
+    app.views.get_mut("other").unwrap().draft = crate::editor::Editor::with_text("from other");
+    let pressed = in_session(&app, session::Event::Send);
+    app.selected = Some("other".into());
+    let task = app.update(pressed);
+    let request = daemon.expect("_sill/sessions.submit");
+    assert_eq!(request["params"]["session_id"], "demo");
+    assert_eq!(request["params"]["text"], "from demo");
+    daemon.reply(&request, json!({}));
+    settle_task(&mut app, task);
+    assert!(app.views["demo"].draft.text().trim().is_empty(), "the composer it was sent from clears");
+    assert_eq!(app.views["other"].draft.text().trim(), "from other");
+    assert!(app.views["other"].outbox.pending().is_empty());
+    // a session whose view has gone: nothing happens
+    let _ = app.update(Message::Session("gone".into(), session::Event::Send));
+    assert_eq!(app.views["other"].draft.text().trim(), "from other");
+}
+
 /// Cancellation keeps delivery=queued in SFP; the outcome removes the composer row.
 #[test]
 fn cancelled_queued_prompts_disappear_from_the_composer() {
@@ -2958,13 +3064,14 @@ fn sending_restores_keyboard_focus_to_the_prompt() {
     let mut live = Live::new((720.0, 860.0));
     live.frame(&app, |_| {});
     type_text(&mut app, "first prompt");
-    live.apply(&mut app, Message::Send);
+    let send = in_session(&app, session::Event::Send);
+    live.apply(&mut app, send);
     type_text(&mut app, "next prompt");
     let messages = live.frame(&app, |ui| {
         ui.send(vec![key(iced::keyboard::key::Named::Enter)])
     });
     assert!(
-        messages.iter().any(|m| matches!(m, Message::Send)),
+        messages.iter().any(|m| matches!(m, Message::Session(_, session::Event::Send))),
         "{messages:?}"
     );
 }
@@ -2987,7 +3094,7 @@ fn returning_from_backend_restores_keyboard_focus_to_the_prompt() {
                 ui.send(vec![key(iced::keyboard::key::Named::Enter)])
             });
             assert!(
-                messages.iter().any(|m| matches!(m, Message::Send)),
+                messages.iter().any(|m| matches!(m, Message::Session(_, session::Event::Send))),
                 "returning from {page:?}: {messages:?}"
             );
         }
@@ -3169,7 +3276,7 @@ fn word_selection_works_in_prompt_and_source_bindings() {
         widget::text_editor::{Binding, KeyPress, Motion, Status},
     };
     for binding in [
-        crate::ui::enter_sends,
+        |press| crate::ui::enter_sends("demo", press),
         crate::ui::reading_keys,
         Binding::<Message>::from_key_press,
     ] {
@@ -3468,7 +3575,7 @@ fn attachment_only_send_keeps_files_on_refusal() {
         .unwrap()
         .attachments
         .push(attachment.clone().into());
-    let task = app.update(Message::Send);
+    let task = app.update(in_session(&app, session::Event::Send));
     let request = daemon.expect("_sill/sessions.submit");
     let submit: Submit = serde_json::from_value(request["params"].clone()).unwrap();
     assert!(submit.text.is_empty());
@@ -3887,8 +3994,8 @@ fn prompt_undo_and_redo_shortcuts() {
             text: None,
             status: Status::Focused { is_hovered: false },
         };
-        assert!(matches!(crate::ui::enter_sends(press.clone()),
-            Some(Binding::Custom(Message::PromptHistory(value))) if value == redo));
+        assert!(matches!(crate::ui::enter_sends("demo", press.clone()),
+            Some(Binding::Custom(Message::Session(_, session::Event::PromptHistory(value)))) if value == redo));
         assert!(matches!(crate::ui::reading_keys(press),
             Some(Binding::Custom(Message::Files(crate::files::Action::History(value)))) if value == redo));
     }
@@ -3908,27 +4015,27 @@ fn prompt_list_keys() {
     };
     let (plain, shift) = (Modifiers::empty(), Modifiers::SHIFT);
     use key::Named::{Enter, Tab};
-    assert!(matches!(crate::ui::enter_sends(press(Enter, plain, true)),
-        Some(Binding::Custom(Message::Send))));
-    assert!(matches!(crate::ui::enter_sends(press(Enter, shift, true)),
-        Some(Binding::Custom(Message::PromptNewline))));
-    assert!(matches!(crate::ui::enter_sends(press(Tab, plain, true)),
-        Some(Binding::Custom(Message::PromptIndent(false)))));
-    assert!(matches!(crate::ui::enter_sends(press(Tab, shift, true)),
-        Some(Binding::Custom(Message::PromptIndent(true)))));
+    assert!(matches!(crate::ui::enter_sends("demo", press(Enter, plain, true)),
+        Some(Binding::Custom(Message::Session(_, session::Event::Send)))));
+    assert!(matches!(crate::ui::enter_sends("demo", press(Enter, shift, true)),
+        Some(Binding::Custom(Message::Session(_, session::Event::PromptNewline)))));
+    assert!(matches!(crate::ui::enter_sends("demo", press(Tab, plain, true)),
+        Some(Binding::Custom(Message::Session(_, session::Event::PromptIndent(false))))));
+    assert!(matches!(crate::ui::enter_sends("demo", press(Tab, shift, true)),
+        Some(Binding::Custom(Message::Session(_, session::Event::PromptIndent(true))))));
     // an unfocused prompt and Ctrl+Tab leave Tab to the window
-    assert!(crate::ui::enter_sends(press(Tab, plain, false)).is_none());
-    assert!(crate::ui::enter_sends(press(Tab, Modifiers::COMMAND, true)).is_none());
+    assert!(crate::ui::enter_sends("demo", press(Tab, plain, false)).is_none());
+    assert!(crate::ui::enter_sends("demo", press(Tab, Modifiers::COMMAND, true)).is_none());
     // on a plain line Tab changes nothing in the draft; in a list it indents, undone in one step
     let (mut app, _) = App::new(true, None);
     for (draft, indented) in [("plain", "plain"), ("- item", "  - item")] {
         let view = app.current_mut().unwrap();
         view.draft = crate::editor::Editor::with_text(draft);
-        let _ = app.update(Message::PromptIndent(false));
+        let _ = app.update(in_session(&app, session::Event::PromptIndent(false)));
         assert_eq!(app.current().unwrap().draft.text(), indented);
-        let _ = app.update(Message::PromptNewline);
+        let _ = app.update(in_session(&app, session::Event::PromptNewline));
         assert_ne!(app.current().unwrap().draft.text(), indented);
-        let _ = app.update(Message::PromptHistory(false));
+        let _ = app.update(in_session(&app, session::Event::PromptHistory(false)));
         assert_eq!(app.current().unwrap().draft.text(), indented);
     }
     // where Enter does not send, it is the list's line break
@@ -4262,7 +4369,7 @@ fn acp_controls_distinguish_loading_restoring_empty_and_failed() {
         ui.find("Refreshing controls…").unwrap();
         ui.find("Saved selection").unwrap();
         ui.click("Saved selection").unwrap();
-        assert!(!ui.into_messages().any(|message| matches!(message, Message::SetMode(_) | Message::SetOption(..))));
+        assert!(!ui.into_messages().any(|message| matches!(message, Message::Session(_, session::Event::SetMode(_)) | Message::Session(_, session::Event::SetOption(..)))));
     }
     app.views.get_mut("demo").unwrap().conversation.session.as_mut().unwrap().controls.as_mut().unwrap().status = "ready".into();
     app.views.get_mut("demo").unwrap().status = sill_client::lane::Status::Reconnecting("offline".into());
@@ -4270,7 +4377,7 @@ fn acp_controls_distinguish_loading_restoring_empty_and_failed() {
         let mut ui = simulator(&app, (1200.0, 860.0));
         ui.find("Refreshing controls…").unwrap();
         ui.click("Saved selection").unwrap();
-        assert!(!ui.into_messages().any(|message| matches!(message, Message::SetMode(_))));
+        assert!(!ui.into_messages().any(|message| matches!(message, Message::Session(_, session::Event::SetMode(_)))));
     }
     app.views.get_mut("demo").unwrap().status = sill_client::lane::Status::Live;
     let controls = app.views.get_mut("demo").unwrap().conversation.session.as_mut().unwrap().controls.as_mut().unwrap();
@@ -4326,5 +4433,5 @@ fn a_long_thought_folds_to_its_last_line() {
     let mut ui = simulator(&app, (1200.0, 860.0));
     ui.click("So I will fold the thought to one line.").unwrap();
     let messages: Vec<Message> = ui.into_messages().collect();
-    assert!(matches!(messages.as_slice(), [Message::ToggleTool(id)] if id == "raw"));
+    assert!(matches!(messages.as_slice(), [Message::Session(_, session::Event::ToggleTool(id))] if id == "raw"));
 }

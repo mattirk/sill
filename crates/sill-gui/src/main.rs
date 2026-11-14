@@ -1,10 +1,12 @@
 mod agents_ui;
 mod providers_ui;
 mod annotation;
+mod armed;
 mod annotation_state;
 #[cfg(test)]
 mod annotation_tests;
 mod box_ui;
+mod changes_page;
 mod changes_ui;
 mod control;
 mod crosscheck;
@@ -39,6 +41,7 @@ mod mac_procs;
 mod macos;
 mod media;
 mod menu;
+mod menu_page;
 mod names;
 mod network;
 #[cfg(test)]
@@ -48,7 +51,9 @@ mod policies;
 mod processes;
 mod rows;
 mod selection;
+mod session;
 mod settings;
+mod settings_page;
 mod settings_ui;
 mod shell;
 mod shortcuts;
@@ -65,6 +70,7 @@ mod ui;
 mod usage;
 mod viewer;
 mod vm_ui;
+mod window;
 mod workspaces;
 mod workspaces_ui;
 mod files;
@@ -75,7 +81,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use iced::widget::{markdown, operation, scrollable, text_editor};
+use iced::widget::{markdown, operation, scrollable};
 use iced::{Font, Subscription, Task};
 use serde_json::json;
 use sill_client::actions::{Actions, Outcome};
@@ -86,9 +92,6 @@ use sill_client::outbox::{Outbox, Settled};
 use sill_client::supervision::Attention;
 use sill_client::{Change, Connector, Conversation};
 use sill_proto::sessions::Session;
-use sill_proto::sfp::{
-    Answer, AnswerQuestion, CancelTurn, ConfigValue, Control, SessionControl, SubmissionKey,
-};
 
 #[derive(Parser)]
 #[command(about = "Sill's desktop window")]
@@ -324,37 +327,13 @@ pub enum Message {
     NetworkDone(String, network::Choice, Outcome),
     /// A network choice's note has had its time (its number, so a later note stays).
     NetworkNoticeExpired(String, u64),
-    /// The conversation scrolled: at its end, its offset, and the height in view.
-    Scrolled(bool, f32, f32),
+    /// What the person does in a session's own view, with that session's id (`session.rs`).
+    Session(String, session::Event),
+    /// Ctrl+End: the selected session's conversation to its end. The keys' messages mean the
+    /// session selected when the key arrives.
     Latest,
-    Prompt(text_editor::Action),
-    PromptHistory(bool),
-    /// Shift+Enter in the prompt: a line break that continues a list.
-    PromptNewline,
-    /// Tab (false) or Shift+Tab in the prompt: indentation in a list, focus elsewhere.
-    PromptIndent(bool),
-    Send,
-    Stop,
-    Answer {
-        question_id: String,
-        option_id: String,
-    },
-    Unqueue(String),
-    /// A queued prompt goes now: the agent's turn stops and it is sent first.
-    SendNow(String),
     /// The login card of a session (`login_ui`).
     Login(String, login_ui::Event),
-    ToggleTool(String),
-    /// A group of tool calls in a run (`tool_runs`), by its first call's item.
-    ToggleGroup(String),
-    ToggleAnswered(String),
-    SetMode(Pick),
-    SetOption(String, Pick),
-    /// A prompt that did not arrive: back into the composer, sent again, checked, or dropped.
-    EditSend(String),
-    RetrySend(String),
-    CheckSend(String),
-    DiscardSend(String),
     /// A press on the top bar's empty space: the window manager moves the window (not in Shelf
     /// mode, which is locked to its edge).
     DragWindow,
@@ -377,15 +356,12 @@ pub enum Message {
     Media(media::Event),
     Annotation(annotation::Event),
     AttachmentPaths(String, String, Option<Vec<std::path::PathBuf>>),
-    /// `>_`: the session's jail shell in place of the prompt, or the prompt again.
+    /// The shell shortcuts: the selected session's jail shell in place of the prompt, or the
+    /// prompt again.
     ToggleTerminal,
     ToggleHostTerminal,
     Terminal(String, u64, terminal::Event),
-    TermAction(terminal::Action),
     TermPaste(String, u64, Option<String>),
-    /// End the shell itself (hiding the pane only detaches from it).
-    EndTerminal,
-    ReopenTerminal,
     Files(files::Action),
     /// The window's new width.
     Resized(iced::Size),
@@ -451,13 +427,6 @@ pub enum Message {
     DaemonSettings(u64, Result<sill_proto::admin::Settings, String>),
     /// A tab's ×: end its session (a ghost's needs a second press).
     CloseTab(String),
-    /// A form question: a field edited, the form sent, or declined.
-    FormEdit(String, forms::Edit),
-    SubmitForm(String),
-    DeclineForm(String),
-    /// A held prompt: send it after all, or drop it.
-    ResumeHeld(String),
-    DiscardHeld(String),
     Noop,
 }
 
@@ -752,7 +721,7 @@ pub struct App {
     /// A session just created or reopened: chosen once the list shows it.
     pending_choose: Option<String>,
     /// A ghost's tab whose × was pressed once.
-    pub armed_close: Option<String>,
+    pub armed_close: armed::Armed<String>,
     pub selected: Option<String>,
     /// Open tabs in activation order, most recently visited last.
     tab_history: Vec<String>,
@@ -901,7 +870,7 @@ impl App {
             crosscheck: crosscheck::State::default(),
             daemon_settings: None,
             pending_choose: None,
-            armed_close: None,
+            armed_close: Default::default(),
             selected: None,
             tab_history: Vec::new(),
             initial,
@@ -1039,334 +1008,12 @@ impl App {
         )
     }
 
-    /// Put the window where it belongs in its mode (`geometry::target`), off the window's thread:
-    /// the displays read as they are now, the window placed and held to its mode's limits. What
-    /// it was placed with comes back (`Message::Placed`).
-    fn placing(
-        &self,
-    ) -> impl Fn() -> Option<(Vec<geometry::Display>, Option<geometry::Target>)>
-    + Send
-    + Clone
-    + 'static {
-        let (xid, mode, settings) = (self.xid, self.layout.mode, self.settings.clone());
-        move || {
-            let xid = xid?;
-            let displays = desktop::displays()?;
-            let target = geometry::target(mode, &settings, &displays);
-            if let Some(t) = &target {
-                desktop::place(xid, t.rect, t.limits);
-            }
-            Some((displays, target))
-        }
-    }
-
-    /// Show the window: placed, mapped, placed again, then activated with the time of the press
-    /// that asked for it (0 when none did).
-    fn show(&mut self, time: u32) -> Task<Message> {
-        let Some(id) = self.window_id else {
-            return Task::none();
-        };
-        self.visible = true;
-        let xid = self.xid;
-        let place = self.placing();
-        let again = place.clone();
-        blocking(
-            move || {
-                if let Some(xid) = xid {
-                    desktop::stamp(xid);
-                }
-                place()
-            },
-            Message::Placed,
-        )
-        .chain(iced::window::set_mode(id, iced::window::Mode::Windowed))
-        .chain(blocking(
-            move || {
-                let xid = xid?;
-                // the window manager maps it first; then it is placed again and activated —
-                // asked again a moment later, should the first ask come before it was managed
-                std::thread::sleep(std::time::Duration::from_millis(60));
-                let placed = again();
-                desktop::activate(xid, time);
-                // the window manager now and then lets the request go by, or gives the focus
-                // back to the window before: asked again, and the focus set directly, until
-                // the window is active — for a little over a second, never once it is
-                let mut asks = 1;
-                for wait in [200u64, 250, 300, 400] {
-                    std::thread::sleep(std::time::Duration::from_millis(wait));
-                    if desktop::is_active(xid) {
-                        break;
-                    }
-                    asks += 1;
-                    desktop::activate(xid, time);
-                    desktop::focus(xid);
-                }
-                // to the journal when it took more than one ask: how often the window
-                // manager lets a request go by
-                if asks > 1 {
-                    eprintln!(
-                        "sill-gui: brought up: {} after {asks} asks",
-                        if desktop::is_active(xid) {
-                            "active"
-                        } else {
-                            "still not active"
-                        }
-                    );
-                }
-                placed
-            },
-            Message::Placed,
-        ))
-        // and the keyboard in the session's prompt
-        .chain(self.focus_prompt())
-    }
-
     /// The prompt takes the keyboard, where a session's conversation is shown.
     fn focus_prompt(&self) -> Task<Message> {
         if self.backend_shown() || self.current().is_none_or(|v| v.terminal_shown || v.annotation.is_some()) {
             return Task::none();
         }
         operation::focus("prompt")
-    }
-
-    /// Hide the window; it goes on, and the hotkey or `sill toggle` shows it again. The window is
-    /// read first: a change the person made to it is kept before it goes.
-    fn hide(&mut self) -> Task<Message> {
-        if self.window_id.is_none() {
-            return Task::none();
-        }
-        self.visible = false;
-        match self.xid {
-            Some(xid) => blocking(
-                move || desktop::snapshot(xid),
-                |read| Message::Geometry(Read::Hide, read),
-            ),
-            None => self.hidden(),
-        }
-    }
-
-    /// The settings saved, and the window unmapped.
-    fn hidden(&mut self) -> Task<Message> {
-        self.save_settings();
-        match self.window_id {
-            Some(id) => iced::window::set_mode(id, iced::window::Mode::Hidden),
-            None => Task::none(),
-        }
-    }
-
-    /// The hotkey's toggle: shown and active, it hides; shown behind others, it comes up; hidden,
-    /// it shows.
-    fn toggle(&mut self, time: u32) -> Task<Message> {
-        if !self.visible {
-            return self.show(time);
-        }
-        let Some(xid) = self.xid else {
-            return self.hide();
-        };
-        blocking(
-            move || desktop::is_active(xid),
-            move |active| Message::ToggleDecided(active, time),
-        )
-    }
-
-    /// The window where it belongs (`placing`) on X11; elsewhere Shelf mode's width rule
-    /// (`fit_without_x11`).
-    fn place(&self) -> Task<Message> {
-        if self.xid.is_none() {
-            return self.fit_without_x11(true);
-        }
-        blocking(self.placing(), Message::Placed)
-    }
-
-    /// Placed for the current mode after a change into or out of Shelf mode (`switching`).
-    fn place_switch(&mut self) -> Task<Message> {
-        self.switching = Some(self.layout.mode);
-        blocking(self.placing(), Message::SwitchPlaced)
-    }
-
-    /// The displays and the window as read (`Message::Geometry`): the regular look, or the last
-    /// one before the window hides or leaves a mode, when the person's change is kept at once.
-    fn geometry_read(
-        &mut self,
-        why: Read,
-        read: Option<(Vec<geometry::Display>, Option<geometry::Rect>)>,
-    ) -> Task<Message> {
-        match why {
-            Read::Poll => {
-                // hidden since it was asked: showing reads the displays afresh
-                let Some((displays, window)) = read.filter(|_| self.visible) else {
-                    return Task::none();
-                };
-                let target = geometry::target(self.layout.mode, &self.settings, &displays);
-                match self
-                    .geometry
-                    .observe(displays, window, target.as_ref(), Instant::now())
-                {
-                    geometry::Step::Nothing => {}
-                    geometry::Step::Place => return self.place(),
-                    geometry::Step::Keep(rect) => self.keep(self.layout.mode, rect),
-                }
-                Task::none()
-            }
-            Read::Hide => {
-                self.flush_geometry(self.layout.mode, read.and_then(|(_, window)| window));
-                // shown again while it was read: it stays
-                if self.visible {
-                    self.save_settings();
-                    return Task::none();
-                }
-                self.hidden()
-            }
-            Read::Leave(old) => {
-                self.flush_geometry(old, read.and_then(|(_, window)| window));
-                // out of Shelf mode the window stays on the display it was on: the main one
-                if old == layout::Mode::Shelf
-                    && let Some(main) = geometry::main_display(&self.geometry.displays)
-                {
-                    self.settings.display = Some(main.name.clone());
-                }
-                self.save_settings();
-                self.place_switch()
-            }
-        }
-    }
-
-    /// The person's own geometry in `mode`, kept (`geometry::remember`).
-    fn keep(&mut self, mode: layout::Mode, rect: geometry::Rect) {
-        if geometry::remember(mode, &mut self.settings, &self.geometry.displays, rect) {
-            self.save_settings();
-        }
-    }
-
-    /// The person's last change kept before the window hides, changes mode or quits: `window` as
-    /// read now, else as last seen.
-    fn flush_geometry(&mut self, mode: layout::Mode, window: Option<geometry::Rect>) {
-        if let Some(rect) = self.geometry.flush(window, Instant::now()) {
-            self.keep(mode, rect);
-        }
-    }
-
-    /// Shelf mode's share on the main display, as Settings shows it.
-    pub fn shelf_share(&self) -> f32 {
-        geometry::main_display(&self.geometry.displays).map_or_else(
-            || self.settings.shelf_share(),
-            |main| self.settings.shelf_share_on(&main.name),
-        )
-    }
-
-    /// Interface scale changes now: everything inside the window grows or shrinks, the window
-    /// itself stays where it is, as large as it was. iced's sizes are in units of the scale, so
-    /// the window's and the monitor's are converted to the new one. On X11 the window's place,
-    /// size and limits are device pixels and stay as they are; without X11 Shelf mode is fitted
-    /// again once iced reports the monitor in the new units.
-    fn set_scale(&mut self, scale: f32) -> Task<Message> {
-        let (old, new) = (self.settings.scale(), settings::valid_scale(scale));
-        if old == new {
-            return Task::none();
-        }
-        let ratio = old / new;
-        self.width *= ratio;
-        self.height *= ratio;
-        self.monitor = self
-            .monitor
-            .map(|m| iced::Size::new(m.width * ratio, m.height * ratio));
-        self.settings.interface_scale = Some(new);
-        self.save_settings();
-        match self.window_id {
-            Some(id) if self.no_x11 => iced::window::monitor_size(id).map(Message::Monitor),
-            _ => Task::none(),
-        }
-    }
-
-    fn set_always_on_top(&mut self, on: bool) -> Task<Message> {
-        self.settings.always_on_top = Some(on);
-        self.save_settings();
-        let Some(id) = self.window_id else {
-            return Task::none();
-        };
-        iced::window::set_level(
-            id,
-            if on {
-                iced::window::Level::AlwaysOnTop
-            } else {
-                iced::window::Level::Normal
-            },
-        )
-    }
-
-    fn save_settings(&mut self) {
-        self.settings.mode = Some(self.layout.mode.name().into());
-        self.settings.drawer_width = self.layout.drawer;
-        if self.persist {
-            settings::save(&self.settings);
-        }
-    }
-
-    /// Without X11 (Wayland) there are no displays to read and no place to set: Shelf mode is held
-    /// to its share of the monitor iced reports (a maximum the compositor may honour), and Drawer
-    /// and Full get half its width when entered. Nothing is kept per display.
-    fn fit_without_x11(&self, entering: bool) -> Task<Message> {
-        if self.layout.plain {
-            return Task::none();
-        }
-        let (Some(id), Some(monitor), true) = (self.window_id, self.monitor, self.no_x11) else {
-            return Task::none();
-        };
-        if self.layout.mode == layout::Mode::Shelf {
-            let width = (monitor.width * self.settings.shelf_share()).round();
-            let max = iced::Size::new(
-                (monitor.width * layout::SHELF_MAX).round(),
-                monitor.height.max(self.height),
-            );
-            return iced::window::set_max_size(id, Some(max))
-                .chain(iced::window::resize(id, iced::Size::new(width, self.height)));
-        }
-        let unlimited = iced::window::set_max_size(id, None);
-        if !entering {
-            return unlimited;
-        }
-        let width = (monitor.width * layout::WORK_SHARE).round();
-        unlimited.chain(iced::window::resize(id, iced::Size::new(width, self.height)))
-    }
-
-    /// Into `mode`: the drawer in Drawer mode only (a quick look elsewhere closes), the window
-    /// from the Shelf's edge to its working size and place and back; Drawer ⇄ Full keep the
-    /// window as it is.
-    fn set_mode(&mut self, mode: layout::Mode) -> Task<Message> {
-        use layout::Mode;
-        let old = self.layout.mode;
-        if old == mode {
-            return Task::none();
-        }
-        if mode == Mode::Full {
-            self.layout.before_full = old;
-        }
-        self.layout.mode = mode;
-        let opening = mode == Mode::Drawer && !self.drawer.shown;
-        self.drawer.shown = mode == Mode::Drawer;
-        self.save_settings();
-        let mut tasks = vec![self.restore_scroll()];
-        if opening && let Some(id) = self.selected.clone() {
-            tasks.push(self.files_refresh(&id));
-        }
-        if (old == Mode::Shelf) != (mode == Mode::Shelf) {
-            // the window read first, so what the person made of it in the old mode is kept; then
-            // placed where the new mode has it
-            match self.xid {
-                // a change already under way: the window is still as that one found it, and is
-                // placed for the mode current when it lands (`Read::Leave`, `SwitchPlaced`)
-                Some(_) if self.switching.is_some() => {}
-                Some(xid) => {
-                    self.switching = Some(mode);
-                    tasks.push(blocking(
-                        move || desktop::snapshot(xid),
-                        move |read| Message::Geometry(Read::Leave(old), read),
-                    ));
-                }
-                None => tasks.push(self.place()),
-            }
-        }
-        Task::batch(tasks)
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -1468,6 +1115,14 @@ impl App {
 
     fn current_mut(&mut self) -> Option<&mut SessionView> {
         self.views.get_mut(self.selected.as_deref()?)
+    }
+
+    /// A session event from the keys, for the session selected now.
+    fn selected_event(&mut self, event: session::Event) -> Task<Message> {
+        match self.selected.clone() {
+            Some(id) => self.session_event(id, event),
+            None => Task::none(),
+        }
     }
 
     /// The session list, read off the GUI thread.
@@ -1648,19 +1303,8 @@ impl App {
                 }
                 return Task::batch(tasks);
             }
-            Message::Scrolled(at_bottom, offset, viewport) => {
-                if let Some(view) = self.current_mut() {
-                    view.follow_tail = at_bottom;
-                    view.scroll_offset = offset;
-                    view.viewport = viewport;
-                }
-            }
-            Message::Latest => {
-                if let Some(view) = self.current_mut() {
-                    view.follow_tail = true;
-                }
-                return operation::snap_to_end("conversation");
-            }
+            Message::Session(id, event) => return self.session_event(id, event),
+            Message::Latest => return self.selected_event(session::Event::Latest),
             Message::Copy(value) => return iced::clipboard::write(value),
             Message::CopyFile => {
                 if let Some(reader) = self.current().and_then(|v| v.reader.as_ref()) {
@@ -1695,145 +1339,7 @@ impl App {
                 return self.network_done(id, choice, outcome);
             }
             Message::NetworkNoticeExpired(id, serial) => self.network.expire(&id, serial),
-            Message::Prompt(action) => {
-                if let Some(view) = self.current_mut() {
-                    if view.annotation.is_none() { view.draft.perform(action); }
-                }
-            }
-            Message::PromptHistory(redo) => {
-                if let Some(view) = self.current_mut() {
-                    if view.annotation.is_none() { view.draft.history(redo); }
-                }
-            }
-            Message::PromptNewline => {
-                if let Some(view) = self.current_mut().filter(|view| view.annotation.is_none()) {
-                    view.draft.edit(lists::newline);
-                }
-            }
-            Message::PromptIndent(outdent) => {
-                let indented = self.current_mut().is_some_and(|view| {
-                    view.annotation.is_none() && view.draft.edit(|draft| lists::indent(draft, outdent))
-                });
-                if !indented {
-                    return keys::step(!outdent);
-                }
-            }
-            Message::Send => return self.send(),
-            Message::Stop => return self.stop(),
-            Message::Answer {
-                question_id,
-                option_id,
-            } => return self.answer(question_id, option_id),
-            Message::Unqueue(submission_id) => {
-                let Some(view) = self.current() else {
-                    return Task::none();
-                };
-                let params = SubmissionKey {
-                    session_id: view.id.clone(),
-                    submission_id,
-                };
-                return self.act(
-                    &view.id,
-                    Act::Unqueue,
-                    "_sill/submissions.cancel",
-                    json!(params),
-                );
-            }
             Message::Login(session, event) => return self.login_event(session, event),
-            Message::SendNow(submission_id) => {
-                let (Some(view), Some(actions)) = (self.current(), self.actions.clone()) else {
-                    return Task::none();
-                };
-                let session = view.id.clone();
-                let params = json!(SubmissionKey {
-                    session_id: session.clone(),
-                    submission_id,
-                });
-                return blocking(
-                    move || {
-                        actions.call_needing("sill.send_now", "_sill/submissions.send_now", params)
-                    },
-                    move |outcome| Message::Done(session, Act::SendNow, outcome),
-                );
-            }
-            Message::ToggleTool(id) => {
-                if let Some(view) = self.current_mut() {
-                    toggle(&mut view.open_tools, id);
-                }
-            }
-            Message::ToggleGroup(id) => {
-                if let Some(view) = self.current_mut() {
-                    toggle(&mut view.open_groups, id);
-                }
-            }
-            Message::ToggleAnswered(id) => {
-                if let Some(view) = self.current_mut() {
-                    toggle(&mut view.open_answers, id);
-                }
-            }
-            Message::SetMode(pick) => {
-                return self.control(Control::SetMode {
-                    mode_id: pick.value,
-                });
-            }
-            Message::SetOption(option_id, pick) => {
-                let value = match pick.boolean {
-                    Some(value) => ConfigValue::Bool { value },
-                    None => ConfigValue::Id { value: pick.value },
-                };
-                return self.control(Control::SetConfig { option_id, value });
-            }
-            Message::EditSend(id) => {
-                if let Some(view) = self.current_mut()
-                    && view.annotation.is_none()
-                    && let Some(pending) = view.outbox.take(&id)
-                {
-                    let mut text = view.draft.text().trim_end().to_string();
-                    if !text.trim().is_empty() {
-                        text.push_str("\n\n");
-                    }
-                    text.push_str(pending.text());
-                    let restored = view.pending_attachments.remove(&id).unwrap_or_else(|| pending.submit.attachments.into_iter().map(Into::into).collect());
-                    view.attachments.extend(restored);
-                    view.draft = editor::Editor::with_text(&text);
-                    return operation::focus("prompt");
-                }
-            }
-            Message::RetrySend(id) => {
-                let Some(view) = self.current_mut() else {
-                    return Task::none();
-                };
-                let Some(submit) = view.outbox.retry(&id) else {
-                    return Task::none();
-                };
-                let session = view.id.clone();
-                return self.act(
-                    &session,
-                    Act::Send(id),
-                    "_sill/sessions.submit",
-                    json!(submit),
-                );
-            }
-            Message::CheckSend(id) => {
-                let Some(view) = self.current_mut() else {
-                    return Task::none();
-                };
-                let Some(key) = view.outbox.check(&id) else {
-                    return Task::none();
-                };
-                let session = view.id.clone();
-                return self.act(
-                    &session,
-                    Act::Check(id),
-                    "_sill/submissions.get",
-                    json!(key),
-                );
-            }
-            Message::DiscardSend(id) => {
-                if let Some(view) = self.current_mut() {
-                    view.outbox.take(&id);
-                }
-            }
             Message::ResizeWindow(direction) => {
                 // Shelf mode is locked to its edge: only its right edge is the person's
                 if self.layout.mode == layout::Mode::Shelf
@@ -1896,15 +1402,11 @@ impl App {
                 self.menu = None;
                 return iced::window::latest().and_then(iced::window::toggle_maximize);
             }
-            Message::ToggleTerminal | Message::ToggleHostTerminal => {
-                if self.current().is_some_and(|v| v.annotation.is_some()) { return Task::none(); }
-                return self.toggle_shell(matches!(message, Message::ToggleHostTerminal));
+            Message::ToggleTerminal => {
+                return self.selected_event(session::Event::ToggleTerminal);
             }
-            Message::ReopenTerminal => return self.open_terminal(),
-            Message::EndTerminal => {
-                if let Some(pane) = self.current().and_then(|v| v.terminal.as_ref()) {
-                    pane.close();
-                }
+            Message::ToggleHostTerminal => {
+                return self.selected_event(session::Event::ToggleHostTerminal);
             }
             Message::Terminal(session, generation, event) => {
                 // a login's terminal closing lets the session go on (`login_ui`)
@@ -1926,36 +1428,6 @@ impl App {
                 }
                 if let Some(failed) = closed {
                     return self.login_terminal_closed(&session, generation, failed);
-                }
-            }
-            Message::TermAction(action) => {
-                let Some((session, generation)) = self
-                    .current()
-                    .map(|view| (view.id.clone(), view.terminal_generation))
-                else {
-                    return Task::none();
-                };
-                let Some(pane) = self.current_mut().and_then(|v| v.terminal.as_mut()) else {
-                    return Task::none();
-                };
-                match action {
-                    terminal::Action::Copy => {
-                        if let Some(selected) = pane.selection() {
-                            return iced::clipboard::write(selected);
-                        }
-                    }
-                    terminal::Action::Paste => {
-                        return iced::clipboard::read().map(move |text| {
-                            Message::TermPaste(session.clone(), generation, text)
-                        });
-                    }
-                    terminal::Action::PastePrimary => {
-                        return iced::clipboard::read_primary().map(move |text| {
-                            Message::TermPaste(session.clone(), generation, text)
-                        });
-                    }
-                    terminal::Action::Open(url) => terminal::open_link(url),
-                    action => pane.perform(action),
                 }
             }
             Message::TermPaste(session, generation, text) => {
@@ -2191,76 +1663,12 @@ impl App {
                 if self.demo {
                     return Task::none();
                 }
-                if ghost && self.armed_close.as_deref() != Some(id.as_str()) {
-                    self.armed_close = Some(id);
+                if ghost && !self.armed_close.press(id.clone()) {
                     return Task::none();
                 }
-                self.armed_close = None;
+                self.armed_close.clear();
                 let (method, params) = sill_client::sessions::end(&id);
                 return self.act(&id, Act::End(id.clone()), method, params);
-            }
-            Message::FormEdit(question_id, edit) => {
-                if let Some(view) = self.current_mut()
-                    && let Some(question) = view.conversation.questions.get(&question_id)
-                {
-                    let form = view.forms.entry(question_id).or_default();
-                    forms::apply(form, question, edit);
-                }
-            }
-            Message::SubmitForm(question_id) => {
-                let Some(view) = self.current_mut() else {
-                    return Task::none();
-                };
-                let Some(question) = view.conversation.questions.get(&question_id) else {
-                    return Task::none();
-                };
-                let form = view.forms.get(&question_id).cloned().unwrap_or_default();
-                match forms::values(&form, question) {
-                    Ok(values) => return self.answer_with(question_id, Answer::Form { values }),
-                    Err(problem) => {
-                        view.failed = Some(format!("The form cannot be sent: {problem}"))
-                    }
-                }
-            }
-            Message::DeclineForm(question_id) => {
-                return self.answer_with(question_id, Answer::Cancel);
-            }
-            Message::ResumeHeld(submission_id) | Message::DiscardHeld(submission_id)
-                if self.demo =>
-            {
-                let _ = submission_id;
-            }
-            Message::ResumeHeld(submission_id) => {
-                let Some(view) = self.current() else {
-                    return Task::none();
-                };
-                let key = SubmissionKey {
-                    session_id: view.id.clone(),
-                    submission_id,
-                };
-                let session = view.id.clone();
-                return self.act(
-                    &session,
-                    Act::Resume,
-                    "_sill/submissions.resume",
-                    json!(key),
-                );
-            }
-            Message::DiscardHeld(submission_id) => {
-                let Some(view) = self.current() else {
-                    return Task::none();
-                };
-                let key = SubmissionKey {
-                    session_id: view.id.clone(),
-                    submission_id,
-                };
-                let session = view.id.clone();
-                return self.act(
-                    &session,
-                    Act::Unqueue,
-                    "_sill/submissions.cancel",
-                    json!(key),
-                );
             }
             Message::Page(down) => {
                 let reading = self.current().is_some_and(|v| v.files.reader.is_some());
@@ -2274,45 +1682,6 @@ impl App {
             Message::Noop => {}
         }
         Task::none()
-    }
-
-    /// The pending changes and Settings → auto-revert, read off the GUI thread.
-    fn changes_load(&self) -> Task<Message> {
-        use changes_ui::Event;
-        let Some(actions) = self.actions.clone() else {
-            return Task::done(Message::Changes(Event::Loaded(Ok((demo::changes(), 0)))));
-        };
-        let workspaces = self.workspaces_page_load();
-        let changes = blocking(
-            move || {
-                let entries = actions
-                    .reading(sill_client::changes::list)
-                    .map_err(|e| format!("{e:#}"))?;
-                // unread settings: no countdown rather than a wrong one
-                let minutes = actions
-                    .read::<sill_proto::admin::Settings>("_sill/settings.get", json!({}))
-                    .map_or(0, |s| sill_client::changes::auto_revert(&s));
-                Ok((entries, minutes))
-            },
-            |loaded| Message::Changes(Event::Loaded(loaded)),
-        );
-        Task::batch([changes, workspaces])
-    }
-
-    fn history_load(&self, before: Option<String>) -> Task<Message> {
-        use changes_ui::Event;
-        let Some(actions) = self.actions.clone() else {
-            return Task::none();
-        };
-        let append = before.is_some();
-        blocking(
-            move || {
-                actions
-                    .reading(|c| sill_client::changes::history(c, before.clone()))
-                    .map_err(|e| format!("{e:#}"))
-            },
-            move |page| Message::Changes(Event::HistoryLoaded(page, append)),
-        )
     }
 
     /// A page of the herring's in the conversation's place.
@@ -2347,677 +1716,6 @@ impl App {
                 Task::batch([self.settings_load(), self.vm_event(vm_ui::Event::Read), self.crosscheck_reviewers_load()])
             }
         }
-    }
-
-    fn read_daemon_settings(&mut self) -> Task<Message> {
-        let Some(actions) = self.actions.clone() else {
-            return Task::none();
-        };
-        if self.settings_pending {
-            return Task::none();
-        }
-        self.settings_pending = true;
-        let revision = self.settings_revision;
-        blocking(
-            move || {
-                actions
-                    .reading(|client| {
-                        client.call::<sill_proto::admin::Settings>(
-                            "_sill/settings.get",
-                            sill_proto::Empty {},
-                        )
-                    })
-                    .map_err(|e| format!("{e:#}"))
-            },
-            move |result| Message::DaemonSettings(revision, result),
-        )
-    }
-
-    fn settings_load(&mut self) -> Task<Message> {
-        let Some(page) = self.settings_page.as_mut() else {
-            return Task::none();
-        };
-        let token = page.token.clone();
-        let load = sill_client::request_id("settings-load");
-        page.load_token = load.clone();
-        if !page.autostart_busy {
-            page.autostart = sill_proto::autostart_enabled().map_err(|e| e.to_string());
-        }
-        let Some(actions) = self.actions.clone() else {
-            // the demo: the defaults, as a daemon that was never configured has them
-            let snapshot = sill_client::settings::Snapshot {
-                settings: sill_proto::admin::Settings {
-                    theme: style::theme_id().into(),
-                    ..Default::default()
-                },
-                instructions: "Commit after the person has tested a feature.".into(),
-                global_pins: vec![],
-                active_hours: Some(crate::usage::demo()),
-            };
-            return Task::done(Message::SettingsReply(
-                token,
-                settings_ui::Event::Loaded(load, Box::new(Ok(snapshot))),
-            ));
-        };
-        blocking(
-            move || {
-                actions
-                    .reading(sill_client::settings::read)
-                    .map_err(|e| format!("{e:#}"))
-            },
-            move |r| Message::SettingsReply(token, settings_ui::Event::Loaded(load, Box::new(r))),
-        )
-    }
-
-    /// One request of the Settings page; `said` tells what it did, from its answer.
-    fn settings_call(
-        &self,
-        (method, params): sill_client::settings::Request,
-        said: fn(&serde_json::Value) -> String,
-    ) -> Task<Message> {
-        let Some(token) = self.settings_page.as_ref().map(|p| p.token.clone()) else {
-            return Task::none();
-        };
-        let Some(actions) = self.actions.clone() else {
-            return Task::done(Message::SettingsReply(
-                token,
-                settings_ui::Event::Done(Err(
-                    "The demo has no daemon: settings are examples here.".into(),
-                )),
-            ));
-        };
-        blocking(
-            move || match actions.call(method, params) {
-                sill_client::actions::Outcome::Done(value) => Ok(said(&value)),
-                other => Err(other.problem().unwrap_or("failed").to_string()),
-            },
-            move |r| Message::SettingsReply(token, settings_ui::Event::Done(r)),
-        )
-    }
-
-    fn settings_event(&mut self, event: settings_ui::Event) -> Task<Message> {
-        use settings_ui::Event;
-        use sill_client::settings;
-        if let Event::Policy(event) = event {
-            return self.policy_event(event);
-        }
-        let Some(page) = &mut self.settings_page else {
-            return Task::none();
-        };
-        match event {
-            Event::Autostart(enabled) => {
-                if page.autostart_busy || self.demo
-                    || !matches!(sill_proto::transport::selected(), Ok(None))
-                {
-                    return Task::none();
-                }
-                page.autostart_busy = true;
-                page.said = None;
-                let token = page.token.clone();
-                return blocking(
-                    move || crate::daemon_ui::set_autostart(enabled),
-                    move |result| Message::SettingsReply(token, Event::AutostartDone(result)),
-                );
-            }
-            Event::AutostartDone(result) => {
-                page.autostart_busy = false;
-                page.autostart = sill_proto::autostart_enabled().map_err(|e| e.to_string());
-                page.said = Some(match result {
-                    Ok(()) => "Daemon autostart preference updated.".into(),
-                    Err(why) => format!("Autostart change failed: {why}"),
-                });
-                return self.daemon_event(daemon_ui::Event::Check);
-            }
-            Event::Category(category) => {
-                page.category = category;
-                page.armed_delete = false;
-                self.settings.settings_category = category;
-                // only the person's own window writes their file: never the demo or a test
-                if self.persist {
-                    crate::settings::save(&self.settings);
-                }
-                return operation::scroll_to(
-                    "settings",
-                    scrollable::AbsoluteOffset {
-                        x: 0.0,
-                        y: page.scroll_offsets.get(&category).copied().unwrap_or(0.0),
-                    },
-                );
-            }
-            Event::Scrolled(category, offset) => {
-                page.scroll_offsets.insert(category, offset);
-            }
-            Event::ToggleSection(title) => {
-                if !page.collapsed.remove(title) {
-                    page.collapsed.insert(title);
-                }
-                if title == "Policies"
-                    && !page.collapsed.contains(title)
-                    && !page.policies.loaded
-                    && !page.policies.busy
-                {
-                    return self.policy_event(policies::Event::Refresh);
-                }
-            }
-            Event::Policy(_) => unreachable!(),
-            Event::Loaded(load, loaded) => {
-                if page.load_token != load {
-                    return Task::none();
-                }
-                let loaded = *loaded;
-                if let Ok(snapshot) = &loaded {
-                    // An older background settings.get must not undo this page's fresh read.
-                    self.settings_revision += 1;
-                    style::set_theme(&snapshot.settings.theme);
-                    self.daemon_settings = Some(snapshot.settings.clone());
-                    if !page.edited {
-                        page.instructions = text_editor::Content::with_text(&snapshot.instructions);
-                    } else if page.instructions_saving.is_none()
-                        && page.instructions.text() == snapshot.instructions
-                    {
-                        page.edited = false;
-                    }
-                }
-                page.snapshot = Some(loaded);
-                self.sync_drawer_follow();
-            }
-            Event::Change(change) => {
-                page.armed_delete = false;
-                // the theme shows at once; the rest after the daemon has it
-                if let sill_proto::admin::SettingChange::Theme { value } = &change {
-                    style::set_theme(value);
-                }
-                return self.settings_call(settings::patch(change), |_| String::new());
-            }
-            Event::Done(result) => {
-                page.said = match result {
-                    Ok(said) => (!said.is_empty()).then_some(said),
-                    Err(why) => Some(format!("Not changed: {why}")),
-                };
-                return self.settings_load();
-            }
-            Event::ShortcutInput(id, value) => {
-                page.shortcuts
-                    .get_or_insert_with(|| self.settings.shortcuts.clone())
-                    .insert(id, value);
-            }
-            Event::ApplyShortcuts => {
-                if let Some(draft) = &page.shortcuts {
-                    match crate::shortcuts::validate(draft) {
-                        Ok(()) => {
-                            self.settings.shortcuts = draft.clone();
-                            page.shortcuts = None;
-                            self.save_settings();
-                        }
-                        Err(why) => page.said = Some(why),
-                    }
-                }
-            }
-            Event::ResetShortcuts => {
-                page.shortcuts = None;
-                self.settings.shortcuts.clear();
-                self.save_settings();
-            }
-            Event::Scale(scale) => return self.set_scale(scale),
-            Event::ShelfShare(share) => {
-                // the main display's width, and the default for displays without their own
-                self.settings.shelf_width = Some(share);
-                if let Some(main) = geometry::main_display(&self.geometry.displays) {
-                    let prefs = self.settings.displays.entry(main.name.clone()).or_default();
-                    prefs.shelf_width = Some(share);
-                }
-                self.save_settings();
-                if self.layout.mode == layout::Mode::Shelf {
-                    return self.place();
-                }
-            }
-            Event::Instructions(action) => {
-                if action.is_edit() {
-                    page.edited = true;
-                }
-                page.instructions.perform(action);
-            }
-            Event::InstructionsNewline => {
-                page.edited = true;
-                lists::newline(&mut page.instructions);
-            }
-            Event::InstructionsIndent(outdent) => {
-                let before = page.instructions.text();
-                if !lists::indent(&mut page.instructions, outdent) {
-                    return keys::step(!outdent);
-                }
-                page.edited |= page.instructions.text() != before;
-            }
-            Event::SaveInstructions => {
-                if page.instructions_saving.is_some() {
-                    return Task::none();
-                }
-                let text = page.instructions.text();
-                page.instructions_saving = Some(text.clone());
-                let token = page.token.clone();
-                let actions = self.actions.clone();
-                return blocking(
-                    {
-                        let text = text.clone();
-                        move || match actions {
-                            Some(actions) => {
-                                let (method, params) = settings::set_instructions(&text);
-                                actions.call(method, params)
-                            }
-                            None => Outcome::NotSent(
-                                "The demo has no daemon: settings are examples here.".into(),
-                            ),
-                        }
-                    },
-                    move |outcome| {
-                        Message::SettingsReply(token, Event::InstructionsSaved(text, outcome))
-                    },
-                );
-            }
-            Event::InstructionsSaved(text, outcome) => {
-                if page.instructions_saving.as_ref() != Some(&text) {
-                    return Task::none();
-                }
-                page.instructions_saving = None;
-                page.said = Some(match outcome.problem() {
-                    Some(why) => format!("Not changed: {why}"),
-                    None => {
-                        "Instructions saved: agents get them when they start or next look".into()
-                    }
-                });
-                // Keep edits protected until a read confirms the current text. A failed save,
-                // an old snapshot or new typing during the request must not replace them.
-                return self.settings_load();
-            }
-            Event::PinPath(value) => page.pin_path = value,
-            Event::AddPin => {
-                let path = page.pin_path.trim().to_string();
-                if !path.starts_with('/') {
-                    return Task::none();
-                }
-                page.pin_path.clear();
-                let path = sill_proto::sessions::HostPath::from_path(std::path::Path::new(&path));
-                return self.settings_call(settings::add_global_pin(path), |_| {
-                    "Pinned for every new session".into()
-                });
-            }
-            Event::RemovePin(path) => {
-                return self.settings_call(settings::remove_global_pin(path), |_| String::new());
-            }
-            Event::RestoreNetworkPrompts => {
-                return self.settings_call(
-                    settings::patch(sill_proto::admin::SettingChange::NetworkQuietHosts { value: vec![] }),
-                    |_| "Network prompts restored. Network access is unchanged.".into(),
-                );
-            }
-            Event::Compact => {
-                page.said = Some("Compacting…".into());
-                return self.settings_call(settings::compact(), |v| {
-                    let n = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("0").to_string();
-                    format!(
-                        "Compacted {} · {} trimmed · {} deleted",
-                        n("compacted"),
-                        n("trimmed"),
-                        n("deleted")
-                    )
-                });
-            }
-            Event::DeleteAll => {
-                if !std::mem::take(&mut page.armed_delete) {
-                    page.armed_delete = true;
-                    return Task::none();
-                }
-                return self.settings_call(settings::forget_ended(), |v| {
-                    format!(
-                        "Deleted {} ended sessions",
-                        v.get("deleted").and_then(|x| x.as_str()).unwrap_or("0")
-                    )
-                });
-            }
-            Event::ToggleWhere => page.where_open = !page.where_open,
-            Event::AlwaysOnTop(on) => return self.set_always_on_top(on),
-            Event::HotkeyInput(value) => page.hotkey = Some(value),
-            Event::ApplyHotkey => {
-                let Some(spec) = page.hotkey.clone() else {
-                    return Task::none();
-                };
-                if crate::hotkey::validate(&spec).is_err() {
-                    return Task::none();
-                }
-                page.hotkey = None;
-                // the grab follows at once; the setting is the daemon's
-                if let Some(hotkey) = &self.hotkey {
-                    hotkey.set(spec.trim());
-                }
-                return self.settings_call(
-                    settings::patch(sill_proto::admin::SettingChange::Hotkey {
-                        value: Some(spec.trim().to_string()),
-                    }),
-                    |_| String::new(),
-                );
-            }
-        }
-        Task::none()
-    }
-
-    fn changes_event(&mut self, event: changes_ui::Event) -> Task<Message> {
-        use changes_ui::Event;
-        use sill_client::changes;
-        use sill_proto::changes::Entry;
-        let demo = self.demo;
-        // a listing is the window's: one that arrives after the page closed is kept for the next
-        // opening all the same
-        let event = match event {
-            Event::Loaded(loaded) => {
-                let listing = &mut self.changes_listing;
-                match loaded {
-                    Ok((entries, minutes)) => {
-                        listing.auto_revert = minutes;
-                        listing.entries = Some(Ok(entries));
-                    }
-                    Err(error) => listing.entries = Some(Err(error)),
-                }
-                let Some(page) = &mut self.changes else {
-                    return Task::none();
-                };
-                page.loading = false;
-                if let Some(Ok(entries)) = &listing.entries {
-                    page.fresh_entries = true;
-                    let keys: Vec<String> = entries.iter().map(changes::entry_key).collect();
-                    page.open
-                        .retain(|k, _| changes_ui::workspace_of(k).is_some() || keys.contains(k));
-                    if page
-                        .armed
-                        .as_ref()
-                        .is_some_and(|a| !keys.iter().any(|k| a.ends_with(k.as_str())))
-                    {
-                        page.armed = None;
-                    }
-                }
-                return Task::none();
-            }
-            event => event,
-        };
-        let Some(page) = &mut self.changes else {
-            return Task::none();
-        };
-        let listing = &self.changes_listing;
-        match event {
-            Event::Loaded(_) => {}
-            Event::Refresh => {
-                if page.history {
-                    page.history_loading = true;
-                    return self.history_load(None);
-                }
-                page.loading = true;
-                return self.changes_load();
-            }
-            Event::History(on) => {
-                page.history = on;
-                if on && page.events.is_empty() && !page.history_loading {
-                    page.history_loading = true;
-                    return self.history_load(None);
-                }
-            }
-            Event::HistoryLoaded(loaded, append) => {
-                page.history_loading = false;
-                match loaded {
-                    Ok(next) => {
-                        if !append {
-                            page.events.clear();
-                        }
-                        page.events.extend(next.events);
-                        page.next = next.next;
-                        page.history_error = None;
-                    }
-                    Err(error) => page.history_error = Some(error),
-                }
-            }
-            Event::MoreHistory => {
-                let before = page.next.clone();
-                page.history_loading = true;
-                return self.history_load(before);
-            }
-            Event::Diff(key) => {
-                if page.open.remove(&key).is_some() {
-                    return Task::none();
-                }
-                let Some(entry) = listing.entry(&key) else {
-                    return Task::none();
-                };
-                let target = changes::target(entry);
-                page.open.insert(key.clone(), None);
-                let Some(actions) = self.actions.clone() else {
-                    return Task::done(Message::Changes(Event::DiffLoaded(
-                        key,
-                        Ok(demo::changes_diff()),
-                    )));
-                };
-                return blocking(
-                    move || {
-                        actions
-                            .reading(|c| changes::diff(c, target.clone()))
-                            .map_err(|e| format!("{e:#}"))
-                    },
-                    move |diff| Message::Changes(Event::DiffLoaded(key, diff)),
-                );
-            }
-            Event::WorkspaceDiff(workspace, path) => {
-                let key = changes_ui::workspace_key(&workspace, &path);
-                if page.open.remove(&key).is_some() {
-                    return Task::none();
-                }
-                page.open.insert(key, None);
-                return self.workspace_file_diff(workspace, path);
-            }
-            Event::DiffLoaded(key, diff) => {
-                if let Some(slot) = page.open.get_mut(&key) {
-                    *slot = Some(diff);
-                }
-            }
-            event @ (Event::Keep(_)
-            | Event::KeepAll(_)
-            | Event::Revert(_)
-            | Event::RevertAll(_)
-            | Event::Undo(_)) => {
-                let (keys, armed_as) = match &event {
-                    Event::Keep(key) | Event::Undo(key) => (vec![key.clone()], None),
-                    Event::KeepAll(keys) => (keys.clone(), None),
-                    Event::Revert(key) => (vec![key.clone()], Some(key.clone())),
-                    Event::RevertAll(keys) => {
-                        (keys.clone(), keys.first().map(|k| format!("all {k}")))
-                    }
-                    _ => unreachable!(),
-                };
-                // the listing from before the page was opened is shown, not acted on
-                if !page.fresh_entries {
-                    return Task::none();
-                }
-                // reverting takes a second press
-                if let Some(armed) = armed_as {
-                    if page.armed.as_ref() != Some(&armed) {
-                        page.armed = Some(armed);
-                        return Task::none();
-                    }
-                    page.armed = None;
-                }
-                if demo {
-                    page.said = Some("The demo keeps and reverts nothing.".into());
-                    return Task::none();
-                }
-                let entries: Vec<&Entry> = keys.iter().filter_map(|k| listing.entry(k)).collect();
-                let Some(first) = entries.first() else {
-                    return Task::none();
-                };
-                let (verb, requests) = match (&event, first) {
-                    (Event::Revert(_), Entry::Live { repo, path, .. }) => {
-                        ("reverted", vec![changes::git_revert(repo, path)])
-                    }
-                    (
-                        Event::Undo(_),
-                        Entry::Kept {
-                            session_id,
-                            keep_id,
-                            ..
-                        },
-                    ) => ("undone", vec![changes::undo(session_id, keep_id)]),
-                    // the daemon takes 128 paths a request: more go in several
-                    (Event::Keep(_) | Event::KeepAll(_), Entry::Overlay { session_id, .. }) => {
-                        ("kept", changes::keep_all(session_id, &entries))
-                    }
-                    (Event::Revert(_) | Event::RevertAll(_), Entry::Overlay { session_id, .. }) => {
-                        ("reverted", changes::revert_all(session_id, &entries))
-                    }
-                    _ => return Task::none(),
-                };
-                let Some(actions) = self.actions.clone() else {
-                    return Task::none();
-                };
-                return blocking(
-                    move || changes::call_all(&actions, requests),
-                    move |outcome| Message::Done(String::new(), Act::Changes(verb), outcome),
-                );
-            }
-        }
-        Task::none()
-    }
-
-    fn menu_event(&mut self, event: menu::Event) -> Task<Message> {
-        use menu::Event;
-        match event {
-            Event::View(mode) => {
-                self.menu = None;
-                return self.set_mode(mode);
-            }
-            Event::Leave => {
-                self.menu = None;
-            }
-            Event::Toggle | Event::Hover => {
-                if matches!(event, Event::Toggle) && self.menu.take().is_some() {
-                    return Task::none();
-                }
-                if self.menu.is_some() {
-                    return Task::none();
-                }
-                self.menu = Some(menu::Menu::default());
-                let Some(actions) = self.actions.clone() else {
-                    // the demo has two agents and nothing to reopen
-                    let demo = ["claude", "codex"]
-                        .iter()
-                        .map(|id| {
-                            serde_json::from_value(json!({
-                                "id": id, "name": if *id == "claude" { "Claude Code" } else { "Codex" },
-                                "command": [], "home_paths": [{"path": format!("~/.{id}"), "kind": "directory"}]
-                            }))
-                            .expect("a demo agent")
-                        })
-                        .collect();
-                    self.menu.as_mut().unwrap().agents = Some(Ok(demo));
-                    return Task::none();
-                };
-                let settings = actions.clone();
-                return Task::batch([
-                    blocking(
-                        move || {
-                            actions
-                                .reading(sill_client::sessions::startable)
-                                .map_err(|e| format!("{e:#}"))
-                        },
-                        |agents| Message::Menu(Event::Agents(agents)),
-                    ),
-                    blocking(
-                        move || {
-                            settings
-                                .read::<sill_proto::admin::Settings>(
-                                    "_sill/settings.get",
-                                    json!({}),
-                                )
-                                .ok()
-                                .and_then(|s| s.remember_pins)
-                                .unwrap_or(false)
-                        },
-                        |on| Message::Menu(Event::RememberPins(on)),
-                    ),
-                    self.list(),
-                ]);
-            }
-            Event::Agents(agents) => {
-                let ids: Vec<String> = agents.as_ref().map(|a| a.iter().map(|d| d.id.clone()).collect()).unwrap_or_default();
-                if let Some(menu) = &mut self.menu {
-                    menu.agents = Some(agents);
-                }
-                return self.agent_icons_load(ids);
-            }
-            Event::RememberPins(on) => {
-                if let Some(menu) = &mut self.menu {
-                    menu.remember_pins = on;
-                }
-            }
-            Event::Filter(value) => {
-                if let Some(menu) = &mut self.menu {
-                    menu.filter = value;
-                }
-            }
-            Event::More => {
-                if let Some(menu) = &mut self.menu {
-                    menu.expanded = true;
-                }
-            }
-            Event::New { agent, ghost, workspaces } => {
-                let remember = self
-                    .menu
-                    .take()
-                    .map(|m| m.remember_pins)
-                    .unwrap_or_else(|| {
-                        self.daemon_settings
-                            .as_ref()
-                            .and_then(|s| s.remember_pins)
-                            .unwrap_or(false)
-                    });
-                if self.demo {
-                    return Task::none();
-                }
-                let (method, params) = sill_client::sessions::create(&agent, ghost, remember, workspaces);
-                return self.act("", Act::Create, method, params);
-            }
-            Event::Reopen(id) => {
-                self.menu = None;
-                let ended = self
-                    .all_sessions
-                    .iter()
-                    .any(|s| s.session_id == id && s.ended_at.is_some());
-                if !ended {
-                    return self.choose(id);
-                }
-                let (method, params) = sill_client::sessions::reopen(&id);
-                return self.act(&id, Act::Reopen(id.clone()), method, params);
-            }
-            Event::Setup(_) => {
-                self.menu = None;
-                return self.update(Message::ShowPage(Page::Agents));
-            }
-            Event::NewHere(id) => {
-                self.menu = None;
-                let Some(from) = self.all_sessions.iter().find(|s| s.session_id == id) else {
-                    return Task::none();
-                };
-                let (method, params) = sill_client::sessions::new_here(from);
-                return self.act("", Act::Create, method, params);
-            }
-            Event::Delete(id) => {
-                let Some(menu) = &mut self.menu else {
-                    return Task::none();
-                };
-                if menu.armed.as_deref() != Some(id.as_str()) {
-                    menu.armed = Some(id);
-                    return Task::none();
-                }
-                menu.armed = None;
-                let (method, params) = sill_client::sessions::delete(&id);
-                return self.act(&id, Act::Delete, method, params);
-            }
-        }
-        Task::none()
     }
 
     /// Escape goes between the session and the backend; an
@@ -3059,7 +1757,7 @@ impl App {
         }
         // the session: to the backend's default page — the drawer and the mode stay as they are
         // (they have their own controls)
-        self.armed_close = None;
+        self.armed_close.clear();
         self.show_page(self.default_page())
     }
 
@@ -3583,210 +2281,6 @@ impl App {
         Task::none()
     }
 
-    /// The prompt goes to the agent (the daemon queues it while a turn runs). It leaves the
-    /// composer, but stays in the outbox until the daemon has it.
-    fn send(&mut self) -> Task<Message> {
-        let demo = self.demo;
-        let Some(view) = self.current_mut() else {
-            return Task::none();
-        };
-        let text = view.draft.text().trim_end().to_string();
-        if view.annotation.is_some() || view.attachments_busy {
-            return Task::none();
-        }
-        if text.trim().is_empty() && view.attachments.is_empty() {
-            let next = view.conversation.submissions.values()
-                .filter(|s| s.delivery == "queued" && s.insertion == "pending"
-                    && s.outcome == "pending" && !s.held)
-                .min_by_key(|s| s.accepted_seq.parse::<u64>().unwrap_or(u64::MAX))
-                .map(|s| s.submission_id.clone());
-            return match next {
-                Some(id) => self.update(Message::SendNow(id)),
-                None => Task::none(),
-            };
-        }
-        view.draft = editor::Editor::new();
-        view.follow_tail = true;
-        view.failed = None;
-        let logged_in = view
-            .conversation
-            .session
-            .as_ref()
-            .is_some_and(|s| s.authentication.is_none());
-        view.login.settle(logged_in);
-        if demo {
-            for event in demo::prompt(view.conversation.seq + 1, &text) {
-                view.accept(event);
-            }
-            return operation::snap_to_end("conversation").chain(self.focus_prompt());
-        }
-        let session = view.id.clone();
-        let attachments = std::mem::take(&mut view.attachments);
-        self.submit(&session, text, attachments)
-    }
-
-    /// `text` goes to `session`'s agent as a prompt of the person's: the composer's, or one a
-    /// button writes for them (the shelf's Resolve). The draft is not touched.
-    pub(crate) fn submit(&mut self, session: &str, text: String, attachments: Vec<media::DraftAttachment>) -> Task<Message> {
-        self.submit_for(session, text, attachments, None)
-    }
-
-    /// [`App::submit`] with the prompt's `purpose` (`Submit::purpose`): one a button wrote for
-    /// the person whose turn the conversation folds (Apply's commit).
-    pub(crate) fn submit_for(
-        &mut self,
-        session: &str,
-        text: String,
-        attachments: Vec<media::DraftAttachment>,
-        purpose: Option<String>,
-    ) -> Task<Message> {
-        let Some(view) = self.views.get_mut(session) else {
-            return Task::none();
-        };
-        view.follow_tail = true;
-        view.failed = None;
-        let submit = view.outbox.send_for(
-            session,
-            text,
-            attachments.iter().map(|a| a.attachment.clone()).collect(),
-            purpose,
-        );
-        view.pending_attachments.insert(submit.submission_id.clone(), attachments);
-        let reopen = view.lane.is_none();
-        if reopen {
-            self.open_lane(session, lane::Mode::Open);
-        }
-        let id = submit.submission_id.clone();
-        Task::batch([
-            self.act(
-                session,
-                Act::Send(id),
-                "_sill/sessions.submit",
-                json!(submit),
-            ),
-            operation::snap_to_end("conversation"),
-            self.focus_prompt(),
-        ])
-    }
-
-    /// Stop the turn. Prompts still queued are removed first: stopping first
-    /// could let the turn's end dispatch the next one.
-    fn stop(&mut self) -> Task<Message> {
-        if self.demo {
-            return Task::none();
-        }
-        let (Some(view), Some(actions)) = (self.current(), self.actions.clone()) else {
-            return Task::none();
-        };
-        let Some(turn_id) = view
-            .conversation
-            .session
-            .as_ref()
-            .and_then(|s| s.turn_id.clone())
-        else {
-            return Task::none();
-        };
-        let queued = view.conversation.queued_submission_ids();
-        let session = view.id.clone();
-        let session_id = session.clone();
-        blocking(
-            move || {
-                let mut kept = vec![];
-                for submission_id in queued {
-                    let key = SubmissionKey {
-                        session_id: session_id.clone(),
-                        submission_id,
-                    };
-                    if let Some(problem) = actions
-                        .call("_sill/submissions.cancel", json!(key))
-                        .problem()
-                    {
-                        kept.push(problem.to_string());
-                    }
-                }
-                let cancel = CancelTurn {
-                    session_id,
-                    turn_id,
-                };
-                let outcome = actions.call("_sill/sessions.cancel", json!(cancel));
-                if kept.is_empty() || !outcome.is_done() {
-                    outcome
-                } else {
-                    Outcome::Refused {
-                        code: None,
-                        message: format!(
-                            "stop requested, but some queued prompts could not be removed: {}",
-                            kept.join("; ")
-                        ),
-                    }
-                }
-            },
-            move |outcome| Message::Done(session, Act::Stop, outcome),
-        )
-    }
-
-    fn answer(&mut self, question_id: String, option_id: String) -> Task<Message> {
-        let demo = self.demo;
-        let Some(view) = self.current_mut() else {
-            return Task::none();
-        };
-        view.follow_tail = view.follow_tail || view.conversation_shown();
-        if demo {
-            for event in demo::answered(view.conversation.seq + 1, &option_id) {
-                view.accept(event);
-            }
-            return operation::snap_to_end("conversation");
-        }
-        let _ = view;
-        self.answer_with(question_id, Answer::Permission { option_id })
-    }
-
-    /// One answer to a question of the selected session; a second press while it is on its way
-    /// sends nothing.
-    fn answer_with(&mut self, question_id: String, answer: Answer) -> Task<Message> {
-        let Some(view) = self.current_mut() else {
-            return Task::none();
-        };
-        if !view.answering.insert(question_id.clone()) {
-            return Task::none();
-        }
-        view.failed = None;
-        let params = AnswerQuestion {
-            session_id: view.id.clone(),
-            question_id: question_id.clone(),
-            answer_id: sill_client::request_id("answer"),
-            answer,
-        };
-        let session = view.id.clone();
-        self.act(
-            &session,
-            Act::Answer(question_id),
-            "_sill/questions.answer",
-            json!(params),
-        )
-    }
-
-    fn control(&mut self, control: Control) -> Task<Message> {
-        if self.demo {
-            return Task::none();
-        }
-        let Some(view) = self.current_mut() else {
-            return Task::none();
-        };
-        view.failed = None;
-        let params = SessionControl {
-            session_id: view.id.clone(),
-            control,
-        };
-        let session = view.id.clone();
-        self.act(
-            &session,
-            Act::Control,
-            "_sill/sessions.control",
-            json!(params),
-        )
-    }
-
     fn demo_tick(&mut self) -> Task<Message> {
         let step = self.demo_step;
         self.demo_step += 1;
@@ -3806,83 +2300,6 @@ impl App {
             Task::none()
         }
     }
-
-    fn toggle_shell(&mut self, host: bool) -> Task<Message> {
-        if let Some(view) = self.current_mut() {
-            view.select_shell(host);
-        }
-        self.toggle_terminal()
-    }
-
-    fn toggle_terminal(&mut self) -> Task<Message> {
-        let Some(view) = self.current_mut() else {
-            return Task::none();
-        };
-        if view.terminal_shown {
-            view.terminal_shown = false;
-            return operation::focus("prompt");
-        }
-        view.terminal_shown = true;
-        let reusable = view.terminal.as_ref().is_some_and(|t| {
-            matches!(
-                t.status,
-                terminal::Status::Opening | terminal::Status::Running
-            )
-        });
-        if let Some(pane) = view.terminal.as_mut().filter(|_| reusable) {
-            pane.focused = true;
-            return Task::none();
-        }
-        self.open_terminal()
-    }
-
-    /// A pane on the session's jail shell (the pretend one in `--demo`); its events come tagged
-    /// so a replaced pane's late ones are dropped. The replaced pane detaches as it goes.
-    fn open_terminal(&mut self) -> Task<Message> {
-        let connect = self.connect.clone();
-        let demo = self.demo;
-        self.next_terminal += 1;
-        let generation = self.next_terminal;
-        let Some(view) = self.current_mut() else {
-            return Task::none();
-        };
-        view.terminal_generation = generation;
-        let (cols, rows) = view
-            .terminal
-            .as_ref()
-            .map_or((80, 16), |t| (t.cols, t.rows));
-        // the old pane goes first, so its stream is closed before another attaches
-        view.terminal = None;
-        let (pane, events) = match (demo, connect) {
-            (false, Some(connect)) => terminal::Pane::open(cols, rows, {
-                let id = view.id.clone();
-                let host = view.terminal_host;
-                let cwd = view
-                    .files
-                    .roots
-                    .iter()
-                    .find(|r| r.metadata.as_ref().is_some_and(|m| m.directory))
-                    .map(|r| r.path.clone())
-                    .or_else(|| view.files.home.clone());
-                move |cols, rows| {
-                    if host {
-                        sill_client::terminal::host_shell(connect, id, cwd)(cols, rows)
-                    } else {
-                        sill_client::terminal::jail_shell(connect, id)(cols, rows)
-                    }
-                }
-            }),
-            _ => terminal::Pane::open(cols, rows, terminal::demo_shell),
-        };
-        view.terminal = Some(pane);
-        let session = view.id.clone();
-        let stream = iced::futures::stream::unfold(events, |events| async move {
-            events.recv().await.ok().map(|event| (event, events))
-        });
-        Task::run(stream, move |event| {
-            Message::Terminal(session.clone(), generation, event)
-        })
-    }
 }
 
 /// With `SILL_GUI_TRACE` set, what happened, on stderr: requests' outcomes, lanes' states.
@@ -3890,11 +2307,5 @@ fn trace(what: impl FnOnce() -> String) {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *ON.get_or_init(|| std::env::var_os("SILL_GUI_TRACE").is_some()) {
         eprintln!("sill-gui: {}", what());
-    }
-}
-
-fn toggle(set: &mut BTreeSet<String>, id: String) {
-    if !set.remove(&id) {
-        set.insert(id);
     }
 }

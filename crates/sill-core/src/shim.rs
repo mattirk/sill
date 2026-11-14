@@ -147,11 +147,6 @@ impl Control {
         Ok(r.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string())
     }
 
-    pub fn read_file(&mut self, path: &Path) -> Result<String> {
-        let r = self.call(json!({ "op": "read_file", "path": path }))?;
-        Ok(r.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string())
-    }
-
     /// Open an image inside the live jail. Binary bytes stay on the descriptor; no text
     /// conversion, host-path lookup or agent process is involved.
     pub fn open_image(&mut self, path: &Path) -> Result<std::fs::File> {
@@ -222,11 +217,6 @@ impl Control {
         let fd = fd.context("no pty fd in the shim's reply")?;
         let pid = reply.get("pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         Ok((fd, pid))
-    }
-
-    pub fn write_file(&mut self, path: &Path, content: &str) -> Result<()> {
-        self.call(json!({ "op": "write_file", "path": path, "content": content }))?;
-        Ok(())
     }
 
     // --- what runs in the jail (docs/jail-processes.md)

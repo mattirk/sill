@@ -775,14 +775,13 @@ impl Hub {
         let ghosts: Vec<sill_core::store::Session> =
             self.with_store(|s| s.sessions()).unwrap_or_default().into_iter().filter(|s| s.ghost && s.ended_at.is_none()).collect();
         let uid = rustix::process::getuid().as_raw();
-        let user = std::env::var("USER").unwrap_or_else(|_| uid.to_string());
         for s in ghosts {
             let runner = self.runners.lock().unwrap().get(&s.id).cloned();
             let runner = runner.filter(|r| r.alive());
             if runner.as_ref().is_some_and(|r| r.busy()) || !sill_core::session::is_running(&s.id) {
                 continue;
             }
-            let due = match self.session_changes(&s, uid, &user) {
+            let due = match self.session_changes(&s, uid) {
                 Ok(changes) => sill_core::changes::ghost_due(&changes, std::time::SystemTime::now(), after),
                 Err(e) => {
                     eprintln!("sill daemon: ghost {}: scanning its writes: {e:#}", s.id);
@@ -819,13 +818,13 @@ impl Hub {
 
     /// A session's writes as the Changes page lists them: its upper trees against its policy (a
     /// ghost's tightened).
-    fn session_changes(&self, s: &sill_core::store::Session, uid: u32, user: &str) -> Result<Vec<sill_core::ledger::Change>> {
+    fn session_changes(&self, s: &sill_core::store::Session, uid: u32) -> Result<Vec<sill_core::ledger::Change>> {
         let sdir = sill_core::session::state_dir_path(uid, &s.id)?;
         if !sdir.is_dir() { return Ok(vec![]); }
         let launch = sill_core::session::policy_snapshot(&s.id)?.context("launch not recorded; rebuild the session")?;
         let filesystem = launch.filesystem.context("filesystem plan not recorded; rebuild the session")?;
         let policy = launch.policy;
-        let plan = sill_core::changes::session_plan(policy.clone(), sdir, &self.home, uid, user, &filesystem)?;
+        let plan = sill_core::changes::session_view(&policy, &sdir, &self.home, &filesystem)?;
         sill_core::changes::scan(&policy, &plan, None)
     }
 

@@ -88,7 +88,7 @@ fn apply_and_discard_send_the_revision_the_person_saw() {
     app.views.get_mut("demo").unwrap().workspaces.loaded = Some(loaded(3));
     let task = app.update(Message::Workspaces(Event::Discard("demo".into(), "ws-1".into())));
     settle_task(&mut app, task);
-    assert_eq!(app.views["demo"].workspaces.armed.as_deref(), Some("ws-1"));
+    assert!(app.views["demo"].workspaces.armed.get().is_some_and(|(w, _)| w == "ws-1"));
     let task = app.update(Message::Workspaces(Event::Discard("demo".into(), "ws-1".into())));
     settle_task(&mut app, task);
     let (said, bad) = app.views["demo"].workspaces.notices["ws-1"].clone();
@@ -227,17 +227,17 @@ fn apply_onto_another_branch_asks_once_for_that_branch() {
     let task = app.update(Message::Workspaces(Event::Apply("demo".into(), "ws-1".into())));
     settle_task(&mut app, task);
     let state = &app.views["demo"].workspaces;
-    assert_eq!(state.apply_armed, Some(("ws-1".into(), "feature".into())));
+    assert!(state.apply_armed.get().is_some_and(|(w, seen)| w == "ws-1" && seen.destination_branch == "feature"));
     assert!(state.notices["ws-1"].0.contains("started from main, but your checkout is on feature"));
     assert!(state.running.is_none());
     // the checkout switched again before the second click: asked again, for the new branch
     app.views.get_mut("demo").unwrap().workspaces.loaded = Some(on("other"));
     let task = app.update(Message::Workspaces(Event::Apply("demo".into(), "ws-1".into())));
     settle_task(&mut app, task);
-    assert_eq!(app.views["demo"].workspaces.apply_armed, Some(("ws-1".into(), "other".into())));
+    assert!(app.views["demo"].workspaces.apply_armed.get().is_some_and(|(w, seen)| w == "ws-1" && seen.destination_branch == "other"));
     // clicking elsewhere drops the question
     let _ = app.update(Message::Workspaces(Event::Disarm("demo".into())));
-    assert_eq!(app.views["demo"].workspaces.apply_armed, None);
+    assert_eq!(app.views["demo"].workspaces.apply_armed.get(), None);
     let task = app.update(Message::Workspaces(Event::Apply("demo".into(), "ws-1".into())));
     settle_task(&mut app, task);
     // the second click for the same branch applies onto it
@@ -255,7 +255,64 @@ fn apply_onto_another_branch_asks_once_for_that_branch() {
     server.join().unwrap();
     let state = &app.views["demo"].workspaces;
     assert_eq!(state.notices.get("ws-1"), Some(&("Applied to your checkout.".to_string(), false)));
-    assert_eq!(state.apply_armed, None);
+    assert_eq!(state.apply_armed.get(), None);
+    assert_eq!(state.apply_onto, None);
+}
+
+/// The second click confirms what the shelf showed at the first. A workspace read again between
+/// the two with other work in it is asked about again: nothing is sent for what the person has
+/// not seen.
+#[test]
+fn a_workspace_that_changed_between_the_two_clicks_is_asked_about_again() {
+    let (client, mut daemon) = daemon();
+    let mut app = live_app(vec![client]);
+    let at = |tip: &str, branch: &str| {
+        let mut l = loaded(3);
+        l.details[0].revision.tip = tip.into();
+        l.details[0].revision.destination_branch = branch.into();
+        l
+    };
+    let armed_for = |app: &App, tip: &str| app.views["demo"].workspaces.armed.get().is_some_and(|(w, seen)| w == "ws-1" && seen.tip == tip);
+    let click = |app: &mut App, event: Event| {
+        let task = app.update(Message::Workspaces(event));
+        settle_task(app, task);
+    };
+    let server = std::thread::spawn(move || {
+        // one Discard, of the work shown at the click before it
+        let discard = daemon.expect("_sill/workspaces.discard");
+        assert_eq!(discard["params"]["revision"]["tip"], "t2");
+        daemon.reply(&discard, json!({"workspace": workspace(), "operation": null, "discarded": null}));
+        // one Apply, likewise
+        let get = daemon.expect("_sill/workspaces.get");
+        let mut d = detail(3);
+        d["revision"]["tip"] = json!("t4");
+        d["revision"]["destination_branch"] = json!("feature");
+        daemon.reply(&get, d);
+        let apply = daemon.expect("_sill/workspaces.apply");
+        assert_eq!(apply["params"]["revision"]["tip"], "t4");
+        daemon.reply(&apply, json!({"workspace": workspace(), "operation": null, "discarded": null}));
+    });
+    app.views.get_mut("demo").unwrap().workspaces.loaded = Some(at("t1", "main"));
+    click(&mut app, Event::Discard("demo".into(), "ws-1".into()));
+    assert!(armed_for(&app, "t1"));
+    app.views.get_mut("demo").unwrap().workspaces.loaded = Some(at("t2", "main"));
+    click(&mut app, Event::Discard("demo".into(), "ws-1".into()));
+    assert!(armed_for(&app, "t2"), "armed again, for what the shelf shows now");
+    assert!(app.views["demo"].workspaces.running.is_none() && app.views["demo"].workspaces.notices.is_empty());
+    click(&mut app, Event::Discard("demo".into(), "ws-1".into()));
+    assert_eq!(app.views["demo"].workspaces.armed.get(), None);
+    assert_eq!(app.views["demo"].workspaces.notices["ws-1"], ("Discarded. Undo on Changes for 7 days.".to_string(), false));
+    // an Apply onto another branch
+    app.views.get_mut("demo").unwrap().workspaces.loaded = Some(at("t3", "feature"));
+    click(&mut app, Event::Apply("demo".into(), "ws-1".into()));
+    app.views.get_mut("demo").unwrap().workspaces.loaded = Some(at("t4", "feature"));
+    click(&mut app, Event::Apply("demo".into(), "ws-1".into()));
+    let state = &app.views["demo"].workspaces;
+    assert!(state.apply_armed.get().is_some_and(|(_, seen)| seen.tip == "t4") && state.apply_onto.is_none() && state.running.is_none());
+    assert!(state.notices["ws-1"].0.contains("your checkout is on feature"));
+    click(&mut app, Event::Apply("demo".into(), "ws-1".into()));
+    server.join().unwrap();
+    assert_eq!(app.views["demo"].workspaces.notices["ws-1"], ("Applied to your checkout.".to_string(), false));
 }
 
 /// The Apply loop of 2026-11-11: the daemon went on refusing as `uncommitted` although the

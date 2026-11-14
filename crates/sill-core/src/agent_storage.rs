@@ -13,7 +13,73 @@ use std::path::{Path, PathBuf};
 pub struct Binding {
     pub source: HostPath,
     pub target: HostPath,
-    pub declaration: Option<HomePath>,
+    pub kind: BindingKind,
+}
+
+/// What the jail does at a path of the filesystem view. The view carries its name
+/// (`PathRule::behavior`, a string of the frozen protocol); nothing is enforced from the name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Behavior {
+    /// Host files readable, writes kept in the session.
+    Overlay,
+    /// The selected agent's private profile, bound over its home path.
+    Agent,
+    /// A declared login file, imported or synchronized with the normal profile.
+    Credential,
+    /// Another agent's host data, hidden in both views.
+    AgentMask,
+    /// A pinned folder: writes reach the host.
+    Pin,
+    /// Session-private scratch.
+    Private,
+    /// Hidden in both views.
+    Mask,
+    /// A read-only host binding.
+    ReadOnly,
+    /// Writes reach the host.
+    Direct,
+    /// The session's own copy of a repository, bound at the repository's path.
+    Workspace,
+}
+
+impl Behavior {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Overlay => "overlay",
+            Self::Agent => "agent",
+            Self::Credential => "credential",
+            Self::AgentMask => "agent_mask",
+            Self::Pin => "pin",
+            Self::Private => "private",
+            Self::Mask => "mask",
+            Self::ReadOnly => "read_only",
+            Self::Direct => "direct",
+            Self::Workspace => "workspace",
+        }
+    }
+}
+
+/// Why a path is bound into the jail; what is prepared and checked for it follows from this.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BindingKind {
+    /// A declared home path of the selected agent, backed by its private profile.
+    Agent(HomePath),
+    /// A pinned host folder, bound at its own path.
+    Pin,
+    /// Session-private scratch from the state filesystem.
+    Private,
+    /// An explicit bind of a development jail.
+    Development,
+}
+
+impl Binding {
+    pub fn declaration(&self) -> Option<&HomePath> {
+        match &self.kind {
+            BindingKind::Agent(entry) => Some(entry),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,7 +152,7 @@ pub fn resolve(
     plan.rule(
         home,
         Some(home),
-        "overlay",
+        Behavior::Overlay,
         "policy",
         "Host files are readable; writes stay in this session except for explicit bindings.",
     );
@@ -98,12 +164,12 @@ pub fn resolve(
         plan.bindings.push(Binding {
             source: HostPath::from_path(&source),
             target: HostPath::from_path(&target),
-            declaration: Some(entry.clone()),
+            kind: BindingKind::Agent(entry.clone()),
         });
         plan.rule(
             &target,
             Some(&source),
-            "agent",
+            Behavior::Agent,
             &format!("agent {}: home_paths", agent.id),
             if ghost {
                 "Session-private agent state; only declared credentials are imported."
@@ -113,7 +179,7 @@ pub fn resolve(
         );
     }
     for credential in &plan.credentials.files.clone() {
-        plan.rule(&home.join(credential), Some(&profile.join(credential)), "credential", "agent: login_files", "Only this declared file may be imported or synchronized between the normal profile and ghosts.");
+        plan.rule(&home.join(credential), Some(&profile.join(credential)), Behavior::Credential, "agent: login_files", "Only this declared file may be imported or synchronized between the normal profile and ghosts.");
     }
     for other in registry.values() {
         other.validate()?;
@@ -134,7 +200,7 @@ pub fn resolve(
                     path: HostPath::from_path(&path),
                     kind: entry.kind,
                 });
-                plan.rule(&path, None, "agent_mask", &format!("agent {}: home_paths", other.id), "Original host agent data is hidden in both views; selected private profile bindings are separate.");
+                plan.rule(&path, None, Behavior::AgentMask, &format!("agent {}: home_paths", other.id), "Original host agent data is hidden in both views; selected private profile bindings are separate.");
             }
         }
     }
@@ -143,12 +209,12 @@ pub fn resolve(
             plan.bindings.push(Binding {
                 source: HostPath::from_path(pin),
                 target: HostPath::from_path(pin),
-                declaration: None,
+                kind: BindingKind::Pin,
             });
             plan.rule(
                 pin,
                 Some(pin),
-                "pin",
+                Behavior::Pin,
                 "session pins",
                 "Writes reach the pinned host folder directly.",
             );
@@ -160,83 +226,42 @@ pub fn resolve(
             plan.bindings.push(Binding {
                 source: HostPath::from_path(&source),
                 target: HostPath::from_path(&target),
-                declaration: None,
+                kind: BindingKind::Private,
             });
             plan.rule(
                 &target,
                 Some(&source),
-                "private",
+                Behavior::Private,
                 "policy: paths.private",
                 "Session-private scratch; no host cache import.",
             );
         }
     }
-    for (patterns, behavior, reason) in [
-        (
-            &policy.paths.mask,
-            "mask",
+    for pattern in &policy.paths.mask {
+        plan.mask(
+            &crate::paths::mask_root(pattern, home),
+            "policy: paths.mask",
             "Hidden by the policy in both views.",
-        ),
-        (&policy.paths.ro, "read_only", "Read-only host binding."),
-        (
-            &policy.paths.direct,
-            "direct",
-            "Writes reach the host directly.",
-        ),
-    ] {
-        for pattern in patterns {
-            for target in if behavior == "mask" { vec![crate::paths::mask_root(pattern, home)] } else { expand_pattern(pattern, home) } {
-                plan.rule(
-                    &target,
-                    None,
-                    behavior,
-                    &format!(
-                        "policy: paths.{}",
-                        if behavior == "read_only" {
-                            "ro"
-                        } else {
-                            behavior
-                        }
-                    ),
-                    reason,
-                );
-            }
+        );
+    }
+    for pattern in &policy.paths.ro {
+        for target in expand_pattern(pattern, home) {
+            plan.policy_paths.read_only.push(HostPath::from_path(&target));
+            plan.rule(&target, None, Behavior::ReadOnly, "policy: paths.ro", "Read-only host binding.");
         }
     }
-    let config = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".config"));
-    let state = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".local/state"));
-    for target in [
-        config.join("sill"),
-        state.join("sill"),
-        PathBuf::from("/var/log/journal"),
-    ].into_iter().chain(crate::paths::sill_backups(&state)?) {
-        plan.rule(
+    for pattern in &policy.paths.direct {
+        for target in expand_pattern(pattern, home) {
+            plan.policy_paths.direct.push(HostPath::from_path(&target));
+            plan.rule(&target, None, Behavior::Direct, "policy: paths.direct", "Writes reach the host directly.");
+        }
+    }
+    for target in crate::paths::sill_own(home)? {
+        plan.mask(
             &target,
-            None,
-            "mask",
             "Sill internal storage",
             "Sill configuration, profiles and daemon records stay hidden.",
         );
-    }
-    for rule in &plan.view.rules {
-        let target = rule.target.to_path()?;
-        match rule.behavior.as_str() {
-            "mask" => plan.policy_paths.masks.push(AgentMask {
-                path: rule.target.clone(),
-                kind: if target.is_file() {
-                    HomePathKind::File
-                } else {
-                    HomePathKind::Directory
-                },
-            }),
-            "read_only" => plan.policy_paths.read_only.push(rule.target.clone()),
-            "direct" => plan.policy_paths.direct.push(rule.target.clone()),
-            _ => (),
-        }
     }
     // A private root must never compete with a pin, private scratch, or another declared root.
     for (i, binding) in plan.bindings.iter().enumerate() {
@@ -244,14 +269,14 @@ pub fn resolve(
         for other in &plan.bindings[..i] {
             let parent = other.target.to_path()?;
             ensure!(
-                !(binding.declaration.is_some() || other.declaration.is_some())
+                !(binding.declaration().is_some() || other.declaration().is_some())
                     || !(target.starts_with(&parent) || parent.starts_with(&target)),
                 "agent storage conflicts with another binding: {} and {}",
                 target.display(),
                 parent.display()
             );
         }
-        if binding.declaration.is_some() {
+        if binding.declaration().is_some() {
             for pattern in policy
                 .paths
                 .mask
@@ -268,19 +293,17 @@ pub fn resolve(
                     );
                 }
             }
-            for rule in plan
-                .view
-                .rules
-                .iter()
-                .filter(|r| matches!(r.behavior.as_str(), "mask" | "direct" | "read_only"))
-            {
-                let restricted = rule.target.to_path()?;
+            let restricted_paths = plan.policy_paths.masks.iter().map(|m| (&m.path, Behavior::Mask))
+                .chain(plan.policy_paths.read_only.iter().map(|p| (p, Behavior::ReadOnly)))
+                .chain(plan.policy_paths.direct.iter().map(|p| (p, Behavior::Direct)));
+            for (path, behavior) in restricted_paths {
+                let restricted = path.to_path()?;
                 ensure!(
                     !(target.starts_with(&restricted) || restricted.starts_with(&target))
-                        || (rule.behavior == "mask" && private_under_wildcard_mask(policy, home, &target, &restricted)),
+                        || (behavior == Behavior::Mask && private_under_wildcard_mask(policy, home, &target, &restricted)),
                     "agent storage {} conflicts with {} at {}",
                     target.display(),
-                    rule.behavior,
+                    behavior.as_str(),
                     restricted.display()
                 );
             }
@@ -313,12 +336,12 @@ pub fn resolve_development(
         plan.bindings.push(Binding {
             source: HostPath::from_path(source),
             target: HostPath::from_path(target),
-            declaration: None,
+            kind: BindingKind::Development,
         });
         plan.rule(
             target,
             Some(source),
-            "direct",
+            Behavior::Direct,
             "development --bind",
             "Explicit development-jail binding.",
         );
@@ -389,30 +412,38 @@ impl Plan {
         &mut self,
         target: &Path,
         backing: Option<&Path>,
-        behavior: &str,
+        behavior: Behavior,
         source: &str,
         reason: &str,
     ) {
         self.view.rules.push(PathRule {
             target: HostPath::from_path(target),
             backing: backing.map(HostPath::from_path),
-            behavior: behavior.into(),
+            behavior: behavior.as_str().into(),
             source: source.into(),
             reason: reason.into(),
         });
+    }
+    /// A path hidden in both views: enforced through `policy_paths`, shown through the view.
+    fn mask(&mut self, target: &Path, source: &str, reason: &str) {
+        self.policy_paths.masks.push(AgentMask {
+            path: HostPath::from_path(target),
+            kind: if target.is_file() { HomePathKind::File } else { HomePathKind::Directory },
+        });
+        self.rule(target, None, Behavior::Mask, source, reason);
     }
     /// A workspace session's repositories (§12): a pin at or inside one is not bound — its clone
     /// takes the repository's place — and the view says so.
     pub fn set_workspaces(&mut self, binds: &[WorkspaceBind]) -> Result<()> {
         let sources: Vec<PathBuf> = binds.iter().map(|b| b.source.to_path()).collect::<Result<_>>()?;
         let covered = |t: &HostPath| t.to_path().is_ok_and(|t| sources.iter().any(|s| t.starts_with(s)));
-        self.bindings.retain(|b| b.declaration.is_some() || !covered(&b.target));
-        self.view.rules.retain(|r| r.behavior != "pin" || !covered(&r.target));
+        self.bindings.retain(|b| b.declaration().is_some() || !covered(&b.target));
+        self.view.rules.retain(|r| r.behavior != Behavior::Pin.as_str() || !covered(&r.target));
         for b in binds {
             self.rule(
                 &b.source.to_path()?,
                 Some(&b.clone.to_path()?),
-                "workspace",
+                Behavior::Workspace,
                 "session workspace",
                 "This session's own copy of the repository; the person's checkout changes only when they apply its work.",
             );
@@ -429,7 +460,7 @@ impl Plan {
     pub fn state_paths(&self) -> Result<Vec<PathBuf>> {
         self.bindings
             .iter()
-            .filter(|b| b.declaration.is_some())
+            .filter(|b| b.declaration().is_some())
             .map(|b| b.target.to_path())
             .collect()
     }
@@ -447,7 +478,7 @@ impl Plan {
         use std::os::unix::fs::DirBuilderExt;
         let profile = self.profile.to_path()?;
         let parent = profile.parent().context("profile parent")?;
-        if self.ghost || self.bindings.iter().any(|b| b.declaration.is_some()) {
+        if self.ghost || self.bindings.iter().any(|b| b.declaration().is_some()) {
             std::fs::DirBuilder::new()
                 .recursive(true)
                 .mode(0o700)
@@ -457,7 +488,7 @@ impl Plan {
         }
         for binding in &self.bindings {
             let source = binding.source.to_path()?;
-            if let Some(entry) = &binding.declaration {
+            if let BindingKind::Agent(entry) = &binding.kind {
                 let rel = source
                     .strip_prefix(&profile)
                     .context("agent source outside its profile")?;
@@ -473,12 +504,7 @@ impl Plan {
                         )?;
                     }
                 }
-            } else if self
-                .view
-                .rules
-                .iter()
-                .any(|r| r.behavior == "private" && r.target == binding.target)
-            {
+            } else if binding.kind == BindingKind::Private {
                 std::fs::DirBuilder::new()
                     .recursive(true)
                     .mode(0o700)
@@ -503,8 +529,8 @@ impl Plan {
         spec.agent_binds = self
             .bindings
             .iter()
-            .filter(|b| b.declaration.is_some())
-            .map(|b| Ok((b.target.to_path()?, b.declaration.as_ref().unwrap().kind)))
+            .filter_map(|b| b.declaration().map(|entry| (b, entry.kind)))
+            .map(|(b, kind)| Ok((b.target.to_path()?, kind)))
             .collect::<Result<_>>()?;
         Ok(())
     }
@@ -840,14 +866,7 @@ mod tests {
             clone: HostPath::from_path(&f.root.join("clone")),
             objects: HostPath::from_path(&repo.join(".git/objects")),
         });
-        let plan = crate::changes::session_plan(
-            Policy::builtin_default(),
-            f.state.clone(),
-            &f.home,
-            rustix::process::getuid().as_raw(),
-            "fixture",
-            &storage,
-        )
+        let plan = crate::changes::session_view(&Policy::builtin_default(), &f.state, &f.home, &storage)
         .unwrap();
         assert!(plan.direct.contains(&repo));
     }
@@ -875,14 +894,7 @@ mod tests {
         .unwrap();
         std::fs::remove_file(&first).unwrap();
         f.put(&second, "a later host file");
-        let plan = crate::changes::session_plan(
-            policy,
-            f.state.clone(),
-            &f.home,
-            rustix::process::getuid().as_raw(),
-            "fixture",
-            &storage,
-        )
+        let plan = crate::changes::session_view(&policy, &f.state, &f.home, &storage)
         .unwrap();
         assert!(plan.masked.contains(&f.home.join("hidden")));
         assert!(

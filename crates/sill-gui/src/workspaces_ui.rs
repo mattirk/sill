@@ -63,7 +63,10 @@ impl App {
                 }
                 let onto = ws::other_branch(d)
                     .map(|(_, now)| now)
-                    .filter(|now| state.apply_armed.as_ref().is_some_and(|(w, b)| *w == id && b == now));
+                    .filter(|now| {
+                        state.apply_armed.get().is_some_and(|(w, seen)| *w == id && *seen == d.revision)
+                            || state.apply_onto.as_ref().is_some_and(|(w, b)| *w == id && b == now)
+                    });
                 let label = onto.map_or("Apply".to_string(), |now| format!("Apply onto {now}?"));
                 let apply = keys::press_maybe(
                     button(text(label).size(style::SMALL)).padding([3, 10]).style(style::solid(P.accent)),
@@ -97,7 +100,7 @@ impl App {
                     tooltip::Position::Top,
                 ));
             }
-            let discard = if state.armed.as_deref() == Some(id.as_str()) {
+            let discard = if state.armed.get().is_some_and(|(w, seen)| *w == id && *seen == d.revision) {
                 format!("Discard {}?", if d.summary.files > 0 { format!("{} file{}", d.summary.files, if d.summary.files == 1 { "" } else { "s" }) } else { "it".into() })
             } else {
                 "Discard".into()

@@ -116,16 +116,6 @@ fn path(b: Vec<u8>) -> PathBuf {
 }
 
 pub fn init(conn: &Connection) -> Result<()> {
-    // a store from the first design (2026-11-09, before §12) holds no workspace worth keeping
-    let old: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspaces')
-           AND NOT EXISTS(SELECT 1 FROM pragma_table_info('workspaces') WHERE name='discards')",
-        [],
-        |r| r.get(0),
-    )?;
-    if old {
-        conn.execute_batch("DROP TABLE workspaces; DROP TABLE IF EXISTS workspace_journal;")?;
-    }
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS workspaces (
             id TEXT PRIMARY KEY, name TEXT NOT NULL, session_id TEXT NOT NULL, source BLOB NOT NULL,
@@ -181,7 +171,7 @@ struct Row {
     base: String,
     branch: String,
     path: PathBuf,
-    state: String,
+    state: api::WorkspaceState,
     shallow: bool,
     discards: i64,
     created_by: String,
@@ -225,7 +215,7 @@ fn stored_row(r: &rusqlite::Row) -> rusqlite::Result<Row> {
         base: r.get(5)?,
         branch: r.get(6)?,
         path: path(r.get(7)?),
-        state: r.get(8)?,
+        state: stored_state(&r.get::<_, String>(8)?),
         shallow: r.get(9)?,
         discards: r.get(10)?,
         created_by: r.get(11)?,
@@ -256,7 +246,7 @@ fn save(conn: &Connection, r: &Row) -> Result<()> {
             r.base,
             r.branch,
             bytes(&r.path),
-            r.state,
+            state_name(r.state),
             r.shallow,
             r.discards,
             r.created_by,
@@ -267,16 +257,76 @@ fn save(conn: &Connection, r: &Row) -> Result<()> {
     Ok(())
 }
 
-fn intent(conn: &Connection, op: &str, workspace: &str, kind: &str, intent: &Value, now: i64) -> Result<()> {
+/// What a journal entry does to its workspace (`workspace_journal.kind`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    Create,
+    Carry,
+    Rebase,
+    Apply,
+    Copy,
+    Discard,
+}
+
+impl Step {
+    fn name(self) -> &'static str {
+        match self {
+            Step::Create => "create",
+            Step::Carry => "carry",
+            Step::Rebase => "rebase",
+            Step::Apply => "apply",
+            Step::Copy => "copy",
+            Step::Discard => "discard",
+        }
+    }
+}
+
+/// How a journal entry ended (`workspace_journal.state`; `running` until then). The last four
+/// are shown on the workspace until something resolves them ([`shown_operation`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ended {
+    Done,
+    Failed,
+    Interrupted,
+    Conflict,
+    Waiting,
+    Notice,
+}
+
+impl Ended {
+    fn name(self) -> &'static str {
+        match self {
+            Ended::Done => "done",
+            Ended::Failed => "failed",
+            Ended::Interrupted => "interrupted",
+            Ended::Conflict => "conflict",
+            Ended::Waiting => "waiting",
+            Ended::Notice => "notice",
+        }
+    }
+}
+
+fn state_name(state: api::WorkspaceState) -> &'static str {
+    match state {
+        api::WorkspaceState::Open => "open",
+        api::WorkspaceState::Result => "result",
+    }
+}
+
+fn stored_state(name: &str) -> api::WorkspaceState {
+    if name == "result" { api::WorkspaceState::Result } else { api::WorkspaceState::Open }
+}
+
+fn intent(conn: &Connection, op: &str, workspace: &str, kind: Step, intent: &Value, now: i64) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO workspace_journal(operation,workspace_id,kind,intent,state,started_at) VALUES(?1,?2,?3,?4,'running',?5)",
-        params![op, workspace, kind, intent.to_string(), now],
+        params![op, workspace, kind.name(), intent.to_string(), now],
     )?;
     Ok(())
 }
 
-fn settle(conn: &Connection, op: &str, state: &str, detail: &str) -> Result<()> {
-    conn.execute("UPDATE workspace_journal SET state=?2, detail=?3 WHERE operation=?1", params![op, state, detail])?;
+fn settle(conn: &Connection, op: &str, state: Ended, detail: &str) -> Result<()> {
+    conn.execute("UPDATE workspace_journal SET state=?2, detail=?3 WHERE operation=?1", params![op, state.name(), detail])?;
     Ok(())
 }
 
@@ -322,7 +372,7 @@ fn record(conn: &Connection, r: &Row) -> Result<api::Workspace> {
         base: r.base.clone(),
         branch: r.branch.clone(),
         path: HostPath::from_path(&r.path),
-        state: if r.state == "result" { api::WorkspaceState::Result } else { api::WorkspaceState::Open },
+        state: r.state,
         operation: shown_operation(conn, &r.id)?,
         limitations: if r.shallow { vec!["shallow_source".into()] } else { vec![] },
         created_at: crate::sfp::timestamp(r.created_at),
@@ -415,7 +465,7 @@ fn commit_leftovers<H: Host>(h: &H, r: &Row) -> Result<()> {
     if !flow::uncommitted(&r.path)? {
         return Ok(());
     }
-    if r.state == "open" && h.life(&r.session_id) == Life::Alive {
+    if r.state == api::WorkspaceState::Open && h.life(&r.session_id) == Life::Alive {
         return Err(refuse(
             "uncommitted",
             "The workspace has uncommitted changes: apply from its session, where the agent is asked to commit them first.",
@@ -475,7 +525,7 @@ fn keeps_work(r: &Row, l: &Option<flow::Mirror>) -> bool {
 
 /// An open workspace whose session has ended.
 fn ending<H: Host>(h: &H, r: &Row) -> bool {
-    r.state == "open" && matches!(h.life(&r.session_id), Life::Missing | Life::Ended)
+    r.state == api::WorkspaceState::Open && matches!(h.life(&r.session_id), Life::Missing | Life::Ended)
 }
 
 /// A workspace whose session ended: with work left, a result; with nothing, freed (§12).
@@ -493,7 +543,7 @@ fn settle_ended<H: Host>(h: &H, mut r: Row, l: &Option<flow::Mirror>) -> Result<
         free(h, &r)?;
         return Ok(None);
     }
-    r.state = "result".into();
+    r.state = api::WorkspaceState::Result;
     r.updated_at = h.now();
     h.db(|c| save(c, &r))?;
     Ok(Some(r))
@@ -504,14 +554,14 @@ fn settle_unpinned<H: Host>(h: &H, mut r: Row) -> Result<()> {
     if !keeps_work(&r, &look(&r)?) {
         return free(h, &r);
     }
-    r.state = "result".into();
+    r.state = api::WorkspaceState::Result;
     r.updated_at = h.now();
     h.db(|c| save(c, &r))
 }
 
 /// After an Apply or Discard of a result: nothing left, so it is done with.
 fn settle_result<H: Host>(h: &H, r: Row) -> Result<Option<Row>> {
-    if r.state == "result" && !keeps_work(&r, &look(&r)?) {
+    if r.state == api::WorkspaceState::Result && !keeps_work(&r, &look(&r)?) {
         free(h, &r)?;
         return Ok(None);
     }
@@ -553,7 +603,7 @@ pub fn session_layout(conn: &Connection, session: &str) -> Result<Vec<Layout>> {
 /// The workspaces `session`'s jail binds: the open ones, those of its pinned repositories at its
 /// last start. A workspace whose pin was removed is a result and is not mounted.
 pub fn session_mounts(conn: &Connection, session: &str) -> Result<Vec<Layout>> {
-    layout_where(conn, session, |r| r.state == "open")
+    layout_where(conn, session, |r| r.state == api::WorkspaceState::Open)
 }
 
 fn layout_where(conn: &Connection, session: &str, keep: impl Fn(&Row) -> bool) -> Result<Vec<Layout>> {
@@ -587,7 +637,7 @@ pub fn ensure_for_session<H: Host>(h: &H, session: &str) -> Result<Vec<Layout>> 
     });
     let pinned: Vec<PathBuf> = pins.iter().filter(|p| repository_top(p)).filter_map(|p| p.canonicalize().ok()).collect();
     for r in h.db(|c| of_session(c, session))? {
-        if r.state == "open" && !pinned.contains(&r.source) {
+        if r.state == api::WorkspaceState::Open && !pinned.contains(&r.source) {
             settle_unpinned(h, r)?;
         }
     }
@@ -607,8 +657,8 @@ pub fn ensure_for_session<H: Host>(h: &H, session: &str) -> Result<Vec<Layout>> 
         if let Some(mut r) = existing.filter(|r| r.path.exists()) {
             // before the jail runs in it: what the looks since its last start left goes
             let _ = flow::prune(&r.path);
-            if r.state != "open" {
-                r.state = "open".into();
+            if r.state != api::WorkspaceState::Open {
+                r.state = api::WorkspaceState::Open;
                 r.updated_at = h.now();
                 h.db(|c| save(c, &r))?;
             }
@@ -634,13 +684,13 @@ pub fn ensure_for_session<H: Host>(h: &H, session: &str) -> Result<Vec<Layout>> 
         let at = super::path_for(&h.root(), &src, &id, &name);
         let op = key(&format!("ensure:{session}:{id}"));
         let now = h.now();
-        h.db(|c| intent(c, &op, &id, "create", &json!({"path": bytes(&at), "source": bytes(&src.root)}), now))?;
+        h.db(|c| intent(c, &op, &id, Step::Create, &json!({"path": bytes(&at), "source": bytes(&src.root)}), now))?;
         let made = match super::create(&src, &id, &name, &at, &op) {
             Ok(m) => m,
             Err(e) => {
                 let _ = super::remove_partial(&at, &op);
                 let _ = super::drop_anchors(&src.root, &id);
-                h.db(|c| settle(c, &op, "failed", &format!("{e:#}")))?;
+                h.db(|c| settle(c, &op, Ended::Failed, &format!("{e:#}")))?;
                 return Err(e.context(format!("make the workspace of {}", src.root.display())));
             }
         };
@@ -653,7 +703,7 @@ pub fn ensure_for_session<H: Host>(h: &H, session: &str) -> Result<Vec<Layout>> 
             base: made.base,
             branch: made.branch,
             path: made.path,
-            state: "open".into(),
+            state: api::WorkspaceState::Open,
             shallow: src.shallow,
             discards: 0,
             created_by: op.clone(),
@@ -663,7 +713,7 @@ pub fn ensure_for_session<H: Host>(h: &H, session: &str) -> Result<Vec<Layout>> 
         h.db(|c| {
             let tx = c.unchecked_transaction()?;
             save(c, &r)?;
-            settle(c, &op, "done", "")?;
+            settle(c, &op, Ended::Done, "")?;
             c.execute("DELETE FROM session_live_repositories WHERE session_id=?1 AND source=?2", params![session, bytes(&src.root)])?;
             tx.commit()?;
             Ok(())
@@ -691,16 +741,16 @@ fn carry_into<H: Host>(h: &H, r: &Row, overlay: Option<&Overlay>) {
     let (state, detail) = match outcome {
         Ok(None) => return,
         Ok(Some((state, detail))) => (state, detail),
-        Err(e) => ("waiting", format!("Work the agent did in {} before it was pinned could not be brought into the workspace: {e:#}. It stays in the session's overlay and is tried again at the session's next start.", r.source.display())),
+        Err(e) => (Ended::Waiting, format!("Work the agent did in {} before it was pinned could not be brought into the workspace: {e:#}. It stays in the session's overlay and is tried again at the session's next start.", r.source.display())),
     };
     let _ = h.db(|c| {
-        intent(c, &op, &r.id, "carry", &json!({"upper": bytes(&upper)}), h.now())?;
+        intent(c, &op, &r.id, Step::Carry, &json!({"upper": bytes(&upper)}), h.now())?;
         settle(c, &op, state, &detail)
     });
 }
 
 /// [`carry_into`]'s work: the journal state and line to record, None when nothing was there.
-fn carry_steps<H: Host>(h: &H, r: &Row, upper: &Path, started: i64) -> Result<Option<(&'static str, String)>> {
+fn carry_steps<H: Host>(h: &H, r: &Row, upper: &Path, started: i64) -> Result<Option<(Ended, String)>> {
     let Some(p) = carry::pending(&r.source, &r.path, upper, started)? else { return Ok(None) };
     let src = r.source.display();
     if carry::is_empty(&p) {
@@ -708,7 +758,7 @@ fn carry_steps<H: Host>(h: &H, r: &Row, upper: &Path, started: i64) -> Result<Op
         return Ok(None);
     }
     let how = if p.from_reflog { "" } else { " Its starting point was not in your checkout's history, so the agent's files were taken as they are: look before you apply." };
-    let done = if p.from_reflog { "done" } else { "notice" };
+    let done = if p.from_reflog { Ended::Done } else { Ended::Notice };
     match carry::merge(&r.path, &p)? {
         carry::Merge::Clean { ours, tree } => {
             let n = carry::write_clean(&r.path, &ours, &tree)?;
@@ -721,7 +771,7 @@ fn carry_steps<H: Host>(h: &H, r: &Row, upper: &Path, started: i64) -> Result<Op
             drop(git);
             if own {
                 return Ok(Some((
-                    "waiting",
+                    Ended::Waiting,
                     format!(
                         "Work the agent did in {src} before it was pinned conflicts with the workspace's own work ({}). It stays in the session's overlay and is brought in at the session's next start once the workspace is applied or discarded.",
                         files.join(", ")
@@ -741,7 +791,7 @@ fn carry_steps<H: Host>(h: &H, r: &Row, upper: &Path, started: i64) -> Result<Op
                     let stopped = conflicted(&r.path);
                     let branch = super::source_head(&r.source).map(|(b, _)| b).unwrap_or_default();
                     Ok(Some((
-                        "conflict",
+                        Ended::Conflict,
                         format!(
                             "Work from before {src} was pinned, carried onto {branch} ({}), stopped: {}",
                             &tip[..tip.len().min(12)],
@@ -998,8 +1048,8 @@ pub fn prepare<H: Host>(h: &H, a: &api::Operate) -> Result<api::Prepared> {
                 );
                 let k = key(&a.operation_id);
                 h.db(|c| {
-                    intent(c, &k, &r.id, "rebase", &json!({"dest": dest}), h.now())?;
-                    settle(c, &k, "conflict", &detail)
+                    intent(c, &k, &r.id, Step::Rebase, &json!({"dest": dest}), h.now())?;
+                    settle(c, &k, Ended::Conflict, &detail)
                 })?;
             } else {
                 let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -1083,13 +1133,13 @@ pub fn apply<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
     let (now_rev, _) = revision_now(&r)?;
     h.db(|c| {
         receipts(c)?.begin(&a.operation_id, METHOD, &fingerprint)?;
-        intent(c, &k, &r.id, "apply", &json!({"branch": now_rev.destination_branch, "old": now_rev.destination_tip, "tip": now_rev.tip}), h.now())
+        intent(c, &k, &r.id, Step::Apply, &json!({"branch": now_rev.destination_branch, "old": now_rev.destination_tip, "tip": now_rev.tip}), h.now())
     })?;
     let outcome = flow::apply(&r.source, &r.path, &r.id, &now_rev.destination_branch, &now_rev.destination_tip, &r.branch, &wrote);
     match outcome {
         Ok(Ok(_)) => {
             h.db(|c| {
-                settle(c, &k, "done", "")?;
+                settle(c, &k, Ended::Done, "")?;
                 set_copied(c, &r.id, &flow::Copied::new())?;
                 settle_notices(c, &r.id)?;
                 receipts(c)?.finish(&a.operation_id, None, None)
@@ -1100,7 +1150,7 @@ pub fn apply<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
         Ok(Err(stop)) => {
             let message = stop_message(&stop);
             h.db(|c| {
-                settle(c, &k, "failed", &message)?;
+                settle(c, &k, Ended::Failed, &message)?;
                 receipts(c)?.finish(&a.operation_id, None, Some("invalid_state"))
             })?;
             Err(refuse(stop.reason(), message, stop.paths().to_vec()))
@@ -1108,7 +1158,7 @@ pub fn apply<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
         Err(e) => {
             let detail = "The Apply stopped part way: check your checkout's branch and the files it changed, then look again.";
             let _ = h.db(|c| {
-                settle(c, &k, "interrupted", detail)?;
+                settle(c, &k, Ended::Interrupted, detail)?;
                 receipts(c)?.finish(&a.operation_id, None, Some("operation_failed"))
             });
             Err(e.context(detail))
@@ -1151,13 +1201,13 @@ pub fn copy<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
     let before = h.db(|c| copied(c, &r.id))?;
     h.db(|c| {
         receipts(c)?.begin(&a.operation_id, METHOD, &fingerprint)?;
-        intent(c, &k, &r.id, "copy", &json!({"branch": now_rev.destination_branch, "at": now_rev.destination_tip}), h.now())
+        intent(c, &k, &r.id, Step::Copy, &json!({"branch": now_rev.destination_branch, "at": now_rev.destination_tip}), h.now())
     })?;
     match flow::copy(&r.source, &r.path, &now_rev.destination_branch, &now_rev.destination_tip, &before) {
         Ok(Ok(wrote)) => {
             h.db(|c| {
                 set_copied(c, &r.id, &wrote)?;
-                settle(c, &k, "done", "")?;
+                settle(c, &k, Ended::Done, "")?;
                 receipts(c)?.finish(&a.operation_id, None, None)
             })?;
             changed(h, Some(&r), Some(&a.operation_id), None)
@@ -1165,7 +1215,7 @@ pub fn copy<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
         Ok(Err(stop)) => {
             let message = stop_message(&stop);
             h.db(|c| {
-                settle(c, &k, "failed", &message)?;
+                settle(c, &k, Ended::Failed, &message)?;
                 receipts(c)?.finish(&a.operation_id, None, Some("invalid_state"))
             })?;
             Err(refuse(stop.reason(), message, stop.paths().to_vec()))
@@ -1175,7 +1225,7 @@ pub fn copy<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
             // name is taken for the person's, so nothing is written over unasked
             let detail = "Applying without commit stopped part way: check the files it changed in your checkout.";
             let _ = h.db(|c| {
-                settle(c, &k, "failed", detail)?;
+                settle(c, &k, Ended::Failed, detail)?;
                 receipts(c)?.finish(&a.operation_id, None, Some("operation_failed"))
             });
             Err(e.context(detail))
@@ -1251,7 +1301,7 @@ pub fn discard<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
             &format!("INSERT INTO workspace_discards({DISCARD_COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)"),
             params![d.id, d.workspace_id, d.session_id, d.name, bytes(&d.source), d.branch, d.snapshot, d.anchor, d.until, d.created_at],
         )?;
-        intent(c, &key(&a.operation_id), &r.id, "discard", &json!({"snapshot": kept, "anchor": d.anchor}), h.now())?;
+        intent(c, &key(&a.operation_id), &r.id, Step::Discard, &json!({"snapshot": kept, "anchor": d.anchor}), h.now())?;
         tx.commit()?;
         Ok(())
     })?;
@@ -1260,7 +1310,7 @@ pub fn discard<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
         },
     )?;
     h.db(|c| {
-        settle(c, &key(&a.operation_id), "done", "")?;
+        settle(c, &key(&a.operation_id), Ended::Done, "")?;
         settle_notices(c, &r.id)?;
         receipts(c)?.finish(&a.operation_id, None, None)
     })?;
@@ -1372,7 +1422,7 @@ pub fn undo<H: Host>(h: &H, a: &api::Undo) -> Result<api::Changed> {
                 base: made.base,
                 branch: made.branch,
                 path: made.path,
-                state: "result".into(),
+                state: api::WorkspaceState::Result,
                 shallow: src.shallow,
                 discards: 0,
                 created_by: op,
@@ -1409,7 +1459,7 @@ pub fn session_notice(conn: &Connection, session: &str) -> Result<Option<String>
     );
     // the person's uncommitted work is not in the copy (§5): said, so the agent does not look
     // for code that is only in their checkout. A look that fails says nothing.
-    for r in rows.iter().filter(|r| r.state == "open") {
+    for r in rows.iter().filter(|r| r.state == api::WorkspaceState::Open) {
         let Ok(Some(m)) = look(r) else { continue };
         if m.checkout_only.is_empty() {
             continue;
@@ -1467,19 +1517,19 @@ pub fn reconcile<H: Host>(h: &H) -> Result<()> {
         let i: Value = serde_json::from_str(&intent_text).unwrap_or(Value::Null);
         let p = |name: &str| -> PathBuf { path(i[name].as_array().map(|a| a.iter().filter_map(|b| b.as_u64().map(|b| b as u8)).collect()).unwrap_or_default()) };
         match kind.as_str() {
-            "create" => {
+            kind if kind == Step::Create.name() => {
                 if h.db(|c| load(c, &id))?.is_some() {
-                    h.db(|c| settle(c, &op, "done", ""))?;
+                    h.db(|c| settle(c, &op, Ended::Done, ""))?;
                 } else {
                     let _ = super::remove_partial(&p("path"), &op);
                     let source = p("source");
                     if source.exists() {
                         let _ = super::drop_anchors(&source, &id);
                     }
-                    h.db(|c| settle(c, &op, "failed", "interrupted by a restart; nothing was kept"))?;
+                    h.db(|c| settle(c, &op, Ended::Failed, "interrupted by a restart; nothing was kept"))?;
                 }
             }
-            _ => h.db(|c| settle(c, &op, "interrupted", "Interrupted by a restart: check your checkout before going on."))?,
+            _ => h.db(|c| settle(c, &op, Ended::Interrupted, "Interrupted by a restart: check your checkout before going on."))?,
         }
     }
     drop(guard);
@@ -1490,11 +1540,6 @@ pub fn reconcile<H: Host>(h: &H) -> Result<()> {
     })?;
     for r in rows {
         settle_session(h, r)?;
-    }
-    // spare folders of before 2026-11-09, when a finished folder was kept for the next session
-    let spares = h.root().join(".spare");
-    if spares.exists() {
-        let _ = super::remove_folder(&spares);
     }
     sweep(h)?;
     Ok(())

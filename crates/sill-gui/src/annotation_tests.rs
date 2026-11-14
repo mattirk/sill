@@ -115,11 +115,11 @@ fn annotation_blocks_send_and_prompt_changes_until_saved_or_cancelled() {
     app.views.get_mut("demo").unwrap().draft = crate::editor::Editor::with_text("fix this button");
     open(&mut app, 0);
     stroke(&mut app, 12.0);
-    let task = app.update(Message::Send);
+    let task = app.update(crate::tests::in_session(&app, crate::session::Event::Send));
     settle_task(&mut app, task);
-    let _ = app.update(Message::Prompt(iced::widget::text_editor::Action::Edit(
+    let _ = app.update(crate::tests::in_session(&app, crate::session::Event::Prompt(iced::widget::text_editor::Action::Edit(
         iced::widget::text_editor::Edit::Paste(std::sync::Arc::new("unexpected".into())),
-    )));
+    ))));
     let _ = app.update(Message::Media(media::Event::Remove(0)));
     let view = &app.views["demo"];
     assert_eq!(view.draft.text().trim_end(), "fix this button");
@@ -129,7 +129,7 @@ fn annotation_blocks_send_and_prompt_changes_until_saved_or_cancelled() {
 
     let task = app.update(Message::Annotation(Event::Save));
     assert!(app.views["demo"].annotation.as_ref().unwrap().saving);
-    let blocked = app.update(Message::Send);
+    let blocked = app.update(crate::tests::in_session(&app, crate::session::Event::Send));
     settle_task(&mut app, blocked);
     assert_eq!(app.views["demo"].draft.text().trim_end(), "fix this button");
     assert_eq!(app.views["demo"].attachments.len(), 1);
@@ -251,7 +251,7 @@ fn annotation_failed_send_restores_editable_markers_and_stable_attachment_identi
     stroke(&mut app, 12.0);
     save(&mut app);
     let attachment = app.views["demo"].attachments[0].clone();
-    let task = app.update(Message::Send);
+    let task = app.update(crate::tests::in_session(&app, crate::session::Event::Send));
     let request = daemon.expect("_sill/sessions.submit");
     let submit: Submit = serde_json::from_value(request["params"].clone()).unwrap();
     assert_eq!(submit.attachments, vec![attachment.attachment.clone()]);
@@ -279,7 +279,7 @@ fn annotation_uncertain_retry_preserves_exact_flattened_bytes_and_submission_ide
     stroke(&mut app, 12.0);
     save(&mut app);
     let expected = app.views["demo"].attachments[0].attachment.clone();
-    let task = app.update(Message::Send);
+    let task = app.update(crate::tests::in_session(&app, crate::session::Event::Send));
     let request = first.expect("_sill/sessions.submit");
     let submit: Submit = serde_json::from_value(request["params"].clone()).unwrap();
     assert_eq!(submit.attachments, vec![expected]);
@@ -302,7 +302,7 @@ fn annotation_uncertain_retry_preserves_exact_flattened_bytes_and_submission_ide
             .len(),
         1
     );
-    let retry = app.update(Message::RetrySend(submit.submission_id.clone()));
+    let retry = app.update(crate::tests::in_session(&app, crate::session::Event::RetrySend(submit.submission_id.clone())));
     let retried = second.expect("_sill/sessions.submit");
     assert_eq!(retried["params"], request["params"]);
     second.reply(&retried, serde_json::json!({}));
@@ -348,7 +348,7 @@ fn annotation_accounts_for_original_pixels_and_releases_replaced_or_discarded_pr
         "replaced preview is released"
     );
     assert!(!app.views["demo"].media.contains_key(&first_key));
-    let task = app.update(Message::Send);
+    let task = app.update(crate::tests::in_session(&app, crate::session::Event::Send));
     let request = daemon.expect("_sill/sessions.submit");
     let id = request["params"]["submission_id"]
         .as_str()
@@ -361,7 +361,7 @@ fn annotation_accounts_for_original_pixels_and_releases_replaced_or_discarded_pr
     );
     drop(daemon);
     settle_task(&mut app, task);
-    let _ = app.update(Message::DiscardSend(id));
+    let _ = app.update(crate::tests::in_session(&app, crate::session::Event::DiscardSend(id)));
     assert!(app.views["demo"].pending_attachments.is_empty());
     assert_eq!(app.views["demo"].decoded_media_bytes(), 0);
     assert!(

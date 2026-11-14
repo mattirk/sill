@@ -260,30 +260,15 @@ pub fn session_base_policy(name: &str, home: &Path, ghost: bool, agent: Option<&
     Ok(policy)
 }
 
-// Launch records keep exact Linux path bytes, as the public HostPath DTOs do; the string form of
-// early records is read too.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum EncodedPath {
-    Bytes(Vec<u8>),
-    Text(PathBuf),
-}
-impl EncodedPath {
-    fn into_path(self) -> PathBuf {
-        use std::os::unix::ffi::OsStringExt;
-        match self {
-            Self::Bytes(bytes) => std::ffi::OsString::from_vec(bytes).into(),
-            Self::Text(path) => path,
-        }
-    }
-}
+// Launch records keep exact Linux path bytes, as the public HostPath DTOs do.
 mod paths_bytes {
     use super::*;
     pub fn serialize<S: serde::Serializer>(paths: &[PathBuf], serializer: S) -> std::result::Result<S::Ok, S::Error> {
         paths.iter().map(|path| path.as_os_str().as_encoded_bytes()).collect::<Vec<_>>().serialize(serializer)
     }
     pub fn deserialize<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Vec<PathBuf>, D::Error> {
-        Ok(Vec::<EncodedPath>::deserialize(deserializer)?.into_iter().map(EncodedPath::into_path).collect())
+        use std::os::unix::ffi::OsStringExt;
+        Ok(Vec::<Vec<u8>>::deserialize(deserializer)?.into_iter().map(|bytes| std::ffi::OsString::from_vec(bytes).into()).collect())
     }
 }
 
@@ -683,7 +668,7 @@ pub fn ensure_started(opts: &StartOptions, home: &Path, exe: &Path) -> Result<St
         let paths = |list: Vec<&sill_proto::sessions::HostPath>| list.into_iter().map(|p| p.to_path()).collect::<Result<Vec<_>, _>>();
         masks_git_cannot_undo(
             &paths(plan.policy_paths.masks.iter().map(|m| &m.path).collect())?,
-            &paths(plan.bindings.iter().filter(|b| b.declaration.is_none() && b.source == b.target).map(|b| &b.target).collect())?,
+            &paths(plan.bindings.iter().filter(|b| b.kind == crate::agent_storage::BindingKind::Pin).map(|b| &b.target).collect())?,
             &paths(plan.workspaces.iter().map(|w| &w.source).collect())?,
         )?;
         plan.prepare()?;

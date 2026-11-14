@@ -1060,11 +1060,11 @@ mod link_tests {
     #[test]
     fn terminal_events_from_a_closed_view_cannot_reach_its_reopened_pane() {
         let (mut app, _) = crate::App::new(true, None);
-        let old_events = app.open_terminal();
+        let old_events = app.open_terminal("demo");
         let old = app.views["demo"].terminal_generation;
         app.views
             .insert("demo".into(), crate::SessionView::new("demo"));
-        let new_events = app.open_terminal();
+        let new_events = app.open_terminal("demo");
         let current = app.views["demo"].terminal_generation;
         assert_ne!(old, current);
         let _ = app.update(crate::Message::Terminal("demo".into(), old, Event::Ended));
@@ -1087,10 +1087,10 @@ mod link_tests {
     #[test]
     fn clipboard_completion_is_discarded_after_switching_shells_or_tabs() {
         let (mut app, _) = crate::App::new(true, None);
-        let first_events = app.open_terminal();
+        let first_events = app.open_terminal("demo");
         let first = app.views["demo"].terminal_generation;
         // Replacing/switching the shell does not redirect the pending paste.
-        let second_events = app.open_terminal();
+        let second_events = app.open_terminal("demo");
         let second = app.views["demo"].terminal_generation;
         let _ = app.update(crate::Message::TermPaste(
             "demo".into(),
@@ -1102,7 +1102,7 @@ mod link_tests {
         app.views
             .insert("other".into(), crate::SessionView::new("other"));
         app.selected = Some("other".into());
-        let other_events = app.open_terminal();
+        let other_events = app.open_terminal("other");
         let _ = app.update(crate::Message::TermPaste(
             "demo".into(),
             second,

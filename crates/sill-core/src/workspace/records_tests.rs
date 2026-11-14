@@ -368,16 +368,6 @@ fn an_ended_session_with_nothing_left_frees_its_folder() {
     assert!(!clone2.exists());
 }
 
-/// Spare folders an earlier version kept (one finished folder per repository) go at the
-/// daemon's start: a new workspace takes its build output from the checkout.
-#[test]
-fn a_start_removes_the_spare_folders_of_before() {
-    let f = fixture("old-spare");
-    write(&f.host.root.join(".spare/7fda970fa7eda2a1/target/debug/app"), "old\n");
-    reconcile(&f.host).unwrap();
-    assert!(!f.host.root.join(".spare").exists());
-}
-
 #[test]
 fn undo_after_the_folder_is_gone_makes_a_workspace_of_its_own() {
     let f = fixture("undo-gone");
@@ -465,7 +455,7 @@ fn reconcile_removes_a_half_made_workspace() {
     let src = super::super::inspect(&f.source).unwrap().unwrap();
     let at = f.host.root.join("src/half-ws-x");
     super::super::create(&src, "ws-x", "half", &at, "op-half").unwrap();
-    f.host.db(|c| intent(c, "op-half", "ws-x", "create", &json!({"path": bytes(&at), "source": bytes(&f.source)}), 1)).unwrap();
+    f.host.db(|c| intent(c, "op-half", "ws-x", Step::Create, &json!({"path": bytes(&at), "source": bytes(&f.source)}), 1)).unwrap();
     reconcile(&f.host).unwrap();
     assert!(!at.exists());
     assert_eq!(git(&f.source, &["for-each-ref", "refs/sill/workspaces/ws-x/"]), "");
@@ -527,7 +517,7 @@ fn a_start_after_a_pin_change_matches_the_workspaces_to_the_pins() {
     ensure_for_session(&f.host, "s1").unwrap();
     assert_eq!(mounted(), [other.clone()], "the unpinned workspace is out of the jail");
     let kept = f.host.db(|c| load(c, &again.workspace_id)).unwrap().unwrap();
-    assert_eq!(kept.state, "result");
+    assert_eq!(kept.state, api::WorkspaceState::Result);
     assert_eq!(read(&kept.path.join("f1.txt")), "work\n", "its work is kept");
     assert!(f.host.db(|c| session_layout(c, "s1")).unwrap().iter().any(|l| l.source == f.source), "the rebase helper still binds it");
     assert!(get(&f.host, &again.workspace_id).unwrap().summary.files == 1, "offered for Apply");
@@ -535,7 +525,7 @@ fn a_start_after_a_pin_change_matches_the_workspaces_to_the_pins() {
     // pinned once more: the same workspace opens again, its work in it
     set_pins(vec![f.source.clone(), other.clone()]);
     ensure_for_session(&f.host, "s1").unwrap();
-    assert_eq!(f.host.db(|c| load(c, &again.workspace_id)).unwrap().unwrap().state, "open");
+    assert_eq!(f.host.db(|c| load(c, &again.workspace_id)).unwrap().unwrap().state, api::WorkspaceState::Open);
     let mut both = mounted();
     both.sort();
     let mut want = vec![f.source.clone(), other.clone()];

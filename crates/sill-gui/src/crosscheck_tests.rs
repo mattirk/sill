@@ -126,7 +126,7 @@ fn only_a_current_review_with_problems_is_sent_to_be_fixed() {
     for _ in 0..=crate::demo::CHUNKS.len() {
         let _ = app.update(Message::DemoTick);
     }
-    let _ = app.update(Message::Answer { question_id: "demo-question".into(), option_id: "allow".into() });
+    let _ = app.update(crate::tests::in_session(&app, crate::session::Event::Answer { question_id: "demo-question".into(), option_id: "allow".into() }));
     let sent = |app: &App| app.views["demo"].outbox.pending().iter().filter(|p| p.submit.purpose.as_deref() == Some(api::FIX_PURPOSE)).count();
     let before = sent(&app);
     for (state, stale, problems) in [("complete", false, 0), ("complete", true, 2), ("reviewing", false, 0), ("failed", false, 0)] {

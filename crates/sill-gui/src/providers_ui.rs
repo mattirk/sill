@@ -25,7 +25,7 @@ pub struct Providers {
     note: Option<String>,
     form: Option<Form>,
     /// A Remove waiting for its second press.
-    armed: Option<String>,
+    armed: crate::armed::Armed<String>,
     busy: bool,
     serial: u64,
 }
@@ -291,7 +291,7 @@ impl Providers {
                 1 => "1 model".to_string(),
                 n => format!("{n} models"),
             };
-            let armed = self.armed.as_deref() == Some(&p.id);
+            let armed = self.armed.is(&p.id);
             section = section.push(
                 row![
                     text(&p.name).size(style::TEXT),
@@ -514,19 +514,24 @@ impl App {
                     return self.agents_reveal(agent);
                 }
             }
-            Event::Add => (p.form, p.armed) = (Some(Form::new()), None),
+            Event::Add => {
+                p.form = Some(Form::new());
+                p.armed.clear();
+            }
             Event::Edit(id) => {
-                p.armed = None;
+                p.armed.clear();
                 p.form = p.entries.iter().find(|e| e.provider.id == id).map(Form::of);
             }
             Event::Cancel => p.form = None,
             Event::Remove(id) => {
-                if p.armed.as_deref() != Some(&id) {
-                    p.armed = Some(id);
+                if !p.armed.is(&id) {
+                    p.armed.press(id);
                     return Task::none();
                 }
+                // with no daemon to ask (the demo) it stays armed
                 let Some(connect) = connect else { return Task::none() };
-                (p.armed, p.busy) = (None, true);
+                p.armed.clear();
+                p.busy = true;
                 return crate::blocking(
                     move || {
                         let client = connect().map_err(|e| format!("{e:#}"))?;
@@ -928,7 +933,7 @@ mod tests {
         let _ = app.providers_event(listed(&["opencode"]));
         let _ = app.providers_event(Event::Remove("one".into()));
         let p = &app.agents_page.providers;
-        assert_eq!(p.armed.as_deref(), Some("one"));
+        assert!(p.armed.is(&"one".to_string()));
         assert!(!p.busy && p.entries.len() == 1);
     }
 }

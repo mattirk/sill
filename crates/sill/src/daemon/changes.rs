@@ -19,7 +19,7 @@ use super::Hub;
 impl Hub {
     pub(super) fn changes_list(&self) -> Result<ChangesList> {
         let sessions = self.with_store(|s| s.sessions())?;
-        let (uid, user) = who();
+        let uid = own_uid();
         // a workspace's clone is not listed here: what it holds is the workspace's, told whole
         // (committed work too) by `workspaces.list`
         let mut pinned: Vec<PathBuf> = self.with_store(|st| self.pinned_checkouts(st))?;
@@ -36,7 +36,7 @@ impl Hub {
         let mut out = Vec::new();
         for s in sessions {
             if self.crosscheck_worker(&s.id) { continue; }
-            let list: Vec<Change> = self.session_changes(&s, uid, &user).with_context(|| format!("reading changes for session {}", s.id))?.into_iter().filter(|c| !c.ignored).collect();
+            let list: Vec<Change> = self.session_changes(&s, uid).with_context(|| format!("reading changes for session {}", s.id))?.into_iter().filter(|c| !c.ignored).collect();
             let kept = kept_dir(uid, &s.id).map(|d| keep::undoable(&d)).unwrap_or_default();
             if list.is_empty() && kept.is_empty() {
                 continue;
@@ -69,7 +69,7 @@ impl Hub {
             }
             DiffOf::Kept { session, id } => {
                 self.review_changes_forbidden(&session)?;
-                let dir = kept_dir(who().0, &session)?;
+                let dir = kept_dir(own_uid(), &session)?;
                 let Some(k) = keep::list(&dir).into_iter().find(|k| k.id == id) else { bail!("no keep {id} in session {session}") };
                 Ok(sill_core::changes::undo_diff(&k.path, &keep::prior_path(&dir, &k)))
             }
@@ -79,7 +79,7 @@ impl Hub {
     /// Keep each (path, hash as listed): copied to the host with the previous version saved for undo.
     pub(super) fn changes_keep(&self, session: &str, items: Vec<(PathBuf, Option<String>)>) -> Result<Done> {
         let changes = self.scan_one(session)?;
-        let dir = kept_dir(who().0, session)?;
+        let dir = kept_dir(own_uid(), session)?;
         let mut d = Done::default();
         for (path, hash) in with_new_parents(&changes, items) {
             let Some(c) = changes.iter().find(|c| c.path == path) else {
@@ -128,7 +128,7 @@ impl Hub {
     /// `force` puts the previous version back even when the host was edited since.
     pub(super) fn changes_undo(&self, session: &str, ids: Vec<String>, force: bool) -> Result<Done> {
         self.review_changes_forbidden(session)?;
-        let dir = kept_dir(who().0, session)?;
+        let dir = kept_dir(own_uid(), session)?;
         let all = keep::undoable(&dir);
         let pick: Vec<_> = if ids.is_empty() { all } else { all.into_iter().filter(|k| ids.contains(&k.id)).collect() };
         let mut d = Done::default();
@@ -163,7 +163,7 @@ impl Hub {
             return;
         }
         let after = std::time::Duration::from_secs(minutes as u64 * 60);
-        let (uid, user) = who();
+        let uid = own_uid();
         let sessions: Vec<Session> = self.with_store(|s| s.sessions()).unwrap_or_default().into_iter().filter(|s| !s.ghost).collect();
         for s in sessions {
             if self.crosscheck_worker(&s.id) { continue; }
@@ -174,7 +174,7 @@ impl Hub {
             let Ok(state_dirs) = filesystem.state_paths() else { continue };
             let now = std::time::SystemTime::now();
             let mut due: Vec<Change> = self
-                .session_changes(&s, uid, &user)
+                .session_changes(&s, uid)
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|c| !c.conflict && !c.ignored && sill_core::changes::repo_root(&c.path).is_none())
@@ -209,8 +209,8 @@ impl Hub {
         let id = id.to_string();
         let _ = std::thread::Builder::new().name(format!("sill-turn-{id}")).spawn(move || {
             let Some(s) = hub.with_store(|st| st.sessions()).ok().and_then(|v| v.into_iter().find(|s| s.id == id)) else { return };
-            let (uid, user) = who();
-            let changes = match hub.session_changes(&s, uid, &user) {
+            let uid = own_uid();
+            let changes = match hub.session_changes(&s, uid) {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("sill daemon: session {id}: scanning after the turn: {e:#}");
@@ -258,11 +258,11 @@ impl Hub {
     /// frontend needs to show a file as the agent sees it — an image the agent names, say.
     pub(in crate::daemon) fn jail_view(&self, id: &str) -> Result<sill_proto::JailView> {
         let Some(s) = self.with_store(|st| st.sessions())?.into_iter().find(|s| s.id == id) else { bail!("no session {id}") };
-        let (uid, user) = who();
+        let uid = own_uid();
         let launch = sill_core::session::policy_snapshot(&s.id)?.context("launch not recorded; rebuild the session")?;
         let filesystem = launch.filesystem.context("filesystem plan not recorded; rebuild the session")?;
         let sdir = sill_core::session::state_dir_path(uid, &s.id)?;
-        let plan = sill_core::changes::session_plan(launch.policy, sdir, &self.home, uid, &user, &filesystem)?;
+        let plan = sill_core::changes::session_view(&launch.policy, &sdir, &self.home, &filesystem)?;
         Ok(sill_proto::JailView { layers: plan.layers.into_iter().map(|l| (l.host, l.upper)).collect(), masked: plan.masked })
     }
 
@@ -276,8 +276,8 @@ impl Hub {
     fn scan_one(&self, session: &str) -> Result<Vec<Change>> {
         self.review_changes_forbidden(session)?;
         let Some(s) = self.with_store(|st| st.sessions())?.into_iter().find(|s| s.id == session) else { bail!("no session {session}") };
-        let (uid, user) = who();
-        self.session_changes(&s, uid, &user)
+        let uid = own_uid();
+        self.session_changes(&s, uid)
     }
 
     fn find_change(&self, session: &str, path: &Path) -> Result<(String, Change)> {
@@ -321,9 +321,8 @@ impl Hub {
     }
 }
 
-fn who() -> (u32, String) {
-    let uid = rustix::process::getuid().as_raw();
-    (uid, std::env::var("USER").unwrap_or_else(|_| uid.to_string()))
+fn own_uid() -> u32 {
+    rustix::process::getuid().as_raw()
 }
 
 fn kept_dir(uid: u32, session: &str) -> Result<PathBuf> {

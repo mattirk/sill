@@ -579,7 +579,7 @@ mod annotation_tests {
             let content = iced::widget::text_editor::Content::with_text("draft");
             let input = iced::widget::text_editor(&content)
                 .id("annotation-shortcut-input")
-                .on_action(Message::Prompt)
+                .on_action(|action| crate::session::message("demo", crate::session::Event::Prompt(action)))
                 .key_binding(crate::ui::reading_keys);
             let view = annotation_shortcuts(input, active);
             let mut ui = iced_test::Simulator::with_size(
@@ -606,7 +606,7 @@ mod annotation_tests {
                 ]);
             }
             let messages: Vec<_> = ui.into_messages()
-                .filter(|message| !matches!(message, Message::Prompt(_)))
+                .filter(|message| !matches!(message, Message::Session(_, crate::session::Event::Prompt(_))))
                 .collect();
             if active {
                 assert!(matches!(messages.as_slice(), [

@@ -27,7 +27,7 @@ pub struct AgentsPage {
     busy: BTreeSet<String>,
     logs: BTreeMap<String, String>,
     note: Option<String>,
-    armed: Option<String>,
+    armed: crate::armed::Armed<String>,
     editor: Option<Editor>,
     details: Option<String>,
     /// Directory proposals the person unticked, per agent, until Apply.
@@ -704,12 +704,11 @@ impl App {
                 };
                 let entry = target(&self.settings, entry).clone();
                 let key = format!("install:{id}:{}:{}", entry.version, entry.source);
-                if entry.source == "live" && p.armed.as_deref() != Some(&key) {
-                    p.armed = Some(key);
+                if entry.source == "live" && !p.armed.press(key) {
                     p.logs.insert(id, format!("Unreviewed live index: {} v{}; {}. Press the same action again to confirm.", entry.name, entry.version, entry.install_spec));
                     return Task::none();
                 }
-                p.armed = None;
+                p.armed.clear();
                 let Some(connect) = self.connect.clone() else {
                     return Task::none();
                 };
@@ -738,12 +737,10 @@ impl App {
                     return Task::none();
                 }
                 let key = format!("{}:{id}", if reset { "reset" } else { "remove" });
-                if p.armed.as_deref() != Some(&key) {
-                    p.armed = Some(key);
+                if !p.armed.press(key) {
                     p.logs.insert(id, if reset {"Reset stops running sessions and deletes this agent's Sill login, settings, history and saved API keys. Press Reset again to confirm."} else {"Remove the Sill-managed installation. Press Remove again to confirm."}.into());
                     return Task::none();
                 }
-                p.armed = None;
                 let Some(entry) = p.entries.iter().find(|e| e.registry.entry_id == id) else {
                     return Task::none();
                 };
@@ -1152,7 +1149,7 @@ mod tests {
         let _ = app.update(msg(Event::Install("live-agent".into())));
         assert!(app.agents_page.busy.is_empty());
         assert_eq!(
-            app.agents_page.armed.as_deref(),
+            app.agents_page.armed.get().map(String::as_str),
             Some("install:live-agent:1:live")
         );
         assert!(app.agents_page.logs["live-agent"].contains("some-package@1"));
@@ -1200,7 +1197,7 @@ mod tests {
         assert_eq!(target(&app.settings, &app.agents_page.entries[0]).version, "2");
         let _ = app.update(msg(Event::Install("codex-acp".into())));
         assert_eq!(
-            app.agents_page.armed.as_deref(),
+            app.agents_page.armed.get().map(String::as_str),
             Some("install:codex-acp:2:live")
         );
         assert!(app.agents_page.logs["codex-acp"].contains("codex@2"));
@@ -1208,10 +1205,10 @@ mod tests {
         let _ = app.update(msg(Event::Latest("codex-acp".into(), false)));
         assert!(!app.settings.prefers_latest("codex-acp"));
         assert_eq!(target(&app.settings, &app.agents_page.entries[0]).version, "1");
-        app.agents_page.armed = None;
+        app.agents_page.armed.clear();
         app.agents_page.logs.clear();
         let _ = app.update(msg(Event::Install("codex-acp".into())));
-        assert!(app.agents_page.armed.is_none());
+        assert!(app.agents_page.armed.get().is_none());
         assert!(!app.agents_page.logs.contains_key("codex-acp"));
         let _ = app.update(msg(Event::Latest("codex-acp".into(), true)));
         assert!(app.settings.supported_agents.is_empty());

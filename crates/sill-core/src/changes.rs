@@ -1,4 +1,4 @@
-//! Per-session change list on the host (SPEC §4.4): rebuild the session's jail plan to know its
+//! Per-session change list on the host (SPEC §4.4): compute the session's layout to know its
 //! layers, scan the ledger, group by repository. Nothing reaches the host without a keep: pinned
 //! folders are bound live and never appear here (SPEC §4.4, decision 18).
 
@@ -14,65 +14,39 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::jail::{self, JailSpec};
+use crate::jail;
 use crate::ledger::{self, Change, ScanOptions};
 use crate::policy::Policy;
 
-/// The jail plan of a session as the launcher built it (same inputs: policy, state dir, host mounts).
-pub fn session_plan(
-    policy: Policy,
-    state_dir: PathBuf,
-    home: &Path,
-    uid: u32,
-    user: &str,
-    filesystem: &crate::agent_storage::Plan,
-) -> Result<jail::JailPlan> {
-    let mut policy = policy;
-    policy.paths.mask.clear();
-    policy.paths.direct.clear();
-    policy.paths.ro.clear();
-    let spec = JailSpec {
-        policy,
-        home: home.to_path_buf(),
-        user: user.to_string(),
-        uid,
-        state_dir,
-        unsafe_state: true, // reading only
-        cwd: home.to_path_buf(),
-        env: Default::default(),
-        share_net: false,
-        mounts: crate::mounts::host_mounts()?,
-        root_entries: jail::read_root_entries()?,
-        proxy_socket: None,
-        proxy_port: jail::PROXY_PORT,
-        binds: vec![],
-        agent_masks: vec![],
-        policy_paths: None,
-        agent_binds: vec![],
-        masks: vec![], // the other agents' paths are tmpfs in the jail: nothing of theirs is in an upper tree
-        memory_dir: None,
-        bridge_dir: None,
-        workspace_mask: vec![],
-        seccomp_fd: None,
-        extra_args: vec![],
-        command: vec!["true".into()],
-    };
-    let mut plan = spec.plan()?;
-    plan.masked = filesystem.policy_paths.masks.iter().chain(&filesystem.agent_masks).map(|m| m.path.to_path()).collect::<Result<_>>()?;
-    plan.direct = filesystem.bindings.iter().map(|b| b.target.to_path()).chain(filesystem.policy_paths.direct.iter().chain(&filesystem.policy_paths.read_only).map(|p| p.to_path())).collect::<Result<_>>()?;
+/// Where a session's writes are and which of them are no change against the host.
+pub struct SessionView {
+    /// The overlay layers, as the launcher laid them (same policy, state dir and host mounts).
+    pub layers: Vec<jail::Layer>,
+    /// Hidden in the jail: nothing below is the agent's.
+    pub masked: Vec<PathBuf>,
+    /// Bound through: what the upper trees hold below is hidden from the agent.
+    pub direct: Vec<PathBuf>,
+}
+
+/// The view of a session from its launch record. Nothing of a jail is built or validated: only
+/// the layout is computed, from the mounts as they are now.
+pub fn session_view(policy: &Policy, state_dir: &Path, home: &Path, filesystem: &crate::agent_storage::Plan) -> Result<SessionView> {
+    let layout = jail::layout(policy, home, state_dir, &crate::mounts::host_mounts()?, &jail::read_root_entries()?)?;
+    let masked = filesystem.policy_paths.masks.iter().chain(&filesystem.agent_masks).map(|m| m.path.to_path()).collect::<Result<_>>()?;
+    let mut direct: Vec<PathBuf> = filesystem.bindings.iter().map(|b| b.target.to_path()).chain(filesystem.policy_paths.direct.iter().chain(&filesystem.policy_paths.read_only).map(|p| p.to_path())).collect::<Result<_>>()?;
     // a workspace's clone is bound over its repository (docs/parallel-coding.md §12): what the
     // upper tree holds below it is hidden from the agent and no change against the host — listing
     // it offered a revert that went through the bind into the clone
     for w in &filesystem.workspaces {
-        plan.direct.push(w.source.to_path()?);
+        direct.push(w.source.to_path()?);
     }
-    Ok(plan)
+    Ok(SessionView { layers: layout.layers, masked, direct })
 }
 
 /// Scan a session's upper trees. Inside git repositories, git-ignored paths count as ignored (build
 /// output) exactly as the repository defines them; the policy's `ledger_ignore` patterns apply
 /// everywhere else.
-pub fn scan(policy: &Policy, plan: &jail::JailPlan, session_start: Option<std::time::SystemTime>) -> Result<Vec<Change>> {
+pub fn scan(policy: &Policy, plan: &SessionView, session_start: Option<std::time::SystemTime>) -> Result<Vec<Change>> {
     let mut skip = plan.masked.clone();
     skip.extend(plan.direct.iter().cloned());
     let opts = ScanOptions { session_start, ignore: policy.paths.ledger_ignore.clone(), skip };

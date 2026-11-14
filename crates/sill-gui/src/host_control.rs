@@ -788,7 +788,7 @@ mod tests {
         assert!(ui.find("HOST · Process inspection completed").is_err(), "no notice line of its own any more");
         ui.click("Process inspection").unwrap();
         let messages: Vec<Message> = ui.into_messages().collect();
-        assert!(messages.iter().any(|m| matches!(m, Message::ToggleTool(id) if id == "asked")), "{messages:?}");
+        assert!(messages.iter().any(|m| matches!(m, Message::Session(_, crate::session::Event::ToggleTool(id)) if id == "asked")), "{messages:?}");
         for m in messages {
             let _ = app.update(m);
         }

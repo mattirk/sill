@@ -26,7 +26,7 @@ pub struct Menu {
     pub filter: String,
     pub expanded: bool,
     /// The session whose delete was pressed once.
-    pub armed: Option<String>,
+    pub armed: crate::armed::Armed<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -462,7 +462,7 @@ impl App {
                 tooltip::Position::Left,
             ));
         }
-        let armed = menu.armed.as_deref() == Some(session.session_id.as_str());
+        let armed = menu.armed.is(&session.session_id);
         line = line.push(tooltip(
             keys::press(
                 button(if armed {

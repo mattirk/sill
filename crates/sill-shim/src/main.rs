@@ -66,12 +66,8 @@ enum Request {
     Kill { #[serde(default = "default_grace")] grace_ms: u64 },
     /// Restore a path from the host view (SPEC §4.4 revert).
     Revert { path: PathBuf },
-    /// Read a file as the jail sees it (merged view).
-    ReadFile { path: PathBuf },
     /// Open a regular image in the jail and return its read-only fd via SCM_RIGHTS.
     OpenImage { path_bytes: Vec<u8> },
-    /// Write a file in the jail (merged view, recorded by the overlay).
-    WriteFile { path: PathBuf, content: String },
     /// Managed processes (docs/tasks.md §2.4): what the jail's `sill-proc` can do, for the daemon.
     ProcList,
     /// What runs in the jail now, classed (`activity.rs`).
@@ -561,14 +557,6 @@ fn handle_request(req: Request, shared: &Shared, procs: &procs::Procs) -> Reply 
             Ok(what) => Reply::ok().with("action", what),
             Err(e) => Reply::err(format!("{e:#}")),
         },
-        Request::ReadFile { path } => match std::fs::read_to_string(&path) {
-            Ok(content) => Reply::ok().with("content", content),
-            Err(e) => Reply::err(format!("{}: {e}", path.display())),
-        },
-        Request::WriteFile { path, content } => match write_file(&path, &content) {
-            Ok(()) => Reply::ok(),
-            Err(e) => Reply::err(format!("{e:#}")),
-        },
         Request::OpenPty { .. } | Request::OpenImage { .. } => Reply::err("handled by the control loop"),
     }
 }
@@ -938,21 +926,4 @@ fn revert(path: &Path) -> Result<&'static str> {
     std::io::copy(&mut from, &mut to).with_context(|| format!("copy {} back", path.display()))?;
     fchmod(&to, mode)?;
     Ok("restored")
-}
-
-/// Write a regular file at `path` (parents created), never through a symlink.
-fn write_file(path: &Path, content: &str) -> Result<()> {
-    use rustix::fs::{FileType, Mode, OFlags, RawMode, ResolveFlags, fstat, openat2};
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let (dir, name) = parent_and_name(path)?;
-    let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let fd = openat2(&dir, &name, flags, Mode::from_raw_mode(0o644), ResolveFlags::NO_SYMLINKS | ResolveFlags::BENEATH)
-        .with_context(|| format!("write {} (no symlinks)", path.display()))?;
-    if FileType::from_raw_mode(fstat(&fd)?.st_mode as RawMode) != FileType::RegularFile {
-        bail!("{}: not a regular file", path.display());
-    }
-    let mut f = std::fs::File::from(fd);
-    f.write_all(content.as_bytes()).with_context(|| format!("write {}", path.display()))
 }

@@ -115,12 +115,12 @@ pub struct State {
     space_reading: bool,
     scanning: bool,
     clearing: bool,
-    armed_clear: bool,
+    armed_clear: crate::armed::Armed<()>,
     space_read_at: Option<std::time::Instant>,
     /// What is under way ("Restarting…"); the buttons wait for it.
     busy: Option<&'static str>,
     said: Option<Result<String, String>>,
-    armed_remove: Option<PathBuf>,
+    armed_remove: crate::armed::Armed<PathBuf>,
     reading: bool,
     /// The phase last seen by Tick, to read the info again when it changes.
     seen: Option<Phase>,
@@ -229,7 +229,7 @@ impl App {
             }
             state.busy = Some(busy);
             state.said = None;
-            state.armed_remove = None;
+            state.armed_remove.clear();
             blocking(work, |result| msg(Event::Done(result)))
         };
         match event {
@@ -305,7 +305,7 @@ impl App {
                 if self.vm.scanning || self.vm.clearing {
                     return Task::none();
                 }
-                self.vm.armed_clear = false;
+                self.vm.armed_clear.clear();
                 if self.demo {
                     self.vm.caches = Some(Ok(sill_proto::storage::Caches {
                         caches: vec![sill_proto::storage::BuildCache {
@@ -343,7 +343,7 @@ impl App {
                 self.vm.scanning = false;
                 self.vm.caches = Some(result);
             }
-            Event::CancelClear => self.vm.armed_clear = false,
+            Event::CancelClear => self.vm.armed_clear.clear(),
             Event::ClearCaches => {
                 if self.vm.scanning || self.vm.clearing {
                     return Task::none();
@@ -364,11 +364,9 @@ impl App {
                 if ids.is_empty() {
                     return Task::none();
                 }
-                if !self.vm.armed_clear {
-                    self.vm.armed_clear = true;
+                if !self.vm.armed_clear.press(()) {
                     return Task::none();
                 }
-                self.vm.armed_clear = false;
                 if self.demo {
                     self.vm.said = Some(Err(DEMO.into()));
                     return Task::none();
@@ -524,11 +522,9 @@ impl App {
                 if self.vm.busy.is_some() || self.vm_phase().is_some_and(|p| p.moving()) {
                     return Task::none();
                 }
-                if self.vm.armed_remove.as_ref() != Some(&path) {
-                    self.vm.armed_remove = Some(path);
+                if !self.vm.armed_remove.press(path.clone()) {
                     return Task::none();
                 }
-                self.vm.armed_remove = None;
                 if self.demo {
                     self.vm.said = Some(Err(DEMO.into()));
                     return Task::none();
@@ -635,7 +631,7 @@ impl App {
                 let mut actions = row![quiet_button(
                     if vm.clearing {
                         "Clearing…"
-                    } else if vm.armed_clear {
+                    } else if vm.armed_clear.is(&()) {
                         "Confirm clear all build caches"
                     } else {
                         "Clear all build caches"
@@ -644,7 +640,7 @@ impl App {
                         .then(|| msg(Event::ClearCaches)),
                 )]
                 .spacing(8);
-                if vm.armed_clear {
+                if vm.armed_clear.is(&()) {
                     actions = actions.push(quiet_button("Cancel", Some(msg(Event::CancelClear))));
                 }
                 body = body.push(actions);
@@ -831,7 +827,7 @@ impl App {
         // ---- Shared folders
         let mut folders = column![].spacing(4);
         for (_, path, present) in &info.folders {
-            let armed = vm.armed_remove.as_ref() == Some(path);
+            let armed = vm.armed_remove.is(path);
             let mut line = column![text(home_relative(path)).size(style::TEXT)].width(Fill);
             if !present {
                 line = line.push(
@@ -863,7 +859,7 @@ impl App {
         if info.folders.is_empty() {
             folders = folders.push(text("None").size(style::SMALL).color(P.fg_dim));
         }
-        if vm.armed_remove.is_some() {
+        if vm.armed_remove.get().is_some() {
             folders = folders.push(
                 text("Sessions that pin something in it lose it. Press again to unshare.")
                     .size(style::SMALL)
@@ -1019,7 +1015,7 @@ mod tests {
         assert!(matches!(app.vm.said, Some(Err(_))));
         let path = PathBuf::from("/Users/someone/GIT/sill");
         let _ = app.vm_event(Event::RemoveFolder(path.clone()));
-        assert_eq!(app.vm.armed_remove, Some(path));
+        assert!(app.vm.armed_remove.is(&path));
     }
 
     #[test]
@@ -1044,13 +1040,13 @@ mod tests {
         let _ = app.vm_event(Event::Read);
         let _ = app.vm_event(Event::ScanCaches);
         let _ = app.vm_event(Event::ClearCaches);
-        assert!(app.vm.armed_clear);
+        assert!(app.vm.armed_clear.is(&()));
         assert!(!app.vm.clearing);
         let _ = app.vm_event(Event::CancelClear);
-        assert!(!app.vm.armed_clear);
+        assert!(!app.vm.armed_clear.is(&()));
         app.vm.caches.as_mut().unwrap().as_mut().unwrap().caches[0].active = true;
         let _ = app.vm_event(Event::ClearCaches);
-        assert!(!app.vm.armed_clear);
+        assert!(!app.vm.armed_clear.is(&()));
         assert!(!app.vm.clearing);
     }
 

@@ -24,7 +24,7 @@ use sill_proto::sfp::{Answer, Item, Question, Tool};
 
 use crate::layout::{self, Drawer};
 use crate::style::{self, P, alpha};
-use crate::{App, Message, Pick, SessionView, Tab, icons, keys, rows, selection, viewer};
+use crate::{App, Message, Pick, SessionView, Tab, icons, keys, rows, selection, session, viewer};
 
 pub(crate) const MONO_FONT: Font = Font::with_name(crate::fonts::MONO_FAMILY);
 /// The window's resize edges, over its outer pixels: wide enough (the person, 2026-11-07).
@@ -609,7 +609,7 @@ impl App {
         }
         // Closing ends the session (a ghost asks once: it deletes it).
         if closable {
-            let armed = self.armed_close.as_deref() == Some(tab.id.as_str());
+            let armed = self.armed_close.is(&tab.id);
             label = label.push(
                 container(keys::press(
                     button(
@@ -1084,11 +1084,14 @@ impl App {
             .height(Fill)
             .width(Fill)
             .style(style::feed_scroll)
-            .on_scroll(|viewport| {
-                Message::Scrolled(
-                    viewport.relative_offset().y >= 0.99,
-                    viewport.absolute_offset().y,
-                    viewport.bounds().height,
+            .on_scroll(move |viewport| {
+                session::message(
+                    &view.id,
+                    session::Event::Scrolled(
+                        viewport.relative_offset().y >= 0.99,
+                        viewport.absolute_offset().y,
+                        viewport.bounds().height,
+                    ),
                 )
             });
         // the scrollable stays the stack's first layer whether or not "↓ Latest" is over it:
@@ -1101,7 +1104,7 @@ impl App {
                     button(text("↓ Latest").size(style::SMALL))
                         .padding([4, 10])
                         .style(style::solid(P.surface)),
-                    Message::Latest,
+                    session::message(&view.id, session::Event::Latest),
                 ))
                 .padding(Padding {
                     top: 0.0,
@@ -1231,7 +1234,7 @@ impl App {
                         return whole();
                     }
                     let open = view.open_tools.contains(&item.item_id);
-                    let line = folded_thought(&item.item_id, source, open);
+                    let line = folded_thought(&view.id, &item.item_id, source, open);
                     if open {
                         Column::new().push(line).push(whole()).spacing(4).into()
                     } else {
@@ -1261,7 +1264,7 @@ impl App {
                 };
                 let color = crate::host_control::notice_color(source, color);
                 if source.starts_with("HOST action ") || source.starts_with("HOST process ") || is_long_notice(source) {
-                    folded_note(&item.item_id, source, color, view.open_tools.contains(&item.item_id))
+                    folded_note(&view.id, &item.item_id, source, color, view.open_tools.contains(&item.item_id))
                 } else {
                     note(source, color)
                 }
@@ -1323,7 +1326,7 @@ impl App {
             .padding([3, 6])
             .width(Fill)
             .style(style::row_button);
-        let line = keys::press(line, Message::ToggleTool(item.item_id.clone()));
+        let line = keys::press(line, session::message(&view.id, session::Event::ToggleTool(item.item_id.clone())));
         let body = Column::new().push(line);
         if view.open_tools.contains(&item.item_id) {
             tool_output(body, tool)
@@ -1360,7 +1363,7 @@ impl App {
         .padding([3, 6])
         .width(Fill)
         .style(style::row_button);
-        let mut body = Column::new().push(keys::press(line, Message::ToggleGroup(key)));
+        let mut body = Column::new().push(keys::press(line, session::message(&view.id, session::Event::ToggleGroup(key))));
         if open {
             let mut opened = Column::new().spacing(12).padding(Padding { top: 6.0, right: 0.0, bottom: 4.0, left: 0.0 });
             for entry in crate::tool_runs::entries(&inside, |_| false) {
@@ -1476,9 +1479,9 @@ impl App {
                     .into()
             };
             let toggle = if single {
-                Message::ToggleTool(first.item_id.clone())
+                session::message(&view.id, session::Event::ToggleTool(first.item_id.clone()))
             } else {
-                Message::ToggleGroup(first.item_id.clone())
+                session::message(&view.id, session::Event::ToggleGroup(first.item_id.clone()))
             };
             block = block.push(keys::press(
                 button(content)
@@ -1542,7 +1545,7 @@ impl App {
             .align_y(Alignment::Center);
             keys::press(
                 button(line).padding([3, 6]).width(Fill).style(style::row_button),
-                Message::ToggleTool(action.key.clone()),
+                session::message(&view.id, session::Event::ToggleTool(action.key.clone())),
             )
             .into()
         };
@@ -1602,9 +1605,9 @@ impl App {
                 )
                 .push(status_mark(group.status()));
             let toggle = if single {
-                Message::ToggleTool(first.key.clone())
+                session::message(&view.id, session::Event::ToggleTool(first.key.clone()))
             } else {
-                Message::ToggleGroup(first.key.clone())
+                session::message(&view.id, session::Event::ToggleGroup(first.key.clone()))
             };
             block = block.push(keys::press(
                 button(cells).padding([3, 6]).width(Fill).style(style::row_button),
@@ -1648,9 +1651,14 @@ impl App {
                         button(text(&option.title).size(style::TEXT))
                             .padding([6, 12])
                             .style(option_style(&option.kind)),
-                        (!sending).then(|| Message::Answer {
-                            question_id: question.question_id.clone(),
-                            option_id: option.option_id.clone(),
+                        (!sending).then(|| {
+                            session::message(
+                                &view.id,
+                                session::Event::Answer {
+                                    question_id: question.question_id.clone(),
+                                    option_id: option.option_id.clone(),
+                                },
+                            )
                         }),
                     ));
                 }
@@ -1680,7 +1688,7 @@ impl App {
                 button(text(if open { "▾ hide" } else { "▸ show" }).size(style::TINY))
                     .padding([0, 4])
                     .style(style::quiet),
-                Message::ToggleAnswered(question.question_id.clone()),
+                session::message(&view.id, session::Event::ToggleAnswered(question.question_id.clone())),
             ));
             if open {
                 card = asked(card, question);
@@ -1707,7 +1715,7 @@ impl App {
             && !view.attachments_busy
             && (!view.draft.text().trim().is_empty() || !view.attachments.is_empty());
         let action: Element<'_, Message> = if view.conversation.busy() {
-            stop_button()
+            stop_button(&view.id)
         } else {
             keys::press_maybe(
                 button(svg(icons::send()).width(12).height(12).style(
@@ -1722,7 +1730,7 @@ impl App {
                 ))
                 .padding(3)
                 .style(style::send),
-                sendable.then_some(Message::Send),
+                sendable.then(|| session::message(&view.id, session::Event::Send)),
             )
         };
         let shell = bar_button(icons::glyph(
@@ -1741,12 +1749,12 @@ impl App {
         .style(style::quiet);
         let shell = container(keys::press_maybe(
             shell,
-            (has_session && view.annotation.is_none()).then_some(Message::ToggleTerminal),
+            (has_session && view.annotation.is_none()).then(|| session::message(&view.id, session::Event::ToggleTerminal)),
         ))
         .id("terminal-button");
         let shell = mouse_area(shell);
         let shell = if has_session && view.annotation.is_none() {
-            shell.on_right_press(Message::ToggleHostTerminal)
+            shell.on_right_press(session::message(&view.id, session::Event::ToggleHostTerminal))
         } else {
             shell
         };
@@ -1895,7 +1903,7 @@ impl App {
             .values()
             .filter(|s| s.held && s.outcome == "pending")
         {
-            composer = composer.push(held(submission));
+            composer = composer.push(held(&view.id, submission));
         }
         let mut queued = Column::new().spacing(4);
         let mut has_queued = false;
@@ -1936,7 +1944,7 @@ impl App {
                             )
                             .padding([3, 6])
                             .style(style::quiet),
-                            Message::SendNow(submission.submission_id.clone())
+                            session::message(&view.id, session::Event::SendNow(submission.submission_id.clone()))
                         ),
                         container(
                             text("Send now: stops the agent's turn and sends this first")
@@ -1950,7 +1958,7 @@ impl App {
                         button(icons::glyph("x", 12.0, alpha(P.fg, 0.6)))
                             .padding([2, 6])
                             .style(style::quiet),
-                        Message::Unqueue(submission.submission_id.clone())
+                        session::message(&view.id, session::Event::Unqueue(submission.submission_id.clone()))
                     ),
                 ]
                 .spacing(8)
@@ -1983,7 +1991,9 @@ impl App {
             .style(style::prompt)
             .highlight_with::<crate::lists::Marks>(crate::lists::colours(), crate::lists::format);
         let editor = if view.annotation.is_none() {
-            editor.on_action(Message::Prompt).key_binding(enter_sends)
+            editor
+                .on_action(move |action| session::message(&view.id, session::Event::Prompt(action)))
+                .key_binding(move |key_press| enter_sends(&view.id, key_press))
         } else {
             editor
         };
@@ -1992,7 +2002,7 @@ impl App {
         let terminal = view.terminal.as_ref()
             .filter(|_| view.terminal_shown && view.annotation.is_none());
         let input: Element<'_, Message> = match terminal {
-            Some(pane) => self.terminal_pane(pane, view.terminal_host),
+            Some(pane) => self.terminal_pane(&view.id, pane, view.terminal_host),
             None => editor.into(),
         };
         // under the prompt the icons sit low (the prompt's own padding is above them); under the
@@ -2024,6 +2034,7 @@ impl App {
     /// of the host shell's warning-coloured one.
     fn terminal_pane<'a>(
         &'a self,
+        session: &'a str,
         pane: &'a crate::terminal::Pane,
         host: bool,
     ) -> Element<'a, Message> {
@@ -2046,13 +2057,14 @@ impl App {
                     button(text("End shell").size(style::TINY))
                         .padding([0, 6])
                         .style(style::quiet),
-                    Message::EndTerminal,
+                    session::message(session, session::Event::EndTerminal),
                 ));
-                pane.view().map(Message::TermAction)
+                pane.view()
+                    .map(move |action| session::message(session, session::Event::TermAction(action)))
             }
             Status::Opening => center(text("Opening the shell…").color(P.fg_dim)).into(),
-            Status::Failed(error) => ended(format!("The shell could not be opened: {error}")),
-            Status::Ended => ended("The shell ended.".into()),
+            Status::Failed(error) => ended(session, format!("The shell could not be opened: {error}")),
+            Status::Ended => ended(session, "The shell ended.".into()),
         };
         let mut pane_column = column![
             rule::horizontal(1).style(style::rule_style(P.success)),
@@ -2153,7 +2165,7 @@ pub(crate) fn bar_tip<'a>(
     .into()
 }
 
-fn stop_button<'a>() -> Element<'a, Message> {
+fn stop_button<'a>(session: &str) -> Element<'a, Message> {
     container(keys::press(
         button(
             svg(icons::stop())
@@ -2163,7 +2175,7 @@ fn stop_button<'a>() -> Element<'a, Message> {
         )
         .padding(3)
         .style(style::tinted(P.error)),
-        Message::Stop,
+        session::message(session, session::Event::Stop),
     ))
     .id("stop")
     .into()
@@ -2199,7 +2211,7 @@ fn form<'a>(view: &'a SessionView, question: &'a Question) -> Element<'a, Messag
                     .style(style::selectable(P.fg_dim)),
             );
         }
-        let edit = |edit: crate::forms::Edit| Message::FormEdit(id(), edit);
+        let edit = |edit: crate::forms::Edit| session::message(&view.id, session::Event::FormEdit(id(), edit));
         let input: Element<'a, Message> = match field.kind.as_str() {
             "choice" | "choices" => {
                 let single = field.kind == "choice";
@@ -2271,12 +2283,15 @@ fn form<'a>(view: &'a SessionView, question: &'a Question) -> Element<'a, Messag
                 .size(style::SMALL)
                 .padding(6)
                 .on_input(move |value| {
-                    Message::FormEdit(
-                        id(),
-                        crate::forms::Edit::Text {
-                            key: key.clone(),
-                            text: value,
-                        },
+                    session::message(
+                        &view.id,
+                        session::Event::FormEdit(
+                            id(),
+                            crate::forms::Edit::Text {
+                                key: key.clone(),
+                                text: value,
+                            },
+                        ),
                     )
                 })
                 .into()
@@ -2295,13 +2310,13 @@ fn form<'a>(view: &'a SessionView, question: &'a Question) -> Element<'a, Messag
             button(text("Submit").size(style::TEXT))
                 .padding([6, 12])
                 .style(style::solid(P.accent)),
-            (answerable && !sending).then(|| Message::SubmitForm(id())),
+            (answerable && !sending).then(|| session::message(&view.id, session::Event::SubmitForm(id()))),
         ),
         keys::press_maybe(
             button(text("Decline").size(style::TEXT))
                 .padding([6, 12])
                 .style(style::solid(P.fg_dim)),
-            (!sending).then(|| Message::DeclineForm(id())),
+            (!sending).then(|| session::message(&view.id, session::Event::DeclineForm(id()))),
         ),
     ]
     .spacing(8);
@@ -2310,7 +2325,7 @@ fn form<'a>(view: &'a SessionView, question: &'a Question) -> Element<'a, Messag
 
 /// A prompt the daemon holds until the person decides (after a restart or a failure): send it
 /// after all, or drop it.
-fn held(submission: &sill_proto::sfp::Submission) -> Element<'_, Message> {
+fn held<'a>(session: &str, submission: &'a sill_proto::sfp::Submission) -> Element<'a, Message> {
     let why = submission.hold_reason.as_ref().map_or_else(
         || "held until you decide".to_string(),
         |r| r.message.clone(),
@@ -2341,11 +2356,11 @@ fn held(submission: &sill_proto::sfp::Submission) -> Element<'_, Message> {
             .clip(true),
             small(
                 "Send",
-                Message::ResumeHeld(submission.submission_id.clone())
+                session::message(session, session::Event::ResumeHeld(submission.submission_id.clone()))
             ),
             small(
                 "Discard",
-                Message::DiscardHeld(submission.submission_id.clone())
+                session::message(session, session::Event::DiscardHeld(submission.submission_id.clone()))
             ),
         ]
         .spacing(4)
@@ -2402,15 +2417,15 @@ fn outbox<'a>(mut composer: Column<'a, Message>, view: &'a SessionView) -> Colum
         match &pending.state {
             State::Failed(_) => {
                 line = line
-                    .push(small("Edit", Message::EditSend(id.clone())))
-                    .push(small("Send again", Message::RetrySend(id.clone())))
-                    .push(small("Discard", Message::DiscardSend(id)));
+                    .push(small("Edit", session::message(&view.id, session::Event::EditSend(id.clone()))))
+                    .push(small("Send again", session::message(&view.id, session::Event::RetrySend(id.clone()))))
+                    .push(small("Discard", session::message(&view.id, session::Event::DiscardSend(id))));
             }
             State::Uncertain(_) => {
                 line = line
-                    .push(small("Check", Message::CheckSend(id.clone())))
-                    .push(small("Edit", Message::EditSend(id.clone())))
-                    .push(small("Discard", Message::DiscardSend(id)));
+                    .push(small("Check", session::message(&view.id, session::Event::CheckSend(id.clone()))))
+                    .push(small("Edit", session::message(&view.id, session::Event::EditSend(id.clone()))))
+                    .push(small("Discard", session::message(&view.id, session::Event::DiscardSend(id))));
             }
             State::Sending | State::Checking => {}
         }
@@ -2464,7 +2479,7 @@ fn controls(view: &SessionView) -> Vec<Element<'_, Message>> {
             .map(|current| picks.iter().find(|p| &p.value == current).cloned().unwrap_or_else(|| Pick {
                 value: current.clone(), title: current.clone(), boolean: None,
             }));
-        out.push(control(picks, selected, Message::SetMode));
+        out.push(control(picks, selected, move |pick| session::message(&view.id, session::Event::SetMode(pick))));
     }
     for option in &controls.options {
         // the mode set already covers a "mode"-category option (Claude Code sends both)
@@ -2506,7 +2521,7 @@ fn controls(view: &SessionView) -> Vec<Element<'_, Message>> {
         };
         let option_id = option.option_id.clone();
         out.push(control(picks, selected, move |pick| {
-            Message::SetOption(option_id.clone(), pick)
+            session::message(&view.id, session::Event::SetOption(option_id.clone(), pick))
         }));
     }
     out
@@ -2721,7 +2736,7 @@ fn control<'a>(
 }
 
 /// Where the shell was: what became of it, and a fresh one.
-fn ended<'a>(said: String) -> Element<'a, Message> {
+fn ended<'a>(session: &str, said: String) -> Element<'a, Message> {
     center(
         column![
             text(said).size(style::SMALL).color(P.fg_dim),
@@ -2729,7 +2744,7 @@ fn ended<'a>(said: String) -> Element<'a, Message> {
                 button(text("Open a new shell").size(style::SMALL))
                     .padding([4, 10])
                     .style(style::quiet),
-                Message::ReopenTerminal
+                session::message(session, session::Event::ReopenTerminal)
             ),
         ]
         .spacing(8)
@@ -2796,10 +2811,12 @@ pub(crate) fn list_keys(key_press: &text_editor::KeyPress, shifted: bool) -> Opt
 
 /// Enter sends; Shift+Enter is a new line; everything else is the editor's own.
 pub(crate) fn enter_sends(
+    session: &str,
     key_press: text_editor::KeyPress,
 ) -> Option<text_editor::Binding<Message>> {
+    let custom = |event| Some(text_editor::Binding::Custom(session::message(session, event)));
     if let Some(redo) = history_shortcut(&key_press) {
-        return Some(text_editor::Binding::Custom(Message::PromptHistory(redo)));
+        return custom(session::Event::PromptHistory(redo));
     }
     if matches!(key_press.key.as_ref(), Key::Character(c) if c.eq_ignore_ascii_case("v"))
         && key_press.modifiers.command()
@@ -2815,10 +2832,10 @@ pub(crate) fn enter_sends(
     }
     match list_keys(&key_press, true) {
         Some(ListKey::Newline) => {
-            return Some(text_editor::Binding::Custom(Message::PromptNewline));
+            return custom(session::Event::PromptNewline);
         }
         Some(ListKey::Indent(outdent)) => {
-            return Some(text_editor::Binding::Custom(Message::PromptIndent(outdent)));
+            return custom(session::Event::PromptIndent(outdent));
         }
         None => {}
     }
@@ -2826,7 +2843,7 @@ pub(crate) fn enter_sends(
         && !key_press.modifiers.shift()
         && matches!(key_press.status, text_editor::Status::Focused { .. })
     {
-        return Some(text_editor::Binding::Custom(Message::Send));
+        return custom(session::Event::Send);
     }
     text_editor::Binding::from_key_press(key_press)
 }
@@ -2978,8 +2995,8 @@ pub(crate) fn thought_line(source: &str) -> String {
 }
 
 /// A long thought's line: pressable, with a chevron; the thought itself goes under it when open
-/// (the same open set as tool calls, `Message::ToggleTool`).
-fn folded_thought<'a>(item_id: &str, source: &str, open: bool) -> Element<'a, Message> {
+/// (the same open set as tool calls, `session::Event::ToggleTool`).
+fn folded_thought<'a>(session: &str, item_id: &str, source: &str, open: bool) -> Element<'a, Message> {
     let color = alpha(P.fg, 0.55);
     let line = button(
         row![
@@ -3003,12 +3020,12 @@ fn folded_thought<'a>(item_id: &str, source: &str, open: bool) -> Element<'a, Me
     .padding([3, 6])
     .width(Fill)
     .style(style::row_button);
-    keys::press(line, Message::ToggleTool(item_id.to_owned()))
+    keys::press(line, session::message(session, session::Event::ToggleTool(item_id.to_owned())))
 }
 
 /// A long notice: one pressable line with a chevron, the whole text under it when open (the
-/// same open set as tool calls, `Message::ToggleTool`).
-fn folded_note<'a>(item_id: &str, message: &'a str, color: Color, open: bool) -> Element<'a, Message> {
+/// same open set as tool calls, `session::Event::ToggleTool`).
+fn folded_note<'a>(session: &str, item_id: &str, message: &'a str, color: Color, open: bool) -> Element<'a, Message> {
     let line = button(
         row![
             text(if open { "▾" } else { "▸" }).size(style::SMALL).color(color).width(14),
@@ -3030,7 +3047,7 @@ fn folded_note<'a>(item_id: &str, message: &'a str, color: Color, open: bool) ->
     .padding([3, 6])
     .width(Fill)
     .style(style::row_button);
-    let line = keys::press(line, Message::ToggleTool(item_id.to_owned()));
+    let line = keys::press(line, session::message(session, session::Event::ToggleTool(item_id.to_owned())));
     let mut body = Column::new().push(line);
     if open {
         body = body.push(note(message, color));
