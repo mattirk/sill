@@ -15,11 +15,20 @@ use sill_core::session::StartOptions;
 use sill_core::store::Store;
 use sill_proto::rpc::Error;
 use sill_proto::{
-    Attach, DaemonStatus, Key, LogRequest, MemorySearch, MemorySession, Session, SessionAnswer, SessionCommand, Started, Text, Transcript, method,
+    Attach, DaemonStatus, End, Ending, Key, LogRequest, MemorySearch, MemorySession, Session, SessionAnswer, SessionCommand, Started, Text, Transcript, method,
 };
 
 use super::Conn;
-use super::runner::Runner;
+use super::runner::{Runner, SummaryDone, SummaryKind};
+
+/// What an end that waits for the agent's summary needs once the answer is in (the facts as they
+/// were when the end was asked for; the row's summary is replaced only when memory is on).
+struct EndCtx {
+    facts: sill_core::memory::Facts,
+    memory: bool,
+    /// The old summary stays: memory is off, or a reopened session was closed without a turn.
+    keep_old: bool,
+}
 
 pub struct Hub {
     store: Mutex<Store>,
@@ -37,6 +46,8 @@ pub struct Hub {
     /// Starting a conversation (jail, agent, ACP) is one at a time: two attaches of one session
     /// must not start two agents.
     starting: Mutex<()>,
+    /// Sessions whose end waits for the agent's summary turn (`sessions.end`).
+    ending: Mutex<HashMap<String, EndCtx>>,
 }
 
 impl Hub {
@@ -54,6 +65,7 @@ impl Hub {
             children: Arc::default(),
             runners: Mutex::new(HashMap::new()),
             starting: Mutex::new(()),
+            ending: Mutex::new(HashMap::new()),
         };
         hub.adopt_running();
         Ok(hub)
@@ -116,10 +128,17 @@ impl Hub {
             }
             method::SESSIONS_STOP => {
                 let k: Key = args(params)?;
-                if let Some(r) = self.runners.lock().unwrap().remove(&k.key) {
-                    r.retire();
-                }
+                self.retire_runner(&k.key);
                 sill_core::session::stop(&k.key).map_err(|e| Error::failed(format!("{e:#}")))?;
+                Ok(json!({}))
+            }
+            method::SESSIONS_END => {
+                let e: End = args(params)?;
+                to_value(self.end_session(&e.key, &e.reason).map_err(|e| Error::failed(format!("{e:#}")))?)
+            }
+            method::SESSIONS_CHECKPOINT => {
+                let k: Key = args(params)?;
+                self.checkpoint(&k.key).map_err(|e| Error::failed(format!("{e:#}")))?;
                 Ok(json!({}))
             }
             method::SESSIONS_ATTACH => {
@@ -308,6 +327,166 @@ impl Hub {
         Ok(())
     }
 
+    /// The session's conversation is over as far as the daemon is concerned: no more events out.
+    fn retire_runner(&self, id: &str) {
+        if let Some(r) = self.runners.lock().unwrap().remove(id) {
+            r.retire();
+        }
+    }
+
+    /// The session ends as closing its tab does (docs/memory.md §2.2). With memory on, its agent —
+    /// when it is up, idle and saw the conversation — writes the summary as its last turn and the
+    /// end follows the answer (`pending`); without the agent, sill's own summary from the facts and
+    /// the end at once. A reopened session closed without a turn keeps the summary it had
+    /// (decision 13). With memory off only `ended_at` is set. A session without a single prompt is
+    /// deleted instead: there is nothing to remember. Asked again while the agent writes: still
+    /// pending. Asked during a checkpoint: that checkpoint becomes the end's summary.
+    fn end_session(self: &Arc<Self>, id: &str, reason: &str) -> Result<Ending> {
+        if !sill_core::session::valid_id(id) {
+            bail!("not a session id");
+        }
+        let runner = self.runners.lock().unwrap().get(id).filter(|r| r.alive()).cloned();
+        if let Some(r) = &runner {
+            match r.summarizing() {
+                Some(SummaryKind::End) => return Ok(Ending { pending: true, deleted: false }),
+                Some(SummaryKind::Checkpoint) => {
+                    let ctx = self.end_ctx(id)?;
+                    if r.adopt_checkpoint() {
+                        self.ending.lock().unwrap().insert(id.to_string(), ctx);
+                        eprintln!("sill daemon: session {id} ends ({reason}): its checkpoint becomes the summary");
+                        return Ok(Ending { pending: true, deleted: false });
+                    }
+                }
+                None => {}
+            }
+        }
+        let mut ctx = self.end_ctx(id)?;
+        // nothing was asked: nothing to remember (docs/memory.md §2.1), the row would only crowd
+        // every search and recall with "0 prompts"
+        if ctx.facts.prompts == 0 {
+            eprintln!("sill daemon: session {id} ends ({reason}): nothing was asked, deleting it");
+            self.finish_end(id, None, true);
+            return Ok(Ending { pending: false, deleted: true });
+        }
+        let saw = runner.as_ref().is_some_and(|r| r.agent_saw_session());
+        ctx.keep_old = ctx.keep_old && !saw;
+        let said = self.with_store(|s| s.count_kind(id, "agent")).unwrap_or(0) > 0;
+        if let Some(r) = runner
+            && ctx.memory
+            && !ctx.keep_old
+            && said
+            && saw
+            && r.agent_idle()
+        {
+            let prompt = sill_core::memory::summary_prompt(&ctx.facts, &self.home);
+            match r.ask_summary(self, &prompt, "the session ends: the agent writes its summary for memory", SummaryKind::End) {
+                Ok(()) => {
+                    self.ending.lock().unwrap().insert(id.to_string(), ctx);
+                    eprintln!("sill daemon: session {id} ends ({reason}): the agent writes its summary");
+                    return Ok(Ending { pending: true, deleted: false });
+                }
+                Err(e) => eprintln!("sill daemon: session {id}: the agent could not be asked for a summary ({e:#})"),
+            }
+        }
+        eprintln!("sill daemon: session {id} ends ({reason})");
+        self.finish_end(id, Some((ctx, None)), false);
+        Ok(Ending { pending: false, deleted: false })
+    }
+
+    fn end_ctx(&self, id: &str) -> Result<EndCtx> {
+        let store = self.store.lock().unwrap();
+        let Some(s) = store.sessions()?.into_iter().find(|x| x.id == id) else { bail!("no session {id}") };
+        let uid = rustix::process::getuid().as_raw();
+        let kept_dir = sill_core::session::state_dir(uid, id).map(|d| d.join("kept")).unwrap_or_default();
+        let facts = sill_core::memory::collect(&store, &s, &kept_dir);
+        Ok(EndCtx { facts, memory: sill_core::config::load().memory(), keep_old: !s.summary.is_empty() })
+    }
+
+    /// *Summarize now* (docs/memory.md §2.5): the summary turn, the session going on; the answer
+    /// is stored and comes to the attached frontends as `Summarized`.
+    fn checkpoint(self: &Arc<Self>, id: &str) -> Result<()> {
+        let r = self.runner(id).map_err(|e| anyhow::anyhow!("{}", e.message))?;
+        let ctx = self.end_ctx(id)?;
+        let prompt = sill_core::memory::checkpoint_prompt(&ctx.facts, &self.home);
+        r.ask_summary(self, &prompt, "summarize now: the agent writes a checkpoint summary for memory", SummaryKind::Checkpoint)
+    }
+
+    /// A summary turn is over (the runner's lock is not held): the end completes, or the
+    /// checkpoint is stored and announced.
+    pub fn summary_done(self: &Arc<Self>, id: &str, done: SummaryDone) {
+        let answer = done.text.map(|a| a.trim().to_string()).filter(|a| !a.is_empty());
+        match done.kind {
+            SummaryKind::End => {
+                let ctx = self.ending.lock().unwrap().remove(id);
+                let Some(ctx) = ctx else {
+                    eprintln!("sill daemon: session {id}: a summary came in with no end waiting for it");
+                    return;
+                };
+                self.finish_end(id, Some((ctx, answer)), false);
+            }
+            SummaryKind::Checkpoint => {
+                let mut title = None;
+                let text = answer.map(|a| {
+                    let (t, body) = sill_core::memory::split_title(&a);
+                    title = t;
+                    if body.is_empty() { a } else { body }
+                });
+                if let Some(text) = &text {
+                    self.with_store(|s| {
+                        if let Some(t) = &title {
+                            s.set_title(id, t, "agent")?;
+                        }
+                        s.set_summary(id, text, "agent")
+                    })
+                    .ok();
+                    refresh_memory();
+                }
+                if let Some(r) = self.runners.lock().unwrap().get(id) {
+                    r.notify(&sill_core::wire::Event::Summarized { text, title });
+                }
+            }
+        }
+    }
+
+    /// Record the end — the row written from `ctx` and the agent's `answer`, or deleted — tell
+    /// the attached frontends, and stop the jail on a thread of its own (a stop can take seconds).
+    fn finish_end(self: &Arc<Self>, id: &str, ctx: Option<(EndCtx, Option<String>)>, delete: bool) {
+        if !delete && let Some((ctx, answer)) = ctx {
+            self.with_store(|s| match answer {
+                _ if !ctx.memory || ctx.keep_old => s.end_only(id),
+                Some(a) => {
+                    let (title, body) = sill_core::memory::split_title(&a);
+                    if let Some(t) = title {
+                        s.set_title(id, &t, "agent")?;
+                    }
+                    s.end(id, if body.is_empty() { &a } else { &body }, "agent")
+                }
+                None => s.end(id, &sill_core::memory::auto_summary(&ctx.facts, sill_core::store::now(), &self.home), "auto"),
+            })
+            .ok();
+        }
+        if let Some(r) = self.runners.lock().unwrap().get(id) {
+            r.notify(&sill_core::wire::Event::SessionEnded { deleted: delete });
+        }
+        self.retire_runner(id);
+        self.ending.lock().unwrap().remove(id);
+        let hub = self.clone();
+        let id = id.to_string();
+        let _ = std::thread::Builder::new().name(format!("sill-end-{id}")).spawn(move || {
+            if let Err(e) = sill_core::session::stop(&id) {
+                eprintln!("sill daemon: stopping session {id}: {e:#}");
+            }
+            if delete {
+                let uid = rustix::process::getuid().as_raw();
+                if let Err(e) = sill_core::session::remove_state(uid, &id) {
+                    eprintln!("sill daemon: removing session {id}'s state: {e:#}");
+                }
+                hub.with_store(|s| s.delete(&id)).ok();
+            }
+            refresh_memory();
+        });
+    }
+
     /// Start a stored session's jail from its row — pins, policy, desktop grants, the agent's binds
     /// — or find it running (what `shelf/session.rs` built in-process before the daemon).
     fn start_session(&self, id: &str) -> Result<Started> {
@@ -398,6 +577,13 @@ impl Hub {
                 None => {}
             }
         }
+    }
+}
+
+/// The jail's read-only memory snapshot follows the store (docs/memory.md §2.3).
+fn refresh_memory() {
+    if let Err(e) = sill_core::memory::refresh_snapshot() {
+        eprintln!("sill daemon: memory snapshot: {e:#}");
     }
 }
 

@@ -7,7 +7,8 @@
 //! written and updated, the agent's session id is kept for `session/load`, and a session/load's
 //! replay is neither written nor sent (the stored transcript is already what a frontend shows). A
 //! permission request is answered here when the session auto-allows, else it goes to every attached
-//! frontend and the first answer counts; with nobody attached it waits for the next attach.
+//! frontend and the first answer counts; with nobody attached it waits for the next attach. The
+//! summary turn (the session's end, or a checkpoint) is a prompt of the daemon's own, with a cap.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -15,6 +16,24 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Result, bail};
 use sill_core::acp::{self, Controls};
 use sill_core::wire::{self, Answer, Entry, Reply};
+
+/// What a summary turn is for (docs/memory.md §2.2, §2.5): the session's end, or a checkpoint
+/// while it goes on. A checkpoint becomes the end's when the tab closes during it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SummaryKind {
+    End,
+    Checkpoint,
+}
+
+/// How long the agent gets for its summary before the turn is cut short.
+pub const SUMMARY_CAP: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// A summary turn's outcome, handed to the hub once the runner's lock is released.
+pub struct SummaryDone {
+    pub kind: SummaryKind,
+    /// What the agent wrote; None when it wrote nothing (or was gone).
+    pub text: Option<String>,
+}
 
 use super::Conn;
 use super::hub::Hub;
@@ -49,6 +68,11 @@ struct State {
     ended: bool,
     /// Replaced by a newer runner (a fresh start): its events go nowhere and write nothing.
     retired: bool,
+    /// The summary turn in flight, if any, and the text it has produced so far (its tool calls
+    /// flush the agent's text to the store; the summary keeps a copy). `generation` tells the 90 s cap
+    /// whether the turn it was started for is still the one running.
+    summary: Option<(SummaryKind, String, u64)>,
+    summary_gen: u64,
 }
 
 impl Runner {
@@ -77,11 +101,20 @@ impl Runner {
         hub.runner_ended(&self);
     }
 
-    fn handle(&self, hub: &Hub, ev: acp::Event) {
+    fn handle(&self, hub: &Arc<Hub>, ev: acp::Event) {
+        let done = self.handle_locked(hub, ev);
+        // the lock is released: the hub may lock this runner again (retire it, broadcast to it)
+        if let Some(d) = done {
+            hub.summary_done(&self.id, d);
+        }
+    }
+
+    fn handle_locked(&self, hub: &Arc<Hub>, ev: acp::Event) -> Option<SummaryDone> {
         let mut st = self.st.lock().unwrap();
         if st.retired {
-            return;
+            return None;
         }
+        let mut done = None;
         let id = self.id.clone();
         match &ev {
             acp::Event::Ready { session_id, resumed, controls } => {
@@ -111,10 +144,10 @@ impl Runner {
             | acp::Event::SubagentText { .. }
                 if st.replaying =>
             {
-                return;
+                return None;
             }
             // some agents echo the prompt back during the turn; the frontend shows what it sent
-            acp::Event::UserText(_) => return,
+            acp::Event::UserText(_) => return None,
             acp::Event::Text(t) => st.agent_md.push_str(t),
             acp::Event::ToolCall { id: call, title, status, kind, detail, diff, .. } => {
                 flush(hub, &id, &mut st);
@@ -130,12 +163,20 @@ impl Runner {
             acp::Event::Stopped(_) => {
                 st.busy = false;
                 flush(hub, &id, &mut st);
+                // the summary turn: its text goes to the hub once this event is out
+                if let Some((kind, text, _)) = st.summary.take() {
+                    done = Some(SummaryDone { kind, text: Some(text.trim().to_string()) });
+                }
             }
             acp::Event::Ended(_) => {
                 st.busy = false;
                 st.ended = true;
                 flush(hub, &id, &mut st);
                 st.pending.clear(); // the agent is gone: its questions with it
+                // an agent that went away mid-summary: the mechanical one it is
+                if let Some((kind, _, _)) = st.summary.take() {
+                    done = Some(SummaryDone { kind, text: None });
+                }
             }
             _ => {}
         }
@@ -164,6 +205,105 @@ impl Runner {
             st.auth = Some(wire.clone());
         }
         broadcast(&self.id, &mut st.subs, &wire);
+        done
+    }
+
+    /// The agent saw this conversation: it resumed its own context, or it has had a turn since
+    /// this runner started. A cold agent after a failed `session/load` has neither, and must not be
+    /// asked to summarize what it never saw (docs/memory.md decision 13).
+    pub fn agent_saw_session(&self) -> bool {
+        let st = self.st.lock().unwrap();
+        st.ready.as_ref().is_some_and(|(_, resumed)| *resumed) || st.turns > 0
+    }
+
+    /// The agent is up and between turns: it can be asked one more thing.
+    pub fn agent_idle(&self) -> bool {
+        let st = self.st.lock().unwrap();
+        st.ready.is_some() && !st.busy && !st.ended && !st.retired
+    }
+
+    /// The summary turn running, if any.
+    pub fn summarizing(&self) -> Option<SummaryKind> {
+        self.st.lock().unwrap().summary.as_ref().map(|(k, _, _)| *k)
+    }
+
+    /// The tab closed during a checkpoint: its answer becomes the session's final summary.
+    pub fn adopt_checkpoint(&self) -> bool {
+        let mut st = self.st.lock().unwrap();
+        match st.summary.as_mut() {
+            Some((kind, _, _)) if *kind == SummaryKind::Checkpoint => {
+                *kind = SummaryKind::End;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Ask the agent for a summary as a plain turn (docs/memory.md §2.2): no standing block, no
+    /// user entry — a note marks it in the transcript and for the attached frontends — and the
+    /// answer is stored like any agent message. The hub gets [`SummaryDone`] when the turn stops,
+    /// when the agent goes, or when [`SUMMARY_CAP`] passes (the turn is cancelled then; what was
+    /// written so far, marked as cut short, is the answer). Refused while the agent is busy, down,
+    /// or already summarizing.
+    pub fn ask_summary(self: &Arc<Self>, hub: &Arc<Hub>, prompt: &str, note: &str, kind: SummaryKind) -> Result<()> {
+        let generation = {
+            let mut st = self.st.lock().unwrap();
+            if st.ended || st.retired || st.ready.is_none() {
+                bail!("the agent is not running");
+            }
+            if st.busy {
+                bail!("the agent is busy");
+            }
+            if st.summary.is_some() {
+                bail!("a summary is being written already");
+            }
+            st.busy = true;
+            st.summary_gen += 1;
+            let generation = st.summary_gen;
+            st.summary = Some((kind, String::new(), generation));
+            broadcast(&self.id, &mut st.subs, &wire::Event::Note(note.to_string()));
+            generation
+        };
+        if self.commands.try_send(acp::Command::Prompt(prompt.to_string(), vec![])).is_err() {
+            let mut st = self.st.lock().unwrap();
+            st.busy = false;
+            st.summary = None;
+            bail!("the session loop is gone");
+        }
+        hub.with_store(|s| s.append(&self.id, "note", note, "")).ok();
+        let (me, hub) = (self.clone(), hub.clone());
+        std::thread::Builder::new()
+            .name(format!("sill-summary-cap-{}", self.id))
+            .spawn(move || {
+                std::thread::sleep(SUMMARY_CAP);
+                me.cut_summary(&hub, generation, &format!("cut short: the agent had not finished after {} seconds", SUMMARY_CAP.as_secs()));
+            })
+            .ok();
+        Ok(())
+    }
+
+    /// Stop the summary turn started as generation `generation` before the agent stopped it: the turn is
+    /// cancelled and what it wrote so far, marked with `why`, is the answer.
+    fn cut_summary(&self, hub: &Arc<Hub>, generation: u64, why: &str) {
+        let done = {
+            let mut st = self.st.lock().unwrap();
+            match st.summary.as_ref() {
+                Some((_, _, g)) if *g == generation => {}
+                _ => return,
+            }
+            let (kind, mut text, _) = st.summary.take().unwrap();
+            text.push_str(&st.agent_md);
+            let text = text.trim().to_string();
+            let _ = self.commands.try_send(acp::Command::Cancel);
+            SummaryDone { kind, text: (!text.is_empty()).then(|| format!("{text}\n({why})")) }
+        };
+        hub.summary_done(&self.id, done);
+    }
+
+    /// One event to every attached frontend (the hub's own: the end, a checkpoint's answer).
+    pub fn notify(&self, event: &wire::Event) {
+        let mut st = self.st.lock().unwrap();
+        broadcast(&self.id, &mut st.subs, event);
     }
 
     /// Subscribe `conn` and bring it up to date: what a frontend that just opened needs to show the
@@ -263,10 +403,13 @@ impl Runner {
     }
 }
 
-/// The agent's gathered text becomes an `agent` entry.
+/// The agent's gathered text becomes an `agent` entry; a summary turn keeps its copy.
 fn flush(hub: &Hub, id: &str, st: &mut State) {
     let md = std::mem::take(&mut st.agent_md);
     if !md.trim().is_empty() {
+        if let Some((_, text, _)) = st.summary.as_mut() {
+            text.push_str(&md);
+        }
         hub.with_store(|s| s.append(id, "agent", &md, "")).ok();
     }
 }

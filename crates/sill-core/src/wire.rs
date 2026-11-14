@@ -77,6 +77,14 @@ pub enum Event {
     AuthRequired { message: String, methods: Vec<AuthMethodInfo> },
     Stopped(StopReason),
     Ended(Option<String>),
+    /// The daemon ended the session (`sessions.end`): its row is written — or deleted, when
+    /// nothing was asked in it — and its jail is stopping. Frontends drop the session.
+    SessionEnded { deleted: bool },
+    /// A line for the transcript's reader that sill wrote itself (the summary turn's mark).
+    Note(String),
+    /// A checkpoint summary (`sessions.checkpoint`) is in: the text as stored (None when the agent
+    /// wrote nothing), and the name it gave the session if the first line was one.
+    Summarized { text: Option<String>, title: Option<String> },
 }
 
 /// The answer to a question: the chosen permission option (None = cancel), or the form's values
@@ -177,7 +185,7 @@ impl Event {
                 answer(request, arx);
                 A::Elicitation { message, fields, reply: tx }
             }
-            Event::Resolved { .. } => return None,
+            Event::Resolved { .. } | Event::SessionEnded { .. } | Event::Summarized { .. } | Event::Note(_) => return None,
             Event::Other(t) => A::Other(t),
             Event::Usage { used, size } => A::Usage { used, size },
             Event::AuthRequired { message, methods } => A::AuthRequired { message, methods },

@@ -15,7 +15,7 @@ pub mod rpc;
 pub use client::Client;
 
 /// Bumped when a method or a type changes shape; the daemon reports its own in [`DaemonStatus`].
-pub const PROTOCOL: u32 = 2;
+pub const PROTOCOL: u32 = 3;
 
 /// Method names. Groups follow the table in docs/daemon.md §3.3.
 pub mod method {
@@ -41,6 +41,11 @@ pub mod method {
     pub const SESSIONS_ANSWER: &str = "_sill/sessions.answer";
     /// Notification, daemon → attached frontends: `SessionEvent`.
     pub const SESSION_EVENT: &str = "_sill/session.event";
+    /// End a session as closing its tab would (docs/memory.md §2.2): the summary turn when the
+    /// agent can be asked, the row written or deleted, the jail stopped. Params [`End`].
+    pub const SESSIONS_END: &str = "_sill/sessions.end";
+    /// *Summarize now*: the summary turn without the end; the answer comes as a `Summarized` event.
+    pub const SESSIONS_CHECKPOINT: &str = "_sill/sessions.checkpoint";
     pub const MEMORY_LIST: &str = "_sill/memory.list";
     pub const MEMORY_SHOW: &str = "_sill/memory.show";
     pub const MEMORY_SEARCH: &str = "_sill/memory.search";
@@ -176,6 +181,23 @@ pub struct SessionAnswer {
     pub key: String,
     pub request: u64,
     pub answer: serde_json::Value,
+}
+
+/// `_sill/sessions.end`. `reason`: `close` (the tab), `idle` (the policy's idle timeout), `quit`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct End {
+    pub key: String,
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// `_sill/sessions.end`'s answer. `pending`: the agent writes its summary first; the session's
+/// `SessionEnded` event says when it is done. Otherwise the end is complete when this arrives.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Ending {
+    pub pending: bool,
+    /// The session was deleted (nothing was asked in it) instead of remembered.
+    pub deleted: bool,
 }
 
 /// `_sill/session.event`: `event` is a `sill_core::wire::Event` as JSON.

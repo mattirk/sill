@@ -30,6 +30,15 @@ fn subs() -> &'static Subs {
     SUBS.get_or_init(Default::default)
 }
 
+/// Where a session's lifecycle events go (`SessionEnded`, `Summarized`, `Note`): they are the
+/// window's, not a view's — the view may be gone or never attached — so one channel for all.
+type Lifecycle = Mutex<Option<async_channel::Sender<(String, sill_core::wire::Event)>>>;
+static LIFECYCLE: OnceLock<Lifecycle> = OnceLock::new();
+
+pub fn set_lifecycle(tx: async_channel::Sender<(String, sill_core::wire::Event)>) {
+    *LIFECYCLE.get_or_init(Default::default).lock().unwrap() = Some(tx);
+}
+
 /// A connection's identity in `SUBS` (its address: the `Arc` lives as long as it is in use).
 fn tag(c: &Arc<Client>) -> usize {
     Arc::as_ptr(c) as usize
@@ -115,6 +124,18 @@ pub fn command(id: &str, cmd: &sill_core::wire::Command) -> Result<()> {
     Ok(())
 }
 
+/// End a session as closing its tab does (docs/memory.md §2.2); the daemon writes the summary or
+/// asks the agent for it first (`pending`), then sends `SessionEnded`.
+pub fn end(id: &str, reason: &str) -> Result<sill_proto::Ending> {
+    call(sill_proto::method::SESSIONS_END, sill_proto::End { key: id.to_string(), reason: reason.to_string() })
+}
+
+/// *Summarize now*: the answer comes as a `Summarized` event.
+pub fn checkpoint(id: &str) -> Result<()> {
+    call::<serde_json::Value>(sill_proto::method::SESSIONS_CHECKPOINT, sill_proto::Key { key: id.to_string() })?;
+    Ok(())
+}
+
 /// Route one connection's notifications to the attached views until it closes; then every view
 /// that attached through it learns the session's conversation is gone from here.
 fn dispatch(c: Arc<Client>) {
@@ -127,6 +148,12 @@ fn dispatch(c: Arc<Client>) {
         }
         let Ok(n) = serde_json::from_value::<sill_proto::SessionEvent>(params) else { continue };
         let Ok(wire) = serde_json::from_value::<sill_core::wire::Event>(n.event) else { continue };
+        if matches!(wire, sill_core::wire::Event::SessionEnded { .. } | sill_core::wire::Event::Summarized { .. } | sill_core::wire::Event::Note(_)) {
+            if let Some(tx) = LIFECYCLE.get().and_then(|l| l.lock().unwrap().clone()) {
+                let _ = tx.send_blocking((n.key, wire));
+            }
+            continue;
+        }
         let Some(tx) = subs().lock().unwrap().get(&n.key).filter(|(_, t)| *t == me).map(|(tx, _)| tx.clone()) else { continue };
         let key = n.key.clone();
         // a question: the view answers through a reply channel, the answer goes to the daemon

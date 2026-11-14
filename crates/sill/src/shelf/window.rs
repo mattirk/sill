@@ -57,6 +57,9 @@ pub struct Shelf {
     /// Sessions whose tab and page are gone while their agent still writes the summary
     /// (`background_view`): the view lives until the turn ends, then `close_view` finishes.
     backgrounded: RefCell<std::collections::HashSet<String>>,
+    /// Sessions the daemon was asked to end and has not yet (`close_session`): their tabs are
+    /// closing, a second close hides them, the idle sweep leaves them alone.
+    ending: RefCell<std::collections::HashSet<String>>,
     /// Quit was asked: the shelf exits as soon as the last view has gone (`close_view`).
     quitting: std::cell::Cell<bool>,
     changes: Rc<ChangesPage>,
@@ -266,6 +269,7 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
         pending_restart: RefCell::new(std::collections::HashSet::new()),
         views: RefCell::new(HashMap::new()),
         backgrounded: RefCell::new(std::collections::HashSet::new()),
+        ending: RefCell::new(std::collections::HashSet::new()),
         quitting: std::cell::Cell::new(false),
         changes: changes.clone(),
         agents: agents_page.clone(),
@@ -274,6 +278,19 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
         pane_host: pane_host.clone(),
     });
     SHELF.with(|s| *s.borrow_mut() = Some(Rc::downgrade(&shelf)));
+    {
+        // the daemon's lifecycle events (a session's end, a checkpoint's answer, a note) come on
+        // one channel for the window to route
+        let (tx, rx) = async_channel::unbounded::<(String, sill_core::wire::Event)>();
+        super::client::set_lifecycle(tx);
+        let weak = Rc::downgrade(&shelf);
+        glib::spawn_future_local(async move {
+            while let Ok((id, ev)) = rx.recv().await {
+                let Some(s) = weak.upgrade() else { break };
+                s.lifecycle(&id, ev);
+            }
+        });
+    }
     {
         // auto-revert (SPEC §4.4): the Changes page sweeps once a minute; a session that is mid-turn
         // is left alone
@@ -419,7 +436,7 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     {
         // closing a tab: quit its driver and stop its unit; the stored session stays (reopen from "+")
         let s = shelf.clone();
-        *tabs.on_close.borrow_mut() = Some(Box::new(move |id| s.close_session(id)));
+        *tabs.on_close.borrow_mut() = Some(Box::new(move |id| s.close_session(id, "close")));
     }
     {
         let s = shelf.clone();
@@ -459,7 +476,7 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
                     }
                     gdk::Key::W | gdk::Key::w => {
                         if let Some(id) = s.tabs.selected() {
-                            s.close_session(&id);
+                            s.close_session(&id, "close");
                         }
                         return glib::Propagation::Stop;
                     }
@@ -1304,80 +1321,68 @@ impl Shelf {
         });
     }
 
-    /// The tab closes: the session ends (docs/memory.md §2.2). With memory on, its agent — when
-    /// it is up, idle and saw the conversation — writes the summary as its last turn while the tab
-    /// stays; then the end is recorded, the view goes and the jail stops. Without the agent, sill's
-    /// own summary from the facts, and the same end at once. A reopened session closed without a
-    /// turn keeps the summary it had (decision 13: no cold agent dressed as a continuation). With
-    /// memory off only `ended_at` is set, the summary stays empty. Closed again while the agent
-    /// writes, the tab goes and the summary finishes out of sight (`background_view`); closed
-    /// during *Summarize now*, that checkpoint becomes the end's summary the same way. The
-    /// summary's first line names the session (title.rs) unless the person named it. A session
-    /// without a single prompt is deleted instead: there is nothing to remember.
-    fn close_session(self: &Rc<Self>, id: &str) {
-        let view = self.views.borrow().get(id).cloned();
-        if view.as_ref().is_some_and(|v| v.summary_pending() && !v.checkpoint_pending()) {
+    /// The tab closes: the session ends (docs/memory.md §2.2) — in the daemon (`sessions.end`),
+    /// which asks the agent for the summary when it is up, idle and saw the conversation, else
+    /// writes sill's own, deletes a session nobody prompted, and stops the jail. While the agent
+    /// writes, the tab stays (`ending`) and `SessionEnded` closes it; closed again meanwhile, the
+    /// tab goes and the summary finishes out of sight (`background_view`). `reason`: `close`,
+    /// `idle`, `quit`.
+    fn close_session(self: &Rc<Self>, id: &str, reason: &str) {
+        if !self.ending.borrow_mut().insert(id.to_string()) {
             self.background_view(id);
             return;
         }
-        let stored = self.store.sessions().unwrap_or_default().into_iter().find(|s| s.id == id);
-        let (Some(view), Some(stored)) = (view, stored) else {
-            self.close_view(id);
-            stop_then(id, || {});
-            return;
-        };
-        let home = session::home().unwrap_or_default();
-        let kept_dir = sill_core::session::state_dir(session::uid(), id).map(|d| d.join("kept")).unwrap_or_default();
-        let facts = sill_core::memory::collect(&self.store, &stored, &kept_dir);
-        let prompt = sill_core::memory::summary_prompt(&facts, &home);
+        let (tx, rx) = async_channel::bounded::<anyhow::Result<sill_proto::Ending>>(1);
+        let (sid, why) = (id.to_string(), reason.to_string());
+        std::thread::Builder::new()
+            .name(format!("sill-end-{sid}"))
+            .spawn(move || {
+                let _ = tx.send_blocking(super::client::end(&sid, &why));
+            })
+            .ok();
         let shelf = self.clone();
         let sid = id.to_string();
-        let memory = sill_core::config::load().memory();
-        let keep_old = !view.agent_saw_session() && !stored.summary.is_empty();
-        let unprompted = facts.prompts == 0;
-        let finish = move |answer: Option<String>| {
-            // nothing was asked: nothing to remember (docs/memory.md §2.1), the row would only
-            // crowd every search and recall with "0 prompts"
-            if unprompted {
-                shelf.close_view(&sid);
-                let shelf = shelf.clone();
-                stop_then(&sid.clone(), move || {
-                    let _ = sill_core::session::remove_state(session::uid(), &sid);
-                    let _ = shelf.store.delete(&sid);
-                    refresh_memory();
-                });
-                return;
-            }
-            let agent = answer.map(|a| a.trim().to_string()).filter(|a| !a.is_empty());
-            let _ = match agent {
-                _ if !memory || keep_old => shelf.store.end_only(&sid),
-                Some(a) => {
-                    let (title, body) = sill_core::memory::split_title(&a);
-                    if let Some(t) = title {
-                        let _ = shelf.store.set_title(&sid, &t, "agent");
-                    }
-                    shelf.store.end(&sid, if body.is_empty() { &a } else { &body }, "agent")
+        glib::spawn_future_local(async move {
+            match rx.recv().await {
+                Ok(Ok(e)) if e.pending => shelf.set_status("the session ends: its summary is being written"),
+                Ok(Ok(e)) => shelf.session_ended(&sid, e.deleted),
+                Ok(Err(e)) => {
+                    eprintln!("sill: ending session {sid}: {e:#}");
+                    shelf.set_status(&format!("ending the session failed: {e:#}"));
+                    shelf.session_ended(&sid, false);
                 }
-                None => shelf.store.end(&sid, &sill_core::memory::auto_summary(&facts, sill_core::store::now(), &home), "auto"),
-            };
-            refresh_memory();
-            shelf.close_view(&sid);
-            stop_then(&sid, || {});
-        };
-        // Summarize now in flight (docs/memory.md §2.5): its answer is the end's summary — the
-        // page's callback is replaced, the tab goes, the turn finishes in the background
-        if view.checkpoint_pending() {
-            self.set_status("the session ends: its summary is being written");
-            view.adopt_summary(Box::new(finish));
-            self.background_view(id);
-            return;
+                Err(_) => {}
+            }
+        });
+    }
+
+    /// The daemon ended the session (the answer to `sessions.end`, or its `SessionEnded` event —
+    /// whichever comes first; the other finds nothing left to do): the view and tab go.
+    fn session_ended(self: &Rc<Self>, id: &str, _deleted: bool) {
+        self.ending.borrow_mut().remove(id);
+        if self.views.borrow().contains_key(id) || self.tabs.ids().iter().any(|t| t == id) {
+            self.close_view(id);
         }
-        let said_anything = self.store.count_kind(id, "agent").unwrap_or(0) > 0;
-        if !unprompted && memory && !keep_old && said_anything && view.agent_saw_session() && view.agent_idle() {
-            self.set_status("the session ends: its summary is being written");
-            view.ask_summary(&prompt, Box::new(finish));
-        } else {
-            finish(None);
+        refresh_memory();
+    }
+
+    /// A session's lifecycle event from the daemon (`client::set_lifecycle`): the end, a
+    /// checkpoint's answer, a note for the conversation.
+    fn lifecycle(self: &Rc<Self>, id: &str, ev: sill_core::wire::Event) {
+        use sill_core::wire::Event as W;
+        match ev {
+            W::SessionEnded { deleted } => self.session_ended(id, deleted),
+            W::Summarized { text, title } => {
+                if let Some(v) = self.views.borrow().get(id).cloned() {
+                    v.summarized(text, title);
+                }
+            }
+            W::Note(n) => {
+                if let Some(v) = self.views.borrow().get(id).cloned() {
+                    v.note(&n);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1391,7 +1396,7 @@ impl Shelf {
         let sessions = self.store.sessions().unwrap_or_default();
         for id in self.tabs.ids() {
             let Some(s) = sessions.iter().find(|x| x.id == id) else { continue };
-            if self.busy.borrow().contains(&id) || self.views.borrow().get(&id).is_some_and(|v| v.summary_pending()) {
+            if self.busy.borrow().contains(&id) || self.ending.borrow().contains(&id) {
                 continue;
             }
             let Ok(policy) = sill_core::policy::Policy::load(&s.policy, &home) else { continue };
@@ -1399,7 +1404,7 @@ impl Shelf {
             let since = s.last_used.max(self.opened.borrow().get(&id).copied().unwrap_or(now));
             if limit > 0 && now - since > limit {
                 self.set_status(&format!("“{}” ended: idle for {} minutes", s.title, policy.limits.idle_timeout_minutes));
-                self.close_session(&id);
+                self.close_session(&id, "idle");
             }
         }
     }
@@ -1426,7 +1431,7 @@ impl Shelf {
         self.window.set_visible(false);
         self.quitting.set(true);
         for id in self.tabs.ids() {
-            self.close_session(&id);
+            self.close_session(&id, "quit");
             if self.views.borrow().contains_key(&id) {
                 self.background_view(&id);
             }

@@ -133,7 +133,7 @@ pub fn build(store: Rc<Store>, s: &Session, view: Option<Rc<SessionView>>, chang
     // opening the page — the agent saw the whole session, the text box did not)
     if let Some(v) = view.as_ref() {
         let weak: Weak<SessionView> = Rc::downgrade(v);
-        let (store, id, stored, from_agent, buf, changed, set_by, home) = (store.clone(), id.clone(), stored.clone(), from_agent.clone(), buf.clone(), changed.clone(), set_by.clone(), home.clone());
+        let (stored, from_agent, buf, changed, set_by) = (stored.clone(), from_agent.clone(), buf.clone(), changed.clone(), set_by.clone());
         let refresh_state = {
             let weak = weak.clone();
             let b = summarize.clone();
@@ -173,32 +173,24 @@ pub fn build(store: Rc<Store>, s: &Session, view: Option<Rc<SessionView>>, chang
         }
         summarize.connect_clicked(move |b| {
             let Some(v) = weak.upgrade() else { return };
-            let Some(sess) = store.sessions().unwrap_or_default().into_iter().find(|x| x.id == id) else { return };
-            let kept_dir = sill_core::session::state_dir(super::session::uid(), &id).map(|d| d.join("kept")).unwrap_or_default();
-            let facts = sill_core::memory::collect(&store, &sess, &kept_dir);
-            let prompt = sill_core::memory::checkpoint_prompt(&facts, &home);
             b.set_sensitive(false);
             b.set_label("writing…");
-            let (store, id, stored, from_agent, buf, changed, set_by, b2, refresh_state, v2, title) = (store.clone(), id.clone(), stored.clone(), from_agent.clone(), buf.clone(), changed.clone(), set_by.clone(), b.clone(), refresh_state.clone(), v.clone(), title.clone());
-            v.ask_checkpoint(&prompt, Box::new(move |answer| {
+            let (stored, from_agent, buf, changed, set_by, b2, refresh_state, title, v2) = (stored.clone(), from_agent.clone(), buf.clone(), changed.clone(), set_by.clone(), b.clone(), refresh_state.clone(), title.clone(), v.clone());
+            // the daemon runs the turn, stores the answer and names the session from its first
+            // line (title.rs); the page only shows what it stored
+            v.ask_checkpoint(Box::new(move |answer, name| {
                 b2.set_label("Summarize now");
                 refresh_state();
                 let Some(a) = answer.map(|a| a.trim().to_string()).filter(|a| !a.is_empty()) else { return };
-                // the first line names the session (title.rs), unless the person named it
-                let (name, body) = sill_core::memory::split_title(&a);
-                if let Some(n) = name {
-                    v2.rename(&n, "agent");
+                if name.is_some() {
                     title.set_text(&v2.session.borrow().title);
                 }
-                let a = if body.is_empty() { a } else { body };
-                if store.set_summary(&id, &a, "agent").is_ok() {
-                    *stored.borrow_mut() = a.clone();
-                    from_agent.set(true);
-                    buf.set_text(&a);
-                    from_agent.set(false);
-                    set_by("agent", false);
-                    changed();
-                }
+                *stored.borrow_mut() = a.clone();
+                from_agent.set(true);
+                buf.set_text(&a);
+                from_agent.set(false);
+                set_by("agent", false);
+                changed();
             }));
         });
     }

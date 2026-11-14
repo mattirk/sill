@@ -106,18 +106,9 @@ pub struct SessionView {
     store: Rc<Store>,
     /// Markdown of the agent message being streamed (persisted at turn end).
     agent_md: RefCell<String>,
-    /// The session is ending and its agent writes the summary (docs/memory.md §2.2): what gets the
-    /// answer when the turn stops — or None when the agent is gone or too slow.
-    summarizing: RefCell<Option<Box<dyn FnOnce(Option<String>)>>>,
-    /// The running summary turn is *Summarize now* (docs/memory.md §2.5): the session goes on
-    /// after it — unless the tab closes meanwhile, when the end adopts it (`adopt_summary`).
-    checkpoint: std::cell::Cell<bool>,
-    /// The summary turn's text so far, across its tool calls (each one flushes `agent_md`).
-    summary_text: RefCell<String>,
-    /// Prompts the person sent in this view's life, and whether the agent resumed its own context
-    /// at Ready: together, whether the agent has anything to summarize (docs/memory.md decision 13).
-    turns_this_run: std::cell::Cell<usize>,
-    resumed: std::cell::Cell<bool>,
+    /// *Summarize now* is running in the daemon (docs/memory.md §2.5): what gets the answer and the
+    /// name it gave the session when the `Summarized` event arrives (None: it wrote nothing).
+    checkpoint: RefCell<Option<Box<dyn FnOnce(Option<String>, Option<String>)>>>,
     /// After a resume with replay: ignore replayed events until the first turn starts.
     replaying: RefCell<bool>,
     /// Called when a turn ends (the window refreshes the ledger pages).
@@ -487,11 +478,7 @@ impl SessionView {
             driver: RefCell::new(None),
             store,
             agent_md: RefCell::new(String::new()),
-            summarizing: RefCell::new(None),
-            checkpoint: std::cell::Cell::new(false),
-            summary_text: RefCell::new(String::new()),
-            turns_this_run: std::cell::Cell::new(0),
-            resumed: std::cell::Cell::new(false),
+            checkpoint: RefCell::new(None),
             replaying: RefCell::new(false),
             on_busy: RefCell::new(None),
             on_turn_end: RefCell::new(None),
@@ -2143,37 +2130,54 @@ impl SessionView {
         }
     }
 
-    /// The agent saw this conversation: it resumed its own context, or the person sent it a prompt
-    /// since this view opened. A cold agent after a failed `session/load` has neither, and must not
-    /// be asked to summarize what it never saw.
-    pub fn agent_saw_session(&self) -> bool {
-        self.resumed.get() || self.turns_this_run.get() > 0
-    }
-
     /// The agent is up and between turns: it can be asked one more thing.
     pub fn agent_idle(&self) -> bool {
         self.driver.borrow().is_some() && self.ready.get() && !self.busy.get()
     }
 
-    /// Ask the agent for the session's summary as its last turn (docs/memory.md §2.2): the prompt
-    /// goes as a plain turn — no standing block, no user entry (a note marks it in the transcript),
-    /// the answer shows and is stored like any agent message — and `then` gets its text when the
-    /// turn stops, None when the agent is gone, busy, or has not answered within 90 seconds (the
-    /// turn is cancelled then; the caller writes the mechanical summary).
-    pub fn ask_summary(self: &Rc<Self>, prompt: &str, then: Box<dyn FnOnce(Option<String>)>) {
-        self.ask_summary_turn(prompt, "the session ends: the agent writes its summary for memory", false, then);
-    }
-
-    /// *Summarize now* (docs/memory.md §2.5): the same turn as a checkpoint — the answer goes to
-    /// `then`, the session goes on. Refused (None at once) while the agent is busy or down.
-    pub fn ask_checkpoint(self: &Rc<Self>, prompt: &str, then: Box<dyn FnOnce(Option<String>)>) {
-        self.ask_summary_turn(prompt, "summarize now: the agent writes a checkpoint summary for memory", true, then);
-    }
-
-    /// Name the session (store, the view's copy, the tab); `kind` as in `Session::title_kind`.
-    pub fn rename(&self, title: &str, kind: &str) {
+    /// *Summarize now* (docs/memory.md §2.5): the daemon asks the agent for a checkpoint summary
+    /// and stores it; `then` gets the text and the session's new name when the `Summarized` event
+    /// comes back (`summarized`), or None at once when the daemon refuses (the agent busy or down).
+    pub fn ask_checkpoint(self: &Rc<Self>, then: Box<dyn FnOnce(Option<String>, Option<String>)>) {
+        if self.checkpoint.borrow().is_some() || !self.agent_idle() {
+            then(None, None);
+            return;
+        }
+        *self.checkpoint.borrow_mut() = Some(then);
         let id = self.id();
-        let _ = self.store.set_title(&id, title, kind);
+        let (tx, rx) = async_channel::bounded::<anyhow::Result<()>>(1);
+        std::thread::Builder::new().name(format!("sill-checkpoint-{id}")).spawn(move || {
+            let _ = tx.send_blocking(super::client::checkpoint(&id));
+        }).ok();
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let Ok(Err(e)) = rx.recv().await else { return };
+            let Some(v) = weak.upgrade() else { return };
+            v.conv.add_note(&format!("no checkpoint: {e:#}"));
+            if let Some(cb) = v.checkpoint.borrow_mut().take() {
+                cb(None, None);
+            }
+        });
+    }
+
+    /// The daemon's answer to `ask_checkpoint` (the window routes the `Summarized` event here).
+    pub fn summarized(&self, text: Option<String>, title: Option<String>) {
+        if let Some(t) = &title {
+            self.title_changed(t, "agent");
+        }
+        if let Some(cb) = self.checkpoint.borrow_mut().take() {
+            cb(text, title);
+        }
+    }
+
+    /// A line of sill's own in the conversation (the daemon's note for a summary turn).
+    pub fn note(&self, text: &str) {
+        self.conv.add_note(text);
+    }
+
+    /// The session's name changed (here or in the daemon): the view's copy and the tab follow.
+    pub fn title_changed(&self, title: &str, kind: &str) {
+        let id = self.id();
         {
             let mut s = self.session.borrow_mut();
             s.title = title.to_string();
@@ -2184,67 +2188,12 @@ impl SessionView {
         }
     }
 
-    /// A checkpoint is being written.
-    pub fn checkpoint_pending(&self) -> bool {
-        self.summarizing.borrow().is_some() && self.checkpoint.get()
-    }
-
-    /// The tab closed during a checkpoint: its answer becomes the session's final summary —
-    /// `then` replaces the page's callback, and the turn counts as the end's.
-    pub fn adopt_summary(&self, then: Box<dyn FnOnce(Option<String>)>) {
-        if self.summarizing.borrow().is_some() {
-            *self.summarizing.borrow_mut() = Some(then);
-            self.checkpoint.set(false);
-        } else {
-            then(None);
-        }
-    }
-
-    fn ask_summary_turn(self: &Rc<Self>, prompt: &str, note: &str, checkpoint: bool, then: Box<dyn FnOnce(Option<String>)>) {
-        let Some(d) = self.driver.borrow().as_ref().map(|d| d.commands.clone()) else {
-            then(None);
-            return;
-        };
-        let ask = Command::Prompt { text: prompt.to_string(), attachments: vec![], entry: Some(wire::Entry::Note(note.to_string())) };
-        if !self.agent_idle() || self.summarizing.borrow().is_some() || d.try_send(ask).is_err() {
-            then(None);
-            return;
-        }
-        self.conv.add_note(note);
-        self.checkpoint.set(checkpoint);
-        *self.summarizing.borrow_mut() = Some(then);
-        let weak = Rc::downgrade(self);
-        glib::timeout_add_local_once(std::time::Duration::from_secs(90), move || {
-            let Some(v) = weak.upgrade() else { return };
-            v.end_summary_turn("cut short: the agent had not finished after 90 seconds");
-        });
-    }
-
-    /// Stop the summary turn before the agent stopped it: the turn is cancelled and what it wrote
-    /// so far, marked with `why`, is the answer (None when it had written nothing).
-    fn end_summary_turn(&self, why: &str) {
-        let Some(cb) = self.summarizing.borrow_mut().take() else { return };
-        if let Some(d) = self.driver.borrow().as_ref() {
-            let _ = d.commands.try_send(Command::Cancel);
-        }
-        let partial = self.take_summary_text();
-        let answer = (!partial.is_empty()).then(|| format!("{partial}\n({why})"));
-        glib::idle_add_local_once(move || cb(answer));
-    }
-
-    /// The summary turn's text: what its tool calls flushed, then what is still streaming.
-    fn take_summary_text(&self) -> String {
-        let mut text = std::mem::take(&mut *self.summary_text.borrow_mut());
-        text.push_str(&self.agent_md.borrow());
-        text.trim().to_string()
+    /// A checkpoint is being written (its button waits).
+    pub fn summary_pending(&self) -> bool {
+        self.checkpoint.borrow().is_some()
     }
 
     /// Send a prompt; false if the agent is busy or the session is down.
-    /// A summary turn is running (the end's, or a checkpoint): the agent is writing.
-    pub fn summary_pending(&self) -> bool {
-        self.summarizing.borrow().is_some()
-    }
-
     pub fn send(self: &Rc<Self>, text: &str) -> bool {
         let trace = std::env::var_os("SILL_TRACE").is_some();
         let t0 = std::time::Instant::now();
@@ -2302,7 +2251,6 @@ impl SessionView {
                 self.conv.add_user_with(text, &names);
                 lap("add_user");
                 // the transcript entry is the daemon's to write, when it takes the prompt
-                self.turns_this_run.set(self.turns_this_run.get() + 1);
                 lap("done");
                 true
             }
@@ -2316,12 +2264,9 @@ impl SessionView {
     }
 
     /// The agent's text so far is closed (a tool call or the end of the turn): the daemon writes it
-    /// to the transcript; the view keeps it only for a summary turn, whose text survives its tool calls.
+    /// to the transcript, the view only drops its copy.
     fn flush_agent(&self) {
-        let md = std::mem::take(&mut *self.agent_md.borrow_mut());
-        if !md.trim().is_empty() && self.summarizing.borrow().is_some() {
-            self.summary_text.borrow_mut().push_str(&md);
-        }
+        self.agent_md.borrow_mut().clear();
     }
 
     fn handle(self: &Rc<Self>, ev: Event) {
@@ -2333,7 +2278,6 @@ impl SessionView {
                 // the daemon stored the agent's session id; the view's copy follows
                 self.session.borrow_mut().acp_session_id = Some(session_id.clone());
                 *self.replaying.borrow_mut() = *resumed;
-                self.resumed.set(*resumed);
                 if !*resumed {
                     // a fresh ACP session (also after a login's retry): its context has no standing
                     // block yet, whatever this agent process was sent before
@@ -2420,13 +2364,7 @@ impl SessionView {
                 if let Some(cb) = self.on_busy.borrow().as_ref() {
                     cb(&self.id(), false);
                 }
-                // the summary turn: its text goes to whoever asked, once this event is handled
                 self.flush_agent();
-                let summary_cb = self.summarizing.borrow_mut().take();
-                if let Some(cb) = summary_cb {
-                    let answer = self.take_summary_text();
-                    glib::idle_add_local_once(move || cb(Some(answer)));
-                }
                 let id = self.id();
                 let weak = Rc::downgrade(self);
                 glib::idle_add_local_once(move || {
@@ -2469,11 +2407,10 @@ impl SessionView {
                 }
                 self.flush_agent();
                 *self.driver.borrow_mut() = None;
-                // an agent that went away mid-summary: the mechanical one it is
-                let summary_cb = self.summarizing.borrow_mut().take();
-                if let Some(cb) = summary_cb {
-                    self.summary_text.borrow_mut().clear();
-                    glib::idle_add_local_once(move || cb(None));
+                // an agent that went away mid-checkpoint: the daemon says so with an empty answer,
+                // but its view may be gone by then
+                if let Some(cb) = self.checkpoint.borrow_mut().take() {
+                    glib::idle_add_local_once(move || cb(None, None));
                 }
             }
             _ => {}
