@@ -67,7 +67,13 @@ fn render_views() {
     // the jail shell in the prompt's place: the pretend shell lists its files
     // the task carries the pane's events; dropping it would hang the shell up
     let _events = app.update(Message::ToggleTerminal);
-    let pane = app.terminal.as_mut().unwrap();
+    let pane = app
+        .views
+        .get_mut("demo")
+        .unwrap()
+        .terminal
+        .as_mut()
+        .unwrap();
     pane.accept(crate::terminal::Event::Opened);
     crate::tests::settle(pane, "project$");
     pane.input(b"ls\r".to_vec());
@@ -75,8 +81,8 @@ fn render_views() {
     pane.accept(crate::terminal::Event::Output);
     render(&app, "5-terminal");
     let (mut empty, _) = App::new(true, None);
-    empty.conversation = crate::model::Conversation::default();
-    empty.choices.clear();
+    empty.views.clear();
+    empty.tabs.clear();
     empty.selected = None;
     render(&empty, "4-empty");
 }
@@ -123,4 +129,9 @@ fn render_files() {
     }));
     render_size(&app, "9-diff", (1000.0, 860.0));
     render_size(&app, "10-narrow-drawer", (480.0, 700.0));
+    // the agent waits on a question while the file is open: the strip keeps it in reach
+    for _ in 0..=demo::CHUNKS.len() {
+        let _ = app.update(Message::DemoTick);
+    }
+    render_size(&app, "11-strip", (1000.0, 860.0));
 }

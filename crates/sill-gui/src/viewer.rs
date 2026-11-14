@@ -1,21 +1,31 @@
-//! Agent Markdown as the shelf shows it: selectable prose (iced_selection's helpers for headings,
-//! paragraphs and lists) and fenced code on the code background with a copy button that shows
-//! while the pointer is over the block (`.sill-code`, `.sill-copy`). Everything else — quotes,
-//! tables, rules, images — keeps iced's defaults for now.
-use iced::widget::markdown::{Bullet, HeadingLevel, Settings, Text, Uri, Viewer};
-use iced::widget::{button, column, container, hover, right, scrollable, text};
-use iced::{Element, Fill, Font, Padding};
+//! Agent Markdown as the shelf shows it: prose and fenced code on the code background with a copy
+//! button that shows while the pointer is over the block (`.sill-code`, `.sill-copy`). Headings,
+//! paragraphs, list markers and every code line are selection leaves, so one selection runs
+//! across all of them inside the conversation's (or a reader's) selection area; tables and quotes
+//! reach them through iced's defaults, which call back into `paragraph`. Rules and images keep
+//! iced's defaults.
+use iced::widget::markdown::{self, Bullet, HeadingLevel, Item, Settings, Text, Uri, Viewer};
+use iced::widget::{button, checkbox, column, container, hover, right, row, scrollable, text};
+use iced::{Element, Fill, Font, Padding, Pixels, alignment, padding};
 
 use crate::Message;
+use crate::selection;
 use crate::style::{self, P};
 
 pub struct SillViewer;
+
+fn bullet_items(bullet: &Bullet) -> &[Item] {
+    match bullet {
+        Bullet::Point { items } | Bullet::Task { items, .. } => items,
+    }
+}
 
 impl<'a> Viewer<'a, Message> for SillViewer {
     fn on_link_click(url: Uri) -> Message {
         Message::Link(url)
     }
 
+    /// As iced_selection's heading: the level's size, half a line above all but the first.
     fn heading(
         &self,
         settings: Settings,
@@ -23,11 +33,30 @@ impl<'a> Viewer<'a, Message> for SillViewer {
         text: &'a Text,
         index: usize,
     ) -> Element<'a, Message> {
-        iced_selection::markdown::heading(settings, level, text, index, Message::Link)
+        let size = match level {
+            HeadingLevel::H1 => settings.h1_size,
+            HeadingLevel::H2 => settings.h2_size,
+            HeadingLevel::H3 => settings.h3_size,
+            HeadingLevel::H4 => settings.h4_size,
+            HeadingLevel::H5 => settings.h5_size,
+            HeadingLevel::H6 => settings.h6_size,
+        };
+        container(
+            selection::rich_text(text.spans(settings.style))
+                .on_link_click(Message::Link)
+                .size(size)
+                .style(style::selectable_inherited),
+        )
+        .padding(padding::top(if index > 0 {
+            settings.text_size / 2.0
+        } else {
+            Pixels::ZERO
+        }))
+        .into()
     }
 
-    /// As iced_selection's paragraph, with inline code a size smaller: the code face is wider
-    /// than the prose face, and the shelf sets code one step down (`.sill-code`: 92 %).
+    /// Inline code a size smaller than the prose: the code face is wider than the prose face,
+    /// and the shelf sets code one step down (`.sill-code`: 92 %).
     fn paragraph(&self, settings: Settings, text: &Text) -> Element<'a, Message> {
         let code = Font::with_name(crate::fonts::MONO_FAMILY);
         let spans: Vec<_> = text
@@ -42,23 +71,60 @@ impl<'a> Viewer<'a, Message> for SillViewer {
                 }
             })
             .collect();
-        iced_selection::rich_text(spans)
+        selection::rich_text(spans)
             .size(settings.text_size)
             .on_link_click(Message::Link)
+            .style(style::selectable_inherited)
             .into()
     }
 
+    /// As iced_selection's list: a bullet (or a task's box) beside each item's blocks.
     fn unordered_list(&self, settings: Settings, bullets: &'a [Bullet]) -> Element<'a, Message> {
-        iced_selection::markdown::unordered_list(self, settings, bullets)
+        column(bullets.iter().map(|bullet| {
+            let marker: Element<'a, Message> = match bullet {
+                Bullet::Point { .. } => selection::text("•")
+                    .size(settings.text_size)
+                    .style(style::selectable_inherited)
+                    .into(),
+                Bullet::Task { done, .. } => container(checkbox(*done).size(settings.text_size))
+                    .center_y(
+                        iced::widget::text::LineHeight::default().to_absolute(settings.text_size),
+                    )
+                    .into(),
+            };
+            row![marker, self.items(settings, bullet)]
+                .spacing(settings.spacing)
+                .into()
+        }))
+        .spacing(settings.spacing * 0.75)
+        .padding([0.0, settings.spacing.0])
+        .into()
     }
 
+    /// As iced_selection's list: right-aligned numbers wide enough for the longest.
     fn ordered_list(
         &self,
         settings: Settings,
         start: u64,
         bullets: &'a [Bullet],
     ) -> Element<'a, Message> {
-        iced_selection::markdown::ordered_list(self, settings, start, bullets)
+        let digits = ((start + bullets.len() as u64).max(1) as f32)
+            .log10()
+            .ceil();
+        column(bullets.iter().enumerate().map(|(i, bullet)| {
+            row![
+                selection::text(format!("{}.", i as u64 + start))
+                    .size(settings.text_size)
+                    .align_x(alignment::Horizontal::Right)
+                    .width(settings.text_size * ((digits / 2.0).ceil() + 1.0))
+                    .style(style::selectable_inherited),
+                self.items(settings, bullet)
+            ]
+            .spacing(settings.spacing)
+            .into()
+        }))
+        .spacing(settings.spacing * 0.75)
+        .into()
     }
 
     fn code_block(
@@ -71,10 +137,11 @@ impl<'a> Viewer<'a, Message> for SillViewer {
         let body = container(
             scrollable(
                 container(column(lines.iter().map(|line| {
-                    iced_selection::rich_text(line.spans(settings.style))
+                    selection::rich_text(line.spans(settings.style))
                         .on_link_click(Message::Link)
                         .font(Font::with_name(crate::fonts::MONO_FAMILY))
                         .size(settings.code_size)
+                        .style(style::selectable_inherited)
                         .into()
                 })))
                 .padding(Padding::from([8.0, 12.0])),
@@ -96,5 +163,19 @@ impl<'a> Viewer<'a, Message> for SillViewer {
         container(hover(body, copy))
             .padding(Padding::from([2.0, 8.0]))
             .into()
+    }
+}
+
+impl SillViewer {
+    /// A list item's own blocks, a little closer together than the list's.
+    fn items<'a>(&self, settings: Settings, bullet: &'a Bullet) -> Element<'a, Message> {
+        markdown::view_with(
+            bullet_items(bullet),
+            Settings {
+                spacing: settings.spacing * 0.6,
+                ..settings
+            },
+            self,
+        )
     }
 }

@@ -256,6 +256,20 @@ pub fn feed_scroll(_: &Theme, status: scrollable::Status) -> scrollable::Style {
 pub fn selectable(color: Color) -> impl Fn(&Theme) -> iced_selection::text::Style {
     move |_| iced_selection::text::Style {
         color: Some(color),
-        selection: alpha(P.accent, 0.35),
+        selection: selection(),
     }
+}
+
+/// Selectable text in the colour it inherits: Markdown, whose spans colour themselves. One
+/// selection crosses messages, so every text is selected in the same tint.
+pub fn selectable_inherited(_: &Theme) -> iced_selection::text::Style {
+    iced_selection::text::Style {
+        color: None,
+        selection: selection(),
+    }
+}
+
+/// What selected text lies on.
+fn selection() -> Color {
+    alpha(P.accent, 0.35)
 }

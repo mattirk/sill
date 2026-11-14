@@ -1,6 +1,10 @@
 //! The window as the shelf draws it (`docs/reference-ui` 01–02 and 19–22): a top bar with the
-//! sill mark, one tab per running session and the agent's activity at the right; the
+//! sill mark, one tab per open session and the selected agent's activity at the right; the
 //! conversation; the composer with the agent's controls and send / stop.
+//!
+//! Supervision (docs/sill-gui.md, direction 4): every tab carries its session's mark — working,
+//! a question waiting, a problem — and while a file or the transcript covers the conversation a
+//! status strip keeps the selected session's state, its question and Stop in reach.
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -14,48 +18,94 @@ use iced::widget::{
 use iced::{
     Alignment, Color, Element, Fill, Font, Padding, Radians, Rectangle, Renderer, Shrink, Theme,
 };
+use sill_client::lane::Status;
+use sill_client::outbox::State;
+use sill_client::supervision::{Activity, Attention, Level, clock};
 use sill_proto::sfp::{Answer, Item, Question, Tool};
 
 use crate::style::{self, P, alpha};
-use crate::{App, Message, Pick, SessionChoice, icons, viewer};
+use crate::{App, Message, Pick, SessionView, Tab, icons, selection, viewer};
 
 const MONO_FONT: Font = Font::with_name(crate::fonts::MONO_FAMILY);
+/// Below this width the drawer takes the content area instead of sitting beside it.
+pub const NARROW: f32 = 600.0;
 
 impl App {
     pub(crate) fn view(&self) -> Element<'_, Message> {
         let content = responsive(move |size| {
-            let body = match self.file_view() {
-                Some(view) => view,
+            let Some(view) = self.current() else {
+                return self.empty();
+            };
+            let covered = !view.conversation_shown();
+            let body = match self.file_view(view) {
+                Some(reader) => reader,
                 None => {
-                    let conversation = match &self.text_view {
-                        Some(content) => self.transcript_view(content),
-                        None => self.feed(),
+                    let conversation = match &view.text_view {
+                        Some(content) => self.transcript_view(view, content),
+                        None => self.feed(view),
                     };
-                    column![conversation, self.composer()].height(Fill).into()
+                    column![conversation, self.composer(view)]
+                        .height(Fill)
+                        .into()
                 }
             };
-            let main = column![self.file_chips(), body].width(Fill).height(Fill);
-            if self.workspace.shown {
-                if size.width < 600.0 {
-                    return self.file_drawer().map(|message| match message {
-                        Message::Workspace(crate::workspace::Action::Open { path, repo }) => {
-                            Message::Workspace(crate::workspace::Action::OpenAndHide { path, repo })
-                        }
-                        message => message,
-                    });
-                }
-                row![
-                    main,
-                    rule::vertical(1).style(style::rule_style(P.border)),
-                    container(self.file_drawer()).width((size.width * 0.28).clamp(205.0, 320.0))
-                ]
-                .height(Fill)
-                .into()
+            let main = column![self.file_chips(view), body]
+                .width(Fill)
+                .height(Fill);
+            let narrow = size.width < NARROW;
+            // the conversation keeps one place in the widget tree whether the drawer is beside it
+            // or not: moving it would give its scrollable fresh state (back at the top) and drop
+            // a selection in it
+            let page: Element<'_, Message> = if self.workspace.shown && narrow {
+                self.file_drawer(view).map(|message| match message {
+                    Message::Workspace(crate::workspace::Action::Open { path, repo }) => {
+                        Message::Workspace(crate::workspace::Action::OpenAndHide { path, repo })
+                    }
+                    message => message,
+                })
             } else {
-                main.into()
+                let mut page = row![main].height(Fill);
+                if self.workspace.shown {
+                    page = page
+                        .push(rule::vertical(1).style(style::rule_style(P.border)))
+                        .push(
+                            container(self.file_drawer(view))
+                                .width((size.width * 0.28).clamp(205.0, 320.0)),
+                        );
+                }
+                page.into()
+            };
+            // the conversation is out of sight: its state, question and Stop stay in reach
+            let mut screen = column![page].height(Fill);
+            if covered || (self.workspace.shown && narrow) {
+                screen = screen.push(self.strip(view));
             }
+            screen.into()
         });
         column![self.top_bar(), content].into()
+    }
+
+    /// No session selected: why, and what to do.
+    fn empty(&self) -> Element<'_, Message> {
+        let hint = if let Some(error) = &self.list_error {
+            format!("The daemon cannot be reached: {error}")
+        } else if !self.listed {
+            "Connecting…".into()
+        } else if self.tabs.is_empty() {
+            "No open session. Start one in the shelf; it shows here as a tab.".into()
+        } else {
+            "No session is running. Choose one above to open it.".into()
+        };
+        container(center(text(hint).size(style::TEXT).color(
+            if self.list_error.is_some() {
+                P.error
+            } else {
+                P.fg_dim
+            },
+        )))
+        .padding(24)
+        .height(Fill)
+        .into()
     }
 
     // --- top bar --------------------------------------------------------------------------------
@@ -66,15 +116,15 @@ impl App {
             .height(18)
             .style(style::icon(P.fg));
         let mut tabs = row![].spacing(2).height(Fill);
-        for choice in &self.choices {
-            tabs = tabs.push(self.tab(choice));
+        for tab in &self.tabs {
+            tabs = tabs.push(self.tab(tab));
         }
         let select = tooltip(
             button(text("⌶").size(style::TEXT))
                 .padding([2, 8])
                 .style(style::quiet)
-                .on_press(Message::ToggleText),
-            container(text("Select text across messages").size(style::TINY))
+                .on_press_maybe(self.current().map(|_| Message::ToggleText)),
+            container(text("The conversation as one text").size(style::TINY))
                 .padding([3, 8])
                 .style(style::fill(P.surface)),
             tooltip::Position::Bottom,
@@ -91,7 +141,6 @@ impl App {
                             scrollable::Scrollbar::default()
                         ))
                         .style(style::feed_scroll),
-                    space().width(Fill),
                     self.activity(),
                     select,
                     button(
@@ -123,132 +172,267 @@ impl App {
         .into()
     }
 
-    fn tab<'a>(&'a self, choice: &'a SessionChoice) -> Element<'a, Message> {
-        let active = self.selected.as_ref().is_some_and(|s| s.id == choice.id);
-        let color = if active { P.fg } else { alpha(P.fg, 0.6) };
-        let label = button(
-            row![
-                svg(icons::for_agent(&choice.agent))
-                    .width(13)
-                    .height(13)
-                    .style(style::icon(color)),
-                text(&choice.title).size(style::TEXT).color(color),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-        )
-        .padding([4, 12])
-        .style(style::quiet)
-        .on_press(Message::Choose(choice.clone()));
+    /// A tab: the agent's glyph, the title, and the session's mark — accent while working,
+    /// warning while a question waits, error for a problem. Dimmer when the session is not running.
+    fn tab<'a>(&'a self, tab: &'a Tab) -> Element<'a, Message> {
+        let active = self.selected.as_deref() == Some(tab.id.as_str());
+        let view = self.views.get(&tab.id);
+        let live = view.is_some_and(|v| !v.status.ended()) || tab.running;
+        let color = match (active, live) {
+            (true, _) => P.fg,
+            (false, true) => alpha(P.fg, 0.6),
+            (false, false) => alpha(P.fg, 0.35),
+        };
+        let mut label = row![
+            svg(icons::for_agent(&tab.agent))
+                .width(13)
+                .height(13)
+                .style(style::icon(color)),
+            text(&tab.title).size(style::TEXT).color(color),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        let attention = view.map(SessionView::attention);
+        if let Some(mark) = attention.as_ref().and_then(mark) {
+            label = label.push(mark);
+        }
+        let label = button(label)
+            .padding([4, 12])
+            .style(style::quiet)
+            .on_press(Message::Choose(tab.id.clone()));
         let underline = rule::horizontal(2).style(style::rule_style(if active {
             P.accent
         } else {
             Color::TRANSPARENT
         }));
-        column![
+        let tab_body = column![
             container(label).height(Fill).align_y(Alignment::Center),
             underline
         ]
         .width(Shrink)
-        .height(Fill)
-        .into()
+        .height(Fill);
+        match attention.filter(|a| a.level() >= Level::Problem) {
+            Some(attention) => tooltip(
+                tab_body,
+                container(text(attention.summary()).size(style::TINY))
+                    .padding([3, 8])
+                    .style(style::fill(P.surface)),
+                tooltip::Position::Bottom,
+            )
+            .into(),
+            None => tab_body.into(),
+        }
     }
 
     /// Right of the tabs: the timer and a spinner while the agent works, the spinner alone while
     /// a question waits, otherwise a dot — grey when all is well, red when disconnected.
     fn activity(&self) -> Element<'_, Message> {
-        let activity = self
-            .conversation
-            .session
-            .as_ref()
-            .map_or("", |s| s.activity.as_str());
-        let disconnected = self.error.is_some() && !self.demo;
-        if !disconnected && (activity == "working" || activity == "waiting") {
+        let Some(view) = self.current() else {
+            return status_dot(
+                if self.list_error.is_some() {
+                    P.error
+                } else {
+                    alpha(P.fg, 0.35)
+                },
+                self.list_error.clone().unwrap_or_default(),
+            );
+        };
+        let attention = view.attention();
+        let trouble = view
+            .status
+            .problem()
+            .map(str::to_owned)
+            .or_else(|| self.list_error.clone());
+        if trouble.is_none() && matches!(attention.activity, Activity::Working | Activity::Waiting)
+        {
             let mut parts = row![].spacing(8).align_y(Alignment::Center);
-            if activity == "working"
-                && let Some(elapsed) = self.elapsed()
+            if attention.activity == Activity::Working
+                && let Some(ms) = attention.working_ms
             {
                 parts = parts.push(
-                    text(elapsed)
+                    text(clock(ms))
                         .size(style::TEXT)
                         .font(MONO_FONT)
                         .color(P.fg_dim),
                 );
             }
-            return parts
-                .push(
-                    canvas(Spinner {
-                        angle: spin(self.now),
-                        color: P.accent,
-                    })
-                    .width(16)
-                    .height(16),
-                )
-                .into();
+            return parts.push(self.spinner(P.accent)).into();
         }
-        let (color, tip) = if disconnected {
-            (P.error, self.error.clone().unwrap_or_default())
-        } else {
-            (alpha(P.fg, 0.35), self.status.clone())
-        };
-        tooltip(
-            container(space().width(8).height(8)).style(move |_| container::Style {
-                background: Some(color.into()),
-                border: iced::Border {
-                    radius: 4.0.into(),
-                    ..iced::Border::default()
-                },
-                ..container::Style::default()
-            }),
-            container(text(tip).size(style::TINY))
-                .padding([3, 8])
-                .style(style::fill(P.surface)),
-            tooltip::Position::Left,
-        )
+        match trouble {
+            Some(error) => status_dot(P.error, error),
+            None => status_dot(alpha(P.fg, 0.35), status_text(&view.status).into()),
+        }
+    }
+
+    fn spinner(&self, color: Color) -> Element<'_, Message> {
+        canvas(Spinner {
+            angle: spin(self.now),
+            color,
+        })
+        .width(16)
+        .height(16)
         .into()
     }
 
-    /// Working time of the current turn, m:ss (completed intervals plus the running one).
-    fn elapsed(&self) -> Option<String> {
-        let session = self.conversation.session.as_ref()?;
-        let since = session.active_since_ms?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()?
-            .as_millis() as u64;
-        let seconds = (session.active_ms + now.saturating_sub(since)) / 1000;
-        Some(format!("{}:{:02}", seconds / 60, seconds % 60))
+    // --- supervision ----------------------------------------------------------------------------
+
+    /// While the conversation is out of sight: the selected session's state, its first question
+    /// with its options, other sessions that need the person, the way back, and Stop.
+    fn strip<'a>(&'a self, view: &'a SessionView) -> Element<'a, Message> {
+        let attention = view.attention();
+        let color = match attention.level() {
+            Level::Question => P.warning,
+            Level::Problem => P.error,
+            Level::Working => P.accent,
+            Level::Calm => P.fg_dim,
+        };
+        let mut bar = row![].spacing(8).align_y(Alignment::Center);
+        if attention.level() == Level::Working {
+            bar = bar.push(self.spinner(P.accent));
+        }
+        let mut summary = attention.summary();
+        if attention.activity == Activity::Working
+            && attention.questions.is_empty()
+            && let Some(ms) = attention.working_ms
+        {
+            summary = format!("{summary} · {}", clock(ms));
+        }
+        bar = bar.push(
+            container(
+                text(one_line(&summary, 90))
+                    .size(style::SMALL)
+                    .color(color)
+                    .wrapping(text::Wrapping::None),
+            )
+            .width(Fill)
+            .clip(true),
+        );
+        // a permission question can be answered from here; a form needs the conversation
+        if let Some(question) = view.conversation.open_questions().next()
+            && question.fields.is_empty()
+        {
+            for option in &question.options {
+                bar = bar.push(
+                    button(text(&option.title).size(style::TINY))
+                        .padding([2, 8])
+                        .style(option_style(&option.kind))
+                        .on_press_maybe((!view.answering.contains(&question.question_id)).then(
+                            || Message::Answer {
+                                question_id: question.question_id.clone(),
+                                option_id: option.option_id.clone(),
+                            },
+                        )),
+                );
+            }
+        }
+        for tab in &self.tabs {
+            if self.selected.as_deref() == Some(tab.id.as_str()) {
+                continue;
+            }
+            let Some(other) = self.views.get(&tab.id).map(SessionView::attention) else {
+                continue;
+            };
+            if other.level() < Level::Problem {
+                continue;
+            }
+            let label = format!(
+                "{} {}",
+                if other.level() == Level::Question {
+                    "?"
+                } else {
+                    "!"
+                },
+                one_line(&tab.title, 18)
+            );
+            bar =
+                bar.push(tooltip(
+                    button(text(label).size(style::TINY).color(
+                        if other.level() == Level::Question {
+                            P.warning
+                        } else {
+                            P.error
+                        },
+                    ))
+                    .padding([2, 6])
+                    .style(style::quiet)
+                    .on_press(Message::Choose(tab.id.clone())),
+                    container(text(other.summary()).size(style::TINY))
+                        .padding([3, 8])
+                        .style(style::fill(P.surface)),
+                    tooltip::Position::Top,
+                ));
+        }
+        // a file's reader has its own way back
+        if view.files.reader.is_none() {
+            bar = bar.push(
+                button(text("‹ Conversation").size(style::TINY))
+                    .padding([2, 8])
+                    .style(style::quiet)
+                    .on_press(Message::ShowConversation),
+            );
+        }
+        if view.conversation.busy() {
+            bar = bar.push(stop_button());
+        }
+        column![
+            rule::horizontal(1).style(style::rule_style(P.border)),
+            container(bar)
+                .padding([4, 10])
+                .width(Fill)
+                .style(style::fill(P.surface)),
+        ]
+        .into()
     }
 
     // --- the conversation -----------------------------------------------------------------------
 
-    fn feed(&self) -> Element<'_, Message> {
+    fn feed<'a>(&'a self, view: &'a SessionView) -> Element<'a, Message> {
+        let conversation = &view.conversation;
+        if conversation.session_id.is_empty() {
+            let (hint, color) = match &view.status {
+                Status::Reconnecting(error) => (format!("Connecting… {error}"), P.error),
+                Status::NotRunning => (
+                    "Not running. Send a prompt, or choose the tab again, to start it.".into(),
+                    P.fg_dim,
+                ),
+                Status::Gone(why) | Status::Stopped(why) => (why.clone(), P.error),
+                _ => ("Loading conversation…".into(), P.fg_dim),
+            };
+            return container(center(text(hint).size(style::TEXT).color(color)))
+                .padding(24)
+                .height(Fill)
+                .into();
+        }
         let mut feed = Column::new().spacing(12).padding(Padding {
             top: 10.0,
             right: 14.0,
             bottom: 18.0,
             left: 12.0,
         });
-        let questions: Vec<&Question> = self.conversation.questions.values().collect();
+        let questions: Vec<&Question> = conversation.questions.values().collect();
         let mut placed = BTreeSet::new();
-        let items = self.conversation.visible_items();
+        let items = conversation.visible_items();
         for (index, item) in items.iter().enumerate() {
-            feed = feed.push(self.item(item));
+            feed = feed.push(self.item(view, item));
             for question in questions
                 .iter()
                 .filter(|q| q.tool_item_id.as_deref() == Some(item.item_id.as_str()))
             {
                 placed.insert(question.question_id.as_str());
-                feed = feed.push(self.question(question));
+                feed = feed.push(self.question(view, question));
             }
             // the last item of a turn that was stopped or failed: say so under it
             if let Some(turn_id) = &item.turn_id
                 && items.get(index + 1).and_then(|next| next.turn_id.as_ref()) != Some(turn_id)
-                && let Some(end) = self.conversation.turn_end(turn_id)
+                && let Some(end) = conversation.turn_end(turn_id)
             {
                 feed = feed.push(
-                    container(text(format!("· {end}")).size(style::SMALL).color(P.fg_dim))
-                        .padding([0, 8]),
+                    container(
+                        selection::text(format!("· {end}"))
+                            .size(style::SMALL)
+                            .style(style::selectable(P.fg_dim)),
+                    )
+                    .padding([0, 8]),
                 );
             }
         }
@@ -256,26 +440,13 @@ impl App {
             .iter()
             .filter(|q| !placed.contains(q.question_id.as_str()))
         {
-            feed = feed.push(self.question(question));
+            feed = feed.push(self.question(view, question));
         }
-        if let Some(error) = &self.error {
+        if let Some(error) = view.status.problem() {
             feed = feed.push(note(error, P.error));
         }
-        if let Some(failed) = &self.failed {
+        if let Some(failed) = &view.failed {
             feed = feed.push(note(failed, P.error));
-        }
-        let empty = self.conversation.session_id.is_empty();
-        if empty {
-            let hint = if self.loading {
-                "Loading conversation…"
-            } else if self.choices.is_empty() {
-                "No running session. Start one in the shelf; it shows here as a tab."
-            } else {
-                "Choose a session above."
-            };
-            return container(center(text(hint).size(style::TEXT).color(P.fg_dim)))
-                .height(Fill)
-                .into();
         }
         let scroll = scrollable(feed)
             .id("conversation")
@@ -288,31 +459,40 @@ impl App {
                     viewport.absolute_offset().y,
                 )
             });
-        if self.follow_tail {
-            return scroll.into();
+        // the scrollable stays the stack's first layer whether or not "↓ Latest" is over it:
+        // were it the root one moment and a layer the next, its state (where it is scrolled to)
+        // would be new each time tail-follow turned off
+        let mut layers = stack![scroll];
+        if !view.follow_tail {
+            layers = layers.push(
+                right(
+                    button(text("↓ Latest").size(style::SMALL))
+                        .padding([4, 10])
+                        .style(style::solid(P.surface))
+                        .on_press(Message::Latest),
+                )
+                .padding(Padding {
+                    top: 0.0,
+                    right: 18.0,
+                    bottom: 12.0,
+                    left: 0.0,
+                })
+                .align_y(Alignment::End)
+                .height(Fill),
+            );
         }
-        let latest = right(
-            button(text("↓ Latest").size(style::SMALL))
-                .padding([4, 10])
-                .style(style::solid(P.surface))
-                .on_press(Message::Latest),
-        )
-        .padding(Padding {
-            top: 0.0,
-            right: 18.0,
-            bottom: 12.0,
-            left: 0.0,
-        })
-        .align_y(Alignment::End)
-        .height(Fill);
-        stack![scroll, latest].into()
+        // one selection across every message
+        selection::area(layers)
+            .on_copy(Message::Copy)
+            .on_drag(Message::Selecting)
+            .into()
     }
 
-    fn item<'a>(&'a self, item: &'a Item) -> Element<'a, Message> {
+    fn item<'a>(&'a self, view: &'a SessionView, item: &'a Item) -> Element<'a, Message> {
         if let Some(tool) = &item.tool {
-            return self.tool(item, tool);
+            return self.tool(view, item, tool);
         }
-        let source = self
+        let source = view
             .rendered
             .get(&item.item_id)
             .map_or("", |r| r.source.as_str());
@@ -321,22 +501,26 @@ impl App {
             "user" => ruled(
                 3.0,
                 alpha(P.accent, 0.9),
-                container(iced_selection::text(source).size(style::TEXT))
-                    .padding([10, 14])
-                    .width(Fill)
-                    .style(style::fill(P.code_bg)),
+                container(
+                    selection::text(source)
+                        .size(style::TEXT)
+                        .style(style::selectable_inherited),
+                )
+                .padding([10, 14])
+                .width(Fill)
+                .style(style::fill(P.code_bg)),
             ),
             "thought" => container(
-                iced_selection::text(source)
+                selection::text(source)
                     .size(style::SMALL)
                     .style(style::selectable(alpha(P.fg, 0.55))),
             )
             .padding([0, 8])
             .into(),
             "note" => container(
-                text(format!("· {source}"))
+                selection::text(format!("· {source}"))
                     .size(style::SMALL)
-                    .color(P.fg_dim),
+                    .style(style::selectable(P.fg_dim)),
             )
             .padding([0, 8])
             .into(),
@@ -354,9 +538,9 @@ impl App {
                 };
                 note(source, color)
             }
-            "plan" => self.plan(item),
+            "plan" => plan(item),
             // agent text and anything newer: Markdown as the agent wrote it
-            _ => match self.rendered.get(&item.item_id) {
+            _ => match view.rendered.get(&item.item_id) {
                 Some(rendered) => container(markdown::view_with(
                     rendered.markdown.items(),
                     markdown_settings(),
@@ -370,37 +554,14 @@ impl App {
         }
     }
 
-    fn plan<'a>(&'a self, item: &'a Item) -> Element<'a, Message> {
-        let mut steps = Column::new().spacing(2);
-        for block in &item.content {
-            let status = block
-                .extra
-                .get("status")
-                .and_then(|s| s.as_str())
-                .unwrap_or("pending");
-            let (glyph, color) = match status {
-                "completed" => ("✓", alpha(P.fg, 0.5)),
-                "in_progress" => ("◐", P.accent),
-                _ => ("○", alpha(P.fg, 0.4)),
-            };
-            steps = steps.push(
-                row![
-                    text(glyph).size(style::SMALL).color(color).width(16),
-                    iced_selection::text(block.text.as_deref().unwrap_or("")).size(style::SMALL),
-                ]
-                .spacing(6),
-            );
-        }
-        ruled(
-            2.0,
-            alpha(P.fg, 0.18),
-            container(steps).padding([4, 10]).width(Fill),
-        )
-    }
-
     /// A tool call: one quiet line — kind glyph, title, status mark — that opens to its output and
     /// diff (`.sill-tool`, `.sill-tool-line`, `.sill-tool-body`).
-    fn tool<'a>(&'a self, item: &'a Item, tool: &'a Tool) -> Element<'a, Message> {
+    fn tool<'a>(
+        &'a self,
+        view: &'a SessionView,
+        item: &'a Item,
+        tool: &'a Tool,
+    ) -> Element<'a, Message> {
         let (mark, mark_color) = status_mark(&tool.status);
         let line = button(
             row![
@@ -426,11 +587,11 @@ impl App {
         .style(style::row_button)
         .on_press(Message::ToggleTool(item.item_id.clone()));
         let mut body = Column::new().push(line);
-        if self.open_tools.contains(&item.item_id) {
+        if view.open_tools.contains(&item.item_id) {
             if !tool.detail.trim().is_empty() {
                 body = body.push(
                     container(
-                        iced_selection::text(tool.detail.trim_end())
+                        selection::text(tool.detail.trim_end())
                             .font(MONO_FONT)
                             .size(style::MONO)
                             .style(style::selectable(alpha(P.fg, 0.8))),
@@ -464,29 +625,31 @@ impl App {
 
     /// A question: open, the card with the agent's options as buttons; answered, one line with
     /// the answer that opens to what was asked (`.sill-permission`, `.sill-answered-toggle`).
-    fn question<'a>(&'a self, question: &'a Question) -> Element<'a, Message> {
+    fn question<'a>(
+        &'a self,
+        view: &'a SessionView,
+        question: &'a Question,
+    ) -> Element<'a, Message> {
         let mut card = Column::new().spacing(8);
         if question.state == "open" {
-            card = card.push(text(&question.title).size(style::TEXT));
+            card = card.push(
+                selection::text(&question.title)
+                    .size(style::TEXT)
+                    .style(style::selectable_inherited),
+            );
             card = asked(card, question);
             if question.fields.is_empty() {
+                let sending = view.answering.contains(&question.question_id);
                 let mut options = row![].spacing(8);
                 for option in &question.options {
-                    let paint = if option.kind.starts_with("allow") {
-                        style::solid(P.accent)
-                    } else if option.kind.starts_with("reject") {
-                        style::solid(P.error)
-                    } else {
-                        style::solid(P.fg_dim)
-                    };
                     options = options.push(
                         button(text(&option.title).size(style::TEXT))
                             .padding([6, 12])
-                            .style(paint)
-                            .on_press(Message::Answer {
+                            .style(option_style(&option.kind))
+                            .on_press_maybe((!sending).then(|| Message::Answer {
                                 question_id: question.question_id.clone(),
                                 option_id: option.option_id.clone(),
-                            }),
+                            })),
                     );
                 }
                 card = card.push(options.wrap().vertical_spacing(8));
@@ -502,7 +665,7 @@ impl App {
                 );
             }
         } else {
-            let open = self.open_answers.contains(&question.question_id);
+            let open = view.open_answers.contains(&question.question_id);
             let outcome = match &question.answer {
                 Some(Answer::Permission { option_id }) => question
                     .options
@@ -514,7 +677,11 @@ impl App {
                 Some(Answer::Form { .. }) => "answered".into(),
                 None => question.state.clone(),
             };
-            card = card.push(text(format!("{} → {outcome}", question.title)).size(style::TEXT));
+            card = card.push(
+                selection::text(format!("{} → {outcome}", question.title))
+                    .size(style::TEXT)
+                    .style(style::selectable_inherited),
+            );
             card = card.push(
                 button(text(if open { "▾ hide" } else { "▸ show" }).size(style::TINY))
                     .padding([0, 4])
@@ -535,7 +702,11 @@ impl App {
         )
     }
 
-    fn transcript_view<'a>(&'a self, content: &'a text_editor::Content) -> Element<'a, Message> {
+    fn transcript_view<'a>(
+        &'a self,
+        view: &'a SessionView,
+        content: &'a text_editor::Content,
+    ) -> Element<'a, Message> {
         column![
             row![
                 text("The conversation as text, captured when opened")
@@ -547,7 +718,7 @@ impl App {
                     .on_press(Message::RefreshText),
                 button(text("Copy all").size(style::SMALL))
                     .style(style::quiet)
-                    .on_press_with(|| Message::Copy(self.conversation.transcript())),
+                    .on_press_with(|| Message::Copy(view.conversation.transcript())),
                 button(text("Close").size(style::SMALL))
                     .style(style::quiet)
                     .on_press(Message::ToggleText),
@@ -569,10 +740,10 @@ impl App {
 
     // --- the composer ---------------------------------------------------------------------------
 
-    fn composer(&self) -> Element<'_, Message> {
-        let has_session = !self.conversation.session_id.is_empty();
+    fn composer<'a>(&'a self, view: &'a SessionView) -> Element<'a, Message> {
+        let has_session = !view.conversation.session_id.is_empty() || self.demo;
         let mut composer = Column::new();
-        for submission in self
+        for submission in view
             .conversation
             .submissions
             .values()
@@ -598,8 +769,10 @@ impl App {
                 .padding([2, 12]),
             );
         }
-        let editor = text_editor(&self.prompt)
+        composer = outbox(composer, view);
+        let editor = text_editor(&view.draft)
             .id("prompt")
+            .placeholder(placeholder(view))
             .on_action(Message::Prompt)
             .key_binding(enter_sends)
             .padding([8, 14])
@@ -607,22 +780,8 @@ impl App {
             .height(Shrink)
             .max_height(220)
             .style(style::prompt);
-        let working = self
-            .conversation
-            .session
-            .as_ref()
-            .is_some_and(|s| s.activity == "working" || s.activity == "waiting");
-        let action: Element<'_, Message> = if working && has_session {
-            button(
-                svg(icons::stop())
-                    .width(14)
-                    .height(14)
-                    .style(style::icon(P.bg)),
-            )
-            .padding(6)
-            .style(style::solid(P.error))
-            .on_press(Message::Stop)
-            .into()
+        let action: Element<'_, Message> = if view.conversation.busy() {
+            stop_button()
         } else {
             button(
                 svg(icons::send())
@@ -632,13 +791,11 @@ impl App {
             )
             .padding(6)
             .style(style::solid(P.accent))
-            .on_press_maybe(
-                (has_session && !self.prompt.text().trim().is_empty()).then_some(Message::Send),
-            )
+            .on_press_maybe((!view.draft.text().trim().is_empty()).then_some(Message::Send))
             .into()
         };
         let shell = button(text(">_").size(style::SMALL).font(MONO_FONT).color(
-            if self.terminal_shown {
+            if view.terminal_shown {
                 P.accent
             } else {
                 P.fg_dim
@@ -657,16 +814,16 @@ impl App {
         let mut bar = row![shell, space().width(Fill)]
             .spacing(4)
             .align_y(Alignment::Center);
-        for control in self.controls() {
+        for control in controls(view) {
             bar = bar.push(control);
         }
-        if let Some(usage) = self.usage() {
+        if let Some(usage) = usage(view) {
             bar =
                 bar.push(container(text(usage).size(style::SMALL).color(P.fg_dim)).padding([0, 6]));
         }
         bar = bar.push(action);
         // as in the shelf, the prompt folds away while the terminal is up in its place
-        let input: Element<'_, Message> = match (&self.terminal, self.terminal_shown) {
+        let input: Element<'_, Message> = match (&view.terminal, view.terminal_shown) {
             (Some(pane), true) => self.terminal_pane(pane),
             _ => editor.into(),
         };
@@ -721,86 +878,259 @@ impl App {
         ]
         .into()
     }
+}
 
-    /// The agent's ACP controls as dropdowns: its modes, then each of its options.
-    fn controls(&self) -> Vec<Element<'_, Message>> {
-        let Some(controls) = self
-            .conversation
-            .session
-            .as_ref()
-            .and_then(|s| s.controls.as_ref())
-        else {
-            return vec![];
+/// The selected session's lane state, for the dot's tooltip.
+fn status_text(status: &Status) -> &'static str {
+    match status {
+        Status::Closed => "Not open",
+        Status::Connecting => "Connecting…",
+        Status::Reconnecting(_) => "Reconnecting…",
+        Status::Loading => "Catching up…",
+        Status::Live => "Connected",
+        Status::NotRunning => "Not running",
+        Status::Gone(_) => "Gone",
+        Status::Stopped(_) => "Stopped following",
+    }
+}
+
+fn placeholder(view: &SessionView) -> &'static str {
+    match view.status {
+        Status::NotRunning => "Not running — sending a prompt starts it",
+        _ => "",
+    }
+}
+
+/// The small round dot at the top bar's right, with what it means.
+fn status_dot<'a>(color: Color, tip: String) -> Element<'a, Message> {
+    tooltip(
+        container(space().width(8).height(8)).style(move |_| container::Style {
+            background: Some(color.into()),
+            border: iced::Border {
+                radius: 4.0.into(),
+                ..iced::Border::default()
+            },
+            ..container::Style::default()
+        }),
+        container(text(tip).size(style::TINY))
+            .padding([3, 8])
+            .style(style::fill(P.surface)),
+        tooltip::Position::Left,
+    )
+    .into()
+}
+
+/// A tab's mark for its session's state, if it has one to show.
+fn mark<'a>(attention: &Attention) -> Option<Element<'a, Message>> {
+    let (glyph, color) = match attention.level() {
+        Level::Question => ("?", P.warning),
+        Level::Problem => ("!", P.error),
+        Level::Working => ("●", P.accent),
+        Level::Calm => return None,
+    };
+    Some(
+        text(glyph)
+            .size(if glyph == "●" {
+                style::TINY
+            } else {
+                style::SMALL
+            })
+            .color(color)
+            .into(),
+    )
+}
+
+/// Stop the selected session's turn (found by its id in tests: it has no text).
+fn stop_button<'a>() -> Element<'a, Message> {
+    container(
+        button(
+            svg(icons::stop())
+                .width(14)
+                .height(14)
+                .style(style::icon(P.bg)),
+        )
+        .padding(6)
+        .style(style::solid(P.error))
+        .on_press(Message::Stop),
+    )
+    .id("stop")
+    .into()
+}
+
+fn option_style(
+    kind: &str,
+) -> impl Fn(&Theme, iced::widget::button::Status) -> iced::widget::button::Style {
+    if kind.starts_with("allow") {
+        style::solid(P.accent)
+    } else if kind.starts_with("reject") {
+        style::solid(P.error)
+    } else {
+        style::solid(P.fg_dim)
+    }
+}
+
+/// Prompts on their way, or that did not arrive: what happened, and what can be done.
+fn outbox<'a>(mut composer: Column<'a, Message>, view: &'a SessionView) -> Column<'a, Message> {
+    for pending in view.outbox.pending() {
+        let id = pending.id().to_string();
+        let (said, color) = match &pending.state {
+            State::Sending => ("Sending…".to_string(), P.fg_dim),
+            State::Checking => ("Checking whether it arrived…".to_string(), P.fg_dim),
+            State::Failed(why) => (format!("Not sent: {why}"), P.error),
+            State::Uncertain(why) => (format!("May not have arrived: {why}"), P.warning),
         };
-        let mut out = vec![];
-        if !controls.modes.is_empty() {
-            let picks: Vec<Pick> = controls
-                .modes
-                .iter()
-                .map(|m| Pick {
-                    value: m.value.clone(),
-                    title: m.title.clone(),
-                    boolean: None,
-                })
-                .collect();
-            let selected = controls
-                .current_mode
-                .as_ref()
-                .and_then(|current| picks.iter().find(|p| &p.value == current).cloned());
-            out.push(control(picks, selected, Message::SetMode));
-        }
-        for option in &controls.options {
-            // the mode set already covers a "mode"-category option (Claude Code sends both; the
-            // shelf skips it the same way)
-            if option.category == "mode" && !controls.modes.is_empty() {
-                continue;
+        let mut line = row![
+            container(
+                column![
+                    text(one_line(pending.text(), 100))
+                        .size(style::SMALL)
+                        .wrapping(text::Wrapping::None),
+                    text(one_line(&said, 110))
+                        .size(style::TINY)
+                        .color(color)
+                        .wrapping(text::Wrapping::None),
+                ]
+                .spacing(2)
+            )
+            .width(Fill)
+            .clip(true),
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center);
+        let small = |label: &'static str, message: Message| {
+            button(text(label).size(style::TINY))
+                .padding([1, 6])
+                .style(style::quiet)
+                .on_press(message)
+        };
+        match &pending.state {
+            State::Failed(_) => {
+                line = line
+                    .push(small("Edit", Message::EditSend(id.clone())))
+                    .push(small("Send again", Message::RetrySend(id.clone())))
+                    .push(small("Discard", Message::DiscardSend(id)));
             }
-            let (picks, selected) = match &option.value {
-                sill_proto::sfp::ControlValue::Boolean { value } => {
-                    let picks = vec![
-                        Pick {
-                            value: "false".into(),
-                            title: "Off".into(),
-                            boolean: Some(false),
-                        },
-                        Pick {
-                            value: "true".into(),
-                            title: "On".into(),
-                            boolean: Some(true),
-                        },
-                    ];
-                    let selected = picks.iter().find(|p| p.boolean == Some(*value)).cloned();
-                    (picks, selected)
-                }
-                sill_proto::sfp::ControlValue::Id { value } => {
-                    let picks: Vec<Pick> = option
-                        .choices
-                        .iter()
-                        .map(|c| Pick {
-                            value: c.value.clone(),
-                            title: c.title.clone(),
-                            boolean: None,
-                        })
-                        .collect();
-                    let selected = picks.iter().find(|p| &p.value == value).cloned();
-                    (picks, selected)
-                }
-            };
-            let option_id = option.option_id.clone();
-            out.push(control(picks, selected, move |pick| {
-                Message::SetOption(option_id.clone(), pick)
-            }));
+            State::Uncertain(_) => {
+                line = line
+                    .push(small("Check", Message::CheckSend(id.clone())))
+                    .push(small("Edit", Message::EditSend(id.clone())))
+                    .push(small("Discard", Message::DiscardSend(id)));
+            }
+            State::Sending | State::Checking => {}
         }
-        out
+        composer = composer.push(container(line).padding([3, 12]));
     }
+    composer
+}
 
-    /// Context used of the model's window, as the agent last reported it.
-    fn usage(&self) -> Option<String> {
-        let usage = self.conversation.session.as_ref()?.usage.as_ref()?;
-        let used: u64 = usage.used.parse().ok()?;
-        let size: u64 = usage.size.parse().ok().filter(|s| *s > 0)?;
-        Some(format!("{}%", used * 100 / size))
+/// The agent's ACP controls as dropdowns: its modes, then each of its options.
+fn controls(view: &SessionView) -> Vec<Element<'_, Message>> {
+    let Some(controls) = view
+        .conversation
+        .session
+        .as_ref()
+        .and_then(|s| s.controls.as_ref())
+    else {
+        return vec![];
+    };
+    let mut out = vec![];
+    if !controls.modes.is_empty() {
+        let picks: Vec<Pick> = controls
+            .modes
+            .iter()
+            .map(|m| Pick {
+                value: m.value.clone(),
+                title: m.title.clone(),
+                boolean: None,
+            })
+            .collect();
+        let selected = controls
+            .current_mode
+            .as_ref()
+            .and_then(|current| picks.iter().find(|p| &p.value == current).cloned());
+        out.push(control(picks, selected, Message::SetMode));
     }
+    for option in &controls.options {
+        // the mode set already covers a "mode"-category option (Claude Code sends both; the
+        // shelf skips it the same way)
+        if option.category == "mode" && !controls.modes.is_empty() {
+            continue;
+        }
+        let (picks, selected) = match &option.value {
+            sill_proto::sfp::ControlValue::Boolean { value } => {
+                let picks = vec![
+                    Pick {
+                        value: "false".into(),
+                        title: "Off".into(),
+                        boolean: Some(false),
+                    },
+                    Pick {
+                        value: "true".into(),
+                        title: "On".into(),
+                        boolean: Some(true),
+                    },
+                ];
+                let selected = picks.iter().find(|p| p.boolean == Some(*value)).cloned();
+                (picks, selected)
+            }
+            sill_proto::sfp::ControlValue::Id { value } => {
+                let picks: Vec<Pick> = option
+                    .choices
+                    .iter()
+                    .map(|c| Pick {
+                        value: c.value.clone(),
+                        title: c.title.clone(),
+                        boolean: None,
+                    })
+                    .collect();
+                let selected = picks.iter().find(|p| &p.value == value).cloned();
+                (picks, selected)
+            }
+        };
+        let option_id = option.option_id.clone();
+        out.push(control(picks, selected, move |pick| {
+            Message::SetOption(option_id.clone(), pick)
+        }));
+    }
+    out
+}
+
+/// Context used of the model's window, as the agent last reported it.
+fn usage(view: &SessionView) -> Option<String> {
+    let usage = view.conversation.session.as_ref()?.usage.as_ref()?;
+    let used: u64 = usage.used.parse().ok()?;
+    let size: u64 = usage.size.parse().ok().filter(|s| *s > 0)?;
+    Some(format!("{}%", used * 100 / size))
+}
+
+fn plan(item: &Item) -> Element<'_, Message> {
+    let mut steps = Column::new().spacing(2);
+    for block in &item.content {
+        let status = block
+            .extra
+            .get("status")
+            .and_then(|s| s.as_str())
+            .unwrap_or("pending");
+        let (glyph, color) = match status {
+            "completed" => ("✓", alpha(P.fg, 0.5)),
+            "in_progress" => ("◐", P.accent),
+            _ => ("○", alpha(P.fg, 0.4)),
+        };
+        steps = steps.push(
+            row![
+                text(glyph).size(style::SMALL).color(color).width(16),
+                selection::text(block.text.as_deref().unwrap_or(""))
+                    .size(style::SMALL)
+                    .style(style::selectable_inherited),
+            ]
+            .spacing(6),
+        );
+    }
+    ruled(
+        2.0,
+        alpha(P.fg, 0.18),
+        container(steps).padding([4, 10]).width(Fill),
+    )
 }
 
 /// One ACP control: as wide as its selected label, as the shelf's dropdowns are. iced's pick
@@ -822,7 +1152,6 @@ fn control<'a>(
         .into()
 }
 
-/// The width `content` takes in the prose face at `size`, laid out the way text widgets do.
 /// Where the shell was: what became of it, and a fresh one.
 fn ended<'a>(said: String) -> Element<'a, Message> {
     center(
@@ -839,6 +1168,7 @@ fn ended<'a>(said: String) -> Element<'a, Message> {
     .into()
 }
 
+/// The width `content` takes in the prose face at `size`, laid out the way text widgets do.
 fn text_width(content: &str, size: f32) -> f32 {
     use iced::advanced::text::Paragraph as _;
     let paragraph = iced::advanced::graphics::text::Paragraph::with_text(iced::advanced::Text {
@@ -909,13 +1239,17 @@ fn ruled<'a>(
 /// What a question asks, under its title: the description and the subject.
 fn asked<'a>(mut card: Column<'a, Message>, question: &'a Question) -> Column<'a, Message> {
     if let Some(description) = &question.description {
-        card = card.push(iced_selection::text(description).size(style::SMALL));
+        card = card.push(
+            selection::text(description)
+                .size(style::SMALL)
+                .style(style::selectable_inherited),
+        );
     }
     if let Some(subject) = &question.subject
         && let Some(text) = &subject.text
     {
         card = card.push(
-            iced_selection::text(text)
+            selection::text(text)
                 .font(MONO_FONT)
                 .size(style::MONO)
                 .style(style::selectable(alpha(P.fg, 0.85))),
@@ -930,7 +1264,7 @@ fn note<'a>(message: &'a str, color: Color) -> Element<'a, Message> {
         3.0,
         color,
         container(
-            iced_selection::text(message)
+            selection::text(message)
                 .size(style::SMALL)
                 .style(style::selectable(color)),
         )
@@ -958,7 +1292,7 @@ fn diff(diff: &str) -> Element<'_, Message> {
             alpha(P.fg, 0.8)
         };
         column = column.push(
-            iced_selection::text(*line)
+            selection::text(*line)
                 .font(MONO_FONT)
                 .size(style::MONO)
                 .style(style::selectable(color)),
@@ -1014,7 +1348,7 @@ fn status_mark(status: &str) -> (&'static str, Color) {
 
 /// One line of at most `max` characters: newlines shown as ⏎, the rest cut with "…" (iced 0.14
 /// text has no ellipsis of its own).
-fn one_line(text: &str, max: usize) -> String {
+pub(crate) fn one_line(text: &str, max: usize) -> String {
     let flat = text.trim().replace('\n', " ⏎ ");
     if flat.chars().count() <= max {
         return flat;

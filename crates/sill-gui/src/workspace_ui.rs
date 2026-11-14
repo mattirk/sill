@@ -6,11 +6,13 @@ use iced::widget::{
 use iced::{Alignment, Element, Fill, Font, Padding};
 use sill_proto::sessions::HostPath;
 
+use sill_client::files::{FilesState as State, key, name, relative};
+
 use crate::{
-    App, Message,
+    App, Message, SessionView, selection,
     style::{self, P},
     viewer,
-    workspace::{Action, State, key, name},
+    workspace::Action,
 };
 
 fn msg(action: Action) -> Message {
@@ -41,10 +43,8 @@ fn tip<'a>(content: impl Into<Element<'a, Message>>, value: String) -> Element<'
 }
 
 impl App {
-    pub(crate) fn file_chips(&self) -> Element<'_, Message> {
-        let Some(state) = self.workspace.state() else {
-            return space().height(0).into();
-        };
+    pub(crate) fn file_chips<'a>(&'a self, view: &'a SessionView) -> Element<'a, Message> {
+        let state = &view.files;
         let mut chips = row![].spacing(6).align_y(Alignment::Center);
         for root in state.roots.iter().filter(|r| !r.global) {
             let directory = root.metadata.as_ref().is_some_and(|m| m.directory);
@@ -133,16 +133,8 @@ impl App {
         result.into()
     }
 
-    pub(crate) fn file_drawer(&self) -> Element<'_, Message> {
-        let Some(state) = self.workspace.state() else {
-            return container(
-                text("Choose a session to browse its files.")
-                    .size(style::SMALL)
-                    .color(P.fg_dim),
-            )
-            .padding(14)
-            .into();
-        };
+    pub(crate) fn file_drawer<'a>(&'a self, view: &'a SessionView) -> Element<'a, Message> {
+        let state = &view.files;
         let toolbar = row![
             action("‹", Action::ToggleDrawer),
             action(
@@ -216,18 +208,7 @@ impl App {
                             body = body.push(caption("Working tree is clean."));
                         }
                         for entry in &repo.entries {
-                            let relative = entry
-                                .path
-                                .to_path()
-                                .ok()
-                                .and_then(|p| {
-                                    base.to_path().ok().and_then(|b| {
-                                        p.strip_prefix(b)
-                                            .ok()
-                                            .map(|p| p.to_string_lossy().into_owned())
-                                    })
-                                })
-                                .unwrap_or_else(|| entry.path.display.clone());
+                            let relative = relative(&entry.path, base);
                             let color = if entry.status.contains('D') {
                                 P.error
                             } else if entry.status.contains('?') {
@@ -292,7 +273,7 @@ impl App {
             toolbar,
             rule::horizontal(1).style(style::rule_style(P.border)),
             scrollable(body.padding([4, 0]))
-                .id(format!("files-{}", self.workspace.active))
+                .id(format!("files-{}", view.id))
                 .height(Fill)
                 .style(style::feed_scroll),
             container(column![input, controls].spacing(4)).padding(8)
@@ -301,9 +282,10 @@ impl App {
         .into()
     }
 
-    pub(crate) fn file_view(&self) -> Option<Element<'_, Message>> {
-        let state = self.workspace.state()?;
-        let file = state.viewer.as_ref()?;
+    pub(crate) fn file_view<'a>(&'a self, view: &'a SessionView) -> Option<Element<'a, Message>> {
+        let state = &view.files;
+        let file = state.reader.as_ref()?;
+        let rendering = view.reader.as_ref()?;
         let is_diff = file.repo.is_some();
         let heading = row![
             action("‹ Conversation", Action::CloseViewer),
@@ -339,14 +321,7 @@ impl App {
                 ));
             }
         }
-        if file.text.len() <= 256 * 1024
-            && (!is_diff || file.text.lines().count() <= 2000)
-            && (is_diff
-                || matches!(
-                    file.path.display.rsplit('.').next(),
-                    Some("md" | "markdown")
-                ))
-        {
+        if file.renderable() {
             tools = tools.push(action(
                 if file.source { "Rendered" } else { "Source" },
                 Action::Source,
@@ -363,7 +338,7 @@ impl App {
                 .height(Fill)
                 .into()
         } else if file.source {
-            text_editor(&file.content)
+            text_editor(&rendering.content)
                 .id("file-reader")
                 .height(Fill)
                 .padding(12)
@@ -374,28 +349,39 @@ impl App {
                 .into()
         } else if is_diff {
             let diff = diff_rows(&file.text);
-            scrollable(container(diff).padding(12))
-                .id("diff-reader")
-                .height(Fill)
-                .direction(scrollable::Direction::Both {
-                    vertical: scrollable::Scrollbar::default(),
-                    horizontal: scrollable::Scrollbar::default(),
-                })
-                .style(style::feed_scroll)
-                .into()
-        } else {
-            scrollable(
-                container(markdown::view_with(
-                    file.markdown.items(),
-                    crate::ui::markdown_settings(),
-                    &viewer::SillViewer,
-                ))
-                .padding(16),
+            selection::area(
+                scrollable(container(diff).padding(12))
+                    .id("diff-reader")
+                    .height(Fill)
+                    .direction(scrollable::Direction::Both {
+                        vertical: scrollable::Scrollbar::default(),
+                        horizontal: scrollable::Scrollbar::default(),
+                    })
+                    .style(style::feed_scroll),
             )
-            .id("markdown-reader")
-            .height(Fill)
-            .style(style::feed_scroll)
+            .on_copy(Message::Copy)
             .into()
+        } else if let Some(markdown) = &rendering.markdown {
+            selection::area(
+                scrollable(
+                    container(markdown::view_with(
+                        markdown.items(),
+                        crate::ui::markdown_settings(),
+                        &viewer::SillViewer,
+                    ))
+                    .padding(16),
+                )
+                .id("markdown-reader")
+                .height(Fill)
+                .style(style::feed_scroll),
+            )
+            .on_copy(Message::Copy)
+            .into()
+        } else {
+            container(text("Reading…").size(style::TEXT).color(P.fg_dim))
+                .padding(18)
+                .height(Fill)
+                .into()
         };
         let footer = if is_diff {
             "Git’s view: working tree against HEAD."
@@ -437,7 +423,7 @@ fn node<'a>(
 ) -> Element<'a, Message> {
     let expanded = state.expanded.contains(key(path));
     let active = state
-        .viewer
+        .reader
         .as_ref()
         .is_some_and(|f| key(&f.path) == key(path));
     let muted =
@@ -605,7 +591,7 @@ fn diff_rows(source: &str) -> Column<'_, Message> {
                     .width(40)
                     .size(style::TINY)
                     .color(P.fg_dim),
-                iced_selection::text(line)
+                selection::text(line)
                     .size(style::MONO)
                     .font(Font::with_name(crate::fonts::MONO_FAMILY))
                     .style(style::selectable(color)),

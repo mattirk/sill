@@ -178,6 +178,12 @@ impl Client {
         Ok(result)
     }
 
+    /// This connection can still carry a request. False once the daemon closed it, a write failed
+    /// or a call timed out: a request now would never be sent, so the caller connects again first.
+    pub fn is_open(&self) -> bool {
+        !self.closed.load(Ordering::Acquire)
+    }
+
     /// The connection is gone (the daemon left or restarted): the caller connects again.
     pub fn is_closed(e: &anyhow::Error) -> bool {
         e.to_string().contains("closed the connection") || e.to_string().contains("went away") || e.to_string().contains("writing to the daemon")

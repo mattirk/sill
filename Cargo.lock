@@ -3955,6 +3955,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sill-client"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "sill-proto",
+]
+
+[[package]]
 name = "sill-core"
 version = "0.0.1"
 dependencies = [
@@ -3986,11 +3996,14 @@ dependencies = [
  "async-channel",
  "clap",
  "iced",
+ "iced_runtime",
  "iced_selection",
  "iced_test",
  "serde",
  "serde_json",
+ "sill-client",
  "sill-proto",
+ "unicode-segmentation",
 ]
 
 [[package]]

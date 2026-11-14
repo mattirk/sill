@@ -2,8 +2,11 @@
 //! one: a prompt, a finished shell call, agent text streaming in (`CHUNKS`), then an edit that
 //! waits on a permission question (`waiting`), answered by `answered`. Everything arrives as SFP
 //! events, so the demo drives the same model as a live session.
-use crate::model::Conversation;
+use sill_client::Conversation;
+use sill_client::files::{Data, Request, Root, name};
+use sill_proto::sessions::HostPath;
 use sill_proto::sfp::*;
+use sill_proto::{admin, discovery};
 
 pub const CHUNKS: &[&str] = &[
     "A streamed paragraph with **bold**, *italic*, and `inline code` — the send arrow is drawn in `conversation.rs`.\n\n",
@@ -76,22 +79,14 @@ fn tool(title: &str, kind: &str, status: &str, detail: &str, diff: &str) -> Tool
 }
 
 pub fn conversation() -> Conversation {
-    let mut view = Conversation {
-        session_id: "demo".into(),
-        subscription_id: "demo-subscription".into(),
-        seq: 3,
-        session: Some(session("working", None)),
-        ..Conversation::default()
-    };
-    view.items.insert(
-        "user".into(),
-        item(
-            "user",
-            "1",
-            "user",
-            "Make the send arrow a little smaller and show me the change.",
-        ),
-    );
+    let mut view = Conversation::new("demo", "demo-subscription", 3);
+    view.session = Some(session("working", None));
+    view.insert_item(item(
+        "user",
+        "1",
+        "user",
+        "Make the send arrow a little smaller and show me the change.",
+    ));
     let mut shell = item("tool", "2", "tool", "");
     shell.tool = Some(tool(
         "rg -n 'sill-send' crates/sill/src/shelf",
@@ -100,16 +95,13 @@ pub fn conversation() -> Conversation {
         "crates/sill/src/shelf/conversation.rs:1640:button.sill-send > image { -gtk-icon-size: 1.1em; }",
         "",
     ));
-    view.items.insert("tool".into(), shell);
-    view.items.insert(
-        "agent".into(),
-        item(
-            "agent",
-            "3",
-            "agent",
-            "The arrow's size is one rule in the stylesheet.\n\n",
-        ),
-    );
+    view.insert_item(shell);
+    view.insert_item(item(
+        "agent",
+        "3",
+        "agent",
+        "The arrow's size is one rule in the stylesheet.\n\n",
+    ));
     view
 }
 
@@ -240,4 +232,90 @@ pub fn prompt(seq: u64, text: &str) -> Vec<SessionEvent> {
             },
         ),
     ]
+}
+
+fn path(path: &str) -> HostPath {
+    HostPath::from_path(std::path::Path::new(path))
+}
+
+fn metadata(directory: bool) -> admin::FileMetadata {
+    admin::FileMetadata {
+        file: !directory,
+        directory,
+        symlink: false,
+        target: None,
+        length: "150".into(),
+        readonly: false,
+    }
+}
+
+/// The demo's files: one pinned project with a few folders, a Markdown file and a diff.
+pub fn files(request: &Request) -> Result<Data, String> {
+    Ok(match request {
+        Request::Roots => Data::Roots {
+            roots: vec![Root {
+                path: path("/home/demo/project"),
+                global: false,
+                metadata: Some(metadata(true)),
+                error: None,
+            }],
+            home: path("/home/demo"),
+        },
+        Request::Directory { path: dir, .. } => {
+            let entries = match dir.display.as_str() {
+                "/home/demo" => vec![("project", true)],
+                "/home/demo/project" => vec![
+                    ("src", true),
+                    ("docs", true),
+                    ("README.md", false),
+                    ("Cargo.toml", false),
+                    (".gitignore", false),
+                ],
+                "/home/demo/project/src" => vec![("main.rs", false)],
+                "/home/demo/project/docs" => vec![("guide.md", false)],
+                _ => vec![],
+            };
+            Data::Directory(admin::FilesPage {
+                entries: entries
+                    .into_iter()
+                    .map(|(entry, directory)| admin::FileEntry {
+                        path: path(&format!("{}/{entry}", dir.display)),
+                        metadata: metadata(directory),
+                    })
+                    .collect(),
+                next: None,
+            })
+        }
+        Request::Inspect(at) => Data::Metadata(metadata(!name(at).contains('.'))),
+        Request::File {
+            path: file,
+            repo: Some(_),
+        } => Data::File(format!(
+            "diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n@@ -1,3 +1,4 @@\n # Sill\n-A conversation preview.\n+A place to work with your agents.\n+Files and diffs stay with each session.\n",
+            name(file)
+        )),
+        Request::File { path: file, .. } => Data::File(if file.display.ends_with(".rs") {
+            "fn main() {\n    println!(\"Hello from Sill\");\n}\n".into()
+        } else {
+            "# A workspace for your session\n\nBrowse pinned folders, read files and review **what changed** without leaving the conversation.\n\n## Staying oriented\n\n- Expanded folders stay open across refreshes.\n- Each session remembers its own files.\n- Close the viewer to return to the conversation.\n\n```rust\nfn main() {\n    println!(\"Hello from Sill\");\n}\n```\n\nThis is a synthetic file in the demo.\n".into()
+        }),
+        Request::Repo(repo) => Data::Repo {
+            root: Some(repo.clone()),
+            head: "main".into(),
+            entries: vec![
+                discovery::StatusEntry {
+                    path: path("/home/demo/project/README.md"),
+                    status: "M".into(),
+                },
+                discovery::StatusEntry {
+                    path: path("/home/demo/project/src/main.rs"),
+                    status: "?".into(),
+                },
+            ],
+            summary: "+12 −3  ?1".into(),
+        },
+        Request::Pin { .. } => {
+            return Err("Demo pins are examples; use a real session to change pins.".into());
+        }
+    })
 }

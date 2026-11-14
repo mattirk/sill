@@ -1,10 +1,9 @@
-//! The terminal pane: the shell the daemon keeps in the session's jail (docs/protocol.md,
-//! terminals), under the label the shelf uses, so either frontend finds the shell the other one
-//! opened. alacritty_terminal is the emulator; its bytes come and go over the SFP byte stream,
-//! never a local pty. Hiding the pane only detaches; the shell keeps running and is found again.
-use std::io::{Read, Write};
+//! The terminal pane: the shell the daemon keeps in the session's jail, drawn by this window.
+//! alacritty_terminal is the emulator; the bytes come and go through sill-client's terminal
+//! [`Link`] over the daemon's byte stream, never a local pty. Hiding the pane keeps it attached;
+//! dropping or replacing it detaches (the link closes its stream) and the shell keeps running.
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, OnceLock};
 
 use alacritty_terminal::event::{Event as TermEvent, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -19,13 +18,10 @@ use alacritty_terminal::vte::ansi::{Color as Ansi, CursorShape, NamedColor, Proc
 use iced::keyboard::{self, Key, Modifiers, key::Named};
 use iced::widget::canvas::{self, Frame, Geometry, Stroke};
 use iced::{Color, Element, Fill, Font, Rectangle, Renderer, Size, Theme, mouse};
-use sill_proto::terminals as api;
-use sill_proto::transport::RawStream;
+use sill_client::terminal::{self as link, Connection, Link, Replies};
 
 use crate::style::{self, P};
 
-/// The shelf's name for a session's plain shell (`shell`), shared so the two find each other's.
-pub const LABEL: &str = "shell";
 /// Glyph size; Source Code Pro advances 600/1000 of an em, which fixes the cell's width.
 const SIZE: f32 = style::MONO;
 const CELL_W: f32 = SIZE * 0.6;
@@ -33,25 +29,7 @@ const CELL_H: f32 = (SIZE * 1.3) as u32 as f32;
 const PAD: f32 = 6.0;
 const MONO: Font = Font::with_name(crate::fonts::MONO_FAMILY);
 
-/// The requests that steer a terminal besides its bytes.
-pub enum Control {
-    Resize(u16, u16),
-    /// End the shell itself, not only this view of it.
-    Close,
-}
-
-/// An attached terminal: its byte stream, and the requests that steer it.
-pub struct Connection {
-    /// Older output was dropped before this attach; the screen starts partway.
-    pub discarded: bool,
-    /// The terminal's size when its recent output was drawn: the replay is read at that size,
-    /// then the pane resizes it to its own.
-    pub size: (u16, u16),
-    pub stream: RawStream,
-    pub control: Box<dyn FnMut(Control) -> anyhow::Result<()> + Send>,
-}
-
-/// What the pane hears from its worker.
+/// What the pane hears from its link.
 #[derive(Debug, Clone)]
 pub enum Event {
     Opened,
@@ -83,15 +61,10 @@ pub enum Status {
     Ended,
 }
 
-enum Op {
-    Input(Vec<u8>),
-    Resize(u16, u16),
-    Close,
-}
-
-/// Answers the emulator writes back (device attributes, colour queries) go to the shell.
+/// Answers the emulator writes back (device attributes, colour queries) go to the shell. The
+/// handle does not keep the link alive: dropping the pane still detaches.
 #[derive(Clone)]
-struct Listener(mpsc::Sender<Op>);
+struct Listener(Arc<OnceLock<Replies>>);
 
 impl EventListener for Listener {
     fn send_event(&self, event: TermEvent) {
@@ -100,13 +73,45 @@ impl EventListener for Listener {
             TermEvent::ColorRequest(index, format) => format(rgb(index)),
             _ => return,
         };
-        let _ = self.0.send(Op::Input(reply.into_bytes()));
+        if let Some(replies) = self.0.get() {
+            replies.send(reply.into_bytes());
+        }
+    }
+}
+
+/// The link's output into the emulator, on the link's reading thread.
+struct Feed {
+    term: Arc<FairMutex<Term<Listener>>>,
+    parser: Processor<alacritty_terminal::vte::ansi::StdSyncHandler>,
+    pending: Arc<AtomicBool>,
+    events: async_channel::Sender<Event>,
+}
+
+impl link::Screen for Feed {
+    fn begin(&mut self, cols: u16, rows: u16, discarded: bool) {
+        // the replay is read at the size it was drawn at; the pane resizes it afterwards
+        let mut term = self.term.lock();
+        term.resize(TermSize::new(cols as usize, rows as usize));
+        if discarded {
+            self.parser.advance(
+                &mut *term,
+                b"\x1b[2m[earlier output was not kept]\x1b[0m\r\n",
+            );
+        }
+    }
+
+    fn output(&mut self, bytes: &[u8]) -> bool {
+        self.parser.advance(&mut *self.term.lock(), bytes);
+        if !self.pending.swap(true, Ordering::AcqRel) {
+            return self.events.send_blocking(Event::Output).is_ok();
+        }
+        true
     }
 }
 
 pub struct Pane {
     term: Arc<FairMutex<Term<Listener>>>,
-    ops: mpsc::Sender<Op>,
+    link: Link,
     pending: Arc<AtomicBool>,
     pub cols: u16,
     pub rows: u16,
@@ -122,28 +127,33 @@ impl Pane {
         rows: u16,
         connect: impl FnOnce(u16, u16) -> anyhow::Result<Connection> + Send + 'static,
     ) -> (Self, async_channel::Receiver<Event>) {
-        let (ops, commands) = mpsc::channel();
+        let replies = Arc::new(OnceLock::new());
         let size = TermSize::new(cols as usize, rows as usize);
         let term = Arc::new(FairMutex::new(Term::new(
             Config::default(),
             &size,
-            Listener(ops.clone()),
+            Listener(replies.clone()),
         )));
         let pending = Arc::new(AtomicBool::new(false));
         let (events, receiver) = async_channel::unbounded();
-        let (screen, flag) = (term.clone(), pending.clone());
-        std::thread::Builder::new()
-            .name("sill-gui-terminal".into())
-            .spawn(move || match connect(cols, rows) {
-                Err(error) => {
-                    let _ = events.send_blocking(Event::Failed(format!("{error:#}")));
-                }
-                Ok(connection) => run(connection, screen, flag, commands, events),
-            })
-            .expect("start terminal worker");
+        let feed = Feed {
+            term: term.clone(),
+            parser: Processor::new(),
+            pending: pending.clone(),
+            events: events.clone(),
+        };
+        let link = Link::open(cols, rows, connect, feed, move |event| {
+            let event = match event {
+                link::Event::Opened => Event::Opened,
+                link::Event::Failed(error) => Event::Failed(error),
+                link::Event::Ended => Event::Ended,
+            };
+            events.send_blocking(event).is_ok()
+        });
+        let _ = replies.set(link.replies());
         let pane = Self {
             term,
-            ops,
+            link,
             pending,
             cols,
             rows,
@@ -196,7 +206,7 @@ impl Pane {
             term.scroll_display(Scroll::Bottom);
             term.selection = None;
         }
-        let _ = self.ops.send(Op::Input(bytes));
+        self.link.input(bytes);
         self.cache.clear();
     }
 
@@ -220,13 +230,13 @@ impl Pane {
         self.term
             .lock()
             .resize(TermSize::new(cols as usize, rows as usize));
-        let _ = self.ops.send(Op::Resize(cols, rows));
+        self.link.resize(cols, rows);
         self.cache.clear();
     }
 
     /// End the shell itself; the pane then shows that it ended.
     pub fn close(&self) {
-        let _ = self.ops.send(Op::Close);
+        self.link.close();
     }
 
     pub fn selection(&self) -> Option<String> {
@@ -267,160 +277,10 @@ impl Pane {
     }
 }
 
-/// Bytes both ways until the stream or the pane goes; dropping the pane only detaches.
-fn run(
-    connection: Connection,
-    term: Arc<FairMutex<Term<Listener>>>,
-    pending: Arc<AtomicBool>,
-    commands: mpsc::Receiver<Op>,
-    events: async_channel::Sender<Event>,
-) {
-    let Connection {
-        discarded,
-        size: (cols, rows),
-        stream,
-        mut control,
-    } = connection;
-    term.lock()
-        .resize(TermSize::new(cols as usize, rows as usize));
-    let RawStream {
-        mut reader,
-        mut writer,
-        interrupt,
-        ..
-    } = stream;
-    let mut parser = Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new();
-    if discarded {
-        parser.advance(
-            &mut *term.lock(),
-            b"\x1b[2m[earlier output was not kept]\x1b[0m\r\n",
-        );
-    }
-    if events.send_blocking(Event::Opened).is_err() {
-        return;
-    }
-    let output = events.clone();
-    let stop = interrupt.clone();
-    let reading = std::thread::Builder::new()
-        .name("sill-gui-terminal-output".into())
-        .spawn(move || {
-            let mut bytes = [0u8; 32 * 1024];
-            loop {
-                match reader.read(&mut bytes) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        parser.advance(&mut *term.lock(), &bytes[..n]);
-                        if !pending.swap(true, Ordering::AcqRel)
-                            && output.send_blocking(Event::Output).is_err()
-                        {
-                            break;
-                        }
-                    }
-                }
-            }
-            let _ = output.send_blocking(Event::Ended);
-            stop();
-        });
-    if reading.is_err() {
-        let _ = events.send_blocking(Event::Failed("could not read the terminal".into()));
-        interrupt();
-        return;
-    }
-    while let Ok(op) = commands.recv() {
-        match op {
-            Op::Input(bytes) => {
-                if writer
-                    .write_all(&bytes)
-                    .and_then(|()| writer.flush())
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            Op::Resize(cols, rows) => {
-                if let Err(error) = control(Control::Resize(cols, rows)) {
-                    eprintln!("sill-gui: resizing the terminal: {error:#}");
-                }
-            }
-            Op::Close => {
-                if let Err(error) = control(Control::Close) {
-                    let _ = events.send_blocking(Event::Failed(format!("{error:#}")));
-                }
-                break;
-            }
-        }
-    }
-    interrupt();
-}
-
-/// The session's jail shell over a connection of its own: the running one under [`LABEL`] when
-/// there is one (the shelf's, or this pane's from before), else a new login shell.
-pub fn jail_shell(
-    session_id: String,
-) -> impl FnOnce(u16, u16) -> anyhow::Result<Connection> + Send + 'static {
-    move |cols, rows| {
-        let client = sill_proto::Client::connect()?;
-        let listed: api::Terminals = client.call(
-            "_sill/terminals.list",
-            api::List {
-                session_id: Some(session_id.clone()),
-            },
-        )?;
-        let found = listed
-            .terminals
-            .into_iter()
-            .rev()
-            .find(|t| t.label == LABEL && t.state == "running");
-        let terminal = match found {
-            Some(t) => t,
-            None => client.call(
-                "_sill/terminals.open",
-                api::Open {
-                    session_id: Some(session_id),
-                    label: LABEL.into(),
-                    argv: vec![],
-                    // the pane emulates xterm, whatever the jail's default is
-                    env: [("TERM", "xterm-256color"), ("COLORTERM", "truecolor")]
-                        .into_iter()
-                        .map(|(k, v)| (k.to_string(), v.to_string()))
-                        .collect(),
-                    cwd: None,
-                    cols,
-                    rows,
-                },
-            )?,
-        };
-        let id = terminal.terminal_id.clone();
-        let key = |id: &str| api::TerminalKey {
-            terminal_id: id.to_string(),
-        };
-        let stream: api::Stream = client.call("_sill/terminals.attach", key(&id))?;
-        let stream = sill_proto::transport::open_stream(&stream.token)?;
-        let control = move |control: Control| -> anyhow::Result<()> {
-            let _: serde_json::Value = match control {
-                Control::Resize(cols, rows) => client.call(
-                    "_sill/terminals.resize",
-                    api::Resize {
-                        terminal_id: id.clone(),
-                        cols,
-                        rows,
-                    },
-                )?,
-                Control::Close => client.call("_sill/terminals.close", key(&id))?,
-            };
-            Ok(())
-        };
-        Ok(Connection {
-            discarded: terminal.discarded_bytes != "0",
-            size: (terminal.cols, terminal.rows),
-            stream,
-            control: Box::new(control),
-        })
-    }
-}
-
 /// `--demo`: a pretend shell on the other end of a socket pair; it echoes, knows `ls` and `exit`.
+#[cfg(unix)]
 pub fn demo_shell(cols: u16, rows: u16) -> anyhow::Result<Connection> {
+    use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
     const PROMPT: &str = "\x1b[32mdemo@jail\x1b[0m:\x1b[34m~/project\x1b[0m$ ";
     let (ours, mut theirs) = UnixStream::pair()?;
@@ -485,7 +345,7 @@ pub fn demo_shell(cols: u16, rows: u16) -> anyhow::Result<Connection> {
     Ok(Connection {
         discarded: false,
         size: (cols, rows),
-        stream: RawStream {
+        stream: sill_proto::transport::RawStream {
             reader: Box::new(ours.try_clone()?),
             writer: Box::new(ours),
             interrupt: Arc::new(move || {
@@ -495,6 +355,12 @@ pub fn demo_shell(cols: u16, rows: u16) -> anyhow::Result<Connection> {
         },
         control: Box::new(|_| Ok(())),
     })
+}
+
+/// Off Unix the demo has no pretend shell.
+#[cfg(not(unix))]
+pub fn demo_shell(_: u16, _: u16) -> anyhow::Result<Connection> {
+    anyhow::bail!("the demo's pretend shell needs a Unix socket pair")
 }
 
 // --- drawing and input ----------------------------------------------------------------------

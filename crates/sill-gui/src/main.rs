@@ -1,8 +1,9 @@
-mod backend;
 mod demo;
 mod fonts;
 mod icons;
-mod model;
+#[cfg(test)]
+mod perf;
+mod selection;
 #[cfg(test)]
 mod snapshots;
 mod style;
@@ -15,25 +16,29 @@ mod workspace;
 mod workspace_ui;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use iced::widget::{markdown, text_editor};
+use iced::widget::{markdown, operation, scrollable, text_editor};
 use iced::{Font, Subscription, Task};
 use serde_json::json;
+use sill_client::actions::{Actions, Outcome};
+use sill_client::conversation::item_text;
+use sill_client::files::FilesState;
+use sill_client::lane::{self, Lane, Status};
+use sill_client::outbox::{Outbox, Settled};
+use sill_client::supervision::Attention;
+use sill_client::{Change, Connector, Conversation};
+use sill_proto::sessions::Session;
 use sill_proto::sfp::{
-    Answer, AnswerQuestion, CancelTurn, ConfigValue, Control, SessionControl, SessionEvent,
-    SubmissionKey, Submit,
+    Answer, AnswerQuestion, CancelTurn, ConfigValue, Control, SessionControl, SubmissionKey,
 };
 
-use backend::{Command, Update};
-use model::{Conversation, item_text};
-
 #[derive(Parser)]
-#[command(about = "Experimental Iced conversation frontend for Sill (runs beside the shelf)")]
+#[command(about = "Experimental Iced frontend for Sill (runs beside the shelf)")]
 struct Options {
-    /// Attach to an existing session by exact ID, unique prefix or title.
+    /// Open an existing session by exact ID, unique prefix or title.
     #[arg(long, conflicts_with = "demo")]
     session: Option<String>,
     /// Show a synthetic streaming conversation without connecting to a daemon.
@@ -59,16 +64,23 @@ fn main() -> iced::Result {
     .run()
 }
 
+/// A session shown as a tab: every one that has not ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct SessionChoice {
-    id: String,
-    title: String,
-    agent: String,
+pub struct Tab {
+    pub id: String,
+    pub title: String,
+    pub agent: String,
+    pub running: bool,
 }
 
-impl std::fmt::Display for SessionChoice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.title)
+impl From<&Session> for Tab {
+    fn from(s: &Session) -> Self {
+        Self {
+            id: s.session_id.clone(),
+            title: s.title.clone(),
+            agent: s.agent.clone(),
+            running: s.running,
+        }
     }
 }
 
@@ -86,14 +98,30 @@ impl std::fmt::Display for Pick {
     }
 }
 
+/// What a request the person made was, for its outcome.
 #[derive(Debug, Clone)]
-enum Message {
-    Workspace(workspace::Action),
-    Backend(u64, Update),
-    Choose(SessionChoice),
+pub enum Act {
+    Send(String),
+    Check(String),
+    Stop,
+    Answer(String),
+    Unqueue,
+    Control,
+}
+
+#[derive(Debug, Clone)]
+pub enum Message {
+    /// An update from a session's lane: the session, the lane it came from, the update.
+    Lane(String, u64, lane::Update),
+    Listed(Result<Vec<Session>, String>),
+    /// The outcome of a request the person made in a session.
+    Done(String, Act, Outcome),
+    Choose(String),
     Refresh,
     Copy(String),
     Link(String),
+    /// A selection drag in the conversation started (`true`) or ended (`false`).
+    Selecting(bool),
     ToggleText,
     RefreshText,
     TextAction(text_editor::Action),
@@ -113,123 +141,307 @@ enum Message {
     ToggleAnswered(String),
     SetMode(Pick),
     SetOption(String, Pick),
+    /// A prompt that did not arrive: back into the composer, sent again, checked, or dropped.
+    EditSend(String),
+    RetrySend(String),
+    CheckSend(String),
+    DiscardSend(String),
+    /// From the status strip: back to the conversation, from files or the transcript.
+    ShowConversation,
     /// A press on the top bar's empty space: the window manager moves the window.
     DragWindow,
     Quit,
     /// `>_`: the session's jail shell in place of the prompt, or the prompt again.
     ToggleTerminal,
-    Terminal(u64, terminal::Event),
+    Terminal(String, u64, terminal::Event),
     TermAction(terminal::Action),
     TermPaste(Option<String>),
     /// End the shell itself (hiding the pane only detaches from it).
     EndTerminal,
     ReopenTerminal,
+    Workspace(workspace::Action),
+    /// The window's new width.
+    Resized(f32),
+    Noop,
 }
 
-struct Rendered {
-    source: String,
-    markdown: markdown::Content,
+pub struct Rendered {
+    pub source: String,
+    pub markdown: markdown::Content,
 }
 
-struct App {
-    workspace: workspace::Workspace,
-    commands: Option<mpsc::Sender<Command>>,
-    choices: Vec<SessionChoice>,
-    selected: Option<SessionChoice>,
-    conversation: Conversation,
-    rendered: BTreeMap<String, Rendered>,
-    status: String,
-    error: Option<String>,
-    /// A request the person made that the daemon refused; shown until the next one.
-    failed: Option<String>,
-    text_view: Option<text_editor::Content>,
-    prompt: text_editor::Content,
-    /// Tool rows opened to show their output and diff.
-    open_tools: BTreeSet<String>,
-    /// Answered questions opened to show what was asked.
-    open_answers: BTreeSet<String>,
-    demo: bool,
-    demo_step: usize,
-    loading: bool,
-    generation: u64,
-    follow_tail: bool,
-    scroll_offset: f32,
-    /// Set by each tick while the agent is busy; the spinner's angle comes from it.
-    now: Instant,
-    /// The session's jail shell; kept attached while hidden, dropped (detached) on switching.
-    terminal: Option<terminal::Pane>,
-    terminal_shown: bool,
+/// Everything that belongs to one open session, for as long as it is open in this window: its
+/// lane and conversation, what the person typed and sent, its terminal, files and scroll position.
+/// Dropping it ends the lane and detaches the terminal; the session goes on.
+pub struct SessionView {
+    pub id: String,
+    lane: Option<Lane>,
+    lane_epoch: u64,
+    pub status: Status,
+    pub conversation: Conversation,
+    pub rendered: BTreeMap<String, Rendered>,
+    pub draft: text_editor::Content,
+    pub outbox: Outbox,
+    /// A request the person made that did not take effect; shown until the next one.
+    pub failed: Option<String>,
+    pub open_tools: BTreeSet<String>,
+    pub open_answers: BTreeSet<String>,
+    /// Answers on their way, so a second press does not send another.
+    pub answering: BTreeSet<String>,
+    pub follow_tail: bool,
+    pub scroll_offset: f32,
+    pub text_view: Option<text_editor::Content>,
+    pub terminal: Option<terminal::Pane>,
+    pub terminal_shown: bool,
     terminal_generation: u64,
+    pub files: FilesState,
+    pub reader: Option<workspace::ReaderView>,
+    /// The failed turn the person has looked at, so its mark goes.
+    seen_failure: Option<String>,
 }
 
-/// A fresh identity for a submission or an answer (1–128 bytes, unique for this daemon).
-fn request_id(kind: &str) -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    format!(
-        "gui-{kind}-{}-{nanos:x}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    )
+impl SessionView {
+    fn new(id: &str) -> Self {
+        Self {
+            id: id.into(),
+            lane: None,
+            lane_epoch: 0,
+            status: Status::Closed,
+            conversation: Conversation::default(),
+            rendered: BTreeMap::new(),
+            draft: text_editor::Content::new(),
+            outbox: Outbox::default(),
+            failed: None,
+            open_tools: BTreeSet::new(),
+            open_answers: BTreeSet::new(),
+            answering: BTreeSet::new(),
+            follow_tail: true,
+            scroll_offset: 0.0,
+            text_view: None,
+            terminal: None,
+            terminal_shown: false,
+            terminal_generation: 0,
+            files: FilesState::default(),
+            reader: None,
+            seen_failure: None,
+        }
+    }
+
+    /// The conversation is on screen (not a file, not the transcript).
+    pub fn conversation_shown(&self) -> bool {
+        self.text_view.is_none() && self.files.reader.is_none()
+    }
+
+    pub fn attention(&self) -> Attention {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        let mut attention = Attention::of(&self.conversation, &self.outbox, &self.status, now);
+        if attention.failed.is_some()
+            && self.seen_failure.as_deref() == self.conversation.last_turn_id()
+        {
+            attention.failed = None;
+        }
+        attention
+    }
+
+    /// The person has looked at this session: a failure shown is no longer news.
+    fn seen(&mut self) {
+        self.seen_failure = self.conversation.last_turn_id().map(str::to_owned);
+    }
+
+    /// Every item's rendering, after a snapshot.
+    fn rebuild(&mut self) {
+        self.rendered.clear();
+        let ids: Vec<String> = self.conversation.items().keys().cloned().collect();
+        for id in ids {
+            self.render(&id);
+        }
+    }
+
+    /// One item's rendering, parsed incrementally while its text only grows.
+    fn render(&mut self, id: &str) {
+        let source = match self.conversation.item(id) {
+            None => {
+                self.rendered.remove(id);
+                return;
+            }
+            // a tool row is drawn from its fields, not as Markdown
+            Some(item) if item.kind == "tool" => return,
+            Some(item) => item_text(item),
+        };
+        match self.rendered.get_mut(id) {
+            Some(cached) if cached.source == source => {}
+            Some(cached) if source.starts_with(&cached.source) => {
+                cached.markdown.push_str(&source[cached.source.len()..]);
+                cached.source = source;
+            }
+            _ => {
+                self.rendered.insert(
+                    id.to_string(),
+                    Rendered {
+                        markdown: markdown::Content::parse(&source),
+                        source,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Apply one event; whether the conversation grew or changed visibly.
+    fn accept(&mut self, event: sill_proto::sfp::SessionEvent) -> bool {
+        match self.conversation.accept(event) {
+            Ok(Some(change)) => {
+                match &change {
+                    Change::Item(id) => self.render(id),
+                    Change::ItemRemoved(id) => {
+                        self.rendered.remove(id);
+                    }
+                    Change::Submission(_) => {
+                        self.outbox.reconcile(&self.conversation);
+                    }
+                    Change::Question(id) => {
+                        if self
+                            .conversation
+                            .questions
+                            .get(id)
+                            .is_some_and(|q| q.state != "open")
+                        {
+                            self.answering.remove(id);
+                        }
+                    }
+                    Change::Session | Change::Turn(_) => {}
+                }
+                true
+            }
+            Ok(None) => false,
+            Err(error) => {
+                self.failed = Some(format!("{error:#}. Restoring the conversation."));
+                if let Some(lane) = &self.lane {
+                    lane.resync();
+                }
+                false
+            }
+        }
+    }
+
+    /// The session ended or was deleted, as its own state says.
+    fn ended(&self) -> bool {
+        self.conversation
+            .session
+            .as_ref()
+            .is_some_and(|s| s.lifecycle == "ended" || s.deleted)
+    }
+}
+
+pub struct App {
+    pub demo: bool,
+    connect: Option<Connector>,
+    actions: Option<Arc<Actions>>,
+    /// Where every lane reports, tagged with its session and epoch.
+    lanes: Option<async_channel::Sender<(String, u64, lane::Update)>>,
+    next_lane: u64,
+    pub tabs: Vec<Tab>,
+    pub views: BTreeMap<String, SessionView>,
+    pub selected: Option<String>,
+    /// `--session`, chosen when the first list arrives.
+    initial: Option<String>,
+    /// Trouble reading the daemon's session list.
+    pub list_error: Option<String>,
+    pub listed: bool,
+    pub workspace: workspace::Workspace,
+    /// Set by each tick while the agent is busy; the spinner's angle comes from it.
+    pub now: Instant,
+    demo_step: usize,
+    /// The window's width, for the narrow layout's choices.
+    pub width: f32,
+    /// A selection is being dragged in the conversation: following the tail would pull the text
+    /// from under the pointer, so new text does not scroll it until the drag ends.
+    pub selecting: bool,
+}
+
+/// Run `work` on a thread of its own; its result comes back as a message.
+fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+    done: impl FnOnce(T) -> Message + Send + 'static,
+) -> Task<Message> {
+    let (tx, rx) = iced::futures::channel::oneshot::channel();
+    let spawned = std::thread::Builder::new()
+        .name("sill-gui-call".into())
+        .spawn(move || {
+            let _ = tx.send(work());
+        });
+    if spawned.is_err() {
+        return Task::none();
+    }
+    Task::perform(rx, move |result| match result {
+        Ok(value) => done(value),
+        Err(_) => Message::Noop,
+    })
 }
 
 impl App {
     fn new(demo: bool, initial: Option<String>) -> (Self, Task<Message>) {
-        let (workspace, file_task) = workspace::Workspace::new(demo);
+        Self::with(demo, initial, (!demo).then(sill_client::connect))
+    }
+
+    /// The app on `connect`'s daemon (none in `--demo`).
+    pub fn with(
+        demo: bool,
+        initial: Option<String>,
+        connect: Option<Connector>,
+    ) -> (Self, Task<Message>) {
+        let (workspace, file_task) = workspace::Workspace::new(connect.clone());
         let mut app = Self {
-            workspace,
-            commands: None,
-            choices: Vec::new(),
-            selected: None,
-            conversation: Conversation::default(),
-            rendered: BTreeMap::new(),
-            status: "Connecting…".into(),
-            error: None,
-            failed: None,
-            text_view: None,
-            prompt: text_editor::Content::new(),
-            open_tools: BTreeSet::new(),
-            open_answers: BTreeSet::new(),
             demo,
-            demo_step: 0,
-            loading: false,
-            generation: 0,
-            follow_tail: true,
-            scroll_offset: 0.0,
+            actions: connect.clone().map(Actions::new),
+            connect,
+            lanes: None,
+            next_lane: 0,
+            tabs: Vec::new(),
+            views: BTreeMap::new(),
+            selected: None,
+            initial,
+            list_error: None,
+            listed: false,
+            workspace,
             now: Instant::now(),
-            terminal: None,
-            terminal_shown: false,
-            terminal_generation: 0,
+            demo_step: 0,
+            width: 720.0,
+            selecting: false,
         };
         if demo {
-            app.conversation = demo::conversation();
-            let choice = SessionChoice {
+            let tab = Tab {
                 id: "demo".into(),
                 title: "witty-willow".into(),
                 agent: "claude".into(),
+                running: true,
             };
-            app.choices = vec![choice.clone()];
-            app.selected = Some(choice);
-            app.status = "Demo".into();
-            app.sync_rendered();
-            app.workspace.select("demo");
-            return (app, file_task);
+            let mut view = SessionView::new("demo");
+            view.conversation = demo::conversation();
+            view.status = Status::Live;
+            view.rebuild();
+            app.tabs = vec![tab];
+            app.views.insert("demo".into(), view);
+            app.selected = Some("demo".into());
+            app.listed = true;
+            let files = app.files_refresh("demo");
+            return (app, Task::batch([file_task, files]));
         }
-        let (commands, events) = backend::start(initial);
-        app.commands = Some(commands);
-        let stream = iced::futures::stream::unfold(events, |events| async move {
-            events.recv().await.ok().map(|event| (event, events))
+        let (tx, rx) = async_channel::bounded(256);
+        app.lanes = Some(tx);
+        let lanes = iced::futures::stream::unfold(rx, |rx| async move {
+            rx.recv().await.ok().map(|update| (update, rx))
         });
+        let list = app.list();
         (
             app,
             Task::batch([
                 file_task,
-                Task::run(stream, |(generation, update)| {
-                    Message::Backend(generation, update)
+                Task::run(lanes, |(session, epoch, update)| {
+                    Message::Lane(session, epoch, update)
                 }),
+                list,
             ]),
         )
     }
@@ -241,7 +453,7 @@ impl App {
                 .push(iced::time::every(Duration::from_millis(600)).map(|_| Message::DemoTick));
         }
         // the spinner and the timer move only while the agent is busy
-        if self.busy() {
+        if self.current().is_some_and(|v| v.conversation.busy()) {
             subscriptions.push(iced::time::every(Duration::from_millis(80)).map(|_| Message::Tick));
         }
         // sessions started or ended elsewhere appear and go
@@ -250,296 +462,277 @@ impl App {
                 .push(iced::time::every(Duration::from_secs(15)).map(|_| Message::Refresh));
         }
         subscriptions.push(iced::keyboard::listen().filter_map(quit_key));
+        subscriptions
+            .push(iced::window::resize_events().map(|(_, size)| Message::Resized(size.width)));
         Subscription::batch(subscriptions)
     }
 
-    /// The agent is working or waiting on a question.
-    fn busy(&self) -> bool {
-        self.conversation
-            .session
-            .as_ref()
-            .is_some_and(|s| s.activity == "working" || s.activity == "waiting")
+    /// Below this the drawer takes the content area instead of sitting beside it.
+    pub fn narrow(&self) -> bool {
+        self.width < ui::NARROW
     }
 
-    fn command(&mut self, command: Command) {
-        if self
-            .commands
-            .as_ref()
-            .is_some_and(|tx| tx.send(command).is_err())
-        {
-            self.error = Some("Connection worker stopped. Reopen the preview.".into());
+    pub fn current(&self) -> Option<&SessionView> {
+        self.views.get(self.selected.as_deref()?)
+    }
+
+    fn current_mut(&mut self) -> Option<&mut SessionView> {
+        self.views.get_mut(self.selected.as_deref()?)
+    }
+
+    /// The session list, read off the GUI thread.
+    fn list(&self) -> Task<Message> {
+        let Some(actions) = self.actions.clone() else {
+            return Task::none();
+        };
+        blocking(
+            move || actions.sessions().map_err(|e| format!("{e:#}")),
+            Message::Listed,
+        )
+    }
+
+    /// A lane for `id`, replacing any it had; updates from an older lane are ignored.
+    fn open_lane(&mut self, id: &str, mode: lane::Mode) {
+        let (Some(connect), Some(tx)) = (self.connect.clone(), self.lanes.clone()) else {
+            return;
+        };
+        self.next_lane += 1;
+        let epoch = self.next_lane;
+        let view = self
+            .views
+            .entry(id.to_string())
+            .or_insert_with(|| SessionView::new(id));
+        let session = id.to_string();
+        view.lane_epoch = epoch;
+        view.status = Status::Connecting;
+        view.lane = Some(Lane::open(id, mode, connect, move |update| {
+            tx.send_blocking((session.clone(), epoch, update)).is_ok()
+        }));
+    }
+
+    /// One request the person made in `session`; its outcome comes back as `Done`.
+    fn act(
+        &self,
+        session: &str,
+        act: Act,
+        method: &'static str,
+        params: serde_json::Value,
+    ) -> Task<Message> {
+        let Some(actions) = self.actions.clone() else {
+            return Task::none();
+        };
+        let session = session.to_string();
+        blocking(
+            move || actions.call(method, params),
+            move |outcome| Message::Done(session, act, outcome),
+        )
+    }
+
+    /// Back to the conversation's last place: its tail when it was following, else its offset.
+    fn restore_scroll(&self) -> Task<Message> {
+        let Some(view) = self.current() else {
+            return Task::none();
+        };
+        if view.follow_tail {
+            operation::snap_to_end("conversation")
+        } else {
+            operation::scroll_to(
+                "conversation",
+                scrollable::AbsoluteOffset {
+                    x: 0.0,
+                    y: view.scroll_offset,
+                },
+            )
         }
-    }
-
-    fn call(&mut self, method: &'static str, params: serde_json::Value, what: &'static str) {
-        self.failed = None;
-        self.command(Command::Call {
-            method,
-            params,
-            what,
-        });
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
-        if let Message::Backend(generation, _) = &message
-            && *generation != self.generation
-        {
-            return Task::none();
-        }
-        let scroll_to_tail = self.follow_tail
-            && matches!(
-                &message,
-                Message::Backend(_, Update::Snapshot(_) | Update::Event(_))
-                    | Message::DemoTick
-                    | Message::Send
-                    | Message::Answer { .. }
-            );
         match message {
-            Message::Workspace(action) => {
-                let restore = matches!(
-                    action,
-                    workspace::Action::CloseViewer
-                        | workspace::Action::CloseFile(_)
-                        | workspace::Action::ToggleDrawer
-                );
-                self.workspace.update(action);
-                if restore && self.workspace.state().is_none_or(|s| s.viewer.is_none()) {
-                    return if self.follow_tail {
-                        iced::widget::operation::snap_to_end("conversation")
-                    } else {
-                        iced::widget::operation::scroll_to(
-                            "conversation",
-                            iced::widget::scrollable::AbsoluteOffset {
-                                x: 0.0,
-                                y: self.scroll_offset,
-                            },
-                        )
-                    };
-                }
+            Message::Lane(session, epoch, update) => {
+                return self.lane_update(session, epoch, update);
             }
-            Message::Backend(_, Update::Sessions(sessions)) => {
-                self.choices = sessions
-                    .into_iter()
-                    .filter(|s| s.ended_at.is_none())
-                    .map(|s| SessionChoice {
-                        id: s.session_id,
-                        title: s.title,
-                        agent: s.agent,
-                    })
-                    .collect();
-                if let Some(selected) = &self.selected
-                    && let Some(fresh) = self.choices.iter().find(|c| c.id == selected.id)
-                {
-                    self.selected = Some(fresh.clone());
-                }
-            }
-            Message::Backend(_, Update::Snapshot(snapshot)) => {
-                self.selected = self
-                    .choices
-                    .iter()
-                    .find(|s| s.id == snapshot.session_id)
-                    .cloned();
-                if self.workspace.active != snapshot.session_id {
-                    self.workspace.select(&snapshot.session_id);
-                }
-                self.conversation = *snapshot;
-                self.rendered.clear();
-                self.text_view = None;
-                self.loading = false;
-                self.error = None;
-                self.sync_rendered();
-            }
-            Message::Backend(_, Update::Event(event)) => self.accept(*event),
-            Message::Backend(_, Update::Status(status)) => {
-                if status == "Connected" {
-                    self.loading = false;
-                    self.error = None;
-                }
-                self.status = status;
-            }
-            Message::Backend(_, Update::Error(error)) => {
-                self.status = "Disconnected · retrying".into();
-                self.error = Some(error);
-                self.loading = false;
-            }
-            Message::Backend(_, Update::Failed(failure)) => self.failed = Some(failure),
-            Message::Choose(choice) => {
-                if self.selected.as_ref().is_some_and(|s| s.id == choice.id)
-                    && !self.conversation.session_id.is_empty()
-                {
-                    return Task::none();
-                }
-                self.generation += 1;
-                self.command(Command::Attach {
-                    id: choice.id.clone(),
-                    generation: self.generation,
-                });
-                self.workspace.select(&choice.id);
-                self.selected = Some(choice);
-                self.loading = true;
-                self.follow_tail = true;
-                self.scroll_offset = 0.0;
-                self.conversation = Conversation::default();
-                self.rendered.clear();
-                self.text_view = None;
-                self.open_tools.clear();
-                self.open_answers.clear();
-                self.terminal = None;
-                self.terminal_shown = false;
-                self.status = "Loading conversation…".into();
-                self.error = None;
-                self.failed = None;
-            }
+            Message::Listed(result) => return self.listed(result),
+            Message::Done(session, act, outcome) => return self.done(session, act, outcome),
+            Message::Choose(id) => return self.choose(id),
             Message::Refresh => {
-                self.command(Command::Refresh);
-                if self.workspace.shown {
-                    self.workspace.update(workspace::Action::Refresh);
+                let mut tasks = vec![self.list()];
+                if self.workspace.shown
+                    && let Some(id) = self.selected.clone()
+                {
+                    tasks.push(self.files_refresh(&id));
                 }
+                return Task::batch(tasks);
             }
             Message::Scrolled(at_bottom, offset) => {
-                self.follow_tail = at_bottom;
-                self.scroll_offset = offset;
+                if let Some(view) = self.current_mut() {
+                    view.follow_tail = at_bottom;
+                    view.scroll_offset = offset;
+                }
             }
             Message::Latest => {
-                self.follow_tail = true;
-                return iced::widget::operation::snap_to_end("conversation");
+                if let Some(view) = self.current_mut() {
+                    view.follow_tail = true;
+                }
+                return operation::snap_to_end("conversation");
             }
             Message::Copy(value) => return iced::clipboard::write(value),
-            Message::Link(url) => {
-                self.status = "Link copied".into();
-                return iced::clipboard::write(url);
-            }
+            Message::Link(url) => return iced::clipboard::write(url),
+            Message::Selecting(held) => self.selecting = held,
             Message::ToggleText => {
-                self.text_view = if self.text_view.is_some() {
-                    None
-                } else {
-                    Some(text_editor::Content::with_text(
-                        &self.conversation.transcript(),
-                    ))
-                };
+                if let Some(view) = self.current_mut() {
+                    view.text_view = match view.text_view {
+                        Some(_) => None,
+                        None => Some(text_editor::Content::with_text(
+                            &view.conversation.transcript(),
+                        )),
+                    };
+                    if view.text_view.is_none() {
+                        return self.restore_scroll();
+                    }
+                }
             }
             Message::RefreshText => {
-                self.text_view = Some(text_editor::Content::with_text(
-                    &self.conversation.transcript(),
-                ));
+                if let Some(view) = self.current_mut() {
+                    view.text_view = Some(text_editor::Content::with_text(
+                        &view.conversation.transcript(),
+                    ));
+                }
             }
             Message::TextAction(action) => {
                 if !matches!(action, text_editor::Action::Edit(_))
-                    && let Some(content) = &mut self.text_view
+                    && let Some(content) = self.current_mut().and_then(|v| v.text_view.as_mut())
                 {
                     content.perform(action);
                 }
             }
-            Message::DemoTick => {
-                if let Some(chunk) = demo::CHUNKS.get(self.demo_step) {
-                    self.accept(demo::append(self.conversation.seq + 1, chunk));
-                } else if self.demo_step == demo::CHUNKS.len() {
-                    for event in demo::waiting(self.conversation.seq + 1) {
-                        self.accept(event);
-                    }
-                }
-                self.demo_step += 1;
-            }
+            Message::DemoTick => return self.demo_tick(),
             Message::Tick => self.now = Instant::now(),
-            Message::Prompt(action) => self.prompt.perform(action),
-            Message::Send => self.send(),
-            Message::Stop => {
-                if let Some(turn_id) = self
-                    .conversation
-                    .session
-                    .as_ref()
-                    .and_then(|s| s.turn_id.clone())
-                    && !self.demo
-                {
-                    let params = CancelTurn {
-                        session_id: self.conversation.session_id.clone(),
-                        turn_id,
-                    };
-                    self.call("_sill/sessions.cancel", json!(params), "Stopping the turn");
+            Message::Prompt(action) => {
+                if let Some(view) = self.current_mut() {
+                    view.draft.perform(action);
                 }
             }
+            Message::Send => return self.send(),
+            Message::Stop => return self.stop(),
             Message::Answer {
                 question_id,
                 option_id,
-            } => {
-                if self.demo {
-                    for event in demo::answered(self.conversation.seq + 1, &option_id) {
-                        self.accept(event);
-                    }
-                } else {
-                    let params = AnswerQuestion {
-                        session_id: self.conversation.session_id.clone(),
-                        question_id,
-                        answer_id: request_id("answer"),
-                        answer: Answer::Permission { option_id },
-                    };
-                    self.call(
-                        "_sill/questions.answer",
-                        json!(params),
-                        "Answering the question",
-                    );
-                }
-            }
+            } => return self.answer(question_id, option_id),
             Message::Unqueue(submission_id) => {
+                let Some(view) = self.current() else {
+                    return Task::none();
+                };
                 let params = SubmissionKey {
-                    session_id: self.conversation.session_id.clone(),
+                    session_id: view.id.clone(),
                     submission_id,
                 };
-                self.call(
+                return self.act(
+                    &view.id,
+                    Act::Unqueue,
                     "_sill/submissions.cancel",
                     json!(params),
-                    "Removing the queued prompt",
                 );
             }
-            Message::ToggleTool(id) => toggle(&mut self.open_tools, id),
-            Message::ToggleAnswered(id) => toggle(&mut self.open_answers, id),
-            Message::SetMode(pick) => self.control(Control::SetMode {
-                mode_id: pick.value,
-            }),
+            Message::ToggleTool(id) => {
+                if let Some(view) = self.current_mut() {
+                    toggle(&mut view.open_tools, id);
+                }
+            }
+            Message::ToggleAnswered(id) => {
+                if let Some(view) = self.current_mut() {
+                    toggle(&mut view.open_answers, id);
+                }
+            }
+            Message::SetMode(pick) => {
+                return self.control(Control::SetMode {
+                    mode_id: pick.value,
+                });
+            }
             Message::SetOption(option_id, pick) => {
                 let value = match pick.boolean {
                     Some(value) => ConfigValue::Bool { value },
                     None => ConfigValue::Id { value: pick.value },
                 };
-                self.control(Control::SetConfig { option_id, value });
+                return self.control(Control::SetConfig { option_id, value });
+            }
+            Message::EditSend(id) => {
+                if let Some(view) = self.current_mut()
+                    && let Some(pending) = view.outbox.take(&id)
+                {
+                    let mut text = view.draft.text().trim_end().to_string();
+                    if !text.trim().is_empty() {
+                        text.push_str("\n\n");
+                    }
+                    text.push_str(pending.text());
+                    view.draft = text_editor::Content::with_text(&text);
+                    return operation::focus("prompt");
+                }
+            }
+            Message::RetrySend(id) => {
+                let Some(view) = self.current_mut() else {
+                    return Task::none();
+                };
+                let Some(submit) = view.outbox.retry(&id) else {
+                    return Task::none();
+                };
+                let session = view.id.clone();
+                return self.act(
+                    &session,
+                    Act::Send(id),
+                    "_sill/sessions.submit",
+                    json!(submit),
+                );
+            }
+            Message::CheckSend(id) => {
+                let Some(view) = self.current_mut() else {
+                    return Task::none();
+                };
+                let Some(key) = view.outbox.check(&id) else {
+                    return Task::none();
+                };
+                let session = view.id.clone();
+                return self.act(
+                    &session,
+                    Act::Check(id),
+                    "_sill/submissions.get",
+                    json!(key),
+                );
+            }
+            Message::DiscardSend(id) => {
+                if let Some(view) = self.current_mut() {
+                    view.outbox.take(&id);
+                }
+            }
+            Message::ShowConversation => {
+                if let Some(view) = self.current_mut() {
+                    view.text_view = None;
+                    view.files.close_reader();
+                    view.reader = None;
+                }
+                if self.workspace.shown && self.narrow() {
+                    self.workspace.shown = false;
+                }
+                return self.restore_scroll();
             }
             Message::DragWindow => return iced::window::latest().and_then(iced::window::drag),
             Message::Quit => return iced::exit(),
-            Message::ToggleTerminal => {
-                if self.terminal_shown {
-                    self.terminal_shown = false;
-                    return iced::widget::operation::focus("prompt");
-                }
-                self.terminal_shown = true;
-                let reusable = self.terminal.as_ref().is_some_and(|t| {
-                    matches!(
-                        t.status,
-                        terminal::Status::Opening | terminal::Status::Running
-                    )
-                });
-                if reusable {
-                    if let Some(pane) = &mut self.terminal {
-                        pane.focused = true;
-                    }
-                    return Task::none();
-                }
-                return self.open_terminal();
-            }
+            Message::ToggleTerminal => return self.toggle_terminal(),
             Message::ReopenTerminal => return self.open_terminal(),
             Message::EndTerminal => {
-                if let Some(pane) = &self.terminal {
+                if let Some(pane) = self.current().and_then(|v| v.terminal.as_ref()) {
                     pane.close();
                 }
             }
-            Message::Terminal(generation, event) => {
-                if generation == self.terminal_generation
-                    && let Some(pane) = &mut self.terminal
+            Message::Terminal(session, generation, event) => {
+                if let Some(view) = self.views.get_mut(&session)
+                    && generation == view.terminal_generation
+                    && let Some(pane) = &mut view.terminal
                 {
                     pane.accept(event);
                 }
             }
             Message::TermAction(action) => {
-                let Some(pane) = &mut self.terminal else {
+                let Some(pane) = self.current_mut().and_then(|v| v.terminal.as_mut()) else {
                     return Task::none();
                 };
                 match action {
@@ -555,126 +748,479 @@ impl App {
                 }
             }
             Message::TermPaste(text) => {
-                if let (Some(pane), Some(text)) = (&mut self.terminal, text) {
+                if let (Some(pane), Some(text)) =
+                    (self.current_mut().and_then(|v| v.terminal.as_mut()), text)
+                {
                     pane.paste(&text);
                 }
             }
+            Message::Workspace(action) => return self.workspace_action(action),
+            Message::Resized(width) => self.width = width,
+            Message::Noop => {}
         }
-        if scroll_to_tail && self.text_view.is_none() {
-            iced::widget::operation::snap_to_end("conversation")
+        Task::none()
+    }
+
+    fn lane_update(&mut self, session: String, epoch: u64, update: lane::Update) -> Task<Message> {
+        let selected = self.selected.as_deref() == Some(session.as_str());
+        let selecting = self.selecting;
+        let Some(view) = self
+            .views
+            .get_mut(&session)
+            .filter(|v| v.lane_epoch == epoch)
+        else {
+            return Task::none();
+        };
+        if !matches!(update, lane::Update::Event(_)) {
+            trace(|| match &update {
+                lane::Update::Snapshot(c) => {
+                    format!(
+                        "{session} lane {epoch}: snapshot of {} items at {}",
+                        c.items().len(),
+                        c.seq
+                    )
+                }
+                other => format!("{session} lane {epoch}: {other:?}"),
+            });
+        }
+        view.status.follow(&update);
+        let mut grew = false;
+        let mut relist = false;
+        let mut checks = vec![];
+        match update {
+            lane::Update::Snapshot(conversation) => {
+                view.conversation = *conversation;
+                view.rebuild();
+                view.outbox.reconcile(&view.conversation);
+                view.answering.clear();
+                view.failed = None;
+                if selected {
+                    view.seen();
+                }
+                grew = true;
+            }
+            lane::Update::Resubscribed { subscription_id } => {
+                view.conversation.subscription_id = subscription_id;
+            }
+            lane::Update::Event(event) => {
+                grew = view.accept(*event);
+                relist = view.ended();
+            }
+            // prompts whose fate a lost connection hid: ask the daemon now
+            lane::Update::Live => {
+                for id in view.outbox.uncertain() {
+                    if let Some(key) = view.outbox.check(&id) {
+                        checks.push((id, key));
+                    }
+                }
+            }
+            lane::Update::NotRunning | lane::Update::Stopped(_) => view.lane = None,
+            lane::Update::Gone(_) => {
+                view.lane = None;
+                relist = true;
+            }
+            lane::Update::Connecting { .. } => {}
+        }
+        let snap = grew && selected && view.follow_tail && view.conversation_shown() && !selecting;
+        let mut tasks: Vec<Task<Message>> = checks
+            .into_iter()
+            .map(|(id, key)| {
+                self.act(
+                    &session,
+                    Act::Check(id),
+                    "_sill/submissions.get",
+                    json!(key),
+                )
+            })
+            .collect();
+        if relist {
+            tasks.push(self.list());
+        }
+        if snap {
+            tasks.push(operation::snap_to_end("conversation"));
+        }
+        Task::batch(tasks)
+    }
+
+    fn listed(&mut self, result: Result<Vec<Session>, String>) -> Task<Message> {
+        let sessions = match result {
+            Ok(sessions) => sessions,
+            Err(error) => {
+                self.list_error = Some(error);
+                return Task::none();
+            }
+        };
+        self.list_error = None;
+        self.listed = true;
+        self.tabs = sessions
+            .iter()
+            .filter(|s| s.ended_at.is_none())
+            .map(Tab::from)
+            .collect();
+        // a session that ended or went: its view goes, and with it its lane and terminal
+        let open: BTreeSet<&str> = self.tabs.iter().map(|t| t.id.as_str()).collect();
+        self.views.retain(|id, _| open.contains(id.as_str()));
+        if self
+            .selected
+            .as_ref()
+            .is_some_and(|s| !open.contains(s.as_str()))
+        {
+            self.selected = None;
+        }
+        // watch every running session for supervision; watching never starts one
+        let watch: Vec<String> = self
+            .tabs
+            .iter()
+            .filter(|t| t.running)
+            .filter(|t| {
+                self.views
+                    .get(&t.id)
+                    .is_none_or(|v| matches!(v.status, Status::Closed | Status::NotRunning))
+            })
+            .map(|t| t.id.clone())
+            .collect();
+        for id in watch {
+            self.open_lane(&id, lane::Mode::Watch);
+        }
+        let mut tasks = vec![];
+        if let Some(key) = self.initial.take() {
+            let found: Vec<&Session> = sessions
+                .iter()
+                .filter(|s| s.ended_at.is_none())
+                .filter(|s| s.session_id == key || s.session_id.starts_with(&key) || s.title == key)
+                .collect();
+            let exact = found.iter().find(|s| s.session_id == key);
+            match (exact, found.as_slice()) {
+                (Some(s), _) | (None, [s]) => {
+                    let id = s.session_id.clone();
+                    tasks.push(self.choose(id));
+                }
+                (None, []) => self.list_error = Some(format!("no open session {key}")),
+                (None, _) => self.list_error = Some(format!("ambiguous session {key}")),
+            }
+        }
+        if self.selected.is_none()
+            && let Some(tab) = self.tabs.iter().find(|t| t.running)
+        {
+            let id = tab.id.clone();
+            tasks.push(self.choose(id));
+        }
+        Task::batch(tasks)
+    }
+
+    fn choose(&mut self, id: String) -> Task<Message> {
+        if !self.tabs.iter().any(|t| t.id == id) {
+            return Task::none();
+        }
+        let again = self.selected.as_deref() == Some(id.as_str());
+        self.selected = Some(id.clone());
+        let view = self
+            .views
+            .entry(id.clone())
+            .or_insert_with(|| SessionView::new(&id));
+        view.seen();
+        // the person opened it: attaching may start it now
+        if let Some(lane) = &view.lane {
+            lane.promote();
+        }
+        let needs_lane = view.lane.is_none() && !self.demo;
+        let load_files = view.files.roots_pending.is_none() && !view.files.initialized;
+        if needs_lane {
+            self.open_lane(&id, lane::Mode::Open);
+        }
+        if again {
+            return Task::none();
+        }
+        let mut tasks = vec![self.restore_scroll()];
+        if load_files {
+            tasks.push(self.files_refresh(&id));
+        }
+        Task::batch(tasks)
+    }
+
+    fn done(&mut self, session: String, act: Act, outcome: Outcome) -> Task<Message> {
+        trace(|| format!("{session} {act:?} → {outcome:?}"));
+        let Some(view) = self.views.get_mut(&session) else {
+            return Task::none();
+        };
+        let settled = match &act {
+            Act::Send(id) => Some((id.clone(), view.outbox.settle(id, &outcome))),
+            Act::Check(id) => Some((id.clone(), view.outbox.checked(id, &outcome))),
+            Act::Answer(question) => {
+                view.answering.remove(question);
+                None
+            }
+            _ => None,
+        };
+        match settled {
+            // it never reached the agent: the text goes back where it was typed, if that is free
+            Some((id, Settled::Kept)) if view.draft.text().trim().is_empty() => {
+                if let Some(pending) = view.outbox.take(&id) {
+                    let reason = match &pending.state {
+                        sill_client::outbox::State::Failed(reason) => reason.clone(),
+                        _ => String::new(),
+                    };
+                    view.draft = text_editor::Content::with_text(pending.text());
+                    view.failed = Some(format!(
+                        "Not sent: {reason}. The prompt is back in the composer."
+                    ));
+                    if self.selected.as_deref() == Some(session.as_str()) {
+                        return operation::focus("prompt");
+                    }
+                }
+            }
+            Some(_) => {}
+            None => {
+                if let Some(problem) = outcome.problem() {
+                    let what = match act {
+                        Act::Stop => "Stopping the turn",
+                        Act::Answer(_) => "Answering the question",
+                        Act::Unqueue => "Removing the queued prompt",
+                        Act::Control => "Changing the agent's setting",
+                        Act::Send(_) | Act::Check(_) => unreachable!(),
+                    };
+                    let uncertain = matches!(outcome, Outcome::Uncertain(_));
+                    view.failed = Some(if uncertain {
+                        format!(
+                            "{what}: the connection was lost ({problem}); it may have taken effect — the conversation shows what did."
+                        )
+                    } else {
+                        format!("{what}: {problem}")
+                    });
+                }
+            }
+        }
+        Task::none()
+    }
+
+    /// The prompt goes to the agent (the daemon queues it while a turn runs). It leaves the
+    /// composer, but stays in the outbox until the daemon has it.
+    fn send(&mut self) -> Task<Message> {
+        let demo = self.demo;
+        let Some(view) = self.current_mut() else {
+            return Task::none();
+        };
+        let text = view.draft.text().trim_end().to_string();
+        if text.trim().is_empty() {
+            return Task::none();
+        }
+        view.draft = text_editor::Content::new();
+        view.follow_tail = true;
+        view.failed = None;
+        if demo {
+            for event in demo::prompt(view.conversation.seq + 1, &text) {
+                view.accept(event);
+            }
+            return operation::snap_to_end("conversation");
+        }
+        let session = view.id.clone();
+        let submit = view.outbox.send(&session, text);
+        let reopen = view.lane.is_none();
+        if reopen {
+            self.open_lane(&session, lane::Mode::Open);
+        }
+        let id = submit.submission_id.clone();
+        Task::batch([
+            self.act(
+                &session,
+                Act::Send(id),
+                "_sill/sessions.submit",
+                json!(submit),
+            ),
+            operation::snap_to_end("conversation"),
+        ])
+    }
+
+    /// Stop the turn. As the shelf does, prompts still queued are removed first: stopping first
+    /// could let the turn's end dispatch the next one.
+    fn stop(&mut self) -> Task<Message> {
+        if self.demo {
+            return Task::none();
+        }
+        let (Some(view), Some(actions)) = (self.current(), self.actions.clone()) else {
+            return Task::none();
+        };
+        let Some(turn_id) = view
+            .conversation
+            .session
+            .as_ref()
+            .and_then(|s| s.turn_id.clone())
+        else {
+            return Task::none();
+        };
+        let queued = view.conversation.queued_submission_ids();
+        let session = view.id.clone();
+        let session_id = session.clone();
+        blocking(
+            move || {
+                let mut kept = vec![];
+                for submission_id in queued {
+                    let key = SubmissionKey {
+                        session_id: session_id.clone(),
+                        submission_id,
+                    };
+                    if let Some(problem) = actions
+                        .call("_sill/submissions.cancel", json!(key))
+                        .problem()
+                    {
+                        kept.push(problem.to_string());
+                    }
+                }
+                let cancel = CancelTurn {
+                    session_id,
+                    turn_id,
+                };
+                let outcome = actions.call("_sill/sessions.cancel", json!(cancel));
+                if kept.is_empty() || !outcome.is_done() {
+                    outcome
+                } else {
+                    Outcome::Refused {
+                        code: None,
+                        message: format!(
+                            "stop requested, but some queued prompts could not be removed: {}",
+                            kept.join("; ")
+                        ),
+                    }
+                }
+            },
+            move |outcome| Message::Done(session, Act::Stop, outcome),
+        )
+    }
+
+    fn answer(&mut self, question_id: String, option_id: String) -> Task<Message> {
+        let demo = self.demo;
+        let Some(view) = self.current_mut() else {
+            return Task::none();
+        };
+        view.follow_tail = view.follow_tail || view.conversation_shown();
+        if demo {
+            for event in demo::answered(view.conversation.seq + 1, &option_id) {
+                view.accept(event);
+            }
+            return operation::snap_to_end("conversation");
+        }
+        if !view.answering.insert(question_id.clone()) {
+            return Task::none();
+        }
+        view.failed = None;
+        let params = AnswerQuestion {
+            session_id: view.id.clone(),
+            question_id: question_id.clone(),
+            answer_id: sill_client::request_id("answer"),
+            answer: Answer::Permission { option_id },
+        };
+        let session = view.id.clone();
+        self.act(
+            &session,
+            Act::Answer(question_id),
+            "_sill/questions.answer",
+            json!(params),
+        )
+    }
+
+    fn control(&mut self, control: Control) -> Task<Message> {
+        if self.demo {
+            return Task::none();
+        }
+        let Some(view) = self.current_mut() else {
+            return Task::none();
+        };
+        view.failed = None;
+        let params = SessionControl {
+            session_id: view.id.clone(),
+            control,
+        };
+        let session = view.id.clone();
+        self.act(
+            &session,
+            Act::Control,
+            "_sill/sessions.control",
+            json!(params),
+        )
+    }
+
+    fn demo_tick(&mut self) -> Task<Message> {
+        let step = self.demo_step;
+        self.demo_step += 1;
+        let Some(view) = self.views.get_mut("demo") else {
+            return Task::none();
+        };
+        if let Some(chunk) = demo::CHUNKS.get(step) {
+            view.accept(demo::append(view.conversation.seq + 1, chunk));
+        } else if step == demo::CHUNKS.len() {
+            for event in demo::waiting(view.conversation.seq + 1) {
+                view.accept(event);
+            }
+        }
+        if view.follow_tail && view.conversation_shown() && !self.selecting {
+            operation::snap_to_end("conversation")
         } else {
             Task::none()
         }
     }
 
-    /// A pane on the session's jail shell (the pretend one in `--demo`); its events come tagged
-    /// so a replaced pane's late ones are dropped.
-    fn open_terminal(&mut self) -> Task<Message> {
-        if self.conversation.session_id.is_empty() {
+    fn toggle_terminal(&mut self) -> Task<Message> {
+        let Some(view) = self.current_mut() else {
+            return Task::none();
+        };
+        if view.terminal_shown {
+            view.terminal_shown = false;
+            return operation::focus("prompt");
+        }
+        view.terminal_shown = true;
+        let reusable = view.terminal.as_ref().is_some_and(|t| {
+            matches!(
+                t.status,
+                terminal::Status::Opening | terminal::Status::Running
+            )
+        });
+        if let Some(pane) = view.terminal.as_mut().filter(|_| reusable) {
+            pane.focused = true;
             return Task::none();
         }
-        self.terminal_generation += 1;
-        let generation = self.terminal_generation;
-        let (cols, rows) = self
+        self.open_terminal()
+    }
+
+    /// A pane on the session's jail shell (the pretend one in `--demo`); its events come tagged
+    /// so a replaced pane's late ones are dropped. The replaced pane detaches as it goes.
+    fn open_terminal(&mut self) -> Task<Message> {
+        let connect = self.connect.clone();
+        let demo = self.demo;
+        let Some(view) = self.current_mut() else {
+            return Task::none();
+        };
+        view.terminal_generation += 1;
+        let generation = view.terminal_generation;
+        let (cols, rows) = view
             .terminal
             .as_ref()
             .map_or((80, 16), |t| (t.cols, t.rows));
-        let (pane, events) = if self.demo {
-            terminal::Pane::open(cols, rows, terminal::demo_shell)
-        } else {
-            terminal::Pane::open(
+        // the old pane goes first, so its stream is closed before another attaches
+        view.terminal = None;
+        let (pane, events) = match (demo, connect) {
+            (false, Some(connect)) => terminal::Pane::open(
                 cols,
                 rows,
-                terminal::jail_shell(self.conversation.session_id.clone()),
-            )
+                sill_client::terminal::jail_shell(connect, view.id.clone()),
+            ),
+            _ => terminal::Pane::open(cols, rows, terminal::demo_shell),
         };
-        self.terminal = Some(pane);
+        view.terminal = Some(pane);
+        let session = view.id.clone();
         let stream = iced::futures::stream::unfold(events, |events| async move {
             events.recv().await.ok().map(|event| (event, events))
         });
-        Task::run(stream, move |event| Message::Terminal(generation, event))
+        Task::run(stream, move |event| {
+            Message::Terminal(session.clone(), generation, event)
+        })
     }
+}
 
-    /// The prompt goes to the agent (the daemon queues it while a turn runs); the composer clears.
-    fn send(&mut self) {
-        let text = self.prompt.text().trim_end().to_string();
-        if text.trim().is_empty() || self.conversation.session_id.is_empty() {
-            return;
-        }
-        self.prompt = text_editor::Content::new();
-        self.follow_tail = true;
-        if self.demo {
-            for event in demo::prompt(self.conversation.seq + 1, &text) {
-                self.accept(event);
-            }
-            return;
-        }
-        let params = Submit {
-            session_id: self.conversation.session_id.clone(),
-            submission_id: request_id("prompt"),
-            text,
-            attachments: vec![],
-        };
-        self.call("_sill/sessions.submit", json!(params), "Sending the prompt");
-    }
-
-    fn control(&mut self, control: Control) {
-        if self.demo {
-            return;
-        }
-        let params = SessionControl {
-            session_id: self.conversation.session_id.clone(),
-            control,
-        };
-        self.call(
-            "_sill/sessions.control",
-            json!(params),
-            "Changing the agent's setting",
-        );
-    }
-
-    fn reconnect(&mut self) {
-        self.generation += 1;
-        self.command(Command::Reconnect(self.generation));
-        self.status = "Restoring conversation…".into();
-    }
-
-    fn accept(&mut self, event: SessionEvent) {
-        match self.conversation.accept(event) {
-            Ok(true) => self.sync_rendered(),
-            Ok(false) => {}
-            Err(error) => {
-                self.error = Some(format!("{error:#}. Restoring the conversation."));
-                self.reconnect();
-            }
-        }
-    }
-
-    fn sync_rendered(&mut self) {
-        self.rendered
-            .retain(|id, _| self.conversation.items.contains_key(id));
-        for item in self.conversation.items.values() {
-            if item.kind == "tool" {
-                continue; // a tool row is drawn from its fields, not as Markdown
-            }
-            let source = item_text(item);
-            match self.rendered.get_mut(&item.item_id) {
-                Some(cached) if cached.source == source => {}
-                Some(cached) if source.starts_with(&cached.source) => {
-                    cached.markdown.push_str(&source[cached.source.len()..]);
-                    cached.source = source;
-                }
-                _ => {
-                    self.rendered.insert(
-                        item.item_id.clone(),
-                        Rendered {
-                            markdown: markdown::Content::parse(&source),
-                            source,
-                        },
-                    );
-                }
-            }
-        }
+/// With `SILL_GUI_TRACE` set, what happened, on stderr: requests' outcomes, lanes' states.
+fn trace(what: impl FnOnce() -> String) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| std::env::var_os("SILL_GUI_TRACE").is_some()) {
+        eprintln!("sill-gui: {}", what());
     }
 }
 

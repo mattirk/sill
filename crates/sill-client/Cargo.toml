@@ -1,0 +1,16 @@
+[package]
+name = "sill-client"
+description = "Toolkit-independent Sill frontend core: SFP view reconstruction, session lanes with reconnect and resubscription, the person's requests and their outcomes, session files and terminals"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# No GUI toolkit, no async runtime, nothing Linux-only: a frontend on any desktop builds on this
+# (docs/sill-gui.md §4.1). Blocking threads and callbacks; the frontend chooses how to wake up.
+[dependencies]
+sill-proto.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
