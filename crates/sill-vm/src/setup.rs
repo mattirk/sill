@@ -289,8 +289,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sill-vm-seed-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        seed(&dir, "#cloud-config\n").unwrap();
-        seed(&dir, "#cloud-config\nusers: []\n").unwrap();
+        super::seed(&dir, "#cloud-config\n").unwrap();
+        super::seed(&dir, "#cloud-config\nusers: []\n").unwrap();
         assert!(dir.join("seed.iso").is_file());
         std::fs::remove_dir_all(&dir).unwrap();
     }
