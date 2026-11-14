@@ -1,0 +1,27 @@
+[workspace]
+resolver = "3"
+members = ["crates/sill-core", "crates/sill-shim", "crates/sill"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/mattirk/sill-shelf"
+rust-version = "1.90"
+
+[workspace.dependencies]
+sill-core = { path = "crates/sill-core" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+clap = { version = "4", features = ["derive"] }
+rustix = { version = "1", features = ["fs", "process", "mount", "net", "pipe"] }
+glob = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
