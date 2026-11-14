@@ -19,6 +19,8 @@ pub const CAPABILITY: &str = sill_proto::host_control::CAPABILITY;
 
 /// The caption's fixed words; the operations follow.
 pub const CAPTION: &str = "HOST CONTROL · actions can run outside the jail";
+/// The caption's words while only the VM's operations are active in Sill.app.
+pub const VM_CAPTION: &str = "VM CONTROL · actions can run outside the jail, inside Sill's VM";
 
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -414,23 +416,43 @@ pub fn buttons<'a>(view: &'a SessionView, session: &'a Session, can_change: bool
     .into()
 }
 
+/// The caption's words and colour for these active operations: Host control in the warning's
+/// stronger colour; in Sill.app, with only the VM's operations active, VM control in yellow (the
+/// agent acts outside its jail but inside Sill's VM; the person, 2026-11-13).
+fn caption_words(operations: &[String]) -> (&'static str, iced::Color) {
+    let vm_only = groups().len() > 1
+        && !operations.iter().any(|op| sill_proto::host_control::MAC_OPERATIONS.contains(&op.as_str()));
+    if vm_only { (VM_CAPTION, style::yellow()) } else { (CAPTION, P.error) }
+}
+
+/// The colour of the daemon's "Host control activated" notice in the conversation: yellow when
+/// it activated only the VM's operations in Sill.app, else `color` as given.
+pub fn notice_color(text: &str, color: iced::Color) -> iced::Color {
+    if text.starts_with("Host control activated") && groups().len() > 1 && !text.contains("mac_") {
+        style::yellow()
+    } else {
+        color
+    }
+}
+
 /// The permanent caption over the composer while the session has active Host control.
 pub fn caption<'a>(session: &Session) -> Option<Element<'a, Message>> {
     let brief = session.host_control.as_ref()?;
+    let (words, color) = caption_words(&brief.operations);
     Some(
         column![
-            rule::horizontal(1).style(style::rule_style(P.error)),
+            rule::horizontal(1).style(style::rule_style(color)),
             container(
-                text(format!("{CAPTION} · {}", brief.operations.join(", ")))
+                text(format!("{words} · {}", brief.operations.join(", ")))
                     .size(style::TINY)
-                    .color(P.error)
+                    .color(color)
                     .width(Fill)
                     .wrapping(text::Wrapping::WordOrGlyph)
             )
             .width(Fill)
             .padding([2, 8])
             .clip(true)
-            .style(style::fill(alpha(P.error, 0.08))),
+            .style(style::fill(alpha(color, 0.08))),
         ]
         .into(),
     )

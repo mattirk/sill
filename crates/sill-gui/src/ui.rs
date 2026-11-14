@@ -1191,6 +1191,7 @@ impl App {
                     "warning" => P.warning,
                     _ => P.fg_dim,
                 };
+                let color = crate::host_control::notice_color(source, color);
                 if source.starts_with("HOST action ") || source.starts_with("HOST process ") || is_long_notice(source) {
                     folded_note(&item.item_id, source, color, view.open_tools.contains(&item.item_id))
                 } else {
