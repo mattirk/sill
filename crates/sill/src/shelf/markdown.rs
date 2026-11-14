@@ -211,6 +211,32 @@ fn ensure_schemes() {
 
 /// A prose segment: wrapped, read-only, with the Markdown tags; `class` is the message kind
 /// (`sill-agent`, `sill-thought`).
+/// Ask a text view for its height again once its layout is validated. GTK 4.24 keeps the size a
+/// wrapped view requested before its lines were laid out — the margins and one empty line — and
+/// doesn't request again when they come in (4.18 did), so every message showed as a sliver. GTK's
+/// validation runs from idles above the default priority; a low-priority idle lands after them. Once
+/// on map (a transcript replayed before the shelf is shown) and after every render (streaming).
+fn settle_height(tv: &gtk::TextView) {
+    let weak = tv.downgrade();
+    gtk::glib::idle_add_local_full(gtk::glib::Priority::LOW, move || {
+        if let Some(tv) = weak.upgrade() {
+            tv.queue_resize();
+        }
+        gtk::glib::ControlFlow::Break
+    });
+}
+
+/// Every text view in a message (prose and code segments) settles its height after a render.
+fn settle_heights(msg: &gtk::Box) {
+    let mut c = msg.first_child();
+    while let Some(w) = c {
+        if let Some(tv) = w.downcast_ref::<gtk::TextView>() {
+            settle_height(tv);
+        }
+        c = w.next_sibling();
+    }
+}
+
 fn prose_view(class: &str) -> gtk::TextView {
     let tv = gtk::TextView::builder()
         .editable(false)
@@ -225,6 +251,7 @@ fn prose_view(class: &str) -> gtk::TextView {
         .build();
     tv.add_css_class(class);
     install_tags(&tv.buffer());
+    tv.connect_map(settle_height);
     tv
 }
 
@@ -243,6 +270,7 @@ fn code_view() -> sourceview5::View {
     view.set_top_margin(scale(6.0));
     view.set_bottom_margin(scale(6.0));
     view.add_css_class("sill-code");
+    view.connect_map(|v| settle_height(v.upcast_ref()));
     view
 }
 
@@ -858,5 +886,6 @@ pub fn render(msg: &gtk::Box, class: &str, markdown: &str) {
         }
     }
     out.finish();
+    settle_heights(msg);
     remember(msg, class, markdown, table_width);
 }
