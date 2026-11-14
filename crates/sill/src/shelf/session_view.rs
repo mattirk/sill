@@ -96,6 +96,9 @@ pub struct SessionView {
     live_pins: RefCell<Vec<std::path::PathBuf>>,
     /// Watches on pinned repos' `.git` (commits, index) so the chip numbers follow host activity too.
     git_monitors: RefCell<Vec<gtk::gio::FileMonitor>>,
+    /// The chips as shown (pin path, the box holding the name and the git numbers): a refresh with
+    /// the same pins updates the numbers in place instead of rebuilding.
+    chips: RefCell<Vec<(std::path::PathBuf, gtk::Box)>>,
     /// Watches the session's runtime dir for `denied` (hosts the proxy refused).
     denied_monitor: RefCell<Option<gtk::gio::FileMonitor>>,
     denied_seen: RefCell<std::collections::HashSet<String>>,
@@ -399,6 +402,7 @@ impl SessionView {
             on_host_terminal: RefCell::new(None),
             live_pins: RefCell::new(Vec::new()),
             git_monitors: RefCell::new(Vec::new()),
+            chips: RefCell::new(Vec::new()),
             denied_monitor: RefCell::new(None),
             denied_seen: RefCell::new(Default::default()),
             refresh_pending: std::cell::Cell::new(false),
@@ -1191,10 +1195,20 @@ impl SessionView {
 
     /// Chips under the session bar, one per pinned folder, with an unpin ×.
     pub fn refresh_pins(self: &Rc<Self>) {
+        let pins = self.store.pins(&self.id()).unwrap_or_default();
+        // the pins the chips already show: only their git numbers are refreshed, in place — a
+        // rebuild every time flickered, the numbers arriving a moment after the names
+        let same = {
+            let chips = self.chips.borrow();
+            chips.len() == pins.len() && chips.iter().zip(&pins).all(|((p, _), q)| p == q)
+        };
+        if same {
+            self.refresh_chip_numbers();
+            return;
+        }
         while let Some(c) = self.pins_row.first_child() {
             self.pins_row.remove(&c);
         }
-        let pins = self.store.pins(&self.id()).unwrap_or_default();
         // watch each pinned repo's .git (index/HEAD/refs change on commit, checkout, host or jail)
         self.git_monitors.borrow_mut().clear();
         for p in &pins {
@@ -1212,6 +1226,7 @@ impl SessionView {
         }
         self.pins_row.set_visible(!pins.is_empty());
         if pins.is_empty() {
+            self.chips.borrow_mut().clear();
             return;
         }
         let home = std::env::var("HOME").unwrap_or_default();
@@ -1267,38 +1282,62 @@ impl SessionView {
             chip.append(&x);
             self.pins_row.append(&chip);
         }
-        // git working-tree summary next to each name: +added −deleted (vs HEAD), untracked count.
-        // git runs off the main thread (it walks the repo; on the main thread it stalled painting and
-        // scrolling for seconds); the chips' boxes are the handle, so a refresh in between — which
-        // removes them from the row — makes a late result harmless.
+        *self.chips.borrow_mut() = summaries;
+        self.refresh_chip_numbers();
+    }
+
+    /// The git numbers next to each chip's name: +added −deleted (vs HEAD), untracked count. git
+    /// runs off the main thread (it walks the repo; on the main thread it stalled painting and
+    /// scrolling for seconds); the labels are set in place and only when they changed. A chip box
+    /// no longer in the row is a late result for chips that were rebuilt meanwhile.
+    fn refresh_chip_numbers(self: &Rc<Self>) {
+        let chips: Vec<(std::path::PathBuf, gtk::Box)> = self.chips.borrow().clone();
+        if chips.is_empty() {
+            return;
+        }
         let (tx, rx) = async_channel::bounded::<Vec<Option<(u64, u64, u64)>>>(1);
-        let paths: Vec<std::path::PathBuf> = summaries.iter().map(|(p, _)| p.clone()).collect();
-        let boxes: Vec<gtk::Box> = summaries.into_iter().map(|(_, b)| b).collect();
+        let paths: Vec<std::path::PathBuf> = chips.iter().map(|(p, _)| p.clone()).collect();
         std::thread::spawn(move || {
             let found: Vec<Option<(u64, u64, u64)>> = paths.iter().map(|p| git_summary(p)).collect();
             let _ = tx.send_blocking(found);
         });
         glib::spawn_future_local(async move {
             let Ok(found) = rx.recv().await else { return };
-            for (lbox, s) in boxes.iter().zip(found) {
-                let Some((add, del, untracked)) = s else { continue };
+            for ((_, lbox), s) in chips.iter().zip(found) {
                 if lbox.parent().is_none() {
-                    continue; // replaced by a newer refresh
+                    continue;
                 }
-                if add > 0 {
-                    let a = gtk::Label::new(Some(&format!("+{add}")));
-                    a.add_css_class("sill-git-add");
-                    lbox.append(&a);
+                let mut wanted: Vec<(String, &str)> = Vec::new();
+                if let Some((add, del, untracked)) = s {
+                    if add > 0 {
+                        wanted.push((format!("+{add}"), "sill-git-add"));
+                    }
+                    if del > 0 {
+                        wanted.push((format!("−{del}"), "sill-git-del"));
+                    }
+                    if untracked > 0 {
+                        wanted.push((format!("?{untracked}"), "dim-label"));
+                    }
                 }
-                if del > 0 {
-                    let d = gtk::Label::new(Some(&format!("−{del}")));
-                    d.add_css_class("sill-git-del");
-                    lbox.append(&d);
+                // the labels after the name
+                let mut current: Vec<gtk::Widget> = Vec::new();
+                let mut c = lbox.first_child().and_then(|n| n.next_sibling());
+                while let Some(w) = c {
+                    c = w.next_sibling();
+                    current.push(w);
                 }
-                if untracked > 0 {
-                    let u = gtk::Label::new(Some(&format!("?{untracked}")));
-                    u.add_css_class("dim-label");
-                    lbox.append(&u);
+                let same = current.len() == wanted.len()
+                    && current.iter().zip(&wanted).all(|(w, (t, _))| w.downcast_ref::<gtk::Label>().is_some_and(|l| l.text() == t.as_str()));
+                if same {
+                    continue;
+                }
+                for w in current {
+                    lbox.remove(&w);
+                }
+                for (t, class) in wanted {
+                    let l = gtk::Label::new(Some(&t));
+                    l.add_css_class(class);
+                    lbox.append(&l);
                 }
             }
         });
