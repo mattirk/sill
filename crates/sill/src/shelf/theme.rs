@@ -4,7 +4,7 @@
 //! Markdown text tags use the same values. Every theme is complete — "Adwaita" is sill's copy of
 //! that palette, not the desktop's — so a shelf looks the same on every machine whatever the GTK
 //! theme, icon theme or dark/light preference there (2026-11-01). Built-in: Adwaita Dark, Adwaita
-//! Light, Dracula, Solarized Dark, Solarized Light, Nord, Miasma. Chosen theme is saved in
+//! Light, Dracula, Solarized Dark, Solarized Light, Nord, Miasma, Gruvbox Dark, Gruvbox Light. Chosen theme is saved in
 //! `~/.config/sill/sill.toml`.
 //!
 //! The text scale (`text_scale` in the same file) is applied here too: one `font-size` rule on the
@@ -84,6 +84,22 @@ pub fn builtin() -> Vec<Theme> {
             bg: "#222222", surface: "#2b2b28", code_bg: "#1c1c1c", fg: "#c2c2b0", fg_dim: "#787866",
             accent: "#c9a554", warning: "#b36d43", success: "#5f875f", error: "#bb7744", link: "#d7c483",
             border: "#363632",
+        },
+        // Gruvbox Dark (morhetz's palette, terminalcolors.com's Alacritty file): bg0 page, bg1
+        // surfaces, bg0 hard code, fg1 text, fg4 dim; the "bright" hues on the dark ground
+        Theme {
+            id: "gruvbox-dark", name: "Gruvbox Dark", dark: true,
+            bg: "#282828", surface: "#3c3836", code_bg: "#1d2021", fg: "#ebdbb2", fg_dim: "#a89984",
+            accent: "#83a598", warning: "#fabd2f", success: "#b8bb26", error: "#fb4934", link: "#8ec07c",
+            border: "#504945",
+        },
+        // Gruvbox Light (morhetz's palette, terminalcolors.com's Alacritty file): bg0 hard page,
+        // bg1 surfaces, bg0 soft code, fg1 text, fg4 dim; the "bright" (darker) hues on paper
+        Theme {
+            id: "gruvbox-light", name: "Gruvbox Light", dark: false,
+            bg: "#fbf1c7", surface: "#ebdbb2", code_bg: "#f2e5bc", fg: "#3c3836", fg_dim: "#7c6f64",
+            accent: "#076678", warning: "#b57614", success: "#79740e", error: "#9d0006", link: "#076678",
+            border: "#d5c4a1",
         },
     ]
 }
@@ -280,7 +296,8 @@ pub fn stylesheet(t: &Theme) -> String {
              popover > contents, tooltip > contents {{ background: {surface}; color: {fg}; border: 1px solid {border}; }}\n\
              entry {{ background: {surface}; color: {fg}; border-color: {border}; }}\n\
              list, listview, row, scrolledwindow, viewport {{ background: transparent; color: {fg}; }}\n\
-             button {{ border: none; box-shadow: none; text-shadow: none; -gtk-icon-shadow: none; background-image: none; background-color: alpha({fg}, 0.08); }}\n\
+             button {{ border: none; box-shadow: none; text-shadow: none; -gtk-icon-shadow: none; background-image: none; background-color: alpha({fg}, 0.08); color: {fg}; }}\n\
+             button:checked, button:active {{ color: {fg}; }}\n\
              button:hover {{ background-color: alpha({fg}, 0.14); }}\n\
              button.flat, menubutton.flat > button, menubutton > button.flat {{ background: transparent; }}\n\
              button.flat:hover, menubutton.flat > button:hover, menubutton > button.flat:hover {{ background: alpha({fg}, 0.07); }}\n\
