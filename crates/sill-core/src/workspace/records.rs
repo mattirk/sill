@@ -635,7 +635,7 @@ enum Settled {
 }
 
 /// The workspace's record, revision and what an Apply would bring, from one look that also
-/// settles an ended session's workspace.
+/// settles an ended session's workspace and a stopped rebase that has since finished.
 fn detail<H: Host>(h: &H, r: Row) -> Result<Settled> {
     let l = look(&r)?;
     let r = if ending(h, &r) {
@@ -646,6 +646,9 @@ fn detail<H: Host>(h: &H, r: Row) -> Result<Settled> {
     } else {
         r
     };
+    // a stopped rebase the agent or the person finished in the workspace is no longer one: the
+    // shelf offers Apply again, not Resolve and Abort for a rebase that is over
+    clear_conflict(h, &r)?;
     let workspace = h.db(|c| record(c, &r))?;
     let Some(m) = l else { return Ok(Settled::Record(workspace)) };
     let (revision, needs_rebase) = revision_now(&r)?;

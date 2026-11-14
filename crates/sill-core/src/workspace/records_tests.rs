@@ -359,6 +359,35 @@ fn prepare_rebases_onto_a_moved_checkout_keeping_uncommitted_work() {
     assert!(aborted.workspace.unwrap().operation.is_none());
 }
 
+/// The agent, asked to Resolve, finishes the stopped rebase in the workspace: the next look
+/// shows no stopped rebase, so the shelf offers Apply (the person, 2026-11-09: after Resolve
+/// they had to click Abort rebase before Apply was there again).
+#[test]
+fn a_rebase_finished_in_the_workspace_is_no_longer_shown_as_stopped() {
+    let f = fixture("resolved");
+    let w = session(&f, "s1");
+    let clone = clone_of(&w);
+    write(&clone.join("f1.txt"), "agent\n");
+    git(&clone, &["commit", "-qam", "agent"]);
+    write(&f.source.join("f1.txt"), "host\n");
+    git(&f.source, &["commit", "-qam", "host"]);
+    let op = |id: &str| api::Operate { operation_id: id.into(), workspace_id: w.workspace_id.clone() };
+    let p = prepare(&f.host, &op("p1")).unwrap();
+    assert_eq!(p.conflicts, vec!["f1.txt".to_string()]);
+    let shown = || session_view(&f.host, "s1").unwrap().workspaces.remove(0).operation.map(|o| o.state);
+    assert_eq!(shown().as_deref(), Some("conflict"), "stopped: Resolve and Abort rebase");
+    // resolved and continued in the workspace, as the agent does
+    write(&clone.join("f1.txt"), "both\n");
+    git(&clone, &["add", "f1.txt"]);
+    let done = Command::new("git").arg("-C").arg(&clone).args(["-c", "user.name=t", "-c", "user.email=t@t", "rebase", "--continue"]).env("GIT_EDITOR", "true").output().unwrap();
+    assert!(done.status.success(), "{}", String::from_utf8_lossy(&done.stderr));
+    assert_eq!(shown(), None, "finished: Apply");
+    let d = get(&f.host, &w.workspace_id).unwrap();
+    assert!(d.workspace.operation.is_none() && !d.needs_rebase);
+    apply(&f.host, &apply_req("a1", &w, &rev(&f, &w))).unwrap();
+    assert_eq!(read(&f.source.join("f1.txt")), "both\n");
+}
+
 #[test]
 fn reconcile_removes_a_half_made_workspace() {
     let f = fixture("reconcile");
