@@ -99,7 +99,9 @@ pub fn request<T: DeserializeOwned>(r: Request) -> Result<T> {
     };
     let client = connect()?;
     let timeout = if slow { sill_proto::client::CALL_TIMEOUT } else { sill_proto::client::QUICK_TIMEOUT };
-    let (method, params, wrapped_text) = public_request(&r)?.unwrap_or((sill_core::frontend::METHOD, serde_json::to_value(&r)?, false));
+    let Some((method, params, wrapped_text)) = public_request(&r)? else {
+        anyhow::bail!("the shelf has no public method for {}", serde_json::to_value(&r)?.as_object().and_then(|o| o.keys().next().cloned()).unwrap_or_default());
+    };
     let mut result: Result<serde_json::Value> = client.call_within(method, &params, timeout);
     if result.as_ref().is_err_and(sill_proto::Client::is_closed) {
         let mut slot = slot.lock().unwrap();

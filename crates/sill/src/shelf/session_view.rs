@@ -87,6 +87,8 @@ pub struct SessionView {
     usage_lbl: RefCell<Option<gtk::Label>>,
     /// History not shown yet: the first shown entry's seq, and the "show earlier" row at the top.
     earlier: RefCell<Option<(i64, gtk::Box, gtk::Button)>>,
+    /// The snapshot's entries above what is shown, oldest first; "show earlier" takes from the end.
+    older: RefCell<Vec<Entry>>,
     /// Managed processes (docs/tasks.md §2.4, §2.5): the shim's list as last polled, the ports
     /// bridged to the host's loopback, the ports the person was asked about / said yes to, the
     /// indicator in the controls row and the poll timer.
@@ -97,7 +99,8 @@ pub struct SessionView {
     proc_btn: RefCell<Option<gtk::Button>>,
     proc_tick: RefCell<Option<glib::SourceId>>,
     /// A log to show in the shelf's viewer: (title, source).
-    pub on_open_log: RefCell<Option<Box<dyn Fn(&str, sill_core::session::LogSource)>>>,
+    /// Open a managed process's output: title, session ID, process name.
+    pub on_open_log: RefCell<Option<Box<dyn Fn(&str, String, String)>>>,
     pins_row: gtk::Box,
     /// Agent controls (mode, model, effort, toggles) + send button, under the prompt.
     controls_row: gtk::Box,
@@ -510,6 +513,7 @@ impl SessionView {
             usage: std::cell::Cell::new(None),
             usage_lbl: RefCell::new(None),
             earlier: RefCell::new(None),
+            older: RefCell::new(Vec::new()),
             procs: RefCell::new(Vec::new()),
             bridges: RefCell::new(HashMap::new()),
             port_asked: RefCell::new(Default::default()),
@@ -1474,15 +1478,19 @@ impl SessionView {
         self.rebuilding.set(false);
     }
 
-    /// Stored entries onto the conversation, in order.
-    fn replay_history(self: &Rc<Self>, tail: Vec<Entry>, total: usize) {
+    /// The snapshot's entries onto the conversation, in order: the last [`HISTORY_CHUNK`] now, the
+    /// rest kept here for "show earlier" (the snapshot already holds them; nothing more is asked).
+    fn replay_history(self: &Rc<Self>, mut entries: Vec<Entry>) {
         self.conv.clear();
         self.agent_md.borrow_mut().clear();
         self.earlier.borrow_mut().take();
+        let tail = entries.split_off(entries.len().saturating_sub(HISTORY_CHUNK));
+        let hidden = entries.len();
+        *self.older.borrow_mut() = entries;
         let first_seq = tail.first().map(|e| e.seq);
         self.render_entries(&tail);
         if let Some(first) = first_seq
-            && total > tail.len()
+            && hidden > 0
         {
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
             row.set_halign(gtk::Align::Center);
@@ -1492,7 +1500,7 @@ impl SessionView {
             row.append(&b);
             self.conv.prepend_top(&row);
             *self.earlier.borrow_mut() = Some((first, row, b.clone()));
-            self.update_earlier(total - tail.len());
+            self.update_earlier(hidden);
             let weak = Rc::downgrade(self);
             b.connect_clicked(move |_| {
                 if let Some(v) = weak.upgrade() {
@@ -1582,14 +1590,17 @@ impl SessionView {
 
     /// The chunk of history before what is shown, rendered above it; the row goes when none is left.
     fn show_earlier(self: &Rc<Self>) {
-        let Some((first, row, _)) = self.earlier.borrow().clone() else { return };
-        let id = self.id();
-        let chunk = self.store.entries_before(&id, Some(first), HISTORY_CHUNK).unwrap_or_default();
+        let Some((_, row, _)) = self.earlier.borrow().clone() else { return };
+        let chunk = {
+            let mut older = self.older.borrow_mut();
+            let at = older.len().saturating_sub(HISTORY_CHUNK);
+            older.split_off(at)
+        };
         let Some(new_first) = chunk.first().map(|e| e.seq) else { return };
         self.conv.begin_insert_after(&row);
         self.render_entries(&chunk);
         self.conv.end_insert();
-        let left = self.store.entries_before(&id, Some(new_first), usize::MAX).map(|v| v.len()).unwrap_or(0);
+        let left = self.older.borrow().len();
         if left > 0 {
             if let Some(e) = self.earlier.borrow_mut().as_mut() {
                 e.0 = new_first;
@@ -2340,7 +2351,7 @@ impl SessionView {
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(&t["sill:replay:".len()..])
                     && let Ok(entries) = serde_json::from_value::<Vec<Entry>>(value["entries"].clone())
                 {
-                    self.replay_history(entries, value["total"].as_u64().unwrap_or(0) as usize);
+                    self.replay_history(entries);
                 }
                 return;
             }
@@ -2588,7 +2599,13 @@ impl SessionView {
         let running_ports: Vec<(u16, String)> = list.iter().filter(|p| p.running()).filter_map(|p| p.port.map(|port| (port, p.name.clone()))).collect();
         self.bridges.borrow_mut().retain(|port, _| running_ports.iter().any(|(p, _)| p == port));
         let allowed = {
-            remote::request::<sill_core::policy::Processes>(Request::ProcessPolicy { session: self.id() }).unwrap_or_default()
+            // the session's policy as the daemon reads it (public policy.get), its process rules
+            let name = self.session.borrow().policy.clone();
+            remote::request::<String>(Request::PolicyText { name })
+                .ok()
+                .and_then(|text| sill_core::policy::Policy::parse(&text).ok())
+                .map(|p| p.processes)
+                .unwrap_or_default()
         };
         for (port, name) in running_ports {
             if self.bridges.borrow().contains_key(&port) {
@@ -2690,10 +2707,8 @@ impl SessionView {
                 log.connect_clicked(move |_| {
                     pop.popdown();
                     let Some(v) = weak.upgrade() else { return };
-                    if let Ok(socket) = sill_core::session::socket_path(&v.id())
-                        && let Some(cb) = v.on_open_log.borrow().as_ref()
-                    {
-                        cb(&format!("{n} · process"), sill_core::session::LogSource::Proc { socket, name: n.clone() });
+                    if let Some(cb) = v.on_open_log.borrow().as_ref() {
+                        cb(&format!("{n} · process"), v.id(), n.clone());
                     }
                 });
             }

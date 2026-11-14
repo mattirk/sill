@@ -521,7 +521,7 @@ impl Viewer {
             let (tx, rx) = async_channel::bounded::<String>(1);
             let of = sill_core::wire::DiffOf::Change { session, path: c.path.clone() };
             std::thread::spawn(move || {
-                let text = match super::client::call::<sill_proto::Text>(sill_proto::method::CHANGES_DIFF, of) {
+                let text = match crate::changes_client::diff(&|m, p| super::client::call(m, p), of) {
                     Ok(t) => t.text,
                     Err(e) => format!("diff: {e:#}"),
                 };

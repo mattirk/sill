@@ -371,19 +371,7 @@ fn dispatch(c: Arc<Client>) {
             }
             continue;
         }
-        if method != sill_proto::method::SESSION_EVENT {
-            continue;
-        }
-        let Ok(n) = serde_json::from_value::<sill_proto::SessionEvent>(params) else { continue };
-        let wire = n.event;
-        if matches!(wire, sill_core::wire::Event::SessionEnded { .. } | sill_core::wire::Event::Summarized { .. } | sill_core::wire::Event::Note(_)) {
-            super::remote::invalidate();
-            lifecycle(n.key, Lifecycle::Event(wire));
-            continue;
-        }
-        // Internal notifications are retained only for window lifecycle while host methods
-        // are migrated. Conversation state comes exclusively from the public SFP subscription.
-
+        // Nothing else is subscribed to: conversation and lifecycle come from `_sill/session.event`.
     }
     forget(&c);
     super::remote::invalidate();

@@ -7,6 +7,7 @@ use sill_proto::sessions as api;
 fn record(store: &Store, s: sill_core::store::Session) -> Result<api::Session> {
     Ok(api::Session {
         running: s.ended_at.is_none() && sill_core::session::is_running(&s.id),
+        policy_changed: s.ended_at.is_none() && sill_core::changes::home().is_ok_and(|home| sill_core::session::jail_outdated(&s.id, &s.policy, &home)),
         pins: store.pins(&s.id)?.iter().map(|p| api::HostPath::from_path(p)).collect(),
         session_id: s.id,
         agent: s.agent,

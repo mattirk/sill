@@ -838,7 +838,7 @@ impl FolderTree {
             // every session's overlay changes, as the daemon scans them (docs/daemon.md §7 M2)
             let mut pairs: Vec<(String, Change)> = Vec::new();
             let mut owners: BTreeMap<PathBuf, String> = BTreeMap::new(); // path → the session that changed it
-            match super::client::call::<sill_core::wire::ChangesList>(sill_proto::method::CHANGES_LIST, sill_proto::Empty::default()) {
+            match crate::changes_client::list(&|m, p| super::client::call(m, p)) {
                 Ok(list) => {
                     for s in list.sessions {
                         for r in s.changes.into_iter().chain(s.agent_state) {

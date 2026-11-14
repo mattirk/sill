@@ -99,7 +99,8 @@ Public session administration is now implemented too (2026-11-03):
 
 These methods require no `sill.internal` capability. Metadata is an explicit public record,
 including settings, pins and decimal-string Unix-second timestamps; it exposes no ACP session
-identity or shim socket. Every operation uses an exact session ID. The CLI resolves unique
+identity or shim socket. `policy_changed` is true when a running session's policy file changed
+after its jail was built; stopping and starting the session applies it. Every operation uses an exact session ID. The CLI resolves unique
 prefixes/titles locally and rejects ambiguity. Shelf session listing and lifecycle writes, the
 CLI and the Python client's `list/create/get/update/start/stop/end/checkpoint` use this surface.
 Remaining internal administration handlers are temporary same-build APIs, not a compatibility
@@ -1126,14 +1127,20 @@ wire contracts. Their public equivalents or diagnostic purposes are:
 | Internal surface | Public equivalent or reason it remains internal |
 |---|---|
 | Historical session CRUD/control aliases | Public `sessions.*`, `submissions.*`, `questions.answer`; exact identities and explicit retry rules apply there. |
-| Stored ACP-era transcript entries/counts/replay | Shelf's legacy rendering cache; independent clients use canonical SFP snapshots/events and public `memory.text` transcript/export. |
+| Stored ACP-era transcript entries/counts/replay | Legacy CLI/TUI rendering; Shelf and independent clients use canonical SFP snapshots/events and public `memory.text` transcript/export. |
 | Rich registry presentation records | Shelf's current card layout; public `registry.list` selects versions/sources and public agent/registry administration supplies installability, definitions, installed status and icons. |
 | `sessions.jail_view` | Unused frontend compatibility diagnostic exposing overlay implementation paths. Public host files and session-scoped `files.image` cover the existing file/image consumers without making storage layout a contract. |
-| `JailOutdated` | Same-build session-policy freshness presentation. Public session metadata, policy reads and explicit stop/start let independent clients apply changed policy. |
+| `JailOutdated` | Superseded by the public session record's `policy_changed`; Shelf uses that. |
 | `ReadLog` and old session log helpers | Daemon/session implementation diagnostics. Public `sessions.log` and `procs.tail` expose the supported user-facing log access. |
 | `ProcessPolicy` | Current process-panel presentation defaults. Public named process methods preserve their own bounds and target semantics. |
 | `Kept`, old Changes/history helpers | Public bounded `changes.list`, `changes.history`, `changes.diff`, keep/revert/undo methods. |
 | Old file search and git presentation helpers | Public exact-path `files.find`, `repos.root/head/summary/changed_lines/status`. |
+
+**Shelf is a public-only client (2026-11-03).** It does not offer `sill.internal`, so any internal
+call from it fails with `unsupported`. Its conversation, "show earlier" history (paged locally
+from the attach snapshot), Changes tree, diffs and counts, kept-path counts, process logs and
+process port policy, and policy-freshness check all use public methods. The CLI and the TUI
+still use internal adapters; migrating them is the remaining part of §7.10 step 4.
 
 New public functionality must get explicit schemas and bounds rather than being added to the
 opaque internal frontend dispatcher. Unknown public method names never fall back to internal

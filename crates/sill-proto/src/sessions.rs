@@ -60,6 +60,10 @@ pub struct Session {
     pub settings: Settings,
     pub follows: Option<String>,
     pub compacted: String,
+    /// The session's policy file changed after its running jail was built: stop and start the
+    /// session to apply it. False when the session is not running.
+    #[serde(default)]
+    pub policy_changed: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SessionKey {

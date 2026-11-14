@@ -1323,7 +1323,7 @@ impl Shelf {
             self.tabs.select(&id);
             return;
         }
-        if note.is_none() && super::remote::request(sill_core::frontend::Request::JailOutdated { session: id.clone(), policy: s.policy.clone() }).unwrap_or(false) {
+        if note.is_none() && super::client::call::<sill_proto::sessions::Session>("_sill/sessions.get", sill_proto::sessions::SessionKey { session_id: id.clone() }).is_ok_and(|s| s.policy_changed) {
             let shelf = self.clone();
             let s2 = s.clone();
             stop_then(&id, move || {
@@ -1413,8 +1413,8 @@ impl Shelf {
             let shelf = self.clone();
             *view.on_host_terminal.borrow_mut() = Some(Box::new(move |window| shelf.open_host_terminal(window)));
             let shelf = self.clone();
-            *view.on_open_log.borrow_mut() = Some(Box::new(move |title, src| {
-                shelf.viewer.open_log(title, std::sync::Arc::new(move |lines| super::remote::request(sill_core::frontend::Request::ReadLog { source: src.clone(), lines }).unwrap_or_else(|e| format!("{e:#}"))));
+            *view.on_open_log.borrow_mut() = Some(Box::new(move |title, session, name| {
+                shelf.viewer.open_log(title, std::sync::Arc::new(move |lines| super::remote::request::<String>(sill_core::frontend::Request::ProcTail { session: session.clone(), name: name.clone(), lines: lines.clamp(1, 10_000) }).unwrap_or_else(|e| format!("{e:#}"))));
                 shelf.viewer.root.set_visible(true);
                 shelf.viewer.focus();
             }));
@@ -1505,19 +1505,23 @@ impl Shelf {
     /// and the person chooses — *Keep some* opens Changes and leaves the tab, *Discard and close*
     /// closes it. Escape does neither.
     fn ask_ghost_close(self: &Rc<Self>, id: &str) {
-        let (tx, rx) = async_channel::bounded::<anyhow::Result<sill_proto::Count>>(1);
+        let (tx, rx) = async_channel::bounded::<anyhow::Result<usize>>(1);
         let sid = id.to_string();
         std::thread::Builder::new()
             .name(format!("sill-ghost-ask-{sid}"))
             .spawn(move || {
-                let _ = tx.send_blocking(super::client::call(sill_proto::method::SESSIONS_CHANGES, sill_proto::Key { key: sid }));
+                // the public list leaves out ignored build output, as the question should
+                let count = crate::changes_client::list(&|m, p| super::client::call(m, p)).map(|list| {
+                    list.sessions.iter().find(|s| s.id == sid).map_or(0, |s| s.changes.len() + s.agent_state.len())
+                });
+                let _ = tx.send_blocking(count);
             })
             .ok();
         let shelf = self.clone();
         let sid = id.to_string();
         glib::spawn_future_local(async move {
             let n = match rx.recv().await {
-                Ok(Ok(c)) => c.n,
+                Ok(Ok(n)) => n,
                 // the count could not be had: ask anyway rather than discard unseen
                 Ok(Err(e)) => {
                     eprintln!("sill: counting ghost {sid}'s changes: {e:#}");

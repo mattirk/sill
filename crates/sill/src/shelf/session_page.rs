@@ -34,15 +34,17 @@ pub fn build(store: Rc<Store>, s: &Session, view: Option<Rc<SessionView>>, chang
     title.set_selectable(true);
     page.append(&title);
     let now = sill_core::store::now();
-    let kept = super::remote::request::<Vec<(std::path::PathBuf, String)>>(sill_core::frontend::Request::Kept { session: id.clone() }).unwrap_or_default();
+    let kept = crate::changes_client::list(&|m, p| super::client::call(m, p))
+        .map(|list| list.sessions.into_iter().find(|s| s.id == id).map_or(0, |s| s.kept.len()))
+        .unwrap_or_default();
     let pins = store.pins(&id).unwrap_or_default();
     let mut facts = vec![s.agent.clone(), format!("started {}", sill_memory::datetime(s.created_at))];
     match s.ended_at {
         Some(t) => facts.push(format!("ended {} · {}", sill_memory::datetime(t), sill_memory::duration(t - s.created_at))),
         None => facts.push(format!("open · {}", sill_memory::duration(now - s.created_at))),
     }
-    if !kept.is_empty() {
-        facts.push(format!("kept {} path{}", kept.len(), if kept.len() == 1 { "" } else { "s" }));
+    if kept > 0 {
+        facts.push(format!("kept {kept} path{}", if kept == 1 { "" } else { "s" }));
     }
     if !pins.is_empty() {
         facts.push(pins.iter().map(|p| sill_memory::tilde(p, &home)).collect::<Vec<_>>().join(", "));

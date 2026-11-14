@@ -1,8 +1,7 @@
 //! Read facade for the daemon's store. No SQLite connection exists in the shelf.
 use std::path::PathBuf;
 use anyhow::Result;
-use sill_core::frontend::Request;
-pub use sill_core::store::{Entry, Session};
+pub use sill_core::store::Session;
 
 pub struct Store;
 impl Store {
@@ -37,9 +36,6 @@ impl Store {
             after = page.next;
             if after.is_none() { return Ok(out); }
         }
-    }
-    pub fn entries_before(&self, id: &str, before: Option<i64>, limit: usize) -> Result<Vec<Entry>> {
-        super::remote::request(Request::Entries { session: id.into(), before, limit })
     }
     pub fn memories(&self, id: &str) -> Result<Vec<(i64, String, String)>> {
         let mut after=None;let mut out=Vec::new();loop {
