@@ -4524,6 +4524,25 @@
           "additionalProperties": false,
           "properties": {
             "type": {
+              "const": "drawer_follow_changes",
+              "type": "string"
+            },
+            "value": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
               "const": "hotkey",
               "type": "string"
             },
@@ -4872,6 +4891,13 @@
           ]
         },
         "desktop_x11": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "drawer_follow_changes": {
           "default": null,
           "type": [
             "boolean",

@@ -15,6 +15,10 @@ pub struct Config {
     /// Width of the file tree (the drawer) while it is open, logical pixels, out of the shelf's
     /// width; set by dragging the handle between the panes. Unset = 30 % of the shelf.
     pub drawer_width: Option<i32>,
+    /// The drawer's view follows the repository (the shown folder's, else the session's first
+    /// pinned one): the diff view while it has changes, the tree while it is clean, switched again on
+    /// every change to its files; the view button still switches by hand in between. Unset = off.
+    pub drawer_follow_changes: Option<bool>,
     /// Global show/hide key, GTK accelerator syntax (`<Alt>space`, `<Super>grave`, `F12`).
     pub hotkey: Option<String>,
     /// Backend page the "sill" button opens: `changes` (default), `files`, `agents`, `settings`.
@@ -169,6 +173,10 @@ impl Config {
 
     pub fn tray(&self) -> bool {
         self.tray.unwrap_or(true)
+    }
+
+    pub fn drawer_follow_changes(&self) -> bool {
+        self.drawer_follow_changes.unwrap_or(false)
     }
 
     pub fn remember_pins(&self) -> bool {

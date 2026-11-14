@@ -163,6 +163,15 @@ pub fn build(timer_auto: Rc<std::cell::Cell<bool>>) -> gtk::Widget {
         glib::Propagation::Proceed
     });
     row(&card, "Tray icon", Some("Takes effect at the next shelf start"), &tray);
+
+    // the drawer's view follows the pinned repository: diff while it has changes, tree when clean
+    let follow = switch(super::remote::config::load().drawer_follow_changes());
+    follow.set_tooltip_text(Some("The drawer shows the diff view while the repository (the shown folder's, else the session's first pinned one) has changes and the file tree when it is clean, and switches again whenever its files change. The view button still switches by hand until the next change."));
+    follow.connect_state_set(|_, on| {
+        let _ = super::remote::config::update(|c| c.drawer_follow_changes = Some(on));
+        glib::Propagation::Proceed
+    });
+    row(&card, "Drawer follows changes", Some("Diff view while the pinned repository has changes, the tree when it is clean"), &follow);
     root.append(&sec);
 
     // ---- Sessions: pins, desktop, auto-revert, host terminal

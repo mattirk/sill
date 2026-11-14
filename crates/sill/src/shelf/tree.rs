@@ -24,6 +24,25 @@ use super::{session, theme};
 const DIFF_TIP: &str = "Show what differs from HEAD (git diff --stat) in the shown folder's repository, else in this session's pinned ones";
 const TREE_TIP: &str = "Back to the file tree";
 
+/// The repository "Drawer follows changes" watches, as one scan saw it.
+struct Followed {
+    /// Its path, git status and line totals: any change to its files changes this.
+    state: String,
+    dirty: bool,
+}
+
+/// The followed repository: that of the first of `dirs` (the shown folder, then the session's pins)
+/// that is a folder in one. Off the GTK thread; `statuses` are the scan's own when it has the repo.
+fn followed(dirs: &[PathBuf], statuses: &[(PathBuf, Vec<(PathBuf, String)>)]) -> Option<Followed> {
+    let repo = dirs.iter().filter(|d| super::remote::is_dir(d)).find_map(|d| super::remote::repo_root(&d.join("x")))?;
+    let status = match statuses.iter().find(|(r, _)| *r == repo) {
+        Some((_, st)) => st.clone(),
+        None => super::remote::git_status(&repo).unwrap_or_default(),
+    };
+    let totals = super::remote::git_summary(&repo);
+    Some(Followed { state: format!("{repo:?}{status:?}{totals:?}"), dirty: !status.is_empty() })
+}
+
 /// Folders below this depth are opened when a scoped tree is shown (0 = the pinned folder itself).
 const OPEN_DEPTH: u32 = 1;
 /// Opening stops once this many rows are shown (a huge folder must not stall the shelf).
@@ -239,6 +258,9 @@ pub struct FolderTree {
     /// the view it switches to.
     switch: gtk::Button,
     diff_mode: std::cell::Cell<bool>,
+    /// "Drawer follows changes": the followed repository's state when the view was last set by it
+    /// (status and totals); a different one switches the view again.
+    follow_seen: RefCell<Option<String>>,
     panes: gtk::Stack,
     stat: Rc<super::diffstat::DiffStat>,
     view: gtk::ListView,
@@ -620,6 +642,7 @@ impl FolderTree {
             search_seq: std::cell::Cell::new(0),
             switch: switch.clone(),
             diff_mode: std::cell::Cell::new(false),
+            follow_seen: RefCell::new(None),
             panes,
             stat,
             view,
@@ -852,6 +875,23 @@ impl FolderTree {
         }
     }
 
+    /// "Drawer follows changes": when the followed repository's state differs from the last one
+    /// seen, the view follows it — diff while it has changes, tree when clean. A switch by hand
+    /// holds until the next change; with the setting off (`None`), the next time on starts afresh.
+    fn follow(self: &Rc<Self>, followed: Option<Followed>) {
+        let Some(Followed { state, dirty }) = followed else {
+            *self.follow_seen.borrow_mut() = None;
+            return;
+        };
+        if self.follow_seen.borrow().as_deref() == Some(state.as_str()) {
+            return;
+        }
+        *self.follow_seen.borrow_mut() = Some(state);
+        if dirty != self.diff_mode.get() {
+            self.set_diff_mode(dirty);
+        }
+    }
+
     /// Rescan every session's ledger and git status off the main thread, then rebuild badges and roots.
     /// Refreshes come from several places (the monitors, a turn's end, an edit, a save, focus,
     /// the tab): at most one scan runs, and one asked meanwhile runs once more after it — a burst
@@ -900,8 +940,12 @@ impl FolderTree {
         *self.pinned.borrow_mut() = target_pins;
         let scope = self.scope.borrow().clone();
         let pins_for_git = pins.clone();
+        // "Drawer follows changes": the shown folder, else the session's first pinned folder
+        let follow_from: Option<Vec<PathBuf>> = super::remote::config::load()
+            .drawer_follow_changes()
+            .then(|| scope.iter().cloned().chain(self.pinned.borrow().iter().cloned()).collect());
         type Statuses = Vec<(PathBuf, Vec<(PathBuf, String)>)>;
-        let (tx, rx) = async_channel::bounded::<(Vec<(String, Change)>, BTreeMap<PathBuf, String>, Statuses)>(1);
+        let (tx, rx) = async_channel::bounded::<(Vec<(String, Change)>, BTreeMap<PathBuf, String>, Statuses, Option<Followed>)>(1);
         drop(sessions);
         std::thread::spawn(move || {
             // every session's overlay changes, as the daemon scans them (docs/daemon.md §7 M2)
@@ -937,12 +981,14 @@ impl FolderTree {
                 repos.push(r);
             }
             let statuses: Statuses = repos.into_iter().map(|r| (super::remote::git_status(&r).unwrap_or_default(), r)).map(|(st, r)| (r, st)).collect();
-            let _ = tx.send_blocking((pairs, owners, statuses));
+            let followed = follow_from.and_then(|dirs| followed(&dirs, &statuses));
+            let _ = tx.send_blocking((pairs, owners, statuses, followed));
         });
         let t = self.clone();
         glib::spawn_future_local(async move {
-            if let Ok((all, owners, statuses)) = rx.recv().await {
+            if let Ok((all, owners, statuses, followed)) = rx.recv().await {
                 t.apply(all, owners, statuses);
+                t.follow(followed);
             }
             t.scanning.set(false);
             if t.again.replace(false) {
