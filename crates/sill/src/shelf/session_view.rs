@@ -1591,8 +1591,9 @@ impl SessionView {
             if !self.denied_seen.borrow_mut().insert(host.to_string()) {
                 continue;
             }
-            // telemetry stays blocked without a question
-            if quiet.iter().any(|p| sill_core::proxy::host_matches(p, host)) {
+            // telemetry stays blocked without a question (`host:port` when the port is not the default one)
+            let name = host.rsplit_once(':').filter(|(h, p)| !h.is_empty() && p.parse::<u16>().is_ok()).map(|(h, _)| h).unwrap_or(host);
+            if quiet.iter().any(|p| sill_core::proxy::host_matches(p, name)) {
                 continue;
             }
             let agent_name = agents::load(&session::home().unwrap_or_default())
@@ -1603,9 +1604,9 @@ impl SessionView {
             let exact = host.to_string();
             let v = self.clone();
             actions.push((format!("Allow {host}"), Rc::new(move || v.allow_domain(&exact))));
-            let labels: Vec<&str> = host.split('.').collect();
+            let labels: Vec<&str> = name.split('.').collect();
             if labels.len() >= 3 {
-                let wild = format!("*.{}", labels[1..].join("."));
+                let wild = format!("*.{}{}", labels[1..].join("."), host.strip_prefix(name).unwrap_or(""));
                 let v = self.clone();
                 let w = wild.clone();
                 actions.push((format!("Allow {wild}"), Rc::new(move || v.allow_domain(&w))));

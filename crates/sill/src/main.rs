@@ -621,12 +621,20 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
                     }
                     None => eprintln!("proxy: {l}"),
                 }
+                // `deny host:port (why)`: the host alone when the port is the default one a bare
+                // pattern grants, `host:port` otherwise — what the shelf offers is what would allow it
                 if let Some(rest) = l.strip_prefix("deny ")
-                    && let Some(host) = rest.split(':').next()
+                    && let Some(target) = rest.split_whitespace().next()
+                    && let Some((host, port)) = target.rsplit_once(':')
+                    && !host.is_empty()
                     && let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&denied)
                 {
                     use std::io::Write;
-                    let _ = writeln!(f, "{host}");
+                    let _ = if port == sill_core::proxy::CONNECT_PORT.to_string() || port == sill_core::proxy::HTTP_PORT.to_string() {
+                        writeln!(f, "{host}")
+                    } else {
+                        writeln!(f, "{target}")
+                    };
                 }
             })
         }));

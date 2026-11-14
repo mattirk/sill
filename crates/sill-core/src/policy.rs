@@ -52,8 +52,10 @@ pub struct Network {
     /// `none` | `all` | `allow` (only the domains in `allow`)
     #[serde(default)]
     pub mode: NetMode,
-    /// Domain patterns (`api.anthropic.com`, `*.githubusercontent.com`). Host-local addresses
-    /// (loopback, link-local, RFC 1918) are refused in every mode unless listed in `allow_local`.
+    /// Domain patterns (`api.anthropic.com`, `*.githubusercontent.com`). A pattern grants one port:
+    /// 443 for `CONNECT` and 80 for plain HTTP, unless it says `host:8443` or `host:*`. Host-local
+    /// addresses (loopback, link-local, RFC 1918 and the other reserved blocks) are refused in every
+    /// mode unless listed in `allow_local`, same pattern form.
     #[serde(default)]
     pub allow: Vec<String>,
     #[serde(default)]
