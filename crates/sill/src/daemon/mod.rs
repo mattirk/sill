@@ -58,15 +58,19 @@ static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
 /// Run until `_sill/daemon.shutdown` or a fatal socket error. The listener is systemd's when the
 /// unit passed one (`LISTEN_FDS`), ours otherwise (direct mode: spawned by the first client).
 pub fn run() -> Result<()> {
+    // one daemon per store, whatever socket it listens on: two would be two writers of sill.db
+    let _store_lock = lock_store()?;
     let (listener, mode) = match activated_listener()? {
-        Some(l) => (l, "unit"),
-        None => (bind_direct()?, "direct"),
+        Some(l) => (l, "socket-activated (sill.service)"),
+        // systemd sets INVOCATION_ID for whatever it runs: the transient unit a client started
+        None if std::env::var_os("INVOCATION_ID").is_some() => (bind_direct()?, "started by a client in its own unit (sill-daemon.service)"),
+        None => (bind_direct()?, "started bare by a client (no unit: see daemon.log)"),
     };
     let hub = Arc::new(Hub::new(mode)?);
     let dir = sill_proto::runtime_dir()?;
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join("daemon.pid"), std::process::id().to_string())?;
-    eprintln!("sill daemon: {} mode, pid {}, {} sessions in the store, protocol {}", mode, std::process::id(), hub.session_count(), sill_proto::PROTOCOL);
+    eprintln!("sill daemon: {}, pid {}, {} sessions in the store, protocol {}", mode, std::process::id(), hub.session_count(), sill_proto::PROTOCOL);
     let me = rustix::process::geteuid();
     for conn in listener.incoming() {
         let conn = match conn {
@@ -99,6 +103,29 @@ pub fn run() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// An exclusive lock beside `sill.db` for as long as this daemon runs (released by the kernel when
+/// it exits, a crash included). A second daemon on the same store — started with another
+/// `$XDG_RUNTIME_DIR`, say, so its socket did not collide — refuses to start.
+fn lock_store() -> Result<std::fs::File> {
+    let db = sill_core::store::default_path()?;
+    let dir = db.parent().context("store path")?;
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join("daemon.lock");
+    let f = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(&path).with_context(|| format!("open {}", path.display()))?;
+    match rustix::fs::flock(&f, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => {
+            let _ = f.set_len(0);
+            let _ = std::io::Write::write_all(&mut &f, format!("{}\n", std::process::id()).as_bytes());
+            Ok(f)
+        }
+        Err(rustix::io::Errno::WOULDBLOCK) => {
+            let holder = std::fs::read_to_string(&path).unwrap_or_default();
+            bail!("another sill daemon (pid {}) already uses {}", holder.trim(), db.display())
+        }
+        Err(e) => Err(e).with_context(|| format!("lock {}", path.display())),
+    }
 }
 
 /// systemd's socket, when this process was started by it: fd 3, `LISTEN_PID` ours.

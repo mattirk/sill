@@ -219,12 +219,13 @@ $S dev revert ~/some/repo/other.txt                          # restore from the 
 $S dev stop
 ```
 
-The dev session starts the way the shelf's sessions do (SPEC §4.7): as the transient user unit
-`sill-dev.service` where the systemd user instance is reachable (`journalctl --user -u sill-dev`),
-otherwise — or with `--direct`, or `SILL_LAUNCHER=direct` — as a detached process with pids and logs
-in `$XDG_RUNTIME_DIR/sill/dev/` (the proxy log lists every allow/deny). Direct mode without a delegated
-cgroup has no resource limits: the default policy refuses to start then (`[limits] required = true`);
-set it to `false` to run anyway with a warning. `--net` shares the host network (testing only).
+The dev session starts the way the daemon starts the shelf's sessions (docs/daemon.md §3.1): in a
+transient scope `sill-dev.scope` under `sill.slice` with the policy's limits where the systemd user
+instance answers, its log in the journal (`journalctl --user -t sill-dev`, the proxy's allow/deny
+lines included); otherwise — or with `--direct`, or `SILL_LAUNCHER=direct` — in a cgroup made by hand
+under the `sill init` subtree, logging to `$XDG_RUNTIME_DIR/sill/dev/jail.log`. Without either there
+are no resource limits: the default policy refuses to start then (`[limits] required = true`); set
+it to `false` to run anyway with a warning. `--net` shares the host network (testing only).
 
 ## Build
 

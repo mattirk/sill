@@ -308,8 +308,9 @@ struct JailArgs {
     /// extra read-write bind HOST=JAIL (agent home, private scratch); repeatable
     #[arg(long = "bind")]
     binds: Vec<String>,
-    /// dev start: force the `direct` launcher (detached process, no systemd unit) even where the
-    /// user instance is usable; same as SILL_LAUNCHER=direct
+    /// dev start: no systemd scope even where the user manager answers — the session cgroup under
+    /// the `sill init` subtree, or no limits; the path of a host without systemd. Same as
+    /// SILL_LAUNCHER=direct
     #[arg(long)]
     direct: bool,
     /// override the policy's desktop access: on | off (SPEC §4.2)
@@ -956,7 +957,7 @@ fn daemon_cmd(cmd: Option<DaemonCmd>) -> Result<()> {
         Some(DaemonCmd::Status) => {
             let c = sill_proto::Client::connect_or_start()?;
             let s: sill_proto::DaemonStatus = c.call(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default())?;
-            println!("sill daemon {} (protocol {}), pid {}, {} mode, up since {}", s.version, s.protocol, s.pid, s.mode, sill_memory::datetime(s.started));
+            println!("sill daemon {} (protocol {}), pid {}, {}, up since {}", s.version, s.protocol, s.pid, s.mode, sill_memory::datetime(s.started));
             println!("jails:    {}", s.launcher);
             println!("socket:   {}", s.socket);
             println!("sessions: {} in the store, {} running", s.sessions, s.running);

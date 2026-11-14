@@ -15,7 +15,7 @@
 //! - Stop is the scope's stop (or `cgroup.kill`), or SIGKILL to bwrap when there is no cgroup.
 //!
 //! The daemon is the only process that starts sessions; `sill dev start` from a terminal uses the
-//! same code.
+//! same code. `SILL_LAUNCHER=direct` skips the scopes, to try the no-systemd path on a host with it.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -68,7 +68,11 @@ pub fn current() -> &'static Launcher {
 
 fn probe() -> Launcher {
     let journal = Path::new(JOURNAL_STREAM).exists() && std::os::unix::net::UnixStream::connect(JOURNAL_STREAM).is_ok();
-    match systemd_user_usable() {
+    // `SILL_LAUNCHER=direct` (`sill dev start --direct`): no scopes even where the user manager
+    // answers — how the path of a host without systemd is tried on one with it
+    let forced = std::env::var("SILL_LAUNCHER").is_ok_and(|v| v == "direct");
+    let systemd = if forced { Err("SILL_LAUNCHER=direct".to_string()) } else { systemd_user_usable() };
+    match systemd {
         Ok(()) => Launcher { scopes: true, cgroup_root: None, reason: "systemd user instance reachable".into(), journal },
         Err(why) => match delegated_subtree() {
             Some(root) => Launcher { scopes: false, cgroup_root: Some(root), reason: format!("{why}; sill init subtree"), journal },
