@@ -1,0 +1,544 @@
+//! Backend page "Agents": the ACP registry (SPEC §4.1) as a quiet list — search, a three-way
+//! filter, one row per agent with its icon, version, description, links and a single action.
+//! Installs run on a worker thread into sill's tools dir; their output streams under the row.
+
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::time::{Duration, SystemTime};
+
+use gtk4 as gtk;
+use gtk::glib;
+use gtk::prelude::*;
+use sill_core::registry::{self, Entry};
+
+use super::{icons, session, settings, theme};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Filter {
+    All,
+    Installed,
+    NotInstalled,
+}
+
+/// What a row shows about an entry's state here.
+enum State {
+    /// Installed by sill (tools dir), with the version it has.
+    Managed(String),
+    /// A built-in whose command is already on this machine (not by sill).
+    System(PathBuf),
+    Absent,
+}
+
+struct Row {
+    state_box: gtk::Box,
+    log: gtk::Label,
+    icon_box: gtk::Box,
+    /// Inline settings (gear), built on first open.
+    editor: gtk::Box,
+}
+
+enum Progress {
+    Line(String, String),
+    Done(String, Result<String, String>),
+    Icon(String, PathBuf),
+}
+
+pub struct AgentsPage {
+    pub root: gtk::Box,
+    list: gtk::ListBox,
+    search: gtk::SearchEntry,
+    note: gtk::Label,
+    refresh_btn: gtk::Button,
+    filter: Cell<Filter>,
+    entries: RefCell<Vec<Entry>>,
+    rows: RefCell<HashMap<String, Row>>,
+    installing: RefCell<std::collections::HashSet<String>>,
+    logs: RefCell<HashMap<String, Vec<String>>>,
+    tx: async_channel::Sender<Progress>,
+    fetching: Cell<bool>,
+    icons_queued: RefCell<std::collections::HashSet<String>>,
+}
+
+impl AgentsPage {
+    pub fn new() -> Rc<Self> {
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        root.set_margin_start(12);
+        root.set_margin_end(12);
+        root.set_margin_top(4);
+        root.set_margin_bottom(12);
+
+        // search + filter + refresh on one line
+        let bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let search = gtk::SearchEntry::new();
+        search.set_placeholder_text(Some("Search agents…"));
+        search.set_hexpand(true);
+        bar.append(&search);
+        let filters = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        filters.add_css_class("linked");
+        let all = gtk::ToggleButton::with_label("All");
+        let inst = gtk::ToggleButton::with_label("Installed");
+        inst.set_group(Some(&all));
+        let not = gtk::ToggleButton::with_label("Not installed");
+        not.set_group(Some(&all));
+        all.set_active(true);
+        for b in [&all, &inst, &not] {
+            b.add_css_class("sill-filter");
+            filters.append(b);
+        }
+        bar.append(&filters);
+        let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
+        refresh.add_css_class("flat");
+        refresh.set_tooltip_text(Some("Fetch the registry again"));
+        bar.append(&refresh);
+        root.append(&bar);
+
+        let note = gtk::Label::new(None);
+        note.add_css_class("dim-label");
+        note.set_xalign(0.0);
+        note.set_wrap(true);
+        note.set_visible(false);
+        root.append(&note);
+
+        let list = gtk::ListBox::new();
+        list.add_css_class("sill-agents");
+        list.set_selection_mode(gtk::SelectionMode::None);
+        let scroll = gtk::ScrolledWindow::builder().vexpand(true).child(&list).build();
+        root.append(&scroll);
+
+        let (tx, rx) = async_channel::unbounded::<Progress>();
+        let page = Rc::new(Self {
+            root,
+            list,
+            search: search.clone(),
+            note,
+            refresh_btn: refresh.clone(),
+            filter: Cell::new(Filter::All),
+            entries: RefCell::new(Vec::new()),
+            rows: RefCell::new(HashMap::new()),
+            installing: RefCell::new(Default::default()),
+            logs: RefCell::new(HashMap::new()),
+            tx,
+            fetching: Cell::new(false),
+            icons_queued: RefCell::new(Default::default()),
+        });
+
+        {
+            let p = page.clone();
+            search.connect_search_changed(move |_| p.rebuild());
+        }
+        for (b, f) in [(&all, Filter::All), (&inst, Filter::Installed), (&not, Filter::NotInstalled)] {
+            let p = page.clone();
+            b.connect_toggled(move |b| {
+                if b.is_active() {
+                    p.filter.set(f);
+                    p.rebuild();
+                }
+            });
+        }
+        {
+            let p = page.clone();
+            refresh.connect_clicked(move |_| p.fetch());
+        }
+        {
+            // worker → UI
+            let p = page.clone();
+            glib::spawn_future_local(async move {
+                while let Ok(msg) = rx.recv().await {
+                    p.progress(msg);
+                }
+            });
+        }
+        page
+    }
+
+    /// Show what is cached; fetch when there is nothing or it is older than six hours.
+    pub fn refresh(self: &Rc<Self>) {
+        let home = session::home().unwrap_or_default();
+        match registry::load_cached(&home) {
+            Some((reg, when)) => {
+                *self.entries.borrow_mut() = reg.agents;
+                self.rebuild();
+                let age = SystemTime::now().duration_since(when).unwrap_or_default();
+                self.set_note("");
+                self.refresh_btn.set_tooltip_text(Some(&format!("{} agents, fetched {} · fetch again", self.entries.borrow().len(), ago(age))));
+                if age > Duration::from_secs(6 * 3600) {
+                    self.fetch();
+                }
+            }
+            None => self.fetch(),
+        }
+    }
+
+    /// The note is for problems only; it takes no room otherwise.
+    fn set_note(&self, text: &str) {
+        self.note.set_text(text);
+        self.note.set_visible(!text.is_empty());
+    }
+
+    fn fetch(self: &Rc<Self>) {
+        if self.fetching.replace(true) {
+            return;
+        }
+        self.refresh_btn.set_sensitive(false);
+        let tx = self.tx.clone();
+        let home = session::home().unwrap_or_default();
+        std::thread::spawn(move || {
+            let r = registry::fetch(&home).map(|_| String::new()).map_err(|e| format!("{e:#}"));
+            let _ = tx.send_blocking(Progress::Done(String::new(), r));
+        });
+    }
+
+    fn state_of(&self, entry: &Entry, home: &std::path::Path) -> State {
+        if let Some(i) = registry::installed(home, &entry.id) {
+            return State::Managed(i.version);
+        }
+        if let Some(id) = registry::builtin_for(entry)
+            && let Some(agent) = sill_core::agents::load(home).get(id)
+            && let Some(path) = registry::available(agent, home)
+        {
+            return State::System(path);
+        }
+        State::Absent
+    }
+
+    /// Rebuild the list from the entries, the search text and the filter.
+    fn rebuild(self: &Rc<Self>) {
+        while let Some(c) = self.list.first_child() {
+            self.list.remove(&c);
+        }
+        self.rows.borrow_mut().clear();
+        let home = session::home().unwrap_or_default();
+        let needle = self.search.text().to_lowercase();
+        let mut entries: Vec<Entry> = self.entries.borrow().clone();
+        entries.sort_by_key(|e| e.name.to_lowercase());
+        let fg = icons::fg_for(&self.list, &theme::current());
+        for e in entries {
+            if !needle.is_empty()
+                && !(e.name.to_lowercase().contains(&needle)
+                    || e.id.to_lowercase().contains(&needle)
+                    || e.description.to_lowercase().contains(&needle))
+            {
+                continue;
+            }
+            let state = self.state_of(&e, &home);
+            let installed = !matches!(state, State::Absent);
+            match self.filter.get() {
+                Filter::Installed if !installed => continue,
+                Filter::NotInstalled if installed => continue,
+                _ => {}
+            }
+            self.list.append(&self.row(&e, state, fg, &home));
+        }
+    }
+
+    fn row(self: &Rc<Self>, e: &Entry, state: State, fg: gtk::gdk::RGBA, home: &std::path::Path) -> gtk::Box {
+        let col = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        col.add_css_class("sill-agent");
+
+        // line 1: icon, name, version · action
+        let top = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let icon_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        icon_box.set_valign(gtk::Align::Center);
+        icon_box.set_size_request(16, 16);
+        let icon_path = registry::icon_cache_dir(home).join(format!("{}.svg", e.id));
+        if icon_path.is_file() {
+            icon_box.append(&icons::from_file(&icon_path, fg, 16));
+        } else {
+            icon_box.append(&icons::named(icons::PLACEHOLDER, fg, 16));
+            self.queue_icon(e);
+        }
+        top.append(&icon_box);
+        let name = gtk::Label::new(Some(&e.name));
+        name.add_css_class("sill-agent-name");
+        name.set_xalign(0.0);
+        top.append(&name);
+        let ver = gtk::Label::new(Some(&format!("v{}", e.version)));
+        ver.add_css_class("dim-label");
+        ver.add_css_class("sill-agent-version");
+        top.append(&ver);
+        if !e.description.is_empty() {
+            col.set_tooltip_text(Some(&e.description));
+        }
+        let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        spacer.set_hexpand(true);
+        top.append(&spacer);
+        // id and links sit before the action, quiet
+        let id = gtk::Label::new(Some(&e.id));
+        id.add_css_class("sill-agent-id");
+        id.set_valign(gtk::Align::Center);
+        top.append(&id);
+        let bottom = top.clone();
+        for (url, tip) in [(e.repository.as_deref(), "Source"), (e.website.as_deref(), "Website")] {
+            let Some(url) = url else { continue };
+            let b = gtk::Button::new();
+            b.set_child(Some(&icons::named(if tip == "Source" { "sill-code" } else { "sill-link" }, fg, 13)));
+            b.add_css_class("flat");
+            b.add_css_class("sill-agent-link");
+            b.set_tooltip_text(Some(&format!("{tip}: {url}")));
+            b.set_valign(gtk::Align::Center);
+            let url = url.to_string();
+            b.connect_clicked(move |b| {
+                let win = b.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+                gtk::UriLauncher::new(&url).launch(win.as_ref(), None::<&gtk::gio::Cancellable>, |_| {});
+            });
+            bottom.append(&b);
+        }
+        let state_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        state_box.set_valign(gtk::Align::Center);
+        state_box.set_margin_start(6);
+        top.append(&state_box);
+        col.append(&top);
+
+        // installer output (hidden until there is some)
+        let log = gtk::Label::new(None);
+        log.add_css_class("sill-agent-log");
+        log.set_xalign(0.0);
+        log.set_wrap(true);
+        log.set_selectable(true);
+        log.set_visible(false);
+        col.append(&log);
+        // inline settings, opened by the gear
+        let editor = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        editor.set_visible(false);
+        col.append(&editor);
+
+        self.rows.borrow_mut().insert(e.id.clone(), Row { state_box: state_box.clone(), log: log.clone(), icon_box, editor });
+        self.fill_state(e, state, &state_box);
+        if let Some(lines) = self.logs.borrow().get(&e.id)
+            && let Some(last) = lines.last()
+        {
+            log.set_text(last);
+            log.set_visible(true);
+        }
+        col
+    }
+
+    /// The right-hand side of a row: one clear action, the rest quiet.
+    fn fill_state(self: &Rc<Self>, e: &Entry, state: State, state_box: &gtk::Box) {
+        while let Some(c) = state_box.first_child() {
+            state_box.remove(&c);
+        }
+        if self.installing.borrow().contains(&e.id) {
+            let sp = gtk::Spinner::new();
+            sp.set_spinning(true);
+            state_box.append(&sp);
+            let l = gtk::Label::new(Some("installing…"));
+            l.add_css_class("dim-label");
+            state_box.append(&l);
+            return;
+        }
+        if !matches!(state, State::Absent) {
+            state_box.append(&self.gear(e));
+        }
+        match state {
+            State::Managed(version) => {
+                let update = version != e.version;
+                let l = gtk::Label::new(Some(if update { "update available" } else { "installed" }));
+                l.add_css_class("dim-label");
+                l.set_tooltip_text(Some(&format!("installed by sill: v{version}")));
+                state_box.append(&l);
+                if update {
+                    state_box.append(&self.action_button(e, &format!("Update to v{}", e.version), "sill-install"));
+                }
+                let rm = gtk::Button::from_icon_name("user-trash-symbolic");
+                rm.add_css_class("flat");
+                rm.add_css_class("sill-menu-trash");
+                rm.set_tooltip_text(Some("Remove this install"));
+                let p = self.clone();
+                let e2 = e.clone();
+                rm.connect_clicked(move |_| p.uninstall(&e2));
+                state_box.append(&rm);
+            }
+            State::System(path) => {
+                let l = gtk::Label::new(Some("installed"));
+                l.add_css_class("dim-label");
+                l.set_tooltip_text(Some(&format!("found on this machine: {}", path.display())));
+                state_box.append(&l);
+            }
+            State::Absent => match e.how() {
+                Some(_) => state_box.append(&self.action_button(e, "Install", "sill-install")),
+                None => {
+                    let l = gtk::Label::new(Some("no Linux build"));
+                    l.add_css_class("dim-label");
+                    state_box.append(&l);
+                }
+            },
+        }
+    }
+
+    /// The gear: shows or hides this agent's settings under the row (command, environment with API
+    /// keys, proxy domains, offered or not).
+    fn gear(self: &Rc<Self>, e: &Entry) -> gtk::Button {
+        let fg = icons::fg_for(&self.list, &theme::current());
+        let b = gtk::Button::new();
+        b.set_child(Some(&icons::named("sill-settings", fg, 13)));
+        b.add_css_class("flat");
+        b.add_css_class("sill-agent-link");
+        b.set_tooltip_text(Some("Settings: command, environment (API keys), domains"));
+        let p = self.clone();
+        let e2 = e.clone();
+        b.connect_clicked(move |_| {
+            let rows = p.rows.borrow();
+            let Some(r) = rows.get(&e2.id) else { return };
+            if r.editor.is_visible() {
+                r.editor.set_visible(false);
+                return;
+            }
+            let home = session::home().unwrap_or_default();
+            let id = registry::builtin_for(&e2).map(str::to_string).unwrap_or_else(|| e2.id.clone());
+            while let Some(c) = r.editor.first_child() {
+                r.editor.remove(&c);
+            }
+            if let Some(agent) = sill_core::agents::load(&home).remove(&id) {
+                r.editor.append(&settings::agent_editor(home, agent));
+                r.editor.set_visible(true);
+            }
+        });
+        b
+    }
+
+    fn action_button(self: &Rc<Self>, e: &Entry, label: &str, class: &str) -> gtk::Button {
+        let b = gtk::Button::with_label(label);
+        b.add_css_class(class);
+        b.set_tooltip_text(Some(&match e.how() {
+            Some("npx") => format!("npm package {} into ~/.local/state/sill/tools (no install scripts run)", e.package_name().unwrap_or_default()),
+            Some("uvx") => format!("Python package {} with uv into ~/.local/state/sill/tools", e.package_name().unwrap_or_default()),
+            _ => "download the Linux binary into ~/.local/state/sill/tools".to_string(),
+        }));
+        let p = self.clone();
+        let e2 = e.clone();
+        b.connect_clicked(move |_| p.install(&e2));
+        b
+    }
+
+    fn install(self: &Rc<Self>, e: &Entry) {
+        if !self.installing.borrow_mut().insert(e.id.clone()) {
+            return;
+        }
+        self.logs.borrow_mut().insert(e.id.clone(), Vec::new());
+        let home = session::home().unwrap_or_default();
+        self.refresh_row(e, &home);
+        let tx = self.tx.clone();
+        let entry = e.clone();
+        std::thread::Builder::new()
+            .name(format!("sill-install-{}", e.id))
+            .spawn(move || {
+                let id = entry.id.clone();
+                let progress = tx.clone();
+                let mut log = |line: String| {
+                    let _ = progress.send_blocking(Progress::Line(id.clone(), line));
+                };
+                let r = registry::install(&home, &entry, &mut log)
+                    .map(|a| format!("installed {} — it is in the + menu now", a.name))
+                    .map_err(|e| format!("{e:#}"));
+                let _ = tx.send_blocking(Progress::Done(entry.id.clone(), r));
+            })
+            .ok();
+    }
+
+    fn uninstall(self: &Rc<Self>, e: &Entry) {
+        let home = session::home().unwrap_or_default();
+        let msg = match registry::uninstall(&home, e) {
+            Ok(()) => "removed".to_string(),
+            Err(err) => format!("remove failed: {err:#}"),
+        };
+        self.logs.borrow_mut().insert(e.id.clone(), vec![msg]);
+        self.refresh_row(e, &home);
+    }
+
+    fn refresh_row(self: &Rc<Self>, e: &Entry, home: &std::path::Path) {
+        let state = self.state_of(e, home);
+        let rows = self.rows.borrow();
+        if let Some(r) = rows.get(&e.id) {
+            self.fill_state(e, state, &r.state_box);
+            if let Some(lines) = self.logs.borrow().get(&e.id)
+                && let Some(last) = lines.last()
+            {
+                r.log.set_text(last);
+                r.log.set_visible(true);
+            }
+        }
+    }
+
+    fn queue_icon(self: &Rc<Self>, e: &Entry) {
+        if e.icon.is_none() || !self.icons_queued.borrow_mut().insert(e.id.clone()) {
+            return;
+        }
+        let tx = self.tx.clone();
+        let entry = e.clone();
+        let home = session::home().unwrap_or_default();
+        std::thread::spawn(move || {
+            if let Some(p) = registry::fetch_icon(&home, &entry) {
+                let _ = tx.send_blocking(Progress::Icon(entry.id.clone(), p));
+            }
+        });
+    }
+
+    fn progress(self: &Rc<Self>, msg: Progress) {
+        match msg {
+            Progress::Line(id, line) => {
+                let mut logs = self.logs.borrow_mut();
+                logs.entry(id.clone()).or_default().push(line.clone());
+                if let Some(r) = self.rows.borrow().get(&id) {
+                    r.log.set_text(&line);
+                    r.log.set_visible(true);
+                }
+            }
+            Progress::Done(id, result) if id.is_empty() => {
+                // the registry fetch
+                self.fetching.set(false);
+                self.refresh_btn.set_sensitive(true);
+                match result {
+                    Ok(_) => self.refresh(),
+                    Err(e) => self.set_note(&format!("registry: {e}")),
+                }
+            }
+            Progress::Done(id, result) => {
+                self.installing.borrow_mut().remove(&id);
+                let (text, failed) = match result {
+                    Ok(t) => (t, false),
+                    Err(e) => (e, true),
+                };
+                self.logs.borrow_mut().entry(id.clone()).or_default().push(text.clone());
+                let home = session::home().unwrap_or_default();
+                let entry = self.entries.borrow().iter().find(|e| e.id == id).cloned();
+                if let Some(e) = entry {
+                    self.refresh_row(&e, &home);
+                }
+                if let Some(r) = self.rows.borrow().get(&id) {
+                    r.log.set_text(&text);
+                    r.log.set_visible(true);
+                    if failed {
+                        r.log.add_css_class("sill-changed");
+                    } else {
+                        r.log.remove_css_class("sill-changed");
+                    }
+                }
+            }
+            Progress::Icon(id, path) => {
+                if let Some(r) = self.rows.borrow().get(&id) {
+                    while let Some(c) = r.icon_box.first_child() {
+                        r.icon_box.remove(&c);
+                    }
+                    let fg = icons::fg_for(&self.list, &theme::current());
+                    r.icon_box.append(&icons::from_file(&path, fg, 16));
+                }
+            }
+        }
+    }
+}
+
+fn ago(d: Duration) -> String {
+    let s = d.as_secs();
+    if s < 90 {
+        "just now".into()
+    } else if s < 3600 {
+        format!("{} min ago", s / 60)
+    } else if s < 86_400 {
+        format!("{} h ago", s / 3600)
+    } else {
+        format!("{} days ago", s / 86_400)
+    }
+}

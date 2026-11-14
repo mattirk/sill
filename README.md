@@ -115,9 +115,19 @@ Each agent runs completely inside sill: its own paths (`~/.claude` and `~/.claud
 per-session directories on the state filesystem, never on the host. Delete
 `~/.local/state/sill/agents/<id>` to make the agent log in again.
 
+**Agents page** (sill ▾ → Agents): the ACP registry (`cdn.agentclientprotocol.com`, cached in
+`~/.cache/sill`, refreshed when older than six hours) with search, an All / Installed / Not installed filter and
+one action per entry. *Install* puts the package under `~/.local/state/sill/tools/<id>/` (npm with
+`--ignore-scripts`, uv with its own tool dir, or the Linux binary with its checksum verified), probes it once
+over ACP for session resume, and writes `~/.config/sill/agents/<id>.toml`, so it appears in the `+` menu with
+its registry icon. Entries that are the built-ins' own packages (Claude Code, Codex, Gemini) keep the
+built-in's jail settings and only take the new command. The gear on an installed row edits its command,
+environment (API keys) and proxy domains; third-party agents start with an empty allow-list, so add their API
+domains there if one can't connect. The trash icon removes an install again.
+
 **Logging in.** When an agent refuses to open a session without a login, the conversation shows one button
 per method the agent offers. Claude Code's logins run in the shelf's terminal pane inside the jail. Codex
-with an API key: put `OPENAI_API_KEY` in its environment (Settings → Agents) and pick *API Key*. Codex with
+with an API key: put `OPENAI_API_KEY` in its environment (the gear on the Agents page) and pick *API Key*. Codex with
 ChatGPT: pick *ChatGPT* (or run `sill login codex`); that login runs on this machine because its browser
 callback can't reach into the jail, but with `CODEX_HOME` pointing at the jail's own `~/.codex` copy, so
 nothing lands on the host; the session then restarts. Claude's credentials file is the one host file an

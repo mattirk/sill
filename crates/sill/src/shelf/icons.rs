@@ -26,6 +26,9 @@ const STROKES: &[(&str, &str)] = &[
     ("sill-settings", "M10 5H3M12 19H3M14 3v4M16 17v4M21 12h-9M21 19h-5M21 5h-7M8 10v4M8 12H3"),
     // a prompt: chevron and underscore, no window chrome
     ("sill-terminal", "M3 18l7-7-7-7M12 20h9"),
+    ("sill-agents", "M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2M14 2h6a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z"),
+    ("sill-code", "m16 18 6-6-6-6M8 6l-6 6 6 6"),
+    ("sill-link", "M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"),
 ];
 
 pub const PLACEHOLDER: &str = "sill-agent-symbolic";
@@ -67,9 +70,13 @@ fn glyph(name: &str) -> Option<&'static str> {
 }
 
 /// An image for an agent's icon in colour `color` (the containing widget's foreground): a sill glyph
-/// rendered as a texture, any other name from the icon theme, the placeholder when unknown.
+/// rendered as a texture, an SVG file (registry icons) recoloured, any other name from the icon
+/// theme, the placeholder when unknown.
 pub fn image(agent: Option<&sill_core::agents::Agent>, color: gdk::RGBA, px: i32) -> gtk::Image {
     let name = agent.and_then(|a| a.icon.clone()).unwrap_or_else(|| PLACEHOLDER.to_string());
+    if name.starts_with('/') {
+        return from_file(std::path::Path::new(&name), color, px);
+    }
     if glyph(&name).is_none() {
         let known = gdk::Display::default().map(|d| gtk::IconTheme::for_display(&d).has_icon(&name)).unwrap_or(false);
         if known {
@@ -98,4 +105,84 @@ pub fn fg_for(widget: &impl IsA<gtk::Widget>, theme: &super::theme::Theme) -> gd
         return c;
     }
     widget.color()
+}
+
+/// An SVG file drawn in one colour: every `fill`/`stroke` that isn't `none` and every
+/// `currentColor` becomes `color`, so a third-party icon reads like the built-in glyphs on any
+/// theme. Falls back to the placeholder when the file can't be read.
+pub fn from_file(path: &std::path::Path, color: gdk::RGBA, px: i32) -> gtk::Image {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return named(PLACEHOLDER, color, px);
+    };
+    let fg = hex(color);
+    let mut svg = recolour_attr(&recolour_attr(&text, "fill", &fg), "stroke", &fg).replace("currentColor", &fg);
+    // an icon with no colour anywhere renders black: give the root a fill
+    if !svg.contains("fill=") && !svg.contains("fill:") {
+        svg = svg.replacen("<svg", &format!("<svg fill=\"{fg}\""), 1);
+    }
+    // our size, whatever the file says
+    let size = px * 4;
+    if let Some(start) = svg.find("<svg") {
+        let end = svg[start..].find('>').map(|i| start + i).unwrap_or(svg.len());
+        let mut head = svg[start..end].to_string();
+        head = strip_attr(&head, "width");
+        head = strip_attr(&head, "height");
+        head.push_str(&format!(" width=\"{size}\" height=\"{size}\""));
+        svg = format!("{}{}{}", &svg[..start], head, &svg[end..]);
+    }
+    texture_image(svg, px)
+}
+
+/// Replace the value of every `attr="…"` (and `attr:…` in style attributes) that isn't `none`.
+fn recolour_attr(svg: &str, attr: &str, fg: &str) -> String {
+    let mut out = String::with_capacity(svg.len());
+    let mut rest = svg;
+    let needle = format!("{attr}=\"");
+    while let Some(i) = rest.find(&needle) {
+        // only a whole attribute name (not `stroke-width=`): the char before must not be alnum or '-'
+        let before = rest[..i].chars().last();
+        let whole = !matches!(before, Some(c) if c.is_alphanumeric() || c == '-');
+        let vstart = i + needle.len();
+        let Some(vlen) = rest[vstart..].find('"') else { break };
+        let value = &rest[vstart..vstart + vlen];
+        out.push_str(&rest[..vstart]);
+        if whole && value != "none" && !value.starts_with("url(") {
+            out.push_str(fg);
+        } else {
+            out.push_str(value);
+        }
+        rest = &rest[vstart + vlen..];
+    }
+    out.push_str(rest);
+    // style="fill:#000" forms
+    let needle = format!("{attr}:");
+    let mut out2 = String::with_capacity(out.len());
+    let mut rest = out.as_str();
+    while let Some(i) = rest.find(&needle) {
+        let before = rest[..i].chars().last();
+        let whole = !matches!(before, Some(c) if c.is_alphanumeric() || c == '-');
+        let vstart = i + needle.len();
+        let vlen = rest[vstart..].find([';', '"', '}']).unwrap_or(rest.len() - vstart);
+        let value = rest[vstart..vstart + vlen].trim();
+        out2.push_str(&rest[..vstart]);
+        if whole && value != "none" && !value.starts_with("url(") {
+            out2.push_str(fg);
+        } else {
+            out2.push_str(&rest[vstart..vstart + vlen]);
+        }
+        rest = &rest[vstart + vlen..];
+    }
+    out2.push_str(rest);
+    out2
+}
+
+fn strip_attr(head: &str, attr: &str) -> String {
+    let needle = format!(" {attr}=\"");
+    let mut h = head.to_string();
+    while let Some(i) = h.find(&needle) {
+        let vstart = i + needle.len();
+        let Some(vlen) = h[vstart..].find('"') else { break };
+        h.replace_range(i..vstart + vlen + 1, "");
+    }
+    h
 }

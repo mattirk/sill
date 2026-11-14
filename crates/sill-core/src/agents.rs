@@ -160,8 +160,20 @@ pub fn load(home: &Path) -> BTreeMap<String, Agent> {
                 continue;
             }
             if let Ok(text) = std::fs::read_to_string(&p)
-                && let Ok(a) = toml::from_str::<Agent>(&text)
+                && let Ok(mut a) = toml::from_str::<Agent>(&text)
             {
+                // an override written before a field existed keeps the built-in's value for it
+                if let Some(b) = out.get(&a.id) {
+                    if a.icon.is_none() {
+                        a.icon = b.icon.clone();
+                    }
+                    if a.host_login.is_empty() {
+                        a.host_login = b.host_login.clone();
+                    }
+                    if a.home_env.is_none() {
+                        a.home_env = b.home_env.clone();
+                    }
+                }
                 out.insert(a.id.clone(), a);
             }
         }

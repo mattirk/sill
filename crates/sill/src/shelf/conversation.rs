@@ -402,6 +402,20 @@ popover.sill-menu > contents { padding: 4px; min-width: 180px; }
 .sill-status { min-width: 8px; min-height: 8px; border-radius: 4px; background: alpha(@view_fg_color, 0.3); }
 .sill-status.sill-attention { background: @warning_color; }
 .sill-spinner { min-width: 15px; min-height: 15px; opacity: 0.8; }
+/* Agents page: one quiet row per registry entry */
+.sill-agents { background: transparent; }
+.sill-agents > row { padding: 0; }
+.sill-agents > row:hover { background: alpha(@view_fg_color, 0.03); }
+.sill-agent { padding: 7px 10px 7px 8px; border-bottom: 1px solid alpha(@view_fg_color, 0.08); }
+.sill-agent-name { font-weight: 600; }
+.sill-agent-version { font-size: 85%; }
+.sill-agent-id { font-family: monospace; font-size: 80%; opacity: 0.5; }
+.sill-agent-link { padding: 0 4px; min-height: 0; min-width: 0; opacity: 0.55; }
+.sill-agent-link:hover { opacity: 1; }
+.sill-agent-log { font-family: monospace; font-size: 80%; opacity: 0.7; }
+button.sill-install { padding: 1px 10px; min-height: 22px; font-weight: normal; background: alpha(@accent_bg_color, 0.25); border: none; box-shadow: none; }
+button.sill-install:hover { background: alpha(@accent_bg_color, 0.45); }
+.sill-filter { padding: 2px 10px; min-height: 0; font-weight: normal; }
 .sill-files > row { padding: 1px 4px; min-height: 0; }
 .sill-files > row:selected { background: alpha(@accent_bg_color, 0.25); }
 .sill-files treeexpander { padding: 1px 0; }

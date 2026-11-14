@@ -15,6 +15,7 @@ use adw::prelude::*;
 use sill_core::agents;
 use sill_core::store::{Session, Store};
 
+use super::agents_page::AgentsPage;
 use super::changes::ChangesPage;
 use super::files::FilesPage;
 use super::session_view::SessionView;
@@ -40,6 +41,7 @@ pub struct Shelf {
     pending_restart: RefCell<std::collections::HashSet<String>>,
     views: RefCell<HashMap<String, Rc<SessionView>>>,
     changes: Rc<ChangesPage>,
+    agents: Rc<AgentsPage>,
     files: Rc<FilesPage>,
 }
 
@@ -123,12 +125,14 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
     stack.add_named(&pages, Some("sessions"));
     let changes = ChangesPage::new(store.clone());
     let files = FilesPage::new(store.clone());
+    let agents_page = AgentsPage::new();
     let settings_page = settings::build();
     // backend pages get a header with an obvious way back to the session
     let back_buttons: Rc<RefCell<Vec<gtk::Button>>> = Rc::new(RefCell::new(Vec::new()));
     for (name, title, body) in [
         ("changes", "Changes", changes.root.clone().upcast::<gtk::Widget>()),
         ("files", "Files", files.root.clone().upcast::<gtk::Widget>()),
+        ("agents", "Agents", agents_page.root.clone().upcast::<gtk::Widget>()),
         ("settings", "Settings", settings_page.clone().upcast::<gtk::Widget>()),
     ] {
         let wrap = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -175,6 +179,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         pending_restart: RefCell::new(std::collections::HashSet::new()),
         views: RefCell::new(HashMap::new()),
         changes: changes.clone(),
+        agents: agents_page.clone(),
         files: files.clone(),
     });
     {
@@ -223,6 +228,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
                 ("Sessions", "sill-sessions", "sessions"),
                 ("Changes", "sill-changes", "changes"),
                 ("Files", "sill-files", "files"),
+                ("Agents", "sill-agents", "agents"),
                 ("Settings", "sill-settings", "settings"),
             ] {
                 let b = gtk::Button::new();
@@ -402,6 +408,7 @@ impl Shelf {
         match name {
             "changes" => self.changes.refresh(),
             "files" => self.files.refresh(),
+            "agents" => self.agents.refresh(),
             "sessions" => self.focus_prompt(),
             _ => {}
         }

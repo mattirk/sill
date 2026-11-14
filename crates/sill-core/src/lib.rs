@@ -17,6 +17,7 @@ pub mod mounts;
 pub mod paths;
 pub mod policy;
 pub mod proxy;
+pub mod registry;
 pub mod session;
 pub mod shim;
 pub mod store;
