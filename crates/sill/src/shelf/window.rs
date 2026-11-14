@@ -54,6 +54,34 @@ pub struct Shelf {
     viewer: Rc<Viewer>,
 }
 
+/// Start the host terminal detached from the shelf: `{cwd}` in the command line is the directory,
+/// which is the working directory too; the terminal outlives the shelf (own session, no fds) and
+/// is reaped when it exits.
+fn launch_terminal(cmdline: &str, cwd: &Path) -> anyhow::Result<()> {
+    let words = shell_words::split(cmdline)?;
+    let Some((prog, args)) = words.split_first() else { anyhow::bail!("empty command") };
+    let dir = cwd.to_string_lossy();
+    let mut cmd = std::process::Command::new(prog);
+    cmd.args(args.iter().map(|a| a.replace("{cwd}", &dir)))
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // SAFETY: setsid between fork and exec only.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            rustix::process::setsid()?;
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().map_err(|e| anyhow::anyhow!("{prog}: {e}"))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
 pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
     let config = sill_core::config::load();
     super::theme::set_text_scale(config.text_scale()); // applies the theme too
@@ -248,6 +276,18 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
             s.viewer.root.set_visible(false);
             s.focus_prompt();
         }));
+        // a save in the viewer: the tree's badges and the pin chips' git numbers follow at once
+        let s = shelf.clone();
+        *viewer.on_saved.borrow_mut() = Some(Box::new(move |_| {
+            if s.tree.root.is_visible() {
+                s.tree.refresh();
+            }
+            if let Some(id) = s.tabs.selected()
+                && let Some(v) = s.views.borrow().get(&id)
+            {
+                v.refresh_pins();
+            }
+        }));
     }
     {
         // a monitor plugged in or out: the primary's work area may be another one now
@@ -322,7 +362,33 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
                 s.tabs.edit_selected();
                 return glib::Propagation::Stop;
             }
-            if key == gdk::Key::t && state.contains(gdk::ModifierType::CONTROL_MASK) {
+            let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
+            let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
+            // Ctrl+Shift+Left/Right walk the tabs, Ctrl+Shift+F toggles the file tree,
+            // Ctrl+Shift+T opens a terminal on the host
+            if ctrl && shift {
+                match key {
+                    gdk::Key::Left => {
+                        s.step_tab(-1);
+                        return glib::Propagation::Stop;
+                    }
+                    gdk::Key::Right => {
+                        s.step_tab(1);
+                        return glib::Propagation::Stop;
+                    }
+                    gdk::Key::F | gdk::Key::f => {
+                        if s.tree.root.is_visible() { s.close_tree() } else { s.toggle_tree(None) }
+                        return glib::Propagation::Stop;
+                    }
+                    gdk::Key::T | gdk::Key::t => {
+                        s.open_host_terminal();
+                        return glib::Propagation::Stop;
+                    }
+                    _ => {}
+                }
+            }
+            // Ctrl+T: the shell inside the jail
+            if ctrl && !shift && key.to_lower() == gdk::Key::t {
                 if let Some(id) = s.tabs.selected()
                     && let Some(v) = s.views.borrow().get(&id)
                 {
@@ -349,15 +415,20 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         }
     }
 
-    // back from the host (editor, terminal): refresh the pin chips' git numbers
+    // back from the host (editor, terminal): refresh the pin chips' git numbers and the tree
     {
         let s = shelf.clone();
         window.connect_is_active_notify(move |w| {
-            if w.is_active()
-                && let Some(id) = s.tabs.selected()
+            if !w.is_active() {
+                return;
+            }
+            if let Some(id) = s.tabs.selected()
                 && let Some(v) = s.views.borrow().get(&id)
             {
                 v.refresh_pins();
+            }
+            if s.tree.root.is_visible() {
+                s.tree.refresh(); // a file edited by hand: its badge; a new one: its row
             }
         });
     }
@@ -478,6 +549,37 @@ impl Shelf {
         }
         self.tree.root.set_visible(true);
         self.place();
+    }
+
+    /// A terminal on the host (Ctrl+Shift+T, the shell button's right-click), in the folder the
+    /// person is looking at: the tree's selection, else the session's first pinned folder, else home.
+    /// A host process by design — outside the jail, nothing it does is recorded.
+    fn open_host_terminal(&self) {
+        let tree = if self.tree.root.is_visible() { self.tree.selected_dir() } else { None };
+        let pinned = || self.tabs.selected().and_then(|id| self.store.pins(&id).ok()).and_then(|pins| pins.into_iter().find(|p| p.is_dir()));
+        let cwd = tree
+            .or_else(pinned)
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let Some(cmd) = sill_core::config::load().host_terminal() else {
+            self.set_status("no terminal found on the host: set one under Settings → Host terminal");
+            return;
+        };
+        match launch_terminal(&cmd, &cwd) {
+            Ok(()) => self.set_status(&format!("terminal on the host in {}", cwd.display())),
+            Err(e) => self.set_status(&format!("terminal failed: {e:#}")),
+        }
+    }
+
+    /// Select the tab `delta` places over, wrapping around (Ctrl+Shift+Left/Right).
+    fn step_tab(&self, delta: i32) {
+        let ids = self.tabs.ids();
+        if ids.is_empty() {
+            return;
+        }
+        let cur = self.tabs.selected().and_then(|id| ids.iter().position(|i| *i == id)).unwrap_or(0) as i32;
+        let n = ids.len() as i32;
+        self.tabs.select(&ids[(cur + delta).rem_euclid(n) as usize]);
     }
 
     fn close_tree(&self) {
@@ -870,6 +972,8 @@ impl Shelf {
             *view.on_open_folder.borrow_mut() = Some(Box::new(move |p| shelf.toggle_tree(Some(p.to_path_buf()))));
             let shelf = self.clone();
             *view.on_open_file.borrow_mut() = Some(Box::new(move |p, full| shelf.open_file(p, full)));
+            let shelf = self.clone();
+            *view.on_host_terminal.borrow_mut() = Some(Box::new(move || shelf.open_host_terminal()));
         }
         {
             // the top-bar status mirrors the selected view's status
@@ -1065,4 +1169,33 @@ fn effective_desktop(s: &Session) -> (bool, bool) {
     let (x11, dbus) = sill_core::config::desktop_grants(&s.desktop, &sill_core::config::load());
     let (px, pd) = sill_core::policy::Policy::load(&s.policy, &home).map(|p| (p.jail.x11, p.jail.dbus)).unwrap_or((false, false));
     (x11.unwrap_or(px), dbus.unwrap_or(pd))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The command line is split like a shell would, `{cwd}` is filled in and is the working directory.
+    #[test]
+    fn launch_terminal_runs_in_the_folder() {
+        let dir = std::env::temp_dir().join(format!("sill-term-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        launch_terminal("sh -c 'pwd > \"$0/out.txt\"; echo \"$0\" >> \"$0/out.txt\"' {cwd}", &dir).unwrap();
+        let out = dir.join("out.txt");
+        let mut tries = 0;
+        while !out.exists() && tries < 100 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            tries += 1;
+        }
+        let text = std::fs::read_to_string(&out).unwrap();
+        let canon = dir.canonicalize().unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(std::path::Path::new(lines[0]).canonicalize().unwrap(), canon);
+        assert_eq!(lines[1], dir.to_string_lossy());
+        assert!(launch_terminal("", &dir).is_err());
+        assert!(launch_terminal("/nonexistent/terminal", &dir).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

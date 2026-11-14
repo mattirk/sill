@@ -82,6 +82,8 @@ pub struct SessionView {
     pub on_open_file: RefCell<Option<Box<dyn Fn(&std::path::Path, bool)>>>,
     /// Shell toggle in the controls row (M3 wires the terminal pane to it).
     pub on_shell: RefCell<Option<Box<dyn Fn(bool)>>>,
+    /// The shell button's right-click "terminal on the host": the window opens it (Ctrl+Shift+T).
+    pub on_host_terminal: RefCell<Option<Box<dyn Fn()>>>,
     /// Pins that were live when the jail started; changed pins need a session restart.
     live_pins: RefCell<Vec<std::path::PathBuf>>,
     /// Watches on pinned repos' `.git` (commits, index) so the chip numbers follow host activity too.
@@ -373,6 +375,7 @@ impl SessionView {
             on_open_folder: RefCell::new(None),
             on_open_file: RefCell::new(None),
             on_shell: RefCell::new(None),
+            on_host_terminal: RefCell::new(None),
             live_pins: RefCell::new(Vec::new()),
             git_monitors: RefCell::new(Vec::new()),
             denied_monitor: RefCell::new(None),
@@ -549,6 +552,71 @@ impl SessionView {
         }
     }
 
+    /// The shell button's right-click menu: a terminal on the host, and which one (the known
+    /// terminals that are installed; `host_terminal` in `sill.toml`, free-form under Settings).
+    fn fill_terminal_menu(self: &Rc<Self>, pop: &gtk::Popover) {
+        let mbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let open = gtk::Button::with_label("Terminal on the host here    Ctrl+Shift+T");
+        open.add_css_class("flat");
+        open.add_css_class("sill-menu-item");
+        if let Some(l) = open.child().and_then(|c| c.downcast::<gtk::Label>().ok()) {
+            l.set_xalign(0.0);
+        }
+        open.set_tooltip_text(Some("A host process, outside the jail: nothing it does is recorded"));
+        {
+            let v = self.clone();
+            let p = pop.clone();
+            open.connect_clicked(move |_| {
+                p.popdown();
+                if let Some(cb) = v.on_host_terminal.borrow().as_ref() {
+                    cb();
+                }
+            });
+        }
+        mbox.append(&open);
+        let cfg = sill_core::config::load();
+        let current = cfg.host_terminal();
+        let installed = sill_core::config::installed_terminals();
+        // a hand-written command line (Settings) that isn't one of the known ones
+        let custom = cfg.host_terminal.as_deref().map(str::trim).is_some_and(|t| !t.is_empty() && !installed.iter().any(|(_, c)| *c == t));
+        if !installed.is_empty() || custom {
+            let head = gtk::Label::new(Some("which terminal"));
+            head.add_css_class("dim-label");
+            head.set_xalign(0.0);
+            head.set_margin_start(10);
+            head.set_margin_top(6);
+            mbox.append(&head);
+        }
+        let mut group: Option<gtk::CheckButton> = None;
+        for (prog, cmd) in installed {
+            let b = gtk::CheckButton::with_label(prog);
+            b.add_css_class("sill-menu-item");
+            b.set_group(group.as_ref());
+            b.set_active(!custom && current.as_deref() == Some(cmd));
+            let p = pop.clone();
+            b.connect_toggled(move |b| {
+                // connected after set_active: only the person's choice is saved
+                if b.is_active() {
+                    let _ = sill_core::config::update(|c| c.host_terminal = Some(cmd.to_string()));
+                    p.popdown();
+                }
+            });
+            mbox.append(&b);
+            if group.is_none() {
+                group = Some(b);
+            }
+        }
+        if custom {
+            let b = gtk::CheckButton::with_label("as set in Settings");
+            b.add_css_class("sill-menu-item");
+            b.set_group(group.as_ref());
+            b.set_active(true);
+            b.set_sensitive(false);
+            mbox.append(&b);
+        }
+        pop.set_child(Some(&mbox));
+    }
+
     pub fn toggle_shell(self: &Rc<Self>) {
         let on = self.bottom.visible_child_name().as_deref() != Some("shell");
         self.show_shell(on);
@@ -722,7 +790,7 @@ impl SessionView {
         term.set_child(Some(&super::icons::scalable("sill-terminal", fg)));
         term.add_css_class("flat");
         term.add_css_class("sill-ctl-icon");
-        term.set_tooltip_text(Some("Shell inside this session's jail (Ctrl+`)"));
+        term.set_tooltip_text(Some("Shell inside this session's jail (Ctrl+`) · right-click: a terminal on the host"));
         term.set_active(self.bottom.visible_child_name().as_deref() == Some("shell"));
         *self.shell_btn.borrow_mut() = Some(term.clone());
         {
@@ -732,6 +800,23 @@ impl SessionView {
                     cb(t.is_active());
                 }
             });
+        }
+        {
+            // right-click: a terminal on the host, and which one
+            let menu = gtk::Popover::new();
+            menu.add_css_class("sill-menu");
+            menu.set_has_arrow(false);
+            menu.set_parent(&term);
+            let v = self.clone();
+            menu.connect_show(move |pop| v.fill_terminal_menu(pop));
+            let right = gtk::GestureClick::new();
+            right.set_button(3);
+            let m = menu.clone();
+            right.connect_pressed(move |g, _, _, _| {
+                m.popup();
+                g.set_state(gtk::EventSequenceState::Claimed);
+            });
+            term.add_controller(right);
         }
         self.controls_row.append(&term);
         let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);

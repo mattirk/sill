@@ -45,8 +45,8 @@ fn file_icon(path: &Path, is_dir: bool, expanded: bool) -> gio::Icon {
     gio::content_type_get_symbolic_icon(&ctype)
 }
 
-fn children_of(dir: &Path) -> gio::ListStore {
-    let store = gio::ListStore::new::<gtk::StringObject>();
+/// A directory's entries as full paths: directories first, dot files last, case-insensitive.
+fn list_dir(dir: &Path) -> Vec<String> {
     let mut entries: Vec<(bool, String)> = std::fs::read_dir(dir)
         .map(|rd| {
             rd.filter_map(Result::ok)
@@ -54,16 +54,57 @@ fn children_of(dir: &Path) -> gio::ListStore {
                 .collect()
         })
         .unwrap_or_default();
-    // directories first, dot files last, case-insensitive
     entries.sort_by(|a, b| {
         b.0.cmp(&a.0)
             .then(a.1.starts_with('.').cmp(&b.1.starts_with('.')))
             .then(a.1.to_lowercase().cmp(&b.1.to_lowercase()))
     });
-    for (_, name) in entries {
-        store.append(&gtk::StringObject::new(&dir.join(name).to_string_lossy()));
+    entries.into_iter().map(|(_, name)| dir.join(name).to_string_lossy().into_owned()).collect()
+}
+
+/// The directories the tree has listed, by their store (weak: the model drops a store when its row
+/// collapses). A refresh brings each live one up to date in place.
+type Listed = Rc<RefCell<BTreeMap<PathBuf, glib::WeakRef<gio::ListStore>>>>;
+
+fn children_of(dir: &Path, listed: &Listed) -> gio::ListStore {
+    let store = gio::ListStore::new::<gtk::StringObject>();
+    for p in list_dir(dir) {
+        store.append(&gtk::StringObject::new(&p));
     }
+    listed.borrow_mut().insert(dir.to_path_buf(), store.downgrade());
     store
+}
+
+/// Bring a listed directory up to date without rebuilding it: entries that went are removed, new
+/// ones inserted at their place; everything else keeps its row (and what is expanded below it).
+fn sync_children(dir: &Path, store: &gio::ListStore) {
+    let wanted = list_dir(dir);
+    let (mut i, mut w) = (0u32, 0usize);
+    loop {
+        let have = store.item(i).and_downcast::<gtk::StringObject>().map(|o| o.string().to_string());
+        match (have, wanted.get(w)) {
+            (Some(h), Some(want)) if &h == want => {
+                i += 1;
+                w += 1;
+            }
+            (Some(h), Some(want)) => {
+                if wanted[w..].contains(&h) {
+                    store.insert(i, &gtk::StringObject::new(want)); // new, sorts before `h`
+                    i += 1;
+                    w += 1;
+                } else {
+                    store.remove(i); // gone
+                }
+            }
+            (Some(_), None) => store.remove(i),
+            (None, Some(want)) => {
+                store.append(&gtk::StringObject::new(want));
+                i += 1;
+                w += 1;
+            }
+            (None, None) => break,
+        }
+    }
 }
 
 pub struct FolderTree {
@@ -91,6 +132,7 @@ pub struct FolderTree {
     pub on_close: RefCell<Option<Box<dyn Fn()>>>,
     /// A pin of this session changed: the window refreshes its chips and, for a folder, its jail.
     pub on_pin: RefCell<Option<Box<dyn Fn(&str)>>>,
+    listed: Listed,
 }
 
 impl FolderTree {
@@ -122,9 +164,13 @@ impl FolderTree {
         let pinned: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
         let elsewhere: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
         let roots = gio::ListStore::new::<gtk::StringObject>();
-        let tree = gtk::TreeListModel::new(roots.clone(), false, false, |item| {
-            let path = PathBuf::from(item.downcast_ref::<gtk::StringObject>()?.string().as_str());
-            if path.is_dir() { Some(children_of(&path).upcast()) } else { None }
+        let listed: Listed = Rc::new(RefCell::new(BTreeMap::new()));
+        let tree = gtk::TreeListModel::new(roots.clone(), false, false, {
+            let listed = listed.clone();
+            move |item| {
+                let path = PathBuf::from(item.downcast_ref::<gtk::StringObject>()?.string().as_str());
+                if path.is_dir() { Some(children_of(&path, &listed).upcast()) } else { None }
+            }
         });
         let selection = gtk::SingleSelection::new(Some(tree.clone()));
         selection.set_autoselect(false);
@@ -283,6 +329,7 @@ impl FolderTree {
             on_open: RefCell::new(None),
             on_close: RefCell::new(None),
             on_pin: RefCell::new(None),
+            listed,
         });
         *tree_rc.borrow_mut() = Some(Rc::downgrade(&t));
         {
@@ -318,6 +365,13 @@ impl FolderTree {
             });
         }
         t
+    }
+
+    /// The directory of the selected row (a file's parent): where "a terminal here" opens.
+    pub fn selected_dir(&self) -> Option<PathBuf> {
+        let row = self.selection.selected_item().and_downcast::<gtk::TreeListRow>()?;
+        let p = path_of(&row)?;
+        if p.is_dir() { Some(p) } else { p.parent().map(Path::to_path_buf) }
     }
 
     pub fn scope(&self) -> Option<PathBuf> {
@@ -475,6 +529,12 @@ impl FolderTree {
         }
         *self.badges.borrow_mut() = badges;
         *self.changes.borrow_mut() = all;
+        // directories already listed: files that appeared or went since, in place
+        self.listed.borrow_mut().retain(|_, w| w.upgrade().is_some());
+        let listed: Vec<(PathBuf, gio::ListStore)> = self.listed.borrow().iter().filter_map(|(d, w)| w.upgrade().map(|s| (d.clone(), s))).collect();
+        for (dir, store) in listed {
+            sync_children(&dir, &store);
+        }
         // keep the tree if the roots didn't change (expansion state survives)
         let current: Vec<String> = (0..self.roots.n_items())
             .filter_map(|i| self.roots.item(i).and_downcast::<gtk::StringObject>().map(|o| o.string().to_string()))
@@ -508,5 +568,48 @@ impl FolderTree {
             }
             i += 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(store: &gio::ListStore) -> Vec<String> {
+        (0..store.n_items())
+            .filter_map(|i| store.item(i).and_downcast::<gtk::StringObject>())
+            .filter_map(|o| Path::new(o.string().as_str()).file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect()
+    }
+
+    /// A refresh lists what appeared and drops what went, keeping the other rows in place.
+    #[test]
+    fn sync_children_edits_the_store_in_place() {
+        if gtk::init().is_err() {
+            eprintln!("no display: skipped"); // gtk::StringObject needs GTK up
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("sill-tree-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("b.txt"), "").unwrap();
+        std::fs::write(dir.join("README.md"), "").unwrap();
+        let listed: Listed = Rc::new(RefCell::new(BTreeMap::new()));
+        let store = children_of(&dir, &listed);
+        assert_eq!(names(&store), ["src", "b.txt", "README.md"]);
+        let first = store.item(0).unwrap(); // the `src` row object must survive the sync
+        std::fs::write(dir.join("a.txt"), "").unwrap(); // new, sorts first among the files
+        std::fs::write(dir.join(".hidden"), "").unwrap(); // new, dot file: last
+        std::fs::remove_file(dir.join("b.txt")).unwrap(); // gone
+        sync_children(&dir, &store);
+        assert_eq!(names(&store), ["src", "a.txt", "README.md", ".hidden"]);
+        assert_eq!(store.item(0).unwrap(), first);
+        // nothing changed: nothing moves
+        sync_children(&dir, &store);
+        assert_eq!(names(&store), ["src", "a.txt", "README.md", ".hidden"]);
+        // the directory went: the store empties
+        std::fs::remove_dir_all(&dir).unwrap();
+        sync_children(&dir, &store);
+        assert_eq!(store.n_items(), 0);
     }
 }

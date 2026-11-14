@@ -1,6 +1,6 @@
 //! Shelf settings file `~/.config/sill/sill.toml` (SPEC §4.9).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -30,6 +30,42 @@ pub struct Config {
     /// session menu (stored per session).
     pub desktop_x11: Option<bool>,
     pub desktop_dbus: Option<bool>,
+    /// The terminal the shelf opens on the host (Ctrl+Shift+T, the shell button's right-click): a
+    /// command line, `{cwd}` replaced by the directory (it is also the process's working directory).
+    /// Unset = the first of [`HOST_TERMINALS`] found in `PATH`.
+    pub host_terminal: Option<String>,
+}
+
+/// Terminals the shelf knows, in preference order: (program, command line). Programs that start
+/// their shell in the inherited working directory need no flag; the others are told.
+pub const HOST_TERMINALS: &[(&str, &str)] = &[
+    ("x-terminal-emulator", "x-terminal-emulator"),
+    ("gnome-terminal", "gnome-terminal --working-directory={cwd}"),
+    ("kitty", "kitty --directory {cwd}"),
+    ("alacritty", "alacritty --working-directory {cwd}"),
+    ("wezterm", "wezterm start --cwd {cwd}"),
+    ("konsole", "konsole --workdir {cwd}"),
+    ("xfce4-terminal", "xfce4-terminal --working-directory={cwd}"),
+    ("tilix", "tilix --working-directory={cwd}"),
+    ("terminator", "terminator --working-directory={cwd}"),
+    ("foot", "foot --working-directory={cwd}"),
+    ("urxvt", "urxvt -cd {cwd}"),
+    ("xterm", "xterm"),
+];
+
+/// Is `program` on `PATH`?
+pub fn in_path(program: &str) -> bool {
+    if program.contains('/') {
+        return Path::new(program).is_file();
+    }
+    std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).any(|d| d.join(program).is_file()))
+        .unwrap_or(false)
+}
+
+/// The known terminals that are installed, in preference order.
+pub fn installed_terminals() -> Vec<(&'static str, &'static str)> {
+    HOST_TERMINALS.iter().copied().filter(|(p, _)| in_path(p)).collect()
 }
 
 /// The per-session desktop choices (stored in `sessions.desktop`): (id, label).
@@ -86,6 +122,14 @@ impl Config {
     /// The factor applied to the desktop font: zoom × [`TEXT_SCALE_BASE`].
     pub fn text_scale(&self) -> f64 {
         self.zoom() * TEXT_SCALE_BASE
+    }
+
+    /// The host terminal's command line: as configured, else the first installed known one.
+    pub fn host_terminal(&self) -> Option<String> {
+        match self.host_terminal.as_deref().map(str::trim) {
+            Some(t) if !t.is_empty() => Some(t.to_string()),
+            _ => installed_terminals().first().map(|(_, cmd)| cmd.to_string()),
+        }
     }
 
     /// A valid default page id.

@@ -58,6 +58,8 @@ pub struct Viewer {
     weak: RefCell<Weak<Viewer>>,
     /// The close button (and Escape past the first entry) asks the owner to close the viewer.
     pub on_close: RefCell<Option<Box<dyn Fn()>>>,
+    /// A file was written (Ctrl+S): the owner refreshes what shows its state (tree badges, chips).
+    pub on_saved: RefCell<Option<Box<dyn Fn(&Path)>>>,
 }
 
 impl Viewer {
@@ -157,6 +159,7 @@ impl Viewer {
             history: RefCell::new(Vec::new()),
             weak: RefCell::new(Weak::new()),
             on_close: RefCell::new(None),
+            on_saved: RefCell::new(None),
         });
         *v.weak.borrow_mut() = Rc::downgrade(&v);
         {
@@ -310,6 +313,9 @@ impl Viewer {
                 self.discard_armed.set(false);
                 self.update_title();
                 self.say(&format!("saved {}", path.display()));
+                if let Some(cb) = self.on_saved.borrow().as_ref() {
+                    cb(&path);
+                }
             }
             Err(e) => self.say(&format!("save failed: {e}")),
         }

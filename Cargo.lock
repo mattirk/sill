@@ -1773,6 +1773,7 @@ dependencies = [
  "pulldown-cmark",
  "rustix",
  "serde_json",
+ "shell-words",
  "sill-core",
  "sourceview5",
  "toml",
