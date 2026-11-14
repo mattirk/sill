@@ -87,7 +87,7 @@ pub enum Event {
     Space(Result<sill_proto::storage::Space, String>),
     ScanCaches,
     Caches(Result<sill_proto::storage::Caches, String>),
-    ClearCache(String),
+    ClearCaches,
     CancelClear,
     Cleared(Result<(), String>),
     OpenStorage,
@@ -114,8 +114,8 @@ pub struct State {
     caches: Option<Result<sill_proto::storage::Caches, String>>,
     space_reading: bool,
     scanning: bool,
-    clearing: Option<String>,
-    armed_clear: Option<String>,
+    clearing: bool,
+    armed_clear: bool,
     space_read_at: Option<std::time::Instant>,
     /// What is under way ("Restarting…"); the buttons wait for it.
     busy: Option<&'static str>,
@@ -302,10 +302,10 @@ impl App {
                 self.vm.space = Some(result);
             }
             Event::ScanCaches => {
-                if self.vm.scanning || self.vm.clearing.is_some() {
+                if self.vm.scanning || self.vm.clearing {
                     return Task::none();
                 }
-                self.vm.armed_clear = None;
+                self.vm.armed_clear = false;
                 if self.demo {
                     self.vm.caches = Some(Ok(sill_proto::storage::Caches {
                         caches: vec![sill_proto::storage::BuildCache {
@@ -343,29 +343,32 @@ impl App {
                 self.vm.scanning = false;
                 self.vm.caches = Some(result);
             }
-            Event::CancelClear => self.vm.armed_clear = None,
-            Event::ClearCache(id) => {
-                if self.vm.scanning || self.vm.clearing.is_some() {
+            Event::CancelClear => self.vm.armed_clear = false,
+            Event::ClearCaches => {
+                if self.vm.scanning || self.vm.clearing {
                     return Task::none();
                 }
-                let eligible = self
+                let ids: Vec<String> = self
                     .vm
                     .caches
                     .as_ref()
                     .and_then(|r| r.as_ref().ok())
-                    .is_some_and(|r| {
+                    .map(|r| {
                         r.caches
                             .iter()
-                            .any(|c| c.session_id == id && !c.active && c.problem.is_none())
-                    });
-                if !eligible {
+                            .filter(|c| !c.active && c.problem.is_none())
+                            .map(|c| c.session_id.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if ids.is_empty() {
                     return Task::none();
                 }
-                if self.vm.armed_clear.as_ref() != Some(&id) {
-                    self.vm.armed_clear = Some(id);
+                if !self.vm.armed_clear {
+                    self.vm.armed_clear = true;
                     return Task::none();
                 }
-                self.vm.armed_clear = None;
+                self.vm.armed_clear = false;
                 if self.demo {
                     self.vm.said = Some(Err(DEMO.into()));
                     return Task::none();
@@ -373,31 +376,44 @@ impl App {
                 let Some(connect) = self.connect.clone() else {
                     return Task::none();
                 };
-                self.vm.clearing = Some(id.clone());
+                self.vm.clearing = true;
                 self.vm.said = None;
                 return blocking(
                     move || {
                         let client = connect().map_err(|e| format!("{e:#}"))?;
-                        client
-                            .call_within::<serde_json::Value>(
+                        let mut failures = Vec::new();
+                        for id in ids {
+                            if let Err(error) = client.call_within::<serde_json::Value>(
                                 "_sill/storage.clear_build_cache",
-                                sill_proto::storage::ClearBuildCache { session_id: id },
+                                sill_proto::storage::ClearBuildCache {
+                                    session_id: id.clone(),
+                                },
                                 std::time::Duration::from_secs(120),
-                            )
-                            .map(|_| ())
-                            .map_err(|e| format!("{e:#}"))
+                            ) {
+                                failures.push(format!("{id}: {error:#}"));
+                            }
+                        }
+                        if failures.is_empty() {
+                            Ok(())
+                        } else {
+                            Err(format!(
+                                "Some build caches could not be cleared: {}",
+                                failures.join("; ")
+                            ))
+                        }
                     },
                     |r| msg(Event::Cleared(r)),
                 );
             }
             Event::Cleared(result) => {
-                self.vm.clearing = None;
-                self.vm.said = Some(result.map(|()| {
-                    "Build cache cleared. Refresh the list before clearing another cache.".into()
-                }));
+                self.vm.clearing = false;
+                self.vm.said = Some(result.map(|()| "All eligible build caches cleared.".into()));
                 // Never retry a timed-out deletion. A fresh scan shows what remains.
                 self.vm.caches = None;
-                return self.vm_event(Event::ReadSpace);
+                return Task::batch([
+                    self.vm_event(Event::ReadSpace),
+                    self.vm_event(Event::ScanCaches),
+                ]);
             }
             Event::Read => {
                 if self.demo {
@@ -596,8 +612,7 @@ impl App {
                     } else {
                         "Scan build caches"
                     },
-                    (supported && !vm.scanning && vm.clearing.is_none())
-                        .then(|| msg(Event::ScanCaches))
+                    (supported && !vm.scanning && !vm.clearing).then(|| msg(Event::ScanCaches))
                 ),
             ]
             .spacing(8),
@@ -613,10 +628,28 @@ impl App {
                             .color(P.fg_dim),
                     );
                 }
+                let eligible = report
+                    .caches
+                    .iter()
+                    .any(|c| !c.active && c.problem.is_none());
+                let mut actions = row![quiet_button(
+                    if vm.clearing {
+                        "Clearing…"
+                    } else if vm.armed_clear {
+                        "Confirm clear all build caches"
+                    } else {
+                        "Clear all build caches"
+                    },
+                    (supported && eligible && !vm.scanning && !vm.clearing)
+                        .then(|| msg(Event::ClearCaches)),
+                )]
+                .spacing(8);
+                if vm.armed_clear {
+                    actions = actions.push(quiet_button("Cancel", Some(msg(Event::CancelClear))));
+                }
+                body = body.push(actions);
                 for cache in &report.caches {
                     let id = &cache.session_id;
-                    let armed = vm.armed_clear.as_ref() == Some(id);
-                    let clearing = vm.clearing.as_ref() == Some(id);
                     let title = if cache.title.is_empty() {
                         id.clone()
                     } else {
@@ -637,29 +670,10 @@ impl App {
                     if let Some(problem) = &cache.problem {
                         line = line.push(text(problem).size(style::SMALL).color(P.warning));
                     }
-                    let mut actions = row![quiet_button(
-                        if cache.active {
-                            "Running"
-                        } else if clearing {
-                            "Clearing…"
-                        } else if armed {
-                            "Confirm clear build cache"
-                        } else {
-                            "Clear build cache"
-                        },
-                        (supported
-                            && !cache.active
-                            && cache.problem.is_none()
-                            && !vm.scanning
-                            && vm.clearing.is_none())
-                        .then(|| msg(Event::ClearCache(id.clone()))),
-                    )]
-                    .spacing(8);
-                    if armed {
-                        actions =
-                            actions.push(quiet_button("Cancel", Some(msg(Event::CancelClear))));
+                    if cache.active {
+                        line = line.push(text("Running").size(style::SMALL).color(P.fg_dim));
                     }
-                    body = body.push(line.push(actions));
+                    body = body.push(line);
                 }
             }
             Some(Err(why)) => body = body.push(text(why).size(style::SMALL).color(P.warning)),
@@ -1029,16 +1043,15 @@ mod tests {
         let (mut app, _) = App::new(true, None);
         let _ = app.vm_event(Event::Read);
         let _ = app.vm_event(Event::ScanCaches);
-        let id = "604fd5e1".to_string();
-        let _ = app.vm_event(Event::ClearCache(id.clone()));
-        assert_eq!(app.vm.armed_clear, Some(id.clone()));
-        assert!(app.vm.clearing.is_none());
+        let _ = app.vm_event(Event::ClearCaches);
+        assert!(app.vm.armed_clear);
+        assert!(!app.vm.clearing);
         let _ = app.vm_event(Event::CancelClear);
-        assert!(app.vm.armed_clear.is_none());
+        assert!(!app.vm.armed_clear);
         app.vm.caches.as_mut().unwrap().as_mut().unwrap().caches[0].active = true;
-        let _ = app.vm_event(Event::ClearCache(id));
-        assert!(app.vm.armed_clear.is_none());
-        assert!(app.vm.clearing.is_none());
+        let _ = app.vm_event(Event::ClearCaches);
+        assert!(!app.vm.armed_clear);
+        assert!(!app.vm.clearing);
     }
 
     #[test]
@@ -1050,7 +1063,7 @@ mod tests {
         let disk = &mut app.vm.space.as_mut().unwrap().as_mut().unwrap().state;
         disk.used = 62 << 30;
         disk.available = 1 << 30;
-        let _ = app.vm_event(Event::ClearCache("604fd5e1".into()));
+        let _ = app.vm_event(Event::ClearCaches);
         let content = container(app.vm_storage()).padding(20).width(Fill);
         let mut ui =
             iced_test::Simulator::with_size(crate::snapshots::settings(), (680.0, 600.0), content);
