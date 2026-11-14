@@ -28,7 +28,7 @@ const STREAM_MS: u64 = 80;
 struct ToolRow {
     row: gtk::Box,
     title: gtk::Label,
-    mark: gtk::Label,
+    mark: gtk::DrawingArea,
     body: gtk::Label,
     /// A file edit as a unified diff (hidden until there is one), filled live as updates arrive.
     diff: sourceview5::View,
@@ -53,7 +53,7 @@ struct Children {
 /// mark) that opens the list of rows. File edits and other steps make separate cards.
 struct ToolGroup {
     header_title: gtk::Label,
-    header_mark: gtk::Label,
+    header_mark: gtk::DrawingArea,
     rows: gtk::Box,
     ids: RefCell<Vec<String>>,
     edit: bool,
@@ -477,24 +477,61 @@ impl Conversation {
         }
     }
 
-    /// Status mark and CSS class for an ACP tool status (`Debug` name).
-    fn status_mark(status: &str) -> (&'static str, &'static str) {
+    /// CSS class for an ACP tool status (`Debug` name); the class also picks what the mark draws.
+    fn status_class(status: &str) -> &'static str {
         match status {
-            "Pending" => ("·", "sill-mark-pending"),
-            "InProgress" => ("…", "sill-mark-running"),
-            "Completed" => ("✓", "sill-mark-done"),
-            "Failed" => ("✕", "sill-mark-failed"),
-            _ => ("·", "sill-mark-pending"),
+            "InProgress" => "sill-mark-running",
+            "Completed" => "sill-mark-done",
+            "Failed" => "sill-mark-failed",
+            _ => "sill-mark-pending",
         }
     }
 
-    fn set_mark(label: &gtk::Label, status: &str) {
-        let (glyph, class) = Self::status_mark(status);
-        label.set_text(glyph);
+    /// A tool row's status mark: thin lines drawn in the widget's own colour (so the CSS classes'
+    /// colour and opacity, and a theme change, apply) — a check when done, a small cross when
+    /// failed, a ring while running, a dot while pending. Font glyphs read heavy and differ by font.
+    fn mark_area() -> gtk::DrawingArea {
+        let area = gtk::DrawingArea::new();
+        area.add_css_class("sill-tool-mark");
+        area.set_content_width(12);
+        area.set_content_height(12);
+        area.set_valign(gtk::Align::Center);
+        area.set_draw_func(|w, cr, width, height| {
+            let c = w.color();
+            cr.set_source_rgba(c.red() as f64, c.green() as f64, c.blue() as f64, c.alpha() as f64);
+            cr.set_line_width(1.3);
+            cr.set_line_cap(gtk::cairo::LineCap::Round);
+            cr.set_line_join(gtk::cairo::LineJoin::Round);
+            // a 12 px box, centred
+            cr.translate((width as f64 - 12.0) / 2.0, (height as f64 - 12.0) / 2.0);
+            if w.has_css_class("sill-mark-done") {
+                cr.move_to(2.5, 6.5);
+                cr.line_to(5.0, 9.0);
+                cr.line_to(9.5, 3.5);
+            } else if w.has_css_class("sill-mark-failed") {
+                cr.move_to(3.5, 3.5);
+                cr.line_to(8.5, 8.5);
+                cr.move_to(8.5, 3.5);
+                cr.line_to(3.5, 8.5);
+            } else if w.has_css_class("sill-mark-running") {
+                cr.arc(6.0, 6.0, 3.0, 0.0, 2.0 * std::f64::consts::PI);
+            } else {
+                cr.arc(6.0, 6.0, 1.2, 0.0, 2.0 * std::f64::consts::PI);
+                let _ = cr.fill();
+                return;
+            }
+            let _ = cr.stroke();
+        });
+        area
+    }
+
+    fn set_mark(area: &gtk::DrawingArea, status: &str) {
+        let class = Self::status_class(status);
         for c in ["sill-mark-pending", "sill-mark-running", "sill-mark-done", "sill-mark-failed"] {
-            label.remove_css_class(c);
+            area.remove_css_class(c);
         }
-        label.add_css_class(class);
+        area.add_css_class(class);
+        area.queue_draw();
     }
 
     /// The children slot of a delegation row, made on first use.
@@ -602,9 +639,7 @@ impl Conversation {
         title_l.set_ellipsize(gtk::pango::EllipsizeMode::End);
         title_l.set_hexpand(true);
         title_l.set_tooltip_text(Some(title));
-        let mark = gtk::Label::new(None);
-        mark.add_css_class("sill-tool-mark");
-        mark.set_width_chars(1);
+        let mark = Self::mark_area();
         Self::set_mark(&mark, status);
         row.append(&glyph);
         row.append(&title_l);
@@ -720,9 +755,7 @@ impl Conversation {
         header_title.set_single_line_mode(true);
         header_title.set_ellipsize(gtk::pango::EllipsizeMode::End);
         header_title.set_hexpand(true);
-        let header_mark = gtk::Label::new(None);
-        header_mark.add_css_class("sill-tool-mark");
-        header_mark.set_width_chars(1);
+        let header_mark = Self::mark_area();
         header.append(&glyph);
         header.append(&header_title);
         header.append(&header_mark);
@@ -1250,7 +1283,7 @@ button.sill-copy > image { -gtk-icon-size: 0.9em; }
 .sill-tool-count { font-size: 85%; }
 .sill-tool-auto-tag { font-size: 75%; opacity: 0.45; padding: 0 5px; border: 1px solid alpha(@view_fg_color, 0.3); }
 .sill-tool-said { font-size: 90%; padding: 4px 10px 6px 28px; color: alpha(@view_fg_color, 0.7); }
-.sill-tool-mark { font-family: monospace; }
+.sill-tool-mark { margin: 0 2px; }
 .sill-mark-pending { opacity: 0.4; }
 .sill-mark-running { color: @accent_color; }
 .sill-mark-done { opacity: 0.5; }
