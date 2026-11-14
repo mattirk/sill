@@ -252,6 +252,13 @@ impl Store {
         Ok(())
     }
 
+    /// The session ended; its summary stays as it is (memory off, or a reopened session closed
+    /// without a turn keeps the summary it had).
+    pub fn end_only(&self, id: &str) -> Result<()> {
+        self.conn.execute("UPDATE sessions SET ended_at = ?2 WHERE id = ?1", params![id, now()])?;
+        Ok(())
+    }
+
     /// The session's recall scope (docs/memory.md §2.3); "" = the default from its pins.
     pub fn set_memory_scope(&self, id: &str, scope: &str) -> Result<()> {
         self.conn.execute("UPDATE sessions SET memory_scope = ?2 WHERE id = ?1", params![id, scope])?;

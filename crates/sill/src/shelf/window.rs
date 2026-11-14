@@ -1236,9 +1236,11 @@ impl Shelf {
     }
 
     /// The tab closes: the session ends (docs/memory.md §2.2). With memory on, its agent — when
-    /// it is up, idle and has said anything — writes the summary as its last turn while the tab
-    /// stays; then the end is recorded, the view goes and the jail stops. Without the agent, or
-    /// with memory off, sill's own summary from the facts, and the same end at once.
+    /// it is up, idle and saw the conversation — writes the summary as its last turn while the tab
+    /// stays; then the end is recorded, the view goes and the jail stops. Without the agent, sill's
+    /// own summary from the facts, and the same end at once. A reopened session closed without a
+    /// turn keeps the summary it had (decision 13: no cold agent dressed as a continuation). With
+    /// memory off only `ended_at` is set, the summary stays empty.
     fn close_session(self: &Rc<Self>, id: &str) {
         let view = self.views.borrow().get(id).cloned();
         // closed again while the summary is written: end now with what the agent has so far
@@ -1259,18 +1261,21 @@ impl Shelf {
         let prompt = sill_core::memory::summary_prompt(&facts, &home);
         let shelf = self.clone();
         let sid = id.to_string();
+        let memory = sill_core::config::load().memory();
+        let keep_old = !view.agent_saw_session() && !stored.summary.is_empty();
         let finish = move |answer: Option<String>| {
-            let (summary, kind) = match answer.map(|a| a.trim().to_string()).filter(|a| !a.is_empty()) {
-                Some(a) => (a, "agent"),
-                None => (sill_core::memory::auto_summary(&facts, sill_core::store::now(), &home), "auto"),
+            let agent = answer.map(|a| a.trim().to_string()).filter(|a| !a.is_empty());
+            let _ = match agent {
+                _ if !memory || keep_old => shelf.store.end_only(&sid),
+                Some(a) => shelf.store.end(&sid, &a, "agent"),
+                None => shelf.store.end(&sid, &sill_core::memory::auto_summary(&facts, sill_core::store::now(), &home), "auto"),
             };
-            let _ = shelf.store.end(&sid, &summary, kind);
             refresh_memory();
             shelf.close_view(&sid);
             stop_then(&sid, || {});
         };
         let said_anything = self.store.count_kind(id, "agent").unwrap_or(0) > 0;
-        if sill_core::config::load().memory() && said_anything && view.agent_idle() {
+        if memory && !keep_old && said_anything && view.agent_saw_session() && view.agent_idle() {
             self.set_status("the session ends: its summary is being written");
             view.ask_summary(&prompt, Box::new(finish));
         } else {

@@ -116,6 +116,10 @@ pub fn snapshot_dir() -> PathBuf {
 /// Write the jail's snapshot anew from `sill.db` (its own connection: callable off the GTK
 /// thread), or — memory off — remove it. Called when a session ends or is deleted, and at start.
 pub fn refresh_snapshot() -> Result<()> {
+    // one at a time: two refreshes (a session's end, then a delete) must rename in the order they
+    // read, or the deleted session comes back to the jail until the next one
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = snapshot_dir();
     if !crate::config::load().memory() {
         let _ = std::fs::remove_file(dir.join(sill_memory::SNAPSHOT_FILE));
@@ -144,6 +148,9 @@ pub fn recall(store: &Store, s: &Session, pins: &[PathBuf], home: &Path, n: usiz
         return String::new();
     }
     let scope = Scope::resolve(&s.memory_scope, !pins.is_empty());
+    if scope == Scope::Off || n == 0 {
+        return String::new(); // no block at all, not even the pointer at sill-memory (§4)
+    }
     let all = sill_memory::sessions(store.conn()).unwrap_or_default();
     let follows = Some(s.follows.as_str()).filter(|f| !f.is_empty());
     let picked = sill_memory::recall_pick(&all, &s.id, pins, scope, n, follows);

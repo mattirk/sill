@@ -108,6 +108,12 @@ pub struct SessionView {
     /// The session is ending and its agent writes the summary (docs/memory.md §2.2): what gets the
     /// answer when the turn stops — or None when the agent is gone or too slow.
     summarizing: RefCell<Option<Box<dyn FnOnce(Option<String>)>>>,
+    /// The summary turn's text so far, across its tool calls (each one flushes `agent_md`).
+    summary_text: RefCell<String>,
+    /// Prompts the person sent in this view's life, and whether the agent resumed its own context
+    /// at Ready: together, whether the agent has anything to summarize (docs/memory.md decision 13).
+    turns_this_run: std::cell::Cell<usize>,
+    resumed: std::cell::Cell<bool>,
     /// Stored entry `seq` per live tool-call id, so title/status updates reach the transcript too.
     tool_seqs: RefCell<HashMap<String, i64>>,
     /// After a resume with replay: ignore replayed events until the first turn starts.
@@ -433,6 +439,9 @@ impl SessionView {
             store,
             agent_md: RefCell::new(String::new()),
             summarizing: RefCell::new(None),
+            summary_text: RefCell::new(String::new()),
+            turns_this_run: std::cell::Cell::new(0),
+            resumed: std::cell::Cell::new(false),
             tool_seqs: RefCell::new(HashMap::new()),
             replaying: RefCell::new(false),
             on_busy: RefCell::new(None),
@@ -2085,6 +2094,13 @@ impl SessionView {
         }
     }
 
+    /// The agent saw this conversation: it resumed its own context, or the person sent it a prompt
+    /// since this view opened. A cold agent after a failed `session/load` has neither, and must not
+    /// be asked to summarize what it never saw.
+    pub fn agent_saw_session(&self) -> bool {
+        self.resumed.get() || self.turns_this_run.get() > 0
+    }
+
     /// The agent is up and between turns: it can be asked one more thing.
     pub fn agent_idle(&self) -> bool {
         self.driver.borrow().is_some() && self.ready.get() && !self.busy.get()
@@ -2110,14 +2126,27 @@ impl SessionView {
         let weak = Rc::downgrade(self);
         glib::timeout_add_local_once(std::time::Duration::from_secs(90), move || {
             let Some(v) = weak.upgrade() else { return };
-            let cb = v.summarizing.borrow_mut().take();
-            if let Some(cb) = cb {
-                if let Some(d) = v.driver.borrow().as_ref() {
-                    let _ = d.commands.try_send(Command::Cancel);
-                }
-                cb(None);
-            }
+            v.end_summary_turn("cut short: the agent had not finished after 90 seconds");
         });
+    }
+
+    /// Stop the summary turn before the agent stopped it: the turn is cancelled and what it wrote
+    /// so far, marked with `why`, is the answer (None when it had written nothing).
+    fn end_summary_turn(&self, why: &str) {
+        let Some(cb) = self.summarizing.borrow_mut().take() else { return };
+        if let Some(d) = self.driver.borrow().as_ref() {
+            let _ = d.commands.try_send(Command::Cancel);
+        }
+        let partial = self.take_summary_text();
+        let answer = (!partial.is_empty()).then(|| format!("{partial}\n({why})"));
+        glib::idle_add_local_once(move || cb(answer));
+    }
+
+    /// The summary turn's text: what its tool calls flushed, then what is still streaming.
+    fn take_summary_text(&self) -> String {
+        let mut text = std::mem::take(&mut *self.summary_text.borrow_mut());
+        text.push_str(&self.agent_md.borrow());
+        text.trim().to_string()
     }
 
     /// Send a prompt; false if the agent is busy or the session is down.
@@ -2129,13 +2158,7 @@ impl SessionView {
     /// The tab was closed again while the agent writes its summary: the turn is cancelled and what
     /// it wrote so far is the summary, marked as cut short (None when it had written nothing).
     pub fn cut_summary_short(&self) {
-        let Some(cb) = self.summarizing.borrow_mut().take() else { return };
-        if let Some(d) = self.driver.borrow().as_ref() {
-            let _ = d.commands.try_send(Command::Cancel);
-        }
-        let partial = self.agent_md.borrow().trim().to_string();
-        let answer = (!partial.is_empty()).then(|| format!("{partial}\n(cut short: the tab was closed again while the agent wrote this)"));
-        glib::idle_add_local_once(move || cb(answer));
+        self.end_summary_turn("cut short: the tab was closed again while the agent wrote this");
     }
 
     pub fn send(self: &Rc<Self>, text: &str) -> bool {
@@ -2196,6 +2219,7 @@ impl SessionView {
                 let id = self.id();
                 let _ = self.store.append(&id, "user", text, &names.join("\n"));
                 let _ = self.store.touch(&id);
+                self.turns_this_run.set(self.turns_this_run.get() + 1);
                 lap("store append+touch");
                 // first prompt names the session (keywords), unless it has nothing to say
                 let first = self.store.count_kind(&id, "user").map(|n| n <= 1).unwrap_or(false);
@@ -2223,6 +2247,10 @@ impl SessionView {
         let md = std::mem::take(&mut *self.agent_md.borrow_mut());
         if !md.trim().is_empty() {
             let _ = self.store.append(&self.id(), "agent", &md, "");
+            // the summary turn's text survives its tool calls
+            if self.summarizing.borrow().is_some() {
+                self.summary_text.borrow_mut().push_str(&md);
+            }
         }
     }
 
@@ -2235,6 +2263,7 @@ impl SessionView {
                 let _ = self.store.set_acp_session_id(&self.id(), session_id);
                 self.session.borrow_mut().acp_session_id = Some(session_id.clone());
                 *self.replaying.borrow_mut() = *resumed;
+                self.resumed.set(*resumed);
                 if !*resumed {
                     // a fresh ACP session (also after a login's retry): its context has no standing
                     // block yet, whatever this agent process was sent before
@@ -2317,10 +2346,10 @@ impl SessionView {
                     cb(&self.id(), false);
                 }
                 // the summary turn: its text goes to whoever asked, once this event is handled
-                let answer = self.agent_md.borrow().clone();
                 self.flush_agent();
                 let summary_cb = self.summarizing.borrow_mut().take();
                 if let Some(cb) = summary_cb {
+                    let answer = self.take_summary_text();
                     glib::idle_add_local_once(move || cb(Some(answer)));
                 }
                 let id = self.id();
@@ -2368,6 +2397,7 @@ impl SessionView {
                 // an agent that went away mid-summary: the mechanical one it is
                 let summary_cb = self.summarizing.borrow_mut().take();
                 if let Some(cb) = summary_cb {
+                    self.summary_text.borrow_mut().clear();
                     glib::idle_add_local_once(move || cb(None));
                 }
             }
