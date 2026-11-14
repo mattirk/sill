@@ -2,8 +2,9 @@
 # Started by sill.socket on the first connection; always on from then (decision 4).
 #   systemctl --user status sill          # is it up
 #   journalctl --user -u sill -f          # its log
-#   systemctl --user restart sill         # after an update — sessions survive it (KillMode=process)
-# Delegate=yes: the daemon puts each session in a cgroup of its own below this unit (M1).
+#   systemctl --user restart sill         # after an update — sessions survive it: each is a scope
+#                                         # sill-<id>.scope under sill.slice, not part of this unit
+#   systemctl --user set-property sill.slice MemoryMax=16G   # cap every session together
 [Unit]
 Description=sill daemon
 Requires=sill.socket
@@ -14,6 +15,4 @@ Type=simple
 ExecStart=/usr/local/bin/sill daemon
 Restart=on-failure
 RestartSec=1
-KillMode=process
-Delegate=yes
 Slice=app.slice

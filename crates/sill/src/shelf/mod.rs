@@ -4,6 +4,7 @@
 mod agents_page;
 mod changes;
 mod clamp;
+pub mod client;
 mod conversation;
 mod fonts;
 mod herring;

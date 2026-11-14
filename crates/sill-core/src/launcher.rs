@@ -1,15 +1,22 @@
-//! Launcher modes (SPEC §4.7): how a session's `sill launch` process is started, limited, stopped
-//! and logged. The systemd user instance is the preferred launcher, not a prerequisite.
+//! How a session's `sill launch` process is started, limited, stopped and logged (SPEC §4.7,
+//! docs/daemon.md §3.1 decision 10): a **child of the daemon**, in a cgroup of its own.
 //!
-//! - `unit`: `systemd-run --user --unit sill-<id> …`; limits are unit properties, logs go to the
-//!   journal, stop is `systemctl --user stop`.
-//! - `direct`: `<exe> launch …` detached (setsid, double fork, fds closed); limits through an own
-//!   cgroup under a delegated subtree when one exists (`sill init`, SPEC §4.12), logs under
-//!   `$XDG_RUNTIME_DIR/sill/<id>/`, stop is `cgroup.kill` or SIGKILL to bwrap.
+//! - With a systemd user manager the child runs in a transient **scope** `sill-<id>.scope` under
+//!   `sill.slice` (`systemd-run --user --scope`: systemd makes the cgroup, writes the policy's
+//!   limits into it, and the command is exec'd in place — the pid is ours to wait on). The slice is
+//!   the aggregate: `systemctl --user set-property sill.slice MemoryMax=…` caps every session at
+//!   once. The daemon's own unit stays a plain cgroup, so it restarts — a delegated unit that had
+//!   enabled controllers for session cgroups could never be entered again (cgroup v2's
+//!   no-internal-processes rule), which is why the first cut of decision 10 was changed.
+//! - Without one, the session cgroup is made by hand under the subtree `sill init` creates
+//!   (SPEC §4.12); with neither there are no limits and the policy's `[limits] required` decides.
+//! - Logs: one journald stream per session (`journalctl --user -t sill-<id>`) where journald is,
+//!   files under `$XDG_RUNTIME_DIR/sill/<id>/` otherwise.
+//! - Stop is the scope's stop (or `cgroup.kill`), or SIGKILL to bwrap when there is no cgroup.
 //!
-//! The mode is probed once per process ([`current`]); `SILL_LAUNCHER=unit|direct` forces it.
+//! The daemon is the only process that starts sessions; `sill dev start` from a terminal uses the
+//! same code.
 
-use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -17,84 +24,123 @@ use anyhow::{Context, Result, bail};
 
 use crate::policy::Limits;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    Unit,
-    Direct,
-}
-
-impl fmt::Display for Mode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Mode::Unit => "unit",
-            Mode::Direct => "direct",
-        })
-    }
-}
-
 /// What this process found out about the host, once.
 #[derive(Debug, Clone)]
 pub struct Launcher {
-    pub mode: Mode,
-    /// Why this mode (one line, for the Settings page and the session note).
-    pub reason: String,
-    /// `direct` only: the writable delegated cgroup subtree for this uid, if any.
+    /// Sessions run in transient scopes made by the systemd user manager.
+    pub scopes: bool,
+    /// Without scopes: where session cgroups are made by hand; None = no limits possible here.
     pub cgroup_root: Option<PathBuf>,
+    /// Which case, one line (the Settings page, the session note).
+    pub reason: String,
+    /// Session logs go to journald streams; files otherwise.
+    pub journal: bool,
 }
 
 impl Launcher {
     /// Whether sessions get resource limits in this mode.
     pub fn has_limits(&self) -> bool {
-        match self.mode {
-            Mode::Unit => true,
-            Mode::Direct => self.cgroup_root.is_some(),
-        }
+        self.scopes || self.cgroup_root.is_some()
     }
 
-    /// One line for the Settings page.
+    /// One line for the Settings page and `sill daemon status`.
     pub fn describe(&self) -> String {
-        match (self.mode, &self.cgroup_root) {
-            (Mode::Unit, _) => format!("unit — sessions run as transient systemd user units ({})", self.reason),
-            (Mode::Direct, Some(c)) => format!("direct — sessions run detached ({}); limits via cgroup {}", self.reason, c.display()),
-            (Mode::Direct, None) => format!(
-                "direct — sessions run detached ({}); no resource limits: a busy agent can starve the host (run `sudo sill init` to delegate a cgroup subtree)",
-                self.reason
+        let logs = if self.journal { "logs in the journal (journalctl --user -t sill-<id>)" } else { "logs under $XDG_RUNTIME_DIR/sill/<id>/" };
+        if self.scopes {
+            return format!("sessions are children of the daemon in scopes sill-<id>.scope under sill.slice, limits as scope properties; {logs}");
+        }
+        match &self.cgroup_root {
+            Some(c) => format!("sessions are children of the daemon, limits in cgroups under {} ({}); {}", c.display(), self.reason, logs),
+            None => format!(
+                "sessions are children of the daemon with no resource limits ({}): a busy agent can starve the host — `sudo sill init --delegate-cgroup`; {}",
+                self.reason, logs
             ),
         }
     }
 }
 
-/// The launcher this process uses; probed on first call.
+static L: OnceLock<Launcher> = OnceLock::new();
+
+/// The launcher this process uses; probed on first call (nothing is written).
 pub fn current() -> &'static Launcher {
-    static L: OnceLock<Launcher> = OnceLock::new();
     L.get_or_init(probe)
 }
 
 fn probe() -> Launcher {
-    let forced = std::env::var("SILL_LAUNCHER").ok();
-    let unit_usable = unit_usable();
-    let mode = match forced.as_deref() {
-        Some("unit") => Mode::Unit,
-        Some("direct") => Mode::Direct,
-        _ => match unit_usable {
-            Ok(()) => Mode::Unit,
-            Err(_) => Mode::Direct,
+    let journal = Path::new(JOURNAL_STREAM).exists() && std::os::unix::net::UnixStream::connect(JOURNAL_STREAM).is_ok();
+    match systemd_user_usable() {
+        Ok(()) => Launcher { scopes: true, cgroup_root: None, reason: "systemd user instance reachable".into(), journal },
+        Err(why) => match delegated_subtree() {
+            Some(root) => Launcher { scopes: false, cgroup_root: Some(root), reason: format!("{why}; sill init subtree"), journal },
+            None => Launcher { scopes: false, cgroup_root: None, reason: format!("{why}; no sill init subtree"), journal },
         },
-    };
-    let reason = match (forced.as_deref(), &unit_usable) {
-        (Some(f), _) if f == "unit" || f == "direct" => format!("SILL_LAUNCHER={f}"),
-        (_, Ok(())) => "systemd user instance reachable".into(),
-        (_, Err(e)) => e.clone(),
-    };
-    let cgroup_root = match mode {
-        Mode::Unit => None,
-        Mode::Direct => delegated_subtree(),
-    };
-    Launcher { mode, reason, cgroup_root }
+    }
 }
 
-/// `systemd-run --user` works when `$XDG_RUNTIME_DIR` is set and the user manager answers.
-fn unit_usable() -> std::result::Result<(), String> {
+/// The scope a session runs in (`sill-<id>.scope`).
+pub fn scope_name(unit: &str) -> String {
+    format!("{unit}.scope")
+}
+
+/// The `systemd-run --user --scope` prefix that puts a child in `sill-<id>.scope` under
+/// `sill.slice` with the policy's limits; the command follows `--`.
+pub fn scope_command(unit: &str, limits: &Limits) -> std::process::Command {
+    let mut cmd = std::process::Command::new("systemd-run");
+    cmd.args(["--user", "--scope", "--quiet", "--collect", "--unit", unit, "--slice=sill.slice"])
+        .arg(format!("--property=CPUWeight={}", limits.cpu_weight))
+        .arg(format!("--property=IOWeight={}", limits.io_weight))
+        .arg(format!("--property=MemoryHigh={}", limits.memory_high))
+        .arg(format!("--property=MemoryMax={}", limits.memory_max))
+        .arg(format!("--property=TasksMax={}", limits.tasks_max))
+        // a stop must not hang on an interactive shell in the jail (bash ignores SIGTERM)
+        .arg("--property=TimeoutStopSec=5")
+        .arg("--");
+    cmd
+}
+
+/// A scope of that name is loaded (active, or failed and not yet forgotten).
+pub fn scope_loaded(unit: &str) -> bool {
+    std::process::Command::new("systemctl")
+        .args(["--user", "cat", &scope_name(unit)])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Stop a session's scope — kills its whole cgroup — and forget a failed one, so the name is free
+/// for the next start. Ok(true) when a scope was there.
+pub fn stop_scope(unit: &str) -> Result<bool> {
+    let name = scope_name(unit);
+    if !scope_loaded(unit) {
+        return Ok(false);
+    }
+    let _ = std::process::Command::new("systemctl").args(["--user", "stop", "--quiet", &name]).stdin(std::process::Stdio::null()).status();
+    let _ = std::process::Command::new("systemctl").args(["--user", "reset-failed", "--quiet", &name]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+    Ok(true)
+}
+
+/// Stop `sill-<id>.service`, the transient unit a session ran in before the daemon owned sessions
+/// (SPEC §4.7 as it was), when one is loaded. Nothing to do on a host that never had one.
+pub fn stop_legacy_unit(unit: &str) {
+    let name = format!("{unit}.service");
+    let loaded = std::process::Command::new("systemctl")
+        .args(["--user", "is-active", "--quiet", &name])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if loaded {
+        let _ = std::process::Command::new("systemctl").args(["--user", "stop", "--quiet", &name]).stdin(std::process::Stdio::null()).status();
+    }
+}
+
+/// `systemd-run --user` works: the user manager answers and `$XDG_RUNTIME_DIR` is set. What
+/// `sill init --user` and the client's daemon start use to choose a transient unit over a bare spawn.
+pub fn systemd_user_usable() -> std::result::Result<(), String> {
     if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
         return Err("XDG_RUNTIME_DIR is not set".into());
     }
@@ -110,12 +156,83 @@ fn unit_usable() -> std::result::Result<(), String> {
         Err(e) => Err(format!("systemctl not found ({e})")),
         Ok(o) => {
             let state = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            // "running" and "degraded" both accept systemd-run; "offline"/"unknown"/empty do not
             if matches!(state.as_str(), "running" | "degraded" | "starting" | "initializing" | "maintenance") {
                 Ok(())
             } else {
                 Err(format!("systemd user instance not reachable ({})", if state.is_empty() { "no answer" } else { &state }))
             }
+        }
+    }
+}
+
+/// journald's stream socket: a connection with a header is a log stream with its own identifier.
+pub const JOURNAL_STREAM: &str = "/run/systemd/journal/stdout";
+
+/// A journald stream for one session's output: `journalctl --user -t <identifier>` reads it.
+/// `priority` is the syslog level of lines without a `<n>` prefix (6 = info; a ghost session logs
+/// at 4, warning). The caller hands the stream to the child as stdout and stderr.
+pub fn journal_stream(identifier: &str, priority: u8) -> Result<std::os::unix::net::UnixStream> {
+    use std::io::Write;
+    let mut s = std::os::unix::net::UnixStream::connect(JOURNAL_STREAM).context("journald stream socket")?;
+    // identifier, unit id (none: journald takes the connecting cgroup's), priority, level prefix,
+    // forward to syslog / kmsg / console
+    s.write_all(format!("{identifier}\n\n{priority}\n0\n0\n0\n0\n").as_bytes())?;
+    Ok(s)
+}
+
+/// Spawn `cmd` as a child of this process in its own session (no terminal hangup reaches it, and
+/// it is nobody's job), stdin from /dev/null, stdout and stderr on `log`. The caller keeps the
+/// `Child` and waits on it: the daemon's supervision.
+pub fn spawn_child(mut cmd: std::process::Command, log: std::os::unix::net::UnixStream) -> Result<std::process::Child> {
+    // Stdio takes an OwnedFd; a unix stream is one
+    let out: std::os::fd::OwnedFd = log.try_clone()?.into();
+    let err: std::os::fd::OwnedFd = log.into();
+    cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::from(out)).stderr(std::process::Stdio::from(err));
+    // SAFETY: setsid is async-signal-safe.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            rustix::process::setsid()?;
+            Ok(())
+        });
+    }
+    cmd.spawn().context("spawn")
+}
+
+/// A session's log sink when there is no journald: the files in its runtime dir, as one stream
+/// (a socketpair whose other end a thread copies into the file — so the child sees one fd kind
+/// either way).
+pub fn file_stream(path: &Path) -> Result<std::os::unix::net::UnixStream> {
+    use std::io::{Read, Write};
+    let (ours, theirs) = std::os::unix::net::UnixStream::pair()?;
+    let mut file = std::fs::File::create(path).with_context(|| format!("create {}", path.display()))?;
+    let mut ours = ours;
+    std::thread::Builder::new().name("sill-log-copy".into()).spawn(move || {
+        let mut buf = [0u8; 8192];
+        while let Ok(n) = ours.read(&mut buf) {
+            if n == 0 || file.write_all(&buf[..n]).is_err() {
+                break;
+            }
+        }
+    })?;
+    Ok(theirs)
+}
+
+/// Wait until `pid` is gone, for a process that is not our child (an adopted session, docs/daemon.md
+/// §3.6): a pidfd becomes readable at exit. Returns at once when the pid is already gone.
+pub fn wait_pid_gone(pid: u32) -> Result<()> {
+    let Some(p) = rustix::process::Pid::from_raw(pid as i32) else { bail!("pid {pid}") };
+    let fd = match rustix::process::pidfd_open(p, rustix::process::PidfdFlags::empty()) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::SRCH) => return Ok(()),
+        Err(e) => return Err(e).context("pidfd_open"),
+    };
+    let mut fds = [rustix::event::PollFd::new(&fd, rustix::event::PollFlags::IN)];
+    loop {
+        match rustix::event::poll(&mut fds, None) {
+            Ok(_) => return Ok(()),
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(e) => return Err(e).context("poll pidfd"),
         }
     }
 }
@@ -189,45 +306,6 @@ pub fn kill_session_cgroup(root: &Path, session: &str) -> Result<bool> {
     }
     let _ = std::fs::remove_dir(&dir);
     Ok(true)
-}
-
-/// Spawn `cmd` detached from this process: its own session (setsid), double-forked so nobody has
-/// to reap it, stdin from /dev/null, stdout/stderr on `log`, every other fd closed (Rust marks
-/// them close-on-exec). Returns after the intermediate child exited; the grandchild runs on.
-pub fn spawn_detached(mut cmd: std::process::Command, log: std::fs::File) -> Result<()> {
-    cmd.stdin(std::process::Stdio::null()).stdout(log.try_clone()?).stderr(log);
-    // SAFETY: only async-signal-safe calls (setsid, fork, _exit) between fork and exec.
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        cmd.pre_exec(|| {
-            rustix::process::setsid()?;
-            match libc_fork() {
-                0 => Ok(()),          // grandchild: goes on to exec
-                -1 => Err(std::io::Error::last_os_error()),
-                _ => libc_exit(0),    // intermediate: gone at once, the grandchild is init's
-            }
-        });
-    }
-    let mut child = cmd.spawn().context("spawn")?;
-    let st = child.wait()?;
-    if !st.success() {
-        bail!("detached start failed ({st})");
-    }
-    Ok(())
-}
-
-// Tiny libc shims: rustix has no fork (by design); these two are all that is needed here.
-unsafe extern "C" {
-    fn fork() -> i32;
-    fn _exit(code: i32) -> !;
-}
-fn libc_fork() -> i32 {
-    // SAFETY: called between fork and exec in `pre_exec`, where fork is allowed.
-    unsafe { fork() }
-}
-fn libc_exit(code: i32) -> ! {
-    // SAFETY: plain _exit.
-    unsafe { _exit(code) }
 }
 
 /// Whether the pid named in `file` is still alive.

@@ -34,6 +34,9 @@ pub fn is_markdown(path: &Path) -> bool {
     path.extension().map(|e| e.to_string_lossy().to_lowercase()).is_some_and(|e| matches!(e.as_str(), "md" | "markdown" | "mdown"))
 }
 
+/// Reads the last `n` lines of a log; blocking, run off the main thread (a daemon call or files).
+pub type LogReader = std::sync::Arc<dyn Fn(usize) -> String + Send + Sync>;
+
 pub struct Viewer {
     pub root: gtk::Box,
     title: gtk::Label,
@@ -61,7 +64,7 @@ pub struct Viewer {
     /// A file was written (Ctrl+S): the owner refreshes what shows its state (tree badges, chips).
     pub on_saved: RefCell<Option<Box<dyn Fn(&Path)>>>,
     /// A session's log being shown: its history key (`log: <title>`) and where it comes from.
-    log: RefCell<Option<(PathBuf, sill_core::session::LogSource)>>,
+    log: RefCell<Option<(PathBuf, LogReader)>>,
     /// The follow timer while a log is shown.
     log_tick: RefCell<Option<glib::SourceId>>,
     /// A page of the shelf's own (a session's summary and notes, docs/memory.md §2.5) under its
@@ -299,7 +302,7 @@ impl Viewer {
     }
 
     /// A session's log on top of what is shown, followed while it is shown (Escape comes back).
-    pub fn open_log(&self, title: &str, src: sill_core::session::LogSource) {
+    pub fn open_log(&self, title: &str, src: LogReader) {
         self.drop_edits();
         let key = PathBuf::from(format!("log: {title}"));
         *self.log.borrow_mut() = Some((key.clone(), src));
@@ -330,7 +333,7 @@ impl Viewer {
         self.show(&key);
     }
 
-    fn show_log(&self, src: sill_core::session::LogSource) {
+    fn show_log(&self, src: LogReader) {
         self.text.set_language(None);
         self.text.set_highlight_syntax(false);
         self.stack.set_visible_child_name("text");
@@ -348,10 +351,10 @@ impl Viewer {
         self.refresh_log(src);
     }
 
-    fn refresh_log(&self, src: sill_core::session::LogSource) {
+    fn refresh_log(&self, src: LogReader) {
         let (tx, rx) = async_channel::bounded::<String>(1);
         std::thread::spawn(move || {
-            let _ = tx.send_blocking(sill_core::session::read_log(&src, 2000));
+            let _ = tx.send_blocking(src(2000));
         });
         let weak = self.weak.borrow().clone();
         glib::spawn_future_local(async move {

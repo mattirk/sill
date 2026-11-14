@@ -610,10 +610,17 @@ fn stage_once(i: &mut Init, staged: &mut Option<PathBuf>, home: &Path, exe: &Pat
 fn user_setup(a: &InitArgs) -> Result<()> {
     let mut i = Init { dry: a.dry_run, did: vec![], skipped: vec![], problems: vec![] };
     let home = PathBuf::from(std::env::var("HOME").context("HOME not set")?);
-    let launcher = sill_core::launcher::current();
-    println!("sill init --user{} — launcher: {}", if a.dry_run { " (dry run)" } else { "" }, launcher.describe());
+    let systemd = sill_core::launcher::systemd_user_usable();
+    println!(
+        "sill init --user{} — {}",
+        if a.dry_run { " (dry run)" } else { "" },
+        match &systemd {
+            Ok(()) => "systemd user instance reachable: units".to_string(),
+            Err(e) => format!("no systemd user instance ({e}): autostart file, daemon spawned by its first client"),
+        }
+    );
     let exe = std::env::current_exe()?;
-    if launcher.mode == sill_core::launcher::Mode::Unit {
+    if systemd.is_ok() {
         let mut staged: Option<PathBuf> = None;
         if !unit_known("sill-shelf.service") {
             // no system-wide unit (cargo install, tarball without root): a private copy

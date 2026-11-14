@@ -448,14 +448,7 @@ pub fn build() -> gtk::Widget {
         ("Policy".into(), "default — /etc/sill/policies/default.toml, then ~/.config/sill/policies/, then built-in".into()),
         ("Agents".into(), "the Agents page: install from the ACP registry, the gear edits command, environment, domains (~/.config/sill/agents/*.toml)".into()),
         ("Sessions".into(), format!("{home}/.local/state/sill/sill.db; jails under /var/lib/sill/<uid>/sessions/")),
-        ("Launcher".into(), sill_core::launcher::current().describe()),
-        (
-            "Jails".into(),
-            match sill_core::launcher::current().mode {
-                sill_core::launcher::Mode::Unit => "systemctl --user list-units 'sill-*'; logs: journalctl --user -u sill-<id>".to_string(),
-                sill_core::launcher::Mode::Direct => "pids and logs under $XDG_RUNTIME_DIR/sill/<id>/ ({bwrap,launch}.pid, {jail,proxy}.log)".to_string(),
-            },
-        ),
+        ("Daemon".into(), "sill daemon status — sessions are its children in scopes sill-<id>.scope under sill.slice (systemctl --user list-units 'sill-*.scope'); logs: journalctl --user -t sill-<id>, or $XDG_RUNTIME_DIR/sill/<id>/jail.log without journald".into()),
         ("Keys".into(), "hotkey show/hide · Escape sessions ⇄ backend · Enter send · Shift+Enter newline · Ctrl+T shell · Ctrl+Shift+H host shell · Ctrl+Shift+T / W new / close tab · Ctrl+Shift+F tree · F2 or double-click rename".into()),
     ];
     let card = gtk::Box::new(gtk::Orientation::Vertical, 0);

@@ -2126,7 +2126,7 @@ impl SessionView {
     fn connected(self: &Rc<Self>, d: session::Driver) {
         self.start_proc_polling();
         if !self.mode_noted.replace(true)
-            && let Some(n) = session::mode_note()
+            && let Some(n) = d.note.clone()
         {
             self.conv.add_note(&n);
         }

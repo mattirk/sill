@@ -55,11 +55,11 @@ enum Cmd {
         /// registry id of the agent: its domains join the proxy allow-list
         #[arg(long)]
         agent: Option<String>,
-        /// direct launcher mode: no unit around this process — write pid files, log the proxy to a
-        /// file, limit the jail through --cgroup-root
+        /// started by the daemon as its child (docs/daemon.md §3.1): write pid files, put the jail in
+        /// the session cgroup under --cgroup-root, log everything to stderr
         #[arg(long)]
-        detached: bool,
-        /// delegated cgroup subtree to create the session cgroup in (direct mode)
+        child: bool,
+        /// delegated cgroup subtree to create the session cgroup in
         #[arg(long)]
         cgroup_root: Option<PathBuf>,
     },
@@ -427,7 +427,7 @@ fn main() -> Result<()> {
         }
         Cmd::Jail { cmd } => jail_cmd(cmd),
         Cmd::Dev { cmd } => dev_cmd(cmd),
-        Cmd::Launch { session, jail, shim, agent, detached, cgroup_root } => launch(&session, jail, shim, agent.as_deref(), detached, cgroup_root),
+        Cmd::Launch { session, jail, shim, agent, child, cgroup_root } => launch(&session, jail, shim, agent.as_deref(), child, cgroup_root),
         Cmd::Init(a) => init::run(a),
         Cmd::Shelf { cwd, hidden } => shelf::run(cwd, hidden),
         Cmd::Toggle => shelf::toggle(),
@@ -724,12 +724,21 @@ fn dev_cmd(cmd: DevCmd) -> Result<()> {
     }
 }
 
-/// `sill launch`: the process that owns a session on the host side — inside its systemd user unit,
-/// or detached in `direct` mode (SPEC §4.7), where it records its pids and limits the jail itself.
-fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Option<&str>, direct: bool, cgroup_root: Option<PathBuf>) -> Result<()> {
+/// The systemd scope this process runs in, when it is one of sill's (`…/sill.slice/sill-<id>.scope`).
+fn own_scope() -> Option<String> {
+    let cg = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    let path = cg.lines().find_map(|l| l.strip_prefix("0::"))?;
+    let leaf = path.rsplit('/').next()?;
+    (path.contains("/sill.slice/") && leaf.starts_with("sill-") && leaf.ends_with(".scope")).then(|| leaf.to_string())
+}
+
+/// `sill launch`: the process that owns a session on the host side — the daemon's child in its own
+/// scope, or with `--cgroup-root` in a session cgroup it makes (docs/daemon.md §3.1); it records its
+/// pids for re-adoption.
+fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Option<&str>, child: bool, cgroup_root: Option<PathBuf>) -> Result<()> {
     let rt = shim::runtime_dir(session)?;
     std::fs::create_dir_all(&rt)?;
-    if direct {
+    if child {
         std::fs::write(rt.join("launch.pid"), std::process::id().to_string())?;
     }
     let shim_bin = match shim_bin {
@@ -781,18 +790,10 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
         // offers to allow the host for this agent (SPEC §4.8)
         let denied = rt.join("denied");
         let _ = std::fs::remove_file(&denied);
-        // unit mode: the journal; direct mode: its own file next to jail.log
-        let proxy_log = if direct { std::fs::File::create(rt.join("proxy.log")).ok() } else { None };
         proxy_thread = Some(std::thread::spawn(move || {
             sill_core::proxy::serve(listener, rules, move |l| {
-                use std::io::Write;
-                match proxy_log.as_ref() {
-                    Some(mut f) => {
-                        // &File is Write
-                        let _ = writeln!(f, "{l}");
-                    }
-                    None => eprintln!("proxy: {l}"),
-                }
+                // stderr is the session's journald stream or its jail.log (docs/daemon.md §3.1)
+                eprintln!("proxy: {l}");
                 // `deny host:port (why)`: the host alone when the port is the default one a bare
                 // pattern grants, `host:port` otherwise — what the shelf offers is what would allow
                 // it. Only a plain host name (or IP) gets there: a wildcard or garbage in the
@@ -823,10 +824,10 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
     std::fs::write(rt.join("cwd"), spec.cwd.to_string_lossy().as_bytes())?;
     std::fs::write(rt.join("state_dir"), spec.state_dir.to_string_lossy().as_bytes())?;
 
-    // direct mode limits: the session cgroup under the delegated subtree, bwrap moves itself in
-    // before exec so every process of the jail is born inside it
+    // limits: the session cgroup under the daemon's root, bwrap moves itself in before exec so
+    // every process of the jail is born inside it
     let mut cgroup_procs: Option<PathBuf> = None;
-    if direct {
+    if child {
         match &cgroup_root {
             Some(root) => {
                 let mut warnings = Vec::new();
@@ -837,7 +838,11 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
                 eprintln!("sill launch: limits in cgroup {}", dir.display());
                 cgroup_procs = Some(dir.join("cgroup.procs"));
             }
-            None => eprintln!("sill launch: warning: no resource limits — a busy agent can starve the host"),
+            // a scope made by the daemon (`systemd-run --scope`) carries the limits already
+            None => match own_scope() {
+                Some(scope) => eprintln!("sill launch: limits on {scope}"),
+                None => eprintln!("sill launch: warning: no resource limits — a busy agent can starve the host"),
+            },
         }
     }
 
@@ -874,13 +879,13 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
                 Ok(())
             });
         }
-        let mut child = cmd.spawn().context("spawn bwrap")?;
-        if direct {
-            std::fs::write(rt.join("bwrap.pid"), child.id().to_string())?;
+        let mut bwrap = cmd.spawn().context("spawn bwrap")?;
+        if child {
+            std::fs::write(rt.join("bwrap.pid"), bwrap.id().to_string())?;
         }
-        eprintln!("sill launch: jail started (bwrap pid {}, {} mode), sockets in {}", child.id(), if direct { "direct" } else { "unit" }, rt.display());
+        eprintln!("sill launch: jail started (bwrap pid {}), sockets in {}", bwrap.id(), rt.display());
         let started = std::time::Instant::now();
-        let status = child.wait()?;
+        let status = bwrap.wait()?;
         if !status.success() && started.elapsed() < std::time::Duration::from_secs(2) && attempt < 6 {
             eprintln!("sill launch: jail ended at once ({status}); the previous jail may still be going away, retrying ({attempt}/5)");
             std::thread::sleep(std::time::Duration::from_millis(500));
@@ -892,7 +897,7 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
     eprintln!("sill launch: jail ended ({status})");
     let _ = std::fs::remove_file(&shim_sock);
     let _ = std::fs::remove_file(rt.join("proxy.sock"));
-    if direct {
+    if child {
         let _ = std::fs::remove_file(rt.join("bwrap.pid"));
         let _ = std::fs::remove_file(rt.join("launch.pid"));
         if let Some(root) = &cgroup_root {
@@ -926,23 +931,16 @@ fn start_session(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>) -> Re
             })
             .collect::<Result<Vec<_>>>()?,
     };
-    let sock = sill_core::session::ensure_started(&opts, &home()?, &std::env::current_exe()?)?;
+    // a dev session is this terminal's child, not the daemon's: it runs on after this command
+    // (its own session and scope)
     let launcher = sill_core::launcher::current();
-    let unit = sill_core::session::unit_name(session);
-    match launcher.mode {
-        sill_core::launcher::Mode::Unit => {
-            println!("session {session} started as unit {unit}.service; socket {}", sock.display());
-            println!("logs: journalctl --user -u {unit} -f");
-        }
-        sill_core::launcher::Mode::Direct => {
-            let rt = shim::runtime_dir(session)?;
-            println!("session {session} started detached ({}); socket {}", launcher.reason, sock.display());
-            println!("logs: {}/{{jail,proxy}}.log", rt.display());
-            if !launcher.has_limits() {
-                println!("warning: no resource limits — a busy agent can starve the host (sudo sill init)");
-            }
-        }
+    let started = sill_core::session::ensure_started(&opts, &home()?, &std::env::current_exe()?)?;
+    println!("session {session} started; socket {}", started.socket.display());
+    println!("logs: {}", sill_core::session::log_hint(session));
+    if !launcher.has_limits() {
+        println!("warning: no resource limits — a busy agent can starve the host ({})", launcher.reason);
     }
+    std::mem::forget(started.child); // runs on; nobody here waits for it
     Ok(())
 }
 
@@ -959,7 +957,7 @@ fn daemon_cmd(cmd: Option<DaemonCmd>) -> Result<()> {
             let c = sill_proto::Client::connect_or_start()?;
             let s: sill_proto::DaemonStatus = c.call(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default())?;
             println!("sill daemon {} (protocol {}), pid {}, {} mode, up since {}", s.version, s.protocol, s.pid, s.mode, sill_memory::datetime(s.started));
-            println!("launcher: {}", s.launcher);
+            println!("sessions: {}", s.launcher);
             println!("socket:   {}", s.socket);
             println!("sessions: {} in the store, {} running", s.sessions, s.running);
             Ok(())

@@ -1,18 +1,21 @@
-//! Shelf-side session driver: ensure the session's unit runs, start the agent through the shim, run
-//! the ACP loop on a thread, hand events to the GTK main loop.
+//! Shelf-side session driver: have the daemon start the session's jail (docs/daemon.md §3.4), start
+//! the agent through the shim, run the ACP loop on a thread, hand events to the GTK main loop.
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use sill_core::acp::{self, AutoPermission, Command, Event, SessionOptions};
 use sill_core::agents;
-use sill_core::session::{StartOptions, ensure_started, state_dir};
+use sill_core::session::state_dir;
 use sill_core::shim;
 use sill_core::store;
 
 pub struct Driver {
     pub commands: async_channel::Sender<Command>,
     pub events: async_channel::Receiver<Event>,
+    /// What the conversation says about the jail's limits, if anything (`mode_note`, taken here
+    /// on the worker thread).
+    pub note: Option<String>,
 }
 
 pub fn home() -> Result<PathBuf> {
@@ -23,33 +26,18 @@ pub fn uid() -> u32 {
     rustix::process::getuid().as_raw()
 }
 
-/// Start (or reconnect to) a stored session with its `pins`. The jail's cwd is the home directory
-/// (SPEC §3.1). `fresh`: an agent still running in the jail is stopped and started again instead
-/// of being reattached (for adapters that refuse a second `initialize`, Codex's "Already
-/// initialized"). Blocking — `systemd-run`, the wait for the shim socket, the control calls — so
-/// the view runs it on a worker thread (SPEC §4.11 #13).
-pub fn start(s: &store::Session, pins: Vec<PathBuf>, fresh: bool) -> Result<Driver> {
+/// Start (or reconnect to) a stored session. The daemon starts the jail from the stored row — its
+/// pins, policy and desktop grants (`_pins` is what the caller believes they are; the daemon reads
+/// the store) — and answers with the shim socket. `fresh`: an agent still running in the jail is
+/// stopped and started again instead of being reattached (for adapters that refuse a second
+/// `initialize`, Codex's "Already initialized"). Blocking — the daemon call, the control calls —
+/// so the view runs it on a worker thread (SPEC §4.11 #13).
+pub fn start(s: &store::Session, _pins: Vec<PathBuf>, fresh: bool) -> Result<Driver> {
     let home = home()?;
     let registry = agents::load(&home);
     let Some(agent) = registry.get(&s.agent) else { bail!("unknown agent {}", s.agent) };
-    let sdir = state_dir(uid(), &s.id)?;
-    let policy = sill_core::policy::Policy::load(&s.policy, &home)?;
-    let binds = sill_core::session::binds_for(agent, &policy, &sdir, &home, &pins)?;
-    let opts = StartOptions {
-        session: s.id.clone(),
-        policy: s.policy.clone(),
-        cwd: home.clone(),
-        state_dir: Some(sdir),
-        unsafe_state: false,
-        share_net: false,
-        env: vec![],
-        shim_bin: None,
-        agent: Some(s.agent.clone()),
-        binds,
-        x11: sill_core::config::desktop_grants(&s.desktop, &sill_core::config::load()).0,
-        dbus: sill_core::config::desktop_grants(&s.desktop, &sill_core::config::load()).1,
-    };
-    let sock = ensure_started(&opts, &home, &sill_core::session::staged_exe()?)?;
+    let started: sill_proto::Started = super::client::call(sill_proto::method::SESSIONS_START, sill_proto::Key { key: s.id.clone() })?;
+    let sock = started.socket;
     let mut control = shim::Control::connect(&sock)?;
     if fresh && control.status()?.running {
         control.kill(3000)?;
@@ -73,20 +61,15 @@ pub fn start(s: &store::Session, pins: Vec<PathBuf>, fresh: bool) -> Result<Driv
         // run_session sends Event::Ended itself, error included
         let _ = acp::run_session(stream, sopts, cmd_rx, ev_tx);
     })?;
-    Ok(Driver { commands: cmd_tx, events: ev_rx })
+    Ok(Driver { commands: cmd_tx, events: ev_rx, note: mode_note() })
 }
 
-/// What a session's conversation says about how its jail runs: nothing in `unit` mode (the
-/// normal case), one line in `direct` mode — with the warning when there are no limits.
+/// What a session's conversation says about how its jail runs: nothing in the normal case, one
+/// line when the daemon could give it no resource limits. Blocking (a daemon call): off the main thread.
 pub fn mode_note() -> Option<String> {
-    let l = sill_core::launcher::current();
-    match l.mode {
-        sill_core::launcher::Mode::Unit => None,
-        sill_core::launcher::Mode::Direct if l.has_limits() => Some(format!("jail runs detached, direct mode ({}); limits in its own cgroup", l.reason)),
-        sill_core::launcher::Mode::Direct => Some(format!(
-            "jail runs detached, direct mode ({}): no resource limits — a busy agent can starve the host (sudo sill init)",
-            l.reason
-        )),
+    match super::client::status() {
+        Ok(s) if !s.limits => Some(format!("no resource limits for this jail — a busy agent can starve the host ({})", s.launcher)),
+        _ => None,
     }
 }
 

@@ -1,6 +1,6 @@
-//! Session lifecycle on the host side (SPEC §4.7): a session is a `sill launch` process — a transient
-//! systemd user unit where there is one, a detached process otherwise (`launcher`) — reachable through
-//! its shim socket. Starting is idempotent.
+//! Session lifecycle on the host side (SPEC §4.7, docs/daemon.md §3.1): a session is a `sill launch`
+//! process, a child of the daemon in a cgroup of its own (`launcher`), reachable through its shim
+//! socket. Starting is idempotent.
 
 use std::path::{Path, PathBuf};
 
@@ -341,6 +341,7 @@ pub fn remove_state(uid: u32, session: &str) -> Result<()> {
     Ok(())
 }
 
+/// `sill-<id>`: the session's scope (or cgroup) and journald stream identifier. Reduced to systemd's grammar so a crafted id names nothing but its own garbled self.
 pub fn unit_name(session: &str) -> String {
     // a unit name is not a path, but systemd's grammar is narrower than ours: anything else is
     // reduced to what it allows, so a crafted id names no other unit than its own garbled self
@@ -348,9 +349,10 @@ pub fn unit_name(session: &str) -> String {
     format!("sill-{safe}")
 }
 
-/// Where a session's log is (SPEC §4.7): the unit's journal, or the detached session's files.
+/// Where a session's log is (SPEC §4.7): its journald stream, or its files in the runtime dir.
 #[derive(Debug, Clone)]
 pub enum LogSource {
+    /// A journald stream identifier (`sill-<id>`).
     Journal(String),
     Files(Vec<PathBuf>),
     /// A managed process's output, read from the shim (docs/tasks.md §2.4).
@@ -358,22 +360,21 @@ pub enum LogSource {
 }
 
 pub fn log_source(session: &str) -> LogSource {
-    match crate::launcher::current().mode {
-        crate::launcher::Mode::Unit => LogSource::Journal(unit_name(session)),
-        crate::launcher::Mode::Direct => {
-            let rt = shim::runtime_dir(session).unwrap_or_default();
-            LogSource::Files(vec![rt.join("jail.log"), rt.join("proxy.log")])
-        }
+    if crate::launcher::current().journal {
+        LogSource::Journal(unit_name(session))
+    } else {
+        let rt = shim::runtime_dir(session).unwrap_or_default();
+        LogSource::Files(vec![rt.join("jail.log")])
     }
 }
 
-/// The last `lines` of a log: `journalctl --user -u <unit>` (precise times, no hostname), or each
-/// file's tail under its name. Blocking: run it off the UI thread.
+/// The last `lines` of a log: `journalctl --user -t <identifier>` (precise times, no hostname), or
+/// each file's tail under its name. Blocking: run it off the UI thread.
 pub fn read_log(src: &LogSource, lines: usize) -> String {
     match src {
-        LogSource::Journal(unit) => {
+        LogSource::Journal(ident) => {
             let out = std::process::Command::new("journalctl")
-                .args(["--user", "-u", unit, "-n", &lines.to_string(), "--no-pager", "--no-hostname", "-o", "short-precise"])
+                .args(["--user", "-t", ident, "-n", &lines.to_string(), "--no-pager", "--no-hostname", "-o", "short-precise"])
                 .output();
             match out {
                 Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
@@ -515,78 +516,35 @@ fn launch_args(opts: &StartOptions) -> Vec<std::ffi::OsString> {
     a
 }
 
-/// Start the session unless it is already reachable, in the launcher mode this process probed
-/// (SPEC §4.7): a transient systemd user unit with the policy's limits, or a detached `launch`
-/// process that limits itself through the delegated cgroup subtree when there is one.
-pub fn ensure_started(opts: &StartOptions, home: &Path, exe: &Path) -> Result<PathBuf> {
+/// What `ensure_started` found or made: the shim socket, and the child when it started one (the
+/// daemon keeps it and waits on it; an already reachable session has none).
+pub struct Started {
+    pub socket: PathBuf,
+    pub child: Option<std::process::Child>,
+}
+
+/// Start the session unless it is already reachable (SPEC §4.7, docs/daemon.md §3.1): `sill launch`
+/// as a child of this process, in a session cgroup under the launcher's root when there is one,
+/// its output on a journald stream (info level; ghost sessions will log at warning) or in `jail.log`.
+pub fn ensure_started(opts: &StartOptions, home: &Path, exe: &Path) -> Result<Started> {
     let sock = socket_path(&opts.session)?;
     if shim::Control::connect(&sock).is_ok() {
-        return Ok(sock);
+        return Ok(Started { socket: sock, child: None });
     }
     let policy = Policy::load(&opts.policy, home)?;
     let launcher = crate::launcher::current();
-    match launcher.mode {
-        crate::launcher::Mode::Unit => start_unit(opts, &policy, exe)?,
-        crate::launcher::Mode::Direct => start_direct(opts, &policy, exe, launcher)?,
-    }
-    for _ in 0..50 {
-        if shim::Control::connect(&sock).is_ok() {
-            return Ok(sock);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    match launcher.mode {
-        crate::launcher::Mode::Unit => bail!(
-            "unit {} started but the shim socket did not appear; see journalctl --user -u {}",
-            unit_name(&opts.session),
-            unit_name(&opts.session)
-        ),
-        crate::launcher::Mode::Direct => bail!(
-            "session started but the shim socket did not appear; see {}",
-            shim::runtime_dir(&opts.session)?.join("jail.log").display()
-        ),
-    }
-}
-
-fn start_unit(opts: &StartOptions, policy: &Policy, exe: &Path) -> Result<()> {
-    let unit = unit_name(&opts.session);
-    // a failed earlier start leaves the unit around ("already exists" from systemd-run, SPEC §4.11 #14)
-    let _ = std::process::Command::new("systemctl")
-        .args(["--user", "reset-failed", "--quiet", &format!("{unit}.service")])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-    let mut cmd = std::process::Command::new("systemd-run");
-    cmd.args(["--user", "--unit", &unit, "--collect", "--quiet", "--same-dir"])
-        .arg(format!("--property=CPUWeight={}", policy.limits.cpu_weight))
-        .arg(format!("--property=IOWeight={}", policy.limits.io_weight))
-        .arg(format!("--property=MemoryHigh={}", policy.limits.memory_high))
-        .arg(format!("--property=MemoryMax={}", policy.limits.memory_max))
-        .arg(format!("--property=TasksMax={}", policy.limits.tasks_max))
-        .arg("--property=KillMode=control-group")
-        // nothing in a session gains privileges: not the launcher, not bwrap (which sets it anyway)
-        .arg("--property=NoNewPrivileges=yes")
-        // a stop must not hang on an interactive shell in the jail (bash ignores SIGTERM): SIGKILL
-        // follows after a short grace; the agent itself was already asked to leave by the shim
-        .arg("--property=TimeoutStopSec=5")
-        .args(["--setenv=HOME", "--setenv=USER", "--setenv=TERM", "--setenv=LANG"])
-        .arg("--")
-        .arg(exe)
-        .args(launch_args(opts));
-    let st = cmd.status().context("run systemd-run (is the systemd user instance running?)")?;
-    if !st.success() {
-        bail!("systemd-run failed ({st})");
-    }
-    Ok(())
-}
-
-fn start_direct(opts: &StartOptions, policy: &Policy, exe: &Path, launcher: &crate::launcher::Launcher) -> Result<()> {
-    if launcher.cgroup_root.is_none() && policy.limits.required {
+    if !launcher.has_limits() && policy.limits.required {
         bail!(
             "no cgroup for the policy's limits ({}): the session would run unlimited. \
-             `sudo sill init` delegates a subtree; or set [limits] required = false in the policy",
+             `sudo sill init --delegate-cgroup`, or set [limits] required = false in the policy",
             launcher.reason
         );
+    }
+    let unit = unit_name(&opts.session);
+    // a scope left over from a jail that is gone or unusable (the socket did not answer): its name
+    // must be free; stopping it kills whatever lingers in its cgroup
+    if launcher.scopes && crate::launcher::stop_scope(&unit).unwrap_or(false) {
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
     let rt = shim::runtime_dir(&opts.session)?;
     std::fs::create_dir_all(&rt)?;
@@ -594,41 +552,69 @@ fn start_direct(opts: &StartOptions, policy: &Policy, exe: &Path, launcher: &cra
     for f in ["bwrap.pid", "launch.pid"] {
         let _ = std::fs::remove_file(rt.join(f));
     }
-    let log = std::fs::File::create(rt.join("jail.log")).with_context(|| format!("create {}", rt.join("jail.log").display()))?;
-    let mut cmd = std::process::Command::new(exe);
-    cmd.args(launch_args(opts)).arg("--detached");
+    let log = if launcher.journal {
+        crate::launcher::journal_stream(&unit_name(&opts.session), 6)?
+    } else {
+        crate::launcher::file_stream(&rt.join("jail.log"))?
+    };
+    let mut cmd = if launcher.scopes {
+        let mut c = crate::launcher::scope_command(&unit, &policy.limits);
+        c.arg(exe);
+        c
+    } else {
+        std::process::Command::new(exe)
+    };
+    cmd.args(launch_args(opts)).arg("--child");
     if let Some(root) = &launcher.cgroup_root {
         cmd.arg("--cgroup-root").arg(root);
     }
     cmd.current_dir(&opts.cwd);
-    crate::launcher::spawn_detached(cmd, log)
+    let mut child = crate::launcher::spawn_child(cmd, log)?;
+    for _ in 0..50 {
+        if shim::Control::connect(&sock).is_ok() {
+            return Ok(Started { socket: sock, child: Some(child) });
+        }
+        if let Ok(Some(st)) = child.try_wait() {
+            bail!("session ended before its shim socket appeared ({st}); see {}", log_hint(&opts.session));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    bail!("session started but the shim socket did not appear in 5 s; see {}", log_hint(&opts.session))
 }
 
-/// Stop a session the way it was started: the unit's cgroup, the delegated cgroup, or SIGKILL to
-/// bwrap (pid 1 of the jail's namespace: everything in it dies with it).
+/// Where to look when a session misbehaves.
+pub fn log_hint(session: &str) -> String {
+    match log_source(session) {
+        LogSource::Journal(ident) => format!("journalctl --user -t {ident}"),
+        LogSource::Files(files) => files.first().map(|f| f.display().to_string()).unwrap_or_default(),
+        LogSource::Proc { .. } => String::new(),
+    }
+}
+
+/// Stop a session: ask the shim to end the agent, then stop its scope or kill the session cgroup
+/// (everything in the jail) — or, with no cgroup, SIGKILL to bwrap, pid 1 of the jail's namespace.
 pub fn stop(session: &str) -> Result<()> {
     if let Ok(sock) = socket_path(session)
         && let Ok(mut c) = shim::Control::connect(&sock)
     {
         let _ = c.kill(5000);
     }
-    let unit = format!("{}.service", unit_name(session));
-    let unit_active = std::process::Command::new("systemctl")
-        .args(["--user", "is-active", "--quiet", &unit])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if unit_active {
-        std::process::Command::new("systemctl").args(["--user", "stop", &unit]).status()?;
-        return Ok(());
-    }
-    // direct mode (or a unit that is already gone): cgroup first, pid files otherwise
     let rt = shim::runtime_dir(session)?;
-    let killed_group = match crate::launcher::delegated_subtree() {
-        Some(root) => crate::launcher::kill_session_cgroup(&root, session).unwrap_or(false),
-        None => false,
+    let launcher = crate::launcher::current();
+    // a jail started before the daemon owned sessions runs as a service unit of its own: stop that
+    // too, or closing its tab after an upgrade would leave it running
+    if launcher.scopes {
+        crate::launcher::stop_legacy_unit(&unit_name(session));
+    }
+    let killed_group = if launcher.scopes {
+        crate::launcher::stop_scope(&unit_name(session)).unwrap_or(false)
+    } else {
+        match &launcher.cgroup_root {
+            Some(root) => crate::launcher::kill_session_cgroup(root, session).unwrap_or(false),
+            None => false,
+        }
     };
     if !killed_group {
         crate::launcher::kill_pid_file(&rt.join("bwrap.pid"));

@@ -23,6 +23,12 @@ pub mod method {
     pub const DAEMON_SHUTDOWN: &str = "_sill/daemon.shutdown";
     pub const SESSIONS_LIST: &str = "_sill/sessions.list";
     pub const SESSIONS_GET: &str = "_sill/sessions.get";
+    /// Start a stored session's jail (or find it running): `Key` → `Started`.
+    pub const SESSIONS_START: &str = "_sill/sessions.start";
+    /// Stop a session's jail: `Key` → `{}`.
+    pub const SESSIONS_STOP: &str = "_sill/sessions.stop";
+    /// The tail of a session's log: `LogRequest` → `Text`.
+    pub const SESSIONS_LOG: &str = "_sill/sessions.log";
     pub const MEMORY_LIST: &str = "_sill/memory.list";
     pub const MEMORY_SHOW: &str = "_sill/memory.show";
     pub const MEMORY_SEARCH: &str = "_sill/memory.search";
@@ -53,6 +59,10 @@ pub struct DaemonStatus {
     pub mode: String,
     /// The session launcher the daemon found (`launcher::describe`).
     pub launcher: String,
+    /// Sessions get resource limits (a cgroup root was found).
+    pub limits: bool,
+    /// Session logs are journald streams (`journalctl --user -t sill-<id>`), else files.
+    pub journal: bool,
     pub socket: String,
     /// Sessions in the store, and how many of them have a live jail.
     pub sessions: usize,
@@ -115,6 +125,21 @@ pub struct Transcript {
     pub key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grep: Option<String>,
+}
+
+/// `_sill/sessions.start`: the shim socket of the running jail.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Started {
+    pub socket: PathBuf,
+    /// This call started the jail (false: it was already running).
+    pub fresh: bool,
+}
+
+/// `_sill/sessions.log`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogRequest {
+    pub key: String,
+    pub lines: usize,
 }
 
 /// A result that is text the way the CLI prints it (`memory.show`, `memory.search`, `memory.transcript`).

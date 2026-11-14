@@ -23,7 +23,7 @@ pub struct Client {
     next_id: AtomicU64,
     pending: Pending,
     /// `(method, params)` of every notification the daemon sent.
-    pub notifications: Receiver<(String, Value)>,
+    pub notifications: Mutex<Receiver<(String, Value)>>,
 }
 
 impl Client {
@@ -35,8 +35,9 @@ impl Client {
     }
 
     /// Connect, starting the daemon when nothing answers: the systemd socket starts it by itself
-    /// where the units are installed; otherwise `sill daemon` is spawned detached (direct mode,
-    /// docs/daemon.md §3.1) and the socket waited for.
+    /// where the units are installed; otherwise `sill daemon` is started — as a transient user unit
+    /// with `Delegate=yes` where the user manager answers, so sessions get their cgroups, else
+    /// spawned detached — and the socket waited for (direct mode, docs/daemon.md §3.1).
     pub fn connect_or_start() -> Result<Client> {
         match Self::connect() {
             Ok(c) => return Ok(c),
@@ -50,17 +51,38 @@ impl Client {
         std::fs::create_dir_all(&dir)?;
         let _ = std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700));
         let exe = std::env::current_exe()?;
-        let log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("daemon.log"))?;
-        let mut cmd = std::process::Command::new(&exe);
-        cmd.arg("daemon").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(log);
-        // its own session: no terminal hangup reaches it, and it is nobody's job
-        unsafe {
-            std::os::unix::process::CommandExt::pre_exec(&mut cmd, || {
-                let _ = rustix::process::setsid();
-                Ok(())
-            });
+        if systemd_user_usable() {
+            // `sill-daemon.service`, transient, its log in the journal; `systemctl --user stop
+            // sill-daemon` ends it and sessions stay (they are scopes of their own)
+            let _ = std::process::Command::new("systemctl")
+                .args(["--user", "reset-failed", "--quiet", "sill-daemon.service"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            let st = std::process::Command::new("systemd-run")
+                .args(["--user", "--unit", "sill-daemon", "--collect", "--quiet", "-p", "Slice=app.slice"])
+                .args(["--setenv=HOME", "--setenv=USER", "--setenv=TERM", "--setenv=LANG"])
+                .arg("--")
+                .arg(&exe)
+                .arg("daemon")
+                .status()
+                .context("systemd-run")?;
+            if !st.success() {
+                bail!("systemd-run --user for the daemon failed ({st}); journalctl --user -u sill-daemon");
+            }
+        } else {
+            let log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("daemon.log"))?;
+            let mut cmd = std::process::Command::new(&exe);
+            cmd.arg("daemon").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(log);
+            // its own session: no terminal hangup reaches it, and it is nobody's job
+            unsafe {
+                std::os::unix::process::CommandExt::pre_exec(&mut cmd, || {
+                    let _ = rustix::process::setsid();
+                    Ok(())
+                });
+            }
+            cmd.spawn().with_context(|| format!("starting {} daemon", exe.display()))?;
         }
-        cmd.spawn().with_context(|| format!("starting {} daemon", exe.display()))?;
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             match Self::connect() {
@@ -71,6 +93,11 @@ impl Client {
                 Err(_) => std::thread::sleep(Duration::from_millis(50)),
             }
         }
+    }
+
+    /// The connection is gone (the daemon left or restarted): the caller connects again.
+    pub fn is_closed(e: &anyhow::Error) -> bool {
+        e.to_string().contains("closed the connection") || e.to_string().contains("went away") || e.to_string().contains("writing to the daemon")
     }
 
     pub fn over(stream: UnixStream) -> Result<Client> {
@@ -105,7 +132,7 @@ impl Client {
                 let _ = tx.send(Err(Error::new(Error::INTERNAL, "the daemon closed the connection")));
             }
         })?;
-        Ok(Client { writer: Mutex::new(stream), next_id: AtomicU64::new(1), pending, notifications: nrx })
+        Ok(Client { writer: Mutex::new(stream), next_id: AtomicU64::new(1), pending, notifications: Mutex::new(nrx) })
     }
 
     /// One request, its answer.
@@ -123,4 +150,18 @@ impl Client {
         let v = rx.recv().context("the daemon went away")?.map_err(|e| anyhow::anyhow!("{method}: {e}"))?;
         serde_json::from_value(v).with_context(|| format!("{method}: unexpected answer shape"))
     }
+}
+
+/// `systemd-run --user` works here: `$XDG_RUNTIME_DIR` set, systemd the init, the user manager answering.
+fn systemd_user_usable() -> bool {
+    if std::env::var_os("XDG_RUNTIME_DIR").is_none() || !std::path::Path::new("/run/systemd/system").is_dir() {
+        return false;
+    }
+    std::process::Command::new("systemctl")
+        .args(["--user", "is-system-running"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map(|o| matches!(String::from_utf8_lossy(&o.stdout).trim(), "running" | "degraded" | "starting" | "initializing" | "maintenance"))
+        .unwrap_or(false)
 }

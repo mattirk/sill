@@ -669,11 +669,12 @@ impl Shelf {
         self.place();
     }
 
-    /// A session's log in the viewer, followed (SPEC §4.7): the unit's journal, or the detached
-    /// session's log files.
+    /// A session's log in the viewer, followed (SPEC §4.7): read through the daemon, which knows
+    /// whether it is a journald stream or files.
     fn open_log(&self, id: &str, title: &str) {
         let unit = sill_core::session::unit_name(id);
-        self.viewer.open_log(&format!("{title} · {unit}"), sill_core::session::log_source(id));
+        let sid = id.to_string();
+        self.viewer.open_log(&format!("{title} · {unit}"), std::sync::Arc::new(move |lines| super::client::session_log(&sid, lines)));
         self.viewer.root.set_visible(true);
         self.viewer.focus();
     }
@@ -1076,12 +1077,9 @@ impl Shelf {
         }
         grid.attach(&key("Recall"), 0, 4, 1, 1);
         grid.attach(&mem, 1, 4, 1, 1);
-        // where the jail runs (SPEC §4.7 launcher modes), copyable
+        // where the jail runs (docs/daemon.md §3.1: a child of the daemon in scope sill-<id>), copyable
         let unit = sill_core::session::unit_name(id);
-        let whereabouts = match sill_core::launcher::current().mode {
-            sill_core::launcher::Mode::Unit => format!("unit {unit} · journalctl --user -u {unit}"),
-            sill_core::launcher::Mode::Direct => format!("detached · $XDG_RUNTIME_DIR/sill/{id}/"),
-        };
+        let whereabouts = format!("{unit}.scope · journalctl --user -t {unit} · $XDG_RUNTIME_DIR/sill/{id}/");
         // the log, in the viewer and followed: the unit's journal, or the detached session's files
         let log_btn = gtk::Button::with_label("Show, follow");
         log_btn.set_halign(gtk::Align::Start);
@@ -1259,7 +1257,7 @@ impl Shelf {
             *view.on_host_terminal.borrow_mut() = Some(Box::new(move |window| shelf.open_host_terminal(window)));
             let shelf = self.clone();
             *view.on_open_log.borrow_mut() = Some(Box::new(move |title, src| {
-                shelf.viewer.open_log(title, src);
+                shelf.viewer.open_log(title, std::sync::Arc::new(move |lines| sill_core::session::read_log(&src, lines)));
                 shelf.viewer.root.set_visible(true);
                 shelf.viewer.focus();
             }));
@@ -1793,7 +1791,9 @@ fn stop_then(id: &str, then: impl FnOnce() + 'static) {
     std::thread::Builder::new()
         .name(format!("sill-stop-{id}"))
         .spawn(move || {
-            let _ = sill_core::session::stop(&id);
+            if let Err(e) = super::client::call::<serde_json::Value>(sill_proto::method::SESSIONS_STOP, sill_proto::Key { key: id.clone() }) {
+                eprintln!("sill: stopping session {id}: {e:#}");
+            }
             let _ = tx.send_blocking(());
         })
         .ok();
