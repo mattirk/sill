@@ -2,6 +2,7 @@ mod agents_ui;
 mod changes_ui;
 mod control;
 mod demo;
+mod daemon_ui;
 mod desktop;
 mod details;
 mod fonts;
@@ -228,6 +229,7 @@ pub enum Message {
     Details(details::Event),
     Name(names::Event),
     Refresh,
+    Daemon(daemon_ui::Event),
     Copy(String),
     /// Copy the open file (read when pressed, not per frame).
     CopyFile,
@@ -580,6 +582,7 @@ pub struct App {
     /// Numbers the notes on exposed ports, so a later one outlives an earlier one's expiry.
     process_serial: u64,
     pub demo: bool,
+    daemon: daemon_ui::State,
     connect: Option<Connector>,
     actions: Option<Arc<Actions>>,
     /// Where every lane reports, tagged with its session and epoch.
@@ -690,6 +693,7 @@ impl App {
     ) -> (Self, Task<Message>) {
         let (workspace, file_task) = workspace::Workspace::new(connect.clone());
         let mut app = Self {
+            daemon: daemon_ui::State::default(),
             network: network::State::default(),
             process_serial: 0,
             demo,
@@ -810,7 +814,7 @@ impl App {
         let lanes = iced::futures::stream::unfold(rx, |rx| async move {
             rx.recv().await.ok().map(|update| (update, rx))
         });
-        let list = Task::batch([app.list(), app.read_daemon_settings()]);
+        let list = Task::batch([app.list(), app.read_daemon_settings(), app.daemon_event(daemon_ui::Event::Check)]);
         (
             app,
             Task::batch([
@@ -1307,6 +1311,7 @@ impl App {
             Message::Choose(id) => return self.choose(id),
             Message::Details(event) => return self.details_event(event),
             Message::Name(event) => return self.name_event(event),
+            Message::Daemon(event) => return self.daemon_event(event),
             Message::Refresh => {
                 // A slow daemon must not accumulate a new thread on each timer tick.
                 // Explicit lifecycle requests still queue a follow-up through list().
@@ -1315,7 +1320,7 @@ impl App {
                 } else {
                     self.list()
                 };
-                let mut tasks = vec![list, self.read_daemon_settings()];
+                let mut tasks = vec![list, self.read_daemon_settings(), self.daemon_event(daemon_ui::Event::Check)];
                 if let Some(p) = self.details.as_ref().filter(|p| !p.pending) {
                     tasks.push(self.details_load(p.id.clone()));
                 }
@@ -2549,6 +2554,7 @@ impl App {
                 other => format!("{session} lane {epoch}: {other:?}"),
             });
         }
+        let connection_lost = matches!(&update, lane::Update::Connecting { error: Some(_), .. });
         let was_busy = view.conversation.busy();
         view.status.follow(&update);
         let mut grew = false;
@@ -2601,6 +2607,12 @@ impl App {
                 )
             })
             .collect();
+        if connection_lost {
+            if self.daemon.problem.is_none() && !self.daemon.restarting {
+                self.daemon.problem = Some("Checking daemon after a session connection interruption…".into());
+            }
+            tasks.push(self.daemon_event(daemon_ui::Event::Check));
+        }
         if finished {
             if self.details.as_ref().is_some_and(|p| p.id == session) {
                 tasks.push(self.details_load(session.clone()));

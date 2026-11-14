@@ -438,18 +438,10 @@ impl App {
         }
     }
 
-    /// Right of the tabs: the timer and a spinner while the agent works, the spinner alone while
-    /// a question waits, otherwise a dot — grey when all is well, red when disconnected.
+    /// Agent activity while connected; otherwise the daemon status, in the existing slot.
     fn activity(&self) -> Element<'_, Message> {
         let Some(view) = self.current() else {
-            return status_dot(
-                if self.list_error.is_some() {
-                    P.error
-                } else {
-                    alpha(P.fg, 0.35)
-                },
-                self.list_error.clone().unwrap_or_default(),
-            );
+            return self.daemon_indicator(activity_canvas(self.daemon_dot(), None));
         };
         let attention = view.attention();
         let trouble = view
@@ -459,14 +451,9 @@ impl App {
             .or_else(|| self.list_error.clone());
         let busy_now = trouble.is_none()
             && matches!(attention.activity, Activity::Working | Activity::Waiting);
-        let indicator = if busy_now {
+        let indicator = if busy_now && (!self.daemon_trouble() || self.demo) {
             Indicator::Spinner(P.accent)
-        } else {
-            Indicator::Dot(match &trouble {
-                Some(_) => P.error,
-                None => alpha(P.fg, 0.35),
-            })
-        };
+        } else { self.daemon_dot() };
         // the timer, as the shelf's: while the agent works, and whenever the pointer is over the
         // activity — the session's worked time, still while it does not work; it slides out from
         // under the indicator when it appears, as the shelf's revealer does
@@ -498,22 +485,23 @@ impl App {
             view.clock_shown.set(None);
         }
         let shown = activity_canvas(indicator, clock);
-        let shown: Element<'_, Message> = if busy_now {
-            shown
-        } else {
-            let tip = trouble.unwrap_or_else(|| status_text(&view.status).into());
-            tooltip(
-                shown,
-                container(text(tip).size(style::TINY))
-                    .padding([3, 8])
-                    .style(style::fill(P.surface)),
-                tooltip::Position::Bottom,
-            )
-            .into()
-        };
-        mouse_area(shown)
-            .on_enter(Message::ActivityHover(true))
-            .into()
+        self.daemon_indicator(shown)
+    }
+
+    fn daemon_dot(&self) -> Indicator {
+        if self.demo { Indicator::Dot(alpha(P.fg, 0.35)) }
+        else if self.daemon.stopped && !self.daemon.restarting { Indicator::Dot(alpha(P.error, 0.7)) }
+        else { Indicator::Pulse(if self.daemon_trouble() { P.warning } else { P.success }) }
+    }
+
+    fn daemon_indicator<'a>(&'a self, shown: Element<'a, Message>) -> Element<'a, Message> {
+        let shown = tooltip(shown,
+            container(text(if self.demo { "Demo — no daemon".into() } else { self.daemon_label() }).size(style::TINY))
+                .padding([3, 8]).style(style::fill(P.surface)), tooltip::Position::Bottom);
+        let area = mouse_area(shown).on_enter(Message::ActivityHover(true));
+        if !self.demo && self.daemon_trouble() {
+            area.on_press(Message::Daemon(crate::daemon_ui::Event::Open)).into()
+        } else { area.into() }
     }
 
     // --- the conversation -----------------------------------------------------------------------
@@ -1358,44 +1346,11 @@ impl App {
     }
 }
 
-/// The selected session's lane state, for the dot's tooltip.
-fn status_text(status: &Status) -> &'static str {
-    match status {
-        Status::Closed => "Not open",
-        Status::Connecting => "Connecting…",
-        Status::Reconnecting(_) => "Reconnecting…",
-        Status::Loading => "Catching up…",
-        Status::Live => "Connected",
-        Status::NotRunning => "Not running",
-        Status::Gone(_) => "Gone",
-        Status::Stopped(_) => "Stopped following",
-    }
-}
-
 fn placeholder(view: &SessionView) -> &'static str {
     match view.status {
         Status::NotRunning => "Not running — sending a prompt starts it",
         _ => "",
     }
-}
-
-/// The small round dot at the top bar's right, with what it means.
-fn status_dot<'a>(color: Color, tip: String) -> Element<'a, Message> {
-    tooltip(
-        container(space().width(8).height(8)).style(move |_| container::Style {
-            background: Some(color.into()),
-            border: iced::Border {
-                radius: 4.0.into(),
-                ..iced::Border::default()
-            },
-            ..container::Style::default()
-        }),
-        container(text(tip).size(style::TINY))
-            .padding([3, 8])
-            .style(style::fill(P.surface)),
-        tooltip::Position::Left,
-    )
-    .into()
 }
 
 /// A tab's mark for its session's state, if it has one to show.
@@ -2183,6 +2138,7 @@ struct Clock {
 enum Indicator {
     Spinner(Color),
     Dot(Color),
+    Pulse(Color),
 }
 
 /// The activity: its indicator, with the timer beside it when shown.
@@ -2204,7 +2160,7 @@ struct Busy {
 impl Busy {
     /// Anything moving: the spinner, a ticking timer, or the timer still sliding out.
     fn moving(&self) -> bool {
-        matches!(self.indicator, Indicator::Spinner(_))
+        matches!(self.indicator, Indicator::Spinner(_) | Indicator::Pulse(_))
             || self
                 .clock
                 .is_some_and(|c| c.ticking || c.shown.elapsed() < CLOCK_SLIDE)
@@ -2227,7 +2183,11 @@ impl canvas::Program<Message> for Busy {
                 event,
                 iced::Event::Window(iced::window::Event::RedrawRequested(_))
             ))
-        .then(canvas::Action::request_redraw)
+        .then(|| {
+            if matches!(self.indicator, Indicator::Pulse(_)) && self.clock.is_none() {
+                canvas::Action::request_redraw_at(Instant::now() + Duration::from_millis(50))
+            } else { canvas::Action::request_redraw() }
+        })
     }
 
     fn draw(
@@ -2267,6 +2227,10 @@ impl canvas::Program<Message> for Busy {
                 frame.stroke(&arc, stroke(alpha(color, 0.95)));
             }
             // the shelf's status square: 8 px, round
+            Indicator::Pulse(color) => {
+                let phase = spin_epoch().elapsed().as_secs_f32() * std::f32::consts::TAU / 4.0;
+                frame.fill(&canvas::Path::circle(center, 4.0), alpha(color, 0.3 + 0.15 * (1.0 + phase.sin())));
+            }
             Indicator::Dot(color) => frame.fill(&canvas::Path::circle(center, 4.0), color),
         }
         if let Some(shown_clock) = self.clock {

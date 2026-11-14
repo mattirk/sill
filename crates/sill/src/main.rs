@@ -254,6 +254,8 @@ enum DaemonCmd {
     },
     /// Version, mode, uptime and sessions of the running daemon (starts one when none runs)
     Status,
+    /// Restart only the daemon; leave the GUI and sessions running
+    Restart,
     /// Ask the running daemon to leave; sessions are not touched
     Stop,
     /// The protocol as one JSON document: every method with its params and result, every type's
@@ -739,7 +741,7 @@ fn main() -> Result<()> {
         Cmd::Toggle => frontend::toggle(),
         Cmd::Frontend { name } => frontend::set(name),
         Cmd::Restart { hidden, dev, detached } => {
-            if sill_proto::transport::selected()?.is_some() { restart_box_daemon() }
+            if sill_proto::transport::selected()?.is_some() { restart_daemon_only() }
             else { frontend::restart(hidden, dev, detached) }
         },
         #[cfg(feature = "shelf")]
@@ -1422,6 +1424,7 @@ fn daemon_cmd(cmd: Option<DaemonCmd>) -> Result<()> {
     match cmd {
         Some(DaemonCmd::Relay { session, socket, agent_socket, cwd, resume, experimental_acp_v2 }) => daemon::relay::run(&session, &socket, &agent_socket, &cwd, resume, experimental_acp_v2),
         None => daemon::run(),
+        Some(DaemonCmd::Restart) => restart_daemon_only(),
         Some(DaemonCmd::Status) => {
             let c = sill_proto::Client::connect_or_start()?;
             let s: sill_proto::DaemonStatus = c.call_within(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default(), sill_proto::client::QUICK_TIMEOUT)?;
@@ -1629,23 +1632,35 @@ fn box_cmd(cmd: BoxCmd) -> Result<()> {
 }
 
 
-/// A selected remote daemon restarts on its own host; local systemd units and shelf processes
-/// must never be stopped because `--box NAME` was passed to a command.
-fn restart_box_daemon() -> Result<()> {
-    let old = sill_proto::Client::connect()?;
-    let status: sill_proto::DaemonStatus = old.call(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default())?;
+/// Restart only the selected daemon (local or SSH), never a frontend or another host.
+fn restart_daemon_only() -> Result<()> {
+    let old = match sill_proto::Client::connect() {
+        Ok(client) => client,
+        Err(error) => {
+            let absent = error.chain().filter_map(|e| e.downcast_ref::<std::io::Error>())
+                .any(|e| matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused));
+            if sill_proto::transport::selected()?.is_none() && absent {
+                let client = sill_proto::Client::connect_or_start()?;
+                let status: sill_proto::DaemonStatus = client.call_within(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default(), sill_proto::client::QUICK_TIMEOUT)?;
+                println!("daemon started (pid {})", status.pid);
+                return Ok(());
+            }
+            return Err(error);
+        }
+    };
+    let status: sill_proto::DaemonStatus = old.call_within(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default(), sill_proto::client::QUICK_TIMEOUT)?;
     old.call_within::<serde_json::Value>(sill_proto::method::DAEMON_SHUTDOWN, sill_proto::Empty::default(), sill_proto::client::QUICK_TIMEOUT)?;
     drop(old);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         std::thread::sleep(std::time::Duration::from_millis(100));
         if let Ok(client) = sill_proto::Client::connect_or_start()
-            && let Ok(next) = client.call::<sill_proto::DaemonStatus>(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default())
-            && next.pid != status.pid
+            && let Ok(next) = client.call_within::<sill_proto::DaemonStatus>(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default(), sill_proto::client::QUICK_TIMEOUT)
+            && (next.pid != status.pid || next.started != status.started)
         {
-            println!("box daemon restarted (pid {}); sessions keep running", next.pid);
+            println!("daemon restarted (pid {}); sessions keep running", next.pid);
             return Ok(());
         }
-        if std::time::Instant::now() >= deadline { bail!("the box daemon did not restart within 10 s; inspect its journal or daemon.log on the box"); }
+        if std::time::Instant::now() >= deadline { bail!("the daemon did not restart within 10 s; inspect its journal or daemon.log"); }
     }
 }

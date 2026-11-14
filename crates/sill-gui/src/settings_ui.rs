@@ -57,7 +57,7 @@ impl Default for SettingsPage {
             token: sill_client::request_id("settings-page"),
             load_token: String::new(),
             policies: crate::policies::State::default(),
-            collapsed: std::collections::BTreeSet::from(["Keyboard shortcuts", "Policies"]),
+            collapsed: std::collections::BTreeSet::from(["Keyboard shortcuts", "Policies", "Daemon technical details"]),
             shortcuts: None,
             snapshot: None,
             instructions: text_editor::Content::new(),
@@ -324,7 +324,7 @@ impl App {
             .into(),
             Some(Ok(snapshot)) => self.settings_sections(page, snapshot),
         };
-        let page_column = column![body].max_width(MEASURE).padding(Padding {
+        let page_column = column![section(page, "Daemon", self.daemon_rows(page)), body].max_width(MEASURE).padding(Padding {
             top: 4.0,
             bottom: 28.0,
             left: 16.0,

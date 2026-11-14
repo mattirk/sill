@@ -1145,3 +1145,24 @@ fn travelling_policy_cli_preserves_base_shorthand_and_blocks_jailed_import() {
     assert!(!denied.status.success());
     assert!(String::from_utf8_lossy(&denied.stderr).contains("host administrative actions"));
 }
+
+#[test]
+fn daemon_only_restart_replaces_process_and_keeps_store() {
+    let mut d = Daemon::start();
+    let created = d.connect().unwrap().call("_sill/sessions.create", json!({"create_id":"restart-keeps-session","agent":"claude","policy":"default"})).unwrap();
+    assert!(created.get("error").is_none(), "{created}");
+    let before = d.connect().unwrap().call(sill_proto::method::DAEMON_STATUS, json!({})).unwrap();
+    let status = Daemon::command(&d.dir).arg("restart").status().unwrap();
+    // Always ask the replacement to exit, including if the restart command reports failure.
+    let after = d.connect().and_then(|mut c| {
+        let result = c.call(sill_proto::method::DAEMON_STATUS, json!({}));
+        let _ = c.call(sill_proto::method::DAEMON_SHUTDOWN, json!({}));
+        result
+    });
+    assert!(status.success(), "{}", d.log());
+    let after = after.unwrap();
+    assert_ne!(before["result"]["pid"], after["result"]["pid"]);
+    assert_eq!(before["result"]["sessions"], 1);
+    assert_eq!(before["result"]["sessions"], after["result"]["sessions"]);
+    assert!(d.wait_exit().success());
+}
