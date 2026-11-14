@@ -44,6 +44,9 @@ pub mod method {
     /// End a session as closing its tab would (docs/memory.md §2.2): the summary turn when the
     /// agent can be asked, the row written or deleted, the jail stopped. Params [`End`].
     pub const SESSIONS_END: &str = "_sill/sessions.end";
+    /// How many unkept writes a session has outside its pins (not counting build output); answers
+    /// [`Count`]. The shelf asks before a ghost's tab closes (docs/memory.md §3.3).
+    pub const SESSIONS_CHANGES: &str = "_sill/sessions.changes";
     /// *Summarize now*: the summary turn without the end; the answer comes as a `Summarized` event.
     pub const SESSIONS_CHECKPOINT: &str = "_sill/sessions.checkpoint";
     /// The writes that were the shelf's (M1c): `sill.db` has one writer, the daemon.

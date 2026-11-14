@@ -123,6 +123,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: MemoryCmd,
     },
+    /// Sessions, through the daemon: start one, list them, end one (docs/daemon.md §3.4)
+    Session {
+        #[command(subcommand)]
+        cmd: SessionCmd,
+    },
     /// The ACP agent registry sill installs from (security.md S13)
     Registry {
         #[command(subcommand)]
@@ -142,6 +147,31 @@ enum DaemonCmd {
     Status,
     /// Ask the running daemon to leave; sessions are not touched
     Stop,
+}
+
+#[derive(Subcommand)]
+enum SessionCmd {
+    /// A new session with its jail started; prints its id. The shelf lists it under Reopen to
+    /// open its conversation.
+    New {
+        /// registry id of the agent
+        #[arg(long, default_value = "claude")]
+        agent: String,
+        #[arg(long, default_value = "default")]
+        policy: String,
+        /// a ghost (docs/memory.md §3): no pins, no memory written, writes revert after an hour,
+        /// everything deleted at its end
+        #[arg(long)]
+        ghost: bool,
+        /// pin a folder or file (repeatable; refused for a ghost)
+        #[arg(long = "pin")]
+        pins: Vec<PathBuf>,
+    },
+    /// Sessions in the store, newest first: id, state, agent, title
+    List,
+    /// End a session as closing its tab does: the summary, or for a ghost its deletion (KEY: an
+    /// id, its first characters, or the exact title)
+    End { key: Vec<String> },
 }
 
 #[derive(Subcommand)]
@@ -419,6 +449,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Memory { cmd } => memory_cmd(cmd),
+        Cmd::Session { cmd } => session_cmd(cmd),
         Cmd::Daemon { cmd } => daemon_cmd(cmd),
         Cmd::Registry { cmd: RegistryCmd::Snapshot { out } } => {
             let out = out.unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sill-core/registry/snapshot.json"));
@@ -951,6 +982,37 @@ fn shell_words(s: &str) -> Vec<String> {
 }
 
 // --- shared --------------------------------------------------------------------------------------
+
+fn session_cmd(cmd: SessionCmd) -> Result<()> {
+    let c = sill_proto::Client::connect_or_start()?;
+    match cmd {
+        SessionCmd::New { agent, policy, ghost, pins } => {
+            let pins = pins.into_iter().map(|p| p.canonicalize().with_context(|| format!("pin {}", p.display()))).collect::<Result<Vec<_>>>()?;
+            let new = sill_proto::NewSession { agent, policy, pins, ghost, ..Default::default() };
+            let k: sill_proto::Key = c.call(sill_proto::method::SESSIONS_NEW, new)?;
+            let started: sill_proto::Started = c.call(sill_proto::method::SESSIONS_START, sill_proto::Key { key: k.key.clone() })?;
+            println!("{}", k.key);
+            eprintln!("{}session {} started; socket {}", if ghost { "ghost " } else { "" }, k.key, started.socket.display());
+        }
+        SessionCmd::List => {
+            let rows: Vec<sill_proto::Session> = c.call(sill_proto::method::SESSIONS_LIST, sill_proto::Empty::default())?;
+            for s in rows {
+                let state = if s.running { "running" } else if s.ended_at.is_some() { "ended" } else { "open" };
+                println!("{}  {:<7} {}{:<8} {}", s.id, state, if s.ghost { "ghost " } else { "" }, s.agent, s.title);
+            }
+        }
+        SessionCmd::End { key } => {
+            let s: sill_proto::Session = c.call(sill_proto::method::SESSIONS_GET, sill_proto::Key { key: key.join(" ") })?;
+            let e: sill_proto::Ending = c.call(sill_proto::method::SESSIONS_END, sill_proto::End { key: s.id.clone(), reason: "close".into() })?;
+            match (e.pending, e.deleted) {
+                (true, _) => println!("{}: the agent writes its summary; the session ends when it is done", s.id),
+                (false, true) => println!("{}: deleted ({})", s.id, if s.ghost { "a ghost leaves nothing" } else { "nothing was asked in it" }),
+                (false, false) => println!("{}: ended", s.id),
+            }
+        }
+    }
+    Ok(())
+}
 
 fn daemon_cmd(cmd: Option<DaemonCmd>) -> Result<()> {
     match cmd {

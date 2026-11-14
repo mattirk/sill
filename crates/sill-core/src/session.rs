@@ -424,7 +424,11 @@ pub enum LogSource {
 }
 
 pub fn log_source(session: &str) -> LogSource {
-    if crate::launcher::current().journal {
+    let file = shim::runtime_dir(session).map(|rt| rt.join("jail.log")).ok().filter(|f| f.is_file());
+    if let Some(f) = file {
+        // a ghost's, or any session's without journald
+        LogSource::Files(vec![f])
+    } else if crate::launcher::current().journal {
         LogSource::Journal(unit_name(session))
     } else {
         let rt = shim::runtime_dir(session).unwrap_or_default();
@@ -619,7 +623,9 @@ pub fn ensure_started(opts: &StartOptions, home: &Path, exe: &Path) -> Result<St
     for f in ["bwrap.pid", "launch.pid"] {
         let _ = std::fs::remove_file(rt.join(f));
     }
-    let log = if launcher.journal {
+    // a ghost's log — the proxy's host names included — stays in its runtime dir (RAM) and goes
+    // with the session, never into the journal (docs/memory.md §3.4)
+    let log = if launcher.journal && !opts.ghost {
         crate::launcher::journal_stream(&unit_name(&opts.session), 6)?
     } else {
         crate::launcher::file_stream(&rt.join("jail.log"))?

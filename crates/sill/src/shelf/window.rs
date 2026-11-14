@@ -57,6 +57,9 @@ pub struct Shelf {
     /// Sessions the daemon was asked to end and has not yet (`close_session`): their tabs are
     /// closing, a second close hides them, the idle sweep leaves them alone.
     ending: RefCell<std::collections::HashSet<String>>,
+    /// Ghost tabs whose close the person confirmed (or that had nothing to keep): the next
+    /// `close_session` goes through without asking.
+    discard_ok: RefCell<std::collections::HashSet<String>>,
     /// Quit was asked: the shelf exits as soon as the last view has gone (`close_view`).
     quitting: std::cell::Cell<bool>,
     changes: Rc<ChangesPage>,
@@ -266,6 +269,7 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
         views: RefCell::new(HashMap::new()),
         backgrounded: RefCell::new(std::collections::HashSet::new()),
         ending: RefCell::new(std::collections::HashSet::new()),
+        discard_ok: RefCell::new(std::collections::HashSet::new()),
         quitting: std::cell::Cell::new(false),
         changes: changes.clone(),
         agents: agents_page.clone(),
@@ -1332,6 +1336,13 @@ impl Shelf {
     /// tab goes and the summary finishes out of sight (`background_view`). `reason`: `close`,
     /// `idle`, `quit`.
     fn close_session(self: &Rc<Self>, id: &str, reason: &str) {
+        // a ghost's tab asks once when it has unkept changes (docs/memory.md §3.3): closing deletes
+        // them, and Keep is the one way anything of a ghost survives
+        let ghost = self.views.borrow().get(id).is_some_and(|v| v.session.borrow().ghost);
+        if ghost && reason == "close" && !self.ending.borrow().contains(id) && !self.discard_ok.borrow_mut().remove(id) {
+            self.ask_ghost_close(id);
+            return;
+        }
         if !self.ending.borrow_mut().insert(id.to_string()) {
             self.background_view(id);
             return;
@@ -1357,6 +1368,56 @@ impl Shelf {
                 }
                 Err(_) => {}
             }
+        });
+    }
+
+    /// Before a ghost's tab closes: the daemon counts its unkept writes; none, and it closes; some,
+    /// and the person chooses — *Keep some* opens Changes and leaves the tab, *Discard and close*
+    /// closes it. Escape does neither.
+    fn ask_ghost_close(self: &Rc<Self>, id: &str) {
+        let (tx, rx) = async_channel::bounded::<anyhow::Result<sill_proto::Count>>(1);
+        let sid = id.to_string();
+        std::thread::Builder::new()
+            .name(format!("sill-ghost-ask-{sid}"))
+            .spawn(move || {
+                let _ = tx.send_blocking(super::client::call(sill_proto::method::SESSIONS_CHANGES, sill_proto::Key { key: sid }));
+            })
+            .ok();
+        let shelf = self.clone();
+        let sid = id.to_string();
+        glib::spawn_future_local(async move {
+            let n = match rx.recv().await {
+                Ok(Ok(c)) => c.n,
+                // the count could not be had: ask anyway rather than discard unseen
+                Ok(Err(e)) => {
+                    eprintln!("sill: counting ghost {sid}'s changes: {e:#}");
+                    usize::MAX
+                }
+                Err(_) => return,
+            };
+            if n == 0 {
+                shelf.discard_ok.borrow_mut().insert(sid.clone());
+                shelf.close_session(&sid, "close");
+                return;
+            }
+            let title = shelf.views.borrow().get(&sid).map(|v| v.session.borrow().title.clone()).unwrap_or_default();
+            let what = if n == usize::MAX { "unkept changes".to_string() } else if n == 1 { "1 unkept change".to_string() } else { format!("{n} unkept changes") };
+            let dialog = gtk::AlertDialog::builder()
+                .modal(true)
+                .message(format!("“{title}” is a ghost with {what}"))
+                .detail("Closing it deletes them with the session. Keep copies a change to the host.")
+                .buttons(["Keep some", "Discard and close"])
+                .default_button(0)
+                .build();
+            let s2 = shelf.clone();
+            dialog.choose(Some(&shelf.window), None::<&gtk::gio::Cancellable>, move |r| match r {
+                Ok(1) => {
+                    s2.discard_ok.borrow_mut().insert(sid.clone());
+                    s2.close_session(&sid, "close");
+                }
+                Ok(0) => s2.show_page("changes"),
+                _ => {}
+            });
         });
     }
 

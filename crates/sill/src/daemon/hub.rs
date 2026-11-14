@@ -283,6 +283,16 @@ impl Hub {
                 self.with_store(|s| s.set_agent_settings(&a.agent, &settings)).map_err(|e| Error::failed(format!("{e:#}")))?;
                 Ok(json!({}))
             }
+            method::SESSIONS_CHANGES => {
+                let k: Key = args(params)?;
+                let s = self.with_store(|st| st.sessions()).map_err(|e| Error::failed(format!("{e:#}")))?.into_iter().find(|s| s.id == k.key);
+                let Some(s) = s else { return Err(Error::failed(format!("no session {}", k.key))) };
+                let uid = rustix::process::getuid().as_raw();
+                let user = std::env::var("USER").unwrap_or_else(|_| uid.to_string());
+                let changes = self.session_changes(&s, uid, &user).map_err(|e| Error::failed(format!("{e:#}")))?;
+                // what the person would want to look at: build output is not asked about
+                to_value(Count { n: changes.iter().filter(|c| !c.ignored).count() })
+            }
             method::SESSIONS_END => {
                 let e: End = args(params)?;
                 to_value(self.end_session(&e.key, &e.reason).map_err(|e| Error::failed(format!("{e:#}")))?)
@@ -559,6 +569,7 @@ impl Hub {
         if !sill_core::session::valid_id(id) {
             bail!("not a session id");
         }
+        let ghost = self.is_ghost(id);
         self.retire_runner(id);
         self.ending.lock().unwrap().remove(id);
         if let Err(e) = sill_core::session::stop(id) {
@@ -569,10 +580,24 @@ impl Hub {
             eprintln!("sill daemon: removing session {id}'s state: {e:#}");
         }
         self.with_store(|s| {
-            s.delete(id)?;
-            s.prune_pins()?;
-            Ok(())
+            // a ghost's rows are overwritten as they go and the file is rewritten without them,
+            // its WAL emptied: the depth docs/memory.md §3.4 promises, no more
+            if ghost {
+                s.conn().execute_batch("PRAGMA secure_delete = ON")?;
+            }
+            let r = s.delete(id).and_then(|_| s.prune_pins().map(|_| ()));
+            if ghost {
+                let _ = s.conn().execute_batch("PRAGMA secure_delete = OFF");
+                if r.is_ok() {
+                    s.vacuum()?;
+                    s.conn().query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+                }
+            }
+            r
         })?;
+        if ghost && let Ok(rt) = sill_core::shim::runtime_dir(id) {
+            let _ = std::fs::remove_dir_all(rt); // its log is there
+        }
         refresh_memory();
         eprintln!("sill daemon: session {id} deleted");
         Ok(())
@@ -593,7 +618,7 @@ impl Hub {
             if runner.as_ref().is_some_and(|r| r.busy()) || !sill_core::session::is_running(&s.id) {
                 continue;
             }
-            let due = match self.ghost_changes(&s, uid, &user) {
+            let due = match self.session_changes(&s, uid, &user) {
                 Ok(changes) => sill_core::changes::ghost_due(&changes, std::time::SystemTime::now(), after),
                 Err(e) => {
                     eprintln!("sill daemon: ghost {}: scanning its writes: {e:#}", s.id);
@@ -625,14 +650,21 @@ impl Hub {
         }
     }
 
-    /// A ghost's writes as the Changes page lists them: its upper trees against the tightened policy.
-    fn ghost_changes(&self, s: &sill_core::store::Session, uid: u32, user: &str) -> Result<Vec<sill_core::ledger::Change>> {
+    /// A session's writes as the Changes page lists them: its upper trees against its policy (a
+    /// ghost's tightened).
+    fn session_changes(&self, s: &sill_core::store::Session, uid: u32, user: &str) -> Result<Vec<sill_core::ledger::Change>> {
         let mut policy = Policy::load(&s.policy, &self.home)?;
-        policy.ghostly(&self.home);
+        if s.ghost {
+            policy.ghostly(&self.home);
+        }
         let registry = sill_core::agents::load(&self.home);
         let Some(agent) = registry.get(&s.agent) else { bail!("unknown agent {}", s.agent) };
         let sdir = sill_core::session::state_dir(uid, &s.id)?;
-        let binds = sill_core::session::binds_for(agent, &policy, &sdir, &self.home, &[], true)?;
+        if !sdir.is_dir() {
+            return Ok(vec![]);
+        }
+        let pins = self.with_store(|st| st.pins(&s.id)).unwrap_or_default();
+        let binds = sill_core::session::binds_for(agent, &policy, &sdir, &self.home, &pins, s.ghost)?;
         let plan = sill_core::changes::session_plan(policy.clone(), sdir, &self.home, uid, user, binds)?;
         sill_core::changes::scan(&policy, &plan, None)
     }
@@ -826,15 +858,15 @@ impl Hub {
         let hub = self.clone();
         let id = id.to_string();
         let _ = std::thread::Builder::new().name(format!("sill-end-{id}")).spawn(move || {
+            if delete {
+                // the trash can's path: jail, state, rows — a ghost's scrubbed, its log removed
+                if let Err(e) = hub.delete_session(&id) {
+                    eprintln!("sill daemon: deleting session {id}: {e:#}");
+                }
+                return;
+            }
             if let Err(e) = sill_core::session::stop(&id) {
                 eprintln!("sill daemon: stopping session {id}: {e:#}");
-            }
-            if delete {
-                let uid = rustix::process::getuid().as_raw();
-                if let Err(e) = sill_core::session::remove_state(uid, &id) {
-                    eprintln!("sill daemon: removing session {id}'s state: {e:#}");
-                }
-                hub.with_store(|s| s.delete(&id)).ok();
             }
             refresh_memory();
         });
