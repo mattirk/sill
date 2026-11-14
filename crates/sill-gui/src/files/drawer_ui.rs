@@ -1,6 +1,6 @@
 //! The file drawer: its toolbar, the tree of pinned folders and the Changes list.
 use iced::widget::{
-    Column, button, column, container, responsive, row, rule, scrollable, space, text, text_input,
+    Column, button, column, container, responsive, row, rule, scrollable, space, text,
 };
 use iced::{Alignment, Element, Fill, Font, Padding, Shrink};
 use sill_proto::sessions::HostPath;
@@ -84,30 +84,15 @@ impl App {
                 }
             }
         }
-        let input = text_input("Absolute path", &state.path_input)
-            .size(style::TINY)
-            .padding(7)
-            .on_input(|s| msg(Action::Path(s)))
-            .on_submit(msg(Action::BrowsePath));
-        let controls = row![
-            action("Open", Action::BrowsePath),
-            keys::press_maybe(
-                button(
-                    text(if state.pin_pending.is_some() {
-                        "Pinning…"
-                    } else {
-                        "+ Pin"
-                    })
-                    .size(style::SMALL)
-                )
-                .padding([3, 7])
-                .style(style::quiet),
-                state.pin_pending.is_none().then(|| msg(Action::PinPath))
-            )
-        ]
-        .spacing(4)
-        .height(26)
-        .align_y(Alignment::Center);
+        let close = tip(
+            keys::press(
+                button(crate::icons::glyph("chevron-right", 13.0, style::alpha(P.fg, 0.35)))
+                    .padding([5, 7])
+                    .style(style::quiet),
+                msg(Action::ToggleDrawer),
+            ),
+            "Close drawer".into(),
+        );
         column![
             toolbar,
             rule::horizontal(1).style(style::rule_style(P.border)),
@@ -116,16 +101,7 @@ impl App {
                 .id(format!("files-{}", view.id))
                 .height(Fill)
                 .style(style::feed_scroll),
-            if state.diff_mode {
-                Element::from(space().height(0))
-            } else {
-                container(column![input, controls].spacing(4))
-                    .padding(Padding {
-                        bottom: 4.0,
-                        ..Padding::new(8.0)
-                    })
-                    .into()
-            }
+            row![space().width(Fill), close].padding([4, 4])
         ]
         .height(Fill)
         .into()
