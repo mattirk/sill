@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use sill_core::history::Kind as H;
 use sill_core::keep::{self, KeepOptions};
 use sill_core::ledger::{Change, FileType, Kind};
@@ -20,7 +20,6 @@ impl Hub {
     pub(super) fn changes_list(&self) -> Result<ChangesList> {
         let sessions = self.with_store(|s| s.sessions())?;
         let (uid, user) = who();
-        let registry = sill_core::agents::load(&self.home);
         let mut pinned: Vec<PathBuf> = self.pinned_repos()?;
         pinned.sort();
         pinned.dedup();
@@ -31,14 +30,14 @@ impl Hub {
             .collect();
         let mut out = Vec::new();
         for s in sessions {
-            let list: Vec<Change> = self.session_changes(&s, uid, &user).unwrap_or_default().into_iter().filter(|c| !c.ignored).collect();
+            let list: Vec<Change> = self.session_changes(&s, uid, &user).with_context(|| format!("reading changes for session {}", s.id))?.into_iter().filter(|c| !c.ignored).collect();
             let kept = kept_dir(uid, &s.id).map(|d| keep::undoable(&d)).unwrap_or_default();
             if list.is_empty() && kept.is_empty() {
                 continue;
             }
-            let state_dirs = registry.get(&s.agent).map(|a| sill_core::session::state_paths(a, &self.home)).unwrap_or_default();
+            let state_dirs = sill_core::session::recorded_filesystem(&s.id)?.state_paths()?;
             let (agent_state, changes): (Vec<Change>, Vec<Change>) =
-                list.into_iter().partition(|c| sill_core::changes::is_agent_state(&c.path, &state_dirs, &self.home));
+                list.into_iter().partition(|c| sill_core::changes::is_agent_state(&c.path, &state_dirs));
             out.push(SessionChanges {
                 id: s.id.clone(),
                 title: s.title.clone(),
@@ -156,20 +155,20 @@ impl Hub {
         }
         let after = std::time::Duration::from_secs(minutes as u64 * 60);
         let (uid, user) = who();
-        let registry = sill_core::agents::load(&self.home);
         let sessions: Vec<Session> = self.with_store(|s| s.sessions()).unwrap_or_default().into_iter().filter(|s| !s.ghost).collect();
         for s in sessions {
             if self.children.lock().unwrap().contains_key(&s.id) && self.runners.lock().unwrap().get(&s.id).is_none_or(|r| !r.alive() || r.busy()) {
                 continue;
             }
-            let state_dirs = registry.get(&s.agent).map(|a| sill_core::session::state_paths(a, &self.home)).unwrap_or_default();
+            let Ok(filesystem) = sill_core::session::recorded_filesystem(&s.id) else { continue };
+            let Ok(state_dirs) = filesystem.state_paths() else { continue };
             let now = std::time::SystemTime::now();
             let mut due: Vec<Change> = self
                 .session_changes(&s, uid, &user)
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|c| !c.conflict && !c.ignored && sill_core::changes::repo_root(&c.path).is_none())
-                .filter(|c| !sill_core::changes::is_agent_state(&c.path, &state_dirs, &self.home))
+                .filter(|c| !sill_core::changes::is_agent_state(&c.path, &state_dirs))
                 .filter(|c| written(c).is_some_and(|t| now.duration_since(t).unwrap_or_default() >= after))
                 .collect();
             if due.is_empty() {
@@ -192,10 +191,8 @@ impl Hub {
         }
     }
 
-    /// After each turn, on a thread (it scans): the agent's own new dot-paths move into its
-    /// sill-owned home (SPEC §4.2, what the frontend's `after_turn` did before the split) — never for a ghost, whose
-    /// state must not reach the home every later session shares — and the attached frontends get
-    /// a note: how many changes wait in Changes, what was adopted.
+    /// After a turn, report ordinary overlay changes. Reading the ledger never adopts files
+    /// or changes the filesystem rules of this or another session.
     pub fn turn_ended(self: &std::sync::Arc<Self>, id: &str) {
         let hub = self.clone();
         let id = id.to_string();
@@ -209,33 +206,14 @@ impl Hub {
                     return;
                 }
             };
-            let registry = sill_core::agents::load(&hub.home);
-            let agent = registry.get(&s.agent);
-            let mut adopted_note = String::new();
-            if let Some(agent) = agent.filter(|_| !s.ghost) {
-                let pins = hub.with_store(|st| st.jail_pins(&s.id)).unwrap_or_default();
-                match sill_core::session::adopt_agent_state(agent, &hub.home, &changes, &pins) {
-                    Ok(adopted) if !adopted.is_empty() => {
-                        let names: Vec<String> = adopted.iter().map(|p| format!("~/{}", p.strip_prefix(&hub.home).unwrap_or(p).display())).collect();
-                        adopted_note = format!("{} kept as {}'s own state (in its jail home from the next start)", names.join(", "), agent.name);
-                    }
-                    Ok(_) => {}
-                    Err(e) => eprintln!("sill daemon: session {id}: adopting the agent's state: {e:#}"),
-                }
-            }
-            let state = agent.map(|a| sill_core::session::state_paths(a, &hub.home)).unwrap_or_default();
-            let pending = changes.iter().filter(|c| !c.ignored && !sill_core::changes::is_agent_state(&c.path, &state, &hub.home)).count();
-            let mut msg = match pending {
+            let Ok(filesystem) = sill_core::session::recorded_filesystem(&s.id) else { return };
+            let Ok(state) = filesystem.state_paths() else { return };
+            let pending = changes.iter().filter(|c| !c.ignored && !sill_core::changes::is_agent_state(&c.path, &state)).count();
+            let msg = match pending {
                 0 => String::new(),
                 n if s.ghost => format!("{n} change(s) in Changes — they revert an hour after their last write unless kept"),
                 n => format!("{n} change(s) pending in Changes"),
             };
-            if !adopted_note.is_empty() {
-                if !msg.is_empty() {
-                    msg.push_str(" · ");
-                }
-                msg.push_str(&adopted_note);
-            }
             // the turn may have written anything: whatever shows the overlays rescans
             hub.changes_changed();
             if !msg.is_empty() {
@@ -270,13 +248,11 @@ impl Hub {
     pub(in crate::daemon) fn jail_view(&self, id: &str) -> Result<sill_proto::JailView> {
         let Some(s) = self.with_store(|st| st.sessions())?.into_iter().find(|s| s.id == id) else { bail!("no session {id}") };
         let (uid, user) = who();
-        let policy = sill_core::session::policy_of(&s, &self.home)?;
-        let registry = sill_core::agents::load(&self.home);
-        let Some(agent) = registry.get(&s.agent) else { bail!("unknown agent {}", s.agent) };
-        let sdir = sill_core::session::state_dir(uid, &s.id)?;
-        let pins = sill_core::session::launch_pins(&s.id)?;
-        let binds = sill_core::session::binds_for(agent, &policy, &sdir, &self.home, &pins, s.ghost)?;
-        let plan = sill_core::changes::session_plan(policy, sdir, &self.home, uid, &user, binds)?;
+        let launch = sill_core::session::policy_snapshot(&s.id)?.context("launch not recorded; rebuild the session")?;
+        let filesystem = launch.filesystem.context("filesystem plan not recorded; rebuild the session")?;
+        let sdir = sill_core::session::state_dir_path(uid, &s.id)?;
+        let mut plan = sill_core::changes::session_plan(launch.policy, sdir, &self.home, uid, &user, &filesystem)?;
+        plan.masked.extend(launch.fragment_masks);
         Ok(sill_proto::JailView { layers: plan.layers.into_iter().map(|l| (l.host, l.upper)).collect(), masked: plan.masked })
     }
 

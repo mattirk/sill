@@ -50,6 +50,7 @@ const ROWS: &[(&str, &str, &str)] = &[
 pub enum Event {
     /// Show or hide the panel.
     Toggle(String),
+    Filesystem(String),
     /// The next build and, for a running jail, its launch (a read is numbered: only the latest
     /// one counts), and the agent's name when it was asked for.
     Read(String, u64, Result<Views, String>),
@@ -87,6 +88,7 @@ pub enum Change {
 #[derive(Default)]
 pub struct Perms {
     pub open: bool,
+    pub filesystem_open: bool,
     pub views: Option<Views>,
     pub error: Option<String>,
     reading: Option<u64>,
@@ -163,6 +165,7 @@ impl Perms {
         else {
             return false;
         };
+        if launch.filesystem.as_ref().map(|f| &f.rules) != preview.filesystem.as_ref().map(|f| &f.rules) || launch.filesystem.is_none() { return true; }
         let differs = ROWS.iter().any(|(capability, _, _)| {
             state(launch, capability).map(|s| s.effective)
                 != state(preview, capability).map(|s| s.effective)
@@ -188,6 +191,9 @@ impl App {
 
     pub(crate) fn permissions_event(&mut self, event: Event) -> Task<Message> {
         match event {
+            Event::Filesystem(id) => {
+                if let Some(view) = self.views.get_mut(&id) { view.permissions.filesystem_open = !view.permissions.filesystem_open; }
+            }
             Event::Toggle(id) => {
                 let Some(view) = self.views.get_mut(&id) else {
                     return Task::none();
@@ -872,6 +878,34 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>, narrow: bo
         .into()
     };
     content = content.push(columns);
+    content = content.push(keys::press(button(text(if perms.filesystem_open { "▾ Filesystem" } else { "▸ Filesystem" }).size(style::TINY)).style(style::quiet), Message::Perms(Event::Filesystem(id.into()))));
+    if perms.filesystem_open {
+        let mut files = Column::new().spacing(4);
+        if let Some(views) = &perms.views {
+            let current = if running { views.launch.as_ref() } else { Some(&views.preview) };
+            files = files.push(text(if running { "Current filesystem" } else { "Next launch" }).size(style::TINY).color(P.fg_dim));
+            let show = |label: &str, fs: Option<&sill_proto::admin::FilesystemView>| {
+                let mut rows = Column::new().spacing(3).push(text(label.to_string()).size(style::TINY).color(P.fg_dim));
+                match fs {
+                    None => rows = rows.push(text("Filesystem plan not recorded; rebuild this session.").size(style::TINY).color(P.warning)),
+                    Some(fs) => {
+                        for rule in &fs.rules {
+                            let backing = rule.backing.as_ref().map(|p| format!(" → {}", p.display)).unwrap_or_default();
+                            rows = rows.push(tip(text(format!("{}: {}{}", rule.behavior, rule.target.display, backing)).size(style::TINY), format!("{} — {}", rule.source, rule.reason)));
+                        }
+                        for path in &fs.unused { rows = rows.push(text(format!("Stored but unused: {}", path.display)).size(style::TINY).color(P.fg_dim)); }
+                    }
+                }
+                rows
+            };
+            files = files.push(show("", current.and_then(|v| v.filesystem.as_ref())));
+            if running && current.and_then(|v| v.filesystem.as_ref()).map(|f| &f.rules) != views.preview.filesystem.as_ref().map(|f| &f.rules) {
+                files = files.push(show("After restart", views.preview.filesystem.as_ref()));
+            }
+        }
+        content = content.push(iced::widget::scrollable(files).height(iced::Length::Fixed(200.0)));
+    }
+
 
     let pending = perms.restart_pending(running) || session.policy_changed;
     // one line for the last change's note, else the restart that is waiting
@@ -976,7 +1010,7 @@ mod tests {
     }
 
     fn view(kind: &str, public_web: bool, hosts: Value) -> Value {
-        json!({"view": kind, "session_id": "demo", "name": "default", "text": null,
+        json!({"filesystem": {"rules": [], "unused": []},"view": kind, "session_id": "demo", "name": "default", "text": null,
                "fragment_ro": [], "fragment_masks": [], "sources": [], "suggestions": [],
                "fingerprint": null, "diagnostics": [],
                "permissions": [grant("test_desktop", false, "policy"), grant("private_bus", false, "policy"),
@@ -984,6 +1018,24 @@ mod tests {
                                grant("public_web", public_web, if public_web { "session" } else { "policy" }),
                                grant("host_control", false, "policy")],
                "session_hosts": hosts})
+    }
+
+    #[test]
+    fn filesystem_changes_require_restart_but_unused_inventory_does_not() {
+        let launch: PolicyView = serde_json::from_value(view("launch", false, json!([]))).unwrap();
+        let mut preview = launch.clone();
+        preview.filesystem.as_mut().unwrap().unused.push(sill_proto::sessions::HostPath::from_path(std::path::Path::new("/stored/.cargo")));
+        let mut perms = Perms { views: Some(Views { launch: Some(launch), preview, agent_name: None }), ..Default::default() };
+        assert!(!perms.filesystem_open);
+        assert!(!perms.restart_pending(true));
+        perms.views.as_mut().unwrap().preview.filesystem.as_mut().unwrap().rules.push(sill_proto::admin::PathRule {
+            target: sill_proto::sessions::HostPath::from_path(std::path::Path::new("/home/me/.codex")),
+            backing: None, behavior: "agent".into(), source: "home_paths".into(), reason: "new definition".into(),
+        });
+        assert!(perms.restart_pending(true));
+        assert!(!perms.restart_pending(false));
+        perms.views.as_mut().unwrap().launch.as_mut().unwrap().filesystem = None;
+        assert!(perms.restart_pending(true));
     }
 
     /// A client whose daemon granted the permission-modes capability, and that daemon's end.

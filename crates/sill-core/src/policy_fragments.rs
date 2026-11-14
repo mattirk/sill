@@ -94,6 +94,8 @@ pub struct Suggestion {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Resolution {
+    /// Missing evidence requires a rebuild, never inference from current definitions.
+    pub filesystem: Option<crate::agent_storage::Plan>,
     /// Pins used by this launch, independent of later store edits.
     #[serde(default, with = "paths_bytes")]
     pub launch_pins: Vec<PathBuf>,
@@ -321,6 +323,7 @@ pub fn resolve(base: &Policy, pins: &[PathBuf], ignore_roots: &[PathBuf]) -> Res
         }
     }
     let mut out = Resolution {
+        filesystem: None,
         launch_pins: pins.to_vec(),
         policy: base.clone(),
         fragment_ro: vec![],

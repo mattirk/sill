@@ -226,6 +226,7 @@ fn policy_view(view: &str, session_id: &str, name: &str, r: sill_core::policy_fr
         }))
         .collect();
     Ok(api::PolicyView {
+        filesystem: r.filesystem.as_ref().map(|p| p.view.clone()),
         permissions,
         session_hosts,
         view: view.into(), session_id: session_id.into(), name: name.into(),
@@ -335,6 +336,7 @@ fn preview(hub: &Hub, session_id: &str) -> Result<api::PolicyView> {
     Ok(match sill_core::session::next_build(&row, &sill_core::changes::home()?, &pins, &[]) {
         Ok(resolved) => policy_view("preview", session_id, &row.policy, resolved)?,
         Err(e) => api::PolicyView {
+            filesystem: None,
             view: "preview".into(), session_id: session_id.into(), name: row.policy,
             permissions: vec![], session_hosts: vec![], text: None, fragment_ro: vec![], fragment_masks: vec![], sources: vec![],
             suggestions: vec![], fingerprint: None, diagnostics: vec![format!("{e:#}")],
@@ -348,6 +350,7 @@ fn permissions_changed(hub: &Hub, session_id: &str, live_revoked: bool) -> Resul
     let restart_required = sill_core::session::is_running(session_id) && (live_revoked
         || match sill_core::session::policy_snapshot(session_id)? {
             Some(launch) => {
+                if launch.filesystem.as_ref().map(|p| &p.view.rules) != preview.filesystem.as_ref().map(|p| &p.rules) { return Ok(api::PermissionsChanged { preview, restart_required: true }); }
                 let (choices, hosts) = hub.with_store(|store| Ok((store.permission_choices(session_id)?, store.network_hosts(session_id)?)))?;
                 sill_core::session::grants_outdated(&launch, &choices, &hosts)
             }
@@ -553,7 +556,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             let name = a.host.rsplit_once(':').filter(|(_, port)| port.parse::<u16>().is_ok()).map(|(name, _)| name).unwrap_or(&a.host);
             if !sill_core::proxy::valid_hostname(name.strip_prefix("*.").unwrap_or(name)) { return Err(invalid("invalid host pattern")); }
             let home = sill_core::changes::home()?;
-            let mut agent = sill_core::agents::load(&home).remove(&row.agent).ok_or_else(|| domain("not_found", "unknown agent"))?;
+            let mut agent = sill_core::agents::load(&home)?.remove(&row.agent).ok_or_else(|| domain("not_found", "unknown agent"))?;
             if !agent.domains.contains(&a.host) {
                 if agent.domains.len() >= 256 { return Err(domain("limit_exceeded", "at most 256 agent network defaults")); }
                 agent.domains.push(a.host.clone());
@@ -949,7 +952,7 @@ fn denied(hub: &Hub, a: api::DeniedList) -> Result<api::NetworkDenied> {
     } else {
         None
     };
-    let agent_name = sill_core::agents::load(&home)
+    let agent_name = sill_core::agents::load(&home)?
         .get(&row.agent)
         .map(|a| a.name.clone())
         .unwrap_or(row.agent);

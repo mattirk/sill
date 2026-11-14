@@ -79,6 +79,39 @@ pub fn remove_file_beneath(root: &Path, rel: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Initialize a missing declared file without reading or replacing an existing one. An atomic
+/// no-replace rename prevents a concurrent launcher from overwriting newly saved settings.
+pub fn initialize_private_beneath(root: &Path, rel: &Path, bytes: &[u8]) -> Result<()> {
+    use rustix::fs::{renameat_with, RenameFlags};
+    let dir = open_dir_beneath(root, rel.parent().unwrap_or(Path::new("")), true)?;
+    let name = rel.file_name().context("declared file has no name")?;
+    let check = || -> Result<bool> {
+        match openat2(&dir, name, OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty(), RESOLVE) {
+            Ok(fd) => {
+                anyhow::ensure!(FileType::from_raw_mode(fstat(&fd)?.st_mode) == FileType::RegularFile, "{}: not a regular file", rel.display());
+                Ok(true)
+            }
+            Err(Errno::NOENT) => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    };
+    if check()? { return Ok(()); }
+    let tmp = format!(".sill-init-{:032x}", rand::random::<u128>());
+    let fd = openat2(&dir, tmp.as_str(), OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC, Mode::from_raw_mode(0o600), RESOLVE)?;
+    let result = (|| -> Result<()> {
+        let mut file = std::fs::File::from(fd);
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        match renameat_with(&dir, tmp.as_str(), &dir, name, RenameFlags::NOREPLACE) {
+            Ok(()) => Ok(()),
+            Err(Errno::EXIST) => { check()?; Ok(()) }
+            Err(e) => Err(e.into()),
+        }
+    })();
+    let _ = unlinkat(&dir, tmp.as_str(), AtFlags::empty());
+    result
+}
+
 /// Replace the regular file `name` in `dir` with `bytes` in one step: written to a temporary next
 /// to it, synced, renamed over — a crash leaves the old or the new version whole, never an empty
 /// file. `dir` is opened without following a link at its end; a symlink at `name` is refused (its

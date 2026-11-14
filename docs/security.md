@@ -113,6 +113,17 @@ the second. What does help, and what sill does or should do:
   umask. The `kept/<id>/prior` payloads keep the host file's own mode, under a 0700 parent, which is
   right: undo must put the mode back.
 
+## Explicit agent storage, 2026-11-07
+
+Implemented in source; host and human validation pending. Ownership comes only from typed
+agent declarations, with no adoption or credential discovery. Original host agent roots are
+masked in both views; private roots bind through held, type-checked descriptors. A private
+agent binding may replace an agent-origin mask, never a policy secret mask. The immutable
+launch plan also supplies Changes classification and ghost credential authority. Host login
+uses private HOME/XDG storage and imports only declared files. See
+[design and validation](agent-directories.md). Earlier audit rows mentioning `shared_files`,
+`seed_files` or adopted paths describe superseded implementation, not supported configuration.
+
 ## Proposed top three (as written before the fixes)
 
 Chosen by reach × likelihood under threat (a), the agent that is already running. S1, S2 and S4 share

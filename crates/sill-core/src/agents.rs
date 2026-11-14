@@ -2,7 +2,9 @@
 //! TOML files in `~/.config/sill/agents/` and `/usr/share/sill/agents/` (user files win).
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf, Component};
+use anyhow::{Context, Result, bail, ensure};
+pub use sill_proto::agent_admin::{HomePath, HomePathKind};
 
 use serde::{Deserialize, Serialize};
 
@@ -32,35 +34,21 @@ pub struct Agent {
     /// Environment that switches the agent's own sandbox off inside the jail (SPEC §4.2).
     #[serde(default)]
     pub sandbox_off_env: BTreeMap<String, String>,
-    /// Where the agent keeps its own files (`~/.claude`); changes there are "agent state" in the UI.
-    #[serde(default)]
-    pub state_dirs: Vec<String>,
-    /// Paths replaced inside the jail by a sill-owned copy (`~/.local/state/sill/agents/<id>/…`), so
-    /// the agent runs completely inside: its credentials, transcripts, settings and caches never touch
-    /// the host's own installation of the agent (SPEC §4.10 #4).
-    #[serde(default)]
-    pub home_paths: Vec<String>,
-    /// Files copied from the host into the sill-owned home when it is first created (login only).
-    #[serde(default)]
-    pub seed_files: Vec<String>,
-    /// Credential files relative to the sill-owned agent home. Only these files may cross
-    /// the ghost boundary; settings, plugins and history remain session-private.
+    /// Exact persistent roots. None means setup required; Some([]) explicitly declares statelessness.
+    #[serde(default, deserialize_with = "declared_paths")]
+    pub home_paths: Option<Vec<HomePath>>,
+    /// Credential files relative to the private home; no automatic discovery.
     #[serde(default)]
     pub login_files: Vec<String>,
-    /// Files bound from the host *over* the sill-owned home: the login itself. OAuth refresh tokens
-    /// rotate, so two copies of the credentials revoke each other; one shared file is the only
-    /// workable option (and the only thing the agent writes to the host).
-    #[serde(default)]
-    pub shared_files: Vec<String>,
     /// Login methods (ids from `initialize`) that run on the host instead of inside the jail: a
     /// browser flow with a localhost callback cannot be reached from the jail's own network
     /// namespace, so sill runs the agent on the host for the login only and the result lands in the
-    /// `shared_files` login file (see [`crate::login`]).
+    /// declared credential files (see [`crate::login`]).
     #[serde(default)]
     pub host_login: Vec<String>,
     /// Environment variable that relocates the agent's home directory (`CODEX_HOME`). A host-side
-    /// login is run with it pointing at the sill-owned copy of `home_paths[0]`, so the login file
-    /// lands there directly and the host never gets a `~/.codex` of its own.
+    /// login points it at `home_paths[0]` inside the fresh scratch tree. Only declared
+    /// credentials are imported into the persistent profile after successful login.
     #[serde(default)]
     pub home_env: Option<String>,
     /// `home_env` names the directory *containing* `home_paths[0]` rather than that path itself:
@@ -79,6 +67,19 @@ pub struct Agent {
     pub memory_paths: Vec<String>,
 }
 
+fn declared_paths<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<Vec<HomePath>>, D::Error> {
+    use serde::de::Error;
+    let value = Option::<Vec<serde_json::Value>>::deserialize(d)?;
+    value.map(|entries| entries.into_iter().map(|entry| {
+        if let Some(object) = entry.as_object() {
+            if let Some(key) = object.keys().find(|key| !["path", "kind", "initial_content"].contains(&key.as_str())) {
+                return Err(D::Error::custom(format!("unknown home_paths field {key}")));
+            }
+        }
+        serde_json::from_value(entry).map_err(D::Error::custom)
+    }).collect()).transpose()
+}
+
 fn yes() -> bool {
     true
 }
@@ -90,6 +91,7 @@ pub fn override_path(home: &Path, id: &str) -> std::path::PathBuf {
 
 /// Write an agent as the user's override (the whole entry: overrides replace built-ins).
 pub fn save_override(home: &Path, agent: &Agent) -> anyhow::Result<std::path::PathBuf> {
+    agent.validate()?;
     let path = override_path(home, &agent.id);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -122,13 +124,10 @@ pub fn builtin() -> Vec<Agent> {
             // (refused there, a login never finished and an expired token was not renewed, 2026-11-05)
             domains: vec!["api.anthropic.com".into(), "*.anthropic.com".into(), "claude.ai".into(), "*.claude.ai".into(), "claude.com".into(), "*.claude.com".into()],
             sandbox_off_env: Default::default(),
-            state_dirs: vec!["~/.claude".into(), "~/.claude.json".into()],
-            home_paths: vec!["~/.claude".into(), "~/.claude.json".into()],
-            seed_files: vec!["~/.claude.json".into()],
+            home_paths: Some(vec![HomePath::directory("~/.claude"), HomePath::file("~/.claude.json", "{}")]),
             login_files: vec![".claude/.credentials.json".into()],
             // sill's Claude logs in on its own (terminal login inside the jail, written to the sill-owned
             // home): a separate grant from the host's Claude Code / Zed, so neither can revoke the other
-            shared_files: vec![],
             host_login: vec![],
             home_env: None,
             home_env_parent: false,
@@ -145,13 +144,10 @@ pub fn builtin() -> Vec<Agent> {
             experimental_acp_v2: false,
             domains: vec!["api.openai.com".into(), "*.openai.com".into(), "chatgpt.com".into(), "*.chatgpt.com".into()],
             sandbox_off_env: Default::default(),
-            state_dirs: vec!["~/.codex".into()],
-            home_paths: vec!["~/.codex".into()],
-            seed_files: vec![],
-            login_files: vec![],
+            home_paths: Some(vec![HomePath::directory("~/.codex")]),
+            login_files: vec![".codex/auth.json".into()],
             // no host login is shared into jails: Codex in sill logs in on its own (the host-side
             // login lands in the sill-owned home through `CODEX_HOME`)
-            shared_files: vec![],
             host_login: vec!["chat-gpt".into(), "chatgpt".into()],
             home_env: Some("CODEX_HOME".into()),
             home_env_parent: false,
@@ -168,12 +164,9 @@ pub fn builtin() -> Vec<Agent> {
             experimental_acp_v2: false,
             domains: vec!["*.googleapis.com".into(), "*.google.com".into()],
             sandbox_off_env: Default::default(),
-            state_dirs: vec!["~/.gemini".into()],
-            home_paths: vec!["~/.gemini".into()],
-            seed_files: vec![],
-            login_files: vec![],
+            home_paths: Some(vec![HomePath::directory("~/.gemini")]),
+            login_files: vec![".gemini/oauth_creds.json".into(), ".gemini/google_accounts.json".into()],
             // its login lands in the sill-owned home (the host-side login relocates GEMINI_CLI_HOME)
-            shared_files: vec![],
             // "Log in with Google" opens a browser and waits on a 127.0.0.1 callback port: host only
             host_login: vec!["oauth-personal".into()],
             home_env: Some("GEMINI_CLI_HOME".into()),
@@ -186,40 +179,67 @@ pub fn builtin() -> Vec<Agent> {
 }
 
 /// All agents, by id; files override built-ins with the same id.
-pub fn load(home: &Path) -> BTreeMap<String, Agent> {
+pub fn load(home: &Path) -> Result<BTreeMap<String, Agent>> {
     let mut out: BTreeMap<String, Agent> = builtin().into_iter().map(|a| (a.id.clone(), a)).collect();
-    for dir in [std::path::PathBuf::from("/usr/share/sill/agents"), home.join(".config/sill/agents")] {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
-        for e in rd.filter_map(Result::ok) {
-            let p = e.path();
-            if p.extension().and_then(|x| x.to_str()) != Some("toml") {
-                continue;
-            }
-            if let Ok(text) = std::fs::read_to_string(&p)
-                && let Ok(mut a) = toml::from_str::<Agent>(&text)
-            {
-                // an override written before a field existed keeps the built-in's value for it
-                if let Some(b) = out.get(&a.id) {
-                    if a.login_files.is_empty() { a.login_files = b.login_files.clone(); }
-                    if a.icon.is_none() {
-                        a.icon = b.icon.clone();
-                    }
-                    if a.host_login.is_empty() {
-                        a.host_login = b.host_login.clone();
-                    }
-                    if a.home_env.is_none() {
-                        a.home_env = b.home_env.clone();
-                        a.home_env_parent = b.home_env_parent;
-                    }
-                    if a.memory_paths.is_empty() {
-                        a.memory_paths = b.memory_paths.clone();
-                    }
-                }
-                out.insert(a.id.clone(), a);
-            }
+    for dir in [PathBuf::from("/usr/share/sill/agents"), home.join(".config/sill/agents")] {
+        let rd = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("read agent definitions {}", dir.display())),
+        };
+        for entry in rd {
+            let p = entry?.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("toml") { continue; }
+            let text = std::fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?;
+            let a: Agent = toml::from_str(&text).with_context(|| format!("invalid agent definition {}; update it to the current format", p.display()))?;
+            a.validate().with_context(|| format!("invalid agent definition {}", p.display()))?;
+            out.insert(a.id.clone(), a);
         }
     }
-    out
+    Ok(out)
+}
+
+/// Strict relative path validation: never normalize away traversal or a shared parent.
+pub fn relative_path(path: &str) -> Result<PathBuf> {
+    ensure!(!path.is_empty() && !path.contains(['\0', '*', '?', '[', ']']), "expected an exact relative path");
+    ensure!(path.split('/').all(|c| !c.is_empty() && c != "." && c != ".."), "path has empty, dot or parent components");
+    let p = PathBuf::from(path);
+    ensure!(p.components().all(|c| matches!(c, Component::Normal(_))), "expected a relative path");
+    Ok(p)
+}
+
+impl Agent {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(plain_id(&self.id), "invalid agent id");
+        ensure!(!self.home_env_parent || self.home_env.is_some(), "home_env_parent requires home_env");
+        let Some(paths) = &self.home_paths else {
+            ensure!(self.login_files.is_empty() && self.home_env.is_none(), "declare home_paths before credentials or home_env");
+            return Ok(());
+        };
+        let mut roots = Vec::new();
+        for entry in paths {
+            let rel = relative_path(entry.path.strip_prefix("~/").context("home_paths must start with ~/")?)?;
+            ensure!(![".config", ".local", ".local/share", ".local/state", ".local/bin", ".cache"].iter().any(|p| rel == Path::new(p)), "{} is a shared parent", entry.path);
+            ensure!(entry.kind == HomePathKind::File || entry.initial_content.is_none(), "directory cannot have initial_content");
+            ensure!(!roots.iter().any(|p: &PathBuf| rel.starts_with(p) || p.starts_with(&rel)), "overlapping home_paths: {}", entry.path);
+            roots.push(rel);
+        }
+        for credential in &self.login_files {
+            let rel = relative_path(credential)?;
+            ensure!(paths.iter().zip(&roots).any(|(entry, root)| entry.kind == HomePathKind::Directory && rel != *root && rel.starts_with(root)), "credential {credential} must be below a declared directory");
+        }
+        if self.home_env.is_some() {
+            ensure!(paths.first().is_some_and(|p| p.kind == HomePathKind::Directory), "home_env requires a directory as the first home_paths entry");
+        }
+        Ok(())
+    }
+    pub fn ready(&self, home: &Path) -> Result<&[HomePath]> {
+        self.validate()?;
+        match &self.home_paths {
+            Some(paths) => Ok(paths),
+            None => bail!("agent {} needs directory setup: declare home_paths in {} before login or launch", self.id, override_path(home, &self.id).display()),
+        }
+    }
 }
 
 /// Reset an agent to how a fresh install starts: each of `homes` (its sill-owned home, the copies
@@ -320,9 +340,42 @@ mod login_tests {
     use super::*;
 
     #[test]
+    fn declarations_reject_legacy_keys_unknown_fields_and_ambiguous_paths() {
+        let base = "id = 'fixture'\nname = 'Fixture'\ncommand = ['true']\n";
+        for extra in ["state_dirs = []", "shared_files = []", "seed_files = []", "home_paths = ['~/.fixture']", "home_paths = [{path = '~/.fixture', kind = 'directory', typo = true}]"] {
+            assert!(toml::from_str::<Agent>(&format!("{base}{extra}")).is_err(), "{extra}");
+        }
+        let mut a = builtin().remove(1);
+        a.login_files.clear();
+        a.home_env = None;
+        for path in ["~", "~/", "~/.config", "~/.local/share", "/tmp/example", "~/.codex/../.ssh", "~/.config/*", "~/.codex//nested", "~/.codex/."] {
+            a.home_paths = Some(vec![HomePath::directory(path)]);
+            assert!(a.validate().is_err(), "{path}");
+        }
+        a.home_paths = Some(vec![HomePath::directory("~/.config/example"), HomePath::directory("~/.config/example/child")]);
+        assert!(a.validate().is_err());
+        a.home_paths = Some(vec![HomePath::file("~/.example.json", "{}")]);
+        a.home_env = Some("EXAMPLE_HOME".into());
+        assert!(a.validate().is_err());
+    }
+
+    #[test]
+    fn an_invalid_override_is_an_error_and_never_falls_back_to_builtin() {
+        let home = std::env::temp_dir().join(format!("sill-invalid-agent-{:032x}", rand::random::<u128>()));
+        let path = override_path(&home, "codex");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "id = 'codex'\nname = 'Codex'\ncommand = ['custom']\nhome_paths = ['~/.codex']").unwrap();
+        let error = load(&home).unwrap_err().to_string();
+        assert!(error.contains("invalid agent definition") && error.contains("codex.toml"));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn the_curated_agents_share_no_login_with_the_host() {
         for a in builtin() {
-            assert!(a.shared_files.is_empty(), "{} shares a host file", a.id);
+            a.validate().unwrap();
+            assert!(a.home_paths.is_some());
+            assert!(!a.login_files.is_empty());
         }
     }
 

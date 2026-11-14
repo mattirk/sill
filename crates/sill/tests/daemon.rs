@@ -584,7 +584,7 @@ read auth
 sleep 1
 printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
 "#).unwrap();
-    std::fs::write(agents.join("fixture.toml"), format!("id = 'fixture'\nname = 'Fixture'\ncommand = ['/bin/sh', '{}']\n", script.display())).unwrap();
+    std::fs::write(agents.join("fixture.toml"), format!("id = 'fixture'\nname = 'Fixture'\ncommand = ['/bin/sh', '{}']\nhome_paths = []\nhost_login = ['browser']\n", script.display())).unwrap();
     // Fake local installer: one package fails, the other creates only fixture files.
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();

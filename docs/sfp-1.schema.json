@@ -1182,11 +1182,14 @@
           "type": "boolean"
         },
         "home_paths": {
-          "default": [],
+          "default": null,
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/HomePath"
           },
-          "type": "array"
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "host_login": {
           "default": [],
@@ -1228,27 +1231,6 @@
           },
           "default": {},
           "type": "object"
-        },
-        "seed_files": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "shared_files": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "state_dirs": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
         },
         "supports_load": {
           "default": false,
@@ -3901,6 +3883,17 @@
         },
         "view": {
           "type": "string"
+        },
+        "filesystem": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FilesystemView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Exact filesystem rules; None means no launch evidence was recorded."
         }
       },
       "required": [
@@ -6474,6 +6467,89 @@
         "size"
       ],
       "type": "object"
+    },
+    "FilesystemView": {
+      "type": "object",
+      "properties": {
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PathRule"
+          }
+        },
+        "unused": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HostPath"
+          }
+        }
+      },
+      "required": [
+        "rules",
+        "unused"
+      ]
+    },
+    "PathRule": {
+      "type": "object",
+      "properties": {
+        "target": {
+          "$ref": "#/$defs/HostPath"
+        },
+        "backing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HostPath"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "behavior": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "target",
+        "behavior",
+        "source",
+        "reason"
+      ]
+    },
+    "HomePath": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/HomePathKind"
+        },
+        "initial_content": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "kind"
+      ],
+      "description": "Exact persistent locations; absence of home_paths means setup is required."
+    },
+    "HomePathKind": {
+      "type": "string",
+      "enum": [
+        "directory",
+        "file"
+      ]
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

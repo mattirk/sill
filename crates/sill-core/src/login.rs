@@ -1,15 +1,6 @@
-//! Host-side agent login (SPEC §4.1 agents). Some logins open a browser and wait on a localhost
-//! callback (Codex's ChatGPT flow); inside the jail neither the browser nor the callback port is
-//! reachable, and the adapter does not hand out the URL. So the agent is started on the host for the
-//! login only: `initialize` → `authenticate` over its stdio, nothing else. Its home is relocated
-//! (`home_env`, `CODEX_HOME`) to a directory made fresh for the login — not the jail's copy: that
-//! one is the agent's to write, and a config planted there (an MCP server command, a hook) would run
-//! on the host through this very process (security.md S4). What the login writes is copied into
-//! the jail's copy afterwards — after the adapter's own helpers have stopped, and never the
-//! databases, logs or temp files a fresh home creates around the login (they would replace the
-//! agent's history) — files only and never through a link, so the host never gets a
-//! `~/.codex` or `~/.gemini`; an agent without `home_env` writes the host file named in
-//! `shared_files`, which is bound in. Either way the session starts again.
+//! Host-side login uses a fresh private HOME and XDG tree. Only declared credential files
+//! return to the profile; settings, history, hooks and incidental tool output never do.
+//! The browser helper alone restores the person's environment. Host methods must be declared.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -40,7 +31,9 @@ pub fn run(agent: &Agent, home: &Path, method: &str, report: impl FnMut(Line)) -
 
 /// Run `method` of `agent` on the host, copying login files into its sill-owned home and each
 /// existing directory in `extra_homes` (such as ghost sessions' copies of the agent home).
-pub fn run_into(agent: &Agent, home: &Path, extra_homes: &[PathBuf], method: &str, mut report: impl FnMut(Line)) -> Result<()> {
+pub fn run_into(agent: &Agent, home: &Path, extra_homes: &[(PathBuf, crate::credentials::Rules)], method: &str, mut report: impl FnMut(Line)) -> Result<()> {
+    let paths = agent.ready(home)?;
+    anyhow::ensure!(agent.host_login.iter().any(|m| m == method), "host login method is not explicitly declared");
     let Some(prog) = agent.command.first() else { bail!("agent {} has no command", agent.id) };
     let mut env = agent.env.clone();
     let mut unset: Vec<&str> = Vec::new();
@@ -60,48 +53,27 @@ pub fn run_into(agent: &Agent, home: &Path, extra_homes: &[PathBuf], method: &st
         }
         Ok(())
     };
-    let mut copy_back: Option<PathBuf> = None;
-    match (&agent.home_env, agent.home_paths.first()) {
-        (Some(var), Some(first)) => {
-            let name = Path::new(first).file_name().map(|n| n.to_os_string()).unwrap_or_default();
-            let owned = scratch.join(name);
-            private(&owned)?;
-            let target = if agent.home_env_parent { &scratch } else { &owned };
-            env.insert(var.clone(), target.display().to_string());
-            copy_back = Some(crate::session::agent_home(home, &agent.id));
-        }
-        _ if !agent.shared_files.is_empty() => {
-            // the login file's directory may not exist yet on a host that never ran the agent
-            for p in &agent.shared_files {
-                let path = crate::paths::expand_home(p, home);
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-            }
-        }
-        _ => {
-            // an agent sill knows nothing about: run its login with `$HOME` (and the XDG dirs) at
-            // the sill-owned agent home, so whatever it writes — `~/.foo`, `~/.config/foo` — lands
-            // there and is bound into its jails from then on (`session::adopted_binds`). The
-            // browser it opens must NOT inherit that: an `xdg-open` shim first on PATH (and
-            // `$BROWSER`) restores the real home and XDG dirs, so it is your browser, your profile.
-            // Only `$HOME` moves; the XDG dirs stay real, so a browser the agent launches by any
-            // route (xdg-open, a bundled opener, Python's webbrowser) finds its own profile. The
-            // price: an agent keeping its login under `$XDG_CONFIG_HOME` writes it to the host.
-            private(&scratch)?;
-            let shim_dir = browser_shim(home)?;
-            let path = std::env::var("PATH").unwrap_or_default();
-            env.insert("PATH".into(), format!("{}:{path}", shim_dir.display()));
-            env.insert("BROWSER".into(), shim_dir.join("xdg-open").display().to_string());
-            env.insert("HOME".into(), scratch.display().to_string());
-            copy_back = Some(crate::session::agent_home(home, &agent.id));
-            // no keyring for the login (the "fail" backend: every call raises, the "null" one silently
-            // swallows writes): a token kept in the desktop's secret service would be
-            // invisible inside the jail, so the agent must fall back to its file (Vibe: ~/.vibe/.env)
-            unset.push("DBUS_SESSION_BUS_ADDRESS");
-            env.insert("PYTHON_KEYRING_BACKEND".into(), "keyring.backends.fail.Keyring".into());
-        }
+    private(&scratch)?;
+    let shim_dir = browser_shim(home)?;
+    let path = std::env::var("PATH").unwrap_or_default();
+    env.insert("PATH".into(), format!("{}:{path}", shim_dir.display()));
+    env.insert("BROWSER".into(), shim_dir.join("xdg-open").display().to_string());
+    env.insert("HOME".into(), scratch.display().to_string());
+    for (name, rel) in [("XDG_CONFIG_HOME", ".config"), ("XDG_DATA_HOME", ".local/share"), ("XDG_STATE_HOME", ".local/state"), ("XDG_CACHE_HOME", ".cache")] {
+        let dir = scratch.join(rel);
+        private(&dir)?;
+        env.insert(name.into(), dir.display().to_string());
     }
+    if let (Some(var), Some(first)) = (&agent.home_env, paths.first()) {
+        let rel = crate::agents::relative_path(first.path.strip_prefix("~/").context("home path")?)?;
+        let owned = scratch.join(rel);
+        private(&owned)?;
+        let target = if agent.home_env_parent { owned.parent().context("home_env parent")? } else { &owned };
+        env.insert(var.clone(), target.display().to_string());
+    }
+    unset.push("DBUS_SESSION_BUS_ADDRESS");
+    env.insert("PYTHON_KEYRING_BACKEND".into(), "keyring.backends.fail.Keyring".into());
+    let copy_back = Some(crate::session::agent_home(home, &agent.id));
     let mut cmd = Command::new(prog);
     cmd.args(&agent.command[1..]).envs(&env).current_dir(home);
     for v in &unset {
@@ -166,10 +138,11 @@ pub fn run_into(agent: &Agent, home: &Path, extra_homes: &[PathBuf], method: &st
     let copied = match (&result, copy_back) {
         (Ok(()), Some(dst)) => (|| -> Result<usize> {
             std::fs::create_dir_all(&dst)?;
-            let n = copy_login(&scratch, &dst)?;
-            for extra in extra_homes {
+            crate::credentials::seed(&crate::credentials::Rules::for_agent(agent)?, &scratch, &dst)?;
+            let n = crate::credentials::files(agent, &scratch)?.iter().filter(|p| scratch.join(p).is_file()).count();
+            for (extra, frozen_rules) in extra_homes {
                 if extra.is_dir() {
-                    crate::credentials::seed(agent, &dst, extra)?;
+                    crate::credentials::seed(frozen_rules, &dst, extra)?;
                 }
             }
             Ok(n)
@@ -224,37 +197,7 @@ fn descendants(root: i32) -> Vec<i32> {
     out
 }
 
-/// What a login wrote that is the login: everything in the scratch except what a fresh agent
-/// home creates around it — databases (copied over the agent's own they would replace its history
-/// and state), logs, caches and temp files. A file that vanished meanwhile is skipped.
-fn copy_login(scratch: &Path, dst: &Path) -> Result<usize> {
-    const SKIP_DIRS: &[&str] = &["tmp", ".tmp", "log", "logs", "cache", ".cache", "sessions", "shell_snapshots", "thread-writer-locks", "plugins", "skills"];
-    fn skipped_file(name: &str) -> bool {
-        [".sqlite", ".sqlite-wal", ".sqlite-shm", ".sqlite-journal", ".db", ".db-wal", ".db-shm", ".lock", ".log"].iter().any(|s| name.ends_with(s))
-    }
-    fn walk(base: &Path, dir: &Path, dst: &Path, n: &mut usize) -> Result<()> {
-        use std::os::unix::fs::PermissionsExt;
-        let gone = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
-        let entries = match std::fs::read_dir(dir) { Ok(e) => e, Err(e) if gone(&e) => return Ok(()), Err(e) => return Err(e.into()) };
-        for e in entries {
-            let e = match e { Ok(e) => e, Err(e) if gone(&e) => continue, Err(e) => return Err(e.into()) };
-            let (p, name) = (e.path(), e.file_name().to_string_lossy().into_owned());
-            let md = match std::fs::symlink_metadata(&p) { Ok(m) => m, Err(e) if gone(&e) => continue, Err(e) => return Err(e.into()) };
-            if md.is_dir() {
-                if !SKIP_DIRS.contains(&name.as_str()) { walk(base, &p, dst, n)?; }
-            } else if md.is_file() && !skipped_file(&name) {
-                let bytes = match std::fs::read(&p) { Ok(b) => b, Err(e) if gone(&e) => continue, Err(e) => return Err(e.into()) };
-                let rel = p.strip_prefix(base).unwrap_or(&p);
-                crate::safe_fs::write_file_beneath(dst, rel, &bytes, md.permissions().mode() & 0o777)?;
-                *n += 1;
-            }
-        }
-        Ok(())
-    }
-    let mut n = 0;
-    walk(scratch, scratch, dst, &mut n)?;
-    Ok(n)
-}
+
 
 /// The result object of response `id`; notifications on the way are reported.
 fn wait_response(
@@ -348,6 +291,7 @@ print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{}}),flush=True)
 "#).unwrap();
         let mut agent=crate::agents::builtin().into_iter().find(|a|a.id=="codex").unwrap();
         agent.experimental_acp_v2=true;
+        agent.host_login = vec!["browser".into()];
         agent.command=vec!["/usr/bin/python3".into(),script.to_string_lossy().into_owned(),"2".into(),"agent".into()];
         run(&agent,&home,"browser",|_|{}).unwrap();
         agent.command[2]="1".into();
@@ -367,7 +311,9 @@ print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{}}),flush=True)
         }
         std::fs::create_dir_all(dst.join(".codex")).unwrap();
         std::fs::write(dst.join(".codex/state_5.sqlite"), "the agent's history").unwrap();
-        assert_eq!(copy_login(&scratch, &dst).unwrap(), 2);
+        let agent = crate::agents::builtin().into_iter().find(|a| a.id == "codex").unwrap();
+        crate::credentials::seed(&crate::credentials::Rules::for_agent(&agent).unwrap(), &scratch, &dst).unwrap();
+        assert!(!dst.join(".codex/config.toml").exists());
         assert_eq!(std::fs::read_to_string(dst.join(".codex/auth.json")).unwrap(), "login");
         assert_eq!(std::fs::read_to_string(dst.join(".codex/state_5.sqlite")).unwrap(), "the agent's history");
         for gone in [".codex/state_5.sqlite-wal", ".codex/logs_2.sqlite", ".codex/.tmp", ".codex/tmp", ".codex/log"] {

@@ -74,9 +74,14 @@ pub struct JailSpec {
     /// Extra read-write binds (host path, jail path): agent home, session-private scratch. Applied
     /// after the overlays and masks; nothing below them is recorded.
     pub binds: Vec<(PathBuf, PathBuf)>,
-    /// Masked on top of the policy's list: the other agents' paths (`session::other_agents_paths`),
-    /// so one agent's jail never shows another's credentials (SPEC §4.11 #8). Missing paths are skipped.
+    /// Additional masks for standalone CLI jails. Missing paths are skipped.
     pub masks: Vec<PathBuf>,
+    /// Original host agent roots, separate from policy masks.
+    pub agent_masks: Vec<(PathBuf, crate::agents::HomePathKind)>,
+    /// Expanded policy paths from the immutable launch plan; None only for standalone CLI jails.
+    pub policy_paths: Option<crate::agent_storage::PolicyPaths>,
+    /// Targets of validated private agent bindings.
+    pub agent_binds: Vec<(PathBuf, crate::agents::HomePathKind)>,
     /// Repository-fragment restrictions, applied after writable pins and other binds.
     /// Kept separate from base-policy paths so a writable pin can contain a fragment mask.
     pub fragment_ro: Vec<PathBuf>,
@@ -428,12 +433,15 @@ impl JailSpec {
             .chain(self.masks.iter().cloned())
             .filter(|p| p.exists())
             .collect();
-        for path in p.paths.mask.iter().flat_map(|pat| expand_pattern(pat, &self.home)).chain(own) {
+        let policy_masks: Vec<(PathBuf, bool)> = match &self.policy_paths {
+            Some(paths) => paths.masks.iter().map(|m| Ok((m.path.to_path()?, m.kind == crate::agents::HomePathKind::Directory))).collect::<Result<_>>()?,
+            None => p.paths.mask.iter().flat_map(|pat| expand_pattern(pat, &self.home)).chain(own).map(|p| { let dir = p.is_dir(); (p, dir) }).collect(),
+        };
+        for (path, is_dir) in policy_masks {
             if masked.contains(&path) {
                 continue;
             }
             {
-                let is_dir = path.is_dir();
                 for target in [path.clone(), host_view(&path)] {
                     if is_dir {
                         push(&mut a, &[&"--tmpfs", &target]);
@@ -444,6 +452,32 @@ impl JailSpec {
                 masked.push(path);
             }
         }
+        // Host agent originals are never reachable through the host view. A selected agent's
+        // private binding may replace an agent mask, but never a policy secret mask.
+        let mut agent_masked = Vec::new();
+        let mut roots = self.agent_masks.clone();
+        roots.sort_by(|a, b| a.0.cmp(&b.0));
+        for (path, kind) in roots {
+            // Validate the nearest existing component; never follow an original-home symlink.
+            let existing = path.ancestors().find(|p| p.symlink_metadata().is_ok()).context("agent root has no existing ancestor")?;
+            let fd = rustix::fs::openat2(rustix::fs::CWD, existing, rustix::fs::OFlags::PATH | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty(), rustix::fs::ResolveFlags::NO_SYMLINKS)
+                .with_context(|| format!("host agent root {} must not contain symlinks", path.display()))?;
+            if existing == path {
+                let actual = rustix::fs::FileType::from_raw_mode(rustix::fs::fstat(&fd)?.st_mode);
+                anyhow::ensure!(matches!((kind, actual), (crate::agents::HomePathKind::Directory, rustix::fs::FileType::Directory) | (crate::agents::HomePathKind::File, rustix::fs::FileType::RegularFile)), "host agent root has the wrong type: {}", path.display());
+            }
+            if agent_masked.iter().any(|p: &PathBuf| path.starts_with(p)) { continue; }
+            // An absent root is masked in the jail's own view only (in case it appears on the host
+            // later): the host view is read-only, so bwrap could not make a mount point there for
+            // it (found 2026-11-07: `~/.gemini`, declared by the built-in gemini, never created).
+            let targets: Vec<PathBuf> = if existing == path { vec![path.clone(), host_view(&path)] } else { vec![path.clone()] };
+            for target in targets {
+                if kind == crate::agents::HomePathKind::Directory { push(&mut a, &[&"--tmpfs", &target]); }
+                else { push(&mut a, &[&"--ro-bind", &"/dev/null", &target]); }
+            }
+            agent_masked.push(path);
+        }
+        let mut mount_fds = Vec::new();
         // what the jail needs from sill's state, back over the mask: the adapters it runs
         let tools = state_dir.join("tools");
         if tools.is_dir() {
@@ -454,24 +488,31 @@ impl JailSpec {
         // a bind inside a mask puts the masked thing back, a bind over a mask buries it: neither
         // is mounted, whatever a policy, a pin or an agent override asks for (security.md S2)
         let mut direct = Vec::new();
-        for pat in &p.paths.direct {
-            for path in expand_pattern(pat, &self.home) {
-                no_bind_across_mask(&path, &masked)?;
-                push(&mut a, &[&"--bind", &path, &path]);
-                direct.push(path);
-            }
+        let direct_paths = match &self.policy_paths {
+            Some(paths) => paths.direct.iter().map(|p| p.to_path()).collect::<Result<Vec<_>>>()?,
+            None => p.paths.direct.iter().flat_map(|pat| expand_pattern(pat, &self.home)).collect(),
+        };
+        let ro_paths = match &self.policy_paths {
+            Some(paths) => paths.read_only.iter().map(|p| p.to_path()).collect::<Result<Vec<_>>>()?,
+            None => p.paths.ro.iter().flat_map(|pat| expand_pattern(pat, &self.home)).collect(),
+        };
+        for path in direct_paths {
+            no_bind_across_mask(&path, &masked)?;
+            no_bind_across_mask(&path, &agent_masked)?;
+            push(&mut a, &[&"--bind", &path, &path]);
+            direct.push(path);
         }
-        for pat in &p.paths.ro {
-            for path in expand_pattern(pat, &self.home) {
-                no_bind_across_mask(&path, &masked)?;
-                push(&mut a, &[&"--ro-bind", &path, &path]);
-            }
+        for path in ro_paths {
+            no_bind_across_mask(&path, &masked)?;
+            no_bind_across_mask(&path, &agent_masked)?;
+            push(&mut a, &[&"--ro-bind", &path, &path]);
         }
         for (host, inside) in &self.binds {
             if host == inside {
                 // the host's own tree (a pin, a shared file): inside a mask it re-exposes, over a
                 // mask it buries — neither is mounted
                 no_bind_across_mask(inside, &masked)?;
+                no_bind_across_mask(inside, &agent_masked)?;
                 push(&mut a, &[&"--bind", host, inside]);
             } else {
                 // sill's own tree in the host path's place (the session's private scratch, the
@@ -483,7 +524,24 @@ impl JailSpec {
                 if let Some(m) = masked.iter().find(|m| is_under(inside, m)) {
                     no_bind_across_mask(inside, std::slice::from_ref(m))?;
                 }
-                push(&mut a, &[&"--bind", host, inside]);
+                if let Some((_, expected)) = self.agent_binds.iter().find(|(target, _)| target == inside) {
+                    use rustix::fs::{openat2, fstat, FileType, OFlags, Mode, ResolveFlags, CWD};
+                    let fd = openat2(CWD, host, OFlags::PATH | OFlags::CLOEXEC | OFlags::NOFOLLOW, Mode::empty(), ResolveFlags::NO_SYMLINKS)
+                        .with_context(|| format!("open declared agent storage {}", host.display()))?;
+                    let kind = FileType::from_raw_mode(fstat(&fd)?.st_mode);
+                    anyhow::ensure!(matches!((expected, kind), (crate::agents::HomePathKind::Directory, FileType::Directory) | (crate::agents::HomePathKind::File, FileType::RegularFile)), "agent storage has the wrong type");
+                    push(&mut a, &[&"--bind-fd", &fd.as_raw_fd().to_string(), inside]);
+                    mount_fds.push(Arc::new(fd));
+                } else {
+                    if agent_masked.iter().any(|m| inside.starts_with(m)) {
+                        no_bind_across_mask(inside, &agent_masked)?;
+                    }
+                    push(&mut a, &[&"--bind", host, inside]);
+                    for m in agent_masked.iter().filter(|m| m.starts_with(inside)) {
+                        if self.agent_masks.iter().any(|(p, kind)| p == m && *kind == crate::agents::HomePathKind::Directory) { push(&mut a, &[&"--tmpfs", m]); }
+                        else { push(&mut a, &[&"--ro-bind", &"/dev/null", m]); }
+                    }
+                }
                 for m in masked.iter().filter(|m| is_under(m, inside) && *m != inside) {
                     if m.is_dir() {
                         push(&mut a, &[&"--tmpfs", m]);
@@ -506,7 +564,8 @@ impl JailSpec {
             push(&mut a, &[&"--ro-bind", dir, &BRIDGE_DIR]);
         }
         a.extend(self.extra_args.iter().cloned());
-        let mount_fds = self.apply_fragment_paths(&mut a, &mut masked)?;
+        masked.extend(agent_masked);
+        mount_fds.extend(self.apply_fragment_paths(&mut a, &mut masked)?);
         // bwrap's root tmpfs is writable by default; make it read-only now that every mount is in place
         push(&mut a, &[&"--remount-ro", &"/"]);
         push(&mut a, &[&"--chdir", &self.cwd]);
@@ -727,6 +786,9 @@ mod tests {
             proxy_socket: None,
             proxy_port: PROXY_PORT,
             binds: vec![],
+            agent_masks: vec![],
+            policy_paths: None,
+            agent_binds: vec![],
             masks: vec![],
             fragment_ro: vec![],
             fragment_masks: vec![],
@@ -972,6 +1034,94 @@ mod tests {
         assert!(!r.contains(".gemini"), "a path that does not exist is not masked");
         assert_eq!(plan.masked.iter().filter(|m| **m == dir.join(".codex")).count(), 1);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn declared_agent_masks_cover_both_views_and_bind_a_held_private_source() {
+        use crate::agents::HomePathKind::{Directory, File};
+        let tree = FragmentTree::new();
+        let original = tree.0.join("home/.codex");
+        let source = tree.0.join("private/.codex");
+        std::fs::create_dir_all(&original).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        let mut s = spec();
+        s.agent_masks = vec![(original.clone(), Directory), (tree.0.join("home/.claude.json"), File)];
+        s.agent_binds = vec![(original.clone(), Directory)];
+        s.binds = vec![(source.clone(), original.clone())];
+        let plan = s.plan().unwrap();
+        let a = &plan.argv;
+        let mask = a.windows(2).position(|a| a[0] == "--tmpfs" && a[1] == original).unwrap();
+        assert!(a.windows(2).any(|a| a[0] == "--tmpfs" && a[1] == host_view(&original)));
+        let bind = a.windows(3).position(|a| a[0] == "--bind-fd" && a[2] == original).unwrap();
+        assert!(bind > mask);
+        assert!(plan.masked.contains(&tree.0.join("home/.claude.json")), "absent originals must stay hidden if later created on the host");
+        let fd: i32 = a[bind + 1].to_str().unwrap().parse().unwrap();
+        assert!(plan.mount_fds.iter().any(|held| held.as_raw_fd() == fd));
+        std::fs::rename(&source, source.with_extension("saved")).unwrap();
+        std::os::unix::fs::symlink(&original, &source).unwrap();
+        assert_eq!(std::fs::read_link(format!("/proc/self/fd/{fd}")).unwrap(), source.with_extension("saved"));
+        assert!(s.plan().is_err());
+        std::fs::remove_file(&source).unwrap();
+        std::fs::rename(source.with_extension("saved"), &source).unwrap();
+        s.policy.paths.mask.push(original.display().to_string());
+        assert!(s.plan().is_err(), "private agent source may never override a policy secret mask");
+        s.policy.paths.mask.clear();
+        s.binds = vec![(original.clone(), original)];
+        assert!(s.plan().is_err(), "a pin cannot expose the host agent original");
+    }
+
+    #[test]
+    #[ignore = "host only: requires bubblewrap user namespaces and overlayfs"]
+    fn real_agent_storage_keeps_host_cargo_readable_across_restarts() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target")
+            .join(format!("agent-storage-jail-{:032x}", rand::random::<u128>()));
+        std::fs::create_dir_all(&root).unwrap();
+        let tree = FragmentTree(root.canonicalize().unwrap());
+        let home = tree.0.join("home");
+        let put = |path: PathBuf, value: &str| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, value).unwrap();
+        };
+        put(home.join(".cargo/registry/src/host-marker"), "host-cache");
+        put(home.join(".cargo/credentials.toml"), "fixture-secret");
+        put(home.join(".codex/host-original"), "private-host-profile");
+        put(home.join(".claude/host-original"), "private-host-profile");
+        put(home.join(".local/state/sill/agents/codex/.cargo/stray"), "unused");
+        put(home.join(".local/state/sill/agents/codex/.codex/saved"), "saved-settings");
+        let registry = crate::agents::builtin().into_iter().map(|a| (a.id.clone(), a)).collect::<BTreeMap<_, _>>();
+        for agent in ["codex", "claude", "codex", "claude"] {
+            let mut s = spec();
+            s.home = home.clone();
+            s.cwd = home.clone();
+            s.uid = rustix::process::getuid().as_raw();
+            s.state_dir = tree.0.join(format!("state-{agent}"));
+            s.unsafe_state = true;
+            s.mounts = crate::mounts::host_mounts().unwrap();
+            s.root_entries = read_root_entries().unwrap();
+            s.command = vec!["/bin/sh".into(), "-eu".into(), "-c".into(), r#"
+test "$(cat "$1/.cargo/registry/src/host-marker")" = host-cache
+test "$(cat "/.sill/host$1/.cargo/registry/src/host-marker")" = host-cache
+test ! -s "$1/.cargo/credentials.toml"
+test ! -s "/.sill/host$1/.cargo/credentials.toml"
+test ! -e "$1/.codex/host-original"
+test ! -e "$1/.claude/host-original"
+test ! -e "/.sill/host$1/.codex/host-original"
+test ! -e "/.sill/host$1/.claude/host-original"
+mkdir -p "$1/.cargo/new-child"
+printf session-cache > "$1/.cargo/new-child/download"
+test ! -e "/.sill/host$1/.cargo/new-child/download"
+if test "$2" = codex; then test "$(cat "$1/.codex/saved")" = saved-settings; fi
+"#.into(), "storage-fixture".into(), home.clone().into(), agent.into()];
+            let storage = crate::agent_storage::resolve(&registry[agent], &registry, &s.policy, &s.state_dir, &home, &[], false).unwrap();
+            storage.prepare().unwrap();
+            storage.apply(&mut s).unwrap();
+            let plan = s.plan().unwrap();
+            prepare(&plan).unwrap();
+            let output = plan.command().output().unwrap();
+            assert!(output.status.success(), "{agent}: {}", String::from_utf8_lossy(&output.stderr));
+            assert!(!home.join(".cargo/new-child").exists());
+            assert_eq!(std::fs::read_to_string(home.join(".cargo/registry/src/host-marker")).unwrap(), "host-cache");
+        }
     }
 
     /// A sill-owned bind (private scratch, agent home) over a masked path is mounted, the mask laid

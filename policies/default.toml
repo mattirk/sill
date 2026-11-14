@@ -44,6 +44,7 @@ mask = [
   "~/.ssh", "~/.gnupg", "~/secrets",
   "~/.local/share/keyrings",
   "~/.config/*/credentials*", "~/.netrc", "~/.git-credentials",
+  "~/.cargo/credentials", "~/.cargo/credentials.toml",
   "~/.aws", "~/.azure", "~/.config/gcloud",
   "~/.config/Nextcloud",           # sync account tokens
   "~/.mozilla", "~/.config/chromium", "~/.config/google-chrome",

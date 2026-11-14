@@ -675,7 +675,7 @@ impl HostLogin {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o755)).unwrap();
         let definition = format!(
-            "id = \"fakelogin\"\nname = \"Fake login\"\ncommand = [\"{adapter}\"]\nhome_paths = [\"~/.fakelogin\"]\nstate_dirs = [\"~/.fakelogin\"]\nhome_env = \"FAKE_HOME\"\nhost_login = [\"browser\"]\n\n[env]\nFAKE_HELPER = \"{helper}\"\nFAKE_HELPER_PID = \"{pid}\"\n{fail}",
+            "id = \"fakelogin\"\nname = \"Fake login\"\ncommand = [\"{adapter}\"]\nhome_paths = [{{path = \"~/.fakelogin\", kind = \"directory\"}}]\nlogin_files = [\".fakelogin/auth.json\"]\nhome_env = \"FAKE_HOME\"\nhost_login = [\"browser\"]\n\n[env]\nFAKE_HELPER = \"{helper}\"\nFAKE_HELPER_PID = \"{pid}\"\n{fail}",
             adapter = adapter.display(), helper = tools.join("helper").display(), pid = dir.join("helper.pid").display(),
             fail = if fail { "FAKE_FAIL = \"1\"\n" } else { "" },
         );
@@ -780,22 +780,24 @@ fn a_host_login_propagates_to_existing_ghost_session_homes() {
     std::fs::write(ghost.join(".fakelogin/state.sqlite"), "ghost history").unwrap();
     let home = login.dir.join("home");
     // The subprocess owns its environment; the parallel test runner is never mutated.
-    let agent = sill_core::agents::load(&home).remove("fakelogin").unwrap();
+    let agent = sill_core::agents::load(&home).unwrap().remove("fakelogin").unwrap();
     let mut env_agent = agent;
     env_agent.env.insert("XDG_STATE_HOME".into(), login.dir.join("state").display().to_string());
     // Run `run_into` with `ghost` as an existing ghost session's agent home copy.
 
-    sill_core::login::run_into(&env_agent, &home, std::slice::from_ref(&ghost), "browser", |_| {}).unwrap();
+    sill_core::login::run_into(&env_agent, &home, &[(ghost.clone(), sill_core::credentials::Rules::for_agent(&env_agent).unwrap())], "browser", |_| {}).unwrap();
     assert_eq!(std::fs::read_to_string(sill_core::session::agent_home(&home, "fakelogin").join(".fakelogin/auth.json")).unwrap(), "token");
     assert_eq!(std::fs::read_to_string(ghost.join(".fakelogin/auth.json")).unwrap(), "token", "the ghost home got the new login");
     assert_eq!(std::fs::read_to_string(ghost.join(".fakelogin/state.sqlite")).unwrap(), "ghost history", "the ghost's history is untouched");
     // The mount plan must expose registry credentials from the private ghost home, while
     // neither mounting the normal agent home nor importing its config or history.
     let mut registry_agent = env_agent.clone();
-    registry_agent.home_paths.clear();
+    registry_agent.home_paths = Some(vec![sill_core::agents::HomePath::directory("~/.fakelogin")]);
     let policy = sill_core::policy::Policy::builtin_default();
     let state = login.dir.join("ghost-state");
-    let binds = sill_core::session::binds_for(&registry_agent, &policy, &state, &home, &[], true).unwrap();
+    let plan = sill_core::agent_storage::resolve(&registry_agent, &Default::default(), &policy, &state, &home, &[], true).unwrap();
+    plan.prepare().unwrap();
+    let binds = plan.binds().unwrap();
     let inside = home.join(".fakelogin/auth.json");
     let (source, target) = binds.iter().find(|(_, target)| inside.starts_with(target)).expect("ghost credential directory is mounted");
     let mounted = source.join(inside.strip_prefix(target).unwrap());
@@ -806,7 +808,9 @@ fn a_host_login_propagates_to_existing_ghost_session_homes() {
     // A first Claude login needs a regular .claude.json even when no host copy exists.
     let claude = sill_core::agents::builtin().into_iter().find(|a| a.id == "claude").unwrap();
     let claude_state = login.dir.join("claude-ghost-state");
-    let binds = sill_core::session::binds_for(&claude, &policy, &claude_state, &home, &[], true).unwrap();
+    let plan = sill_core::agent_storage::resolve(&claude, &Default::default(), &policy, &claude_state, &home, &[], true).unwrap();
+    plan.prepare().unwrap();
+    let binds = plan.binds().unwrap();
     let (source, _) = binds.iter().find(|(_, target)| *target == home.join(".claude.json")).unwrap();
     assert!(source.is_file());
     assert_eq!(std::fs::read(source).unwrap(), b"{}");

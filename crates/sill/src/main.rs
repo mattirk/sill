@@ -891,6 +891,18 @@ fn policy_session_key(c: &sill_proto::Client, key: &str) -> Result<String> {
     Ok(c.resolve_session(key)?.session_id)
 }
 fn print_policy_view(view: &sill_proto::admin::PolicyView) {
+    match &view.filesystem {
+        None => println!("filesystem: not recorded; rebuild this session"),
+        Some(fs) => {
+            println!("filesystem ({}):", view.view);
+            for rule in &fs.rules {
+                let backing = rule.backing.as_ref().map(|p| format!(" -> {}", p.display)).unwrap_or_default();
+                println!("  {}: {}{} [{}] {}", rule.behavior, rule.target.display, backing, rule.source, rule.reason);
+            }
+            for path in &fs.unused { println!("  stored but unused: {}", path.display); }
+        }
+    }
+
     println!("# {} policy for {} ({})", view.view, view.session_id, view.name);
     if let Some(text) = &view.text { print!("{text}"); }
     for permission in &view.permissions {
@@ -954,7 +966,7 @@ fn main() -> Result<()> {
         },
         Cmd::Login { agent, method } => {
             let home = home()?;
-            let registry = sill_core::agents::load(&home);
+            let registry = sill_core::agents::load(&home)?;
             let Some(a) = registry.get(&agent) else { bail!("unknown agent {agent}") };
             let method = match method.or_else(|| a.host_login.first().cloned()) {
                 Some(m) => m,
@@ -962,7 +974,7 @@ fn main() -> Result<()> {
             };
             let ghosts = sill_core::store::Store::open_default()
                 .and_then(|s| s.sessions())
-                .map(|rows| sill_core::session::existing_ghost_homes(&rows, &a.id))
+                .map(|rows| sill_core::session::ghost_credential_homes(&rows, &a.id))
                 .unwrap_or_default();
             sill_core::login::run_into(a, &home, &ghosts, &method, |line| match line {
                 sill_core::login::Line::Status(t) => eprintln!("{t}"),
@@ -1282,7 +1294,18 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
     let frozen_policy = jail.resolved_policy.is_some();
     let mut spec = build_spec(jail, command)?;
     // the other agents' homes and login files stay out of this jail (SPEC §4.11 #8)
-    spec.masks = sill_core::session::other_agents_paths(&sill_core::agents::load(&spec.home), agent, &spec.home);
+    if !frozen_policy {
+        let registry = sill_core::agents::load(&spec.home)?;
+        if let Some(id) = agent {
+            let definition = registry.get(id).context("unknown agent")?;
+            let plan = sill_core::agent_storage::resolve(definition, &registry, &spec.policy, &spec.state_dir, &spec.home, &[], ghost)?;
+            anyhow::ensure!(spec.binds.is_empty(), "agent launch bindings must come from the filesystem plan");
+            plan.prepare()?;
+            plan.apply(&mut spec)?;
+        } else {
+            spec.agent_masks = registry.values().flat_map(|a| a.home_paths.iter().flatten()).map(|p| (sill_core::paths::expand_home(&p.path, &spec.home), p.kind)).collect();
+        }
+    }
     let idle = spec.policy.limits.agent_idle_minutes as u64 * 60;
     spec.command.extend(["--agent-idle".into(), idle.to_string().into()]);
     // Desktop development's private bus: the shim starts dbus-daemon inside the jail, on the
@@ -1327,7 +1350,7 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
         let listener = UnixListener::bind(&proxy_sock).with_context(|| format!("bind {}", proxy_sock.display()))?;
         let mut rules = sill_core::proxy::Rules::from(&spec.policy.network);
         // the agent's own endpoints (registry `domains`) on top of the policy's list
-        if !frozen_policy && let Some(a) = agent.and_then(|id| sill_core::agents::load(&home().ok()?).remove(id)) {
+        if !frozen_policy && let Some(a) = agent.and_then(|id| sill_core::agents::load(&home().ok()?).ok()?.remove(id)) {
             rules.allow.extend(a.domains);
         }
         eprintln!("sill launch: proxy mode {:?}, {} allow patterns", rules.mode, rules.allow.len());
@@ -1755,7 +1778,7 @@ fn build_spec(a: JailArgs, command: Vec<OsString>) -> Result<JailSpec> {
         let Some((h, j)) = b.split_once('=') else { bail!("--bind expects HOST=JAIL, got {b}") };
         binds.push((PathBuf::from(h), PathBuf::from(j)));
     }
-    Ok(JailSpec {
+    let mut spec = JailSpec {
         fragment_ro: resolution.as_ref().map(|r| r.fragment_ro.clone()).unwrap_or_default(),
         fragment_masks: resolution.as_ref().map(|r| r.fragment_masks.clone()).unwrap_or_default(),
         policy,
@@ -1772,13 +1795,21 @@ fn build_spec(a: JailArgs, command: Vec<OsString>) -> Result<JailSpec> {
         proxy_socket: a.proxy.map(std::path::absolute).transpose()?,
         proxy_port: jail::PROXY_PORT,
         binds,
+        agent_masks: vec![],
+        policy_paths: None,
+        agent_binds: vec![],
         masks: vec![],
         memory_dir: None,
         bridge_dir: None,
         seccomp_fd: None,
         extra_args,
         command,
-    })
+    };
+    if let Some(resolution) = resolution {
+        let plan = resolution.filesystem.context("filesystem plan not recorded; rebuild the session")?;
+        plan.apply(&mut spec)?;
+    }
+    Ok(spec)
 }
 
 /// `/var/lib/sill/<uid>/sessions/dev` when the sill state filesystem is mounted, otherwise the user's

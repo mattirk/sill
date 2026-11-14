@@ -370,14 +370,18 @@ pub fn install(home: &Path, entry: &Entry, log: &mut dyn FnMut(String)) -> Resul
         _ => install_binary(&dir, &entry.distribution.binary.as_ref().unwrap()[platform_key()], log)?,
     };
     let icon = fetch_icon(home, entry);
-    let supports_load = match probe_load_session(&command, &env, home) {
+    let supports_load = if builtin_for(entry).is_none() {
+        log("installed; directory setup required before login, launch or capability probing".into());
+        false
+    } else { match probe_load_session(&command, &env, home) {
         Ok(b) => b,
         Err(e) => {
             log(format!("probe (in a throwaway jail) failed: {e:#}"));
             false
         }
+    }
     };
-    log(format!("probe: {}", if supports_load { "resumes sessions" } else { "no session resume" }));
+    log(format!("session resume: {}", if supports_load { "resumes sessions" } else { "no session resume" }));
 
     let installed = Installed { version: entry.version.clone(), kind: how.to_string(), command: command.clone(), env: env.clone(), trust: entry.trust };
     std::fs::write(dir.join("installed.json"), serde_json::to_string_pretty(&installed)?)?;
@@ -399,11 +403,8 @@ pub fn install(home: &Path, entry: &Entry, log: &mut dyn FnMut(String)) -> Resul
             experimental_acp_v2: false,
             domains: vec![],
             sandbox_off_env: Default::default(),
-            state_dirs: vec![],
-            home_paths: vec![],
-            seed_files: vec![],
+            home_paths: None,
             login_files: vec![],
-            shared_files: vec![],
             host_login: vec![],
             home_env: None,
             home_env_parent: false,

@@ -503,7 +503,7 @@ mod tests {
             daemon.reply(
                 &agent,
                 json!({"id": "claude", "name": "Claude",
-                "command": ["claude-acp"], "home_paths": [".claude"]}),
+                "command": ["claude-acp"], "home_paths": [{"path": "~/.claude", "kind": "directory"}]}),
             );
             let control = daemon.expect("_sill/sessions.control");
             daemon.reply(&control, json!({}));
@@ -537,7 +537,7 @@ mod tests {
             daemon.reply(
                 &agent,
                 json!({"id": "claude", "name": "Claude",
-                "command": ["claude-acp"], "home_paths": [".claude"]}),
+                "command": ["claude-acp"], "home_paths": [{"path": "~/.claude", "kind": "directory"}]}),
             );
             let mut seen = vec![];
             for method in [

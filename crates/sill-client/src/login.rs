@@ -39,12 +39,10 @@ pub enum Route {
 }
 
 /// Which way `method` goes for `agent`: the agent's host-login methods
-/// and every protocol-level method of an agent installed from the registry (no home paths, no
-/// curated method list) go to the host; a method with a terminal command runs it in the jail;
+/// explicitly choose host execution; a method with a terminal command runs it in the jail;
 /// the rest is the agent's own.
 pub fn route(agent: &Definition, method: &AuthMethod) -> Route {
-    let unknown_agent = agent.home_paths.is_empty();
-    if agent.host_login.contains(&method.method_id) || (unknown_agent && method.terminal.is_none())
+    if agent.host_login.contains(&method.method_id)
     {
         return Route::Host;
     }
@@ -87,6 +85,7 @@ pub fn prepare(client: &Client, session_id: &str) -> Result<(Definition, bool)> 
             },
         )
         .with_context(|| format!("reading agent {}", session.agent))?;
+    anyhow::ensure!(agent.home_paths.is_some(), "agent {} needs directory setup before login", agent.id);
     let restart_first = session.running && session.policy_changed;
     if restart_first {
         restart(client, session_id)?;
@@ -160,7 +159,7 @@ mod tests {
     fn agent(host_login: &[&str], home_paths: &[&str]) -> Definition {
         serde_json::from_value(json!({
             "id": "a", "name": "A", "command": ["agent", "--acp"], "env": {"A": "1"},
-            "host_login": host_login, "home_paths": home_paths,
+            "host_login": host_login, "home_paths": home_paths.iter().map(|p| serde_json::json!({"path": p, "kind": "directory"})).collect::<Vec<_>>(),
         }))
         .unwrap()
     }
@@ -192,8 +191,8 @@ mod tests {
                     .into(),
             }
         );
-        // an agent from the registry: its browser flows cannot finish in the jail
+        // No directory declaration can implicitly grant a host login route.
         let unknown = agent(&[], &[]);
-        assert_eq!(route(&unknown, &method("oauth", None)), Route::Host);
+        assert_eq!(route(&unknown, &method("oauth", None)), Route::Agent);
     }
 }

@@ -156,6 +156,8 @@ pub struct SessionHostGrant {
 /// Policy inspection always identifies its view; previews are never evidence of enforcement.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PolicyView {
+    /// Exact filesystem rules; None means no launch evidence was recorded.
+    pub filesystem: Option<FilesystemView>,
     #[serde(default)]
     pub permissions: Vec<PermissionState>,
     /// The session's remembered host approvals as this view resolves them. A launch snapshot
@@ -172,6 +174,19 @@ pub struct PolicyView {
     pub suggestions: Vec<PolicySuggestion>,
     pub fingerprint: Option<String>,
     pub diagnostics: Vec<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FilesystemView {
+    pub rules: Vec<PathRule>,
+    pub unused: Vec<HostPath>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PathRule {
+    pub target: HostPath,
+    pub backing: Option<HostPath>,
+    pub behavior: String,
+    pub source: String,
+    pub reason: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PolicySource {

@@ -152,8 +152,9 @@ pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
                 valid_id(&a.agent_id)?;
                 if a.method_id.is_empty() || a.method_id.len() > 256 || a.method_id.chars().any(char::is_control) { return Err(invalid("invalid method_id")); }
                 let home = sill_core::changes::home()?;
-                let agent = sill_core::agents::load(&home).remove(&a.agent_id).ok_or_else(|| domain("not_found", "agent not found"))?;
-                let ghosts = hub.ghost_homes_of(&agent.id);
+                let agent = sill_core::agents::load(&home)?.remove(&a.agent_id).ok_or_else(|| domain("not_found", "agent not found"))?;
+                agent.ready(&home)?;
+                let ghosts = hub.with_store(|s| Ok(sill_core::session::ghost_credential_homes(&s.sessions()?, &agent.id)))?;
                 Ok(json!(start(hub, id, method, input, format!("login:{}", agent.id), move |progress| {
                     sill_core::login::run_into(&agent, &home, &ghosts, &a.method_id, |line| {
                         progress.send(match line {
@@ -168,7 +169,7 @@ pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
                 let a: api::AgentReset = args(params)?;
                 valid_id(&a.agent_id)?;
                 let home = sill_core::changes::home()?;
-                let agent = sill_core::agents::load(&home).remove(&a.agent_id).ok_or_else(|| domain("not_found", "agent not found"))?;
+                let agent = sill_core::agents::load(&home)?.remove(&a.agent_id).ok_or_else(|| domain("not_found", "agent not found"))?;
                 // Reset must not race a daemon host login that will copy credentials back later.
                 let _job = Job::reserve(format!("login:{}", agent.id))?;
                 // first the running sessions: a running agent holds its login and writes to its home

@@ -25,15 +25,9 @@ pub struct Definition {
     #[serde(default)]
     pub sandbox_off_env: BTreeMap<String, String>,
     #[serde(default)]
-    pub state_dirs: Vec<String>,
-    #[serde(default)]
-    pub home_paths: Vec<String>,
-    #[serde(default)]
-    pub seed_files: Vec<String>,
+    pub home_paths: Option<Vec<HomePath>>,
     #[serde(default)]
     pub login_files: Vec<String>,
-    #[serde(default)]
-    pub shared_files: Vec<String>,
     #[serde(default)]
     pub host_login: Vec<String>,
     #[serde(default)]
@@ -44,6 +38,25 @@ pub struct Definition {
     pub icon: Option<String>,
     #[serde(default)]
     pub memory_paths: Vec<String>,
+}
+/// Exact persistent locations; absence of home_paths means setup is required.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HomePath {
+    pub path: String,
+    pub kind: HomePathKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_content: Option<String>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HomePathKind { Directory, File }
+impl HomePath {
+    pub fn directory(path: &str) -> Self {
+        Self { path: path.into(), kind: HomePathKind::Directory, initial_content: None }
+    }
+    pub fn file(path: &str, initial: &str) -> Self {
+        Self { path: path.into(), kind: HomePathKind::File, initial_content: Some(initial.into()) }
+    }
 }
 fn yes()->bool{true}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

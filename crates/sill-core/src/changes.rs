@@ -25,8 +25,12 @@ pub fn session_plan(
     home: &Path,
     uid: u32,
     user: &str,
-    binds: Vec<(PathBuf, PathBuf)>,
+    filesystem: &crate::agent_storage::Plan,
 ) -> Result<jail::JailPlan> {
+    let mut policy = policy;
+    policy.paths.mask.clear();
+    policy.paths.direct.clear();
+    policy.paths.ro.clear();
     let spec = JailSpec {
         fragment_ro: vec![],
         fragment_masks: vec![],
@@ -43,7 +47,10 @@ pub fn session_plan(
         root_entries: jail::read_root_entries()?,
         proxy_socket: None,
         proxy_port: jail::PROXY_PORT,
-        binds,
+        binds: vec![],
+        agent_masks: vec![],
+        policy_paths: None,
+        agent_binds: vec![],
         masks: vec![], // the other agents' paths are tmpfs in the jail: nothing of theirs is in an upper tree
         memory_dir: None,
         bridge_dir: None,
@@ -51,7 +58,10 @@ pub fn session_plan(
         extra_args: vec![],
         command: vec!["true".into()],
     };
-    spec.plan()
+    let mut plan = spec.plan()?;
+    plan.masked = filesystem.policy_paths.masks.iter().chain(&filesystem.agent_masks).map(|m| m.path.to_path()).collect::<Result<_>>()?;
+    plan.direct = filesystem.bindings.iter().map(|b| b.target.to_path()).chain(filesystem.policy_paths.direct.iter().chain(&filesystem.policy_paths.read_only).map(|p| p.to_path())).collect::<Result<_>>()?;
+    Ok(plan)
 }
 
 /// Scan a session's upper trees. Inside git repositories, git-ignored paths count as ignored (build
@@ -266,11 +276,8 @@ pub fn apply_gitignore(changes: &mut [Change]) {
 }
 
 /// Is this path inside one of the agent's own state locations (`~/.claude`, `~/.claude.json`, …)?
-pub fn is_agent_state(path: &Path, state_dirs: &[String], home: &Path) -> bool {
-    state_dirs.iter().any(|d| {
-        let p = crate::paths::expand_home(d, home);
-        path == p || path.starts_with(&p)
-    })
+pub fn is_agent_state(path: &Path, state_paths: &[PathBuf]) -> bool {
+    state_paths.iter().any(|p| path.starts_with(p))
 }
 
 /// Group changes by the nearest enclosing git repository ("" = outside any repo).

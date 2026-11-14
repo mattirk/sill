@@ -25,18 +25,15 @@ pub struct StartOptions {
     pub shim_bin: Option<PathBuf>,
     /// Registry id of the agent the session runs: its domains join the proxy allow-list.
     pub agent: Option<String>,
-    /// Extra read-write binds (host, jail), see [`binds_for`].
+    /// Explicit development-jail binds. Agent sessions resolve their bindings from declarations.
     pub binds: Vec<(PathBuf, PathBuf)>,
     /// A ghost session (docs/memory.md §3): `sill launch --ghost` tightens the policy
     /// (`Policy::ghostly`) and leaves the memory snapshot out unless Settings say otherwise.
     pub ghost: bool,
 }
 
-/// The binds a session needs beyond the policy's mounts: the agent's sill-owned home paths and the
-/// session-private scratch directories. Creates what is missing (seeding the agent home from the host
-/// on first use, login files only).
 /// The sill-owned home of an agent: `~/.local/state/sill/agents/<id>/`, holding the jail's copy of
-/// each `home_paths` entry under its basename (`.codex`, `.claude`, `.claude.json`).
+/// each declared home path under its full relative path.
 pub fn agent_home(home: &Path, agent_id: &str) -> PathBuf {
     std::env::var("XDG_STATE_HOME")
         .map(PathBuf::from)
@@ -58,171 +55,19 @@ pub fn existing_ghost_homes(sessions: &[crate::store::Session], agent_id: &str) 
     sessions
         .iter()
         .filter(|s| s.agent == agent_id)
-        .filter_map(|s| state_dir(uid, &s.id).ok())
+        .filter_map(|s| state_dir_path(uid, &s.id).ok())
         .map(|dir| ghost_agent_home(&dir, agent_id))
         .filter(|p| p.is_dir())
         .collect()
 }
 
-/// Parents under `~` that many programs share: an agent's entry below them is adopted one level
-/// down (`~/.config/<agent>`), never the parent itself.
-const SHARED_PARENTS: &[&str] = &[".config", ".local", ".cache"];
-
-/// Agent-owned paths that live in the sill-owned home without being listed in the registry:
-/// whatever the agent (or its host-side login) has put there. Each is (owned path, path under `~`).
-/// Top-level dot entries of the agent home map to `~/<name>`; entries one level below a shared
-/// parent map to `~/.config/<name>` and so on.
-pub fn adopted_binds(agent: &crate::agents::Agent, home: &Path) -> Vec<(PathBuf, PathBuf)> {
-    let base = agent_home(home, &agent.id);
-    let curated: Vec<String> = agent
-        .home_paths
-        .iter()
-        .filter_map(|p| Path::new(p).file_name().map(|n| n.to_string_lossy().into_owned()))
-        .collect();
-    let mut out = Vec::new();
-    let Ok(rd) = std::fs::read_dir(&base) else { return out };
-    for e in rd.filter_map(Result::ok) {
-        let name = e.file_name().to_string_lossy().into_owned();
-        if !name.starts_with('.') || curated.contains(&name) {
-            continue;
-        }
-        if SHARED_PARENTS.contains(&name.as_str()) {
-            let parent = base.join(&name);
-            let Ok(rd2) = std::fs::read_dir(&parent) else { continue };
-            for c in rd2.filter_map(Result::ok) {
-                let cname = c.file_name().to_string_lossy().into_owned();
-                if name == ".local" && (cname == "share" || cname == "state" || cname == "bin") {
-                    // one more level: ~/.local/share/<agent>
-                    let Ok(rd3) = std::fs::read_dir(c.path()) else { continue };
-                    for g in rd3.filter_map(Result::ok) {
-                        let rel = Path::new(&name).join(&cname).join(g.file_name());
-                        out.push((base.join(&rel), home.join(&rel)));
-                    }
-                    continue;
-                }
-                let rel = Path::new(&name).join(&cname);
-                out.push((base.join(&rel), home.join(&rel)));
-            }
-        } else {
-            out.push((base.join(&name), home.join(&name)));
-        }
-    }
-    out
-}
-
-/// The host paths every *other* registry agent owns — its `home_paths` and `shared_files` (the
-/// host's own `~/.codex/auth.json`, `~/.gemini/oauth_creds.json`), and whatever it adopted — that
-/// exist on the host: masked in `agent`'s jail, so one agent never sees another's credentials
-/// (SPEC §4.11 #8). With no current agent (`sill dev`), every agent's paths.
-pub fn other_agents_paths(registry: &std::collections::BTreeMap<String, crate::agents::Agent>, agent: Option<&str>, home: &Path) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
-    for (id, a) in registry {
-        if Some(id.as_str()) == agent {
-            continue;
-        }
-        let own = a.home_paths.iter().chain(a.shared_files.iter()).map(|p| crate::paths::expand_home(p, home));
-        for p in own.chain(adopted_binds(a, home).into_iter().map(|(_, inside)| inside)) {
-            if p.exists() && !out.contains(&p) {
-                out.push(p);
-            }
-        }
-    }
-    out.sort();
-    out
-}
-
-/// Every path under `~` that is the agent's own (registry `state_dirs` and `home_paths` plus the
-/// adopted ones), as `~/…` strings for [`crate::changes::is_agent_state`].
-pub fn state_paths(agent: &crate::agents::Agent, home: &Path) -> Vec<String> {
-    let mut v: Vec<String> = agent.state_dirs.iter().chain(agent.home_paths.iter()).cloned().collect();
-    for (_, inside) in adopted_binds(agent, home) {
-        if let Ok(rel) = inside.strip_prefix(home) {
-            v.push(format!("~/{}", rel.display()));
-        }
-    }
-    v.sort();
-    v.dedup();
-    v
-}
-
-/// Move new agent-private paths out of a session's upper tree into the sill-owned home, so they
-/// persist across that agent's sessions, stay off the host and out of the ledger: the shallowest
-/// *new* path under a dot entry of `~` (`~/.foo`, `~/.config/foo`, `~/.gemini/foo` when `~/.gemini`
-/// already existed). Pinned folders are never touched. Returns what was adopted (paths under `~`);
-/// the binds take effect when the session starts again.
-pub fn adopt_agent_state(
-    agent: &crate::agents::Agent,
-    home: &Path,
-    changes: &[crate::ledger::Change],
-    pins: &[PathBuf],
-) -> Result<Vec<PathBuf>> {
-    use crate::ledger::Kind;
-    let base = agent_home(home, &agent.id);
-    let already: Vec<PathBuf> = adopted_binds(agent, home).into_iter().map(|(_, i)| i).collect();
-    let curated: Vec<PathBuf> = agent.home_paths.iter().map(|p| crate::paths::expand_home(p, home)).collect();
-    let added: std::collections::HashSet<&Path> =
-        changes.iter().filter(|c| c.kind == Kind::Added).map(|c| c.path.as_path()).collect();
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    for c in changes {
-        let Ok(rel) = c.path.strip_prefix(home) else { continue };
-        let comps: Vec<String> = rel.components().map(|x| x.as_os_str().to_string_lossy().into_owned()).collect();
-        let Some(first) = comps.first() else { continue };
-        if !first.starts_with('.') {
-            continue;
-        }
-        if pins.iter().any(|p| c.path.starts_with(p)) || already.iter().chain(curated.iter()).any(|p| c.path.starts_with(p)) {
-            continue;
-        }
-        // the shallowest new ancestor (including the path itself)
-        let mut cur = home.to_path_buf();
-        let mut pick = None;
-        for comp in &comps {
-            cur = cur.join(comp);
-            if added.contains(cur.as_path()) {
-                pick = Some(cur.clone());
-                break;
-            }
-        }
-        let Some(pick) = pick else { continue };
-        // never adopt a shared parent itself (`~/.config` as a whole)
-        if pick.parent() == Some(home) && SHARED_PARENTS.contains(&comps[0].as_str()) {
-            continue;
-        }
-        if !candidates.contains(&pick) {
-            candidates.push(pick);
-        }
-    }
-    let mut adopted = Vec::new();
-    for host_path in candidates {
-        let Some(change) = changes.iter().find(|c| c.path == host_path) else { continue };
-        let rel = host_path.strip_prefix(home).unwrap_or(&host_path);
-        let dst = base.join(rel);
-        if let Some(parent) = dst.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        copy_tree(&change.upper, &dst)?;
-        adopted.push(host_path);
-    }
-    Ok(adopted)
-}
-
-/// Copy a file or directory tree (regular files and directories only; overlay whiteouts and
-/// special files are skipped), merging into an existing destination.
-fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
-    let meta = std::fs::symlink_metadata(src)?;
-    if meta.is_dir() {
-        std::fs::create_dir_all(dst)?;
-        for e in std::fs::read_dir(src)?.filter_map(Result::ok) {
-            copy_tree(&e.path(), &dst.join(e.file_name()))?;
-        }
-    } else if meta.is_file() {
-        std::fs::copy(src, dst)?;
-    } else if meta.file_type().is_symlink() {
-        let target = std::fs::read_link(src)?;
-        let _ = std::fs::remove_file(dst);
-        std::os::unix::fs::symlink(target, dst)?;
-    }
-    Ok(())
+/// Only recorded credential declarations authorize writes into an existing ghost.
+pub fn ghost_credential_homes(sessions: &[crate::store::Session], agent_id: &str) -> Vec<(PathBuf, crate::credentials::Rules)> {
+    sessions.iter().filter(|s| s.ghost && s.agent == agent_id).filter_map(|s| {
+        let plan = recorded_filesystem(&s.id).ok()?;
+        let path = plan.profile.to_path().ok()?;
+        path.is_dir().then_some((path, plan.credentials))
+    }).collect()
 }
 
 /// The policy a session's jail runs with: its own, tightened for a ghost (`Policy::ghostly`).
@@ -234,113 +79,24 @@ pub fn policy_of(s: &crate::store::Session, home: &Path) -> Result<Policy> {
     Ok(p)
 }
 
-/// `ghost` (docs/memory.md §3.2): the agent home is a copy in the session's state dir
-/// ([`ghost_agent_home`], seeded with credential files only), adopted state is not bound (writes
-/// there go to the overlay like any other) and pins are ignored — a ghost has none.
-pub fn binds_for(
-    agent: &crate::agents::Agent,
-    policy: &Policy,
-    state_dir: &Path,
-    home: &Path,
-    pins: &[PathBuf],
-    ghost: bool,
-) -> Result<Vec<(PathBuf, PathBuf)>> {
-    use crate::paths::{expand_home, expand_pattern, layer_name};
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
-    let mut out = Vec::new();
-    // agent home: ~/.local/state/sill/agents/<id>/<basename of the path>. The agents' homes hold
-    // credentials: 0700 from the `agents/` directory down, whatever the umask, on every start (a
-    // home made before this was 0755/0664, SPEC §4.11 #8). A ghost's is a copy of it.
-    let agents_base = if ghost {
-        let copy = ghost_agent_home(state_dir, &agent.id);
-        if !copy.exists() {
-            let t0 = std::time::Instant::now();
-            std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&copy)?;
-            crate::credentials::seed(agent, &agent_home(home, &agent.id), &copy)?;
-            eprintln!("sill: ghost agent home for {} copied in {} ms", agent.id, t0.elapsed().as_millis());
-        }
-        copy
-    } else {
-        agent_home(home, &agent.id)
-    };
-    let pins: &[PathBuf] = if ghost { &[] } else { pins };
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&agents_base)?;
-    for d in [agents_base.as_path()].into_iter().chain(agents_base.parent()) {
-        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))?;
-    }
-    for p in &agent.home_paths {
-        let inside = expand_home(p, home);
-        let name = inside.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let owned = agents_base.join(&name);
-        let file_path = inside.is_file() || agent.seed_files.iter().any(|seed| seed == p);
-        if !owned.exists() {
-            if !file_path {
-                std::fs::DirBuilder::new().mode(0o700).create(&owned)?;
-            } else {
-                // a file path (~/.claude.json): seed from the host or start empty
-                let content = if ghost { b"{}".to_vec() } else { std::fs::read(&inside).unwrap_or_else(|_| b"{}".to_vec()) };
-                let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&owned)?;
-                std::io::Write::write_all(&mut f, &content)?;
-            }
-            for seed in agent.seed_files.iter().filter(|_| !ghost) {
-                let src = expand_home(seed, home);
-                if let Ok(rel) = src.strip_prefix(&inside)
-                    && owned.is_dir()
-                    && src.is_file()
-                    && let Ok(content) = std::fs::read(&src)
-                {
-                    // the seed is the login: written 0600, never through a link
-                    let _ = crate::safe_fs::write_file_beneath(&owned, rel, &content, 0o600);
-                }
-            }
-        }
-        // bwrap needs the mount point to exist inside: a missing ~/.claude.json would be created as
-        // a copy-up in the overlay, which is harmless (it is skipped by the ledger as a bind)
-        out.push((owned, inside));
-    }
-    // adopted agent state (see `adopted_binds`): the agent's own files that landed in its home
-    for (owned, inside) in if ghost { vec![] } else { adopted_binds(agent, home) } {
-        if !out.iter().any(|(_, i)| *i == inside) {
-            out.push((owned, inside));
-        }
-    }
-    if ghost {
-        // Registry agents have no curated home paths. Mount only private directories containing
-        // their credential files, never the normal agent's adopted state.
-        for rel in crate::credentials::files(agent, &agent_home(home, &agent.id))? {
-            let parent = rel.parent().context("credential parent")?;
-            let inside = home.join(parent);
-            if !out.iter().any(|(_, p)| inside.starts_with(p)) {
-                crate::safe_fs::open_dir_beneath(&agents_base, parent, true)?;
-                out.push((agents_base.join(parent), inside));
-            }
-        }
-    }
-    // the login file shared with the host (bound after the home so it wins)
-    for p in &agent.shared_files {
-        let inside = expand_home(p, home);
-        if inside.is_file() {
-            out.push((inside.clone(), inside));
-        }
-    }
-    // pinned folders: live, host = jail (git or not)
-    for p in pins {
-        if p.is_dir() && !out.iter().any(|(_, i)| i == p) {
-            out.push((p.clone(), p.clone()));
-        }
-    }
-    // session-private scratch
-    for pat in &policy.paths.private {
-        for inside in expand_pattern(pat, home).into_iter().chain(std::iter::once(expand_home(pat, home))) {
-            if out.iter().any(|(_, i)| *i == inside) {
-                continue;
-            }
-            let scratch = state_dir.join("private").join(layer_name(&inside));
-            std::fs::create_dir_all(&scratch)?;
-            out.push((scratch, inside));
-        }
-    }
-    Ok(out)
+/// Reading session state must not create directories or inspect today's ownership declarations.
+pub fn recorded_filesystem(session: &str) -> Result<crate::agent_storage::Plan> {
+    policy_snapshot(session)?.and_then(|s| s.filesystem)
+        .context("filesystem plan not recorded; rebuild this session before inspecting or changing its files")
+}
+
+pub fn state_dir_path(uid: u32, session: &str) -> Result<PathBuf> {
+    checked_id(session)?;
+    Ok(Path::new(crate::jail::STATE_FS).join(uid.to_string()).join("sessions").join(session))
+}
+
+pub fn freeze_filesystem(mut resolution: crate::policy_fragments::Resolution, agent_id: &str, home: &Path, state_dir: &Path, pins: &[PathBuf], ghost: bool) -> Result<crate::policy_fragments::Resolution> {
+    let registry = crate::agents::load(home)?;
+    let agent = registry.get(agent_id).context("unknown agent")?;
+    let mut plan = crate::agent_storage::resolve(agent, &registry, &resolution.policy, state_dir, home, pins, ghost)?;
+    plan.add_fragments(&resolution.fragment_ro, &resolution.fragment_masks);
+    resolution.filesystem = Some(plan);
+    Ok(resolution)
 }
 
 /// Where the daemon puts files attached to a prompt: inside the session's private `~/.cache`
@@ -485,10 +241,11 @@ pub fn effective_base_policy(name: &str, home: &Path, ghost: bool) -> Result<Pol
 
 /// Freeze registry endpoints too: proxy behavior and the recorded policy must agree.
 pub fn session_base_policy(name: &str, home: &Path, ghost: bool, agent: Option<&str>) -> Result<Policy> {
+    let registry = crate::agents::load(home)?;
     let mut policy = effective_base_policy(name, home, ghost)?;
     if policy.network.mode != crate::policy::NetMode::None {
-        if let Some(agent) = agent.and_then(|id| crate::agents::load(home).remove(id)) {
-            policy.network.allow.extend(agent.domains);
+        if let Some(agent) = agent.and_then(|id| registry.get(id)) {
+            policy.network.allow.extend(agent.domains.clone());
         }
     }
     Ok(policy)
@@ -528,7 +285,8 @@ pub fn next_build_restrictions(row: &crate::store::Session, home: &Path, pins: &
 
 /// A stored session's next build, as the launcher resolves it.
 pub fn next_build(row: &crate::store::Session, home: &Path, pins: &[PathBuf], ignore_roots: &[PathBuf]) -> Result<crate::policy_fragments::Resolution> {
-    resolved_policy_with_grants(next_build_restrictions(row, home, pins, ignore_roots)?, &row.id)
+    let resolution = resolved_policy_with_grants(next_build_restrictions(row, home, pins, ignore_roots)?, &row.id)?;
+    freeze_filesystem(resolution, &row.agent, home, &state_dir_path(rustix::process::getuid().as_raw(), &row.id)?, pins, row.ghost)
 }
 
 /// The launch no longer matches the remembered grants: a capability choice changed, or a host
@@ -769,10 +527,26 @@ pub fn ensure_started(opts: &StartOptions, home: &Path, exe: &Path) -> Result<St
     if shim::answers(&sock) {
         return Ok(Started { socket: sock, child: None });
     }
+    anyhow::ensure!(opts.agent.is_none() || opts.binds.is_empty(), "agent session bindings must come from the resolved filesystem plan");
     let base = session_base_policy(&opts.policy, home, opts.ghost, opts.agent.as_deref())?;
     let resolution = crate::policy_fragments::resolve(&base, &opts.pins, &opts.ignore_fragments)?;
     let resolution = resolved_policy_with_grants(resolution, &opts.session)?;
+    let resolution = if let Some(id) = &opts.agent {
+        let state = opts.state_dir.clone().unwrap_or(state_dir_path(rustix::process::getuid().as_raw(), &opts.session)?);
+        freeze_filesystem(resolution, id, home, &state, &opts.pins, opts.ghost)?
+    } else {
+        let registry = crate::agents::load(home)?;
+        let state = opts.state_dir.clone().unwrap_or(state_dir_path(rustix::process::getuid().as_raw(), &opts.session)?);
+        let mut resolution = resolution;
+        let mut plan = crate::agent_storage::resolve_development(&registry, &resolution.policy, &state, home, &opts.binds)?;
+        plan.add_fragments(&resolution.fragment_ro, &resolution.fragment_masks);
+        resolution.filesystem = Some(plan);
+        resolution
+    };
     resolution.policy.permissions.validate_launch(&resolution.policy.network)?;
+    if let Some(plan) = &resolution.filesystem {
+        plan.prepare()?;
+    }
     let serialized_resolution = serde_json::to_vec_pretty(&resolution)?;
     if serialized_resolution.len() > MAX_POLICY_SNAPSHOT_BYTES { bail!("launch policy snapshot exceeds 4 MiB"); }
     let policy = &resolution.policy;
@@ -911,21 +685,6 @@ pub fn stop(session: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn no_host_login_is_shared_into_jails_and_the_hosts_codex_login_stays_masked() {
-        let registry: std::collections::BTreeMap<String, crate::agents::Agent> = crate::agents::builtin().into_iter().map(|a| (a.id.clone(), a)).collect();
-        assert!(registry.values().all(|a| a.shared_files.is_empty()), "a built-in agent shares a host login file");
-        let home = std::env::temp_dir().join(format!("sill-shared-login-{}", std::process::id()));
-        std::fs::create_dir_all(home.join(".codex")).unwrap();
-        std::fs::write(home.join(".codex/auth.json"), "host login").unwrap();
-        // the host's own Codex home (with its login) is hidden from every other agent's jail
-        assert!(other_agents_paths(&registry, Some("claude"), &home).contains(&home.join(".codex")));
-        // and Codex's own jail binds its sill-owned home there, never the host file over it
-        let codex = &registry["codex"];
-        assert!(!codex.shared_files.iter().any(|p| crate::paths::expand_home(p, &home) == home.join(".codex/auth.json")));
-        let _ = std::fs::remove_dir_all(&home);
-    }
 
     struct PolicyTestTree(PathBuf);
     impl PolicyTestTree {

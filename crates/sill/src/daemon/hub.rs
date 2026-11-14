@@ -154,15 +154,22 @@ impl Hub {
     pub(super) fn sync_credentials_for(&self, session: Option<&str>) -> Result<()> {
         let mut sync = self.credentials.lock().unwrap();
         let rows = self.with_store(|s| s.sessions())?;
-        let registry = sill_core::agents::load(&self.home);
         let target = session.and_then(|id| rows.iter().find(|s| s.id == id)).map(|s| s.agent.as_str());
+        let mut groups: Vec<(sill_core::credentials::Rules, PathBuf, Vec<PathBuf>)> = Vec::new();
+        for row in rows.iter().filter(|r| r.ghost && (session.is_none() || target == Some(r.agent.as_str()))) {
+            // Missing launch evidence is never reconstructed from today's definitions.
+            let Ok(plan) = sill_core::session::recorded_filesystem(&row.id) else { continue };
+            let profile = plan.profile.to_path()?;
+            if !profile.is_dir() { continue; }
+            let base = plan.normal_profile.to_path()?;
+            if let Some((_, _, ghosts)) = groups.iter_mut().find(|(rules, normal, _)| *rules == plan.credentials && *normal == base) {
+                ghosts.push(profile);
+            } else { groups.push((plan.credentials, base, vec![profile])); }
+        }
         let mut first_error = None;
-        for agent in registry.values().filter(|a| session.is_none() || target == Some(a.id.as_str())) {
-            let ghosts = sill_core::session::existing_ghost_homes(&rows, &agent.id);
-            if !ghosts.is_empty() {
-                if let Err(e) = sync.reconcile(agent, &sill_core::session::agent_home(&self.home, &agent.id), &ghosts) {
-                    if first_error.is_none() { first_error = Some(e); }
-                }
+        for (rules, base, ghosts) in groups {
+            if let Err(e) = sync.reconcile(&rules, &base, &ghosts) {
+                if first_error.is_none() { first_error = Some(e); }
             }
         }
         match first_error { Some(e) => Err(e), None => Ok(()) }
@@ -509,7 +516,8 @@ impl Hub {
                 let started = self.start_session(id)?;
                 let (s, agent) = self.with_store(|store| {
                     let s = store.sessions()?.into_iter().find(|s| s.id == id).context("session missing")?;
-                    let agent = sill_core::agents::load(&self.home).get(&s.agent).cloned().context("unknown agent")?;
+                    let agent = sill_core::agents::load(&self.home)?.get(&s.agent).cloned().context("unknown agent")?;
+                    agent.ready(&self.home)?;
                     Ok((s, agent))
                 })?;
                 let mut control = sill_core::shim::Control::connect(&started.socket)?;
@@ -733,16 +741,14 @@ impl Hub {
     /// A session's writes as the Changes page lists them: its upper trees against its policy (a
     /// ghost's tightened).
     fn session_changes(&self, s: &sill_core::store::Session, uid: u32, user: &str) -> Result<Vec<sill_core::ledger::Change>> {
-        let policy = sill_core::session::policy_of(s, &self.home)?;
-        let registry = sill_core::agents::load(&self.home);
-        let Some(agent) = registry.get(&s.agent) else { bail!("unknown agent {}", s.agent) };
-        let sdir = sill_core::session::state_dir(uid, &s.id)?;
-        if !sdir.is_dir() {
-            return Ok(vec![]);
-        }
-        let pins = sill_core::session::launch_pins(&s.id)?;
-        let binds = sill_core::session::binds_for(agent, &policy, &sdir, &self.home, &pins, s.ghost)?;
-        let plan = sill_core::changes::session_plan(policy.clone(), sdir, &self.home, uid, user, binds)?;
+        let sdir = sill_core::session::state_dir_path(uid, &s.id)?;
+        if !sdir.is_dir() { return Ok(vec![]); }
+        let launch = sill_core::session::policy_snapshot(&s.id)?.context("launch not recorded; rebuild the session")?;
+        let filesystem = launch.filesystem.context("filesystem plan not recorded; rebuild the session")?;
+        let policy = launch.policy;
+        let mut plan = sill_core::changes::session_plan(policy.clone(), sdir, &self.home, uid, user, &filesystem)?;
+        plan.masked.extend(launch.fragment_masks);
+        plan.direct.extend(launch.fragment_ro);
         sill_core::changes::scan(&policy, &plan, None)
     }
 
@@ -1115,7 +1121,7 @@ impl Hub {
             if !ignore_roots.is_empty() { bail!("jail already running; stop it before ignoring a fragment for a new build"); }
             return Ok(Started { socket: sill_core::shim::runtime_dir(id)?.join("shim.sock"), fresh: false });
         }
-        let registry = sill_core::agents::load(&self.home);
+        let registry = sill_core::agents::load(&self.home)?;
         let Some(agent) = registry.get(&s.agent) else { bail!("unknown agent {}", s.agent) };
         // Diagnose unavailable capabilities before preparing host state or launch bindings.
         // ensure_started resolves and validates again at the actual enforcement boundary.
@@ -1123,8 +1129,8 @@ impl Hub {
         resolved.policy.permissions.validate_launch(&resolved.policy.network)?;
         let uid = rustix::process::getuid().as_raw();
         let sdir = sill_core::session::state_dir(uid, id)?;
-        let policy = Policy::load(&s.policy, &self.home)?;
-        let binds = sill_core::session::binds_for(agent, &policy, &sdir, &self.home, &pins, s.ghost)?;
+        agent.ready(&self.home)?;
+        let binds = vec![];
         let opts = StartOptions {
             session: id.to_string(),
             policy: s.policy.clone(),

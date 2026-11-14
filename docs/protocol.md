@@ -7,6 +7,11 @@ stable `sfp/1`. Clients and daemon upgrade together. A mismatch requires explici
 a failed handshake never authorizes restarting a daemon. Private relay protocol 2
 requires a coordinated cutover from older development workers.
 
+The 2026-11-07 agent-directory cutover changes `home_paths` to typed records and removes
+`state_dirs`, `seed_files` and `shared_files`. The development schema baseline is deliberately
+re-recorded with the daemon and clients updated together; it is not a stable-SFP compatibility
+change or an automatic migration. Existing agent definitions must be replaced explicitly.
+
 ## Clean baseline decision (2026-11-03)
 
 Sill currently has one user and disposable development history on every machine. The
@@ -708,6 +713,15 @@ fragment paths are represented separately from base-policy paths in inspection r
 | `_sill/policy.check` | Validate transferred text as a complete policy or fragment; fragment roots identify daemon-host paths. |
 | `_sill/policy.import` | Install transferred complete-policy text under a name; existing user policies require explicit replacement. |
 | `_sill/policy.start` | Start a stopped, non-ended session with explicit ignored fragment roots for this build only. |
+
+Preview and launch views also contain `filesystem`: path rules with target/backing `HostPath`,
+behavior, source and explanation, plus a bounded metadata-only list of stored but unused paths.
+No profile contents or credential values are returned. Resolution is read-only; creation occurs
+only during launch preparation. The launch snapshot is enforcement evidence; preview is the
+next build. Missing filesystem evidence is displayed as not recorded and path-sensitive Changes
+operations require rebuilding. Filesystem differences trigger restart-needed reporting. The GUI
+Permissions panel exposes these rules in a collapsed Filesystem section; the CLI prints them in
+`policy preview` and `policy snapshot`.
 
 All are host administrative APIs, unavailable through jailed-agent tooling. CLI file input
 is read on the frontend and transferred as text, capped at 1 MiB; fragment files are capped

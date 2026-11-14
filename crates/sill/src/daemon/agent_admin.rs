@@ -25,26 +25,26 @@ pub fn handle(hub:&Hub,m:&str,p:Value)->Option<Result<Value>>{
             "_sill/agents.list"=>{
                 let a:api::List=args(p)?;let n=a.limit.unwrap_or(64) as usize;
                 if !(1..=128).contains(&n){return Err(Error::invalid_params("limit must be 1–128").into());}
-                let mut agents=sill_core::agents::load(&home).into_values().filter(|v|a.after.as_ref().is_none_or(|id|&v.id>id)).take(n+1).map(definition).collect::<Result<Vec<_>>>()?;
+                let mut agents=sill_core::agents::load(&home)?.into_values().filter(|v|a.after.as_ref().is_none_or(|id|&v.id>id)).take(n+1).map(definition).collect::<Result<Vec<_>>>()?;
                 let more=agents.len()>n;agents.truncate(n);let next=more.then(||agents.last().unwrap().id.clone());json!(api::Page{agents,next})
             }
             "_sill/agents.save"=>{
-                let a:api::Definition=sill_proto::rpc::strict(p)?;valid(&a.id)?;
+                let a:sill_core::agents::Agent=serde_json::from_value(p).map_err(Error::invalid_params)?;valid(&a.id)?;
                 if a.command.is_empty()||a.command.iter().any(|v|v.contains('\0')){return Err(Error::invalid_params("nonempty command without NUL required").into());}
-                let agent=serde_json::from_value(json!(a))?;
+                let agent=a;
                 json!(api::Saved{path:HostPath::from_path(&sill_core::agents::save_override(&home,&agent)?)})
             }
             "_sill/agents.remove"=>{let a:api::AgentKey=args(p)?;valid(&a.agent_id)?;json!(api::Removed{removed:sill_core::agents::remove_override(&home,&a.agent_id)?})}
             "_sill/agents.get"|"_sill/agents.available"|"_sill/agents.defaults.get"=>{
                 let a:api::AgentKey=args(p)?;valid(&a.agent_id)?;
-                let agent=sill_core::agents::load(&home).remove(&a.agent_id).ok_or_else(||err("not_found","agent not found"))?;
+                let agent=sill_core::agents::load(&home)?.remove(&a.agent_id).ok_or_else(||err("not_found","agent not found"))?;
                 match m{
                     "_sill/agents.get"=>json!(definition(agent)?),
                     "_sill/agents.available"=>json!(api::Available{path:sill_core::registry::available(&agent,&home).map(|p|HostPath::from_path(&p))}),
                     _=>json!(hub.with_store(|s|Ok(s.agent_settings(&a.agent_id)))?),
                 }
             }
-            "_sill/agents.defaults.set"=>{let a:api::Defaults=args(p)?;valid(&a.agent_id)?;if !sill_core::agents::load(&home).contains_key(&a.agent_id){return Err(err("not_found","agent not found"));}hub.with_store(|s|s.set_agent_settings(&a.agent_id,&a.settings))?;json!({})}
+            "_sill/agents.defaults.set"=>{let a:api::Defaults=args(p)?;valid(&a.agent_id)?;if !sill_core::agents::load(&home)?.contains_key(&a.agent_id){return Err(err("not_found","agent not found"));}hub.with_store(|s|s.set_agent_settings(&a.agent_id,&a.settings))?;json!({})}
             "_sill/registry.refresh"=>{let _:sill_proto::Empty=args(p)?;sill_core::registry::fetch(&home)?;json!({})}
             "_sill/registry.installed"=>{
                 let a:api::AgentKey=args(p)?;valid(&a.agent_id)?;

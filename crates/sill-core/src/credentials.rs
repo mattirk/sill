@@ -4,117 +4,54 @@
 use crate::{agents::Agent, safe_fs};
 use anyhow::{Result, bail};
 use std::collections::{BTreeSet, HashMap};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 const LIMIT: u64 = 1024 * 1024;
 
 /// Paths are relative to the sill-owned home, not to the person's real home.
-/// Custom agents may declare their own `login_files`; known credential names written by a
-/// host login are discovered without assuming that all its output is authentication state.
-pub fn files(agent: &Agent, base: &Path) -> Result<Vec<PathBuf>> {
-    let mut paths: BTreeSet<PathBuf> = agent.login_files.iter().map(PathBuf::from).collect();
-    let known: &[&str] = match agent.id.as_str() {
-        "claude" => &[".claude/.credentials.json"],
-        "codex" => &[".codex/auth.json"],
-        "gemini" => &[".gemini/oauth_creds.json", ".gemini/google_accounts.json"],
-        "opencode" | "opencode-v2" => &[".local/share/opencode/auth.json"],
-        "vibe" => &[".vibe/.env"],
-        _ => &[],
-    };
-    paths.extend(known.iter().map(PathBuf::from));
-    fn discover(
-        base: &Path,
-        rel: &Path,
-        depth: usize,
-        budget: &mut usize,
-        out: &mut BTreeSet<PathBuf>,
-    ) {
-        use std::os::fd::AsRawFd;
-        if depth == 0 || *budget == 0 {
-            return;
-        }
-        let Ok(dir) = safe_fs::open_dir_beneath(base, rel, false) else {
-            return;
-        };
-        let Ok(entries) = std::fs::read_dir(format!("/proc/self/fd/{}", dir.as_raw_fd())) else {
-            return;
-        };
-        for e in entries.flatten() {
-            if *budget == 0 {
-                break;
-            }
-            *budget -= 1;
-            let path = rel.join(e.file_name());
-            let Ok(kind) = e.file_type() else { continue };
-            if kind.is_dir()
-                && !matches!(
-                    e.file_name().to_str(),
-                    Some(
-                        "projects"
-                            | "sessions"
-                            | "plugins"
-                            | "skills"
-                            | "logs"
-                            | "log"
-                            | "memories"
-                            | "cache"
-                            | ".cache"
-                            | "tmp"
-                    )
-                )
-            {
-                discover(base, &path, depth - 1, budget, out);
-            } else if kind.is_file()
-                && matches!(
-                    e.file_name().to_str(),
-                    Some(
-                        "auth.json"
-                            | ".credentials.json"
-                            | "oauth_creds.json"
-                            | "google_accounts.json"
-                    )
-                )
-            {
-                out.insert(path);
-            }
-        }
-    }
-    discover(base, Path::new(""), 5, &mut 512, &mut paths);
-    for p in &paths {
-        if p.components().any(|c| !matches!(c, Component::Normal(_))) || p.components().count() < 2
-        {
-            bail!("login_files must name files below a private directory");
-        }
-    }
-    Ok(paths.into_iter().collect())
+/// Only explicit login_files may cross a profile boundary; conventional names have no authority.
+pub fn files(agent: &Agent, _base: &Path) -> Result<Vec<PathBuf>> {
+    agent.validate()?;
+    Ok(agent.login_files.iter().map(PathBuf::from).collect::<BTreeSet<_>>().into_iter().collect())
 }
 
-pub fn seed(agent: &Agent, base: &Path, ghost: &Path) -> Result<()> {
-    for rel in files(agent, base)? {
-        if let Some(bytes) = safe_fs::read_file_beneath(base, &rel, LIMIT)? {
-            safe_fs::replace_private_beneath(ghost, &rel, &bytes)?;
+/// Credential authority frozen with a jail's filesystem plan. Contains paths, never tokens.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Rules {
+    pub files: Vec<PathBuf>,
+    selection: Option<Selection>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct Selection { credential: String, config: String, pointer: String, value: serde_json::Value }
+impl Rules {
+    pub fn for_agent(agent: &Agent) -> Result<Self> {
+        agent.validate()?;
+        let files = files(agent, Path::new(""))?;
+        let selection = match agent.id.as_str() {
+            "gemini" => Some(Selection { credential: ".gemini/oauth_creds.json".into(), config: ".gemini/settings.json".into(), pointer: "/security/auth/selectedType".into(), value: serde_json::json!("oauth-personal") }),
+            "claude" => Some(Selection { credential: ".claude/.credentials.json".into(), config: ".claude.json".into(), pointer: "/hasCompletedOnboarding".into(), value: serde_json::json!(true) }),
+            _ => None,
+        }.filter(|s| files.contains(&PathBuf::from(&s.credential)) && agent.home_paths.iter().flatten().any(|p| {
+            let root = Path::new(p.path.trim_start_matches("~/"));
+            Path::new(&s.config) == root || (p.kind == crate::agents::HomePathKind::Directory && Path::new(&s.config).starts_with(root))
+        }));
+        Ok(Self { files, selection })
+    }
+}
+
+pub fn seed(rules: &Rules, base: &Path, ghost: &Path) -> Result<()> {
+    for rel in &rules.files {
+        if let Some(bytes) = safe_fs::read_file_beneath(base, rel, LIMIT)? {
+            safe_fs::replace_private_beneath(ghost, rel, &bytes)?;
         }
     }
-    auth_selection(agent, ghost)?;
+    auth_selection(rules, ghost)?;
     Ok(())
 }
 
-// Reconstruct only login-selection metadata; never copy the settings that may name host commands.
-fn auth_selection(agent: &Agent, root: &Path) -> Result<()> {
-    let (credential, config, pointer, value) = match agent.id.as_str() {
-        "gemini" => (
-            ".gemini/oauth_creds.json",
-            ".gemini/settings.json",
-            "/security/auth/selectedType",
-            serde_json::json!("oauth-personal"),
-        ),
-        "claude" => (
-            ".claude/.credentials.json",
-            ".claude.json",
-            "/hasCompletedOnboarding",
-            serde_json::json!(true),
-        ),
-        _ => return Ok(()),
-    };
+// Reconstruct only login-selection metadata; never copy settings that may name host commands.
+fn auth_selection(rules: &Rules, root: &Path) -> Result<()> {
+    let Some(selection) = &rules.selection else { return Ok(()) };
+    let Selection { credential, config, pointer, value } = selection;
     if safe_fs::read_file_beneath(root, Path::new(credential), LIMIT)?.is_none() {
         return Ok(());
     }
@@ -129,7 +66,7 @@ fn auth_selection(agent: &Agent, root: &Path) -> Result<()> {
     if config_value.pointer(pointer).is_some() {
         return Ok(());
     }
-    if agent.id == "gemini" {
+    if pointer == "/security/auth/selectedType" {
         for pointer in ["/security", "/security/auth"] {
             if config_value
                 .pointer(pointer)
@@ -139,10 +76,10 @@ fn auth_selection(agent: &Agent, root: &Path) -> Result<()> {
             }
         }
     }
-    if agent.id == "gemini" {
-        config_value["security"]["auth"]["selectedType"] = value;
+    if pointer == "/security/auth/selectedType" {
+        config_value["security"]["auth"]["selectedType"] = value.clone();
     } else {
-        config_value["hasCompletedOnboarding"] = value;
+        config_value["hasCompletedOnboarding"] = value.clone();
     }
     safe_fs::replace_private_beneath(
         root,
@@ -164,7 +101,7 @@ pub struct Sync {
 impl Sync {
     /// A changed existing member wins over an unchanged member. New empty ghosts never erase
     /// the login. Simultaneous independent updates use mtime, then canonical-home order.
-    pub fn reconcile(&mut self, agent: &Agent, base: &Path, ghosts: &[PathBuf]) -> Result<()> {
+    pub fn reconcile(&mut self, rules: &Rules, base: &Path, ghosts: &[PathBuf]) -> Result<()> {
         use std::os::unix::fs::DirBuilderExt;
         std::fs::DirBuilder::new()
             .recursive(true)
@@ -174,10 +111,7 @@ impl Sync {
             .chain(ghosts.iter().map(PathBuf::as_path))
             .filter(|p| p.is_dir())
             .collect();
-        let mut paths: BTreeSet<PathBuf> = files(agent, base)?.into_iter().collect();
-        for root in &roots {
-            paths.extend(files(agent, root)?);
-        }
+        let paths = rules.files.iter().cloned();
         for rel in paths {
             let mut values = Vec::new();
             for root in &roots {
@@ -231,7 +165,7 @@ impl Sync {
             }
         }
         for root in &roots {
-            auth_selection(agent, root)?;
+            auth_selection(rules, root)?;
         }
         // Do not keep tokens belonging to deleted ghost homes in the daemon's memory.
         self.seen.retain(|p, _| p.exists());
@@ -314,7 +248,7 @@ mod tests {
         ] {
             f.put(&f.base, path, b"private");
         }
-        seed(&f.agent, &f.base, &f.ghosts[0]).unwrap();
+        seed(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts[0]).unwrap();
         assert_eq!(
             f.read(&f.ghosts[0], ".codex/auth.json"),
             Some(b"private".to_vec())
@@ -333,17 +267,17 @@ mod tests {
         }
         std::fs::remove_file(f.base.join(".codex/auth.json")).unwrap();
         std::os::unix::fs::symlink(f.dir.join("outside"), f.base.join(".codex/auth.json")).unwrap();
-        assert!(seed(&f.agent, &f.base, &f.ghosts[1]).is_err());
+        assert!(seed(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts[1]).is_err());
     }
 
     #[test]
     fn terminal_login_and_atomic_refresh_reach_normal_home_and_other_ghosts() {
         let f = Fixture::new("refresh");
         let mut sync = Sync::default();
-        sync.reconcile(&f.agent, &f.base, &f.ghosts).unwrap();
+        sync.reconcile(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts).unwrap();
         f.put(&f.ghosts[0], ".codex/auth.json", b"first login");
         f.put(&f.ghosts[0], ".codex/config.toml", b"ghost-only");
-        sync.reconcile(&f.agent, &f.base, &f.ghosts).unwrap();
+        sync.reconcile(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts).unwrap();
         for root in [&f.base, &f.ghosts[1]] {
             assert_eq!(
                 f.read(root, ".codex/auth.json"),
@@ -353,7 +287,7 @@ mod tests {
         }
         // Replacing the inode is how token refresh libraries commonly save their credentials.
         f.put(&f.ghosts[1], ".codex/auth.json", b"refreshed");
-        sync.reconcile(&f.agent, &f.base, &f.ghosts).unwrap();
+        sync.reconcile(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts).unwrap();
         for root in [&f.base, &f.ghosts[0]] {
             assert_eq!(
                 f.read(root, ".codex/auth.json"),
@@ -361,7 +295,7 @@ mod tests {
             );
         }
         std::fs::remove_file(f.ghosts[0].join(".codex/auth.json")).unwrap();
-        sync.reconcile(&f.agent, &f.base, &f.ghosts).unwrap();
+        sync.reconcile(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts).unwrap();
         assert_eq!(
             f.read(&f.base, ".codex/auth.json"),
             None,
@@ -371,14 +305,15 @@ mod tests {
     }
 
     #[test]
-    fn registry_credentials_are_discovered_but_symlink_destinations_are_refused() {
+    fn declared_registry_credentials_sync_but_symlink_destinations_are_refused() {
         let mut f = Fixture::new("registry");
         f.agent.id = "custom-agent".into();
-        f.agent.home_paths.clear();
+        f.agent.home_paths = Some(vec![crate::agents::HomePath::directory("~/.local/share/custom")]);
+        f.agent.login_files = vec![".local/share/custom/auth.json".into()];
         f.put(&f.base, ".local/share/custom/auth.json", b"login");
         f.put(&f.base, ".local/share/custom/settings.json", b"hooks");
         let mut sync = Sync::default();
-        sync.reconcile(&f.agent, &f.base, &f.ghosts).unwrap();
+        sync.reconcile(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts).unwrap();
         assert_eq!(
             f.read(&f.ghosts[0], ".local/share/custom/auth.json"),
             Some(b"login".to_vec())
@@ -391,7 +326,7 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::remove_dir_all(f.ghosts[1].join(".local")).unwrap();
         std::os::unix::fs::symlink(&outside, f.ghosts[1].join(".local")).unwrap();
-        assert!(sync.reconcile(&f.agent, &f.base, &f.ghosts).is_err());
+        assert!(sync.reconcile(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts).is_err());
         assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
     }
 
@@ -408,13 +343,13 @@ mod tests {
         let f = Fixture::new("partial");
         let mut sync = Sync::default();
         f.put(&f.base, ".codex/auth.json", b"good");
-        sync.reconcile(&f.agent, &f.base, &f.ghosts).unwrap();
+        sync.reconcile(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts).unwrap();
         safe_fs::write_file_beneath(&f.ghosts[0], Path::new(".codex/auth.json"), b"{", 0o600)
             .unwrap();
-        assert!(sync.reconcile(&f.agent, &f.base, &f.ghosts).is_err());
+        assert!(sync.reconcile(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts).is_err());
         assert_eq!(f.read(&f.base, ".codex/auth.json"), Some(b"good".to_vec()));
         f.put(&f.ghosts[0], ".codex/auth.json", b"completed");
-        sync.reconcile(&f.agent, &f.base, &f.ghosts).unwrap();
+        sync.reconcile(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts).unwrap();
         assert_eq!(
             f.read(&f.base, ".codex/auth.json"),
             Some(b"completed".to_vec())
@@ -426,7 +361,7 @@ mod tests {
         let f = Fixture::new("restart");
         f.put(&f.base, ".codex/auth.json", b"old");
         Sync::default()
-            .reconcile(&f.agent, &f.base, &f.ghosts)
+            .reconcile(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts)
             .unwrap();
         f.put(&f.ghosts[0], ".codex/auth.json", b"refreshed");
         let file = std::fs::File::open(f.ghosts[0].join(".codex/auth.json")).unwrap();
@@ -436,7 +371,7 @@ mod tests {
         )
         .unwrap();
         Sync::default()
-            .reconcile(&f.agent, &f.base, &f.ghosts)
+            .reconcile(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts)
             .unwrap();
         assert_eq!(
             f.read(&f.base, ".codex/auth.json"),
@@ -461,7 +396,7 @@ mod tests {
             ".gemini/settings.json",
             br#"{"mcpServers":{"host-only":{"command":"bad"}}}"#,
         );
-        seed(&f.agent, &f.base, &f.ghosts[0]).unwrap();
+        seed(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts[0]).unwrap();
         let settings: serde_json::Value =
             serde_json::from_slice(&f.read(&f.ghosts[0], ".gemini/settings.json").unwrap())
                 .unwrap();
@@ -470,7 +405,7 @@ mod tests {
             serde_json::json!({"security":{"auth":{"selectedType":"oauth-personal"}}})
         );
         Sync::default()
-            .reconcile(&f.agent, &f.base, &f.ghosts)
+            .reconcile(&Rules::for_agent(&f.agent).unwrap(), &f.base, &f.ghosts)
             .unwrap();
         let settings: serde_json::Value =
             serde_json::from_slice(&f.read(&f.base, ".gemini/settings.json").unwrap()).unwrap();

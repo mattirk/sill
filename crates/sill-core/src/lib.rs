@@ -8,6 +8,7 @@
 
 pub mod acp;
 pub mod agents;
+pub mod agent_storage;
 pub mod changes;
 pub mod config;
 pub mod frontend;
