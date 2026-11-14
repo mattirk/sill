@@ -2634,3 +2634,38 @@ fn the_timer_stays_open_when_moving_towards_the_plus_button() {
         "timer closes after leaving the controls"
     );
 }
+
+/// Opening and closing + must retain both the tail and a manually scrolled position.
+#[test]
+fn the_plus_menu_keeps_the_conversation_position() {
+    for at_tail in [true, false] {
+        let mut app = streamed();
+        let _ = app.update(Message::DemoTick);
+        let mut live = Live::new((720.0, 400.0));
+        live.apply(&mut app, Message::Latest);
+        live.frame(&app, |_| {});
+        if !at_tail {
+            let messages = live.frame(&app, |ui| {
+                ui.aim(iced::Point::new(360.0, 200.0));
+                ui.send(vec![wheel(1.0)]);
+            });
+            for message in messages {
+                live.apply(&mut app, message);
+            }
+        }
+        let mut before = None;
+        live.frame(&app, |ui| before = scrolled(ui, "conversation"));
+        let before = before.unwrap();
+        assert!(before > 100.0);
+        for open in [true, false] {
+            live.apply(&mut app, Message::Menu(crate::menu::Event::Toggle));
+            assert_eq!(app.menu.is_some(), open);
+            let mut after = None;
+            live.frame(&app, |ui| after = scrolled(ui, "conversation"));
+            assert!(
+                (before - after.unwrap()).abs() < 1.0,
+                "menu open={open}, at tail={at_tail}: {before} → {after:?}"
+            );
+        }
+    }
+}

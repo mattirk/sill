@@ -93,10 +93,36 @@ impl App {
         });
         let bar = container(responsive(move |size| self.top_bar(size.width))).height(37);
         let window = column![bar, content];
-        match &self.menu {
-            Some(menu) => iced::widget::stack![window, self.session_menu(menu)].into(),
-            None => window.into(),
+        // Keep the conversation at the same tree position when the menu opens/closes.
+        // Wrapping it in a stack only while open discards its scroll and selection state.
+        let mut layers = stack![window];
+        // GTK's corner chevron borrows the drawer's space without adding a row.
+        if self.workspace.shown && !self.backend_shown() && self.current().is_some() {
+            layers = layers.push(
+                container(keys::press(
+                    button(
+                        container(icons::glyph("chevron-right", 14.0, alpha(P.fg, 0.55)))
+                            .height(22)
+                            .align_y(Alignment::Center),
+                    )
+                    .padding(2)
+                    .style(style::quiet),
+                    Message::Layout(layout::Action::Mode(layout::Mode::Full)),
+                ))
+                .id("expand-full")
+                .align_right(Fill)
+                .align_bottom(Fill)
+                .padding(Padding {
+                    right: 4.0,
+                    bottom: 8.0,
+                    ..Padding::ZERO
+                }),
+            );
         }
+        if let Some(menu) = &self.menu {
+            layers = layers.push(self.session_menu(menu));
+        }
+        layers.into()
     }
 
     /// The drawer's edge: a line to drag, wider than it looks.

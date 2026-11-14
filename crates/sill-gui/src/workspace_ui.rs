@@ -245,7 +245,9 @@ impl App {
                 state.pin_pending.is_none().then(|| msg(Action::PinPath))
             )
         ]
-        .spacing(4);
+        .spacing(4)
+        .height(26)
+        .align_y(Alignment::Center);
         column![
             toolbar,
             rule::horizontal(1).style(style::rule_style(P.border)),
