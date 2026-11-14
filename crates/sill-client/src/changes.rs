@@ -262,6 +262,84 @@ pub fn revert(session_id: &str, entries: &[&Entry]) -> Request {
     ("_sill/changes.revert", json!(revert))
 }
 
+/// The most paths the daemon takes in one keep or revert.
+pub const BATCH: usize = 128;
+
+fn depth(entry: &Entry) -> usize {
+    path(entry)
+        .to_path()
+        .map_or(0, |p| p.components().count())
+}
+
+/// Keep any number of entries: requests of at most `BATCH`, folders before what is in them (a
+/// file's new folder is on the host before the request with the file).
+pub fn keep_all(session_id: &str, entries: &[&Entry]) -> Vec<Request> {
+    let mut entries = entries.to_vec();
+    entries.sort_by_key(|e| depth(e));
+    entries
+        .chunks(BATCH)
+        .map(|batch| keep(session_id, batch))
+        .collect()
+}
+
+/// Revert any number of entries: requests of at most `BATCH`, deepest first. What is inside a
+/// folder the session created is left out when that folder is reverted too: reverting the folder
+/// removes it whole, and a cloned repository is then one path, not thousands.
+pub fn revert_all(session_id: &str, entries: &[&Entry]) -> Vec<Request> {
+    let created: Vec<std::path::PathBuf> = entries
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Overlay {
+                path,
+                kind,
+                file_type,
+                conflict: false,
+                ..
+            } if kind == "added" && file_type == "dir" => path.to_path().ok(),
+            _ => None,
+        })
+        .collect();
+    let mut entries: Vec<&Entry> = entries
+        .iter()
+        .copied()
+        .filter(|e| {
+            let Ok(p) = path(e).to_path() else {
+                return true;
+            };
+            !created.iter().any(|dir| p != *dir && p.starts_with(dir))
+        })
+        .collect();
+    entries.sort_by_key(|e| std::cmp::Reverse(depth(e)));
+    entries
+        .chunks(BATCH)
+        .map(|batch| revert(session_id, batch))
+        .collect()
+}
+
+/// Make the requests in order and answer as one: what each did, together. The first that is not
+/// done ends it, and nothing after it is sent.
+pub fn call_all(actions: &crate::actions::Actions, requests: Vec<Request>) -> crate::actions::Outcome {
+    use crate::actions::Outcome;
+    let single = requests.len() == 1;
+    let mut all = Done {
+        done: vec![],
+        failed: vec![],
+    };
+    for (method, params) in requests {
+        match actions.call(method, params) {
+            Outcome::Done(value) if single => return Outcome::Done(value),
+            Outcome::Done(value) => {
+                if let Ok(done) = serde_json::from_value::<Done>(value) {
+                    all.done.extend(done.done);
+                    all.failed.extend(done.failed);
+                }
+            }
+            other => return other,
+        }
+    }
+    Outcome::Done(json!(all))
+}
+
 /// Undo a keep: the host file goes back to what it was before.
 pub fn undo(session_id: &str, keep_id: &str) -> Request {
     let undo = Undo {
@@ -443,6 +521,41 @@ mod tests {
             "repo": null, "hash":"h1", "protected": null
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn many_changes_go_in_batches_and_a_created_folder_as_one_path() {
+        let mut entries = vec![];
+        let mut dir = overlay("s1", "/home/x/db", false, 0);
+        if let Entry::Overlay { file_type, .. } = &mut dir {
+            *file_type = "dir".into();
+        }
+        entries.push(dir);
+        for i in 0..2000 {
+            entries.push(overlay("s1", &format!("/home/x/db/sub/f{i}"), false, 0));
+        }
+        for i in 0..300 {
+            entries.push(overlay("s1", &format!("/home/x/other{i}"), false, 0));
+        }
+        let refs: Vec<&Entry> = entries.iter().collect();
+        let paths = |r: &Request| serde_json::from_value::<Revert>(r.1.clone()).unwrap().paths;
+        let reverts = revert_all("s1", &refs);
+        let sent: Vec<HostPath> = reverts.iter().flat_map(paths).collect();
+        assert_eq!(sent.len(), 301);
+        assert!(reverts.iter().all(|r| paths(r).len() <= BATCH));
+        assert!(sent.iter().any(|p| p.to_path().unwrap() == std::path::Path::new("/home/x/db")));
+        // a folder that is only modified on the host keeps its entries
+        if let Entry::Overlay { kind, .. } = &mut entries[0] {
+            *kind = "modified".into();
+        }
+        let refs: Vec<&Entry> = entries.iter().collect();
+        assert_eq!(revert_all("s1", &refs).iter().flat_map(paths).count(), 2301);
+        // keeps: every entry, the folder in the first request
+        let keeps = keep_all("s1", &refs);
+        let items = |r: &Request| serde_json::from_value::<Keep>(r.1.clone()).unwrap().items;
+        assert_eq!(keeps.iter().map(|r| items(r).len()).sum::<usize>(), 2301);
+        assert!(keeps.iter().all(|r| items(r).len() <= BATCH));
+        assert!(items(&keeps[0]).iter().any(|i| i.path.to_path().unwrap() == std::path::Path::new("/home/x/db")));
     }
 
     #[test]

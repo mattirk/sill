@@ -2820,9 +2820,9 @@ impl App {
                 let Some(first) = entries.first() else {
                     return Task::none();
                 };
-                let (verb, (method, params)) = match (&event, first) {
+                let (verb, requests) = match (&event, first) {
                     (Event::Revert(_), Entry::Live { repo, path, .. }) => {
-                        ("reverted", changes::git_revert(repo, path))
+                        ("reverted", vec![changes::git_revert(repo, path)])
                     }
                     (
                         Event::Undo(_),
@@ -2831,16 +2831,23 @@ impl App {
                             keep_id,
                             ..
                         },
-                    ) => ("undone", changes::undo(session_id, keep_id)),
+                    ) => ("undone", vec![changes::undo(session_id, keep_id)]),
+                    // the daemon takes 128 paths a request: more go in several
                     (Event::Keep(_) | Event::KeepAll(_), Entry::Overlay { session_id, .. }) => {
-                        ("kept", changes::keep(session_id, &entries))
+                        ("kept", changes::keep_all(session_id, &entries))
                     }
                     (Event::Revert(_) | Event::RevertAll(_), Entry::Overlay { session_id, .. }) => {
-                        ("reverted", changes::revert(session_id, &entries))
+                        ("reverted", changes::revert_all(session_id, &entries))
                     }
                     _ => return Task::none(),
                 };
-                return self.act("", Act::Changes(verb), method, params);
+                let Some(actions) = self.actions.clone() else {
+                    return Task::none();
+                };
+                return blocking(
+                    move || changes::call_all(&actions, requests),
+                    move |outcome| Message::Done(String::new(), Act::Changes(verb), outcome),
+                );
             }
         }
         Task::none()
