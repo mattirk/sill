@@ -51,6 +51,7 @@ pub fn prepare(dir: &Path, image_dir: &Path) -> Result<Prepared> {
         seed(dir)?;
     }
     std::fs::write(dir.join("ssh_config"), ssh_config(dir))?;
+    private_disks(dir)?;
     Ok(Prepared { first, updated })
 }
 
@@ -189,6 +190,18 @@ fn quoted(path: &Path) -> String {
     format!("\"{}\"", path.display().to_string().replace('"', "\\\""))
 }
 
+/// The disks hold everything in the VM: the owner's alone, also those made before this was
+/// set (they were 0644, kept from other accounts only by the directory's own mode).
+fn private_disks(dir: &Path) -> Result<()> {
+    for disk in ["system.raw", "home.raw", "state.raw"] {
+        let path = dir.join(disk);
+        if path.exists() {
+            set_mode(&path, 0o600)?;
+        }
+    }
+    Ok(())
+}
+
 fn set_mode(path: &Path, mode: u32) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
@@ -222,6 +235,24 @@ mod tests {
         use std::os::unix::fs::MetadataExt;
         let taken = std::fs::metadata(dir.join("out.raw")).unwrap().blocks() * 512;
         assert!(taken < 8 << 20, "{taken} bytes on disk for a 64 MB file mostly zeros");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_disks_become_the_owners_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("sill-vm-private-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // one made before, readable by all; one not there yet
+        std::fs::write(dir.join("home.raw"), b"disk").unwrap();
+        std::fs::set_permissions(dir.join("home.raw"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::write(dir.join("system.raw"), b"disk").unwrap();
+        super::private_disks(&dir).unwrap();
+        for disk in ["home.raw", "system.raw"] {
+            let mode = std::fs::metadata(dir.join(disk)).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{disk}");
+        }
+        assert!(!dir.join("state.raw").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
