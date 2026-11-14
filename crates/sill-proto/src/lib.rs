@@ -81,28 +81,6 @@ pub struct Ending {
     pub deleted: bool,
 }
 
-/// `_sill/sessions.new`: a session row. `pins` are copied as given; with `remember_pins` and none
-/// given, the pins of the latest session that had any (Settings → Remember pins). Answers [`Key`]
-/// with the new id.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct NewSession {
-    pub agent: String,
-    pub policy: String,
-    #[serde(default)]
-    pub pins: Vec<PathBuf>,
-    #[serde(default)]
-    pub memory_scope: String,
-    /// The ended session this one follows (*New here*).
-    #[serde(default)]
-    pub follows: String,
-    #[serde(default)]
-    pub remember_pins: bool,
-    /// A ghost session (docs/memory.md §3): no pins (refused when given), no memory written, the
-    /// row and every trace deleted at its end.
-    #[serde(default)]
-    pub ghost: bool,
-}
-
 /// `_sill/sessions.jail_view`: each overlay layer (host path, its upper tree) and the masked paths.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct JailView {
@@ -132,13 +110,6 @@ pub struct ChangesUndo {
     pub ids: Vec<String>,
     #[serde(default)]
     pub force: bool,
-}
-
-/// `_sill/changes.git_revert`.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct GitRevert {
-    pub repo: PathBuf,
-    pub rel: PathBuf,
 }
 
 /// `_sill/memory.compact`'s answer.

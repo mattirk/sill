@@ -16,10 +16,11 @@ History/terminal retention remains separate work; discarding old history does no
 the need for correct new-session recovery, retry identities, snapshots or explicit gaps.
 
 The cleanup removes old control RPC aliases, transcript import, historical schema upgrades,
-individual source-receipt fallback and old relay feature negotiation. Incompatible storage
-is refused explicitly rather than silently migrated or deleted. Existing complete schemas
-and canonical records remain usable, except obsolete source receipts require a clean store.
-Legacy inline-upload references are not preserved for retries; start new sessions at cutover.
+individual source-receipt fallback and old relay feature negotiation. A database from an
+earlier development build is neither migrated nor detected: since 2026-11-07, when the
+pre-baseline guards went with the other compatibility layers, it fails at its first query
+against the current schema, and the answer is a clean store.
+Old inline-upload references are not preserved for retries; start new sessions at cutover.
 Active transcript recording remains because summaries and memory still consume it.
 
 **Backup and restore (settled for sfp/1, 2026-11-03).** Retry identities belong to a daemon
@@ -69,9 +70,7 @@ The implemented public conversation surface is `_sill/sessions.attach`,
 `_sill/submissions.send_now` needs the capability `sill.send_now: 1` (the first one, 2026-11-05):
 the queued submission goes next, before older queued ones, resumed if it was held, and the active
 turn is cancelled so it goes as soon as the agent has stopped. A prompt's user item is created when
-it is dispatched, not when it is accepted: a queued prompt appears where the agent receives it (an
-item made at acceptance by an older daemon is removed and made again there, reason
-`moved_to_dispatch`).
+it is dispatched, not when it is accepted: a queued prompt appears where the agent receives it.
 `_sill/policy.allow_host` approves a concrete hostname for the selected session only. It
 returns `agent_name: "this session"` and `live: true` when a running proxy can use the grant
 on new connections. Grants persist with the session, enter policy previews and subsequent
@@ -656,7 +655,7 @@ network-denial, process and memory operations; CLI memory readers use the same p
   (extended on valid page reads, up to 30 minutes total), and are closed on disconnect or by
   `_sill/memory.text.close`. At most four leases per connection and 32 globally consume at most
   512 MiB of anonymous disk files, with 256 MiB per file and a 30-second construction budget.
-  Individual legacy records above 64 MiB return `limit_exceeded`. Temporary files are unlinked
+  Individual records above 64 MiB return `limit_exceeded`. Temporary files are unlinked
   immediately, so failures and daemon crashes cannot leave exported content on disk.
 - Host data responses are bounded at 4 MiB. Policy names and network denial lists are live keyset pages of at most 128 entries;
   denial cursors order unique `(kind, host)` pairs across denied, acknowledged and quiet hosts.

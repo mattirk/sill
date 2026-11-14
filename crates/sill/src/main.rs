@@ -179,8 +179,6 @@ enum Cmd {
     HostControl {
         #[command(subcommand)]
         cmd: HostControlCmd,
-        /// Backwards-compatible shorthand for `policy show NAME`
-        name: Option<String>,
     },
 }
 
@@ -662,10 +660,9 @@ fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
     Ok(())
 }
 
-fn policy_cmd(name: Option<String>, cmd: Option<PolicyCmd>) -> Result<()> {
+fn policy_cmd(cmd: Option<PolicyCmd>) -> Result<()> {
     use sill_proto::{admin as api, sessions::{HostPath, SessionKey}};
-    if name.is_some() && cmd.is_some() { bail!("choose a policy name or a policy subcommand"); }
-    let cmd = cmd.unwrap_or(PolicyCmd::Show { name: name.unwrap_or_else(|| "default".into()) });
+    let cmd = cmd.unwrap_or(PolicyCmd::Show { name: "default".into() });
     if let PolicyCmd::Show { name } = &cmd {
         if sill_proto::transport::selected()?.is_none() {
             let policy = Policy::load(name, &home()?)?;
@@ -918,7 +915,7 @@ fn main() -> Result<()> {
         unsafe { std::env::set_var("SILL_BOX", name); }
     }
     match cli.cmd {
-        Cmd::Policy { name, cmd } => policy_cmd(name, cmd),
+        Cmd::Policy { cmd } => policy_cmd(cmd),
         Cmd::Permissions { cmd } => permissions_cmd(cmd),
         Cmd::HostControl { cmd } => host_control_cmd(cmd),
         Cmd::Memory { cmd } => memory_cmd(cmd),
@@ -1258,9 +1255,6 @@ fn own_scope() -> Option<String> {
 /// scope, or with `--cgroup-root` in a session cgroup it makes (docs/daemon.md §3.1); it records its
 /// pids for re-adoption.
 fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Option<&str>, child: bool, cgroup_root: Option<PathBuf>) -> Result<()> {
-            // a proxy of the pre-launcher dev path, if one is still around
-            sill_core::launcher::kill_pid_file(&rt.join("proxy.pid"));
-            let _ = std::fs::remove_file(rt.join("proxy.pid"));
     // bwrap passes what it inherits on into the jail: only the descriptors made below for it get
     // there, nothing this launcher was started with (docs/daemon.md §3.11)
     let inherited = sill_core::launcher::cloexec_inherited();
@@ -1634,8 +1628,12 @@ fn session_cmd(cmd: SessionCmd) -> Result<()> {
     match cmd {
         SessionCmd::New { agent, policy, ghost, pins } => {
             let pins = pins.into_iter().map(|p| p.canonicalize().with_context(|| format!("pin {}", p.display()))).collect::<Result<Vec<_>>>()?;
-            let new = sill_proto::NewSession { agent, policy, pins, ghost, ..Default::default() };
-            let k: sill_proto::sessions::SessionKey = c.call("_sill/sessions.create", sill_proto::sessions::Create::from_legacy(new,sill_core::sfp::new_id()))?;
+            let create = sill_proto::sessions::Create {
+                create_id: sill_core::sfp::new_id(), agent, policy,
+                pins: pins.iter().map(|p| sill_proto::sessions::HostPath::from_path(p)).collect(),
+                memory_scope: String::new(), follows: String::new(), remember_pins: false, ghost,
+            };
+            let k: sill_proto::sessions::SessionKey = c.call("_sill/sessions.create", create)?;
             let _: sill_proto::sessions::Started = c.call("_sill/sessions.start", &k)?;
             println!("{}", k.session_id);
             eprintln!("{}session {} started", if ghost { "ghost " } else { "" }, k.session_id);

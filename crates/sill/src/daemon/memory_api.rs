@@ -404,10 +404,10 @@ fn create_text(hub: &Hub, conn: u64, a: &api::TextRead, identity: &str) -> Resul
     if ghost != Some(false) {
         return Err(domain("not_found", "memory session not found"));
     }
-    // A pathological individual legacy row must not allocate unbounded memory in formatters.
+    // A pathological individual row must not allocate unbounded memory in formatters.
     let largest:i64=store.conn().query_row("SELECT max(n) FROM (SELECT coalesce(max(length(CAST(text AS BLOB))),0) n FROM entries WHERE session_id=?1 UNION ALL SELECT coalesce(max(length(CAST(text AS BLOB))),0) FROM memories WHERE session_id=?1 UNION ALL SELECT length(CAST(summary AS BLOB)) FROM sessions WHERE id=?1)",[&a.session_id],|r|r.get(0))?;
     if largest > 64 * 1024 * 1024 {
-        return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Record, Some(67108864), "legacy memory record exceeds 64 MiB"));
+        return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Record, Some(67108864), "memory record exceeds 64 MiB"));
     }
     let info = sill_memory::find_session(store.conn(), &a.session_id)?
         .ok_or_else(|| domain("not_found", "session not found"))?;

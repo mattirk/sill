@@ -78,31 +78,18 @@ CREATE TRIGGER IF NOT EXISTS memory_name_ad AFTER DELETE ON session_names BEGIN
     DELETE FROM memory_text WHERE session_id = old.session_id AND kind = 'name'; END;
 ";
 
-/// Index session names (idempotent); names stored before the triggers existed are added once.
+/// Index session names (idempotent): the triggers keep `memory_text` in step with `session_names`.
 pub fn install_names(conn: &Connection) -> Result<()> {
     conn.execute_batch(NAME_TRIGGERS)?;
-    conn.execute_batch(
-        "INSERT INTO memory_text (session_id, kind, ref, text) SELECT n.session_id, 'name', 0, n.name FROM session_names n
-         WHERE NOT EXISTS (SELECT 1 FROM memory_text t WHERE t.session_id = n.session_id AND t.kind = 'name');",
-    )?;
     Ok(())
 }
 
-/// Set the searchable text up in `sill.db` (idempotent). The first time, it is filled from what
-/// the store already holds, so sessions from before memory are searchable too.
+/// Set the searchable text up in `sill.db` (idempotent): the text table, its index and the
+/// triggers that fill it as the store writes.
 pub fn install(conn: &Connection) -> Result<()> {
-    let existed: bool = conn.query_row("SELECT count(*) FROM sqlite_master WHERE name = 'memory_text'", [], |r| r.get::<_, i64>(0)).map(|n| n > 0)?;
     conn.execute_batch(TEXT_SCHEMA)?;
     conn.execute_batch(TEXT_UPDATE_TRIGGER)?;
     conn.execute_batch(STORE_TRIGGERS)?;
-    if !existed {
-        conn.execute_batch(
-            "INSERT INTO memory_text (session_id, kind, ref, text) SELECT id, 'title', 0, title FROM sessions;
-             INSERT INTO memory_text (session_id, kind, ref, text) SELECT id, 'summary', 0, summary FROM sessions WHERE summary <> '';
-             INSERT INTO memory_text (session_id, kind, ref, text) SELECT session_id, kind, ts, text FROM memories;
-             INSERT INTO memory_text (session_id, kind, ref, text) SELECT session_id, 'prompt', seq, text FROM entries WHERE kind = 'user';",
-        )?;
-    }
     Ok(())
 }
 
@@ -933,7 +920,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn memory_pin_queries_accept_legacy_text_and_exact_blob_paths() {
+    fn memory_pin_queries_accept_text_and_exact_blob_paths() {
         use std::os::unix::ffi::OsStrExt;
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE session_pins(session_id TEXT, path TEXT)").unwrap();
@@ -1003,13 +990,16 @@ mod tests {
              CREATE TABLE session_pins (session_id TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (session_id, path));
              CREATE TABLE entries (session_id TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL,
                  extra TEXT NOT NULL DEFAULT '', PRIMARY KEY (session_id, seq));
-             CREATE TABLE memories (session_id TEXT NOT NULL, ts INTEGER NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL);
-             INSERT INTO sessions (id, agent, title, created_at, last_used) VALUES ('old00001', 'claude', 'before memory', 100, 100);
-             INSERT INTO entries VALUES ('old00001', 1, 100, 'user', 'the légacy prompt', '');",
+             CREATE TABLE memories (session_id TEXT NOT NULL, ts INTEGER NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL);",
         )
         .unwrap();
         install(&c).unwrap();
-        install(&c).unwrap(); // idempotent: no second backfill
+        install(&c).unwrap(); // idempotent
+        c.execute_batch(
+            "INSERT INTO sessions (id, agent, title, created_at, last_used) VALUES ('old00001', 'claude', 'first session', 100, 100);
+             INSERT INTO entries VALUES ('old00001', 1, 100, 'user', 'the légacy prompt', '');",
+        )
+        .unwrap();
         c
     }
 
@@ -1043,7 +1033,7 @@ mod tests {
         let c = store_like();
         let home = Path::new("/home/me");
         let q = |t: &str| search(&c, &Query::parse(t, home), 10_000, 10).unwrap().into_iter().map(|h| (h.session.id, h.kind)).collect::<Vec<_>>();
-        // backfilled at install, diacritics folded, prefixes match
+        // indexed by the triggers, diacritics folded, prefixes match
         assert_eq!(q("legacy"), [("old00001".to_string(), "prompt".to_string())]);
         assert_eq!(q("leg"), [("old00001".to_string(), "prompt".to_string())]);
         session(&c, "aaaa1111", "proxy allow button", &["/home/me/GIT/sill"], None);

@@ -173,8 +173,8 @@ pub struct Kept {
     pub undone_at: Option<i64>,
 }
 
-// Storage compatibility: retain strings in existing journals, encode only non-UTF-8
-// paths as explicit bytes. Public SFP methods use HostPath instead of this storage shape.
+// Stored paths: UTF-8 ones as strings, only non-UTF-8 ones as explicit bytes. Public SFP
+// methods use HostPath instead of this storage shape.
 mod stored_path {
     use super::*;
     use base64::{Engine, engine::general_purpose::STANDARD};

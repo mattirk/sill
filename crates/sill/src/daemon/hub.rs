@@ -14,9 +14,25 @@ use sill_core::policy::Policy;
 use sill_core::session::StartOptions;
 use sill_core::store::Store;
 use sill_proto::rpc::Error;
-use sill_proto::{DaemonStatus, Ending, NewSession, Started, method};
+use sill_proto::{DaemonStatus, Ending, Started, method};
 
 use super::Conn;
+
+/// A session row to create: `_sill/sessions.create`'s input with its pins as paths. `pins` are
+/// copied as given; with `remember_pins` and none given, the pins of the latest session that had
+/// any (Settings → Remember pins).
+pub(crate) struct NewSession {
+    pub agent: String,
+    pub policy: String,
+    pub pins: Vec<PathBuf>,
+    pub memory_scope: String,
+    /// The ended session this one follows (*New here*).
+    pub follows: String,
+    pub remember_pins: bool,
+    /// A ghost session (docs/memory.md §3): no pins (refused when given), no memory written, the
+    /// row and every trace deleted at its end.
+    pub ghost: bool,
+}
 use super::runner::{Runner, SummaryDone, SummaryKind};
 
 // the Changes page's methods: a child module, so it reaches the hub's own fields
@@ -576,7 +592,7 @@ impl Hub {
     }
 
     /// The trash can: the conversation and jail go, then the session's state on the host and its
-    /// row; pins of deleted sessions are pruned so they do not haunt the tree.
+    /// row (its pins with it).
     pub(super) fn delete_session(&self, id: &str) -> Result<()> {
         if !sill_core::session::valid_id(id) {
             bail!("not a session id");
@@ -643,7 +659,7 @@ impl Hub {
             }
             s.conn().execute("DELETE FROM daemon_runners WHERE id=?1", [id])?;
             s.conn().execute("DELETE FROM daemon_ends WHERE id=?1", [id])?;
-            let r = s.delete(id).and_then(|_| s.prune_pins().map(|_| ()));
+            let r = s.delete(id);
             if ghost {
                 let _ = s.conn().execute_batch("PRAGMA secure_delete = OFF");
                 if r.is_ok() {

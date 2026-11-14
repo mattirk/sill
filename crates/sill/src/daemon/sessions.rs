@@ -11,8 +11,7 @@ fn record(store: &Store, s: sill_core::store::Session) -> Result<api::Session> {
             let pins = if s.ghost { vec![] } else { store.jail_pins(&s.id).unwrap_or_default() };
             let domains = sill_core::agents::load(&home).remove(&s.agent).map(|a| a.domains).unwrap_or_default();
             match sill_core::session::session_base_policy(&s.policy, &home, s.ghost, Some(&s.agent)) {
-                Ok(base) => sill_core::session::jail_outdated_with_grants(&s.id, &base, &pins, store, &domains)
-                    || sill_core::session::jail_outdated(&s.id, &s.policy, &home),
+                Ok(base) => sill_core::session::jail_outdated_with_grants(&s.id, &base, &pins, store, &domains),
                 Err(_) => true,
             }
         }),

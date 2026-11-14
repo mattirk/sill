@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 
-// Preserve existing TEXT identities; only paths that cannot be represented as UTF-8 use
-// SQLite BLOBs. SQLite's dynamic typing keeps old databases readable without rewriting pins.
+// UTF-8 paths are TEXT; only paths that cannot be represented as UTF-8 use SQLite BLOBs, and
+// reads take either.
 pub(crate) fn sql_path(path: &Path) -> rusqlite::types::Value {
     use std::os::unix::ffi::OsStrExt;
     match path.to_str() {
@@ -85,18 +85,6 @@ pub struct Entry {
     pub attachments: Vec<crate::acp::UserAttachment>,
 }
 
-/// Development schemas are not migrated into the clean SFP baseline. Check before schema
-/// setup so opening an unsupported database cannot partially upgrade it.
-pub(crate) fn require_columns(conn: &Connection, table: &str, columns: &[&str]) -> Result<()> {
-    let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)", [table], |r| r.get(0))?;
-    if !exists { return Ok(()); }
-    for column in columns {
-        let present: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)", params![table, column], |r| r.get(0))?;
-        anyhow::ensure!(present, "unsupported pre-baseline database: {table}.{column} is missing; stop sessions and explicitly reset old conversation state before upgrading, preserving settings and pins; no data was migrated or deleted");
-    }
-    Ok(())
-}
-
 pub struct Store {
     conn: Connection,
 }
@@ -164,11 +152,6 @@ impl Store {
         // another writer (a CLI) holding a write: wait a little instead of failing at once (a
         // failure here is the service's crash loop, SPEC §4.11 #17)
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        require_columns(&conn, "sessions", &["auto_allow", "agent_settings", "ended_at", "summary", "summary_kind", "memory_scope", "follows", "compacted", "title_kind", "ghost"])
-            .with_context(|| format!("open {}", path.display()))?;
-        require_columns(&conn, "entries", &["tool_kind", "detail", "diff", "call_id", "parent"])
-            .with_context(|| format!("open {}", path.display()))?;
-        crate::sfp::check_schema(&conn).with_context(|| format!("open {}", path.display()))?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              CREATE TABLE IF NOT EXISTS sessions (
@@ -212,8 +195,7 @@ impl Store {
             "CREATE TABLE IF NOT EXISTS pin_heads (session_id TEXT NOT NULL, repo TEXT NOT NULL, head TEXT NOT NULL, ts INTEGER NOT NULL,
                  PRIMARY KEY (session_id, repo))",
         )?;
-        conn.execute_batch("CREATE TABLE IF NOT EXISTS session_names (session_id TEXT PRIMARY KEY, name TEXT NOT NULL);
-            INSERT OR IGNORE INTO session_names SELECT id, title FROM sessions WHERE title_kind = '';")?;
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS session_names (session_id TEXT PRIMARY KEY, name TEXT NOT NULL)")?;
         sill_memory::install_names(&conn).context("memory name index")?;
         Ok(Self { conn })
     }
@@ -627,11 +609,6 @@ impl Store {
         Ok(out)
     }
 
-    /// Drop pins whose session no longer exists (older deletes didn't clear them); how many went.
-    pub fn prune_pins(&self) -> Result<usize> {
-        Ok(self.conn.execute("DELETE FROM session_pins WHERE session_id NOT IN (SELECT id FROM sessions)", [])?)
-    }
-
     pub fn unpin(&self, session_id: &str, path: &Path) -> Result<()> {
         self.conn.execute("DELETE FROM session_pins WHERE session_id = ?1 AND path = ?2", params![session_id, sql_path(path)])?;
         Ok(())
@@ -701,13 +678,6 @@ impl Store {
         )?)
     }
 
-    /// Stream legacy transcript rows without materializing the full conversation.
-    pub fn visit_entries(&self, session_id:&str, mut visit:impl FnMut(Entry)->Result<()>) -> Result<()> {
-        let mut st=self.conn.prepare("SELECT seq, ts, kind, text, extra, tool_kind, detail, diff, call_id, parent FROM entries WHERE session_id=?1 ORDER BY seq")?;
-        for row in st.query_map(params![session_id],Self::entry_row)? {visit(row?)?;}
-        Ok(())
-    }
-
     pub fn entries(&self, session_id: &str) -> Result<Vec<Entry>> {
         let mut st = self.conn.prepare("SELECT seq, ts, kind, text, extra, tool_kind, detail, diff, call_id, parent FROM entries WHERE session_id = ?1 ORDER BY seq")?;
         let rows = st.query_map(params![session_id], Self::entry_row)?;
@@ -772,51 +742,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pre_baseline_store_is_rejected_without_partial_migration() {
-        let dir=std::env::temp_dir().join(format!("sill-old-store-{}",new_id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file=dir.join("store.db");
-        let conn=Connection::open(&file).unwrap();
-        conn.execute_batch("CREATE TABLE sessions(id TEXT PRIMARY KEY,agent TEXT,title TEXT,
-            created_at INTEGER,last_used INTEGER,acp_session_id TEXT,policy TEXT);
-            INSERT INTO sessions VALUES ('original','test','Keep me',1,1,NULL,'default')").unwrap();
-        let before:Vec<Option<String>>=conn.prepare("SELECT sql FROM sqlite_master ORDER BY name").unwrap()
-            .query_map([],|r|r.get(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-        let error=Store::open(&file).err().unwrap();
-        assert!(format!("{error:#}").contains("unsupported pre-baseline database"));
-        let after:Vec<Option<String>>=conn.prepare("SELECT sql FROM sqlite_master ORDER BY name").unwrap()
-            .query_map([],|r|r.get(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-        assert_eq!(before,after);
-        assert_eq!(conn.query_row("SELECT title FROM sessions",[],|r|r.get::<_,String>(0)).unwrap(),"Keep me");
-        drop(conn);std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn incompatible_sfp_state_is_rejected_before_store_setup() {
-        for (label,setup) in [
-            ("events", "CREATE TABLE sfp_events(session_id TEXT,seq INTEGER,json TEXT); INSERT INTO sfp_events VALUES ('s',1,'original')"),
-            ("receipts", "CREATE TABLE sfp_sources(session_id TEXT,generation_id TEXT,source_seq TEXT); INSERT INTO sfp_sources VALUES ('s','g','1')"),
-        ] {
-            let dir=std::env::temp_dir().join(format!("sill-old-sfp-{label}-{}",new_id()));
-            std::fs::create_dir_all(&dir).unwrap();
-            let file=dir.join("store.db");
-            let conn=Connection::open(&file).unwrap();
-            conn.execute_batch(setup).unwrap();
-            let before:Vec<Option<String>>=conn.prepare("SELECT sql FROM sqlite_master ORDER BY name").unwrap()
-                .query_map([],|r|r.get(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-            let error=Store::open(&file).err().unwrap();
-            assert!(format!("{error:#}").contains("unsupported pre-baseline"));
-            let after:Vec<Option<String>>=conn.prepare("SELECT sql FROM sqlite_master ORDER BY name").unwrap()
-                .query_map([],|r|r.get(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-            assert_eq!(before,after,"store setup ran before rejecting {label}");
-            let preserved:i64=conn.query_row(if label=="events" {"SELECT count(*) FROM sfp_events WHERE json='original'"} else {"SELECT count(*) FROM sfp_sources WHERE source_seq='1'"},[],|r|r.get(0)).unwrap();
-            assert_eq!(preserved,1);
-            drop(conn);std::fs::remove_dir_all(dir).unwrap();
-        }
-    }
-
-    #[test]
-    fn pins_preserve_non_utf8_bytes_and_existing_text_rows_across_reopen() {
+    fn pins_preserve_non_utf8_bytes_and_text_rows_across_reopen() {
         use std::os::unix::ffi::OsStringExt;
         let dir = std::env::temp_dir().join(format!("sill-store-byte-pins-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

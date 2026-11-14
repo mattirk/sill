@@ -164,9 +164,9 @@ mod tests {
         s.title.clear();
         assert_eq!(display_title(&s), "renamed again");
         s.name = None;
-        s.title = "Legacy title".into();
+        s.title = "A title without a name".into();
         s.title_kind.clear();
-        assert_eq!(display_title(&s), "Legacy title");
+        assert_eq!(display_title(&s), "A title without a name");
     }
 
     #[test]

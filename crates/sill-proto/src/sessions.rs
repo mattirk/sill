@@ -184,20 +184,6 @@ impl From<Change> for crate::wire::SessionSet {
         }
     }
 }
-impl Create {
-    pub fn from_legacy(n: crate::NewSession, create_id: String) -> Self {
-        Self {
-            create_id,
-            agent: n.agent,
-            policy: n.policy,
-            pins: n.pins.iter().map(|p| HostPath::from_path(p)).collect(),
-            memory_scope: n.memory_scope,
-            follows: n.follows,
-            remember_pins: n.remember_pins,
-            ghost: n.ghost,
-        }
-    }
-}
 impl crate::Client {
     pub fn list_sessions(&self) -> anyhow::Result<Vec<Session>> {
         let mut after = None;

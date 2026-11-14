@@ -1407,7 +1407,7 @@ fn session_permission_choices_restore_defaults_and_frontend_gate() {
 }
 
 #[test]
-fn travelling_policy_cli_preserves_base_shorthand_and_blocks_jailed_import() {
+fn travelling_policy_cli_shows_the_default_and_blocks_jailed_import() {
     let d = Daemon::start();
     let run = |args: &[&str], jailed: bool| {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_sill"));
@@ -1419,7 +1419,8 @@ fn travelling_policy_cli_preserves_base_shorthand_and_blocks_jailed_import() {
         if jailed { cmd.env("SILL_SESSION", "1"); } else { cmd.env_remove("SILL_SESSION"); }
         cmd.output().unwrap()
     };
-    let old = run(&["policy", "default"], false);
+    // without a subcommand: the default policy, as `policy show default`
+    let old = run(&["policy"], false);
     let explicit = run(&["policy", "show", "default"], false);
     assert!(old.status.success(), "{}", String::from_utf8_lossy(&old.stderr));
     assert!(explicit.status.success(), "{}", String::from_utf8_lossy(&explicit.stderr));

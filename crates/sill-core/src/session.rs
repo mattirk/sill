@@ -545,8 +545,8 @@ fn snapshot_dir(session: &str) -> Result<PathBuf> {
 
 const MAX_POLICY_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 
-/// Never infer mounted pins from mutable settings. Legacy snapshots have no pin evidence;
-/// leaving their overlay writes visible is safer than hiding recoverable work.
+/// Never infer mounted pins from mutable settings: a snapshot without pin evidence means none,
+/// and leaving its overlay writes visible is safer than hiding recoverable work.
 pub fn launch_pins(session: &str) -> Result<Vec<PathBuf>> {
     Ok(policy_snapshot(session)?.map(|s| s.launch_pins).unwrap_or_default())
 }
@@ -650,20 +650,12 @@ fn snapshot_outdated(snapshot: Result<Option<crate::policy_fragments::Resolution
             without.network.allow.retain(|h| !added.contains(&h));
             fingerprint(&without).map(|current| current != snapshot.fingerprint).unwrap_or(true)
         }
-        // A legacy jail has no evidence that it applied newly introduced fragments.
+        // A jail without a snapshot has no evidence that it applied the fragments.
         Ok(None) => crate::policy_fragments::resolve(base, pins, &[])
             .map(|current| !current.sources.is_empty()).unwrap_or(true),
         // Missing evidence must not make corrupt or unreadable snapshots appear current.
         Err(_) => true,
     }
-}
-
-/// Compatibility for pre-snapshot jails.
-pub fn jail_outdated(session: &str, policy: &str, home: &Path) -> bool {
-    let Ok(sock) = socket_path(session) else { return false };
-    let Ok(started) = std::fs::metadata(&sock).and_then(|m| m.modified()) else { return false };
-    let Some(path) = Policy::resolve_path(policy, home) else { return false };
-    std::fs::metadata(path).and_then(|m| m.modified()).map(|changed| changed > started).unwrap_or(false)
 }
 
 pub fn is_running(session: &str) -> bool {
@@ -888,11 +880,6 @@ pub fn stop(session: &str) -> Result<()> {
     }
     let rt = shim::runtime_dir(session)?;
     let launcher = crate::launcher::current();
-    // a jail started before the daemon owned sessions runs as a service unit of its own: stop that
-    // too, or closing its tab after an upgrade would leave it running
-    if launcher.scopes {
-        crate::launcher::stop_legacy_unit(&unit_name(session));
-    }
     let killed_group = if launcher.scopes {
         crate::launcher::stop_scope(&unit_name(session)).unwrap_or(false)
     } else {
@@ -969,11 +956,11 @@ mod tests {
         assert!(changed.launch_pins.is_empty());
         let saved = read_policy_snapshot(&tree.snapshots()).unwrap().unwrap();
         assert_eq!(saved.launch_pins, vec![tree.repo()]);
-        // Old jails have no evidence of mounted pins; never substitute today's settings.
-        let mut legacy = serde_json::to_value(saved).unwrap();
-        legacy.as_object_mut().unwrap().remove("launch_pins");
-        let legacy: crate::policy_fragments::Resolution = serde_json::from_value(legacy).unwrap();
-        assert!(legacy.launch_pins.is_empty());
+        // A snapshot without pin evidence means none; never substitute today's settings.
+        let mut without = serde_json::to_value(saved).unwrap();
+        without.as_object_mut().unwrap().remove("launch_pins");
+        let without: crate::policy_fragments::Resolution = serde_json::from_value(without).unwrap();
+        assert!(without.launch_pins.is_empty());
     }
 
     #[test]
@@ -1067,7 +1054,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_jail_needs_rebuild_for_valid_or_invalid_repository_fragment() {
+    fn jail_without_snapshot_needs_rebuild_for_valid_or_invalid_repository_fragment() {
         let tree = PolicyTestTree::new();
         let base = Policy::builtin_default();
         assert!(!snapshot_outdated(Ok(None), &base, &[tree.repo()], &[]));

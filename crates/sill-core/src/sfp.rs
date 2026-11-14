@@ -29,22 +29,9 @@ pub struct Source { pub generation_id: String, pub seq: u64 }
 pub const RETAINED_EVENTS: i64 = 4096;
 pub const RETAINED_EVENT_BYTES: i64 = 16 * 1024 * 1024;
 
-/// Reject unsupported development state before daemon startup can recover operations or
-/// adopt workers. This only reads schema/receipt metadata and never changes the database.
-pub(crate) fn check_schema(conn:&rusqlite::Connection)->Result<()> {
-    crate::store::require_columns(conn, "sfp_events", &["bytes"])?;
-    let old_receipts: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sfp_sources')", [], |r| r.get(0))?;
-    if old_receipts {
-        let populated: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sfp_sources)", [], |r| r.get(0))?;
-        anyhow::ensure!(!populated, "unsupported pre-baseline source receipts; stop sessions and explicitly reset old conversation state before upgrading, preserving settings and pins; no data was migrated or deleted");
-    }
-    Ok(())
-}
-
 pub struct Journal<'a> { store: &'a Store }
 impl<'a> Journal<'a> {
     pub fn new(store: &'a Store) -> Result<Self> {
-        check_schema(store.conn())?;
         store.conn().execute_batch("CREATE TABLE IF NOT EXISTS sfp_sessions (
             session_id TEXT PRIMARY KEY, seq INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS sfp_records (
@@ -115,7 +102,7 @@ impl<'a> Journal<'a> {
                 controls:None, authentication:None, usage:None, agent_title:None, commands:vec![], active_ms:0, active_since_ms:None,
             };
             self.store.conn().execute("INSERT OR IGNORE INTO sfp_sessions(session_id,state) VALUES (?1,?2)", params![session_id, serde_json::to_string(&state)?])?;
-            // Pre-SFP transcripts remain available to memory, but are never imported into
+            // The memory transcript (`entries`) stays memory's: it is never imported into
             // canonical history or used to infer source identity and replay continuity.
             self.session(session_id)
         })
@@ -430,17 +417,10 @@ impl<'a> Journal<'a> {
     }
 
     /// `submission` goes to the agent now: its delivery as given, and its prompt as a user item
-    /// at this point of the conversation. An item made at acceptance (before items came with
-    /// dispatch) is moved here: removed and made again.
+    /// at this point of the conversation.
     pub fn dispatched(&self, submission: &Submission) -> Result<Vec<StoredEvent>> {
         let session_id = &submission.session_id;
         let mut events = vec![Event::SubmissionUpdated { submission: submission.clone() }];
-        let mut stmt = self.store.conn().prepare("SELECT id FROM sfp_records WHERE session_id=?1 AND kind='item' AND removed=0
-            AND json_extract(json,'$.item.submission_id')=?2")?;
-        let earlier: Vec<String> = stmt.query_map(params![session_id,submission.submission_id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
-        for item_id in earlier {
-            events.push(Event::ItemRemoved { item_id, reason: Reason { code:"moved_to_dispatch".into(), message:"The prompt moved to where it was sent".into() } });
-        }
         events.push(Event::ItemCreated { item: Item { item_id:new_id(), created_seq:String::new(), turn_id:None,
             submission_id:Some(submission.submission_id.clone()), agent_generation_id:submission.agent_generation_id.clone(),
             kind:"user".into(), content:vec![Content::text(&submission.text)], tool:None } });
@@ -659,29 +639,6 @@ mod tests {
     fn code(e:anyhow::Error)->String { e.downcast_ref::<DomainError>().unwrap().code.into() }
 
     #[test]
-    fn incompatible_event_schema_is_rejected_without_modifying_history() {
-        let dir=std::env::temp_dir().join(format!("sill-event-baseline-{}",new_id()));
-        let store=Store::open(&dir.join("s.db")).unwrap();
-        store.conn().execute_batch("CREATE TABLE sfp_events(session_id TEXT NOT NULL,seq INTEGER NOT NULL,json TEXT NOT NULL,PRIMARY KEY(session_id,seq));
-            INSERT INTO sfp_events VALUES ('s',1,'original')").unwrap();
-        assert!(Journal::new(&store).err().unwrap().to_string().contains("unsupported pre-baseline"));
-        assert!(!store.conn().query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('sfp_events') WHERE name='bytes')",[],|r|r.get::<_,bool>(0)).unwrap());
-        assert_eq!(store.conn().query_row("SELECT json FROM sfp_events",[],|r|r.get::<_,String>(0)).unwrap(),"original");
-        drop(store);std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn old_source_receipts_are_rejected_instead_of_replaying_work() {
-        let f=Fixture::new();
-        f.store.conn().execute_batch("CREATE TABLE sfp_sources(session_id TEXT,generation_id TEXT,source_seq TEXT);
-            INSERT INTO sfp_sources VALUES ('s','g','1')").unwrap();
-        assert!(Journal::new(&f.store).err().unwrap().to_string().contains("unsupported pre-baseline source receipts"));
-        assert_eq!(f.store.conn().query_row("SELECT count(*) FROM sfp_sources",[],|r|r.get::<_,i64>(0)).unwrap(),1);
-        f.store.conn().execute("DELETE FROM sfp_sources",[]).unwrap();
-        Journal::new(&f.store).unwrap();
-    }
-
-    #[test]
     fn source_receipts_coalesce_without_filling_unseen_gaps() {
         let f=Fixture::new();let j=f.journal();
         for seq in [1,3,4] {j.append(&f.id,Some(Source{generation_id:"g1".into(),seq}),&[]).unwrap();}
@@ -744,22 +701,18 @@ mod tests {
         assert_eq!(j.item(&f.id,"i").unwrap().content[0].text.as_deref(),Some("hello"));
     }
     /// A queued prompt shows where the agent receives it: its item is made at dispatch, after what
-    /// came meanwhile; one made at acceptance (an older daemon) moves there.
+    /// came meanwhile.
     #[test]
     fn a_prompt_item_is_made_where_it_is_dispatched() {
         let f=Fixture::new(); let j=f.journal();
         let (queued,events)=j.accept(&f.submit("q"),"queued").unwrap();
         assert!(!events.iter().any(|e|matches!(e.event,Event::ItemCreated{..})));
         j.append(&f.id,None,&[Event::ItemCreated{item:item("meanwhile")}]).unwrap();
-        // the older daemon's item, made at acceptance
-        let mut old=item("old"); old.kind="user".into(); old.submission_id=Some("q".into());
-        j.append(&f.id,None,&[Event::ItemCreated{item:old}]).unwrap();
         let mut sent=queued; sent.delivery="direct".into();
-        let events=j.dispatched(&sent).unwrap();
-        assert!(events.iter().any(|e|matches!(&e.event,Event::ItemRemoved{item_id,..} if item_id=="old")));
+        j.dispatched(&sent).unwrap();
         let (_,records)=j.snapshot(&f.id).unwrap();
         let items:Vec<&Item>=records.iter().filter_map(|r|match r {Record::Item{item}=>Some(item),_=>None}).collect();
-        assert_eq!(items.len(),2,"the old item is gone");
+        assert_eq!(items.len(),2,"what came meanwhile, then the prompt");
         assert_eq!(items[0].item_id,"meanwhile");
         assert_eq!((items[1].kind.as_str(),items[1].submission_id.as_deref()),("user",Some("q")));
         assert_eq!(j.submission(&f.id,"q").unwrap().delivery,"direct");
@@ -840,7 +793,7 @@ mod tests {
         assert_eq!(code(j.append(&f.id,None,&[Event::ItemCreated {item:item("i")}]).unwrap_err()),"invalid_state");
     }
     #[test]
-    fn old_transcripts_are_not_imported_and_deletion_erases_canonical_data() {
+    fn memory_transcripts_are_not_imported_and_deletion_erases_canonical_data() {
         let f=Fixture::new();let session=f.store.create("test","default").unwrap();
         f.store.append(&session.id,"user","old prompt","").unwrap(); let j=f.journal();
         j.ensure(&session.id,"g").unwrap();let first=j.snapshot(&session.id).unwrap();assert_eq!(first.1.len(),1);

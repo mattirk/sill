@@ -186,14 +186,12 @@ pub(crate) fn read_path(r: &rusqlite::Row<'_>, column: usize) -> rusqlite::Resul
 }
 fn read_paths(r: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<Vec<PathBuf>> {
     use rusqlite::types::ValueRef;
-    // Legacy TEXT rows were newline-delimited; BLOB is the new NUL-delimited encoding.
-    // A NUL cannot occur in a Unix filename, but newlines and arbitrary bytes can.
-    let (bytes, separator) = match r.get_ref(column)? {
-        ValueRef::Text(bytes) => (bytes, b'\n'),
-        ValueRef::Blob(bytes) => (bytes, 0),
-        value => return Err(rusqlite::Error::InvalidColumnType(column, "paths".into(), value.data_type())),
-    };
-    Ok(bytes.split(|b| *b == separator).filter(|b| !b.is_empty()).map(path_from_bytes).collect())
+    // NUL-delimited bytes: a NUL cannot occur in a Unix filename, but newlines and arbitrary
+    // bytes can.
+    match r.get_ref(column)? {
+        ValueRef::Blob(bytes) => Ok(bytes.split(|b| *b == 0).filter(|b| !b.is_empty()).map(path_from_bytes).collect()),
+        value => Err(rusqlite::Error::InvalidColumnType(column, "paths".into(), value.data_type())),
+    }
 }
 
 pub fn query(conn: &Connection, f: &Filter) -> Result<Vec<Event>> {
@@ -320,7 +318,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exact_paths_newlines_legacy_rows_and_keyset_pages() {
+    fn exact_paths_newlines_and_keyset_pages() {
         use std::os::unix::ffi::OsStringExt;
         let c = Connection::open_in_memory().unwrap();
         install(&c).unwrap();
@@ -329,11 +327,9 @@ mod tests {
         sweep.paths = vec![exact.clone(), "/files/two\nlines".into()];
         record(&c, &sweep).unwrap();
         record(&c, &Event::new(Kind::Kept, &exact, 20)).unwrap();
-        c.execute("INSERT INTO history(ts,kind,path,paths) VALUES (10,'auto-reverted','/legacy','/legacy/a'||char(10)||'/legacy/b')", []).unwrap();
         let all = query(&c, &Filter::default()).unwrap();
         assert_eq!(all[0].path, exact);
         assert_eq!(all[1].paths, sweep.paths);
-        assert_eq!(all[2].paths, vec![PathBuf::from("/legacy/a"), PathBuf::from("/legacy/b")]);
         let found = query(&c, &Filter { path: Some(exact.clone()), ..Default::default() }).unwrap();
         assert_eq!(found.len(), 2);
         assert!(query(&c, &Filter { path: Some("/files/\u{fffd}\nname".into()), ..Default::default() }).unwrap().is_empty());

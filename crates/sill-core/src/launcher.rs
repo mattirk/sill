@@ -126,22 +126,6 @@ pub fn stop_scope(unit: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// Stop `sill-<id>.service`, the transient unit a session ran in before the daemon owned sessions
-/// (SPEC §4.7 as it was), when one is loaded. Nothing to do on a host that never had one.
-pub fn stop_legacy_unit(unit: &str) {
-    let name = format!("{unit}.service");
-    let loaded = std::process::Command::new("systemctl")
-        .args(["--user", "is-active", "--quiet", &name])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if loaded {
-        let _ = std::process::Command::new("systemctl").args(["--user", "stop", "--quiet", &name]).stdin(std::process::Stdio::null()).status();
-    }
-}
-
 /// `systemd-run --user` works: the user manager answers and `$XDG_RUNTIME_DIR` is set. What
 /// `sill init --user` and the client's daemon start use to choose a transient unit over a bare spawn.
 pub fn systemd_user_usable() -> std::result::Result<(), String> {
@@ -398,15 +382,6 @@ pub fn kill_session_process(file: &Path, session: &str, kind: SessionProcess) ->
         Some(pid) => kill_with_children(pid as i32),
         None => false,
     }
-}
-
-/// Send SIGKILL to the pid read from a file and to its direct children; true if a signal was
-/// sent. Unchecked: only for files that name no session process (the dev path's old `proxy.pid`);
-/// a session's own go through [`kill_session_process`].
-pub fn kill_pid_file(file: &Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(file) else { return false };
-    let Ok(pid) = text.trim().parse::<i32>() else { return false };
-    kill_with_children(pid)
 }
 
 /// SIGKILL to `pid` and its direct children. bwrap is two processes: the outer one that waits,

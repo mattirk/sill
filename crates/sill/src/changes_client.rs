@@ -1,4 +1,4 @@
-//! Local presentation conversions over public SFP only. Exact paths never pass through legacy JSON.
+//! Local presentation conversions over public SFP only. Exact paths never pass through lossy JSON strings.
 use anyhow::{Result, bail};
 use serde_json::Value;
 use sill_proto::{changes as api, sessions::HostPath as P, wire};
@@ -356,7 +356,7 @@ mod tests {
         );
     }
     #[test]
-    fn exact_paths_cross_public_mutation_without_legacy_json() {
+    fn exact_paths_cross_public_mutation_without_lossy_json() {
         use std::os::unix::ffi::OsStringExt;
         let path = std::path::PathBuf::from(std::ffi::OsString::from_vec(
             b"/fixture/\xff\nname".to_vec(),

@@ -249,8 +249,7 @@ impl JailSpec {
         }
         // parents before children (mount order)
         layers.sort_by(|a, b| a.host.cmp(&b.host));
-        // Preserve legacy state names, but never let distinct host roots reuse an upper
-        // tree (for example /a/b and /a%b both historically flatten to a%b).
+        // Never let distinct host roots reuse an upper tree (/a/b and /a%b both flatten to a%b).
         let mut owners = BTreeMap::new();
         for layer in &layers {
             if let Some(previous) = owners.insert(layer.upper.clone(), layer.host.clone()) {

@@ -17,7 +17,6 @@ use crate::store::{Session, Store};
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Facts {
     pub title: String,
-    #[serde(default, alias = "original_name")]
     pub name: Option<String>,
     pub agent: String,
     pub created_at: i64,
@@ -190,7 +189,7 @@ pub struct Compaction {
 /// Compaction and retention over the ended sessions, by the settings, as of `now`: level 1 after
 /// `compact_after`, level 2 after `keep_full_transcripts`, deletion after `delete_after` (each
 /// step off at 0); an ended session without a prompt goes at once (nothing happened in it — the
-/// shelf deletes one as it closes, this catches those ended by an older shelf). Open sessions (no
+/// frontend deletes one as it closes, this catches those ended otherwise). Open sessions (no
 /// `ended_at`) are never touched. `remove_state` takes a deleted session's state on the host (the
 /// kept journal, its agent home) — the caller knows the uid.
 pub fn compact_all(store: &Store, now: i64, remove_state: &dyn Fn(&str)) -> Result<Compaction> {
