@@ -141,6 +141,11 @@ impl App {
                 if operations.iter().any(|op| op == "mac_input") && !crate::mac_input::allowed() {
                     crate::mac_input::ask();
                 }
+                // the Mac acts only on what the person switched on here, not on the daemon's word
+                #[cfg(target_os = "macos")]
+                if !view.host_control.busy {
+                    crate::local_vm::person_asked(&id, &operations);
+                }
                 let params = json!({"session_id": id, "operations": operations});
                 self.host_control_request(id, "_sill/host_control.activate", params)
             }
@@ -168,6 +173,12 @@ impl App {
                     return Task::none();
                 }
                 view.host_control.busy = false;
+                #[cfg(target_os = "macos")]
+                crate::local_vm::person_answered(
+                    &id,
+                    outcome.as_ref().ok().filter(|s| s.active).map(|s| s.generation),
+                    outcome.is_err(),
+                );
                 match outcome {
                     Ok(state) => {
                         if state.active {

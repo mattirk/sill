@@ -794,9 +794,59 @@ fn new_frame_id() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The session's Host control is active at this generation with `operation` granted: asked of
-/// the daemon itself (it checked too; the Mac checks again).
+/// What the person switched on in this window, by session: the Mac operations of the last
+/// Activate and the generation the daemon gave it. The daemon runs in the VM, where anything
+/// outside a jail can talk to it, so its word alone does not open the Mac (security review,
+/// 2026-11-13): an activation this window did not make is refused here.
+static TICKED: Mutex<std::collections::BTreeMap<String, Ticked>> = Mutex::new(std::collections::BTreeMap::new());
+
+#[derive(Default)]
+struct Ticked {
+    /// The operations of an Activate still on its way to the daemon.
+    asked: Option<Vec<String>>,
+    /// The generation and operations of the activation the person made.
+    granted: Option<(u64, Vec<String>)>,
+}
+
+/// The person pressed Activate for `session` with these operations.
+pub fn person_asked(session: &str, operations: &[String]) {
+    TICKED.lock().unwrap().entry(session.into()).or_default().asked = Some(operations.to_vec());
+}
+
+/// The daemon answered the window's own request: `active` carries the activation's generation,
+/// `None` is a revocation; `failed` leaves what was granted before as it was.
+pub fn person_answered(session: &str, active: Option<u64>, failed: bool) {
+    let mut ticked = TICKED.lock().unwrap();
+    let Some(entry) = ticked.get_mut(session) else { return };
+    let asked = entry.asked.take();
+    if failed {
+        return;
+    }
+    match (active, asked) {
+        (Some(generation), Some(operations)) => entry.granted = Some((generation, operations)),
+        // an answer to something else than an Activate of this window: what stands, stands
+        (Some(_), None) => {}
+        (None, _) => {
+            ticked.remove(session);
+        }
+    }
+}
+
+/// The person switched `operation` on for `session` in this window, at this generation.
+fn ticked(session: &str, generation: u64, operation: &str) -> bool {
+    TICKED.lock().unwrap().get(session).and_then(|t| t.granted.as_ref()).is_some_and(|(granted, operations)| {
+        *granted == generation && operations.iter().any(|op| op == operation)
+    })
+}
+
+/// The session's Host control is active at this generation with `operation` granted: by the
+/// person in this window (`TICKED`) and in the daemon's answer (it checked too).
 fn granted(session: &str, generation: u64, operation: &str) -> Result<(), String> {
+    if !ticked(session, generation, operation) {
+        return Err(format!(
+            "refused: {operation} was not switched on for this session in Sill's window at this generation"
+        ));
+    }
     let state: sill_proto::host_control::State = sill_proto::Client::connect()
         .and_then(|client| client.call("_sill/host_control.state", serde_json::json!({"session_id": session})))
         .map_err(|e| format!("the grant could not be checked: {e:#}"))?;
@@ -919,7 +969,7 @@ fn mac_input(session: &str, generation: u64, args: &serde_json::Value) -> Result
 }
 
 /// Every few seconds: a session whose Mac processes still run but whose `mac_commands` grant has
-/// gone (revoked, the session ended, the daemon restarted) has them stopped. Started once.
+/// gone (revoked, activated anew, the session ended, the daemon restarted) has them stopped. Started once.
 fn watch_mac_processes() {
     static STARTED: std::sync::Once = std::sync::Once::new();
     STARTED.call_once(|| {
@@ -930,11 +980,34 @@ fn watch_mac_processes() {
                     .and_then(|client| client.call("_sill/host_control.state", serde_json::json!({"session_id": session})));
                 // the daemon unreachable is not a revocation: only a clear answer stops them
                 if let Ok(state) = state
-                    && (!state.active || !state.operations.iter().any(|op| op == "mac_commands"))
+                    && (!state.active
+                        || !state.operations.iter().any(|op| op == "mac_commands")
+                        || !ticked(&session, state.generation, "mac_commands"))
                 {
                     crate::mac_procs::stop_session(&session);
                 }
             }
         });
     });
+}
+
+#[cfg(test)]
+mod grant_tests {
+    #[test]
+    fn the_mac_acts_only_on_what_the_person_switched_on_in_this_window() {
+        let s = "ticked-test";
+        assert!(!super::ticked(s, 1, "mac_view"), "the daemon's word alone is not enough");
+        super::person_asked(s, &["mac_view".into()]);
+        assert!(!super::ticked(s, 1, "mac_view"), "not before the daemon answered");
+        super::person_answered(s, Some(4), false);
+        assert!(super::ticked(s, 4, "mac_view"));
+        assert!(!super::ticked(s, 4, "mac_commands"), "only what was switched on");
+        assert!(!super::ticked(s, 5, "mac_view"), "an activation made elsewhere has another generation");
+        // a failed change leaves the grant; a revocation ends it
+        super::person_asked(s, &["mac_view".into(), "mac_commands".into()]);
+        super::person_answered(s, None, true);
+        assert!(super::ticked(s, 4, "mac_view") && !super::ticked(s, 4, "mac_commands"));
+        super::person_answered(s, None, false);
+        assert!(!super::ticked(s, 4, "mac_view"));
+    }
 }

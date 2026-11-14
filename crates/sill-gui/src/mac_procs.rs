@@ -5,7 +5,6 @@
 //! (the person's decisions of 2026-11-13).
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -140,20 +139,8 @@ fn start(session: &str, run: &Value, shared: &[PathBuf]) -> Result<Value, String
     let _ = std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700));
     let log = dir.join(format!("{id}.log"));
     let out = std::fs::File::create(&log).map_err(|e| e.to_string())?;
-    let err = out.try_clone().map_err(|e| e.to_string())?;
-    let mut child = Command::new(&executable)
-        .args(&argv[1..])
-        .current_dir(&cwd)
-        .env_clear()
-        .envs(&env)
-        .stdin(Stdio::null())
-        .stdout(out)
-        .stderr(err)
-        // a group of its own: stopping it stops what it started
-        .process_group(0)
-        .spawn()
-        .map_err(|e| format!("{program}: {e}"))?;
-    let pid = child.id() as i32;
+    let pid = spawn(&executable, &argv, &cwd, &env, &out).map_err(|e| format!("{program}: {e}"))?;
+    drop(out);
     let started = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
     PROCS.lock().unwrap().insert(
         id,
@@ -163,20 +150,112 @@ fn start(session: &str, run: &Value, shared: &[PathBuf]) -> Result<Value, String
     std::thread::Builder::new()
         .name("sill-gui-mac-proc".into())
         .spawn(move || {
-            let ended = match child.wait() {
-                Ok(status) => match (status.code(), std::os::unix::process::ExitStatusExt::signal(&status)) {
-                    (Some(code), _) => format!("exit {code}"),
-                    (None, Some(signal)) => format!("signal {signal}"),
-                    _ => "ended".into(),
-                },
-                Err(e) => format!("unknown: {e}"),
-            };
+            let ended = reap(pid);
             if let Some(p) = PROCS.lock().unwrap().get_mut(&id) {
                 p.ended = Some(ended);
             }
         })
         .map_err(|e| e.to_string())?;
     Ok(json!({"name": format!("mac:{id}"), "pid": pid, "cwd": cwd, "argv": argv}))
+}
+
+unsafe extern "C" {
+    /// The spawned program answers to macOS for itself, not as Sill: private but long-standing
+    /// (libSystem, since macOS 10.14; Chromium and LLDB start their helpers so).
+    fn responsibility_spawnattrs_setdisclaim(attr: *mut libc::posix_spawnattr_t, disclaim: libc::c_int) -> libc::c_int;
+    fn posix_spawn_file_actions_addchdir_np(
+        actions: *mut libc::posix_spawn_file_actions_t,
+        path: *const libc::c_char,
+    ) -> libc::c_int;
+}
+
+/// Start `executable` as `argv` in `cwd` with `env`, its output in `log`: the leader of a group
+/// of its own (stopping it stops what it started), with no signal blocked or ignored and no
+/// descriptor of Sill's but the log, and responsible for itself to macOS, so it has none of
+/// Sill's consents (Screen Recording, Accessibility; security review, 2026-11-13).
+fn spawn(
+    executable: &Path,
+    argv: &[String],
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+    log: &std::fs::File,
+) -> Result<i32, String> {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let c = |bytes: &[u8]| CString::new(bytes).map_err(|_| "a NUL byte in the request".to_string());
+    let path = c(executable.as_os_str().as_bytes())?;
+    let dir = c(cwd.as_os_str().as_bytes())?;
+    let args: Vec<CString> = argv.iter().map(|a| c(a.as_bytes())).collect::<Result<_, _>>()?;
+    let vars: Vec<CString> = env.iter().map(|(k, v)| c(format!("{k}={v}").as_bytes())).collect::<Result<_, _>>()?;
+    let pointers = |list: &[CString]| -> Vec<*mut libc::c_char> {
+        list.iter().map(|s| s.as_ptr().cast_mut()).chain([std::ptr::null_mut()]).collect()
+    };
+    let (args, vars) = (pointers(&args), pointers(&vars));
+    let step = |code: libc::c_int, what: &str| match code {
+        0 => Ok(()),
+        code => Err(format!("{what}: {}", std::io::Error::from_raw_os_error(code))),
+    };
+    // SAFETY: the attribute and action objects are initialised before use and destroyed after;
+    // every pointer handed over outlives the call
+    unsafe {
+        let mut attr: libc::posix_spawnattr_t = std::mem::zeroed();
+        let mut actions: libc::posix_spawn_file_actions_t = std::mem::zeroed();
+        step(libc::posix_spawnattr_init(&mut attr), "spawn attributes")?;
+        step(libc::posix_spawn_file_actions_init(&mut actions), "spawn actions")?;
+        let result = (|| {
+            let flags = libc::POSIX_SPAWN_SETPGROUP
+                | libc::POSIX_SPAWN_SETSIGMASK
+                | libc::POSIX_SPAWN_SETSIGDEF
+                | libc::POSIX_SPAWN_CLOEXEC_DEFAULT;
+            step(libc::posix_spawnattr_setflags(&mut attr, flags as libc::c_short), "spawn flags")?;
+            step(libc::posix_spawnattr_setpgroup(&mut attr, 0), "process group")?;
+            let mut none: libc::sigset_t = std::mem::zeroed();
+            let mut all: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut none);
+            libc::sigfillset(&mut all);
+            step(libc::posix_spawnattr_setsigmask(&mut attr, &none), "signal mask")?;
+            step(libc::posix_spawnattr_setsigdefault(&mut attr, &all), "signal defaults")?;
+            step(responsibility_spawnattrs_setdisclaim(&mut attr, 1), "disclaiming responsibility")?;
+            step(
+                libc::posix_spawn_file_actions_addopen(&mut actions, 0, c"/dev/null".as_ptr(), libc::O_RDONLY, 0),
+                "stdin",
+            )?;
+            step(libc::posix_spawn_file_actions_adddup2(&mut actions, log.as_raw_fd(), 1), "stdout")?;
+            step(libc::posix_spawn_file_actions_adddup2(&mut actions, log.as_raw_fd(), 2), "stderr")?;
+            step(posix_spawn_file_actions_addchdir_np(&mut actions, dir.as_ptr()), "working directory")?;
+            let mut pid: libc::pid_t = 0;
+            match libc::posix_spawn(&mut pid, path.as_ptr(), &actions, &attr, args.as_ptr(), vars.as_ptr()) {
+                0 => Ok(pid),
+                code => Err(std::io::Error::from_raw_os_error(code).to_string()),
+            }
+        })();
+        libc::posix_spawnattr_destroy(&mut attr);
+        libc::posix_spawn_file_actions_destroy(&mut actions);
+        result
+    }
+}
+
+/// Wait for the group's leader `pid` and say how it ended. What it left running in its group
+/// ends with it: killed while the leader is still unreaped, so the group is surely this one.
+fn reap(pid: i32) -> String {
+    // SAFETY: `pid` is a child this module spawned and nothing else waits for
+    unsafe {
+        let mut info: libc::siginfo_t = std::mem::zeroed();
+        libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOWAIT);
+        libc::killpg(pid, libc::SIGKILL);
+        let mut status = 0;
+        if libc::waitpid(pid, &mut status, 0) != pid {
+            return format!("unknown: {}", std::io::Error::last_os_error());
+        }
+        if libc::WIFEXITED(status) {
+            format!("exit {}", libc::WEXITSTATUS(status))
+        } else if libc::WIFSIGNALED(status) {
+            format!("signal {}", libc::WTERMSIG(status))
+        } else {
+            "ended".into()
+        }
+    }
 }
 
 fn list(session: &str) -> Value {
@@ -276,6 +355,14 @@ mod tests {
 
     #[test]
     fn a_program_runs_in_a_shared_folder_and_stops_with_its_group() {
+        // as Sill's threads are: TERM blocked here must not be blocked in the program
+        // SAFETY: changes this test thread's signal mask only
+        unsafe {
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGTERM);
+            libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+        }
         let shared = std::env::temp_dir().canonicalize().unwrap();
         let dir = shared.join(format!("sill-mac-procs-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -299,6 +386,27 @@ mod tests {
         let stopped = super::handle("s1", &json!({"stop": long}), &[]).unwrap();
         assert_eq!(stopped["ended"], "signal 15");
         assert!(super::sessions_running().iter().all(|s| s != "s1"));
+        // it answers to macOS for itself, not as the process that started it (Sill's consents)
+        let check = "import ctypes,os;print(ctypes.CDLL(None).responsibility_get_pid_responsible_for_pid(os.getpid())==os.getpid())";
+        if std::path::Path::new("/usr/bin/python3").exists() {
+            let own = super::handle("s1", &json!({"run":{"argv":["/usr/bin/python3","-c",check],"cwd":dir}}), &[dir.clone()]).unwrap();
+            for _ in 0..50 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let out = super::handle("s1", &json!({"output": own["name"]}), &[]).unwrap();
+                if out["output"] != "" {
+                    assert_eq!(out["output"], "True\n");
+                    break;
+                }
+            }
+        }
+        // what a program leaves in the background ends with it
+        let pidfile = dir.join("background.pid");
+        let script = format!("sleep 60 & echo $! > {}", pidfile.display());
+        super::handle("s1", &json!({"run":{"argv":["/bin/sh","-c",script],"cwd":dir}}), &[dir.clone()]).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let background: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+        // SAFETY: signal 0 only asks whether the process exists
+        assert_eq!(unsafe { libc::kill(background, 0) }, -1, "the background child is gone");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
