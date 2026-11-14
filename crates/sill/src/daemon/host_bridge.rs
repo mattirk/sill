@@ -81,7 +81,7 @@ pub fn serve(hub: Arc<Hub>, session: String, generation: u64, listener: UnixList
                                 serde_json::to_string(&request.args)?
                             ),
                         );
-                        let result = action(&hub, &session, generation, &request);
+                        let result = action(&hub, &session, generation, &request, _gate);
                         host_control::note(
                             &hub,
                             &session,
@@ -174,7 +174,13 @@ fn stop_group(p: &sill_core::store::HostProcess) -> Result<()> {
     }
     Ok(())
 }
-fn action(hub: &Arc<Hub>, session: &str, generation: u64, r: &Request) -> Result<Value> {
+fn action(
+    hub: &Arc<Hub>,
+    session: &str,
+    generation: u64,
+    r: &Request,
+    _gate: MutexGuard<'static, ()>,
+) -> Result<Value> {
     match r.operation.as_str() {
         "launch" | "commands" => {
             let a: Launch = serde_json::from_value(r.args.clone())?;
@@ -364,21 +370,27 @@ fn action(hub: &Arc<Hub>, session: &str, generation: u64, r: &Request) -> Result
         }
         "mac_commands" => {
             super::host_mac::check_commands(&r.args)?;
-            let (result, _) = super::host_mac::request(session, generation, "commands", &r.args)?;
+            let (_gate, (result, _)) = forward_mac(_gate, session, generation, || {
+                super::host_mac::request(session, generation, "commands", &r.args)
+            })?;
             let mut reply = result;
             reply["location"] = json!("mac");
             Ok(reply)
         }
         "mac_input" => {
             super::host_mac::check_input(&r.args)?;
-            let (result, _) = super::host_mac::request(session, generation, "input", &r.args)?;
+            let (_gate, (result, _)) = forward_mac(_gate, session, generation, || {
+                super::host_mac::request(session, generation, "input", &r.args)
+            })?;
             let mut reply = result;
             reply["location"] = json!("mac");
             Ok(reply)
         }
         "mac_view" => {
             super::host_mac::check_view(&r.args)?;
-            let (result, picture) = super::host_mac::request(session, generation, "view", &r.args)?;
+            let (_gate, (result, picture)) = forward_mac(_gate, session, generation, || {
+                super::host_mac::request(session, generation, "view", &r.args)
+            })?;
             let Some(png) = picture else {
                 return Ok(json!({"result": result, "location": "mac"}));
             };
@@ -404,6 +416,25 @@ fn action(hub: &Arc<Hub>, session: &str, generation: u64, r: &Request) -> Result
         _ => bail!("operation backend unavailable"),
     }
 }
+/// Only the remote wait is outside the lifecycle gate. The Mac checks the grant before
+/// acting (and between input actions). Recheck under the gate before publishing a late
+/// result or writing a picture, so revoke/cleanup cannot be undone by that reply.
+pub(super) fn forward_mac<T>(
+    held: MutexGuard<'static, ()>,
+    session: &str,
+    generation: u64,
+    forward: impl FnOnce() -> Result<T>,
+) -> Result<(MutexGuard<'static, ()>, T)> {
+    drop(held);
+    let result = forward();
+    let held = gate();
+    anyhow::ensure!(
+        host_control::brief(session).is_some_and(|b| b.generation == generation),
+        "Host control changed while awaiting the Mac; outcome unknown, do not replay automatically"
+    );
+    Ok((held, result?))
+}
+
 /// How many of a session's pictures stay readable in the jail.
 const KEPT_VIEWS: usize = 8;
 fn views(session: &str) -> Result<PathBuf> {
@@ -417,7 +448,9 @@ fn mac_views(session: &str) -> Result<PathBuf> {
 /// `processes.json`, the records, and `<id>.log`, each one's captured output. They stay after
 /// revocation, like the records: ownership evidence, not authority.
 fn host_dir(session: &str) -> Result<PathBuf> {
-    Ok(sill_core::shim::runtime_dir(session)?.join("bridge").join(sill_core::jail::BRIDGE_HOST_DIR))
+    Ok(sill_core::shim::runtime_dir(session)?
+        .join("bridge")
+        .join(sill_core::jail::BRIDGE_HOST_DIR))
 }
 pub fn host_log(session: &str, id: &str) -> Result<PathBuf> {
     Ok(host_dir(session)?.join(format!("{id}.log")))

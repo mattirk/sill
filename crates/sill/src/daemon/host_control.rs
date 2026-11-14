@@ -310,3 +310,58 @@ pub fn shutdown(hub: &Hub) {
     let sessions: Vec<_> = table().lock().unwrap().active.keys().cloned().collect();
     for session in sessions { let _ = revoke(hub, &session, "daemon shutdown"); }
 }
+
+#[cfg(test)]
+mod mac_forward_tests {
+    use super::*;
+    use std::{sync::mpsc, time::Duration};
+
+    #[test]
+    fn delayed_mac_reply_does_not_block_revocation_or_other_sessions() {
+        // A channel stands in for a Mac that has accepted a request but not replied.
+        // Exercise both revocation and scope changes while the reply is outstanding.
+        for replacement in [None, Some(2)] {
+            let session = format!("test-mac-forward-{replacement:?}");
+            {
+                let _gate = super::super::host_bridge::gate();
+                table().lock().unwrap().active.insert(session.clone(), Activation {
+                    generation: 1, operations: BTreeSet::from(["mac_view".into()]),
+                    since: 0, activator: 0,
+                });
+            }
+            let (started_tx, started_rx) = mpsc::channel();
+            let (reply_tx, reply_rx) = mpsc::channel();
+            let worker_session = session.clone();
+            let worker = std::thread::spawn(move || {
+                let held = super::super::host_bridge::gate();
+                super::super::host_bridge::forward_mac(held, &worker_session, 1, || {
+                    started_tx.send(()).unwrap();
+                    reply_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Ok(())
+                }).map(|_| ()).map_err(|e| e.to_string())
+            });
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let (changed_tx, changed_rx) = mpsc::channel();
+            let change_session = session.clone();
+            let change = std::thread::spawn(move || {
+                // This is the same gate and table used by revoke/activate and every
+                // other session's bridge. It must be available before the reply.
+                let _gate = super::super::host_bridge::gate();
+                let mut t = table().lock().unwrap();
+                let mut old = t.active.remove(&change_session).unwrap();
+                if let Some(generation) = replacement {
+                    old.generation = generation;
+                    t.active.insert(change_session, old);
+                }
+                changed_tx.send(()).unwrap();
+            });
+            let changed = changed_rx.recv_timeout(Duration::from_secs(2));
+            reply_tx.send(()).unwrap();
+            change.join().unwrap();
+            let result = worker.join().unwrap();
+            table().lock().unwrap().active.remove(&session);
+            assert!(changed.is_ok(), "lifecycle gate held during Mac IO");
+            assert!(result.unwrap_err().contains("do not replay automatically"));
+        }
+    }
+}
