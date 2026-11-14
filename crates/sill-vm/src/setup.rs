@@ -175,6 +175,8 @@ fn seed(dir: &Path, user_data: &str) -> Result<()> {
         format!("instance-id: {instance}\nlocal-hostname: sill-box\n"),
     )?;
     let iso = dir.join("seed.iso");
+    // hdiutil refuses to write over a file: a seed made again replaces the one before it
+    let _ = std::fs::remove_file(&iso);
     let made = Command::new("hdiutil")
         .args(["makehybrid", "-quiet", "-iso", "-joliet", "-default-volume-name", "cidata", "-o"])
         .arg(&iso)
@@ -277,6 +279,19 @@ mod tests {
             assert_eq!(mode, 0o600, "{disk}");
         }
         assert!(!dir.join("state.raw").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A seed made again (its words changed) replaces the one already there: hdiutil alone
+    /// refuses to write over a file, and Sill.app did not start (the person, 2026-11-13).
+    #[test]
+    fn a_seed_is_made_over_the_one_before_it() {
+        let dir = std::env::temp_dir().join(format!("sill-vm-seed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        seed(&dir, "#cloud-config\n").unwrap();
+        seed(&dir, "#cloud-config\nusers: []\n").unwrap();
+        assert!(dir.join("seed.iso").is_file());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
