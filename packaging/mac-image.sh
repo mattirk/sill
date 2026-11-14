@@ -139,11 +139,13 @@ guest 'rm -rf src .cargo .rustup .cache'
 guest 'sudo apt-get -qq clean && sudo rm -rf /var/lib/apt/lists/*'
 # the next boot is a new instance: the app's seed gives the account its key, and the host keys
 # and machine id are made anew
-guest 'sudo cloud-init clean --logs --machine-id && rm -f ~/.ssh/authorized_keys ~/.bash_history'
 # the home the build left (the user units' links among it) becomes the image's own /home, which
-# a new home disk starts from
-guest 'sudo mkdir -p /mnt/root && sudo mount --bind / /mnt/root &&
+# a new home disk starts from, without the build's key; the build's own home disk keeps the key
+# for the logins still to come and is thrown away
+guest 'sudo cloud-init clean --logs --machine-id && rm -f ~/.bash_history &&
+    sudo mkdir -p /mnt/root && sudo mount --bind / /mnt/root &&
     sudo rm -rf /mnt/root/home/sill && sudo cp -a /home/sill /mnt/root/home/ &&
+    sudo rm -f /mnt/root/home/sill/.ssh/authorized_keys &&
     sudo umount /mnt/root && sudo rmdir /mnt/root'
 guest 'sudo fstrim -a >/dev/null 2>&1 || true'
 power_off
