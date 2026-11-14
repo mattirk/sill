@@ -92,7 +92,15 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
     if let Some(w) = config.width {
         x11::set_width_fraction(w);
     }
-    let store = Rc::new(Store::open_default().expect("open session store"));
+    // a store that will not open (held by another process past the busy timeout, a damaged file)
+    // is a window saying so, not a panic the service restarts into forever (SPEC §4.11 #17)
+    let store = match Store::open_default() {
+        Ok(s) => Rc::new(s),
+        Err(e) => {
+            eprintln!("sill: cannot open the session store: {e:#}");
+            return error_window(app, &format!("sill cannot open its session store:\n{e:#}"));
+        }
+    };
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
@@ -1262,6 +1270,20 @@ impl Shelf {
             }
         }
     }
+}
+
+/// What the shelf shows when it cannot run at all: the reason, in a window, instead of a crash.
+fn error_window(app: &adw::Application, text: &str) -> gtk::Window {
+    let w = adw::ApplicationWindow::builder().application(app).title("sill").default_width(560).default_height(160).build();
+    let l = gtk::Label::new(Some(text));
+    l.set_wrap(true);
+    l.set_selectable(true);
+    l.set_margin_top(24);
+    l.set_margin_bottom(24);
+    l.set_margin_start(24);
+    l.set_margin_end(24);
+    w.set_content(Some(&l));
+    w.upcast()
 }
 
 /// Stop a session's jail on a worker thread and run `then` on the main loop when it is gone. A

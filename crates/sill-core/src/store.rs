@@ -80,6 +80,9 @@ impl Store {
             std::fs::create_dir_all(dir)?;
         }
         let conn = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
+        // another shelf or a CLI holding a write: wait a little instead of failing at once (a
+        // failure here is the service's crash loop, SPEC §4.11 #17)
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              CREATE TABLE IF NOT EXISTS sessions (
@@ -234,12 +237,14 @@ impl Store {
     }
 
     pub fn append(&self, session_id: &str, kind: &str, text: &str, extra: &str) -> Result<i64> {
-        let seq: i64 = self
-            .conn
-            .query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM entries WHERE session_id = ?1", params![session_id], |r| r.get(0))?;
-        self.conn.execute(
-            "INSERT INTO entries (session_id, seq, ts, kind, text, extra) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![session_id, seq, now(), kind, text, extra],
+        // the next seq and the insert in one statement: two writers (a shelf and the CLI) can't
+        // pick the same number
+        let seq: i64 = self.conn.query_row(
+            "INSERT INTO entries (session_id, seq, ts, kind, text, extra)
+             SELECT ?1, COALESCE(MAX(seq), 0) + 1, ?2, ?3, ?4, ?5 FROM entries WHERE session_id = ?1
+             RETURNING seq",
+            params![session_id, now(), kind, text, extra],
+            |r| r.get(0),
         )?;
         Ok(seq)
     }

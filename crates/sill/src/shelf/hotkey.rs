@@ -145,7 +145,12 @@ impl Hotkey {
             let mut last_release: Option<(u8, u32)> = None;
             loop {
                 // drain what the server already delivered, then wait for the socket or a request
-                while let Ok(Some(ev)) = conn.poll_for_event() {
+                loop {
+                    let ev = match conn.poll_for_event() {
+                        Ok(Some(ev)) => ev,
+                        Ok(None) => break,
+                        Err(_) => return, // the X connection is gone: so is the thread, not spinning on it
+                    };
                     match ev {
                         Event::KeyRelease(k) => last_release = Some((k.detail, k.time)),
                         Event::KeyPress(k) => {
@@ -167,7 +172,7 @@ impl Hotkey {
                     }
                 }
                 let mut fds = [PollFd::new(&xsock, PollFlags::IN), PollFd::new(&wake_rd, PollFlags::IN)];
-                if poll(&mut fds, None).is_err() {
+                if poll(&mut fds, None).is_err() || fds[0].revents().intersects(PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL) {
                     break;
                 }
                 if fds[1].revents().contains(PollFlags::IN) {

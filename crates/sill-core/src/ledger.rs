@@ -16,7 +16,7 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::jail::Layer;
 
@@ -77,18 +77,29 @@ pub fn scan(layers: &[Layer], opts: &ScanOptions) -> Result<Vec<Change>> {
     Ok(out)
 }
 
+/// The entries of an upper directory, sorted; an unreadable one (a directory the agent made
+/// mode 000) is skipped with a warning instead of ending the whole scan (SPEC §4.11 #17).
+fn entries(dir: &Path) -> Vec<std::fs::DirEntry> {
+    let mut v: Vec<_> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd.filter_map(Result::ok).collect(),
+        Err(e) => {
+            tracing::warn!("ledger: {} not read ({e}); its changes are not listed", dir.display());
+            return Vec::new();
+        }
+    };
+    v.sort_by_key(|e| e.file_name());
+    v
+}
+
 fn walk(upper_root: &Path, host_root: &Path, dir: &Path, opts: &ScanOptions, out: &mut Vec<Change>) -> Result<()> {
-    let rd = std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))?;
-    let mut entries: Vec<_> = rd.collect::<std::io::Result<Vec<_>>>()?;
-    entries.sort_by_key(|e| e.file_name());
-    for e in entries {
+    for e in entries(dir) {
         let upper = e.path();
         let rel = upper.strip_prefix(upper_root).expect("below upper root");
         let host = host_root.join(rel);
         if opts.skip.iter().any(|s| host.starts_with(s)) {
             continue;
         }
-        let md = upper.symlink_metadata()?;
+        let Ok(md) = upper.symlink_metadata() else { continue };
         let ft = md.file_type();
         let host_md = host.symlink_metadata().ok();
         // Conflict: the host changed after the agent's copy was written (host mtime newer than the
@@ -169,7 +180,8 @@ fn walk(upper_root: &Path, host_root: &Path, dir: &Path, opts: &ScanOptions, out
             None => Kind::Added,
             Some(h) if file_type_of(&h.file_type()) != file_type => Kind::TypeChanged,
             Some(h) => {
-                if same_content(&upper, &md, &host, h)? {
+                // unreadable on either side: shown as modified rather than hidden
+                if same_content(&upper, &md, &host, h).unwrap_or(false) {
                     continue; // identical to the host: hidden (SPEC §4.4)
                 }
                 Kind::Modified
@@ -182,12 +194,11 @@ fn walk(upper_root: &Path, host_root: &Path, dir: &Path, opts: &ScanOptions, out
 
 /// Below a replaced or new directory: everything is Added, no host comparison.
 fn walk_new(upper_root: &Path, host_root: &Path, dir: &Path, opts: &ScanOptions, out: &mut Vec<Change>) -> Result<()> {
-    for e in std::fs::read_dir(dir)? {
-        let e = e?;
+    for e in entries(dir) {
         let upper = e.path();
         let rel = upper.strip_prefix(upper_root).expect("below upper root");
         let host = host_root.join(rel);
-        let md = upper.symlink_metadata()?;
+        let Ok(md) = upper.symlink_metadata() else { continue };
         if md.file_type().is_char_device() && md.rdev() == 0 {
             continue;
         }
