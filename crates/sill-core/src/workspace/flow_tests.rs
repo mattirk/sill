@@ -80,7 +80,7 @@ fn apply_now(s: &Path, c: &crate::workspace::Created) -> std::result::Result<App
 #[test]
 fn a_snapshot_takes_everything_but_ignored_files_and_touches_nothing() {
     let d = tmp("snap");
-    let (_, _, c) = setup(&d);
+    let (s, _, c) = setup(&d);
     write(&c.path.join("f1.txt"), "edited\n");
     write(&c.path.join("new.txt"), "untracked\n");
     write(&c.path.join("target/big"), "build output\n");
@@ -91,14 +91,14 @@ fn a_snapshot_takes_everything_but_ignored_files_and_touches_nothing() {
     assert_eq!(git(&c.path, &["show", &format!("{snap}:new.txt")]), "untracked");
     assert!(git(&c.path, &["ls-tree", "-r", "--name-only", &snap]).lines().all(|l| !l.starts_with("target")));
     assert_eq!(git(&c.path, &["rev-parse", &format!("{snap}^")]), git(&c.path, &["rev-parse", "HEAD"]));
-    assert!(unapplied(&c.path).unwrap());
+    assert!(unapplied(&s, &c.path, &c.branch).unwrap());
 }
 
 #[test]
 fn apply_brings_commits_and_uncommitted_work_and_can_repeat() {
     let d = tmp("apply");
     let (s, _, c) = setup(&d);
-    assert!(!unapplied(&c.path).unwrap(), "nothing to apply at the start");
+    assert!(!unapplied(&s, &c.path, &c.branch).unwrap(), "nothing to apply at the start");
     // a commit and an uncommitted edit, a new file and a deletion
     write(&c.path.join("f1.txt"), "committed\n");
     git(&c.path, &["commit", "-qam", "agent commit"]);
@@ -114,7 +114,7 @@ fn apply_brings_commits_and_uncommitted_work_and_can_repeat() {
     assert!(!s.join("f3.txt").exists());
     let status = git(&s, &["status", "--porcelain"]);
     assert!(status.contains("M f2.txt") && status.contains("?? added.txt") && status.contains("D f3.txt"), "uncommitted: {status}");
-    assert!(!unapplied(&c.path).unwrap());
+    assert!(!unapplied(&s, &c.path, &c.branch).unwrap());
     // the agent goes on: edits the same uncommitted file again, then commits it all
     write(&c.path.join("f2.txt"), "uncommitted, revised\n");
     apply_now(&s, &c).unwrap();
@@ -207,10 +207,10 @@ fn discard_returns_to_what_was_applied_and_undo_brings_it_back() {
     assert_eq!(read(&c.path.join("f3.txt")), "line 3\n");
     assert!(!c.path.join("scratch.txt").exists());
     assert!(c.path.join("target/out").exists(), "ignored build output kept");
-    assert!(!unapplied(&c.path).unwrap());
+    assert!(!unapplied(&s, &c.path, &c.branch).unwrap());
     assert_eq!(git(&s, &["rev-parse", "refs/sill/workspaces/w1/discarded/1"]), kept, "kept in the person's own store");
     // Undo brings all of it back
-    assert!(undo(&c.path, &c.branch, &kept).unwrap());
+    assert!(undo(&s, &c.path, &c.branch, &kept).unwrap());
     assert_eq!(read(&c.path.join("f2.txt")), "later\n");
     assert_eq!(read(&c.path.join("f3.txt")), "later uncommitted\n");
     assert_eq!(read(&c.path.join("scratch.txt")), "new\n");
@@ -218,15 +218,21 @@ fn discard_returns_to_what_was_applied_and_undo_brings_it_back() {
     // discarded again, then new work: Undo would overwrite it, so it refuses
     let kept = discard(&s, &c.path, "w1", "2", &c.branch).unwrap();
     write(&c.path.join("f2.txt"), "newer\n");
-    assert!(!undo(&c.path, &c.branch, &kept).unwrap());
+    assert!(!undo(&s, &c.path, &c.branch, &kept).unwrap());
     assert_eq!(read(&c.path.join("f2.txt")), "newer\n");
 }
 
+/// What Apply would bring, as the paths of the mirror's difference to the workspace.
+fn pending(s: &Path, c: &crate::workspace::Created) -> Vec<String> {
+    let m = mirror(s, &c.path, &c.branch).unwrap();
+    git(&c.path, &["diff", "--name-only", &m.commit, &m.now]).lines().map(str::to_string).collect()
+}
+
 /// The person reverts an applied file in their checkout and the agent reverts it in the
-/// workspace: both sides equal, nothing to bring, however the record of the last Apply reads.
+/// workspace: both sides equal, nothing to bring, whatever the last Apply recorded.
 #[test]
 fn a_revert_on_both_sides_leaves_nothing_to_apply() {
-    let d = tmp("reconcile");
+    let d = tmp("mirror-both");
     let (s, _, c) = setup(&d);
     write(&c.path.join("f1.txt"), "edited\n");
     write(&c.path.join("new.txt"), "untracked\n");
@@ -236,68 +242,85 @@ fn a_revert_on_both_sides_leaves_nothing_to_apply() {
     std::fs::remove_file(s.join("new.txt")).unwrap();
     git(&c.path, &["reset", "-q", "--hard"]);
     std::fs::remove_file(c.path.join("new.txt")).unwrap();
-    assert!(unapplied(&c.path).unwrap(), "the record alone still says the revert is pending");
-    assert!(reconcile(&s, &c.path).unwrap());
-    assert!(!unapplied(&c.path).unwrap(), "the person already has what the workspace has");
-    assert!(!reconcile(&s, &c.path).unwrap(), "settled once");
+    assert!(!unapplied(&s, &c.path, &c.branch).unwrap(), "the person already has what the workspace has");
     assert_eq!(git(&c.path, &["status", "--porcelain"]), "", "the workspace is untouched");
     assert_eq!(git(&s, &["status", "--porcelain"]), "", "the checkout is untouched");
-    // a later Discard has nothing to bring back
+    // a Discard has nothing to take back
     discard(&s, &c.path, "w1", "1", &c.branch).unwrap();
     assert_eq!(read(&c.path.join("f1.txt")), "line 1\n");
     assert!(!c.path.join("new.txt").exists());
 }
 
 /// The person resets their checkout after an Apply while the workspace keeps the change: the
-/// change is not theirs any more, so it is offered again and Apply brings it back.
+/// change is not theirs any more, so it is offered again and Apply brings it back. Their own
+/// edit of an applied file is theirs: offered as a difference, and it stops Apply.
 #[test]
 fn a_reset_checkout_gets_the_applied_change_offered_again() {
-    let d = tmp("reconcile-host");
+    let d = tmp("mirror-host");
     let (s, _, c) = setup(&d);
     write(&c.path.join("f1.txt"), "edited\n");
     write(&c.path.join("new.txt"), "untracked\n");
     apply_now(&s, &c).unwrap();
+    assert!(pending(&s, &c).is_empty());
     git(&s, &["reset", "-q", "--hard"]);
     std::fs::remove_file(s.join("new.txt")).unwrap();
     // the agent goes on in another file
     write(&c.path.join("f2.txt"), "more\n");
-    assert!(reconcile(&s, &c.path).unwrap());
-    let changed = git(&c.path, &["diff", "--name-only", APPLIED, &snapshot(&c.path, "x").unwrap()]);
-    assert_eq!(changed.lines().collect::<Vec<_>>(), ["f1.txt", "f2.txt", "new.txt"], "all of it is pending again");
-    assert!(!reconcile(&s, &c.path).unwrap(), "settled once");
+    assert_eq!(pending(&s, &c), ["f1.txt", "f2.txt", "new.txt"], "all of it is pending again");
     apply_now(&s, &c).unwrap();
     assert_eq!(read(&s.join("f1.txt")), "edited\n");
     assert_eq!(read(&s.join("new.txt")), "untracked\n");
     assert_eq!(read(&s.join("f2.txt")), "more\n");
-    assert!(!unapplied(&c.path).unwrap());
-    // the person's own different edit of an applied file is theirs: not taken into the record
+    assert!(!unapplied(&s, &c.path, &c.branch).unwrap());
     write(&s.join("f1.txt"), "the person's own\n");
-    assert!(!reconcile(&s, &c.path).unwrap());
+    assert_eq!(pending(&s, &c), ["f1.txt"]);
+    assert_eq!(apply_now(&s, &c).unwrap_err(), Stop::Overlap(vec!["f1.txt".into()]));
+    assert_eq!(read(&s.join("f1.txt")), "the person's own\n");
 }
 
-/// Reverting in the workspace alone is a real difference: the checkout still has the edit, and
-/// bringing the revert there is offered as before. The person's own other edit stays theirs.
+/// Reverting in the workspace alone is a real difference: the checkout still has the agent's
+/// applied edit, and bringing the revert there is offered. Once the person has overwritten that
+/// edit with their own, nothing of the agent's is anywhere: nothing is offered, theirs stays.
 #[test]
-fn a_revert_in_the_workspace_alone_still_offers_the_reverse() {
-    let d = tmp("reconcile-one");
+fn a_revert_in_the_workspace_alone_offers_the_reverse_of_the_agents_apply_only() {
+    let d = tmp("mirror-one");
     let (s, _, c) = setup(&d);
     write(&c.path.join("f1.txt"), "edited\n");
     apply_now(&s, &c).unwrap();
     git(&c.path, &["reset", "-q", "--hard"]);
-    assert!(!reconcile(&s, &c.path).unwrap());
-    assert!(unapplied(&c.path).unwrap(), "the checkout has the edit, the workspace does not");
+    assert_eq!(pending(&s, &c), ["f1.txt"], "the checkout has the edit, the workspace does not");
     apply_now(&s, &c).unwrap();
     assert_eq!(read(&s.join("f1.txt")), "line 1\n", "the revert is brought over");
-    assert!(!unapplied(&c.path).unwrap());
-    // the person edits the applied file to something else: theirs, and it stops Apply
+    assert!(!unapplied(&s, &c.path, &c.branch).unwrap());
     write(&c.path.join("f1.txt"), "edited again\n");
     apply_now(&s, &c).unwrap();
     write(&s.join("f1.txt"), "the person's own\n");
     git(&c.path, &["reset", "-q", "--hard"]);
-    assert!(!reconcile(&s, &c.path).unwrap());
-    assert!(unapplied(&c.path).unwrap());
-    assert_eq!(apply_now(&s, &c).unwrap_err(), Stop::Overlap(vec!["f1.txt".into()]));
+    assert!(!unapplied(&s, &c.path, &c.branch).unwrap(), "the person's own edit is not the agent's to take back");
     assert_eq!(read(&s.join("f1.txt")), "the person's own\n");
+}
+
+/// After a rebase onto the person's new commit, Discard keeps the workspace on that commit: the
+/// person's side is their tip, not where the workspace started (before 2026-11-09 it went back to
+/// the recorded Apply's base, undoing the rebase).
+#[test]
+fn discard_after_a_rebase_stays_on_the_persons_commit() {
+    let d = tmp("mirror-rebase");
+    let (s, _, c) = setup(&d);
+    write(&c.path.join("f1.txt"), "agent\n");
+    write(&s.join("f3.txt"), "the person's commit\n");
+    git(&s, &["commit", "-qam", "theirs"]);
+    git(&c.path, &["fetch", "-q", s.to_str().unwrap(), "main"]);
+    git(&c.path, &["rebase", "-q", "--autostash", "FETCH_HEAD"]);
+    assert_eq!(read(&c.path.join("f1.txt")), "agent\n", "the edit survives the rebase");
+    let m = mirror(&s, &c.path, &c.branch).unwrap();
+    assert_eq!(m.upstream, head(&s));
+    assert_eq!(pending(&s, &c), ["f1.txt"]);
+    discard(&s, &c.path, "w1", "1", &c.branch).unwrap();
+    assert_eq!(git(&c.path, &["rev-parse", &format!("refs/heads/{}", c.branch)]), head(&s), "still on the person's commit");
+    assert_eq!(read(&c.path.join("f1.txt")), "line 1\n");
+    assert_eq!(read(&c.path.join("f3.txt")), "the person's commit\n");
+    assert!(!unapplied(&s, &c.path, &c.branch).unwrap());
 }
 
 #[test]
@@ -333,6 +356,6 @@ fn a_reused_folder_keeps_build_output_but_nothing_a_session_planted() {
     assert!(!to.join(".git/hooks/post-checkout").exists());
     assert!(!std::fs::read_to_string(to.join(".git/info/exclude")).unwrap_or_default().contains("f2.txt"));
     assert_eq!(git(&to, &["status", "--porcelain"]), "");
-    assert!(!unapplied(&to).unwrap());
+    assert!(!unapplied(&s, &to, &made.branch).unwrap());
     git(&to, &["fsck"]);
 }

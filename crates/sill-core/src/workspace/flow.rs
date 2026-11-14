@@ -4,9 +4,12 @@
 //!
 //! A **snapshot** is a commit of a clone's whole state — its HEAD plus every tracked change and
 //! every untracked file that is not ignored — made with a private index, so the clone's own index
-//! and files are untouched. `refs/sill/applied` in the clone is the snapshot of the last Apply (at
-//! creation, of the base): what the person already has. All Git here runs through the hardened
-//! view ([`Git`]); nothing in either repository's config runs.
+//! and files are untouched. The **mirror** ([`mirror`]) is the person's side: the clone's state
+//! with the agent's paths as the checkout has them, read fresh from the checkout at every look;
+//! what Apply would bring and what Discard resets to. `refs/sill/applied` in the clone is the
+//! snapshot of the last Apply (at creation, of the base), kept to tell the agent's earlier Apply
+//! from the person's own edit of a dirty file. All Git here runs through the hardened view
+//! ([`Git`]); nothing in either repository's config runs.
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -69,56 +72,64 @@ pub fn set_applied(clone: &Path, snapshot: &str) -> Result<()> {
     ok(c, "applied ref").map(drop)
 }
 
-/// The person may change an applied file in their checkout after the Apply — revert it, reset
-/// the checkout, edit it — and then `refs/sill/applied` no longer says what they have. Every path
-/// of the agent's work (changed since the last Apply, or applied and not yet committed) is
-/// looked at in the checkout and the record follows it:
-/// - the checkout as recorded: nothing to do;
-/// - the checkout as the workspace is now: the record takes it, nothing is pending there (the
-///   person, 2026-11-09: a revert on both sides left the shelf offering the revert, and Discard
-///   brought the edit back);
-/// - the checkout as its own HEAD: the person took the change back, and the record does too, so
-///   the shelf offers it again (royal-horse, 2026-11-09: after a `git reset --hard` in the
-///   checkout, an applied file the workspace still had changed was no longer offered);
-/// - anything else is the person's own edit: left as it is, and it stops Apply.
-///
-/// Only the record moves; neither working tree is touched. Returns whether it moved.
-pub fn reconcile(source: &Path, clone: &Path) -> Result<bool> {
+/// The clone's `refs/sill/applied`.
+pub fn applied(clone: &Path) -> Result<String> {
+    rev(&Git::open(clone)?, APPLIED)
+}
+
+/// The person's side of a workspace, as it is now (§12): the workspace's state with every path of
+/// the agent's work — changed since where the workspace's own commits start, or applied and still
+/// uncommitted in the checkout — replaced by what the person's checkout has there. What Apply
+/// would bring is the difference from it to the workspace: nothing where the checkout already has
+/// the workspace's content, however it got there; a revert where the checkout has the agent's
+/// earlier Apply and the workspace no longer does. Discard resets the workspace to it. Made fresh
+/// from the checkout at every look, so no record of what the person has can go stale under them
+/// (2026-11-09; the recorded last Apply had, twice). `refs/sill/applied` stays only to tell the
+/// agent's earlier Apply from the person's own edit of a dirty file.
+pub struct Mirror {
+    /// A commit of the person's side in the clone's own store, its parent `upstream`: so
+    /// `rev-list commit..branch` is the workspace's own commits.
+    pub commit: String,
+    /// Where the workspace's own commits start: the checkout's tip when the workspace has it,
+    /// else their common ancestor (a rebase is due).
+    pub upstream: String,
+    /// The workspace's state now, as a snapshot.
+    pub now: String,
+}
+
+pub fn mirror(source: &Path, clone: &Path, workspace_branch: &str) -> Result<Mirror> {
     let ws = Git::open(clone)?;
-    let applied = rev(&ws, APPLIED)?;
-    let now = snapshot(clone, "sill: check")?;
     let src = Git::open(source)?;
-    // the agent's paths: changed since the last Apply, or applied but uncommitted
-    let mut paths: Vec<Entry> = diff_tree(&ws, &applied, &now)?;
-    for e in diff_tree(&ws, "HEAD", &applied)? {
-        if !paths.iter().any(|p| p.path == e.path) {
-            paths.push(e);
+    let tip = rev(&ws, &format!("refs/heads/{workspace_branch}"))?;
+    let (_, dest) = super::source_head(source)?;
+    let upstream = if super::descends(clone, &dest, &tip)? {
+        dest
+    } else {
+        let mut c = ws.cmd();
+        c.args(["merge-base", &dest, &tip]);
+        let out = run(c)?;
+        if out.status.success() { String::from_utf8_lossy(&out.stdout).trim().to_string() } else { rev(&ws, "refs/sill/base")? }
+    };
+    let now = snapshot(clone, "sill: check")?;
+    let applied = rev(&ws, APPLIED)?;
+    // the agent's paths: changed since upstream, or dirty in the checkout with the agent's content
+    let mut paths: Vec<String> = diff_tree(&ws, &upstream, &now)?.into_iter().filter(|e| e.mode != "160000").map(|e| e.path).collect();
+    for (x, _, path) in dirty(&src)? {
+        let staged = x != ' ' && x != '?';
+        if !staged && !paths.contains(&path) && worktree_blob(&src, source, &path)? == try_rev(&ws, &format!("{applied}:{path}"))? {
+            paths.push(path);
         }
     }
-    // (path, the record's new entry: mode and blob, None when absent)
-    let mut moved: Vec<(String, Option<(String, String)>)> = Vec::new();
-    for e in paths {
-        if e.mode == "160000" {
-            continue;
-        }
-        let host = worktree_blob(&src, source, &e.path)?;
-        if host == try_rev(&ws, &format!("{applied}:{}", e.path))? {
-            continue;
-        }
-        let in_now = try_rev(&ws, &format!("{now}:{}", e.path))?;
-        if host == in_now {
-            moved.push((e.path.clone(), in_now.map(|b| (tree_mode(&ws, &now, &e.path).unwrap_or_else(|| "100644".into()), b))));
-            continue;
-        }
-        let in_head = try_rev(&src, &format!("HEAD:{}", e.path))?;
-        if host == in_head {
-            moved.push((e.path.clone(), in_head.map(|b| (tree_mode(&src, "HEAD", &e.path).unwrap_or_else(|| "100644".into()), b))));
+    // what the checkout has on them, where that differs from the workspace
+    let mut entries: Vec<(String, Option<(String, String)>)> = Vec::new();
+    for path in paths {
+        let host = host_entry(&ws, source, &path)?;
+        let ours = try_rev(&ws, &format!("{now}:{path}"))?.map(|b| (tree_mode(&ws, &now, &path).unwrap_or_else(|| "100644".into()), b));
+        if host != ours {
+            entries.push((path, host));
         }
     }
-    if moved.is_empty() {
-        return Ok(false);
-    }
-    let index = ws.dirs().0.join(format!("sill-applied-index-{}", std::process::id()));
+    let index = ws.dirs().0.join(format!("sill-mirror-index-{}", std::process::id()));
     let _ = std::fs::remove_file(&index);
     let with = |args: &[&str]| {
         let mut c = ws.cmd_write();
@@ -130,32 +141,67 @@ pub fn reconcile(source: &Path, clone: &Path) -> Result<bool> {
         c
     };
     let made = (|| {
-        ok(with(&["read-tree", &applied]), "reconcile: read applied")?;
-        for (path, entry) in &moved {
-            match entry {
-                Some((mode, blob)) => ok(with(&["update-index", "--add", "--cacheinfo", &format!("{mode},{blob},{path}")]), "reconcile: update")?,
-                None => ok(with(&["update-index", "--force-remove", "--", path]), "reconcile: remove")?,
-            };
+        ok(with(&["read-tree", &now]), "mirror: read the workspace")?;
+        if !entries.is_empty() {
+            use std::io::Write;
+            let mut c = with(&["update-index", "-z", "--index-info"]);
+            c.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+            let mut child = c.spawn()?;
+            {
+                let mut stdin = child.stdin.take().context("no stdin")?;
+                let none = "0".repeat(applied.len());
+                for (path, entry) in &entries {
+                    match entry {
+                        Some((mode, blob)) => write!(stdin, "{mode} {blob}\t{path}\0")?,
+                        None => write!(stdin, "0 {none}\t{path}\0")?,
+                    }
+                }
+            }
+            let out = child.wait_with_output()?;
+            if !out.status.success() {
+                bail!("mirror: {}", String::from_utf8_lossy(&out.stderr).trim());
+            }
         }
-        let tree = ok(with(&["write-tree"]), "reconcile: write tree")?;
-        let parent = rev(&ws, &format!("{applied}^"))?;
-        ok(with(&["commit-tree", &tree, "-p", &parent, "-m", "sill: applied"]), "reconcile: commit")
+        let tree = ok(with(&["write-tree"]), "mirror: write tree")?;
+        ok(with(&["commit-tree", &tree, "-p", &upstream, "-m", "sill: mirror"]), "mirror: commit")
     })();
     let _ = std::fs::remove_file(&index);
-    set_applied(clone, &made?)?;
-    Ok(true)
+    Ok(Mirror { commit: made?, upstream, now })
 }
 
-/// The clone's `refs/sill/applied`.
-pub fn applied(clone: &Path) -> Result<String> {
-    rev(&Git::open(clone)?, APPLIED)
+/// The checkout's entry at `path`, its blob written into the clone's own store: mode and blob, or
+/// None when there is no file there (a link's target is the blob, never followed).
+fn host_entry(ws: &Git, root: &Path, path: &str) -> Result<Option<(String, String)>> {
+    use std::os::unix::fs::PermissionsExt;
+    let full = root.join(path);
+    let Ok(meta) = std::fs::symlink_metadata(&full) else { return Ok(None) };
+    if meta.file_type().is_symlink() {
+        use std::io::Write;
+        let target = std::fs::read_link(&full)?;
+        let mut c = ws.cmd_write();
+        c.args(["hash-object", "-w", "--no-filters", "--stdin"]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped());
+        let mut child = c.spawn()?;
+        child.stdin.take().context("no stdin")?.write_all(target.as_os_str().as_encoded_bytes())?;
+        let out = child.wait_with_output()?;
+        if !out.status.success() {
+            bail!("hash-object: {}", String::from_utf8_lossy(&out.stderr).trim());
+        }
+        return Ok(Some(("120000".into(), String::from_utf8_lossy(&out.stdout).trim().to_string())));
+    }
+    if !meta.is_file() {
+        return Ok(None);
+    }
+    let mode = if meta.permissions().mode() & 0o111 != 0 { "100755" } else { "100644" };
+    let mut c = ws.cmd_write();
+    c.args(["hash-object", "-w", "--no-filters", "--"]).arg(&full);
+    Ok(Some((mode.into(), ok(c, "hash-object")?)))
 }
 
-/// Whether the clone differs from what the person has: its whole state against `refs/sill/applied`.
-pub fn unapplied(clone: &Path) -> Result<bool> {
+/// Whether the workspace has anything to bring: its state against the person's side ([`mirror`]).
+pub fn unapplied(source: &Path, clone: &Path, workspace_branch: &str) -> Result<bool> {
+    let m = mirror(source, clone, workspace_branch)?;
     let git = Git::open(clone)?;
-    let now = snapshot(clone, "sill: check")?;
-    Ok(rev(&git, &format!("{now}^{{tree}}"))? != rev(&git, &format!("{APPLIED}^{{tree}}"))?)
+    Ok(rev(&git, &format!("{}^{{tree}}", m.commit))? != rev(&git, &format!("{}^{{tree}}", m.now))?)
 }
 
 /// One entry of `git diff-tree -r -z`: new mode and blob (None when deleted) and the path.
@@ -428,7 +474,9 @@ pub fn reset_to(clone: &Path, workspace_branch: &str, snap: &str) -> Result<()> 
 
 /// Discard (§12): keep the clone's whole state as a snapshot in the source's own store
 /// (`refs/sill/workspaces/<id>/discarded/<n>`, for Undo even after the folder is reused), then
-/// reset the clone to what was last applied. Returns the discarded snapshot.
+/// reset the clone to the person's side ([`mirror`]): their checkout's content on the agent's
+/// paths, the branch at their tip (after a rebase, still on their commit). Returns the discarded
+/// snapshot.
 pub fn discard(source: &Path, clone: &Path, id: &str, n: &str, workspace_branch: &str) -> Result<String> {
     if clone.join(".git/rebase-merge").exists() || clone.join(".git/rebase-apply").exists() {
         bail!("a rebase is stopped in the workspace");
@@ -444,9 +492,9 @@ pub fn discard(source: &Path, clone: &Path, id: &str, n: &str, workspace_branch:
         .arg(ws.view_dir())
         .arg(format!("+refs/sill/discarding:{}", super::anchor_ref(id, &format!("discarded/{n}"))));
     ok(c, "keep the discarded work")?;
-    let applied = rev(&ws, APPLIED)?;
     drop(ws);
-    reset_to(clone, workspace_branch, &applied)?;
+    let m = mirror(source, clone, workspace_branch)?;
+    reset_to(clone, workspace_branch, &m.commit)?;
     let ws = Git::open(clone)?;
     let mut c = ws.cmd_write();
     c.args(["update-ref", "-d", "refs/sill/discarding"]);
@@ -454,10 +502,10 @@ pub fn discard(source: &Path, clone: &Path, id: &str, n: &str, workspace_branch:
     Ok(snap)
 }
 
-/// Undo a Discard: put snapshot `discarded` back, only while the clone still is what was applied
+/// Undo a Discard: put snapshot `discarded` back, only while the clone has nothing to bring
 /// (nothing done since the Discard). `Ok(false)` when it changed.
-pub fn undo(clone: &Path, workspace_branch: &str, discarded: &str) -> Result<bool> {
-    if unapplied(clone)? {
+pub fn undo(source: &Path, clone: &Path, workspace_branch: &str, discarded: &str) -> Result<bool> {
+    if unapplied(source, clone, workspace_branch)? {
         return Ok(false);
     }
     reset_to(clone, workspace_branch, discarded)?;

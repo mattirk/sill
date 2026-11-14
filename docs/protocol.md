@@ -784,13 +784,14 @@ workspaces when its jail starts; there is no create method.
 and repositories kept live with their reason). `_sill/workspaces.list` (live keyset pages, newest
 first, optionally one session's; the first page lists discarded work still undoable),
 `_sill/workspaces.get` (record, current `revision`, what an Apply would bring, `needs_rebase`) and
-`_sill/workspaces.diff` (against what was applied, or against the base; at most 4 MiB) read.
+`_sill/workspaces.diff` (against what the person has — their checkout on the agent's paths — or
+against the base; at most 4 MiB) read.
 `_sill/workspaces.prepare` rebases onto a moved checkout in a helper jail built from the session's
 next build (no network), keeping uncommitted changes; a rebase that stops is left for the
 workspace (`conflicts`, `operation` reads `rebase`/`conflict`) and `_sill/workspaces.abort` undoes
 it. `_sill/workspaces.apply` brings exactly the revision the person saw — commits by fast-forward,
 uncommitted changes into the working tree — and the workspace goes on. `_sill/workspaces.discard`
-resets the workspace to what was applied and keeps the work 7 days; `_sill/workspaces.undo` puts it
+resets the workspace to what the person has and keeps the work 7 days; `_sill/workspaces.undo` puts it
 back. `_sill/workspaces.changed` (notification, this capability only) invalidates one workspace.
 
 Mutations take an `operation_id` with the receipts of [sfp-operations.md](sfp-operations.md): an

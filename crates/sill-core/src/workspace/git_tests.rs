@@ -330,7 +330,7 @@ fn no_program_from_either_config_runs_on_the_host() {
     super::flow::set_applied(&c.path, &a.snapshot).unwrap();
     write(&c.path.join("f3.txt"), "more\n");
     let kept = super::flow::discard(&s, &c.path, "ab12", "1", &c.branch).unwrap();
-    assert!(super::flow::undo(&c.path, &c.branch, &kept).unwrap());
+    assert!(super::flow::undo(&s, &c.path, &c.branch, &kept).unwrap());
     let spare = super::flow::spare_path(&d.0.join("ws"), &s);
     std::fs::create_dir_all(spare.parent().unwrap()).unwrap();
     std::fs::rename(&c.path, &spare).unwrap();
