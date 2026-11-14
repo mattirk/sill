@@ -65,6 +65,11 @@ Unused tokens expire in 60 seconds; at most 64 wait at once. Descriptors never c
 Rust control calls default to a 120-second deadline (5 seconds for daemon status/shutdown);
 timeout closes the connection and does not establish whether a mutation took effect.
 
+The proposed [VM management API](managed-vms.md#vm-management-api-and-sfp) would serve a
+separate host-side VM manager, with its own protocol identity and version. SFP would still
+connect the frontend to the guest session daemon. Reusing SFP conventions for VM management
+does not add VM lifecycle methods to the current contract; that API remains unspecified.
+
 ## Conversation and administration
 
 The implemented public conversation surface is `_sill/sessions.attach`,
