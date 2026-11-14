@@ -67,13 +67,6 @@ impl std::fmt::Display for Kind {
     }
 }
 
-// A hint, not a probe: custom ports can be identified explicitly in the form.
-fn likely_ollama(address: &str) -> bool {
-    address.trim_end_matches('/').ends_with("/v1")
-        && address.split("://").nth(1).and_then(|s| s.split('/').next())
-            .is_some_and(|authority| authority.ends_with(":11434"))
-}
-
 #[derive(Default)]
 struct LimitInputs {
     context: String,
@@ -109,8 +102,6 @@ struct Form {
     /// The id of the provider being edited; a new one gets its id from its name.
     editing: Option<String>,
     kind: Kind,
-    ollama: bool,
-    ollama_choice: Option<bool>,
     limits_model: Option<String>,
     name: String,
     address: String,
@@ -136,8 +127,6 @@ impl Form {
         Form {
             editing: None,
             kind,
-            ollama: false,
-            ollama_choice: None,
             limits_model: None,
             name: kind.name().into(),
             address: kind.address().into(),
@@ -161,8 +150,6 @@ impl Form {
         Form {
             editing: Some(p.id.clone()),
             kind: Kind::Other,
-            ollama: likely_ollama(&p.base_url),
-            ollama_choice: None,
             name: p.name.clone(),
             address: p.base_url.clone(),
             had_key: entry.has_key,
@@ -238,7 +225,6 @@ pub enum Event {
     Address(String),
     Key(String),
     ClearKey(bool),
-    Ollama(bool),
     LimitsModel(String),
     Context(String, String),
     Output(String, String),
@@ -434,12 +420,10 @@ fn form_view(form: &Form) -> Element<'_, Message> {
             limits = limits.push(text(why).size(style::SMALL).color(P.error));
         }
         let detecting = form.detecting.as_ref().is_some_and(|(_, m)| m == model);
-        limits = limits.push(checkbox(form.ollama).label("Ollama server (enable context detection)")
-            .text_size(style::SMALL).on_toggle(|on| msg(Event::Ollama(on))));
-        if form.ollama {
-            limits = limits.push(control(if detecting { "Detecting…" } else { "Detect Ollama context" },
-                (!form.saving && form.detecting.is_none() && !form.address.trim().is_empty()).then(|| Event::Detect(model.clone()))));
-        }
+        // Offered for every endpoint: nothing in the record says which server answers, and one
+        // that is not Ollama answers with the reason.
+        limits = limits.push(control(if detecting { "Detecting…" } else { "Detect Ollama context" },
+            (!form.saving && form.detecting.is_none() && !form.address.trim().is_empty()).then(|| Event::Detect(model.clone()))));
         if let Some(result) = form.detected.get(model) {
             limits = match result {
                 Ok(n) => limits.push(
@@ -580,14 +564,11 @@ impl App {
                             form.address = kind.address().into();
                         }
                         form.kind = kind;
-                        form.ollama_choice = Some(kind == Kind::Ollama);
-                        form.ollama = kind == Kind::Ollama;
                         form.detecting = None;
                         form.detected.clear();
                     }
                     Event::Name(s) => form.name = s,
                     Event::Address(s) => {
-                        form.ollama = form.ollama_choice.unwrap_or_else(|| likely_ollama(&s));
                         (form.address, form.status) = (s, None);
                         form.detecting = None;
                         form.detected.clear();
@@ -618,12 +599,6 @@ impl App {
                         }
                     }
                     Event::Default(model) => form.default_model = Some(model).filter(|m| m != AGENT_CHOOSES),
-                    Event::Ollama(on) => {
-                        form.ollama_choice = Some(on);
-                        form.ollama = on;
-                        form.detecting = None;
-                        form.detected.clear();
-                    }
                     Event::LimitsModel(model) => form.limits_model = Some(model),
                     Event::Context(model, v) => form.limits.entry(model).or_default().context = v,
                     Event::Output(model, v) => form.limits.entry(model).or_default().output = v,
@@ -633,7 +608,7 @@ impl App {
                         }
                     }
                     Event::Detect(model) => {
-                        if !form.ollama || form.detecting.is_some() || form.saving || !form.ticked.contains(&model)
+                        if form.detecting.is_some() || form.saving || !form.ticked.contains(&model)
                         {
                             return Task::none();
                         }
@@ -737,27 +712,10 @@ mod tests {
     }
 
     #[test]
-    fn detection_requires_ollama_and_limit_editor_selects_one_model() {
+    fn the_limit_editor_selects_one_model() {
         let (mut app, _) = App::new(true, None);
         let _ = app.providers_event(listed(&["opencode"]));
         let _ = app.providers_event(Event::Edit("one".into()));
-        assert!(!app.agents_page.providers.form.as_ref().unwrap().ollama);
-        let _ = app.providers_event(Event::Address("https://openrouter.ai/api/v1".into()));
-        assert!(!app.agents_page.providers.form.as_ref().unwrap().ollama);
-        let _ = app.providers_event(Event::Address("http://server.example:1234/v1".into()));
-        assert!(!app.agents_page.providers.form.as_ref().unwrap().ollama);
-        let _ = app.providers_event(Event::Ollama(true));
-        assert!(app.agents_page.providers.form.as_ref().unwrap().ollama, "custom ports need explicit opt-in");
-        let _ = app.providers_event(Event::Address("http://server.example:11434/v1".into()));
-        assert!(app.agents_page.providers.form.as_ref().unwrap().ollama);
-        let _ = app.providers_event(Event::Address("http://custom.example:12345/v1".into()));
-        assert!(app.agents_page.providers.form.as_ref().unwrap().ollama);
-        let _ = app.providers_event(Event::Ollama(false));
-        let _ = app.providers_event(Event::Address("http://server.example:11434/v1".into()));
-        assert!(!app.agents_page.providers.form.as_ref().unwrap().ollama);
-        let mut saved = entry("lan", false);
-        saved.provider.base_url = "http://server.example:11434/v1".into();
-        assert!(Form::of(&saved).ollama, "editing an Ollama address keeps detection available");
         let _ = app.providers_event(Event::Context("a".into(), "32768".into()));
         let _ = app.providers_event(Event::LimitsModel("b".into()));
         let _ = app.providers_event(Event::Context("b".into(), "16384".into()));
@@ -775,7 +733,6 @@ mod tests {
         let mut form = Form::new();
         form.editing = Some("lan-ollama".into());
         form.kind = Kind::Ollama;
-        form.ollama = true;
         form.name = "Ollama (workstation)".into();
         form.address = "http://192.168.1.20:11434/v1".into();
         let model = "qwen3-coder:30b".to_string();
