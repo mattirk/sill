@@ -5,7 +5,7 @@
 //! Sessions' conversations arrive as `_sill/session.event` notifications on that one connection; a
 //! dispatcher thread per connection hands each to the view attached to its session, as the
 //! `acp::Event` the view has always rendered. When the connection goes, every view attached through
-//! it gets `Ended` and attaches again on its next prompt.
+//! it reconnects with backoff and restores live subscriptions without ending their views.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -23,7 +23,14 @@ fn slot() -> &'static Mutex<Option<Arc<Client>>> {
 }
 
 /// Session id → (the view's event channel, the connection it attached through).
-type Subs = Mutex<HashMap<String, (async_channel::Sender<Event>, usize)>>;
+#[derive(Clone)]
+struct Subscription {
+    events: async_channel::Sender<Event>,
+    connection: usize,
+    generation: u64,
+}
+static NEXT_SUB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+type Subs = Mutex<HashMap<String, Subscription>>;
 static SUBS: OnceLock<Subs> = OnceLock::new();
 
 fn subs() -> &'static Subs {
@@ -119,7 +126,9 @@ fn call_on<T: DeserializeOwned>(l: &'static Lane, method: &str, params: impl Ser
 }
 
 fn write<T: DeserializeOwned>(method: &str, params: impl Serialize + Clone) -> Result<T> {
-    call_on(&WRITER, method, params)
+    let result = call_on(&WRITER, method, params);
+    if result.is_ok() { super::remote::invalidate(); }
+    result
 }
 
 /// A request that must not queue (see [`QUICK`]).
@@ -171,11 +180,6 @@ pub fn note_remove(id: &str, ts: i64, text: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn set_agent_settings(agent: &str, settings: &sill_core::store::AgentSettings) -> Result<()> {
-    write::<serde_json::Value>(sill_proto::method::AGENTS_SET_SETTINGS, sill_proto::AgentSettingsSet { agent: agent.to_string(), settings: settings.clone() })?;
-    Ok(())
-}
-
 pub fn compact() -> Result<sill_proto::Compacted> {
     write(sill_proto::method::MEMORY_COMPACT, sill_proto::Empty::default())
 }
@@ -219,30 +223,55 @@ pub fn session_log(id: &str, lines: usize) -> String {
 /// Attach to a session's conversation (the daemon starts jail and agent when needed): its events
 /// go to `events` from now on — the session's current state first. Registered before the call, so
 /// nothing the daemon sends ahead of its answer is lost.
-pub fn attach(id: &str, fresh: bool, events: async_channel::Sender<Event>) -> Result<()> {
+pub fn attach(id: &str, fresh: bool, events: async_channel::Sender<Event>) -> Result<u64> {
     let req = sill_proto::Attach { key: id.to_string(), fresh };
+    let generation = NEXT_SUB.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut c = connected()?;
+    subs().lock().unwrap().insert(id.to_string(), Subscription { events, connection: tag(&c), generation });
     let mut tries = 0;
     loop {
-        let c = connected()?;
-        subs().lock().unwrap().insert(id.to_string(), (events.clone(), tag(&c)));
         match c.call::<serde_json::Value>(sill_proto::method::SESSIONS_ATTACH, req.clone()) {
             Err(e) if Client::is_closed(&e) && tries == 0 => {
                 forget(&c);
                 tries += 1;
+                let next = connected()?;
+                let mut all = subs().lock().unwrap();
+                let Some(sub) = all.get_mut(id).filter(|s| s.generation == generation) else { return Ok(generation) };
+                sub.connection = tag(&next);
+                drop(all);
+                c = next;
             }
             Err(e) => {
-                subs().lock().unwrap().remove(id);
+                let mut all = subs().lock().unwrap();
+                if all.get(id).is_some_and(|s| s.generation == generation) { all.remove(id); }
                 return Err(e);
             }
-            Ok(_) => return Ok(()),
+            Ok(_) => {
+                detach_abandoned(&c, id);
+                return Ok(generation);
+            }
         }
     }
 }
 
+fn detach_abandoned(c: &Arc<Client>, id: &str) {
+    let still_used = subs().lock().unwrap().get(id).is_some_and(|s| s.connection == tag(c));
+    if !still_used {
+        let _ = c.call::<serde_json::Value>(sill_proto::method::SESSIONS_DETACH, sill_proto::Key { key: id.into() });
+    }
+}
+
 /// The view is done with the session (its tab closed or its driver replaced).
-pub fn detach(id: &str) {
-    subs().lock().unwrap().remove(id);
-    let _ = call::<serde_json::Value>(sill_proto::method::SESSIONS_DETACH, sill_proto::Key { key: id.to_string() });
+pub fn detach(id: &str, generation: u64) {
+    let current = slot().lock().unwrap().clone();
+    let mut all = subs().lock().unwrap();
+    if !all.get(id).is_some_and(|s| s.generation == generation) { return; }
+    let sub = all.remove(id).unwrap();
+    // Serialize removal with the next driver's registration. A delayed old driver's Quit must
+    // not unsubscribe a replacement that has already attached through the same connection.
+    if let Some(c) = current.filter(|c| tag(c) == sub.connection) {
+        let _ = c.call_within::<serde_json::Value>(sill_proto::method::SESSIONS_DETACH, sill_proto::Key { key: id.into() }, sill_proto::client::QUICK_TIMEOUT);
+    }
 }
 
 /// A command to the session: a refusal (a turn running, the session gone) comes back as the error.
@@ -271,7 +300,14 @@ fn dispatch(c: Arc<Client>) {
         let next = c.notifications.lock().unwrap().recv();
         let Ok((method, params)) = next else { break };
         if method == sill_proto::method::CHANGES_CHANGED {
+            super::remote::invalidate();
             lifecycle(String::new(), Lifecycle::ChangesChanged);
+            continue;
+        }
+        if method == sill_proto::method::SESSION_REPLAY {
+            let Some(key) = params.get("key").and_then(|v| v.as_str()) else { continue };
+            let tx = subs().lock().unwrap().get(key).filter(|s| s.connection == me).map(|s| s.events.clone());
+            if let Some(tx) = tx { let _ = tx.send_blocking(Event::Other(format!("sill:replay:{params}"))); }
             continue;
         }
         if method != sill_proto::method::SESSION_EVENT {
@@ -280,6 +316,7 @@ fn dispatch(c: Arc<Client>) {
         let Ok(n) = serde_json::from_value::<sill_proto::SessionEvent>(params) else { continue };
         let wire = n.event;
         if matches!(wire, sill_core::wire::Event::SessionEnded { .. } | sill_core::wire::Event::Summarized { .. } | sill_core::wire::Event::Note(_)) {
+            super::remote::invalidate();
             lifecycle(n.key, Lifecycle::Event(wire));
             continue;
         }
@@ -295,7 +332,7 @@ fn dispatch(c: Arc<Client>) {
             }
             _ => {}
         }
-        let Some(tx) = subs().lock().unwrap().get(&n.key).filter(|(_, t)| *t == me).map(|(tx, _)| tx.clone()) else { continue };
+        let Some(tx) = subs().lock().unwrap().get(&n.key).filter(|s| s.connection == me).map(|s| s.events.clone()) else { continue };
         let key = n.key.clone();
         // a question: the view answers through a reply channel, the answer goes to the daemon
         let ev = sill_core::wire::event_into_acp(wire, move |request, answer| {
@@ -311,13 +348,83 @@ fn dispatch(c: Arc<Client>) {
         }
     }
     forget(&c);
-    open().lock().unwrap().clear();
-    let gone: Vec<async_channel::Sender<Event>> = {
-        let mut s = subs().lock().unwrap();
-        let ids: Vec<String> = s.iter().filter(|(_, (_, t))| *t == me).map(|(k, _)| k.clone()).collect();
-        ids.into_iter().filter_map(|k| s.remove(&k)).map(|(tx, _)| tx).collect()
+    super::remote::invalidate();
+    let waiting: Vec<(String, u64)> = {
+        let mut all = subs().lock().unwrap();
+        all.retain(|_, sub| !sub.events.is_closed());
+        all.iter_mut().filter_map(|(id, sub)| {
+            if sub.connection != me { return None; }
+            sub.connection = 0;
+            let _ = sub.events.try_send(Event::Other("sill:reconnecting".into()));
+            Some((id.clone(), sub.generation))
+        }).collect()
     };
-    for tx in gone {
-        let _ = tx.send_blocking(Event::Ended(Some("the connection to the sill daemon closed".into())));
+    // Request numbers belong to the restored runner. Replayed pending questions install their
+    // new reply channels; never forward an answer through a stale permission widget.
+    let ids: std::collections::HashSet<&str> = waiting.iter().map(|(id, _)| id.as_str()).collect();
+    open().lock().unwrap().retain(|(id, _), _| !ids.contains(id.as_str()));
+    if !waiting.is_empty() {
+        let _ = std::thread::Builder::new().name("sill-client-reconnect".into()).spawn(move || reconnect(waiting));
+    }
+}
+
+/// A stale reconnect may race a tab closing or a new driver. Generation checks ensure it cannot
+/// resurrect that old subscription or remove its replacement.
+fn reconnect(mut waiting: Vec<(String, u64)>) {
+    let mut delay = std::time::Duration::from_millis(100);
+    while !waiting.is_empty() {
+        waiting.retain(|(id, generation)| subs().lock().unwrap().get(id)
+            .is_some_and(|s| s.generation == *generation && !s.events.is_closed() && s.connection == 0));
+        if waiting.is_empty() { return; }
+        std::thread::sleep(delay);
+        let c = match connected() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("sill: reconnecting to the daemon: {e:#}");
+                delay = (delay * 2).min(std::time::Duration::from_secs(5));
+                continue;
+            }
+        };
+        let mut retry = Vec::new();
+        for (id, generation) in waiting {
+            let events = {
+                let mut all = subs().lock().unwrap();
+                let Some(sub) = all.get_mut(&id).filter(|s| s.generation == generation && s.connection == 0) else { continue };
+                sub.connection = tag(&c); // register before replay starts
+                sub.events.clone()
+            };
+            let result = (|| -> Result<()> {
+                let session: sill_proto::Session = c.call(sill_proto::method::SESSIONS_GET, sill_proto::Key { key: id.clone() })?;
+                if session.ended_at.is_some() {
+                    lifecycle(id.clone(), Lifecycle::Event(sill_core::wire::Event::SessionEnded { deleted: false, reason: "ended".into() }));
+                    anyhow::bail!("the session ended while the daemon reconnected");
+                }
+                c.call::<serde_json::Value>(sill_proto::method::SESSIONS_ATTACH, sill_proto::Attach { key: id.clone(), fresh: false })?;
+                Ok(())
+            })();
+            match result {
+                Ok(()) => {
+                    // A detach during the request must still win. Do not detach a replacement
+                    // driver which has already attached through this same connection.
+                    detach_abandoned(&c, &id);
+                }
+                Err(e) if Client::is_closed(&e) => {
+                    forget(&c);
+                    let mut all = subs().lock().unwrap();
+                    if let Some(sub) = all.get_mut(&id).filter(|s| s.generation == generation) {
+                        sub.connection = 0;
+                        retry.push((id, generation));
+                    }
+                }
+                Err(e) => {
+                    let mut all = subs().lock().unwrap();
+                    if all.get(&id).is_some_and(|s| s.generation == generation) { all.remove(&id); }
+                    drop(all);
+                    let _ = events.send_blocking(Event::Ended(Some(format!("reattaching: {e:#}"))));
+                }
+            }
+        }
+        waiting = retry;
+        delay = (delay * 2).min(std::time::Duration::from_secs(5));
     }
 }

@@ -17,7 +17,7 @@ use gtk::glib;
 use gtk::prelude::*;
 use sill_core::changes;
 use sill_core::ledger::Change;
-use sill_core::store::Store;
+use super::remote_store::Store;
 
 use super::{session, theme};
 
@@ -32,21 +32,7 @@ const OPEN_LIMIT: u32 = 600;
 /// one) — no git process, so it is cheap enough for every bind; the tree watches `.git`, so a
 /// checkout re-decorates the row.
 fn head_label(repo: &Path) -> Option<(String, bool)> {
-    let dot = repo.join(".git");
-    let gitdir = if dot.is_file() {
-        let text = std::fs::read_to_string(&dot).ok()?;
-        let rel = text.strip_prefix("gitdir:")?.trim();
-        let p = Path::new(rel);
-        if p.is_absolute() { p.to_path_buf() } else { repo.join(p) }
-    } else {
-        dot
-    };
-    let head = std::fs::read_to_string(gitdir.join("HEAD")).ok()?;
-    let head = head.trim();
-    Some(match head.strip_prefix("ref:") {
-        Some(r) => (r.trim().strip_prefix("refs/heads/").unwrap_or(r.trim()).to_string(), false),
-        None => (head.chars().take(7).collect(), true),
-    })
+    super::remote::head(repo)
 }
 
 /// A search shows at most this many results and looks at this many entries (a home full of
@@ -58,35 +44,7 @@ const SEARCH_VISITS: usize = 50_000;
 /// contains `q` (already lower-cased). Breadth-first so the shallow hits come first, noise folders
 /// and links skipped, results sorted by path; `(found, cut)` where `cut` says a limit stopped it.
 fn find_files(bases: &[PathBuf], q: &str, cap: usize, visits: usize) -> (Vec<PathBuf>, bool) {
-    let by_path = q.contains('/');
-    let mut found: Vec<PathBuf> = Vec::new();
-    let mut seen = 0usize;
-    let mut cut = false;
-    'bases: for base in bases {
-        let mut queue: std::collections::VecDeque<PathBuf> = std::collections::VecDeque::from([base.clone()]);
-        while let Some(dir) = queue.pop_front() {
-            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
-            for e in rd.flatten() {
-                seen += 1;
-                if seen > visits || found.len() >= cap {
-                    cut = true;
-                    break 'bases;
-                }
-                let name = e.file_name().to_string_lossy().into_owned();
-                let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false); // a link is neither followed nor listed as a dir
-                let path = e.path();
-                let hay = if by_path { path.strip_prefix(base).map(|r| r.to_string_lossy().to_lowercase()).unwrap_or_default() } else { name.to_lowercase() };
-                if hay.contains(q) {
-                    found.push(path.clone());
-                }
-                if is_dir && !is_noise(&name) {
-                    queue.push_back(path);
-                }
-            }
-        }
-    }
-    found.sort();
-    (found, cut)
+    super::remote::find(bases, q, cap, visits)
 }
 
 fn is_noise(name: &str) -> bool {
@@ -132,24 +90,19 @@ fn row_glyph(path: &Path, is_dir: bool, expanded: bool) -> &'static str {
 /// A directory itself — not a link to one: the tree lists what is in a pin, never what a link in it
 /// points at elsewhere on the host (security.md S9).
 fn is_real_dir(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).map(|m| m.is_dir()).unwrap_or(false)
+    super::remote::is_dir(path)
 }
 
 fn is_link(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).map(|m| m.is_symlink()).unwrap_or(false)
+    super::remote::metadata(path).is_ok_and(|m| m.symlink)
 }
 
 /// A directory's entries as full paths: directories first, dot files last, case-insensitive.
 /// `ghosts`: paths (below `dir`) that a session's overlay has and the host hasn't — listed as files
 /// too, so a change always has a row (a folder's dot never points at nothing).
 fn list_dir(dir: &Path, ghosts: &[String]) -> Vec<String> {
-    let mut entries: Vec<(bool, String)> = std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.filter_map(Result::ok)
-                .map(|e| (e.file_type().map(|t| t.is_dir()).unwrap_or(false), e.file_name().to_string_lossy().into_owned()))
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut entries: Vec<(bool, String)> = super::remote::list(dir).unwrap_or_default().into_iter()
+        .map(|e| (e.metadata.directory, e.path.file_name().unwrap_or_default().to_string_lossy().into_owned())).collect();
     for g in ghosts {
         let name = Path::new(g).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         if !name.is_empty() && !entries.iter().any(|(_, n)| *n == name) {
@@ -208,7 +161,7 @@ impl Badge {
 fn ghosts(badges: &BTreeMap<PathBuf, Badge>, dir: &Path) -> Vec<String> {
     badges
         .iter()
-        .filter(|(p, b)| p.parent() == Some(dir) && b.is_change() && !p.exists())
+        .filter(|(p, b)| p.parent() == Some(dir) && b.is_change() && !super::remote::exists(p))
         .map(|(p, _)| p.to_string_lossy().into_owned())
         .collect()
 }
@@ -217,6 +170,10 @@ fn ghosts(badges: &BTreeMap<PathBuf, Badge>, dir: &Path) -> Vec<String> {
 /// ones inserted at their place; everything else keeps its row (and what is expanded below it).
 fn sync_children(dir: &Path, store: &gio::ListStore, ghosts: &[String]) {
     let wanted = list_dir(dir, ghosts);
+    sync_names(store, &wanted);
+}
+
+fn sync_names(store: &gio::ListStore, wanted: &[String]) {
     let (mut i, mut w) = (0u32, 0usize);
     loop {
         let have = store.item(i).and_downcast::<gtk::StringObject>().map(|o| o.string().to_string());
@@ -242,6 +199,27 @@ fn sync_children(dir: &Path, store: &gio::ListStore, ghosts: &[String]) {
             }
             (None, None) => break,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn sync_keeps_unchanged_row_objects() {
+        if gtk::init().is_err() { return }
+        let store = gio::ListStore::new::<gtk::StringObject>();
+        sync_names(&store, &["a".into(), "c".into()]);
+        let first = store.item(0).unwrap();
+        let last = store.item(1).unwrap();
+        sync_names(&store, &["a".into(), "b".into(), "c".into()]);
+        assert_eq!(store.item(0).unwrap(), first);
+        assert_eq!(store.item(2).unwrap(), last);
+        sync_names(&store, &["c".into()]);
+        assert_eq!(store.item(0).unwrap(), last);
+        assert_eq!(store.n_items(), 1);
+        sync_names(&store, &[]);
+        assert_eq!(store.n_items(), 0);
     }
 }
 
@@ -294,6 +272,7 @@ pub struct FolderTree {
     /// Watches on every listed directory and on the repositories' `.git`: the tree follows what
     /// happens on disk (the agent's writes, hand edits, commits) while it is shown.
     monitors: RefCell<BTreeMap<PathBuf, gio::FileMonitor>>,
+    poll: RefCell<Option<glib::SourceId>>,
     refresh_pending: std::cell::Cell<bool>,
     /// A scan is in flight; a refresh asked meanwhile runs once more after it (`again`).
     scanning: std::cell::Cell<bool>,
@@ -499,7 +478,7 @@ impl FolderTree {
                 // tooltip says so —, a folder with changes below in a softer warning with the list
                 name.set_tooltip_text(None);
                 if link {
-                    let target = std::fs::read_link(&path).map(|t| t.display().to_string()).unwrap_or_else(|_| "?".into());
+                    let target = super::remote::read_link(&path).map(|t| t.display().to_string()).unwrap_or_else(|_| "?".into());
                     name.set_tooltip_text(Some(&format!("a link → {target}: not followed here; open the target itself if you mean it")));
                 }
                 match &badge_entry {
@@ -532,7 +511,7 @@ impl FolderTree {
                     };
                     name.set_tooltip_text(Some(&tip));
                 }
-                let is_repo = is_dir && path.join(".git").exists();
+                let is_repo = is_dir && super::remote::exists(&path.join(".git"));
                 // a repository root: `git <branch>` (the short hash when detached)
                 let head = if is_repo { head_label(&path) } else { None };
                 let mut parts: Vec<String> = Vec::new();
@@ -647,6 +626,7 @@ impl FolderTree {
             bound,
             decorate,
             monitors: RefCell::new(BTreeMap::new()),
+            poll: RefCell::new(None),
             refresh_pending: std::cell::Cell::new(false),
             scanning: std::cell::Cell::new(false),
             again: std::cell::Cell::new(false),
@@ -668,7 +648,7 @@ impl FolderTree {
                 let Some(t) = weak.upgrade() else { return };
                 let Some(row) = t.tree.row(pos) else { return };
                 let Some(path) = path_of(&row) else { return };
-                if path.is_dir() {
+                if super::remote::is_dir(&path) {
                     row.set_expanded(!row.is_expanded());
                 } else if let Some(cb) = t.on_open.borrow().as_ref() {
                     t.selection.set_selected(pos);
@@ -701,7 +681,7 @@ impl FolderTree {
     pub fn selected_dir(&self) -> Option<PathBuf> {
         let row = self.selection.selected_item().and_downcast::<gtk::TreeListRow>()?;
         let p = path_of(&row)?;
-        if p.is_dir() { Some(p) } else { p.parent().map(Path::to_path_buf) }
+        if super::remote::is_dir(&p) { Some(p) } else { p.parent().map(Path::to_path_buf) }
     }
 
     pub fn scope(&self) -> Option<PathBuf> {
@@ -715,7 +695,7 @@ impl FolderTree {
         if !self.root.is_visible() {
             return;
         }
-        let first = self.store.pins(id).unwrap_or_default().into_iter().find(|p| p.is_dir());
+        let first = self.store.pins(id).unwrap_or_default().into_iter().find(|p| super::remote::is_dir(&p));
         if first != self.scope() {
             self.set_scope(first);
         }
@@ -812,7 +792,7 @@ impl FolderTree {
         // the drawer's first look at a session with a pinned folder: that folder (see `homed`)
         if !self.homed.get() && self.scope.borrow().is_none() {
             let target = self.pin_target.borrow().clone();
-            let first = target.as_ref().and_then(|t| self.store.pins(t).ok()).unwrap_or_default().into_iter().find(|p| p.is_dir());
+            let first = target.as_ref().and_then(|t| self.store.pins(t).ok()).unwrap_or_default().into_iter().find(|p| super::remote::is_dir(&p));
             if let Some(dir) = first {
                 self.set_scope(Some(dir));
                 return;
@@ -873,21 +853,21 @@ impl FolderTree {
             // git working-tree status of every repo in view (pins, repos with session changes, the
             // scope's repo) — here, not on the GTK thread: `git status` on a big tree takes a while
             // (SPEC §4.11 #13)
-            let mut repos: Vec<PathBuf> = pins_for_git.iter().filter(|p| p.join(".git").exists()).cloned().collect();
+            let mut repos: Vec<PathBuf> = pins_for_git.iter().filter(|p| super::remote::exists(&p.join(".git"))).cloned().collect();
             for c in &all {
-                if let Some(r) = changes::repo_root(&c.path)
+                if let Some(r) = super::remote::repo_root(&c.path)
                     && !repos.contains(&r)
                 {
                     repos.push(r);
                 }
             }
             if let Some(s) = &scope
-                && let Some(r) = changes::repo_root(&s.join("x"))
+                && let Some(r) = super::remote::repo_root(&s.join("x"))
                 && !repos.contains(&r)
             {
                 repos.push(r);
             }
-            let statuses: Statuses = repos.into_iter().map(|r| (changes::git_status(&r), r)).map(|(st, r)| (r, st)).collect();
+            let statuses: Statuses = repos.into_iter().map(|r| (super::remote::request(sill_core::frontend::Request::GitStatus { repo: r.clone() }).unwrap_or_default(), r)).map(|(st, r)| (r, st)).collect();
             let _ = tx.send_blocking((pairs, owners, statuses));
         });
         let t = self.clone();
@@ -931,9 +911,9 @@ impl FolderTree {
         // status but show only as repositories with changes
         let mut roots: Vec<PathBuf> = match &scope {
             Some(s) => vec![s.clone()],
-            None => self.pinned.borrow().iter().filter(|p| p.is_dir()).cloned().collect(),
+            None => self.pinned.borrow().iter().filter(|p| super::remote::is_dir(&p)).cloned().collect(),
         };
-        let global: Vec<PathBuf> = self.global.borrow().iter().filter(|p| p.is_dir()).cloned().collect();
+        let global: Vec<PathBuf> = self.global.borrow().iter().filter(|p| super::remote::is_dir(&p)).cloned().collect();
         // the global view's third group: every repository a session changed that isn't pinned
         let mut touched: Vec<PathBuf> = Vec::new();
         for c in all.iter().filter(|c| !c.ignored) {
@@ -946,7 +926,7 @@ impl FolderTree {
                 p = d.parent();
             }
             if scope.is_none()
-                && let Some(r) = changes::repo_root(&c.path)
+                && let Some(r) = super::remote::repo_root(&c.path)
                 && !roots.contains(&r)
                 && !global.contains(&r)
                 && !touched.contains(&r)
@@ -1027,22 +1007,14 @@ impl FolderTree {
     }
 
     /// Watch exactly these directories (non-recursive; the listed ones are what is on screen).
-    fn watch(self: &Rc<Self>, dirs: Vec<PathBuf>) {
-        let mut monitors = self.monitors.borrow_mut();
-        monitors.retain(|d, _| dirs.contains(d));
-        for d in dirs {
-            if monitors.contains_key(&d) || !d.is_dir() {
-                continue;
-            }
-            let Ok(m) = gio::File::for_path(&d).monitor_directory(gio::FileMonitorFlags::NONE, None::<&gio::Cancellable>) else { continue };
-            let weak = Rc::downgrade(self);
-            m.connect_changed(move |_, _, _, _| {
-                if let Some(t) = weak.upgrade() {
-                    t.refresh_soon();
-                }
-            });
-            monitors.insert(d, m);
-        }
+    fn watch(self: &Rc<Self>, _dirs: Vec<PathBuf>) {
+        if self.poll.borrow().is_some() { return }
+        let weak = Rc::downgrade(self);
+        *self.poll.borrow_mut() = Some(glib::timeout_add_local(std::time::Duration::from_secs(2), move || {
+            let Some(tree) = weak.upgrade() else { return glib::ControlFlow::Break };
+            if tree.root.is_visible() { tree.refresh_soon(); }
+            glib::ControlFlow::Continue
+        }));
     }
 
     /// A directory the person just opened: watched from now on (the next refresh would do it too).
@@ -1082,92 +1054,5 @@ impl FolderTree {
             }
             i += 1;
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn names(store: &gio::ListStore) -> Vec<String> {
-        (0..store.n_items())
-            .filter_map(|i| store.item(i).and_downcast::<gtk::StringObject>())
-            .filter_map(|o| Path::new(o.string().as_str()).file_name().map(|n| n.to_string_lossy().into_owned()))
-            .collect()
-    }
-
-    /// A search finds by name, by path with a slash, skips noise folders, and says when cut.
-    #[test]
-    fn find_files_by_name_and_path() {
-        let d = std::env::temp_dir().join(format!("sill-find-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        for f in ["src/main.rs", "src/shelf/tree.rs", "docs/Tree.md", "target/debug/tree.d", "node_modules/x/tree.js"] {
-            let p = d.join(f);
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(&p, "").unwrap();
-        }
-        let (found, cut) = find_files(&[d.clone()], "tree", 100, 10_000);
-        let rel: Vec<String> = found.iter().map(|p| p.strip_prefix(&d).unwrap().display().to_string()).collect();
-        assert_eq!(rel, vec!["docs/Tree.md", "src/shelf/tree.rs"], "noise folders skipped, case folded");
-        assert!(!cut);
-        let (found, _) = find_files(&[d.clone()], "shelf/tr", 100, 10_000);
-        assert_eq!(found, vec![d.join("src/shelf/tree.rs")]);
-        let (found, cut) = find_files(&[d.clone()], "", 2, 10_000);
-        assert_eq!(found.len(), 2);
-        assert!(cut);
-        std::fs::remove_dir_all(&d).unwrap();
-    }
-
-    /// The root row's checkout label: a branch by name, a detached HEAD by its short hash, a
-    /// worktree through its gitdir file.
-    #[test]
-    fn head_label_reads_the_checkout() {
-        let d = std::env::temp_dir().join(format!("sill-head-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(d.join("repo/.git")).unwrap();
-        std::fs::write(d.join("repo/.git/HEAD"), "ref: refs/heads/feature/x\n").unwrap();
-        assert_eq!(head_label(&d.join("repo")), Some(("feature/x".to_string(), false)));
-        std::fs::write(d.join("repo/.git/HEAD"), "a8cf233deadbeef0123456789abcdef012345678\n").unwrap();
-        assert_eq!(head_label(&d.join("repo")), Some(("a8cf233".to_string(), true)));
-        std::fs::create_dir_all(d.join("wt")).unwrap();
-        std::fs::write(d.join("wt/.git"), format!("gitdir: {}\n", d.join("repo/.git").display())).unwrap();
-        assert_eq!(head_label(&d.join("wt")), Some(("a8cf233".to_string(), true)));
-        assert_eq!(head_label(&d.join("none")), None);
-        std::fs::remove_dir_all(&d).unwrap();
-    }
-
-    /// A refresh lists what appeared and drops what went, keeping the other rows in place.
-    #[test]
-    fn sync_children_edits_the_store_in_place() {
-        if gtk::init().is_err() {
-            eprintln!("no display: skipped"); // gtk::StringObject needs GTK up
-            return;
-        }
-        let dir = std::env::temp_dir().join(format!("sill-tree-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("src")).unwrap();
-        std::fs::write(dir.join("b.txt"), "").unwrap();
-        std::fs::write(dir.join("README.md"), "").unwrap();
-        let listed: Listed = Rc::new(RefCell::new(BTreeMap::new()));
-        let store = children_of(&dir, &listed, &[]);
-        assert_eq!(names(&store), ["src", "b.txt", "README.md"]);
-        let first = store.item(0).unwrap(); // the `src` row object must survive the sync
-        std::fs::write(dir.join("a.txt"), "").unwrap(); // new, sorts first among the files
-        std::fs::write(dir.join(".hidden"), "").unwrap(); // new, dot file: last
-        std::fs::remove_file(dir.join("b.txt")).unwrap(); // gone
-        sync_children(&dir, &store, &[]);
-        assert_eq!(names(&store), ["src", "a.txt", "README.md", ".hidden"]);
-        assert_eq!(store.item(0).unwrap(), first);
-        // nothing changed: nothing moves
-        sync_children(&dir, &store, &[]);
-        assert_eq!(names(&store), ["src", "a.txt", "README.md", ".hidden"]);
-        // a ghost: a path a session has that the host hasn't gets a row among the files
-        let ghost = dir.join("gone.rs").to_string_lossy().into_owned();
-        sync_children(&dir, &store, &[ghost]);
-        assert_eq!(names(&store), ["src", "a.txt", "gone.rs", "README.md", ".hidden"]);
-        // the directory went: the store empties
-        std::fs::remove_dir_all(&dir).unwrap();
-        sync_children(&dir, &store, &[]);
-        assert_eq!(store.n_items(), 0);
     }
 }

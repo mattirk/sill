@@ -101,6 +101,21 @@ pub struct Conversation {
 }
 
 impl Conversation {
+    /// Rebuild from the daemon's transcript after reconnect, discarding partial streamed blocks
+    /// and unanswered widgets whose reply channels belonged to the previous connection.
+    pub fn clear(&self) {
+        while let Some(child) = self.column.first_child() { self.column.remove(&child); }
+        self.current.borrow_mut().take();
+        self.current_thought.borrow_mut().take();
+        self.open_permissions.borrow_mut().clear();
+        self.tool_rows.borrow_mut().clear();
+        self.last_tool.borrow_mut().take();
+        self.insert_after.borrow_mut().take();
+        self.keep_view.set(None);
+        for due in &self.render_due { due.set(false); }
+        self.reset_settle();
+    }
+
     pub fn new(status: gtk::Label) -> Rc<Self> {
         let column = gtk::Box::new(gtk::Orientation::Vertical, 8);
         column.set_margin_start(12);

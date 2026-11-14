@@ -10,7 +10,8 @@ use std::rc::{Rc, Weak};
 use gtk4 as gtk;
 use gtk::glib;
 use gtk::prelude::*;
-use sill_core::store::{Session, Store};
+use sill_core::store::Session;
+use super::remote_store::Store;
 
 use super::session_view::SessionView;
 
@@ -33,7 +34,7 @@ pub fn build(store: Rc<Store>, s: &Session, view: Option<Rc<SessionView>>, chang
     title.set_selectable(true);
     page.append(&title);
     let now = sill_core::store::now();
-    let kept = sill_core::memory::kept_of(&id);
+    let kept = super::remote::request::<Vec<(std::path::PathBuf, String)>>(sill_core::frontend::Request::Kept { session: id.clone() }).unwrap_or_default();
     let pins = store.pins(&id).unwrap_or_default();
     let mut facts = vec![s.agent.clone(), format!("started {}", sill_memory::datetime(s.created_at))];
     match s.ended_at {

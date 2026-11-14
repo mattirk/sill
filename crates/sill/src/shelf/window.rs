@@ -11,8 +11,9 @@ use sill_core::changes;
 use gtk::gdk;
 use gtk::glib;
 use gtk::prelude::*;
-use sill_core::agents;
-use sill_core::store::{Session, Store};
+use super::remote::agents;
+use sill_core::store::Session;
+use super::remote_store::Store;
 
 use super::agents_page::AgentsPage;
 use super::changes::ChangesPage;
@@ -102,7 +103,7 @@ fn launch_terminal(cmdline: &str, cwd: &Path) -> anyhow::Result<()> {
 }
 
 pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
-    let config = sill_core::config::load();
+    let config = super::remote::config::load();
     super::theme::set_text_scale(config.text_scale()); // applies the theme too
     super::theme::apply(&super::theme::by_id(&config.theme));
     if let Some(w) = config.width {
@@ -122,9 +123,11 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     };
     refresh_memory(); // the jail's snapshot follows the store from the start
 
+    let box_name = std::env::var("SILL_BOX").ok().filter(|name| !name.is_empty() && name != "local");
+    let title = box_name.as_ref().map(|name| format!("sill · {name}")).unwrap_or_else(|| "sill".into());
     let window = gtk::ApplicationWindow::builder()
         .application(app)
-        .title("sill")
+        .title(&title)
         .decorated(false)
         .default_width(700)
         .default_height(1000)
@@ -146,6 +149,12 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     action.add_css_class("sill-action");
     action.set_tooltip_text(Some("Sessions ⇄ backend (Escape)"));
     bar.append(&action);
+    if let Some(name) = box_name {
+        let label = gtk::Label::new(Some(&name));
+        label.add_css_class("dim-label");
+        label.set_tooltip_text(Some("Connected box: sessions, files and host shells run here"));
+        bar.append(&label);
+    }
 
     let tabs = TabStrip::new();
     let page_tabs_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -381,7 +390,7 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
             }
             s.herring.flick();
             if b.is_active() {
-                let page = sill_core::config::load().default_page().to_string();
+                let page = super::remote::config::load().default_page().to_string();
                 s.show_page(&page);
             } else {
                 s.show_page("sessions");
@@ -458,7 +467,7 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
                         if s.tree.root.is_visible() {
                             s.close_tree()
                         } else {
-                            let pinned = s.tabs.selected().and_then(|id| s.store.pins(&id).ok()).and_then(|pins| pins.into_iter().find(|p| p.is_dir()));
+                            let pinned = s.tabs.selected().and_then(|id| s.store.pins(&id).ok()).and_then(|pins| pins.into_iter().find(|p| super::remote::is_dir(p)));
                             s.toggle_tree(pinned)
                         }
                         return glib::Propagation::Stop;
@@ -543,7 +552,7 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
                 if s.stack.visible_child_name().as_deref() != Some("sessions") {
                     s.show_page("sessions");
                 } else {
-                    let page = sill_core::config::load().default_page().to_string();
+                    let page = super::remote::config::load().default_page().to_string();
                     s.show_page(&page);
                 }
                 return glib::Propagation::Stop;
@@ -573,7 +582,7 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
             pending.set(Some(glib::timeout_add_local_once(std::time::Duration::from_millis(150), move || {
                 pending2.set(None);
                 x11::set_drawer_width(drawer);
-                let _ = sill_core::config::update(|c| c.drawer_width = Some(drawer));
+                let _ = super::remote::config::update(|c| c.drawer_width = Some(drawer));
             })));
         });
     }
@@ -706,13 +715,22 @@ impl Shelf {
             }
             return;
         }
+        if sill_proto::transport::selected().is_ok_and(|target| target.is_some()) {
+            if let Some(id) = self.tabs.selected()
+                && let Some(view) = self.views.borrow().get(&id)
+            {
+                view.show_host_shell(true);
+                self.set_status("the box's host shell opens in the pane; a desktop terminal window belongs to this machine");
+            }
+            return;
+        }
         let tree = if self.tree.root.is_visible() { self.tree.selected_dir() } else { None };
-        let pinned = || self.tabs.selected().and_then(|id| self.store.pins(&id).ok()).and_then(|pins| pins.into_iter().find(|p| p.is_dir()));
+        let pinned = || self.tabs.selected().and_then(|id| self.store.pins(&id).ok()).and_then(|pins| pins.into_iter().find(|p| super::remote::is_dir(p)));
         let cwd = tree
             .or_else(pinned)
-            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+            .or_else(|| session::home().ok())
             .unwrap_or_else(|| PathBuf::from("/"));
-        let Some(cmd) = sill_core::config::load().host_terminal() else {
+        let Some(cmd) = super::remote::config::load().host_terminal() else {
             self.set_status("no terminal found on the host: set one under Settings → Host terminal");
             return;
         };
@@ -877,7 +895,7 @@ impl Shelf {
 
     /// One tab per backend page in the bar: glyph + title, styled like the session tabs.
     fn build_page_tabs(self: &Rc<Self>, strip: &gtk::Box) {
-        for (id, title) in sill_core::config::PAGES {
+        for (id, title) in super::remote::config::PAGES {
             let tab = gtk::Box::new(gtk::Orientation::Horizontal, 4);
             tab.add_css_class("sill-tab");
             let slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -1000,7 +1018,7 @@ impl Shelf {
         grid.attach(&key("Agent"), 0, 1, 1, 1);
         grid.attach(&agent, 1, 1, 1, 1);
         // policy: the files there are to choose from (plus the session's own if it is none of them)
-        let mut policies = sill_core::policy::available(&home);
+        let mut policies: Vec<String> = super::remote::request(sill_core::frontend::Request::Policies).unwrap_or_default();
         if !policies.contains(&s.policy) {
             policies.push(s.policy.clone());
         }
@@ -1030,7 +1048,7 @@ impl Shelf {
         grid.attach(&key("Policy"), 0, 2, 1, 1);
         grid.attach(&pol, 1, 2, 1, 1);
         // desktop access; "default" says what it resolves to for this session's policy
-        let choices = sill_core::config::DESKTOP_CHOICES;
+        let choices = super::remote::config::DESKTOP_CHOICES;
         let (dx, dd) = {
             let mut d = s.clone();
             d.desktop = String::new();
@@ -1076,10 +1094,10 @@ impl Shelf {
         let mem = gtk::DropDown::from_strings(&labels.iter().map(String::as_str).collect::<Vec<_>>());
         let current = Scope::resolve(&s.memory_scope, pinned);
         mem.set_selected(all.iter().position(|sc| *sc == current).unwrap_or(0) as u32);
-        if s.ghost && !sill_core::config::load().ghost_memory() {
+        if s.ghost && !super::remote::config::load().ghost_memory() {
             mem.set_sensitive(false);
             mem.set_tooltip_text(Some("A ghost session starts blank: Settings → Ghosts see memory turns recall on for ghosts"));
-        } else if sill_core::config::load().memory() {
+        } else if super::remote::config::load().memory() {
             mem.set_tooltip_text(Some("Earlier sessions quoted to the agent when it starts. It can always search all sessions with sill-memory."));
         } else {
             mem.set_sensitive(false);
@@ -1192,8 +1210,7 @@ impl Shelf {
             self.tabs.select(&id);
             return;
         }
-        let home = session::home().unwrap_or_default();
-        if note.is_none() && sill_core::session::jail_outdated(&id, &s.policy, &home) {
+        if note.is_none() && super::remote::request(sill_core::frontend::Request::JailOutdated { session: id.clone(), policy: s.policy.clone() }).unwrap_or(false) {
             let shelf = self.clone();
             let s2 = s.clone();
             stop_then(&id, move || {
@@ -1283,7 +1300,7 @@ impl Shelf {
             *view.on_host_terminal.borrow_mut() = Some(Box::new(move |window| shelf.open_host_terminal(window)));
             let shelf = self.clone();
             *view.on_open_log.borrow_mut() = Some(Box::new(move |title, src| {
-                shelf.viewer.open_log(title, std::sync::Arc::new(move |lines| sill_core::session::read_log(&src, lines)));
+                shelf.viewer.open_log(title, std::sync::Arc::new(move |lines| super::remote::request(sill_core::frontend::Request::ReadLog { source: src.clone(), lines }).unwrap_or_else(|e| format!("{e:#}"))));
                 shelf.viewer.root.set_visible(true);
                 shelf.viewer.focus();
             }));
@@ -1596,7 +1613,7 @@ impl Shelf {
         // whose package was removed on the Agents page drops out until it is installed again).
         // The row starts a normal session; the ghost glyph at its right a ghost (docs/memory.md
         // §3.1), fixed from then on.
-        for (id, agent) in registry.iter().filter(|(_, a)| a.enabled && sill_core::registry::available(a, &home).is_some()) {
+        for (id, agent) in registry.iter().filter(|(_, a)| a.enabled && super::remote::registry::available(a, &home).is_some()) {
             let line = gtk::Box::new(gtk::Orientation::Horizontal, 0);
             let b = row(Some(agent), &agent.name, None);
             b.set_hexpand(true);
@@ -1772,17 +1789,17 @@ impl Shelf {
                         return;
                     }
                     more.set_visible(false);
-                    let hits = sill_memory::search(shelf.store.conn(), &q, sill_core::store::now(), 500).unwrap_or_default();
+                    let hits = shelf.store.search(&text, 500).unwrap_or_default();
                     let mut prev: Option<gtk::Box> = None;
                     for h in &hits {
-                        if let Some((_, line)) = lines.iter().find(|(id, _)| *id == h.session.id) {
+                        if let Some((_, line)) = lines.iter().find(|(id, _)| id == h) {
                             list.reorder_child_after(line, prev.as_ref());
                             prev = Some(line.clone());
                         }
                     }
                     let mut shown = 0;
                     for (id, line) in &lines {
-                        let hit = hits.iter().any(|h| h.session.id == *id);
+                        let hit = hits.iter().any(|h| h == id);
                         line.set_visible(hit);
                         shown += hit as usize;
                     }
@@ -1825,7 +1842,7 @@ fn create_session(store: &Store, agent: &str, policy: &str, ghost: bool) -> anyh
     let new = sill_proto::NewSession {
         agent: agent.to_string(),
         policy: policy.to_string(),
-        remember_pins: !ghost && sill_core::config::load().remember_pins(),
+        remember_pins: !ghost && super::remote::config::load().remember_pins(),
         ghost,
         ..Default::default()
     };
@@ -1844,7 +1861,7 @@ pub fn refresh_tree() {
 /// ends or is deleted, at start, when memory is switched. Removes it with memory off.
 pub fn refresh_memory() {
     std::thread::spawn(|| {
-        if let Err(e) = sill_core::memory::refresh_snapshot() {
+        if let Err(e) = super::remote::request::<serde_json::Value>(sill_core::frontend::Request::RefreshSnapshot) {
             eprintln!("memory snapshot: {e:#}");
         }
     });
@@ -1942,9 +1959,8 @@ fn effective_desktop(s: &Session) -> (bool, bool) {
     if s.ghost {
         return (false, false); // docs/memory.md §3.2: off regardless
     }
-    let home = session::home().unwrap_or_default();
-    let (x11, dbus) = sill_core::config::desktop_grants(&s.desktop, &sill_core::config::load());
-    let (px, pd) = sill_core::policy::Policy::load(&s.policy, &home).map(|p| (p.jail.x11, p.jail.dbus)).unwrap_or((false, false));
+    let (x11, dbus) = super::remote::config::desktop_grants(&s.desktop, &super::remote::config::load());
+    let (px, pd) = super::remote::request(sill_core::frontend::Request::PolicyDesktop { policy: s.policy.clone() }).unwrap_or((false, false));
     (x11.unwrap_or(px), dbus.unwrap_or(pd))
 }
 

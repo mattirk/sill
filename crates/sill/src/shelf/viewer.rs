@@ -12,7 +12,6 @@ use std::rc::{Rc, Weak};
 use gtk4 as gtk;
 use gtk::gdk;
 use gtk::glib;
-use sill_core::changes;
 use sill_core::ledger::Change;
 use sourceview5::prelude::*;
 
@@ -426,8 +425,7 @@ impl Viewer {
         }
         let text = self.text.text(&self.text.start_iter(), &self.text.end_iter(), true).to_string();
         // whole or not at all, and never through a link the agent may have put at the path
-        let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { return };
-        match sill_core::safe_fs::replace_file(dir, name, text.as_bytes()) {
+        match super::remote::write(&path, text.as_bytes()) {
             Ok(()) => {
                 self.dirty.set(false);
                 self.discard_armed.set(false);
@@ -443,7 +441,7 @@ impl Viewer {
 
     fn update_title(&self) {
         let Some(path) = self.history.borrow().last().cloned() else { return };
-        let home = std::env::var("HOME").unwrap_or_default();
+        let home = super::session::home().unwrap_or_default().display().to_string();
         let shown = path.display().to_string().replacen(&home, "~", 1);
         self.title.set_text(&if self.dirty.get() { format!("{shown}  ● unsaved (Ctrl+S)") } else { shown });
         self.title.set_tooltip_text(Some(&path.display().to_string()));
@@ -459,7 +457,7 @@ impl Viewer {
                 resolve: Box::new(move |src| {
                     let p = Path::new(src);
                     let p = if p.is_absolute() { p.to_path_buf() } else { dir.join(p) };
-                    p.is_file().then_some(p)
+                    super::remote::image(&p)
                 }),
                 open: Some(Box::new(move |p| {
                     if let Some(v) = weak.upgrade() {
@@ -471,10 +469,10 @@ impl Viewer {
         let text = self.text.text(&self.text.start_iter(), &self.text.end_iter(), true);
         // in a repository, the blocks that differ from HEAD are tinted (git's view, SPEC §3.1)
         let mut ranges: Vec<(usize, usize)> = Vec::new();
-        if let Some(repo) = changes::repo_root(path)
+        if let Some(repo) = super::remote::repo_root(path)
             && let Ok(rel) = path.strip_prefix(&repo)
         {
-            match changes::git_changed_lines(&repo, rel) {
+            match super::remote::changed_lines(&repo, rel) {
                 Some(r) if !r.is_empty() => {
                     self.say(&format!("{} hunk(s) differ from HEAD: tinted", r.len()));
                     ranges = r;
@@ -504,11 +502,11 @@ impl Viewer {
         }
         // a link under a pin's name is the agent's pointer anywhere on the host: not shown as the
         // pin's file (security.md S9); the target itself can be opened by its own name
-        if std::fs::symlink_metadata(path).map(|m| m.is_symlink()).unwrap_or(false) {
-            let target = std::fs::read_link(path).map(|t| t.display().to_string()).unwrap_or_else(|_| "?".into());
+        if super::remote::metadata(path).is_ok_and(|m| m.symlink) {
+            let target = super::remote::read_link(path).map(|t| t.display().to_string()).unwrap_or_else(|_| "?".into());
             return self.say_only(&format!("{} is a link → {target}: not shown under this name; open the target itself if you mean it", path.display()));
         }
-        if !path.is_file() {
+        if !super::remote::is_file(path) {
             return self.say_only(&format!("{} is not a file (or is gone)", path.display()));
         }
         // pending session change: the diff, not the host file (keep or revert it in Changes first)
@@ -537,17 +535,17 @@ impl Viewer {
             });
             return;
         }
-        let meta = std::fs::metadata(path);
-        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let meta = super::remote::metadata(path);
+        let size = meta.as_ref().map(|m| m.length).unwrap_or(0);
         if size > MAX_BYTES {
             return self.say_only(&format!("{} MB: too large to show", size / 1_000_000));
         }
         if is_image(path) {
-            self.picture.set_filename(Some(path));
+            self.picture.set_filename(super::remote::image(path).as_deref());
             self.stack.set_visible_child_name("image");
             return;
         }
-        let bytes = std::fs::read(path).unwrap_or_default();
+        let bytes = super::remote::read(path).unwrap_or_default();
         if bytes.iter().take(8192).any(|b| *b == 0) {
             return self.say_only(&format!("binary file, {} KB", size.div_ceil(1000)));
         }
@@ -567,7 +565,7 @@ impl Viewer {
         self.text.set_language(lang.as_ref());
         self.text.set_highlight_syntax(true);
         self.text.set_text(&text);
-        self.editable.set(meta.map(|m| !m.permissions().readonly()).unwrap_or(false));
+        self.editable.set(meta.map(|m| !m.readonly).unwrap_or(false));
         self.edit.set_visible(self.editable.get());
         self.dirty.set(false);
         if is_markdown(path) && !self.edit.is_active() {

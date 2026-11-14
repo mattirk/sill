@@ -17,7 +17,7 @@ use std::time::Duration;
 use gtk4 as gtk;
 use gtk::glib;
 use sill_core::ledger::{FileType, Kind};
-use sill_core::store::Store;
+use super::remote_store::Store;
 use sill_core::history::{Event, Filter, Kind as HKind};
 use sill_core::wire::{ChangeRow, ChangesList, DiffOf, Done, LiveRepo, SessionChanges};
 use sourceview5::prelude::*;
@@ -407,7 +407,7 @@ impl ChangesPage {
         }
         self.rows.borrow_mut().clear();
         self.diff.set_text("");
-        let minutes = sill_core::config::load().auto_revert_minutes();
+        let minutes = super::remote::config::load().auto_revert_minutes();
         let mut total = 0;
         let mut conflicts = 0;
         // pinned folders first: live (host = jail); git repositories among them show git's view

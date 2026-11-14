@@ -12,11 +12,14 @@ mod hotkey;
 mod icons;
 mod markdown;
 mod processes;
+mod remote;
+mod remote_store;
 mod session;
 mod session_page;
 mod session_view;
 mod settings;
 mod spinner;
+mod streams;
 mod tabs;
 mod theme;
 mod tray;
@@ -36,6 +39,18 @@ use gtk::prelude::*;
 
 pub const APP_ID: &str = "io.github.mattirk.sill";
 
+fn application_id() -> String {
+    match std::env::var("SILL_BOX").ok().filter(|name| !name.is_empty() && name != "local") {
+        Some(name) => {
+            use std::hash::{Hash, Hasher};
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            name.hash(&mut hash);
+            format!("{APP_ID}.box_{:016x}", hash.finish())
+        }
+        None => APP_ID.into(),
+    }
+}
+
 /// Wall-clock stamp for `SILL_TRACE` lines (shelf.log has no journal prefix).
 pub fn trace_ts() -> String {
     let d = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
@@ -46,10 +61,11 @@ pub fn trace_ts() -> String {
 pub fn run(cwd: Option<PathBuf>, hidden: bool) -> Result<()> {
     let cwd = match cwd {
         Some(c) => std::path::absolute(c)?,
+        None if sill_proto::transport::selected()?.is_some() => remote::home()?,
         None => std::env::current_dir()?,
     };
     fonts::init(); // before GTK's first font map
-    let app = gtk::Application::builder().application_id(APP_ID).build();
+    let app = gtk::Application::builder().application_id(application_id()).build();
     let cwd_for_activate = cwd.clone();
     app.connect_activate(move |app| {
         if let Some(w) = app.windows().first() {
@@ -77,7 +93,7 @@ pub fn run(cwd: Option<PathBuf>, hidden: bool) -> Result<()> {
         } else {
             w.present();
         }
-        if sill_core::config::load().tray() {
+        if remote::config::load().tray() {
             tray::start(app);
         }
     });
@@ -97,7 +113,7 @@ pub fn run(cwd: Option<PathBuf>, hidden: bool) -> Result<()> {
         if let Some(id) = param.and_then(|p| p.str()) {
             let t = theme::by_id(id);
             theme::apply(&t);
-            let _ = sill_core::config::update(|c| c.theme = t.id.to_string());
+            let _ = remote::config::update(|c| c.theme = t.id.to_string());
         }
     });
     app.add_action(&set_theme);
@@ -108,7 +124,7 @@ pub fn run(cwd: Option<PathBuf>, hidden: bool) -> Result<()> {
             let r = window::HOTKEY.with(|h| h.borrow().as_ref().map(|hk| hk.rebind(spec)));
             match r {
                 Some(Ok(())) => {
-                    let _ = sill_core::config::update(|c| c.hotkey = Some(spec.to_string()));
+                    let _ = remote::config::update(|c| c.hotkey = Some(spec.to_string()));
                 }
                 Some(Err(e)) => eprintln!("sill: hotkey {spec}: {e:#}"),
                 None => eprintln!("sill: hotkey grab not active"),
@@ -136,32 +152,63 @@ fn glib_exit_ok() -> gtk::glib::ExitCode {
 
 /// `sill theme NAME`: ask the running shelf to switch theme (saved for next start too).
 pub fn set_theme(name: &str) -> Result<()> {
-    let app = gio::Application::new(Some(APP_ID), gio::ApplicationFlags::empty());
+    let app = gio::Application::new(Some(&application_id()), gio::ApplicationFlags::empty());
     app.register(None::<&gio::Cancellable>)?;
     if !app.is_remote() {
         // no shelf running: just save it
         let t = theme::by_id(name);
-        return sill_core::config::update(|c| c.theme = t.id.to_string());
+        return remote::config::update(|c| c.theme = t.id.to_string());
     }
     app.activate_action("set-theme", Some(&name.to_variant()));
     Ok(())
 }
 
-/// SIGTERM every other `sill shelf` process of this user (fallback for `restart`).
-/// Send `sig` to every other `sill shelf` process.
+/// Resolve the frontend target from its initial environment and actual CLI arguments. Global
+/// options may precede or follow the subcommand; `box connect NAME` selects NAME itself.
+fn shelf_process_target(args: &[&[u8]], environ: &[u8]) -> Option<String> {
+    let executable = args.first()?;
+    if !(*executable == b"sill" || executable.ends_with(b"/sill")) { return None; }
+    let mut target = environ.split(|b| *b == 0).find_map(|entry| entry.strip_prefix(b"SILL_BOX=")).unwrap_or(b"local");
+    let mut positional = Vec::new();
+    let mut i = 1;
+    while i < args.len() {
+        let arg = args[i];
+        if arg == b"--box" {
+            i += 1;
+            target = *args.get(i)?;
+        } else if let Some(name) = arg.strip_prefix(b"--box=") {
+            target = name;
+        } else if !arg.is_empty() {
+            positional.push(arg);
+        }
+        i += 1;
+    }
+    match positional.as_slice() {
+        [command, ..] if *command == b"shelf" => {},
+        [command, action, name, ..] if *command == b"box" && *action == b"connect" => target = name,
+        _ => return None,
+    }
+    let target = std::str::from_utf8(target).ok()?;
+    Some(if target.is_empty() || target == "local" { "local".into() } else { target.into() })
+}
+
+/// Signal only this user's other frontends for the same box. An unreadable process environment
+/// leaves its target unknown, so it is skipped rather than risking another frontend.
 fn kill_old_shelves_with(sig: rustix::process::Signal) {
+    use std::os::unix::fs::MetadataExt;
     let me = std::process::id();
+    let uid = rustix::process::geteuid().as_raw();
+    let target = std::env::var("SILL_BOX").ok().filter(|name| !name.is_empty()).unwrap_or_else(|| "local".into());
     let Ok(rd) = std::fs::read_dir("/proc") else { return };
     for e in rd.filter_map(Result::ok) {
         let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else { continue };
-        if pid == me {
-            continue;
-        }
+        if pid == me || !e.metadata().is_ok_and(|m| m.uid() == uid) { continue; }
         let Ok(cmd) = std::fs::read(e.path().join("cmdline")) else { continue };
+        let Ok(environ) = std::fs::read(e.path().join("environ")) else { continue };
         let args: Vec<&[u8]> = cmd.split(|b| *b == 0).collect();
-        let is_shelf = args.first().map(|a| a.ends_with(b"/sill") || *a == b"sill").unwrap_or(false)
-            && args.get(1).map(|a| *a == b"shelf").unwrap_or(false);
-        if is_shelf && let Some(p) = rustix::process::Pid::from_raw(pid as i32) {
+        if shelf_process_target(&args, &environ).as_deref() == Some(target.as_str())
+            && let Some(p) = rustix::process::Pid::from_raw(pid as i32)
+        {
             let _ = rustix::process::kill_process(p, sig);
         }
     }
@@ -177,7 +224,7 @@ fn kill_old_shelves() {
 fn quit_running_shelf() -> Result<()> {
     // Ask the running shelf to quit over D-Bus. A shelf whose main loop is wedged owns the name
     // but answers nothing: registering against it times out, so that too means "kill it".
-    let app = gio::Application::new(Some(APP_ID), gio::ApplicationFlags::empty());
+    let app = gio::Application::new(Some(&application_id()), gio::ApplicationFlags::empty());
     let remote = match app.register(None::<&gio::Cancellable>) {
         Ok(()) => app.is_remote(),
         Err(e) => {
@@ -194,7 +241,7 @@ fn quit_running_shelf() -> Result<()> {
         let mut freed = false;
         for i in 0..80 {
             std::thread::sleep(std::time::Duration::from_millis(100));
-            let probe = gio::Application::new(Some(APP_ID), gio::ApplicationFlags::empty());
+            let probe = gio::Application::new(Some(&application_id()), gio::ApplicationFlags::empty());
             if probe.register(None::<&gio::Cancellable>).is_ok() && !probe.is_remote() {
                 freed = true;
                 break;
@@ -303,7 +350,7 @@ pub fn restart(hidden: bool, dev: bool, detached: bool) -> Result<()> {
         }
     }
     // running a build from a pinned folder is running what the agent could have written there
-    if let Ok(store) = sill_core::store::Store::open_default()
+    if let Ok(store) = remote_store::Store::open_default()
         && let Ok(sessions) = store.sessions()
     {
         let pins: Vec<PathBuf> = sessions.iter().flat_map(|s| store.pins(&s.id).unwrap_or_default()).chain(store.global_pins().unwrap_or_default()).collect();
@@ -384,10 +431,10 @@ fn restart_detached(hidden: bool, dev: bool) -> Result<()> {
 /// `sill hotkey SPEC`: rebind the running shelf's show/hide key (and save it).
 pub fn set_hotkey(spec: &str) -> Result<()> {
     hotkey::validate(spec)?;
-    let app = gio::Application::new(Some(APP_ID), gio::ApplicationFlags::empty());
+    let app = gio::Application::new(Some(&application_id()), gio::ApplicationFlags::empty());
     app.register(None::<&gio::Cancellable>)?;
     if !app.is_remote() {
-        return sill_core::config::update(|c| c.hotkey = Some(spec.to_string()));
+        return remote::config::update(|c| c.hotkey = Some(spec.to_string()));
     }
     app.activate_action("set-hotkey", Some(&spec.to_variant()));
     Ok(())
@@ -395,11 +442,40 @@ pub fn set_hotkey(spec: &str) -> Result<()> {
 
 /// `sill toggle`: ask the running shelf to show/hide itself.
 pub fn toggle() -> Result<()> {
-    let app = gio::Application::new(Some(APP_ID), gio::ApplicationFlags::empty());
+    let app = gio::Application::new(Some(&application_id()), gio::ApplicationFlags::empty());
     app.register(None::<&gio::Cancellable>)?;
     if !app.is_remote() {
         bail!("the shelf is not running (start it with `sill shelf`)");
     }
     app.activate_action("toggle", None);
     Ok(())
+}
+
+
+#[cfg(test)]
+mod process_scope_tests {
+    use super::shelf_process_target;
+
+    #[test]
+    fn shelf_target_follows_global_options_and_initial_environment() {
+        assert_eq!(shelf_process_target(&[b"/usr/bin/sill", b"shelf"], b"SILL_BOX=server\0TOKEN=never-print\0").as_deref(), Some("server"));
+        assert_eq!(shelf_process_target(&[b"sill", b"--box", b"alpha", b"shelf"], b"").as_deref(), Some("alpha"));
+        assert_eq!(shelf_process_target(&[b"sill", b"shelf", b"--box=beta"], b"SILL_BOX=alpha\0").as_deref(), Some("beta"));
+        assert_eq!(shelf_process_target(&[b"sill", b"shelf", b"--box", b"local"], b"SILL_BOX=alpha\0").as_deref(), Some("local"));
+    }
+
+    #[test]
+    fn box_connect_selects_its_named_frontend() {
+        assert_eq!(shelf_process_target(&[b"sill", b"box", b"connect", b"beta"], b"SILL_BOX=alpha\0").as_deref(), Some("beta"));
+        assert_eq!(shelf_process_target(&[b"sill", b"--box=alpha", b"box", b"connect", b"beta"], b"").as_deref(), Some("beta"));
+        assert_eq!(shelf_process_target(&[b"sill", b"box", b"connect", b"local"], b"SILL_BOX=alpha\0").as_deref(), Some("local"));
+    }
+
+    #[test]
+    fn other_sill_commands_and_executables_are_not_frontends() {
+        assert!(shelf_process_target(&[b"sill", b"daemon"], b"").is_none());
+        assert!(shelf_process_target(&[b"sill", b"box", b"add", b"beta"], b"").is_none());
+        assert!(shelf_process_target(&[b"other", b"shelf"], b"").is_none());
+        assert!(shelf_process_target(&[b"sill", b"--box"], b"").is_none());
+    }
 }

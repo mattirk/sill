@@ -11,19 +11,20 @@ use gtk::gdk;
 use gtk::glib;
 use sill_core::acp::{Attachment, AttachmentKind, AuthMethodInfo, ConfigKind, ConfigValue, Controls, Event};
 use sill_core::wire::{self, Command};
-use sill_core::agents;
-use sill_core::store::{Entry, Session, Store};
+use super::remote::agents;
+use sill_core::frontend::Request;
+use super::remote;
+use sill_core::store::{Entry, Session};
+use super::remote_store::Store;
 
 /// Entries rendered when a session opens; the rest come in chunks of [`HISTORY_CHUNK`] from the
 /// "show earlier" row (SPEC §3.1 history: opening a long session costs the same as a short one).
-const HISTORY_TAIL: usize = 60;
 const HISTORY_CHUNK: usize = 120;
 
 use super::conversation::Conversation;
 
 /// Refused hosts the conversation asks about per session start; the rest go to the log (S7).
 const MAX_DENIED_PROMPTS: usize = 8;
-use super::viewer;
 use super::{markdown, session, theme};
 use vte4::prelude::*;
 
@@ -33,11 +34,9 @@ use vte4::prelude::*;
 type Checkpointed = Box<dyn FnOnce(Option<String>, Option<String>)>;
 
 /// A jail's overlay layers (host path, upper tree) and its masked paths, as the daemon plans them.
-type JailView = (Vec<(std::path::PathBuf, std::path::PathBuf)>, Vec<std::path::PathBuf>);
 
 pub struct SessionView {
     pub root: gtk::Box,
-    jail: RefCell<Option<JailView>>,
     prompt: gtk::TextView,
     /// What goes with the next prompt (SPEC §3.2 attachments) and the strip showing it.
     attachments: RefCell<Vec<Attachment>>,
@@ -57,7 +56,8 @@ pub struct SessionView {
     host_open: std::cell::Cell<bool>,
     /// The host shell's pid while it runs, and the directory it was last seen in: its own place,
     /// apart from the tree's selection; a shell started again (after `exit`) starts there.
-    host_pid: std::cell::Cell<Option<glib::Pid>>,
+    shell_bridge: RefCell<Option<super::streams::PtyBridge>>,
+    host_bridge: RefCell<Option<super::streams::PtyBridge>>,
     host_cwd: RefCell<Option<std::path::PathBuf>>,
     /// The terminal is running a login; when it closes the session is opened again.
     login_pending: Rc<std::cell::Cell<bool>>,
@@ -65,10 +65,6 @@ pub struct SessionView {
     ready: std::cell::Cell<bool>,
     /// The launcher-mode note was shown in this view (once per tab, SPEC §4.7).
     mode_noted: std::cell::Cell<bool>,
-    /// The standing block (sill's own line, the person's instructions; `sill_core::instructions`)
-    /// the current agent process has been sent: `None` after a (re)start so the next prompt carries
-    /// it, compared on every send so an edited file reaches the agent with the next prompt.
-    sent_standing: RefCell<Option<String>>,
     /// The connection died before `Ready` and the agent was restarted once already.
     startup_retried: std::cell::Cell<bool>,
     /// The jail must be rebuilt at the next restart even if the pins are unchanged (new login file).
@@ -99,9 +95,6 @@ pub struct SessionView {
     controls_row: gtk::Box,
     /// Set while the controls are being rebuilt so their change signals don't echo back.
     rebuilding: std::cell::Cell<bool>,
-    /// The model the person just picked: when the agent reports it as current, the remembered mode
-    /// and options are applied once more (the adapter re-seeds effort and may clamp the mode per model).
-    reconcile_model: RefCell<Option<String>>,
     /// sill's own switch: answer permission requests with "allow once" without asking.
     auto_allow: std::cell::Cell<bool>,
     /// Send button; becomes a stop button while a turn is running.
@@ -146,7 +139,7 @@ pub struct SessionView {
     /// the same pins updates the numbers in place instead of rebuilding.
     chips: RefCell<Vec<(std::path::PathBuf, gtk::Box)>>,
     /// Watches the session's runtime dir for `denied` (hosts the proxy refused).
-    denied_monitor: RefCell<Option<gtk::gio::FileMonitor>>,
+    denied_monitor: RefCell<Option<glib::SourceId>>,
     denied_seen: RefCell<std::collections::HashSet<String>>,
     /// Refused hosts asked about since the session started; past `MAX_DENIED_PROMPTS` one note.
     denied_asked: std::cell::Cell<usize>,
@@ -441,7 +434,6 @@ impl SessionView {
         let auto_allow_initial = session.auto_allow;
         let view = Rc::new(Self {
             root,
-            jail: RefCell::new(None),
             prompt: prompt.clone(),
             attachments: RefCell::new(Vec::new()),
             attach_strip,
@@ -454,12 +446,12 @@ impl SessionView {
             host_term: host_term.clone(),
             host_scroll: host_scroll.clone(),
             host_open: std::cell::Cell::new(false),
-            host_pid: std::cell::Cell::new(None),
+            shell_bridge: RefCell::new(None),
+            host_bridge: RefCell::new(None),
             host_cwd: RefCell::new(None),
             login_pending: login_pending.clone(),
             ready: std::cell::Cell::new(false),
             mode_noted: std::cell::Cell::new(false),
-            sent_standing: RefCell::new(None),
             startup_retried: std::cell::Cell::new(false),
             force_restart: std::cell::Cell::new(false),
             shell_btn: RefCell::new(None),
@@ -478,7 +470,6 @@ impl SessionView {
             pins_row,
             controls_row,
             rebuilding: std::cell::Cell::new(false),
-            reconcile_model: RefCell::new(None),
             auto_allow: std::cell::Cell::new(auto_allow_initial),
             send_btn: RefCell::new(None),
             busy: std::cell::Cell::new(false),
@@ -525,33 +516,26 @@ impl SessionView {
             }));
         }
 
-        // stored transcript: the tail now, earlier chunks when asked for
         {
-            let id = view.session.borrow().id.clone();
-            let total = view.store.entry_count(&id).unwrap_or(0);
-            let tail = view.store.entries_before(&id, None, HISTORY_TAIL).unwrap_or_default();
-            let first_seq = tail.first().map(|e| e.seq);
-            view.render_entries(&tail);
-            if let Some(first) = first_seq
-                && total > tail.len()
-            {
-                let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-                row.set_halign(gtk::Align::Center);
-                let b = gtk::Button::with_label("");
-                b.add_css_class("flat");
-                b.add_css_class("sill-earlier");
-                row.append(&b);
-                view.conv.prepend_top(&row);
-                *view.earlier.borrow_mut() = Some((first, row, b.clone()));
-                view.update_earlier(total - tail.len());
-                let weak = Rc::downgrade(&view);
-                b.connect_clicked(move |_| {
-                    if let Some(v) = weak.upgrade() {
-                        v.show_earlier();
-                    }
-                });
-            }
+            let weak = Rc::downgrade(&view);
+            let mut sizes = [(0,0); 2];
+            glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+                let Some(v) = weak.upgrade() else { return glib::ControlFlow::Break };
+                for (i, (term, slot)) in [(&v.terminal, &v.shell_bridge), (&v.host_term, &v.host_bridge)].into_iter().enumerate() {
+                    if let Some(bridge) = slot.borrow().as_ref() {
+                        let size = (term.column_count().max(20) as u16, term.row_count().max(5) as u16);
+                        if sizes[i] != size { bridge.resize(size.0, size.1).ok(); sizes[i] = size; }
+                    } else { sizes[i] = (0,0); }
+                }
+                let shell_closed = v.shell_bridge.borrow().as_ref().is_some_and(|b| b.closed());
+                let host_closed = v.host_bridge.borrow().as_ref().is_some_and(|b| b.closed());
+                if shell_closed { v.shell_closed(); }
+                if host_closed { v.host_shell_closed(); }
+                glib::ControlFlow::Continue
+            });
         }
+
+        // The attach notification supplies an atomic transcript tail before live state.
 
         // Enter sends, Shift+Enter inserts a newline
         let keys = gtk::EventControllerKey::new();
@@ -755,9 +739,8 @@ impl SessionView {
 
     /// Remember the host shell's working directory (its `/proc` cwd: the shelf runs on the host).
     fn note_host_cwd(&self) {
-        let Some(pid) = self.host_pid.get() else { return };
-        if let Ok(dir) = std::fs::read_link(format!("/proc/{}/cwd", pid.0)) {
-            *self.host_cwd.borrow_mut() = Some(dir);
+        if let Some(bridge) = self.host_bridge.borrow().as_ref() && let Ok(Some(cwd)) = bridge.cwd() {
+            *self.host_cwd.borrow_mut() = Some(cwd);
         }
     }
 
@@ -781,40 +764,18 @@ impl SessionView {
             return;
         }
         if !self.host_open.get() {
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
-            let git_env = format!("{}={}", changes::HOST_SHELL_GIT_ENV.0, changes::HOST_SHELL_GIT_ENV.1);
-            let dir = self
-                .host_cwd
-                .borrow()
-                .clone()
-                .filter(|d| d.is_dir())
-                .or_else(|| self.store.pins(&self.id()).unwrap_or_default().into_iter().find(|p| p.is_dir()))
-                .or_else(|| session::home().ok())
-                .unwrap_or_else(|| std::path::PathBuf::from("/"));
-            let weak = Rc::downgrade(self);
-            self.host_term.spawn_async(
-                vte4::PtyFlags::DEFAULT,
-                Some(&dir.to_string_lossy()),
-                &[&shell, "-l"],
-                // SILL_HOST_SHELL: `sill restart` run here knows to step outside the shelf first;
-                // the git env: the pin's .git/config is the agent's (S8)
-                &["TERM=xterm-256color", "COLORTERM=truecolor", "SILL_HOST_SHELL=1", &git_env],
-                glib::SpawnFlags::DEFAULT,
-                || {},
-                -1,
-                None::<&gtk::gio::Cancellable>,
-                move |res| {
-                    let Some(v) = weak.upgrade() else { return };
-                    match res {
-                        Ok(pid) => v.host_pid.set(Some(pid)),
-                        Err(e) => {
-                            v.conv.add_note(&format!("host shell: {e}"));
-                            v.host_open.set(false);
-                            v.show_host_shell(false);
-                        }
-                    }
+            let dir = self.host_cwd.borrow().clone().filter(|d| remote::is_dir(d))
+                .or_else(|| self.store.pins(&self.id()).unwrap_or_default().into_iter().find(|p| remote::is_dir(p)))
+                .or_else(|| session::home().ok());
+            let env = [("TERM".into(), "xterm-256color".into()), ("COLORTERM".into(), "truecolor".into()),
+                ("SILL_HOST_SHELL".into(), "1".into()), (changes::HOST_SHELL_GIT_ENV.0.into(), changes::HOST_SHELL_GIT_ENV.1.into())].into();
+            match super::streams::PtyBridge::open(None, &[], &env, dir.as_deref(), self.host_term.column_count().max(20) as u16, self.host_term.row_count().max(5) as u16) {
+                Ok(mut bridge) => match vte4::Pty::foreign_sync(bridge.take_fd(), None::<&gtk::gio::Cancellable>) {
+                    Ok(pty) => { self.host_term.set_pty(Some(&pty)); *self.host_bridge.borrow_mut() = Some(bridge); }
+                    Err(e) => { self.conv.add_note(&format!("host shell: {e}")); return; }
                 },
-            );
+                Err(e) => { self.conv.add_note(&format!("host shell: {e:#}")); return; }
+            }
             self.host_open.set(true);
         }
         // a third of the window (the pane sits under the view now, so the view's own height shrinks)
@@ -829,7 +790,7 @@ impl SessionView {
     /// The host shell exited: forget it and show the prompt again.
     fn host_shell_closed(self: &Rc<Self>) {
         self.host_open.set(false);
-        self.host_pid.set(None);
+        self.host_bridge.borrow_mut().take();
         self.host_term.set_pty(None);
         self.host_term.reset(true, true);
         self.show_host_shell(false);
@@ -869,6 +830,7 @@ impl SessionView {
     /// The shell's pty hit EOF (exit, Ctrl+D): forget it and show the prompt again.
     fn shell_closed(self: &Rc<Self>) {
         self.shell_open.set(false);
+        self.shell_bridge.borrow_mut().take();
         self.terminal.set_pty(None);
         self.terminal.reset(true, true);
         self.show_shell(false);
@@ -905,7 +867,7 @@ impl SessionView {
             });
         }
         mbox.append(&open);
-        let cfg = sill_core::config::load();
+        let cfg = remote::config::load();
         let current = cfg.host_terminal();
         let window = item("Host terminal in a window");
         window.set_sensitive(current.is_some());
@@ -946,7 +908,7 @@ impl SessionView {
             b.connect_toggled(move |b| {
                 // connected after set_active: only the person's choice is saved
                 if b.is_active() {
-                    let _ = sill_core::config::update(|c| c.host_terminal = Some(cmd.to_string()));
+                    let _ = remote::config::update(|c| c.host_terminal = Some(cmd.to_string()));
                     p.popdown();
                 }
             });
@@ -972,16 +934,13 @@ impl SessionView {
     }
 
     fn open_shell(&self) -> anyhow::Result<()> {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
-        self.open_pty(&[shell, "-l".into()], &std::collections::BTreeMap::new())
+        self.open_pty(&[], &std::collections::BTreeMap::new())
     }
 
     /// Run `argv` on a fresh pty inside the jail, shown in the terminal pane.
     fn open_pty(&self, argv: &[String], env: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
-        let sock = sill_core::session::socket_path(&self.id())?;
-        let mut c = sill_core::shim::Control::connect(&sock).map_err(|_| anyhow::anyhow!("session is not running"))?;
         let home = session::home()?;
-        let cwd = self.store.pins(&self.id()).unwrap_or_default().into_iter().find(|p| p.is_dir()).unwrap_or(home);
+        let cwd = self.store.pins(&self.id()).unwrap_or_default().into_iter().find(|p| remote::is_dir(p)).unwrap_or(home);
         let cols = self.terminal.column_count().max(20) as u16;
         let rows = self.terminal.row_count().max(5) as u16;
         // the pane is a VTE terminal: say so, whatever the jail's default is
@@ -989,8 +948,9 @@ impl SessionView {
         env.entry("TERM".into()).or_insert_with(|| "xterm-256color".into());
         env.entry("COLORTERM".into()).or_insert_with(|| "truecolor".into());
         let env = &env;
-        let (fd, _pid) = c.open_pty(argv, env, Some(&cwd), cols, rows)?;
-        let pty = vte4::Pty::foreign_sync(fd, None::<&gtk::gio::Cancellable>)?;
+        let mut bridge = super::streams::PtyBridge::open(Some(&self.id()), argv, env, Some(&cwd), cols, rows)?;
+        let pty = vte4::Pty::foreign_sync(bridge.take_fd(), None::<&gtk::gio::Cancellable>)?;
+        *self.shell_bridge.borrow_mut() = Some(bridge);
         self.terminal.set_pty(Some(&pty));
         self.terminal.feed(b"\x1b[2J\x1b[H");
         Ok(())
@@ -1039,31 +999,28 @@ impl SessionView {
     /// login only (`sill_core::login`), then rebuild the jail so the new login file is bound in.
     fn login_on_host(self: &Rc<Self>, agent: agents::Agent, m: AuthMethodInfo) {
         self.status.set_text("logging in");
-        self.conv.add_note(&format!("{}: the login runs on this machine; finish it in the browser that opens", m.name));
+        self.conv.add_note(&format!("{}: the login runs on the daemon host; follow the login link it reports", m.name));
         let (tx, rx) = async_channel::unbounded::<Result<String, String>>();
-        let home = session::home().unwrap_or_default();
         let method = m.id.clone();
         std::thread::Builder::new()
             .name("sill-login".into())
             .spawn(move || {
-                let progress = tx.clone();
-                // the agent's stderr is noise (browser chatter) unless the login fails
-                let mut stderr: std::collections::VecDeque<String> = std::collections::VecDeque::new();
-                let r = sill_core::login::run(&agent, &home, &method, |line| match line {
-                    sill_core::login::Line::Status(t) => {
-                        let _ = progress.send_blocking(Ok(t));
+                let r = (|| -> anyhow::Result<()> {
+                    use std::io::BufRead;
+                    let token: String = remote::request(Request::HostLogin { agent: agent.id, method })?;
+                    let stream = sill_proto::transport::open_stream(&token)?;
+                    struct Close(std::sync::Arc<dyn Fn() + Send + Sync>);
+                    impl Drop for Close { fn drop(&mut self) { (self.0)(); } }
+                    let _close = Close(stream.interrupt.clone());
+                    for line in std::io::BufReader::new(stream.reader).lines() {
+                        let value: serde_json::Value = serde_json::from_str(&line?)?;
+                        if let Some(error) = value.get("error").and_then(|v| v.as_str()) { anyhow::bail!("{error}"); }
+                        if value.get("done").and_then(|v| v.as_bool()) == Some(true) { return Ok(()); }
+                        if let Some(status) = value.get("status").and_then(|v| v.as_str()) { let _ = tx.send_blocking(Ok(status.into())); }
                     }
-                    sill_core::login::Line::Stderr(t) => {
-                        if stderr.len() >= 12 {
-                            stderr.pop_front();
-                        }
-                        stderr.push_back(t);
-                    }
-                });
-                let _ = tx.send_blocking(r.map(|()| String::new()).map_err(|e| {
-                    let tail: Vec<String> = stderr.into_iter().collect();
-                    if tail.is_empty() { format!("{e:#}") } else { format!("{e:#}\n{}", tail.join("\n")) }
-                }));
+                    anyhow::bail!("login stream closed before completion")
+                })();
+                let _ = tx.send_blocking(r.map(|_| String::new()).map_err(|e| format!("{e:#}")));
             })
             .ok();
         let weak = Rc::downgrade(self);
@@ -1090,22 +1047,6 @@ impl SessionView {
         });
     }
 
-    /// Remember a control change twice (SPEC §3.2): for this session, which keeps it when reopened,
-    /// and as the default of its agent type, which the next new session starts from.
-    fn remember(&self, f: impl Fn(&mut sill_core::store::AgentSettings)) {
-        let agent = {
-            let mut s = self.session.borrow_mut();
-            f(&mut s.agent_settings);
-            super::client::set(&s.id, wire::SessionSet::Settings(s.agent_settings.clone()));
-            s.agent.clone()
-        };
-        let mut d = self.store.agent_settings(&agent);
-        f(&mut d);
-        if let Err(e) = super::client::set_agent_settings(&agent, &d) {
-            eprintln!("sill: could not remember {agent} default settings: {e:#}");
-        }
-    }
-
     fn command(&self, c: Command) {
         if std::env::var_os("SILL_TRACE").is_some() && matches!(c, Command::SetMode(_) | Command::SetConfig(..)) {
             eprintln!("{} command {c:?}", super::trace_ts());
@@ -1114,56 +1055,6 @@ impl SessionView {
             && let Err(e) = d.commands.try_send(c)
         {
             eprintln!("sill: command dropped, the session loop is gone: {e}");
-        }
-    }
-
-    /// Bring the agent to the controls this session remembers, where they differ from what it
-    /// reports and are still on offer. Model first: the adapter re-seeds effort and may clamp the
-    /// mode for the model, so mode and the rest are set against the model they will run on.
-    fn apply_remembered(&self, c: &Controls) {
-        let remembered = self.session.borrow().agent_settings.clone();
-        if std::env::var_os("SILL_TRACE").is_some() {
-            let shown: Vec<String> = c
-                .options
-                .iter()
-                .map(|o| match &o.kind {
-                    ConfigKind::Select(cur, _) => format!("{}={cur}", o.id),
-                    ConfigKind::Boolean(b) => format!("{}={b}", o.id),
-                })
-                .collect();
-            eprintln!(
-                "{} apply remembered mode={:?} config={:?} to mode={:?} {}",
-                super::trace_ts(),
-                remembered.mode,
-                remembered.config,
-                c.modes.as_ref().map(|(cur, _)| cur),
-                shown.join(" ")
-            );
-        }
-        let want_option = |opt: &sill_core::acp::ConfigOption| -> Option<Command> {
-            let want = remembered.config.get(&opt.id)?;
-            match &opt.kind {
-                ConfigKind::Select(current, values) if want != current && values.iter().any(|(id, _)| id == want) => {
-                    Some(Command::SetConfig(opt.id.clone(), ConfigValue::Id(want.clone())))
-                }
-                ConfigKind::Boolean(current) if (want == "true") != *current => {
-                    Some(Command::SetConfig(opt.id.clone(), ConfigValue::Bool(want == "true")))
-                }
-                _ => None,
-            }
-        };
-        let (models, others): (Vec<_>, Vec<_>) = c.options.iter().partition(|o| o.category == "model");
-        for cmd in models.into_iter().filter_map(want_option) {
-            self.command(cmd);
-        }
-        if let (Some(mode), Some((current, modes))) = (&remembered.mode, &c.modes)
-            && mode != current
-            && modes.iter().any(|(id, _)| id == mode)
-        {
-            self.command(Command::SetMode(mode.clone()));
-        }
-        for cmd in others.into_iter().filter_map(want_option) {
-            self.command(cmd);
         }
     }
 
@@ -1277,7 +1168,6 @@ impl SessionView {
                 }
                 if let Some(id) = ids.get(d.selected() as usize) {
                     v.command(Command::SetMode(id.clone()));
-                    v.remember(|s| s.mode = Some(id.clone()));
                 }
             });
             right.append(&d);
@@ -1297,7 +1187,6 @@ impl SessionView {
                     let weak = Rc::downgrade(self);
                     let ids: Vec<String> = values.iter().map(|(id, _)| id.clone()).collect();
                     let oid = opt.id.clone();
-                    let is_model = opt.category == "model";
                     d.connect_selected_notify(move |d| {
                         let Some(v) = weak.upgrade() else { return };
                         if v.rebuilding.get() {
@@ -1305,13 +1194,6 @@ impl SessionView {
                         }
                         if let Some(id) = ids.get(d.selected() as usize) {
                             v.command(Command::SetConfig(oid.clone(), ConfigValue::Id(id.clone())));
-                            if is_model {
-                                *v.reconcile_model.borrow_mut() = Some(id.clone());
-                            }
-                            let (o, i) = (oid.clone(), id.clone());
-                            v.remember(move |s| {
-                                s.config.insert(o.clone(), i.clone());
-                            });
                         }
                     });
                     right.append(&d);
@@ -1330,10 +1212,6 @@ impl SessionView {
                         let Some(v) = weak.upgrade() else { return glib::Propagation::Proceed };
                         if !v.rebuilding.get() {
                             v.command(Command::SetConfig(oid.clone(), ConfigValue::Bool(state)));
-                            let o = oid.clone();
-                            v.remember(move |s| {
-                                s.config.insert(o.clone(), state.to_string());
-                            });
                         }
                         glib::Propagation::Proceed
                     });
@@ -1431,6 +1309,33 @@ impl SessionView {
     }
 
     /// Stored entries onto the conversation, in order.
+    fn replay_history(self: &Rc<Self>, tail: Vec<Entry>, total: usize) {
+        self.conv.clear();
+        self.agent_md.borrow_mut().clear();
+        self.earlier.borrow_mut().take();
+        let first_seq = tail.first().map(|e| e.seq);
+        self.render_entries(&tail);
+        if let Some(first) = first_seq
+            && total > tail.len()
+        {
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            row.set_halign(gtk::Align::Center);
+            let b = gtk::Button::with_label("");
+            b.add_css_class("flat");
+            b.add_css_class("sill-earlier");
+            row.append(&b);
+            self.conv.prepend_top(&row);
+            *self.earlier.borrow_mut() = Some((first, row, b.clone()));
+            self.update_earlier(total - tail.len());
+            let weak = Rc::downgrade(self);
+            b.connect_clicked(move |_| {
+                if let Some(v) = weak.upgrade() {
+                    v.show_earlier();
+                }
+            });
+        }
+    }
+
     fn render_entries(&self, entries: &[Entry]) {
         for e in entries {
             match e.kind.as_str() {
@@ -1563,38 +1468,20 @@ impl SessionView {
         while let Some(c) = self.pins_row.first_child() {
             self.pins_row.remove(&c);
         }
-        // watch each pinned repo's .git (index/HEAD/refs change on commit, checkout, host or jail)
         self.git_monitors.borrow_mut().clear();
-        for p in &pins {
-            let git = p.join(".git");
-            if !git.is_dir() {
-                continue;
-            }
-            for dir in [git.clone(), git.join("refs/heads")] {
-                if let Ok(m) = gtk::gio::File::for_path(&dir).monitor_directory(gtk::gio::FileMonitorFlags::NONE, None::<&gtk::gio::Cancellable>) {
-                    let weak = Rc::downgrade(self);
-                    m.connect_changed(move |_, _, _, _| {
-                        if let Some(v) = weak.upgrade() {
-                            v.refresh_pins_soon();
-                        }
-                    });
-                    self.git_monitors.borrow_mut().push(m);
-                }
-            }
-        }
         self.pins_row.set_visible(!pins.is_empty());
         if pins.is_empty() {
             self.chips.borrow_mut().clear();
             return;
         }
-        let home = std::env::var("HOME").unwrap_or_default();
+        let home = session::home().unwrap_or_default().to_string_lossy().into_owned();
         let mut summaries: Vec<(std::path::PathBuf, gtk::Box)> = Vec::new();
         for p in pins {
             let chip = gtk::Box::new(gtk::Orientation::Horizontal, 2);
             chip.add_css_class("sill-chip");
             let l = gtk::Button::new();
             let lbox = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-            let is_dir = p.is_dir();
+            let is_dir = remote::is_dir(&p);
             let shown = p.to_string_lossy().replace(&home, "~");
             // a glyph says folder or file, the name alone says which; the whole path is the tooltip
             let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(shown.clone());
@@ -1616,7 +1503,7 @@ impl SessionView {
                 let p = p.clone();
                 l.connect_clicked(move |_| {
                     let Some(v) = weak.upgrade() else { return };
-                    if p.is_dir() {
+                    if remote::is_dir(&p) {
                         if let Some(cb) = v.on_open_folder.borrow().as_ref() {
                             cb(&p);
                         }
@@ -1710,36 +1597,24 @@ impl SessionView {
     /// one-click way to allow it for this agent (SPEC §4.8). Third-party agents start with an
     /// empty allow-list, so this is how their endpoints get in.
     fn watch_denied(self: &Rc<Self>) {
+        if let Some(timer) = self.denied_monitor.borrow_mut().take() { timer.remove(); }
         self.denied_seen.borrow_mut().clear();
         self.denied_asked.set(0);
-        let Ok(rt) = sill_core::shim::runtime_dir(&self.id()) else { return };
-        let Ok(m) = gtk::gio::File::for_path(&rt).monitor_directory(gtk::gio::FileMonitorFlags::NONE, None::<&gtk::gio::Cancellable>) else {
-            return;
-        };
         let weak = Rc::downgrade(self);
-        m.connect_changed(move |_, f, _, _| {
-            if f.basename().is_some_and(|b| b == std::path::Path::new("denied"))
-                && let Some(v) = weak.upgrade()
-            {
-                v.check_denied();
-            }
+        let timer = glib::timeout_add_local(std::time::Duration::from_secs(3), move || {
+            let Some(view) = weak.upgrade() else { return glib::ControlFlow::Break };
+            view.check_denied();
+            glib::ControlFlow::Continue
         });
-        *self.denied_monitor.borrow_mut() = Some(m);
+        *self.denied_monitor.borrow_mut() = Some(timer);
         self.check_denied();
     }
 
     fn check_denied(self: &Rc<Self>) {
-        let Ok(rt) = sill_core::shim::runtime_dir(&self.id()) else { return };
-        let Ok(text) = std::fs::read_to_string(rt.join("denied")) else { return };
-        // hosts answered before (any button): the file outlives the tab, the question must not
-        let answered = rt.join("denied.answered");
-        for host in std::fs::read_to_string(&answered).unwrap_or_default().lines() {
-            self.denied_seen.borrow_mut().insert(host.trim().to_string());
-        }
-        let home = session::home().unwrap_or_default();
-        let quiet = sill_core::policy::Policy::load(&self.session.borrow().policy, &home)
-            .map(|p| p.network.quiet)
-            .unwrap_or_else(|_| sill_core::policy::quiet_default());
+        let Ok(denied) = remote::request::<sill_core::frontend::Denied>(Request::Denied { session: self.id() }) else { return };
+        for host in &denied.answered { self.denied_seen.borrow_mut().insert(host.trim().to_string()); }
+        let text = denied.hosts.join("\n");
+        let quiet = denied.quiet;
         for host in text.lines().map(str::trim).filter(|h| !h.is_empty()) {
             if !self.denied_seen.borrow_mut().insert(host.to_string()) {
                 continue;
@@ -1765,18 +1640,13 @@ impl SessionView {
                 continue;
             }
             self.denied_asked.set(asked + 1);
-            let agent_name = agents::load(&session::home().unwrap_or_default())
-                .get(&self.session.borrow().agent)
-                .map(|a| a.name.clone())
-                .unwrap_or_else(|| self.session.borrow().agent.clone());
+            let agent_name = denied.agent_name.clone();
             let mut actions: Vec<(String, Rc<dyn Fn()>)> = Vec::new();
             let remember = {
-                let (answered, host) = (answered.clone(), host.to_string());
+                let (session, host) = (self.id(), host.to_string());
                 move || {
-                    use std::io::Write;
-                    let f = std::fs::OpenOptions::new().create(true).append(true).open(&answered);
-                    if let Err(e) = f.and_then(|mut f| writeln!(f, "{host}")) {
-                        eprintln!("sill: {}: {e}", answered.display());
+                    if let Err(e) = remote::request::<serde_json::Value>(Request::RememberDenied { session: session.clone(), host: host.clone() }) {
+                        eprintln!("sill: remembering refused host: {e:#}");
                     }
                 }
             };
@@ -1819,15 +1689,9 @@ impl SessionView {
     /// Add a host pattern to this agent's `domains` (its registry override) and rebuild the jail
     /// so the proxy picks it up.
     fn allow_domain(self: &Rc<Self>, pattern: &str) {
-        let home = session::home().unwrap_or_default();
-        let id = self.session.borrow().agent.clone();
-        let Some(mut agent) = agents::load(&home).remove(&id) else { return };
-        if !agent.domains.iter().any(|d| d == pattern) {
-            agent.domains.push(pattern.to_string());
-        }
-        match agents::save_override(&home, &agent) {
-            Ok(_) => {
-                self.conv.add_note(&format!("{pattern} allowed for {}; the session restarts", agent.name));
+        match remote::request::<String>(Request::AllowHost { session: self.id(), host: pattern.into() }) {
+            Ok(name) => {
+                self.conv.add_note(&format!("{pattern} allowed for {name}; the session restarts"));
                 self.force_restart.set(true);
                 self.request_restart();
             }
@@ -1877,23 +1741,10 @@ impl SessionView {
             self.add_attachment(Attachment { name, mime: mime.into(), kind: AttachmentKind::Image { data_base64: sill_core::acp::base64(&bytes) } });
             return;
         }
-        let home = session::home().unwrap_or_default();
-        let s = self.session.borrow().clone();
-        let Ok(policy) = sill_core::policy::Policy::load(&s.policy, &home) else { return };
-        let Ok(sdir) = sill_core::session::state_dir(session::uid(), &s.id) else { return };
-        let Some((host_dir, jail_dir)) = sill_core::session::uploads_dir(&policy, &sdir, &home) else {
-            self.conv.add_note("files can't be attached: this policy keeps no private ~/.cache for the session");
-            return;
-        };
-        // the uploads dir is inside the session's scratch, which the agent can reach: the copy
-        // never follows a link it may have planted there (security.md S6)
-        let rel = host_dir.join(&name);
-        let rel = rel.strip_prefix(&sdir).unwrap_or(&rel);
-        if let Err(e) = sill_core::safe_fs::write_file_beneath(&sdir, rel, &bytes, 0o644) {
-            self.conv.add_note(&format!("could not copy {name} into the session: {e:#}"));
-            return;
+        match remote::request::<std::path::PathBuf>(Request::Upload { session: self.id(), name: name.clone(), bytes }) {
+            Ok(jail_path) => self.add_attachment(Attachment { name, mime: "application/octet-stream".into(), kind: AttachmentKind::File { jail_path } }),
+            Err(e) => self.conv.add_note(&format!("could not attach {name}: {e:#}")),
         }
-        self.add_attachment(Attachment { name: name.clone(), mime: "application/octet-stream".into(), kind: AttachmentKind::File { jail_path: jail_dir.join(&name) } });
     }
 
     fn add_attachment(self: &Rc<Self>, a: Attachment) {
@@ -1957,102 +1808,22 @@ impl SessionView {
         self.bottom.connect_visible_child_name_notify(move |_| f());
     }
 
-    /// The session's overlay, planned once per jail.
-    fn jail_view(&self) -> Option<JailView> {
-        if let Some(j) = self.jail.borrow().as_ref() {
-            return Some(j.clone());
-        }
-        // the daemon plans it (docs/daemon.md §7 M2); once per jail, so a blocking call here is one
-        // short round trip, not one per image — on the quick lane, not behind an attach or a scan
-        let v: sill_proto::JailView = super::client::quick(sill_proto::method::SESSIONS_JAIL_VIEW, sill_proto::Key { key: self.id() }).ok()?;
-        let j = (v.layers, v.masked);
-        *self.jail.borrow_mut() = Some(j.clone());
-        Some(j)
-    }
-
     /// An image path as the agent wrote it → the file it sees in its jail: relative to home, `..`
     /// folded lexically; nothing under a masked path; a pinned folder is the host's own; otherwise
     /// the session's overlay copy when it has one (a regular file — a whiteout means deleted), else
     /// the host file. Images only.
     fn resolve_jail_path(&self, src: &str) -> Option<std::path::PathBuf> {
-        use std::os::unix::fs::FileTypeExt;
-        use std::path::{Component, PathBuf};
-        let src = src.strip_prefix("file://").unwrap_or(src);
-        if src.contains("://") {
-            return None;
-        }
-        let home = session::home().ok()?;
-        let raw = PathBuf::from(src);
-        let raw = if raw.is_absolute() { raw } else { home.join(raw) };
-        let mut p = PathBuf::from("/");
-        for c in raw.components() {
-            match c {
-                Component::ParentDir => {
-                    p.pop();
-                }
-                Component::Normal(n) => p.push(n),
-                _ => {}
-            }
-        }
-        if !viewer::is_image(&p) {
-            return None;
-        }
-        if self.store.jail_pins(&self.id()).unwrap_or_default().iter().any(|pin| pin.is_dir() && p.starts_with(pin)) {
-            return p.is_file().then_some(p);
-        }
-        let (layers, masked) = self.jail_view()?;
-        if masked.iter().any(|m| p.starts_with(m)) {
-            return None;
-        }
-        for (host, upper_root) in &layers {
-            if let Ok(rel) = p.strip_prefix(host) {
-                let upper = upper_root.join(rel);
-                if let Ok(md) = upper.symlink_metadata() {
-                    if md.file_type().is_char_device() {
-                        return None; // deleted in the jail
-                    }
-                    if md.is_file() {
-                        return Some(upper);
-                    }
-                }
-            }
-        }
-        p.is_file().then_some(p)
+        let bytes: Option<Vec<u8>> = remote::request(Request::ResolveImage { session: self.id(), path: src.into() }).ok()?;
+        let bytes = bytes?;
+        let key = format!("{}:{}:{}", std::env::var("SILL_BOX").unwrap_or_default(), self.id(), src);
+        remote::cache_image(&key, &bytes, std::path::Path::new(src).extension().and_then(|s| s.to_str()).unwrap_or("img"))
     }
 
     /// Have the pins changed since the jail started? Only folder pins are mounts; a pinned file never
     /// needs a new jail.
     pub fn pins_changed(&self) -> bool {
-        let dirs = |v: &[std::path::PathBuf]| v.iter().filter(|p| p.is_dir()).cloned().collect::<Vec<_>>();
+        let dirs = |v: &[std::path::PathBuf]| v.iter().filter(|p| remote::is_dir(p)).cloned().collect::<Vec<_>>();
         self.force_restart.get() || dirs(&self.store.pins(&self.id()).unwrap_or_default()) != dirs(&self.live_pins.borrow())
-    }
-
-    /// Context block prepended to prompts while pins exist (SPEC §3.1 pins).
-    fn pin_prefix(&self) -> String {
-        let pins = self.store.pins(&self.id()).unwrap_or_default();
-        let (dirs, files): (Vec<_>, Vec<_>) = pins.iter().partition(|p| p.is_dir());
-        let mut out = String::new();
-        if !dirs.is_empty() {
-            let list: Vec<String> = dirs.iter().map(|p| p.display().to_string()).collect();
-            out.push_str(&format!("[Pinned folders — focus your work there unless told otherwise: {}]\n", list.join(", ")));
-        }
-        if !files.is_empty() {
-            let list: Vec<String> = files.iter().map(|p| p.display().to_string()).collect();
-            out.push_str(&format!("[Pinned files — the person keeps these at hand: {}]\n", list.join(", ")));
-        }
-        out
-    }
-
-    /// What goes before the person's text: the standing block when this agent process has not had
-    /// this version of it (SPEC §3.1 instructions), then the pins, then a blank line. The caller
-    /// commits the standing block to [`Self::sent_standing`] once the prompt was accepted.
-    fn context_prefix(&self, standing: Option<&str>) -> String {
-        let mut out = standing.unwrap_or_default().to_string();
-        out.push_str(&self.pin_prefix());
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out
     }
 
     pub fn focus_prompt(&self) {
@@ -2126,9 +1897,7 @@ impl SessionView {
         let s = self.session.borrow().clone();
         let pins = self.store.pins(&s.id).unwrap_or_default();
         *self.live_pins.borrow_mut() = pins.clone();
-        self.jail.borrow_mut().take(); // the overlay is planned again with the current pins
         self.ready.set(false);
-        self.sent_standing.borrow_mut().take(); // a new agent process: the standing block goes again
         self.status.set_text("starting");
         let (tx, rx) = async_channel::bounded::<Result<session::Driver, String>>(1);
         std::thread::Builder::new()
@@ -2273,46 +2042,13 @@ impl SessionView {
             self.conv.add_note("session is not running");
             return false;
         };
-        // sill's facts about this jail come from the session's policy (none if it can't be read); a
-        // ghost's are of the tightened policy, with the one line it is told (docs/memory.md §3.2)
-        let ghost = self.session.borrow().ghost;
-        let facts = session::home()
-            .ok()
-            .and_then(|h| {
-                let mut p = sill_core::policy::Policy::load(&self.session.borrow().policy, &h).ok()?;
-                if ghost {
-                    p.ghostly(&h);
-                }
-                let mut f = sill_core::instructions::facts_block(&p, &h);
-                if ghost {
-                    f.push_str(sill_core::instructions::GHOST_NOTICE);
-                }
-                Some(f)
-            })
-            .unwrap_or_default();
-        // what earlier sessions in these folders did (docs/memory.md §2.3): changes only when one
-        // in scope ends or the scope changes, so the block stays the same across prompts. A ghost
-        // gets it only when Settings say ghosts see memory.
-        let memory = match session::home() {
-            Err(_) => String::new(),
-            Ok(_) if ghost && !sill_core::config::load().ghost_memory() => String::new(),
-            Ok(h) => {
-                let pins = self.store.pins(&self.id()).unwrap_or_default();
-                sill_core::memory::recall(&self.store, &self.session.borrow(), &pins, &h, sill_core::config::load().memory_recall())
-            }
-        };
-        let standing = sill_core::instructions::standing_block(&facts, &memory, &sill_core::instructions::load_global());
-        let standing_due = self.sent_standing.borrow().as_deref() != Some(standing.as_str());
-        let outgoing = format!("{}{}", self.context_prefix(standing_due.then_some(standing.as_str())), text);
-        lap("prefix");
+        // The daemon adds the standing instructions, scoped recall and current pins once for
+        // every client. Keep the transcript and this request as the person wrote them.
         let attachments = std::mem::take(&mut *self.attachments.borrow_mut());
         let names: Vec<String> = attachments.iter().map(|a| a.name.clone()).collect();
         let entry = wire::Entry::User { text: text.to_string(), names: names.clone() };
-        match d.try_send(Command::Prompt { text: outgoing, attachments: attachments.clone(), entry: Some(entry) }) {
+        match d.try_send(Command::Prompt { text: text.to_string(), attachments: attachments.clone(), entry: Some(entry) }) {
             Ok(()) => {
-                if standing_due {
-                    *self.sent_standing.borrow_mut() = Some(standing);
-                }
                 self.rebuild_attach_strip();
                 self.conv.add_user_with(text, &names);
                 lap("add_user");
@@ -2336,54 +2072,36 @@ impl SessionView {
     }
 
     fn handle(self: &Rc<Self>, ev: Event) {
-        let replaying = *self.replaying.borrow();
         match &ev {
             Event::Ready { session_id, resumed, controls } => {
                 self.ready.set(true);
                 self.startup_retried.set(false);
                 // the daemon stored the agent's session id; the view's copy follows
                 self.session.borrow_mut().acp_session_id = Some(session_id.clone());
-                *self.replaying.borrow_mut() = *resumed;
-                if !*resumed {
-                    // a fresh ACP session (also after a login's retry): its context has no standing
-                    // block yet, whatever this agent process was sent before
-                    self.sent_standing.borrow_mut().take();
-                }
+                *self.replaying.borrow_mut() = false;
                 self.status.set_text(if *resumed { "resumed" } else { "ready" });
                 self.build_controls(controls);
-                // bring the agent back to the settings the person last chose in this session
-                self.apply_remembered(controls);
                 return;
             }
             Event::Controls(c) => {
                 self.build_controls(c);
-                // the model the person picked is current now: the adapter rebuilt the options for it
-                // (effort re-seeded, "auto" possibly clamped) — the remembered picks go once more
-                let picked = self.reconcile_model.borrow().clone();
-                if let Some(model) = picked
-                    && c.options.iter().any(|o| o.category == "model" && matches!(&o.kind, ConfigKind::Select(cur, _) if *cur == model))
-                {
-                    *self.reconcile_model.borrow_mut() = None;
-                    self.apply_remembered(c);
-                }
-                return;
-            }
-            Event::PermissionRequest { .. } if self.auto_allow.get() => {
-                let Event::PermissionRequest { tool_call_id, title, options, reply } = ev else { unreachable!() };
-                use sill_core::acp::PermissionOptionKind as K;
-                let pick = options
-                    .iter()
-                    .find(|o| o.kind == K::AllowOnce)
-                    .or_else(|| options.iter().find(|o| o.kind == K::AllowAlways))
-                    .map(|o| o.id.clone());
-                let _ = reply.send(pick.clone());
-                // a quiet mark on the call's own line, not a note with the whole command
-                self.conv.mark_auto_allowed(&tool_call_id, &title, pick.is_none());
                 return;
             }
             // the daemon answered it (the session auto-allows): a quiet mark on the call's own line
             Event::AutoAnswered { tool_call_id, title, allowed } => {
                 self.conv.mark_auto_allowed(tool_call_id, title, !*allowed);
+                return;
+            }
+            Event::Other(t) if t.starts_with("sill:replay:") => {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&t["sill:replay:".len()..])
+                    && let Ok(entries) = serde_json::from_value::<Vec<Entry>>(value["entries"].clone())
+                {
+                    self.replay_history(entries, value["total"].as_u64().unwrap_or(0) as usize);
+                }
+                return;
+            }
+            Event::Other(t) if t == "sill:reconnecting" => {
+                self.status.set_text("reconnecting");
                 return;
             }
             // a command the daemon refused (a turn running, the session gone)
@@ -2404,14 +2122,6 @@ impl SessionView {
                     cb(&self.id(), true);
                 }
             }
-            Event::UserText(_) | Event::Text(_) | Event::Thought(_) | Event::ToolCall { .. } | Event::ToolCallUpdate { .. } | Event::SubagentText { .. }
-                if replaying =>
-            {
-                return; // the stored transcript is already on screen
-            }
-            // some agents (Mistral Vibe) echo the prompt back as a user message chunk during the
-            // turn; the shelf already shows what it sent, so outside a replay it is dropped
-            Event::UserText(_) => return,
             Event::Text(t) => self.agent_md.borrow_mut().push_str(t),
             // the daemon writes tool calls and their updates to the transcript
             Event::ToolCall { diff, .. } => {
@@ -2510,7 +2220,7 @@ impl SessionView {
             m.cancel();
         }
         if let Some(m) = self.denied_monitor.borrow_mut().take() {
-            m.cancel();
+            m.remove();
         }
         self.on_busy.borrow_mut().take();
         self.on_turn_end.borrow_mut().take();
@@ -2544,10 +2254,10 @@ impl SessionView {
     }
 
     fn poll_procs(self: &Rc<Self>) {
-        let Ok(sock) = sill_core::session::socket_path(&self.id()) else { return };
+        let session = self.id();
         let (tx, rx) = async_channel::bounded::<Option<Vec<sill_core::shim::Proc>>>(1);
         std::thread::spawn(move || {
-            let list = sill_core::shim::Control::connect(&sock).and_then(|mut c| c.proc_list()).ok();
+            let list = remote::request(Request::ProcList { session }).ok();
             let _ = tx.send_blocking(list);
         });
         let weak = Rc::downgrade(self);
@@ -2567,9 +2277,7 @@ impl SessionView {
         let running_ports: Vec<(u16, String)> = list.iter().filter(|p| p.running()).filter_map(|p| p.port.map(|port| (port, p.name.clone()))).collect();
         self.bridges.borrow_mut().retain(|port, _| running_ports.iter().any(|(p, _)| p == port));
         let allowed = {
-            let s = self.session.borrow();
-            let home = session::home().unwrap_or_default();
-            sill_core::policy::Policy::load(&s.policy, &home).map(|p| p.processes).unwrap_or_default()
+            remote::request::<sill_core::policy::Processes>(Request::ProcessPolicy { session: self.id() }).unwrap_or_default()
         };
         for (port, name) in running_ports {
             if self.bridges.borrow().contains_key(&port) {
@@ -2598,8 +2306,7 @@ impl SessionView {
     }
 
     fn expose_port(self: &Rc<Self>, port: u16, name: &str) {
-        let Ok(sock) = sill_core::session::socket_path(&self.id()) else { return };
-        match super::processes::expose(sock, port) {
+        match super::processes::expose(self.id(), port) {
             Ok(b) => {
                 let note = if b.host_port == port {
                     format!("{name}: port {port} is open on this machine at {}", b.url())
@@ -2749,15 +2456,12 @@ impl SessionView {
 
     /// Stop one (or all, with an empty name) or dismiss an ended one; the list is polled again after.
     fn proc_action(self: &Rc<Self>, name: &str, stop: bool) {
-        let Ok(sock) = sill_core::session::socket_path(&self.id()) else { return };
+        let session = self.id();
         let name = name.to_string();
         let (tx, rx) = async_channel::bounded::<Result<(), String>>(1);
         std::thread::spawn(move || {
-            let r = sill_core::shim::Control::connect(&sock).and_then(|mut c| match (stop, name.is_empty()) {
-                (true, true) => c.proc_stop_all().map(|_| ()),
-                (true, false) => c.proc_stop(&name),
-                (false, _) => c.proc_dismiss(&name),
-            });
+            let request = if stop { Request::ProcStop { session, name } } else { Request::ProcDismiss { session, name } };
+            let r = remote::request::<serde_json::Value>(request).map(|_| ());
             let _ = tx.send_blocking(r.map_err(|e| format!("{e:#}")));
         });
         let weak = Rc::downgrade(self);
@@ -2774,37 +2478,8 @@ impl SessionView {
 
 /// (+insertions, −deletions, untracked files) vs HEAD: of a pinned folder's working tree, or of a
 /// pinned file alone (in the repository that holds it, found by walking up); None outside a repo.
-fn git_summary(path: &std::path::Path) -> Option<(u64, u64, u64)> {
-    let (repo, spec): (std::path::PathBuf, Option<std::path::PathBuf>) = if path.is_dir() {
-        (path.to_path_buf(), None)
-    } else {
-        let root = path.ancestors().skip(1).find(|a| a.join(".git").exists())?;
-        (root.to_path_buf(), Some(path.strip_prefix(root).ok()?.to_path_buf()))
-    };
-    if !repo.join(".git").exists() {
-        return None;
-    }
-    let git = sill_core::changes::Git::open(&repo).ok()?;
-    let mut cmd = git.cmd();
-    cmd.args(["diff", "--numstat"]).args(sill_core::changes::Git::DIFF_SAFE).args(["HEAD", "--"]);
-    if let Some(s) = &spec {
-        cmd.arg(s);
-    }
-    let out = cmd.output().ok()?;
-    let (mut add, mut del) = (0u64, 0u64);
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        let mut it = line.split('\t');
-        add += it.next().and_then(|x| x.parse::<u64>().ok()).unwrap_or(0);
-        del += it.next().and_then(|x| x.parse::<u64>().ok()).unwrap_or(0);
-    }
-    let mut cmd = git.cmd();
-    cmd.args(["ls-files", "--others", "--exclude-standard", "--"]);
-    if let Some(s) = &spec {
-        cmd.arg(s);
-    }
-    let out = cmd.output().ok()?;
-    let untracked = String::from_utf8_lossy(&out.stdout).lines().count() as u64;
-    Some((add, del, untracked))
+fn git_summary(path: &std::path::Path) -> Option<(u64,u64,u64)> {
+    remote::request(Request::GitSummary { path: path.into() }).ok().flatten()
 }
 
 /// Let a dropdown shrink: its button shows the selection in a label that ellipsizes, so a tight row

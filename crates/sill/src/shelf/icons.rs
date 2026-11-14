@@ -237,7 +237,10 @@ fn glyph(name: &str) -> Option<&'static str> {
 pub fn image(agent: Option<&sill_core::agents::Agent>, color: gdk::RGBA, px: i32) -> gtk::Image {
     let name = agent.and_then(|a| a.icon.clone()).unwrap_or_else(|| PLACEHOLDER.to_string());
     if name.starts_with('/') {
-        return from_file(std::path::Path::new(&name), color, px);
+        return match super::remote::image(std::path::Path::new(&name)) {
+            Some(cached) => from_file(&cached, color, px),
+            None => named(PLACEHOLDER, color, px),
+        };
     }
     // a name sill has no glyph for is the placeholder, never a lookup in the desktop's icon theme
     let d = glyph(&name).or_else(|| glyph(PLACEHOLDER)).unwrap_or("");

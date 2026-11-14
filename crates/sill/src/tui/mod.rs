@@ -27,34 +27,68 @@ pub fn line_mode(key: &str, fresh: bool, verbose: bool) -> Result<()> {
     let id = s.id.clone();
     eprintln!("sill: {} {} — {} ({}); a line is a prompt, /cancel stops the turn, /quit or Ctrl-D detaches (the session keeps running)", &id[..8.min(id.len())], s.agent, s.title, if s.running { "running" } else { "starting" });
     let pending: Arc<Mutex<Option<Pending>>> = Arc::default();
+    let current = Arc::new(Mutex::new(c.clone()));
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
     {
         // the daemon's notifications, rendered as they come; registered before the attach so the
         // session's current state (the turn in flight, an unanswered question) is not missed
-        let c = c.clone();
+        let current = current.clone();
+        let done = done.clone();
         let id = id.clone();
         let pending = pending.clone();
         std::thread::Builder::new().name("sill-attach-events".into()).spawn(move || {
-            let rx = c.notifications.lock().unwrap();
-            while let Ok((m, params)) = rx.recv() {
-                if m != method::SESSION_EVENT {
-                    continue;
+            loop {
+                let c = current.lock().unwrap().clone();
+                {
+                    let rx = c.notifications.lock().unwrap();
+                    while let Ok((m, params)) = rx.recv() {
+                        if m == "_sill/session.replay" {
+                            if params["key"].as_str() == Some(&id) { render_replay(&params); }
+                            continue;
+                        }
+                        if m != method::SESSION_EVENT { continue; }
+                        let Ok(n) = serde_json::from_value::<SessionEvent>(params) else { continue };
+                        if n.key != id { continue; }
+                        if !render(n.event, verbose, &pending) { std::process::exit(0); }
+                    }
                 }
-                let Ok(n) = serde_json::from_value::<SessionEvent>(params) else { continue };
-                if n.key != id {
-                    continue;
-                }
-                if !render(n.event, verbose, &pending) {
-                    std::process::exit(0);
+                if done.load(std::sync::atomic::Ordering::Acquire) { return; }
+                *pending.lock().unwrap() = None;
+                eprintln!("\nsill: connection lost; reconnecting to the session");
+                let mut delay = std::time::Duration::from_millis(100);
+                loop {
+                    if done.load(std::sync::atomic::Ordering::Acquire) { return; }
+                    std::thread::sleep(delay);
+                    let restored = (|| -> Result<Arc<Client>> {
+                        let next = Arc::new(Client::connect_or_start()?);
+                        let session: Session = next.call(method::SESSIONS_GET, Key { key: id.clone() })?;
+                        if session.ended_at.is_some() {
+                            eprintln!("sill: the session ended while disconnected");
+                            std::process::exit(0);
+                        }
+                        next.call::<serde_json::Value>(method::SESSIONS_ATTACH, Attach { key: id.clone(), fresh: false })?;
+                        Ok(next)
+                    })();
+                    match restored {
+                        Ok(next) => {
+                            *current.lock().unwrap() = next;
+                            eprintln!("sill: reconnected; current turn and waiting questions follow");
+                            break;
+                        }
+                        Err(e) => {
+                            if verbose { eprintln!("sill: reconnecting: {e:#}"); }
+                            delay = (delay * 2).min(std::time::Duration::from_secs(5));
+                        }
+                    }
                 }
             }
-            eprintln!("\nsill: the daemon closed the connection");
-            std::process::exit(1);
         })?;
     }
     c.call::<serde_json::Value>(method::SESSIONS_ATTACH, Attach { key: id.clone(), fresh }).context("attaching")?;
     prompt_mark();
     let command = |cmd: Command| -> Result<()> {
-        c.call::<serde_json::Value>(method::SESSIONS_COMMAND, SessionCommand { key: id.clone(), command: cmd })?;
+        let client = current.lock().unwrap().clone();
+        client.call::<serde_json::Value>(method::SESSIONS_COMMAND, SessionCommand { key: id.clone(), command: cmd })?;
         Ok(())
     };
     for line in std::io::stdin().lock().lines() {
@@ -71,7 +105,8 @@ pub fn line_mode(key: &str, fresh: bool, verbose: bool) -> Result<()> {
             if answer.is_none() && !text.is_empty() {
                 eprintln!("sill: not an option; the request is cancelled");
             }
-            let r = c.call::<serde_json::Value>(method::SESSIONS_ANSWER, SessionAnswer { key: id.clone(), request: q.request, answer: Answer::Permission(answer) });
+            let client = current.lock().unwrap().clone();
+            let r = client.call::<serde_json::Value>(method::SESSIONS_ANSWER, SessionAnswer { key: id.clone(), request: q.request, answer: Answer::Permission(answer) });
             if let Err(e) = r {
                 eprintln!("sill: {e:#}");
             }
@@ -94,6 +129,7 @@ pub fn line_mode(key: &str, fresh: bool, verbose: bool) -> Result<()> {
             }
         }
     }
+    done.store(true, std::sync::atomic::Ordering::Release);
     let _ = command(Command::Quit);
     eprintln!("sill: detached; the session keeps running");
     Ok(())
@@ -217,4 +253,26 @@ fn render(ev: Event, verbose: bool, pending: &Mutex<Option<Pending>>) -> bool {
     }
     let _ = out.flush();
     true
+}
+
+
+/// Stored entries precede the live snapshot on attach, including reconnect. Showing the
+/// transcript explicitly makes terminal reconnection understandable without hiding missed output.
+fn render_replay(replay: &serde_json::Value) {
+    let Some(entries) = replay["entries"].as_array() else { return };
+    if entries.is_empty() { return; }
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "\n\x1b[2m[session history]\x1b[0m");
+    for entry in entries {
+        let text = entry["text"].as_str().unwrap_or_default();
+        match entry["kind"].as_str().unwrap_or_default() {
+            "user" => { let _ = writeln!(out, "> {text}"); }
+            "agent" => { let _ = writeln!(out, "{text}"); }
+            "note" => { let _ = writeln!(out, "\x1b[2m· {text}\x1b[0m"); }
+            "tool" => { let _ = writeln!(out, "\x1b[36m⚙ {text}\x1b[0m"); }
+            _ => {}
+        }
+    }
+    let _ = writeln!(out, "\x1b[2m[live session]\x1b[0m");
+    let _ = out.flush();
 }

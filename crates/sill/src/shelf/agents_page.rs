@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime};
 use gtk4 as gtk;
 use gtk::glib;
 use gtk::prelude::*;
-use sill_core::registry::{self, Entry, Trust};
+use super::remote::registry::{self, Entry, Trust};
 
 use super::{icons, session, settings, theme};
 
@@ -224,7 +224,7 @@ impl AgentsPage {
             return State::Managed(i.version, i.trust);
         }
         if let Some(id) = registry::builtin_for(entry)
-            && let Some(agent) = sill_core::agents::load(home).get(id)
+            && let Some(agent) = super::remote::agents::load(home).get(id)
             && let Some(path) = registry::available(agent, home)
         {
             return State::System(path);
@@ -457,7 +457,7 @@ impl AgentsPage {
             while let Some(c) = r.editor.first_child() {
                 r.editor.remove(&c);
             }
-            if let Some(agent) = sill_core::agents::load(&home).remove(&id) {
+            if let Some(agent) = super::remote::agents::load(&home).remove(&id) {
                 r.editor.append(&settings::agent_editor(home, agent));
                 r.editor.set_visible(true);
             }
@@ -470,12 +470,12 @@ impl AgentsPage {
     fn forget_button(self: &Rc<Self>, e: &Entry) -> Option<gtk::Button> {
         let home = session::home().ok()?;
         let id = registry::builtin_for(e).map(str::to_string).unwrap_or_else(|| e.id.clone());
-        let agent = sill_core::agents::load(&home).remove(&id)?;
-        let dirs = sill_core::agents::memory_dirs(&agent, &home);
+        let agent = super::remote::agents::load(&home).remove(&id)?;
+        let dirs = super::remote::agents::memory_dirs(&agent, &home);
         if dirs.is_empty() {
             return None;
         }
-        let files: usize = dirs.iter().map(|d| sill_core::agents::count_files(d)).sum();
+        let files: usize = super::remote::agents::memory_files(&agent);
         let fg = icons::fg_for(&self.list, &theme::current());
         let b = gtk::Button::new();
         b.set_child(Some(&icons::named("sill-brain", fg, 13)));
@@ -491,7 +491,7 @@ impl AgentsPage {
         let p = self.clone();
         let e2 = e.clone();
         b.connect_clicked(move |_| {
-            let msg = match sill_core::agents::forget_memory(&agent, &home) {
+            let msg = match super::remote::agents::forget_memory(&agent, &home) {
                 Ok(n) => format!("forgot {n} memory file{}", if n == 1 { "" } else { "s" }),
                 Err(err) => format!("forget failed: {err:#}"),
             };

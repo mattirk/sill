@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use sill_core::acp::Event;
 use sill_core::store;
 use sill_core::wire::Command;
@@ -19,11 +19,7 @@ pub struct Driver {
 }
 
 pub fn home() -> Result<PathBuf> {
-    Ok(PathBuf::from(std::env::var("HOME").context("HOME")?))
-}
-
-pub fn uid() -> u32 {
-    rustix::process::getuid().as_raw()
+    super::remote::home()
 }
 
 /// Attach to a stored session's conversation; the daemon starts its jail and agent from the
@@ -34,7 +30,7 @@ pub fn uid() -> u32 {
 /// back as an `Event::Other("refused: …")` the view shows as a note.
 pub fn start(s: &store::Session, _pins: Vec<PathBuf>, fresh: bool) -> Result<Driver> {
     let (ev_tx, ev_rx) = async_channel::unbounded();
-    super::client::attach(&s.id, fresh, ev_tx.clone())?;
+    let subscription = super::client::attach(&s.id, fresh, ev_tx.clone())?;
     let (cmd_tx, cmd_rx) = async_channel::unbounded::<Command>();
     let id = s.id.clone();
     std::thread::Builder::new().name(format!("sill-cmd-{id}")).spawn(move || {
@@ -47,7 +43,7 @@ pub fn start(s: &store::Session, _pins: Vec<PathBuf>, fresh: bool) -> Result<Dri
             }
         }
         // the tab closed (Quit) or the view dropped its driver: the agent stays the daemon's
-        super::client::detach(&id);
+        super::client::detach(&id, subscription);
     })?;
     Ok(Driver { commands: cmd_tx, events: ev_rx, note: mode_note() })
 }

@@ -5,7 +5,7 @@
 //! are folded — each a title over a card of rows (label and a short dim line on the left, the
 //! control on the right; wide controls under their label), held to a reading width.
 //!
-//! Adding a parameter: a field in `sill_core::config::Config`, a row here in the section it belongs
+//! Adding a parameter: a field in `super::remote::config::Config`, a row here in the section it belongs
 //! to, built with [`row`] or [`wide`] and [`choice`] (or another widget), saved through
 //! `config::update`, and applied live if it can be.
 
@@ -51,15 +51,15 @@ pub fn build() -> gtk::Widget {
     let dropdown = choice(&names, themes.iter().position(|t| t.id == current), move |i| {
         if let Some(t) = themes.get(i) {
             theme::apply(t);
-            let _ = sill_core::config::update(|c| c.theme = t.id.to_string());
+            let _ = super::remote::config::update(|c| c.theme = t.id.to_string());
         }
     });
     row(&card, "Theme", None, &dropdown);
 
     // text size: steps from the table; a hand-edited value in between shows as the nearest step
-    let scales = sill_core::config::TEXT_SCALES;
+    let scales = super::remote::config::TEXT_SCALES;
     let labels: Vec<&str> = scales.iter().map(|(_, l)| *l).collect();
-    let current = sill_core::config::load().zoom();
+    let current = super::remote::config::load().zoom();
     let nearest = scales
         .iter()
         .enumerate()
@@ -67,8 +67,8 @@ pub fn build() -> gtk::Widget {
         .map(|(i, _)| i);
     let size_dd = choice(&labels, nearest, move |i| {
         if let Some((zoom, _)) = scales.get(i) {
-            theme::set_text_scale(*zoom * sill_core::config::TEXT_SCALE_BASE);
-            let _ = sill_core::config::update(|c| c.text_scale = Some(*zoom));
+            theme::set_text_scale(*zoom * super::remote::config::TEXT_SCALE_BASE);
+            let _ = super::remote::config::update(|c| c.text_scale = Some(*zoom));
         }
     });
     row(&card, "Text size", None, &size_dd);
@@ -81,7 +81,7 @@ pub fn build() -> gtk::Widget {
     scale.set_digits(2);
     scale.connect_value_changed(|s| {
         x11::set_width_fraction(s.value());
-        let _ = sill_core::config::update(|c| c.width = Some(s.value()));
+        let _ = super::remote::config::update(|c| c.width = Some(s.value()));
     });
     scale.set_tooltip_text(Some("Fraction of the primary monitor's work area for the shelf with the file tree open (drag the line between them for the tree's share); with the tree closed the shelf is that much narrower. Applies the next time the shelf is shown."));
     wide(&card, "Width", Some("Share of the monitor, with the file tree open"), &scale);
@@ -91,7 +91,7 @@ pub fn build() -> gtk::Widget {
     let (sec, card) = section("Shelf");
 
     // show/hide key: click the button, press the combination you want; the outcome on the dim line
-    let current = sill_core::config::load().hotkey.unwrap_or_else(|| super::hotkey::DEFAULT.to_string());
+    let current = super::remote::config::load().hotkey.unwrap_or_else(|| super::hotkey::DEFAULT.to_string());
     let hk = gtk::Button::with_label(&pretty(&current));
     hk.add_css_class("sill-hotkey");
     hk.set_tooltip_text(Some("Click, then press the combination you want (Escape cancels). Something with a modifier plus a key is safest; a bare F-key also works."));
@@ -119,7 +119,7 @@ pub fn build() -> gtk::Widget {
             if key == gdk::Key::Escape {
                 capturing.set(false);
                 b.remove_css_class("sill-capturing");
-                b.set_label(&pretty(&sill_core::config::load().hotkey.unwrap_or_else(|| super::hotkey::DEFAULT.to_string())));
+                b.set_label(&pretty(&super::remote::config::load().hotkey.unwrap_or_else(|| super::hotkey::DEFAULT.to_string())));
                 return glib::Propagation::Stop;
             }
             let Some(spec) = spec_from(key, state) else { return glib::Propagation::Stop };
@@ -128,12 +128,12 @@ pub fn build() -> gtk::Widget {
             let result = super::window::HOTKEY.with(|h| h.borrow().as_ref().map(|hk| hk.rebind(&spec)));
             match result {
                 Some(Ok(())) => {
-                    let _ = sill_core::config::update(|c| c.hotkey = Some(spec.clone()));
+                    let _ = super::remote::config::update(|c| c.hotkey = Some(spec.clone()));
                     b.set_label(&pretty(&spec));
                     msg.set_text(&format!("bound to {}", pretty(&spec)));
                 }
                 Some(Err(err)) => {
-                    b.set_label(&pretty(&sill_core::config::load().hotkey.unwrap_or_else(|| super::hotkey::DEFAULT.to_string())));
+                    b.set_label(&pretty(&super::remote::config::load().hotkey.unwrap_or_else(|| super::hotkey::DEFAULT.to_string())));
                     msg.set_text(&format!("{}: {err:#}", pretty(&spec)));
                 }
                 None => msg.set_text("hotkey grab is not active (no X11?)"),
@@ -144,21 +144,21 @@ pub fn build() -> gtk::Widget {
     }
 
     // the page the "sill" button opens
-    let page_ids: Vec<&str> = sill_core::config::PAGES.iter().map(|(id, _)| *id).collect();
-    let page_titles: Vec<&str> = sill_core::config::PAGES.iter().map(|(_, t)| *t).collect();
-    let current_page = sill_core::config::load().default_page().to_string();
+    let page_ids: Vec<&str> = super::remote::config::PAGES.iter().map(|(id, _)| *id).collect();
+    let page_titles: Vec<&str> = super::remote::config::PAGES.iter().map(|(_, t)| *t).collect();
+    let current_page = super::remote::config::load().default_page().to_string();
     let page_dd = choice(&page_titles, page_ids.iter().position(|id| *id == current_page), move |i| {
         if let Some(id) = page_ids.get(i) {
-            let _ = sill_core::config::update(|c| c.default_page = Some(id.to_string()));
+            let _ = super::remote::config::update(|c| c.default_page = Some(id.to_string()));
         }
     });
     row(&card, "Default page", Some("What the sill button opens"), &page_dd);
 
     // tray icon: a StatusNotifierItem on the panel (SPEC §4.6); registered at shelf start
-    let tray = switch(sill_core::config::load().tray());
+    let tray = switch(super::remote::config::load().tray());
     tray.set_tooltip_text(Some("A sill icon on the panel's tray: a click shows or hides the shelf, its menu quits. Needs a panel that takes StatusNotifier items (Cinnamon, KDE, XFCE, MATE, LXQt; GNOME with the AppIndicator extension). Takes effect at the next shelf start."));
     tray.connect_state_set(|_, on| {
-        let _ = sill_core::config::update(|c| c.tray = Some(on));
+        let _ = super::remote::config::update(|c| c.tray = Some(on));
         glib::Propagation::Proceed
     });
     row(&card, "Tray icon", Some("Takes effect at the next shelf start"), &tray);
@@ -168,10 +168,10 @@ pub fn build() -> gtk::Widget {
     let (sec, card) = section("Sessions");
 
     // remember pins: a new session starts with the latest pins (SPEC §3.2 Pins)
-    let pins = switch(sill_core::config::load().remember_pins());
+    let pins = switch(super::remote::config::load().remember_pins());
     pins.set_tooltip_text(Some("A new session starts with the pinned folders and files of the latest session that had any, so the workspace carries over. Off: a new session starts with no pins."));
     pins.connect_state_set(|_, on| {
-        let _ = sill_core::config::update(|c| c.remember_pins = Some(on));
+        let _ = super::remote::config::update(|c| c.remember_pins = Some(on));
         glib::Propagation::Proceed
     });
     row(&card, "Remember pins", Some("A new session starts with the latest session's pins"), &pins);
@@ -183,12 +183,11 @@ pub fn build() -> gtk::Widget {
     fill_global_pins(&pins_box, &pins_msg);
 
     // desktop access for new sessions (SPEC §4.2): X11 / D-Bus — policy, on, off
-    let home_path = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
-    let (pol_x11, pol_dbus) = sill_core::policy::Policy::load("default", &home_path).map(|p| (p.jail.x11, p.jail.dbus)).unwrap_or((false, false));
+    let (pol_x11, pol_dbus) = super::remote::request(sill_core::frontend::Request::PolicyDesktop { policy: "default".into() }).unwrap_or((false, false));
     let onoff = |b: bool| if b { "on" } else { "off" };
     let dbox = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    type Get = fn(&sill_core::config::Config) -> Option<bool>;
-    type Set = fn(&mut sill_core::config::Config, Option<bool>);
+    type Get = fn(&super::remote::config::Config) -> Option<bool>;
+    type Set = fn(&mut super::remote::config::Config, Option<bool>);
     let items: [(&str, bool, Get, Set, &str); 2] = [
         ("X11", pol_x11, |c| c.desktop_x11, |c, v| c.desktop_x11 = v,
          "Give new sessions the X11 display: the agent can run and see GUI programs — and, as any X11 client, read keys and drive every window. A session's own menu (its tab glyph) can override this."),
@@ -200,9 +199,9 @@ pub fn build() -> gtk::Widget {
         l.add_css_class("dim-label");
         let policy_label = format!("policy ({})", onoff(pol));
         let labels: Vec<&str> = vec![&policy_label, "on", "off"];
-        let current = get(&sill_core::config::load());
+        let current = get(&super::remote::config::load());
         let dd = choice(&labels, Some(match current { None => 0, Some(true) => 1, Some(false) => 2 }), move |i| {
-            let _ = sill_core::config::update(|c| set(c, match i { 1 => Some(true), 2 => Some(false), _ => None }));
+            let _ = super::remote::config::update(|c| set(c, match i { 1 => Some(true), 2 => Some(false), _ => None }));
         });
         dd.set_tooltip_text(Some(tip));
         dbox.append(&l);
@@ -211,13 +210,13 @@ pub fn build() -> gtk::Widget {
     row(&card, "Desktop", Some("For new sessions; a session's own menu can override"), &dbox);
 
     // auto-revert: unkept changes outside git and pins go away after this long
-    let choices = sill_core::config::AUTO_REVERT_CHOICES;
+    let choices = super::remote::config::AUTO_REVERT_CHOICES;
     let labels: Vec<&str> = choices.iter().map(|(_, l)| *l).collect();
-    let current = sill_core::config::load().auto_revert_minutes();
+    let current = super::remote::config::load().auto_revert_minutes();
     let nearest = choices.iter().enumerate().min_by_key(|(_, (m, _))| (*m as i64 - current as i64).abs()).map(|(i, _)| i);
     let ar_dd = choice(&labels, nearest, move |i| {
         if let Some((m, _)) = choices.get(i) {
-            let _ = sill_core::config::update(|c| c.auto_revert_minutes = Some(*m));
+            let _ = super::remote::config::update(|c| c.auto_revert_minutes = Some(*m));
         }
     });
     ar_dd.set_tooltip_text(Some("What the agent changed outside git and outside pinned folders is reverted this long after its last write, once the session is idle. Keep in Changes stops the clock."));
@@ -226,7 +225,7 @@ pub fn build() -> gtk::Widget {
     // host terminal (Ctrl+Shift+H): a command line; empty = the first installed known terminal
     let term = gtk::Entry::new();
     term.set_hexpand(true);
-    let cfg = sill_core::config::load();
+    let cfg = super::remote::config::load();
     term.set_text(cfg.host_terminal.as_deref().unwrap_or(""));
     let detected = cfg.host_terminal().unwrap_or_else(|| "none found".into());
     term.set_placeholder_text(Some(&format!("auto: {detected}")));
@@ -235,7 +234,7 @@ pub fn build() -> gtk::Widget {
     ));
     term.connect_changed(|e| {
         let t = e.text().trim().to_string();
-        let _ = sill_core::config::update(|c| c.host_terminal = if t.is_empty() { None } else { Some(t) });
+        let _ = super::remote::config::update(|c| c.host_terminal = if t.is_empty() { None } else { Some(t) });
     });
     wide(&card, "Host terminal", Some("Ctrl+Shift+H; empty = the first installed terminal sill knows"), &term);
     root.append(&sec);
@@ -248,7 +247,7 @@ pub fn build() -> gtk::Widget {
     instr.set_bottom_margin(6);
     instr.set_left_margin(8);
     instr.set_right_margin(8);
-    instr.buffer().set_text(&sill_core::instructions::load_global());
+    instr.buffer().set_text(&super::remote::instructions::load_global());
     let instr_scroll = gtk::ScrolledWindow::builder().child(&instr).min_content_height(96).hexpand(true).build();
     instr_scroll.add_css_class("frame");
     instr_scroll.set_tooltip_text(Some(
@@ -259,7 +258,7 @@ pub fn build() -> gtk::Widget {
         let msg = instr_msg.clone();
         instr.buffer().connect_changed(move |b| {
             let text = b.text(&b.start_iter(), &b.end_iter(), false);
-            match sill_core::instructions::save_global(&text) {
+            match super::remote::instructions::save_global(&text) {
                 Ok(_) => msg.set_text("For every agent, in Markdown: sent once after it starts and again after an edit"),
                 Err(e) => msg.set_text(&format!("save failed: {e:#}")),
             }
@@ -270,10 +269,10 @@ pub fn build() -> gtk::Widget {
     // ---- Memory (docs/memory.md): summary, recall, compaction, the actions
     let (sec, card) = section("Memory");
 
-    let memory = switch(sill_core::config::load().memory());
+    let memory = switch(super::remote::config::load().memory());
     memory.set_tooltip_text(Some("When a session's tab is closed, its agent writes a short summary as its last turn (what was asked, done, decided, left open), kept with the session and shown in the Reopen list; sill writes one from the facts when the agent can't be asked. Off: sessions end without a summary, as before."));
     memory.connect_state_set(|_, on| {
-        let _ = sill_core::config::update(|c| c.memory = Some(on));
+        let _ = super::remote::config::update(|c| c.memory = Some(on));
         super::window::refresh_memory(); // written, or removed with memory off
         glib::Propagation::Proceed
     });
@@ -282,21 +281,21 @@ pub fn build() -> gtk::Widget {
     // how many earlier sessions a new agent is told about (docs/memory.md §2.3)
     let counts: [(u32, &str); 5] = [(0, "none"), (1, "1 session"), (3, "3 sessions"), (5, "5 sessions"), (10, "10 sessions")];
     let labels: Vec<&str> = counts.iter().map(|(_, l)| *l).collect();
-    let current = sill_core::config::load().memory_recall() as u32;
+    let current = super::remote::config::load().memory_recall() as u32;
     let nearest = counts.iter().enumerate().min_by_key(|(_, (n, _))| (*n as i64 - current as i64).abs()).map(|(i, _)| i);
     let recall_dd = choice(&labels, nearest, move |i| {
         if let Some((n, _)) = counts.get(i) {
-            let _ = sill_core::config::update(|c| c.memory_recall = Some(*n));
+            let _ = super::remote::config::update(|c| c.memory_recall = Some(*n));
         }
     });
     recall_dd.set_tooltip_text(Some("How many earlier sessions a new agent is told about when it starts: the ones in the same folders, nearest first, else the latest anywhere. Each session can narrow this in its session menu. None: the agent is only told how to search."));
     row(&card, "Recall", Some("Earlier sessions a new agent is told about"), &recall_dd);
 
     // ghost sessions read memory or not (docs/memory.md §3.2); they never write it
-    let ghost_mem = switch(sill_core::config::load().ghost_memory.unwrap_or(false));
+    let ghost_mem = switch(super::remote::config::load().ghost_memory.unwrap_or(false));
     ghost_mem.set_tooltip_text(Some("A ghost session gets the recall block and can search memory read-only, like a session without pins. It never writes memory either way: nothing of a ghost is remembered. Off: a ghost starts blank."));
     ghost_mem.connect_state_set(|_, on| {
-        let _ = sill_core::config::update(|c| c.ghost_memory = Some(on));
+        let _ = super::remote::config::update(|c| c.ghost_memory = Some(on));
         glib::Propagation::Proceed
     });
     row(&card, "Ghosts see memory", Some("Ghost sessions read earlier sessions (never write)"), &ghost_mem);
@@ -304,7 +303,7 @@ pub fn build() -> gtk::Widget {
     // compaction and retention (docs/memory.md §2.4): three durations, each off at 0
     let durations: [(&str, &str); 7] = [("0", "never"), ("7d", "a week"), ("30d", "a month"), ("90d", "3 months"), ("180d", "6 months"), ("1y", "a year"), ("2y", "two years")];
     let dur_labels: Vec<&str> = durations.iter().map(|(_, l)| *l).collect();
-    let duration_row = |label: &'static str, sub: &'static str, tip: &'static str, current: i64, set: fn(&mut sill_core::config::Config, Option<String>)| {
+    let duration_row = |label: &'static str, sub: &'static str, tip: &'static str, current: i64, set: fn(&mut super::remote::config::Config, Option<String>)| {
         let nearest = durations
             .iter()
             .enumerate()
@@ -312,13 +311,13 @@ pub fn build() -> gtk::Widget {
             .map(|(i, _)| i);
         let dd = choice(&dur_labels, nearest, move |i| {
             if let Some((d, _)) = durations.get(i) {
-                let _ = sill_core::config::update(|c| set(c, Some(d.to_string())));
+                let _ = super::remote::config::update(|c| set(c, Some(d.to_string())));
             }
         });
         dd.set_tooltip_text(Some(tip));
         row(&card, label, Some(sub), &dd);
     };
-    let cfg = sill_core::config::load();
+    let cfg = super::remote::config::load();
     duration_row(
         "Compact after",
         "After the end: thoughts, tool outputs and diffs go",
@@ -379,9 +378,12 @@ pub fn build() -> gtk::Widget {
         dialog.select_folder(parent.as_ref(), None::<&gtk::gio::Cancellable>, move |res| {
             let Ok(f) = res else { return };
             let Some(dir) = f.path() else { return };
-            let r = sill_core::store::Store::open_default().and_then(|store| {
-                let home = std::env::var("HOME").map(std::path::PathBuf::from).unwrap_or_default();
-                sill_core::memory::export_all(&store, &dir, &home)
+            let r = super::remote::request::<Vec<sill_core::frontend::ExportFile>>(sill_core::frontend::Request::Export).and_then(|files| {
+                for file in &files {
+                    let name = std::path::Path::new(&file.name).file_name().ok_or_else(|| anyhow::anyhow!("invalid export filename"))?;
+                    sill_core::safe_fs::replace_file(&dir, name, file.text.as_bytes())?;
+                }
+                Ok(files.len())
             });
             b.set_label(&match r {
                 Ok(n) => format!("Exported {n} sessions"),
@@ -396,7 +398,7 @@ pub fn build() -> gtk::Widget {
     delete.set_tooltip_text(Some("Delete every ended session with its summary, notes, transcript and recorded changes. Sessions open in a tab stay. Click twice."));
     delete.connect_clicked(|b| {
         if !b.has_css_class("destructive-action") {
-            let n = sill_core::store::Store::open_default().and_then(|s| s.sessions()).map(|v| v.iter().filter(|s| s.ended_at.is_some()).count()).unwrap_or(0);
+            let n = super::remote_store::Store::open_default().and_then(|s| s.sessions()).map(|v| v.iter().filter(|s| s.ended_at.is_some()).count()).unwrap_or(0);
             if n == 0 {
                 b.set_label("Nothing to delete");
                 return;
@@ -434,7 +436,7 @@ pub fn build() -> gtk::Widget {
     root.append(&sec);
 
     // ---- Where things are: reference, folded — a title that opens a card
-    let home = std::env::var("HOME").unwrap_or_default();
+    let home = super::session::home().unwrap_or_default().display().to_string();
     let info: Vec<(String, String)> = vec![
         ("Config".into(), format!("{home}/.config/sill/sill.toml")),
         ("Instructions".into(), format!("{home}/.config/sill/instructions.md — the box above; per agent type and per session come later")),
@@ -496,8 +498,8 @@ fn fill_global_pins(list: &gtk::Box, msg: &gtk::Label) {
     while let Some(c) = list.first_child() {
         list.remove(&c);
     }
-    let home = std::env::var("HOME").map(std::path::PathBuf::from).unwrap_or_default();
-    let pins = sill_core::store::Store::open_default().and_then(|st| st.global_pins()).unwrap_or_default();
+    let home = super::session::home().unwrap_or_default();
+    let pins = super::remote_store::Store::open_default().and_then(|st| st.global_pins()).unwrap_or_default();
     for p in &pins {
         let r = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let shown = p.strip_prefix(&home).map(|rel| format!("~/{}", rel.display())).unwrap_or_else(|_| p.display().to_string());
@@ -742,7 +744,7 @@ fn pretty(spec: &str) -> String {
 /// One agent's registry entry, editable: on/off, command, environment, domains.
 /// Per-agent settings (offered, command, environment, domains), saved as the registry override.
 /// Shown inline on the Agents page.
-pub fn agent_editor(home: PathBuf, agent: sill_core::agents::Agent) -> gtk::Box {
+pub fn agent_editor(home: PathBuf, agent: super::remote::agents::Agent) -> gtk::Box {
     let body = gtk::Box::new(gtk::Orientation::Vertical, 6);
     body.set_margin_start(24);
     body.set_margin_top(4);
@@ -811,7 +813,7 @@ pub fn agent_editor(home: PathBuf, agent: sill_core::agents::Agent) -> gtk::Box 
                     l.split_once('=').map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
                 })
                 .collect();
-            match sill_core::agents::save_override(&home, &a) {
+            match super::remote::agents::save_override(&home, &a) {
                 Ok(p) => msg.set_text(&format!("saved {}", p.display().to_string().replace(&home.display().to_string(), "~"))),
                 Err(e) => msg.set_text(&format!("save failed: {e:#}")),
             }
@@ -819,7 +821,7 @@ pub fn agent_editor(home: PathBuf, agent: sill_core::agents::Agent) -> gtk::Box 
     }
     {
         let (home, id, msg) = (home.clone(), agent.id.clone(), msg.clone());
-        reset.connect_clicked(move |_| match sill_core::agents::remove_override(&home, &id) {
+        reset.connect_clicked(move |_| match super::remote::agents::remove_override(&home, &id) {
             Ok(true) => msg.set_text("override removed; reopen the page to see the built-in values"),
             Ok(false) => msg.set_text("no override to remove"),
             Err(e) => msg.set_text(&format!("reset failed: {e:#}")),
