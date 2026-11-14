@@ -94,12 +94,15 @@ impl Runner {
         if seeded!=session { events.extend(journal.append(&self.id,None,&[p::Event::SessionUpdated{session:seeded}])?); }
         Ok(events)
     }
+    /// As `Runner::summarizing`: the summary turn running, or the one that stopped and is not
+    /// yet applied (`completed`). A closing summary therefore says `end` until the session's end
+    /// clears it in the same update, never open and not summarizing in between.
     fn summarizing_wire(st:&State)->Option<String> {
-        st.summary.as_ref().map(|(kind,_,_)|kind.wire().to_string())
+        st.summary.as_ref().map(|(kind,_,_)|*kind).or_else(|| st.completed.as_ref().map(|done|done.kind)).map(|kind|kind.wire().to_string())
     }
     /// The session state's `summarizing` brought to the runner's summary turn: one
     /// `session.updated` when they differ, none when they agree. Called wherever the summary
-    /// turn starts, stops, changes kind or is dropped, in the same transaction.
+    /// turn starts, stops, changes kind, is applied or is dropped, in the same transaction.
     pub(super) fn sfp_summarizing(&self,store:&Store,st:&State)->Result<Vec<p::StoredEvent>> {
         let want=Self::summarizing_wire(st);
         let journal=Journal::new(store)?;
@@ -562,6 +565,21 @@ mod tests {
         let submission=j.submission(&f.runner.id,"submission").unwrap();
         assert_eq!(submission.insertion,"unknown");assert_eq!(submission.outcome,"unknown");
         assert!(st.active_submission.is_none());
+    }
+    #[test]
+    fn a_stopped_summary_is_summarizing_until_it_is_applied() {
+        let f=Fixture::new();let j=Journal::new(&f.store).unwrap();
+        let mut st=State::default();
+        let summarizing=|st:&State|{f.runner.sfp_summarizing(&f.store,st).unwrap();j.session(&f.runner.id).unwrap().summarizing};
+        st.summary=Some((SummaryKind::Checkpoint,String::new(),1));
+        assert_eq!(summarizing(&st).as_deref(),Some("checkpoint"));
+        // the turn stopped: its answer waits for the hub, the session still summarizes
+        st.summary=None;st.completed=Some(SummaryDone {kind:SummaryKind::Checkpoint,text:Some("summary".into())});
+        assert!(f.runner.sfp_summarizing(&f.store,&st).unwrap().is_empty(),"no update while it is applied");
+        assert_eq!(summarizing(&st).as_deref(),Some("checkpoint"));
+        // applied (`summary_applied`)
+        st.completed=None;
+        assert_eq!(summarizing(&st),None);
     }
     #[test]
     fn ending_summary_and_authentication_block_queue_dispatch() {

@@ -680,9 +680,14 @@ frontend reconnects. Older state defaults to zero; past work is not reconstructe
 Session state's `summarizing` (2026-11-10) is `checkpoint` while the turn running is sill's
 *Summarize now* turn, `end` while it is the session's closing summary (a checkpoint becomes `end`
 when the tab closes during it), and null otherwise: the agent's own work, or nothing running.
-Activity stays `working` during a summary turn; the field only tells the work apart. The daemon
-writes it in the same transaction that starts, stops, changes or drops the summary turn, re-seeds
-it from the runner at recovery, and clears it when the session ends. Older state reads as null.
+Activity stays `working` during a summary turn; the field only tells the work apart. It lasts
+until the summary is applied, not only while the turn runs: a stopped summary waiting for the
+daemon to store it still says its kind (the runner's `completed`). A closing summary therefore
+says `end` until the session's end clears it in the same update, so a session is never open and
+not summarizing between the two; a checkpoint clears once its answer is stored. The daemon writes
+it in the same transaction that starts, stops, changes, applies or drops the summary turn,
+re-seeds it from the runner at recovery, and clears it when the session ends. Older state reads
+as null.
 
 
 ### Public host data and memory details (development implementation)

@@ -172,10 +172,12 @@ impl Runner {
                 stopped = matches!(delivery.event, relay::Event::Stopped(_))
                     || matches!(&delivery.event,relay::Event::V2Update{..}) && public_events.iter().any(|event|matches!(&event.event,sill_proto::sfp::Event::TurnUpdated{turn} if turn.outcome!="pending"));
                 let done = self.handle_locked(store, &mut st, delivery.event.clone(), false)?;
-                // the summary turn stopped, or its agent went: the session says so with the event
+                // a stopped summary is still the session's until the hub has applied it
+                if let Some(done) = &done { st.completed = Some(done.clone()); }
+                // the summary turn started or changed, or its agent went: the session says so
+                // with the event
                 public_events.extend(self.sfp_summarizing(store, &st)?);
                 if seq > 0 { st.cursor = seq; }
-                if let Some(done) = &done { st.completed = Some(done.clone()); }
                 self.save(store, &st)?;
                 tx.commit()?;
                 hub.sfp_publish(&self.id, &public_events);
@@ -342,11 +344,20 @@ impl Runner {
         Ok(())
     }
 
+    /// The hub has stored the summary: the session stops saying it summarizes (for an end, the
+    /// session's end said so already and the runner is retired).
     fn summary_applied(&self, hub: &Hub) {
         hub.with_store(|store| {
             let mut st = self.st.lock().unwrap();
             st.completed = None;
-            if !st.retired { self.save(store, &st)?; self.sfp_dispatch(store,hub,&mut st)?; }
+            if !st.retired {
+                let tx = store.conn().unchecked_transaction()?;
+                let events = self.sfp_summarizing(store, &st)?;
+                self.save(store, &st)?;
+                tx.commit()?;
+                hub.sfp_publish(&self.id, &events);
+                self.sfp_dispatch(store,hub,&mut st)?;
+            }
             Ok(())
         }).ok();
     }

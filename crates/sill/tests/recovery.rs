@@ -531,6 +531,18 @@ fn summarizing(fixture: &Fixture) -> Value {
     serde_json::from_str::<Value>(&state).unwrap()["summarizing"].clone()
 }
 
+/// The session states the journal published, in order: `(summarizing, lifecycle)` of each
+/// `session.updated`.
+fn published_states(fixture: &Fixture) -> Vec<(Value, String)> {
+    let database = fixture.database();
+    let mut statement = database.prepare("SELECT json FROM sfp_events WHERE session_id=?1 ORDER BY seq").unwrap();
+    statement.query_map([&fixture.session], |row| row.get::<_, String>(0)).unwrap()
+        .map(|json| serde_json::from_str::<Value>(&json.unwrap()).unwrap())
+        .filter(|event| event["type"] == "session.updated")
+        .map(|event| (event["session"]["summarizing"].clone(), event["session"]["lifecycle"].as_str().unwrap_or_default().to_owned()))
+        .collect()
+}
+
 fn exercise_recovery(adopt_checkpoint: bool, lose_worker: bool) {
     let (mut fixture, release, observed) = Fixture::new();
     fixture.start();
@@ -614,6 +626,14 @@ fn exercise_recovery(adopt_checkpoint: bool, lose_worker: bool) {
     let count: i64 = fixture.database().query_row("SELECT count(*) FROM entries WHERE session_id=?1 AND kind='agent'", [&fixture.session], |row| row.get(0)).unwrap();
     assert_eq!(count, if lose_worker { 1 } else { 2 }, "neither turn nor summary may be appended twice");
     assert_eq!(summarizing(&fixture), Value::Null, "the summary turn is over, also after the restart");
+    // From the closing summary's start to the end, the session never says it is open and not
+    // summarizing: the stopped summary stays `end` until the end clears it in the same update.
+    let states = published_states(&fixture);
+    let start = states.iter().position(|(kind, _)| kind == "end").expect("the closing summary was published");
+    let ended = states.iter().position(|(_, lifecycle)| lifecycle == "ended").expect("the end was published");
+    assert!(start < ended, "{states:?}");
+    assert!(states[start..ended].iter().all(|(kind, _)| kind == "end"), "{states:?}");
+    assert_eq!(states[ended].0, Value::Null, "{states:?}");
     assert_eq!(observed.recv_timeout(Duration::from_secs(5)).unwrap(), "finished");
     let deadline = Instant::now() + Duration::from_secs(10);
     while fixture.relay.try_wait().unwrap().is_none() {
