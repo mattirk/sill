@@ -556,6 +556,7 @@ fn row(card: &gtk::Box, label: &str, sub: Option<&str>, w: &impl IsA<gtk::Widget
     r.append(&col);
     w.set_halign(gtk::Align::End);
     w.set_valign(gtk::Align::Center);
+    page_scrolls(w);
     r.append(w);
     s
 }
@@ -569,8 +570,31 @@ fn wide(card: &gtk::Box, label: &str, sub: Option<&str>, w: &impl IsA<gtk::Widge
     }
     r.append(&col);
     w.set_hexpand(true);
+    if !w.is::<gtk::ScrolledWindow>() {
+        page_scrolls(w); // a text box scrolls its own text
+    }
     r.append(w);
     s
+}
+
+/// The wheel over a control scrolls the page, never the control: a scale would otherwise take the
+/// wheel and move its value mid-scroll. The event is taken before the control sees it and the
+/// page's scrolled window moved by hand (a wheel notch as GTK does it, by the page size).
+fn page_scrolls(w: &impl IsA<gtk::Widget>) {
+    let ctl = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+    ctl.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let weak = w.downgrade();
+    ctl.connect_scroll(move |c, _dx, dy| {
+        let Some(w) = weak.upgrade() else { return glib::Propagation::Proceed };
+        let Some(page) = w.ancestor(gtk::ScrolledWindow::static_type()).and_downcast::<gtk::ScrolledWindow>() else {
+            return glib::Propagation::Proceed;
+        };
+        let adj = page.vadjustment();
+        let step = if c.unit() == gdk::ScrollUnit::Wheel { adj.page_size().powf(2.0 / 3.0) } else { 1.0 };
+        adj.set_value(adj.value() + dy * step);
+        glib::Propagation::Stop
+    });
+    w.add_controller(ctl);
 }
 
 /// A row of just the widget (the Memory actions).
