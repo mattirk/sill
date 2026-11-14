@@ -282,3 +282,23 @@ fn render_syntax_views() {
     render(&app, "syntax-light-diff");
     crate::style::set_theme(&before);
 }
+
+#[test]
+#[ignore = "writes source editing and unsaved notice PNGs for review"]
+fn render_source_editing() {
+    use crate::{Message, workspace::Action};
+    use iced::widget::text_editor;
+    use sill_proto::sessions::HostPath;
+    let (mut app, _) = App::new(true, None);
+    let _ = app.update(Message::Workspace(Action::Open {
+        path: HostPath::from_path(std::path::Path::new("/home/demo/project/src/main.rs")),
+        repo: None,
+    }));
+    let _ = app.update(Message::Workspace(Action::Text(text_editor::Action::Edit(
+        text_editor::Edit::Insert('X'),
+    ))));
+    render(&app, "edit-source");
+    let _ = app.update(Message::Workspace(Action::CloseViewer));
+    render(&app, "unsaved-source");
+    render_size(&app, "narrow-unsaved-source", (480.0, 860.0));
+}

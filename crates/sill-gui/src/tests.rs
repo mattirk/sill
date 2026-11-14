@@ -117,7 +117,7 @@ pub(crate) fn block_on<F: std::future::Future>(future: F) -> F::Output {
 }
 
 /// Run `task` to its end and apply the messages it produces (its widget operations are dropped).
-fn settle_task(app: &mut App, task: Task<Message>) {
+pub(crate) fn settle_task(app: &mut App, task: Task<Message>) {
     use iced::futures::StreamExt;
     let Some(stream) = iced_runtime::task::into_stream(task) else {
         return;

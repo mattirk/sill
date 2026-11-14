@@ -1715,10 +1715,17 @@ pub(crate) fn enter_sends(
     text_editor::Binding::from_key_press(key_press)
 }
 
-/// A read-only editor's keys: the window's shortcuts first, then the editor's own.
+/// The source reader's keys: Save and window shortcuts first, then the editor's own.
 pub(crate) fn reading_keys(
     key_press: text_editor::KeyPress,
 ) -> Option<text_editor::Binding<Message>> {
+    if key_press.modifiers.command()
+        && matches!(&key_press.key, iced::keyboard::Key::Character(c) if c.eq_ignore_ascii_case("s"))
+    {
+        return Some(text_editor::Binding::Custom(Message::Workspace(
+            crate::workspace::Action::SaveFile,
+        )));
+    }
     if let Some(message) = keys::from_text(&key_press.key, key_press.modifiers, false) {
         return Some(text_editor::Binding::Custom(message));
     }

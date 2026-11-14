@@ -1072,6 +1072,9 @@ impl App {
     /// Every message: its update, and the herring's stroke when the view went between the
     /// session and the backend (by the herring, Escape or anything else).
     fn update(&mut self, message: Message) -> Task<Message> {
+        if self.guard_file_edits(&message) {
+            return Task::none();
+        }
         let before = self.backend_shown();
         let task = self.apply(message);
         if before != self.backend_shown() {
@@ -1126,8 +1129,8 @@ impl App {
             }
             Message::Copy(value) => return iced::clipboard::write(value),
             Message::CopyFile => {
-                if let Some(file) = self.current().and_then(|v| v.files.reader.as_ref()) {
-                    return iced::clipboard::write(file.text.clone());
+                if let Some(reader) = self.current().and_then(|v| v.reader.as_ref()) {
+                    return iced::clipboard::write(reader.content.text());
                 }
             }
             Message::Link(url) => return iced::clipboard::write(url),
@@ -2061,13 +2064,9 @@ impl App {
         if self.current().is_some_and(|v| v.terminal_shown) {
             return Task::none();
         }
-        // an open file closes first (the drawer stays: it is the mode's)
-        if let Some(view) = self.current_mut()
-            && view.files.reader.is_some()
-        {
-            view.files.close_reader();
-            view.reader = None;
-            return self.restore_scroll();
+        // Closing an edited source goes through the same unsaved notice as its close button.
+        if self.current().is_some_and(|v| v.files.reader.is_some()) {
+            return self.update(Message::Workspace(workspace::Action::CloseViewer));
         }
         // the session: to the backend's default page — the drawer and the mode stay as they are
         // (they have their own controls)
@@ -2181,11 +2180,28 @@ impl App {
         self.list_error = None;
         self.listed = true;
         self.all_sessions = sessions.clone();
+        let drafts: Vec<_> = self
+            .tabs
+            .iter()
+            .filter(|tab| {
+                self.views
+                    .get(&tab.id)
+                    .and_then(|v| v.reader.as_ref())
+                    .is_some_and(|r| r.dirty || r.saving.is_some())
+            })
+            .cloned()
+            .collect();
         self.tabs = sessions
             .iter()
             .filter(|s| s.ended_at.is_none())
             .map(Tab::from)
             .collect();
+        // An externally ended session retains its tab while it holds unsaved source edits.
+        for tab in drafts {
+            if !self.tabs.iter().any(|t| t.id == tab.id) {
+                self.tabs.push(tab);
+            }
+        }
         // a session that ended or went: its view goes, and with it its lane and terminal
         let open: BTreeSet<&str> = self.tabs.iter().map(|t| t.id.as_str()).collect();
         self.views.retain(|id, _| open.contains(id.as_str()));

@@ -471,6 +471,7 @@ pub fn shortcut(event: keyboard::Event) -> Option<Message> {
         Key::Character(c) if ctrl && !shift && c.eq_ignore_ascii_case("t") => {
             Message::ToggleTerminal
         }
+        Key::Character("s") if ctrl => Message::Workspace(crate::workspace::Action::SaveFile),
         Key::Character("q") if ctrl => Message::Quit,
         Key::Named(Named::Escape) => Message::Escape,
         Key::Named(Named::PageUp) if !ctrl => Message::Page(false),

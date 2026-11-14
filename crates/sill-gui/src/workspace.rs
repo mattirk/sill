@@ -31,6 +31,16 @@ pub enum Action {
     },
     CloseViewer,
     RefreshFile,
+    SaveFile,
+    Saved {
+        session: String,
+        key: String,
+        serial: u64,
+        text: String,
+        outcome: sill_client::actions::Outcome,
+    },
+    DiscardEdits,
+    CancelDiscard,
     Source,
     Text(text_editor::Action),
     Path(String),
@@ -54,12 +64,17 @@ pub struct ReaderView {
     pub revision: u64,
     pub content: text_editor::Content,
     pub markdown: Option<markdown::Content>,
+    pub saved: String,
+    pub dirty: bool,
+    pub saving: Option<u64>,
+    pub notice: Option<String>,
 }
 
 pub struct Workspace {
     pub shown: bool,
     /// The tree row under the pointer: its pin button shows, as the shelf's does on hover.
     pub hovered: Option<String>,
+    pub pending_discard: Option<(String, Box<Message>)>,
     serial: u64,
     follow_seen: std::collections::BTreeMap<String, String>,
     /// None in `--demo`: requests are answered with synthetic files at once.
@@ -73,6 +88,7 @@ impl Workspace {
                 Self {
                     shown: false,
                     hovered: None,
+                    pending_discard: None,
                     serial: 0,
                     follow_seen: Default::default(),
                     files: None,
@@ -89,6 +105,7 @@ impl Workspace {
             Self {
                 shown: false,
                 hovered: None,
+                pending_discard: None,
                 serial: 0,
                 follow_seen: Default::default(),
                 files: Some(files),
@@ -118,6 +135,10 @@ impl SessionView {
                 revision: file.revision,
                 content: text_editor::Content::with_text(&file.text),
                 markdown: None,
+                saved: file.text.clone(),
+                dirty: false,
+                saving: None,
+                notice: None,
             });
         }
         let reader = self.reader.as_mut().unwrap();
@@ -128,7 +149,7 @@ impl SessionView {
             && file.pending.is_none()
             && file.error.is_none()
         {
-            reader.markdown = Some(markdown::Content::parse(&file.text));
+            reader.markdown = Some(markdown::Content::parse(&reader.content.text()));
         }
     }
 }
@@ -173,6 +194,117 @@ impl Workspace {
 }
 
 impl App {
+    /// Unsaved buffers survive navigation; ask only before an action can discard them.
+    pub fn guard_file_edits(&mut self, message: &Message) -> bool {
+        let target = match message {
+            Message::Quit
+            | Message::CloseRequested
+            | Message::Control(crate::control::Command::Quit) => self
+                .views
+                .iter()
+                .find(|(_, v)| {
+                    v.reader
+                        .as_ref()
+                        .is_some_and(|r| r.dirty || r.saving.is_some())
+                })
+                .map(|(id, _)| id.clone()),
+            Message::CloseTab(id) => Some(id.clone()),
+            Message::Workspace(
+                Action::Open { .. }
+                | Action::OpenAndHide { .. }
+                | Action::CloseViewer
+                | Action::RefreshFile
+                | Action::BrowsePath
+                | Action::PinPath,
+            ) => self.selected.clone(),
+            Message::Workspace(Action::Reply(reply))
+                if matches!(reply.request, Request::Inspect(_)) =>
+            {
+                Some(reply.session.clone())
+            }
+            _ => None,
+        };
+        let Some(id) = target else {
+            return false;
+        };
+        let Some(reader) = self.views.get_mut(&id).and_then(|v| v.reader.as_mut()) else {
+            return false;
+        };
+        if !reader.dirty && reader.saving.is_none() {
+            return false;
+        }
+        reader.notice = Some(
+            if reader.saving.is_some() {
+                "Saving… wait before closing or replacing this file."
+            } else {
+                "Unsaved changes. Save before continuing, or discard them."
+            }
+            .into(),
+        );
+        if reader.saving.is_none() {
+            self.workspace.pending_discard = Some((id.clone(), Box::new(message.clone())));
+        }
+        if !matches!(message, Message::Workspace(Action::Reply(_))) {
+            self.selected = Some(id);
+            self.changes = None;
+            self.settings_page = None;
+            self.agents_page.shown = false;
+        }
+        true
+    }
+
+    fn save_file(&mut self) -> Task<Message> {
+        let Some(id) = self.selected.clone() else {
+            return Task::none();
+        };
+        let Some(view) = self.views.get_mut(&id) else {
+            return Task::none();
+        };
+        let (Some(file), Some(reader)) = (&view.files.reader, &mut view.reader) else {
+            return Task::none();
+        };
+        if file.repo.is_some()
+            || file.pending.is_some()
+            || file.error.is_some()
+            || !reader.dirty
+            || reader.saving.is_some()
+        {
+            return Task::none();
+        }
+        let text = reader.content.text();
+        if text.len() > sill_proto::admin::FILE_CHUNK_BYTES {
+            reader.notice =
+                Some("Save supports files up to 1 MiB; your edits are still here.".into());
+            return Task::none();
+        }
+        let Some(actions) = self.actions.clone() else {
+            reader.notice = Some("The demo cannot save files; your edits are still here.".into());
+            return Task::none();
+        };
+        self.workspace.serial += 1;
+        let serial = self.workspace.serial;
+        reader.saving = Some(serial);
+        reader.notice = None;
+        let key = reader.key.clone();
+        let params = serde_json::to_value(sill_proto::admin::FileWrite {
+            path: file.path.clone(),
+            bytes_base64: sill_proto::admin::encode_bytes(text.as_bytes()),
+        })
+        .unwrap();
+        crate::blocking(
+            move || (text, actions.call("_sill/files.write", params)),
+            move |(text, outcome)| {
+                Message::Workspace(Action::Saved {
+                    session: id.clone(),
+                    key: key.clone(),
+                    serial,
+                    text,
+                    outcome,
+                })
+            },
+        )
+    }
+
     pub fn sync_drawer_follow(&mut self) {
         let enabled = self
             .daemon_settings
@@ -250,6 +382,76 @@ impl App {
 
     pub fn workspace_action(&mut self, action: Action) -> Task<Message> {
         match action {
+            Action::SaveFile => self.save_file(),
+            Action::Saved {
+                session,
+                key,
+                serial,
+                text,
+                outcome,
+            } => {
+                let Some(view) = self.views.get_mut(&session) else {
+                    return Task::none();
+                };
+                let Some(reader) = view
+                    .reader
+                    .as_mut()
+                    .filter(|r| r.key == key && r.saving == Some(serial))
+                else {
+                    return Task::none();
+                };
+                reader.saving = None;
+                if outcome.is_done() {
+                    reader.saved = text.clone();
+                    reader.dirty = reader.content.text() != text;
+                    reader.markdown = None;
+                    reader.notice = Some("Saved".into());
+                    if let Some(file) = &mut view.files.reader {
+                        file.text = text;
+                    }
+                    if self
+                        .workspace
+                        .pending_discard
+                        .as_ref()
+                        .is_some_and(|(id, _)| id == &session)
+                    {
+                        self.workspace.pending_discard = None;
+                    }
+                    return self.files_refresh(&session);
+                }
+                reader.notice = Some(match outcome {
+                    sill_client::actions::Outcome::Uncertain(why) => format!(
+                        "Save outcome unknown: {why}. Edits kept; check the file before retrying."
+                    ),
+                    _ => format!(
+                        "Save failed: {}. Edits kept.",
+                        outcome.problem().unwrap_or("unknown error")
+                    ),
+                });
+                Task::none()
+            }
+            Action::CancelDiscard => {
+                self.workspace.pending_discard = None;
+                if let Some(reader) = self.current_mut().and_then(|v| v.reader.as_mut()) {
+                    reader.notice = None;
+                }
+                Task::none()
+            }
+            Action::DiscardEdits => {
+                let Some((id, next)) = self.workspace.pending_discard.take() else {
+                    return Task::none();
+                };
+                if let Some(reader) = self.views.get_mut(&id).and_then(|v| v.reader.as_mut()) {
+                    if reader.saving.is_some() {
+                        return Task::none();
+                    }
+                    reader.content = text_editor::Content::with_text(&reader.saved);
+                    reader.dirty = false;
+                    reader.notice = None;
+                    reader.markdown = None;
+                }
+                self.update(*next)
+            }
             Action::Reply(reply) => {
                 let session = reply.session.clone();
                 let active = self.selected.as_deref() == Some(session.as_str());
@@ -352,10 +554,19 @@ impl App {
                         vec![]
                     }
                     Action::Text(action) => {
-                        if !matches!(action, text_editor::Action::Edit(_))
+                        let editing = matches!(action, text_editor::Action::Edit(_));
+                        let editable = view.files.reader.as_ref().is_some_and(|f| {
+                            f.source && f.repo.is_none() && f.pending.is_none() && f.error.is_none()
+                        });
+                        if (!editing || editable)
                             && let Some(reader) = &mut view.reader
                         {
                             reader.content.perform(action);
+                            if editing {
+                                reader.dirty = reader.content.text() != reader.saved;
+                                reader.markdown = None;
+                                reader.notice = None;
+                            }
                         }
                         vec![]
                     }
@@ -371,7 +582,11 @@ impl App {
                         view.files.error = None;
                         vec![]
                     }
-                    Action::ToggleDrawer
+                    Action::SaveFile
+                    | Action::Saved { .. }
+                    | Action::DiscardEdits
+                    | Action::CancelDiscard
+                    | Action::ToggleDrawer
                     | Action::Reply(_)
                     | Action::Hover(_)
                     | Action::Unhover(_) => unreachable!(),

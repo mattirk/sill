@@ -324,8 +324,26 @@ impl App {
         }
         if file.renderable() {
             heading = heading.push(action(
-                if file.source { "Rendered" } else { "Source" },
+                if file.source { "Preview" } else { "Source" },
                 Action::Source,
+            ));
+        }
+        if rendering.dirty {
+            heading = heading.push(text("Unsaved").size(style::SMALL).color(P.warning));
+        }
+        if !is_diff && (file.source || rendering.dirty) {
+            heading = heading.push(keys::press_maybe(
+                button(
+                    text(if rendering.saving.is_some() {
+                        "Saving…"
+                    } else {
+                        "Save"
+                    })
+                    .size(style::SMALL),
+                )
+                .padding([3, 7])
+                .style(style::quiet),
+                (rendering.dirty && rendering.saving.is_none()).then(|| msg(Action::SaveFile)),
             ));
         }
         heading = heading
@@ -418,8 +436,28 @@ impl App {
                 right: 6.0,
             }),
             rule::horizontal(1).style(style::rule_style(P.border)),
-            body,
         ];
+        if let Some(notice) = &rendering.notice {
+            let mut notice_row = row![text(notice).size(style::SMALL).width(Fill)]
+                .spacing(8)
+                .align_y(Alignment::Center);
+            if self
+                .workspace
+                .pending_discard
+                .as_ref()
+                .is_some_and(|(id, _)| id == &view.id)
+            {
+                notice_row = notice_row
+                    .push(action("Discard", Action::DiscardEdits))
+                    .push(action("Cancel", Action::CancelDiscard));
+            }
+            page = page.push(
+                container(notice_row)
+                    .padding([8, 12])
+                    .style(style::fill(style::alpha(P.warning, 0.10))),
+            );
+        }
+        page = page.push(body);
         if is_diff {
             page = page.push(
                 container(
