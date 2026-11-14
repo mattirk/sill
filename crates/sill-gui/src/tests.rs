@@ -1102,7 +1102,7 @@ fn file_drawer_buttons_open_the_viewer_and_return_to_conversation() {
     }
     assert!(demo_view(&app).files.reader.is_some());
     let mut ui = simulator(&app, (1000.0, 860.0));
-    ui.click("‹ Conversation").unwrap();
+    ui.click(iced::widget::Id::new("close-file")).unwrap();
     for message in ui.into_messages().collect::<Vec<_>>() {
         let _ = app.update(message);
     }

@@ -56,9 +56,13 @@ impl App {
                         .into()
                 }
             };
-            let main = column![self.file_chips(view), body]
-                .width(Fill)
-                .height(Fill);
+            // a file open takes the chips' row too, as in the shelf
+            let chips: Element<'_, Message> = if view.files.reader.is_some() {
+                space().height(0).into()
+            } else {
+                self.file_chips(view)
+            };
+            let main = column![chips, body].width(Fill).height(Fill);
             let placement = self.layout.drawer(self.workspace.shown, size.width);
             let over = matches!(placement, Drawer::Over(_));
             // the conversation keeps one place in the widget tree wherever the drawer is: moving

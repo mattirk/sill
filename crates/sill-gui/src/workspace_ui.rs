@@ -304,48 +304,72 @@ impl App {
         let file = state.reader.as_ref()?;
         let rendering = view.reader.as_ref()?;
         let is_diff = file.repo.is_some();
-        let heading = row![
-            action("‹ Conversation", Action::CloseViewer),
-            space().width(Fill),
-            glyph_action("refresh", "Read the file again", Action::RefreshFile),
-            keys::press(
-                button(text("Copy").size(style::SMALL))
-                    .padding([3, 7])
-                    .style(style::quiet),
-                Message::CopyFile
-            ),
-            glyph_action("x", "Close the file", Action::CloseViewer)
-        ]
-        .align_y(Alignment::Center);
-        let mut tools = row![].spacing(6).align_y(Alignment::Center);
-        if is_diff {
-            tools = tools
-                .push(text("git diff").size(style::TINY).color(P.accent))
-                .push(action(
-                    "Open file",
-                    Action::Open {
-                        path: file.path.clone(),
-                        repo: None,
-                    },
-                ));
+        // one bar, as the shelf's viewer (reference 10, 11): the path — `git diff: <path>` for a
+        // diff — dimmed, shortened with ~ and cut at its start; then what can be done; close
+        let shown = home_relative(&file.path.display);
+        let title = if is_diff {
+            format!("git diff: {shown}")
         } else {
-            tools = tools.push(text("File").size(style::TINY).color(P.fg_dim));
-            if !state.pinned(&file.path) {
-                tools = tools.push(action(
-                    "+ Pin",
-                    Action::Pin {
-                        path: file.path.clone(),
-                        on: true,
-                    },
-                ));
-            }
+            shown
+        };
+        let mut heading = row![
+            container(
+                iced_selection::text(title)
+                    .size(style::TEXT)
+                    .wrapping(text::Wrapping::None)
+                    .style(style::selectable(P.fg_dim))
+            )
+            .width(Fill)
+            .clip(true),
+        ]
+        .spacing(2)
+        .align_y(Alignment::Center);
+        if is_diff {
+            heading = heading.push(action(
+                "Open file",
+                Action::Open {
+                    path: file.path.clone(),
+                    repo: None,
+                },
+            ));
+        } else if !state.pinned(&file.path) {
+            heading = heading.push(action(
+                "+ Pin",
+                Action::Pin {
+                    path: file.path.clone(),
+                    on: true,
+                },
+            ));
         }
         if file.renderable() {
-            tools = tools.push(action(
+            heading = heading.push(action(
                 if file.source { "Rendered" } else { "Source" },
                 Action::Source,
             ));
         }
+        heading = heading
+            .push(glyph_action(
+                "refresh",
+                "Read the file again",
+                Action::RefreshFile,
+            ))
+            .push(tip(
+                keys::press(
+                    button(crate::icons::glyph("copy", 13.0, style::alpha(P.fg, 0.7)))
+                        .padding([5, 7])
+                        .style(style::quiet),
+                    Message::CopyFile,
+                ),
+                "Copy the text".into(),
+            ))
+            .push(
+                container(glyph_action(
+                    "x",
+                    "Close (Escape steps back)",
+                    Action::CloseViewer,
+                ))
+                .id("close-file"),
+            );
         let body: Element<'_, Message> = if let Some(error) = &file.error {
             container(text(error).size(style::TEXT).color(P.error))
                 .padding(18)
@@ -404,28 +428,37 @@ impl App {
                 .height(Fill)
                 .into()
         };
-        let footer = if is_diff {
-            "Git’s view: working tree against HEAD."
-        } else {
-            "Read-only · file on the daemon host"
-        };
-        Some(
-            column![
-                heading,
+        let mut page = column![
+            container(heading).padding(Padding {
+                top: 4.0,
+                bottom: 4.0,
+                left: 12.0,
+                right: 6.0,
+            }),
+            rule::horizontal(1).style(style::rule_style(P.border)),
+            body,
+        ];
+        if is_diff {
+            page = page.push(
                 container(
-                    iced_selection::text(&file.path.display)
-                        .size(style::SMALL)
-                        .style(style::selectable(P.fg))
+                    text("git's view: the working tree against HEAD (open the file from the tree to edit it)")
+                        .size(style::TINY)
+                        .color(P.fg_dim),
                 )
-                .padding([4, 12]),
-                container(tools).padding([4, 12]),
-                rule::horizontal(1).style(style::rule_style(P.border)),
-                body,
-                container(text(footer).size(style::TINY).color(P.fg_dim)).padding([6, 12])
-            ]
-            .height(Fill)
-            .into(),
-        )
+                .padding([6, 12]),
+            );
+        }
+        Some(page.height(Fill).into())
+    }
+}
+
+/// A path as the shelf titles it: the home directory as `~`.
+fn home_relative(path: &str) -> String {
+    match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() && path.starts_with(&format!("{home}/")) => {
+            format!("~{}", &path[home.len()..])
+        }
+        _ => path.to_string(),
     }
 }
 

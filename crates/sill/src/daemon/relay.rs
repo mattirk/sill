@@ -315,6 +315,30 @@ impl Shared {
         Ok(())
     }
 
+    /// Stop was asked for: ACP has the client answer the agent's open questions as cancelled
+    /// after `session/cancel` — an agent waiting on one would otherwise never end its turn. Each
+    /// is recorded as resolved, so frontends close its card. (V2 sessions clear their own on
+    /// `V2PermissionsCancelled`.)
+    fn cancel_questions_locked(&self, state: &mut State) {
+        let open: Vec<u64> = state
+            .pending
+            .iter()
+            .filter(|(_, p)| matches!(p.event, Event::PermissionRequest { .. } | Event::Elicitation { .. }))
+            .map(|(request, _)| *request)
+            .collect();
+        for request in open {
+            let pending = state.pending.remove(&request).unwrap();
+            let answer = match pending.event {
+                Event::Elicitation { .. } => Answer::Form(None),
+                _ => Answer::Permission(None),
+            };
+            // a reply handler already gone has nothing left to cancel; resolved either way
+            let _ = pending.reply.send(answer);
+            state.answered.insert(request);
+            self.append_locked(state, Event::Resolved { request });
+        }
+    }
+
     fn acknowledge(&self, seq: u64) {
         let mut state = self.state.lock().unwrap();
         let seq = seq.min(state.next_seq);
@@ -564,8 +588,15 @@ fn serve(mut stream: UnixStream, shared: Arc<Shared>) -> Result<()> {
                         } else if state.ended_at.is_some() {
                             Some("the ACP conversation has ended".into())
                         } else {
+                            let cancel = matches!(command, Command::Cancel);
                             match shared.commands.try_send(command.into_acp()) {
-                                Ok(()) => { state.last_command = id; None }
+                                Ok(()) => {
+                                    state.last_command = id;
+                                    if cancel {
+                                        shared.cancel_questions_locked(&mut state);
+                                    }
+                                    None
+                                }
                                 Err(_) => Some("the ACP conversation has ended".into()),
                             }
                         }
@@ -933,6 +964,28 @@ mod tests {
         let state = shared.state.lock().unwrap();
         assert!(!state.answered.contains(&1));
         assert_eq!(state.journal.len(), 1, "no Resolved event can claim a dropped reply was delivered");
+    }
+
+    #[test]
+    fn stop_answers_the_open_questions_as_cancelled_and_resolves_them() {
+        let (commands, _) = async_channel::unbounded();
+        let shared = Shared { state: Mutex::new(State::default()), changed: Condvar::new(), commands };
+        let (permission, permission_rx) = futures::channel::oneshot::channel();
+        shared.take_event(acp::Event::PermissionRequest { tool_call_id: "tool".into(), title: "work".into(), options: vec![], reply: permission });
+        let (form, form_rx) = futures::channel::oneshot::channel();
+        shared.take_event(acp::Event::Elicitation { message: "Choose".into(), fields: vec![], reply: form });
+        {
+            let mut state = shared.state.lock().unwrap();
+            shared.cancel_questions_locked(&mut state);
+            assert!(state.pending.is_empty());
+            assert!(state.answered.contains(&1) && state.answered.contains(&2));
+            let resolved: Vec<u64> = state.journal.iter().filter_map(|e| match e.delivered.event { Event::Resolved { request } => Some(request), _ => None }).collect();
+            assert_eq!(resolved, [1, 2]);
+        }
+        assert_eq!(futures::executor::block_on(permission_rx).unwrap(), None, "cancelled, as ACP asks");
+        assert_eq!(futures::executor::block_on(form_rx).unwrap(), None);
+        // an answer that arrives after the stop is already settled, not an error
+        shared.answer(1, Answer::Permission(Some("allow".into()))).unwrap();
     }
 
     #[test]
