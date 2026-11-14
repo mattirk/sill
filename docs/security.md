@@ -149,3 +149,64 @@ Then, in order: S5 (`O_DIRECTORY|O_NOFOLLOW` + owner check in `init` and `state_
 (one `openat2`-beneath helper shared by uploads, viewer save, revert), S7 (LDH-only hostnames, no
 `*`, no public-suffix wildcards, a per-session cap), S12, S13, S14, S15 (mask `/var/log/journal`),
 S17, S20 (SPEC wording).
+
+## Compared with other agent sandboxes — 2026-11-02
+
+Against what Zed, Claude Code and Codex CLI document for their own sandboxes (Zed blog
+"Sandboxing" and docs `ai/sandboxing`, 2026-08; Claude Code's bash sandbox; Codex CLI's
+Seatbelt / bwrap + Landlock), read next to this file and the README.
+
+| | sill | Zed | Claude Code | Codex CLI |
+|---|---|---|---|---|
+| What is inside the boundary | **the whole agent process** — binary, shell, MCP servers, everything it spawns, one bwrap jail per session | the native agent's **terminal tool** only; edit/fetch run in the editor under permission prompts; external ACP agents (Claude Code, Gemini CLI) not sandboxed by Zed | the **Bash tool** only; Read/Edit/Write in the unsandboxed parent | every command, Seatbelt or bwrap + Landlock; read-only default |
+| Filesystem | overlay: the agent writes anywhere, unpinned writes stay on the state fs until Keep; pins are live rw binds | deny-list: no writes outside the project, none to `.git` | allow/deny paths; falls back to unsandboxed by default when the sandbox cannot start | workspace-write or read-only |
+| Network | per-agent allow-list through sill's proxy, refused host → Allow button, DNS on the host, local ranges refused | blocked for sandboxed commands | proxy allow-list | off |
+| Secrets | masked in every jail (`~/.ssh`, keyrings, `.netrc`, cloud creds, other agents' homes); the agent's own login is a sill-owned copy | the project-dir rule only | paths only | — |
+| Review | Changes view, per-file Keep/revert with hash check and undo journal | editor diff for edit-tool changes | git | git |
+| Platforms | Linux, bwrap; a session that cannot build its jail does not start | macOS, Linux, WSL; runs unsandboxed with a warning when bwrap is missing | macOS, Linux | macOS, Linux, WSL |
+
+**Where sill is ahead.** The boundary is around the agent, not around one tool: a prompt-injected
+agent abusing *any* tool, MCP server or subprocess is still in the jail — Codex's model, applied to
+arbitrary ACP agents. Overlay + Keep lets the agent install tools and touch `~/.config` and leaves
+the decision to the person afterwards, where a deny-list just stops it. The host-side consumer
+surface is audited (S1–S11 above): Zed names the `.git` hooks problem and forbids writes to `.git`;
+sill runs host git with a private `--git-dir` and filtered config, gives host shells
+`GIT_CONFIG_PARAMETERS`, has Keep refuse `.git/config`, `.git/hooks` and sill's own config, never
+runs an agent on the host from a jail-writable directory, probes installs in a throwaway jail.
+Memory and transcripts are read-only snapshots inside the jail.
+
+**Where sill is behind, or open.**
+
+- **One fence** (S18). bwrap is the only boundary — no seccomp filter, no Landlock, no systemd
+  hardening on the units. Codex layers Landlock under bwrap. A bwrap or kernel bug is a full escape.
+- **Linux-only is by design, not a gap to close in the jail code**: on macOS and Windows sill will
+  run a Linux VM (real virtualization) with sill-linux inside it, so the jail stays one
+  implementation and the VM is the second fence there. Zed's "run unsandboxed with a warning"
+  fallback is not wanted: a session whose jail cannot be built must not start (as today).
+- **Exfiltration through the default allow-list** (S20): github.com and npm are allowed by design.
+  Same for everyone; worth saying in the install docs.
+- **Open findings**: S12 (autostart bakes `current_exe` from a checkout), S13 (unsigned registry
+  index), S15 (user journal readable in the jail), S17 (VTE link click-through, host-side image
+  decoding), S19 (`nosuid,nodev` on the state fstab line), S10's remainder (agent not paused
+  during Keep).
+- **Desktop grant** (X11 / D-Bus, amber glyph): a deliberate hole the others do not have because
+  they never give the agent the desktop.
+
+**Order proposed.**
+
+1. **A second fence in the jail (S18)**: a seccomp BPF filter passed to bwrap with `--seccomp <fd>`,
+   the container-standard deny list (`mount`, `umount2`, `pivot_root`, `ptrace` of other pids,
+   `keyctl`, `bpf`, `userfaultfd`, `perf_event_open`, `io_uring_*`, `kexec_*`, `open_by_handle_at`,
+   `unshare`/`setns` with namespace flags, `add_key`, `request_key`) — the escape surface of nearly
+   every container CVE of the last years, and an hour of code against bwrap's existing flag.
+   Then `NoNewPrivileges=`, `ProtectSystem=strict`, `RestrictNamespaces=` on `sill-<id>` units
+   and `sill-shelf.service` as the layer outside bwrap. Landlock for the ro-policy paths later
+   (needs a PID 1 in the jail to apply it; the shim is the candidate).
+2. **The small ones in the same pass**: S15 (mask `/var/log/journal`), S19 (`nosuid,nodev`, image
+   mode), S12 (refuse to bake a `current_exe` under a pin or a writable checkout into autostart —
+   point the unit at the installed `<prefix>/bin/sill` or refuse with the reason).
+3. **S13, before the registry is public**: a signed index (minisign, key in the binary), exact
+   npm specs with integrity hashes, sdists refused for `uv tool install`.
+4. **Pause the agent during Keep** (S10 remainder): the shim holds the agent's turn (or the shelf
+   waits for idle) while the copy runs, closing the window the hash check only narrows.
+5. S17 (link click-through, decode images in a jail or via a size-capped loader).
