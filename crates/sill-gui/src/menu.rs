@@ -165,15 +165,15 @@ impl App {
         if !reopenable.is_empty() {
             panel = panel
                 .push(rule::horizontal(1).style(style::rule_style(P.border)))
-                .push(caption("Reopen"))
+                // the filter of the sessions to reopen: no caption or hint, the list below says it
                 .push(
                     container(
-                        text_input("Filter titles and summaries", &menu.filter)
+                        text_input("", &menu.filter)
                             .size(style::SMALL)
                             .padding(6)
                             .on_input(|value| event(Event::Filter(value))),
                     )
-                    .padding([2, 4]),
+                    .padding([6, 4]),
                 );
             let filtering = !menu.filter.trim().is_empty();
             let found: Vec<_> = reopenable

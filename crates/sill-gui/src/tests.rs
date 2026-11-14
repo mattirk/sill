@@ -2424,7 +2424,6 @@ fn the_menu_lists_agents_and_sessions_to_reopen() {
     let mut ui = simulator(&app, (720.0, 860.0));
     ui.find("Claude Code").unwrap();
     ui.find("Codex").unwrap();
-    ui.find("Reopen").unwrap();
     ui.find("2 more…").unwrap();
     assert!(ui.find("Ended session 6").is_err(), "only the first five");
     ui.click("Ended session 1").unwrap();
