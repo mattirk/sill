@@ -221,7 +221,7 @@ fn serve_shim(mut stream: UnixStream, release: Arc<std::sync::Mutex<mpsc::Receiv
     let initialize = read(&mut reader).unwrap();
     assert_eq!(initialize["method"], "initialize");
     observed.send("initialize".into()).unwrap();
-    send(&mut stream, json!({"jsonrpc":"2.0","id":initialize["id"],"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true},"authMethods":[]}}));
+    send(&mut stream, json!({"jsonrpc":"2.0","id":initialize["id"],"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true}},"authMethods":[]}}));
     let new_session = read(&mut reader).unwrap();
     assert_eq!(new_session["method"], "session/new");
     send(&mut stream, json!({"jsonrpc":"2.0","id":new_session["id"],"result":{"sessionId":"fake-session"}}));
@@ -453,11 +453,15 @@ fn sfp_submission_question_and_item_identity_survive_main_daemon_restart() {
     let mut client=Connection::connect(&fixture.socket()).unwrap();
     let (_,initial)=public_snapshot(&mut client,&fixture.session);
     let generation=initial.iter().find(|r|r["type"]=="session").unwrap()["session"]["agent_generation_id"].clone();
-    let input=json!({"session_id":fixture.session,"submission_id":"recovery-submission","text":"work","attachments":[]});
+    // an inline image: stored as an upload, so the identical retry must compare against that
+    let input=json!({"session_id":fixture.session,"submission_id":"recovery-submission","text":"work","attachments":[{"type":"inline","name":"dot.png","mime":"image/png","data_base64":"iVBORw0KGgo="}]});
     let accepted=client.call("_sill/sessions.submit",input.clone());
     let repeated=client.call("_sill/sessions.submit",input.clone());
     assert_eq!(accepted["submission_id"],repeated["submission_id"]);
     assert_eq!(accepted["accepted_seq"],repeated["accepted_seq"]);
+    assert_eq!(accepted["attachments"][0]["type"],"uploaded","the journal references the image");
+    let image=client.call("_sill/uploads.get",json!({"session_id":fixture.session,"upload_id":accepted["attachments"][0]["upload_id"]}));
+    assert_eq!(image["data_base64"],"iVBORw0KGgo=");
     let prepared=observed.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(prepared.contains("work") && prepared.contains(sill_core::instructions::BASE));
     fixture.wait("SFP partial text committed",||fixture.snapshot()["agent_md"]=="before restart ");

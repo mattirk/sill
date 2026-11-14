@@ -11,7 +11,7 @@ The implemented public conversation surface is `_sill/sessions.attach`,
 `_sill/sessions.snapshot`, `_sill/sessions.detach`, `_sill/sessions.submit`,
 `_sill/submissions.get`, `_sill/submissions.cancel`, `_sill/submissions.resume`,
 `_sill/questions.answer`, `_sill/sessions.control`, `_sill/sessions.cancel`,
-`_sill/uploads.create` and `_sill/session.event`, plus `_sill/daemon.schema`.
+`_sill/uploads.create`, `_sill/uploads.get` and `_sill/session.event`, plus `_sill/daemon.schema`.
 The schema command exports the concrete records and method shapes. Counters are decimal strings;
 records/events use named objects and `type` tags. `scripts/sfp_client.py` is an independent Python
 consumer and schema validator (install `scripts/requirements-sfp.txt`).
@@ -36,7 +36,27 @@ conversations, but ambiguous cancellation or answer-delivery evidence is reporte
 
 Uploads are immutable session-scoped objects with client IDs and bounded base64 data. Inline
 attachments currently support images; file attachments reference uploaded objects. Upload IDs
-retain content identity independently of their staged jail file.
+retain content identity independently of their staged jail file. The daemon stores an inline
+attachment as an upload when it accepts the submission (`inline-<index>-<submission_id>`), so
+submission records reference attachment bytes and never carry them; a frontend fetches what it
+displays with `_sill/uploads.get`. Records journaled before this change may still hold inline data.
+An uploaded PNG, JPEG, GIF or WebP reaches the agent as an image block when the agent advertised
+image support; any other upload, and every upload to an agent without it, is a staged file.
+
+Known follow-ups in this area: inline upload IDs (`inline-<index>-<submission_id>`, cut to 128
+bytes) share the client's upload ID namespace, so a client upload of that name or two long
+submission IDs with a common 119-byte prefix fail with `id_conflict`; the shelf fetches every
+displayed upload again whenever it rebuilds a view, although uploads are immutable and could be
+cached by session and upload ID; and the adapter's once-per-update-kind log set
+(`AdapterState.unhandled`) is persisted with the adapter state, so it logs once per session rather
+than once per daemon run (`#[serde(skip)]` would fix it). The plan's step marks (✓ ◐ ○) are
+written in both `sfp_client::plan_text` and `Conversation::set_plan`.
+
+ACP v1 updates beyond text and tools are projected too: `plan` becomes a `plan` item per turn
+(one `plan_entry` block per step with `status` and `priority`; later plans patch its content),
+`notice` a `notice` item (`severity` on its block), `available_commands_update` the session's
+`commands`, and a `session_info_update` title the session's `agent_title` (sill's own title is
+unaffected). Other update kinds are logged by the daemon and never become conversation items.
 
 Host/session administration and presentation operations still awaiting public SFP schemas are
 under `_sill/internal/…`, marked `x-sill-internal` in the exported schema. These are temporary

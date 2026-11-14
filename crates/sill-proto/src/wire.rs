@@ -265,7 +265,28 @@ pub enum Event {
     /// A checkpoint summary (`sessions.checkpoint`) is in: the text as stored (None when the agent
     /// wrote nothing), and the name it gave the session if the first line was one.
     Summarized { text: Option<String>, title: Option<String> },
+    /// A prompt with what went with it (`UserText` stays for prompts without attachments).
+    UserMessage { text: String, attachments: Vec<UserAttachment> },
+    /// The agent's whole current plan; each replaces the turn's last.
+    Plan(Vec<PlanEntry>),
+    /// The slash commands the agent offers now.
+    Commands(Vec<AgentCommand>),
 }
+
+/// An attachment as a frontend shows it: inline data, or an upload it fetches when displayed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct UserAttachment {
+    pub name: String,
+    pub mime: String,
+    pub upload_id: Option<String>,
+    pub data_base64: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PlanEntry { pub content: String, pub status: String, pub priority: String }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentCommand { pub name: String, pub description: String, pub hint: Option<String> }
 
 /// The answer to a question: the chosen permission option (None = cancel), or the form's values
 /// (None = cancel).

@@ -7,6 +7,7 @@ instead read the JSON printed by `sill daemon schema`. Cursor files include the
 entire reconstructed view, because a cursor alone is insufficient for replay.
 """
 import argparse
+import base64
 import copy
 import json
 import os
@@ -91,6 +92,32 @@ class View:
             raise ValueError(f"unknown required state event {kind}; client upgrade needed")
         self.seq = seq
         return True
+
+    def session(self):
+        record = self.records.get(("session", self.session_id))
+        return record["session"] if record else None
+
+    def commands(self):
+        """The slash commands the agent offers now (`/name`, its description and input hint)."""
+        session = self.session()
+        return [] if session is None else session.get("commands", [])
+
+    def items(self, kind=None):
+        found = [r["item"] for (k, _), r in self.records.items() if k == "item" and (kind is None or r["item"]["kind"] == kind)]
+        return sorted(found, key=lambda item: sequence(item["created_seq"]))
+
+    def plan(self):
+        """The latest plan's steps as (status, priority, text); a plan revises itself in place."""
+        plans = self.items("plan")
+        if not plans:
+            return []
+        return [(b.get("status"), b.get("priority"), b["text"]) for b in plans[-1]["content"] if b["type"] == "plan_entry"]
+
+    def attachments(self, item):
+        """A user item's attachments, from its submission. Bytes are fetched with uploads.get;
+        only records journaled before attachments became uploads still embed them."""
+        record = self.records.get(("submission", item.get("submission_id")))
+        return [] if record is None else record["submission"]["attachments"]
 
     def document(self):
         return {"session_id": self.session_id, "seq": str(self.seq), "records": list(self.records.values())}
@@ -240,6 +267,11 @@ def main():
     submit.add_argument("text")
     submit.add_argument("--submission-id", required=True, help="reuse this ID and identical input after an uncertain reply")
     submit.add_argument("--retry", action="store_true", help="repeat the identical accepted submission to exercise deduplication")
+    submit.add_argument("--image", type=Path, action="append", default=[], help="attach an image inline (at most 1 MiB in total)")
+    upload = commands.add_parser("upload", help="write an upload's bytes (an attachment the journal references) to a file")
+    upload.add_argument("session_id")
+    upload.add_argument("upload_id")
+    upload.add_argument("--out", type=Path, required=True)
     for name in ("status", "cancel", "resume"):
         action = commands.add_parser(name)
         action.add_argument("session_id")
@@ -270,14 +302,22 @@ def main():
         elif args.command == "submit":
             # Attach starts the agent if necessary; the mutation itself never creates a session.
             client.attach(args.session_id)
-            params = {"session_id": args.session_id, "submission_id": args.submission_id, "text": args.text, "attachments": []}
+            images = [{"type": "inline", "name": path.name, "mime": "image/" + (path.suffix.lstrip(".").lower().replace("jpg", "jpeg") or "png"),
+                       "data_base64": base64.b64encode(path.read_bytes()).decode()} for path in args.image]
+            params = {"session_id": args.session_id, "submission_id": args.submission_id, "text": args.text, "attachments": images}
             result = client.call("_sill/sessions.submit", params)
             if args.retry:
                 retry = client.call("_sill/sessions.submit", params)
                 if (retry["submission_id"], retry["accepted_seq"]) != (result["submission_id"], result["accepted_seq"]):
                     raise ValueError("retry created another submission")
                 result = retry
+            if any(a["type"] == "inline" for a in result["attachments"]):
+                raise ValueError("the accepted submission embeds attachment bytes instead of referencing an upload")
             print(json.dumps(result, ensure_ascii=False))
+        elif args.command == "upload":
+            result = client.call("_sill/uploads.get", {"session_id": args.session_id, "upload_id": args.upload_id})
+            args.out.write_bytes(base64.b64decode(result["data_base64"], validate=True))
+            print(json.dumps({k: result[k] for k in ("upload_id", "name", "mime")}, ensure_ascii=False))
         elif args.command == "answer":
             answer = {"type": "cancel"} if args.cancel else ({"type": "permission", "option_id": args.option} if args.option else {"type": "form", "values": args.form_json})
             result = client.call("_sill/questions.answer", {"session_id": args.session_id, "question_id": args.question_id, "answer_id": args.answer_id, "answer": answer})

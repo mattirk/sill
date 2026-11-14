@@ -59,5 +59,23 @@ class ViewTests(unittest.TestCase):
         self.assertEqual(replacement.records[("item", "i")]["item"]["content"][0]["text"], "hello!")
 
 
+class PresentationTests(unittest.TestCase):
+    def test_plan_revises_in_place_and_commands_come_from_the_session(self):
+        step = lambda text, status: {"block_id": "entry-" + text, "type": "plan_entry", "text": text, "status": status, "priority": "high"}
+        plan = {"item_id": "p", "created_seq": "1", "kind": "plan", "content": [step("read", "in_progress"), step("fix", "pending")]}
+        view = View("s")
+        view.apply(event(1, {"type": "item.created", "item": plan}))
+        view.apply(event(2, {"type": "item.patched", "item_id": "p", "set": {"content": [step("read", "completed"), step("fix", "in_progress")]}}))
+        self.assertEqual(view.plan(), [("completed", "high", "read"), ("in_progress", "high", "fix")])
+        view.apply(event(3, {"type": "session.updated", "session": {"session_id": "s", "commands": [{"name": "review", "description": "Review", "hint": None}]}}))
+        self.assertEqual(view.commands()[0]["name"], "review")
+
+    def test_user_attachments_reference_uploads(self):
+        submission = {"submission_id": "x", "attachments": [{"type": "uploaded", "upload_id": "inline-0-x", "name": "shot.png", "mime": "image/png"}]}
+        view = View("s", "2", [{"type": "submission", "submission": submission},
+                               {"type": "item", "item": {"item_id": "u", "created_seq": "2", "kind": "user", "submission_id": "x", "content": []}}])
+        self.assertEqual(view.attachments(view.items("user")[0])[0]["upload_id"], "inline-0-x")
+
+
 if __name__ == "__main__":
     unittest.main()

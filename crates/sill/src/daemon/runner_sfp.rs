@@ -165,6 +165,7 @@ impl Runner {
             self.sfp_initialize_locked(store,hub,&st)?;
             if st.ended || st.retired {return Err(Error::domain("invalid_state","the agent connection ended; explicitly restart the session before submitting new work").into());}
             validate_attachments(store,&self.id,&input.attachments)?;
+            let input=inline_as_uploads(store,input)?;
             let journal=Journal::new(store)?;
             // Accept records even while the adapter is starting/busy; dispatch owns readiness.
             let (submission,events)=journal.accept(&input,"queued")?;
@@ -195,7 +196,7 @@ impl Runner {
         let result=(||->Result<Vec<p::StoredEvent>>{
             let tx=store.conn().unchecked_transaction()?;
             let prepared=st.context.prepare(store,&self.id,home,&submission.text)?;
-            let attachments=attachments(store,&self.id,&submission.attachments)?;
+            let attachments=attachments(store,&self.id,&submission.attachments,st.images.unwrap_or(true))?;
             Self::queue(st,relay::Command::Prompt{text:prepared.text.clone(),attachments});
             st.context.commit(prepared); st.busy=true; st.active_submission=Some(submission.submission_id.clone());
             submission.delivery="direct".into();
@@ -272,11 +273,22 @@ fn validate_attachments(store:&Store,session_id:&str,input:&[p::Attachment])->Re
     }
     if size>1024*1024 {return Err(Error::domain("limit_exceeded","inline attachments exceed 1 MiB").into());}Ok(())
 }
-fn attachments(store:&Store,session_id:&str,input:&[p::Attachment])->Result<Vec<acp::Attachment>> {
+/// Journal records reference attachment bytes and never carry them: every attach would otherwise
+/// download every screenshot ever sent, and enough of them exceed the snapshot limit.
+pub(in crate::daemon) fn inline_as_uploads(store:&Store,mut input:p::Submit)->Result<p::Submit> {
+    for (i,a) in input.attachments.iter_mut().enumerate() {
+        if let p::Attachment::Inline{name,mime,data_base64}=a {
+            let (upload_id,name)=super::super::uploads::from_inline(store,&input.session_id,&input.submission_id,i,name,mime,data_base64)?;
+            *a=p::Attachment::Uploaded{upload_id,name,mime:mime.clone()};
+        }
+    }
+    Ok(input)
+}
+fn attachments(store:&Store,session_id:&str,input:&[p::Attachment],images:bool)->Result<Vec<acp::Attachment>> {
     validate_attachments(store,session_id,input)?;
     input.iter().map(|a|match a {
         p::Attachment::Inline{name,mime,data_base64}=>Ok(acp::Attachment{name:name.clone(),mime:mime.clone(),kind:acp::AttachmentKind::Image{data_base64:data_base64.clone()}}),
-        p::Attachment::Uploaded{upload_id,..}=>super::super::uploads::resolve(store,session_id,upload_id),
+        p::Attachment::Uploaded{upload_id,..}=>super::super::uploads::resolve(store,session_id,upload_id,images),
     }).collect()
 }
 
@@ -480,6 +492,66 @@ mod tests {
         let seq=j.snapshot(&f.runner.id).unwrap().0;
         assert!(f.runner.sfp_initial_events(&f.store,&st).unwrap().is_empty());
         assert_eq!(j.snapshot(&f.runner.id).unwrap().0,seq,"seeding is idempotent");
+    }
+    #[test]
+    fn a_session_adopted_from_a_pre_sfp_daemon_keeps_controls_images_cancel_and_questions() {
+        // What the daemon before SFP saved for a running session: no generation, no adapter, no
+        // journal; Ready and Capabilities were delivered (and ACKed) long ago. Its relay has no
+        // outcome evidence (Fixture::new).
+        let f=Fixture::new();
+        f.store.conn().execute("DELETE FROM sfp_sessions",[]).unwrap();
+        let controls=acp::Controls{modes:Some(("agent-full-access".into(),vec![("read-only".into(),"Read-only".into()),("agent-full-access".into(),"Full access".into())])),options:vec![]};
+        let old=serde_json::json!({"cursor":10,"ready":["acp-session",false],"controls":controls,"images":true,"busy":false,"turns":3});
+        let runner=Runner::new(&f.runner.id,f.runner.relay.clone(),old).unwrap();
+        let j=Journal::new(&f.store).unwrap();
+        let mut st=runner.st.lock().unwrap();
+        runner.sfp_initial_events(&f.store,&st).unwrap();
+        let session=j.session(&runner.id).unwrap();
+        assert_eq!(session.controls.as_ref().and_then(|c|c.current_mode.as_deref()),Some("agent-full-access"),"mode/model/auto controls show");
+        assert_eq!(session.capabilities.get("images"),Some(&true),"no false 'no image support' note");
+
+        // the stop button during a turn: a cancellation, not an uncertain outcome
+        j.accept(&f.input(),"direct").unwrap();
+        st.active_submission=Some("submission".into());
+        for (seq,event) in [(11,relay::Event::TurnStarted)] { runner.sfp_project(&f.store,&mut st,&event,seq).unwrap(); runner.handle_locked(&f.store,&mut st,event,false).unwrap(); }
+        runner.commit_command(&f.store,&f.dir,&mut st,wire::Command::Cancel).unwrap();
+        let stopped=relay::Event::Stopped(acp::StopReason::Cancelled);
+        runner.sfp_project(&f.store,&mut st,&stopped,12).unwrap(); runner.handle_locked(&f.store,&mut st,stopped,false).unwrap();
+        assert_eq!(j.submission(&runner.id,"submission").unwrap().outcome,"cancelled");
+
+        // a question answered through SFP: delivered, but the old relay cannot prove handoff
+        let ask=relay::Event::PermissionRequest{request:1,tool_call_id:String::new(),title:"Run?".into(),options:vec![acp::PermissionOption{id:"yes".into(),name:"Yes".into(),kind:acp::PermissionOptionKind::AllowOnce}]};
+        runner.sfp_project(&f.store,&mut st,&ask,13).unwrap();
+        let question_id=st.adapter.question_id(1).unwrap().to_string();
+        runner.sfp_commit_answer(&f.store,&mut st,p::AnswerQuestion{session_id:runner.id.clone(),question_id:question_id.clone(),answer_id:"a".into(),answer:p::Answer::Permission{option_id:"yes".into()}}).unwrap();
+        runner.sfp_project(&f.store,&mut st,&relay::Event::Resolved{request:1},14).unwrap();
+        let q=j.question(&runner.id,&question_id).unwrap();
+        assert_eq!((q.state.as_str(),q.delivery.as_deref()),("answered",Some("unknown")));
+        assert!(j.session(&runner.id).unwrap().question_ids.is_empty());
+    }
+    #[test]
+    fn inline_images_are_stored_once_referenced_by_id_and_reach_the_agent_as_images() {
+        let f=Fixture::new();
+        let png=acp::base64(b"\x89PNG fake");
+        let mut input=f.input();
+        input.attachments=vec![p::Attachment::Inline{name:"screenshot-1.png (1180×518)".into(),mime:"image/png".into(),data_base64:png.clone()}];
+        let stored=inline_as_uploads(&f.store,input.clone()).unwrap();
+        let [p::Attachment::Uploaded{upload_id,name,mime}]=&stored.attachments[..] else {panic!("expected a reference: {:?}",stored.attachments)};
+        assert_eq!((name.as_str(),mime.as_str()),("screenshot-1.png (1180×518)","image/png"));
+        assert_eq!(inline_as_uploads(&f.store,input).unwrap(),stored,"a retried submission finds the same upload");
+        let (accepted,_)=Journal::new(&f.store).unwrap().accept(&stored,"queued").unwrap();
+        assert!(!serde_json::to_string(&accepted).unwrap().contains(&png),"the journal never carries the bytes");
+        let fetched=super::super::super::uploads::get(&f.store,p::UploadGet{session_id:f.runner.id.clone(),upload_id:upload_id.clone()}).unwrap();
+        assert_eq!(fetched.data_base64,png);
+        let sent=attachments(&f.store,&f.runner.id,&accepted.attachments,true).unwrap();
+        assert!(matches!(&sent[0].kind,acp::AttachmentKind::Image{data_base64} if data_base64==&png));
+        // a long non-ASCII label is cut to the upload's 255 bytes, not 255 characters
+        let mut long=f.input();
+        long.submission_id="long".into();
+        long.attachments=vec![p::Attachment::Inline{name:"kuvakaappaus-ä".repeat(30),mime:"image/png".into(),data_base64:png.clone()}];
+        let stored=inline_as_uploads(&f.store,long).unwrap();
+        let [p::Attachment::Uploaded{name,..}]=&stored.attachments[..] else {panic!("expected a reference")};
+        assert!(name.len()<=255 && name.starts_with("kuvakaappaus-ä"));
     }
     #[test]
     fn diagnostic_dumps_from_the_acp_loop_are_not_conversation() {

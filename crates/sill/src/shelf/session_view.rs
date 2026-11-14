@@ -43,6 +43,9 @@ pub struct SessionView {
     attach_strip: gtk::Box,
     /// The agent accepts image blocks (from `initialize`).
     images_ok: std::cell::Cell<bool>,
+    /// The slash commands the agent offers, and the list that completes them as `/` is typed.
+    commands: RefCell<Vec<sill_core::acp::AgentCommand>>,
+    command_pop: gtk::Popover,
     /// Bottom slot: "prompt" or "shell" (SPEC §3.1 switcher).
     bottom: gtk::Stack,
     terminal: vte4::Terminal,
@@ -438,6 +441,17 @@ impl SessionView {
             attachments: RefCell::new(Vec::new()),
             attach_strip,
             images_ok: std::cell::Cell::new(true),
+            commands: RefCell::new(Vec::new()),
+            command_pop: {
+                let pop = gtk::Popover::new();
+                pop.add_css_class("sill-menu");
+                pop.set_has_arrow(false);
+                pop.set_autohide(false);
+                pop.set_can_focus(false);
+                pop.set_position(gtk::PositionType::Top);
+                pop.set_parent(&prompt);
+                pop
+            },
             bottom,
             pane,
             terminal: terminal.clone(),
@@ -502,6 +516,28 @@ impl SessionView {
             pending_prompt: RefCell::new(None),
         });
 
+        // the command list hangs off the prompt; let go of it with the prompt (GTK warns otherwise)
+        {
+            let pop = view.command_pop.clone();
+            view.prompt.connect_destroy(move |_| pop.unparent());
+        }
+
+        // a prompt's images: inline data as sent, or the daemon's upload, as a local file to draw
+        {
+            let session_id = view.id();
+            view.conv.set_image_loader(std::sync::Arc::new(move |a| {
+                let data = match (&a.data_base64, &a.upload_id) {
+                    (Some(data), _) => data.clone(),
+                    (None, Some(upload_id)) => super::client::quick::<sill_proto::sfp::Upload>("_sill/uploads.get", sill_proto::sfp::UploadGet { session_id: session_id.clone(), upload_id: upload_id.clone() })
+                        .map_err(|e| eprintln!("sill: loading {}: {e:#}", a.name)).ok()?.data_base64,
+                    (None, None) => return None,
+                };
+                let bytes = glib::base64_decode(&data);
+                let ext = a.mime.strip_prefix("image/").unwrap_or("img");
+                remote::cache_image(&format!("upload:{}", a.upload_id.as_deref().unwrap_or(&a.name)), &bytes, ext)
+            }));
+        }
+
         // how messages find their images, and where a click on one goes — before the transcript is shown
         {
             let resolve_weak = Rc::downgrade(&view);
@@ -558,7 +594,16 @@ impl SessionView {
                     }
                     return glib::Propagation::Proceed;
                 }
+                if key == gdk::Key::Tab && v.command_pop.is_visible() {
+                    if let Some(name) = v.command_matches().first().map(|c| c.name.clone()) { v.complete_command(&name); }
+                    return glib::Propagation::Stop;
+                }
+                if key == gdk::Key::Escape && v.command_pop.is_visible() {
+                    v.command_pop.popdown();
+                    return glib::Propagation::Stop;
+                }
                 if (key == gdk::Key::Return || key == gdk::Key::KP_Enter) && !state.contains(gdk::ModifierType::SHIFT_MASK) {
+                    v.command_pop.popdown();
                     let buf = prompt.buffer();
                     let text = buf.text(&buf.start_iter(), &buf.end_iter(), false).trim().to_string();
                     if !text.is_empty() && v.send(&text) {
@@ -573,7 +618,7 @@ impl SessionView {
         {
             let weak = Rc::downgrade(&view);
             prompt.buffer().connect_changed(move |_| {
-                if let Some(view) = weak.upgrade() { view.set_busy(view.busy.get()); }
+                if let Some(view) = weak.upgrade() { view.set_busy(view.busy.get()); view.show_command_matches(); }
             });
         }
 
@@ -1349,7 +1394,9 @@ impl SessionView {
     fn render_entries(&self, entries: &[Entry]) {
         for e in entries {
             match e.kind.as_str() {
+                "user" if !e.attachments.is_empty() => self.conv.add_user_full(&e.text, &e.attachments),
                 "user" => self.conv.add_user_with(&e.text, &e.extra.lines().filter(|l| !l.is_empty()).map(str::to_string).collect::<Vec<_>>()),
+                "plan" => self.conv.set_plan_text(&e.text),
                 "agent" => self.conv.add_agent_block(&e.text),
                 "thought" => self.conv.add_thought_block(&e.text),
                 "subagent" => self.conv.add_subagent_text(&e.parent, &e.text),
@@ -1365,6 +1412,55 @@ impl SessionView {
                 _ => self.conv.add_note(&e.text),
             }
         }
+    }
+
+    /// The offered commands the prompt's `/word` starts, while that is all the prompt holds.
+    fn command_matches(&self) -> Vec<sill_core::acp::AgentCommand> {
+        let buf = self.prompt.buffer();
+        let text = buf.text(&buf.start_iter(), &buf.end_iter(), false);
+        let Some(word) = text.strip_prefix('/').filter(|w| !w.contains(char::is_whitespace)) else { return vec![] };
+        self.commands.borrow().iter().filter(|c| c.name.trim_start_matches('/').starts_with(word)).take(8).cloned().collect()
+    }
+
+    fn show_command_matches(self: &Rc<Self>) {
+        let matches = self.command_matches();
+        if matches.is_empty() {
+            self.command_pop.popdown();
+            return;
+        }
+        let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        for c in matches {
+            let b = gtk::Button::new();
+            b.add_css_class("flat");
+            b.add_css_class("sill-menu-item");
+            b.set_can_focus(false);
+            let line = match &c.hint { Some(h) if !h.is_empty() => format!("/{} {h}", c.name.trim_start_matches('/')), _ => format!("/{}", c.name.trim_start_matches('/')) };
+            let l = gtk::Label::new(Some(&line));
+            l.set_xalign(0.0);
+            let d = gtk::Label::new(Some(&c.description));
+            d.add_css_class("dim-label");
+            d.set_xalign(0.0);
+            d.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            d.set_max_width_chars(60);
+            let both = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            both.append(&l);
+            if !c.description.is_empty() { both.append(&d); }
+            b.set_child(Some(&both));
+            let weak = Rc::downgrade(self);
+            let name = c.name.clone();
+            b.connect_clicked(move |_| if let Some(v) = weak.upgrade() { v.complete_command(&name); });
+            list.append(&b);
+        }
+        self.command_pop.set_child(Some(&list));
+        if !self.command_pop.is_visible() { self.command_pop.popup(); }
+    }
+
+    fn complete_command(&self, name: &str) {
+        self.command_pop.popdown();
+        let buf = self.prompt.buffer();
+        buf.set_text(&format!("/{} ", name.trim_start_matches('/')));
+        buf.place_cursor(&buf.end_iter());
+        self.prompt.grab_focus();
     }
 
     fn update_earlier(&self, left: usize) {
@@ -2121,6 +2217,10 @@ impl SessionView {
                 return;
             }
             Event::Capabilities { images } => self.images_ok.set(*images),
+            Event::Commands(commands) => {
+                *self.commands.borrow_mut() = commands.clone();
+                return;
+            }
             Event::Usage { used, size } => {
                 self.usage.set(Some((*used, *size)));
                 self.show_usage();

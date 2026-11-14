@@ -263,6 +263,44 @@ pub enum Event {
     Stopped(StopReason),
     /// The session ended (connection closed or error).
     Ended(Option<String>),
+    /// The agent's whole current plan (ACP `plan`: each update replaces the last).
+    Plan(Vec<PlanEntry>),
+    /// The slash commands the agent offers now (ACP `available_commands_update`).
+    Commands(Vec<AgentCommand>),
+    /// The agent named or renamed the session (ACP `session_info_update` with a title).
+    AgentTitle(String),
+    /// Something the agent wants shown (ACP `notice`): severity as ACP's string.
+    Notice { severity: String, title: String, description: Option<String> },
+    /// A prompt as a frontend shows it, with its attachments. Never sent by [`run_session`]: the
+    /// daemon's view of a submission (`sfp_client`) produces it.
+    UserMessage { text: String, attachments: Vec<UserAttachment> },
+}
+
+/// An attachment as a view shows it: inline data, or an upload fetched from the daemon on display.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserAttachment {
+    pub name: String,
+    pub mime: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_base64: Option<String>,
+}
+
+/// One step of the agent's plan (ACP `PlanEntry`): status and priority as ACP's strings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanEntry {
+    pub content: String,
+    pub status: String,
+    pub priority: String,
+}
+
+/// A slash command the agent offers (ACP `AvailableCommand`); `hint` describes free-text input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCommand {
+    pub name: String,
+    pub description: String,
+    pub hint: Option<String>,
 }
 
 /// One way to log in, as the agent advertises it in `initialize`.
@@ -838,8 +876,25 @@ fn to_event(update: SessionUpdate) -> Event {
             detail: tool_detail(u.fields.raw_input.as_ref(), u.fields.content.as_deref(), u.fields.raw_output.as_ref()),
             diff: tool_diff(u.fields.content.as_deref()),
         },
+        SessionUpdate::Plan(p) => Event::Plan(p.entries.iter().map(|e| PlanEntry { content: e.content.clone(), status: acp_string(&e.status), priority: acp_string(&e.priority) }).collect()),
+        SessionUpdate::AvailableCommandsUpdate(u) => Event::Commands(u.available_commands.iter().map(|c| AgentCommand {
+            name: c.name.clone(),
+            description: c.description.clone(),
+            hint: match &c.input { Some(acp_v1::AvailableCommandInput::Unstructured(i)) => Some(i.hint.clone()), _ => None },
+        }).collect()),
+        SessionUpdate::SessionInfoUpdate(u) => match u.title {
+            agent_client_protocol::schema::MaybeUndefined::Value(title) if !title.trim().is_empty() => Event::AgentTitle(title),
+            // Codex sends one after every turn with only `_meta` (thread status): nothing to show.
+            _ => Event::Other(format!("_sill_session_info {:?}", u.updated_at).chars().take(120).collect()),
+        },
+        SessionUpdate::Notice(n) => Event::Notice { severity: acp_string(&n.severity), title: n.title.clone(), description: n.description.clone() },
         other => Event::Other(format!("{other:?}").chars().take(120).collect()),
     }
+}
+
+/// An ACP enum's wire string (`in_progress`, `high`, `warning`…), whatever the variant.
+fn acp_string(value: &impl Serialize) -> String {
+    serde_json::to_value(value).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_else(|| "unknown".into())
 }
 
 /// The delegation a notification belongs to: claude-agent-acp puts the Task/Agent call's id in
@@ -964,6 +1019,24 @@ fn kind_name(block: &ContentBlock) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn update(json: serde_json::Value) -> Event { to_event(serde_json::from_value(json).unwrap()) }
+
+    #[test]
+    fn plans_commands_titles_and_notices_are_typed_not_dumped() {
+        let plan = update(serde_json::json!({"sessionUpdate":"plan","entries":[
+            {"content":"read","priority":"high","status":"completed"},{"content":"fix","priority":"medium","status":"in_progress"}]}));
+        assert!(matches!(&plan, Event::Plan(e) if e.len()==2 && e[1].status=="in_progress" && e[0].priority=="high"), "{plan:?}");
+        let commands = update(serde_json::json!({"sessionUpdate":"available_commands_update","availableCommands":[
+            {"name":"review","description":"Review changes","input":{"hint":"what to review"}},{"name":"init","description":"Write AGENTS.md"}]}));
+        assert!(matches!(&commands, Event::Commands(c) if c[0].hint.as_deref()==Some("what to review") && c[1].hint.is_none()), "{commands:?}");
+        assert!(matches!(update(serde_json::json!({"sessionUpdate":"session_info_update","title":"Fix the shelf"})), Event::AgentTitle(t) if t=="Fix the shelf"));
+        // Codex: after every turn, only `_meta`; the old dump of this became a visible note
+        let codex = update(serde_json::json!({"sessionUpdate":"session_info_update","_meta":{"codex":{"threadStatus":"idle"}}}));
+        assert!(matches!(&codex, Event::Other(t) if is_diagnostic(t)), "{codex:?}");
+        let notice = update(serde_json::json!({"sessionUpdate":"notice","severity":"warning","title":"Rate limited","description":"retrying"}));
+        assert!(matches!(&notice, Event::Notice { severity, title, description: Some(d) } if severity=="warning" && title=="Rate limited" && d=="retrying"), "{notice:?}");
+    }
 
     #[test]
     fn delegation_adapter_spellings() {

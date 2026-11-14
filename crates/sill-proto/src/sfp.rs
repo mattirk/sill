@@ -25,6 +25,20 @@ pub struct SessionState {
     pub controls: Option<SessionControls>,
     pub authentication: Option<Authentication>,
     pub usage: Option<Usage>,
+    /// The name the agent gave the session, if any (sill's own title is `title`).
+    #[serde(default)]
+    pub agent_title: Option<String>,
+    /// Slash commands the agent offers now; empty when it offers none or never said.
+    #[serde(default)]
+    pub commands: Vec<AgentCommand>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentCommand {
+    pub name: String,
+    pub description: String,
+    /// What to type after the command, when it takes free text.
+    pub hint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -85,7 +99,8 @@ pub struct Item {
     pub turn_id: Option<String>,
     pub submission_id: Option<String>,
     pub agent_generation_id: String,
-    /// user, agent, thought, tool, note.
+    /// user, agent, thought, tool, note, notice, plan. A plan's content is one `plan_entry`
+    /// block per step (`status`, `priority`); a notice's `severity` is on its text block.
     pub kind: String,
     pub content: Vec<Content>,
     pub tool: Option<Tool>,
@@ -270,6 +285,13 @@ pub struct UploadCreate {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct UploadCreated { pub upload_id: String }
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UploadGet { pub session_id: String, pub upload_id: String }
+/// An upload's immutable bytes. Submissions reference attachments by upload ID, so snapshots
+/// never carry attachment data; a frontend fetches what it displays.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Upload { pub upload_id: String, pub name: String, pub mime: String, pub data_base64: String }
 
 #[cfg(test)]
 mod tests {

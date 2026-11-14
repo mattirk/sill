@@ -20,6 +20,7 @@ use sill_core::store::Store;
 use super::{context, relay};
 #[path = "runner_sfp.rs"]
 mod sfp_runner;
+pub(in crate::daemon) use sfp_runner::inline_as_uploads;
 
 /// What a summary turn is for (docs/memory.md §2.2, §2.5): the session's end, or a checkpoint
 /// while it goes on. A checkpoint becomes the end's when the tab closes during it.

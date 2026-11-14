@@ -57,7 +57,7 @@ impl View {
         match notification.event {
             Event::ItemCreated { item } => {
                 if self.items.contains_key(&item.item_id) { bail!("duplicate SFP item identity"); }
-                events.extend(render_item(&item));
+                events.extend(render_item(&item, &self.attachments_of(&item)));
                 self.items.insert(item.item_id.clone(), item);
             }
             Event::ItemTextAppended { item_id, block_id, text } => {
@@ -81,7 +81,12 @@ impl View {
             Event::ItemPatched { item_id, set } => {
                 let item = self.items.get_mut(&item_id).context("SFP patch target missing")?;
                 let content_changed = set.content.is_some();
-                if let Some(content) = set.content { item.content = content; }
+                let content_changed = content_changed && item.kind != "plan";
+                if let Some(content) = set.content {
+                    item.content = content;
+                    // A plan replaces itself in place wherever it stands; nothing else moves.
+                    if item.kind == "plan" { events.push(wire::Event::Plan(plan_entries(item))); }
+                }
                 if let Some(tool) = set.tool {
                     events.push(wire::Event::ToolCallUpdate { id: item_id, status: Some(tool.status.clone()), title: Some(tool.title.clone()), detail: Some(tool.detail.clone()), diff: Some(tool.diff.clone()) });
                     item.tool = Some(tool);
@@ -132,15 +137,16 @@ impl View {
         live.reverse();
         let entries: Vec<crate::store::Entry> = items.iter().filter(|item|!live.iter().any(|open|open.item_id == item.item_id) && !is_diagnostic_note(item)).map(|item| crate::store::Entry {
             seq: item.created_seq.parse().unwrap_or_default(), ts: 0,
-            kind: if item.kind == "agent" && content_parent(item).is_some() { "subagent".into() } else { item.kind.clone() },
-            text: item.tool.as_ref().map(|t| t.title.clone()).unwrap_or_else(|| item.content.iter().filter_map(|b| b.text.as_deref()).collect::<Vec<_>>().join("")),
+            kind: match item.kind.as_str() { "agent" if content_parent(item).is_some() => "subagent".into(), "notice" => "note".into(), kind => kind.into() },
+            text: if item.kind == "plan" { plan_text(&plan_entries(item)) } else { item.tool.as_ref().map(|t| t.title.clone()).unwrap_or_else(|| item.content.iter().filter_map(|b| b.text.as_deref()).collect::<Vec<_>>().join("")) },
+            attachments: self.attachments_of(item).into_iter().map(|a| crate::acp::UserAttachment { name: a.name, mime: a.mime, upload_id: a.upload_id, data_base64: a.data_base64 }).collect(),
             extra: item.tool.as_ref().map(|t| t.status.clone()).unwrap_or_default(), tool_kind: item.tool.as_ref().map(|t| t.kind.clone()).unwrap_or_default(),
             detail: item.tool.as_ref().map(|t| t.detail.clone()).unwrap_or_default(), diff: item.tool.as_ref().map(|t| t.diff.clone()).unwrap_or_default(),
             call_id: if item.tool.is_some() { item.item_id.clone() } else { String::new() }, parent: item.tool.as_ref().and_then(|t| t.parent_item_id.clone()).or_else(||content_parent(item).map(str::to_owned)).unwrap_or_default(),
         }).collect();
         let mut out = vec![wire::Event::Other(format!("sill:replay:{}", serde_json::json!({"key":self.session_id,"total":entries.len(),"entries":entries})))];
         if let Some(session) = &self.session { out.extend(render_session(session, None)); }
-        for item in live { out.extend(render_item(&item)); }
+        for item in live { out.extend(render_item(&item, &[])); }
         let questions: Vec<Question> = self.questions.values().filter(|q| q.state == "open").cloned().collect();
         for question in questions { out.extend(self.render_question(&question)); }
         for submission in self.submissions.values() {
@@ -148,6 +154,16 @@ impl View {
             else if submission.delivery == "queued" && submission.outcome == "pending" { out.push(wire::Event::Note("Prompt queued until the agent is ready".into())); }
         }
         out
+    }
+    /// What went with a user item: its submission's attachments. Data appears only in records
+    /// from before attachments became uploads; otherwise a frontend fetches by upload ID.
+    fn attachments_of(&self, item: &Item) -> Vec<wire::UserAttachment> {
+        if item.kind != "user" { return vec![]; }
+        let Some(submission) = item.submission_id.as_ref().and_then(|id| self.submissions.get(id)) else { return vec![] };
+        submission.attachments.iter().map(|a| match a {
+            Attachment::Inline { name, mime, data_base64 } => wire::UserAttachment { name: name.clone(), mime: mime.clone(), upload_id: None, data_base64: Some(data_base64.clone()) },
+            Attachment::Uploaded { upload_id, name, mime } => wire::UserAttachment { name: name.clone(), mime: mime.clone(), upload_id: Some(upload_id.clone()), data_base64: None },
+        }).collect()
     }
     fn render_question(&mut self, question: &Question) -> Vec<wire::Event> {
         let request = *self.requests.entry(question.question_id.clone()).or_insert_with(|| { self.next_request += 1; self.next_request });
@@ -173,8 +189,21 @@ fn content_parent(item: &Item) -> Option<&str> {
 fn is_diagnostic_note(item: &Item) -> bool {
     item.kind == "note" && item.content.iter().filter_map(|b| b.text.as_deref()).any(crate::acp::is_diagnostic)
 }
-fn render_item(item: &Item) -> Vec<wire::Event> {
+fn plan_entries(item: &Item) -> Vec<wire::PlanEntry> {
+    let field = |block: &Content, key: &str| block.extra.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    item.content.iter().filter(|b| b.kind == "plan_entry").map(|b| wire::PlanEntry { content: b.text.clone().unwrap_or_default(), status: field(b, "status"), priority: field(b, "priority") }).collect()
+}
+/// A plan as one line per step, for transcript replay (the live view draws the same marks).
+pub fn plan_text(entries: &[wire::PlanEntry]) -> String {
+    entries.iter().map(|e| format!("{} {}", match e.status.as_str() { "completed" => "✓", "in_progress" => "◐", _ => "○" }, e.content)).collect::<Vec<_>>().join("\n")
+}
+fn render_item(item: &Item, attachments: &[wire::UserAttachment]) -> Vec<wire::Event> {
     if is_diagnostic_note(item) { return vec![]; }
+    if item.kind == "plan" { return vec![wire::Event::Plan(plan_entries(item))]; }
+    if item.kind == "user" && !attachments.is_empty() {
+        let text = item.content.iter().filter_map(|b| b.text.as_deref()).collect::<Vec<_>>().join("");
+        return vec![wire::Event::UserMessage { text, attachments: attachments.to_vec() }];
+    }
     if let Some(tool) = &item.tool { return vec![wire::Event::ToolCall { id: item.item_id.clone(), title: tool.title.clone(), kind: tool.kind.clone(), status: tool.status.clone(), detail: Some(tool.detail.clone()), diff: Some(tool.diff.clone()), parent: tool.parent_item_id.clone() }]; }
     item.content.iter().filter_map(|block| block.text.as_ref().map(|text|(block,text))).map(|(block,text)| match item.kind.as_str() {
         "user" => wire::Event::UserText(text.clone()),
@@ -201,6 +230,9 @@ fn render_session(session: &SessionState, previous: Option<&SessionState>) -> Ve
     if previous.is_none() || previous.is_some_and(|old| old.capabilities != session.capabilities) { out.push(wire::Event::Capabilities { images:session.capabilities.get("images").copied().unwrap_or(false) }); }
     if (previous.is_none() || previous.is_some_and(|old| old.authentication != session.authentication)) && let Some(a)=&session.authentication {
         out.push(wire::Event::AuthRequired { message:a.message.clone(),methods:a.methods.iter().map(|m|wire::AuthMethodInfo { id:m.method_id.clone(),name:m.title.clone(),description:m.description.clone(),terminal:m.terminal.as_ref().map(|t|(t.args.clone(),t.env.clone())) }).collect() });
+    }
+    if previous.map_or(!session.commands.is_empty(), |old| old.commands != session.commands) {
+        out.push(wire::Event::Commands(session.commands.iter().map(|c| wire::AgentCommand { name: c.name.clone(), description: c.description.clone(), hint: c.hint.clone() }).collect()));
     }
     if (previous.is_none() || previous.is_some_and(|old| old.usage != session.usage)) && let Some(u)=&session.usage { out.push(wire::Event::Usage { used:u.used.parse().unwrap_or_default(),size:u.size.parse().unwrap_or_default() }); }
     if (previous.is_none() || previous.is_some_and(|old| old.activity != session.activity || old.turn_id != session.turn_id)) && matches!(session.activity.as_str(),"working"|"waiting") && session.turn_id.is_some() { out.push(wire::Event::TurnStarted); }
@@ -306,6 +338,53 @@ mod tests {
         assert_eq!(replay["total"],1);
         assert!(crate::acp::is_diagnostic("_sill_authenticated") && crate::acp::is_diagnostic("Plan(Plan { entries: [] })"));
         assert!(!crate::acp::is_diagnostic("prompt failed: Internal(x)") && !crate::acp::is_diagnostic("Policy allowed: Run (ls)"));
+    }
+    fn replay_of(events: &[wire::Event]) -> serde_json::Value {
+        let wire::Event::Other(replay)=&events[0] else {panic!("expected replacement history: {events:?}")};
+        serde_json::from_str(replay.strip_prefix("sill:replay:").unwrap()).unwrap()
+    }
+    #[test]
+    fn plans_update_in_place_without_rebuilding_the_conversation() {
+        let mut view=View {session_id:"s".into(),subscription_id:"sub".into(),..Default::default()};
+        let step=|text:&str,status:&str| { let mut c=Content::text(text); c.block_id=format!("entry-{text}"); c.kind="plan_entry".into(); c.extra.insert("status".into(),serde_json::json!(status)); c.extra.insert("priority".into(),serde_json::json!("high")); c };
+        let mut plan=item(); plan.kind="plan".into(); plan.content=vec![step("read","in_progress"),step("fix","pending")];
+        let created=view.accept(notification("1",Event::ItemCreated {item:plan})).unwrap();
+        assert!(matches!(&created[..], [wire::Event::Plan(e)] if e[0].status=="in_progress" && e[1].content=="fix"));
+        let mut later=item(); later.item_id="after".into(); later.created_seq="2".into();
+        view.accept(notification("2",Event::ItemCreated {item:later})).unwrap();
+        let patched=view.accept(notification("3",Event::ItemPatched {item_id:"item".into(),set:ItemPatch {content:Some(vec![step("read","completed"),step("fix","in_progress")]),..Default::default()}})).unwrap();
+        assert!(matches!(&patched[..], [wire::Event::Plan(e)] if e[0].status=="completed"), "{patched:?}");
+        let replay=replay_of(&view.render_snapshot());
+        assert_eq!(replay["entries"][0]["kind"],"plan");
+        assert_eq!(replay["entries"][0]["text"],"✓ read\n◐ fix");
+    }
+    #[test]
+    fn a_prompt_shows_its_attachments_live_and_in_history() {
+        let mut view=View {session_id:"s".into(),subscription_id:"sub".into(),..Default::default()};
+        let submission=Submission { submission_id:"sub-1".into(),session_id:"s".into(),accepted_seq:"1".into(),agent_generation_id:"g".into(),text:"look".into(),
+            attachments:vec![Attachment::Uploaded{upload_id:"inline-0-sub-1".into(),name:"shot.png".into(),mime:"image/png".into()},Attachment::Inline{name:"old.png".into(),mime:"image/png".into(),data_base64:"AAAA".into()}],
+            acceptance:"accepted".into(),delivery:"direct".into(),held:false,hold_reason:None,insertion:"pending".into(),outcome:"pending".into(),reason:None };
+        view.accept(notification("1",Event::SubmissionUpdated {submission})).unwrap();
+        let mut user=item(); user.kind="user".into(); user.submission_id=Some("sub-1".into()); user.content=vec![Content::text("look")];
+        let shown=view.accept(notification("2",Event::ItemCreated {item:user})).unwrap();
+        let [wire::Event::UserMessage {text,attachments}]=&shown[..] else {panic!("expected a user message: {shown:?}")};
+        assert_eq!(text,"look");
+        assert_eq!(attachments[0].upload_id.as_deref(),Some("inline-0-sub-1"));
+        assert!(attachments[0].data_base64.is_none(),"uploaded bytes are fetched, not carried");
+        assert_eq!(attachments[1].data_base64.as_deref(),Some("AAAA"));
+        let replay=replay_of(&view.render_snapshot());
+        assert_eq!(replay["entries"][0]["attachments"][0]["upload_id"],"inline-0-sub-1");
+    }
+    #[test]
+    fn offered_commands_reach_the_view_when_they_change() {
+        let mut view=View {session_id:"s".into(),subscription_id:"sub".into(),..Default::default()};
+        let mut session=SessionState { session_id:"s".into(),agent_generation_id:"g".into(),lifecycle:"open".into(),title:None,summary:None,end_reason:None,deleted:false,activity:"idle".into(),turn_id:None,question_ids:vec![],background:None,capabilities:BTreeMap::new(),controls:None,authentication:None,usage:None,agent_title:None,commands:vec![] };
+        let quiet=view.accept(notification("1",Event::SessionUpdated {session:session.clone()})).unwrap();
+        assert!(!quiet.iter().any(|e|matches!(e,wire::Event::Commands(_))));
+        session.commands=vec![AgentCommand {name:"review".into(),description:"Review".into(),hint:Some("what".into())}];
+        let offered=view.accept(notification("2",Event::SessionUpdated {session:session.clone()})).unwrap();
+        assert!(offered.iter().any(|e|matches!(e,wire::Event::Commands(c) if c[0].name=="review" && c[0].hint.as_deref()==Some("what"))));
+        assert!(!view.accept(notification("3",Event::SessionUpdated {session})).unwrap().iter().any(|e|matches!(e,wire::Event::Commands(_))));
     }
     #[test]
     fn missing_patch_target_requires_resynchronization() {

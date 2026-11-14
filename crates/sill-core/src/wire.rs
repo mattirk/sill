@@ -222,6 +222,9 @@ pub fn event_into_acp(ev: Event, answer: impl FnOnce(u64, futures::channel::ones
             Event::AuthRequired { message, methods } => A::AuthRequired { message, methods: methods.into_iter().map(Into::into).collect() },
             Event::Stopped(r) => A::Stopped(r.into()),
             Event::Ended(e) => A::Ended(e),
+            Event::UserMessage { text, attachments } => A::UserMessage { text, attachments: attachments.into_iter().map(|a| acp::UserAttachment { name: a.name, mime: a.mime, upload_id: a.upload_id, data_base64: a.data_base64 }).collect() },
+            Event::Plan(entries) => A::Plan(entries.into_iter().map(|e| acp::PlanEntry { content: e.content, status: e.status, priority: e.priority }).collect()),
+            Event::Commands(commands) => A::Commands(commands.into_iter().map(|c| acp::AgentCommand { name: c.name, description: c.description, hint: c.hint }).collect()),
         })
     }
 }

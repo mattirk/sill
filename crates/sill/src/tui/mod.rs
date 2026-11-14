@@ -142,6 +142,10 @@ fn render(ev: Event, verbose: bool, pending: &Mutex<Option<Pending>>) -> bool {
         Event::UserText(t) => {
             let _ = writeln!(out, "\x1b[2m> {t}\x1b[0m");
         }
+        Event::UserMessage { text, attachments } => {
+            let names: Vec<&str> = attachments.iter().map(|a| a.name.as_str()).collect();
+            let _ = writeln!(out, "\x1b[2m> {text}\n  [{}]\x1b[0m", names.join(", "));
+        }
         Event::ToolCall { title, status, .. } => {
             let _ = writeln!(out, "\n\x1b[36m⚙ {title} [{status}]\x1b[0m");
         }

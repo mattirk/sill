@@ -181,6 +181,10 @@ impl Hub {
                 let a:UploadCreate=args(params)?;
                 self.with_store(|s| super::uploads::create(s,a)).map(|s|json!(s)).map_err(failure)
             })(),
+            "_sill/uploads.get" => (|| {
+                let a:UploadGet=args(params)?;
+                self.with_store(|s| super::uploads::get(s,a)).map(|s|json!(s)).map_err(failure)
+            })(),
             "_sill/sessions.control" => (|| {
                 let a:SessionControl=args(params)?;
                 self.runner_for_sfp(&a.session_id)?.sfp_control(self,a.control).map_err(failure)?;
@@ -196,7 +200,8 @@ impl Hub {
                 let previous=self.with_store(|store| {
                     let journal=Journal::new(store)?;
                     match journal.submission(&a.session_id,&a.submission_id) {
-                        Ok(_)=>journal.accept(&a,"queued").map(|(s,_)|Some(s)),
+                        // compare what was accepted: inline attachments as the uploads they became
+                        Ok(_)=>journal.accept(&super::runner::inline_as_uploads(store,a.clone())?,"queued").map(|(s,_)|Some(s)),
                         Err(e) if e.downcast_ref::<sill_core::sfp::DomainError>().is_some_and(|e|e.code=="not_found")=>Ok(None),
                         Err(e)=>Err(e),
                     }

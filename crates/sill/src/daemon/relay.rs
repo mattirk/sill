@@ -71,6 +71,12 @@ pub(crate) enum Event {
     AuthRequired { message: String, methods: Vec<acp::AuthMethodInfo> },
     Stopped(acp::StopReason),
     Ended(Option<String>),
+    // Added 2026-11-03 without a protocol bump: a daemon reads every older relay's events, and a
+    // relay only ever talks to the daemon build that spawned it or a newer one.
+    Plan(Vec<acp::PlanEntry>),
+    Commands(Vec<acp::AgentCommand>),
+    AgentTitle(String),
+    Notice { severity: String, title: String, description: Option<String> },
 }
 
 /// What the daemon asks of the ACP conversation. `text` is what the agent gets: the daemon has
@@ -159,6 +165,11 @@ fn event_from_acp(event: acp::Event, request: u64) -> (Event, Option<Reply>) {
         A::AuthRequired { message, methods } => Event::AuthRequired { message, methods },
         A::Stopped(r) => Event::Stopped(r),
         A::Ended(e) => Event::Ended(e),
+        A::Plan(p) => Event::Plan(p),
+        A::Commands(c) => Event::Commands(c),
+        A::AgentTitle(t) => Event::AgentTitle(t),
+        A::Notice { severity, title, description } => Event::Notice { severity, title, description },
+        A::UserMessage { text, .. } => Event::UserText(text),
     };
     (event, None)
 }

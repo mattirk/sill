@@ -21,6 +21,10 @@ pub(crate) struct AdapterState {
     subagent_items: BTreeMap<String, String>,
     questions: BTreeMap<u64, String>,
     replaying: bool,
+    /// The turn's plan item: each ACP plan replaces the last, in place.
+    plan_item: Option<String>,
+    /// Update kinds the ACP loop dumped instead of rendering, logged once each.
+    unhandled: std::collections::BTreeSet<String>,
 }
 
 fn id(prefix: &str) -> String {
@@ -57,6 +61,7 @@ impl AdapterState {
                 next.authentication = None;
                 self.text_item = None;
                 self.thought_item = None;
+                self.plan_item = None;
                 self.subagent_items.clear();
                 let turn = sfp::Turn { turn_id: id("turn"), agent_generation_id: self.generation.clone(), activity: "working".into(), outcome: "pending".into(), reason: None };
                 next.turn_id = Some(turn.turn_id.clone());
@@ -181,7 +186,37 @@ impl AdapterState {
             }
             // Private markers and the ACP loop's debug dump of updates it does not handle
             // (older relays send those too) are diagnostics, not conversation.
-            relay::Event::Other(text) if acp::is_diagnostic(text) => {}
+            relay::Event::Other(text) if acp::is_diagnostic(text) => {
+                let kind: String = text.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+                if !text.starts_with("_sill") && self.unhandled.insert(kind.clone()) {
+                    eprintln!("sill daemon: {}: ACP update {kind} is not rendered", session.session_id);
+                }
+            }
+            relay::Event::Plan(entries) if !self.replaying => {
+                let content: Vec<sfp::Content> = entries.iter().enumerate().map(|(i, e)| sfp::Content {
+                    block_id: format!("entry-{i}"), kind: "plan_entry".into(), text: Some(e.content.clone()),
+                    extra: BTreeMap::from([("status".into(), serde_json::json!(e.status)), ("priority".into(), serde_json::json!(e.priority))]),
+                }).collect();
+                match &self.plan_item {
+                    Some(item_id) => out.push(sfp::Event::ItemPatched { item_id: item_id.clone(), set: sfp::ItemPatch { content: Some(content), ..Default::default() } }),
+                    None => {
+                        let item_id = id("item");
+                        self.plan_item = Some(item_id.clone());
+                        out.push(sfp::Event::ItemCreated { item: self.item(item_id, "plan", content, None) });
+                    }
+                }
+            }
+            relay::Event::Plan(_) => {}
+            relay::Event::Notice { .. } if self.replaying => {}
+            relay::Event::Notice { severity, title, description } => {
+                let mut content = sfp::Content::text(match description { Some(d) if !d.is_empty() => format!("{title}\n{d}"), _ => title.clone() });
+                content.extra.insert("severity".into(), serde_json::json!(severity));
+                out.push(sfp::Event::ItemCreated { item: self.item(id("item"), "notice", vec![content], None) });
+            }
+            relay::Event::Commands(commands) => {
+                next.commands = commands.iter().map(|c| sfp::AgentCommand { name: c.name.clone(), description: c.description.clone(), hint: c.hint.clone() }).collect();
+            }
+            relay::Event::AgentTitle(title) => { next.agent_title = Some(title.clone()); }
             relay::Event::Other(text) => out.push(sfp::Event::ItemCreated { item: self.item(id("item"), "note", vec![sfp::Content::text(text)], None) }),
             relay::Event::AutoAnswered { title, allowed, .. } => out.push(sfp::Event::ItemCreated { item: self.item(id("item"), "note", vec![sfp::Content::text(format!("Policy {}: {title}", if *allowed { "allowed" } else { "denied" }))], None) }),
             relay::Event::AuthRequired { message, methods } => {
@@ -279,7 +314,7 @@ pub(crate) fn session_controls(controls: &acp::Controls) -> sfp::SessionControls
 mod tests {
     use super::*;
     fn session() -> sfp::SessionState {
-        sfp::SessionState { session_id: "s".into(), agent_generation_id: "generation-one".into(), lifecycle: "open".into(), title:None, summary:None, end_reason:None, deleted:false, activity: "idle".into(), turn_id: None, question_ids: vec![], background: None, capabilities: BTreeMap::new(), controls: None, authentication: None, usage: None }
+        sfp::SessionState { session_id: "s".into(), agent_generation_id: "generation-one".into(), lifecycle: "open".into(), title:None, summary:None, end_reason:None, deleted:false, activity: "idle".into(), turn_id: None, question_ids: vec![], background: None, capabilities: BTreeMap::new(), controls: None, authentication: None, usage: None, agent_title: None, commands: vec![] }
     }
     #[test]
     fn restart_retains_item_and_question_identity_but_replacement_does_not() {
@@ -348,6 +383,31 @@ mod tests {
         assert_eq!(restored, format!("prefix{huge}"));
         let thoughts = adapter.project(&session, &relay::Event::Thought("é".repeat(256 * 1024)), None);
         assert_eq!(thoughts.iter().filter(|e|matches!(e,sfp::Event::ItemCreated { .. })).count(),2);
+    }
+
+    #[test]
+    fn a_turns_plan_is_one_item_revised_in_place_and_commands_belong_to_the_session() {
+        let mut adapter = AdapterState::default();
+        let session = session();
+        adapter.project(&session, &relay::Event::TurnStarted, None);
+        let step = |content: &str, status: &str| acp::PlanEntry { content: content.into(), status: status.into(), priority: "medium".into() };
+        let first = adapter.project(&session, &relay::Event::Plan(vec![step("read", "in_progress"), step("fix", "pending")]), None);
+        let sfp::Event::ItemCreated { item } = &first[0] else { panic!("expected a plan item: {first:?}") };
+        assert_eq!(item.kind, "plan");
+        assert_eq!(item.content[1].text.as_deref(), Some("fix"));
+        assert_eq!(item.content[0].extra["status"], "in_progress");
+        let revised = adapter.project(&session, &relay::Event::Plan(vec![step("read", "completed"), step("fix", "in_progress")]), None);
+        assert!(matches!(&revised[0], sfp::Event::ItemPatched { item_id, set } if item_id == &item.item_id && set.content.as_ref().unwrap()[0].extra["status"] == "completed"));
+        adapter.project(&session, &relay::Event::Stopped(acp::StopReason::EndTurn), None);
+        adapter.project(&session, &relay::Event::TurnStarted, None);
+        assert!(matches!(adapter.project(&session, &relay::Event::Plan(vec![step("next", "pending")]), None)[0], sfp::Event::ItemCreated { .. }), "a new turn has its own plan");
+
+        let commands = adapter.project(&session, &relay::Event::Commands(vec![acp::AgentCommand { name: "review".into(), description: "Review".into(), hint: None }]), None);
+        assert!(matches!(&commands[..], [sfp::Event::SessionUpdated { session }] if session.commands[0].name == "review"));
+        let titled = adapter.project(&session, &relay::Event::AgentTitle("Fix the shelf".into()), None);
+        assert!(matches!(&titled[..], [sfp::Event::SessionUpdated { session: s }] if s.agent_title.as_deref() == Some("Fix the shelf") && s.title == session.title));
+        let notice = adapter.project(&session, &relay::Event::Notice { severity: "warning".into(), title: "Rate limited".into(), description: Some("retrying".into()) }, None);
+        assert!(matches!(&notice[0], sfp::Event::ItemCreated { item } if item.kind == "notice" && item.content[0].text.as_deref() == Some("Rate limited\nretrying") && item.content[0].extra["severity"] == "warning"));
     }
 
     #[test]

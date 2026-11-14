@@ -86,7 +86,7 @@ impl<'a> Journal<'a> {
                 title:Some(row.title), summary:(!row.summary.is_empty()).then_some(row.summary), end_reason:None, deleted:false,
                 activity: "unknown".into(), turn_id: None, question_ids: vec![], background: None,
                 capabilities: BTreeMap::from([("steering".into(), false)]),
-                controls:None, authentication:None, usage:None,
+                controls:None, authentication:None, usage:None, agent_title:None, commands:vec![],
             };
             let inserted = self.store.conn().execute("INSERT OR IGNORE INTO sfp_sessions(session_id,state) VALUES (?1,?2)", params![session_id, serde_json::to_string(&state)?])?;
             if inserted == 1 {
@@ -114,6 +114,8 @@ impl<'a> Journal<'a> {
             if session.agent_generation_id==generation_id { return Ok(vec![]); }
             session.agent_generation_id=generation_id.into(); session.activity="unknown".into();
             session.turn_id=None; session.question_ids.clear(); session.background=None;
+            // The replacement agent announces its own commands; the old ones may not exist there.
+            session.commands.clear();
             let mut events=vec![Event::SessionUpdated { session }];
             let (_,records)=self.snapshot(session_id)?;
             for record in records {

@@ -64,6 +64,9 @@ pub struct Entry {
     pub diff: String,
     pub call_id: String,
     pub parent: String,
+    /// For `user`, from a frontend's view of the journal (the store keeps names in `extra`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<crate::acp::UserAttachment>,
 }
 
 pub struct Store {
@@ -565,6 +568,7 @@ impl Store {
             diff: r.get(7)?,
             call_id: r.get(8)?,
             parent: r.get(9)?,
+            attachments: Vec::new(),
         })
     }
 }

@@ -55,6 +55,10 @@ impl From<Event> for wire::Event {
             Event::AuthRequired { message, methods } => wire::Event::AuthRequired { message, methods: methods.into_iter().map(Into::into).collect() },
             Event::Stopped(r) => wire::Event::Stopped(r.into()),
             Event::Ended(e) => wire::Event::Ended(e),
+            Event::Plan(entries) => wire::Event::Plan(entries.into_iter().map(|e| wire::PlanEntry { content: e.content, status: e.status, priority: e.priority }).collect()),
+            Event::Commands(commands) => wire::Event::Commands(commands.into_iter().map(|c| wire::AgentCommand { name: c.name, description: c.description, hint: c.hint }).collect()),
+            Event::AgentTitle(title) => wire::Event::Other(format!("_sill_agent_title {title}")),
+            Event::Notice { title, description, .. } => wire::Event::Note(match description { Some(d) if !d.is_empty() => format!("{title}\n{d}"), _ => title }),
         }
     }
 }

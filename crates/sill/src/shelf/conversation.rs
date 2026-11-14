@@ -14,7 +14,7 @@ use std::rc::Rc;
 use futures::channel::oneshot;
 use gtk4 as gtk;
 use gtk::prelude::*;
-use sill_core::acp::{Event, PermissionOption};
+use sill_core::acp::{Event, PermissionOption, PlanEntry, UserAttachment};
 
 use super::{markdown, theme};
 
@@ -99,7 +99,17 @@ pub struct Conversation {
     insert_after: RefCell<Option<gtk::Widget>>,
     /// (upper, value) before a chunk was put above the view: the view stays where it was.
     keep_view: std::cell::Cell<Option<(f64, f64)>>,
+    /// The turn's plan, redrawn in place as the agent revises it; a new prompt starts another.
+    plan: RefCell<Option<gtk::Label>>,
+    /// A prompt's attachment → a local file to draw (runs off the main thread: it may ask the daemon).
+    image_loader: RefCell<Option<ImageLoader>>,
 }
+
+pub type ImageLoader = std::sync::Arc<dyn Fn(&UserAttachment) -> Option<std::path::PathBuf> + Send + Sync>;
+/// The tallest a prompt's image thumbnail is drawn; a click opens it large.
+const THUMB_HEIGHT: i32 = 160;
+/// The widest a thumbnail is drawn: a wide screenshot gets shorter instead.
+const THUMB_MAX_WIDTH: i32 = 480;
 
 impl Conversation {
     pub fn set_expanded(&self, expanded: bool) {
@@ -115,6 +125,7 @@ impl Conversation {
         self.open_permissions.borrow_mut().clear();
         self.tool_rows.borrow_mut().clear();
         self.last_tool.borrow_mut().take();
+        self.plan.borrow_mut().take();
         self.insert_after.borrow_mut().take();
         self.keep_view.set(None);
         for due in &self.render_due { due.set(false); }
@@ -167,6 +178,8 @@ impl Conversation {
             last_page: std::cell::Cell::new(0.0),
             insert_after: RefCell::new(None),
             keep_view: std::cell::Cell::new(None),
+            plan: RefCell::new(None),
+            image_loader: RefCell::new(None),
         });
         // The content height is only known after layout: follow the adjustment's geometry (`changed` covers
         // both the content growing and the viewport shrinking, e.g. the prompt box getting taller) instead
@@ -340,9 +353,100 @@ impl Conversation {
         self.add_user_with(text, &[]);
     }
 
+    pub fn set_image_loader(&self, loader: ImageLoader) {
+        *self.image_loader.borrow_mut() = Some(loader);
+    }
+
+    /// A prompt with its attachments: their names under it, and each image as a thumbnail.
+    pub fn add_user_full(&self, text: &str, attachments: &[UserAttachment]) {
+        let names: Vec<String> = attachments.iter().map(|a| a.name.clone()).collect();
+        self.add_user_with(text, &names);
+        let images: Vec<&UserAttachment> = attachments.iter().filter(|a| a.mime.starts_with("image/")).collect();
+        let Some(loader) = self.image_loader.borrow().clone() else { return };
+        if images.is_empty() { return; }
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        row.add_css_class("sill-user-images");
+        for a in images {
+            let b = gtk::Button::new();
+            b.add_css_class("sill-md-image");
+            b.set_halign(gtk::Align::Start);
+            b.set_tooltip_text(Some(&a.name));
+            let pic = gtk::Picture::new();
+            pic.set_can_shrink(true);
+            pic.set_content_fit(gtk::ContentFit::Contain);
+            pic.set_alternative_text(Some(&a.name));
+            pic.set_size_request(-1, THUMB_HEIGHT * 3 / 4);
+            b.set_child(Some(&pic));
+            // the loaded file; a click before it is there (or after it failed) does nothing
+            let loaded: Rc<RefCell<Option<std::path::PathBuf>>> = Rc::default();
+            let ctx = self.md_ctx.borrow().clone();
+            let shown = loaded.clone();
+            b.connect_clicked(move |_| {
+                let Some(path) = shown.borrow().clone() else { return };
+                if let Some(open) = ctx.as_ref().and_then(|c| c.open.as_ref()) { open(&path); }
+            });
+            row.append(&b);
+            let (loader, attachment, weak_b) = (loader.clone(), a.clone(), b.downgrade());
+            gtk::glib::spawn_future_local(async move {
+                let path = gtk::gio::spawn_blocking(move || loader(&attachment)).await.ok().flatten();
+                let Some(b) = weak_b.upgrade() else { return };
+                let Some(pic) = b.child().and_downcast::<gtk::Picture>() else { return };
+                let Some(path) = path else {
+                    b.set_child(Some(&gtk::Label::builder().label("image unavailable").css_classes(["dim-label"]).build()));
+                    return;
+                };
+                // drawn from a copy scaled to at most THUMB_MAX_WIDTH × THUMB_HEIGHT (never up), so the
+                // picture's natural size is the thumbnail's and a wide screenshot cannot widen the column
+                match gtk::gdk_pixbuf::Pixbuf::file_info(&path) {
+                    Some((_, iw, ih)) if iw > 0 && ih > 0 => {
+                        let scale = (THUMB_MAX_WIDTH as f64 / iw as f64).min(THUMB_HEIGHT as f64 / ih as f64).min(1.0);
+                        let (w, h) = (((iw as f64 * scale) as i32).max(1), ((ih as f64 * scale) as i32).max(1));
+                        let k = b.scale_factor().max(1);
+                        match gtk::gdk_pixbuf::Pixbuf::from_file_at_scale(&path, w * k, h * k, true) {
+                            Ok(pb) => pic.set_paintable(Some(&gtk::gdk::Texture::for_pixbuf(&pb))),
+                            Err(_) => pic.set_filename(Some(&path)),
+                        }
+                        pic.set_size_request(w, h);
+                    }
+                    _ => pic.set_filename(Some(&path)),
+                }
+                *loaded.borrow_mut() = Some(path);
+            });
+        }
+        self.place(&row);
+        self.scroll_to_end();
+    }
+
+    /// The agent's plan: one line per step with its state; the turn's plan updates in place.
+    pub fn set_plan(&self, entries: &[PlanEntry]) {
+        let text = entries.iter().map(|e| format!("{} {}", match e.status.as_str() { "completed" => "✓", "in_progress" => "◐", _ => "○" }, e.content)).collect::<Vec<_>>().join("\n");
+        self.set_plan_text(&text);
+    }
+
+    /// A plan as replayed history already shows it (`sfp_client::plan_text`).
+    pub fn set_plan_text(&self, text: &str) {
+        if let Some(label) = self.plan.borrow().as_ref() {
+            label.set_text(text);
+            self.request_follow();
+            return;
+        }
+        self.finish_current();
+        let l = gtk::Label::new(Some(text));
+        l.add_css_class("sill-plan");
+        l.add_css_class("dim-label");
+        l.set_xalign(0.0);
+        l.set_wrap(true);
+        l.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        l.set_selectable(true);
+        self.place(&l);
+        *self.plan.borrow_mut() = Some(l);
+        self.request_follow();
+    }
+
     /// A user turn; `attachments` are the names of what went with it, shown as a dim line under it.
     pub fn add_user_with(&self, text: &str, attachments: &[String]) {
         self.finish_current();
+        self.plan.borrow_mut().take();
         let block = gtk::Box::new(gtk::Orientation::Vertical, 2);
         block.add_css_class("sill-user");
         block.set_margin_top(6);
@@ -1139,6 +1243,10 @@ impl Conversation {
             }
             Event::TurnStarted => self.status.set_text("working…"),
             Event::UserText(t) => self.add_user(&t),
+            Event::UserMessage { text, attachments } => self.add_user_full(&text, &attachments),
+            Event::Plan(entries) => self.set_plan(&entries),
+            Event::Notice { title, description, .. } => self.add_note(&match description { Some(d) if !d.is_empty() => format!("{title}\n{d}"), _ => title }),
+            Event::Commands(_) | Event::AgentTitle(_) => {}
             Event::Text(t) => self.append_markdown(&self.current, "sill-agent", &t),
             Event::Thought(t) => self.append_markdown(&self.current_thought, "sill-thought", &t),
             Event::ToolCall { id, title, status, kind, detail, diff, parent } => {

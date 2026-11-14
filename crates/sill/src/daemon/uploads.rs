@@ -4,9 +4,11 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use rusqlite::{OptionalExtension, params};
 use sill_core::{acp, store::Store};
-use sill_proto::{rpc::Error, sfp::{UploadCreate, UploadCreated}};
+use sill_proto::{rpc::Error, sfp::{Upload, UploadCreate, UploadCreated, UploadGet}};
 
 pub const MAX_UPLOAD_BYTES: usize = 1024 * 1024;
+/// The image types models accept as image blocks; other images (SVG, TIFF, HEIC…) go as files.
+const IMAGE_BLOCK_MIMES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
 fn domain(code: &str, message: &str) -> anyhow::Error { Error::domain(code, message).into() }
 fn initialize(store: &Store) -> Result<()> {
     store.conn().execute_batch("CREATE TABLE IF NOT EXISTS sfp_uploads (
@@ -47,6 +49,36 @@ pub(super) fn create(store: &Store, request: UploadCreate) -> Result<UploadCreat
     Ok(UploadCreated { upload_id:request.upload_id })
 }
 
+pub(super) fn get(store: &Store, request: UploadGet) -> Result<Upload> {
+    session(store, &request.session_id)?;
+    initialize(store)?;
+    let object: Option<(String,String,Vec<u8>)> = store.conn().query_row("SELECT name,mime,bytes FROM sfp_uploads WHERE session_id=?1 AND upload_id=?2",
+        params![request.session_id,request.upload_id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+    let (name,mime,bytes)=object.ok_or_else(||domain("not_found","upload not found in this session"))?;
+    Ok(Upload { upload_id: request.upload_id, name, mime, data_base64: acp::base64(&bytes) })
+}
+
+/// An inline attachment becomes an upload named by its submission and position, so the journal
+/// references it and a retry of the same submission finds the same object.
+pub(super) fn from_inline(store: &Store, session_id: &str, submission_id: &str, index: usize, name: &str, mime: &str, data_base64: &str) -> Result<(String, String)> {
+    let upload_id = truncate(format!("inline-{index}-{submission_id}"), 128);
+    // inline names are labels ("screenshot-1.png (1180×518)"); an upload's is a file name
+    let name = truncate(name.chars().map(|c| if c == '/' || c.is_control() { '_' } else { c }).collect(), 255);
+    let name = if name.is_empty() || name == "." || name == ".." { "image".to_string() } else { name };
+    create(store, UploadCreate { session_id: session_id.into(), upload_id: upload_id.clone(), name: name.clone(), mime: mime.into(), data_base64: data_base64.into() })?;
+    Ok((upload_id, name))
+}
+
+fn image_block(mime: &str, images: bool) -> bool { images && IMAGE_BLOCK_MIMES.contains(&mime) }
+
+/// At most `max` bytes, cut at a character boundary (`create` limits bytes, not characters).
+fn truncate(mut s: String, max: usize) -> String {
+    let mut end = s.len().min(max);
+    while !s.is_char_boundary(end) { end -= 1; }
+    s.truncate(end);
+    s
+}
+
 /// Verify the reference without filesystem writes before accepting a submission.
 pub(super) fn validate(store: &Store, session_id: &str, upload_id: &str, name: &str, mime: &str) -> Result<()> {
     session(store,session_id)?;
@@ -60,12 +92,17 @@ pub(super) fn validate(store: &Store, session_id: &str, upload_id: &str, name: &
 
 /// Materialize a new private copy for this dispatch. Do not use jail-modifiable bytes as the
 /// canonical object. The prepared command persists this chosen path for same-attempt recovery.
-pub(super) fn resolve(store: &Store, session_id: &str, upload_id: &str) -> Result<acp::Attachment> {
+/// An image the agent can take (`images`: it said so in `initialize`) goes as an image block, as it
+/// did when it was inline; anything else is a staged file.
+pub(super) fn resolve(store: &Store, session_id: &str, upload_id: &str, images: bool) -> Result<acp::Attachment> {
     let row=session(store,session_id)?;
     initialize(store)?;
     let object: Option<(String,String,Vec<u8>)> = store.conn().query_row("SELECT name,mime,bytes FROM sfp_uploads WHERE session_id=?1 AND upload_id=?2",
         params![session_id,upload_id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
     let (name,mime,bytes)=object.ok_or_else(||domain("not_found","upload not found in this session"))?;
+    if image_block(&mime, images) {
+        return Ok(acp::Attachment{name,mime,kind:acp::AttachmentKind::Image{data_base64:acp::base64(&bytes)}});
+    }
     let home=std::path::PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
     let policy=sill_core::session::policy_of(&row,&home)?;
     let state=sill_core::session::state_dir(rustix::process::getuid().as_raw(),session_id)?;
@@ -102,6 +139,17 @@ pub(super) fn decode(text: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_images_the_agent_and_model_take_become_image_blocks() {
+        assert!(image_block("image/png", true) && image_block("image/webp", true));
+        assert!(!image_block("image/svg+xml", true) && !image_block("image/heic", true), "staged as files");
+        assert!(!image_block("image/png", false), "an agent without image support gets a file");
+    }
+    #[test]
+    fn truncation_counts_bytes_at_character_boundaries() {
+        assert_eq!(truncate("ää".into(), 3), "ä");
+        assert_eq!(truncate("abc".into(), 128), "abc");
+    }
     #[test]
     fn upload_retry_is_immutable_scoped_and_removed_with_session() {
         let root=std::env::temp_dir().join(format!("sill-upload-test-{}-{}",std::process::id(),super::super::sfp::id()));
