@@ -256,3 +256,29 @@ fn render_thoughts() {
     view.follow_tail = true;
     render(&app, "12-thoughts");
 }
+
+#[test]
+#[ignore = "writes source and diff highlighting PNGs for review"]
+fn render_syntax_views() {
+    use crate::{Message, workspace::Action};
+    use sill_proto::sessions::HostPath;
+    let path = |s: &str| HostPath::from_path(std::path::Path::new(s));
+    let (mut app, _) = App::new(true, None);
+    let _ = app.update(Message::Workspace(Action::Open {
+        path: path("/home/demo/project/src/main.rs"),
+        repo: None,
+    }));
+    render(&app, "syntax-source");
+    let view = app.views.get_mut("demo").unwrap();
+    let file = view.files.reader.as_mut().unwrap();
+    file.repo = Some(path("/home/demo/project"));
+    file.source = false;
+    file.revision += 1;
+    file.text = "diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,3 +1,4 @@\n fn main() {\n-    println!(\"old\");\n+    let café = 42;\n+    println!(\"Hello {café}\");\n }\n".into();
+    view.sync_reader();
+    render(&app, "syntax-diff");
+    let before = crate::style::theme_id().to_owned();
+    crate::style::set_theme("adwaita-light");
+    render(&app, "syntax-light-diff");
+    crate::style::set_theme(&before);
+}

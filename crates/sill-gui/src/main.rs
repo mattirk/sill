@@ -20,6 +20,7 @@ mod settings_ui;
 #[cfg(test)]
 mod snapshots;
 mod style;
+mod syntax;
 mod terminal;
 #[cfg(test)]
 mod tests;

@@ -2448,7 +2448,7 @@ fn the_changes_page_groups_what_sessions_wrote() {
         settle_task(&mut app, task);
     }
     let mut ui = simulator(&app, (720.0, 860.0));
-    ui.find("+theme = \"dracula\"").unwrap();
+    ui.find("+theme = \"dracula\"\n").unwrap();
     drop(ui);
     let key = changes_key(&app, "settings.toml");
     let _ = app.update(Message::Changes(Event::Revert(key.clone())));

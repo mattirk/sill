@@ -406,9 +406,12 @@ impl App {
                     .into(),
                 Some(Ok(diff)) => Element::from(
                     container(
-                        container(crate::workspace_ui::diff_rows(diff))
-                            .padding([6, 10])
-                            .style(style::fill(P.code_bg)),
+                        container(crate::workspace_ui::diff_rows(
+                            diff,
+                            &changes::path(entry).display,
+                        ))
+                        .padding([6, 10])
+                        .style(style::fill(P.code_bg)),
                     )
                     .padding(Padding {
                         top: 2.0,

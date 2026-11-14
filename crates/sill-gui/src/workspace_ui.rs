@@ -364,9 +364,17 @@ impl App {
                 .style(style::reader)
                 .on_action(|a| msg(Action::Text(a)))
                 .key_binding(crate::ui::reading_keys)
+                .highlight(
+                    if is_diff {
+                        "diff"
+                    } else {
+                        crate::syntax::token(&file.path.display)
+                    },
+                    crate::syntax::theme(),
+                )
                 .into()
         } else if is_diff {
-            let diff = diff_rows(&file.text);
+            let diff = diff_rows(&file.text, &file.path.display);
             selection::area(
                 scrollable(container(diff).padding(12))
                     .id("diff-reader")
@@ -846,12 +854,13 @@ pub(crate) fn numbered_diff(source: &str) -> Vec<(Option<usize>, Option<usize>, 
 /// A diff as the shelf shows it: one column of line numbers down the diff's own text, in the
 /// code's face and size so each number sits on its line; additions and deletions in git's
 /// colours, hunk headers in the accent, the file headers bold.
-pub(crate) fn diff_rows(source: &str) -> Column<'_, Message> {
+pub(crate) fn diff_rows<'a>(source: &'a str, path: &str) -> Column<'a, Message> {
     let mono = Font::with_name(crate::fonts::MONO_FAMILY);
     let bold = Font {
         weight: iced::font::Weight::Bold,
         ..mono
     };
+    let highlighted = crate::syntax::diff(source, path);
     let lines = numbered_diff(source);
     let digits = lines.len().max(1).to_string().len();
     let gutter = style::MONO * 0.62 * digits as f32 + 6.0;
@@ -875,6 +884,31 @@ pub(crate) fn diff_rows(source: &str) -> Column<'_, Message> {
         } else {
             (P.fg, mono)
         };
+        let mut spans: Vec<iced::widget::text::Span<'_, (), Font>> = Vec::new();
+        let mut end = 0;
+        if let Some(tokens) = highlighted.get(index) {
+            for (range, token_color) in tokens {
+                if range.start > end {
+                    spans.push(iced::widget::text::Span::new(&line[end..range.start]).color(color));
+                }
+                spans.push(iced::widget::text::Span::new(&line[range.clone()]).color(*token_color));
+                end = range.end;
+            }
+        }
+        if end < line.len() || spans.is_empty() {
+            spans.push(iced::widget::text::Span::new(&line[end..]).color(color));
+        }
+        let content = selection::rich_text(spans)
+            .size(style::MONO)
+            .font(font)
+            .style(style::selectable(color));
+        let background = if old.is_none() && new.is_some() {
+            style::alpha(P.success, 0.08)
+        } else if old.is_some() && new.is_none() {
+            style::alpha(P.error, 0.08)
+        } else {
+            iced::Color::TRANSPARENT
+        };
         rows = rows.push(
             row![
                 text((index + 1).to_string())
@@ -883,10 +917,7 @@ pub(crate) fn diff_rows(source: &str) -> Column<'_, Message> {
                     .color(P.fg_dim)
                     .width(gutter)
                     .align_x(iced::alignment::Horizontal::Right),
-                selection::text(line)
-                    .size(style::MONO)
-                    .font(font)
-                    .style(style::selectable(color)),
+                container(content).style(style::fill(background)),
             ]
             .spacing(12),
         );
