@@ -1044,6 +1044,8 @@ button.sill-install:hover { background: alpha(@accent_bg_color, 0.45); }
 .sill-dim { opacity: 0.45; }
 .sill-pinned { color: @accent_color; }
 .sill-editor gutter { border: none; }
+/* fixed-width text anywhere GTK's own `.monospace` class marks it (the editor, change rows) */
+.monospace, textview.monospace { font-family: monospace; }
 /* the "sill" toggle: quiet, underlined like a selected tab while the backend is open */
 button.sill-action { padding: 2px 8px; min-height: 0; background: transparent; box-shadow: none; border-bottom: 2px solid transparent; }
 button.sill-action:hover { background: alpha(@view_fg_color, 0.07); }

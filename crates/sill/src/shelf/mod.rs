@@ -4,6 +4,7 @@
 mod agents_page;
 mod changes;
 mod conversation;
+mod fonts;
 mod hotkey;
 mod icons;
 mod lang_icons;
@@ -41,6 +42,7 @@ pub fn run(cwd: Option<PathBuf>, hidden: bool) -> Result<()> {
         Some(c) => std::path::absolute(c)?,
         None => std::env::current_dir()?,
     };
+    fonts::init(); // before GTK's first font map
     let app = libadwaita::Application::builder().application_id(APP_ID).build();
     let cwd_for_activate = cwd.clone();
     app.connect_activate(move |app| {
@@ -49,6 +51,7 @@ pub fn run(cwd: Option<PathBuf>, hidden: bool) -> Result<()> {
             window::show(&w, 0);
             return;
         }
+        fonts::pin_rendering();
         let w = window::build(app, cwd_for_activate.clone());
         if std::env::var_os("SILL_TRACE").is_some() {
             // main-loop stall detector: anything that holds the GTK thread shows up here with its length

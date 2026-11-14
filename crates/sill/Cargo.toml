@@ -28,3 +28,4 @@ futures = "0.3"
 sourceview5 = "0.11"
 vte4 = { version = "0.10", features = ["v0_70"] }
 shell-words = "1"
+yeslogic-fontconfig-sys = "6"

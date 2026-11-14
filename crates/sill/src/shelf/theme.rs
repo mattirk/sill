@@ -83,6 +83,25 @@ pub fn by_id(id: &str) -> Theme {
     builtin().into_iter().find(|t| t.id == id).unwrap_or_else(|| builtin().remove(0))
 }
 
+/// The faces the shelf is drawn in — sill's own, embedded (see `fonts.rs`), never the desktop's
+/// font setting. `pt` is the text size at zoom 1; monospace text runs one point smaller.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Font {
+    pub sans: &'static str,
+    pub mono: &'static str,
+    pub pt: f64,
+}
+
+/// What ships: one pair, chosen 2026-11-01 — Source Sans 3 and Source Code Pro (Adobe, OFL 1.1).
+pub const FONT: Font = Font { sans: "Source Sans 3", mono: "Source Code Pro", pt: 13.0 };
+
+impl Font {
+    /// The monospace size at zoom 1.
+    pub fn mono_pt(&self) -> f64 {
+        self.pt - 1.0
+    }
+}
+
 thread_local! {
     static LISTENERS: RefCell<Vec<Box<dyn Fn(&Theme)>>> = const { RefCell::new(Vec::new()) };
     static CURRENT: RefCell<Theme> = RefCell::new(by_id("adwaita"));
@@ -207,9 +226,19 @@ fn named_colors(t: &Theme) -> String {
     s
 }
 
-/// The text scale in effect (1.0 = the desktop's font size).
+/// The text scale in effect: zoom × [`sill_core::config::TEXT_SCALE_BASE`], the factor the
+/// pixel-sized things (icons, Markdown sizes) follow.
 pub fn text_scale() -> f64 {
     TEXT_SCALE.with(|s| s.get())
+}
+
+/// The zoom alone (1.0 = Normal): what the point sizes are multiplied by.
+pub fn zoom() -> f64 {
+    text_scale() / sill_core::config::TEXT_SCALE_BASE
+}
+
+pub fn font() -> Font {
+    FONT
 }
 
 /// Change the text scale live: the stylesheet is rebuilt and the listeners run.
@@ -222,16 +251,12 @@ pub fn set_text_scale(scale: f64) {
 pub fn stylesheet(t: &Theme) -> String {
     let mut s = String::new();
     s.push_str(&format!("@define-color sill_code_bg {};\n", t.code_bg));
-    let scale = text_scale();
-    if (scale - 1.0).abs() > 0.001 {
-        // percentages are relative to the parent; at the toplevel that is the desktop font, so this
-        // one rule scales everything that uses relative sizes (all of sill's own CSS does). A popover
-        // resets to the default font unless told to follow its parent (100 %, not the factor again:
-        // measured, the factor compounds there).
-        s.push_str(&format!("window, tooltip {{ font-size: {:.0}%; }}\npopover {{ font-size: 100%; }}\n", scale * 100.0));
-    }
+    // the faces and the size, absolute: sill's own font at sill's own size × zoom, whatever the
+    // desktop's font setting; every relative size below hangs off this one rule
+    let f = font();
+    s.push_str(&format!("window, popover, tooltip {{ font-family: \"{}\"; font-size: {:.1}pt; }}\n", f.sans, f.pt * zoom()));
     s.push_str(&named_colors(t));
-    s.push_str(super::conversation::CSS);
+    s.push_str(&super::conversation::CSS.replace("font-family: monospace", &format!("font-family: \"{}\"", f.mono)));
     s.push('\n');
     s.push_str(super::tabs::CSS);
     {
@@ -303,3 +328,4 @@ fn with_alpha(hex: &str, alpha: f32) -> Option<String> {
     let c = gtk4::gdk::RGBA::parse(hex).ok()?;
     Some(format!("rgba({},{},{},{alpha})", (c.red() * 255.0).round() as u8, (c.green() * 255.0).round() as u8, (c.blue() * 255.0).round() as u8))
 }
+

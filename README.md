@@ -188,6 +188,15 @@ rebuilt automatically. Restarting the shelf alone does not touch running session
   environment, then *Gemini API key*), or install Antigravity from the Agents page.
 - No terminal in the jail, no policies UI, no focus keeper yet (M3).
 
+## Look
+
+Sill's look is its own and the same on every machine: its icons are drawn glyphs, every theme is a
+complete palette (nothing follows the desktop's GTK theme, icon theme or dark/light setting), and the
+text is set in two faces embedded in the binary — **Source Sans 3** for everything proportional,
+**Source Code Pro** for terminals, code and the editor (both by Adobe, SIL Open Font License 1.1;
+the licence texts ship with the fonts under `crates/sill/fonts/` and `~/.local/state/sill/fonts/`).
+Text size is 13 pt at Normal and scales with the Text size setting only.
+
 ## Keys
 
 | Key | What |

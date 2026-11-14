@@ -48,6 +48,7 @@ pub fn build() -> gtk::Box {
     });
     root.append(&row("Text size", &size_dd));
 
+
     // auto-revert: unkept changes outside git and pins go away after this long
     let choices = sill_core::config::AUTO_REVERT_CHOICES;
     let labels: Vec<&str> = choices.iter().map(|(_, l)| *l).collect();

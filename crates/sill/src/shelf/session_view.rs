@@ -511,8 +511,10 @@ impl SessionView {
     /// Terminal colours from the theme palette: fg/bg plus the 16 ANSI slots mapped onto the theme's
     /// semantic colours (red=error, green=success, yellow=warning, blue=accent, cyan=link …).
     fn apply_terminal_theme(&self, t: &theme::Theme) {
+        let font = theme::font();
         for term in [&self.terminal, &self.host_term] {
-            term.set_font_scale(theme::text_scale());
+            term.set_font(Some(&gtk::pango::FontDescription::from_string(&format!("{} {}", font.mono, font.mono_pt()))));
+            term.set_font_scale(theme::zoom());
             let parse = |c: &str| gtk::gdk::RGBA::parse(c).ok();
             let (Some(fg), Some(bg)) = (parse(t.fg), parse(t.bg)) else { continue };
             let slots = [
@@ -541,8 +543,9 @@ impl SessionView {
         let term = vte4::Terminal::new();
         term.set_size_request(-1, 200);
         term.set_scrollback_lines(10_000);
-        term.set_font(Some(&gtk::pango::FontDescription::from_string("monospace 10")));
-        term.set_font_scale(theme::text_scale());
+        let font = theme::font();
+        term.set_font(Some(&gtk::pango::FontDescription::from_string(&format!("{} {}", font.mono, font.mono_pt()))));
+        term.set_font_scale(theme::zoom());
         term.set_scroll_on_output(false);
         term.set_scroll_on_keystroke(true);
         term.add_css_class("sill-terminal");

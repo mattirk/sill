@@ -143,7 +143,7 @@ pub fn install_tags(buffer: &gtk::TextBuffer) {
     tag("strike").set_strikethrough(true);
     {
         let t = tag("code");
-        t.set_family(Some("monospace"));
+        t.set_family(Some(theme::font().mono));
         t.set_background(Some(&colors.code_bg));
     }
     {
