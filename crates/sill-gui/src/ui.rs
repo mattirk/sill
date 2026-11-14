@@ -949,7 +949,7 @@ impl App {
 
     fn composer<'a>(&'a self, view: &'a SessionView) -> Element<'a, Message> {
         let has_session = !view.conversation.session_id.is_empty() || self.demo;
-        let mut composer = Column::new();
+        let mut composer = Column::new().push(self.network_prompt(view));
         for submission in view
             .conversation
             .submissions

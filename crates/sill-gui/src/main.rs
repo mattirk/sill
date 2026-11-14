@@ -12,6 +12,7 @@ mod keys;
 mod layout;
 mod login_ui;
 mod menu;
+mod network;
 #[cfg(test)]
 mod perf;
 mod rows;
@@ -220,6 +221,10 @@ pub enum Message {
     Selecting(bool),
     DemoTick,
     Tick,
+    NetworkPoll,
+    NetworkRead(String, Result<sill_proto::admin::NetworkDenied, String>),
+    NetworkAnswer(String, String, bool),
+    NetworkDone(String, String, Outcome),
     /// The conversation scrolled: at its end, its offset, and the height in view.
     Scrolled(bool, f32, f32),
     Latest,
@@ -499,6 +504,7 @@ impl SessionView {
 }
 
 pub struct App {
+    network: network::State,
     pub demo: bool,
     connect: Option<Connector>,
     actions: Option<Arc<Actions>>,
@@ -597,6 +603,7 @@ impl App {
     ) -> (Self, Task<Message>) {
         let (workspace, file_task) = workspace::Workspace::new(connect.clone());
         let mut app = Self {
+            network: network::State::default(),
             demo,
             actions: connect.clone().map(Actions::new),
             connect,
@@ -975,6 +982,9 @@ impl App {
         if self.current().is_some_and(|v| v.conversation.busy()) {
             subscriptions.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick));
         }
+        if !self.demo {
+            subscriptions.push(iced::time::every(Duration::from_secs(2)).map(|_| Message::NetworkPoll));
+        }
         // sessions started or ended elsewhere appear and go
         if !self.demo {
             subscriptions
@@ -1144,6 +1154,10 @@ impl App {
             Message::Selecting(held) => self.selecting = held,
             Message::DemoTick => return self.demo_tick(),
             Message::Tick => self.now = Instant::now(),
+            Message::NetworkPoll => return self.poll_network(),
+            Message::NetworkRead(id, result) => self.network.read(id, result),
+            Message::NetworkAnswer(id, host, allow) => return self.answer_network(id, host, allow),
+            Message::NetworkDone(id, host, outcome) => self.network.done(id, host, outcome),
             Message::Prompt(action) => {
                 if let Some(view) = self.current_mut() {
                     view.draft.perform(action);
