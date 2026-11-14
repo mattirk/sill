@@ -1823,7 +1823,7 @@ fn daemon_stdio() -> Result<()> {
 }
 
 fn box_cmd(cmd: BoxCmd) -> Result<()> {
-    use sill_proto::transport::{self, BoxTarget};
+    use sill_proto::transport;
     match cmd {
         BoxCmd::List => {
             println!("local\tthis machine");
@@ -1831,7 +1831,7 @@ fn box_cmd(cmd: BoxCmd) -> Result<()> {
         }
         BoxCmd::Remove { name } => transport::remove(&name)?,
         BoxCmd::Add { host, name, mut binary, install } => {
-            let name = name.unwrap_or_else(|| host.rsplit('@').next().unwrap_or(&host).to_string());
+            let name = name.unwrap_or_else(|| transport::default_name(&host));
             transport::validate_name(&name)?;
             // Sign in separately, on this terminal: human prompts must not consume SFP's short
             // timeout. Background connections ride the shared connection this leaves.
@@ -1843,10 +1843,7 @@ fn box_cmd(cmd: BoxCmd) -> Result<()> {
                 transport::install(&host, &source)?;
                 binary = "~/.local/bin/sill".into();
             }
-            let c = sill_proto::Client::ssh(&host, &binary)
-                .context("checking the box over SSH; verify SSH access and the remote sill binary path")?;
-            let status: sill_proto::DaemonStatus = c.call(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default())?;
-            transport::save(&name, BoxTarget { host: host.clone(), binary, ssh_config: None })?;
+            let status = transport::verify_and_save(&name, &host, &binary)?;
             println!("{name}: sill {}, protocol {}, {} sessions", status.version, status.protocol, status.sessions);
             if !sill_proto::boxlink::unattended(&host).unwrap_or(true) {
                 println!("{name}: SSH cannot log in to {host} without asking (no agent or unencrypted key accepts it). Sill keeps one shared connection open; after a sleep, a reboot of the box or a longer network loss the window shows Sign in to reconnect.");

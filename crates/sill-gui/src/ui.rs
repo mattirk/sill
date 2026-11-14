@@ -395,6 +395,9 @@ impl App {
             container(
                 row![
                     container(mark).padding(Padding::from([0.0, 2.0])),
+                    // a window on a saved box says which (`boxes_ui`)
+                    container(self.box_chip().unwrap_or_else(|| iced::widget::space().width(0).into()))
+                        .center_y(Fill),
                     tabs,
                     // Keep the timer open across the gap and + button, so the button does
                     // not move away as the pointer approaches it from the indicator.

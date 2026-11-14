@@ -444,6 +444,9 @@ impl App {
         if page.category == Category::System && self.vm_shown() {
             page_column = page_column.push(section(page, VIRTUAL_MACHINE, self.vm_rows()));
         }
+        if page.category == Category::System {
+            page_column = page_column.push(section(page, crate::boxes_ui::TITLE, self.boxes_rows()));
+        }
         if let Some(said) = &page.said {
             page_column = page_column
                 .push(container(text(said).size(style::SMALL).color(P.fg_dim)).padding([10, 4]));

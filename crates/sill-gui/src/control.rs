@@ -48,13 +48,23 @@ pub fn socket_path() -> PathBuf {
     {
         return path;
     }
+    sockets().join("gui.sock")
+}
+
+/// The socket of a window on the saved box `name`: `gui-NAME.sock` beside `gui.sock`, as
+/// `sill box connect` gives one (sill's `frontend.rs`), so it opens beside this machine's window.
+pub fn box_socket_path(name: &str) -> PathBuf {
+    sockets().join(format!("gui-{name}.sock"))
+}
+
+fn sockets() -> PathBuf {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .unwrap_or_else(|| {
             std::env::temp_dir().join(format!("sill-{}", rustix::process::getuid().as_raw()))
         });
-    runtime.join("sill").join("gui.sock")
+    runtime.join("sill")
 }
 
 /// Send `command` to a running sill-gui; false when none answers.

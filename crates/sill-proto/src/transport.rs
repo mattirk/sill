@@ -107,6 +107,32 @@ pub fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// The name a box gets when none is given: the host without its user, with anything a name
+/// cannot hold (an IPv6 address's colons, an `ssh://` URI's slashes) as `-`.
+pub fn default_name(host: &str) -> String {
+    let host = host.strip_prefix("ssh://").unwrap_or(host);
+    let host = host.rsplit('@').next().unwrap_or(host);
+    let name: String = host.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '-' })
+        .collect();
+    let name = name.trim_matches('-').to_string();
+    if name.is_empty() || name == "local" { "box".into() } else { name }
+}
+
+/// Ask the daemon on `host` for its status, then save the box as `name`: what `sill box add` and
+/// the window's Add box do once SSH is signed in (or can log in without asking).
+pub fn verify_and_save(name: &str, host: &str, binary: &str) -> Result<crate::DaemonStatus> {
+    validate_name(name)?;
+    validate_host(host)?;
+    validate_binary(binary)?;
+    let client = crate::Client::ssh(host, binary)
+        .context("checking the box over SSH; verify SSH access and the remote sill binary path")?;
+    let status: crate::DaemonStatus = client.call(crate::method::DAEMON_STATUS, crate::Empty::default())?;
+    drop(client);
+    save(name, BoxTarget { host: host.to_string(), binary: binary.to_string(), ssh_config: None })?;
+    Ok(status)
+}
+
 pub(crate) fn validate_host(host: &str) -> Result<()> {
     if host.is_empty() || host.starts_with('-') || host.chars().any(|c| c.is_control() || c.is_whitespace()) { bail!("invalid SSH destination"); }
     Ok(())
@@ -163,6 +189,17 @@ pub fn install(host: &str, source: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_box_is_named_after_its_host() {
+        assert_eq!(default_name("matti@192.168.1.50"), "192.168.1.50");
+        assert_eq!(default_name("my-server"), "my-server");
+        assert_eq!(default_name("ssh://me@host.example:2222"), "host.example-2222");
+        assert_eq!(default_name("me@fe80::1"), "fe80--1");
+        assert_eq!(default_name("local"), "box");
+        for host in ["matti@192.168.1.50", "ssh://me@host.example:2222", "me@fe80::1", "local"] {
+            validate_name(&default_name(host)).unwrap();
+        }
+    }
     #[test]
     fn session_connections_ride_the_shared_connection_and_never_prompt() {
         let args = ssh_base("example.test").unwrap().get_args().map(|s| s.to_string_lossy().into_owned()).collect::<Vec<_>>();

@@ -6,6 +6,7 @@ mod annotation_state;
 #[cfg(test)]
 mod annotation_tests;
 mod box_ui;
+mod boxes_ui;
 mod changes_page;
 mod changes_ui;
 mod control;
@@ -320,6 +321,8 @@ pub enum Message {
     HostControl(host_control::Event),
     /// The box's shared connection: sign-in, retry and SSH's questions.
     Box(box_ui::Event),
+    /// Settings' Remote boxes: add, open, disconnect and remove saved boxes (`boxes_ui`).
+    Boxes(boxes_ui::Event),
     /// The live view of a session's test desktop (`desktop_view.rs`).
     Desktop(desktop_view::Event),
     NetworkRead(String, Result<sill_proto::admin::NetworkDenied, String>),
@@ -686,6 +689,8 @@ pub struct App {
     vm: vm_ui::State,
     /// The box's shared SSH connection: sign-in state and SSH's questions (`box_ui`).
     box_link: box_ui::State,
+    /// The saved boxes and the Add a box form (`boxes_ui`).
+    boxes: boxes_ui::State,
     connect: Option<Connector>,
     actions: Option<Arc<Actions>>,
     /// Where every lane reports, tagged with its session and epoch.
@@ -843,6 +848,7 @@ impl App {
             daemon: daemon_ui::State::default(),
             vm: vm_ui::State::default(),
             box_link: box_ui::State::default(),
+            boxes: boxes_ui::State::default(),
             network: network::State::default(),
             process_serial: 0,
             permission_serial: 0,
@@ -1332,6 +1338,7 @@ impl App {
             Message::Perms(event) => return self.permissions_event(event),
             Message::HostControl(event) => return self.host_control_event(event),
             Message::Box(event) => return self.box_event(event),
+            Message::Boxes(event) => return self.boxes_event(event),
             Message::Desktop(event) => return self.desktop_event(event),
             Message::NetworkRead(id, result) => self.network.read(id, result),
             Message::NetworkAnswer(id, host, allow, quiet) => return self.answer_network(id, host, allow, quiet),
@@ -1713,7 +1720,12 @@ impl App {
                     category: self.settings.settings_category,
                     ..settings_ui::SettingsPage::default()
                 });
-                Task::batch([self.settings_load(), self.vm_event(vm_ui::Event::Read), self.crosscheck_reviewers_load()])
+                Task::batch([
+                    self.settings_load(),
+                    self.vm_event(vm_ui::Event::Read),
+                    self.boxes_event(boxes_ui::Event::Reload),
+                    self.crosscheck_reviewers_load(),
+                ])
             }
         }
     }

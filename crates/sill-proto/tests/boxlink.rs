@@ -104,7 +104,7 @@ fn scenario(start_server: &dyn Fn() -> bool, stop_server: &dyn Fn()) {
         asked_too.lock().unwrap().push(prompt);
         Some(if TRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 { "wrong".into() } else { PASSPHRASE.into() })
     });
-    boxlink::sign_in(HOST, Some(retyping)).unwrap();
+    assert!(boxlink::sign_in(HOST, Some(retyping)).unwrap(), "this sign-in made the master");
     assert_eq!(asked.lock().unwrap().len(), 2, "the host key was accepted before; the passphrase twice");
     assert_eq!(boxlink::status(), None);
     asked.lock().unwrap().clear();
@@ -121,8 +121,9 @@ fn scenario(start_server: &dyn Fn() -> bool, stop_server: &dyn Fn()) {
         .filter(|e| { use std::os::unix::fs::FileTypeExt; e.file_type().is_ok_and(|t| t.is_socket()) }).count();
     assert_eq!(sockets(), 1, "one control socket for the box");
 
-    // a second sign-in while connected asks nothing
-    boxlink::sign_in(HOST, Some(answering(&[]))).unwrap();
+    // a second sign-in while connected asks nothing, and says the master was not its own (a
+    // failed Add in the window must leave it to whoever made it)
+    assert!(!boxlink::sign_in(HOST, Some(answering(&[]))).unwrap());
     assert!(asked.lock().unwrap().is_empty());
 
     // the master goes (a reboot, a sleep): the key needs its passphrase, so the box waits for

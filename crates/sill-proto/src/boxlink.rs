@@ -219,8 +219,9 @@ pub fn ensure(host: &str) -> Result<()> {
 }
 
 /// The one interactive path. With a prompter, SSH's questions go to it (the window); without,
-/// SSH asks on this terminal. Returns once the master is there.
-pub fn sign_in(host: &str, prompter: Option<Prompter>) -> Result<()> {
+/// SSH asks on this terminal. Returns once the master is there: true when this call made it,
+/// false when one was already there (another window's or command's, which its caller must leave).
+pub fn sign_in(host: &str, prompter: Option<Prompter>) -> Result<bool> {
     show(host, |s| s.signing_in = true);
     let result = (|| {
         let link = link(host);
@@ -228,11 +229,11 @@ pub fn sign_in(host: &str, prompter: Option<Prompter>) -> Result<()> {
         let _exclusive = exclusive(host)?;
         if check(host)? {
             link.connected(host);
-            return Ok(());
+            return Ok(false);
         }
         let mode = match prompter { Some(prompter) => Mode::Ask(prompter), None => Mode::Terminal };
         match start_master(host, mode) {
-            Ok(()) => { link.connected(host); Ok(()) }
+            Ok(()) => { link.connected(host); Ok(true) }
             Err((problem, detail)) => Err(link.failed(host, problem, detail)),
         }
     })();

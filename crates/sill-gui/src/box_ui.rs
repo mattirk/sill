@@ -44,6 +44,17 @@ pub struct State {
 }
 
 impl State {
+    /// What asks SSH's questions in this window's band, for a sign-in to any box (this one's, or
+    /// one being added in Settings); None in the demo.
+    pub(crate) fn prompter(&self) -> Option<boxlink::Prompter> {
+        let asker = self.asker.clone()?;
+        Some(std::sync::Arc::new(move |prompt| {
+            let (reply, answer) = std::sync::mpsc::channel();
+            asker.send_blocking(Ask { prompt, reply }).ok()?;
+            answer.recv().ok().flatten()
+        }))
+    }
+
     fn answer(&mut self, answer: Option<String>) {
         if let Some(ask) = self.asks.pop_front() {
             let _ = ask.reply.send(answer);
@@ -56,20 +67,15 @@ impl App {
     pub(crate) fn box_event(&mut self, event: Event) -> Task<Message> {
         match event {
             Event::SignIn(host) => {
-                let Some(asker) = self.box_link.asker.clone() else {
+                let Some(prompter) = self.box_link.prompter() else {
                     return Task::none();
                 };
                 if self.box_link.signing_in {
                     return Task::none();
                 }
                 self.box_link.signing_in = true;
-                let prompter: boxlink::Prompter = std::sync::Arc::new(move |prompt| {
-                    let (reply, answer) = std::sync::mpsc::channel();
-                    asker.send_blocking(Ask { prompt, reply }).ok()?;
-                    answer.recv().ok().flatten()
-                });
                 blocking(
-                    move || boxlink::sign_in(&host, Some(prompter)).map_err(|e| format!("{e:#}")),
+                    move || boxlink::sign_in(&host, Some(prompter)).map(|_| ()).map_err(|e| format!("{e:#}")),
                     |result| Message::Box(Event::SignedIn(result)),
                 )
             }
