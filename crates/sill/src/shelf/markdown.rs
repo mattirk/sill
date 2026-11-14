@@ -490,6 +490,16 @@ mod tests {
 
 /// The scroller a code view sits in: code never wraps, it scrolls sideways (2026-11-01); the
 /// height is the content's.
+/// A viewport for a scrolled window's non-scrollable child that does not scroll to the focused
+/// widget: GTK's implicit viewport does, so a click on a tall prose view or selectable label (which
+/// takes focus) yanked the view to that widget's top.
+pub fn still_viewport(child: &impl IsA<gtk::Widget>) -> gtk::Viewport {
+    let v = gtk::Viewport::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
+    v.set_scroll_to_focus(false);
+    v.set_child(Some(child));
+    v
+}
+
 pub fn code_scroller(view: &sourceview5::View) -> gtk::ScrolledWindow {
     gtk::ScrolledWindow::builder()
         .child(view)

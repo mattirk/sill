@@ -160,7 +160,7 @@ impl Conversation {
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vscrollbar_policy(gtk::PolicyType::Automatic)
             .vexpand(true)
-            .child(&clamp)
+            .child(&super::markdown::still_viewport(&clamp))
             .build();
         let conv = Rc::new(Self {
             root,

@@ -118,7 +118,7 @@ impl Viewer {
         md.set_margin_end(12);
         md.set_margin_top(6);
         md.set_margin_bottom(12);
-        let md_scroll = gtk::ScrolledWindow::builder().child(&md).vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build();
+        let md_scroll = gtk::ScrolledWindow::builder().child(&markdown::still_viewport(&md)).vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build();
 
         // image: fitted, never enlarged
         let picture = gtk::Picture::new();
@@ -134,7 +134,7 @@ impl Viewer {
 
         // a page of the shelf's own, in a column that scrolls
         let page_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        let page_scroll = gtk::ScrolledWindow::builder().child(&page_slot).vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build();
+        let page_scroll = gtk::ScrolledWindow::builder().child(&markdown::still_viewport(&page_slot)).vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build();
 
         let stack = gtk::Stack::new();
         stack.add_named(&page_scroll, Some("page"));
