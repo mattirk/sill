@@ -154,6 +154,13 @@ def host_path(path):
 
 
 class Fixture(http.server.BaseHTTPRequestHandler):
+    # every request that reaches this host listener, whatever its method: a jail must never add one
+    hits = 0
+
+    def parse_request(self):
+        Fixture.hits += 1
+        return super().parse_request()
+
     def do_GET(self):
         body = b"host-loopback-fixture\n"
         self.send_response(200)
@@ -1095,6 +1102,268 @@ PY
         (repo / ".sill/policy.toml").write_text("[network]\nmode = 'none'\n[limits]\ntasks_max = 64\n")
         check("a fragment changed after recording: the exception no longer covers it",
               code(hc.call, "_sill/host_control.activate", {"session_id": off, "operations": ["launch"]}) == "exception_required")
+        hc.close()
+        c.call("_sill/sessions.stop", {"session_id": off})
+
+        # -- 21. hostile combinations (docs/permission-modes.md, implementation step 5) -----------
+        # One session with every grant at once (test desktop, private bus, public web, a masked
+        # repository, Host control active under an exception) next to a running Default session.
+        uid = os.getuid()
+        gtk = env.client(modes=False, name="gtk-like")
+        hc = Client(env.socket, capabilities=HOST, name="host-control")
+        masked_repo = env.root / "repo-masked"
+        (masked_repo / ".sill").mkdir(parents=True)
+        (masked_repo / "secret").write_text("masked-secret-text\n")
+        (masked_repo / ".sill/policy.toml").write_text("[paths]\nmask = ['secret']\n")
+        combo = create("combo", env.policy("combo"), pins=[masked_repo])
+        plain = create("plain-default", env.policy("plain-default"))
+        check("a session for every grant at once and a Default session start", start(combo) and start(plain))
+        c.call("_sill/permissions.apply_development", {"session_id": combo})
+        c.call("_sill/permissions.set", {"session_id": combo, "capability": "public_web", "enabled": True})
+        check("…with the test desktop, the private bus and public web after a restart",
+              restart(combo) and sh(c, combo, 'echo "[$WAYLAND_DISPLAY]"')[1] == "[wayland-0]" and reaches(c, combo, THIRD))
+
+        def activate_excepted(sid, ops):
+            met = [x for x in hc_state(sid).get("conflicts", []) if set(ops) & set(x["operations"])]
+            if met:
+                hc.call("_sill/host_control.exception", {"session_id": sid, "operations": ops, "acknowledged": [
+                    {"source": x["source"], "sha256": x["sha256"], "restriction": x["restriction"]} for x in met]})
+            return activate(hc, sid, ops)["generation"]
+
+        def sleepers(n):
+            return [pid for pid in os.listdir("/proc") if pid.isdigit() and read(f"/proc/{pid}/cmdline") == f"/bin/sleep\0{n}\0"]
+
+        def in_scope(sid, name):
+            return [pid for pid in os.listdir("/proc") if pid.isdigit() and comm(pid) == name
+                    and f"sill-{sid}.scope" in read(f"/proc/{pid}/cgroup")]
+
+        generation = activate_excepted(combo, ["launch", "inspect", "stop"])
+        check("Host control is active on it under the masked repository's exception",
+              (get(combo).get("host_control") or {}).get("exception") is True)
+        hits = Fixture.hits
+
+        # the expanded session attacks: production Sill, other sessions, the real desktop, host
+        # services, the masked file, and local addresses in every spelling through the proxy
+        status, out = sh(c, combo, f"""
+            repo={shlex.quote(str(masked_repo))}
+            for p in /run/user/{uid}/sill {env.socket} {env.run} /var/lib/sill \
+                     /run/user/{uid}/systemd/private /run/systemd/private /run/dbus/system_bus_socket; do
+                [ -e "$p" ] && echo "VISIBLE $p"
+            done
+            # masks cover the read-only host view too: present there, empty
+            ls -A /.sill/host/var/lib/sill 2>/dev/null | grep -q . && echo "VISIBLE /.sill/host/var/lib/sill (not empty)"
+            cat "/.sill/host$repo/secret" 2>/dev/null
+            [ "$(ls /tmp/.X11-unix | wc -l)" = 1 ] || echo "X-SOCKETS $(ls /tmp/.X11-unix)"
+            DISPLAY=:0 timeout 5 xdotool getdisplaygeometry >/dev/null 2>&1 && echo REAL-DISPLAY
+            DISPLAY=:0 timeout 5 xdotool key a >/dev/null 2>&1 && echo REAL-INPUT
+            timeout 10 systemd-run --user --quiet true >/dev/null 2>&1 && echo SYSTEMD-RUN
+            timeout 10 systemctl --user show-environment >/dev/null 2>&1 && echo USER-MANAGER
+            timeout 10 dbus-send --session --print-reply --dest=org.freedesktop.systemd1 / org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1 && echo "SERVICE systemd1"
+            timeout 10 dbus-send --system --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.ListNames >/dev/null 2>&1 && echo SYSTEM-BUS
+            timeout 10 sudo -n true >/dev/null 2>&1 && echo SUDO
+            timeout 10 flatpak-spawn --host true >/dev/null 2>&1 && echo FLATPAK-SPAWN
+            cat "$repo/secret" 2>/dev/null
+            ln -s "$repo/secret" /tmp/via-link 2>/dev/null; cat /tmp/via-link 2>/dev/null
+            ln "$repo/secret" /tmp/via-hardlink 2>/dev/null && cat /tmp/via-hardlink 2>/dev/null
+            cat "/proc/self/root$repo/secret" "/proc/1/root$repo/secret" 2>/dev/null
+            mv "$repo/secret" "$repo/moved" 2>/dev/null && cat "$repo/moved" 2>/dev/null
+            cp "$repo/secret" /tmp/copied 2>/dev/null && cat /tmp/copied 2>/dev/null
+            grep -rs masked-secret-text "$repo" /tmp 2>/dev/null
+            python3 - <<'PY'
+import os, socket
+proxy = int(os.environ["HTTP_PROXY"].rstrip("/").rsplit(":", 1)[1])
+P = {port}
+targets = [f"127.0.0.1:{{P}}", f"[::ffff:127.0.0.1]:{{P}}", f"[::ffff:7f00:1]:{{P}}", f"[::1]:{{P}}", f"0.0.0.0:{{P}}",
+           f"2130706433:{{P}}", f"0x7f000001:{{P}}", f"0177.0.0.1:{{P}}", f"127.1:{{P}}", f"localhost.:{{P}}",
+           f"LOCALHOST:{{P}}", f"{lan}:{{P}}", f"127.0.0.1.nip.io:{{P}}", "169.254.169.254:80", f"[::]:{{P}}"]
+def ask(request):
+    s = socket.create_connection(("127.0.0.1", proxy), timeout=4)
+    s.sendall(request.encode())
+    data = b""
+    try:
+        while len(data) < 65536:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+            if request.startswith("CONNECT") and b"\\r\\n\\r\\n" in data:
+                break
+    except OSError:
+        pass
+    s.close()
+    return data
+for target in targets:
+    for request in (f"GET http://{{target}}/ HTTP/1.1\\r\\nHost: {{target}}\\r\\nConnection: close\\r\\n\\r\\n",
+                    f"CONNECT {{target}} HTTP/1.1\\r\\nHost: {{target}}\\r\\n\\r\\n"):
+        data = ask(request)
+        status = data.split(b"\\r\\n", 1)[0].decode(errors="replace")
+        if b"host-loopback-fixture" in data or " 200" in status:
+            print("THROUGH", request.split()[0], target, status)
+smuggled = ask(f"GET http://example.com/ HTTP/1.1\\r\\nHost: 127.0.0.1:{{P}}\\r\\nConnection: close\\r\\n\\r\\n")
+if b"host-loopback-fixture" in smuggled:
+    print("THROUGH host-header smuggling")
+PY
+            timeout 10 /.sill/bin/sill-host input {generation} '{{"actions":[{{"key":"a"}}]}}' >/dev/null 2>&1 && echo INPUT-WITHOUT-GRANT
+            exit 0""", timeout=240)
+        breaches = [line for line in out.splitlines() if line.split(" ", 1)[0] in (
+            "VISIBLE", "X-SOCKETS", "REAL-DISPLAY", "REAL-INPUT", "SYSTEMD-RUN", "USER-MANAGER", "SERVICE", "SYSTEM-BUS",
+            "SUDO", "FLATPAK-SPAWN", "THROUGH", "INPUT-WITHOUT-GRANT") or "masked-secret-text" in line]
+        check("with every grant: no production Sill, other sessions' state, real display or input, host "
+              "services, masked file (link, hard link, /proc root, move, copy, host view) or local address "
+              "in any spelling (raw GET and CONNECT, Host-header smuggling)", not breaches, "\n".join(breaches) or out[-600:])
+        check("the host fixture received nothing from the jail", Fixture.hits == hits, f"{Fixture.hits - hits} requests")
+        # host services the session bus could start (portal, Flatpak's HostCommand helper, secrets):
+        # whatever the private bus activates must run inside this jail, never on the host
+        before = {pid for pid in os.listdir("/proc") if pid.isdigit()}
+        rc, pinged = sh(c, combo, """
+            for dest in org.freedesktop.portal.Desktop org.freedesktop.Flatpak org.freedesktop.secrets org.freedesktop.Notifications; do
+                timeout 15 dbus-send --session --print-reply --dest=$dest / org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1 && echo "answered $dest"
+            done
+            exit 0""", timeout=120)
+        started = [pid for pid in os.listdir("/proc") if pid.isdigit() and pid not in before and read(f"/proc/{pid}/cmdline")]
+        outside = [f"{pid} {read(f'/proc/{pid}/cmdline').replace(chr(0), ' ')[:80]}" for pid in started
+                   if f"sill-{combo}.scope" not in read(f"/proc/{pid}/cgroup")
+                   and any(n in read(f"/proc/{pid}/cmdline") for n in ("portal", "flatpak", "keyring", "secret", "notif"))]
+        info("services the private bus answered for: " + (", ".join(l.split()[1] for l in pinged.splitlines() if l.startswith("answered")) or "none"))
+        check("services the private bus activates run in the session's scope, none on the host", not outside, "\n".join(outside))
+        check("…while its public web works", reaches(c, combo, FOURTH))
+
+        # the Default session next to it gains nothing from it
+        status, out = sh(c, plain, f"""
+            ls -A /tmp/.X11-unix 2>/dev/null | grep . && echo X-SOCKET
+            [ -S /run/user/{uid}/bus ] && echo BUS-SOCKET
+            ls -A /.sill/bridge 2>/dev/null | grep . && echo BRIDGE-ENTRIES
+            timeout 10 /.sill/bin/sill-host state >/dev/null 2>&1 && echo HOST-CONTROL
+            /.sill/bin/sill-proc list 2>&1 | grep -q 'host:' && echo HOST-PROCESSES
+            echo "env [$WAYLAND_DISPLAY$DISPLAY] [$DBUS_SESSION_BUS_ADDRESS]"
+            exit 0""")
+        check("a concurrent Default session sees none of its desktop, bus, bridge, Host control or host processes",
+              not any(m in out for m in ("X-SOCKET", "BUS-SOCKET", "BRIDGE-ENTRIES", "HOST-CONTROL", "HOST-PROCESSES"))
+              and "env [] [disabled:]" in out, out)
+        # (example.net is saved to the agent's defaults by section 12: every new session of it has it)
+        check("…nor its public web: a host the other reaches is refused to it by its proxy", refused(c, plain, FOURTH),
+              str(fetch(c, plain, f"https://{FOURTH}/")))
+        check("…nor its Host control: the Default session's state is inactive", not hc_state(plain)["active"])
+
+        # a frontend without the capabilities changes nothing, through any entry point
+        attempts = {
+            "_sill/host_control.activate": {"session_id": combo, "operations": ["commands"]},
+            "_sill/host_control.exception": {"session_id": combo, "operations": ["commands"], "acknowledged": []},
+            "_sill/host_control.keep": {"session_id": combo, "name": "host:x", "keep": True},
+            "_sill/host_control.revoke": {"session_id": combo},
+            "_sill/host_control.state": {"session_id": combo},
+            "_sill/permissions.set": {"session_id": plain, "capability": "public_web", "enabled": True},
+            "_sill/permissions.apply_development": {"session_id": plain},
+            "_sill/permissions.restore_defaults": {"session_id": combo},
+            # (approving a host is GTK's to do for a Default session; this one uses permission modes)
+            "_sill/policy.allow_host": {"session_id": combo, "host": "allowed-by-gtk.example"},
+        }
+        accepted = [m for m, params in attempts.items() if code(gtk.call, m, params) is None]
+        check("a GTK-like frontend is refused at every grant and Host control entry point", not accepted, " ".join(accepted))
+        check("…and Host control on the session is as it was", hc_state(combo)["active"] and hc_state(combo)["generation"] == generation)
+
+        # revocation racing the agent's launches: every launch admitted before it is cleaned up
+        rc, started_race = sh(c, combo, f"""cat > /tmp/race.sh <<'EOF'
+for i in $(seq 80); do
+    /.sill/bin/sill-host launch {generation} '{{"argv":["/bin/sleep","3071"],"cwd":"/tmp"}}' >/dev/null 2>&1 && echo ok || echo refused
+done > /tmp/race.log 2>&1
+EOF
+            /.sill/bin/sill-proc start --name race -- /bin/sh /tmp/race.sh""")
+        info("race loop: " + started_race.splitlines()[-1] if started_race else "race loop: no output")
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and len(sleepers(3071)) < 3:
+            time.sleep(0.05)
+        hc.call("_sill/host_control.revoke", {"session_id": combo})
+        survivors = sleepers(3071)
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and sh(c, combo, "wc -l < /tmp/race.log")[1].strip() != "80":
+            time.sleep(0.5)
+        log = sh(c, combo, "sort /tmp/race.log | uniq -c")[1]
+        rows = c.call("_sill/procs.list", {"session_id": combo})["processes"]
+        raced = [p for p in rows if p["location"] == "host" and p["argv"] == ["/bin/sleep", "3071"]]
+        check("launches raced the revocation: some admitted, the rest refused", "ok" in log and "refused" in log, log)
+        check("…every admitted one was stopped by the revocation, none left on the host",
+              not survivors and not sleepers(3071) and raced and all(p["state"] != "running" for p in raced),
+              f"{survivors} {[(p['name'], p['state']) for p in raced]}")
+
+        # an orderly daemon stop revokes; nothing is restored; a kept process stays and is listed
+        generation = activate_excepted(combo, ["launch", "inspect", "stop"])
+        kept = json.loads(bridge(combo, "launch", generation, {"argv": ["/bin/sleep", "3072"], "cwd": "/tmp"})[1])
+        unkept = json.loads(bridge(combo, "launch", generation, {"argv": ["/bin/sleep", "3073"], "cwd": "/tmp"})[1])
+        hc.call("_sill/host_control.keep", {"session_id": combo, "name": kept["name"], "keep": True})
+        for client in (c, gtk, hc):
+            client.close()
+        env.stop_daemon()
+        check("an orderly daemon stop stops the unkept host process and keeps the kept one",
+              not sleepers(3073) and sleepers(3072), f"{sleepers(3073)} {sleepers(3072)}")
+        env.start_daemon()
+        c = env.client()
+        hc = Client(env.socket, capabilities=HOST, name="host-control")
+        st = hc_state(combo)
+        check("after the restart nothing is restored: inactive, the exception gone", not st["active"] and st.get("exception") is None,
+              json.dumps(st)[:300])
+        check("…the agent's bridge is closed", bridge(combo, "state")[0] != 0)
+        rc, listed = sh(c, combo, "/.sill/bin/sill-proc list")
+        check("…the kept process stays listed in the jail as kept", kept["name"] in listed and "kept" in listed, listed)
+        check("…and the jail kept its desktop and bus", sh(c, combo, f'[ -S /run/user/{uid}/bus ] && [ -S /tmp/.X11-unix/X* ] && echo both')[1] == "both")
+
+        # a daemon crash (SIGKILL) with an active activation: recovery stops the unkept, restores nothing
+        generation = activate_excepted(combo, ["launch", "stop"])
+        crash = json.loads(bridge(combo, "launch", generation, {"argv": ["/bin/sleep", "3074"], "cwd": "/tmp"})[1])
+        for client in (c, hc):
+            client.close()
+        env.daemon.kill()
+        env.daemon.wait()
+        env.daemon = None
+        check("the host process outlives the crashed daemon", bool(sleepers(3074)))
+        env.start_daemon()
+        c = env.client()
+        hc = Client(env.socket, capabilities=HOST, name="host-control")
+        check("recovery after a crash stops the unkept survivor", not sleepers(3074), str(sleepers(3074)))
+        check("…restores no authority and leaves no endpoint", not hc_state(combo)["active"] and bridge(combo, "state")[0] != 0)
+        rows = {p["name"]: p for p in c.call("_sill/procs.list", {"session_id": combo})["processes"]}
+        check("…and records it as stopped", rows.get(crash["name"], {}).get("state") == "stopped", json.dumps(rows.get(crash["name"])))
+        for pid in sleepers(3072):
+            os.kill(int(pid), 9)
+
+        # helper failures: no fallback to anything of the host's
+        for pid in in_scope(combo, "weston"):
+            os.kill(int(pid), 9)
+        time.sleep(1)
+        status, out = sh(c, combo, """
+            timeout 5 xdotool getdisplaygeometry >/dev/null 2>&1 && echo OWN-DISPLAY
+            DISPLAY=:0 timeout 5 xdotool getdisplaygeometry >/dev/null 2>&1 && echo REAL-DISPLAY
+            exit 0""")
+        check("Weston killed: the jail's display is gone and nothing falls back to the real one",
+              "OWN-DISPLAY" not in out and "REAL-DISPLAY" not in out, out)
+        daemons = in_scope(combo, "dbus-daemon")
+        for pid in daemons:
+            os.kill(int(pid), 9)
+        time.sleep(1)
+        status, out = sh(c, combo, f"""
+            timeout 5 dbus-send --session --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.ListNames >/dev/null 2>&1 && echo BUS
+            echo "[$DBUS_SESSION_BUS_ADDRESS]"
+            exit 0""")
+        check("dbus-daemon killed: the private bus is gone, the address still the jail's own, no host bus",
+              "BUS" not in out.split("\n")[0] and f"[unix:path=/run/user/{uid}/bus]" in out, out)
+        check("…and the jail itself keeps running", sh(c, combo, "echo up")[1] == "up" and bool(daemons))
+
+        # the launcher (the proxy's owner) killed: the whole session ends; Host control with it
+        generation = activate_excepted(combo, ["launch", "stop"])
+        orphan = json.loads(bridge(combo, "launch", generation, {"argv": ["/bin/sleep", "3075"], "cwd": "/tmp"})[1])
+        launchers = [pid for pid in in_scope(combo, "sill") if "launch" in read(f"/proc/{pid}/cmdline").split("\0")]
+        for pid in launchers:
+            os.kill(int(pid), 9)
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and scope_active(combo):
+            time.sleep(0.2)
+        check("the launcher killed: the session's scope ends, jail, desktop and bus with it",
+              bool(launchers) and not scope_active(combo) and not in_scope(combo, "bwrap"), str(launchers))
+        st = hc_state(combo)
+        check("…Host control ends with the jail, and its unkept host process is stopped",
+              not st["active"] and "gone" in (st.get("ended") or {}).get("reason", "") and not sleepers(3075),
+              f"{json.dumps(st)[:300]} {sleepers(3075)}")
+        check("…the session is reported as not running", not get(combo)["running"])
         hc.close()
     finally:
         for sid in created:

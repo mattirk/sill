@@ -296,7 +296,9 @@ impl JailSpec {
             // bwrap checks for the explicit flag even though --unshare-all implies it
             push(&mut a, &[&"--unshare-user", &"--disable-userns"]);
         }
-        push(&mut a, &[&"--new-session", &"--cap-drop", &"ALL", &"--clearenv"]);
+        // the jail never outlives its launcher: without it there is no proxy, no test desktop and
+        // nobody waiting on the jail (the launcher spawns bwrap from the thread that waits on it)
+        push(&mut a, &[&"--die-with-parent", &"--new-session", &"--cap-drop", &"ALL", &"--clearenv"]);
         if p.jail.seccomp && let Some(fd) = self.seccomp_fd {
             push(&mut a, &[&"--seccomp", &fd.to_string()]);
         }
