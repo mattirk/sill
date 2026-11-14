@@ -1062,7 +1062,8 @@ button.sill-action:checked { background: alpha(@view_fg_color, 0.09); border-bot
 .sill-badge { font-size: 80%; color: alpha(@accent_color, 0.9); font-family: monospace; }
 /* the ACP controls row (mode, model, reasoning, …): small, light and quiet until hovered */
 .sill-controls { font-size: 80%; }
-.sill-controls label { font-weight: normal; }
+/* Source Sans 3 sits high in its line box: the row's labels go down a touch to read centred */
+.sill-controls label { font-weight: normal; padding-top: 0.15em; }
 /* Everything in the row is sized in em — buttons, glyphs, gaps — and nothing in px: em follows the
    text scale and the display's font DPI, px only the integer scale factor, so px rows come out
    different on every machine. The glyphs are sill's own textures sized by -gtk-icon-size. */
