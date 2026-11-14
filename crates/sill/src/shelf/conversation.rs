@@ -1509,8 +1509,6 @@ button.sill-md-image:hover { opacity: 0.85; }
 .sill-viewer-bar { padding: 3px 6px 3px 12px; border-bottom: 1px solid alpha(@view_fg_color, 0.12); }
 .sill-viewer-btn { padding: 2px 8px; min-height: 0; min-width: 0; font-size: 90%; }
 .sill-viewer-bar.sill-drawer-bar { padding-left: 4px; padding-right: 4px; }
-.sill-drawer-bar > .sill-tree-search { padding-left: 0; }
-.sill-drawer-bar > .sill-tree-search > image:first-child { margin-left: 0; }
 .sill-drawer-controls > button { padding: 4px; min-width: 1em; min-height: 1em; }
 .sill-drawer-controls > button > image { -gtk-icon-size: 1em; }
 .sill-drawer-controls > button.sill-global-files > image { -gtk-icon-size: 0.95em; }
@@ -1531,6 +1529,8 @@ button.sill-md-image:hover { opacity: 0.85; }
 /* every search entry's glyphs are sill's own (icons::adopt_search_entry), one size everywhere */
 searchentry > image { -gtk-icon-size: 1.1em; }
 .sill-tree-search > image { opacity: 0.6; }
+/* Keep the focused inset at rest too; separate typed text from the search glyph. */
+.sill-drawer-bar > .sill-tree-search > image:first-child { margin-left: 0; margin-right: 6px; }
 .sill-tree-panel .sill-pin { opacity: 0; }
 .sill-tree-panel row:hover .sill-pin { opacity: 0.6; }
 .sill-tree-panel row:hover .sill-pin:hover { opacity: 1; }

@@ -148,8 +148,27 @@ impl View {
                 }
                 if submission.insertion == "unknown" || submission.outcome == "unknown" { events.push(wire::Event::Note("Prompt outcome is uncertain; it will not be resent automatically".into())); }
                 self.submissions.insert(submission.submission_id.clone(),submission.clone());
-                if became_dispatched && self.items.values().any(|i| i.submission_id.as_ref() == Some(&submission.submission_id)) {
-                    events.extend(self.render_snapshot());
+                if became_dispatched {
+                    let mut revealed: Vec<_> = self.items.values().filter(|item|
+                        item.kind == "user" && item.submission_id.as_ref() == Some(&submission.submission_id)
+                    ).collect();
+                    revealed.sort_by_key(|item| item.created_seq.parse::<u64>().unwrap_or_default());
+                    let needs_replay = revealed.first().is_some_and(|first| {
+                        let first_seq = first.created_seq.parse::<u64>().unwrap_or_default();
+                        self.items.values().any(|item| !self.is_unsent_user(item)
+                            && !revealed.iter().any(|new| new.item_id == item.item_id)
+                            && item.created_seq.parse::<u64>().unwrap_or_default() > first_seq)
+                    });
+                    if needs_replay {
+                        events.extend(self.render_snapshot());
+                    } else {
+                        // The usual dispatch adds a prompt at the visual tail. Preserve existing
+                        // widgets (and scroll position) rather than clearing and replaying them.
+                        for item in revealed {
+                            events.extend(render_item(item, &self.attachments_of(item)));
+                        }
+                        events.push(self.queue_event());
+                    }
                 } else {
                     events.push(self.queue_event());
                 }
@@ -565,9 +584,25 @@ mod tests {
             assert!(replay_of(&snapshot)["entries"].as_array().unwrap().is_empty());
             assert!(!snapshot.iter().any(|e| matches!(e, wire::Event::Note(n) if n.contains("queued"))));
         }
+        // A later visible item requires reconstruction to retain durable ordering.
+        let mut interleaved = View {
+            session_id: "s".into(), subscription_id: "sub".into(), seq: view.seq,
+            items: view.items.clone(), submissions: view.submissions.clone(), ..Default::default()
+        };
+        let mut later = item();
+        later.item_id = "later-agent".into();
+        later.created_seq = "3".into();
+        interleaved.accept(notification("3", Event::ItemCreated { item: later })).unwrap();
         submission.delivery = "direct".into();
+        let replay = interleaved.accept(notification("4", Event::SubmissionUpdated { submission: submission.clone() })).unwrap();
+        let entries = replay_of(&replay);
+        assert_eq!(entries["entries"][0]["text"], "waiting text");
+        assert_eq!(entries["entries"][1]["text"], "hello");
+
         let dispatched = view.accept(notification("3", Event::SubmissionUpdated { submission })).unwrap();
-        assert_eq!(replay_of(&dispatched)["entries"][0]["text"], "waiting text");
+        assert!(matches!(&dispatched[0], wire::Event::UserText(text) if text == "waiting text"));
+        assert!(!dispatched.iter().any(|e| matches!(e, wire::Event::Other(s) if s.starts_with("sill:replay:"))),
+            "tail dispatch must preserve the conversation instead of clearing and replaying it");
         assert_eq!(replay_of(&view.render_snapshot())["entries"].as_array().unwrap().len(), 1);
     }
     #[test]
