@@ -1,16 +1,62 @@
 # sill — Sill Frontend Protocol (SFP)
 
+**Implementation in progress, 2026-11-03:** the current control connection uses
+`_sill/initialize` with identity **`sfp/1-dev.1`**. This development identity implements the
+conversation slice described below; it does not claim the complete `sfp/1-draft.1` baseline or
+stable `sfp/1`. Clients and daemon upgrade together. A mismatch requires explicit replacement;
+a failed handshake never authorizes restarting a daemon. Private relay continuity is retained
+where its protocol remains compatible.
+
+The implemented public conversation surface is `_sill/sessions.attach`,
+`_sill/sessions.snapshot`, `_sill/sessions.detach`, `_sill/sessions.submit`,
+`_sill/submissions.get`, `_sill/submissions.cancel`, `_sill/submissions.resume`,
+`_sill/questions.answer`, `_sill/sessions.control`, `_sill/sessions.cancel`,
+`_sill/uploads.create` and `_sill/session.event`, plus `_sill/daemon.schema`.
+The schema command exports the concrete records and method shapes. Counters are decimal strings;
+records/events use named objects and `type` tags. `scripts/sfp_client.py` is an independent Python
+consumer and schema validator (install `scripts/requirements-sfp.txt`).
+
+Conversation changes, public sequence, source deduplication and runner state commit before SFP
+publication and relay ACK. Snapshots have connection-bound 60-second leases, at most 128 records
+and 4 MiB per page, 32 MiB per snapshot, eight leases per connection and a 128 MiB aggregate
+snapshot limit. Replay above 4096 events selects a snapshot. Current development storage retains
+all public events; retention/compaction is unfinished. Agent text/thought output splits into items of at most 256 KiB. A large tool or other record
+exceeding the page limit returns `limit_exceeded`; segmentation of those records remains freeze work. Control messages are
+limited to 8 MiB including newline, prompt text to 1 MiB JSON-encoded and initialization must arrive within ten seconds.
+
+ACP v1 queues submissions during activity; it does not advertise steering. Prepared payload and
+relay command ID are persisted before sending. A successful ACP prompt result establishes
+insertion/completion (or the agent's reported cancellation). Prompt RPC errors report uncertainty.
+Replacement holds unsent submissions and marks possibly dispatched work unknown. Existing
+transcript rows import once with new stable identities in a distinct historical generation;
+matching text never establishes continuity. Permission/form answers persist the winning answer
+and delivery intent before sending. New relays advertise outcome evidence; their resolution confirms handoff to the ACP question
+handler, without claiming that the remote agent acted on it. Adopted older relays retain their
+conversations, but ambiguous cancellation or answer-delivery evidence is reported as unknown.
+
+Uploads are immutable session-scoped objects with client IDs and bounded base64 data. Inline
+attachments currently support images; file attachments reference uploaded objects. Upload IDs
+retain content identity independently of their staged jail file.
+
+Host/session administration and presentation operations still awaiting public SFP schemas are
+under `_sill/internal/…`, marked `x-sill-internal` in the exported schema. These are temporary
+same-build implementation APIs, not protocol 6 compatibility handlers. The old `_sill/…` names
+are removed when their public replacement is not yet implemented. Public host methods, lossless
+path contracts, persistent terminal replay, full mutation recovery, retention bounds, and the
+experimental ACP v2 adapter remain implementation work before `sfp/1` can be declared complete.
+
 **Direction agreed 2026-11-03:** the public frontend contract is named **Sill Frontend Protocol
 (SFP)**. SFP v1 is a design target, not an implemented or frozen public release. Sections 1–5
-describe the existing development protocol; [section 6](#6-sfp-v1-design-direction-2026-11-03)
+record the historical development protocol and the remaining internal method inventory; [section 6](#6-sfp-v1-design-direction-2026-11-03)
 records the work needed before declaring SFP v1 stable. [Section 7](#7-sfp1-draft1-proposed-contract)
 is the first concrete draft, not an implemented API. ACP is the separate agent-facing protocol.
 
-Status: protocol **6**, frozen 2026-11-02 (docs/daemon.md M4–M6). From here every change
-to a method or a type's shape is a line in the changelog below and a bump of
-`sill_proto::PROTOCOL`. A local client asks a mismatched daemon to leave and starts the installed
-binary. An SSH client instead compares method schemas and refuses an unsupported operation; it
-never replaces or restarts the remote daemon merely to match its own version.
+Historical baseline: protocol **6**, frozen 2026-11-02 (docs/daemon.md M4–M6), preceded the SFP
+cutover. Its automatic local replacement and remote structural-schema negotiation are removed.
+The current initialization identity governs control compatibility; the numeric status field is
+an internal historical diagnostic. The table below names the remaining internal methods with
+their new namespace. They require the explicitly negotiated `sill.internal: 1` capability and
+are intended only for same-build clients while their public replacements are implemented.
 
 `sill daemon schema` prints the method inventory as one JSON document — this table, each typed method's
 params and result as `$ref`s, and the JSON Schema (draft 2020-12) of every type under `$defs` —
@@ -37,14 +83,14 @@ daemon answers is named here.
   `id` and no answer. Errors use JSON-RPC's `error {code, message}`; the codes are
   `sill_proto::rpc::Error`'s (parse error, invalid params, method not found, and a generic failure
   whose `message` says what).
-- **Method names** are ACP extension methods, `_sill/<group>.<name>`, so a connection could carry
+- **Method names** are ACP extension methods, `_sill/internal/<group>.<name>`, so a connection could carry
   ACP's own `session/*` traffic one day.
 - **One connection, one subscriber set**: `sessions.attach` subscribes the connection to a
   session's `session.event` notifications (the session's current state first — capabilities,
   controls, a waiting login, the turn in flight with its text so far, unanswered questions);
   `sessions.detach`, a `Quit` command or the connection closing unsubscribes. The daemon's queue
   per connection is bounded; a frontend that stops reading is cut off and attaches again.
-  Before the live snapshot, `_sill/session.replay {key, entries, total}` supplies the stored
+  Before the live snapshot, `_sill/internal/session.replay {key, entries, total}` supplies the stored
   transcript atomically with subscription. A frontend replaces its stored-history view from this
   replay before applying subsequent events; it must not stitch an earlier separate read onto the
   live stream. The core-owned stored `Entry` shape is currently opaque in the standalone schema.
@@ -63,51 +109,51 @@ daemon answers is named here.
 
 | Method | Kind | Params | Result | What |
 |---|---|---|---|---|
-| `_sill/frontend.request` | request | any | any | Typed host-data operations for the shelf (sill_core::frontend::Request); suboperation shapes are not yet in this schema. |
-| `_sill/daemon.schema` | request | `Empty` | any | Protocol schema and supported method shapes, for remote capability negotiation. |
-| `_sill/daemon.status` | request | `Empty` | `DaemonStatus` | Version, protocol, pid, mode and session counts of the daemon. |
-| `_sill/daemon.shutdown` | request | `Empty` | `{}` | Ask the daemon to leave; sessions keep running and the next daemon adopts them. |
-| `_sill/sessions.list` | request | `Empty` | `[Session]` | Every session in the store, newest first. |
-| `_sill/sessions.get` | request | `Key` | `Session` | One session by id, id prefix or exact title. |
-| `_sill/sessions.new` | request | `NewSession` | `Key` | Create a session row; answers its id. |
-| `_sill/sessions.set` | request | `SessionSet` | `{}` | Change one field of a session's row. |
-| `_sill/sessions.delete` | request | `Key` | `{}` | Stop the jail, remove the session's state and its row. |
-| `_sill/sessions.pin` | request | `Pin` | `{}` | Pin a path in a session (bound at its next start). |
-| `_sill/sessions.unpin` | request | `Pin` | `{}` | Unpin a path. |
-| `_sill/sessions.start` | request | `Key` | `Started` | Start a session's jail, or find it running. |
-| `_sill/sessions.stop` | request | `Key` | `{}` | Stop a session's jail; the row stays. |
-| `_sill/sessions.log` | request | `LogRequest` | `Text` | The tail of a session's log. |
-| `_sill/sessions.attach` | request | `Attach` | `{}` | Start jail and agent when needed and subscribe this connection to the session's events; its current state comes first. |
-| `_sill/sessions.detach` | request | `Key` | `{}` | Unsubscribe; the agent stays the daemon's. |
-| `_sill/sessions.command` | request | `SessionCommand` | `{}` | A prompt, cancel, mode, option, login or quit for a running session; a prompt during a turn is refused. |
-| `_sill/sessions.answer` | request | `SessionAnswer` | `{}` | The answer to an agent's question (permission or form); the first answer counts. |
-| `_sill/session.replay` | notification | any | — | An attach’s atomic stored transcript snapshot: key, entries and total (core-owned Entry shape). |
-| `_sill/session.event` | notification | `SessionEvent` | — | One event of a session, to every connection attached to it. |
-| `_sill/sessions.end` | request | `End` | `Ending` | End a session as closing its tab would: the summary turn when the agent can be asked, the row written or deleted, the jail stopped. |
-| `_sill/sessions.checkpoint` | request | `Key` | `{}` | Summarize now, without ending; the summary comes as a Summarized event. |
-| `_sill/sessions.changes` | request | `Key` | `Count` | How many unkept writes a session has outside its pins. |
-| `_sill/sessions.jail_view` | request | `Key` | `JailView` | A session's jail layout, for showing files as the agent sees them. |
-| `_sill/pins.list` | request | `Empty` | `[path]` | The global pins (docs/pins.md). |
-| `_sill/pins.add` | request | `GlobalPin` | `{}` | Add a global pin (canonicalized; refused inside another or in sill's state). |
-| `_sill/pins.remove` | request | `GlobalPin` | `{}` | Remove a global pin. |
-| `_sill/changes.list` | request | `Empty` | `ChangesList` | Every session's overlay changes and undoable keeps, and the pinned repositories' git status. |
-| `_sill/changes.diff` | request | `DiffOf` | `Text` | One change's diff. |
-| `_sill/changes.keep` | request | `ChangesKeep` | `Done` | Copy changed paths to the host; each checked against the hash it was listed with. |
-| `_sill/changes.revert` | request | `ChangesPaths` | `Done` | Put the host's version back in the session. |
-| `_sill/changes.undo` | request | `ChangesUndo` | `Done` | Undo keeps. |
-| `_sill/changes.git_revert` | request | `GitRevert` | `Text` | A pinned repository's path back to HEAD. |
-| `_sill/changes.history` | request | any | any | The ledger across time (SPEC §3.6); params and result are sill_core::history's types, not in this schema yet. |
-| `_sill/changes.changed` | notification | `Empty` | — | The overlays changed (a sweep, a keep, a turn, a deletion): whatever shows them rescans. |
-| `_sill/memory.list` | request | `Empty` | `[MemorySession]` | Ended sessions, newest first. |
-| `_sill/memory.show` | request | `Key` | `Text` | An ended session's summary and notes, as the CLI prints them. |
-| `_sill/memory.search` | request | `MemorySearch` | `Text` | Full-text search over summaries and transcripts. |
-| `_sill/memory.transcript` | request | `Transcript` | `Text` | A session's transcript. |
-| `_sill/memory.note_add` | request | `Note` | `{}` | Add a note to a session's memory. |
-| `_sill/memory.note_remove` | request | `Note` | `{}` | Remove a note by its time. |
-| `_sill/memory.compact` | request | `Empty` | `Compacted` | Compaction and retention now. |
-| `_sill/memory.forget` | request | `Empty` | `Count` | Delete every ended session. |
-| `_sill/agents.set_settings` | request | `AgentSettingsSet` | `{}` | An agent type's default settings. |
-| `_sill/settings.get` | request | `Empty` | any | sill's settings (sill.toml); the type is sill_core::config's, not in this schema yet. |
+| `_sill/internal/frontend.request` | request | any | any | Typed host-data operations for the shelf (sill_core::frontend::Request); suboperation shapes are not yet in this schema. |
+| `_sill/internal/daemon.schema` | request | `Empty` | any | Protocol schema and supported method shapes, for remote capability negotiation. |
+| `_sill/internal/daemon.status` | request | `Empty` | `DaemonStatus` | Version, protocol, pid, mode and session counts of the daemon. |
+| `_sill/internal/daemon.shutdown` | request | `Empty` | `{}` | Ask the daemon to leave; sessions keep running and the next daemon adopts them. |
+| `_sill/internal/sessions.list` | request | `Empty` | `[Session]` | Every session in the store, newest first. |
+| `_sill/internal/sessions.get` | request | `Key` | `Session` | One session by id, id prefix or exact title. |
+| `_sill/internal/sessions.new` | request | `NewSession` | `Key` | Create a session row; answers its id. |
+| `_sill/internal/sessions.set` | request | `SessionSet` | `{}` | Change one field of a session's row. |
+| `_sill/internal/sessions.delete` | request | `Key` | `{}` | Stop the jail, remove the session's state and its row. |
+| `_sill/internal/sessions.pin` | request | `Pin` | `{}` | Pin a path in a session (bound at its next start). |
+| `_sill/internal/sessions.unpin` | request | `Pin` | `{}` | Unpin a path. |
+| `_sill/internal/sessions.start` | request | `Key` | `Started` | Start a session's jail, or find it running. |
+| `_sill/internal/sessions.stop` | request | `Key` | `{}` | Stop a session's jail; the row stays. |
+| `_sill/internal/sessions.log` | request | `LogRequest` | `Text` | The tail of a session's log. |
+| `_sill/internal/sessions.attach` | request | `Attach` | `{}` | Start jail and agent when needed and subscribe this connection to the session's events; its current state comes first. |
+| `_sill/internal/sessions.detach` | request | `Key` | `{}` | Unsubscribe; the agent stays the daemon's. |
+| `_sill/internal/sessions.command` | request | `SessionCommand` | `{}` | A prompt, cancel, mode, option, login or quit for a running session; a prompt during a turn is refused. |
+| `_sill/internal/sessions.answer` | request | `SessionAnswer` | `{}` | The answer to an agent's question (permission or form); the first answer counts. |
+| `_sill/internal/session.replay` | notification | any | — | An attach’s atomic stored transcript snapshot: key, entries and total (core-owned Entry shape). |
+| `_sill/internal/session.event` | notification | `SessionEvent` | — | One event of a session, to every connection attached to it. |
+| `_sill/internal/sessions.end` | request | `End` | `Ending` | End a session as closing its tab would: the summary turn when the agent can be asked, the row written or deleted, the jail stopped. |
+| `_sill/internal/sessions.checkpoint` | request | `Key` | `{}` | Summarize now, without ending; the summary comes as a Summarized event. |
+| `_sill/internal/sessions.changes` | request | `Key` | `Count` | How many unkept writes a session has outside its pins. |
+| `_sill/internal/sessions.jail_view` | request | `Key` | `JailView` | A session's jail layout, for showing files as the agent sees them. |
+| `_sill/internal/pins.list` | request | `Empty` | `[path]` | The global pins (docs/pins.md). |
+| `_sill/internal/pins.add` | request | `GlobalPin` | `{}` | Add a global pin (canonicalized; refused inside another or in sill's state). |
+| `_sill/internal/pins.remove` | request | `GlobalPin` | `{}` | Remove a global pin. |
+| `_sill/internal/changes.list` | request | `Empty` | `ChangesList` | Every session's overlay changes and undoable keeps, and the pinned repositories' git status. |
+| `_sill/internal/changes.diff` | request | `DiffOf` | `Text` | One change's diff. |
+| `_sill/internal/changes.keep` | request | `ChangesKeep` | `Done` | Copy changed paths to the host; each checked against the hash it was listed with. |
+| `_sill/internal/changes.revert` | request | `ChangesPaths` | `Done` | Put the host's version back in the session. |
+| `_sill/internal/changes.undo` | request | `ChangesUndo` | `Done` | Undo keeps. |
+| `_sill/internal/changes.git_revert` | request | `GitRevert` | `Text` | A pinned repository's path back to HEAD. |
+| `_sill/internal/changes.history` | request | any | any | The ledger across time (SPEC §3.6); params and result are sill_core::history's types, not in this schema yet. |
+| `_sill/internal/changes.changed` | notification | `Empty` | — | The overlays changed (a sweep, a keep, a turn, a deletion): whatever shows them rescans. |
+| `_sill/internal/memory.list` | request | `Empty` | `[MemorySession]` | Ended sessions, newest first. |
+| `_sill/internal/memory.show` | request | `Key` | `Text` | An ended session's summary and notes, as the CLI prints them. |
+| `_sill/internal/memory.search` | request | `MemorySearch` | `Text` | Full-text search over summaries and transcripts. |
+| `_sill/internal/memory.transcript` | request | `Transcript` | `Text` | A session's transcript. |
+| `_sill/internal/memory.note_add` | request | `Note` | `{}` | Add a note to a session's memory. |
+| `_sill/internal/memory.note_remove` | request | `Note` | `{}` | Remove a note by its time. |
+| `_sill/internal/memory.compact` | request | `Empty` | `Compacted` | Compaction and retention now. |
+| `_sill/internal/memory.forget` | request | `Empty` | `Count` | Delete every ended session. |
+| `_sill/internal/agents.set_settings` | request | `AgentSettingsSet` | `{}` | An agent type's default settings. |
+| `_sill/internal/settings.get` | request | `Empty` | any | sill's settings (sill.toml); the type is sill_core::config's, not in this schema yet. |
 
 `Empty` is `{}`; `[path]` is a JSON array of path strings; "any" is a shape not in the schema
 yet (`changes.history`, `settings.get`, `session.replay` and `frontend.request` carry core-owned types). A generated
