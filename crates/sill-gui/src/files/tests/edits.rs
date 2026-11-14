@@ -14,7 +14,7 @@ fn source_is_editable_and_binary_file_errors_are_visible() {
     );
     act(&mut app, Action::Source);
     let original = app.views["demo"].reader.as_ref().unwrap().content.text();
-    assert!(original.contains("A workspace for your session"));
+    assert!(original.contains("Your session's files"));
     act(
         &mut app,
         Action::Text(text_editor::Action::Edit(text_editor::Edit::Insert('X'))),

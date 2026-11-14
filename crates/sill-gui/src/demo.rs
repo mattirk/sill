@@ -297,7 +297,7 @@ pub fn files(request: &Request) -> Result<Data, String> {
         Request::File { path: file, .. } => Data::File(if file.display.ends_with(".rs") {
             "fn main() {\n    println!(\"Hello from Sill\");\n}\n".into()
         } else {
-            "# A workspace for your session\n\nBrowse pinned folders, read files and review **what changed** without leaving the conversation.\n\n## Staying oriented\n\n- Expanded folders stay open across refreshes.\n- Each session remembers its own files.\n- Close the viewer to return to the conversation.\n\n```rust\nfn main() {\n    println!(\"Hello from Sill\");\n}\n```\n\nThis is a synthetic file in the demo.\n".into()
+            "# Your session's files\n\nBrowse pinned folders, read files and review **what changed** without leaving the conversation.\n\n## Staying oriented\n\n- Expanded folders stay open across refreshes.\n- Each session remembers its own files.\n- Close the viewer to return to the conversation.\n\n```rust\nfn main() {\n    println!(\"Hello from Sill\");\n}\n```\n\nThis is a synthetic file in the demo.\n".into()
         }),
         Request::Repo(repo) => Data::Repo {
             root: Some(repo.clone()),
