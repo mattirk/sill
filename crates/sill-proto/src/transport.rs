@@ -92,15 +92,33 @@ pub fn binary_command(binary: &str) -> Result<String> {
 }
 
 pub fn ssh_base(host: &str) -> Result<Command> {
+    ssh_base_mode(host, false)
+}
+
+fn ssh_base_mode(host: &str, interactive: bool) -> Result<Command> {
     validate_host(host)?;
     let dir = crate::runtime_dir()?.join("ssh");
     std::fs::create_dir_all(&dir)?;
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
     let mut command = Command::new("ssh");
-    command.args(["-T", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "ControlMaster=auto", "-o", "ControlPersist=60"])
+    command.args(["-T", "-o", if interactive { "BatchMode=no" } else { "BatchMode=yes" }, "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "ControlMaster=auto", "-o", "ControlPersist=60"])
         .arg("-o").arg(format!("ControlPath={}/%C", dir.display())).arg("--").arg(host);
     Ok(command)
+}
+
+/// Authenticate before starting the protocol timeout. OpenSSH prompts on /dev/tty,
+/// and ControlPersist keeps the authenticated connection available to protocol clients.
+pub fn authenticate(host: &str) -> Result<()> {
+    let status = ssh_base_mode(host, true)?.arg("true")
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status().context("starting SSH authentication")?;
+    if !status.success() {
+        bail!("SSH authentication/connection to {host} failed ({status}); see SSH's message above. Check the login, host key and network; no Sill protocol connection was made");
+    }
+    Ok(())
 }
 
 pub fn ssh_command(host: &str, binary: &str) -> Result<Command> {
@@ -128,6 +146,20 @@ pub fn install(host: &str, source: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn interactive_authentication_reuses_batch_connection_path() {
+        let interactive = ssh_base_mode("example.test", true).unwrap();
+        let batch = ssh_base("example.test").unwrap();
+        let args = |cmd: &Command| cmd.get_args().map(|s| s.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        let interactive = args(&interactive);
+        let batch = args(&batch);
+        assert!(interactive.contains(&"BatchMode=no".into()));
+        assert!(batch.contains(&"BatchMode=yes".into()));
+        assert_eq!(interactive.iter().find(|a| a.starts_with("ControlPath=")),
+                   batch.iter().find(|a| a.starts_with("ControlPath=")));
+        assert!(batch.contains(&"ControlPersist=60".into()));
+    }
+
     #[test]
     fn remote_executable_is_one_shell_word() {
         assert_eq!(binary_command("~/a'b/sill").unwrap(), "\"$HOME\"/'a'\\''b/sill'");

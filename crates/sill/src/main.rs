@@ -1830,12 +1830,18 @@ fn box_cmd(cmd: BoxCmd) -> Result<()> {
         BoxCmd::Add { host, name, mut binary, install } => {
             let name = name.unwrap_or_else(|| host.rsplit('@').next().unwrap_or(&host).to_string());
             transport::validate_name(&name)?;
+            // Authenticate separately: human prompts must not consume SFP's short timeout.
+            // GUI and background connections remain noninteractive.
+            use std::io::IsTerminal;
+            if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+                transport::authenticate(&host)?;
+            }
             if let Some(source) = install {
                 transport::install(&host, &source)?;
                 binary = "~/.local/bin/sill".into();
             }
             let c = sill_proto::Client::ssh(&host, &binary)
-                .context("checking the box; if sill is missing, use `--install PATH` with a headless sill binary")?;
+                .context("checking the box over SSH; verify SSH access and the remote sill binary path")?;
             let status: sill_proto::DaemonStatus = c.call(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default())?;
             transport::save(&name, BoxTarget { host, binary })?;
             println!("{name}: sill {}, protocol {}, {} sessions", status.version, status.protocol, status.sessions);

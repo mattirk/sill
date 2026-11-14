@@ -220,7 +220,7 @@ impl Client {
                     .filter(|c| !crate::initialize::FRONTEND_DECLARED.contains(&c.name) || DECLARED.lock().unwrap().contains(c.name))
                     .map(|c| (c.name.to_string(), c.version)).collect(),
             }, QUICK_TIMEOUT,
-        ).context("SFP initialization failed; explicitly update/restart an incompatible daemon")?;
+        ).context("SFP initialization failed")?;
         if result.protocol != crate::initialize::PROTOCOL_ID {
             bail!("daemon selected unsupported protocol {}; explicitly update/restart it", result.protocol);
         }
@@ -323,7 +323,9 @@ impl Client {
         let client = Self::over_io(reader, writer, move || {
             if let Ok(mut c) = stop.lock() { let _ = c.kill(); let _ = c.wait(); }
         })?;
-        client.initialize()?;
+        client.initialize().with_context(|| format!(
+            "SSH connection to {host} did not initialize Sill. Check SSH's messages above and the remote executable {binary}. Background connections cannot prompt: unlock the key with ssh-add or run sill box add in a terminal to authenticate again"
+        ))?;
         Ok(client)
     }
 
