@@ -549,6 +549,7 @@ impl App {
             );
         }
         let editor = text_editor(&self.prompt)
+            .id("prompt")
             .on_action(Message::Prompt)
             .key_binding(enter_sends)
             .padding([8, 14])
@@ -586,7 +587,24 @@ impl App {
             )
             .into()
         };
-        let mut bar = row![space().width(Fill)]
+        let shell = button(text(">_").size(style::SMALL).font(MONO_FONT).color(
+            if self.terminal_shown {
+                P.accent
+            } else {
+                P.fg_dim
+            },
+        ))
+        .padding([2, 6])
+        .style(style::quiet)
+        .on_press_maybe(has_session.then_some(Message::ToggleTerminal));
+        let shell = tooltip(
+            shell,
+            container(text("Terminal in the jail").size(style::SMALL))
+                .padding([4, 8])
+                .style(style::fill(P.code_bg)),
+            tooltip::Position::Top,
+        );
+        let mut bar = row![shell, space().width(Fill)]
             .spacing(4)
             .align_y(Alignment::Center);
         for control in self.controls() {
@@ -597,7 +615,12 @@ impl App {
                 bar.push(container(text(usage).size(style::SMALL).color(P.fg_dim)).padding([0, 6]));
         }
         bar = bar.push(action);
-        composer = composer.push(editor).push(container(bar).padding(Padding {
+        // as in the shelf, the prompt folds away while the terminal is up in its place
+        let input: Element<'_, Message> = match (&self.terminal, self.terminal_shown) {
+            (Some(pane), true) => self.terminal_pane(pane),
+            _ => editor.into(),
+        };
+        composer = composer.push(input).push(container(bar).padding(Padding {
             top: 0.0,
             right: 10.0,
             bottom: 6.0,
@@ -608,6 +631,43 @@ impl App {
             container(composer)
                 .width(Fill)
                 .style(style::fill(P.surface)),
+        ]
+        .into()
+    }
+
+    /// The jail shell under its caption: a rule and label in the success colour, the counterpart
+    /// of the host shell's warning-coloured one (the shelf's `sill-jail-caption`).
+    fn terminal_pane<'a>(&'a self, pane: &'a crate::terminal::Pane) -> Element<'a, Message> {
+        use crate::terminal::Status;
+        let mut caption = row![
+            text("jail · inside the session")
+                .size(style::TINY)
+                .color(P.success),
+            space().width(Fill),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        let body: Element<'_, Message> = match &pane.status {
+            Status::Running => {
+                caption = caption.push(
+                    button(text("End shell").size(style::TINY))
+                        .padding([0, 6])
+                        .style(style::quiet)
+                        .on_press(Message::EndTerminal),
+                );
+                pane.view().map(Message::TermAction)
+            }
+            Status::Opening => center(text("Opening the shell…").color(P.fg_dim)).into(),
+            Status::Failed(error) => ended(format!("The shell could not be opened: {error}")),
+            Status::Ended => ended("The shell ended.".into()),
+        };
+        column![
+            rule::horizontal(1).style(style::rule_style(P.success)),
+            container(caption).padding([2, 12]),
+            container(body)
+                .height(300)
+                .width(Fill)
+                .style(style::fill(P.bg)),
         ]
         .into()
     }
@@ -713,6 +773,22 @@ fn control<'a>(
 }
 
 /// The width `content` takes in the prose face at `size`, laid out the way text widgets do.
+/// Where the shell was: what became of it, and a fresh one.
+fn ended<'a>(said: String) -> Element<'a, Message> {
+    center(
+        column![
+            text(said).size(style::SMALL).color(P.fg_dim),
+            button(text("Open a new shell").size(style::SMALL))
+                .padding([4, 10])
+                .style(style::quiet)
+                .on_press(Message::ReopenTerminal),
+        ]
+        .spacing(8)
+        .align_x(Alignment::Center),
+    )
+    .into()
+}
+
 fn text_width(content: &str, size: f32) -> f32 {
     use iced::advanced::text::Paragraph as _;
     let paragraph = iced::advanced::graphics::text::Paragraph::with_text(iced::advanced::Text {

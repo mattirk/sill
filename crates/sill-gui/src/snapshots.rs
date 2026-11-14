@@ -61,6 +61,16 @@ fn render_views() {
     let _ = app.update(Message::ToggleTool("edit".into()));
     let _ = app.update(Message::ToggleTool("tool".into()));
     render(&app, "3-answered");
+    // the jail shell in the prompt's place: the pretend shell lists its files
+    // the task carries the pane's events; dropping it would hang the shell up
+    let _events = app.update(Message::ToggleTerminal);
+    let pane = app.terminal.as_mut().unwrap();
+    pane.accept(crate::terminal::Event::Opened);
+    crate::tests::settle(pane, "project$");
+    pane.input(b"ls\r".to_vec());
+    crate::tests::settle(pane, "build.sh");
+    pane.accept(crate::terminal::Event::Output);
+    render(&app, "5-terminal");
     let (mut empty, _) = App::new(true, None);
     empty.conversation = crate::model::Conversation::default();
     empty.choices.clear();

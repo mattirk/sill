@@ -6,6 +6,7 @@ mod model;
 #[cfg(test)]
 mod snapshots;
 mod style;
+mod terminal;
 #[cfg(test)]
 mod tests;
 mod ui;
@@ -112,6 +113,14 @@ enum Message {
     /// A press on the top bar's empty space: the window manager moves the window.
     DragWindow,
     Quit,
+    /// `>_`: the session's jail shell in place of the prompt, or the prompt again.
+    ToggleTerminal,
+    Terminal(u64, terminal::Event),
+    TermAction(terminal::Action),
+    TermPaste(Option<String>),
+    /// End the shell itself (hiding the pane only detaches from it).
+    EndTerminal,
+    ReopenTerminal,
 }
 
 struct Rendered {
@@ -142,6 +151,10 @@ struct App {
     follow_tail: bool,
     /// Set by each tick while the agent is busy; the spinner's angle comes from it.
     now: Instant,
+    /// The session's jail shell; kept attached while hidden, dropped (detached) on switching.
+    terminal: Option<terminal::Pane>,
+    terminal_shown: bool,
+    terminal_generation: u64,
 }
 
 /// A fresh identity for a submission or an answer (1–128 bytes, unique for this daemon).
@@ -179,6 +192,9 @@ impl App {
             generation: 0,
             follow_tail: true,
             now: Instant::now(),
+            terminal: None,
+            terminal_shown: false,
+            terminal_generation: 0,
         };
         if demo {
             app.conversation = demo::conversation();
@@ -329,6 +345,8 @@ impl App {
                 self.text_view = None;
                 self.open_tools.clear();
                 self.open_answers.clear();
+                self.terminal = None;
+                self.terminal_shown = false;
                 self.status = "Loading conversation…".into();
                 self.error = None;
                 self.failed = None;
@@ -440,12 +458,94 @@ impl App {
             }
             Message::DragWindow => return iced::window::latest().and_then(iced::window::drag),
             Message::Quit => return iced::exit(),
+            Message::ToggleTerminal => {
+                if self.terminal_shown {
+                    self.terminal_shown = false;
+                    return iced::widget::operation::focus("prompt");
+                }
+                self.terminal_shown = true;
+                let reusable = self.terminal.as_ref().is_some_and(|t| {
+                    matches!(
+                        t.status,
+                        terminal::Status::Opening | terminal::Status::Running
+                    )
+                });
+                if reusable {
+                    if let Some(pane) = &mut self.terminal {
+                        pane.focused = true;
+                    }
+                    return Task::none();
+                }
+                return self.open_terminal();
+            }
+            Message::ReopenTerminal => return self.open_terminal(),
+            Message::EndTerminal => {
+                if let Some(pane) = &self.terminal {
+                    pane.close();
+                }
+            }
+            Message::Terminal(generation, event) => {
+                if generation == self.terminal_generation
+                    && let Some(pane) = &mut self.terminal
+                {
+                    pane.accept(event);
+                }
+            }
+            Message::TermAction(action) => {
+                let Some(pane) = &mut self.terminal else {
+                    return Task::none();
+                };
+                match action {
+                    terminal::Action::Copy => {
+                        if let Some(selected) = pane.selection() {
+                            return iced::clipboard::write(selected);
+                        }
+                    }
+                    terminal::Action::Paste => {
+                        return iced::clipboard::read().map(Message::TermPaste);
+                    }
+                    action => pane.perform(action),
+                }
+            }
+            Message::TermPaste(text) => {
+                if let (Some(pane), Some(text)) = (&mut self.terminal, text) {
+                    pane.paste(&text);
+                }
+            }
         }
         if scroll_to_tail && self.text_view.is_none() {
             iced::widget::operation::snap_to_end("conversation")
         } else {
             Task::none()
         }
+    }
+
+    /// A pane on the session's jail shell (the pretend one in `--demo`); its events come tagged
+    /// so a replaced pane's late ones are dropped.
+    fn open_terminal(&mut self) -> Task<Message> {
+        if self.conversation.session_id.is_empty() {
+            return Task::none();
+        }
+        self.terminal_generation += 1;
+        let generation = self.terminal_generation;
+        let (cols, rows) = self
+            .terminal
+            .as_ref()
+            .map_or((80, 16), |t| (t.cols, t.rows));
+        let (pane, events) = if self.demo {
+            terminal::Pane::open(cols, rows, terminal::demo_shell)
+        } else {
+            terminal::Pane::open(
+                cols,
+                rows,
+                terminal::jail_shell(self.conversation.session_id.clone()),
+            )
+        };
+        self.terminal = Some(pane);
+        let stream = iced::futures::stream::unfold(events, |events| async move {
+            events.recv().await.ok().map(|event| (event, events))
+        });
+        Task::run(stream, move |event| Message::Terminal(generation, event))
     }
 
     /// The prompt goes to the agent (the daemon queues it while a turn runs); the composer clears.

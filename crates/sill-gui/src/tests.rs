@@ -549,3 +549,190 @@ fn ctrl_q_quits() {
     ));
     assert!(crate::quit_key(press(Modifiers::empty())).is_none());
 }
+
+/// Wait until the pane's screen shows `text` (its reader thread fills it from the stream).
+pub fn settle(pane: &crate::terminal::Pane, text: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !pane.screen().contains(text) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{text:?} never appeared:\n{}",
+            pane.screen()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// The terminal is the daemon's byte stream through the emulator: output reaches the screen with
+/// its colours, keys and the emulator's own answers go back, a resize is a request, and the end
+/// of the stream is the end of the shell.
+#[test]
+fn a_terminal_shows_its_stream_and_sends_keys_back() {
+    use crate::terminal::{Connection, Control, Event, Pane, Status};
+    use std::io::Read;
+    use std::sync::{Arc, Mutex};
+    let (ours, mut remote) = UnixStream::pair().unwrap();
+    remote
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let controls = Arc::new(Mutex::new(Vec::new()));
+    let seen = controls.clone();
+    let close = ours.try_clone().unwrap();
+    let (mut pane, events) = Pane::open(40, 10, move |cols, rows| {
+        assert_eq!((cols, rows), (40, 10));
+        Ok(Connection {
+            discarded: true,
+            size: (cols, rows),
+            stream: sill_proto::transport::RawStream {
+                reader: Box::new(ours.try_clone().unwrap()),
+                writer: Box::new(ours),
+                interrupt: Arc::new(move || {
+                    let _ = close.shutdown(std::net::Shutdown::Both);
+                }),
+                shutdown_write: Arc::new(|| {}),
+            },
+            control: Box::new(move |c| {
+                seen.lock().unwrap().push(match c {
+                    Control::Resize(cols, rows) => format!("resize {cols}x{rows}"),
+                    Control::Close => "close".into(),
+                });
+                Ok(())
+            }),
+        })
+    });
+    let next = || events.recv_blocking().unwrap();
+    pane.accept(next());
+    assert_eq!(pane.status, Status::Running);
+    remote.write_all(b"hi \x1b[31mred\x1b[0m\r\n$ ").unwrap();
+    settle(&pane, "hi red");
+    let screen = pane.screen();
+    assert!(
+        screen.starts_with("[earlier output was not kept]\nhi red\n$"),
+        "{screen}"
+    );
+    assert_eq!(pane.fg_at(1, 3), crate::style::P.error);
+    assert_eq!(pane.fg_at(1, 0), crate::style::P.fg);
+
+    pane.input(b"ls\r".to_vec());
+    let mut typed = [0u8; 3];
+    remote.read_exact(&mut typed).unwrap();
+    assert_eq!(&typed, b"ls\r");
+    // a program asking what the terminal is gets the emulator's answer
+    remote.write_all(b"\x1b[c").unwrap();
+    let mut answer = [0u8; 3];
+    remote.read_exact(&mut answer).unwrap();
+    assert_eq!(&answer, b"\x1b[?");
+    let mut rest = [0u8; 64];
+    let _ = remote.read(&mut rest).unwrap();
+
+    pane.resize(100, 30);
+    pane.resize(100, 30);
+    pane.close();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while controls.lock().unwrap().len() < 2 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(*controls.lock().unwrap(), ["resize 100x30", "close"]);
+    drop(remote);
+    loop {
+        let event = next();
+        let ended = matches!(event, Event::Ended);
+        pane.accept(event);
+        if ended {
+            break;
+        }
+    }
+    assert_eq!(pane.status, Status::Ended);
+}
+
+/// Keys as xterm sends them, which shells and full-screen programs expect.
+#[test]
+fn terminal_keys_are_encoded_as_xterm_sends_them() {
+    use crate::terminal::encode;
+    use alacritty_terminal::term::TermMode;
+    use iced::keyboard::{Key, Modifiers, key::Named};
+    let plain = TermMode::empty();
+    let key = |k: Key, m: Modifiers, text: Option<&str>, mode| encode(&k, m, text, mode);
+    let none = Modifiers::empty();
+    let named = |n| Key::Named(n);
+    let ch = |c: &str| Key::Character(c.into());
+    assert_eq!(key(ch("a"), none, Some("a"), plain).unwrap(), b"a");
+    assert_eq!(
+        key(ch("ä"), none, Some("ä"), plain).unwrap(),
+        "ä".as_bytes()
+    );
+    assert_eq!(key(ch("c"), Modifiers::CTRL, None, plain).unwrap(), [3]);
+    assert_eq!(
+        key(ch("x"), Modifiers::ALT, Some("x"), plain).unwrap(),
+        b"\x1bx"
+    );
+    assert_eq!(
+        key(named(Named::Enter), none, Some("\r"), plain).unwrap(),
+        b"\r"
+    );
+    assert_eq!(
+        key(named(Named::Backspace), none, None, plain).unwrap(),
+        [0x7f]
+    );
+    assert_eq!(
+        key(named(Named::Tab), Modifiers::SHIFT, None, plain).unwrap(),
+        b"\x1b[Z"
+    );
+    assert_eq!(
+        key(named(Named::ArrowUp), none, None, plain).unwrap(),
+        b"\x1b[A"
+    );
+    assert_eq!(
+        key(named(Named::ArrowUp), none, None, TermMode::APP_CURSOR).unwrap(),
+        b"\x1bOA"
+    );
+    assert_eq!(
+        key(named(Named::ArrowLeft), Modifiers::CTRL, None, plain).unwrap(),
+        b"\x1b[1;5D"
+    );
+    assert_eq!(
+        key(named(Named::Delete), none, None, plain).unwrap(),
+        b"\x1b[3~"
+    );
+    assert_eq!(
+        key(named(Named::F5), none, None, plain).unwrap(),
+        b"\x1b[15~"
+    );
+    assert!(key(named(Named::Shift), Modifiers::SHIFT, None, plain).is_none());
+}
+
+/// `>_` opens the shell in the prompt's place; typed keys go to it, not to the prompt.
+#[test]
+fn the_terminal_button_opens_the_shell_and_takes_the_keys() {
+    let (mut app, _) = App::new(true, None);
+    let mut ui =
+        iced_test::Simulator::with_size(crate::snapshots::settings(), (720.0, 860.0), app.view());
+    ui.click(">_").unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        matches!(messages.as_slice(), [Message::ToggleTerminal]),
+        "{messages:?}"
+    );
+    // the task carries the pane's events; dropping it would hang the shell up
+    let _events = app.update(Message::ToggleTerminal);
+    let pane = app.terminal.as_mut().unwrap();
+    pane.accept(crate::terminal::Event::Opened);
+    settle(pane, "project$");
+    let mut ui =
+        iced_test::Simulator::with_size(crate::snapshots::settings(), (720.0, 860.0), app.view());
+    let _ = ui.typewrite("ls");
+    let typed: Vec<u8> = ui
+        .into_messages()
+        .filter_map(|m| match m {
+            Message::TermAction(crate::terminal::Action::Input(bytes)) => Some(bytes),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(typed, b"ls");
+    let _ = app.update(Message::ToggleTerminal);
+    assert!(
+        !app.terminal_shown && app.terminal.is_some(),
+        "hiding only detaches the view"
+    );
+}
