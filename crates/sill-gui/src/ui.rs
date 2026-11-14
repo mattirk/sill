@@ -24,7 +24,7 @@ use sill_client::supervision::{Activity, Attention, Level, clock};
 use sill_proto::sfp::{Answer, Item, Question, Tool};
 
 use crate::style::{self, P, alpha};
-use crate::{App, Message, Pick, SessionView, Tab, icons, selection, viewer};
+use crate::{App, Message, Pick, SessionView, Tab, icons, keys, selection, viewer};
 
 const MONO_FONT: Font = Font::with_name(crate::fonts::MONO_FAMILY);
 /// Below this width the drawer takes the content area instead of sitting beside it.
@@ -41,7 +41,7 @@ impl App {
                 Some(reader) => reader,
                 None => {
                     let conversation = match &view.text_view {
-                        Some(content) => self.transcript_view(view, content),
+                        Some(content) => self.transcript_view(content),
                         None => self.feed(view),
                     };
                     column![conversation, self.composer(view)]
@@ -120,10 +120,12 @@ impl App {
             tabs = tabs.push(self.tab(tab));
         }
         let select = tooltip(
-            button(text("⌶").size(style::TEXT))
-                .padding([2, 8])
-                .style(style::quiet)
-                .on_press_maybe(self.current().map(|_| Message::ToggleText)),
+            keys::press_maybe(
+                button(text("⌶").size(style::TEXT))
+                    .padding([2, 8])
+                    .style(style::quiet),
+                self.current().map(|_| Message::ToggleText),
+            ),
             container(text("The conversation as one text").size(style::TINY))
                 .padding([3, 8])
                 .style(style::fill(P.surface)),
@@ -143,17 +145,19 @@ impl App {
                         .style(style::feed_scroll),
                     self.activity(),
                     select,
-                    button(
-                        text(if self.workspace.shown {
-                            "›"
-                        } else {
-                            "Files ‹"
-                        })
-                        .size(style::SMALL)
-                    )
-                    .padding([2, 8])
-                    .style(style::quiet)
-                    .on_press(Message::Workspace(crate::workspace::Action::ToggleDrawer)),
+                    keys::press(
+                        button(
+                            text(if self.workspace.shown {
+                                "›"
+                            } else {
+                                "Files ‹"
+                            })
+                            .size(style::SMALL)
+                        )
+                        .padding([2, 8])
+                        .style(style::quiet),
+                        Message::Workspace(crate::workspace::Action::ToggleDrawer)
+                    ),
                 ]
                 .spacing(6)
                 .align_y(Alignment::Center),
@@ -196,10 +200,10 @@ impl App {
         if let Some(mark) = attention.as_ref().and_then(mark) {
             label = label.push(mark);
         }
-        let label = button(label)
-            .padding([4, 12])
-            .style(style::quiet)
-            .on_press(Message::Choose(tab.id.clone()));
+        let label = keys::press(
+            button(label).padding([4, 12]).style(style::quiet),
+            Message::Choose(tab.id.clone()),
+        );
         let underline = rule::horizontal(2).style(style::rule_style(if active {
             P.accent
         } else {
@@ -312,17 +316,15 @@ impl App {
             && question.fields.is_empty()
         {
             for option in &question.options {
-                bar = bar.push(
+                bar = bar.push(keys::press_maybe(
                     button(text(&option.title).size(style::TINY))
                         .padding([2, 8])
-                        .style(option_style(&option.kind))
-                        .on_press_maybe((!view.answering.contains(&question.question_id)).then(
-                            || Message::Answer {
-                                question_id: question.question_id.clone(),
-                                option_id: option.option_id.clone(),
-                            },
-                        )),
-                );
+                        .style(option_style(&option.kind)),
+                    (!view.answering.contains(&question.question_id)).then(|| Message::Answer {
+                        question_id: question.question_id.clone(),
+                        option_id: option.option_id.clone(),
+                    }),
+                ));
             }
         }
         for tab in &self.tabs {
@@ -344,8 +346,8 @@ impl App {
                 },
                 one_line(&tab.title, 18)
             );
-            bar =
-                bar.push(tooltip(
+            bar = bar.push(tooltip(
+                keys::press(
                     button(text(label).size(style::TINY).color(
                         if other.level() == Level::Question {
                             P.warning
@@ -354,22 +356,23 @@ impl App {
                         },
                     ))
                     .padding([2, 6])
-                    .style(style::quiet)
-                    .on_press(Message::Choose(tab.id.clone())),
-                    container(text(other.summary()).size(style::TINY))
-                        .padding([3, 8])
-                        .style(style::fill(P.surface)),
-                    tooltip::Position::Top,
-                ));
+                    .style(style::quiet),
+                    Message::Choose(tab.id.clone()),
+                ),
+                container(text(other.summary()).size(style::TINY))
+                    .padding([3, 8])
+                    .style(style::fill(P.surface)),
+                tooltip::Position::Top,
+            ));
         }
         // a file's reader has its own way back
         if view.files.reader.is_none() {
-            bar = bar.push(
+            bar = bar.push(keys::press(
                 button(text("‹ Conversation").size(style::TINY))
                     .padding([2, 8])
-                    .style(style::quiet)
-                    .on_press(Message::ShowConversation),
-            );
+                    .style(style::quiet),
+                Message::ShowConversation,
+            ));
         }
         if view.conversation.busy() {
             bar = bar.push(stop_button());
@@ -465,12 +468,12 @@ impl App {
         let mut layers = stack![scroll];
         if !view.follow_tail {
             layers = layers.push(
-                right(
+                right(keys::press(
                     button(text("↓ Latest").size(style::SMALL))
                         .padding([4, 10])
-                        .style(style::solid(P.surface))
-                        .on_press(Message::Latest),
-                )
+                        .style(style::solid(P.surface)),
+                    Message::Latest,
+                ))
                 .padding(Padding {
                     top: 0.0,
                     right: 18.0,
@@ -584,8 +587,8 @@ impl App {
         )
         .padding([3, 6])
         .width(Fill)
-        .style(style::row_button)
-        .on_press(Message::ToggleTool(item.item_id.clone()));
+        .style(style::row_button);
+        let line = keys::press(line, Message::ToggleTool(item.item_id.clone()));
         let mut body = Column::new().push(line);
         if view.open_tools.contains(&item.item_id) {
             if !tool.detail.trim().is_empty() {
@@ -642,15 +645,15 @@ impl App {
                 let sending = view.answering.contains(&question.question_id);
                 let mut options = row![].spacing(8);
                 for option in &question.options {
-                    options = options.push(
+                    options = options.push(keys::press_maybe(
                         button(text(&option.title).size(style::TEXT))
                             .padding([6, 12])
-                            .style(option_style(&option.kind))
-                            .on_press_maybe((!sending).then(|| Message::Answer {
-                                question_id: question.question_id.clone(),
-                                option_id: option.option_id.clone(),
-                            })),
-                    );
+                            .style(option_style(&option.kind)),
+                        (!sending).then(|| Message::Answer {
+                            question_id: question.question_id.clone(),
+                            option_id: option.option_id.clone(),
+                        }),
+                    ));
                 }
                 card = card.push(options.wrap().vertical_spacing(8));
             } else {
@@ -682,12 +685,12 @@ impl App {
                     .size(style::TEXT)
                     .style(style::selectable_inherited),
             );
-            card = card.push(
+            card = card.push(keys::press(
                 button(text(if open { "▾ hide" } else { "▸ show" }).size(style::TINY))
                     .padding([0, 4])
-                    .style(style::quiet)
-                    .on_press(Message::ToggleAnswered(question.question_id.clone())),
-            );
+                    .style(style::quiet),
+                Message::ToggleAnswered(question.question_id.clone()),
+            ));
             if open {
                 card = asked(card, question);
             }
@@ -702,31 +705,31 @@ impl App {
         )
     }
 
-    fn transcript_view<'a>(
-        &'a self,
-        view: &'a SessionView,
-        content: &'a text_editor::Content,
-    ) -> Element<'a, Message> {
+    fn transcript_view<'a>(&'a self, content: &'a text_editor::Content) -> Element<'a, Message> {
         column![
             row![
                 text("The conversation as text, captured when opened")
                     .size(style::SMALL)
                     .color(P.fg_dim),
                 space().width(Fill),
-                button(text("Refresh").size(style::SMALL))
-                    .style(style::quiet)
-                    .on_press(Message::RefreshText),
-                button(text("Copy all").size(style::SMALL))
-                    .style(style::quiet)
-                    .on_press_with(|| Message::Copy(view.conversation.transcript())),
-                button(text("Close").size(style::SMALL))
-                    .style(style::quiet)
-                    .on_press(Message::ToggleText),
+                keys::press(
+                    button(text("Refresh").size(style::SMALL)).style(style::quiet),
+                    Message::RefreshText
+                ),
+                keys::press(
+                    button(text("Copy all").size(style::SMALL)).style(style::quiet),
+                    Message::CopyTranscript
+                ),
+                keys::press(
+                    button(text("Close").size(style::SMALL)).style(style::quiet),
+                    Message::ToggleText
+                ),
             ]
             .spacing(4)
             .align_y(Alignment::Center),
             text_editor(content)
                 .on_action(Message::TextAction)
+                .key_binding(reading_keys)
                 .height(Fill)
                 .font(MONO_FONT)
                 .size(style::MONO)
@@ -759,10 +762,12 @@ impl App {
                     )
                     .width(Fill)
                     .clip(true),
-                    button(text("×").size(style::SMALL))
-                        .padding([0, 6])
-                        .style(style::quiet)
-                        .on_press(Message::Unqueue(submission.submission_id.clone())),
+                    keys::press(
+                        button(text("×").size(style::SMALL))
+                            .padding([0, 6])
+                            .style(style::quiet),
+                        Message::Unqueue(submission.submission_id.clone())
+                    ),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center)
@@ -783,16 +788,17 @@ impl App {
         let action: Element<'_, Message> = if view.conversation.busy() {
             stop_button()
         } else {
-            button(
-                svg(icons::send())
-                    .width(14)
-                    .height(14)
-                    .style(style::icon(P.bg)),
+            keys::press_maybe(
+                button(
+                    svg(icons::send())
+                        .width(14)
+                        .height(14)
+                        .style(style::icon(P.bg)),
+                )
+                .padding(6)
+                .style(style::solid(P.accent)),
+                (!view.draft.text().trim().is_empty()).then_some(Message::Send),
             )
-            .padding(6)
-            .style(style::solid(P.accent))
-            .on_press_maybe((!view.draft.text().trim().is_empty()).then_some(Message::Send))
-            .into()
         };
         let shell = button(text(">_").size(style::SMALL).font(MONO_FONT).color(
             if view.terminal_shown {
@@ -802,8 +808,8 @@ impl App {
             },
         ))
         .padding([2, 6])
-        .style(style::quiet)
-        .on_press_maybe(has_session.then_some(Message::ToggleTerminal));
+        .style(style::quiet);
+        let shell = keys::press_maybe(shell, has_session.then_some(Message::ToggleTerminal));
         let shell = tooltip(
             shell,
             container(text("Terminal in the jail").size(style::SMALL))
@@ -856,12 +862,12 @@ impl App {
         .align_y(Alignment::Center);
         let body: Element<'_, Message> = match &pane.status {
             Status::Running => {
-                caption = caption.push(
+                caption = caption.push(keys::press(
                     button(text("End shell").size(style::TINY))
                         .padding([0, 6])
-                        .style(style::quiet)
-                        .on_press(Message::EndTerminal),
-                );
+                        .style(style::quiet),
+                    Message::EndTerminal,
+                ));
                 pane.view().map(Message::TermAction)
             }
             Status::Opening => center(text("Opening the shell…").color(P.fg_dim)).into(),
@@ -942,7 +948,7 @@ fn mark<'a>(attention: &Attention) -> Option<Element<'a, Message>> {
 
 /// Stop the selected session's turn (found by its id in tests: it has no text).
 fn stop_button<'a>() -> Element<'a, Message> {
-    container(
+    container(keys::press(
         button(
             svg(icons::stop())
                 .width(14)
@@ -950,9 +956,9 @@ fn stop_button<'a>() -> Element<'a, Message> {
                 .style(style::icon(P.bg)),
         )
         .padding(6)
-        .style(style::solid(P.error))
-        .on_press(Message::Stop),
-    )
+        .style(style::solid(P.error)),
+        Message::Stop,
+    ))
     .id("stop")
     .into()
 }
@@ -998,10 +1004,12 @@ fn outbox<'a>(mut composer: Column<'a, Message>, view: &'a SessionView) -> Colum
         .spacing(4)
         .align_y(Alignment::Center);
         let small = |label: &'static str, message: Message| {
-            button(text(label).size(style::TINY))
-                .padding([1, 6])
-                .style(style::quiet)
-                .on_press(message)
+            keys::press(
+                button(text(label).size(style::TINY))
+                    .padding([1, 6])
+                    .style(style::quiet),
+                message,
+            )
         };
         match &pending.state {
             State::Failed(_) => {
@@ -1143,12 +1151,34 @@ fn control<'a>(
 ) -> Element<'a, Message> {
     let label = selected.as_ref().map_or("", |p| p.title.as_str());
     let width = text_width(label, style::SMALL) + 12.0 + style::SMALL + 4.0;
-    pick_list(picks, selected, on_select)
+    let on_select = std::rc::Rc::new(on_select);
+    let select = on_select.clone();
+    let choices = picks.clone();
+    let current = selected.clone();
+    let list = pick_list(picks, selected, move |pick| select(pick))
         .text_size(style::SMALL)
         .padding([3, 6])
         .width(width)
         .style(style::control)
-        .menu_style(style::control_menu)
+        .menu_style(style::control_menu);
+    // with the keyboard, Up and Down step through the choices (the menu is the pointer's)
+    keys::focus(list)
+        .on_key(move |key, _| {
+            let step: isize = match key.as_ref() {
+                Key::Named(Named::ArrowUp) => -1,
+                Key::Named(Named::ArrowDown) => 1,
+                _ => return None,
+            };
+            let at = current
+                .as_ref()
+                .and_then(|c| choices.iter().position(|p| p == c))
+                .map_or(0, |i| i as isize);
+            let next = (at + step).clamp(0, choices.len() as isize - 1) as usize;
+            choices
+                .get(next)
+                .filter(|p| Some(*p) != current.as_ref())
+                .map(|p| on_select(p.clone()))
+        })
         .into()
 }
 
@@ -1157,10 +1187,12 @@ fn ended<'a>(said: String) -> Element<'a, Message> {
     center(
         column![
             text(said).size(style::SMALL).color(P.fg_dim),
-            button(text("Open a new shell").size(style::SMALL))
-                .padding([4, 10])
-                .style(style::quiet)
-                .on_press(Message::ReopenTerminal),
+            keys::press(
+                button(text("Open a new shell").size(style::SMALL))
+                    .padding([4, 10])
+                    .style(style::quiet),
+                Message::ReopenTerminal
+            ),
         ]
         .spacing(8)
         .align_x(Alignment::Center),
@@ -1189,11 +1221,25 @@ fn text_width(content: &str, size: f32) -> f32 {
 pub(crate) fn enter_sends(
     key_press: text_editor::KeyPress,
 ) -> Option<text_editor::Binding<Message>> {
+    // the window's shortcuts work from the prompt, and PageUp/PageDown page the conversation
+    if let Some(message) = keys::from_text(&key_press.key, key_press.modifiers, true) {
+        return Some(text_editor::Binding::Custom(message));
+    }
     if matches!(key_press.key, Key::Named(Named::Enter))
         && !key_press.modifiers.shift()
         && matches!(key_press.status, text_editor::Status::Focused { .. })
     {
         return Some(text_editor::Binding::Custom(Message::Send));
+    }
+    text_editor::Binding::from_key_press(key_press)
+}
+
+/// A read-only editor's keys: the window's shortcuts first, then the editor's own.
+pub(crate) fn reading_keys(
+    key_press: text_editor::KeyPress,
+) -> Option<text_editor::Binding<Message>> {
+    if let Some(message) = keys::from_text(&key_press.key, key_press.modifiers, false) {
+        return Some(text_editor::Binding::Custom(message));
     }
     text_editor::Binding::from_key_press(key_press)
 }

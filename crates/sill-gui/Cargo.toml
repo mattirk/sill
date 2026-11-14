@@ -24,10 +24,12 @@ iced = { version = "=0.14.0", default-features = false, features = ["tiny-skia",
 iced_selection = { version = "=0.5.0", features = ["markdown"] }
 async-channel = "2"
 alacritty_terminal = { version = "0.25.1", default-features = false }
+# effect tasks for the keyboard's own widget operations, as iced's focus_next is built (iced does
+# not re-export its runtime); tests also run tasks to their end with it
+iced_runtime = "=0.14.0"
 unicode-segmentation = "1"
 
 [dev-dependencies]
 serde.workspace = true
 iced_test = "=0.14.0"
-# runs a Task to its end in tests (iced does not re-export its runtime)
-iced_runtime = "=0.14.0"
+

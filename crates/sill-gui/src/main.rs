@@ -1,6 +1,7 @@
 mod demo;
 mod fonts;
 mod icons;
+mod keys;
 #[cfg(test)]
 mod perf;
 mod selection;
@@ -131,6 +132,9 @@ pub enum Message {
     Choose(String),
     Refresh,
     Copy(String),
+    /// Copy the whole conversation as text, or the open file (read when pressed, not per frame).
+    CopyTranscript,
+    CopyFile,
     Link(String),
     /// A selection drag in the conversation started (`true`) or ended (`false`).
     Selecting(bool),
@@ -174,6 +178,14 @@ pub enum Message {
     Workspace(workspace::Action),
     /// The window's new width.
     Resized(f32),
+    /// Tab (true) or Shift+Tab: the keyboard moves to the next or previous control.
+    Focus(bool),
+    /// Ctrl+Shift+Right (1) or Left (-1): the next or previous session.
+    StepTab(i32),
+    /// Escape: the file or transcript closes, else the drawer, else the prompt takes the keys.
+    Escape,
+    /// PageDown (true) or PageUp in the conversation or the open file.
+    Page(bool),
     Noop,
 }
 
@@ -473,7 +485,7 @@ impl App {
             subscriptions
                 .push(iced::time::every(Duration::from_secs(15)).map(|_| Message::Refresh));
         }
-        subscriptions.push(iced::keyboard::listen().filter_map(quit_key));
+        subscriptions.push(iced::keyboard::listen().filter_map(keys::shortcut));
         subscriptions
             .push(iced::window::resize_events().map(|(_, size)| Message::Resized(size.width)));
         Subscription::batch(subscriptions)
@@ -588,6 +600,16 @@ impl App {
                 return operation::snap_to_end("conversation");
             }
             Message::Copy(value) => return iced::clipboard::write(value),
+            Message::CopyTranscript => {
+                if let Some(view) = self.current() {
+                    return iced::clipboard::write(view.conversation.transcript());
+                }
+            }
+            Message::CopyFile => {
+                if let Some(file) = self.current().and_then(|v| v.files.reader.as_ref()) {
+                    return iced::clipboard::write(file.text.clone());
+                }
+            }
             Message::Link(url) => return iced::clipboard::write(url),
             Message::Selecting(held) => self.selecting = held,
             Message::ToggleText => {
@@ -768,9 +790,61 @@ impl App {
             }
             Message::Workspace(action) => return self.workspace_action(action),
             Message::Resized(width) => self.width = width,
+            Message::Focus(forward) => return keys::step(forward),
+            Message::StepTab(delta) => {
+                let Some(at) = self
+                    .selected
+                    .as_ref()
+                    .and_then(|id| self.tabs.iter().position(|t| &t.id == id))
+                    .or((!self.tabs.is_empty()).then_some(0))
+                else {
+                    return Task::none();
+                };
+                let count = self.tabs.len() as i32;
+                let next = (at as i32 + delta).rem_euclid(count) as usize;
+                let id = self.tabs[next].id.clone();
+                return self.choose(id);
+            }
+            Message::Escape => return self.escape(),
+            Message::Page(down) => {
+                let reading = self.current().is_some_and(|v| v.files.reader.is_some());
+                let ids: &[&'static str] = if reading {
+                    &["markdown-reader", "diff-reader"]
+                } else {
+                    &["conversation"]
+                };
+                return keys::page(ids, down);
+            }
             Message::Noop => {}
         }
         Task::none()
+    }
+
+    /// Escape steps back, as in the shelf: the open file closes, then the transcript, then the
+    /// drawer; with nothing left to close, the prompt takes the keyboard.
+    fn escape(&mut self) -> Task<Message> {
+        let drawer = self.workspace.shown;
+        let Some(view) = self.current_mut() else {
+            return Task::none();
+        };
+        if view.files.reader.is_some() {
+            view.files.close_reader();
+            view.reader = None;
+            return self.restore_scroll();
+        }
+        if view.text_view.is_some() {
+            view.text_view = None;
+            return self.restore_scroll();
+        }
+        let terminal = view.terminal_shown;
+        if drawer {
+            self.workspace.shown = false;
+            return Task::none();
+        }
+        if terminal {
+            return Task::none();
+        }
+        operation::focus("prompt")
     }
 
     fn lane_update(&mut self, session: String, epoch: u64, update: lane::Update) -> Task<Message> {
@@ -1233,19 +1307,6 @@ fn trace(what: impl FnOnce() -> String) {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *ON.get_or_init(|| std::env::var_os("SILL_GUI_TRACE").is_some()) {
         eprintln!("sill-gui: {}", what());
-    }
-}
-
-/// Ctrl+Q (Cmd+Q on a Mac) quits: with no title bar there is no close button.
-fn quit_key(event: iced::keyboard::Event) -> Option<Message> {
-    match event {
-        iced::keyboard::Event::KeyPressed { key, modifiers, .. }
-            if modifiers.command()
-                && matches!(key.as_ref(), iced::keyboard::Key::Character("q")) =>
-        {
-            Some(Message::Quit)
-        }
-        _ => None,
     }
 }
 

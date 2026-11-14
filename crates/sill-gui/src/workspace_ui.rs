@@ -9,7 +9,7 @@ use sill_proto::sessions::HostPath;
 use sill_client::files::{FilesState as State, key, name, relative};
 
 use crate::{
-    App, Message, SessionView, selection,
+    App, Message, SessionView, keys, selection,
     style::{self, P},
     viewer,
     workspace::Action,
@@ -18,11 +18,14 @@ use crate::{
 fn msg(action: Action) -> Message {
     Message::Workspace(action)
 }
-fn action<'a>(label: impl Into<String>, event: Action) -> iced::widget::Button<'a, Message> {
-    button(text(label.into()).size(style::SMALL))
-        .padding([3, 7])
-        .style(style::quiet)
-        .on_press(msg(event))
+/// A quiet text button the keyboard reaches too.
+fn action<'a>(label: impl Into<String>, event: Action) -> Element<'a, Message> {
+    keys::press(
+        button(text(label.into()).size(style::SMALL))
+            .padding([3, 7])
+            .style(style::quiet),
+        msg(event),
+    )
 }
 fn short(value: &str, limit: usize) -> String {
     if value.chars().count() <= limit {
@@ -65,17 +68,17 @@ impl App {
                 open
             )]
             .align_y(Alignment::Center);
-            chip = chip.push(
+            chip = chip.push(keys::press_maybe(
                 button(text("×").size(style::TEXT))
                     .padding([1, 5])
-                    .style(style::quiet)
-                    .on_press_maybe(state.pin_pending.is_none().then(|| {
-                        msg(Action::Pin {
-                            path: root.path.clone(),
-                            on: false,
-                        })
-                    })),
-            );
+                    .style(style::quiet),
+                state.pin_pending.is_none().then(|| {
+                    msg(Action::Pin {
+                        path: root.path.clone(),
+                        on: false,
+                    })
+                }),
+            ));
             chips = chips.push(tip(
                 container(chip).style(style::fill(P.surface)),
                 root.path.display.clone(),
@@ -222,14 +225,16 @@ impl App {
                             ]
                             .spacing(4);
                             body = body.push(tip(
-                                button(label)
-                                    .padding([4, 10])
-                                    .width(Fill)
-                                    .style(style::row_button)
-                                    .on_press(msg(Action::Open {
+                                keys::press(
+                                    button(label)
+                                        .padding([4, 10])
+                                        .width(Fill)
+                                        .style(style::row_button),
+                                    msg(Action::Open {
                                         path: entry.path.clone(),
                                         repo: Some(base.clone()),
-                                    })),
+                                    }),
+                                ),
                                 entry.path.display.clone(),
                             ));
                         }
@@ -256,17 +261,19 @@ impl App {
             .on_submit(msg(Action::BrowsePath));
         let controls = row![
             action("Open", Action::BrowsePath),
-            button(
-                text(if state.pin_pending.is_some() {
-                    "Pinning…"
-                } else {
-                    "+ Pin"
-                })
-                .size(style::SMALL)
+            keys::press_maybe(
+                button(
+                    text(if state.pin_pending.is_some() {
+                        "Pinning…"
+                    } else {
+                        "+ Pin"
+                    })
+                    .size(style::SMALL)
+                )
+                .padding([3, 7])
+                .style(style::quiet),
+                state.pin_pending.is_none().then(|| msg(Action::PinPath))
             )
-            .padding([3, 7])
-            .style(style::quiet)
-            .on_press_maybe(state.pin_pending.is_none().then(|| msg(Action::PinPath)))
         ]
         .spacing(4);
         column![
@@ -291,10 +298,12 @@ impl App {
             action("‹ Conversation", Action::CloseViewer),
             space().width(Fill),
             action("↻", Action::RefreshFile),
-            button(text("Copy").size(style::SMALL))
-                .padding([3, 7])
-                .style(style::quiet)
-                .on_press(Message::Copy(file.text.clone())),
+            keys::press(
+                button(text("Copy").size(style::SMALL))
+                    .padding([3, 7])
+                    .style(style::quiet),
+                Message::CopyFile
+            ),
             action("×", Action::CloseViewer)
         ]
         .align_y(Alignment::Center);
@@ -346,6 +355,7 @@ impl App {
                 .font(Font::with_name(crate::fonts::MONO_FAMILY))
                 .style(style::reader)
                 .on_action(|a| msg(Action::Text(a)))
+                .key_binding(crate::ui::reading_keys)
                 .into()
         } else if is_diff {
             let diff = diff_rows(&file.text);
@@ -458,11 +468,13 @@ fn node<'a>(
         .color(color)
     ]
     .spacing(3);
-    let button = button(label)
-        .padding([4, 3])
-        .style(style::row_button)
-        .width(Fill)
-        .on_press(msg(event));
+    let button = keys::press(
+        button(label)
+            .padding([4, 3])
+            .style(style::row_button)
+            .width(Fill),
+        msg(event),
+    );
     let mut line = row![button].align_y(Alignment::Center);
     if !pinned {
         line = line.push(action(

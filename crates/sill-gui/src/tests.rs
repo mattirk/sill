@@ -836,10 +836,10 @@ fn ctrl_q_quits() {
         repeat: false,
     };
     assert!(matches!(
-        crate::quit_key(press(Modifiers::CTRL)),
+        crate::keys::shortcut(press(Modifiers::CTRL)),
         Some(Message::Quit)
     ));
-    assert!(crate::quit_key(press(Modifiers::empty())).is_none());
+    assert!(crate::keys::shortcut(press(Modifiers::empty())).is_none());
 }
 
 // --- the terminal -------------------------------------------------------------------------------
@@ -1211,8 +1211,16 @@ impl Live {
             self.cache.take().unwrap_or_default(),
             &mut self.renderer,
         );
-        for mut operation in self.operations.drain(..) {
-            ui.operate(&self.renderer, operation.as_mut());
+        // as the runtime does: an operation may chain the next (focus traversal counts first)
+        for operation in self.operations.drain(..) {
+            let mut current = Some(operation);
+            while let Some(mut operation) = current.take() {
+                ui.operate(&self.renderer, operation.as_mut());
+                if let iced::advanced::widget::operation::Outcome::Chain(next) = operation.finish()
+                {
+                    current = Some(next);
+                }
+            }
         }
         let mut frame = Frame {
             ui: &mut ui,
@@ -1669,4 +1677,246 @@ fn the_reader_selects_across_markdown_blocks_and_diff_lines() {
         copies(ui.into_messages()),
         ["-A conversation preview.\n+A place to work with your agents.\n+"]
     );
+}
+
+// --- keyboard -----------------------------------------------------------------------------------
+
+/// A key press as the keyboard sends it, with nothing held.
+fn key(named: iced::keyboard::key::Named) -> iced::Event {
+    use iced::keyboard::{Event, Key, Location, Modifiers, key};
+    iced::Event::Keyboard(Event::KeyPressed {
+        key: Key::Named(named),
+        modified_key: Key::Named(named),
+        physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+        location: Location::Standard,
+        modifiers: Modifiers::empty(),
+        text: None,
+        repeat: false,
+    })
+}
+
+/// Tab `steps` times through `app`, pressing `press` at each stop: what each press asks for
+/// (not applied, so the window stays as it is).
+fn at_each_stop(
+    app: &mut App,
+    size: (f32, f32),
+    steps: usize,
+    press: iced::keyboard::key::Named,
+) -> Vec<Option<Message>> {
+    let mut live = Live::new(size);
+    live.frame(app, |_| {});
+    (0..steps)
+        .map(|_| {
+            live.apply(app, Message::Focus(true));
+            live.frame(app, |ui| ui.send(vec![key(press)]))
+                .into_iter()
+                .next()
+        })
+        .collect()
+}
+
+/// The keyboard gate (docs/sill-gui.md, direction 6): Tab reaches the controls in reading order —
+/// the session's tab, the top bar, the file chip, the tool row, the question's options, the
+/// prompt, the controls, the shell and Stop — and Enter or Space presses the focused one.
+#[test]
+fn tab_reaches_every_control_in_reading_order_and_enter_presses_it() {
+    use iced::keyboard::key::Named;
+    let mut app = streamed();
+    let _ = app.update(Message::DemoTick); // the edit now waits on its question
+    let pressed = at_each_stop(&mut app, (720.0, 860.0), 40, Named::Enter);
+    let names: Vec<String> = pressed
+        .iter()
+        .map(|m| match m {
+            Some(Message::Choose(id)) => format!("choose {id}"),
+            Some(Message::Workspace(action)) => {
+                format!("files {action:?}").chars().take(24).collect()
+            }
+            Some(Message::Answer { option_id, .. }) => format!("answer {option_id}"),
+            Some(other) => format!("{other:?}").chars().take(24).collect(),
+            None => "-".into(),
+        })
+        .collect();
+    let at = |what: &str| {
+        names
+            .iter()
+            .position(|n| n.starts_with(what))
+            .unwrap_or_else(|| panic!("{what} not reached: {names:?}"))
+    };
+    assert_eq!(names[0], "choose demo", "{names:?}");
+    assert_eq!(names[1], "ToggleText", "{names:?}");
+    assert!(names[2].starts_with("files ToggleDrawer"), "{names:?}");
+    let order = [
+        at("files Toggle("),
+        at("ToggleTool(\"tool\")"),
+        at("answer allow"),
+        at("answer reject"),
+        at("Send"),
+        at("ToggleTerminal"),
+        at("Stop"),
+    ];
+    assert!(
+        order.windows(2).all(|w| w[0] < w[1]),
+        "{order:?} in {names:?}"
+    );
+}
+
+/// Space presses too, and a dropdown steps through its choices with Up and Down.
+#[test]
+fn space_presses_and_arrows_step_a_dropdown() {
+    use iced::keyboard::key::Named;
+    let mut app = streamed();
+    let spaced = at_each_stop(&mut app, (720.0, 860.0), 1, Named::Space);
+    assert!(
+        matches!(&spaced[0], Some(Message::Choose(id)) if id == "demo"),
+        "{spaced:?}"
+    );
+    let stepped = at_each_stop(&mut app, (720.0, 860.0), 40, Named::ArrowDown);
+    assert!(
+        stepped
+            .iter()
+            .any(|m| matches!(m, Some(Message::SetMode(pick)) if pick.value == "plan")),
+        "the mode dropdown takes Down: {stepped:?}"
+    );
+    assert!(
+        stepped.iter().any(|m| matches!(m, Some(Message::SetOption(option, pick)) if option == "model" && pick.value == "brisk")),
+        "{stepped:?}"
+    );
+}
+
+/// Focus moving to a control out of sight scrolls the conversation to it.
+#[test]
+fn focus_scrolls_the_control_into_sight() {
+    let mut app = streamed();
+    let _ = app.update(Message::DemoTick);
+    let mut live = Live::new((720.0, 380.0));
+    live.frame(&app, |_| {});
+    let mut offsets = vec![];
+    for _ in 0..12 {
+        live.apply(&mut app, Message::Focus(true));
+        let mut offset = None;
+        live.frame(&app, |ui| offset = scrolled(ui, "conversation"));
+        offsets.push(offset.unwrap_or_default());
+    }
+    assert!(
+        offsets.iter().any(|y| *y > 50.0),
+        "tabbing into the conversation scrolled it: {offsets:?}"
+    );
+}
+
+/// The shelf's shortcuts (`shelf/window.rs`), and how the prompt passes them on.
+#[test]
+fn shortcuts_match_the_shelf_and_work_from_the_prompt() {
+    use crate::keys::shortcut;
+    use iced::keyboard::{Event, Key, Location, Modifiers, key, key::Named};
+    let press = |key: Key, modifiers| Event::KeyPressed {
+        key: key.clone(),
+        modified_key: key,
+        physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+        location: Location::Standard,
+        modifiers,
+        text: None,
+        repeat: false,
+    };
+    let named = |n| Key::Named(n);
+    let ch = |c: &str| Key::Character(c.into());
+    let both = Modifiers::CTRL | Modifiers::SHIFT;
+    assert!(matches!(
+        shortcut(press(named(Named::Tab), Modifiers::empty())),
+        Some(Message::Focus(true))
+    ));
+    assert!(matches!(
+        shortcut(press(named(Named::Tab), Modifiers::SHIFT)),
+        Some(Message::Focus(false))
+    ));
+    assert!(matches!(
+        shortcut(press(named(Named::ArrowRight), both)),
+        Some(Message::StepTab(1))
+    ));
+    assert!(matches!(
+        shortcut(press(named(Named::ArrowLeft), both)),
+        Some(Message::StepTab(-1))
+    ));
+    assert!(matches!(
+        shortcut(press(ch("F"), both)),
+        Some(Message::Workspace(crate::workspace::Action::ToggleDrawer))
+    ));
+    assert!(matches!(
+        shortcut(press(ch("t"), Modifiers::CTRL)),
+        Some(Message::ToggleTerminal)
+    ));
+    assert!(matches!(
+        shortcut(press(named(Named::Escape), Modifiers::empty())),
+        Some(Message::Escape)
+    ));
+    assert!(matches!(
+        shortcut(press(named(Named::PageDown), Modifiers::empty())),
+        Some(Message::Page(true))
+    ));
+    assert!(matches!(
+        shortcut(press(named(Named::End), Modifiers::CTRL)),
+        Some(Message::Latest)
+    ));
+    assert!(matches!(
+        shortcut(press(ch("q"), Modifiers::CTRL)),
+        Some(Message::Quit)
+    ));
+    assert!(shortcut(press(ch("a"), Modifiers::empty())).is_none());
+
+    // in the prompt: tab switching beats word selection, PageUp pages the conversation, and
+    // Tab is left to the window
+    use iced::widget::text_editor::{Binding, KeyPress, Status};
+    let typed = |key: Key, modifiers| KeyPress {
+        key: key.clone(),
+        modified_key: key,
+        physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+        modifiers,
+        text: None,
+        status: Status::Focused { is_hovered: false },
+    };
+    assert!(matches!(
+        crate::ui::enter_sends(typed(named(Named::ArrowLeft), both)),
+        Some(Binding::Custom(Message::StepTab(-1)))
+    ));
+    assert!(matches!(
+        crate::ui::enter_sends(typed(named(Named::PageUp), Modifiers::empty())),
+        Some(Binding::Custom(Message::Page(false)))
+    ));
+    assert!(crate::ui::enter_sends(typed(named(Named::Tab), Modifiers::empty())).is_none());
+}
+
+/// Ctrl+Shift+Left/Right walk the tabs, round the ends.
+#[test]
+fn stepping_tabs_wraps_round() {
+    let (mut app, _) = App::new(true, None);
+    add_session(&mut app, "other");
+    let _ = app.update(Message::StepTab(1));
+    assert_eq!(app.selected.as_deref(), Some("other"));
+    let _ = app.update(Message::StepTab(1));
+    assert_eq!(app.selected.as_deref(), Some("demo"));
+    let _ = app.update(Message::StepTab(-1));
+    assert_eq!(app.selected.as_deref(), Some("other"));
+}
+
+/// Escape steps back as in the shelf: the open file, then the transcript, then the drawer.
+#[test]
+fn escape_steps_back() {
+    use crate::workspace::Action;
+    let (mut app, _) = App::new(true, None);
+    let _ = app.update(Message::Workspace(Action::ToggleDrawer));
+    let _ = app.update(Message::Workspace(Action::Open {
+        path: sill_proto::sessions::HostPath::from_path(std::path::Path::new(
+            "/home/demo/project/README.md",
+        )),
+        repo: None,
+    }));
+    let _ = app.update(Message::ToggleText);
+    assert!(demo_view(&app).files.reader.is_some() && demo_view(&app).text_view.is_some());
+    let _ = app.update(Message::Escape);
+    assert!(demo_view(&app).files.reader.is_none(), "the file first");
+    assert!(demo_view(&app).text_view.is_some());
+    let _ = app.update(Message::Escape);
+    assert!(demo_view(&app).text_view.is_none(), "then the transcript");
+    assert!(app.workspace.shown);
+    let _ = app.update(Message::Escape);
+    assert!(!app.workspace.shown, "then the drawer");
 }
