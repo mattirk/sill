@@ -20,7 +20,7 @@ impl Daemon {
     fn dir() -> PathBuf {
         static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("sill-daemon-test-{}-{n}", std::process::id()));
+        let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("daemon-{}-{n}", std::process::id())) /* on disk: each daemon stages a copy of the debug binary, too much for a /tmp tmpfs */;
         let _ = std::fs::remove_dir_all(&dir);
         for sub in ["run", "state", "home"] {
             std::fs::create_dir_all(dir.join(sub)).unwrap();

@@ -76,7 +76,7 @@ impl Fixture {
 
     fn with_python_create(python:bool) -> (Self, mpsc::Sender<()>, mpsc::Receiver<String>) {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!("sill-live-recovery-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("recovery-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
         let _ = std::fs::remove_dir_all(&dir);
         for sub in ["run/sill", "state/sill", "config/sill", "home"] {
             std::fs::create_dir_all(dir.join(sub)).unwrap();
@@ -427,7 +427,8 @@ fn exercise_recovery(adopt_checkpoint: bool, lose_worker: bool) {
     if lose_worker {
         assert_eq!(kind, "auto");
         assert!(!summary.is_empty());
-        assert!(fixture.snapshot()["retired"] == true);
+        // the end is written first, the runner's retirement right after it
+        fixture.wait("the lost worker's runner retired", || fixture.snapshot()["retired"] == true);
     } else {
         assert_eq!(title, "Recovered summary");
         assert_eq!(summary, "Summary before restart and after restart.");

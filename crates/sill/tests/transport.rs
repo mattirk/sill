@@ -26,7 +26,7 @@ fn command(dir: &std::path::Path) -> Command {
 }
 fn fixture() -> Fixture {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    let dir = std::env::temp_dir().join(format!("sill-stdio-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("stdio-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
     for sub in ["home", "state", "config", "run"] { std::fs::create_dir_all(dir.join(sub)).unwrap(); }
     let daemon = command(&dir).arg("daemon").spawn().unwrap();
     let mut fixture = Fixture { dir, daemon };
