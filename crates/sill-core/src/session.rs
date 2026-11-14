@@ -758,7 +758,7 @@ mod tests {
     #[test]
     fn no_host_login_is_shared_into_jails_and_the_hosts_codex_login_stays_masked() {
         let registry: std::collections::BTreeMap<String, crate::agents::Agent> = crate::agents::builtin().into_iter().map(|a| (a.id.clone(), a)).collect();
-        assert!(registry.values().filter(|a| ["claude", "codex"].contains(&a.id.as_str())).all(|a| a.shared_files.is_empty()));
+        assert!(registry.values().all(|a| a.shared_files.is_empty()), "a built-in agent shares a host login file");
         let home = std::env::temp_dir().join(format!("sill-shared-login-{}", std::process::id()));
         std::fs::create_dir_all(home.join(".codex")).unwrap();
         std::fs::write(home.join(".codex/auth.json"), "host login").unwrap();

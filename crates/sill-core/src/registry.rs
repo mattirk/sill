@@ -405,6 +405,8 @@ pub fn install(home: &Path, entry: &Entry, log: &mut dyn FnMut(String)) -> Resul
             home_env_parent: false,
             icon: icon.map(|p| p.display().to_string()),
             memory_paths: vec![],
+            // where a registry agent keeps its login is not known: no log out for it
+            login_files: vec![],
         },
     };
     agents::save_override(home, &agent)?;
