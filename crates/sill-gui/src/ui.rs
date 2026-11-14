@@ -3,8 +3,7 @@
 //! conversation; the composer with the agent's controls and send / stop.
 //!
 //! Supervision (docs/sill-gui.md, direction 4): every tab carries its session's mark — working,
-//! a question waiting, a problem — and while a file or the drawer covers the conversation a
-//! status strip keeps the selected session's state, its question and Stop in reach.
+//! a question waiting, a problem.
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -32,23 +31,18 @@ const MONO_FONT: Font = Font::with_name(crate::fonts::MONO_FAMILY);
 impl App {
     pub(crate) fn view(&self) -> Element<'_, Message> {
         let content = responsive(move |size| {
-            // the Changes page in the conversation's place; the strip keeps the session in reach
+            // The sill pages take the conversation's place.
             let page = match (&self.changes, &self.settings_page) {
                 (Some(page), _) => Some(self.changes_view(page)),
                 (None, Some(page)) => Some(self.settings_view(page)),
                 _ => None,
             };
             if let Some(page) = page {
-                let mut screen = column![page].height(Fill);
-                if let Some(view) = self.current() {
-                    screen = screen.push(self.strip(view));
-                }
-                return screen.into();
+                return column![page].height(Fill).into();
             }
             let Some(view) = self.current() else {
                 return self.empty();
             };
-            let covered = !view.conversation_shown();
             let body = match self.file_view(view) {
                 Some(reader) => reader,
                 None => column![self.feed(view), self.composer(view)]
@@ -63,7 +57,6 @@ impl App {
             };
             let main = column![chips, body].width(Fill).height(Fill);
             let placement = self.layout.drawer(self.workspace.shown, size.width);
-            let over = matches!(placement, Drawer::Over(_));
             // the conversation keeps one place in the widget tree wherever the drawer is: moving
             // it would give its scrollable fresh state (back at the top) and drop a selection
             let mut beside = row![main].height(Fill);
@@ -74,8 +67,7 @@ impl App {
             }
             let mut page = stack![beside];
             if let Drawer::Over(width) = placement {
-                // over the conversation: a file opened from it takes the conversation's place,
-                // and a press on the uncovered strip puts the drawer away
+                // A file opened from the overlay takes the conversation's place.
                 let drawer = self.file_drawer(view).map(|message| match message {
                     Message::Workspace(crate::workspace::Action::Open { path, repo }) => {
                         Message::Workspace(crate::workspace::Action::OpenAndHide { path, repo })
@@ -97,12 +89,7 @@ impl App {
                         .style(style::fill(P.bg)),
                 ]);
             }
-            // the conversation is out of sight: its state, question and Stop stay in reach
-            let mut screen = column![page.height(Fill)].height(Fill);
-            if covered || over {
-                screen = screen.push(self.strip(view));
-            }
-            screen.into()
+            column![page.height(Fill)].height(Fill).into()
         });
         let bar = container(responsive(move |size| self.top_bar(size.width))).height(37);
         let window = column![bar, content];
@@ -472,119 +459,6 @@ impl App {
             .on_enter(Message::ActivityHover(true))
             .on_exit(Message::ActivityHover(false))
             .into()
-    }
-
-    fn spinner(&self, color: Color) -> Element<'_, Message> {
-        activity_canvas(Indicator::Spinner(color), None)
-    }
-
-    // --- supervision ----------------------------------------------------------------------------
-
-    /// While the conversation is out of sight: the selected session's state, its first question
-    /// with its options, other sessions that need the person, the way back, and Stop.
-    fn strip<'a>(&'a self, view: &'a SessionView) -> Element<'a, Message> {
-        let attention = view.attention();
-        let color = match attention.level() {
-            Level::Question => P.warning,
-            Level::Problem => P.error,
-            Level::Working => P.accent,
-            Level::Calm => P.fg_dim,
-        };
-        let mut bar = row![].spacing(8).align_y(Alignment::Center);
-        if attention.level() == Level::Working {
-            bar = bar.push(self.spinner(P.accent));
-        }
-        let mut summary = attention.summary();
-        if attention.activity == Activity::Working
-            && attention.questions.is_empty()
-            && let Some(ms) = attention.working_ms
-        {
-            summary = format!("{summary} · {}", clock(ms));
-        }
-        bar = bar.push(
-            container(
-                text(one_line(&summary, 90))
-                    .size(style::SMALL)
-                    .color(color)
-                    .wrapping(text::Wrapping::None),
-            )
-            .width(Fill)
-            .clip(true),
-        );
-        // a permission question can be answered from here; a form needs the conversation
-        if let Some(question) = view.conversation.open_questions().next()
-            && question.fields.is_empty()
-        {
-            for option in &question.options {
-                bar = bar.push(keys::press_maybe(
-                    button(text(&option.title).size(style::TINY))
-                        .padding([2, 8])
-                        .style(option_style(&option.kind)),
-                    (!view.answering.contains(&question.question_id)).then(|| Message::Answer {
-                        question_id: question.question_id.clone(),
-                        option_id: option.option_id.clone(),
-                    }),
-                ));
-            }
-        }
-        for tab in &self.tabs {
-            if self.selected.as_deref() == Some(tab.id.as_str()) {
-                continue;
-            }
-            let Some(other) = self.views.get(&tab.id).map(SessionView::attention) else {
-                continue;
-            };
-            if other.level() < Level::Problem {
-                continue;
-            }
-            let label = format!(
-                "{} {}",
-                if other.level() == Level::Question {
-                    "?"
-                } else {
-                    "!"
-                },
-                one_line(&tab.title, 18)
-            );
-            bar = bar.push(tooltip(
-                keys::press(
-                    button(text(label).size(style::TINY).color(
-                        if other.level() == Level::Question {
-                            P.warning
-                        } else {
-                            P.error
-                        },
-                    ))
-                    .padding([2, 6])
-                    .style(style::quiet),
-                    Message::Choose(tab.id.clone()),
-                ),
-                container(text(other.summary()).size(style::TINY))
-                    .padding([3, 8])
-                    .style(style::fill(P.surface)),
-                tooltip::Position::Top,
-            ));
-        }
-        // a file's reader has its own way back
-        if view.files.reader.is_none() {
-            bar = bar.push(keys::press(
-                button(text("‹ Conversation").size(style::TINY))
-                    .padding([2, 8])
-                    .style(style::quiet),
-                Message::ShowConversation,
-            ));
-        }
-        if view.conversation.busy() {
-            bar = bar.push(stop_button());
-        }
-        column![
-            rule::horizontal(1).style(style::rule_style(P.border)),
-            container(bar)
-                .padding([4, 10])
-                .width(Fill)
-                .style(style::fill(P.surface)),
-        ]
-        .into()
     }
 
     // --- the conversation -----------------------------------------------------------------------

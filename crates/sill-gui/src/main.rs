@@ -234,8 +234,6 @@ pub enum Message {
     RetrySend(String),
     CheckSend(String),
     DiscardSend(String),
-    /// From the status strip: back to the conversation, from the drawer over it.
-    ShowConversation,
     /// A press on the top bar's empty space: the window manager moves the window.
     DragWindow,
     Quit,
@@ -1222,16 +1220,6 @@ impl App {
                 if let Some(view) = self.current_mut() {
                     view.outbox.take(&id);
                 }
-            }
-            Message::ShowConversation => {
-                if let Some(view) = self.current_mut() {
-                    view.files.close_reader();
-                    view.reader = None;
-                }
-                if self.workspace.shown && self.narrow() {
-                    self.workspace.shown = false;
-                }
-                return self.restore_scroll();
             }
             Message::DragWindow => return iced::window::latest().and_then(iced::window::drag),
             // the window goes; the daemon and its sessions go on (the tray icon and the hotkey

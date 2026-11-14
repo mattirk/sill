@@ -636,10 +636,9 @@ fn a_draft_stays_with_its_session() {
 
 // --- supervision --------------------------------------------------------------------------------
 
-/// With a file covering the conversation, the strip keeps the session's question — answerable —
-/// and Stop in reach, and the way back.
+/// A file takes the full view without a bottom status panel; its close returns to the conversation.
 #[test]
-fn the_status_strip_keeps_the_question_and_stop_in_reach_while_a_file_is_open() {
+fn a_file_has_no_bottom_status_panel_and_can_be_closed() {
     use crate::workspace::Action;
     let (mut app, _) = App::new(true, None);
     for _ in 0..=demo::CHUNKS.len() {
@@ -653,15 +652,12 @@ fn the_status_strip_keeps_the_question_and_stop_in_reach_while_a_file_is_open() 
     }
     assert!(!demo_view(&app).conversation_shown());
     let mut ui = simulator(&app, (1000.0, 860.0));
-    ui.find("Waiting for your answer: Edit conversation.rs")
-        .unwrap();
-    ui.click("Yes").unwrap();
-    ui.click(iced::widget::Id::new("stop")).unwrap();
-    let messages: Vec<Message> = ui.into_messages().collect();
     assert!(
-        matches!(&messages[..], [Message::Answer { option_id, .. }, Message::Stop] if option_id == "allow"),
-        "{messages:?}"
+        ui.find("Waiting for your answer: Edit conversation.rs")
+            .is_err()
     );
+    assert!(ui.find("‹ Conversation").is_err());
+    drop(ui);
     // the file's own close is the way back
     let mut ui = simulator(&app, (1000.0, 860.0));
     ui.click(iced::widget::Id::new("close-file")).unwrap();
@@ -671,8 +667,7 @@ fn the_status_strip_keeps_the_question_and_stop_in_reach_while_a_file_is_open() 
     assert!(demo_view(&app).conversation_shown());
 }
 
-/// Another session waiting on the person shows in its tab and, while files cover the
-/// conversation, in the strip; choosing it goes there.
+/// Another session waiting on the person stays marked in its tab while a file is open.
 #[test]
 fn other_sessions_waiting_on_the_person_are_marked() {
     use crate::workspace::Action;
@@ -698,7 +693,7 @@ fn other_sessions_waiting_on_the_person_are_marked() {
         repo: None,
     }));
     let mut ui = simulator(&app, (1000.0, 860.0));
-    ui.click("? other-title").unwrap();
+    ui.click("other-title").unwrap();
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(
         matches!(&messages[..], [Message::Choose(id)] if id == "other"),
@@ -1145,7 +1140,7 @@ fn a_drawer_over_the_conversation_keeps_its_place() {
     live.frame(&app, |ui| after = scrolled(ui, "conversation"));
     let (before, after) = (before.unwrap(), after.unwrap());
     assert!(before > 100.0, "the conversation is longer than the window");
-    // the status strip under the drawer shortens the view; at the tail, it stays at the tail
+    // Opening the drawer keeps the conversation at its tail.
     assert!(
         after >= before - 1.0,
         "back towards the top: {before} → {after}"

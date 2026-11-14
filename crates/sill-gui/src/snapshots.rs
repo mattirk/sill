@@ -131,11 +131,11 @@ fn render_files() {
     }));
     render_size(&app, "9-diff", (1000.0, 860.0));
     render_size(&app, "10-narrow-drawer", (480.0, 700.0));
-    // the agent waits on a question while the file is open: the strip keeps it in reach
+    // The agent waits on a question while the file is open; no bottom status panel.
     for _ in 0..=demo::CHUNKS.len() {
         let _ = app.update(Message::DemoTick);
     }
-    render_size(&app, "11-strip", (1000.0, 860.0));
+    render_size(&app, "11-file-waiting", (1000.0, 860.0));
 }
 
 #[test]
