@@ -293,8 +293,9 @@ pub fn stylesheet(t: &Theme) -> String {
              .dim-label {{ color: {dim}; }}\n\
              textview {{ background: transparent; color: {fg}; }}\n\
              textview text {{ background: transparent; color: {fg}; }}\n\
-             window, .background {{ background: {bg}; color: {fg}; }}\n\
-             popover > contents, tooltip > contents {{ background: {surface}; color: {fg}; border: 1px solid {border}; }}\n\
+             window, window.background {{ background: {bg}; color: {fg}; }}\n\
+             popover, popover.background {{ background: transparent; color: {fg}; }}\n\
+             popover > contents, popover > arrow, tooltip > contents {{ background: {surface}; color: {fg}; border: 1px solid {border}; }}\n\
              entry {{ background: {surface}; color: {fg}; border-color: {border}; }}\n\
              list, listview, row, scrolledwindow, viewport {{ background: transparent; color: {fg}; }}\n\
              button {{ border: none; box-shadow: none; text-shadow: none; -gtk-icon-shadow: none; background-image: none; background-color: alpha({fg}, 0.08); color: {fg}; }}\n\
