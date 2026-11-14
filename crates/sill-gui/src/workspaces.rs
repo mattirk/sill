@@ -99,7 +99,7 @@ fn resolve_prompt(detail: &str) -> String {
 fn commit_prompt(repository: &str) -> String {
     format!(
         "Commit the uncommitted changes in {repository} now, with a commit message of your own that says what they do, so that I can apply them to my checkout. \
-         Change nothing else. Every changed or new file must end up committed, ignored or removed: `git status` must be clean afterwards."
+         Change nothing else. Every changed or new file must end up committed, ignored or removed: `git status` must be clean afterwards. After committing, reply with only the short commit message (the subject line). If committing fails, report the failure instead."
     )
 }
 

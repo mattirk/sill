@@ -2,7 +2,7 @@
 //! for — folded to one line that opens to them (docs/sill-gui.md, *Folded turns*). What a turn is
 //! for is the protocol's (`Turn::purpose`, `Submission::purpose`), never read from its words.
 //! A fold holds Apply's prompt with the turn it started. An item with a question under it keeps
-//! its own row, so a question is never hidden in a fold.
+//! its own row, so a question is never hidden in a fold. Apply commit replies stay visible too.
 use std::ops::Range;
 
 use sill_proto::sfp::Item;
@@ -31,7 +31,7 @@ pub fn rows<'a>(
     purpose: impl Fn(&'a Item) -> Option<&'a str>,
     stands_alone: impl Fn(&Item) -> bool,
 ) -> Vec<Row> {
-    let folded = |item: &'a Item| purpose(item).filter(|_| !stands_alone(item));
+    let folded = |item: &'a Item| purpose(item).filter(|why| !stands_alone(item) && !(*why == "commit" && item.kind == "agent"));
     let mut rows = Vec::new();
     let mut plain = 0;
     let mut index = 0;
@@ -136,7 +136,8 @@ mod tests {
             vec![
                 Row::Items(0..1),
                 Row::Items(1..2),
-                Row::Fold(2..6, "commit".into()),
+                Row::Fold(2..5, "commit".into()),
+                Row::Items(5..6),
                 Row::Items(6..7),
                 Row::Fold(7..8, "summary".into()),
                 Row::Items(8..9),
@@ -159,7 +160,7 @@ mod tests {
             vec![
                 Row::Fold(0..1, "commit".into()),
                 Row::Items(1..2),
-                Row::Fold(2..3, "commit".into()),
+                Row::Items(2..3),
             ]
         );
     }
