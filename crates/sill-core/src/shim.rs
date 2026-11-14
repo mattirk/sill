@@ -210,6 +210,9 @@ pub fn port_stream(socket: &Path, port: u16) -> Result<UnixStream> {
 
 /// Where a session's sockets live on the host.
 pub fn runtime_dir(session: &str) -> Result<PathBuf> {
+    if !crate::session::valid_id(session) {
+        anyhow::bail!("bad session id {session:?}");
+    }
     let base = std::env::var("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(format!("/run/user/{}", rustix::process::getuid().as_raw())));

@@ -54,7 +54,7 @@ Verified in code and, where marked ⊙, confirmed from inside a running jail:
 | S13 | Medium | **Registry index unsigned, unpinned.** `registry.rs:19,184-201`: curl, no signature, no version pin, `--no-package-lock`, optional sha256. Cache is in private `~/.cache` by default (not agent-writable) but a policy without that entry makes it keepable. | new |
 | S14 | Medium | **"Host-local" refusal is address-class based.** `proxy.rs:55-75` misses the host's own global addresses, LAN neighbours with public/global-v6 addresses, `0.0.0.0/8`, `192.0.0.0/24`, `198.18/15`, `240/4`, `64:ff9b::/96`, `2002::/16`. Only reachable under `mode = "all"`; the default allow-list is unaffected. | **partly fixed 2026-11-01**: the reserved blocks, NAT64 and 6to4 are refused (`proxy::is_local`); the host's own global addresses and LAN neighbours with global addresses are not (would need the host's interface list). |
 | S15 | Low | **User journal readable from inside the jail.** `/var/log` is an ordinary overlaid dir; `/var/log/journal/<mid>/user-<uid>.journal*` is user-readable by ACL → every session's `allow/deny host:port` lines, other sessions' agent stderr, every user service's log. | new |
-| S16 | Low | **Session ids never validated at the sinks.** `state_dir`, `remove_state` (`unshare -Ur rm -rf <sessions/<id>>`), `unit_name`, `runtime_dir` join the id unchecked. Ids only come from `new_id()` today, but `sill.db` lives under `~/.local/state/sill`, overlaid and not masked, so a crafted db reaches the host through Keep (S2/S10 amplifier). | new |
+| S16 | Low | **Session ids never validated at the sinks.** `state_dir`, `remove_state` (`unshare -Ur rm -rf <sessions/<id>>`), `unit_name`, `runtime_dir` join the id unchecked. Ids only come from `new_id()` today, but `sill.db` lives under `~/.local/state/sill`, overlaid and not masked, so a crafted db reaches the host through Keep (S2/S10 amplifier). | **fixed 2026-11-01**: `session::valid_id` (1–64 of `[A-Za-z0-9_-]`) at `state_dir` (so `remove_state` too) and `shim::runtime_dir`; `unit_name` reduces anything else to `_`. Test: `ids_at_the_sinks`. |
 | S17 | Low | **VTE Ctrl+click opens `https?://` matches straight into `UriLauncher`** (`session_view.rs:553-567`), no click-through as §4.5 promises; jail shell output is agent text. Images: any host file with an image extension (SVG included) is decoded by gdk-pixbuf/librsvg on the host (`session_view.rs:1641-1684`). | new |
 | S18 | Low | **Transient `sill-<id>` units and `sill-shelf.service` have no systemd hardening** (no `NoNewPrivileges`, `ProtectSystem`, seccomp). bwrap is the boundary; a bwrap bypass has no second fence. | by design, noted |
 | S19 | Low | Minor: `--state-dir` fstab line lacks `nosuid,nodev` (`init.rs:310`); image briefly 0644 before chmod; proxy `serve` ends on the first `accept` error and `addrs[0]` panics the handler on an empty resolve (`proxy.rs:105,171`); `Proxy-Authorization` forwarded upstream (`:182`); any port on allowed hosts (§4.11 #9). | proxy items **fixed 2026-11-01** (§4.11 #9); fstab/image mode open |
@@ -65,8 +65,10 @@ Verified in code and, where marked ⊙, confirmed from inside a running jail:
 2026-11-01, same day: S1–S6 fixed (status column; commit after this audit). New module
 `sill-core::safe_fs` carries the symlink-proof write/remove/copy and the owner check; `changes::Git`
 is the only way the shelf runs git. Later the same day S8 (host shells with git's fsmonitor off)
-and S10 (`expected_hash` wired, Keep all limited to plain file writes) followed. Still open from this
-pass: S7, S9 (viewer/tree follow links) and S12–S20.
+and S10 (`expected_hash` wired, Keep all limited to plain file writes) followed, then S7 (the
+Allow-host prompt from a validated name, no public-suffix wildcards, capped), S9 (tree and viewer
+stop at links) and S16 (session ids checked at the sinks). Still open from this pass: S12, S13,
+S15, S17–S20.
 
 2026-11-01, later: the §4.11 leftovers closed in seven commits — #8 (other agents' credentials
 masked, homes 0700), #7/#9 (proxy decides on the name before DNS, one port per pattern, connection
@@ -74,7 +76,7 @@ cap, head cap, accept survives; S14's reserved ranges, S19's proxy items), #10 (
 diffs never through a link; S11, S9's save half via `safe_fs::replace_file`), #16 (keep re-stats the
 host), #13 (session start, git status, keep/revert off the GTK thread), #15 (weak closures in the
 session view), #17 (store busy timeout and atomic seq, ledger EACCES, hotkey HUP, store-open error
-window). Open from this file: S7, S9 (viewer/tree reads), S12, S13, S15–S18, S19's
+window). Open from this file: S12, S13, S15, S17, S18, S19's
 fstab/image items.
 
 ## Proposed top three (as written before the fixes)

@@ -297,8 +297,21 @@ pub fn uploads_dir(policy: &Policy, state_dir: &Path, home: &Path) -> Option<(Pa
     Some((host, cache.join("sill").join("uploads")))
 }
 
+/// A session id as `store::new_id` makes them (hex), with room for older or hand-made ones: letters,
+/// digits, `-` and `_`, 1–64 of them — never empty, never a path. Every sink that joins an id into
+/// a path or a unit name checks it: `sill.db` is a file in the person's state, so a row with a
+/// crafted id must not reach `rm -rf` or a mount (security.md S16).
+pub fn valid_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+fn checked_id(id: &str) -> Result<&str> {
+    if valid_id(id) { Ok(id) } else { bail!("bad session id {id:?}") }
+}
+
 /// Where a session's upper trees live on the state filesystem (SPEC §4.9); created 0700 for the user.
 pub fn state_dir(uid: u32, session: &str) -> Result<PathBuf> {
+    let session = checked_id(session)?;
     let state_fs = Path::new(crate::jail::STATE_FS);
     let all = crate::mounts::host_mounts()?;
     if !crate::mounts::is_mount_point(&all, state_fs) {
@@ -318,7 +331,7 @@ pub fn state_dir(uid: u32, session: &str) -> Result<PathBuf> {
 
 /// Remove a session's upper trees (needs a user namespace: overlayfs creates root-owned work dirs).
 pub fn remove_state(uid: u32, session: &str) -> Result<()> {
-    let dir = state_dir(uid, session)?;
+    let dir = state_dir(uid, session)?; // checks the id
     if dir.is_dir() {
         let st = std::process::Command::new("unshare").args(["-Ur", "rm", "-rf"]).arg(&dir).status()?;
         if !st.success() {
@@ -329,7 +342,10 @@ pub fn remove_state(uid: u32, session: &str) -> Result<()> {
 }
 
 pub fn unit_name(session: &str) -> String {
-    format!("sill-{session}")
+    // a unit name is not a path, but systemd's grammar is narrower than ours: anything else is
+    // reduced to what it allows, so a crafted id names no other unit than its own garbled self
+    let safe: String = session.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+    format!("sill-{safe}")
 }
 
 /// Where a session's log is (SPEC §4.7): the unit's journal, or the detached session's files.
@@ -632,6 +648,18 @@ pub fn stop(session: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ids_at_the_sinks() {
+        assert!(valid_id(&crate::store::new_id()));
+        assert!(valid_id("a1b2c3d4") && valid_id("old-style_id"));
+        for bad in ["", "../x", "a/b", ".", "..", "a b", &"x".repeat(65)] {
+            assert!(!valid_id(bad), "{bad:?}");
+            assert!(state_dir(1000, bad).is_err(), "{bad:?}");
+            assert!(crate::shim::runtime_dir(bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(unit_name("../etc"), "sill-___etc");
+    }
 
     /// A detached session's log: each file's tail under its name, empty or missing files skipped.
     #[test]
