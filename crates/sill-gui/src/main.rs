@@ -3381,8 +3381,19 @@ impl App {
             return Task::none();
         };
         let text = view.draft.text().trim_end().to_string();
-        if view.annotation.is_some() || view.attachments_busy || (text.trim().is_empty() && view.attachments.is_empty()) {
+        if view.annotation.is_some() || view.attachments_busy {
             return Task::none();
+        }
+        if text.trim().is_empty() && view.attachments.is_empty() {
+            let next = view.conversation.submissions.values()
+                .filter(|s| s.delivery == "queued" && s.insertion == "pending"
+                    && s.outcome == "pending" && !s.held)
+                .min_by_key(|s| s.accepted_seq.parse::<u64>().unwrap_or(u64::MAX))
+                .map(|s| s.submission_id.clone());
+            return match next {
+                Some(id) => self.update(Message::SendNow(id)),
+                None => Task::none(),
+            };
         }
         view.draft = editor::Editor::new();
         view.follow_tail = true;
