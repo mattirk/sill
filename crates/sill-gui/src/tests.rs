@@ -2570,6 +2570,7 @@ fn cancelled_queued_prompts_disappear_from_the_composer() {
         .insert("queued".into(), submission.clone());
     let mut ui = simulator(&app, (720.0, 860.0));
     ui.find("unique queued prompt").unwrap();
+    ui.find("Queued 1").unwrap();
     drop(ui);
     let mut cancelled = submission;
     cancelled.outcome = "cancelled".into();
@@ -2583,7 +2584,7 @@ fn cancelled_queued_prompts_disappear_from_the_composer() {
     assert!(view.accept(update));
     let mut ui = simulator(&app, (720.0, 860.0));
     assert!(ui.find("unique queued prompt").is_err());
-    assert!(ui.find("Queued").is_err());
+    assert!(ui.find("Queued 1").is_err());
 }
 
 #[test]
@@ -2668,4 +2669,49 @@ fn the_plus_menu_keeps_the_conversation_position() {
             );
         }
     }
+}
+
+#[test]
+fn folder_chips_show_tracked_lines_and_untracked_files_independently() {
+    use sill_client::files::{Repo, Root, key};
+    use sill_proto::sessions::HostPath;
+    let (mut app, _) = App::new(true, None);
+    let path = HostPath::from_path(std::path::Path::new("/project"));
+    let view = app.views.get_mut("demo").unwrap();
+    view.files.roots = vec![Root {
+        path: path.clone(),
+        global: false,
+        metadata: None,
+        error: None,
+    }];
+    view.files.repos.insert(
+        key(&path).into(),
+        Repo {
+            root: Some(path.clone()),
+            lines: Some(("0".into(), "0".into())),
+            summary: "+0 −0  ?3".into(),
+            ..Repo::default()
+        },
+    );
+    {
+        let mut ui = simulator(&app, (720.0, 860.0));
+        ui.find("?3")
+            .expect("new files remain visible with no tracked line changes");
+        assert!(ui.find("+0").is_err());
+        assert!(ui.find("−0").is_err());
+    }
+    let repo = app
+        .views
+        .get_mut("demo")
+        .unwrap()
+        .files
+        .repos
+        .get_mut(key(&path))
+        .unwrap();
+    repo.lines = Some(("12".into(), "7".into()));
+    repo.summary = "+12 −7  ?0".into();
+    let mut ui = simulator(&app, (720.0, 860.0));
+    ui.find("+12").unwrap();
+    ui.find("−7").unwrap();
+    assert!(ui.find("?0").is_err());
 }

@@ -84,21 +84,30 @@ impl App {
             ]
             .spacing(6)
             .align_y(Alignment::Center);
-            // a folder in a repository: the lines its working tree adds and removes
-            if let Some((added, removed)) = state.repo_of(&root.path).and_then(|r| r.lines.as_ref())
-                && (added != "0" || removed != "0")
-            {
-                label = label.push(
-                    row![
-                        text(format!("+{added}"))
-                            .size(style::SMALL)
-                            .color(P.success),
-                        text(format!("−{removed}"))
-                            .size(style::SMALL)
-                            .color(P.error),
-                    ]
-                    .spacing(5),
-                );
+            // Match GTK: tracked line totals against HEAD, plus untracked files separately.
+            if let Some(repo) = state.repo_of(&root.path) {
+                if let Some((added, removed)) = &repo.lines {
+                    for (value, sign, color) in [(added, "+", P.success), (removed, "−", P.error)]
+                    {
+                        if value != "0" {
+                            label = label.push(
+                                text(format!("{sign}{value}"))
+                                    .size(style::SMALL)
+                                    .color(color),
+                            );
+                        }
+                    }
+                }
+                if let Some((_, untracked)) = repo.summary.rsplit_once('?') {
+                    let untracked = untracked.trim();
+                    if !matches!(untracked, "" | "0") {
+                        label = label.push(
+                            text(format!("?{untracked}"))
+                                .size(style::SMALL)
+                                .color(P.fg_dim),
+                        );
+                    }
+                }
             }
             let mut chip = row![keys::press(
                 button(label).padding([3, 8]).style(style::quiet),
@@ -260,7 +269,10 @@ impl App {
                 Element::from(space().height(0))
             } else {
                 container(column![input, controls].spacing(4))
-                    .padding(8)
+                    .padding(Padding {
+                        bottom: 4.0,
+                        ..Padding::new(8.0)
+                    })
                     .into()
             }
         ]

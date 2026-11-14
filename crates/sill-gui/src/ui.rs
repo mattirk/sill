@@ -117,7 +117,7 @@ impl App {
                 .align_bottom(Fill)
                 .padding(Padding {
                     right: 4.0,
-                    bottom: 8.0,
+                    bottom: 4.0,
                     ..Padding::ZERO
                 }),
             );
@@ -973,11 +973,13 @@ impl App {
             })
             .collect();
         waiting.sort_by_key(|s| s.accepted_seq.parse::<u64>().unwrap_or(u64::MAX));
-        for submission in waiting {
+        for (index, submission) in waiting.into_iter().enumerate() {
             has_queued = true;
             queued = queued.push(
                 row![
-                    text("Queued").size(style::TINY).color(P.fg_dim),
+                    text(format!("Queued {}", index + 1))
+                        .size(style::TINY)
+                        .color(P.fg_dim),
                     container(
                         text(one_line(&submission.text, 120))
                             .size(style::SMALL)
@@ -1020,7 +1022,7 @@ impl App {
         if has_queued {
             composer = composer.push(column![
                 container(queued)
-                    .padding([6, 0])
+                    .padding([3, 0])
                     .width(Fill)
                     .style(style::fill(alpha(P.accent, 0.05))),
                 rule::horizontal(1).style(style::rule_style(P.border)),
