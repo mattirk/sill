@@ -285,7 +285,9 @@ entry { border-radius: 0; }
 .sill-back { padding: 2px 10px 2px 6px; background: alpha(@accent_bg_color, 0.18); color: @view_fg_color; }
 .sill-back:hover { background: alpha(@accent_bg_color, 0.32); }
 .sill-pins { padding: 2px 0; }
-.sill-chip { background: alpha(@view_fg_color, 0.07); padding: 1px 2px 1px 8px; }
+.sill-chip { background: alpha(@view_fg_color, 0.07); padding: 0 2px 0 0; }
+.sill-chip-open { padding: 1px 8px; min-height: 0; }
+.sill-scope { padding: 2px 0; }
 .sill-pin { padding: 0 2px; min-height: 0; min-width: 0; opacity: 0.4; -gtk-icon-size: 11px; }
 .sill-pin:hover { opacity: 1; }
 .sill-badge { font-size: 80%; color: alpha(@accent_color, 0.9); font-family: monospace; }

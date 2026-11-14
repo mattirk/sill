@@ -30,6 +30,8 @@ pub struct SessionView {
     /// Called when a turn ends (the window refreshes the ledger pages).
     pub on_turn_end: RefCell<Option<Box<dyn Fn(&str)>>>,
     pub on_title: RefCell<Option<Box<dyn Fn(&str, &str)>>>,
+    /// Click on a pin chip: open the Files page scoped to that folder.
+    pub on_open_folder: RefCell<Option<Box<dyn Fn(&std::path::Path)>>>,
 }
 
 impl SessionView {
@@ -84,6 +86,7 @@ impl SessionView {
             replaying: RefCell::new(false),
             on_turn_end: RefCell::new(None),
             on_title: RefCell::new(None),
+            on_open_folder: RefCell::new(None),
         });
 
         // stored transcript
@@ -140,9 +143,19 @@ impl SessionView {
         for p in pins {
             let chip = gtk::Box::new(gtk::Orientation::Horizontal, 2);
             chip.add_css_class("sill-chip");
-            let l = gtk::Label::new(Some(&p.to_string_lossy().replace(&home, "~")));
-            l.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-            l.set_max_width_chars(32);
+            let l = gtk::Button::with_label(&p.to_string_lossy().replace(&home, "~"));
+            l.add_css_class("flat");
+            l.add_css_class("sill-chip-open");
+            l.set_tooltip_text(Some("Open in Files"));
+            {
+                let v = self.clone();
+                let p = p.clone();
+                l.connect_clicked(move |_| {
+                    if let Some(cb) = v.on_open_folder.borrow().as_ref() {
+                        cb(&p);
+                    }
+                });
+            }
             let x = gtk::Button::from_icon_name("window-close-symbolic");
             x.add_css_class("flat");
             x.add_css_class("sill-tab-close");

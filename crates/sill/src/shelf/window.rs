@@ -334,6 +334,13 @@ impl Shelf {
             *view.on_title.borrow_mut() = Some(Box::new(move |id, title| shelf.tabs.set_title(id, title)));
         }
         {
+            let shelf = self.clone();
+            *view.on_open_folder.borrow_mut() = Some(Box::new(move |p| {
+                shelf.files.set_scope(Some(p.to_path_buf()));
+                shelf.show_page("files");
+            }));
+        }
+        {
             // the top-bar status mirrors the selected view's status
             let shelf = self.clone();
             let vid = id.clone();

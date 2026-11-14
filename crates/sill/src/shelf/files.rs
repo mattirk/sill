@@ -22,6 +22,11 @@ use super::{session, theme};
 pub struct FilesPage {
     pub root: gtk::Box,
     view: gtk::ListView,
+    tree: gtk::TreeListModel,
+    scope_bar: gtk::Box,
+    scope_label: gtk::Label,
+    /// When set, the tree shows only this folder (opened from a pin chip).
+    scope: RefCell<Option<PathBuf>>,
     editor: sourceview5::View,
     buffer: sourceview5::Buffer,
     header: gtk::Label,
@@ -150,8 +155,24 @@ impl FilesPage {
                 if pinned {
                     name.add_css_class("sill-pinned");
                 }
-                badge.set_text(&if pinned { format!("{badge_text} ⌖").trim().to_string() } else { badge_text });
-                badge.set_tooltip_text(if pinned { Some("pinned to the current session") } else { None });
+                let is_repo = is_dir && path.join(".git").exists();
+                let mut parts: Vec<String> = Vec::new();
+                if !badge_text.is_empty() {
+                    parts.push(badge_text);
+                }
+                if is_repo {
+                    parts.push("git".into());
+                }
+                if pinned {
+                    parts.push("⌖".into());
+                }
+                badge.set_text(&parts.join(" "));
+                badge.set_tooltip_text(match (is_repo, pinned) {
+                    (true, true) => Some("git repository · pinned to the current session"),
+                    (true, false) => Some("git repository"),
+                    (false, true) => Some("pinned to the current session"),
+                    _ => None,
+                });
                 pin.set_visible(is_dir);
                 pin.set_icon_name(if pinned { "list-remove-symbolic" } else { "list-add-symbolic" });
                 pin.set_tooltip_text(Some(if pinned { "Unpin from the current session" } else { "Pin to the current session" }));
@@ -175,7 +196,34 @@ impl FilesPage {
         }
         let view = gtk::ListView::new(Some(selection.clone()), Some(factory));
         view.add_css_class("sill-files");
-        let tree_scroll = gtk::ScrolledWindow::builder().vexpand(true).hexpand(false).child(&view).width_request(300).build();
+        // scope bar: shown while the tree is limited to one folder
+        let scope_bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        scope_bar.add_css_class("sill-scope");
+        scope_bar.set_margin_start(6);
+        scope_bar.set_margin_end(4);
+        scope_bar.set_visible(false);
+        let scope_label = gtk::Label::new(None);
+        scope_label.set_xalign(0.0);
+        scope_label.set_hexpand(true);
+        scope_label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+        scope_label.add_css_class("dim-label");
+        let scope_clear = gtk::Button::from_icon_name("window-close-symbolic");
+        scope_clear.add_css_class("flat");
+        scope_clear.add_css_class("sill-tab-close");
+        scope_clear.set_tooltip_text(Some("Show everything"));
+        scope_bar.append(&scope_label);
+        scope_bar.append(&scope_clear);
+        let tree_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        tree_box.append(&scope_bar);
+        // never scroll sideways: names ellipsize, the pin column stays put
+        let tree_scroll = gtk::ScrolledWindow::builder()
+            .vexpand(true)
+            .hexpand(false)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .child(&view)
+            .width_request(220)
+            .build();
+        tree_box.append(&tree_scroll);
 
         // --- editor
         let buffer = sourceview5::Buffer::new(None);
@@ -206,15 +254,19 @@ impl FilesPage {
         right.append(&message);
 
         let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
-        paned.set_start_child(Some(&tree_scroll));
+        paned.set_start_child(Some(&tree_box));
         paned.set_end_child(Some(&right));
-        paned.set_position(340);
+        paned.set_position(280);
         paned.set_hexpand(true);
         root.append(&paned);
 
         let page = Rc::new(Self {
             root,
             view,
+            tree: selection.model().and_downcast::<gtk::TreeListModel>().expect("tree model"),
+            scope_bar,
+            scope_label,
+            scope: RefCell::new(None),
             editor,
             buffer,
             header,
@@ -230,6 +282,10 @@ impl FilesPage {
             on_pin: RefCell::new(None),
         });
         *page_for_bind.borrow_mut() = Some(Rc::downgrade(&page));
+        {
+            let p = page.clone();
+            scope_clear.connect_clicked(move |_| p.set_scope(None));
+        }
 
         // style schemes generated from the palettes, then follow the theme
         if let Some(dir) = theme::write_source_schemes() {
@@ -311,9 +367,10 @@ impl FilesPage {
             return;
         }
         let md = std::fs::metadata(path);
-        if md.as_ref().map(|m| m.len() > 2_000_000).unwrap_or(false) {
+        let size = md.as_ref().map(|m| m.len()).unwrap_or(0);
+        if size > 20_000_000 {
             *self.open.borrow_mut() = None;
-            self.header.set_text(&format!("{} — too large for the editor", path.display()));
+            self.header.set_text(&format!("{} — {} MB, too large for the editor", path.display(), size / 1_000_000));
             self.buffer.set_text("");
             return;
         }
@@ -324,7 +381,33 @@ impl FilesPage {
             self.buffer.set_text("");
             return;
         }
-        let text = String::from_utf8_lossy(&bytes).into_owned();
+        // GtkSourceView can't cope with minified/one-line files (highlighting + wrapping of a
+        // megabyte-long line): show those as a truncated, plain, read-only preview instead
+        const PREVIEW: usize = 200_000;
+        let longest = bytes.split(|b| *b == b'\n').map(|l| l.len()).max().unwrap_or(0);
+        let preview_only = size as usize > 1_500_000 || longest > 20_000;
+        let text = if preview_only {
+            let cut = bytes.len().min(PREVIEW);
+            String::from_utf8_lossy(&bytes[..cut]).into_owned()
+        } else {
+            String::from_utf8_lossy(&bytes).into_owned()
+        };
+        if preview_only {
+            *self.open.borrow_mut() = None;
+            self.buffer.set_language(None);
+            self.buffer.set_highlight_syntax(false);
+            self.editor.set_wrap_mode(gtk::WrapMode::Char);
+            self.buffer.set_text(&text);
+            self.editor.set_editable(false);
+            self.header.set_text(&format!(
+                "{} — {} KB, longest line {} chars: first {} KB shown read-only",
+                path.display(), size / 1000, longest, PREVIEW / 1000
+            ));
+            self.message.set_text("");
+            return;
+        }
+        self.buffer.set_highlight_syntax(true);
+        self.editor.set_wrap_mode(gtk::WrapMode::None);
         let lang = sourceview5::LanguageManager::default().guess_language(Some(path), None);
         self.buffer.set_language(lang.as_ref());
         self.buffer.set_text(&text);
@@ -367,6 +450,20 @@ impl FilesPage {
         }
     }
 
+    /// Limit the tree to one folder (from a pin chip), or show everything again.
+    pub fn set_scope(self: &Rc<Self>, path: Option<PathBuf>) {
+        let home = std::env::var("HOME").unwrap_or_default();
+        match &path {
+            Some(p) => {
+                self.scope_label.set_text(&format!("scope: {}", p.to_string_lossy().replace(&home, "~")));
+                self.scope_bar.set_visible(true);
+            }
+            None => self.scope_bar.set_visible(false),
+        }
+        *self.scope.borrow_mut() = path;
+        self.refresh();
+    }
+
     /// Rescan all sessions and rebuild badges and roots.
     pub fn refresh(self: &Rc<Self>) {
         let sessions = self.store.sessions().unwrap_or_default();
@@ -401,7 +498,11 @@ impl FilesPage {
     fn apply(self: &Rc<Self>, all: Vec<Change>, pins: Vec<PathBuf>) {
         let home = session::home().unwrap_or_default();
         let mut badges: BTreeMap<PathBuf, String> = BTreeMap::new();
-        let mut roots: Vec<PathBuf> = pins;
+        let scope = self.scope.borrow().clone();
+        let mut roots: Vec<PathBuf> = match &scope {
+            Some(s) => vec![s.clone()],
+            None => pins,
+        };
         for c in &all {
             badges.insert(c.path.clone(), format!("{}{}", c.kind.letter(), if c.conflict { "!" } else { "" }));
             let mut p = c.path.parent();
@@ -409,14 +510,15 @@ impl FilesPage {
                 badges.entry(d.to_path_buf()).or_insert_with(|| "·".into());
                 p = d.parent();
             }
-            if let Some(r) = changes::repo_root(&c.path)
+            if scope.is_none()
+                && let Some(r) = changes::repo_root(&c.path)
                 && !roots.contains(&r)
             {
                 roots.push(r);
             }
         }
         roots.dedup();
-        if !roots.contains(&home) {
+        if scope.is_none() && !roots.contains(&home) {
             roots.push(home);
         }
         *self.badges.borrow_mut() = badges;
@@ -430,6 +532,12 @@ impl FilesPage {
             self.roots_model.remove_all();
             for r in &wanted {
                 self.roots_model.append(&gtk::StringObject::new(r));
+            }
+            // a scoped tree opens its single root right away
+            if scope.is_some()
+                && let Some(row) = self.tree.child_row(0)
+            {
+                row.set_expanded(true);
             }
         }
         self.view.queue_draw();
