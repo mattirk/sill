@@ -43,7 +43,7 @@ fn stdio_connection_close_leaves_the_daemon_running() {
     let mut fixture = fixture();
     let mut proxy = fixture.command().args(["daemon", "--stdio"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
     let mut input = proxy.stdin.take().unwrap();
-    writeln!(input,"{}",json!({"jsonrpc":"2.0","id":0,"method":"_sill/initialize","params":{"protocols":[sill_proto::initialize::PROTOCOL_ID],"client":{"name":"test","version":"1"},"capabilities":{"sill.internal":1}}})).unwrap();
+    writeln!(input,"{}",json!({"jsonrpc":"2.0","id":0,"method":"_sill/initialize","params":{"protocols":[sill_proto::initialize::PROTOCOL_ID],"client":{"name":"test","version":"1"},"capabilities":{}}})).unwrap();
     writeln!(input, "{}", json!({"jsonrpc":"2.0","id":1,"method":sill_proto::method::DAEMON_STATUS,"params":{}})).unwrap();
     let reader = BufReader::new(proxy.stdout.take().unwrap());
     let (tx, rx) = std::sync::mpsc::channel();

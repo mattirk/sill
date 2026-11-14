@@ -41,7 +41,6 @@ pub struct SummaryDone {
     pub text: Option<String>,
 }
 
-use super::Conn;
 use super::hub::Hub;
 
 pub struct Runner {
@@ -59,17 +58,12 @@ struct State {
     /// A login request was answered with a saved API key: if the agent asks again, the card shows
     /// (with its reason) instead of the same key going again. Cleared when the agent is logged in.
     key_tried: bool,
-    /// This daemon sent a cancel during the turn in flight: the evidence an older relay's
-    /// `Cancelled` stop lacks (it uses the same reason for a prompt error).
-    cancel_sent: bool,
     answer_outbox: BTreeMap<u64, relay::Answer>,
     cursor: u64,
     next_command: u64,
     outbox: BTreeMap<u64, relay::Command>,
     context: context::Context,
     completed: Option<SummaryDone>,
-    #[serde(skip)]
-    subs: Vec<Arc<Conn>>,
     /// The agent's session id, whether it was resumed, and the controls it opened with.
     ready: Option<(String, bool)>,
     controls: Option<Controls>,
@@ -112,7 +106,6 @@ impl Runner {
     pub fn new(id: &str, relay: Arc<relay::Client>, snapshot: serde_json::Value) -> Result<Arc<Runner>> {
         let mut state: State = if snapshot.is_null() { State::default() } else { serde_json::from_value(snapshot)? };
         if state.generation_id.is_empty() { state.generation_id = super::sfp::id(); }
-        // Subscribers are frontend connections; they are never carried across a daemon restart.
         // Keep retirement durable until the relay's final event is drained: an ended session may
         // outlive the main daemon briefly, and must never replay as a live conversation.
         Ok(Arc::new(Runner { id: id.into(), relay, st: Mutex::new(state) }))
@@ -225,7 +218,6 @@ impl Runner {
             // so the session is not busy any more — the prompt after the login must not be refused
             relay::Event::AuthRequired { .. } => st.busy = false,
             relay::Event::TurnStarted => {
-                st.cancel_sent = false;
                 st.replaying = false;
                 st.busy = true;
                 st.turns += 1;
@@ -253,7 +245,7 @@ impl Runner {
                     let state=update["state"].as_str().unwrap_or("unknown");
                     // The projector only removes a pending native turn after observing active work.
                     if state=="idle" && st.adapter.turn_id().is_none() {
-                        st.busy=false;st.cancel_sent=false;st.last_turn_end=Some(sill_core::store::now());
+                        st.busy=false;st.last_turn_end=Some(sill_core::store::now());
                         if unflushed {
                             flush(store,&id,st)?;st.native_flushed_turn=native_turn;
                             if let Some((kind,text,_))=st.summary.take(){done=Some(SummaryDone{kind,text:Some(text.trim().to_string())});}
@@ -283,7 +275,6 @@ impl Runner {
             }
             relay::Event::Stopped(reason) => {
                 st.busy = false;
-                st.cancel_sent = false;
                 if !matches!(reason, acp::StopReason::Other(r) if r == "_sill_prompt_error") {
                     st.key_tried = false;
                 }
@@ -328,10 +319,6 @@ impl Runner {
             relay::Event::AuthRequired { .. } => st.auth = Some(ev.clone()),
             _ => {}
         }
-        // the daemon's boundary: frontends get the protocol's event, never the relay's
-        if !matches!(&ev,relay::Event::V2PermissionsCancelled|relay::Event::V2Update{..}|relay::Event::PromptAccepted{..}) {
-            broadcast(&self.id, &mut st.subs, &ev.into());
-        }
         Ok(done)
     }
 
@@ -354,9 +341,6 @@ impl Runner {
     /// method and the key's file (`agents::api_key_file`).
     fn saved_key_for(&self, store: &Store, hub: &Hub, event: &relay::Event) -> Option<(String, std::path::PathBuf)> {
         let relay::Event::AuthRequired { methods, .. } = event else { return None };
-        if !self.relay.api_keys() {
-            return None;
-        }
         let agent = store.sessions().ok()?.into_iter().find(|s| s.id == self.id)?.agent;
         methods.iter().filter(|m| m.api_key.is_some()).find_map(|m| {
             let file = sill_core::agents::api_key_file(&hub.home, &agent, &m.id).ok()?;
@@ -404,11 +388,6 @@ impl Runner {
     pub fn agent_idle(&self) -> bool {
         let st = self.st.lock().unwrap();
         st.ready.is_some() && !st.busy && !st.ended && !st.retired
-    }
-
-    /// How many frontends are attached.
-    pub fn sub_count(&self) -> usize {
-        self.st.lock().unwrap().subs.len()
     }
 
     /// A turn is running (a summary turn included).
@@ -506,73 +485,17 @@ impl Runner {
         }
     }
 
-    /// One event to every attached frontend (the hub's own: the end, a checkpoint's answer).
-    pub fn notify(&self, event: &wire::Event) {
-        let mut st = self.st.lock().unwrap();
-        broadcast(&self.id, &mut st.subs, event);
-    }
-
-    /// Subscribe `conn` and bring it up to date: what a frontend that just opened needs to show the
-    /// session as it is — the agent's capabilities and controls, a login it waits for, the turn in
-    /// flight with its text so far, the questions not yet answered.
-    pub fn attach(&self, conn: Arc<Conn>, store: &Store) -> Result<()> {
-        let mut st = self.st.lock().unwrap();
-        st.subs.retain(|c| c.id != conn.id);
-        // Store and runner are locked together by the hub. A turn cannot finish between loading
-        // the transcript and taking the live snapshot, so no final text/tool update can fall into
-        // the gap between the two views of the conversation.
-        let entries = store.entries_before(&self.id, None, 60)?;
-        let total = store.entry_count(&self.id)?;
-        let replay = sill_proto::rpc::Request::new(None, sill_proto::method::SESSION_REPLAY, serde_json::json!({"key":self.id,"entries":entries,"total":total}));
-        conn.send(serde_json::to_string(&replay)?);
-        let mut evs = Vec::new();
-        if let Some(images) = st.images {
-            evs.push(wire::Event::Capabilities { images });
-        }
-        if let Some((session_id, resumed)) = st.ready.clone() {
-            // the agent has this conversation in its context: resumed, or it has had a turn
-            evs.push(wire::Event::Ready { session_id, resumed: resumed || st.turns > 0, controls: st.controls.clone().unwrap_or_default().into() });
-        }
-        if let Some((used, size)) = st.usage {
-            evs.push(wire::Event::Usage { used, size });
-        }
-        if let Some(a) = st.auth.clone() {
-            evs.push(a.into());
-        }
-        if st.busy {
-            evs.push(wire::Event::TurnStarted);
-            if !st.agent_md.is_empty() {
-                evs.push(wire::Event::Text(st.agent_md.clone()));
-            }
-        }
-        evs.extend(st.pending.values().cloned().map(wire::Event::from));
-        let mut one = vec![conn];
-        for e in &evs {
-            broadcast(&self.id, &mut one, e);
-        }
-        st.subs.extend(one);
-        Ok(())
-    }
-
     /// The watchdog's probe of this runner's lock (`Hub::health`).
     pub fn probe(&self, deadline: std::time::Instant) -> bool {
         super::hub::probe(&self.st, deadline)
     }
 
-    pub fn detach(&self, conn: u64) {
-        self.st.lock().unwrap().subs.retain(|c| c.id != conn);
-    }
-
     /// A frontend's command. A prompt is refused while a turn runs; when it is taken, its entry is
     /// written — the person's text, or the note for a turn sill asked for.
-    pub fn command(&self, hub: &Hub, origin: u64, cmd: wire::Command) -> Result<()> {
+    pub fn command(&self, hub: &Hub, cmd: wire::Command) -> Result<()> {
         hub.with_store(|store| {
             let mut st = self.st.lock().unwrap();
-            let user = self.commit_command(store, &hub.home, &mut st, cmd)?;
-            if let Some(text) = user {
-                let mut others: Vec<_> = st.subs.iter().filter(|connection| connection.id != origin).cloned().collect();
-                broadcast(&self.id, &mut others, &wire::Event::UserText(text));
-            }
+            self.commit_command(store, &hub.home, &mut st, cmd)?;
             // Once committed, a transport failure keeps the outbox and busy state for recovery.
             // It must never roll back a command the worker may already have accepted.
             self.drain(store, &mut st)?;
@@ -588,7 +511,6 @@ impl Runner {
         let result = (|| -> Result<Option<String>> {
             if st.ended || st.retired { bail!("the session is not running"); }
             let mut prepared = None;
-            if matches!(cmd, relay::Command::Cancel) && st.busy { st.cancel_sent = true; }
             if let relay::Command::Prompt { text, .. } = &mut cmd {
                 if st.ready.is_none() { bail!("the agent is starting or needs a login"); }
                 if st.busy { bail!("the agent is busy; wait for the turn to end"); }
@@ -620,20 +542,6 @@ impl Runner {
         result
     }
 
-    /// The answer to question `request`: to the agent, and every attached frontend drops its dialog.
-    pub fn answer(&self, request: u64, answer: wire::Answer) -> Result<()> {
-        let answer = relay::Answer::from(answer);
-        let mut st = self.st.lock().unwrap();
-        let Some(question) = st.pending.get(&request) else { bail!("no open question {request} (answered already?)") };
-        if !matches!((question, &answer), (relay::Event::PermissionRequest { .. } | relay::Event::V2PermissionRequest { .. }, relay::Answer::Permission(_)) | (relay::Event::Elicitation { .. }, relay::Answer::Form(_))) {
-            bail!("the answer is not of the question's kind");
-        }
-        self.relay.answer(request, answer)?;
-        st.pending.remove(&request);
-        broadcast(&self.id, &mut st.subs, &wire::Event::Resolved { request });
-        Ok(())
-    }
-
     /// Hand the session over to a newer runner, or end it: no more events out, the loop told to quit.
     pub fn retire(&self, hub: &Hub) -> Result<()> {
         hub.with_store(|store| {
@@ -645,7 +553,6 @@ impl Runner {
             st.summary_deadline = None;
             st.completed = None;
             st.outbox.clear();
-            st.subs.clear();
             st.pending.clear();
             // Save retirement and the Quit outbox before sending it. The terminal cursor remains
             // until deletion/retention, allowing another daemon to drain an unacknowledged Ended.
@@ -681,17 +588,6 @@ fn flush(store: &Store, id: &str, st: &mut State) -> Result<()> {
         store.append(id, "agent", &md, "")?;
     }
     Ok(())
-}
-
-/// One event to every subscriber; a connection that is gone or stuck is dropped from the list.
-fn broadcast(id: &str, subs: &mut Vec<Arc<Conn>>, event: &wire::Event) {
-    if subs.is_empty() {
-        return;
-    }
-    let params = sill_proto::SessionEvent { key: id.to_string(), event: event.clone() };
-    let req = sill_proto::rpc::Request::new(None, sill_proto::method::SESSION_EVENT, serde_json::to_value(params).unwrap_or_default());
-    let Ok(line) = serde_json::to_string(&req) else { return };
-    subs.retain(|c| c.send(line.clone()));
 }
 
 #[cfg(test)]

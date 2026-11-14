@@ -215,7 +215,7 @@ impl AdapterState {
                 // Root reconciles all open/answered questions against their durable records.
             }
             // Private markers and the ACP loop's debug dump of updates it does not handle
-            // (older relays send those too) are diagnostics, not conversation.
+            // are diagnostics, not conversation.
             relay::Event::Other(text) if acp::is_diagnostic(text) => {
                 let kind: String = text.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
                 if !text.starts_with("_sill") && self.unhandled.insert(kind.clone()) {

@@ -10,7 +10,7 @@ use std::io::{BufReader, Write};
 use std::os::fd::FromRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
 
 use anyhow::{Context, Result, bail};
@@ -61,7 +61,6 @@ enum WriteItem { Line(QueuedLine), Flush(std::sync::mpsc::Sender<()>) }
 
 pub struct Conn {
     pub id: u64,
-    internal: AtomicBool,
     tx: SyncSender<WriteItem>,
     queued_bytes: Arc<AtomicUsize>,
     /// To cut a stuck connection off.
@@ -182,7 +181,7 @@ pub fn run() -> Result<()> {
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join("daemon.pid"), std::process::id().to_string())?;
     notify("READY=1");
-    eprintln!("sill daemon: {}, pid {}, {} sessions in the store, protocol {}", mode, std::process::id(), hub.session_count(), sill_proto::PROTOCOL);
+    eprintln!("sill daemon: {}, pid {}, {} sessions in the store, protocol {}", mode, std::process::id(), hub.session_count(), sill_proto::initialize::PROTOCOL_ID);
     {
         // recovery after READY, on a thread (docs/daemon.md §3.9 item 3): reconnecting a relay can
         // take seconds each, and the unit's start timeout must not depend on how many there are
@@ -349,7 +348,7 @@ fn serve(stream: UnixStream, hub: Arc<Hub>) -> Result<()> {
     { reader.get_ref().set_read_timeout(None)?; return streams::claim(token, reader); }
     let stream = reader.get_ref();
     let (tx, rx) = sync_channel::<WriteItem>(QUEUE);
-    let conn = Arc::new(Conn { id: NEXT_CONN.fetch_add(1, Ordering::Relaxed), internal: AtomicBool::new(false), tx, queued_bytes: Arc::new(AtomicUsize::new(0)), sock: stream.try_clone()? });
+    let conn = Arc::new(Conn { id: NEXT_CONN.fetch_add(1, Ordering::Relaxed), tx, queued_bytes: Arc::new(AtomicUsize::new(0)), sock: stream.try_clone()? });
     let mut writer = stream.try_clone()?;
     std::thread::Builder::new().name(format!("sill-daemon-write-{}", conn.id)).spawn(move || {
         for item in rx {
@@ -403,8 +402,6 @@ fn read_loop(mut reader: BufReader<UnixStream>, first: String, hub: &Arc<Hub>, c
             match result {
                 Ok(initialized) => {
                     reader.get_ref().set_read_timeout(None)?;
-                    let internal=initialized.capabilities.get(sill_proto::initialize::INTERNAL_CAPABILITY)==Some(&1);
-                    conn.internal.store(internal,Ordering::Release);
                     conn.reply(&Response::ok(id, serde_json::to_value(initialized)?));
                     hub.connected(conn);
                 }
@@ -414,10 +411,6 @@ fn read_loop(mut reader: BufReader<UnixStream>, first: String, hub: &Arc<Hub>, c
         }
         if let Err(error) = state.require_initialized() {
             conn.reply(&Response::err(Some(id), error));
-            continue;
-        }
-        if method.starts_with("_sill/internal/") && !conn.internal.load(Ordering::Acquire) {
-            conn.reply(&Response::err(Some(id), Error::needs_capability(sill_proto::initialize::INTERNAL_CAPABILITY, "method requires the sill.internal capability")));
             continue;
         }
         if hub.sfp_request(conn, id, method, msg.params.clone().unwrap_or(serde_json::Value::Null))? { continue; }
@@ -468,7 +461,7 @@ mod queue_budget_tests {
     fn failed_sends_and_abandoned_queues_release_their_byte_reservations() {
         let (sock,_peer)=UnixStream::pair().unwrap();
         let (tx,rx)=sync_channel(1);
-        let conn=Conn{id:0,internal:AtomicBool::new(false),tx,queued_bytes:Arc::new(AtomicUsize::new(0)),sock};
+        let conn=Conn{id:0,tx,queued_bytes:Arc::new(AtomicUsize::new(0)),sock};
         assert!(conn.send("queued".into()));
         assert_eq!(conn.queued_bytes.load(Ordering::Relaxed),7);
         assert!(!conn.send("cannot fit".into()),"full channel refuses and releases the new reservation");

@@ -62,12 +62,23 @@ pub struct RegistryEntry {
     pub version: String,
     pub source: String,
     pub installable: bool,
+    pub description: String,
+    pub repository: Option<String>,
+    pub website: Option<String>,
+    /// Installation facts from the daemon's platform; frontends never derive these locally.
+    pub install_kind: Option<String>,
+    pub install_spec: String,
+    pub package_name: Option<String>,
+    pub has_icon: bool,
+    pub builtin_agent_id: Option<String>,
     pub newer: Option<Box<RegistryEntry>>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RegistryPage {
     pub entries: Vec<RegistryEntry>,
     pub next: Option<String>,
+    /// Decimal Unix seconds when the live index was fetched, or null if never fetched.
+    pub fetched_at: Option<String>,
 }
 /// One-use token: claim on a new transport within 60 seconds. No control handshake on that
 /// transport. Port bytes are raw; progress streams are newline-delimited Progress objects.

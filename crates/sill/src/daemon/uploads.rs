@@ -67,15 +67,7 @@ pub(super) fn get(store: &Store, request: UploadGet) -> Result<Upload> {
 /// An inline attachment becomes an upload named by its submission and position, so the journal
 /// references it and a retry of the same submission finds the same object.
 pub(super) fn from_inline(store: &Store, session_id: &str, submission_id: &str, index: usize, name: &str, mime: &str, data_base64: &str) -> Result<(String, String)> {
-    // Preserve the original reference when retrying an already accepted legacy submission.
-    // New references hash the *whole* submission ID and occupy a reserved namespace.
-    let journal = sill_core::sfp::Journal::new(store)?;
-    let previous = match journal.submission(session_id, submission_id) {
-        Ok(s) => s.attachments.get(index).and_then(|a| match a { sill_proto::sfp::Attachment::Uploaded {upload_id,..} => Some(upload_id.clone()), _=>None }),
-        Err(e) if e.downcast_ref::<sill_core::sfp::DomainError>().is_some_and(|e|e.code=="not_found") => None,
-        Err(e) => return Err(e),
-    };
-    let upload_id = previous.unwrap_or_else(|| format!("sill-inline-{}-{index}", sill_core::sfp::create_fingerprint(submission_id)));
+    let upload_id = format!("sill-inline-{}-{index}", sill_core::sfp::create_fingerprint(submission_id));
     // inline names are labels ("screenshot-1.png (1180×518)"); an upload's is a file name
     let name = truncate(name.chars().map(|c| if c == '/' || c.is_control() { '_' } else { c }).collect(), 255);
     let name = if name.is_empty() || name == "." || name == ".." { "image".to_string() } else { name };
@@ -193,16 +185,14 @@ mod tests {
     }
 
     #[test]
-    fn retrying_accepted_legacy_inline_input_keeps_the_original_upload_identity() {
-        let root=std::env::temp_dir().join(format!("sill-legacy-inline-test-{}",super::super::sfp::id()));
+    fn inline_retry_preserves_identity_and_rejects_changed_bytes() {
+        let root=std::env::temp_dir().join(format!("sill-inline-retry-test-{}",super::super::sfp::id()));
         let store=Store::open(&root.join("store.db")).unwrap();let session=store.create("test","default").unwrap();
-        let request=UploadCreate{session_id:session.id.clone(),upload_id:"legacy-submission-0".into(),name:"image.png".into(),mime:"image/png".into(),data_base64:"YQ==".into()};
-        create_owned(&store,request.clone()).unwrap();
+        let original=from_inline(&store,&session.id,"submission",0,"image.png","image/png","YQ==").unwrap();
         let journal=sill_core::sfp::Journal::new(&store).unwrap();journal.ensure(&session.id,"g").unwrap();
-        let input=sill_proto::sfp::Submit{session_id:session.id.clone(),submission_id:"submission".into(),text:"work".into(),attachments:vec![sill_proto::sfp::Attachment::Uploaded{upload_id:request.upload_id.clone(),name:request.name.clone(),mime:request.mime.clone()}]};
+        let input=sill_proto::sfp::Submit{session_id:session.id.clone(),submission_id:"submission".into(),text:"work".into(),attachments:vec![sill_proto::sfp::Attachment::Uploaded{upload_id:original.0.clone(),name:original.1.clone(),mime:"image/png".into()}]};
         journal.accept(&input,"queued").unwrap();
-        let (upload_id,name)=from_inline(&store,&session.id,"submission",0,&request.name,&request.mime,&request.data_base64).unwrap();
-        assert_eq!((upload_id,name),(request.upload_id,request.name));
+        assert_eq!(from_inline(&store,&session.id,"submission",0,"image.png","image/png","YQ==").unwrap(),original);
         assert_eq!(store.conn().query_row("SELECT count(*) FROM sfp_uploads",[],|r|r.get::<_,i64>(0)).unwrap(),1);
         let error=from_inline(&store,&session.id,"submission",0,"image.png","image/png","Yg==").unwrap_err();
         assert_eq!(error.downcast_ref::<Error>().unwrap().data.as_ref().unwrap()["code"],"id_conflict");

@@ -158,7 +158,7 @@ pub fn refresh_snapshot() -> Result<()> {
         return Ok(());
     }
     let db = crate::store::default_path()?;
-    let store = Store::open(&db)?; // migrations and the index, before the snapshot reads them
+    let store = Store::open(&db)?; // schema validation and the index, before the snapshot reads them
     let mut kept = Vec::new();
     for s in store.sessions()? {
         for (path, what) in kept_of(&s.id) {

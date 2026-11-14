@@ -2,62 +2,22 @@
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
-pub const METHOD: &str = sill_proto::method::FRONTEND_REQUEST;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Request {
-    Home,
-    Sessions,
-    Pins { session: String, global: bool },
-    GlobalPins,
-    Entries { session: String, before: Option<i64>, limit: usize },
-    EntryCount { session: String },
-    Memories { session: String },
-    AgentSettings { agent: String },
-    Search { text: String, limit: usize },
-    Export,
-    Recall { key: String },
     PolicyText { name: String },
     Config,
-    SetConfig(crate::config::Config),
     PatchConfig { fields: std::collections::BTreeMap<String, serde_json::Value> },
     Instructions,
     SetInstructions { text: String },
-    Agents,
-    SaveAgent(crate::agents::Agent),
-    RemoveAgent { id: String },
-    Registry,
-    FetchRegistry,
-    Installed { id: String },
-    Available(crate::agents::Agent),
-    Uninstall(crate::registry::Entry),
-    Icon(crate::registry::Entry),
-    Metadata { path: PathBuf },
-    List { path: PathBuf },
-    Find { bases: Vec<PathBuf>, query: String, cap: usize, visits: usize },
-    Read { path: PathBuf },
-    Write { path: PathBuf, bytes: Vec<u8> },
-    Head { path: PathBuf },
-    RepoRoot { path: PathBuf },
-    ChangedLines { repo: PathBuf, rel: PathBuf },
-    JailOutdated { session: String, policy: String },
-    GitStatus { repo: PathBuf },
-    Upload { session: String, name: String, bytes: Vec<u8> },
-    ResolveImage { session: String, path: String },
     Denied { session: String },
     RememberDenied { session: String, host: String },
     AllowHost { session: String, host: String },
-    ProcList { session: String },
     ProcTail { session: String, name: String, lines: usize },
     ProcStop { session: String, name: String },
     ProcDismiss { session: String, name: String },
-    ReadLog { source: crate::session::LogSource, lines: usize },
     Policies,
     PolicyDesktop { policy: String },
-    Kept { session: String },
     RefreshSnapshot,
-    GitSummary { path: PathBuf },
-    ProcessPolicy { session: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -90,33 +50,43 @@ pub struct Denied {
     pub agent_name: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Opened {
-    pub token: String,
-    pub pid: u32,
-}
-
-/// The index's Entry deliberately skips trust when deserializing untrusted registry JSON. Carry
-/// the daemon's presentation metadata separately, without letting an index claim snapshot trust.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Registry presentation from the daemon. Package manifests and installation commands stay
+/// on the daemon; trust is accepted only from its explicit source field.
+#[derive(Debug, Clone)]
 pub struct RegistryEntry {
-    pub entry: crate::registry::Entry,
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub repository: Option<String>,
+    pub website: Option<String>,
     pub trust: crate::registry::Trust,
     pub newer: Option<Box<RegistryEntry>>,
+    pub install_kind: Option<String>,
+    pub install_spec: String,
+    pub package_name: Option<String>,
+    pub has_icon: bool,
+    pub builtin_agent_id: Option<String>,
 }
-impl From<crate::registry::Entry> for RegistryEntry {
-    fn from(mut entry: crate::registry::Entry) -> Self {
-        let trust = entry.trust;
-        let newer = entry.newer.take().map(|entry| Box::new(Self::from(*entry)));
-        Self { entry, trust, newer }
+impl RegistryEntry {
+    pub fn how(&self)->Option<&str> { self.install_kind.as_deref() }
+    pub fn install_spec(&self)->&str { &self.install_spec }
+    pub fn package_name(&self)->Option<&str> {self.package_name.as_deref()}
+}
+pub fn registry_trust(source:&str)->anyhow::Result<crate::registry::Trust> {
+    match source {
+        "snapshot"=>Ok(crate::registry::Trust::Snapshot),
+        "live"=>Ok(crate::registry::Trust::Live),
+        _=>anyhow::bail!("unknown registry source: {source}"),
     }
 }
-impl From<RegistryEntry> for crate::registry::Entry {
-    fn from(value: RegistryEntry) -> Self {
-        let mut entry = value.entry;
-        entry.trust = value.trust;
-        entry.newer = value.newer.map(|entry| Box::new(Self::from(*entry)));
-        entry
+impl TryFrom<sill_proto::host::RegistryEntry> for RegistryEntry {
+    type Error=anyhow::Error;
+    fn try_from(value:sill_proto::host::RegistryEntry)->anyhow::Result<Self> {
+        Ok(Self {id:value.entry_id,name:value.name,version:value.version,description:value.description,
+            repository:value.repository,website:value.website,trust:registry_trust(&value.source)?,
+            newer:value.newer.map(|n|Self::try_from(*n).map(Box::new)).transpose()?,
+            install_kind:if value.installable {value.install_kind}else{None},install_spec:value.install_spec,package_name:value.package_name,has_icon:value.has_icon,builtin_agent_id:value.builtin_agent_id})
     }
 }
 
@@ -124,18 +94,15 @@ impl From<RegistryEntry> for crate::registry::Entry {
 mod tests {
     use super::*;
     #[test]
-    fn registry_presentation_keeps_trust_and_updates_without_changing_index_parsing() {
-        let mut entry = crate::registry::snapshot().agents[0].clone();
-        entry.trust = crate::registry::Trust::Snapshot;
-        let mut newer = entry.clone();
-        newer.version = "next".into();
-        newer.trust = crate::registry::Trust::Live;
-        entry.newer = Some(Box::new(newer));
-        let bytes = serde_json::to_vec(&RegistryEntry::from(entry.clone())).unwrap();
-        let decoded: crate::registry::Entry = serde_json::from_slice::<RegistryEntry>(&bytes).unwrap().into();
-        assert_eq!(decoded.trust, crate::registry::Trust::Snapshot);
-        assert_eq!(decoded.newer.unwrap().version, "next");
-        let index = serde_json::to_value(entry).unwrap();
-        assert_eq!(serde_json::from_value::<crate::registry::Entry>(index).unwrap().trust, crate::registry::Trust::Live);
+    fn registry_presentation_retains_daemon_platform_and_trust() {
+        let wire=sill_proto::host::RegistryEntry {entry_id:"test".into(),name:"Test".into(),version:"1".into(),source:"snapshot".into(),installable:true,
+            description:"Details".into(),repository:Some("https://example.com/source".into()),website:None,install_kind:Some("binary".into()),install_spec:"daemon-platform.tar.gz".into(),package_name:None,has_icon:false,builtin_agent_id:Some("codex".into()),newer:None};
+        let entry=RegistryEntry::try_from(wire.clone()).unwrap();
+        assert_eq!(entry.trust,crate::registry::Trust::Snapshot);
+        assert_eq!(entry.how(),Some("binary"));
+        assert_eq!(entry.install_spec(),"daemon-platform.tar.gz");
+        assert_eq!(entry.builtin_agent_id.as_deref(),Some("codex"));
+        let mut unknown=wire;unknown.source="future".into();
+        assert!(RegistryEntry::try_from(unknown).is_err());
     }
 }

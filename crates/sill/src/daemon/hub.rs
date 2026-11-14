@@ -14,10 +14,7 @@ use sill_core::policy::Policy;
 use sill_core::session::StartOptions;
 use sill_core::store::Store;
 use sill_proto::rpc::Error;
-use sill_proto::{
-    AgentSettingsSet, Attach, Compacted, Count, DaemonStatus, End, Ending, GlobalPin, Key, LogRequest, MemorySearch, MemorySession, NewSession, Note, Pin, Session,
-    SessionAnswer, SessionCommand, SessionSet, Started, Text, Transcript, method,
-};
+use sill_proto::{DaemonStatus, Ending, NewSession, Started, method};
 
 use super::Conn;
 use super::runner::{Runner, SummaryDone, SummaryKind};
@@ -213,19 +210,7 @@ impl Hub {
         let public_ids=self.sfp.lock().unwrap().sessions_for(conn);
         self.sfp.lock().unwrap().disconnect(conn);
         self.conns.lock().unwrap().retain(|w| w.upgrade().is_some_and(|c| c.id != conn));
-        let ids: Vec<String> = {
-            let runners = self.runners.lock().unwrap();
-            runners
-                .iter()
-                .filter(|(_, r)| {
-                    let before = r.sub_count();
-                    r.detach(conn);
-                    r.sub_count() != before
-                })
-                .map(|(id, _)| id.clone())
-                .collect()
-        };
-        for id in ids.into_iter().chain(public_ids) {
+        for id in public_ids {
             self.presence(&id);
         }
     }
@@ -234,7 +219,7 @@ impl Hub {
     /// stream is the daemon's and never drops while it lives, so the shim's agent-idle rule needs
     /// this to know nobody is watching. On a thread: the shim may be slow, the caller is a request.
     pub(super) fn presence(&self, id: &str) {
-        let n = self.runners.lock().unwrap().get(id).filter(|r| r.alive()).map(|r| r.sub_count()).unwrap_or(0) + self.sfp.lock().unwrap().count(id);
+        let n = self.sfp.lock().unwrap().count(id);
         let id = id.to_string();
         let _ = std::thread::Builder::new().name(format!("sill-presence-{id}")).spawn(move || {
             let Ok(sock) = sill_core::session::socket_path(&id) else { return };
@@ -334,258 +319,12 @@ impl Hub {
             method::DAEMON_STATUS => to_value(self.status()?),
             method::DAEMON_SHUTDOWN => Ok(json!({})),
             method::DAEMON_SCHEMA => Ok(sill_proto::schema::document()),
-            sill_core::frontend::METHOD => super::frontend::dispatch(self, params).map_err(|e| Error::failed(format!("{e:#}"))),
-            method::SESSIONS_LIST => to_value(self.sessions()?),
-            method::SESSIONS_GET => {
-                let k: Key = args(params)?;
-                let all = self.sessions()?;
-                let found = all.iter().find(|s| s.id == k.key).or_else(|| all.iter().find(|s| s.id.starts_with(&k.key) || s.title == k.key));
-                match found {
-                    Some(s) => to_value(s),
-                    None => Err(Error::failed(format!("no session {}", k.key))),
-                }
-            }
-            method::SESSIONS_START => {
-                let k: Key = args(params)?;
-                to_value(self.start_session(&k.key).map_err(|e| Error::failed(format!("{e:#}")))?)
-            }
-            method::SESSIONS_STOP => {
-                let k: Key = args(params)?;
-                self.stop_session(&k.key).map_err(|e| Error::failed(format!("{e:#}")))?;
-                Ok(json!({}))
-            }
-            method::SESSIONS_NEW => {
-                let n: NewSession = args(params)?;
-                to_value(Key { key: self.new_session(n).map_err(|e| Error::failed(format!("{e:#}")))? })
-            }
-            method::SESSIONS_SET => {
-                let r: SessionSet = args(params)?;
-                let set = r.set;
-                self.set_session(&r.key, set).map_err(|e| Error::failed(format!("{e:#}")))?;
-                Ok(json!({}))
-            }
-            method::SESSIONS_DELETE => {
-                let k: Key = args(params)?;
-                self.delete_session(&k.key).map_err(|e| Error::failed(format!("{e:#}")))?;
-                Ok(json!({}))
-            }
-            method::SESSIONS_PIN | method::SESSIONS_UNPIN => {
-                let p: Pin = args(params)?;
-                if m == method::SESSIONS_PIN && self.is_ghost(&p.key) {
-                    return Err(Error::failed(GHOST_NO_PINS));
-                }
-                self.with_session(&p.key, |s, id| if m == method::SESSIONS_PIN { s.pin(id, &p.path) } else { s.unpin(id, &p.path) })
-                    .map_err(|e| Error::failed(format!("{e:#}")))?;
-                Ok(json!({}))
-            }
-            method::PINS_LIST => to_value(self.with_store(|st| st.global_pins()).map_err(|e| Error::failed(format!("{e:#}")))?),
-            method::PINS_ADD => {
-                let p: GlobalPin = args(params)?;
-                self.add_global_pin(&p.path).map_err(|e| Error::failed(format!("{e:#}")))?;
-                Ok(json!({}))
-            }
-            method::PINS_REMOVE => {
-                let p: GlobalPin = args(params)?;
-                self.with_store(|st| st.global_unpin(&p.path)).map_err(|e| Error::failed(format!("{e:#}")))?;
-                Ok(json!({}))
-            }
-            method::MEMORY_NOTE_ADD => {
-                let n: Note = args(params)?;
-                if self.is_ghost(&n.key) {
-                    return Err(Error::failed("a ghost session is not remembered: it takes no notes"));
-                }
-                self.with_session(&n.key, |s, id| s.add_memory(id, "note", &n.text)).map_err(|e| Error::failed(format!("{e:#}")))?;
-                refresh_memory();
-                Ok(json!({}))
-            }
-            method::MEMORY_NOTE_REMOVE => {
-                let n: Note = args(params)?;
-                self.with_session(&n.key, |s, id| s.remove_memory(id, n.ts, &n.text)).map_err(|e| Error::failed(format!("{e:#}")))?;
-                refresh_memory();
-                Ok(json!({}))
-            }
-            method::MEMORY_COMPACT => {
-                let uid = rustix::process::getuid().as_raw();
-                let done = self
-                    .with_store(|s| {
-                        let done = sill_core::memory::compact_all(s, sill_core::store::now(), &|id| {
-                            let _ = sill_core::session::remove_state(uid, id);
-                        })?;
-                        s.vacuum()?;
-                        Ok(done)
-                    })
-                    .map_err(|e| Error::failed(format!("{e:#}")))?;
-                refresh_memory();
-                to_value(Compacted { compacted: done.compacted, trimmed: done.trimmed, deleted: done.deleted })
-            }
-            method::MEMORY_FORGET => {
-                let ended: Vec<String> = self.with_store(|s| s.sessions()).map_err(|e| Error::failed(format!("{e:#}")))?.into_iter().filter(|s| s.ended_at.is_some()).map(|s| s.id).collect();
-                for id in &ended {
-                    self.delete_session(id).map_err(|e| Error::failed(format!("{e:#}")))?;
-                }
-                self.with_store(|s| s.vacuum()).ok();
-                to_value(Count { n: ended.len() })
-            }
-            method::AGENTS_SET_SETTINGS => {
-                let a: AgentSettingsSet = args(params)?;
-                let settings = a.settings;
-                self.with_store(|s| s.set_agent_settings(&a.agent, &settings)).map_err(|e| Error::failed(format!("{e:#}")))?;
-                Ok(json!({}))
-            }
-            method::SESSIONS_CHANGES => {
-                let k: Key = args(params)?;
-                let s = self.with_store(|st| st.sessions()).map_err(|e| Error::failed(format!("{e:#}")))?.into_iter().find(|s| s.id == k.key);
-                let Some(s) = s else { return Err(Error::failed(format!("no session {}", k.key))) };
-                let uid = rustix::process::getuid().as_raw();
-                let user = std::env::var("USER").unwrap_or_else(|_| uid.to_string());
-                let changes = self.session_changes(&s, uid, &user).map_err(|e| Error::failed(format!("{e:#}")))?;
-                // what the person would want to look at: build output is not asked about
-                to_value(Count { n: changes.iter().filter(|c| !c.ignored).count() })
-            }
-            method::SESSIONS_JAIL_VIEW => {
-                let k: Key = args(params)?;
-                to_value(self.jail_view(&k.key).map_err(|e| Error::failed(format!("{e:#}")))?)
-            }
-            method::CHANGES_HISTORY => {
-                let f: sill_core::history::Filter = args(params)?;
-                to_value(self.changes_history(f).map_err(|e| Error::failed(format!("{e:#}")))?)
-            }
-            method::CHANGES_LIST => to_value(self.changes_list().map_err(|e| Error::failed(format!("{e:#}")))?),
-            method::CHANGES_DIFF => {
-                let of: sill_core::wire::DiffOf = args(params)?;
-                to_value(Text { text: self.changes_diff(of).map_err(|e| Error::failed(format!("{e:#}")))? })
-            }
-            method::CHANGES_KEEP => {
-                let k: sill_proto::ChangesKeep = args(params)?;
-                let r = self.changes_keep(&k.session, k.items).map_err(|e| Error::failed(format!("{e:#}")));
-                self.changes_changed();
-                to_value(r?)
-            }
-            method::CHANGES_REVERT => {
-                let r: sill_proto::ChangesPaths = args(params)?;
-                let r = self.changes_revert(&r.session, r.paths).map_err(|e| Error::failed(format!("{e:#}")));
-                self.changes_changed();
-                to_value(r?)
-            }
-            method::CHANGES_UNDO => {
-                let u: sill_proto::ChangesUndo = args(params)?;
-                let r = self.changes_undo(&u.session, u.ids, u.force).map_err(|e| Error::failed(format!("{e:#}")));
-                self.changes_changed();
-                to_value(r?)
-            }
-            method::CHANGES_GIT_REVERT => {
-                let g: sill_proto::GitRevert = args(params)?;
-                let r = self.changes_git_revert(&g.repo, &g.rel).map_err(|e| Error::failed(format!("{e:#}")));
-                self.changes_changed();
-                to_value(Text { text: r? })
-            }
-            method::SESSIONS_END => {
-                let e: End = args(params)?;
-                to_value(self.end_session(&e.key, &e.reason).map_err(|e| Error::failed(format!("{e:#}")))?)
-            }
-            method::SESSIONS_CHECKPOINT => {
-                let k: Key = args(params)?;
-                self.checkpoint(&k.key).map_err(|e| Error::failed(format!("{e:#}")))?;
-                Ok(json!({}))
-            }
-            method::SESSIONS_ATTACH => {
-                let a: Attach = args(params)?;
-                self.attach(conn, &a.key, a.fresh).map_err(|e| Error::failed(format!("{e:#}")))?;
-                Ok(json!({}))
-            }
-            method::SESSIONS_DETACH => {
-                let k: Key = args(params)?;
-                if let Some(r) = self.runners.lock().unwrap().get(&k.key) {
-                    r.detach(conn.id);
-                }
-                self.presence(&k.key);
-                Ok(json!({}))
-            }
-            method::SESSIONS_COMMAND => {
-                let c: SessionCommand = args(params)?;
-                let cmd = c.command;
-                let r = self.runner(&c.key)?;
-                if matches!(cmd, sill_core::wire::Command::Quit) {
-                    r.detach(conn.id);
-                    self.presence(&c.key);
-                    return Ok(json!({}));
-                }
-                r.command(self, conn.id, cmd).map_err(|e| Error::failed(format!("{e:#}")))?;
-                Ok(json!({}))
-            }
-            method::SESSIONS_ANSWER => {
-                let a: SessionAnswer = args(params)?;
-                let answer = a.answer;
-                self.runner(&a.key)?.answer(a.request, answer).map_err(|e| Error::failed(format!("{e:#}")))?;
-                Ok(json!({}))
-            }
-            method::SESSIONS_LOG => {
-                let r: LogRequest = args(params)?;
-                if !sill_core::session::valid_id(&r.key) {
-                    return Err(Error::invalid_params("not a session id"));
-                }
-                to_value(Text { text: sill_core::session::read_log(&sill_core::session::log_source(&r.key), r.lines.clamp(1, 20_000)) })
-            }
-            method::MEMORY_LIST => {
-                let store = self.store.lock().unwrap();
-                // a ghost between its end and its deletion is nobody's memory
-                let ghosts: Vec<String> = store.sessions().map_err(Error::failed)?.into_iter().filter(|s| s.ghost).map(|s| s.id).collect();
-                let mut ended: Vec<MemorySession> = sill_memory::sessions(store.conn())
-                    .map_err(Error::failed)?
-                    .into_iter()
-                    .filter(|s| !ghosts.contains(&s.id))
-                    .filter_map(|s| {
-                        Some(MemorySession { id: s.id, agent: s.agent, title: s.title, ended_at: s.ended_at?, summary: sill_memory::first_line(&s.summary).to_string() })
-                    })
-                    .collect();
-                ended.sort_by_key(|s| std::cmp::Reverse(s.ended_at));
-                to_value(ended)
-            }
-            method::MEMORY_SHOW => {
-                let k: Key = args(params)?;
-                let store = self.store.lock().unwrap();
-                let s = find(&store, &k.key)?;
-                let text = sill_memory::show(store.conn(), &s, &sill_core::memory::kept_of(&s.id), &self.home).map_err(Error::failed)?;
-                to_value(Text { text })
-            }
-            method::MEMORY_SEARCH => {
-                let q: MemorySearch = args(params)?;
-                let mut text = q.words;
-                if let Some(f) = q.folder {
-                    text.push(format!("folder:{f}"));
-                }
-                if let Some(a) = q.agent {
-                    text.push(format!("agent:{a}"));
-                }
-                if let Some(s) = q.since {
-                    if sill_memory::parse_age(&s).is_none() {
-                        return Err(Error::invalid_params("since expects 30d, 12h, 2w …"));
-                    }
-                    text.push(format!("since:{s}"));
-                }
-                let query = sill_memory::Query::parse(&text.join(" "), &self.home);
-                if query.is_empty() {
-                    return Err(Error::invalid_params("search for what?"));
-                }
-                let store = self.store.lock().unwrap();
-                let hits = sill_memory::search(store.conn(), &query, sill_core::store::now(), 50).map_err(Error::failed)?;
-                let text = if hits.is_empty() { "nothing found\n".to_string() } else { hits.iter().map(|h| sill_memory::hit_lines(h, &self.home)).collect() };
-                to_value(Text { text })
-            }
-            method::MEMORY_TRANSCRIPT => {
-                let t: Transcript = args(params)?;
-                let store = self.store.lock().unwrap();
-                let s = find(&store, &t.key)?;
-                let text = sill_memory::transcript(store.conn(), &s, t.grep.as_deref()).map_err(Error::failed)?;
-                to_value(Text { text })
-            }
-            method::SETTINGS_GET => to_value(sill_core::config::load()),
             _ => Err(Error::method_not_found(m)),
         }
     }
 
     fn status(&self) -> Result<DaemonStatus, Error> {
-        let sessions = self.sessions()?;
+        let sessions = self.store.lock().unwrap().sessions().map_err(Error::failed)?;
         Ok(DaemonStatus {
             version: env!("CARGO_PKG_VERSION").to_string(),
             protocol: sill_proto::initialize::PROTOCOL_ID.into(),
@@ -596,39 +335,9 @@ impl Hub {
             limits: self.launcher.has_limits(),
             journal: self.launcher.journal,
             socket: sill_proto::sessions::HostPath::from_path(&sill_proto::socket_path().map_err(Error::failed)?),
-            running: sessions.iter().filter(|s| s.running).count(),
+            running: sessions.iter().filter(|s| s.ended_at.is_none() && sill_core::session::is_running(&s.id)).count(),
             sessions: sessions.len(),
         })
-    }
-
-    fn sessions(&self) -> Result<Vec<Session>, Error> {
-        let store = self.store.lock().unwrap();
-        let rows = store.sessions().map_err(Error::failed)?;
-        rows.into_iter()
-            .map(|s| {
-                let pins = store.pins(&s.id).unwrap_or_default();
-                // an ended session has no jail by definition; the probe is a socket connect
-                let running = s.ended_at.is_none() && sill_core::session::is_running(&s.id);
-                Ok(Session {
-                    id: s.id,
-                    agent: s.agent,
-                    title: s.title,
-                    title_kind: s.title_kind,
-                    created_at: s.created_at,
-                    last_used: s.last_used,
-                    policy: s.policy,
-                    auto_allow: s.auto_allow,
-                    desktop: s.desktop,
-                    ended_at: s.ended_at,
-                    summary: s.summary,
-                    summary_kind: s.summary_kind,
-                    memory_scope: s.memory_scope,
-                    pins,
-                    running,
-                    ghost: s.ghost,
-                })
-            })
-            .collect()
     }
 
     /// Reconnect the ACP owner even when nobody has a window open. The relay retains the SDK's
@@ -665,13 +374,6 @@ impl Hub {
                 Err(e) => eprintln!("sill daemon: recovering session {id}: {e:#}; its turn state remains unknown"),
             }
         }
-    }
-
-    fn attach(self: &Arc<Self>, conn: &Arc<Conn>, id: &str, fresh: bool) -> Result<()> {
-        let r = self.ensure_runner(id, fresh)?;
-        self.with_store(|store| r.attach(conn.clone(), store))?;
-        self.presence(id);
-        Ok(())
     }
 
     pub(super) fn ensure_runner(self: &Arc<Self>, id: &str, fresh: bool) -> Result<Arc<Runner>> {
@@ -790,49 +492,6 @@ impl Hub {
         })
     }
 
-    /// A store write on a session that exists (the id checked first: a write to a missing row
-    /// would silently touch nothing).
-    fn with_session<T>(&self, id: &str, f: impl FnOnce(&Store, &str) -> Result<T>) -> Result<T> {
-        if !sill_core::session::valid_id(id) {
-            bail!("not a session id");
-        }
-        let store = self.store.lock().unwrap();
-        if !store.sessions()?.iter().any(|s| s.id == id) {
-            bail!("no session {id}");
-        }
-        f(&store, id)
-    }
-
-    /// A global pin (docs/pins.md): a folder or file that is there, canonical, outside sill's own
-    /// state, and not inside (or around) a global pin already held.
-    fn add_global_pin(&self, path: &std::path::Path) -> Result<()> {
-        let path = path.canonicalize().with_context(|| format!("pin {}", path.display()))?;
-        if !path.is_dir() && !path.is_file() {
-            bail!("{}: not a folder or a file", path.display());
-        }
-        let state = self.home.join(".local/state/sill");
-        if path.starts_with(&state) || path == self.home {
-            bail!("{}: sill's own state and the home itself cannot be pinned", path.display());
-        }
-        let held = self.with_store(|st| st.global_pins())?;
-        if let Some(h) = held.iter().find(|h| path.starts_with(h)) {
-            bail!("{}: already inside the global pin {}", path.display(), h.display());
-        }
-        if let Some(h) = held.iter().find(|h| h.starts_with(&path)) {
-            bail!("{}: the global pin {} is inside it; remove that one first", path.display(), h.display());
-        }
-        self.with_store(|st| st.global_pin(&path))
-    }
-
-    /// A new session row (what `Store::create` and the shelf's `create_session` / `new_here` did).
-    fn new_session(&self, n: NewSession) -> Result<String> {
-        if n.ghost && !n.pins.is_empty() {
-            bail!("{GHOST_NO_PINS}");
-        }
-        let store = self.store.lock().unwrap();
-        Self::create_session_row(&store, n)
-    }
-
     fn create_session_row(store: &Store, n: NewSession) -> Result<String> {
         let s = store.create_with(&n.agent, &n.policy, n.ghost)?;
         let pins = if n.ghost {
@@ -856,28 +515,6 @@ impl Hub {
             store.set_follows(&s.id, &n.follows)?;
         }
         Ok(s.id)
-    }
-
-    fn set_session(&self, id: &str, set: sill_core::wire::SessionSet) -> Result<()> {
-        use sill_core::wire::SessionSet as S;
-        if matches!(set, S::Summary { .. }) && self.is_ghost(id) {
-            bail!("a ghost session is not remembered: it has no summary");
-        }
-        let summary = matches!(set, S::Summary { .. } | S::Title { .. });
-        self.with_session(id, |s, id| match set {
-            S::Title { title, kind } => s.set_title(id, &title, &kind),
-            S::AutoAllow(on) => s.set_auto_allow(id, on),
-            S::Desktop(d) => s.set_desktop(id, &d),
-            S::MemoryScope(m) => s.set_memory_scope(id, &m),
-            S::Policy(p) => s.set_policy(id, &p),
-            S::Summary { text, kind } => s.set_summary(id, &text, &kind),
-            S::Settings(a) => s.set_session_settings(id, &a),
-            S::Reopen => s.reopen(id),
-        })?;
-        if summary {
-            refresh_memory();
-        }
-        Ok(())
     }
 
     /// The trash can: the conversation and jail go, then the session's state on the host and its
@@ -989,8 +626,10 @@ impl Hub {
             }
             eprintln!("sill daemon: ghost {}: reverted {n} of {} path(s) an hour after their last write", s.id, due.len());
             self.changes_changed();
-            if n > 0 && let Some(r) = runner {
-                r.notify(&sill_core::wire::Event::Note(format!("ghost: {n} path(s) reverted, an hour after their last write")));
+            if n > 0 {
+                if let Err(error) = self.sfp_lifecycle(&s.id, None, Some(format!("ghost: {n} path(s) reverted, an hour after their last write"))) {
+                    eprintln!("sill daemon: publishing ghost revert notice: {error:#}");
+                }
             }
         }
     }
@@ -1228,9 +867,6 @@ impl Hub {
                     refresh_memory();
                 }
                 if let Err(e)=self.sfp_lifecycle(id,None,None){eprintln!("sill daemon: publishing summary: {e:#}");}
-                if let Some(r) = self.runners.lock().unwrap().get(id) {
-                    r.notify(&sill_core::wire::Event::Summarized { text, title });
-                }
             }
         }
     }
@@ -1265,9 +901,6 @@ impl Hub {
             .ok();
         }
         if let Err(e)=self.sfp_lifecycle(id,Some((delete,reason)),None){eprintln!("sill daemon: publishing session end: {e:#}");}
-        if let Some(r) = self.runners.lock().unwrap().get(id) {
-            r.notify(&sill_core::wire::Event::SessionEnded { deleted: delete, reason: reason.to_string() });
-        }
         self.retire_runner(id);
         self.ending.lock().unwrap().remove(id);
         // The terminal runner cursor survives until session deletion/retention. The relay may
@@ -1439,10 +1072,6 @@ fn forget(children: &Mutex<HashMap<String, u32>>, id: &str, pid: u32) {
     if c.get(id) == Some(&pid) {
         c.remove(id);
     }
-}
-
-fn find(store: &Store, key: &str) -> Result<sill_memory::SessionInfo, Error> {
-    sill_memory::find_session(store.conn(), key).map_err(Error::failed)?.ok_or_else(|| Error::failed(format!("no session {key}")))
 }
 
 fn args<T: DeserializeOwned>(v: Value) -> Result<T, Error> {

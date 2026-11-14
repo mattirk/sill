@@ -7,7 +7,7 @@ from sfp_client import Client, RpcError
 with_client = Client(sys.argv[1])
 try:
     c = with_client
-    # No internal capability; traverse every configured definition using public schemas.
+    # Traverse every configured definition using public schemas.
     after, agents = None, []
     while True:
         page = c.call("_sill/agents.list", {"after": after, "limit": 1})
@@ -37,10 +37,11 @@ try:
         assert e.error["data"]["details"] == {"scope": "request", "maximum": 128}, e.error
     try:
         c.call("_sill/internal/sessions.list", {}, check=False)
-        raise AssertionError("internal method without its capability")
+        raise AssertionError("removed internal method still exists")
     except RpcError as e:
-        assert e.code == "unsupported" and e.error["data"]["details"] == {"capability": "sill.internal"}, e.error
-    assert any(cap["name"] == "sill.internal" for cap in c.schema["capabilities"]["offered"])
+        assert e.error["code"] == -32601, e.error
+    assert c.schema["capabilities"]["offered"] == []
+    assert all(not m["name"].startswith("_sill/internal/") for m in c.schema["methods"])
     home = c.call("_sill/files.home", {})
     raw = base64.b64decode(home["bytes_base64"]) + b"/conformance-\xff"
     path = {"bytes_base64": base64.b64encode(raw).decode(), "display": "deliberately not the operational path"}

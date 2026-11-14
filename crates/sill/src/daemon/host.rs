@@ -39,7 +39,10 @@ fn source(entry: &sill_core::registry::Entry) -> &'static str {
     match entry.trust { sill_core::registry::Trust::Snapshot => "snapshot", sill_core::registry::Trust::Live => "live" }
 }
 fn summary(entry: &sill_core::registry::Entry) -> api::RegistryEntry {
-    api::RegistryEntry { entry_id: entry.id.clone(), name: entry.name.clone(), version: entry.version.clone(), source: source(entry).into(), installable: entry.how().is_some(), newer: entry.newer.as_ref().map(|e| Box::new(summary(e))) }
+    api::RegistryEntry { entry_id: entry.id.clone(), name: entry.name.clone(), version: entry.version.clone(), source: source(entry).into(), installable: entry.how().is_some(),
+        description:entry.description.clone(),repository:entry.repository.clone(),website:entry.website.clone(),
+        install_kind:entry.how().map(str::to_owned),install_spec:entry.install_spec(),package_name:entry.package_name(),has_icon:entry.icon.is_some(),builtin_agent_id:sill_core::registry::builtin_for(entry).map(str::to_owned),
+        newer: entry.newer.as_ref().map(|e| Box::new(summary(e))) }
 }
 fn select(home: &Path, a: &api::RegistryInstall) -> Result<sill_core::registry::Entry> {
     valid_id(&a.entry_id)?;
@@ -193,10 +196,10 @@ pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
                 let limit = a.limit.unwrap_or(64) as usize;
                 if !(1..=128).contains(&limit) { return Err(invalid("limit must be 1–128")); }
                 let home = sill_core::changes::home()?;
-                let mut entries = sill_core::registry::merged(&home).0;
+                let (mut entries, fetched_at) = sill_core::registry::merged(&home);
                 entries.sort_by(|a,b| a.id.cmp(&b.id));
                 let mut entries = entries.iter().filter(|e| a.after.as_ref().is_none_or(|id| e.id > *id)).peekable();
-                let mut page = api::RegistryPage { entries: Vec::new(), next: None };
+                let mut page = api::RegistryPage { entries: Vec::new(), next: None, fetched_at:fetched_at.and_then(|t|t.duration_since(std::time::UNIX_EPOCH).ok()).map(|t|t.as_secs().to_string()) };
                 let mut bytes = 0;
                 while page.entries.len() < limit {
                     let Some(entry) = entries.next() else { break };
@@ -218,6 +221,19 @@ pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn registry_summary_preserves_ui_metadata_without_install_manifests() {
+        let entry=sill_core::registry::snapshot().agents.iter().find(|e|e.npm_lock.is_some()).unwrap();
+        let wire=summary(entry);
+        assert_eq!(wire.source,"snapshot");
+        assert_eq!(wire.description,entry.description);
+        assert_eq!(wire.install_kind.as_deref(),entry.how());
+        assert_eq!(wire.install_spec,entry.install_spec());
+        assert_eq!(wire.package_name,entry.package_name());
+        assert_eq!(wire.builtin_agent_id.as_deref(),sill_core::registry::builtin_for(entry));
+        let json=serde_json::to_value(wire).unwrap();
+        assert!(json.get("npm_lock").is_none());assert!(json.get("distribution").is_none());
+    }
     #[test]
     fn selection_preserves_reviewed_metadata_and_refuses_unknown_sources() {
         let home = std::env::temp_dir().join(format!("sill-host-select-{}", std::process::id()));

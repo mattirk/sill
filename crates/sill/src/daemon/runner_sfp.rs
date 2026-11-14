@@ -6,7 +6,7 @@ use sill_proto::{sfp as p, rpc::Error};
 impl Runner {
     pub(in crate::daemon) fn sfp_control(&self, hub:&Hub, control:p::Control)->Result<()> {
         if matches!(control,p::Control::RetrySession) {
-            self.command(hub,0,wire::Command::RetrySession)?;
+            self.command(hub,wire::Command::RetrySession)?;
             return self.sfp_login_done(hub);
         }
         let command=match control {
@@ -16,16 +16,13 @@ impl Runner {
             p::Control::SetMode{mode_id}=>wire::Command::SetMode(mode_id),
             p::Control::SetConfig{option_id,value}=>wire::Command::SetConfig(option_id,match value{p::ConfigValue::Id{value}=>wire::ConfigValue::Id(value),p::ConfigValue::Bool{value}=>wire::ConfigValue::Bool(value)}),
         };
-        self.command(hub,0,command)
+        self.command(hub,command)
     }
     /// A login with an API key the person typed: kept where the agent's jail cannot read it
     /// (`agents::api_key_dir`), then the relay is told to send it from there — the command and
     /// the runner's saved outbox carry the file, never the key. The agent's next login requests
     /// are answered with it too, without the card (`Runner::saved_key_for`).
     fn sfp_authenticate_key(&self,hub:&Hub,method_id:String,key:wire::Secret)->Result<()> {
-        if !self.relay.api_keys() {
-            return Err(Error::domain("unsupported","this session's agent connection predates API key logins; start the session again").into());
-        }
         let key=key.0.trim().to_string();
         if key.is_empty() || key.len()>4096 || key.chars().any(char::is_control) {
             return Err(Error::invalid_params("an API key is 1 to 4096 characters on one line").into());
@@ -87,8 +84,7 @@ impl Runner {
         let mut events=if state.agent_generation_id!=st.generation_id {
             journal.replace_generation(&self.id,&st.generation_id)?
         } else {vec![]};
-        // A relay adopted from before SFP (or a journal created after Ready) already delivered
-        // its Ready/Capabilities: the runner holds them, the journal never saw them.
+        // A journal created after Ready needs the capabilities already held by the runner.
         let session=journal.session(&self.id)?;
         let mut seeded=session.clone();
         if seeded.controls.is_none() && let Some(c)=&st.controls { seeded.controls=Some(super::super::sfp_adapter::session_controls(c)); }
@@ -119,39 +115,15 @@ impl Runner {
         if st.replaying && matches!(event,relay::Event::Text(_)|relay::Event::Thought(_)|relay::Event::UserText(_)|relay::Event::ToolCall{..}|relay::Event::ToolCallUpdate{..}|relay::Event::SubagentText{..}) {
             out.extend(journal.append(&self.id,source,&[])?); return Ok(out);
         }
-        // An older relay reports a prompt error as Cancelled too. A cancel this daemon sent
-        // during the turn makes cancellation the explanation (a coincident error would read
-        // as cancelled; it is never resent either way).
-        let cancel_evidence=self.relay.outcome_evidence() || st.cancel_sent;
         let question=match event { relay::Event::Resolved{request}=>st.adapter.question_id(*request).map(|id|journal.question(&self.id,id)).transpose()?, _=>None };
-        // The relay can outlive this daemon version. The older success note carries the same
-        // evidence as the explicit private marker introduced with SFP.
-        let authenticated=matches!(event,relay::Event::Other(text) if text=="_sill_authenticated" || text=="logged in; send the message again");
+        let authenticated=matches!(event,relay::Event::Other(text) if text=="_sill_authenticated");
         let mut events=if authenticated {
             st.auth=None;
             let mut next=session.clone();next.authentication=None;
             if next.question_ids.is_empty() && next.turn_id.is_none() {next.activity="idle".into();}
             vec![p::Event::SessionUpdated{session:next}]
         } else {st.adapter.project(&session,event,question.as_ref())};
-        // Older live relays used Cancelled for both remote cancellation and local errors, and
-        // emitted Resolved even after a callback disappeared. Their handshake cannot prove more.
-        if !self.relay.outcome_evidence() && matches!(event,relay::Event::Resolved{..}) {
-            for e in &mut events {
-                if let p::Event::QuestionUpdated{question}=e {
-                    if question.delivery.as_deref()==Some("confirmed") {question.delivery=Some("unknown".into());}
-                }
-            }
-        }
-        if !cancel_evidence && matches!(event,relay::Event::Stopped(acp::StopReason::Cancelled)) {
-            for e in &mut events {
-                if let p::Event::TurnUpdated{turn}=e {
-                    turn.outcome="unknown".into();
-                    turn.reason=Some(p::Reason{code:"legacy_ambiguous_stop".into(),message:"The relay cannot distinguish cancellation from a prompt error".into()});
-                }
-            }
-        }
         let interrupted=matches!(event,relay::Event::Stopped(acp::StopReason::Other(reason)) if reason=="_sill_prompt_error")
-            || matches!(event,relay::Event::Stopped(acp::StopReason::Cancelled)) && !cancel_evidence
             || matches!(event,relay::Event::AuthRequired{..}) && (st.ready.is_some() || st.active_submission.is_some())
             || matches!(event,relay::Event::Ended(_) | relay::Event::V2PromptFailed{..});
         if interrupted {
@@ -220,7 +192,7 @@ impl Runner {
                 // ACP v1 run loop emits TurnStarted when it begins this command's prompt call;
                 // it does not prove remote insertion. Completion is stronger evidence below.
                 relay::Event::Stopped(reason)=>{
-                    let known = !matches!(reason, acp::StopReason::Other(_)) && (*reason!=acp::StopReason::Cancelled || cancel_evidence);
+                    let known = !matches!(reason, acp::StopReason::Other(_));
                     submission.insertion=if known {"confirmed"} else {"unknown"}.into();
                     submission.outcome=if !known {"unknown"} else if *reason==acp::StopReason::Cancelled {"cancelled"} else if *reason==acp::StopReason::Refusal {"failed"} else {"completed"}.into();
                     events.push(p::Event::SubmissionUpdated{submission}); st.active_submission=None;
@@ -264,10 +236,8 @@ impl Runner {
         queued.sort_by_key(|s|s.accepted_seq.parse::<u64>().unwrap_or(u64::MAX));
         let Some(submission)=queued.into_iter().next() else { return Ok(()); };
         if submission.held { return Ok(()); }
-        let text=submission.text.clone();
         let events=self.sfp_commit_submission(store,&hub.home,st,submission)?;
         hub.sfp_publish(&self.id,&events);
-        broadcast(&self.id,&mut st.subs,&wire::Event::UserText(text));
         self.drain(store,st)
     }
     /// Durable delivery intent and exact prepared payload, before any relay send.
@@ -386,8 +356,7 @@ mod tests {
         received:std::sync::mpsc::Receiver<serde_json::Value>,
     }
     impl Fixture {
-        fn new()->Self {Self::with_evidence(false)}
-        fn with_evidence(outcome_evidence:bool)->Self {
+        fn new()->Self {
             let dir=std::env::temp_dir().join(format!("sill-sfp-runner-{}",sill_core::sfp::new_id()));
             std::fs::create_dir_all(&dir).unwrap();
             let socket=dir.join("relay.sock"); let listener=UnixListener::bind(&socket).unwrap();
@@ -395,7 +364,7 @@ mod tests {
             std::thread::spawn(move || {
                 let (mut stream,_)=listener.accept().unwrap();let mut reader=BufReader::new(stream.try_clone().unwrap());
                 let mut hello=String::new();reader.read_line(&mut hello).unwrap();
-                writeln!(stream,"{}",serde_json::json!({"Hello":{"acknowledged":0,"last":0,"version":relay::RELAY_PROTOCOL,"outcome_evidence":outcome_evidence}})).unwrap();
+                writeln!(stream,"{}",serde_json::json!({"Hello":{"acknowledged":0,"last":0,"version":relay::RELAY_PROTOCOL}})).unwrap();
                 for line in reader.lines() {
                     let Ok(line)=line else {break};let message:serde_json::Value=serde_json::from_str(&line).unwrap();
                     let response=if let Some(c)=message.get("Command") {serde_json::json!({"Accepted":{"id":c["id"],"error":null}})}
@@ -528,40 +497,22 @@ mod tests {
     }
 
     #[test]
-    fn adopted_relays_cannot_claim_outcomes_their_old_events_do_not_prove() {
-        for evidence in [false,true] {
-            let f=Fixture::with_evidence(evidence);let j=Journal::new(&f.store).unwrap();
-            j.accept(&f.input(),"direct").unwrap();let mut st=f.runner.st.lock().unwrap();
-            st.active_submission=Some("submission".into());
-            f.runner.sfp_project(&f.store,&mut st,&relay::Event::Stopped(acp::StopReason::Cancelled),1).unwrap();
-            let submission=j.submission(&f.runner.id,"submission").unwrap();
-            assert_eq!(submission.insertion,if evidence {"confirmed"} else {"unknown"});
-            assert_eq!(submission.outcome,if evidence {"cancelled"} else {"unknown"});
-            f.runner.sfp_project(&f.store,&mut st,&relay::Event::PermissionRequest {request:1,tool_call_id:String::new(),title:"Run?".into(),options:vec![]},2).unwrap();
-            let question_id=st.adapter.question_id(1).unwrap().to_string();
-            f.runner.sfp_commit_answer(&f.store,&mut st,p::AnswerQuestion {session_id:f.runner.id.clone(),question_id:question_id.clone(),answer_id:"answer".into(),answer:p::Answer::Cancel}).unwrap();
-            f.runner.sfp_project(&f.store,&mut st,&relay::Event::Resolved{request:1},3).unwrap();
-            assert_eq!(j.question(&f.runner.id,&question_id).unwrap().delivery.as_deref(),Some(if evidence {"confirmed"} else {"unknown"}));
-        }
+    fn current_relay_cancellation_and_answer_resolution_confirm_outcomes() {
+        let f=Fixture::new();let j=Journal::new(&f.store).unwrap();
+        j.accept(&f.input(),"direct").unwrap();let mut st=f.runner.st.lock().unwrap();
+        st.active_submission=Some("submission".into());
+        f.runner.sfp_project(&f.store,&mut st,&relay::Event::Stopped(acp::StopReason::Cancelled),1).unwrap();
+        let submission=j.submission(&f.runner.id,"submission").unwrap();
+        assert_eq!(submission.insertion,"confirmed");assert_eq!(submission.outcome,"cancelled");
+        f.runner.sfp_project(&f.store,&mut st,&relay::Event::PermissionRequest {request:1,tool_call_id:String::new(),title:"Run?".into(),options:vec![]},2).unwrap();
+        let question_id=st.adapter.question_id(1).unwrap().to_string();
+        f.runner.sfp_commit_answer(&f.store,&mut st,p::AnswerQuestion {session_id:f.runner.id.clone(),question_id:question_id.clone(),answer_id:"answer".into(),answer:p::Answer::Cancel}).unwrap();
+        f.runner.sfp_project(&f.store,&mut st,&relay::Event::Resolved{request:1},3).unwrap();
+        assert_eq!(j.question(&f.runner.id,&question_id).unwrap().delivery.as_deref(),Some("confirmed"));
     }
 
     #[test]
-    fn an_old_relay_cancelled_by_this_daemon_records_a_cancellation() {
-        let f=Fixture::new();let j=Journal::new(&f.store).unwrap();
-        j.accept(&f.input(),"direct").unwrap();let mut st=f.runner.st.lock().unwrap();
-        st.active_submission=Some("submission".into());st.busy=true;
-        f.runner.commit_command(&f.store,&f.dir,&mut st,wire::Command::Cancel).unwrap();
-        assert!(st.cancel_sent);
-        let stopped=relay::Event::Stopped(acp::StopReason::Cancelled);
-        let events=f.runner.sfp_project(&f.store,&mut st,&stopped,1).unwrap();
-        f.runner.handle_locked(&f.store,&mut st,stopped,false).unwrap();
-        let submission=j.submission(&f.runner.id,"submission").unwrap();
-        assert_eq!((submission.insertion.as_str(),submission.outcome.as_str()),("confirmed","cancelled"));
-        assert!(!events.iter().any(|e|matches!(&e.event,p::Event::TurnUpdated{turn} if turn.outcome=="unknown")));
-        assert!(!st.cancel_sent,"the evidence belongs to that turn only");
-    }
-    #[test]
-    fn controls_and_image_support_an_adopted_relay_reported_before_sfp_reach_the_journal() {
+    fn controls_and_image_support_seed_a_new_journal_idempotently() {
         let f=Fixture::new();let j=Journal::new(&f.store).unwrap();
         let mut st=f.runner.st.lock().unwrap();
         st.controls=Some(acp::Controls{modes:Some(("auto".into(),vec![("auto".into(),"Auto".into()),("read-only".into(),"Read only".into())])),options:vec![]});
@@ -574,42 +525,6 @@ mod tests {
         let seq=j.snapshot(&f.runner.id).unwrap().0;
         assert!(f.runner.sfp_initial_events(&f.store,&st).unwrap().is_empty());
         assert_eq!(j.snapshot(&f.runner.id).unwrap().0,seq,"seeding is idempotent");
-    }
-    #[test]
-    fn a_session_adopted_from_a_pre_sfp_daemon_keeps_controls_images_cancel_and_questions() {
-        // What the daemon before SFP saved for a running session: no generation, no adapter, no
-        // journal; Ready and Capabilities were delivered (and ACKed) long ago. Its relay has no
-        // outcome evidence (Fixture::new).
-        let f=Fixture::new();
-        f.store.conn().execute("DELETE FROM sfp_sessions",[]).unwrap();
-        let controls=acp::Controls{modes:Some(("agent-full-access".into(),vec![("read-only".into(),"Read-only".into()),("agent-full-access".into(),"Full access".into())])),options:vec![]};
-        let old=serde_json::json!({"cursor":10,"ready":["acp-session",false],"controls":controls,"images":true,"busy":false,"turns":3});
-        let runner=Runner::new(&f.runner.id,f.runner.relay.clone(),old).unwrap();
-        let j=Journal::new(&f.store).unwrap();
-        let mut st=runner.st.lock().unwrap();
-        runner.sfp_initial_events(&f.store,&st).unwrap();
-        let session=j.session(&runner.id).unwrap();
-        assert_eq!(session.controls.as_ref().and_then(|c|c.current_mode.as_deref()),Some("agent-full-access"),"mode/model/auto controls show");
-        assert_eq!(session.capabilities.get("images"),Some(&true),"no false 'no image support' note");
-
-        // the stop button during a turn: a cancellation, not an uncertain outcome
-        j.accept(&f.input(),"direct").unwrap();
-        st.active_submission=Some("submission".into());
-        for (seq,event) in [(11,relay::Event::TurnStarted)] { runner.sfp_project(&f.store,&mut st,&event,seq).unwrap(); runner.handle_locked(&f.store,&mut st,event,false).unwrap(); }
-        runner.commit_command(&f.store,&f.dir,&mut st,wire::Command::Cancel).unwrap();
-        let stopped=relay::Event::Stopped(acp::StopReason::Cancelled);
-        runner.sfp_project(&f.store,&mut st,&stopped,12).unwrap(); runner.handle_locked(&f.store,&mut st,stopped,false).unwrap();
-        assert_eq!(j.submission(&runner.id,"submission").unwrap().outcome,"cancelled");
-
-        // a question answered through SFP: delivered, but the old relay cannot prove handoff
-        let ask=relay::Event::PermissionRequest{request:1,tool_call_id:String::new(),title:"Run?".into(),options:vec![acp::PermissionOption{id:"yes".into(),name:"Yes".into(),kind:acp::PermissionOptionKind::AllowOnce}]};
-        runner.sfp_project(&f.store,&mut st,&ask,13).unwrap();
-        let question_id=st.adapter.question_id(1).unwrap().to_string();
-        runner.sfp_commit_answer(&f.store,&mut st,p::AnswerQuestion{session_id:runner.id.clone(),question_id:question_id.clone(),answer_id:"a".into(),answer:p::Answer::Permission{option_id:"yes".into()}}).unwrap();
-        runner.sfp_project(&f.store,&mut st,&relay::Event::Resolved{request:1},14).unwrap();
-        let q=j.question(&runner.id,&question_id).unwrap();
-        assert_eq!((q.state.as_str(),q.delivery.as_deref()),("answered",Some("unknown")));
-        assert!(j.session(&runner.id).unwrap().question_ids.is_empty());
     }
     #[test]
     fn inline_images_are_stored_once_referenced_by_id_and_reach_the_agent_as_images() {
@@ -665,7 +580,7 @@ mod tests {
 
     #[test]
     fn native_acceptance_survives_restart_without_claiming_completion_or_losing_insertion() {
-        let f=Fixture::with_evidence(true);let j=Journal::new(&f.store).unwrap();
+        let f=Fixture::new();let j=Journal::new(&f.store).unwrap();
         let (submission,_)=j.accept(&f.input(),"queued").unwrap();
         {
             let mut st=f.runner.st.lock().unwrap();
@@ -686,7 +601,7 @@ mod tests {
     }
     #[test]
     fn native_terminal_state_completes_once_and_cancellation_retires_permissions() {
-        let f=Fixture::with_evidence(true);let j=Journal::new(&f.store).unwrap();let mut st=f.runner.st.lock().unwrap();
+        let f=Fixture::new();let j=Journal::new(&f.store).unwrap();let mut st=f.runner.st.lock().unwrap();
         f.runner.sfp_project(&f.store,&mut st,&relay::Event::V2Ready{session_id:"native".into(),resumed:false,controls:Default::default()},1).unwrap();
         let (submission,_)=j.accept(&f.input(),"queued").unwrap();f.runner.sfp_commit_submission(&f.store,&f.dir,&mut st,submission).unwrap();
         f.runner.sfp_project(&f.store,&mut st,&relay::Event::TurnStarted,2).unwrap();
@@ -705,7 +620,7 @@ mod tests {
 
     #[test]
     fn repeated_native_idle_does_not_append_duplicate_memory_text() {
-        let f=Fixture::with_evidence(true);let mut st=f.runner.st.lock().unwrap();
+        let f=Fixture::new();let mut st=f.runner.st.lock().unwrap();
         let events=[
             relay::Event::V2Ready{session_id:"native".into(),resumed:false,controls:Default::default()},
             relay::Event::TurnStarted,

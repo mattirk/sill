@@ -26,7 +26,7 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5);
 /// daemon that finds a relay of another version after a deploy replaces it (`evict`) instead of
 /// leaving the session with a worker it cannot talk to (docs/daemon.md §3.9 item 1). Bump it with
 /// any change to those types; a change to the frontend protocol's `wire` types alone needs none.
-pub(crate) const RELAY_PROTOCOL: u32 = 1;
+pub(crate) const RELAY_PROTOCOL: u32 = 2;
 
 /// The relay answered but will not cooperate: another version, a cursor it no longer retains, an
 /// answer that is not a Hello. Not a transport failure — the socket answers — so the hub evicts it.
@@ -44,7 +44,7 @@ impl std::error::Error for Refused {}
 // --- what the relay carries ------------------------------------------------------------------------
 //
 // The conversation between the ACP worker and the main daemon, in the relay's own types: never
-// the frontends' `wire` types (docs/protocol.md §7.1), so a frontend protocol change cannot change
+// the frontends' public types, so a frontend protocol change cannot change
 // these bytes or evict a running relay (and the agent conversation it holds). The runner converts
 // at the daemon's boundary, and its stored state (`daemon_runners`) holds these too.
 
@@ -77,8 +77,6 @@ pub(crate) enum Event {
     AuthRequired { message: String, methods: Vec<acp::AuthMethodInfo> },
     Stopped(acp::StopReason),
     Ended(Option<String>),
-    // Added 2026-11-03 without a protocol bump: a daemon reads every older relay's events, and a
-    // relay only ever talks to the daemon build that spawned it or a newer one.
     Plan(Vec<acp::PlanEntry>),
     Commands(Vec<acp::AgentCommand>),
     AgentTitle(String),
@@ -92,8 +90,7 @@ pub(crate) enum Command {
     Prompt { text: String, attachments: Vec<acp::Attachment> },
     Authenticate(String),
     /// A login with an API key the daemon saved: the relay reads `key_file` right before sending,
-    /// so neither this command nor the daemon's saved outbox holds the key. Only for a relay whose
-    /// Hello says `api_keys` (an older one cannot parse it).
+    /// so neither this command nor the daemon's saved outbox holds the key.
     AuthenticateKey { method: String, key_file: std::path::PathBuf },
     RetrySession,
     SetMode(String),
@@ -200,8 +197,7 @@ pub(crate) struct Delivered {
 
 #[derive(Serialize, Deserialize)]
 enum Input {
-    /// `version` is absent from relays before 2026-11-03: it reads as 0, which no relay speaks.
-    Hello { since: u64, #[serde(default)] version: u32, #[serde(default)] supports_native_v2: bool },
+    Hello { since: u64, version: u32 },
     Command { id: u64, command: Command },
     Answer { request: u64, answer: Answer },
     Ack { seq: u64 },
@@ -210,12 +206,7 @@ enum Input {
 #[derive(Serialize, Deserialize)]
 enum Output {
     Hello {
-        acknowledged: u64, last: u64, #[serde(default)] version: u32,
-        /// Older protocol-1 workers synthesized Cancelled on RPC error and did not check
-        /// question reply receiver liveness. Absence preserves continuity without false proof.
-        #[serde(default)] outcome_evidence: bool,
-        /// Accepts `Command::AuthenticateKey` (relays from 2026-11-03 on).
-        #[serde(default)] api_keys: bool,
+        acknowledged: u64, last: u64, version: u32,
     },
     Event(Delivered),
     Accepted { id: u64, error: Option<String> },
@@ -235,7 +226,6 @@ struct Pending {
 
 #[derive(Default)]
 struct State {
-    native_v2: bool,
     journal: VecDeque<JournalEntry>,
     bytes: usize,
     next_seq: u64,
@@ -361,7 +351,7 @@ fn run_with(session: &str, socket: &Path, cwd: &Path, resume: Option<String>, ex
     let (commands, command_rx) = async_channel::unbounded();
     // Backpressure the SDK too: an absent daemon cannot grow an unbounded second queue.
     let (events, event_rx) = async_channel::bounded(256);
-    let shared = Arc::new(Shared { state: Mutex::new(State {native_v2:experimental_acp_v2,..Default::default()}), changed: Condvar::new(), commands });
+    let shared = Arc::new(Shared { state: Mutex::new(State::default()), changed: Condvar::new(), commands });
     let opts = acp::SessionOptions { cwd: cwd.to_path_buf(), auto: acp::AutoPermission::Ask, resume };
     let worker = std::thread::Builder::new().name(format!("sill-relay-acp-{session}")).spawn(move || {
         let _ = if experimental_acp_v2 { sill_core::acp_v2::run_session(stream, opts, command_rx, events) } else { acp::run_session(stream, opts, command_rx, events) };
@@ -439,19 +429,13 @@ fn serve(mut stream: UnixStream, shared: Arc<Shared>) -> Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut first = String::new();
     reader.read_line(&mut first)?;
-    let Input::Hello { since, version, supports_native_v2 } = serde_json::from_str(&first)? else { bail!("a relay connection starts with Hello") };
+    let Input::Hello { since, version } = serde_json::from_str(&first)? else { bail!("a relay connection starts with Hello") };
     stream.set_read_timeout(None)?;
     let (generation, pending) = {
         let mut state = shared.state.lock().unwrap();
-        if state.native_v2 && !supports_native_v2 {
-            // An old daemon cannot decode native events. Refuse before attaching or replacing
-            // the current subscriber, while protocol-1 v1 workers remain adoptable unchanged.
-            write_line(&mut stream,&Output::Hello{acknowledged:state.acknowledged,last:state.next_seq,version:2,outcome_evidence:true,api_keys:true})?;
-            bail!("native ACP v2 relay requires supports_native_v2");
-        }
         if version != RELAY_PROTOCOL {
             // say which version this is, so the daemon knows it is looking at another build's relay
-            write_line(&mut stream, &Output::Hello { acknowledged: state.acknowledged, last: state.next_seq, version: RELAY_PROTOCOL, outcome_evidence: true, api_keys: true })?;
+            write_line(&mut stream, &Output::Hello { acknowledged: state.acknowledged, last: state.next_seq, version: RELAY_PROTOCOL })?;
             bail!("a daemon of relay protocol {version} connected; this relay speaks {RELAY_PROTOCOL}");
         }
         if since < state.acknowledged || since > state.next_seq {
@@ -462,7 +446,7 @@ fn serve(mut stream: UnixStream, shared: Arc<Shared>) -> Result<()> {
         }
         state.generation += 1;
         state.subscriber = Some(stream.try_clone()?);
-        write_line(&mut stream, &Output::Hello { acknowledged: state.acknowledged, last: state.next_seq, version: RELAY_PROTOCOL, outcome_evidence: true, api_keys: true })?;
+        write_line(&mut stream, &Output::Hello { acknowledged: state.acknowledged, last: state.next_seq, version: RELAY_PROTOCOL })?;
         let pending: Vec<_> = state.pending.values().filter(|p| p.seq <= since).map(|p| Delivered { seq: 0, event: p.event.clone() }).collect();
         shared.changed.notify_all();
         (state.generation, pending)
@@ -552,13 +536,9 @@ pub(crate) struct Client {
     writer: Mutex<UnixStream>,
     waiters: Waiters,
     closed: AtomicBool,
-    outcome_evidence: bool,
-    api_keys: bool,
 }
 
 impl Client {
-    pub fn outcome_evidence(&self) -> bool { self.outcome_evidence }
-    pub fn api_keys(&self) -> bool { self.api_keys }
 
     fn write(&self, value: &Input) -> Result<()> {
         if self.closed.load(Ordering::Acquire) {
@@ -609,7 +589,7 @@ pub(super) fn connect(socket: &Path, since: u64) -> Result<(Arc<Client>, mpsc::R
     }
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
-    write_line(&mut stream, &Input::Hello { since, version: RELAY_PROTOCOL, supports_native_v2:true })?;
+    write_line(&mut stream, &Input::Hello { since, version: RELAY_PROTOCOL })?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut first = String::new();
     reader.read_line(&mut first)?;
@@ -617,7 +597,7 @@ pub(super) fn connect(socket: &Path, since: u64) -> Result<(Arc<Client>, mpsc::R
     if first.is_empty() {
         return Err(Refused("the ACP relay closed the connection at Hello (its cursor range, or an older relay)".into()).into());
     }
-    let Ok(Output::Hello { acknowledged, last, version, outcome_evidence, api_keys }) = serde_json::from_str::<Output>(&first) else {
+    let Ok(Output::Hello { acknowledged, last, version }) = serde_json::from_str::<Output>(&first) else {
         return Err(Refused("the ACP relay did not answer Hello with a Hello".into()).into());
     };
     if version != RELAY_PROTOCOL {
@@ -627,7 +607,7 @@ pub(super) fn connect(socket: &Path, since: u64) -> Result<(Arc<Client>, mpsc::R
         return Err(Refused(format!("the ACP relay no longer retains cursor {since} ({acknowledged}..{last})")).into());
     }
     stream.set_read_timeout(None)?;
-    let client = Arc::new(Client { writer: Mutex::new(stream), waiters: Mutex::new(BTreeMap::new()), closed: AtomicBool::new(false), outcome_evidence, api_keys });
+    let client = Arc::new(Client { writer: Mutex::new(stream), waiters: Mutex::new(BTreeMap::new()), closed: AtomicBool::new(false) });
     let receive = Arc::downgrade(&client);
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new().name("sill-relay-reader".into()).spawn(move || {
@@ -823,7 +803,6 @@ mod tests {
                 Err(error) => panic!("connecting relay: {error:#}"),
             }
         };
-        assert!(client.outcome_evidence());
         let mut cursor = 0;
         until(&events, &client, &mut cursor, |event| matches!(event, Event::Ready { .. }));
         let prompt = Command::Prompt { text: "work".into(), attachments: vec![] };
@@ -864,12 +843,6 @@ mod tests {
         assert!(shared.state.lock().unwrap().pending.contains_key(&1));
         shared.answer(1, Answer::Permission(Some("allow".into()))).unwrap();
         assert_eq!(futures::executor::block_on(rx).unwrap().as_deref(), Some("allow"));
-    }
-
-    #[test]
-    fn missing_outcome_evidence_never_implies_support() {
-        let hello: Output = serde_json::from_str(r#"{"Hello":{"acknowledged":0,"last":0,"version":1}}"#).unwrap();
-        assert!(matches!(hello, Output::Hello { outcome_evidence:false, .. }));
     }
 
     #[test]
@@ -924,17 +897,19 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
-    fn native_v2_worker_refuses_legacy_daemon_before_replacing_subscriber() {
+    fn incompatible_daemon_is_refused_before_replacing_subscriber() {
         let (commands,_)=async_channel::unbounded();
-        let shared=Arc::new(Shared{state:Mutex::new(State{native_v2:true,..Default::default()}),changed:Condvar::new(),commands});
+        let shared=Arc::new(Shared{state:Mutex::new(State::default()),changed:Condvar::new(),commands});
+        let (existing,_peer)=UnixStream::pair().unwrap();
+        shared.state.lock().unwrap().subscriber=Some(existing);
         let (mut client,server)=UnixStream::pair().unwrap();
         client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let state=shared.clone();let worker=std::thread::spawn(move||serve(server,state));
-        message(&mut client,json!({"Hello":{"since":0,"version":RELAY_PROTOCOL}}));
-        let response=read(&mut BufReader::new(client));assert_eq!(response["Hello"]["version"],2);
-        assert!(worker.join().unwrap().is_err());assert!(shared.state.lock().unwrap().subscriber.is_none());
-        let offered=serde_json::to_value(Input::Hello{since:0,version:RELAY_PROTOCOL,supports_native_v2:true}).unwrap();
-        assert_eq!(offered["Hello"]["supports_native_v2"],true);
+        message(&mut client,json!({"Hello":{"since":0,"version":1}}));
+        let response=read(&mut BufReader::new(client));assert_eq!(response["Hello"]["version"],RELAY_PROTOCOL);
+        assert!(worker.join().unwrap().is_err());
+        let state=shared.state.lock().unwrap();
+        assert!(state.subscriber.is_some());assert_eq!(state.generation,0);
     }
     #[test]
     fn native_cancellation_removes_pending_handlers_without_false_answer_confirmation() {

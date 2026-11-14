@@ -100,7 +100,7 @@ impl Daemon {
         panic!("the daemon did not come up; log:\n{}", self.log());
     }
 
-    fn connect(&self) -> std::io::Result<Conn> { self.connect_caps(json!({"sill.internal":1})) }
+    fn connect(&self) -> std::io::Result<Conn> { self.connect_caps(json!({})) }
 
     fn connect_caps(&self, capabilities:Value) -> std::io::Result<Conn> {
         let s = UnixStream::connect(self.socket())?;
@@ -122,50 +122,6 @@ impl Daemon {
             std::thread::sleep(Duration::from_millis(50));
         }
     }
-}
-
-#[test]
-fn frontend_reads_the_daemons_host_and_refuses_links() {
-    let d = Daemon::start();
-    let mut c = d.connect().unwrap();
-    let request = |c: &mut Conn, request| c.call(sill_core::frontend::METHOD, serde_json::to_value(request).unwrap()).unwrap();
-    use sill_core::frontend::Request;
-    let file = d.dir.join("home/remote.txt");
-    std::fs::write(&file, "on the box").unwrap();
-    assert_eq!(request(&mut c, Request::Home)["result"], json!(d.dir.join("home")));
-    assert_eq!(request(&mut c, Request::Read { path: file.clone() })["result"], json!(b"on the box".as_slice()));
-    request(&mut c, Request::Write { path: file.clone(), bytes: b"edited from frontend".to_vec() });
-    assert_eq!(std::fs::read_to_string(&file).unwrap(), "edited from frontend");
-    std::os::unix::fs::symlink(&file, d.dir.join("home/link")).unwrap();
-    let link = d.dir.join("home/link");
-    assert!(request(&mut c, Request::Read { path: link.clone() }).get("error").is_some());
-    assert!(request(&mut c, Request::Write { path: link, bytes: b"bad".to_vec() }).get("error").is_some());
-    assert_eq!(std::fs::read_to_string(&file).unwrap(), "edited from frontend");
-    let entries = request(&mut c, Request::List { path: d.dir.join("home") });
-    assert!(entries["result"].as_array().unwrap().iter().any(|e| e["metadata"]["symlink"] == true));
-}
-
-#[test]
-fn frontend_store_and_settings_are_daemon_owned() {
-    let d = Daemon::start();
-    let mut c = d.connect().unwrap();
-    use sill_core::frontend::Request;
-    let request = |c: &mut Conn, request| c.call(sill_core::frontend::METHOD, serde_json::to_value(request).unwrap()).unwrap();
-    assert_eq!(request(&mut c, Request::Sessions)["result"], json!([]));
-    let mut config = sill_core::config::Config::default();
-    config.memory_recall = Some(7);
-    assert!(request(&mut c, Request::SetConfig(config)).get("error").is_none());
-    assert_eq!(request(&mut c, Request::Config)["result"]["memory_recall"], json!(7));
-    request(&mut c, Request::PatchConfig { fields: [("tray".into(), json!(false))].into() });
-    request(&mut c, Request::PatchConfig { fields: [("theme".into(), json!("nord"))].into() });
-    let settings = request(&mut c, Request::Config);
-    assert_eq!(settings["result"]["memory_recall"], json!(7), "changing presentation preserves memory settings");
-    assert_eq!(settings["result"]["tray"], json!(false));
-    assert_eq!(settings["result"]["theme"], json!("nord"));
-    assert!(request(&mut c, Request::PatchConfig { fields: [("unknown".into(), json!(true))].into() }).get("error").is_some());
-    assert!(request(&mut c, Request::SetInstructions { text: "remember the box".into() }).get("error").is_none());
-    assert_eq!(request(&mut c, Request::Instructions)["result"], json!("remember the box"));
-    assert!(request(&mut c, Request::Upload { session: "abcdef01".into(), name: "../bad".into(), bytes: vec![] }).get("error").is_some());
 }
 
 /// Attach a stream to a terminal; the token line and first keystrokes go in one write.
@@ -480,7 +436,7 @@ fn the_schema_is_printed_without_a_daemon() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(doc["protocol"], json!(sill_proto::initialize::PROTOCOL_ID));
-    assert!(doc["$defs"]["Event"].is_object() && doc["$defs"]["Command"].is_object());
+    assert!(doc["$defs"]["Event"].is_object() && doc["$defs"]["Submission"].is_object());
 }
 
 #[test]
@@ -525,13 +481,14 @@ fn initialized_connections_receive_public_change_notifications_only_after_handsh
     assert_eq!(uninitialized.call(sill_proto::method::DAEMON_STATUS,json!({})).unwrap()["error"]["data"]["code"],"not_initialized");
     let mut public=connect_raw();
     public.call(sill_proto::initialize::METHOD,json!({"protocols":[sill_proto::initialize::PROTOCOL_ID],"client":{"name":"external","version":"0"},"capabilities":{}})).unwrap();
-    assert_eq!(public.call(sill_proto::method::SESSIONS_LIST,json!({})).unwrap()["error"]["data"]["code"],"unsupported");
-    let mut internal=d.connect().unwrap();
-    let request_id=internal.next;
-    internal.send_raw(&json!({"jsonrpc":"2.0","id":request_id,"method":sill_proto::method::CHANGES_KEEP,"params":{"session":"missing","items":[]}}).to_string()).unwrap();
+    assert_eq!(public.call("_sill/internal/sessions.list",json!({})).unwrap()["error"]["code"],-32601);
+    let mut publisher=d.connect().unwrap();
+    let session=publisher.call("_sill/sessions.create",json!({"create_id":"notifications","agent":"claude","policy":"default"})).unwrap()["result"]["session_id"].clone();
+    let request_id=publisher.next;
+    publisher.send_raw(&json!({"jsonrpc":"2.0","id":request_id,"method":"_sill/sessions.delete","params":{"session_id":session}}).to_string()).unwrap();
     let mut changed=false;
     loop {
-        let message=internal.read().unwrap();
+        let message=publisher.read().unwrap();
         if message.get("method")==Some(&json!("_sill/changes.changed")) {changed=true;}
         if message.get("id")==Some(&json!(request_id)) {break;}
     }
@@ -550,7 +507,7 @@ fn public_session_lifecycle_retries_pagination_and_restart() {
     let call=|c:&mut Conn,m:&str,p:Value| {
         let r=c.call(m,p).unwrap();assert!(r.get("error").is_none(),"{m}: {r}");r["result"].clone()
     };
-    assert_eq!(c.call(sill_proto::method::SESSIONS_LIST,json!({})).unwrap()["error"]["data"]["code"],"unsupported");
+    assert_eq!(c.call("_sill/internal/sessions.list",json!({})).unwrap()["error"]["code"],-32601);
     let input=json!({"create_id":"durable-create","agent":"claude","policy":"default"});
     let first=call(&mut c,"_sill/sessions.create",input.clone());
     assert_eq!(call(&mut c,"_sill/sessions.create",input.clone()),first);
@@ -928,5 +885,15 @@ fn public_network_denials_are_live_bounded_pages() {
         found.extend(page["hosts"].as_array().unwrap().iter().filter_map(|s|s.as_str().map(str::to_owned)));after=page["next"].clone();if after.is_null(){break;}
     }
     assert_eq!(found.len(),201);assert_eq!(found[0],"host-000.example");assert_eq!(found[200],"host-200.example");
+    let answer=c.call("_sill/policy.remember_denied",json!({"session_id":session,"host":"host-000.example"})).unwrap();
+    assert!(answer.get("error").is_none(),"{answer}");
+    assert_eq!(std::fs::read_to_string(runtime.join("denied.answered")).unwrap(),"host-000.example\n");
+    let allowed=c.call("_sill/policy.allow_host",json!({"session_id":session,"host":"*.example.test"})).unwrap();
+    assert!(allowed.get("error").is_none(),"{allowed}");
+    let agent=c.call("_sill/agents.get",json!({"agent_id":"claude"})).unwrap();
+    assert!(agent["result"]["domains"].as_array().unwrap().contains(&json!("*.example.test")),"{agent}");
+    for host in ["bad\nname", "../invalid"] {
+        assert!(c.call("_sill/policy.allow_host",json!({"session_id":session,"host":host})).unwrap().get("error").is_some());
+    }
     assert!(c.call("_sill/policy.denied",json!({"session_id":session,"limit":0})).unwrap().get("error").is_some());
 }

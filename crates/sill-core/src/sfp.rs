@@ -29,9 +29,22 @@ pub struct Source { pub generation_id: String, pub seq: u64 }
 pub const RETAINED_EVENTS: i64 = 4096;
 pub const RETAINED_EVENT_BYTES: i64 = 16 * 1024 * 1024;
 
+/// Reject unsupported development state before daemon startup can recover operations or
+/// adopt workers. This only reads schema/receipt metadata and never changes the database.
+pub(crate) fn check_schema(conn:&rusqlite::Connection)->Result<()> {
+    crate::store::require_columns(conn, "sfp_events", &["bytes"])?;
+    let old_receipts: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sfp_sources')", [], |r| r.get(0))?;
+    if old_receipts {
+        let populated: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sfp_sources)", [], |r| r.get(0))?;
+        anyhow::ensure!(!populated, "unsupported pre-baseline source receipts; stop sessions and explicitly reset old conversation state before upgrading, preserving settings and pins; no data was migrated or deleted");
+    }
+    Ok(())
+}
+
 pub struct Journal<'a> { store: &'a Store }
 impl<'a> Journal<'a> {
     pub fn new(store: &'a Store) -> Result<Self> {
+        check_schema(store.conn())?;
         store.conn().execute_batch("CREATE TABLE IF NOT EXISTS sfp_sessions (
             session_id TEXT PRIMARY KEY, seq INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS sfp_records (
@@ -44,9 +57,6 @@ impl<'a> Journal<'a> {
           CREATE TABLE IF NOT EXISTS sfp_events (
             session_id TEXT NOT NULL, seq INTEGER NOT NULL, json TEXT NOT NULL, bytes INTEGER NOT NULL,
             PRIMARY KEY(session_id,seq));
-          CREATE TABLE IF NOT EXISTS sfp_sources (
-            session_id TEXT NOT NULL, generation_id TEXT NOT NULL, source_seq TEXT NOT NULL,
-            PRIMARY KEY(session_id,generation_id,source_seq));
           CREATE TABLE IF NOT EXISTS sfp_source_ranges (
             session_id TEXT NOT NULL, generation_id TEXT NOT NULL, first TEXT NOT NULL, last TEXT NOT NULL,
             PRIMARY KEY(session_id,generation_id,first));
@@ -61,21 +71,12 @@ impl<'a> Journal<'a> {
             DELETE FROM sfp_records WHERE session_id=OLD.id;
             DELETE FROM sfp_blocks WHERE session_id=OLD.id;
             DELETE FROM sfp_events WHERE session_id=OLD.id;
-            DELETE FROM sfp_sources WHERE session_id=OLD.id;
             DELETE FROM sfp_answers WHERE session_id=OLD.id;
             DELETE FROM sfp_submission_inputs WHERE session_id=OLD.id;
           END;
           CREATE TRIGGER IF NOT EXISTS sfp_delete_source_ranges AFTER DELETE ON sessions BEGIN
             DELETE FROM sfp_source_ranges WHERE session_id=OLD.id;
           END;")?;
-        let sized:bool=store.conn().query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('sfp_events') WHERE name='bytes')",[],|r|r.get(0))?;
-        if !sized {
-            Self { store }.atomic(|| {
-                store.conn().execute_batch("ALTER TABLE sfp_events ADD COLUMN bytes INTEGER NOT NULL DEFAULT 0;
-                    UPDATE sfp_events SET bytes=length(CAST(json AS BLOB));")?;
-                Ok(())
-            })?;
-        }
         store.conn().execute_batch("CREATE INDEX IF NOT EXISTS sfp_event_sizes ON sfp_events(session_id,seq DESC,bytes)")?;
         Ok(Self { store })
     }
@@ -113,21 +114,9 @@ impl<'a> Journal<'a> {
                 capabilities: BTreeMap::from([("steering".into(), false)]),
                 controls:None, authentication:None, usage:None, agent_title:None, commands:vec![], active_ms:0, active_since_ms:None,
             };
-            let inserted = self.store.conn().execute("INSERT OR IGNORE INTO sfp_sessions(session_id,state) VALUES (?1,?2)", params![session_id, serde_json::to_string(&state)?])?;
-            if inserted == 1 {
-                // Existing rows have stable storage identities but cannot prove agent replay
-                // continuity. Import once under a distinct historical generation, never by text.
-                let imported_generation = format!("history-{}", new_id());
-                self.store.visit_entries(session_id, |row| {
-                    let tool = (row.kind == "tool").then(|| Tool { title:row.text.clone(), kind:row.tool_kind,
-                        status:row.extra, detail:row.detail, diff:row.diff, parent_item_id:None });
-                    let event=Event::ItemCreated { item:Item { item_id:format!("history-{}",new_id()), created_seq:String::new(),
-                        turn_id:None, submission_id:None, agent_generation_id:imported_generation.clone(),
-                        kind:row.kind, content:if tool.is_some() { vec![] } else { vec![Content::text(row.text)] }, tool } };
-                    self.append(session_id,None,&[event])?;
-                    Ok(())
-                })?;
-            }
+            self.store.conn().execute("INSERT OR IGNORE INTO sfp_sessions(session_id,state) VALUES (?1,?2)", params![session_id, serde_json::to_string(&state)?])?;
+            // Pre-SFP transcripts remain available to memory, but are never imported into
+            // canonical history or used to infer source identity and replay continuity.
             self.session(session_id)
         })
     }
@@ -205,13 +194,12 @@ impl<'a> Journal<'a> {
     }
 
     pub fn source_seen(&self, session_id: &str, source: &Source) -> Result<bool> {
-        // Old per-event receipts stay readable; new receipts coalesce only adjacent sequences.
         // Never infer that a missing lower sequence was seen merely from a high-water mark.
         let key=format!("{:020}",source.seq);
-        Ok(self.store.conn().query_row("SELECT EXISTS(SELECT 1 FROM sfp_sources WHERE session_id=?1 AND generation_id=?2 AND source_seq=?3)
-            OR EXISTS(SELECT 1 FROM sfp_source_ranges WHERE session_id=?1 AND generation_id=?2 AND first<=?4 AND last>=?4)",
-            params![session_id, source.generation_id, source.seq.to_string(),key], |r| r.get(0))?)
+        Ok(self.store.conn().query_row("SELECT EXISTS(SELECT 1 FROM sfp_source_ranges WHERE session_id=?1 AND generation_id=?2 AND first<=?3 AND last>=?3)",
+            params![session_id, source.generation_id,key], |r| r.get(0))?)
     }
+
     fn remember_source(&self, session_id:&str, source:&Source) -> Result<()> {
         let low=format!("{:020}",source.seq.saturating_sub(1));
         let high=format!("{:020}",source.seq.saturating_add(1));
@@ -629,19 +617,26 @@ mod tests {
     fn code(e:anyhow::Error)->String { e.downcast_ref::<DomainError>().unwrap().code.into() }
 
     #[test]
-    fn legacy_event_size_migration_is_atomic_and_counts_utf8_bytes() {
-        let dir=std::env::temp_dir().join(format!("sill-event-migration-{}",new_id()));
+    fn incompatible_event_schema_is_rejected_without_modifying_history() {
+        let dir=std::env::temp_dir().join(format!("sill-event-baseline-{}",new_id()));
         let store=Store::open(&dir.join("s.db")).unwrap();
-        store.conn().execute_batch("CREATE TABLE sfp_events(session_id TEXT NOT NULL,seq INTEGER NOT NULL,json TEXT NOT NULL,PRIMARY KEY(session_id,seq))").unwrap();
-        let json="{\"text\":\"🦀\"}";
-        store.conn().execute("INSERT INTO sfp_events VALUES ('s',1,?1)",[json]).unwrap();
-        {
-            let tx=store.conn().unchecked_transaction().unwrap();Journal::new(&store).unwrap();tx.rollback().unwrap();
-        }
+        store.conn().execute_batch("CREATE TABLE sfp_events(session_id TEXT NOT NULL,seq INTEGER NOT NULL,json TEXT NOT NULL,PRIMARY KEY(session_id,seq));
+            INSERT INTO sfp_events VALUES ('s',1,'original')").unwrap();
+        assert!(Journal::new(&store).err().unwrap().to_string().contains("unsupported pre-baseline"));
         assert!(!store.conn().query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('sfp_events') WHERE name='bytes')",[],|r|r.get::<_,bool>(0)).unwrap());
-        Journal::new(&store).unwrap();
-        assert_eq!(store.conn().query_row("SELECT bytes FROM sfp_events",[],|r|r.get::<_,i64>(0)).unwrap(),json.len() as i64);
+        assert_eq!(store.conn().query_row("SELECT json FROM sfp_events",[],|r|r.get::<_,String>(0)).unwrap(),"original");
         drop(store);std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn old_source_receipts_are_rejected_instead_of_replaying_work() {
+        let f=Fixture::new();
+        f.store.conn().execute_batch("CREATE TABLE sfp_sources(session_id TEXT,generation_id TEXT,source_seq TEXT);
+            INSERT INTO sfp_sources VALUES ('s','g','1')").unwrap();
+        assert!(Journal::new(&f.store).err().unwrap().to_string().contains("unsupported pre-baseline source receipts"));
+        assert_eq!(f.store.conn().query_row("SELECT count(*) FROM sfp_sources",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        f.store.conn().execute("DELETE FROM sfp_sources",[]).unwrap();
+        Journal::new(&f.store).unwrap();
     }
 
     #[test]
@@ -656,8 +651,6 @@ mod tests {
         let tx=f.store.conn().unchecked_transaction().unwrap();
         j.append(&f.id,Some(Source{generation_id:"g1".into(),seq:5}),&[]).unwrap();tx.rollback().unwrap();
         assert!(!j.source_seen(&f.id,&Source{generation_id:"g1".into(),seq:5}).unwrap());
-        f.store.conn().execute("INSERT INTO sfp_sources VALUES (?1,'g1','7')",[&f.id]).unwrap();
-        assert!(j.source_seen(&f.id,&Source{generation_id:"g1".into(),seq:7}).unwrap());
         f.store.delete(&f.id).unwrap();assert_eq!(count(),0);
     }
 
@@ -784,32 +777,16 @@ mod tests {
         assert_eq!(code(j.append(&f.id,None,&[Event::ItemCreated {item:item("i")}]).unwrap_err()),"invalid_state");
     }
     #[test]
-    fn transcript_import_happens_once_and_deletion_erases_private_data() {
+    fn old_transcripts_are_not_imported_and_deletion_erases_canonical_data() {
         let f=Fixture::new();let session=f.store.create("test","default").unwrap();
         f.store.append(&session.id,"user","old prompt","").unwrap(); let j=f.journal();
-        j.ensure(&session.id,"g").unwrap();let first=j.snapshot(&session.id).unwrap();assert_eq!(first.1.len(),2);
+        j.ensure(&session.id,"g").unwrap();let first=j.snapshot(&session.id).unwrap();assert_eq!(first.1.len(),1);
+        assert_eq!(f.store.entries(&session.id).unwrap().len(),1);
         j.ensure(&session.id,"new").unwrap();assert_eq!(j.snapshot(&session.id).unwrap(),first);
+        j.append(&session.id,None,&[Event::ItemCreated{item:item("canonical")}]).unwrap();
+        assert_eq!(j.snapshot(&session.id).unwrap().1.len(),2);
         f.store.delete(&session.id).unwrap();assert_eq!(code(j.cursor(&session.id).unwrap_err()),"not_found");
         let count:i64=f.store.conn().query_row("SELECT count(*) FROM sfp_records WHERE session_id=?1",[&session.id],|r|r.get(0)).unwrap();assert_eq!(count,0);
-    }
-    #[test]
-    fn streamed_transcript_import_rolls_back_all_rows_on_a_later_failure() {
-        let f=Fixture::new();let session=f.store.create("test","default").unwrap();
-        f.store.append(&session.id,"user","first","").unwrap();
-        f.store.append(&session.id,"assistant","second","").unwrap();
-        f.store.conn().execute_batch("CREATE TEMP TRIGGER fail_import BEFORE INSERT ON sfp_records
-            WHEN NEW.kind='item' AND json_extract(NEW.json,'$.item.content[0].text')='second'
-            BEGIN SELECT RAISE(ABORT,'injected later row failure'); END").unwrap();
-        let j=f.journal();assert!(j.ensure(&session.id,"g").is_err());
-        for table in ["sfp_sessions","sfp_records","sfp_events"] {
-            let count:i64=f.store.conn().query_row(&format!("SELECT count(*) FROM {table} WHERE session_id=?1"),[&session.id],|r|r.get(0)).unwrap();
-            assert_eq!(count,0,"partial import in {table}");
-        }
-        assert_eq!(f.store.entries(&session.id).unwrap().len(),2,"legacy rows remain available after failure");
-        f.store.conn().execute_batch("DROP TRIGGER fail_import").unwrap();
-        j.ensure(&session.id,"g").unwrap();
-        let text=j.snapshot(&session.id).unwrap().1.into_iter().filter_map(|r|match r {Record::Item{item}=>item.content[0].text.clone(),_=>None}).collect::<Vec<_>>();
-        assert_eq!(text,vec!["first","second"]);
     }
     #[test]
     fn timestamp_is_rfc3339() {

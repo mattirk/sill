@@ -25,7 +25,7 @@ impl Connection {
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
         let mut connection=Self { reader: BufReader::new(stream.try_clone()?), writer: stream, next: 1, events: Vec::new() };
-        connection.call(sill_proto::initialize::METHOD,json!({"protocols":[sill_proto::initialize::PROTOCOL_ID],"client":{"name":"recovery-test","version":"0"},"capabilities":{"sill.internal":1}}));
+        connection.call(sill_proto::initialize::METHOD,json!({"protocols":[sill_proto::initialize::PROTOCOL_ID],"client":{"name":"recovery-test","version":"0"},"capabilities":{}}));
         Ok(connection)
     }
 
@@ -274,10 +274,9 @@ fn a_checkpoint_adopted_as_the_end_survives_a_daemon_restart() {
     exercise_recovery(true, false);
 }
 
-/// The first deploy after the relay exists (docs/daemon.md §3.9 item 1): the surviving relay is
-/// another build's. Here it answers Hello the way relays did before the version existed — no
-/// `version`, which reads as 0 — from a listener in this test, with a process named like a relay
-/// behind `relay.pid`. The daemon must evict it, start a real relay and reach the agent.
+/// A surviving relay with an incompatible explicit protocol identity is replaced. The fake
+/// listener answers version 0 with a process named like a relay behind `relay.pid`; the daemon
+/// must evict it, start a current relay and reach the agent.
 #[test]
 fn a_relay_of_another_version_is_evicted_and_replaced_at_recovery() {
     let (mut fixture, _release, observed) = Fixture::new();
@@ -313,7 +312,7 @@ fn a_relay_of_another_version_is_evicted_and_replaced_at_recovery() {
                     let mut hello = String::new();
                     let _ = reader.read_line(&mut hello);
                     let mut writer = stream;
-                    let _ = writeln!(writer, "{}", json!({"Hello": {"acknowledged": 0, "last": 0}}));
+                    let _ = writeln!(writer, "{}", json!({"Hello": {"acknowledged": 0, "last": 0, "version": 0}}));
                     std::thread::sleep(Duration::from_millis(200)); // the daemon reads before this closes
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(5)),
@@ -369,25 +368,20 @@ fn exercise_recovery(adopt_checkpoint: bool, lose_worker: bool) {
     fixture.start();
     assert_eq!(observed.recv_timeout(Duration::from_secs(5)).unwrap(), "initialize");
     let mut origin = Connection::connect(&fixture.socket()).unwrap();
-    origin.call(method::SESSIONS_ATTACH, json!({"key":fixture.session,"fresh":false}));
+    origin.call("_sill/sessions.attach", json!({"session_id":fixture.session}));
     let mut follower = Connection::connect(&fixture.socket()).unwrap();
-    follower.call(method::SESSIONS_ATTACH, json!({"key":fixture.session,"fresh":false}));
-    assert_eq!(origin.events.first().unwrap()["method"], method::SESSION_REPLAY);
-    assert_eq!(follower.events.first().unwrap()["method"], method::SESSION_REPLAY);
-    origin.call(method::SESSIONS_COMMAND, json!({"key":fixture.session,"command":sill_proto::wire::Command::Prompt {
-        text: "work".into(), attachments: vec![], entry: Some(sill_proto::wire::Entry::User { text: "work".into(), names: vec![] }),
-    }}));
+    follower.call("_sill/sessions.attach", json!({"session_id":fixture.session}));
+    origin.call("_sill/sessions.submit", json!({"session_id":fixture.session,"submission_id":"recovery-turn","text":"work"}));
     origin.call(method::DAEMON_STATUS, json!({}));
     follower.call(method::DAEMON_STATUS, json!({}));
-    assert!(follower.events.iter().any(|event| event["params"]["event"]["UserText"] == "work"), "the second frontend sees the plain accepted prompt");
-    assert!(!origin.events.iter().any(|event| event["params"]["event"].get("UserText").is_some()), "the sending frontend must not receive its optimistic user entry twice");
+    for frontend in [&origin, &follower] {
+        assert!(frontend.events.iter().any(|event| event["params"]["event"]["type"] == "submission.updated"), "both frontends see durable acceptance");
+    }
     let prepared = observed.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(prepared.contains(sill_core::instructions::BASE));
     assert!(prepared.contains("Keep the recovery test's instructions."));
     assert!(prepared.contains("pinned.txt"));
     assert!(!prepared.contains("global-only.txt"));
-    origin.call(method::SESSIONS_DETACH, json!({"key":fixture.session}));
-    follower.call(method::SESSIONS_DETACH, json!({"key":fixture.session}));
     drop(origin);
     drop(follower);
     fixture.wait("partial streamed text committed", || fixture.snapshot()["agent_md"] == "before restart ");
@@ -396,16 +390,23 @@ fn exercise_recovery(adopt_checkpoint: bool, lose_worker: bool) {
     fixture.start();
     fixture.wait("unattended permission recovered", || fixture.snapshot()["pending"].as_object().is_some_and(|questions| questions.len() == 1));
     let mut frontend = Connection::connect(&fixture.socket()).unwrap();
-    frontend.call(method::SESSIONS_ATTACH, json!({"key":fixture.session,"fresh":false}));
-    let question = frontend.events.iter().find_map(|event| event["params"]["event"].get("PermissionRequest")).expect("pending permission delivered on attach");
-    let request = question["request"].as_u64().unwrap();
-    frontend.call(method::SESSIONS_ANSWER, json!({"key":fixture.session,"request":request,"answer":{"Permission":"allow"}}));
+    let attached = frontend.call("_sill/sessions.attach", json!({"session_id":fixture.session}));
+    let token = attached["snapshot"]["token"].clone();
+    let mut page = Value::Null;
+    let mut records = Vec::new();
+    loop {
+        let result = frontend.call("_sill/sessions.snapshot", json!({"token":token,"page":page}));
+        records.extend(result["records"].as_array().unwrap().iter().cloned());
+        page = result["next_page"].clone();
+        if page.is_null() { break; }
+    }
+    let question = records.iter().find(|record| record["type"] == "question" && record["question"]["state"] == "open").expect("pending permission delivered in snapshot");
+    frontend.call("_sill/questions.answer", json!({"session_id":fixture.session,"question_id":question["question"]["question_id"],"answer_id":"recovery-answer","answer":{"type":"permission","option_id":"allow"}}));
     fixture.wait("first turn complete", || fixture.snapshot()["busy"] == false);
     let user: String = fixture.database().query_row("SELECT text FROM entries WHERE session_id=?1 AND kind='user'", [&fixture.session], |row| row.get(0)).unwrap();
     assert_eq!(user, "work", "the expanded prompt must never replace the plain transcript");
     let (count, text): (i64, String) = fixture.database().query_row("SELECT count(*), group_concat(text,'') FROM entries WHERE session_id=?1 AND kind='agent'", [&fixture.session], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
     assert_eq!((count, text.as_str()), (1, "before restart after restart"));
-    frontend.call(method::SESSIONS_DETACH, json!({"key":fixture.session}));
     drop(frontend);
     if adopt_checkpoint {
         Connection::connect(&fixture.socket()).unwrap().call("_sill/sessions.checkpoint", json!({"session_id":fixture.session}));

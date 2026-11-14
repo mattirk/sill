@@ -1,6 +1,6 @@
 //! Public host data methods. No core structs are serialized across this boundary.
 use super::Hub;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use sill_proto::{admin as api, rpc::Error, sessions::HostPath};
@@ -249,27 +249,24 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 return Err(invalid("invalid host"));
             }
             if m.ends_with("remember_denied") {
-                super::frontend::dispatch(
-                    hub,
-                    json!(sill_core::frontend::Request::RememberDenied {
-                        session: a.session_id,
-                        host: a.host
-                    }),
-                )?;
+                use std::io::Write;
+                let path = sill_core::shim::runtime_dir(&a.session_id)?.join("denied.answered");
+                let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+                writeln!(file, "{}", a.host)?;
                 Ok(json!({}))
             } else {
-                let v = super::frontend::dispatch(
-                    hub,
-                    json!(sill_core::frontend::Request::AllowHost {
-                        session: a.session_id,
-                        host: a.host
-                    }),
-                )?;
-                bounded(api::AllowedHost {
-                    agent_name: serde_json::from_value(v)?,
-                })
+                let row = hub.with_store(|s| s.session_exact(&a.session_id))?.ok_or_else(|| domain("not_found", "session not found"))?;
+                let name = a.host.rsplit_once(':').filter(|(_, port)| port.parse::<u16>().is_ok()).map(|(name, _)| name).unwrap_or(&a.host);
+                let name = name.strip_prefix("*.").unwrap_or(name);
+                if !sill_core::proxy::valid_hostname(name) { return Err(invalid("invalid host pattern")); }
+                let home = sill_core::changes::home()?;
+                let mut agent = sill_core::agents::load(&home).remove(&row.agent).context("unknown agent")?;
+                if !agent.domains.contains(&a.host) { agent.domains.push(a.host); }
+                sill_core::agents::save_override(&home, &agent)?;
+                bounded(api::AllowedHost { agent_name: agent.name })
             }
         }
+
         "_sill/files.home" => {
             let _: sill_proto::Empty = args(p)?;
             bounded(HostPath::from_path(&sill_core::changes::home()?))

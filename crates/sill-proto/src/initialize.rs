@@ -6,8 +6,7 @@ use crate::rpc::Error;
 
 pub const METHOD: &str = "_sill/initialize";
 /// Development implementation; the complete sfp/1-draft.1 contract is not frozen or advertised.
-pub const PROTOCOL_ID: &str = "sfp/1-dev.2";
-pub const INTERNAL_CAPABILITY: &str = "sill.internal";
+pub const PROTOCOL_ID: &str = "sfp/1-dev.3";
 
 /// A negotiable optional feature. Names are `namespace.feature` in lowercase ASCII (`a-z`,
 /// `0-9`, `_`, `.`); the `sill.` namespace is the daemon's own. Versions start at 1 and are
@@ -17,10 +16,8 @@ pub const INTERNAL_CAPABILITY: &str = "sill.internal";
 pub struct Capability { pub name: &'static str, pub version: u32, pub doc: &'static str }
 
 /// Every capability this daemon offers. The baseline sfp/1 contract needs none of them; later
-/// compatible additions arrive here (docs/protocol.md §7.2).
-pub const CAPABILITIES: &[Capability] = &[
-    Capability { name: INTERNAL_CAPABILITY, version: 1, doc: "Same-build `_sill/internal/` adapters; not a compatibility contract." },
-];
+/// compatible additions arrive here (docs/protocol.md, Compatibility and errors).
+pub const CAPABILITIES: &[Capability] = &[];
 
 /// Whether `name` is a well-formed capability name.
 pub fn valid_capability_name(name: &str) -> bool {
@@ -31,7 +28,11 @@ pub fn valid_capability_name(name: &str) -> bool {
 
 /// The capabilities answered for an offer: min(offered, supported) for each known one.
 pub fn negotiate(offer: &BTreeMap<String, u32>) -> BTreeMap<String, u32> {
-    CAPABILITIES.iter()
+    negotiate_supported(offer, CAPABILITIES)
+}
+
+fn negotiate_supported(offer: &BTreeMap<String, u32>, supported: &[Capability]) -> BTreeMap<String, u32> {
+    supported.iter()
         .filter_map(|c| offer.get(c.name).map(|&v| (c.name.to_string(), v.min(c.version))))
         .filter(|(_, v)| *v > 0)
         .collect()
@@ -138,8 +139,11 @@ mod tests {
     fn capabilities_negotiate_to_the_lower_version_and_ignore_unknown_offers() {
         let offer = |pairs: &[(&str, u32)]| pairs.iter().map(|(n, v)| (n.to_string(), *v)).collect::<BTreeMap<_, _>>();
         assert!(negotiate(&offer(&[("unknown.feature", 3)])).is_empty());
-        assert_eq!(negotiate(&offer(&[(INTERNAL_CAPABILITY, 7)])), offer(&[(INTERNAL_CAPABILITY, 1)]));
-        assert!(negotiate(&offer(&[(INTERNAL_CAPABILITY, 0)])).is_empty());
+        let supported = [Capability { name: "test.feature", version: 2, doc: "test" }];
+        assert_eq!(negotiate_supported(&offer(&[("test.feature", 7)]), &supported), offer(&[("test.feature", 2)]));
+        assert_eq!(negotiate_supported(&offer(&[("test.feature", 1)]), &supported), offer(&[("test.feature", 1)]));
+        assert!(negotiate_supported(&offer(&[("test.feature", 0)]), &supported).is_empty());
+        assert!(negotiate(&offer(&[("sill.internal", 1)])).is_empty());
         for c in CAPABILITIES { assert!(valid_capability_name(c.name), "{}", c.name); assert!(c.version >= 1); }
         assert!(!valid_capability_name("nodot") && !valid_capability_name("Upper.case") && !valid_capability_name("a..b"));
     }

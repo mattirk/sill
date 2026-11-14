@@ -10,12 +10,7 @@ type Responses = Mutex<BTreeMap<String, (std::time::Instant, serde_json::Value)>
 static RESPONSES: OnceLock<Responses> = OnceLock::new();
 
 fn cacheable(r: &Request) -> bool {
-    matches!(r, Request::Home |
-        Request::Memories { .. } | Request::AgentSettings { .. } | Request::Config | Request::Instructions |
-        Request::Agents | Request::Registry | Request::Installed { .. } |
-        Request::Available(_) | Request::Metadata { .. } | Request::List { .. } | Request::Head { .. } |
-        Request::RepoRoot { .. } | Request::PolicyDesktop { .. } | Request::Policies | Request::Kept { .. } |
-        Request::ProcessPolicy { .. } | Request::JailOutdated { .. })
+    matches!(r, Request::Config | Request::Instructions | Request::PolicyDesktop { .. } | Request::Policies)
 }
 
 pub fn invalidate() {
@@ -25,17 +20,11 @@ pub fn invalidate() {
 }
 
 fn read_only(r:&Request)->bool {
-    matches!(r, Request::Home | Request::Sessions | Request::Pins {..} | Request::GlobalPins |
-        Request::Entries {..} | Request::EntryCount {..} | Request::Memories {..} | Request::AgentSettings {..} |
-        Request::Search {..} | Request::Export | Request::Recall {..} | Request::PolicyText {..} |
-        Request::Config | Request::Instructions | Request::Agents | Request::Registry | Request::Installed {..} |
-        Request::Available(_) | Request::Metadata {..} | Request::List {..} | Request::Find {..} | Request::Read {..} |
-        Request::Head {..} | Request::RepoRoot {..} | Request::ChangedLines {..} | Request::JailOutdated {..} |
-        Request::GitStatus {..} | Request::ResolveImage {..} | Request::Denied {..} | Request::ProcList {..} |
-        Request::ProcTail {..} | Request::ReadLog {..} | Request::Policies | Request::PolicyDesktop {..} |
-        Request::Kept {..} | Request::GitSummary {..} | Request::ProcessPolicy {..})
+    matches!(r, Request::Config | Request::Instructions | Request::PolicyText {..} | Request::Denied {..} |
+        Request::ProcTail {..} | Request::Policies | Request::PolicyDesktop {..})
 }
-fn public_request(r:&Request)->Result<Option<(&'static str,serde_json::Value,bool)>> {
+
+fn public_request(r:&Request)->Result<(&'static str,serde_json::Value,bool)> {
     use serde_json::json;
     let request=match r {
         Request::Denied {session}=>("_sill/policy.denied",json!({"session_id":session}),false),
@@ -43,19 +32,16 @@ fn public_request(r:&Request)->Result<Option<(&'static str,serde_json::Value,boo
         Request::AllowHost {session,host}=>("_sill/policy.allow_host",json!({"session_id":session,"host":host}),false),
         Request::Policies=>("_sill/policy.list",json!({}),false),
         Request::PolicyDesktop {policy}=>("_sill/policy.get",json!({"name":policy}),false),
-        Request::AgentSettings {agent}=>("_sill/agents.defaults.get",json!({"agent_id":agent}),false),
         Request::RefreshSnapshot=>("_sill/memory.refresh",json!({}),false),
         Request::Config=>("_sill/settings.get",json!({}),false),
         Request::PatchConfig {fields} => ("_sill/settings.patch",json!({"changes":fields.iter().map(|(k,v)|json!({"type":k,"value":v})).collect::<Vec<_>>()}),false),
-        Request::SetConfig(c) => ("_sill/settings.patch",json!({"changes":serde_json::to_value(c)?.as_object().unwrap().iter().map(|(k,v)|json!({"type":k,"value":v})).collect::<Vec<_>>()}),false),
         Request::Instructions=>("_sill/settings.instructions.get",json!({}),true),
         Request::SetInstructions {text}=>("_sill/settings.instructions.set",json!({"text":text}),false),
         Request::PolicyText {name}=>("_sill/policy.get",json!({"name":name}),true),
         Request::ProcTail {session,name,lines}=>("_sill/procs.tail",json!({"session_id":session,"name":name,"lines":lines}),true),
-        Request::ProcStop {session,name} if !name.is_empty()=>("_sill/procs.stop",json!({"session_id":session,"name":name}),false),
+        Request::ProcStop {session,name}=>("_sill/procs.stop",json!({"session_id":session,"name":name}),false),
         Request::ProcDismiss {session,name}=>("_sill/procs.dismiss",json!({"session_id":session,"name":name}),false),
-        _=>return Ok(None)
-    };Ok(Some(request))
+    };Ok(request)
 }
 
 pub fn request<T: DeserializeOwned>(r: Request) -> Result<T> {
@@ -72,8 +58,6 @@ pub fn request<T: DeserializeOwned>(r: Request) -> Result<T> {
 
     type Lane = OnceLock<Mutex<Option<Arc<sill_proto::Client>>>>;
     static DATA: Lane = OnceLock::new();
-    static SLOW: Lane = OnceLock::new();
-    let slow = matches!(&r, Request::FetchRegistry | Request::Icon(_) | Request::Find { .. } | Request::Export);
     let cached = cacheable(&r);
     let key = format!("{}:{}", std::env::var("SILL_BOX").unwrap_or_default(), serde_json::to_string(&r)?);
     let cache = RESPONSES.get_or_init(Default::default);
@@ -82,7 +66,7 @@ pub fn request<T: DeserializeOwned>(r: Request) -> Result<T> {
         cache.retain(|_, (at, _)| at.elapsed() < std::time::Duration::from_millis(250));
         if let Some((_, value)) = cache.get(&key) { return Ok(serde_json::from_value(value.clone())?) }
     }
-    let slot = if slow { &SLOW } else { &DATA }.get_or_init(Default::default);
+    let slot = DATA.get_or_init(Default::default);
     let connect = || -> Result<Arc<sill_proto::Client>> {
         let mut slot = slot.lock().unwrap();
         if let Some(client) = slot.as_ref() { return Ok(client.clone()) }
@@ -98,10 +82,8 @@ pub fn request<T: DeserializeOwned>(r: Request) -> Result<T> {
         Ok(client)
     };
     let client = connect()?;
-    let timeout = if slow { sill_proto::client::CALL_TIMEOUT } else { sill_proto::client::QUICK_TIMEOUT };
-    let Some((method, params, wrapped_text)) = public_request(&r)? else {
-        anyhow::bail!("the shelf has no public method for {}", serde_json::to_value(&r)?.as_object().and_then(|o| o.keys().next().cloned()).unwrap_or_default());
-    };
+    let timeout = sill_proto::client::QUICK_TIMEOUT;
+    let (method, params, wrapped_text) = public_request(&r)?;
     let mut result: Result<serde_json::Value> = client.call_within(method, &params, timeout);
     if result.as_ref().is_err_and(sill_proto::Client::is_closed) {
         let mut slot = slot.lock().unwrap();
@@ -119,10 +101,7 @@ pub fn request<T: DeserializeOwned>(r: Request) -> Result<T> {
     } };
     if cached {
         cache.lock().unwrap().insert(key, (std::time::Instant::now(), value.clone()));
-    } else if !matches!(&r, Request::Read { .. } | Request::Find { .. } | Request::Export | Request::Icon(_) |
-        Request::EntryCount { .. } | Request::Entries { .. } | Request::Search { .. } | Request::GitStatus { .. } |
-        Request::GitSummary { .. } | Request::ChangedLines { .. } | Request::Denied { .. } | Request::ProcList { .. } |
-        Request::ProcTail { .. } | Request::ReadLog { .. } | Request::ResolveImage { .. }) {
+    } else if !read_only(&r) {
         // Changes made by this frontend should be visible on its very next read.
         invalidate();
     }
@@ -295,14 +274,25 @@ pub mod agents {
 }
 pub mod registry {
     use anyhow::Context;
-    pub use sill_core::registry::{Entry, Trust, builtin_for, is_tested, snapshot};
+    pub use sill_core::registry::{Trust, is_tested, snapshot};
+    pub use sill_core::frontend::RegistryEntry as Entry;
+    pub fn builtin_for(entry:&Entry)->Option<&str> {entry.builtin_agent_id.as_deref()}
     fn selector(e:&Entry)->sill_proto::agent_admin::EntryKey {sill_proto::agent_admin::EntryKey {entry_id:e.id.clone(),version:e.version.clone(),source:match e.trust {Trust::Snapshot=>"snapshot",Trust::Live=>"live"}.into()}}
     pub fn merged(_home: &std::path::Path) -> (Vec<Entry>, Option<std::time::SystemTime>) {
-        super::request::<(Vec<sill_core::frontend::RegistryEntry>, Option<std::time::SystemTime>)>(super::Request::Registry)
-            .map(|(entries, when)| (entries.into_iter().map(Entry::from).collect(), when)).unwrap_or_default()
+        let load=||->anyhow::Result<_> {
+            let mut entries=Vec::new();let mut after=None;let mut fetched=None;
+            loop {
+                let page:sill_proto::host::RegistryPage=super::public_call("_sill/registry.list",sill_proto::host::RegistryList {after,limit:Some(128)})?;
+                if let Some(seconds)=page.fetched_at {fetched=std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(seconds.parse()?));}
+                entries.extend(page.entries.into_iter().map(Entry::try_from).collect::<anyhow::Result<Vec<_>>>()?);
+                after=page.next;if after.is_none(){return Ok((entries,fetched));}
+            }
+        };
+        load().unwrap_or_else(|error| {eprintln!("load agent registry: {error:#}");(Vec::new(),None)})
     }
+
     pub fn fetch(_home: &std::path::Path) -> anyhow::Result<()> { let _:serde_json::Value=super::public_call("_sill/registry.refresh",sill_proto::Empty::default())?;super::invalidate();Ok(()) }
-    pub fn installed(_home: &std::path::Path, id: &str) -> Option<sill_core::registry::Installed> { super::public_call::<sill_proto::agent_admin::Installation>("_sill/registry.installed",sill_proto::agent_admin::AgentKey {agent_id:id.into()}).ok()?.installed.and_then(|i|serde_json::from_value(serde_json::to_value(i).ok()?).ok()) }
+    pub fn installed(_home: &std::path::Path, id: &str) -> Option<sill_core::registry::Installed> { let i=super::public_call::<sill_proto::agent_admin::Installation>("_sill/registry.installed",sill_proto::agent_admin::AgentKey {agent_id:id.into()}).ok()?.installed?;Some(sill_core::registry::Installed {version:i.version,kind:i.kind,command:i.command,env:i.env,trust:sill_core::frontend::registry_trust(&i.source).ok()?}) }
     pub fn available(agent: &sill_core::agents::Agent, _home: &std::path::Path) -> Option<std::path::PathBuf> { super::public_call::<sill_proto::agent_admin::Available>("_sill/agents.available",sill_proto::agent_admin::AgentKey {agent_id:agent.id.clone()}).ok()?.path.and_then(|p|p.to_path().ok()) }
     pub fn install(home: &std::path::Path, entry: &Entry, log: &mut dyn FnMut(String)) -> anyhow::Result<sill_core::agents::Agent> {
         use std::io::BufRead;

@@ -17,7 +17,7 @@ import socket
 import sys
 import uuid
 
-PROTOCOL = "sfp/1-dev.2"
+PROTOCOL = "sfp/1-dev.3"
 MAX_FRAME = 8 * 1024 * 1024
 MAX_PENDING = 4096
 IDENTITY = {"session": "session_id", "item": "item_id", "turn": "turn_id",
@@ -170,7 +170,7 @@ class Client:
         if self.schema is None:
             return
         entries = [m for m in self.schema["methods"] if m["name"] == method]
-        if len(entries) != 1 or entries[0].get("x-sill-internal"):
+        if len(entries) != 1:
             raise ValueError(f"{method} is not a public method in the exported schema")
         shape = entries[0][member]
         if shape is None:

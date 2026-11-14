@@ -31,10 +31,6 @@ struct Outbound {
     deadline: Instant,
 }
 
-/// Off by default: every first-party client (shelf, CLI, line mode) is built on the public
-/// protocol. Same-build tests and diagnostics that exercise `_sill/internal/` turn it on.
-static OFFER_INTERNAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 pub struct Client {
     writer: SyncSender<Outbound>,
     interrupt: Arc<dyn Fn() + Send + Sync>,
@@ -166,10 +162,6 @@ impl Client {
         }
     }
 
-    /// Whether new connections offer `sill.internal`. Off unless a same-build test or diagnostic
-    /// turns it on, so a leftover internal call from a frontend fails loudly.
-    pub fn offer_internal(on: bool) { OFFER_INTERNAL.store(on, std::sync::atomic::Ordering::Relaxed); }
-
     /// Initialize a raw control connection. `connect*` and `ssh` do this automatically.
     pub fn initialize(&self) -> Result<crate::initialize::Initialized> {
         let result: crate::initialize::Initialized = self.call_within(
@@ -177,9 +169,7 @@ impl Client {
             crate::initialize::Initialize {
                 protocols: vec![crate::initialize::PROTOCOL_ID.into()],
                 client: crate::initialize::Peer { name: "sill".into(), version: env!("CARGO_PKG_VERSION").into() },
-                capabilities: if OFFER_INTERNAL.load(std::sync::atomic::Ordering::Relaxed) {
-                    std::collections::BTreeMap::from([(crate::initialize::INTERNAL_CAPABILITY.into(), 1)])
-                } else { Default::default() },
+                capabilities: Default::default(),
             }, QUICK_TIMEOUT,
         ).context("SFP initialization failed; explicitly update/restart an incompatible daemon")?;
         if result.protocol != crate::initialize::PROTOCOL_ID {

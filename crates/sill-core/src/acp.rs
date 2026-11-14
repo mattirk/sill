@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 // The agent's side as sill keeps it: ACP reduced to what sill shows. These are sill-core's own,
 // not the frontend protocol's (`sill_proto::wire` has its own copies, converted in `crate::wire`):
 // the private relay protocol and the daemon's stored runner state carry them, so their serde form
-// is that protocol's (docs/protocol.md §7.1) and changes only with a relay protocol bump.
+// is that protocol's (docs/protocol-history.md §7.1) and changes only with a relay protocol bump.
 
 /// What a permission option means (ACP `PermissionOptionKind`, the same strings).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -663,7 +663,7 @@ impl AgentsPage {
     }
 
     fn queue_icon(self: &Rc<Self>, e: &Entry) {
-        if e.icon.is_none() || !self.icons_queued.borrow_mut().insert(e.id.clone()) {
+        if !e.has_icon || !self.icons_queued.borrow_mut().insert(e.id.clone()) {
             return;
         }
         let tx = self.tx.clone();

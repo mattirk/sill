@@ -1,7 +1,7 @@
 //! A session's conversation as it crosses the daemon socket (docs/daemon.md §3.3): the wire types
 //! are `sill_proto::wire` (re-exported here, so `sill_core::wire::Event` is the same type), and
 //! this module is the bridge between them and the agent's side as sill keeps it ([`acp`]'s types).
-//! The two are separate on purpose (docs/protocol.md §7.1): the daemon's private relay protocol
+//! The two are separate on purpose (docs/protocol-history.md §7.1): the daemon's private relay protocol
 //! carries `acp`'s, the frontends get these, and the conversion happens at the daemon's boundary,
 //! so a frontend protocol change never changes what the relay speaks. A frontend linking only
 //! `sill-proto` never sees this module.
