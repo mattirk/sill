@@ -141,36 +141,7 @@ impl SessionView {
         controls_row.set_margin_top(4);
         controls_row.set_margin_bottom(4);
         // the person's shell inside the jail (SPEC §3.1): same mounts as the agent, own pty
-        let terminal = vte4::Terminal::new();
-        terminal.set_size_request(-1, 200);
-        terminal.set_scrollback_lines(10_000);
-        terminal.set_font(Some(&gtk::pango::FontDescription::from_string("monospace 10")));
-        terminal.set_font_scale(theme::text_scale()); // VTE has its own font: follow the text size by hand
-        terminal.set_scroll_on_output(false);
-        terminal.set_scroll_on_keystroke(true);
-        terminal.add_css_class("sill-terminal");
-        // printed links open on the host with Ctrl+click: the jail has no browser, and logins
-        // start with a URL (0x400 = PCRE2_MULTILINE, which VTE requires for match regexes)
-        if let Ok(re) = vte4::Regex::for_match(r#"https?://[^\s'"<>)\]]+"#, 0x400) {
-            let tag = terminal.match_add_regex(&re, 0);
-            terminal.match_set_cursor_name(tag, "pointer");
-        }
-        {
-            let click = gtk::GestureClick::new();
-            click.set_button(1);
-            click.set_propagation_phase(gtk::PropagationPhase::Capture);
-            let t = terminal.clone();
-            click.connect_pressed(move |g, _, x, y| {
-                if !g.current_event_state().contains(gdk::ModifierType::CONTROL_MASK) {
-                    return;
-                }
-                if let (Some(url), _) = t.check_match_at(x, y) {
-                    gtk::UriLauncher::new(&url).launch(None::<&gtk::Window>, None::<&gtk::gio::Cancellable>, |_| {});
-                    g.set_state(gtk::EventSequenceState::Claimed);
-                }
-            });
-            terminal.add_controller(click);
-        }
+        let (terminal, term_scroll) = Self::terminal_pane();
         // set while the pane runs a login (see shell_closed). Claude's code prompt never echoes
         // what it receives (a Bun readline quirk, the same in any terminal), so a paste into it is
         // acknowledged with a fading notice over the pane instead; the code itself stays unseen.
@@ -301,12 +272,6 @@ impl SessionView {
             });
             terminal.add_controller(right);
         }
-        let term_scroll = gtk::ScrolledWindow::builder()
-            .child(&terminal)
-            .hscrollbar_policy(gtk::PolicyType::Never)
-            .vscrollbar_policy(gtk::PolicyType::External)
-            .min_content_height(300)
-            .build();
         let bottom = gtk::Stack::new();
         bottom.set_transition_type(gtk::StackTransitionType::Crossfade);
         // not homogeneous: the prompt keeps its own (small) height, the terminal its third of the shelf
@@ -548,9 +513,12 @@ impl SessionView {
         }
     }
 
-    /// The host shell's terminal and its scrolled window: the jail pane's settings (font, scrollback,
-    /// links open with Ctrl+click, Ctrl+Shift+C/V copy and paste).
-    fn host_terminal_pane() -> (vte4::Terminal, gtk::ScrolledWindow) {
+    /// A terminal pane as both shells use it: VTE with the shelf's font and scale (VTE has its own
+    /// font: it follows the text size by hand), 10k lines of scrollback, printed links open on the
+    /// host with Ctrl+click (the jail has no browser, and logins start with a URL; 0x400 =
+    /// PCRE2_MULTILINE, which VTE requires for match regexes), in a scrolled window that owns the
+    /// height. Keys are the caller's: the jail pane pastes with login handling, the host pane plainly.
+    fn terminal_pane() -> (vte4::Terminal, gtk::ScrolledWindow) {
         let term = vte4::Terminal::new();
         term.set_size_request(-1, 200);
         term.set_scrollback_lines(10_000);
@@ -579,6 +547,18 @@ impl SessionView {
             });
             term.add_controller(click);
         }
+        let scroll = gtk::ScrolledWindow::builder()
+            .child(&term)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::External)
+            .min_content_height(300)
+            .build();
+        (term, scroll)
+    }
+
+    /// The host shell's pane: [`Self::terminal_pane`] with plain Ctrl+Shift+C / Ctrl+Shift+V.
+    fn host_terminal_pane() -> (vte4::Terminal, gtk::ScrolledWindow) {
+        let (term, scroll) = Self::terminal_pane();
         {
             let keys = gtk::EventControllerKey::new();
             keys.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -599,12 +579,6 @@ impl SessionView {
             });
             term.add_controller(keys);
         }
-        let scroll = gtk::ScrolledWindow::builder()
-            .child(&term)
-            .hscrollbar_policy(gtk::PolicyType::Never)
-            .vscrollbar_policy(gtk::PolicyType::External)
-            .min_content_height(300)
-            .build();
         (term, scroll)
     }
 

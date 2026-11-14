@@ -45,7 +45,7 @@ struct Rendered {
     msg: gtk::glib::WeakRef<gtk::Box>,
     class: String,
     md: String,
-    table_width: Option<i32>,
+    laid_width: Option<i32>,
     ctx: Option<Rc<Ctx>>,
 }
 
@@ -58,7 +58,7 @@ fn live() -> Vec<(gtk::Box, String, String, Option<i32>)> {
     MESSAGES.with(|m| {
         let mut l = m.borrow_mut();
         l.retain(|r| r.msg.upgrade().is_some());
-        l.iter().filter_map(|r| r.msg.upgrade().map(|b| (b, r.class.clone(), r.md.clone(), r.table_width))).collect()
+        l.iter().filter_map(|r| r.msg.upgrade().map(|b| (b, r.class.clone(), r.md.clone(), r.laid_width))).collect()
     })
 }
 
@@ -83,16 +83,16 @@ pub fn relayout() {
     }
 }
 
-fn remember(msg: &gtk::Box, class: &str, md: &str, table_width: Option<i32>) {
+fn remember(msg: &gtk::Box, class: &str, md: &str, laid_width: Option<i32>) {
     MESSAGES.with(|m| {
         let mut l = m.borrow_mut();
         match l.iter_mut().find(|r| r.msg.upgrade().as_ref() == Some(msg)) {
             Some(r) => {
                 r.class = class.to_string();
                 r.md = md.to_string();
-                r.table_width = table_width;
+                r.laid_width = laid_width;
             }
-            None => l.push(Rendered { msg: msg.downgrade(), class: class.to_string(), md: md.to_string(), table_width, ctx: None }),
+            None => l.push(Rendered { msg: msg.downgrade(), class: class.to_string(), md: md.to_string(), laid_width, ctx: None }),
         }
     });
 }
@@ -103,7 +103,7 @@ pub fn set_context(msg: &gtk::Box, ctx: Rc<Ctx>) {
         let mut l = m.borrow_mut();
         match l.iter_mut().find(|r| r.msg.upgrade().as_ref() == Some(msg)) {
             Some(r) => r.ctx = Some(ctx),
-            None => l.push(Rendered { msg: msg.downgrade(), class: String::new(), md: String::new(), table_width: None, ctx: Some(ctx) }),
+            None => l.push(Rendered { msg: msg.downgrade(), class: String::new(), md: String::new(), laid_width: None, ctx: Some(ctx) }),
         }
     });
 }
@@ -563,7 +563,7 @@ fn mark_changed(mark: Option<(gtk::TextView, i32)>) {
 /// code blocks and images the `sill-md-changed` class.
 pub fn render_marked(msg: &gtk::Box, class: &str, markdown: &str, changed: &[(usize, usize)]) {
     let mut out = Out::new(msg, class);
-    let mut table_width: Option<i32> = None;
+    let mut laid_width: Option<i32> = None;
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TABLES);
@@ -735,7 +735,7 @@ pub fn render_marked(msg: &gtk::Box, class: &str, markdown: &str, changed: &[(us
                             Some(p) if viewer::is_image(&p) => {
                                 let b = out.image(&p, &alt);
                                 if image_changed { b.add_css_class("sill-md-changed") } else { b.remove_css_class("sill-md-changed") }
-                                table_width.get_or_insert(msg.width()); // sized for this width: relayout follows
+                                laid_width.get_or_insert(msg.width()); // sized for this width: relayout follows
                             }
                             // remote images aren't fetched (the shelf is outside the proxy): a link
                             _ if remote => {
@@ -779,7 +779,7 @@ pub fn render_marked(msg: &gtk::Box, class: &str, markdown: &str, changed: &[(us
                             w if w > 0 => w,
                             _ => out.msg.parent().map(|p| p.width()).unwrap_or(0),
                         };
-                        table_width = Some(laid);
+                        laid_width = Some(laid);
                         let view_w = laid - 2 * PROSE_MARGIN;
                         let avail = if view_w > 100 { view_w - scale(16.0) } else { scale(620.0) };
                         let total = |widths: &[i32], gap: i32| widths.iter().sum::<i32>() + gap * (ncols.saturating_sub(1) as i32);
@@ -969,5 +969,5 @@ pub fn render_marked(msg: &gtk::Box, class: &str, markdown: &str, changed: &[(us
     }
     out.finish();
     settle_heights(msg);
-    remember(msg, class, markdown, table_width);
+    remember(msg, class, markdown, laid_width);
 }

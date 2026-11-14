@@ -83,12 +83,38 @@ fn children_of(dir: &Path, listed: &Listed, ghosts: &[String]) -> gio::ListStore
     store
 }
 
-/// The badge paths right below `dir` that the host doesn't have (a session added them in its
+/// What a row's badge says and where it comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Badge {
+    /// git's working-tree status of the path: `M`, `A`, `D`, `R` …, `?` untracked.
+    Git(String),
+    /// A session's unkept overlay change — not on the host until kept in Changes: the ledger's
+    /// letter (with `!` for a conflict) and the session's title.
+    Session { mark: String, session: String },
+    /// A folder with a change somewhere below.
+    Below,
+}
+
+impl Badge {
+    fn text(&self) -> &str {
+        match self {
+            Badge::Git(s) | Badge::Session { mark: s, .. } => s,
+            Badge::Below => "•",
+        }
+    }
+
+    /// A change of its own (not a folder's dot).
+    fn is_change(&self) -> bool {
+        !matches!(self, Badge::Below)
+    }
+}
+
+/// The changed paths right below `dir` that the host doesn't have (a session added them in its
 /// overlay, or they went on the host while an overlay copy remains): rows of their own.
-fn ghosts(badges: &BTreeMap<PathBuf, String>, dir: &Path) -> Vec<String> {
+fn ghosts(badges: &BTreeMap<PathBuf, Badge>, dir: &Path) -> Vec<String> {
     badges
         .iter()
-        .filter(|(p, b)| p.parent() == Some(dir) && b.as_str() != "•" && !p.exists())
+        .filter(|(p, b)| p.parent() == Some(dir) && b.is_change() && !p.exists())
         .map(|(p, _)| p.to_string_lossy().into_owned())
         .collect()
 }
@@ -137,10 +163,7 @@ pub struct FolderTree {
     /// When set, the tree shows only this folder (opened from a pin chip).
     scope: RefCell<Option<PathBuf>>,
     store: Rc<Store>,
-    badges: Rc<RefCell<BTreeMap<PathBuf, String>>>,
-    /// Paths whose badge is a session's unkept overlay change (pending in Changes), not git's: the
-    /// session's title, for the tooltip.
-    pending: Rc<RefCell<BTreeMap<PathBuf, String>>>,
+    badges: Rc<RefCell<BTreeMap<PathBuf, Badge>>>,
     /// Every session's pending changes: the badges here, and the viewer shows a pending path's diff.
     pub changes: Rc<RefCell<Vec<Change>>>,
     pinned: Rc<RefCell<Vec<PathBuf>>>,
@@ -192,8 +215,7 @@ impl FolderTree {
         bar.append(&close);
         root.append(&bar);
 
-        let badges: Rc<RefCell<BTreeMap<PathBuf, String>>> = Rc::new(RefCell::new(BTreeMap::new()));
-        let pending: Rc<RefCell<BTreeMap<PathBuf, String>>> = Rc::new(RefCell::new(BTreeMap::new()));
+        let badges: Rc<RefCell<BTreeMap<PathBuf, Badge>>> = Rc::new(RefCell::new(BTreeMap::new()));
         let pinned: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
         let elsewhere: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
         let roots = gio::ListStore::new::<gtk::StringObject>();
@@ -220,7 +242,8 @@ impl FolderTree {
         selection.set_autoselect(false);
         selection.set_can_unselect(true);
         let factory = gtk::SignalListItemFactory::new();
-        factory.connect_setup(|_, item| {
+        let setup_tree_rc = tree_rc.clone();
+        factory.connect_setup(move |_, item| {
             let Some(item) = item.downcast_ref::<gtk::ListItem>() else { return };
             let expander = gtk::TreeExpander::new();
             expander.set_indent_for_icon(false);
@@ -237,6 +260,13 @@ impl FolderTree {
             let pin = gtk::Button::new();
             pin.add_css_class("flat");
             pin.add_css_class("sill-pin");
+            // wired once: a click pins the row's path, which decorate keeps as the widget name
+            let weak = setup_tree_rc.clone();
+            pin.connect_clicked(move |b| {
+                if let Some(t) = weak.borrow().as_ref().and_then(|w| w.upgrade()) {
+                    t.toggle_pin(Path::new(b.widget_name().as_str()));
+                }
+            });
             b.append(&icon);
             b.append(&name);
             b.append(&badge);
@@ -250,10 +280,8 @@ impl FolderTree {
         let bound: Rc<RefCell<Vec<gtk::ListItem>>> = Rc::new(RefCell::new(Vec::new()));
         let decorate: Rc<dyn Fn(&gtk::ListItem)> = {
             let badges = badges.clone();
-            let pending = pending.clone();
             let pinned = pinned.clone();
             let elsewhere = elsewhere.clone();
-            let tree_rc = tree_rc.clone();
             Rc::new(move |item: &gtk::ListItem| {
                 let Some(row) = item.item().and_downcast::<gtk::TreeListRow>() else { return };
                 let Some(expander) = item.child().and_downcast::<gtk::TreeExpander>() else { return };
@@ -284,30 +312,33 @@ impl FolderTree {
                     fname.clone()
                 };
                 name.set_text(&label);
-                let badge_text = badges.borrow().get(&path).cloned().unwrap_or_default();
-                // a session's unkept overlay change is not on the host: accent (as in Changes), said
-                // in the tooltip — git's own changes are the warning colour
-                let owner = pending.borrow().get(&path).cloned();
-                name.set_tooltip_text(owner.as_ref().map(|s| format!("changed by session “{s}” in its overlay — not on the host until kept there (Changes)")).as_deref());
-                if owner.is_some() {
-                    name.add_css_class("sill-pending");
-                } else if badge_text.starts_with('?') {
-                    name.add_css_class("sill-new");
-                } else if badge_text == "•" {
-                    name.add_css_class("sill-below"); // a folder with changes somewhere below
-                    // the dot's tooltip says what: the changed paths below, a few of them
-                    let below: Vec<String> = badges
-                        .borrow()
-                        .iter()
-                        .filter(|(p, b)| p.starts_with(&path) && **p != path && b.as_str() != "•")
-                        .take(8)
-                        .map(|(p, b)| format!("{b}  {}", p.strip_prefix(&path).unwrap_or(p).display()))
-                        .collect();
-                    if !below.is_empty() {
-                        name.set_tooltip_text(Some(&format!("changed below:\n{}", below.join("\n"))));
+                let badge_entry = badges.borrow().get(&path).cloned();
+                let badge_text = badge_entry.as_ref().map(|b| b.text().to_string()).unwrap_or_default();
+                // the name's colour says the kind: git's change in the warning colour (untracked in
+                // success), a session's unkept overlay change in the accent — not on the host, the
+                // tooltip says so —, a folder with changes below in a softer warning with the list
+                name.set_tooltip_text(None);
+                match &badge_entry {
+                    Some(Badge::Session { session, .. }) => {
+                        name.add_css_class("sill-pending");
+                        name.set_tooltip_text(Some(&format!("changed by session “{session}” in its overlay — not on the host until kept there (Changes)")));
                     }
-                } else if !badge_text.is_empty() {
-                    name.add_css_class("sill-changed");
+                    Some(Badge::Git(s)) if s.starts_with('?') => name.add_css_class("sill-new"),
+                    Some(Badge::Git(_)) => name.add_css_class("sill-changed"),
+                    Some(Badge::Below) => {
+                        name.add_css_class("sill-below");
+                        let below: Vec<String> = badges
+                            .borrow()
+                            .iter()
+                            .filter(|(p, b)| p.starts_with(&path) && **p != path && b.is_change())
+                            .take(8)
+                            .map(|(p, b)| format!("{}  {}", b.text(), p.strip_prefix(&path).unwrap_or(p).display()))
+                            .collect();
+                        if !below.is_empty() {
+                            name.set_tooltip_text(Some(&format!("changed below:\n{}", below.join("\n"))));
+                        }
+                    }
+                    None => {}
                 }
                 let is_pinned = pinned.borrow().contains(&path);
                 if is_pinned {
@@ -346,20 +377,7 @@ impl FolderTree {
                     (false, true) => "Pin to the current session: bound live into its jail",
                     (false, false) => "Pin this file: a chip that opens it",
                 }));
-                let weak = tree_rc.borrow().clone();
-                let p = path.clone();
-                let id = pin.connect_clicked(move |_| {
-                    if let Some(t) = weak.as_ref().and_then(|w| w.upgrade()) {
-                        t.toggle_pin(&p);
-                    }
-                });
-                // one handler per bind
-                unsafe {
-                    if let Some(old) = pin.steal_data::<glib::SignalHandlerId>("sill-pin-handler") {
-                        pin.disconnect(old);
-                    }
-                    pin.set_data("sill-pin-handler", id);
-                }
+                pin.set_widget_name(&path.to_string_lossy()); // what the click (wired at setup) pins
             })
         };
         {
@@ -402,7 +420,6 @@ impl FolderTree {
             scope: RefCell::new(None),
             store,
             badges,
-            pending,
             changes: Rc::new(RefCell::new(Vec::new())),
             pinned,
             elsewhere,
@@ -577,7 +594,7 @@ impl FolderTree {
 
     fn apply(self: &Rc<Self>, all: Vec<Change>, owners: BTreeMap<PathBuf, String>, pins: Vec<PathBuf>) {
         let home = session::home().unwrap_or_default();
-        let mut badges: BTreeMap<PathBuf, String> = BTreeMap::new();
+        let mut badges: BTreeMap<PathBuf, Badge> = BTreeMap::new();
         // git working-tree status of every repo in view (pins, repos with session changes, the scope's
         // repo): M/A/D/R from `git status`, `?` for untracked; the session ledger's letters win below
         let mut repos: Vec<PathBuf> = pins.iter().filter(|p| p.join(".git").exists()).cloned().collect();
@@ -600,13 +617,13 @@ impl FolderTree {
             for (rel, st) in changes::git_status(repo) {
                 from_git += 1;
                 let path = repo.join(rel);
-                badges.insert(path.clone(), st);
+                badges.insert(path.clone(), Badge::Git(st));
                 let mut d = path.parent();
                 while let Some(dir) = d {
                     if dir == repo.as_path() {
                         break;
                     }
-                    badges.entry(dir.to_path_buf()).or_insert_with(|| "•".into());
+                    badges.entry(dir.to_path_buf()).or_insert(Badge::Below);
                     d = dir.parent();
                 }
             }
@@ -617,10 +634,12 @@ impl FolderTree {
             None => pins.into_iter().filter(|p| p.is_dir()).collect(),
         };
         for c in all.iter().filter(|c| !c.ignored) {
-            badges.insert(c.path.clone(), format!("{}{}", c.kind.letter(), if c.conflict { "!" } else { "" }));
+            let mark = format!("{}{}", c.kind.letter(), if c.conflict { "!" } else { "" });
+            let session = owners.get(&c.path).cloned().unwrap_or_default();
+            badges.insert(c.path.clone(), Badge::Session { mark, session });
             let mut p = c.path.parent();
             while let Some(d) = p {
-                badges.entry(d.to_path_buf()).or_insert_with(|| "•".into());
+                badges.entry(d.to_path_buf()).or_insert(Badge::Below);
                 p = d.parent();
             }
             if scope.is_none()
@@ -643,7 +662,6 @@ impl FolderTree {
             if repos.len() == 1 { "y" } else { "ies" }
         )));
         *self.badges.borrow_mut() = badges;
-        *self.pending.borrow_mut() = owners;
         *self.changes.borrow_mut() = all;
         // directories already listed: files that appeared or went since, in place
         self.listed.borrow_mut().retain(|_, w| w.upgrade().is_some());
