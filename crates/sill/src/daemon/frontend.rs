@@ -38,7 +38,12 @@ pub(super) fn open_session_image(hub:&Hub,session:&str,src:&Path,home:&Path)->Re
 
 fn stored_image_path(hub:&Hub,session:&str,p:&Path)->Result<Option<std::path::PathBuf>> {
     use std::os::unix::fs::FileTypeExt;
-    let pins = sill_core::session::launch_pins(session)?;
+    // The pins its jail was launched with; a session that never launched has no jail and no
+    // overlay, so a path under a pin it will mount is the host's file (its stored pins decide).
+    let pins = match sill_core::session::policy_snapshot(session)? {
+        Some(launch) => launch.launch_pins,
+        None => hub.with_store(|s| s.jail_pins(session))?,
+    };
     if pins.iter().any(|pin| pin.is_dir() && p.starts_with(pin)) { return Ok(Some(p.to_path_buf())) }
     // These mounts disappear with the jail; a same-named host file is unrelated.
     // Explicit pins take precedence, just as they do when constructing the jail.
