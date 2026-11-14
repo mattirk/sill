@@ -512,6 +512,39 @@ fn snapshot_outdated(snapshot: Result<Option<Resolution>>, base: &Policy, pins: 
     }
 }
 
+/// A mask hides a path, not what Git keeps of it: a file that was ever committed (or staged) in
+/// a repository the jail is given, as a pin or a workspace, stays readable there through the
+/// object store (`git show`), whatever is laid over its path. That is a restriction the jail
+/// cannot keep, so the build is refused and says so, instead of starting with a mask that hides
+/// nothing. Checked at launch only: it reads the repository's history.
+fn masks_git_cannot_undo(masks: &[PathBuf], pins: &[PathBuf], workspaces: &[PathBuf]) -> Result<()> {
+    for mask in masks {
+        let inside = |roots: &[PathBuf]| roots.iter().any(|r| mask != r && mask.starts_with(r));
+        let repo = match workspaces.iter().find(|w| *mask != **w && mask.starts_with(w)) {
+            Some(source) => Some(source.clone()),
+            None if inside(pins) => mask.parent().and_then(crate::changes::repo_root),
+            None => None,
+        };
+        let Some(repo) = repo else { continue };
+        let Ok(relative) = mask.strip_prefix(&repo) else { continue };
+        if relative.starts_with(".git") { continue; }
+        let git = crate::changes::Git::open(&repo).with_context(|| format!("reading the repository of masked {}", mask.display()))?;
+        let found = |args: &[&str]| -> Result<bool> {
+            let out = git.cmd().arg("--literal-pathspecs").args(args).arg("--").arg(relative).output()?;
+            anyhow::ensure!(out.status.success(), "git in {}: {}", repo.display(), String::from_utf8_lossy(&out.stderr).trim());
+            Ok(!out.stdout.is_empty())
+        };
+        if found(&["ls-files", "-z"])? || found(&["log", "--all", "--reflog", "-1", "--format=%H"])? {
+            bail!(
+                "{} is masked by the policy, but Git has it in {}: what was committed there stays readable through the repository (git show), so the mask would hide nothing. \
+                 Take it out of the repository and its history, or out of the policy's mask, or do not pin the repository",
+                mask.display(), repo.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 pub fn is_running(session: &str) -> bool {
     socket_path(session).map(|p| shim::Control::connect(&p).is_ok()).unwrap_or(false)
 }
@@ -638,6 +671,12 @@ pub fn ensure_started(opts: &StartOptions, home: &Path, exe: &Path) -> Result<St
     };
     resolution.policy.permissions.validate_launch(&resolution.policy.network)?;
     if let Some(plan) = &resolution.filesystem {
+        let paths = |list: Vec<&sill_proto::sessions::HostPath>| list.into_iter().map(|p| p.to_path()).collect::<Result<Vec<_>, _>>();
+        masks_git_cannot_undo(
+            &paths(plan.policy_paths.masks.iter().map(|m| &m.path).collect())?,
+            &paths(plan.bindings.iter().filter(|b| b.declaration.is_none() && b.source == b.target).map(|b| &b.target).collect())?,
+            &paths(plan.workspaces.iter().map(|w| &w.source).collect())?,
+        )?;
         plan.prepare()?;
     }
     let serialized_resolution = serde_json::to_vec_pretty(&resolution)?;
@@ -927,6 +966,42 @@ mod tests {
         std::fs::write(tree.repo().join("elsewhere.json"), serde_json::to_vec(&tree.resolve(&base)).unwrap()).unwrap();
         std::os::unix::fs::symlink(tree.repo().join("elsewhere.json"), tree.snapshots().join("latest.json")).unwrap();
         assert!(read_policy_snapshot(&tree.snapshots()).is_err());
+    }
+
+    /// A masked path inside a pinned or workspace repository: fine while Git never had it,
+    /// refused once it was committed or staged, also after it was deleted again.
+    #[test]
+    fn a_mask_on_what_git_keeps_is_refused() {
+        let tree = PolicyTestTree::new();
+        let repo = tree.repo();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").arg("-C").arg(&repo)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"]).args(args)
+                .env("GIT_CONFIG_NOSYSTEM", "1").output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "-q"]);
+        std::fs::create_dir_all(repo.join("conf")).unwrap();
+        std::fs::write(repo.join("tracked"), "t").unwrap();
+        std::fs::write(repo.join("conf/.env"), "secret").unwrap();
+        std::fs::write(repo.join(".gitignore"), ".env\n").unwrap();
+        git(&["add", "tracked", ".gitignore"]);
+        git(&["commit", "-qm", "one"]);
+        let (env, pins) = (repo.join("conf/.env"), vec![repo.clone()]);
+        // ignored and never committed: the mask is all there is to it; outside any pin nothing is asked
+        masks_git_cannot_undo(&[env.clone()], &pins, &[]).unwrap();
+        masks_git_cannot_undo(&[repo.join("tracked")], &[], &[]).unwrap();
+        // a whole masked folder with nothing of Git's in it
+        masks_git_cannot_undo(&[repo.join("conf")], &[], &pins).unwrap();
+        // staged, then committed, then deleted: Git has it each time
+        git(&["add", "-f", "conf/.env"]);
+        assert!(masks_git_cannot_undo(&[env.clone()], &pins, &[]).unwrap_err().to_string().contains("Git has it"));
+        git(&["commit", "-qm", "two"]);
+        assert!(masks_git_cannot_undo(&[repo.join("conf")], &[], &pins).is_err(), "a workspace's repository, the folder masked");
+        git(&["rm", "-q", "--cached", "conf/.env"]);
+        git(&["commit", "-qm", "three"]);
+        let error = masks_git_cannot_undo(&[env], &pins, &[]).unwrap_err().to_string();
+        assert!(error.contains("Git has it") && error.contains(repo.to_str().unwrap()), "{error}");
     }
 
     /// Without a launch record there is no evidence of what a jail runs with, and a pinned

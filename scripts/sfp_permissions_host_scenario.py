@@ -1137,6 +1137,17 @@ PY
         check("a masked, ignored file inside a workspace's repository is in the clone and hidden; Git works, the checkout is untouched",
               out.split() == [".env", "GIT-WORKS", "EDITED"] and read(wsrepo / "tracked.txt") == "tracked\n", out)
         wsc.close()
+        # a mask cannot undo what Git keeps: once the file was committed, the build is refused
+        git("add", "-f", "conf/.env")
+        git("commit", "-qm", "two")
+        kept_by_git = create("tracked-mask", env.policy("ws-rules"), pins=[wsrepo])
+        failure = None
+        try:
+            c.call("_sill/sessions.start", {"session_id": kept_by_git})
+        except RpcError as error:
+            failure = str(error)
+        check("a mask on a file the pinned repository has committed refuses the jail, saying why",
+              failure is not None and "Git has it" in failure and not get(kept_by_git)["running"], failure or "start succeeded")
         # sill's own files are another matter: a pin that would cover them is refused, the jail does not start
         crossing = create("pin-over-own", env.policy("own"), pins=[env.home / ".local"])
         failure = None

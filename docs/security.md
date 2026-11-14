@@ -293,15 +293,26 @@ workspace fails the build.
 | `mask`, the folder a workspace session's repository | The clone's copy is hidden; Git works; the checkout is untouched. |
 | `ro`, the folder pinned live or a workspace's repository | Writes refused; the path and the folders on the way cannot be moved. |
 
-What this does not do:
+What a mask inside a pinned folder still cannot do, and what sill does about it (2026-11-10,
+the person asked which of these are security issues):
 
-- **A tracked file's content is in the repository's object store**, which a pin shows and a
-  workspace borrows: `git show HEAD:conf/.env` reads it whatever is masked. A mask inside a
-  repository hides what is not committed.
-- In a workspace the rules apply to what the clone holds when the jail is built. A masked path
-  the clone does not have is not masked there (nothing of the host's is at it), and one that is
-  neither a file nor a folder is left alone, with a warning in the jail's log.
-- A glob in a mask is expanded when the jail is built: a file that appears later at a path it
-  would match is not masked until the next build (as outside pins).
-- Paths created by the person's own tools on the host while the jail runs follow the host, as
-  everything in a live pin does.
+- **A file Git has.** A mask hides a path, not what the repository keeps of it: a file that was
+  ever committed or staged stays readable through the object store (`git show`), which a pin
+  shows and a workspace borrows. A mask that hides nothing is a restriction the jail cannot
+  keep, so the build is **refused** and names the path and the repository
+  (`session.rs`, `masks_git_cannot_undo`: the index, every ref and the reflogs, read at launch
+  through the hardened Git view). Not looked at: objects no ref or reflog reaches any more,
+  and copies of the content anywhere else on the machine (another clone, a backup), which are
+  readable through the overlay like any other file unless the policy masks them too.
+- **A path the clone does not hold.** Not an exposure: nothing of the host's is at it. A masked
+  path that is a symbolic link is left alone with a warning in the jail's log; the link's own
+  target is hidden only if the policy masks that.
+- **A read-only path in a workspace** protects the clone's files while the agent works. It is
+  not a promise about what the person later applies: a commit can change the path without
+  writing the file, and Apply is the person's review.
+- **A file that appears after the jail was built** at a path a mask's glob would match is not
+  masked until the next build. This is so for every mask, pinned or not, since the mounts of a
+  running jail are fixed: a secret a program writes on the host while a session runs (a new
+  `~/.config/<app>/credentials…`) is readable there until the session restarts. **Open**: it
+  needs mounts added to a running jail, or masking the folders such files appear in; neither is
+  a small change.
