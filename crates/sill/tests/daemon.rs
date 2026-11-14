@@ -1235,6 +1235,45 @@ fn host_control_is_an_activation_a_displaying_frontend_holds() {
     assert_eq!(host.call("_sill/host_control.state", json!({"session_id":"nope"})).unwrap()["error"]["data"]["code"], "not_found");
 }
 
+/// An orderly stop right after the frontend that displayed Host control left: the revocation
+/// its leaving began is finished before the daemon exits, so the host process it launched is
+/// stopped (found by the host scenario, 2026-11-10: the exit cut the revocation off).
+#[test]
+fn an_orderly_stop_finishes_a_revocation_under_way() {
+    for round in 0..4 {
+        let mut d = Daemon::start();
+        let mut modes = d.connect_caps(json!({"sill.permission_modes":1})).unwrap();
+        let mut host = d.connect_caps(json!({"sill.permission_modes":1,"sill.host_control":1})).unwrap();
+        let created = modes.call("_sill/sessions.create", json!({"create_id":"orderly","agent":"claude","policy":"default"})).unwrap();
+        let id = created["result"]["session_id"].as_str().unwrap().to_string();
+        // a jail's shim socket and bridge directory, as its launcher leaves them
+        let runtime = d.dir.join("run/sill").join(&id);
+        std::fs::create_dir_all(runtime.join("bridge")).unwrap();
+        let _shim = std::os::unix::net::UnixListener::bind(runtime.join("shim.sock")).unwrap();
+        let state = host.call("_sill/host_control.activate", json!({"session_id":id,"operations":["launch"]})).unwrap();
+        let generation = state["result"]["generation"].as_u64().unwrap_or_else(|| panic!("{state}"));
+        let mut bridge = UnixStream::connect(runtime.join("bridge/host.sock")).unwrap();
+        bridge.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        writeln!(bridge, "{}", json!({"generation":generation,"operation":"launch","args":{"argv":["/bin/sleep","4321"],"cwd":"/tmp"}})).unwrap();
+        let mut answer = String::new();
+        BufReader::new(&bridge).read_line(&mut answer).unwrap();
+        let answer: Value = serde_json::from_str(&answer).unwrap();
+        let pid = answer["result"]["pid"].as_u64().unwrap_or_else(|| panic!("{answer}"));
+        let running = || std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| !s.contains(") Z "));
+        assert!(running(), "the host process runs: {answer}");
+        // the frontend leaves and the stop follows at once
+        drop(host);
+        let r = modes.call(sill_proto::method::DAEMON_SHUTDOWN, json!({})).unwrap();
+        assert!(r.get("error").is_none(), "{r}");
+        assert!(d.wait_exit().success());
+        let gone = !running();
+        if !gone {
+            let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+        }
+        assert!(gone, "round {round}: the daemon left with its unkept host process running; log:\n{}", d.log());
+    }
+}
+
 #[test]
 fn development_permissions_apply_together_or_not_at_all() {
     let d = Daemon::start();

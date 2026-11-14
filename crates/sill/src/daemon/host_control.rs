@@ -292,6 +292,10 @@ pub fn handle(hub: &std::sync::Arc<Hub>, conn: &Conn, method: &str, params: serd
 }
 
 pub fn shutdown(hub: &Hub) {
+    // A revocation already under way (a frontend that closed just before) has taken its
+    // activation out of the table and holds the gate until its host processes are stopped:
+    // wait for it, or the exit that follows cuts it off and leaves them running.
+    drop(super::host_bridge::gate());
     let sessions: Vec<_> = table().lock().unwrap().active.keys().cloned().collect();
     for session in sessions { let _ = revoke(hub, &session, "daemon shutdown"); }
 }
