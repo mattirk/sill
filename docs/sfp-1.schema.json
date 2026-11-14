@@ -20,6 +20,60 @@
       ],
       "type": "object"
     },
+    "ActiveHour": {
+      "properties": {
+        "hour": {
+          "description": "Unix time in whole hours.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ms": {
+          "description": "Milliseconds worked in that hour, summed over sessions (more than an hour when several\nagents worked at once).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "hour",
+        "ms"
+      ],
+      "type": "object"
+    },
+    "ActiveTime": {
+      "description": "The time agents worked, by UTC hour, so a frontend can group it into its own local days.",
+      "properties": {
+        "hours": {
+          "description": "Ascending; hours without work are left out.",
+          "items": {
+            "$ref": "#/$defs/ActiveHour"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "hours"
+      ],
+      "type": "object"
+    },
+    "ActiveTimeQuery": {
+      "additionalProperties": false,
+      "description": "`_sill/usage.active_time`: how far back to look.",
+      "properties": {
+        "days": {
+          "description": "Whole days before now, 1 to 366.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "days"
+      ],
+      "type": "object"
+    },
     "AddNote": {
       "additionalProperties": false,
       "properties": {
@@ -5196,6 +5250,21 @@
     },
     "Session2": {
       "properties": {
+        "active_ms": {
+          "default": 0,
+          "description": "The session state's `active_ms` and `active_since_ms` (the time the agent worked), so a\nfrontend that has not attached shows the same time as one that has.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "active_since_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "agent": {
           "type": "string"
         },
@@ -5666,6 +5735,26 @@
           "additionalProperties": false,
           "properties": {
             "type": {
+              "const": "network_quiet_hosts",
+              "type": "string"
+            },
+            "value": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
               "const": "theme",
               "type": "string"
             },
@@ -6034,6 +6123,13 @@
             "integer",
             "null"
           ]
+        },
+        "network_quiet_hosts": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "remember_pins": {
           "default": null,
@@ -7225,6 +7321,16 @@
         "version": 1
       },
       {
+        "doc": "_sill/policy.quiet_host: stop showing a host's refusal banner in every session, without granting access.",
+        "name": "sill.network_quiet",
+        "version": 1
+      },
+      {
+        "doc": "_sill/usage.active_time: the time agents worked per hour, over all sessions, for a running-time chart.",
+        "name": "sill.usage",
+        "version": 1
+      },
+      {
         "doc": "The frontend displays Host control: the permanent session caption and the window-level line naming every session with active control. It may activate and revoke (_sill/host_control.activate, revoke); attached to a session, it counts as displaying that session's control, which ends when the last such connection goes.",
         "name": "sill.host_control",
         "version": 1
@@ -7470,6 +7576,20 @@
       },
       "result": {
         "$ref": "#/$defs/NetworkDenied"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.network_quiet": 1
+      },
+      "doc": "Hide refusal banners for an exact hostname across sessions; network access is unchanged.",
+      "kind": "request",
+      "name": "_sill/policy.quiet_host",
+      "params": {
+        "$ref": "#/$defs/NetworkHost"
+      },
+      "result": {
+        "type": "object"
       }
     },
     {
@@ -8244,6 +8364,20 @@
       },
       "result": {
         "$ref": "#/$defs/Settings"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.usage": 1
+      },
+      "doc": "Read the time agents worked per UTC hour over the last days, summed over all sessions including deleted ones.",
+      "kind": "request",
+      "name": "_sill/usage.active_time",
+      "params": {
+        "$ref": "#/$defs/ActiveTimeQuery"
+      },
+      "result": {
+        "$ref": "#/$defs/ActiveTime"
       }
     },
     {

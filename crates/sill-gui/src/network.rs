@@ -171,7 +171,7 @@ impl App {
                 let params = json!({"session_id": session, "host": target});
                 let mut restarted = false;
                 if quiet {
-                    return (actions.call("_sill/policy.quiet_host", params), false);
+                    return (actions.call_needing("sill.network_quiet", "_sill/policy.quiet_host", params), false);
                 }
                 if allow {
                     let result = actions.call("_sill/policy.allow_host", params.clone());

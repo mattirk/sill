@@ -44,6 +44,11 @@ const fn req_empty<P: JsonSchema>(name: &'static str, doc: &'static str) -> Meth
     Method { name, kind: Kind::Request, doc, params: Some(|g| g.subschema_for::<P>()), result: None, capability: None }
 }
 
+/// A request answered with `{}`, callable only when the daemon answered `capability` at `version` or later.
+const fn req_empty_needing<P: JsonSchema>(name: &'static str, capability: &'static str, version: u32, doc: &'static str) -> Method {
+    Method { capability: Some((capability, version)), ..req_empty::<P>(name, doc) }
+}
+
 /// A notification sent only to connections the daemon answered `capability` at `version` or later.
 const fn notification_needing<P: JsonSchema>(name: &'static str, capability: &'static str, version: u32, doc: &'static str) -> Method {
     Method { capability: Some((capability, version)), ..notification::<P>(name, doc) }
@@ -70,7 +75,7 @@ pub const METHODS: &[Method] = &[
     req::<crate::Empty,crate::memory::Forgotten>("_sill/memory.forget","Delete ended sessions; do not blindly retry because newly ended sessions may appear."),
     req::<crate::admin::SessionImage,crate::admin::FileBytes>("_sill/files.image","Read an image visible through the session filesystem view in bounded chunks; revision detects concurrent edits."),
     req::<crate::admin::DeniedList,crate::admin::NetworkDenied>("_sill/policy.denied","Read network denials and their acknowledgement state (4 MiB response bound)."),
-    req_empty::<crate::admin::NetworkHost>("_sill/policy.quiet_host","Hide refusal banners for an exact hostname across sessions; network access is unchanged."),
+    req_empty_needing::<crate::admin::NetworkHost>("_sill/policy.quiet_host", "sill.network_quiet", 1,"Hide refusal banners for an exact hostname across sessions; network access is unchanged."),
     req_empty::<crate::admin::NetworkHost>("_sill/policy.remember_denied","Acknowledge a denial; inspect denied state after uncertainty before retrying."),
     req::<crate::admin::NetworkHost,crate::admin::AllowedHost>("_sill/policy.allow_host","Approve a concrete host for this session only; policy limits apply. Inspect policy after uncertainty."),
     req_needing::<crate::admin::DesktopCapture,crate::admin::DesktopFrame>("_sill/desktop.capture","sill.desktop_view",1,"Take a picture of the session's test desktop (Desktop development), on the host, outside the jail. A new one is kept for `_sill/desktop.read`; when it is still the `since` revision nothing is encoded and `changed` is false. `not_found` when the session has no test desktop running."),

@@ -966,7 +966,9 @@ fn public_changes_preserve_exact_paths_page_history_and_bound_mutations() {
     assert!(Command::new("git").args(["init","--quiet"]).arg(&repo).status().unwrap().success());
     let filename=std::ffi::OsString::from_vec(b"file-\xff\nname".to_vec());let file=repo.join(filename);
     std::fs::write(&file,"fixture contents\n").unwrap();
-    let added=c.call("_sill/pins.add",json!({"path":HostPath::from_path(&repo)})).unwrap();assert!(added.get("error").is_none(),"{added}");
+    // Changes lists the repositories open sessions have pinned (global pins are only shortcuts since 2026-11-09).
+    let session=c.call("_sill/sessions.create",json!({"create_id":"public-changes","agent":"claude","policy":"default"})).unwrap()["result"]["session_id"].clone();
+    let added=c.call("_sill/sessions.pin",json!({"session_id":session,"path":HostPath::from_path(&repo)})).unwrap();assert!(added.get("error").is_none(),"{added}");
     let page=c.call("_sill/changes.list",json!({"limit":1})).unwrap();
     let entry=&page["result"]["entries"][0];assert_eq!(entry["type"],"live","{page}");
     let mut path:HostPath=serde_json::from_value(entry["path"].clone()).unwrap();assert_eq!(path.to_path().unwrap(),file);

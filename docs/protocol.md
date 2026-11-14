@@ -948,4 +948,4 @@ setting-change variants, and `x11`/`dbus` policy-result fields. These controls a
 socket mounts are removed rather than preserved as aliases. Rebuild daemon and frontends
 together. The stable `sfp/1` cutover is still pending; identity remains `sfp/1-dev.3`.
 
-`_sill/policy.quiet_host` takes `{session_id, host}` and returns `{}`. It saves an exact hostname as a global persistent banner preference, without granting network access. Wildcards are rejected; a numeric port is stripped. Repeating the choice is idempotent.
+`_sill/policy.quiet_host` (`sill.network_quiet: 1`) takes `{session_id, host}` and returns `{}`. It saves an exact hostname as a global persistent banner preference, without granting network access. Wildcards are rejected; a numeric port is stripped. Repeating the choice is idempotent.
