@@ -295,16 +295,29 @@ impl App {
                     tabs = tabs.push(self.page_tab(page, glyph, title));
                 }
             } else {
-                // Each tab may be as wide as its share of the bar. The selected one keeps room
-                // for its close button; the others then share what is left.
-                let count = self.tabs.len().max(1) as f32;
-                let room = size.width - 2.0 * (count - 1.0);
+                // A summarizing session's tab is only its glyph, at the bar's left
+                // (`shown_tabs`). Each other tab may be as wide
+                // as its share of what is left. The selected one keeps room for its close
+                // button; the others then share what is left after it.
+                let folded = |tab: &Tab| self.views.get(&tab.id).is_some_and(SessionView::summarizing);
+                let all = self.tabs.len().max(1) as f32;
+                let icons = self.tabs.iter().filter(|t| folded(t)).count() as f32;
+                let count = (all - icons).max(1.0);
+                let room = size.width - 2.0 * (all - 1.0) - icons * TAB_FOLDED;
+                let selected_full = self
+                    .tabs
+                    .iter()
+                    .any(|t| self.selected.as_deref() == Some(t.id.as_str()) && !folded(t));
                 let mut share = room / count;
-                if share < TAB_CLOSE_FROM && count > 1.0 && self.selected.is_some() {
+                if share < TAB_CLOSE_FROM && count > 1.0 && selected_full {
                     share = (room - TAB_CLOSE_FROM) / (count - 1.0);
                 }
                 let share = share.clamp(TAB_MIN, TAB_MAX);
-                for tab in &self.tabs {
+                for tab in self.shown_tabs() {
+                    if folded(tab) {
+                        tabs = tabs.push(self.folded_tab(tab));
+                        continue;
+                    }
                     let active = self.selected.as_deref() == Some(tab.id.as_str());
                     let width = if active { share.max(TAB_CLOSE_FROM) } else { share };
                     tabs = tabs.push(self.tab(tab, width));
@@ -572,6 +585,56 @@ impl App {
             .into(),
             None => tab_body.into(),
         }
+    }
+
+    /// A summarizing session's tab: only its agent glyph, pulsing in success green, and the
+    /// underline while selected. Pressing it opens the session; its name is in the tooltip.
+    fn folded_tab<'a>(&'a self, tab: &'a Tab) -> Element<'a, Message> {
+        let active = self.selected.as_deref() == Some(tab.id.as_str());
+        let working = self
+            .views
+            .get(&tab.id)
+            .is_some_and(|v| v.attention().activity == Activity::Working);
+        let color = if active { P.fg } else { alpha(P.fg, 0.6) };
+        let glyph = keys::press(
+            button(
+                container(icons::tab_agent(
+                    &tab.agent,
+                    self.agent_icons.get(&tab.agent).map(Vec::as_slice),
+                    if working { P.success } else { color },
+                    working,
+                ))
+                .center_x(Fill),
+            )
+            .width(TAB_FOLDED)
+            .padding([4, 0])
+            .style(style::quiet),
+            Message::Choose(tab.id.clone()),
+        );
+        let body = column![
+            container(glyph).height(Fill).align_y(Alignment::Center),
+            rule::horizontal(2).style(style::rule_style(if active {
+                P.accent
+            } else {
+                Color::TRANSPARENT
+            })),
+        ]
+        .width(TAB_FOLDED)
+        .height(Fill);
+        tooltip(
+            body,
+            container(
+                text(format!(
+                    "{} — summarizing",
+                    self.session_name(&tab.id, &tab.title)
+                ))
+                .size(style::TINY),
+            )
+            .padding([3, 8])
+            .style(style::fill(P.surface)),
+            tooltip::Position::Bottom,
+        )
+        .into()
     }
 
     /// Agent activity while connected; otherwise the daemon status, in the existing slot.
@@ -1804,6 +1867,9 @@ const TAB_MAX: f32 = 220.0;
 const TAB_MIN: f32 = 64.0;
 /// A tab's agent glyph (13 px) in its button's padding.
 const TAB_AGENT: f32 = 21.0;
+/// A summarizing session's tab: the agent glyph with a little more room than in a full tab, so
+/// it reads as a tab of its own rather than the next one's icon.
+const TAB_FOLDED: f32 = TAB_AGENT + 8.0;
 /// A tab's close button: the 12 px glyph and 6 px each side.
 const TAB_CLOSE: f32 = 24.0;
 /// The room a tab's mark takes after the title.

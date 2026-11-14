@@ -4033,3 +4033,75 @@ fn closing_a_background_tab_preserves_selection_and_skips_it_in_history() {
     let _ = app.update(Message::Listed(Ok(vec![demo])));
     assert_eq!(app.selected.as_deref(), Some("demo"));
 }
+
+/// The session's state with `summarizing` set or cleared, as its lane delivers it.
+fn summary_update(app: &App, id: &str, kind: Option<&str>) -> Message {
+    let view = &app.views[id];
+    let mut session = view.conversation.session.clone().unwrap();
+    session.summarizing = kind.map(str::to_owned);
+    session.activity = if kind.is_some() { "working" } else { "idle" }.into();
+    let event = SessionEvent {
+        session_id: id.into(),
+        subscription_id: view.conversation.subscription_id.clone(),
+        seq: (view.conversation.seq + 1).to_string(),
+        event: Event::SessionUpdated { session },
+    };
+    Message::Lane(
+        id.into(),
+        view.lane_epoch,
+        sill_client::lane::Update::Event(Box::new(event)),
+    )
+}
+
+#[test]
+fn a_summary_beginning_returns_to_the_session_before_and_folds_the_tab() {
+    let (mut app, _) = App::new(true, None);
+    add_session(&mut app, "first");
+    add_session(&mut app, "second");
+    add_session(&mut app, "third");
+    let _ = app.choose("first".into());
+    let _ = app.choose("third".into());
+    let _ = app.choose("second".into());
+    // the session visited before is summarizing too: it is skipped
+    let _ = app.update(summary_update(&app, "third", Some("checkpoint")));
+    assert_eq!(app.selected.as_deref(), Some("second"), "a background summary");
+    let _ = app.update(summary_update(&app, "second", Some("checkpoint")));
+    assert!(app.views["second"].summarizing());
+    assert_eq!(app.selected.as_deref(), Some("first"));
+    // the folded tabs lead the bar, in their own order; numbers and steps follow the bar
+    let order = |app: &App| app.shown_tabs().iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+    let shown = order(&app);
+    assert_eq!(shown[..2], ["second", "third"]);
+    let _ = app.update(Message::SelectTab(0));
+    assert_eq!(app.selected.as_deref(), Some("second"));
+    let _ = app.update(Message::StepTab(1));
+    assert_eq!(app.selected.as_deref(), Some("third"));
+    let _ = app.choose("first".into());
+    // opening it again while it summarizes keeps it open: only the beginning moves on
+    let _ = app.choose("second".into());
+    let _ = app.update(summary_update(&app, "second", Some("end")));
+    assert_eq!(app.selected.as_deref(), Some("second"));
+    let _ = app.update(summary_update(&app, "second", None));
+    assert!(!app.views["second"].summarizing());
+    // its summary over, the tab is back in its place
+    let shown = order(&app);
+    assert_eq!(shown[0], "third");
+    assert!(shown.iter().position(|id| id == "first") < shown.iter().position(|id| id == "second"));
+    // the folded tab is only its glyph: its title is not drawn, the others' are
+    let mut ui = simulator(&app, (720.0, 200.0));
+    assert!(ui.find("second-title").is_ok());
+    assert!(ui.find("third-title").is_err());
+    assert!(ui.find("first-title").is_ok());
+}
+
+#[test]
+fn the_only_session_stays_selected_when_it_summarizes() {
+    let (mut app, _) = App::new(true, None);
+    app.tabs.clear();
+    app.views.clear();
+    app.tab_history.clear();
+    add_session(&mut app, "only");
+    let _ = app.choose("only".into());
+    let _ = app.update(summary_update(&app, "only", Some("checkpoint")));
+    assert_eq!(app.selected.as_deref(), Some("only"));
+}

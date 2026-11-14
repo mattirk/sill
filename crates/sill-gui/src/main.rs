@@ -550,6 +550,15 @@ impl SessionView {
         attention
     }
 
+    /// The session's work is sill's summary turn (session state `summarizing`): its tab shows
+    /// only the agent glyph.
+    pub fn summarizing(&self) -> bool {
+        self.conversation
+            .session
+            .as_ref()
+            .is_some_and(|s| s.summarizing.is_some())
+    }
+
     /// The person has looked at this session: a failure shown is no longer news.
     fn seen(&mut self) {
         self.seen_failure = self.conversation.last_turn_id().map(str::to_owned);
@@ -1927,23 +1936,24 @@ impl App {
                 };
             }
             Message::SelectTab(at) => {
-                return match self.tabs.get(at) {
-                    Some(tab) => self.choose(tab.id.clone()),
+                return match self.shown_tabs().get(at).map(|t| t.id.clone()) {
+                    Some(id) => self.choose(id),
                     None => Task::none(),
                 };
             }
             Message::StepTab(delta) => {
+                let shown = self.shown_tabs();
                 let Some(at) = self
                     .selected
                     .as_ref()
-                    .and_then(|id| self.tabs.iter().position(|t| &t.id == id))
-                    .or((!self.tabs.is_empty()).then_some(0))
+                    .and_then(|id| shown.iter().position(|t| &t.id == id))
+                    .or((!shown.is_empty()).then_some(0))
                 else {
                     return Task::none();
                 };
-                let count = self.tabs.len() as i32;
+                let count = shown.len() as i32;
                 let next = (at as i32 + delta).rem_euclid(count) as usize;
-                let id = self.tabs[next].id.clone();
+                let id = shown[next].id.clone();
                 return self.choose(id);
             }
             Message::Escape => return self.escape(),
@@ -2880,6 +2890,9 @@ impl App {
         }
         let connection_lost = matches!(&update, lane::Update::Connecting { error: Some(_), .. });
         let was_busy = view.conversation.busy();
+        // a session already known to be summarizing, or not known at all (its first snapshot):
+        // either way, no step into a summary to follow
+        let was_summarizing = view.conversation.session.is_none() || view.summarizing();
         view.status.follow(&update);
         let mut grew = false;
         let mut relist = false;
@@ -2919,6 +2932,7 @@ impl App {
             lane::Update::Connecting { .. } => {}
         }
         let finished = was_busy && !view.conversation.busy();
+        let began_summary = !was_summarizing && view.summarizing();
         let snap = grew && selected && view.follow_tail && view.conversation_shown() && !selecting;
         let mut tasks: Vec<Task<Message>> = checks
             .into_iter()
@@ -2946,6 +2960,11 @@ impl App {
             tasks.push(self.workspaces_turn_ended(&session));
         }
         tasks.push(self.load_media(&session));
+        // The selected session began its summary: its tab folds to its glyph, and the person
+        // goes back to the session visited before it, if there is one.
+        if began_summary && selected && !self.backend_shown() {
+            tasks.push(self.leave_summary(&session));
+        }
         if relist {
             tasks.push(self.list());
         }
@@ -3134,6 +3153,36 @@ impl App {
         }
         tasks.push(icons);
         Task::batch(tasks)
+    }
+
+    /// The tabs in the order the bar shows them: summarizing sessions first, folded to their
+    /// glyphs, then the rest; each group keeps the tabs' own order, which a summary leaves alone,
+    /// so a tab goes back to its place when its summary ends. Numbered and stepped selection
+    /// follow this order.
+    pub fn shown_tabs(&self) -> Vec<&Tab> {
+        let folded = |t: &&Tab| self.views.get(&t.id).is_some_and(SessionView::summarizing);
+        let (mut shown, rest): (Vec<&Tab>, Vec<&Tab>) = self.tabs.iter().partition(folded);
+        shown.extend(rest);
+        shown
+    }
+
+    /// Away from `session`, which began its summary: to the most recently visited other open
+    /// tab that is not summarizing too. With none, the selection stays.
+    fn leave_summary(&mut self, session: &str) -> Task<Message> {
+        let back = self
+            .tab_history
+            .iter()
+            .rev()
+            .filter(|id| id.as_str() != session)
+            .find(|id| {
+                self.tabs.iter().any(|t| &t.id == *id)
+                    && !self.views.get(*id).is_some_and(SessionView::summarizing)
+            })
+            .cloned();
+        match back {
+            Some(id) => self.choose(id),
+            None => Task::none(),
+        }
     }
 
     fn choose(&mut self, id: String) -> Task<Message> {

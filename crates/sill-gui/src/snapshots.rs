@@ -707,8 +707,9 @@ fn render_tabs() {
     }
 }
 
-/// Three running tabs: the agent working (accent), writing sill's summary (success green) and
-/// idle; the status-bar spinner follows the selected one, here the summarizing tab.
+/// Three running tabs: the agent working (accent), writing sill's summary (success green, folded
+/// to its glyph) and idle; the status-bar spinner follows the selected one, here the
+/// summarizing tab.
 #[test]
 #[ignore = "writes the summarizing-tab PNG for review"]
 fn render_tab_summarizing() {
