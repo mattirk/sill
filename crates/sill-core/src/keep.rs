@@ -2,11 +2,16 @@
 //! never inside the jail. Rules:
 //! - never follow symlinks on either side: every path component is opened with `RESOLVE_NO_SYMLINKS`
 //!   below the mount root, symlinks are recreated as symlinks;
-//! - refuse if the upper file's content hash differs from the one the person reviewed
-//!   (`expected_hash`, from the ledger index) — the agent or a background process changed it since;
+//! - refuse if the content copied differs from the one the person reviewed (`expected_hash`, from the
+//!   ledger index): the hash is taken from the bytes that were actually copied, so nothing swapped in
+//!   between the review and the copy can land on the host;
 //! - deletions (whiteouts) remove the host path; directories are created with the upper's mode;
 //! - mode is preserved, setuid/setgid bits are stripped unless `allow_special`; ownership is left to
-//!   whoever runs this (the person; root-owned targets go through a separate sudo helper later).
+//!   whoever runs this (the person; root-owned targets go through a separate sudo helper later);
+//! - **undo** (SPEC §4.4): with `KeepOptions::undo` set to the session's `kept/` directory, the host's
+//!   previous version is saved there before anything is touched and a line in `kept/log.jsonl` says
+//!   what was done; [`undo`] puts the previous version back, refusing if the host changed since.
+//!   Nothing leaves the overlay without a click, and no click is final.
 
 use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -23,7 +28,32 @@ pub struct KeepOptions {
     pub expected_hash: Option<String>,
     /// Keep setuid/setgid bits.
     pub allow_special: bool,
+    /// The session's `kept/` directory: the host's previous version goes there before every keep so
+    /// the keep can be undone. `None` keeps without undo.
+    pub undo: Option<PathBuf>,
 }
+
+/// One line of `kept/log.jsonl`: a keep and what it replaced.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Kept {
+    /// Name of the payload directory below `kept/`; `prior` inside it is the host's previous version.
+    pub id: String,
+    pub ts: i64,
+    /// Host path.
+    pub path: PathBuf,
+    /// What keep did: `added` `updated` `removed` `symlink` `directory`.
+    pub what: String,
+    /// What the host had before: `absent` `file` `symlink` `dir` `other` (no payload for `absent` and
+    /// `other`; for `dir` the payload is the whole tree when keep removed it, else just its mode).
+    pub before: String,
+    /// SHA-256 of the file keep wrote (files only): a later edit on the host is told apart on undo.
+    pub hash: Option<String>,
+    #[serde(default)]
+    pub undone_at: Option<i64>,
+}
+
+const LOG: &str = "log.jsonl";
+const PRIOR: &str = "prior";
 
 /// Open `path` with every component resolved without following symlinks and without leaving `/`.
 fn open_nofollow(path: &Path, flags: OFlags, mode: Mode) -> Result<std::fs::File> {
@@ -32,6 +62,10 @@ fn open_nofollow(path: &Path, flags: OFlags, mode: Mode) -> Result<std::fs::File
     let fd = openat2(&root, rel, flags | OFlags::CLOEXEC, mode, ResolveFlags::NO_SYMLINKS | ResolveFlags::BENEATH)
         .with_context(|| format!("open {} without following symlinks", path.display()))?;
     Ok(std::fs::File::from(fd))
+}
+
+fn hex(digest: &[u8]) -> String {
+    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 pub fn sha256_file(path: &Path) -> Result<String> {
@@ -46,7 +80,127 @@ pub fn sha256_file(path: &Path) -> Result<String> {
         }
         h.update(&buf[..n]);
     }
-    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    Ok(hex(&h.finalize()))
+}
+
+/// Copy a regular file without following symlinks on either side; `dst` must not exist. Returns the
+/// SHA-256 of the bytes copied.
+fn copy_file(src: &Path, dst: &Path, mode: u32) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut from = open_nofollow(src, OFlags::RDONLY, Mode::empty())?;
+    let mut to = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(OFlags::NOFOLLOW.bits() as i32)
+        .mode(mode & 0o7777)
+        .open(dst)
+        .with_context(|| format!("create {}", dst.display()))?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 1 << 16];
+    loop {
+        let n = from.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+        to.write_all(&buf[..n])?;
+    }
+    to.flush()?;
+    to.sync_all()?;
+    Ok(hex(&h.finalize()))
+}
+
+/// Copy a directory tree: files, symlinks (as symlinks) and directories with their modes; sockets,
+/// devices and fifos are skipped. Nothing is followed. `dst` may exist (entries are merged in).
+fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
+    let md = src.symlink_metadata()?;
+    if !dst.symlink_metadata().map(|m| m.is_dir()).unwrap_or(false) {
+        std::fs::create_dir(dst).with_context(|| format!("create {}", dst.display()))?;
+    }
+    for e in std::fs::read_dir(src)? {
+        let e = e?;
+        let from = e.path();
+        let to = dst.join(e.file_name());
+        let m = from.symlink_metadata()?;
+        let ft = m.file_type();
+        if ft.is_symlink() {
+            remove_if_exists(&to)?;
+            std::os::unix::fs::symlink(std::fs::read_link(&from)?, &to)?;
+        } else if ft.is_dir() {
+            copy_tree(&from, &to)?;
+        } else if ft.is_file() {
+            remove_if_exists(&to)?;
+            copy_file(&from, &to, m.mode())?;
+        }
+    }
+    std::fs::set_permissions(dst, std::fs::Permissions::from_mode(md.mode() & 0o7777))?;
+    Ok(())
+}
+
+/// The host's previous version of a path, saved below `kept/<id>/` before keep touches the host.
+struct Prior {
+    dir: PathBuf,
+    id: String,
+    before: &'static str,
+}
+
+impl Prior {
+    fn save(dir: &Path, change: &Change) -> Result<Self> {
+        if !dir.is_dir() {
+            std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let id = format!("{}-{}", crate::store::now(), crate::store::new_id());
+        let payload = dir.join(&id);
+        std::fs::create_dir(&payload).with_context(|| format!("create {}", payload.display()))?;
+        let host = &change.path;
+        let prior = payload.join(PRIOR);
+        let before = match host.symlink_metadata() {
+            Err(_) => "absent",
+            Ok(md) if md.file_type().is_symlink() => {
+                std::os::unix::fs::symlink(std::fs::read_link(host)?, &prior)?;
+                "symlink"
+            }
+            Ok(md) if md.is_file() => {
+                copy_file(host, &prior, md.mode()).with_context(|| format!("save the previous {}", host.display()))?;
+                "file"
+            }
+            Ok(md) if md.is_dir() => {
+                // keep removes a host directory only for a deletion or a type change; a directory kept
+                // over a directory just gets the upper's mode, so only the mode is worth saving
+                let upper_is_dir = change.upper.symlink_metadata().map(|m| m.is_dir()).unwrap_or(false);
+                if upper_is_dir {
+                    std::fs::create_dir(&prior)?;
+                    std::fs::set_permissions(&prior, std::fs::Permissions::from_mode(md.mode() & 0o7777))?;
+                } else {
+                    copy_tree(host, &prior).with_context(|| format!("save the previous {}", host.display()))?;
+                }
+                "dir"
+            }
+            Ok(_) => "other",
+        };
+        Ok(Self { dir: dir.to_path_buf(), id, before })
+    }
+
+    fn record(self, change: &Change, what: &str, hash: Option<String>) -> Result<()> {
+        let rec = Kept {
+            id: self.id,
+            ts: crate::store::now(),
+            path: change.path.clone(),
+            what: what.to_string(),
+            before: self.before.to_string(),
+            hash,
+            undone_at: None,
+        };
+        let mut log = std::fs::OpenOptions::new().append(true).create(true).mode(0o600).open(self.dir.join(LOG))?;
+        writeln!(log, "{}", serde_json::to_string(&rec)?)?;
+        Ok(())
+    }
+
+    /// Nothing was done: no record, no payload.
+    fn discard(self) {
+        let _ = std::fs::remove_dir_all(self.dir.join(&self.id));
+    }
 }
 
 /// Apply one ledger entry to the host. Returns what was done.
@@ -60,15 +214,36 @@ pub fn keep(change: &Change, opts: &KeepOptions) -> Result<&'static str> {
     if parent != Path::new("/") {
         let _ = open_nofollow(parent, OFlags::PATH | OFlags::DIRECTORY, Mode::empty())?;
     }
+    // the previous version first: if it can't be saved, nothing is kept
+    let prior = match &opts.undo {
+        Some(dir) => Some(Prior::save(dir, change)?),
+        None => None,
+    };
+    let (what, hash) = match apply(change, opts) {
+        Ok(done) => done,
+        Err(e) => {
+            if let Some(p) = prior {
+                p.discard();
+            }
+            return Err(e);
+        }
+    };
+    if let Some(p) = prior {
+        if what == "already absent" { p.discard() } else { p.record(change, what, hash)? }
+    }
+    Ok(what)
+}
 
+fn apply(change: &Change, opts: &KeepOptions) -> Result<(&'static str, Option<String>)> {
+    let host = &change.path;
     match change.kind {
         Kind::Deleted => {
             match host.symlink_metadata() {
                 Ok(md) if md.is_dir() => std::fs::remove_dir_all(host)?,
                 Ok(_) => std::fs::remove_file(host)?,
-                Err(_) => return Ok("already absent"),
+                Err(_) => return Ok(("already absent", None)),
             }
-            Ok("removed")
+            Ok(("removed", None))
         }
         Kind::Added | Kind::Modified | Kind::TypeChanged | Kind::Replaced => {
             let up = change.upper.symlink_metadata().with_context(|| format!("stat {}", change.upper.display()))?;
@@ -76,7 +251,7 @@ pub fn keep(change: &Change, opts: &KeepOptions) -> Result<&'static str> {
                 let target = std::fs::read_link(&change.upper)?;
                 remove_if_exists(host)?;
                 std::os::unix::fs::symlink(target, host)?;
-                return Ok("symlink");
+                return Ok(("symlink", None));
             }
             if up.is_dir() {
                 if host.symlink_metadata().map(|m| !m.is_dir()).unwrap_or(false) {
@@ -84,39 +259,154 @@ pub fn keep(change: &Change, opts: &KeepOptions) -> Result<&'static str> {
                 }
                 std::fs::create_dir_all(host)?;
                 std::fs::set_permissions(host, std::fs::Permissions::from_mode(strip_special(up.mode(), opts)))?;
-                return Ok("directory");
+                return Ok(("directory", None));
             }
             if !up.is_file() {
                 bail!("{}: not a regular file, symlink or directory", change.upper.display());
             }
-            if let Some(expected) = &opts.expected_hash {
-                let actual = sha256_file(&change.upper)?;
-                if &actual != expected {
-                    bail!("{} changed since it was reviewed (hash {}… ≠ {}…)", host.display(), &actual[..12], &expected[..12]);
-                }
-            }
-            // write to a temp file next to the target, then rename: never a half-written file on the host
+            // write to a temp file next to the target, then rename: never a half-written file on the
+            // host; the hash of the bytes copied is the one checked against the review
             let tmp = temp_name(host);
+            let hash = match copy_file(&change.upper, &tmp, strip_special(up.mode(), opts)) {
+                Ok(h) => h,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(e);
+                }
+            };
+            if let Some(expected) = &opts.expected_hash
+                && &hash != expected
             {
-                let mut src = open_nofollow(&change.upper, OFlags::RDONLY, Mode::empty())?;
-                let mut dst = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .custom_flags(OFlags::NOFOLLOW.bits() as i32)
-                    .mode(strip_special(up.mode(), opts) & 0o7777)
-                    .open(&tmp)
-                    .with_context(|| format!("create {}", tmp.display()))?;
-                std::io::copy(&mut src, &mut dst)?;
-                dst.flush()?;
-                dst.sync_all()?;
+                let _ = std::fs::remove_file(&tmp);
+                bail!("{} changed since it was reviewed (hash {}… ≠ {}…)", host.display(), &hash[..12], &expected[..12]);
             }
             if host.symlink_metadata().map(|m| m.is_dir()).unwrap_or(false) {
                 std::fs::remove_dir_all(host)?;
             }
             std::fs::rename(&tmp, host).with_context(|| format!("rename into {}", host.display()))?;
-            Ok(if change.kind == Kind::Added { "added" } else { "updated" })
+            Ok((if change.kind == Kind::Added { "added" } else { "updated" }, Some(hash)))
         }
     }
+}
+
+/// Every keep recorded in `kept/`, oldest first (undone ones included; see [`undoable`]).
+pub fn list(dir: &Path) -> Vec<Kept> {
+    let Ok(text) = std::fs::read_to_string(dir.join(LOG)) else { return Vec::new() };
+    text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
+}
+
+/// The keeps that can still be undone, newest first.
+pub fn undoable(dir: &Path) -> Vec<Kept> {
+    let mut v: Vec<Kept> = list(dir).into_iter().filter(|k| k.undone_at.is_none()).collect();
+    v.reverse();
+    v
+}
+
+/// Where a keep's previous version lies (nothing there for `before` = `absent` or `other`).
+pub fn prior_path(dir: &Path, rec: &Kept) -> PathBuf {
+    dir.join(&rec.id).join(PRIOR)
+}
+
+/// Put the host's previous version back. Refuses when the host changed since the keep (a kept file
+/// edited, a removed path recreated) unless `force`; the same symlink rules as keep apply.
+pub fn undo(dir: &Path, rec: &Kept, force: bool) -> Result<&'static str> {
+    if rec.undone_at.is_some() {
+        bail!("{} was already undone", rec.path.display());
+    }
+    let host = &rec.path;
+    if !host.is_absolute() {
+        bail!("{} is not absolute", host.display());
+    }
+    let parent = host.parent().context("path has no parent")?;
+    if parent != Path::new("/") {
+        let _ = open_nofollow(parent, OFlags::PATH | OFlags::DIRECTORY, Mode::empty())?;
+    }
+    let cur = host.symlink_metadata().ok();
+    if !force {
+        match (&rec.hash, &cur) {
+            (Some(h), Some(md)) if md.is_file() => {
+                if &sha256_file(host)? != h {
+                    bail!("{} was edited on the host after it was kept", host.display());
+                }
+            }
+            (Some(_), Some(_)) => bail!("{} is no longer a regular file", host.display()),
+            (Some(_), None) => bail!("{} is gone from the host", host.display()),
+            (None, _) => {}
+        }
+        if rec.what == "removed" && cur.is_some() {
+            bail!("{} was recreated on the host after it was removed", host.display());
+        }
+    }
+    let prior = prior_path(dir, rec);
+    let what = match rec.before.as_str() {
+        "absent" => {
+            match &cur {
+                // a directory is only removed empty: what was kept below it has its own records
+                Some(md) if md.is_dir() => std::fs::remove_dir(host).with_context(|| format!("remove {}", host.display()))?,
+                Some(_) => std::fs::remove_file(host)?,
+                None => {}
+            }
+            "removed"
+        }
+        "file" => {
+            let md = prior.symlink_metadata().with_context(|| format!("previous version {} is missing", prior.display()))?;
+            if !md.is_file() {
+                bail!("{} is not a regular file", prior.display());
+            }
+            let tmp = temp_name(host);
+            if let Err(e) = copy_file(&prior, &tmp, md.mode()) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+            if cur.as_ref().map(|m| m.is_dir()).unwrap_or(false) {
+                std::fs::remove_dir_all(host)?;
+            }
+            std::fs::rename(&tmp, host).with_context(|| format!("rename into {}", host.display()))?;
+            "restored"
+        }
+        "symlink" => {
+            let target = std::fs::read_link(&prior).with_context(|| format!("previous version {} is missing", prior.display()))?;
+            remove_if_exists(host)?;
+            std::os::unix::fs::symlink(target, host)?;
+            "restored"
+        }
+        "dir" => {
+            if !prior.is_dir() {
+                bail!("previous version {} is missing", prior.display());
+            }
+            if cur.as_ref().map(|m| !m.is_dir()).unwrap_or(false) {
+                remove_if_exists(host)?;
+            }
+            copy_tree(&prior, host)?;
+            "restored"
+        }
+        other => bail!("the host had a {other} at {}; put it back by hand", host.display()),
+    };
+    mark_undone(dir, &rec.id)?;
+    let _ = std::fs::remove_dir_all(dir.join(&rec.id));
+    Ok(what)
+}
+
+/// Rewrite the journal with the record marked undone (write next to it, then rename).
+fn mark_undone(dir: &Path, id: &str) -> Result<()> {
+    let now = crate::store::now();
+    let mut lines = Vec::new();
+    for mut k in list(dir) {
+        if k.id == id {
+            k.undone_at = Some(now);
+        }
+        lines.push(serde_json::to_string(&k)?);
+    }
+    let tmp = dir.join(format!(".{LOG}.{}", std::process::id()));
+    {
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        for l in &lines {
+            writeln!(f, "{l}")?;
+        }
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, dir.join(LOG))?;
+    Ok(())
 }
 
 fn strip_special(mode: u32, opts: &KeepOptions) -> u32 {
@@ -142,6 +432,10 @@ mod tests {
     use super::*;
     use crate::ledger::FileType;
 
+    fn change(path: PathBuf, upper: PathBuf, kind: Kind) -> Change {
+        Change { path, upper, kind, file_type: FileType::File, size: 0, conflict: false, ignored: false }
+    }
+
     #[test]
     fn keeps_file_and_refuses_symlink_parent() {
         let dir = std::env::temp_dir().join(format!("sill-keep-test-{}", std::process::id()));
@@ -149,20 +443,13 @@ mod tests {
         std::fs::create_dir_all(dir.join("upper")).unwrap();
         std::fs::create_dir_all(dir.join("host")).unwrap();
         std::fs::write(dir.join("upper/a.txt"), "new\n").unwrap();
-        let change = Change {
-            path: dir.join("host/a.txt"),
-            upper: dir.join("upper/a.txt"),
-            kind: Kind::Added,
-            file_type: FileType::File,
-            size: 4,
-            conflict: false,
-            ignored: false,
-        };
+        let change = change(dir.join("host/a.txt"), dir.join("upper/a.txt"), Kind::Added);
         assert_eq!(keep(&change, &KeepOptions::default()).unwrap(), "added");
         assert_eq!(std::fs::read_to_string(dir.join("host/a.txt")).unwrap(), "new\n");
-        // hash check
-        let bad = KeepOptions { expected_hash: Some("00".repeat(32)), allow_special: false };
+        // hash check: nothing lands on the host, no temp file stays behind
+        let bad = KeepOptions { expected_hash: Some("00".repeat(32)), ..Default::default() };
         assert!(keep(&change, &bad).is_err());
+        assert_eq!(std::fs::read_dir(dir.join("host")).unwrap().count(), 1);
         // parent reached through a symlink: refused
         std::os::unix::fs::symlink(dir.join("host"), dir.join("link")).unwrap();
         let via_link = Change { path: dir.join("link/a.txt"), ..change.clone() };
@@ -171,6 +458,59 @@ mod tests {
         let del = Change { kind: Kind::Deleted, ..change.clone() };
         assert_eq!(keep(&del, &KeepOptions::default()).unwrap(), "removed");
         assert!(!dir.join("host/a.txt").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn undo_puts_the_previous_version_back() {
+        let dir = std::env::temp_dir().join(format!("sill-undo-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (upper, host, kept) = (dir.join("upper"), dir.join("host"), dir.join("kept"));
+        std::fs::create_dir_all(&upper).unwrap();
+        std::fs::create_dir_all(host.join("d/sub")).unwrap();
+        let opts = KeepOptions { undo: Some(kept.clone()), ..Default::default() };
+
+        // a modified file: undo restores the old content, but not over a later host edit
+        std::fs::write(host.join("a.txt"), "old\n").unwrap();
+        std::fs::write(upper.join("a.txt"), "new\n").unwrap();
+        let m = change(host.join("a.txt"), upper.join("a.txt"), Kind::Modified);
+        assert_eq!(keep(&m, &opts).unwrap(), "updated");
+        let recs = undoable(&kept);
+        assert_eq!(recs.len(), 1);
+        assert_eq!((recs[0].before.as_str(), recs[0].what.as_str()), ("file", "updated"));
+        std::fs::write(host.join("a.txt"), "edited on the host\n").unwrap();
+        assert!(undo(&kept, &recs[0], false).is_err());
+        assert_eq!(undo(&kept, &recs[0], true).unwrap(), "restored");
+        assert_eq!(std::fs::read_to_string(host.join("a.txt")).unwrap(), "old\n");
+        assert!(undoable(&kept).is_empty());
+        assert_eq!(list(&kept).len(), 1); // the journal remembers it
+        assert!(!kept.join(&recs[0].id).exists());
+
+        // an added file: undo removes it
+        std::fs::write(upper.join("b.txt"), "b\n").unwrap();
+        let a = change(host.join("b.txt"), upper.join("b.txt"), Kind::Added);
+        assert_eq!(keep(&a, &opts).unwrap(), "added");
+        let recs = undoable(&kept);
+        assert_eq!(recs[0].before, "absent");
+        assert_eq!(undo(&kept, &recs[0], false).unwrap(), "removed");
+        assert!(!host.join("b.txt").exists());
+
+        // a deleted directory: the whole tree comes back
+        std::fs::write(host.join("d/sub/f.txt"), "f\n").unwrap();
+        std::os::unix::fs::symlink("f.txt", host.join("d/sub/l")).unwrap();
+        let d = change(host.join("d"), upper.join("d"), Kind::Deleted); // upper is a whiteout in real life
+        assert_eq!(keep(&d, &opts).unwrap(), "removed");
+        assert!(!host.join("d").exists());
+        let recs = undoable(&kept);
+        assert_eq!(recs[0].before, "dir");
+        assert_eq!(undo(&kept, &recs[0], false).unwrap(), "restored");
+        assert_eq!(std::fs::read_to_string(host.join("d/sub/f.txt")).unwrap(), "f\n");
+        assert_eq!(std::fs::read_link(host.join("d/sub/l")).unwrap(), PathBuf::from("f.txt"));
+
+        // a deletion of something already absent leaves no record
+        let gone = change(host.join("nope"), upper.join("nope"), Kind::Deleted);
+        assert_eq!(keep(&gone, &opts).unwrap(), "already absent");
+        assert!(undoable(&kept).is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

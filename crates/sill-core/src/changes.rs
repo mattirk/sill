@@ -188,17 +188,29 @@ pub fn git_revert(repo: &Path, rel: &Path) -> Result<&'static str> {
 
 /// Unified diff text for a change (host vs upper).
 pub fn unified_diff(c: &Change) -> Result<String> {
-    use similar::TextDiff;
     let host = if c.path.is_file() { std::fs::read(&c.path).unwrap_or_default() } else { Vec::new() };
     let upper = if c.kind != ledger::Kind::Deleted && c.upper.is_file() { std::fs::read(&c.upper).unwrap_or_default() } else { Vec::new() };
-    if host.iter().any(|b| *b == 0) || upper.iter().any(|b| *b == 0) {
-        return Ok(format!("binary file ({} → {} bytes)", host.len(), upper.len()));
-    }
-    let a = String::from_utf8_lossy(&host);
-    let b = String::from_utf8_lossy(&upper);
-    let diff = TextDiff::from_lines(a.as_ref(), b.as_ref());
     let name = c.path.display().to_string();
-    Ok(diff.unified_diff().context_radius(3).header(&format!("host:{name}"), &format!("jail:{name}")).to_string())
+    Ok(text_diff(&host, &upper, &format!("host:{name}"), &format!("jail:{name}")))
+}
+
+/// What undoing a keep would change: the host's current content against the saved previous version
+/// (`keep::prior_path`).
+pub fn undo_diff(host: &Path, prior: &Path) -> String {
+    let now = if host.is_file() { std::fs::read(host).unwrap_or_default() } else { Vec::new() };
+    let before = if prior.is_file() { std::fs::read(prior).unwrap_or_default() } else { Vec::new() };
+    let name = host.display().to_string();
+    text_diff(&now, &before, &format!("host:{name}"), &format!("undo:{name}"))
+}
+
+fn text_diff(from: &[u8], to: &[u8], from_label: &str, to_label: &str) -> String {
+    use similar::TextDiff;
+    if from.contains(&0) || to.contains(&0) {
+        return format!("binary file ({} → {} bytes)", from.len(), to.len());
+    }
+    let a = String::from_utf8_lossy(from);
+    let b = String::from_utf8_lossy(to);
+    TextDiff::from_lines(a.as_ref(), b.as_ref()).unified_diff().context_radius(3).header(from_label, to_label).to_string()
 }
 
 pub fn home() -> Result<PathBuf> {

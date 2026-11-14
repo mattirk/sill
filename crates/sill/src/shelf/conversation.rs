@@ -987,6 +987,7 @@ button.sill-install:hover { background: alpha(@accent_bg_color, 0.45); }
 .sill-badge.sill-badge-git { color: @success_color; }
 .sill-badge.sill-badge-live { color: @accent_color; }
 .sill-badge.sill-badge-nogit { color: @warning_color; }
+.sill-badge.sill-badge-kept { color: alpha(@success_color, 0.75); }
 .sill-diff-frame { border-top: 1px solid alpha(@view_fg_color, 0.12); }
 .sill-diff { font-size: 90%; }
 .sill-files > row { padding: 1px 4px; min-height: 0; }

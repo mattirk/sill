@@ -132,6 +132,30 @@ enum JailCmd {
         /// keep setuid/setgid bits
         #[arg(long)]
         allow_special: bool,
+        /// don't save the host's previous version under the state dir's kept/ (no undo)
+        #[arg(long)]
+        no_undo: bool,
+    },
+    /// List the session's keeps that can still be undone (SPEC §4.4 keep with undo)
+    Kept {
+        #[command(flatten)]
+        jail: JailArgs,
+    },
+    /// Put the host's previous version of a kept path back
+    Unkeep {
+        #[command(flatten)]
+        jail: JailArgs,
+        /// host path to restore (its most recent keep)
+        path: Option<PathBuf>,
+        /// undo the most recent keep
+        #[arg(long, conflicts_with_all = ["path", "all"])]
+        last: bool,
+        /// undo every keep of the session, newest first
+        #[arg(long, conflicts_with = "path")]
+        all: bool,
+        /// restore even if the host changed after the keep
+        #[arg(long)]
+        force: bool,
     },
     /// List what a jail's session has changed against the host (reads the upper trees)
     Changes {
@@ -298,7 +322,7 @@ fn jail_cmd(cmd: JailCmd) -> Result<()> {
             println!("{}", jail::render(&plan.argv));
             Ok(())
         }
-        JailCmd::Keep { mut jail, path, allow_special } => {
+        JailCmd::Keep { mut jail, path, allow_special, no_undo } => {
             jail.unsafe_state = true;
             let spec = build_spec(jail, vec!["true".into()])?;
             let plan = spec.plan()?;
@@ -311,8 +335,55 @@ fn jail_cmd(cmd: JailCmd) -> Result<()> {
             if c.conflict {
                 bail!("{} changed on the host since the session started; not keeping", path.display());
             }
-            let what = sill_core::keep::keep(c, &sill_core::keep::KeepOptions { expected_hash: None, allow_special })?;
+            let undo = if no_undo { None } else { Some(spec.state_dir.join("kept")) };
+            let what = sill_core::keep::keep(c, &sill_core::keep::KeepOptions { expected_hash: None, allow_special, undo })?;
             println!("{}: {what}", path.display());
+            Ok(())
+        }
+        JailCmd::Kept { mut jail } => {
+            jail.unsafe_state = true; // reading only
+            let spec = build_spec(jail, vec!["true".into()])?;
+            let kept = sill_core::keep::undoable(&spec.state_dir.join("kept"));
+            if kept.is_empty() {
+                println!("nothing kept");
+            }
+            for k in kept {
+                println!("{}  {:<9} {}  (was {})", k.ts, k.what, k.path.display(), k.before);
+            }
+            Ok(())
+        }
+        JailCmd::Unkeep { mut jail, path, last, all, force } => {
+            jail.unsafe_state = true;
+            let spec = build_spec(jail, vec!["true".into()])?;
+            let dir = spec.state_dir.join("kept");
+            let kept = sill_core::keep::undoable(&dir); // newest first
+            let todo: Vec<_> = if all {
+                kept
+            } else if last {
+                kept.into_iter().take(1).collect()
+            } else if let Some(p) = path {
+                let p = std::path::absolute(p)?;
+                let Some(k) = kept.into_iter().find(|k| k.path == p) else { bail!("{} was not kept by this session", p.display()) };
+                vec![k]
+            } else {
+                bail!("give a path, --last or --all");
+            };
+            if todo.is_empty() {
+                bail!("nothing kept");
+            }
+            let mut failed = 0;
+            for k in &todo {
+                match sill_core::keep::undo(&dir, k, force) {
+                    Ok(what) => println!("{}: {what}", k.path.display()),
+                    Err(e) => {
+                        failed += 1;
+                        eprintln!("{}: {e:#}", k.path.display());
+                    }
+                }
+            }
+            if failed > 0 {
+                bail!("{failed} of {} not undone (--force restores over host edits)", todo.len());
+            }
             Ok(())
         }
         JailCmd::Changes { mut jail, all, diff } => {
