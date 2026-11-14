@@ -133,8 +133,29 @@ fn run(dir: &std::path::Path) -> Result<(), String> {
     if let Err(e) = share_git_identity(dir) {
         eprintln!("sill-gui: git identity: {e}");
     }
+    // last, so it mostly overlaps the steps above: sessions start once the guest has its network
+    if let Err(e) = wait_for_network(dir) {
+        eprintln!("sill-gui: the VM's network: {e}");
+    }
     set(Phase::Ready);
     Ok(())
+}
+
+/// How long a start waits for the guest's network before it goes on without it.
+const NETWORK_WAIT_SECS: u32 = 30;
+
+/// Wait until the guest's network is up. SSH over the VM's socket answers before it is, and an
+/// agent's first request failed for it (docs/sill-stick.md section 9). macOS's own DHCP gives the
+/// guest its address whether the Mac is online or not, so this measures the VM, not the Internet;
+/// past the limit the start goes on and an agent's request fails as on any box without network.
+fn wait_for_network(dir: &Path) -> Result<(), String> {
+    let remote = format!(
+        "/usr/lib/systemd/systemd-networkd-wait-online --quiet --any --ipv4 \
+         --operational-state=routable --timeout={NETWORK_WAIT_SECS}"
+    );
+    guest(dir, &remote, "").map_err(|said| {
+        if said.is_empty() { format!("no network after {NETWORK_WAIT_SECS} s") } else { said }
+    })
 }
 
 /// The VM's make: sized for this Mac, with what Settings chose in its place.
@@ -253,6 +274,12 @@ pub fn stop() -> Result<(), String> {
 
 fn stop_held(dir: &Path, shared: &Shared) -> Result<(), String> {
     set(Phase::Stopping);
+    // the agents' Mac programs end with the VM their sessions ran in, as they do when Sill quits
+    // (the person, 2026-11-13); with the VM down nothing could see or stop them
+    crate::mac_procs::stop_all();
+    // every Host control activation ends with the daemon, and the next daemon numbers its
+    // generations from 1 again: what the person switched on before must not match those
+    forget_grants();
     let vm = shared.vm.lock().unwrap().take();
     let mut result = Ok(());
     if let Some(vm) = vm {
@@ -834,8 +861,16 @@ static TICKED: Mutex<std::collections::BTreeMap<String, Ticked>> = Mutex::new(st
 struct Ticked {
     /// The operations of an Activate still on its way to the daemon.
     asked: Option<Vec<String>>,
-    /// The generation and operations of the activation the person made.
-    granted: Option<(u64, Vec<String>)>,
+    /// The activation the person made.
+    granted: Option<Granted>,
+}
+
+struct Granted {
+    generation: u64,
+    /// When the daemon made it: a daemon started again numbers its generations from 1 again, so
+    /// the generation alone could match an activation made after a restart from inside the VM.
+    since: Option<String>,
+    operations: Vec<String>,
 }
 
 /// The person pressed Activate for `session` with these operations.
@@ -843,9 +878,9 @@ pub fn person_asked(session: &str, operations: &[String]) {
     TICKED.lock().unwrap().entry(session.into()).or_default().asked = Some(operations.to_vec());
 }
 
-/// The daemon answered the window's own request: `active` carries the activation's generation,
-/// `None` is a revocation; `failed` leaves what was granted before as it was.
-pub fn person_answered(session: &str, active: Option<u64>, failed: bool) {
+/// The daemon answered the window's own request: `active` carries the activation's generation and
+/// when it was made, `None` is a revocation; `failed` leaves what was granted before as it was.
+pub fn person_answered(session: &str, active: Option<(u64, Option<String>)>, failed: bool) {
     let mut ticked = TICKED.lock().unwrap();
     let Some(entry) = ticked.get_mut(session) else { return };
     let asked = entry.asked.take();
@@ -853,7 +888,9 @@ pub fn person_answered(session: &str, active: Option<u64>, failed: bool) {
         return;
     }
     match (active, asked) {
-        (Some(generation), Some(operations)) => entry.granted = Some((generation, operations)),
+        (Some((generation, since)), Some(operations)) => {
+            entry.granted = Some(Granted { generation, since, operations })
+        }
         // an answer to something else than an Activate of this window: what stands, stands
         (Some(_), None) => {}
         (None, _) => {
@@ -862,20 +899,28 @@ pub fn person_answered(session: &str, active: Option<u64>, failed: bool) {
     }
 }
 
-/// The person switched `operation` on for `session` in this window, at this generation.
-fn ticked(session: &str, generation: u64, operation: &str) -> bool {
-    TICKED.lock().unwrap().get(session).and_then(|t| t.granted.as_ref()).is_some_and(|(granted, operations)| {
-        *granted == generation && operations.iter().any(|op| op == operation)
+/// The VM stops: every activation and the frames aimed under them go with its daemon.
+fn forget_grants() {
+    TICKED.lock().unwrap().clear();
+    FRAMES.lock().unwrap().clear();
+}
+
+/// The person switched `operation` on for `session` in this window: the activation of this
+/// generation, made at `since`.
+fn ticked(session: &str, generation: u64, since: Option<&str>, operation: &str) -> bool {
+    TICKED.lock().unwrap().get(session).and_then(|t| t.granted.as_ref()).is_some_and(|g| {
+        g.generation == generation && g.since.as_deref() == since && g.operations.iter().any(|op| op == operation)
     })
 }
 
 /// The session's Host control is active at this generation with `operation` granted: by the
 /// person in this window (`TICKED`) and in the daemon's answer (it checked too).
 fn granted(session: &str, generation: u64, operation: &str) -> Result<(), String> {
-    if !ticked(session, generation, operation) {
-        return Err(format!(
-            "refused: {operation} was not switched on for this session in Sill's window at this generation"
-        ));
+    let not_ticked =
+        || format!("refused: {operation} was not switched on for this session in Sill's window at this generation");
+    // nothing switched on here at this generation: refused without asking the daemon
+    if !TICKED.lock().unwrap().get(session).and_then(|t| t.granted.as_ref()).is_some_and(|g| g.generation == generation) {
+        return Err(not_ticked());
     }
     let state: sill_proto::host_control::State = sill_proto::Client::connect()
         .and_then(|client| client.call("_sill/host_control.state", serde_json::json!({"session_id": session})))
@@ -885,6 +930,9 @@ fn granted(session: &str, generation: u64, operation: &str) -> Result<(), String
     }
     if !state.operations.iter().any(|op| op == operation) {
         return Err(format!("refused: {operation} is not granted"));
+    }
+    if !ticked(session, generation, state.since.as_deref(), operation) {
+        return Err(not_ticked());
     }
     Ok(())
 }
@@ -937,16 +985,19 @@ fn mac_input(session: &str, generation: u64, args: &serde_json::Value) -> Result
         None => None,
     };
     let _driving = input::drive().ok_or("another session is using the Mac's mouse and keyboard")?;
+    // the person's own input, watched from the first request on
+    input::watch();
     if input::person_active() {
         return Err("paused: the person is using the Mac's mouse or keyboard; take a new picture in a few seconds".into());
     }
+    let began = input::since_now();
     let total = actions.len();
     let stop = |done: usize, why: &str| Ok(json!({"done": done, "of": total, "interrupted": why}));
     for (done, action) in actions.iter().enumerate() {
         if done > 0 && granted(session, generation, "mac_input").is_err() {
             return stop(done, "Host control changed or was revoked");
         }
-        if input::person_active() {
+        if input::person_since(began) {
             return stop(done, "the person used the mouse or keyboard");
         }
         let aimed = |p: &serde_json::Value| -> Result<input::Point, String> {
@@ -984,7 +1035,8 @@ fn mac_input(session: &str, generation: u64, args: &serde_json::Value) -> Result
             } else if let Some(combination) = action.get("key").and_then(|k| k.as_str()) {
                 input::key(combination)?;
             } else if let Some(ms) = action.get("wait").and_then(|w| w.as_u64()) {
-                std::thread::sleep(Duration::from_millis(ms.min(2000)));
+                // ends early if the person takes over: the next action's check stops the rest
+                input::wait(ms.min(2000), began);
             } else {
                 return Err("an action is move, click, drag, scroll, type, key or wait".into());
             }
@@ -1012,7 +1064,7 @@ fn watch_mac_processes() {
                 if let Ok(state) = state
                     && (!state.active
                         || !state.operations.iter().any(|op| op == "mac_commands")
-                        || !ticked(&session, state.generation, "mac_commands"))
+                        || !ticked(&session, state.generation, state.since.as_deref(), "mac_commands"))
                 {
                     crate::mac_procs::stop_session(&session);
                 }
@@ -1026,18 +1078,28 @@ mod grant_tests {
     #[test]
     fn the_mac_acts_only_on_what_the_person_switched_on_in_this_window() {
         let s = "ticked-test";
-        assert!(!super::ticked(s, 1, "mac_view"), "the daemon's word alone is not enough");
+        let at = Some("1794560000");
+        assert!(!super::ticked(s, 1, at, "mac_view"), "the daemon's word alone is not enough");
         super::person_asked(s, &["mac_view".into()]);
-        assert!(!super::ticked(s, 1, "mac_view"), "not before the daemon answered");
-        super::person_answered(s, Some(4), false);
-        assert!(super::ticked(s, 4, "mac_view"));
-        assert!(!super::ticked(s, 4, "mac_commands"), "only what was switched on");
-        assert!(!super::ticked(s, 5, "mac_view"), "an activation made elsewhere has another generation");
+        assert!(!super::ticked(s, 1, at, "mac_view"), "not before the daemon answered");
+        super::person_answered(s, Some((4, at.map(String::from))), false);
+        assert!(super::ticked(s, 4, at, "mac_view"));
+        assert!(!super::ticked(s, 4, at, "mac_commands"), "only what was switched on");
+        assert!(!super::ticked(s, 5, at, "mac_view"), "an activation made elsewhere has another generation");
+        assert!(
+            !super::ticked(s, 4, Some("1794560999"), "mac_view"),
+            "the same generation from a daemon started again is another activation"
+        );
         // a failed change leaves the grant; a revocation ends it
         super::person_asked(s, &["mac_view".into(), "mac_commands".into()]);
         super::person_answered(s, None, true);
-        assert!(super::ticked(s, 4, "mac_view") && !super::ticked(s, 4, "mac_commands"));
+        assert!(super::ticked(s, 4, at, "mac_view") && !super::ticked(s, 4, at, "mac_commands"));
         super::person_answered(s, None, false);
-        assert!(!super::ticked(s, 4, "mac_view"));
+        assert!(!super::ticked(s, 4, at, "mac_view"));
+        // the VM stopping forgets every grant
+        super::person_asked(s, &["mac_view".into()]);
+        super::person_answered(s, Some((6, at.map(String::from))), false);
+        super::forget_grants();
+        assert!(!super::ticked(s, 6, at, "mac_view"));
     }
 }

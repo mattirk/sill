@@ -324,6 +324,7 @@ fn stop(session: &str, id: u64) -> Result<Option<String>, String> {
 pub fn sessions_running() -> Vec<String> {
     let mut sessions: Vec<String> =
         PROCS.lock().unwrap().values().filter(|p| p.ended.is_none()).map(|p| p.session.clone()).collect();
+    sessions.sort();
     sessions.dedup();
     sessions
 }
@@ -342,11 +343,30 @@ pub fn stop_session(session: &str) {
     }
 }
 
-/// Stop every running Mac process (Sill quits).
+/// Stop every running Mac process: Sill quits, or its VM is shut down or restarted. All are asked
+/// at once and those left after 3 s made to, so many of them still take seconds, not 3 s each.
 pub fn stop_all() {
-    for session in sessions_running() {
-        stop_session(&session);
+    let running: Vec<(u64, i32)> =
+        PROCS.lock().unwrap().iter().filter(|(_, p)| p.ended.is_none()).map(|(id, p)| (*id, p.pid)).collect();
+    let left = || -> Vec<i32> {
+        let procs = PROCS.lock().unwrap();
+        running.iter().filter(|(id, _)| procs.get(id).is_some_and(|p| p.ended.is_none())).map(|(_, pid)| *pid).collect()
+    };
+    for (_, pid) in &running {
+        // SAFETY: signals to process groups this module started and still records as running
+        unsafe { libc::killpg(*pid, libc::SIGTERM) };
     }
+    for _ in 0..30 {
+        if left().is_empty() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    for pid in left() {
+        // SAFETY: as above; the leader has not been reaped, so the group is still this one
+        unsafe { libc::killpg(pid, libc::SIGKILL) };
+    }
+    std::thread::sleep(Duration::from_millis(200));
 }
 
 #[cfg(test)]
@@ -407,6 +427,21 @@ mod tests {
         let background: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
         // SAFETY: signal 0 only asks whether the process exists
         assert_eq!(unsafe { libc::kill(background, 0) }, -1, "the background child is gone");
+        // the VM shut down or Sill quitting: every session's programs, together
+        let a = super::handle("s1", &json!({"run":{"argv":["/bin/sleep","60"],"cwd":dir}}), &[dir.clone()]).unwrap();
+        let b = super::handle("s3", &json!({"run":{"argv":["/bin/sleep","60"],"cwd":dir}}), &[dir.clone()]).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let started = std::time::Instant::now();
+        super::stop_all();
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "asked at once, not one by one");
+        assert!(super::sessions_running().is_empty());
+        for (session, started) in [("s1", a), ("s3", b)] {
+            let list = super::handle(session, &json!({"list": true}), &[]).unwrap();
+            assert!(
+                list["processes"].as_array().unwrap().iter().any(|p| p["name"] == started["name"] && p["ended"] == "signal 15"),
+                "{list}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

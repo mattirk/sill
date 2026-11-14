@@ -230,7 +230,7 @@ impl App {
                 #[cfg(target_os = "macos")]
                 crate::local_vm::person_answered(
                     &id,
-                    outcome.as_ref().ok().filter(|s| s.active).map(|s| s.generation),
+                    outcome.as_ref().ok().filter(|s| s.active).map(|s| (s.generation, s.since.clone())),
                     outcome.is_err(),
                 );
                 match outcome {
