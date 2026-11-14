@@ -14,7 +14,7 @@ use agent_client_protocol::schema::v1::{
     RequestPermissionRequest,
     RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigOptionValue, SessionConfigSelectOptions, SessionModeState,
-    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason,
+    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, ToolCallContent,
 };
 use agent_client_protocol::util::MatchDispatch;
 pub use agent_client_protocol::schema::v1::PermissionOptionKind;
@@ -115,8 +115,9 @@ pub enum Event {
     UserText(String),
     Text(String),
     Thought(String),
-    ToolCall { id: String, title: String, kind: String, status: String },
-    ToolCallUpdate { id: String, status: Option<String>, title: Option<String> },
+    /// `detail`: what the call does, for the card's body — input fields, content, output.
+    ToolCall { id: String, title: String, kind: String, status: String, detail: Option<String> },
+    ToolCallUpdate { id: String, status: Option<String>, title: Option<String>, detail: Option<String> },
     /// The agent asks for permission; answer with the chosen option id (None = cancel).
     PermissionRequest { title: String, options: Vec<PermissionOption>, reply: oneshot::Sender<Option<String>> },
     Other(String),
@@ -564,12 +565,6 @@ pub fn run_prompt(
 }
 
 fn to_event(update: SessionUpdate) -> Event {
-    fn text(block: &ContentBlock) -> String {
-        match block {
-            ContentBlock::Text(t) => t.text.clone(),
-            other => format!("[{}]", kind_name(other)),
-        }
-    }
     match update {
         SessionUpdate::UserMessageChunk(c) => Event::UserText(text(&c.content)),
         SessionUpdate::AgentMessageChunk(c) => Event::Text(text(&c.content)),
@@ -579,13 +574,72 @@ fn to_event(update: SessionUpdate) -> Event {
             title: t.title.clone(),
             kind: format!("{:?}", t.kind),
             status: format!("{:?}", t.status),
+            detail: tool_detail(t.raw_input.as_ref(), Some(&t.content), t.raw_output.as_ref()),
         },
         SessionUpdate::ToolCallUpdate(u) => Event::ToolCallUpdate {
             id: u.tool_call_id.to_string(),
             status: u.fields.status.map(|s| format!("{s:?}")),
             title: u.fields.title.clone(),
+            detail: tool_detail(u.fields.raw_input.as_ref(), u.fields.content.as_deref(), u.fields.raw_output.as_ref()),
         },
         other => Event::Other(format!("{other:?}").chars().take(120).collect()),
+    }
+}
+
+/// Text for a tool card's body: the input as `key: value` lines (pretty JSON when nested), the
+/// content blocks (text as is, a diff as its path and line counts), the output; each part clipped.
+fn tool_detail(input: Option<&serde_json::Value>, content: Option<&[ToolCallContent]>, output: Option<&serde_json::Value>) -> Option<String> {
+    const LIMIT: usize = 3000;
+    fn clip(s: String) -> String {
+        if s.chars().count() > LIMIT {
+            let mut t: String = s.chars().take(LIMIT).collect();
+            t.push_str("…");
+            t
+        } else {
+            s
+        }
+    }
+    fn json(v: &serde_json::Value) -> String {
+        match v {
+            serde_json::Value::Object(m) if m.values().all(|x| !x.is_object() && !x.is_array()) => m
+                .iter()
+                .map(|(k, x)| match x {
+                    serde_json::Value::String(t) => format!("{k}: {t}"),
+                    other => format!("{k}: {other}"),
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            serde_json::Value::String(t) => t.clone(),
+            other => serde_json::to_string_pretty(other).unwrap_or_default(),
+        }
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(v) = input {
+        parts.push(clip(json(v)));
+    }
+    for c in content.unwrap_or_default() {
+        match c {
+            ToolCallContent::Content(c) => parts.push(clip(text(&c.content))),
+            ToolCallContent::Diff(d) => {
+                let added = d.new_text.lines().count();
+                let removed = d.old_text.as_deref().map(|t| t.lines().count()).unwrap_or(0);
+                parts.push(format!("{} (+{added} −{removed})", d.path.display()));
+            }
+            ToolCallContent::Terminal(_) => parts.push("[terminal]".into()),
+            _ => {}
+        }
+    }
+    if let Some(v) = output {
+        parts.push(clip(json(v)));
+    }
+    let joined = parts.into_iter().filter(|p| !p.trim().is_empty()).collect::<Vec<_>>().join("\n\n");
+    if joined.is_empty() { None } else { Some(joined) }
+}
+
+fn text(block: &ContentBlock) -> String {
+    match block {
+        ContentBlock::Text(t) => t.text.clone(),
+        other => format!("[{}]", kind_name(other)),
     }
 }
 

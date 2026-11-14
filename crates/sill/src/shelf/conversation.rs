@@ -1,6 +1,11 @@
 //! The conversation view (SPEC §3.1): the ACP stream as a column of blocks — user prompts, agent
 //! messages (streamed markdown), thoughts (collapsed), tool calls with status, permission requests
 //! with buttons.
+//!
+//! Layout (docs/design.md): the column is clamped to a reading measure so prose doesn't run the
+//! full width of a wide shelf; a user turn is plain text with an accent rule, not a bubble; a tool
+//! call is one line (glyph, title, status mark) whose body opens on click; consecutive tool calls
+//! fold into one "n steps" card so a long turn stays a short list.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -9,9 +14,35 @@ use std::rc::Rc;
 use futures::channel::oneshot;
 use gtk4 as gtk;
 use gtk::prelude::*;
+use libadwaita as adw;
 use sill_core::acp::{Event, PermissionOption};
 
-use super::markdown;
+use super::{markdown, theme};
+
+/// Reading measure of the column in logical px at text scale 1: wide enough that a shelf at the
+/// default width fills it edge to edge (no side margins); only a wide shelf gets centred prose.
+const MEASURE: f64 = 800.0;
+/// Width below which the clamp stops centring and just fills.
+const MEASURE_TIGHT: f64 = 640.0;
+
+/// One tool call on screen.
+struct ToolRow {
+    row: gtk::Box,
+    title: gtk::Label,
+    mark: gtk::Label,
+    body: gtk::Label,
+    status: RefCell<String>,
+    group: RefCell<Option<Rc<ToolGroup>>>,
+}
+
+/// Consecutive tool calls folded into one card: a header line (count, latest title, aggregate
+/// mark) that opens the list of rows.
+struct ToolGroup {
+    header_title: gtk::Label,
+    header_mark: gtk::Label,
+    rows: gtk::Box,
+    ids: RefCell<Vec<String>>,
+}
 
 pub struct Conversation {
     pub root: gtk::ScrolledWindow,
@@ -19,7 +50,9 @@ pub struct Conversation {
     /// The agent message being streamed, with its accumulated markdown.
     current: RefCell<Option<(gtk::TextView, String)>>,
     current_thought: RefCell<Option<(gtk::TextView, String)>>,
-    tool_rows: RefCell<HashMap<String, (gtk::Label, gtk::Label)>>,
+    tool_rows: RefCell<HashMap<String, Rc<ToolRow>>>,
+    /// The tool call (or group) the next tool call would join; cleared by any other block.
+    last_tool: RefCell<Option<String>>,
     status: gtk::Label,
     /// Follow new content unless the person scrolled up.
     stick_to_bottom: std::cell::Cell<bool>,
@@ -41,11 +74,21 @@ impl Conversation {
         column.set_margin_end(12);
         column.set_margin_top(8);
         column.set_margin_bottom(8);
+        let clamp = adw::Clamp::builder().child(&column).build();
+        Self::size_clamp(&clamp);
+        {
+            let weak = clamp.downgrade();
+            theme::on_change(move |_| {
+                if let Some(c) = weak.upgrade() {
+                    Self::size_clamp(&c);
+                }
+            });
+        }
         let root = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vscrollbar_policy(gtk::PolicyType::Automatic)
             .vexpand(true)
-            .child(&column)
+            .child(&clamp)
             .build();
         let conv = Rc::new(Self {
             root,
@@ -53,6 +96,7 @@ impl Conversation {
             current: RefCell::new(None),
             current_thought: RefCell::new(None),
             tool_rows: RefCell::new(HashMap::new()),
+            last_tool: RefCell::new(None),
             status,
             stick_to_bottom: std::cell::Cell::new(true),
             ticking: std::cell::Cell::new(false),
@@ -149,6 +193,13 @@ impl Conversation {
         });
     }
 
+    /// The measure follows the text size, so it stays the same number of characters.
+    fn size_clamp(clamp: &adw::Clamp) {
+        let k = theme::text_scale();
+        clamp.set_maximum_size((MEASURE * k) as i32);
+        clamp.set_tightening_threshold((MEASURE_TIGHT * k) as i32);
+    }
+
     fn text_view(css: &str) -> gtk::TextView {
         let tv = gtk::TextView::builder()
             .editable(false)
@@ -158,6 +209,8 @@ impl Conversation {
             .right_margin(8)
             .top_margin(6)
             .bottom_margin(6)
+            .pixels_inside_wrap(3) // a little leading: prose, not a terminal
+            .pixels_below_lines(2)
             .build();
         tv.add_css_class(css);
         markdown::install_tags(&tv.buffer());
@@ -172,8 +225,8 @@ impl Conversation {
         l.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         l.set_selectable(true);
         l.set_xalign(0.0);
-        l.set_halign(gtk::Align::End);
-        l.set_max_width_chars(70);
+        l.set_halign(gtk::Align::Fill);
+        l.set_margin_top(6);
         self.column.append(&l);
         self.scroll_to_end();
     }
@@ -181,6 +234,7 @@ impl Conversation {
     fn finish_current(&self) {
         self.current.borrow_mut().take();
         self.current_thought.borrow_mut().take();
+        self.last_tool.borrow_mut().take();
     }
 
     fn append_markdown(&self, slot: &RefCell<Option<(gtk::TextView, String)>>, css: &str, chunk: &str) {
@@ -217,37 +271,203 @@ impl Conversation {
         self.request_follow();
     }
 
+    /// Glyph for an ACP tool kind (`Debug` name); stored rows don't keep the kind.
+    fn kind_glyph(kind: Option<&str>) -> &'static str {
+        match kind {
+            Some("Read") => "›",
+            Some("Edit") => "✎",
+            Some("Delete") => "✕",
+            Some("Move") => "→",
+            Some("Search") => "⌕",
+            Some("Execute") => "$",
+            Some("Fetch") => "↓",
+            Some("Think") => "…",
+            _ => "⚙",
+        }
+    }
+
+    /// Status mark and CSS class for an ACP tool status (`Debug` name).
+    fn status_mark(status: &str) -> (&'static str, &'static str) {
+        match status {
+            "Pending" => ("·", "sill-mark-pending"),
+            "InProgress" => ("…", "sill-mark-running"),
+            "Completed" => ("✓", "sill-mark-done"),
+            "Failed" => ("✕", "sill-mark-failed"),
+            _ => ("·", "sill-mark-pending"),
+        }
+    }
+
+    fn set_mark(label: &gtk::Label, status: &str) {
+        let (glyph, class) = Self::status_mark(status);
+        label.set_text(glyph);
+        for c in ["sill-mark-pending", "sill-mark-running", "sill-mark-done", "sill-mark-failed"] {
+            label.remove_css_class(c);
+        }
+        label.add_css_class(class);
+    }
+
     pub fn add_tool_call(&self, id: String, title: &str, status: &str) {
-        self.finish_current();
+        self.add_tool_call_full(id, title, status, None, None);
+    }
+
+    /// One line: glyph, title, status mark; the body (what the call does) opens on click.
+    pub fn add_tool_call_full(&self, id: String, title: &str, status: &str, kind: Option<&str>, detail: Option<&str>) {
+        self.current.borrow_mut().take();
+        self.current_thought.borrow_mut().take();
+        let card = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        card.add_css_class("sill-tool");
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        row.add_css_class("sill-tool");
-        let icon = gtk::Label::new(Some("⚙"));
+        row.add_css_class("sill-tool-line");
+        let glyph = gtk::Label::new(Some(Self::kind_glyph(kind)));
+        glyph.add_css_class("sill-tool-glyph");
+        glyph.set_width_chars(1);
         let title_l = gtk::Label::new(Some(title));
         title_l.set_xalign(0.0);
-        title_l.set_wrap(true);
-        title_l.set_wrap_mode(gtk::pango::WrapMode::WordChar); // long paths/commands break anywhere
-        title_l.set_max_width_chars(40); // natural width stays small; hexpand fills what's available
+        title_l.set_single_line_mode(true);
+        title_l.set_ellipsize(gtk::pango::EllipsizeMode::End);
         title_l.set_hexpand(true);
-        let status_l = gtk::Label::new(Some(status));
-        status_l.add_css_class("dim-label");
-        status_l.set_halign(gtk::Align::End);
-        status_l.set_margin_end(4);
-        row.append(&icon);
+        title_l.set_tooltip_text(Some(title));
+        let mark = gtk::Label::new(None);
+        mark.add_css_class("sill-tool-mark");
+        mark.set_width_chars(1);
+        Self::set_mark(&mark, status);
+        row.append(&glyph);
         row.append(&title_l);
-        row.append(&status_l);
-        self.column.append(&row);
-        self.tool_rows.borrow_mut().insert(id, (title_l, status_l));
+        row.append(&mark);
+        card.append(&row);
+        let body = gtk::Label::new(detail);
+        body.add_css_class("sill-tool-body");
+        body.set_xalign(0.0);
+        body.set_wrap(true);
+        body.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        body.set_selectable(true);
+        let body_rev = gtk::Revealer::builder().child(&body).reveal_child(false).transition_type(gtk::RevealerTransitionType::SlideDown).build();
+        card.append(&body_rev);
+        {
+            let rev = body_rev.clone();
+            let b = body.clone();
+            let click = gtk::GestureClick::new();
+            click.connect_released(move |_, _, _, _| {
+                if !b.text().is_empty() {
+                    rev.set_reveal_child(!rev.reveals_child());
+                }
+            });
+            row.add_controller(click);
+        }
+        let tr = Rc::new(ToolRow {
+            row: card,
+            title: title_l,
+            mark,
+            body,
+            status: RefCell::new(status.to_string()),
+            group: RefCell::new(None),
+        });
+        // consecutive calls fold into one card
+        let prev = self.last_tool.borrow().clone();
+        let prev_row = prev.and_then(|pid| self.tool_rows.borrow().get(&pid).cloned()); // borrow ends here
+        self.tool_rows.borrow_mut().insert(id.clone(), tr.clone()); // before the header counts it
+        match prev_row {
+            Some(prev_row) => {
+                let existing = prev_row.group.borrow().clone(); // borrow ends here: start_group writes it
+                let group = match existing {
+                    Some(g) => g,
+                    None => self.start_group(&prev_row),
+                };
+                group.rows.append(&tr.row);
+                group.ids.borrow_mut().push(id.clone());
+                *tr.group.borrow_mut() = Some(group.clone());
+                self.refresh_group(&group);
+            }
+            None => self.column.append(&tr.row),
+        }
+        *self.last_tool.borrow_mut() = Some(id);
         self.request_follow();
     }
 
-    pub fn update_tool_call(&self, id: &str, status: Option<&str>, title: Option<&str>) {
-        if let Some((title_l, status_l)) = self.tool_rows.borrow().get(id) {
-            if let Some(s) = status {
-                status_l.set_text(s);
+    /// Turn a lone tool row into a group card in its place; the row moves inside.
+    fn start_group(&self, first: &Rc<ToolRow>) -> Rc<ToolGroup> {
+        let card = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        card.add_css_class("sill-tool");
+        card.add_css_class("sill-tool-group");
+        let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        header.add_css_class("sill-tool-line");
+        let glyph = gtk::Label::new(Some("⚙"));
+        glyph.add_css_class("sill-tool-glyph");
+        glyph.set_width_chars(1);
+        let header_title = gtk::Label::new(None);
+        header_title.set_xalign(0.0);
+        header_title.set_single_line_mode(true);
+        header_title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        header_title.set_hexpand(true);
+        let header_mark = gtk::Label::new(None);
+        header_mark.add_css_class("sill-tool-mark");
+        header_mark.set_width_chars(1);
+        header.append(&glyph);
+        header.append(&header_title);
+        header.append(&header_mark);
+        card.append(&header);
+        let rows = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        rows.add_css_class("sill-tool-rows");
+        let rows_rev = gtk::Revealer::builder().child(&rows).reveal_child(false).transition_type(gtk::RevealerTransitionType::SlideDown).build();
+        card.append(&rows_rev);
+        {
+            let rev = rows_rev.clone();
+            let click = gtk::GestureClick::new();
+            click.connect_released(move |_, _, _, _| rev.set_reveal_child(!rev.reveals_child()));
+            header.add_controller(click);
+        }
+        // the card takes the first row's place
+        self.column.insert_child_after(&card, Some(&first.row));
+        self.column.remove(&first.row);
+        rows.append(&first.row);
+        let first_id = self.tool_rows.borrow().iter().find(|(_, r)| Rc::ptr_eq(r, first)).map(|(id, _)| id.clone());
+        let g = Rc::new(ToolGroup { header_title, header_mark, rows, ids: RefCell::new(first_id.into_iter().collect()) });
+        *first.group.borrow_mut() = Some(g.clone());
+        g
+    }
+
+    /// Header of a group: "n steps · latest title", mark = running if any runs, failed if any
+    /// failed, else done.
+    fn refresh_group(&self, g: &Rc<ToolGroup>) {
+        let rows = self.tool_rows.borrow();
+        let ids = g.ids.borrow();
+        let members: Vec<&Rc<ToolRow>> = ids.iter().filter_map(|id| rows.get(id)).collect();
+        let latest = members.last().map(|r| r.title.text().to_string()).unwrap_or_default();
+        g.header_title.set_text(&format!("{} steps · {latest}", members.len()));
+        let statuses: Vec<String> = members.iter().map(|r| r.status.borrow().clone()).collect();
+        let agg = if statuses.iter().any(|s| s == "InProgress" || s == "Pending") {
+            "InProgress"
+        } else if statuses.iter().any(|s| s == "Failed") {
+            "Failed"
+        } else {
+            "Completed"
+        };
+        Self::set_mark(&g.header_mark, agg);
+    }
+
+    pub fn update_tool_call_full(&self, id: &str, status: Option<&str>, title: Option<&str>, detail: Option<&str>) {
+        let row = self.tool_rows.borrow().get(id).cloned();
+        let Some(r) = row else { return };
+        if let Some(s) = status {
+            *r.status.borrow_mut() = s.to_string();
+            Self::set_mark(&r.mark, s);
+        }
+        if let Some(t) = title {
+            r.title.set_text(t);
+            r.title.set_tooltip_text(Some(t));
+        }
+        if let Some(d) = detail {
+            // an update's detail (output) is added under what the call already showed
+            let cur = r.body.text();
+            if cur.is_empty() {
+                r.body.set_text(d);
+            } else if !cur.ends_with(d) {
+                r.body.set_text(&format!("{cur}\n\n{d}"));
             }
-            if let Some(t) = title {
-                title_l.set_text(t);
-            }
+        }
+        let group = r.group.borrow().clone();
+        if let Some(g) = group {
+            self.refresh_group(&g);
         }
     }
 
@@ -367,8 +587,12 @@ impl Conversation {
             Event::UserText(t) => self.add_user(&t),
             Event::Text(t) => self.append_markdown(&self.current, "sill-agent", &t),
             Event::Thought(t) => self.append_markdown(&self.current_thought, "sill-thought", &t),
-            Event::ToolCall { id, title, status, .. } => self.add_tool_call(id, &title, &status),
-            Event::ToolCallUpdate { id, status, title } => self.update_tool_call(&id, status.as_deref(), title.as_deref()),
+            Event::ToolCall { id, title, status, kind, detail } => {
+                self.add_tool_call_full(id, &title, &status, Some(&kind), detail.as_deref())
+            }
+            Event::ToolCallUpdate { id, status, title, detail } => {
+                self.update_tool_call_full(&id, status.as_deref(), title.as_deref(), detail.as_deref())
+            }
             Event::PermissionRequest { title, options, reply } => {
                 self.status.set_text("waiting for your answer");
                 self.add_permission(&title, options, reply)
@@ -404,14 +628,26 @@ popover > contents { border-radius: 0; }
 button { border-radius: 0; }
 entry { border-radius: 0; }
 
-.sill-user { background: alpha(@view_fg_color, 0.07); border-radius: 0; padding: 8px 12px; }
+/* a user turn: plain text behind an accent rule, no bubble */
+.sill-user { background: transparent; border-radius: 0; padding: 4px 6px; border-left: 2px solid alpha(@accent_bg_color, 0.9); }
 .sill-user text { background: transparent; }
 .sill-agent { background: transparent; border-radius: 0; }
 .sill-agent text { background: transparent; }
 .sill-thought { background: transparent; color: alpha(@view_fg_color, 0.55); font-size: 90%; }
 .sill-thought text { background: transparent; }
-.sill-tool { background: alpha(@view_fg_color, 0.045); border-radius: 0; padding: 6px 10px;
-             border-left: 2px solid alpha(@accent_bg_color, 0.8); }
+/* a tool call: one quiet line; the body opens under it */
+.sill-tool { background: transparent; border-radius: 0; padding: 0; border-left: 2px solid alpha(@view_fg_color, 0.18); }
+.sill-tool-line { padding: 3px 6px; font-size: 90%; color: alpha(@view_fg_color, 0.75); }
+.sill-tool-line:hover { background: alpha(@view_fg_color, 0.04); color: @view_fg_color; }
+.sill-tool-glyph { font-family: monospace; opacity: 0.6; }
+.sill-tool-mark { font-family: monospace; }
+.sill-mark-pending { opacity: 0.4; }
+.sill-mark-running { color: @accent_color; }
+.sill-mark-done { opacity: 0.5; }
+.sill-mark-failed { color: @error_color; }
+.sill-tool-body { font-family: monospace; font-size: 85%; padding: 4px 10px 6px 28px; color: alpha(@view_fg_color, 0.8); }
+.sill-tool-rows { margin-left: 10px; border-left: 1px solid alpha(@view_fg_color, 0.12); }
+.sill-tool-rows .sill-tool { border-left: none; }
 .sill-permission { background: alpha(@warning_bg_color, 0.10); border-radius: 0; padding: 8px 10px;
                    border-left: 2px solid @warning_bg_color; }
 .sill-permission button { border-radius: 0; }
@@ -437,7 +673,8 @@ popover.sill-menu > contents { padding: 4px; min-width: 180px; }
 .sill-agents { background: transparent; }
 .sill-agents > row { padding: 0; }
 .sill-agents > row:hover { background: alpha(@view_fg_color, 0.03); }
-.sill-agent { padding: 7px 10px 7px 8px; border-bottom: 1px solid alpha(@view_fg_color, 0.08); }
+/* (scoped: the conversation's agent text view carries the same class) */
+.sill-agents .sill-agent { padding: 7px 10px 7px 8px; border-bottom: 1px solid alpha(@view_fg_color, 0.08); }
 .sill-agent-name { font-weight: 600; }
 .sill-agent-version { font-size: 85%; }
 .sill-agent-id { font-family: monospace; font-size: 80%; opacity: 0.5; }

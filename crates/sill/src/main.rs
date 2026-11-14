@@ -435,7 +435,7 @@ fn dev_cmd(cmd: DevCmd) -> Result<()> {
                     Event::ToolCall { title, status, .. } => {
                         let _ = writeln!(out, "\n\x1b[36m⚙ {title} [{status}]\x1b[0m");
                     }
-                    Event::ToolCallUpdate { id, status, title } if verbose => {
+                    Event::ToolCallUpdate { id, status, title, .. } if verbose => {
                         let _ = writeln!(out, "\x1b[36m  ↳ {id} {status:?} {title:?}\x1b[0m");
                     }
                     Event::PermissionRequest { title, reply, .. } => {

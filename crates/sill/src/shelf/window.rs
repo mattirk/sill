@@ -53,6 +53,7 @@ pub struct Shelf {
 
 pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
     let config = sill_core::config::load();
+    super::theme::set_text_scale(config.text_scale()); // applies the theme too
     super::theme::apply(&super::theme::by_id(&config.theme));
     if let Some(w) = config.width {
         x11::set_width_fraction(w);

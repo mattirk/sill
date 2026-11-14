@@ -82,9 +82,7 @@ pub fn run(cwd: Option<PathBuf>, hidden: bool) -> Result<()> {
         if let Some(id) = param.and_then(|p| p.str()) {
             let t = theme::by_id(id);
             theme::apply(&t);
-            let mut c = sill_core::config::load();
-            c.theme = t.id.to_string();
-            let _ = sill_core::config::save(&c);
+            let _ = sill_core::config::update(|c| c.theme = t.id.to_string());
         }
     });
     app.add_action(&set_theme);
@@ -95,9 +93,7 @@ pub fn run(cwd: Option<PathBuf>, hidden: bool) -> Result<()> {
             let r = window::HOTKEY.with(|h| h.borrow().as_ref().map(|hk| hk.rebind(spec)));
             match r {
                 Some(Ok(())) => {
-                    let mut c = sill_core::config::load();
-                    c.hotkey = Some(spec.to_string());
-                    let _ = sill_core::config::save(&c);
+                    let _ = sill_core::config::update(|c| c.hotkey = Some(spec.to_string()));
                 }
                 Some(Err(e)) => eprintln!("sill: hotkey {spec}: {e:#}"),
                 None => eprintln!("sill: hotkey grab not active"),
@@ -130,9 +126,7 @@ pub fn set_theme(name: &str) -> Result<()> {
     if !app.is_remote() {
         // no shelf running: just save it
         let t = theme::by_id(name);
-        let mut c = sill_core::config::load();
-        c.theme = t.id.to_string();
-        return sill_core::config::save(&c);
+        return sill_core::config::update(|c| c.theme = t.id.to_string());
     }
     app.activate_action("set-theme", Some(&name.to_variant()));
     Ok(())
@@ -280,9 +274,7 @@ pub fn set_hotkey(spec: &str) -> Result<()> {
     let app = gio::Application::new(Some(APP_ID), gio::ApplicationFlags::empty());
     app.register(None::<&gio::Cancellable>)?;
     if !app.is_remote() {
-        let mut c = sill_core::config::load();
-        c.hotkey = Some(spec.to_string());
-        return sill_core::config::save(&c);
+        return sill_core::config::update(|c| c.hotkey = Some(spec.to_string()));
     }
     app.activate_action("set-hotkey", Some(&spec.to_variant()));
     Ok(())

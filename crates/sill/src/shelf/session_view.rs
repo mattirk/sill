@@ -114,6 +114,7 @@ impl SessionView {
         terminal.set_size_request(-1, 200);
         terminal.set_scrollback_lines(10_000);
         terminal.set_font(Some(&gtk::pango::FontDescription::from_string("monospace 10")));
+        terminal.set_font_scale(theme::text_scale()); // VTE has its own font: follow the text size by hand
         terminal.set_scroll_on_output(false);
         terminal.set_scroll_on_keystroke(true);
         terminal.add_css_class("sill-terminal");
@@ -413,6 +414,7 @@ impl SessionView {
     /// Terminal colours from the theme palette: fg/bg plus the 16 ANSI slots mapped onto the theme's
     /// semantic colours (red=error, green=success, yellow=warning, blue=accent, cyan=link …).
     fn apply_terminal_theme(&self, t: &theme::Theme) {
+        self.terminal.set_font_scale(theme::text_scale());
         if t.bg.is_empty() {
             self.terminal.set_default_colors();
             return; // Adwaita: VTE's defaults follow the GTK theme
@@ -1175,7 +1177,7 @@ impl SessionView {
                     self.tool_seqs.borrow_mut().insert(id.clone(), seq);
                 }
             }
-            Event::ToolCallUpdate { id, status, title } => {
+            Event::ToolCallUpdate { id, status, title, .. } => {
                 if let Some(seq) = self.tool_seqs.borrow().get(id) {
                     let _ = self.store.update_tool(&self.id(), *seq, title.as_deref(), status.as_deref());
                 }

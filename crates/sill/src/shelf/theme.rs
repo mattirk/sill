@@ -2,6 +2,10 @@
 //! libadwaita's named colours are overridden so stock widgets follow, and sill's own CSS and the
 //! Markdown text tags use the same values. Built-in: Adwaita (system), Dracula, Solarized Dark,
 //! Solarized Light, Nord. Chosen theme is saved in `~/.config/sill/sill.toml`.
+//!
+//! The text scale (`text_scale` in the same file) is applied here too: one `font-size` rule on the
+//! toplevels, so every relative size in the stylesheet, the Markdown tags and the editor follow;
+//! VTE sets its own font and takes the factor through [`on_change`] (see `session_view`).
 
 use std::cell::RefCell;
 
@@ -72,9 +76,11 @@ thread_local! {
     static LISTENERS: RefCell<Vec<Box<dyn Fn(&Theme)>>> = const { RefCell::new(Vec::new()) };
     static CURRENT: RefCell<Theme> = RefCell::new(by_id("adwaita"));
     static PROVIDER: RefCell<Option<gtk::CssProvider>> = const { RefCell::new(None) };
+    static TEXT_SCALE: std::cell::Cell<f64> = const { std::cell::Cell::new(1.0) };
 }
 
-/// Called after every theme change (for widgets that can't be styled by CSS, e.g. GtkSourceView).
+/// Called after every appearance change — theme or text scale — for widgets that can't be styled
+/// by CSS (VTE, drawn icons).
 pub fn on_change(f: impl Fn(&Theme) + 'static) {
     LISTENERS.with(|l| l.borrow_mut().push(Box::new(f)));
 }
@@ -197,17 +203,35 @@ fn named_colors(t: &Theme) -> String {
     s
 }
 
-/// The full stylesheet for a theme: named colours + sill's own rules.
+/// The text scale in effect (1.0 = the desktop's font size).
+pub fn text_scale() -> f64 {
+    TEXT_SCALE.with(|s| s.get())
+}
+
+/// Change the text scale live: the stylesheet is rebuilt and the listeners run.
+pub fn set_text_scale(scale: f64) {
+    TEXT_SCALE.with(|s| s.set(scale));
+    apply(&current());
+}
+
+/// The full stylesheet for a theme: text scale, named colours + sill's own rules.
 pub fn stylesheet(t: &Theme) -> String {
-    let mut s = named_colors(t);
+    let mut s = String::new();
+    let scale = text_scale();
+    if (scale - 1.0).abs() > 0.001 {
+        // percentages are relative to the parent; at the toplevel that is the desktop font, so this
+        // one rule scales everything that uses relative sizes (all of sill's own CSS does). A popover
+        // resets to the default font unless told to follow its parent (100 %, not the factor again:
+        // measured, the factor compounds there).
+        s.push_str(&format!("window, tooltip {{ font-size: {:.0}%; }}\npopover {{ font-size: 100%; }}\n", scale * 100.0));
+    }
+    s.push_str(&named_colors(t));
     s.push_str(super::conversation::CSS);
     s.push('\n');
     s.push_str(super::tabs::CSS);
     if !t.bg.is_empty() {
         s.push_str(&format!(
-            "\n.sill-user {{ background: {surface}; }}\n\
-             .sill-tool {{ background: {surface}; }}\n\
-             .sill-tab {{ background: {surface}; }}\n\
+            "\n.sill-tab {{ background: {surface}; }}\n\
              .sill-tab.selected {{ background: {bg}; }}\n\
              .sill-prompt-box {{ background: {surface}; border-top-color: {border}; }}\n\
              .dim-label {{ color: {dim}; }}\n\

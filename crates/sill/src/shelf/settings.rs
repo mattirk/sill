@@ -1,5 +1,8 @@
-//! Backend page "Settings" (SPEC §3.1): theme and width (saved to ~/.config/sill/sill.toml), plus
-//! where things are.
+//! Backend page "Settings" (SPEC §3.1): theme, text size, width, default page, hotkey (saved to
+//! ~/.config/sill/sill.toml), plus where things are.
+//!
+//! Adding a parameter: a field in `sill_core::config::Config`, a row here built with [`row`] and
+//! [`choice`] (or another widget), saved through `config::update`, and applied live if it can be.
 
 use std::path::PathBuf;
 
@@ -16,37 +19,34 @@ pub fn build() -> gtk::Box {
     root.set_margin_end(16);
     root.set_margin_top(12);
 
-    fn row(label: &str, w: &impl IsA<gtk::Widget>) -> gtk::Box {
-        let b = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        let l = gtk::Label::new(Some(label));
-        l.add_css_class("heading");
-        l.set_xalign(0.0);
-        l.set_width_chars(10);
-        b.append(&l);
-        b.append(w);
-        b
-    }
-
     // theme
     let themes = theme::builtin();
     let names: Vec<&str> = themes.iter().map(|t| t.name).collect();
-    let dropdown = gtk::DropDown::from_strings(&names);
     let current = theme::current().id;
-    if let Some(i) = themes.iter().position(|t| t.id == current) {
-        dropdown.set_selected(i as u32);
-    }
-    {
-        let themes = themes.clone();
-        dropdown.connect_selected_notify(move |d| {
-            if let Some(t) = themes.get(d.selected() as usize) {
-                theme::apply(t);
-                let mut c = sill_core::config::load();
-                c.theme = t.id.to_string();
-                let _ = sill_core::config::save(&c);
-            }
-        });
-    }
+    let dropdown = choice(&names, themes.iter().position(|t| t.id == current), move |i| {
+        if let Some(t) = themes.get(i) {
+            theme::apply(t);
+            let _ = sill_core::config::update(|c| c.theme = t.id.to_string());
+        }
+    });
     root.append(&row("Theme", &dropdown));
+
+    // text size: steps from the table; a hand-edited value in between shows as the nearest step
+    let scales = sill_core::config::TEXT_SCALES;
+    let labels: Vec<&str> = scales.iter().map(|(_, l)| *l).collect();
+    let current = theme::text_scale();
+    let nearest = scales
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| (a.0 - current).abs().partial_cmp(&(b.0 - current).abs()).unwrap())
+        .map(|(i, _)| i);
+    let size_dd = choice(&labels, nearest, move |i| {
+        if let Some((scale, _)) = scales.get(i) {
+            theme::set_text_scale(*scale);
+            let _ = sill_core::config::update(|c| c.text_scale = Some(*scale));
+        }
+    });
+    root.append(&row("Text size", &size_dd));
 
     // width
     let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.2, 0.8, 0.02);
@@ -56,9 +56,7 @@ pub fn build() -> gtk::Box {
     scale.set_digits(2);
     scale.connect_value_changed(|s| {
         x11::set_width_fraction(s.value());
-        let mut c = sill_core::config::load();
-        c.width = Some(s.value());
-        let _ = sill_core::config::save(&c);
+        let _ = sill_core::config::update(|c| c.width = Some(s.value()));
     });
     let hint = gtk::Label::new(Some("of the work area; applies the next time the shelf is shown"));
     hint.add_css_class("dim-label");
@@ -71,21 +69,12 @@ pub fn build() -> gtk::Box {
     // the page the "sill" button opens
     let page_ids: Vec<&str> = sill_core::config::PAGES.iter().map(|(id, _)| *id).collect();
     let page_titles: Vec<&str> = sill_core::config::PAGES.iter().map(|(_, t)| *t).collect();
-    let page_dd = gtk::DropDown::from_strings(&page_titles);
     let current_page = sill_core::config::load().default_page().to_string();
-    if let Some(i) = page_ids.iter().position(|id| *id == current_page) {
-        page_dd.set_selected(i as u32);
-    }
-    {
-        let ids: Vec<String> = page_ids.iter().map(|s| s.to_string()).collect();
-        page_dd.connect_selected_notify(move |d| {
-            if let Some(id) = ids.get(d.selected() as usize) {
-                let mut c = sill_core::config::load();
-                c.default_page = Some(id.clone());
-                let _ = sill_core::config::save(&c);
-            }
-        });
-    }
+    let page_dd = choice(&page_titles, page_ids.iter().position(|id| *id == current_page), move |i| {
+        if let Some(id) = page_ids.get(i) {
+            let _ = sill_core::config::update(|c| c.default_page = Some(id.to_string()));
+        }
+    });
     root.append(&row("Default page", &page_dd));
 
     // show/hide key: click the button, press the combination you want
@@ -129,9 +118,7 @@ pub fn build() -> gtk::Box {
             let result = super::window::HOTKEY.with(|h| h.borrow().as_ref().map(|hk| hk.rebind(&spec)));
             match result {
                 Some(Ok(())) => {
-                    let mut c = sill_core::config::load();
-                    c.hotkey = Some(spec.clone());
-                    let _ = sill_core::config::save(&c);
+                    let _ = sill_core::config::update(|c| c.hotkey = Some(spec.clone()));
                     b.set_label(&pretty(&spec));
                     msg.set_text(&format!("bound to {}", pretty(&spec)));
                 }
@@ -182,6 +169,29 @@ pub fn build() -> gtk::Box {
         root.append(&row(&k, &vl));
     }
     root
+}
+
+/// A settings row: heading label of fixed width, then the control.
+fn row(label: &str, w: &impl IsA<gtk::Widget>) -> gtk::Box {
+    let b = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    let l = gtk::Label::new(Some(label));
+    l.add_css_class("heading");
+    l.set_xalign(0.0);
+    l.set_width_chars(10);
+    b.append(&l);
+    b.append(w);
+    b
+}
+
+/// A dropdown over fixed options; `on_select` gets the chosen index when the person changes it
+/// (not for the initial selection).
+fn choice(options: &[&str], selected: Option<usize>, on_select: impl Fn(usize) + 'static) -> gtk::DropDown {
+    let dd = gtk::DropDown::from_strings(options);
+    if let Some(i) = selected {
+        dd.set_selected(i as u32);
+    }
+    dd.connect_selected_notify(move |d| on_select(d.selected() as usize));
+    dd
 }
 
 /// GTK accelerator spec from a captured key press. Modifier keys alone are refused (they'd fire on
