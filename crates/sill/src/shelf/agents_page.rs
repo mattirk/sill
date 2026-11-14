@@ -60,6 +60,9 @@ pub struct AgentsPage {
     tx: async_channel::Sender<Progress>,
     fetching: Cell<bool>,
     icons_queued: RefCell<std::collections::HashSet<String>>,
+    /// Icons fetched through the daemon, by entry id: the files are named by content hash, so a
+    /// rebuilt row (search, filter, registry refresh) finds its icon here, not by its id.
+    icons: RefCell<HashMap<String, PathBuf>>,
     /// The live-index entry whose Install was clicked once: the next click installs it.
     confirm: RefCell<Option<String>>,
 }
@@ -134,6 +137,7 @@ impl AgentsPage {
             fetching: Cell::new(false),
             confirm: RefCell::new(None),
             icons_queued: RefCell::new(Default::default()),
+            icons: RefCell::new(HashMap::new()),
         });
 
         {
@@ -261,11 +265,11 @@ impl AgentsPage {
                 Filter::NotInstalled if installed => continue,
                 _ => {}
             }
-            self.list.append(&self.row(&e, state, fg, &home));
+            self.list.append(&self.row(&e, state, fg));
         }
     }
 
-    fn row(self: &Rc<Self>, e: &Entry, state: State, fg: gtk::gdk::RGBA, home: &std::path::Path) -> gtk::Box {
+    fn row(self: &Rc<Self>, e: &Entry, state: State, fg: gtk::gdk::RGBA) -> gtk::Box {
         let col = gtk::Box::new(gtk::Orientation::Vertical, 4);
         col.add_css_class("sill-agent");
 
@@ -274,8 +278,8 @@ impl AgentsPage {
         let icon_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         icon_box.set_valign(gtk::Align::Center);
         icon_box.set_size_request(16, 16);
-        let icon_path = registry::icon_cache_dir(home).join(format!("{}.svg", e.id));
-        if icon_path.is_file() {
+        let icon_path = self.icons.borrow().get(&e.id).cloned();
+        if let Some(icon_path) = icon_path.filter(|p| p.is_file()) {
             icon_box.append(&icons::from_file(&icon_path, fg, 16));
         } else {
             icon_box.append(&icons::named(icons::PLACEHOLDER, fg, 16));
@@ -641,6 +645,7 @@ impl AgentsPage {
                 }
             }
             Progress::Icon(id, path) => {
+                self.icons.borrow_mut().insert(id.clone(), path.clone());
                 if let Some(r) = self.rows.borrow().get(&id) {
                     while let Some(c) = r.icon_box.first_child() {
                         r.icon_box.remove(&c);

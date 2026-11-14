@@ -189,7 +189,6 @@ pub mod registry {
         anyhow::bail!("install stream closed before completion")
     }
     pub fn uninstall(_home: &std::path::Path, entry: &Entry) -> anyhow::Result<()> { let _: serde_json::Value = super::request(super::Request::Uninstall(entry.clone()))?; Ok(()) }
-    pub fn icon_cache_dir(_home: &std::path::Path) -> std::path::PathBuf { std::env::temp_dir().join(format!("sill-render-{}", std::process::id())) }
     pub fn fetch_icon(_home: &std::path::Path, entry: &Entry) -> Option<std::path::PathBuf> {
         let bytes: Option<Vec<u8>> = super::request(super::Request::Icon(entry.clone())).ok()?;
         super::cache_image(&format!("agent:{}", entry.id), &bytes?, "svg")
