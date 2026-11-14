@@ -431,18 +431,22 @@ impl App {
             )
         };
         let label: Element<'a, Message> = row![agent, label].align_y(Alignment::Center).into();
-        // the selected tab's ×: closing ends the session (a ghost's asks once: it deletes it)
+        // Reserve the close slot on every tab so selecting one never shifts its neighbours.
+        // Closing ends the session (a ghost asks once: it deletes it).
+        // The 12px glyph plus its 6px padding on each side.
+        const CLOSE_WIDTH: f32 = 24.0;
         let label: Element<'a, Message> = if active && !self.demo {
             let armed = self.armed_close.as_deref() == Some(tab.id.as_str());
             row![
                 label,
                 tooltip(
                     container(keys::press(
-                        button(if armed {
-                            Element::from(text("Close?").size(style::SMALL).color(P.error))
-                        } else {
-                            icons::glyph("x", 12.0, alpha(P.fg, 0.55)).into()
-                        })
+                        button(icons::glyph(
+                            "x",
+                            12.0,
+                            if armed { P.error } else { alpha(P.fg, 0.55) },
+                        ))
+                        .width(CLOSE_WIDTH)
                         .padding([4, 6])
                         .style(style::quiet),
                         Message::CloseTab(tab.id.clone()),
@@ -464,7 +468,9 @@ impl App {
             .align_y(Alignment::Center)
             .into()
         } else {
-            row![label].align_y(Alignment::Center).into()
+            row![label, space().width(if self.demo { 0.0 } else { CLOSE_WIDTH })]
+                .align_y(Alignment::Center)
+                .into()
         };
         let underline = rule::horizontal(2).style(style::rule_style(if active {
             P.accent

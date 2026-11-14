@@ -2325,8 +2325,9 @@ fn closing_a_tab_ends_its_session_and_a_ghost_asks_first() {
     let _ = app.update(Message::CloseTab("demo".into()));
     assert_eq!(app.armed_close.as_deref(), Some("demo"));
     let mut ui = simulator(&app, (720.0, 860.0));
-    ui.find("Close?").unwrap();
-    drop(ui);
+    ui.click(iced::widget::Id::new("close-tab")).unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(matches!(&messages[..], [Message::CloseTab(id)] if id == "demo"));
     let server = std::thread::spawn(move || {
         let end = daemon.expect("_sill/sessions.end");
         assert_eq!(
