@@ -117,8 +117,28 @@ fn kill_old_shelves() {
     }
 }
 
-/// `sill restart`: stop the running shelf (if any) and launch this executable's shelf detached.
-pub fn restart(hidden: bool) -> Result<()> {
+/// `sill restart`: with the `sill-shelf` user service installed this is `systemctl --user restart`
+/// (the installed binary); `--dev` instead stops the service and runs *this* executable detached, for
+/// trying a build without installing it.
+pub fn restart(hidden: bool, dev: bool) -> Result<()> {
+    let unit_known = std::process::Command::new("systemctl")
+        .args(["--user", "cat", "sill-shelf.service"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if unit_known && !dev {
+        let st = std::process::Command::new("systemctl").args(["--user", "restart", "sill-shelf.service"]).status()?;
+        if !st.success() {
+            bail!("systemctl --user restart sill-shelf failed");
+        }
+        println!("sill-shelf.service restarted (journalctl --user -u sill-shelf)");
+        return Ok(());
+    }
+    if unit_known {
+        let _ = std::process::Command::new("systemctl").args(["--user", "stop", "sill-shelf.service"]).status();
+    }
     let app = gio::Application::new(Some(APP_ID), gio::ApplicationFlags::empty());
     app.register(None::<&gio::Cancellable>)?;
     if app.is_remote() {

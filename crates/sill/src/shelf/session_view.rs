@@ -318,17 +318,43 @@ impl SessionView {
         if pins.is_empty() {
             return;
         }
-        let head = gtk::Label::new(Some("pinned"));
+        let head = if gtk::IconTheme::for_display(&gtk::gdk::Display::default().expect("display")).has_icon("view-pin-symbolic") {
+            gtk::Image::from_icon_name("view-pin-symbolic").upcast::<gtk::Widget>()
+        } else {
+            gtk::Label::new(Some("⌖")).upcast::<gtk::Widget>()
+        };
         head.add_css_class("dim-label");
+        head.set_tooltip_text(Some("pinned folders"));
         self.pins_row.append(&head);
         let home = std::env::var("HOME").unwrap_or_default();
         for p in pins {
             let chip = gtk::Box::new(gtk::Orientation::Horizontal, 2);
             chip.add_css_class("sill-chip");
-            let l = gtk::Button::with_label(&p.to_string_lossy().replace(&home, "~"));
+            let l = gtk::Button::new();
+            let lbox = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            lbox.append(&gtk::Label::new(Some(&p.to_string_lossy().replace(&home, "~"))));
+            // git working-tree summary next to the name: +added −deleted (vs HEAD), untracked count
+            if let Some((add, del, untracked)) = git_summary(&p) {
+                if add > 0 {
+                    let a = gtk::Label::new(Some(&format!("+{add}")));
+                    a.add_css_class("sill-git-add");
+                    lbox.append(&a);
+                }
+                if del > 0 {
+                    let d = gtk::Label::new(Some(&format!("−{del}")));
+                    d.add_css_class("sill-git-del");
+                    lbox.append(&d);
+                }
+                if untracked > 0 {
+                    let u = gtk::Label::new(Some(&format!("?{untracked}")));
+                    u.add_css_class("dim-label");
+                    lbox.append(&u);
+                }
+            }
+            l.set_child(Some(&lbox));
             l.add_css_class("flat");
             l.add_css_class("sill-chip-open");
-            l.set_tooltip_text(Some("Open in Files"));
+            l.set_tooltip_text(Some("Open in Files · +lines −lines vs HEAD, ?untracked files"));
             {
                 let v = self.clone();
                 let p = p.clone();
@@ -524,6 +550,7 @@ impl SessionView {
                 if !msg.is_empty() {
                     v.conv.add_note(&msg);
                 }
+                v.refresh_pins(); // git numbers on the chips
                 if let Some(cb) = v.on_turn_end.borrow().as_ref() {
                     cb(&id);
                 }
@@ -536,4 +563,21 @@ impl SessionView {
             let _ = d.commands.try_send(Command::Quit);
         }
     }
+}
+
+/// (+insertions, −deletions, untracked files) of a git working tree vs HEAD; None if not a repo.
+fn git_summary(dir: &std::path::Path) -> Option<(u64, u64, u64)> {
+    if !dir.join(".git").exists() {
+        return None;
+    }
+    let out = std::process::Command::new("git").arg("-C").arg(dir).args(["diff", "--numstat", "HEAD"]).output().ok()?;
+    let (mut add, mut del) = (0u64, 0u64);
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut it = line.split('\t');
+        add += it.next().and_then(|x| x.parse::<u64>().ok()).unwrap_or(0);
+        del += it.next().and_then(|x| x.parse::<u64>().ok()).unwrap_or(0);
+    }
+    let out = std::process::Command::new("git").arg("-C").arg(dir).args(["ls-files", "--others", "--exclude-standard"]).output().ok()?;
+    let untracked = String::from_utf8_lossy(&out.stdout).lines().count() as u64;
+    Some((add, del, untracked))
 }

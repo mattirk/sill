@@ -72,11 +72,14 @@ enum Cmd {
     },
     /// Show/hide the running shelf (bind this to a hotkey)
     Toggle,
-    /// Quit the running shelf and start this binary's shelf in its place (sessions keep running)
+    /// Restart the shelf: `systemctl --user restart sill-shelf` when the service is installed
     Restart {
-        /// start hidden
+        /// start hidden (dev mode)
         #[arg(long)]
         hidden: bool,
+        /// stop the service and run THIS binary instead (try a build without installing it)
+        #[arg(long)]
+        dev: bool,
     },
     /// Switch the shelf's colour theme: adwaita | dracula | solarized-dark | solarized-light | nord
     Theme { name: String },
@@ -210,7 +213,7 @@ fn main() -> Result<()> {
         Cmd::Launch { session, jail, shim } => launch(&session, jail, shim),
         Cmd::Shelf { cwd, hidden } => shelf::run(cwd, hidden),
         Cmd::Toggle => shelf::toggle(),
-        Cmd::Restart { hidden } => shelf::restart(hidden),
+        Cmd::Restart { hidden, dev } => shelf::restart(hidden, dev),
         Cmd::Theme { name } => shelf::set_theme(&name),
         Cmd::Proxy { fd, socket, policy } => {
             let policy = Policy::load(&policy, &home()?)?;

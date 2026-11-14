@@ -58,8 +58,11 @@ Logs: `$XDG_RUNTIME_DIR/sill/dev/{jail,proxy}.log` (the proxy log lists every al
 ## The shelf (M1–M2)
 
 ```bash
-sill shelf --hidden    # start (autostart entry does this); reopens the most recent session
-sill toggle            # show/hide — bind to Alt+Space (Cinnamon custom shortcut)
+systemctl --user enable --now sill-shelf   # once: the shelf as a user service, hidden, with the session
+systemctl --user restart sill-shelf        # after an update (same as `sill restart`)
+journalctl --user -u sill-shelf -f         # its log
+sill toggle                                # show/hide — bind to Alt+Space (Cinnamon custom shortcut)
+sill restart --dev                         # run the build in target/ instead of the installed one
 ```
 
 - **Sessions** are tabs: `+` picks the agent (Claude Code, Codex, Gemini; `~/.config/sill/agents/*.toml`

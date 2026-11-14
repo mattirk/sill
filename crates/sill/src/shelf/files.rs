@@ -44,6 +44,33 @@ pub struct FilesPage {
     pub on_pin: RefCell<Option<Box<dyn Fn(&str)>>>,
 }
 
+/// `git status --porcelain` of a repo: relative path → one-letter status (`M`, `A`, `D`, `R`, `?`).
+fn git_status(repo: &Path) -> Vec<(PathBuf, String)> {
+    let Ok(out) = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["status", "--porcelain", "-z", "--untracked-files=all"])
+        .output()
+    else {
+        return vec![];
+    };
+    let mut v = Vec::new();
+    let mut it = out.stdout.split(|b| *b == 0).filter(|s| !s.is_empty());
+    while let Some(entry) = it.next() {
+        if entry.len() < 4 {
+            continue;
+        }
+        let (x, y) = (entry[0] as char, entry[1] as char);
+        let rel = String::from_utf8_lossy(&entry[3..]).into_owned();
+        if x == 'R' || x == 'C' {
+            let _ = it.next(); // the original path follows
+        }
+        let st = if x == '?' { "?".to_string() } else if y != ' ' { y.to_string() } else { x.to_string() };
+        v.push((PathBuf::from(rel), st));
+    }
+    v
+}
+
 /// Icon for a tree row: folder (open/closed) or the file's MIME symbolic icon.
 fn file_icon(path: &Path, is_dir: bool, expanded: bool) -> gio::Icon {
     if is_dir {
@@ -148,7 +175,10 @@ impl FilesPage {
                 };
                 name.set_text(&label);
                 let badge_text = badges.borrow().get(&path).cloned().unwrap_or_default();
-                if !badge_text.is_empty() && badge_text != "·" {
+                name.remove_css_class("sill-new");
+                if badge_text.starts_with('?') {
+                    name.add_css_class("sill-new");
+                } else if !badge_text.is_empty() && badge_text != "·" {
                     name.add_css_class("sill-changed");
                 }
                 let pinned = pinned_paths.borrow().contains(&path);
@@ -499,6 +529,36 @@ impl FilesPage {
     fn apply(self: &Rc<Self>, all: Vec<Change>, pins: Vec<PathBuf>) {
         let home = session::home().unwrap_or_default();
         let mut badges: BTreeMap<PathBuf, String> = BTreeMap::new();
+        // git working-tree status of every repo in view (roots, pins, repos with session changes):
+        // M/A/D/R from `git status`, `?` for untracked; the session ledger's letters win below
+        let mut repos: Vec<PathBuf> = pins.iter().filter(|p| p.join(".git").exists()).cloned().collect();
+        for c in &all {
+            if let Some(r) = changes::repo_root(&c.path)
+                && !repos.contains(&r)
+            {
+                repos.push(r);
+            }
+        }
+        if let Some(scope) = self.scope.borrow().as_ref()
+            && let Some(r) = changes::repo_root(&scope.join("x"))
+            && !repos.contains(&r)
+        {
+            repos.push(r);
+        }
+        for repo in &repos {
+            for (rel, st) in git_status(repo) {
+                let path = repo.join(rel);
+                badges.insert(path.clone(), st);
+                let mut d = path.parent();
+                while let Some(dir) = d {
+                    if dir == repo.as_path() {
+                        break;
+                    }
+                    badges.entry(dir.to_path_buf()).or_insert_with(|| "·".into());
+                    d = dir.parent();
+                }
+            }
+        }
         let scope = self.scope.borrow().clone();
         let mut roots: Vec<PathBuf> = match &scope {
             Some(s) => vec![s.clone()],

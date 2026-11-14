@@ -304,6 +304,7 @@ entry { border-radius: 0; }
 .sill-files treeexpander { padding: 1px 0; }
 .sill-file-icon { opacity: 0.7; -gtk-icon-size: 14px; }
 .sill-changed { color: @warning_color; }
+.sill-new { color: @success_color; }
 .sill-dim { opacity: 0.45; }
 .sill-pinned { color: @accent_color; }
 .sill-editor gutter { border: none; }
@@ -313,6 +314,8 @@ entry { border-radius: 0; }
 .sill-pins { padding: 2px 0; }
 .sill-chip { background: alpha(@view_fg_color, 0.07); padding: 0 2px 0 0; }
 .sill-chip-open { padding: 1px 8px; min-height: 0; }
+.sill-git-add { color: @success_color; font-size: 90%; }
+.sill-git-del { color: @error_color; font-size: 90%; }
 .sill-scope { padding: 2px 0; }
 .sill-pin { padding: 0 2px; min-height: 0; min-width: 0; opacity: 0.4; -gtk-icon-size: 11px; }
 .sill-pin:hover { opacity: 1; }
