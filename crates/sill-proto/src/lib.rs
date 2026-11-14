@@ -138,3 +138,20 @@ pub mod agent_admin;
 pub mod changes;
 
 pub mod discovery;
+
+/// Per-account startup preference, independent of the daemon's settings/store.
+pub fn autostart_disabled_path() -> Result<PathBuf> {
+    let config = match std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+        Some(path) => PathBuf::from(path),
+        None => PathBuf::from(std::env::var_os("HOME").context("HOME not set")?).join(".config"),
+    };
+    Ok(config.join("sill/daemon-autostart-disabled"))
+}
+
+pub fn autostart_enabled() -> Result<bool> {
+    match std::fs::metadata(autostart_disabled_path()?) {
+        Ok(_) => Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(e.into()),
+    }
+}

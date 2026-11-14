@@ -99,8 +99,20 @@ impl Client {
         Self::connect_local_or_start()
     }
 
+    /// Explicit operator start/restart, independent of the automatic-start preference.
+    pub fn connect_or_start_explicit() -> Result<Client> {
+        if let Some(target) = crate::transport::selected()? {
+            return Self::ssh(&target.host, &target.binary);
+        }
+        Self::connect_local_with_start(true)
+    }
+
     /// Local-only entry point used by the stdio bridge on the box.
     pub fn connect_local_or_start() -> Result<Client> {
+        Self::connect_local_with_start(false)
+    }
+
+    fn connect_local_with_start(explicit: bool) -> Result<Client> {
         let path = crate::socket_path()?;
         match UnixStream::connect(&path) {
             Ok(stream) => {
@@ -116,6 +128,9 @@ impl Client {
                     bail!("no sill daemon is reachable from inside a session");
                 }
             }
+        }
+        if !explicit && !crate::autostart_enabled()? {
+            bail!("daemon autostart is disabled; run `sill daemon` to start it manually, or `sill daemon autostart on`");
         }
         let dir = crate::runtime_dir()?;
         std::fs::create_dir_all(&dir)?;

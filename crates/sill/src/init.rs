@@ -661,6 +661,10 @@ fn user_setup(a: &InitArgs) -> Result<()> {
             Err(e) => format!("no systemd user instance ({e}): autostart file, daemon spawned by its first client"),
         }
     );
+    if !sill_proto::autostart_enabled()? {
+        println!("autostart disabled; `sill daemon autostart on` enables login and on-demand startup");
+        return Ok(());
+    }
     let exe = std::env::current_exe()?;
     if systemd.is_ok() {
         let mut staged: Option<PathBuf> = None;
@@ -788,4 +792,52 @@ mod tests {
         assert!(i.skipped.iter().any(|s| s.contains("`rm` it")), "{:?}", i.skipped);
         let _ = std::fs::remove_dir_all(dir);
     }
+}
+
+/// Configure both login startup and client fallback. Never operate on a selected remote box.
+pub fn autostart(value: Option<&str>) -> Result<()> {
+    if sill_proto::transport::selected()?.is_some() {
+        bail!("autostart is a local account setting; run this command on the box itself");
+    }
+    let Some(value) = value else {
+        println!("daemon autostart: {}", if sill_proto::autostart_enabled()? { "on" } else { "off" });
+        return Ok(());
+    };
+    let path = sill_proto::autostart_disabled_path()?;
+    if value == "on" {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {},
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+            Err(e) => return Err(e.into()),
+        }
+        // Reuse the installer so private units and non-systemd desktops follow the same path.
+        let args = InitArgs {
+            dry_run: false, prefix: "/usr/local".into(), user: true,
+            state_dir: None, state_size: "32G".into(), delegate_cgroup: false,
+            cgroup_only: false, no_copy: false,
+        };
+        user_setup(&args)?;
+    } else {
+        std::fs::create_dir_all(path.parent().unwrap())?;
+        std::fs::write(&path, b"Disabled by sill daemon autostart off\n")?;
+        let mut i = Init { dry: false, did: vec![], skipped: vec![], problems: vec![] };
+        if sill_core::launcher::systemd_user_usable().is_ok() {
+            if unit_known("sill-gui.service") {
+                // Keep this window open; disable only its next login start.
+                i.run("disable GUI login startup", "systemctl", &["--user", "disable", "sill-gui.service"])?;
+            }
+            if unit_known("sill.socket") {
+                // An active socket would bypass the client's no-start preference.
+                i.run("disable daemon socket activation", "systemctl", &["--user", "disable", "--now", "sill.socket"])?;
+            }
+        }
+        let home = PathBuf::from(std::env::var_os("HOME").context("HOME not set")?);
+        match std::fs::remove_file(home.join(".config/autostart/sill.desktop")) {
+            Ok(()) => {},
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+            Err(e) => return Err(e.into()),
+        }
+        println!("Autostart off. The window stays open; stopping socket activation may stop the daemon. Sessions keep running. Start manually with `sill daemon`.");
+    }
+    Ok(())
 }

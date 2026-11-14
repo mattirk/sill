@@ -292,6 +292,11 @@ enum DaemonCmd {
         #[arg(long)] resume: Option<String>,
         #[arg(long)] experimental_acp_v2: bool,
     },
+    /// Enable/disable login and on-demand startup for this account; omit VALUE to inspect
+    Autostart {
+        #[arg(value_parser = ["on", "off"])]
+        value: Option<String>,
+    },
     /// Version, mode, uptime and sessions of the running daemon (starts one when none runs)
     Status,
     /// Restart only the daemon; leave the GUI and sessions running
@@ -1692,6 +1697,7 @@ fn daemon_cmd(cmd: Option<DaemonCmd>) -> Result<()> {
     match cmd {
         Some(DaemonCmd::Relay { session, socket, agent_socket, cwd, resume, experimental_acp_v2 }) => daemon::relay::run(&session, &socket, &agent_socket, &cwd, resume, experimental_acp_v2),
         None => daemon::run(),
+        Some(DaemonCmd::Autostart { value }) => init::autostart(value.as_deref()),
         Some(DaemonCmd::Restart) => restart_daemon_only(),
         Some(DaemonCmd::Status) => {
             let c = sill_proto::Client::connect_or_start()?;
@@ -1915,7 +1921,7 @@ fn restart_daemon_only() -> Result<()> {
             let absent = error.chain().filter_map(|e| e.downcast_ref::<std::io::Error>())
                 .any(|e| matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused));
             if sill_proto::transport::selected()?.is_none() && absent {
-                let client = sill_proto::Client::connect_or_start()?;
+                let client = sill_proto::Client::connect_or_start_explicit()?;
                 let status: sill_proto::DaemonStatus = client.call_within(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default(), sill_proto::client::QUICK_TIMEOUT)?;
                 println!("daemon started (pid {})", status.pid);
                 return Ok(());
@@ -1929,7 +1935,7 @@ fn restart_daemon_only() -> Result<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         std::thread::sleep(std::time::Duration::from_millis(100));
-        if let Ok(client) = sill_proto::Client::connect_or_start()
+        if let Ok(client) = sill_proto::Client::connect_or_start_explicit()
             && let Ok(next) = client.call_within::<sill_proto::DaemonStatus>(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default(), sill_proto::client::QUICK_TIMEOUT)
             && (next.pid != status.pid || next.started != status.started)
         {

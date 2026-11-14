@@ -123,7 +123,8 @@ pub fn restart(hidden: bool, dev: bool, detached: bool, jails: bool) -> Result<(
         // lets a frontend that shows permission state operate sessions using Desktop development
         // or Host control capabilities (admin.rs `frontend_gate`), so this command declares it.
         sill_proto::client::declare_capability("sill.permission_modes");
-        let client = sill_proto::Client::connect_or_start()?;
+        // the operator's own restart: explicit, so `sill daemon autostart off` does not refuse it
+        let client = sill_proto::Client::connect_or_start_explicit()?;
         let running: Vec<_> = client.list_sessions()?.into_iter()
             .filter(|s| s.running && s.ended_at.is_none()).collect();
         running
@@ -132,7 +133,7 @@ pub fn restart(hidden: bool, dev: bool, detached: bool, jails: bool) -> Result<(
     // one jail that cannot be started again does not keep the others, or the window, down
     let mut failed = Vec::new();
     if !running.is_empty() {
-        let client = sill_proto::Client::connect_or_start()?;
+        let client = sill_proto::Client::connect_or_start_explicit()?;
         for session in running {
             let key = sill_proto::sessions::SessionKey { session_id: session.session_id.clone() };
             let restarted = client.call::<serde_json::Value>("_sill/sessions.stop", &key)
@@ -280,7 +281,8 @@ fn stop_running_gui() {
 /// its own — and the next daemon adopts them. Nothing starts it here: the new window's first call
 /// does, from the window's own build (the dev build for `--dev`, the installed one otherwise), so a
 /// window never talks to a daemon of another build. With the installed units, `--dev` also stops
-/// `sill.socket` (a dev daemon binds the same path itself) and a plain restart starts it again.
+/// `sill.socket` (a dev daemon binds the same path itself) and a plain restart starts it again —
+/// unless autostart is off: then the socket stays stopped and the daemon is started here.
 fn restart_daemon(dev: bool) -> Result<()> {
     let socket_unit = systemctl(&["cat", "sill.socket"]);
     if socket_unit {
@@ -299,7 +301,15 @@ fn restart_daemon(dev: bool) -> Result<()> {
         anyhow::ensure!(std::time::Instant::now() < deadline, "old daemon did not stop within 10 seconds");
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    if socket_unit && !dev {
+    if dev {
+        return Ok(());
+    }
+    if !sill_proto::autostart_enabled()? {
+        // Autostart off (docs/daemon.md, Optional autostart): a started sill.socket would let any
+        // client start the daemon again, so it stays stopped, and no client would start one
+        // either — this restart, the operator's own, starts the daemon itself.
+        drop(sill_proto::Client::connect_or_start_explicit()?);
+    } else if socket_unit {
         anyhow::ensure!(systemctl(&["start", "sill.socket"]), "could not start sill.socket");
     }
     Ok(())

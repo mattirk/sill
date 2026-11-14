@@ -1498,3 +1498,30 @@ fn public_workspaces_without_a_jail() {
     let undo = c.call("_sill/workspaces.undo", json!({"operation_id": "u", "discard_id": "wsd-none"})).unwrap();
     assert_eq!(undo["error"]["data"]["code"], "not_found", "{undo}");
 }
+
+#[test]
+fn autostart_off_blocks_fallback_but_allows_a_manual_daemon() {
+    let dir = Daemon::dir();
+    let mut off = Daemon::command(&dir);
+    off.args(["autostart", "off"]).env_remove("SILL_BOX");
+    assert!(off.status().unwrap().success());
+    assert!(dir.join("config/sill/daemon-autostart-disabled").is_file());
+    let mut status = Daemon::command(&dir);
+    status.arg("status").env_remove("SILL_BOX").stderr(Stdio::piped());
+    let output = status.output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("daemon autostart is disabled"));
+    assert!(!dir.join("run/sill/daemon.sock").exists());
+    let mut setup = Command::new(env!("CARGO_BIN_EXE_sill"));
+    let output = setup.args(["init", "--user", "--dry-run"])
+        .env("XDG_CONFIG_HOME", dir.join("config"))
+        .env("XDG_RUNTIME_DIR", dir.join("run"))
+        .env("HOME", dir.join("home")).env_remove("SILL_BOX")
+        .output().unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("autostart disabled"));
+    let d = Daemon::start_in(dir);
+    let mut status = Daemon::command(&d.dir);
+    status.arg("status").env_remove("SILL_BOX");
+    assert!(status.status().unwrap().success());
+}
