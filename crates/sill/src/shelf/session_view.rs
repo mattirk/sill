@@ -35,6 +35,9 @@ type Checkpointed = Box<dyn FnOnce(Option<String>, Option<String>)>;
 
 /// A jail's overlay layers (host path, upper tree) and its masked paths, as the daemon plans them.
 
+/// How long a turn may go without a word from the agent before the status counts the wait.
+const SILENCE: std::time::Duration = std::time::Duration::from_secs(15);
+
 pub struct SessionView {
     pub root: gtk::Box,
     prompt: gtk::TextView,
@@ -105,6 +108,10 @@ pub struct SessionView {
     /// Send button; becomes a stop button while a turn is running.
     send_btn: RefCell<Option<gtk::Button>>,
     busy: std::cell::Cell<bool>,
+    /// When the agent last said anything during a turn, and whether the status says it is quiet:
+    /// after [`SILENCE`] the status counts the wait, so a slow or retrying agent never looks hung.
+    last_event: std::cell::Cell<std::time::Instant>,
+    silence_shown: std::cell::Cell<bool>,
     active_time: std::cell::Cell<(u64, Option<u64>)>,
     pub session: RefCell<Session>,
     pub conv: Rc<Conversation>,
@@ -516,6 +523,8 @@ impl SessionView {
             auto_allow: std::cell::Cell::new(auto_allow_initial),
             send_btn: RefCell::new(None),
             busy: std::cell::Cell::new(false),
+            last_event: std::cell::Cell::new(std::time::Instant::now()),
+            silence_shown: std::cell::Cell::new(false),
             active_time: std::cell::Cell::new((0, None)),
             session: RefCell::new(session),
             conv,
@@ -545,6 +554,26 @@ impl SessionView {
             connect_again: std::cell::Cell::new(None),
             pending_prompt: RefCell::new(None),
         });
+
+        // a turn with no word from the agent for a while: the status counts the wait
+        {
+            let weak = Rc::downgrade(&view);
+            glib::timeout_add_seconds_local(1, move || {
+                let Some(v) = weak.upgrade() else { return glib::ControlFlow::Break };
+                // the person's time to answer is not the agent's silence: count from the answer
+                if v.conv.asking() {
+                    v.last_event.set(std::time::Instant::now());
+                }
+                let quiet = v.last_event.get().elapsed();
+                if v.busy.get() && quiet >= SILENCE {
+                    let secs = quiet.as_secs();
+                    v.status.set_text(&format!("waiting on the agent · {}:{:02}", secs / 60, secs % 60));
+                    v.status.set_tooltip_text(Some("The agent has sent nothing since; it may be waiting on its provider (a slow or retried request)"));
+                    v.silence_shown.set(true);
+                }
+                glib::ControlFlow::Continue
+            });
+        }
 
         // the command list hangs off the prompt; let go of it with the prompt (GTK warns otherwise)
         {
@@ -1588,6 +1617,9 @@ impl SessionView {
 
     /// Flip the send button between "send" and "stop" (SPEC: one button, red while running).
     fn set_busy(&self, busy: bool) {
+        if busy && !self.busy.get() {
+            self.last_event.set(std::time::Instant::now());
+        }
         self.busy.set(busy);
         if let Some(b) = self.send_btn.borrow().as_ref() {
             let buffer = self.prompt.buffer();
@@ -2266,6 +2298,14 @@ impl SessionView {
     }
 
     fn handle(self: &Rc<Self>, ev: Event) {
+        // any word from the agent ends a shown silence
+        self.last_event.set(std::time::Instant::now());
+        if self.silence_shown.replace(false) {
+            self.status.set_tooltip_text(None);
+            if self.busy.get() {
+                self.status.set_text("working…");
+            }
+        }
         match &ev {
             Event::Ready { resumed, controls, .. } => {
                 self.ready.set(true);

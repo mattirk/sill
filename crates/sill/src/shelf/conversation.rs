@@ -101,6 +101,8 @@ pub struct Conversation {
     keep_view: std::cell::Cell<Option<(f64, f64)>>,
     /// The turn's plan, redrawn in place as the agent revises it; a new prompt starts another.
     plan: RefCell<Option<gtk::Label>>,
+    /// Forms still unanswered (each tells whether its reply is still pending).
+    open_forms: RefCell<Vec<Rc<dyn Fn() -> bool>>>,
     /// Login cards still asking (their label and buttons), closed when the login is done.
     auth_cards: RefCell<Vec<(gtk::Label, gtk::FlowBox)>>,
     /// A prompt's attachment → a local file to draw (runs off the main thread: it may ask the daemon).
@@ -182,6 +184,7 @@ impl Conversation {
             keep_view: std::cell::Cell::new(None),
             plan: RefCell::new(None),
             auth_cards: RefCell::new(Vec::new()),
+            open_forms: RefCell::new(Vec::new()),
             image_loader: RefCell::new(None),
         });
         // The content height is only known after layout: follow the adjustment's geometry (`changed` covers
@@ -1145,6 +1148,10 @@ impl Conversation {
         }
         let buttons = answer_row();
         let reply = Rc::new(RefCell::new(Some(reply)));
+        {
+            let pending = reply.clone();
+            self.open_forms.borrow_mut().push(Rc::new(move || pending.borrow().is_some()));
+        }
         let readers = Rc::new(readers);
         let submit = answer_button("Submit");
         submit.add_css_class("suggested-action");
@@ -1224,6 +1231,12 @@ impl Conversation {
         self.auth_cards.borrow_mut().push((label, buttons.clone()));
         self.place(&frame);
         self.request_follow();
+    }
+
+    /// The agent waits for the person: a permission, a form or a login card is unanswered.
+    pub fn asking(&self) -> bool {
+        self.open_forms.borrow_mut().retain(|pending| pending());
+        !self.open_permissions.borrow().is_empty() || !self.open_forms.borrow().is_empty() || !self.auth_cards.borrow().is_empty()
     }
 
     /// The agent no longer asks for a login: the open cards say so instead of offering buttons.
