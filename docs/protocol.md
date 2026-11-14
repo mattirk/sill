@@ -745,6 +745,7 @@ never a saved choice (docs/permission-modes.md, Host control):
 |---|---|---|---|
 | `_sill/host_control.activate` | `{session_id, operations}` | state | `sill.host_control` |
 | `_sill/host_control.revoke` | `{session_id}` | state | `sill.host_control` |
+| `_sill/host_control.keep` | `{session_id, name, keep}` | `{}` | `sill.host_control` |
 | `_sill/host_control.state` | `{session_id}` | state | `sill.permission_modes` |
 
 Operations: `view`, `input`, `inspect`, `launch`, `stop`, `stop_existing`, `commands`. `activate`

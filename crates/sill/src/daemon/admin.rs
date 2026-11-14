@@ -766,14 +766,9 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             session(hub, &a.session_id)?;
             let mut procs = sill_core::shim::Control::connect(&sill_core::session::socket_path(
                 &a.session_id,
-            )?)?
-            .proc_list()?;
+            )?).and_then(|mut c| c.proc_list()).unwrap_or_default();
             procs.sort_by(|a, b| a.name.cmp(&b.name));
-            procs.retain(|p| a.after.as_ref().is_none_or(|after| p.name > *after));
-            let next = (procs.len() > n).then(|| procs[n - 1].name.clone());
-            procs.truncate(n);
-            bounded(api::ProcessesPage {
-                processes: procs
+            let mut processes: Vec<api::Process> = procs
                     .into_iter()
                     .map(|p| api::Process {
                         state: if p.running() {
@@ -794,10 +789,20 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                         pid: p.pid,
                         started: p.started.to_string(),
                         last_line: p.last_line,
+                        location: "jail".into(),
+                        kept: false,
                     })
-                    .collect(),
-                next,
-            })
+                    .collect();
+            processes.extend(hub.with_store(|s| s.host_processes(&a.session_id))?.into_iter().map(|p| api::Process {
+                name: format!("host:{}", p.id), argv: p.argv, cwd: HostPath::from_path(&p.cwd), port: None,
+                pid: p.pid, started: p.started.to_string(), state: p.state, exit_code: p.exit_code,
+                last_line: String::new(), location: "host".into(), kept: p.kept,
+            }));
+            processes.sort_by(|a,b| a.name.cmp(&b.name));
+            processes.retain(|p| a.after.as_ref().is_none_or(|after| p.name > *after));
+            let next = (processes.len() > n).then(|| processes[n - 1].name.clone());
+            processes.truncate(n);
+            bounded(api::ProcessesPage { processes, next })
         }
         "_sill/procs.tail" => {
             let a: api::ProcessTail = args(p)?;
@@ -805,6 +810,19 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             let n = a.lines.unwrap_or(100);
             if n > 10000 {
                 return Err(invalid("lines exceeds 10000"));
+            }
+            if let Some(id) = a.name.strip_prefix("host:") {
+                let found = hub.with_store(|s| Ok(s.host_processes(&a.session_id)?.iter().any(|p| p.id == id)))?;
+                if !found { return Err(invalid("host process not found")); }
+                use std::io::{Read, Seek};
+                let path = sill_core::shim::runtime_dir(&a.session_id)?.join(format!("host-{id}.log"));
+                let mut file = std::fs::File::open(path)?;
+                let size = file.metadata()?.len();
+                file.seek(std::io::SeekFrom::Start(size.saturating_sub(1024 * 1024)))?;
+                let mut bytes = Vec::new(); file.take(1024 * 1024).read_to_end(&mut bytes)?;
+                let text = String::from_utf8_lossy(&bytes);
+                let lines: Vec<_> = text.lines().collect();
+                return bounded(sill_proto::Text { text: lines[lines.len().saturating_sub(n as usize)..].join("\n") });
             }
             bounded(sill_proto::Text {
                 text: sill_core::shim::Control::connect(&sill_core::session::socket_path(
@@ -818,6 +836,9 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             session(hub, &a.session_id)?;
             if a.name.is_empty() || a.name.len() > 128 {
                 return Err(invalid("a process name is required"));
+            }
+            if a.name.starts_with("host:") {
+                return Err(invalid("host processes require sill-host stop with an active stop grant; dismiss is unavailable"));
             }
             let mut c = sill_core::shim::Control::connect(&sill_core::session::socket_path(
                 &a.session_id,

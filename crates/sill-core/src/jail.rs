@@ -36,6 +36,11 @@ pub const HOST_VIEW: &str = "/.sill/host";
 pub const STATE_FS: &str = "/var/lib/sill";
 /// Where the session proxy's socket is bound inside the jail.
 pub const PROXY_SOCKET: &str = "/.sill/proxy.sock";
+/// Host control's bridge directory in the jail (docs/permission-modes.md): the daemon listens on
+/// `host.sock` in it only while the session's Host control is active. The directory is bound, not
+/// the socket, so a socket made later (by a restarted daemon) shows in a running jail.
+pub const BRIDGE_DIR: &str = "/.sill/bridge";
+pub const BRIDGE_SOCKET: &str = "host.sock";
 /// Loopback port the shim forwards to the proxy socket.
 pub const PROXY_PORT: u16 = 3128;
 
@@ -76,6 +81,8 @@ pub struct JailSpec {
     /// The memory snapshot's directory (docs/memory.md §2.3), bound read-only at
     /// `sill_memory::JAIL_DIR` for the jail's `sill-memory`; None = no memory in this jail.
     pub memory_dir: Option<PathBuf>,
+    /// Host path of the Host control bridge directory, bound read-only at [`BRIDGE_DIR`].
+    pub bridge_dir: Option<PathBuf>,
     /// An inheritable fd holding the seccomp program (`seccomp::memfd`), given to bwrap as
     /// `--seccomp <fd>` when the policy's `jail.seccomp` is on (security.md S18); None = no filter.
     pub seccomp_fd: Option<i32>,
@@ -491,6 +498,9 @@ impl JailSpec {
         if let Some(dir) = self.memory_dir.as_ref().filter(|d| d.is_dir()) {
             push(&mut a, &[&"--ro-bind", dir, &sill_memory::JAIL_DIR]);
         }
+        if let Some(dir) = self.bridge_dir.as_ref().filter(|d| d.is_dir()) {
+            push(&mut a, &[&"--ro-bind", dir, &BRIDGE_DIR]);
+        }
         a.extend(self.extra_args.iter().cloned());
         let mount_fds = self.apply_fragment_paths(&mut a, &mut masked)?;
         // bwrap's root tmpfs is writable by default; make it read-only now that every mount is in place
@@ -545,6 +555,9 @@ impl JailSpec {
         }
         if let Some(dir) = &self.memory_dir {
             check_bind(dir, Path::new(sill_memory::JAIL_DIR))?;
+        }
+        if let Some(dir) = &self.bridge_dir {
+            check_bind(dir, Path::new(BRIDGE_DIR))?;
         }
         if let Some(sock) = &self.proxy_socket {
             check_bind(sock, Path::new(PROXY_SOCKET))?;
@@ -714,6 +727,7 @@ mod tests {
             fragment_ro: vec![],
             fragment_masks: vec![],
             memory_dir: None,
+            bridge_dir: None,
             seccomp_fd: None,
             extra_args: vec![],
             command: vec!["true".into()],

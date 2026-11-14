@@ -2644,6 +2644,28 @@
     },
     "Keep": {
       "additionalProperties": false,
+      "description": "Keep (or stop keeping) a bridge-launched host process running after Host control ends.",
+      "properties": {
+        "keep": {
+          "type": "boolean"
+        },
+        "name": {
+          "description": "The process's name in the process list (`host:<id>`).",
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "name",
+        "keep"
+      ],
+      "type": "object"
+    },
+    "Keep2": {
+      "additionalProperties": false,
       "properties": {
         "items": {
           "items": {
@@ -3809,7 +3831,17 @@
             "null"
           ]
         },
+        "kept": {
+          "default": false,
+          "description": "A host process marked to keep running after Host control ends.",
+          "type": "boolean"
+        },
         "last_line": {
+          "type": "string"
+        },
+        "location": {
+          "default": "jail",
+          "description": "`jail` (the shim's managed processes) or `host` (launched on this machine through Host\ncontrol; such a name begins with `host:`).",
           "type": "string"
         },
         "name": {
@@ -6745,7 +6777,7 @@
       "capabilities": {
         "sill.host_control": 1
       },
-      "doc": "End the session's Host control activation; a no-op without one.",
+      "doc": "End the session's Host control activation; a no-op without one. Host processes it launched are stopped, except those marked to keep.",
       "kind": "request",
       "name": "_sill/host_control.revoke",
       "params": {
@@ -6753,6 +6785,20 @@
       },
       "result": {
         "$ref": "#/$defs/State"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.host_control": 1
+      },
+      "doc": "Mark a bridge-launched host process (by its process-list name, host:<id>) to keep running after Host control ends, or not.",
+      "kind": "request",
+      "name": "_sill/host_control.keep",
+      "params": {
+        "$ref": "#/$defs/Keep"
+      },
+      "result": {
+        "$ref": "#/$defs/Empty"
       }
     },
     {
@@ -6825,7 +6871,7 @@
       "kind": "request",
       "name": "_sill/changes.keep",
       "params": {
-        "$ref": "#/$defs/Keep"
+        "$ref": "#/$defs/Keep2"
       },
       "result": {
         "$ref": "#/$defs/Done"

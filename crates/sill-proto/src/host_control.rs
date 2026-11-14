@@ -65,3 +65,13 @@ pub struct Brief {
     pub generation: u64,
     pub operations: Vec<String>,
 }
+
+/// Keep (or stop keeping) a bridge-launched host process running after Host control ends.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Keep {
+    pub session_id: String,
+    /// The process's name in the process list (`host:<id>`).
+    pub name: String,
+    pub keep: bool,
+}

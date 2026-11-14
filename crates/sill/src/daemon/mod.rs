@@ -26,6 +26,7 @@ mod streams;
 mod terminals;
 mod host;
 mod host_control;
+mod host_bridge;
 mod context;
 mod frontend;
 mod admin;
@@ -150,6 +151,7 @@ pub fn run() -> Result<()> {
         None => (bind_direct()?, "started bare by a client (no unit: see daemon.log)"),
     };
     let hub = Arc::new(Hub::new(mode)?);
+    host_bridge::recover(&hub);
     {
         let hub = hub.clone();
         std::thread::Builder::new().name("sill-credentials".into()).spawn(move || {
@@ -461,6 +463,7 @@ fn read_loop(mut reader: BufReader<UnixStream>, first: String, hub: &Arc<Hub>, c
         conn.reply(&reply);
         if method == sill_proto::method::DAEMON_SHUTDOWN {
             eprintln!("sill daemon: shutdown asked, leaving");
+            host_control::shutdown(hub);
             notify("STOPPING=1");
             // a clean exit leaves no pid file; a crash does, and the next start replaces it
             if let Ok(dir) = sill_proto::runtime_dir() {

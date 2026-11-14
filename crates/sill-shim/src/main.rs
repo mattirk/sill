@@ -193,10 +193,15 @@ fn memory_cli(args: &[String]) -> i32 {
     }
 }
 
+mod host_cli;
+
 fn main() -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     // `sill-proc …` (the binary under that name in the jail) or `sill-shim proc …`: the client
     let me = std::env::args().next().unwrap_or_default();
+    if Path::new(&me).file_name().and_then(|n| n.to_str()) == Some("sill-host") {
+        return host_cli::run(&args);
+    }
     if Path::new(&me).file_name().and_then(|n| n.to_str()) == Some("sill-proc") {
         std::process::exit(procs::cli(args));
     }

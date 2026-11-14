@@ -208,6 +208,8 @@ enum HostControlCmd {
     },
     /// End the session's activation
     Revoke { session: String },
+    /// Deliberately keep a host process after revocation (false removes the keep mark)
+    Keep { session: String, name: String, #[arg(value_parser = clap::value_parser!(bool))] keep: bool },
     /// The session's Host control state
     State { session: String },
 }
@@ -748,6 +750,13 @@ fn host_control_cmd(cmd: HostControlCmd) -> Result<()> {
         }
     };
     match cmd {
+        HostControlCmd::Keep { session, name, keep } => {
+            sill_proto::client::declare_capability(api::CAPABILITY);
+            let c = sill_proto::Client::connect_or_start()?;
+            let key = policy_session_key(&c, &session)?;
+            let _: sill_proto::Empty = c.call("_sill/host_control.keep", api::Keep { session_id: key, name: name.clone(), keep })?;
+            println!("{name}: keep after revocation = {keep}");
+        }
         HostControlCmd::State { session } => {
             let c = sill_proto::Client::connect_or_start()?;
             let key = policy_session_key(&c, &session)?;
@@ -1270,9 +1279,21 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
             spec.memory_dir = Some(dir);
-            spec.extra_args.extend(["--ro-bind".into(), shim_bin.into(), "/.sill/bin/sill-memory".into()]);
+            spec.extra_args.extend(["--ro-bind".into(), shim_bin.clone().into(), "/.sill/bin/sill-memory".into()]);
         }
     }
+
+    // Host control's bridge directory (docs/permission-modes.md): empty until the daemon, on an
+    // activation, listens in it; `sill-host` is the shim under that name for the agent
+    let bridge = rt.join("bridge");
+    std::fs::create_dir_all(&bridge)?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bridge, std::fs::Permissions::from_mode(0o700))?;
+        let _ = std::fs::remove_file(bridge.join(jail::BRIDGE_SOCKET));
+    }
+    spec.bridge_dir = Some(bridge);
+    spec.extra_args.extend(["--ro-bind".into(), shim_bin.clone().into(), "/.sill/bin/sill-host".into()]);
 
     let shim_sock = rt.join("shim.sock");
     let proxy_sock = rt.join("proxy.sock");
@@ -1726,6 +1747,7 @@ fn build_spec(a: JailArgs, command: Vec<OsString>) -> Result<JailSpec> {
         binds,
         masks: vec![],
         memory_dir: None,
+        bridge_dir: None,
         seccomp_fd: None,
         extra_args,
         command,

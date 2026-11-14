@@ -88,7 +88,7 @@ pub fn brief(session: &str) -> Option<api::Brief> {
 }
 
 /// A notice in the session's conversation, published to its frontends.
-fn note(hub: &Hub, session: &str, text: String) {
+pub(super) fn note(hub: &Hub, session: &str, text: String) {
     let result = hub.with_store(|store| {
         let journal = sill_core::sfp::Journal::new(store)?;
         let tx = store.conn().unchecked_transaction()?;
@@ -115,7 +115,7 @@ fn list(operations: &BTreeSet<String>) -> String {
 }
 
 /// Activate, or change the scope of an active control. The connection must display Host control.
-pub fn activate(hub: &Hub, conn: &Conn, a: api::Activate) -> Result<api::State> {
+pub fn activate(hub: &std::sync::Arc<Hub>, conn: &Conn, a: api::Activate) -> Result<api::State> {
     if !conn.has_capability(CAPABILITY) {
         let mut error = Error::domain("unsupported", "Host control needs a frontend that displays it");
         error.data.as_mut().unwrap()["details"] = json!({"capability": CAPABILITY});
@@ -145,6 +145,8 @@ pub fn activate(hub: &Hub, conn: &Conn, a: api::Activate) -> Result<api::State> 
     if !sill_core::session::is_running(&a.session_id) {
         return Err(domain("invalid_state", "the session is not running; Host control needs its jail"));
     }
+    let _gate = super::host_bridge::gate();
+    let listener = super::host_bridge::listen(&a.session_id)?;
     let (generation, changed) = {
         let mut t = table().lock().unwrap();
         let generation = t.generations.get(&a.session_id).copied().unwrap_or(0) + 1;
@@ -154,6 +156,7 @@ pub fn activate(hub: &Hub, conn: &Conn, a: api::Activate) -> Result<api::State> 
         t.active.insert(a.session_id.clone(), Activation { generation, operations: operations.clone(), since: sill_core::store::now(), activator: conn.id });
         (generation, changed)
     };
+    super::host_bridge::serve(hub.clone(), a.session_id.clone(), generation, listener);
     let text = match changed {
         Some(old) if old == operations => format!("Host control confirmed (generation {generation}): {}.", list(&operations)),
         Some(old) => format!("Host control scope changed (generation {generation}): {}; before: {}.", list(&operations), list(&old)),
@@ -161,11 +164,13 @@ pub fn activate(hub: &Hub, conn: &Conn, a: api::Activate) -> Result<api::State> 
     };
     eprintln!("sill daemon: session {}: {text}", a.session_id);
     note(hub, &a.session_id, text);
+    drop(_gate);
     Ok(state(hub, &a.session_id))
 }
 
 /// End an activation for `reason`; a no-op without one.
 pub fn revoke(hub: &Hub, session: &str, reason: &str) -> Result<api::State> {
+    let _gate = super::host_bridge::gate();
     let ended = {
         let mut t = table().lock().unwrap();
         let ended = t.active.remove(session).is_some();
@@ -175,6 +180,7 @@ pub fn revoke(hub: &Hub, session: &str, reason: &str) -> Result<api::State> {
         ended
     };
     if ended {
+        super::host_bridge::cleanup(hub, session);
         eprintln!("sill daemon: session {session}: Host control revoked: {reason}");
         note(hub, session, format!("Host control revoked: {reason}."));
     }
@@ -209,7 +215,7 @@ pub fn sweep(hub: &Hub) {
     displaying_changed(hub);
 }
 
-pub fn handle(hub: &Hub, conn: &Conn, method: &str, params: serde_json::Value) -> Option<Result<serde_json::Value>> {
+pub fn handle(hub: &std::sync::Arc<Hub>, conn: &Conn, method: &str, params: serde_json::Value) -> Option<Result<serde_json::Value>> {
     let args = |v: serde_json::Value| serde_json::from_value::<sill_proto::sessions::SessionKey>(v).map_err(|e| anyhow::Error::from(Error::invalid_params(e.to_string())));
     Some(match method {
         "_sill/host_control.activate" => serde_json::from_value::<api::Activate>(params)
@@ -225,6 +231,17 @@ pub fn handle(hub: &Hub, conn: &Conn, method: &str, params: serde_json::Value) -
             super::admin::session_with_pins(hub, &a.session_id)?;
             revoke(hub, &a.session_id, "revoked by the person").map(|s| json!(s))
         }),
+        "_sill/host_control.keep" => serde_json::from_value::<api::Keep>(params).map_err(anyhow::Error::from).and_then(|a| {
+            if !conn.has_capability(CAPABILITY) { return Err(domain("unsupported", "Host control needs a displaying frontend")); }
+            let _gate = super::host_bridge::gate();
+            let id = a.name.strip_prefix("host:").ok_or_else(|| domain("invalid_params", "expected host:<id>"))?;
+            hub.with_store(|s| {
+                let p = s.host_processes(&a.session_id)?.into_iter().find(|p| p.id == id).ok_or_else(|| domain("not_found", "host process not found"))?;
+                s.keep_host_process(&p.id, a.keep)?; Ok(())
+            })?;
+            note(hub, &a.session_id, format!("Host process {}: keep after revocation = {}", a.name, a.keep));
+            Ok(json!({}))
+        }),
         "_sill/host_control.state" => args(params).and_then(|a| {
             if !conn.has_capability("sill.permission_modes") {
                 let mut error = Error::domain("unsupported", "Host control state needs a frontend that shows permission state (session records carry the active brief)");
@@ -236,4 +253,9 @@ pub fn handle(hub: &Hub, conn: &Conn, method: &str, params: serde_json::Value) -
         }),
         _ => return None,
     })
+}
+
+pub fn shutdown(hub: &Hub) {
+    let sessions: Vec<_> = table().lock().unwrap().active.keys().cloned().collect();
+    for session in sessions { let _ = revoke(hub, &session, "daemon shutdown"); }
 }

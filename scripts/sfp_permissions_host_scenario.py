@@ -23,6 +23,7 @@ import os
 import pathlib
 import re
 import shutil
+import shlex
 import socket
 import subprocess
 import sys
@@ -883,6 +884,44 @@ PY
               code(hc.call, "_sill/host_control.activate", {"session_id": no_host, "operations": ["launch"]}) == "permission_denied")
         check("a ghost refuses activation",
               code(hc.call, "_sill/host_control.activate", {"session_id": ghost_bus, "operations": ["launch"]}) == "permission_denied")
+        # -- 18. The jailed host bridge, generations, scope and process disposition ---------------
+        start(ctl)
+        def bridge(sid, op, generation=None, args=None):
+            argv = ["/.sill/bin/sill-host", op]
+            if op != "state":
+                argv += [str(generation), json.dumps(args or {})]
+            rc, text = sh(c, sid, shlex.join(argv))
+            return rc, text
+
+        check("inactive bridge refuses the agent", bridge(ctl, "state")[0] != 0)
+        generation = activate(hc, ctl, ["launch", "stop", "inspect"])["generation"]
+        rc, text = bridge(ctl, "state")
+        check("agent can read the current generation", rc == 0 and json.loads(text)["generation"] == generation, text)
+        check("commands needs its separate grant", bridge(ctl, "commands", generation,
+              {"argv": ["/bin/true"], "cwd": "/tmp"})[0] != 0)
+        check("a stale generation is refused", bridge(ctl, "inspect", generation - 1)[0] != 0)
+        check("another session cannot use this bridge", bridge(no_host, "state")[0] != 0)
+        rc, text = bridge(ctl, "launch", generation, {"argv": ["/bin/sh", "-c", "echo bridge-output; exec sleep 120"], "cwd": "/tmp"})
+        check("agent launches a host process", rc == 0, text)
+        launched = json.loads(text)
+        name = launched["name"]
+        time.sleep(.3)
+        rc, output = bridge(ctl, "inspect", generation, {"name": name})
+        check("agent reads captured host output", rc == 0 and "bridge-output" in output, output)
+        rows = c.call("_sill/procs.list", {"session_id": ctl})["processes"]
+        check("process list identifies the host owner and location", any(p["name"] == name and p["location"] == "host" for p in rows))
+        hc.call("_sill/host_control.keep", {"session_id": ctl, "name": name, "keep": True})
+        hc.call("_sill/host_control.revoke", {"session_id": ctl})
+        check("explicitly kept process survives revocation", pathlib.Path(f"/proc/{launched['pid']}").exists())
+        check("revocation removes agent access", bridge(ctl, "state")[0] != 0)
+        generation = activate(hc, ctl, ["stop", "launch"])["generation"]
+        check("new activation can deliberately stop a kept owned process", bridge(ctl, "stop", generation, {"name": name})[0] == 0)
+        rc, text = bridge(ctl, "launch", generation, {"argv": ["/bin/sleep", "120"], "cwd": "/tmp"})
+        check("second host launch succeeds", rc == 0, text)
+        second = json.loads(text)
+        hc.call("_sill/host_control.revoke", {"session_id": ctl})
+        time.sleep(.3)
+        check("unkept host process is stopped on revocation", not pathlib.Path(f"/proc/{second['pid']}").exists())
         hc.close()
     finally:
         for sid in created:

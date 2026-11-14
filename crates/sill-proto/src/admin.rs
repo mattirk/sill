@@ -250,7 +250,15 @@ pub struct Process {
     pub state: String,
     pub exit_code: Option<i64>,
     pub last_line: String,
+    /// `jail` (the shim's managed processes) or `host` (launched on this machine through Host
+    /// control; such a name begins with `host:`).
+    #[serde(default = "jail_location")]
+    pub location: String,
+    /// A host process marked to keep running after Host control ends.
+    #[serde(default)]
+    pub kept: bool,
 }
+fn jail_location() -> String { "jail".into() }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ProcessesPage {
     pub processes: Vec<Process>,

@@ -1,0 +1,442 @@
+//! Session-bound agent endpoint. It has no administrative RPC dispatch or caller-supplied
+//! session identity. One bounded request per connection; every action carries its generation.
+use super::{Hub, host_control};
+use anyhow::{Context, Result, bail};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use std::{
+    io::{BufRead, BufReader, Read, Write},
+    os::unix::{net::UnixListener, process::CommandExt},
+    path::PathBuf,
+    sync::{Arc, Mutex, MutexGuard, OnceLock},
+    time::Duration,
+};
+
+pub fn gate() -> MutexGuard<'static, ()> {
+    static G: OnceLock<Mutex<()>> = OnceLock::new();
+    G.get_or_init(Default::default).lock().unwrap()
+}
+fn socket(session: &str) -> Result<PathBuf> {
+    Ok(sill_core::shim::runtime_dir(session)?.join("bridge/host.sock"))
+}
+pub fn listen(session: &str) -> Result<UnixListener> {
+    let path = socket(session)?;
+    // The launcher creates and binds the directory, including for currently inactive sessions.
+    anyhow::ensure!(
+        path.parent().unwrap().is_dir(),
+        "restart this session to install its host bridge"
+    );
+    let _ = std::fs::remove_file(&path);
+    let listener = UnixListener::bind(path)?;
+    listener.set_nonblocking(true)?;
+    Ok(listener)
+}
+pub fn serve(hub: Arc<Hub>, session: String, generation: u64, listener: UnixListener) {
+    std::thread::spawn(move || {
+        loop {
+            if host_control::brief(&session).is_none_or(|b| b.generation != generation) {
+                break;
+            }
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    // Sequential, bounded IO: a jailed client cannot grow host threads or buffers.
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+                    let result = (|| -> Result<Value> {
+                        let mut line = String::new();
+                        BufReader::new(&stream).take(65537).read_line(&mut line)?;
+                        anyhow::ensure!(
+                            line.len() <= 65536 && line.ends_with('\n'),
+                            "request too large or incomplete"
+                        );
+                        let request: Request = serde_json::from_str(&line)?;
+                        let _gate = gate();
+                        let active =
+                            host_control::brief(&session).context("Host control is inactive")?;
+                        anyhow::ensure!(
+                            sill_core::session::is_running(&session),
+                            "session jail is gone"
+                        );
+                        anyhow::ensure!(active.generation == generation, "stale bridge");
+                        if request.operation == "state" {
+                            return Ok(json!(active));
+                        }
+                        anyhow::ensure!(
+                            request.generation == Some(generation),
+                            "stale activation generation"
+                        );
+                        anyhow::ensure!(
+                            active.operations.contains(&request.operation),
+                            "operation not granted"
+                        );
+                        host_control::note(
+                            &hub,
+                            &session,
+                            format!(
+                                "HOST action on host · generation {generation}: {} {}",
+                                request.operation,
+                                serde_json::to_string(&request.args)?
+                            ),
+                        );
+                        let result = action(&hub, &session, generation, &request);
+                        host_control::note(
+                            &hub,
+                            &session,
+                            match &result {
+                                Ok(v) => {
+                                    format!("HOST action {} completed: {v}", request.operation)
+                                }
+                                Err(e) => {
+                                    format!("HOST action {} failed: {e:#}", request.operation)
+                                }
+                            },
+                        );
+                        result
+                    })();
+                    let reply = match result {
+                        Ok(v) => json!({"result":v}),
+                        Err(e) => json!({"error":format!("{e:#}")}),
+                    };
+                    let _ = writeln!(stream, "{reply}");
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(50))
+                }
+                Err(_) => {
+                    let _ = host_control::revoke(&hub, &session, "host bridge failed");
+                    break;
+                }
+            }
+        }
+    });
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Request {
+    generation: Option<u64>,
+    operation: String,
+    #[serde(default)]
+    args: Value,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Launch {
+    argv: Vec<String>,
+    cwd: PathBuf,
+    #[serde(default)]
+    env: std::collections::BTreeMap<String, String>,
+}
+fn identity(pid: u32) -> Result<(u64, u32)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    let fields: Vec<_> = stat
+        .rsplit_once(')')
+        .context("bad process stat")?
+        .1
+        .split_whitespace()
+        .collect();
+    Ok((fields[19].parse()?, fields[2].parse()?))
+}
+fn signal(pid: u32, ticks: u64) -> Result<()> {
+    use rustix::process::{Pid, PidfdFlags, Signal, pidfd_open, pidfd_send_signal};
+    anyhow::ensure!(
+        pid != std::process::id(),
+        "refusing to stop the production daemon"
+    );
+    let fd = pidfd_open(
+        Pid::from_raw(pid as i32).context("invalid pid")?,
+        PidfdFlags::empty(),
+    )?;
+    anyhow::ensure!(identity(pid)?.0 == ticks, "process identity changed");
+    pidfd_send_signal(&fd, Signal::KILL)?;
+    Ok(())
+}
+fn stop_group(p: &sill_core::store::HostProcess) -> Result<()> {
+    anyhow::ensure!(
+        identity(p.pid)?.0 == p.start_ticks,
+        "managed group leader is gone or changed; descendants unknown"
+    );
+    // Each target is pinned by pidfd before its start-time check. Never signal a reused PID.
+    // Descendants that deliberately escape the managed group are unrestricted host code.
+    for entry in std::fs::read_dir("/proc")?.flatten() {
+        if let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() {
+            if let Ok((ticks, group)) = identity(pid) {
+                if group == p.pid {
+                    let _ = signal(pid, ticks);
+                }
+            }
+        }
+    }
+    if identity(p.pid).is_ok_and(|(ticks, _)| ticks == p.start_ticks) {
+        signal(p.pid, p.start_ticks)?;
+    }
+    Ok(())
+}
+fn action(hub: &Arc<Hub>, session: &str, generation: u64, r: &Request) -> Result<Value> {
+    match r.operation.as_str() {
+        "launch" | "commands" => {
+            let a: Launch = serde_json::from_value(r.args.clone())?;
+            anyhow::ensure!(
+                !a.argv.is_empty() && a.cwd.is_absolute(),
+                "argv and an absolute host cwd are required"
+            );
+            let id = super::sfp::id();
+            let log = sill_core::shim::runtime_dir(session)?.join(format!("host-{id}.log"));
+            let file = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(log)?;
+            let mut cmd = std::process::Command::new(&a.argv[0]);
+            cmd.args(&a.argv[1..])
+                .current_dir(&a.cwd)
+                .envs(a.env)
+                .stdin(std::process::Stdio::null())
+                .stdout(file.try_clone()?)
+                .stderr(file);
+            unsafe {
+                cmd.pre_exec(|| {
+                    rustix::process::setsid()?;
+                    Ok(())
+                });
+            }
+            let mut child = cmd.spawn()?;
+            let pid = child.id();
+            let saved = (|| -> Result<_> {
+                let p = sill_core::store::HostProcess {
+                    id: id.clone(),
+                    session_id: session.into(),
+                    generation,
+                    pid,
+                    start_ticks: identity(pid)?.0,
+                    argv: a.argv,
+                    cwd: a.cwd,
+                    started: sill_core::store::now(),
+                    ended: None,
+                    exit_code: None,
+                    kept: false,
+                    state: "running".into(),
+                };
+                hub.with_store(|s| s.add_host_process(&p))?;
+                Ok(p)
+            })();
+            if let Err(e) = saved {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e);
+            }
+            let owned = saved.unwrap();
+            let hub = hub.clone();
+            let session = session.to_owned();
+            let owned_id = id.clone();
+            std::thread::spawn(move || {
+                use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
+                // Leave the leader waitable until group cleanup: its PID cannot be reused.
+                let _ = waitid(
+                    WaitId::Pid(Pid::from_raw(pid as i32).unwrap()),
+                    WaitIdOptions::EXITED | WaitIdOptions::NOWAIT,
+                );
+                let _gate = gate();
+                let _ = stop_group(&owned);
+                let result = child.wait();
+                let code = result.as_ref().ok().and_then(|s| s.code()).map(i64::from);
+                let _ = hub.with_store(|s| {
+                    s.end_host_process(
+                        &owned_id,
+                        if result.is_ok() { "exited" } else { "unknown" },
+                        code,
+                    )
+                });
+                host_control::note(
+                    &hub,
+                    &session,
+                    format!("HOST process host:{owned_id} ended: {result:?}"),
+                );
+            });
+            Ok(json!({"name":format!("host:{id}"), "pid":pid, "location":"host"}))
+        }
+        "inspect" => {
+            let owned = hub.with_store(|s| s.host_processes(session))?;
+            if let Some(name) = r.args["name"].as_str() {
+                let p = owned
+                    .iter()
+                    .find(|p| format!("host:{}", p.id) == name)
+                    .context("session-owned host process not found")?;
+                use std::io::Seek;
+                let mut file = std::fs::File::open(
+                    sill_core::shim::runtime_dir(session)?.join(format!("host-{}.log", p.id)),
+                )?;
+                let length = file.metadata()?.len();
+                file.seek(std::io::SeekFrom::Start(length.saturating_sub(64 * 1024)))?;
+                let mut bytes = Vec::new();
+                file.take(64 * 1024).read_to_end(&mut bytes)?;
+                return Ok(
+                    json!({"name":name,"state":p.state,"kept":p.kept,"exit_code":p.exit_code,"output":String::from_utf8_lossy(&bytes),"truncated":length > 64 * 1024,"location":"host"}),
+                );
+            }
+            let managed: Vec<_> = owned.iter().map(|p| json!({"name":format!("host:{}",p.id),"pid":p.pid,"state":p.state,"kept":p.kept,"exit_code":p.exit_code})).collect();
+            let mut processes = vec![];
+            for entry in std::fs::read_dir("/proc")?.flatten() {
+                if processes.len() >= 4096 {
+                    break;
+                }
+                if let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() {
+                    if let Ok((ticks, _)) = identity(pid) {
+                        let comm =
+                            std::fs::read_to_string(entry.path().join("comm")).unwrap_or_default();
+                        processes.push(json!({"pid":pid,"start_ticks":ticks,"name":comm.trim()}));
+                    }
+                }
+            }
+            Ok(json!({"processes":processes,"managed":managed,"location":"host"}))
+        }
+        "stop" => {
+            let name = r.args["name"].as_str().context("name required")?;
+            let p = hub
+                .with_store(|s| {
+                    Ok(s.host_processes(session)?
+                        .into_iter()
+                        .find(|p| format!("host:{}", p.id) == name))
+                })?
+                .context("session-owned host process not found")?;
+            anyhow::ensure!(p.ended.is_none(), "process already ended");
+            stop_group(&p)?;
+            hub.with_store(|s| s.end_host_process(&p.id, "stopped", None))?;
+            Ok(json!({"stopped":name}))
+        }
+        "stop_existing" => {
+            let pid = r.args["pid"]
+                .as_u64()
+                .and_then(|v| u32::try_from(v).ok())
+                .context("pid required")?;
+            let ticks = r.args["start_ticks"]
+                .as_u64()
+                .context("start_ticks from inspect required")?;
+            // Sill infrastructure is never an implicit target of the stop-existing interface.
+            let exe = std::fs::read_link(format!("/proc/{pid}/exe"))?;
+            anyhow::ensure!(
+                !exe.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .starts_with("sill"),
+                "refusing to stop Sill infrastructure"
+            );
+            signal(pid, ticks)?;
+            Ok(json!({"stopped":pid}))
+        }
+        _ => bail!("operation backend unavailable"),
+    }
+}
+pub fn cleanup(hub: &Hub, session: &str) {
+    if let Ok(path) = socket(session) {
+        let _ = std::fs::remove_file(path);
+    }
+    if let Ok(processes) = hub.with_store(|s| s.host_processes(session)) {
+        for p in processes
+            .into_iter()
+            .filter(|p| p.ended.is_none() && !p.kept)
+        {
+            let outcome = stop_group(&p);
+            let _ = hub.with_store(|s| {
+                s.end_host_process(
+                    &p.id,
+                    if outcome.is_ok() {
+                        "stopped"
+                    } else {
+                        "unknown"
+                    },
+                    None,
+                )
+            });
+            host_control::note(
+                hub,
+                session,
+                format!("HOST process host:{} revocation stop: {outcome:?}", p.id),
+            );
+        }
+    }
+}
+
+/// Recovery restores ownership evidence, never authority. Stop unkept survivors; kept ones stay
+/// visible. A missing/reused leader is uncertain and must not cause an unrelated group kill.
+pub fn recover(hub: &Hub) {
+    if let Ok(sessions) = hub.with_store(|s| s.sessions()) {
+        for session in sessions {
+            cleanup(hub, &session.id);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bridge_does_not_accept_a_session_selector_or_admin_envelope() {
+        assert!(
+            serde_json::from_value::<Request>(
+                json!({"generation":1,"operation":"launch","session_id":"other","args":{}})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<Request>(
+                json!({"method":"_sill/host_control.activate","params":{}})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<Launch>(json!({"argv":["true"],"cwd":"/","shell":true}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn stale_process_identity_cannot_stop_a_live_process() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let ticks = identity(child.id()).unwrap().0;
+        assert!(signal(child.id(), ticks + 1).is_err());
+        assert!(child.try_wait().unwrap().is_none());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(signal(std::process::id(), identity(std::process::id()).unwrap().0).is_err());
+    }
+
+    #[test]
+    fn cleanup_stops_the_managed_group_and_preserves_other_processes() {
+        let mut other = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "sleep 30 & wait"]);
+        unsafe {
+            command.pre_exec(|| {
+                rustix::process::setsid()?;
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().unwrap();
+        let p = sill_core::store::HostProcess {
+            id: "test".into(),
+            session_id: "test".into(),
+            generation: 1,
+            pid: child.id(),
+            start_ticks: identity(child.id()).unwrap().0,
+            argv: vec![],
+            cwd: "/".into(),
+            started: 0,
+            ended: None,
+            exit_code: None,
+            kept: false,
+            state: "running".into(),
+        };
+        stop_group(&p).unwrap();
+        assert!(!child.wait().unwrap().success());
+        assert!(other.try_wait().unwrap().is_none());
+        other.kill().unwrap();
+        other.wait().unwrap();
+        assert!(stop_group(&p).is_err());
+    }
+}

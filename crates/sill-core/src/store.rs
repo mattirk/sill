@@ -108,6 +108,26 @@ pub fn default_path() -> Result<PathBuf> {
     Ok(base.join("sill").join("sill.db"))
 }
 
+/// A host process the Host control bridge launched for a session.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostProcess {
+    pub id: String,
+    pub session_id: String,
+    pub generation: u64,
+    pub pid: u32,
+    /// The process's start time in clock ticks since boot (`/proc/<pid>/stat`), its identity
+    /// together with the pid.
+    pub start_ticks: u64,
+    pub argv: Vec<String>,
+    pub cwd: PathBuf,
+    pub started: i64,
+    pub ended: Option<i64>,
+    pub exit_code: Option<i64>,
+    pub kept: bool,
+    /// running, exited, stopped, lost (a survivor a later daemon could not find).
+    pub state: String,
+}
+
 pub fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
@@ -169,6 +189,11 @@ impl Store {
                  session_id TEXT NOT NULL, capability TEXT NOT NULL, enabled INTEGER NOT NULL,
                  PRIMARY KEY (session_id, capability));
              CREATE TABLE IF NOT EXISTS global_pins (path TEXT PRIMARY KEY, added_at INTEGER NOT NULL);
+             CREATE TABLE IF NOT EXISTS host_processes (
+                 id TEXT PRIMARY KEY, session_id TEXT NOT NULL, generation INTEGER NOT NULL,
+                 pid INTEGER NOT NULL, start_ticks INTEGER NOT NULL, argv TEXT NOT NULL, cwd TEXT NOT NULL,
+                 started INTEGER NOT NULL, ended INTEGER, exit_code INTEGER, kept INTEGER NOT NULL DEFAULT 0,
+                 state TEXT NOT NULL DEFAULT 'running');
              CREATE TABLE IF NOT EXISTS entries (
                  session_id TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL,
                  kind TEXT NOT NULL, text TEXT NOT NULL, extra TEXT NOT NULL DEFAULT '',
@@ -464,6 +489,49 @@ impl Store {
     }
 
     /// Human approvals belong to a session, never the agent's endpoint defaults.
+    /// A host process the Host control bridge launched (docs/permission-modes.md): recorded with
+    /// its session, generation and identity (pid and start ticks) so a revocation stops it and a
+    /// later daemon can tell a survivor from a reused pid.
+    pub fn add_host_process(&self, p: &HostProcess) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO host_processes (id, session_id, generation, pid, start_ticks, argv, cwd, started, state)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'running')",
+            params![p.id, p.session_id, p.generation as i64, p.pid as i64, p.start_ticks as i64,
+                    serde_json::to_string(&p.argv)?, p.cwd.to_string_lossy(), p.started],
+        )?;
+        Ok(())
+    }
+
+    /// How a launched host process ended: exited with a code, stopped, or lost (not found again).
+    pub fn end_host_process(&self, id: &str, state: &str, exit_code: Option<i64>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE host_processes SET ended = ?2, exit_code = ?3, state = ?4 WHERE id = ?1 AND ended IS NULL",
+            params![id, now(), exit_code, state],
+        )?;
+        Ok(())
+    }
+
+    pub fn keep_host_process(&self, id: &str, kept: bool) -> Result<bool> {
+        Ok(self.conn.execute("UPDATE host_processes SET kept = ?2 WHERE id = ?1", params![id, kept])? == 1)
+    }
+
+    pub fn host_processes(&self, session_id: &str) -> Result<Vec<HostProcess>> {
+        let mut st = self.conn.prepare(
+            "SELECT id, session_id, generation, pid, start_ticks, argv, cwd, started, ended, exit_code, kept, state
+             FROM host_processes WHERE session_id = ?1 ORDER BY started, id")?;
+        let rows = st.query_map(params![session_id], |r| {
+            let argv: String = r.get(5)?;
+            let cwd: String = r.get(6)?;
+            Ok(HostProcess {
+                id: r.get(0)?, session_id: r.get(1)?, generation: r.get::<_, i64>(2)? as u64,
+                pid: r.get::<_, i64>(3)? as u32, start_ticks: r.get::<_, i64>(4)? as u64,
+                argv: serde_json::from_str(&argv).unwrap_or_default(), cwd: PathBuf::from(cwd),
+                started: r.get(7)?, ended: r.get(8)?, exit_code: r.get(9)?, kept: r.get(10)?, state: r.get(11)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn network_hosts(&self, session_id: &str) -> Result<Vec<String>> {
         let mut statement = self.conn.prepare("SELECT host FROM session_network_hosts WHERE session_id = ?1 ORDER BY host")?;
         let rows = statement.query_map(params![session_id], |row| row.get(0))?;
