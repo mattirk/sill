@@ -385,6 +385,38 @@ fn a_workspace_made_from_the_checkout_is_warm_and_at_the_base() {
     assert_eq!(read(&s.join("target/debug/app")), "warm build\n");
 }
 
+/// An unreadable test-jail leftover must not discard the usable build cache. A tracked
+/// file that cannot be seeded is restored by Git, and a failed artifact leaves no stub.
+#[test]
+fn unreadable_entries_do_not_make_the_workspace_cold() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = tmp("partly-warm");
+    let (s, src, _) = setup(&d);
+    lived_in(&s);
+    let blocked = [s.join("target/jail/work"), s.join("target/debug/unreadable"), s.join("f3.txt")];
+    write(&blocked[0].join("hidden"), "inaccessible");
+    write(&blocked[1], "inaccessible artifact");
+    for path in &blocked {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0)).unwrap();
+    }
+    assert!(std::fs::read_dir(&blocked[0]).is_err(), "test must run without permission bypass");
+    let to = path_for(&d.0.join("ws"), &src, "w2", "partial");
+    let result = crate::workspace::create_as(&src, "w2", "partial", &to, "op2", crate::workspace::seed::How::Bytes);
+    // Restore source permissions even if creation failed, so the fixture can be removed.
+    for (path, mode) in blocked.iter().zip([0o755, 0o644, 0o644]) {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+    let made = result.unwrap();
+    assert_eq!(read(&to.join("target/debug/app")), "warm build\n");
+    assert_eq!(modified(&to.join("target/debug/app")), modified(&s.join("target/debug/app")));
+    assert!(!to.join("target/debug/unreadable").exists());
+    assert!(!to.join("target/jail/work/hidden").exists());
+    assert_eq!(read(&to.join("f3.txt")), "line 3\n");
+    assert_eq!(read(&to.join("f1.txt")), "line 1\n");
+    assert_eq!(git(&to, &["status", "--porcelain"]), "");
+    assert!(!unapplied(&s, &to, &made.branch).unwrap());
+}
+
 /// A checkout that holds sill's workspaces (a home folder kept in Git): the copy leaves itself out.
 #[test]
 fn a_workspace_inside_the_checkout_does_not_copy_itself() {

@@ -280,7 +280,8 @@ pub struct Created {
 ///
 /// The folder starts **warm** where the filesystem can share file data (§12): the checkout's
 /// working tree — its ignored build output with it — is taken as it is, then brought to the base.
-/// Where it cannot, or the checkout cannot be read, the folder starts cold: tracked files only.
+/// Unreadable entries are skipped. Where it cannot share, or the checkout root cannot be read,
+/// the folder starts cold: tracked files only.
 pub fn create(source: &Source, id: &str, name: &str, path: &Path, operation: &str) -> Result<Created> {
     create_as(source, id, name, path, operation, seed::How::Share)
 }
@@ -295,7 +296,13 @@ fn create_as(source: &Source, id: &str, name: &str, path: &Path, operation: &str
     // the marker first: whatever is left of an interrupted attempt is known to be this one's
     std::fs::create_dir_all(path.join(".git"))?;
     std::fs::write(path.join(".git").join(MARKER), operation)?;
-    let warm = seed::copy(&source.root, path, how).is_ok();
+    let warm = match seed::copy(&source.root, path, how) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(path = %source.root.display(), "workspace starts cold: {error:#}");
+            false
+        }
+    };
     if !warm {
         // nothing of a copy that stopped half way stays
         remove_folder(path)?;
