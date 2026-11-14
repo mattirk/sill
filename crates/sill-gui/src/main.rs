@@ -11,6 +11,7 @@ mod demo;
 mod desktop;
 mod desktop_view;
 mod host_control;
+mod host_runs;
 mod details;
 mod diff_ui;
 mod editor;

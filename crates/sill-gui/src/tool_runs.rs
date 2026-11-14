@@ -15,18 +15,21 @@ use crate::shell::Step;
 /// The feed's rows over `items`: each range one row, a run of tool calls when it holds more than
 /// one item. `stands_alone` names items that must keep their own row (a call with a question
 /// under it).
+///
+/// Consecutive Host control notices make a row of their own the same way (`host_runs`), whatever
+/// their turn: never joined with tool calls (the person, 2026-11-13).
 pub fn entries(items: &[&Item], stands_alone: impl Fn(&Item) -> bool) -> Vec<Range<usize>> {
     let joins = |item: &Item| item.tool.is_some() && !stands_alone(item);
+    let host = |item: &Item| crate::host_runs::host_text(item).is_some();
     let mut entries: Vec<Range<usize>> = Vec::new();
     for (index, item) in items.iter().enumerate() {
+        let previous = entries.last().map(|last| items[last.end - 1]);
+        let together = previous.is_some_and(|previous| {
+            (joins(item) && joins(previous) && previous.turn_id == item.turn_id)
+                || (host(item) && host(previous))
+        });
         match entries.last_mut() {
-            Some(last)
-                if joins(item)
-                    && joins(items[last.end - 1])
-                    && items[last.end - 1].turn_id == item.turn_id =>
-            {
-                last.end = index + 1;
-            }
+            Some(last) if together => last.end = index + 1,
             _ => entries.push(index..index + 1),
         }
     }

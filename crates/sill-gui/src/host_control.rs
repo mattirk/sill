@@ -45,6 +45,15 @@ pub struct View {
     serial: u64,
 }
 
+/// What the person can read of an operation name (and "Process ended" for a managed process's
+/// end, as the conversation shows Host's actions).
+pub(crate) fn operation_label(operation: &str) -> String {
+    if operation == "process" {
+        return "Process ended".into();
+    }
+    label(operation).to_string()
+}
+
 /// What the person can read of an operation name.
 fn label(operation: &str) -> &'static str {
     match operation {
@@ -621,38 +630,36 @@ mod tests {
         assert_eq!(app.views["demo"].host_control.selected.len(), OPERATIONS.len() - mac);
     }
 
-    /// A long Host control notice (an inspection's process list) is one line until clicked.
+    /// Host's actions fold into a block of their own (`host_runs`): a request and its outcome
+    /// are one line under their operation, closed until clicked; opened, the full result shows.
     #[test]
-    fn long_notices_fold_to_a_line_until_opened() {
+    fn host_actions_are_one_line_each_in_a_block_until_opened() {
         let (mut app, _) = App::new(true, None);
         let _ = app.update(Message::DemoTick);
         let long = format!("HOST action inspect completed: {}", "{\"pid\":1,\"name\":\"systemd\"},".repeat(40));
-        let short = "HOST action on host · generation 1: inspect {}";
-        for (id, text) in [("long", long.as_str()), ("short", short)] {
+        let request = "HOST action on host · generation 1: inspect {}";
+        for (id, seq, text) in [("asked", "91", request), ("answered", "92", long.as_str())] {
             let view = app.current_mut().unwrap();
             let mut item = view.conversation.item("user").unwrap().clone();
             item.item_id = id.into();
-            item.created_seq = format!("9{}", id.len());
+            item.created_seq = seq.into();
             item.kind = "notice".into();
             item.content = vec![sill_proto::sfp::Content::text(text)];
             let event = crate::tests::event(&view.conversation, sill_proto::sfp::Event::ItemCreated { item });
             assert!(view.accept(event));
         }
-        assert!(crate::ui::is_long_notice(&long) && !crate::ui::is_long_notice(short));
-        // selectable text is not a plain text widget: the fold line and its chevron are
         let mut ui = simulator(&app, (720.0, 860.0));
-        ui.find("HOST · Process inspection completed").unwrap();
-        ui.find("▸").unwrap();
-        assert!(ui.find("▾").is_err(), "folded until clicked");
-        ui.click("HOST · Process inspection completed").unwrap();
+        ui.find("Process inspection").unwrap();
+        assert!(ui.find("HOST · Process inspection completed").is_err(), "no notice line of its own any more");
+        ui.click("Process inspection").unwrap();
         let messages: Vec<Message> = ui.into_messages().collect();
-        assert!(messages.iter().any(|m| matches!(m, Message::ToggleTool(id) if id == "long")), "{messages:?}");
+        assert!(messages.iter().any(|m| matches!(m, Message::ToggleTool(id) if id == "asked")), "{messages:?}");
         for m in messages {
             let _ = app.update(m);
         }
-        assert!(app.current().unwrap().open_tools.contains("long"));
+        assert!(app.current().unwrap().open_tools.contains("asked"));
         let mut ui = simulator(&app, (720.0, 860.0));
-        ui.find("▾").unwrap();
+        ui.find("inspect {}").unwrap();
     }
 
     /// The band names every session with active control, whichever one shows.

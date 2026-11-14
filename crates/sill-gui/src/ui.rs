@@ -840,6 +840,20 @@ impl App {
                         layout_key,
                     );
                 }
+                if items[entry.clone()].iter().all(|i| crate::host_runs::host_text(i).is_some()) {
+                    let notices: Vec<_> = items[entry.clone()]
+                        .iter()
+                        .map(|item| {
+                            (
+                                &item.item_id,
+                                crate::host_runs::host_text(item),
+                                view.open_tools.contains(&item.item_id),
+                                view.open_groups.contains(&item.item_id),
+                            )
+                        })
+                        .collect();
+                    return rows::signature(("host", notices, turn_end(index, items[index])), layout_key);
+                }
                 if entry.len() > 1 {
                     let calls: Vec<_> = items[entry.clone()]
                         .iter()
@@ -954,6 +968,8 @@ impl App {
                     let mut row = Column::new().spacing(SPACING);
                     if let crate::folds::Row::Fold(_, purpose) = &folds[index] {
                         row = row.push(self.fold(view, items[entry].to_vec(), purpose));
+                    } else if items[entry.clone()].iter().all(|i| crate::host_runs::host_text(i).is_some()) {
+                        row = row.push(self.host_run(view, items[entry].to_vec()));
                     } else if entry.len() > 1 {
                         row = row.push(self.tool_run(view, items[entry].to_vec()));
                     } else {
@@ -1278,7 +1294,9 @@ impl App {
         if open {
             let mut opened = Column::new().spacing(12).padding(Padding { top: 6.0, right: 0.0, bottom: 4.0, left: 0.0 });
             for entry in crate::tool_runs::entries(&inside, |_| false) {
-                opened = opened.push(if entry.len() > 1 {
+                opened = opened.push(if inside[entry.clone()].iter().all(|i| crate::host_runs::host_text(i).is_some()) {
+                    self.host_run(view, inside[entry].to_vec())
+                } else if entry.len() > 1 {
                     self.tool_run(view, inside[entry].to_vec())
                 } else {
                     self.item(view, inside[entry.start])
@@ -1414,6 +1432,127 @@ impl App {
             }
         }
         ruled(2.0, alpha(P.fg, 0.18), block.width(Fill))
+    }
+
+    /// Host control's actions as one block (`host_runs`), in Host's colour: a line for each
+    /// operation with its count, the latest action and a status mark; a group opens to a line for
+    /// each action, and an action opens to its full request and result.
+    fn host_run<'a>(&'a self, view: &'a SessionView, notices: Vec<&'a Item>) -> Element<'a, Message> {
+        let texts: Vec<(&str, &str)> = notices
+            .iter()
+            .filter_map(|item| Some((item.item_id.as_str(), crate::host_runs::host_text(item)?)))
+            .collect();
+        let groups = crate::host_runs::groups(crate::host_runs::actions(&texts));
+        let color = P.warning;
+        let quiet = alpha(color, 0.7);
+        let labels: Vec<String> = groups.iter().map(|g| crate::host_control::operation_label(&g.op)).collect();
+        let name_width = labels
+            .iter()
+            .map(|l| text_width(l, style::SMALL))
+            .fold(0.0_f32, f32::max);
+        let count_width = groups
+            .iter()
+            .filter(|g| g.actions.len() > 1)
+            .map(|g| text_width(&g.actions.len().to_string(), style::SMALL))
+            .fold(0.0_f32, f32::max);
+        let action_line = |action: &crate::host_runs::Action<'a>, indent: f32| -> Element<'a, Message> {
+            let line = row![
+                space().width(indent),
+                container(
+                    text(one_line(&crate::host_runs::summary(action), 140))
+                        .size(style::SMALL)
+                        .color(quiet)
+                        .wrapping(text::Wrapping::None),
+                )
+                .width(Fill)
+                .clip(true),
+                status_mark(action.status()),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center);
+            keys::press(
+                button(line).padding([3, 6]).width(Fill).style(style::row_button),
+                Message::ToggleTool(action.key.clone()),
+            )
+            .into()
+        };
+        let details = |action: &crate::host_runs::Action<'a>, indent: f32| -> Element<'a, Message> {
+            let mut body = Column::new().spacing(4);
+            if let Some(request) = action.request {
+                body = body.push(
+                    selection::text(format!("{} {request}", action.op))
+                        .font(MONO_FONT)
+                        .size(style::MONO)
+                        .style(style::selectable(P.fg)),
+                );
+            }
+            match action.outcome {
+                Some(crate::host_runs::Outcome::Done(result)) => {
+                    body = body.push(selection::text(result).font(MONO_FONT).size(style::MONO).style(style::selectable(P.fg_dim)));
+                }
+                Some(crate::host_runs::Outcome::Failed(error)) => {
+                    body = body.push(selection::text(error).size(style::SMALL).style(style::selectable(P.error)));
+                }
+                None => {}
+            }
+            container(container(body).padding([6, 10]).width(Fill).style(style::card(P.code_bg)))
+                .padding(Padding { left: indent, top: 2.0, bottom: 4.0, right: 0.0 })
+                .into()
+        };
+        let mut block = Column::new();
+        for (group, label) in groups.iter().zip(labels) {
+            let single = group.actions.len() == 1;
+            let first = &group.actions[0];
+            let open = if single {
+                view.open_tools.contains(&first.key)
+            } else {
+                view.open_groups.contains(&first.key)
+            };
+            let latest = if open && !single {
+                String::new()
+            } else {
+                one_line(&crate::host_runs::summary(group.actions.last().expect("a group has actions")), 140)
+            };
+            let mut cells = row![text("HOST").size(style::TINY).color(color)].spacing(6).align_y(Alignment::Center);
+            if count_width > 0.0 {
+                cells = cells.push(
+                    text(if single { String::new() } else { group.actions.len().to_string() })
+                        .size(style::SMALL)
+                        .color(quiet)
+                        .width(count_width)
+                        .align_x(iced::alignment::Horizontal::Right),
+                );
+            }
+            let cells = cells
+                .push(text(label).size(style::SMALL).color(color).width(name_width).wrapping(text::Wrapping::None))
+                .push(
+                    container(text(latest).size(style::SMALL).color(quiet).wrapping(text::Wrapping::None))
+                        .width(Fill)
+                        .clip(true),
+                )
+                .push(status_mark(group.status()));
+            let toggle = if single {
+                Message::ToggleTool(first.key.clone())
+            } else {
+                Message::ToggleGroup(first.key.clone())
+            };
+            block = block.push(keys::press(
+                button(cells).padding([3, 6]).width(Fill).style(style::row_button),
+                toggle,
+            ));
+            let indent = 40.0 + count_width;
+            if open && single {
+                block = block.push(details(first, indent));
+            } else if open {
+                for action in &group.actions {
+                    block = block.push(action_line(action, indent));
+                    if view.open_tools.contains(&action.key) {
+                        block = block.push(details(action, indent));
+                    }
+                }
+            }
+        }
+        ruled(3.0, color, container(block).width(Fill).style(style::card_right(alpha(color, 0.08))))
     }
 
     /// A question: open, the card with the agent's options as buttons; answered, one line with
