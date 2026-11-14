@@ -2345,7 +2345,7 @@ impl App {
             for event in demo::prompt(view.conversation.seq + 1, &text) {
                 view.accept(event);
             }
-            return operation::snap_to_end("conversation");
+            return operation::snap_to_end("conversation").chain(self.focus_prompt());
         }
         let session = view.id.clone();
         let submit = view.outbox.send(&session, text);
@@ -2362,6 +2362,7 @@ impl App {
                 json!(submit),
             ),
             operation::snap_to_end("conversation"),
+            self.focus_prompt(),
         ])
     }
 

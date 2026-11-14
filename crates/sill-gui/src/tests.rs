@@ -2507,3 +2507,86 @@ fn changes_actions_are_the_public_requests() {
     settle_task(&mut app, task);
     server.join().unwrap();
 }
+
+/// Cancellation keeps delivery=queued in SFP; the outcome removes the composer row.
+#[test]
+fn cancelled_queued_prompts_disappear_from_the_composer() {
+    let (mut app, _) = App::new(true, None);
+    let submission: Submission = serde_json::from_value(json!({
+        "submission_id":"queued", "session_id":"demo", "accepted_seq":"1",
+        "agent_generation_id":"demo-generation", "text":"unique queued prompt", "attachments":[],
+        "acceptance":"accepted", "delivery":"queued", "held":false,
+        "insertion":"pending", "outcome":"pending"
+    }))
+    .unwrap();
+    app.current_mut()
+        .unwrap()
+        .conversation
+        .submissions
+        .insert("queued".into(), submission.clone());
+    let mut ui = simulator(&app, (720.0, 860.0));
+    ui.find("unique queued prompt").unwrap();
+    drop(ui);
+    let mut cancelled = submission;
+    cancelled.outcome = "cancelled".into();
+    let view = app.current_mut().unwrap();
+    let update = event(
+        &view.conversation,
+        Event::SubmissionUpdated {
+            submission: cancelled,
+        },
+    );
+    assert!(view.accept(update));
+    let mut ui = simulator(&app, (720.0, 860.0));
+    assert!(ui.find("unique queued prompt").is_err());
+    assert!(ui.find("Queued").is_err());
+}
+
+#[test]
+fn sending_restores_keyboard_focus_to_the_prompt() {
+    let (mut app, _) = App::new(true, None);
+    let mut live = Live::new((720.0, 860.0));
+    live.frame(&app, |_| {});
+    type_text(&mut app, "first prompt");
+    live.apply(&mut app, Message::Send);
+    type_text(&mut app, "next prompt");
+    let messages = live.frame(&app, |ui| {
+        ui.send(vec![key(iced::keyboard::key::Named::Enter)])
+    });
+    assert!(
+        messages.iter().any(|m| matches!(m, Message::Send)),
+        "{messages:?}"
+    );
+}
+
+/// Crossing the timer and its gap towards + must not collapse the timer and move the button.
+#[test]
+fn the_timer_stays_open_when_moving_towards_the_plus_button() {
+    let (mut app, _) = App::new(true, None);
+    let mut live = Live::new((720.0, 860.0));
+    app.daemon_settings = Some(sill_proto::admin::Settings {
+        timer_auto: Some(false),
+        ..Default::default()
+    });
+    // Approach + directly, without passing over the indicator: it must stay put.
+    let messages = live.frame(&app, |ui| move_to(ui, iced::Point::new(670.0, 18.0)));
+    for message in messages {
+        let _ = app.update(message);
+    }
+    assert!(!app.activity_hovered, "+ must not open the timer");
+    for x in (625..=700).rev() {
+        let messages = live.frame(&app, |ui| move_to(ui, iced::Point::new(x as f32, 18.0)));
+        for message in messages {
+            let _ = app.update(message);
+        }
+        assert!(app.activity_hovered, "timer closed at x={x}");
+    }
+    let messages = live.frame(&app, |ui| move_to(ui, iced::Point::new(500.0, 100.0)));
+    for message in messages {
+        let _ = app.update(message);
+    }
+    assert!(
+        !app.activity_hovered,
+        "timer closes after leaving the controls"
+    );
+}

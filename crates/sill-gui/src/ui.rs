@@ -210,35 +210,45 @@ impl App {
                         .height(Fill)
                         .direction(scrollable::Direction::Horizontal(style::bar()))
                         .style(style::feed_scroll),
-                    tooltip(
-                        keys::press(
-                            button(
-                                svg(icons::plus())
-                                    .width(15)
-                                    .height(15)
-                                    .style(style::icon(alpha(P.fg, 0.75))),
-                            )
-                            .padding(4)
-                            .style(style::quiet),
-                            Message::Menu(crate::menu::Event::Toggle),
-                        ),
-                        container(
-                            text("New session, reopen one, or change the view").size(style::TINY)
-                        )
-                        .padding([3, 8])
-                        .style(style::fill(P.surface)),
-                        tooltip::Position::Bottom,
-                    ),
-                    // the activity over the drawer when it is beside the conversation, so the +
-                    // ends the conversation's side, as in the shelf
-                    match self.layout.drawer(drawer_open, width) {
-                        // reaching back across the bar's spacing and the +'s padding, so the +
-                        // sits about 10 px left of the divider (the shelf's place)
-                        Drawer::Beside(drawer) => container(activity)
-                            .width(drawer + layout::HANDLE - 14.0)
-                            .align_right(drawer + layout::HANDLE - 14.0),
-                        _ => container(activity),
-                    },
+                    // Keep the timer open across the gap and + button, so the button does
+                    // not move away as the pointer approaches it from the indicator.
+                    mouse_area(
+                        row![
+                            tooltip(
+                                keys::press(
+                                    button(
+                                        svg(icons::plus())
+                                            .width(15)
+                                            .height(15)
+                                            .style(style::icon(alpha(P.fg, 0.75))),
+                                    )
+                                    .padding(4)
+                                    .style(style::quiet),
+                                    Message::Menu(crate::menu::Event::Toggle),
+                                ),
+                                container(
+                                    text("New session, reopen one, or change the view")
+                                        .size(style::TINY)
+                                )
+                                .padding([3, 8])
+                                .style(style::fill(P.surface)),
+                                tooltip::Position::Bottom,
+                            ),
+                            // the activity over the drawer when it is beside the conversation, so the +
+                            // ends the conversation's side, as in the shelf
+                            match self.layout.drawer(drawer_open, width) {
+                                // reaching back across the bar's spacing and the +'s padding, so the +
+                                // sits about 10 px left of the divider (the shelf's place)
+                                Drawer::Beside(drawer) => container(activity)
+                                    .width(drawer + layout::HANDLE - 14.0)
+                                    .align_right(drawer + layout::HANDLE - 14.0),
+                                _ => container(activity),
+                            },
+                        ]
+                        .spacing(6)
+                        .align_y(Alignment::Center),
+                    )
+                    .on_exit(Message::ActivityHover(false)),
                 ]
                 .spacing(6)
                 .align_y(Alignment::Center),
@@ -461,7 +471,6 @@ impl App {
         };
         mouse_area(shown)
             .on_enter(Message::ActivityHover(true))
-            .on_exit(Message::ActivityHover(false))
             .into()
     }
 
@@ -911,12 +920,9 @@ impl App {
         }
         let mut queued = Column::new().spacing(4);
         let mut has_queued = false;
-        for submission in view
-            .conversation
-            .submissions
-            .values()
-            .filter(|s| s.delivery == "queued" && !(s.held && s.outcome == "pending"))
-        {
+        for submission in view.conversation.submissions.values().filter(|s| {
+            s.delivery == "queued" && s.insertion == "pending" && s.outcome == "pending" && !s.held
+        }) {
             has_queued = true;
             queued = queued.push(
                 row![

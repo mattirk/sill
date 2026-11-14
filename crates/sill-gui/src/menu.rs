@@ -297,10 +297,17 @@ impl App {
                         .height(15)
                         .style(style::icon(P.fg)),
                     column![
-                        text(crate::ui::one_line(&session.title, 34)).size(style::TEXT),
+                        container(
+                            text(crate::ui::one_line(&session.title, 34))
+                                .size(style::TEXT)
+                                .wrapping(text::Wrapping::None),
+                        )
+                        .width(Fill)
+                        .clip(true),
                         text(sub).size(style::TINY).color(P.fg_dim),
                     ]
-                    .spacing(1),
+                    .spacing(1)
+                    .width(Fill),
                 ]
                 .spacing(10)
                 .align_y(Alignment::Center),
