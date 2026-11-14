@@ -711,15 +711,51 @@ impl App {
             }
             conversation.turn_end(turn_id).map(|end| end.to_string())
         };
-        // the feed's rows: an item, or a run of tool calls shown as one block (`tool_runs`); a call
-        // with a question under it keeps its own row, so the question stays under its call
-        let entries =
-            crate::tool_runs::entries(&items, |item| places.contains_key(item.item_id.as_str()));
+        // the feed's rows: an item, a run of tool calls shown as one block (`tool_runs`), or a
+        // turn sill started folded to a line (`folds`); a call with a question under it keeps its
+        // own row, so the question stays under its call
+        let folds = crate::folds::rows(
+            &items,
+            |item| conversation.purpose(item),
+            |item| places.contains_key(item.item_id.as_str()),
+        );
+        let entries: Vec<std::ops::Range<usize>> = folds.iter().map(|r| r.range().clone()).collect();
         // what each row's height depends on, so a measured height is used only while it holds
-        let signatures: Vec<u64> = entries
+        let signatures: Vec<u64> = folds
             .iter()
-            .map(|entry| {
+            .map(|row| {
+                let entry = row.range();
                 let index = entry.end - 1;
+                if let crate::folds::Row::Fold(_, purpose) = row {
+                    let open = view.open_groups.contains(&fold_key(items[entry.start]));
+                    // opened, every item in it counts; folded, only the line does
+                    let inside: Vec<_> = items[entry.clone()]
+                        .iter()
+                        .filter(|_| open)
+                        .map(|item| {
+                            let tool = item.tool.as_ref().map(|t| {
+                                (&t.title, &t.command, &t.status, t.detail.len(), t.diff.len())
+                            });
+                            (
+                                &item.item_id,
+                                view.rendered.get(&item.item_id).map(|r| r.source.as_str()),
+                                tool,
+                                view.open_tools.contains(&item.item_id),
+                                view.open_groups.contains(&item.item_id),
+                            )
+                        })
+                        .collect();
+                    return rows::signature(
+                        (
+                            purpose,
+                            entry.len(),
+                            fold_running(conversation, &items[entry.clone()]),
+                            inside,
+                            turn_end(index, items[index]),
+                        ),
+                        layout_key,
+                    );
+                }
                 if entry.len() > 1 {
                     let calls: Vec<_> = items[entry.clone()]
                         .iter()
@@ -832,7 +868,9 @@ impl App {
                     let entry = entries[index].clone();
                     let (item, last) = (items[entry.start], entry.end - 1);
                     let mut row = Column::new().spacing(SPACING);
-                    if entry.len() > 1 {
+                    if let crate::folds::Row::Fold(_, purpose) = &folds[index] {
+                        row = row.push(self.fold(view, items[entry].to_vec(), purpose));
+                    } else if entry.len() > 1 {
                         row = row.push(self.tool_run(view, items[entry].to_vec()));
                     } else {
                         row = row.push(self.item(view, item));
@@ -1123,6 +1161,48 @@ impl App {
         } else {
             body
         }
+    }
+
+    /// A turn sill started for the person (`folds`): one pressable line with a chevron, what it
+    /// was for and how many items it holds; opened, its items as the feed shows them.
+    fn fold<'a>(&'a self, view: &'a SessionView, inside: Vec<&'a Item>, purpose: &str) -> Element<'a, Message> {
+        let key = fold_key(inside[0]);
+        let open = view.open_groups.contains(&key);
+        let running = fold_running(&view.conversation, &inside);
+        let quiet = alpha(P.fg, 0.55);
+        let line = button(
+            row![
+                text(if open { "▾" } else { "▸" }).size(style::SMALL).color(quiet).width(14),
+                text(crate::folds::label(purpose, running))
+                    .size(style::SMALL)
+                    .color(quiet)
+                    .width(Fill),
+                text(match inside.len() {
+                    1 => "1 item".to_string(),
+                    n => format!("{n} items"),
+                })
+                .size(style::TINY)
+                .color(alpha(P.fg, 0.4)),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        )
+        .padding([3, 6])
+        .width(Fill)
+        .style(style::row_button);
+        let mut body = Column::new().push(keys::press(line, Message::ToggleGroup(key)));
+        if open {
+            let mut opened = Column::new().spacing(12).padding(Padding { top: 6.0, right: 0.0, bottom: 4.0, left: 0.0 });
+            for entry in crate::tool_runs::entries(&inside, |_| false) {
+                opened = opened.push(if entry.len() > 1 {
+                    self.tool_run(view, inside[entry].to_vec())
+                } else {
+                    self.item(view, inside[entry.start])
+                });
+            }
+            body = body.push(opened);
+        }
+        ruled(2.0, alpha(P.fg, 0.18), container(body).width(Fill))
     }
 
     /// A run of tool calls (`tool_runs`) as one ruled block: a line for each group of calls that
@@ -2492,6 +2572,25 @@ fn asked<'a>(mut card: Column<'a, Message>, question: &'a Question) -> Column<'a
         );
     }
     card
+}
+
+/// A fold's place in the open set (`SessionView::open_groups`), apart from its first item's own.
+fn fold_key(first: &Item) -> String {
+    format!("fold {}", first.item_id)
+}
+
+/// Whether the agent is still at a folded turn: its turn runs, or its prompt waits for one.
+fn fold_running(conversation: &sill_client::conversation::Conversation, inside: &[&Item]) -> bool {
+    inside.iter().any(|item| {
+        item.turn_id.as_deref().is_some_and(|t| conversation.turn_pending(t))
+    }) || inside.last().is_some_and(|item| {
+        item.kind == "user"
+            && item
+                .submission_id
+                .as_ref()
+                .and_then(|id| conversation.submissions.get(id))
+                .is_some_and(|s| s.outcome == "pending")
+    })
 }
 
 /// An error or a notice: its colour as text, tint and rule (`.sill-error-note`).

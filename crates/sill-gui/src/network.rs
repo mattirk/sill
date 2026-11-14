@@ -243,6 +243,7 @@ impl App {
                 "[sill: the person allowed network access to {host}. Carry on with what needed it.]"
             ),
             attachments: vec![],
+            purpose: None,
         };
         self.act(
             id,

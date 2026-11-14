@@ -221,6 +221,24 @@ jail sees (`~/.local/state/sill/keys/<agent>/<method>`), and the relay reads it 
 agent process), a saved key for an offered method answers it without `authentication` being set;
 refused once, the login card shows with the agent's reason. `agents.reset` removes saved keys.
 
+### What a turn is for (added 2026-11-10)
+
+A `Turn` has `purpose`: why sill, not the person, started it. `summary` is a summary the daemon
+asked the agent for (a checkpoint or a session's end, `ask_summary`); `commit` is the turn a
+submission with `purpose` `commit` started. It is null, or absent in records from before the
+field, for the person's own turns and anything the agent began itself. A `Submit` may carry
+`purpose`: a prompt a frontend wrote for the person rather than one they typed. Only `commit`
+(Apply's request to commit a workspace, docs/parallel-coding.md) is accepted; any other value is
+refused with `invalid_params`, and an absent `purpose` keeps an older submission's idempotency
+fingerprint. The `Submission` record repeats it, so a client knows the prompt's item (the `user`
+item whose `submission_id` names it) belongs with its turn.
+
+The daemon records the purpose when it queues the prompt (`AdapterState::prompt_purpose`) and
+the adapter stamps it on the turn that prompt starts, keeping it through the turn's later
+updates. A client folds such a turn rather than guessing from its words (sill-gui: *Folded
+turns*, docs/sill-gui.md). The field needs no capability: a client that ignores it shows the
+turn as any other.
+
 ### Tool calls and their command
 
 A tool item's `tool` has `title`, `kind`, `status`, `detail`, `diff`, `parent_item_id` and

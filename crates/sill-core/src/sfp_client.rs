@@ -484,7 +484,7 @@ mod tests {
         let mut view=View {session_id:"s".into(),subscription_id:"sub".into(),..Default::default()};
         let submission=Submission { submission_id:"sub-1".into(),session_id:"s".into(),accepted_seq:"1".into(),agent_generation_id:"g".into(),text:"look".into(),
             attachments:vec![Attachment::Uploaded{upload_id:"inline-0-sub-1".into(),name:"shot.png".into(),mime:"image/png".into()},Attachment::Inline{name:"old.png".into(),mime:"image/png".into(),data_base64:"AAAA".into()}],
-            acceptance:"accepted".into(),delivery:"direct".into(),held:false,hold_reason:None,insertion:"pending".into(),outcome:"pending".into(),reason:None };
+            acceptance:"accepted".into(),delivery:"direct".into(),held:false,hold_reason:None,insertion:"pending".into(),outcome:"pending".into(),reason:None,purpose:None };
         view.accept(notification("1",Event::SubmissionUpdated {submission})).unwrap();
         let mut user=item(); user.kind="user".into(); user.submission_id=Some("sub-1".into()); user.content=vec![Content::text("look")];
         let shown=view.accept(notification("2",Event::ItemCreated {item:user})).unwrap();
@@ -524,7 +524,7 @@ mod tests {
     fn a_prompt_behind_a_held_one_says_why_it_waits() {
         let mut view=View {session_id:"s".into(),subscription_id:"sub".into(),..Default::default()};
         let sub=|id:&str,held:bool| Submission { submission_id:id.into(),session_id:"s".into(),accepted_seq:"1".into(),agent_generation_id:"g".into(),text:"t".into(),attachments:vec![],
-            acceptance:"accepted".into(),delivery:"queued".into(),held,hold_reason:None,insertion:"pending".into(),outcome:"pending".into(),reason:None };
+            acceptance:"accepted".into(),delivery:"queued".into(),held,hold_reason:None,insertion:"pending".into(),outcome:"pending".into(),reason:None,purpose:None };
         view.accept(notification("1",Event::SubmissionUpdated {submission:sub("first",true)})).unwrap();
         let shown=view.accept(notification("2",Event::SubmissionUpdated {submission:sub("second",false)})).unwrap();
         assert!(shown.iter().any(|e|matches!(e,wire::Event::Note(n) if n.contains("waits behind the held prompt"))), "{shown:?}");
@@ -536,7 +536,7 @@ mod tests {
             submission_id: id.into(), session_id: "s".into(), accepted_seq: seq.into(),
             agent_generation_id: "g".into(), text: id.into(), attachments: vec![],
             acceptance: "accepted".into(), delivery: "queued".into(), held: false,
-            hold_reason: None, insertion: "pending".into(), outcome: "pending".into(), reason: None,
+            hold_reason: None, insertion: "pending".into(), outcome: "pending".into(), reason: None, purpose: None,
         };
         let rows = |events: Vec<wire::Event>| -> Vec<serde_json::Value> {
             events.into_iter().find_map(|e| match e {
@@ -570,7 +570,7 @@ mod tests {
             submission_id: "pending".into(), session_id: "s".into(), accepted_seq: "1".into(),
             agent_generation_id: "g".into(), text: "waiting text".into(), attachments: vec![],
             acceptance: "accepted".into(), delivery: "queued".into(), held: false,
-            hold_reason: None, insertion: "pending".into(), outcome: "pending".into(), reason: None,
+            hold_reason: None, insertion: "pending".into(), outcome: "pending".into(), reason: None, purpose: None,
         };
         view.accept(notification("1", Event::SubmissionUpdated { submission: submission.clone() })).unwrap();
         let mut user = item();

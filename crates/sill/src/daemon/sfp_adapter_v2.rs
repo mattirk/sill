@@ -64,7 +64,8 @@ impl AdapterState {
                 "running"|"requires_action"=>{
                     self.v2.active_seen=true;
                     let activity=if state=="running"{"working"}else{"waiting"};
-                    let turn=self.turn.get_or_insert_with(||sfp::Turn {turn_id:id("turn"),agent_generation_id:self.generation.clone(),activity:"unknown".into(),outcome:"pending".into(),reason:None});
+                    if self.turn.is_none() {self.turn=Some(self.new_turn("unknown"));}
+                    let turn=self.turn.as_mut().unwrap();
                     if turn.activity!=activity {turn.activity=activity.into();out.push(sfp::Event::TurnUpdated{turn:turn.clone()});}
                     self.v2.last_turn=Some(turn.turn_id.clone());
                     next.turn_id=Some(turn.turn_id.clone());next.activity=activity.into();

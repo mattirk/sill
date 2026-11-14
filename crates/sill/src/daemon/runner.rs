@@ -462,6 +462,7 @@ impl Runner {
             st.summary_deadline = Some(sill_core::store::now() + SUMMARY_CAP.as_secs() as i64);
             st.summary = Some((kind, String::new(), st.summary_gen));
             Self::queue(&mut st, relay::Command::Prompt { text: prompt.into(), attachments: vec![] });
+            st.adapter.prompt_purpose(Some("summary".into()));
             store.append(&self.id, "note", note, "")?;
             let journal = sill_core::sfp::Journal::new(store)?;
             let mut events = journal.append(&self.id, None, &[sill_proto::sfp::Event::ItemCreated {
@@ -542,6 +543,7 @@ impl Runner {
                 *text = p.text.clone();
                 prepared = Some(p);
                 st.busy = true;
+                st.adapter.prompt_purpose(None);
             }
             let remembered = cmd.clone().into_acp();
             let controls = st.controls.clone();

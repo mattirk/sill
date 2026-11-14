@@ -321,6 +321,22 @@ impl Conversation {
         places
     }
 
+    /// Why sill, not the person, started what `item` belongs to (`Turn::purpose`): its turn's
+    /// purpose, or for the person's item its submission's (`Submit::purpose`). None for the
+    /// person's own work.
+    pub fn purpose(&self, item: &Item) -> Option<&str> {
+        if item.kind == "user" {
+            let id = item.submission_id.as_ref()?;
+            return self.submissions.get(id)?.purpose.as_deref();
+        }
+        self.turns.get(item.turn_id.as_ref()?)?.purpose.as_deref()
+    }
+
+    /// Whether `turn_id` is still running.
+    pub fn turn_pending(&self, turn_id: &str) -> bool {
+        self.turns.get(turn_id).is_some_and(|t| t.outcome == "pending")
+    }
+
     /// The note a turn ends with, when it did not complete: stopped by the person, or failed.
     pub fn turn_end(&self, turn_id: &str) -> Option<String> {
         let turn = self.turns.get(turn_id)?;

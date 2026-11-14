@@ -302,7 +302,8 @@ impl App {
                 }
                 let prompt = commit_prompt(&d.workspace.source.display);
                 view.workspaces.committing = Some((workspace, d.state_tree.clone()));
-                self.submit(&session, prompt, vec![])
+                // the conversation folds the prompt and its turn to one line (`folds`)
+                self.submit_for(&session, prompt, vec![], Some("commit".into()))
             }
             Event::Committed(session, loaded) => {
                 let Some(view) = self.views.get_mut(&session) else { return Task::none() };

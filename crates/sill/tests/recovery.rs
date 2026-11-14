@@ -586,6 +586,11 @@ fn exercise_recovery(adopt_checkpoint: bool, lose_worker: bool) {
     fixture.wait("partial closing summary committed", || fixture.snapshot()["agent_md"].as_str().is_some_and(|text| text.contains("Summary before restart")));
     // an adopted checkpoint is the closing summary from then on
     assert_eq!(summarizing(&fixture), json!("end"));
+    // the summary's turn says it is one, for frontends to fold; the person's turn does not
+    let (_, records) = public_snapshot(&mut Connection::connect(&fixture.socket()).unwrap(), &fixture.session);
+    let purposes: Vec<&Value> = records.iter().filter(|r| r["type"] == "turn").map(|r| &r["turn"]["purpose"]).collect();
+    assert!(purposes.iter().any(|p| p.as_str() == Some("summary")), "{purposes:?}");
+    assert!(purposes.iter().any(|p| p.is_null()), "{purposes:?}");
     fixture.stop(false);
     release.send(()).unwrap(); // the summary completes with nobody attached, including no daemon
     assert_eq!(observed.recv_timeout(Duration::from_secs(5)).unwrap(), "summary-complete");

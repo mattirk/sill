@@ -216,7 +216,7 @@ mod tests {
         let store=Store::open(&root.join("store.db")).unwrap();let session=store.create("test","default").unwrap();
         let original=from_inline(&store,&session.id,"submission",0,"image.png","image/png","YQ==").unwrap();
         let journal=sill_core::sfp::Journal::new(&store).unwrap();journal.ensure(&session.id,"g").unwrap();
-        let input=sill_proto::sfp::Submit{session_id:session.id.clone(),submission_id:"submission".into(),text:"work".into(),attachments:vec![sill_proto::sfp::Attachment::Uploaded{upload_id:original.0.clone(),name:original.1.clone(),mime:"image/png".into()}]};
+        let input=sill_proto::sfp::Submit{session_id:session.id.clone(),submission_id:"submission".into(),text:"work".into(),attachments:vec![sill_proto::sfp::Attachment::Uploaded{upload_id:original.0.clone(),name:original.1.clone(),mime:"image/png".into()}],purpose:None};
         journal.accept(&input,"queued").unwrap();
         assert_eq!(from_inline(&store,&session.id,"submission",0,"image.png","image/png","YQ==").unwrap(),original);
         assert_eq!(store.conn().query_row("SELECT count(*) FROM sfp_uploads",[],|r|r.get::<_,i64>(0)).unwrap(),1);

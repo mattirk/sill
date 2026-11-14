@@ -66,11 +66,23 @@ impl Outbox {
         text: String,
         attachments: Vec<sill_proto::sfp::Attachment>,
     ) -> Submit {
+        self.send_for(session_id, text, attachments, None)
+    }
+
+    /// A submission with a `purpose` (`Submit::purpose`): a prompt written for the person.
+    pub fn send_for(
+        &mut self,
+        session_id: &str,
+        text: String,
+        attachments: Vec<sill_proto::sfp::Attachment>,
+        purpose: Option<String>,
+    ) -> Submit {
         let submit = Submit {
             session_id: session_id.into(),
             submission_id: crate::request_id("prompt"),
             text,
             attachments,
+            purpose,
         };
         self.pending.push(Pending {
             submit: submit.clone(),

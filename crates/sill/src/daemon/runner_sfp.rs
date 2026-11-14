@@ -267,6 +267,7 @@ impl Runner {
             let prepared=st.context.prepare(store,&self.id,home,&submission.text)?;
             let attachments=attachments(store,&self.id,&submission.attachments,st.images.unwrap_or(true))?;
             Self::queue(st,relay::Command::Prompt{text:prepared.text.clone(),attachments});
+            st.adapter.prompt_purpose(submission.purpose.clone());
             st.context.commit(prepared); st.busy=true; st.active_submission=Some(submission.submission_id.clone());
             submission.delivery="direct".into();
             let events=journal.dispatched(&submission)?;
@@ -451,7 +452,7 @@ mod tests {
             {let mut st=runner.st.lock().unwrap();st.ready=Some(("agent".into(),false));Journal::new(&store).unwrap().ensure(&id,&st.generation_id).unwrap();runner.save(&store,&st).unwrap();}
             Self {dir,store,runner,received}
         }
-        fn input(&self)->p::Submit {p::Submit {session_id:self.runner.id.clone(),submission_id:"submission".into(),text:"work".into(),attachments:vec![]}}
+        fn input(&self)->p::Submit {p::Submit {session_id:self.runner.id.clone(),submission_id:"submission".into(),text:"work".into(),attachments:vec![],purpose:None}}
         fn reopened(&self)->(Store,Arc<Runner>) {
             let store=Store::open(&self.dir.join("s.db")).unwrap();
             let runner=Runner::new(&self.runner.id,self.runner.relay.clone(),Runner::load(&self.runner.id,&store).unwrap()).unwrap();
@@ -459,6 +460,26 @@ mod tests {
         }
     }
     impl Drop for Fixture {fn drop(&mut self){let _=std::fs::remove_dir_all(&self.dir);}}
+
+    #[test]
+    fn a_submissions_purpose_marks_the_turn_it_starts_and_only_that_one() {
+        let f=Fixture::new();let j=Journal::new(&f.store).unwrap();let mut st=f.runner.st.lock().unwrap();
+        let turns=|events:Vec<p::StoredEvent>|events.into_iter().filter_map(|e|match e.event {p::Event::TurnUpdated{turn}=>Some(turn),_=>None}).collect::<Vec<_>>();
+        let mut commit=f.input();commit.submission_id="commit".into();commit.purpose=Some("commit".into());
+        let (submission,_)=j.accept(&commit,"queued").unwrap();assert_eq!(submission.purpose.as_deref(),Some("commit"));
+        f.runner.sfp_commit_submission(&f.store,&f.dir,&mut st,submission).unwrap();
+        let started=turns(f.runner.sfp_project(&f.store,&mut st,&relay::Event::TurnStarted,1).unwrap());
+        assert_eq!(started[0].purpose.as_deref(),Some("commit"));
+        let ended=turns(f.runner.sfp_project(&f.store,&mut st,&relay::Event::Stopped(acp::StopReason::EndTurn),2).unwrap());
+        assert!(ended.iter().all(|t|t.purpose.as_deref()==Some("commit")),"the turn keeps its purpose to its end");
+        st.busy=false;
+        let (plain,_)=j.accept(&f.input(),"queued").unwrap();
+        f.runner.sfp_commit_submission(&f.store,&f.dir,&mut st,plain).unwrap();
+        let started=turns(f.runner.sfp_project(&f.store,&mut st,&relay::Event::TurnStarted,3).unwrap());
+        assert_eq!(started[0].purpose,None,"the person's own prompt");
+        let mut odd=f.input();odd.submission_id="odd".into();odd.purpose=Some("anything".into());
+        assert!(j.accept(&odd,"queued").is_err(),"only known purposes");
+    }
 
     #[test]
     fn send_now_goes_before_older_queued_prompts() {

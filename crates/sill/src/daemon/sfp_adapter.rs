@@ -26,6 +26,9 @@ pub(crate) struct AdapterState {
     replaying: bool,
     /// The turn's plan item: each ACP plan replaces the last, in place.
     plan_item: Option<String>,
+    /// The purpose of the turn the next prompt starts (`sfp::Turn::purpose`), set when the runner
+    /// queues that prompt and taken by the turn it starts.
+    next_purpose: Option<String>,
     /// Update kinds the ACP loop dumped instead of rendering, logged once each.
     unhandled: std::collections::BTreeSet<String>,
     /// Image bytes the last `project` referenced; the runner keeps them in the same transaction.
@@ -86,12 +89,19 @@ impl AdapterState {
     }
     pub fn turn_id(&self) -> Option<&str> { self.turn.as_ref().map(|t| t.turn_id.as_str()) }
     pub fn take_media(&mut self) -> Vec<AgentMedia> { std::mem::take(&mut self.media) }
+    /// The prompt being queued starts a turn for `purpose` (null: the person's own).
+    pub fn prompt_purpose(&mut self, purpose: Option<String>) { self.next_purpose = purpose; }
+    /// A new pending turn, carrying the queued prompt's purpose.
+    fn new_turn(&mut self, activity: &str) -> sfp::Turn {
+        sfp::Turn { turn_id: id("turn"), agent_generation_id: self.generation.clone(), activity: activity.into(), outcome: "pending".into(), reason: None, purpose: self.next_purpose.take() }
+    }
 
     /// `existing_question` is the durable current record for `Resolved`, preserving the winner.
     /// The journal stamps new items' creation sequence when it appends each event.
     pub fn project(&mut self, session: &sfp::SessionState, event: &relay::Event, existing_question: Option<&sfp::Question>) -> Vec<sfp::Event> {
         if self.generation != session.agent_generation_id {
-            *self = Self { generation: session.agent_generation_id.clone(), ..Default::default() };
+            // a prompt queued before the agent changed is still the next one it is sent
+            *self = Self { generation: session.agent_generation_id.clone(), next_purpose: self.next_purpose.take(), ..Default::default() };
         }
         let mut out = Vec::new();
         let mut next = session.clone();
@@ -138,7 +148,7 @@ impl AdapterState {
                 self.thought_item = None;
                 self.plan_item = None;
                 self.subagent_items.clear();
-                let turn = sfp::Turn { turn_id: id("turn"), agent_generation_id: self.generation.clone(), activity: if self.is_v2() { "unknown" } else { "working" }.into(), outcome: "pending".into(), reason: None };
+                let turn = self.new_turn(if self.is_v2() { "unknown" } else { "working" });
                 next.turn_id = Some(turn.turn_id.clone());
                 next.activity = turn.activity.clone();
                 self.turn = Some(turn.clone());

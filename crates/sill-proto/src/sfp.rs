@@ -147,6 +147,11 @@ pub struct Turn {
     pub activity: String,
     pub outcome: String,
     pub reason: Option<Reason>,
+    /// Why sill started the turn when the person did not: `summary` (a summary sill asked the
+    /// agent for), `commit` (a submission whose `purpose` is `commit`); null for the person's own
+    /// turns and the agent's. Frontends fold such a turn to one line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Reason { pub code: String, pub message: String }
@@ -167,6 +172,11 @@ pub struct Submit {
     pub text: String,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
+    /// A prompt a frontend wrote for the person rather than one they typed: `commit` (Apply's
+    /// request to commit a workspace). Null or absent for the person's own words; other values
+    /// are refused. Carried to the submission and to the turn it starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Submission {
@@ -183,6 +193,9 @@ pub struct Submission {
     pub insertion: String,
     pub outcome: String,
     pub reason: Option<Reason>,
+    /// The submit's `purpose`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SubmissionKey { pub session_id: String, pub submission_id: String }

@@ -389,6 +389,7 @@ impl<'a> Journal<'a> {
         self.atomic(|| {
             self.exists(&input.session_id)?;
             validate_id(&input.submission_id)?;
+            if input.purpose.as_deref().is_some_and(|p| p!="commit") { return Err(error("invalid_params","unknown submission purpose")); }
             if serde_json::to_string(&input.text)?.len()>1024*1024 {return Err(DomainError::limit(sill_proto::rpc::LimitScope::Request, Some(1048576), "prompt text exceeds 1 MiB encoded limit"));}
             let fingerprint = serde_json::to_string(input)?;
             let previous: Option<String> = self.store.conn().query_row("SELECT input FROM sfp_submission_inputs WHERE session_id=?1 AND submission_id=?2", params![input.session_id,input.submission_id], |r| r.get(0)).optional()?;
@@ -404,7 +405,7 @@ impl<'a> Journal<'a> {
                 submission_id:input.submission_id.clone(), session_id:input.session_id.clone(), accepted_seq:String::new(),
                 agent_generation_id:state.agent_generation_id, text:input.text.clone(), attachments:input.attachments.clone(),
                 acceptance:"accepted".into(), delivery:delivery.into(), held:false, hold_reason:None,
-                insertion:"pending".into(), outcome:"pending".into(), reason:None,
+                insertion:"pending".into(), outcome:"pending".into(), reason:None, purpose:input.purpose.clone(),
             };
             // the prompt's conversation item comes when it is sent (`dispatched`): a queued prompt
             // belongs where the agent reads it, not where it was typed
@@ -628,7 +629,7 @@ mod tests {
             Self {dir,store,id}
         }
         fn journal(&self)->Journal<'_> { Journal::new(&self.store).unwrap() }
-        fn submit(&self,id:&str)->Submit { Submit {session_id:self.id.clone(),submission_id:id.into(),text:"hello".into(),attachments:vec![]} }
+        fn submit(&self,id:&str)->Submit { Submit {session_id:self.id.clone(),submission_id:id.into(),text:"hello".into(),attachments:vec![],purpose:None} }
     }
     impl Drop for Fixture { fn drop(&mut self) { let _=std::fs::remove_dir_all(&self.dir); } }
     fn item(id:&str)->Item { Item {item_id:id.into(),created_seq:String::new(),turn_id:None,submission_id:None,agent_generation_id:"g1".into(),kind:"agent".into(),content:vec![Content::text("hello")],tool:None} }

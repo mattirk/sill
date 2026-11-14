@@ -52,6 +52,7 @@ mod viewer;
 mod workspaces;
 mod workspaces_ui;
 mod files;
+mod folds;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -3286,15 +3287,28 @@ impl App {
     /// `text` goes to `session`'s agent as a prompt of the person's: the composer's, or one a
     /// button writes for them (the shelf's Resolve). The draft is not touched.
     pub(crate) fn submit(&mut self, session: &str, text: String, attachments: Vec<media::DraftAttachment>) -> Task<Message> {
+        self.submit_for(session, text, attachments, None)
+    }
+
+    /// [`App::submit`] with the prompt's `purpose` (`Submit::purpose`): one a button wrote for
+    /// the person whose turn the conversation folds (Apply's commit).
+    pub(crate) fn submit_for(
+        &mut self,
+        session: &str,
+        text: String,
+        attachments: Vec<media::DraftAttachment>,
+        purpose: Option<String>,
+    ) -> Task<Message> {
         let Some(view) = self.views.get_mut(session) else {
             return Task::none();
         };
         view.follow_tail = true;
         view.failed = None;
-        let submit = view.outbox.send_with_attachments(
+        let submit = view.outbox.send_for(
             session,
             text,
             attachments.iter().map(|a| a.attachment.clone()).collect(),
+            purpose,
         );
         view.pending_attachments.insert(submit.submission_id.clone(), attachments);
         let reopen = view.lane.is_none();

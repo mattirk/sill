@@ -6655,6 +6655,13 @@
         "outcome": {
           "type": "string"
         },
+        "purpose": {
+          "description": "The submit's `purpose`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "reason": {
           "anyOf": [
             {
@@ -6714,6 +6721,13 @@
             "$ref": "#/$defs/Attachment"
           },
           "type": "array"
+        },
+        "purpose": {
+          "description": "A prompt a frontend wrote for the person rather than one they typed: `commit` (Apply's\nrequest to commit a workspace). Null or absent for the person's own words; other values\nare refused. Carried to the submission and to the turn it starts.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "session_id": {
           "type": "string"
@@ -7154,6 +7168,13 @@
         },
         "outcome": {
           "type": "string"
+        },
+        "purpose": {
+          "description": "Why sill started the turn when the person did not: `summary` (a summary sill asked the\nagent for), `commit` (a submission whose `purpose` is `commit`); null for the person's own\nturns and the agent's. Frontends fold such a turn to one line.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "reason": {
           "anyOf": [
