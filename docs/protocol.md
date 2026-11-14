@@ -188,8 +188,9 @@ protocol is separately versioned and remains internal.
 
 The current wire version is 6 and earlier development versions include 1. SFP v1 therefore needs
 an unambiguous protocol identity and negotiation scheme; simply resetting `PROTOCOL` to 1 would
-collide with the old meaning. Exact handshake fields and legacy transition policy remain to be
-specified. A naming change alone does not change the existing `_sill/` method namespace.
+collide with the old meaning. Exact handshake fields remain to be specified. The transition is a
+coordinated upgrade of clients and daemon, with no protocol 6 compatibility layer. A naming change
+alone does not change the existing `_sill/` method namespace.
 
 ### ACP v2 considerations
 
@@ -207,6 +208,10 @@ Design SFP for the following semantics now, while retaining ACP v1 support:
   running or that automatic cleanup is safe. Do not freeze the runner's single `busy` flag as
   the public model. Define cancellation scope and distinguish a cancellation request from its
   confirmed outcome.
+- **Prompts during work steer when supported.** By default, deliver the prompt into active work
+  when the agent supports steering; otherwise queue it. Specify how that support is determined
+  and how queued versus steering submissions are reported, independently of acceptance and
+  completion.
 - **Transcript items have durable identities.** Messages, tool calls and their updates need IDs,
   with documented omitted/null/replacement/append behavior. Replaying or reconnecting must not
   duplicate items. Specify ordering, cursor scope, snapshot-to-live handoff, retention gaps and
@@ -243,19 +248,27 @@ Design SFP for the following semantics now, while retaining ACP v1 support:
    reconnection and PTY resize/exit semantics. Socket and SSH clients must observe the same contract.
 4. Specify negotiation, extension rules, lifecycle ownership and migration from development
    protocol 6. A running daemon's compatibility must be evaluated independently of its build ID.
+   On incompatibility, explain the mismatch and require explicit action before replacing or
+   restarting either a local or remote daemon. The initial SFP v1 transition upgrades clients
+   and daemon together; it does not retain a protocol 6 compatibility layer.
 5. Exercise the contract with a small independent client importing no `sill-core` types. Include
    reconnect/replay, duplicate submission, multiple observers answering one question, unknown
    variants and stream teardown in conformance checks. A Rust schema-generation test alone is
    insufficient evidence of frontend independence.
+6. Implement and exercise an experimental ACP v2 adapter before freezing SFP v1, validating the
+   conversation lifecycle and replay against actual v2 behavior. Keep draft v2 support opt-in
+   and retain ACP v1 support; the v2 adapter is a freeze prerequisite, not deferred until after
+   SFP v1 stabilizes.
 
-### Open product decisions
+### Product decisions (answered 2026-11-03)
 
-Asked through a form on 2026-11-03; unanswered choices remain open, not implicitly approved.
-Technical details above still need a concrete specification after these choices.
+The person answered these interactively. They govern the SFP v1 work; they do not describe
+changes already implemented in development protocol 6. The technical details above still need
+a concrete specification.
 
-| Decision | Recommended choice | Alternative |
-|---|---|---|
-| Transition from protocol 6 | Coordinated upgrade to SFP v1, without a legacy compatibility layer | Serve both during a transition period |
-| Incompatible daemon | Explain mismatch and offer explicit restart/upgrade; no automatic replacement | Retain automatic replacement locally, explicit action remotely |
-| ACP v2 implementation timing | Design for v2 now; gate its adapter until stable and keep v1 working | Require an experimental v2 adapter before freezing SFP v1 |
-| Prompt submitted during work | Queue by default; offer steering when supported | Require explicit queue/steer choice, or steer by default with queue fallback |
+| Decision | Chosen behavior |
+|---|---|
+| Transition from protocol 6 | Upgrade clients and daemon together; no legacy compatibility layer. |
+| Incompatible daemon | Explain the mismatch and require explicit action before replacement or restart, locally and remotely. |
+| ACP v2 implementation timing | Validate SFP with an experimental ACP v2 adapter before freezing v1; keep draft support opt-in and retain ACP v1. |
+| Prompt submitted during work | Steer active work when supported; otherwise queue the prompt. |
