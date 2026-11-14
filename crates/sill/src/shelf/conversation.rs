@@ -1144,7 +1144,9 @@ button.sill-md-image:hover { opacity: 0.85; }
 /* the drawer's search box: as quiet as the bar's buttons, a plain field until it holds text */
 .sill-tree-search, .sill-tree-search:focus-within { min-height: 0; padding: 0 4px; font-size: 90%; background: transparent; border: none; box-shadow: none; outline: none; }
 .sill-tree-search > text, .sill-tree-search > text:focus { outline: none; box-shadow: none; }
-.sill-tree-search > image { -gtk-icon-size: 1.1em; opacity: 0.6; }
+/* every search entry's glyphs are sill's own (icons::adopt_search_entry), one size everywhere */
+searchentry > image { -gtk-icon-size: 1.1em; }
+.sill-tree-search > image { opacity: 0.6; }
 .sill-tree-panel .sill-pin { opacity: 0; }
 .sill-tree-panel row:hover .sill-pin { opacity: 0.6; }
 .sill-tree-panel row:hover .sill-pin:hover { opacity: 1; }

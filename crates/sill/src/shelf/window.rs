@@ -1527,6 +1527,7 @@ impl Shelf {
             // prompts, with folder: agent: since: — the list keeps the hits, best first
             let search = gtk::SearchEntry::new();
             search.add_css_class("sill-menu-search");
+            super::icons::adopt_search_entry(&search);
             search.set_tooltip_text(Some("Search the sessions' titles, summaries, notes and your prompts. folder:~/path, agent:claude and since:30d narrow it."));
             menu.append(&search);
             let list = gtk::Box::new(gtk::Orientation::Vertical, 0);

@@ -73,6 +73,7 @@ impl AgentsPage {
         // search + filter + refresh on one line
         let bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let search = gtk::SearchEntry::new();
+        icons::adopt_search_entry(&search);
         search.set_placeholder_text(Some("Search agents…"));
         search.set_hexpand(true);
         bar.append(&search);
@@ -346,9 +347,9 @@ impl AgentsPage {
             state_box.remove(&c);
         }
         if self.installing.borrow().contains(&e.id) {
-            let sp = gtk::Spinner::new();
+            let sp = super::spinner::Spinner::new(); // not GtkSpinner: see spinner.rs
             sp.set_spinning(true);
-            state_box.append(&sp);
+            state_box.append(&sp.area);
             let l = gtk::Label::new(Some("installing…"));
             l.add_css_class("dim-label");
             state_box.append(&l);

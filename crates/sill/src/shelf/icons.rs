@@ -138,6 +138,19 @@ pub fn adopt_glyph(image: &gtk::Image, name: &str) {
     }
 }
 
+/// A search entry's magnifier and clear cross are the desktop's themed icons, a different size on
+/// every machine (2026-11-02: small on Arch, larger on Debian): swap them for sill's glyphs, sized
+/// in em by the stylesheet's `searchentry > image` rule like every other glyph on the shelf.
+pub fn adopt_search_entry(entry: &gtk::SearchEntry) {
+    let mut child = entry.first_child();
+    while let Some(w) = child {
+        if let Ok(image) = w.clone().downcast::<gtk::Image>() {
+            adopt_glyph(&image, if image.prev_sibling().is_none() { "sill-search" } else { "sill-x" });
+        }
+        child = w.next_sibling();
+    }
+}
+
 /// A flat button showing glyph `name` ([`glyph_image`]).
 pub fn glyph_button(name: &str) -> gtk::Button {
     let b = gtk::Button::new();
