@@ -3,7 +3,8 @@
 //! auto-allow of the agent's permission requests, which never widens jail access) and **Jail
 //! access** (the daemon's capability states: public web, test desktop, private bus, GPU, and the
 //! hosts approved for this session), and a separate **Host actions** group. While the session has
-//! more than its policy's baseline, a "Jailed · expanded access" caption stays over the composer.
+//! more than its policy's baseline, the shield is coloured and its tooltip names what it has (the
+//! "Jailed · expanded access" caption over the composer went 2026-11-13, at the person's request).
 //!
 //! The daemon decides everything shown: the next build's preview and, for a running jail, its
 //! launch snapshot. A change goes to the daemon and the panel reads both again; what differs
@@ -113,6 +114,8 @@ pub struct Perms {
     pub filesystem_open: bool,
     /// The granular toggles are shown under the Basic switches.
     pub advanced: bool,
+    /// Host control's operations to activate again after the Development switch's restart.
+    reactivate: Vec<String>,
     pub views: Option<Views>,
     pub error: Option<String>,
     reading: Option<u64>,
@@ -222,6 +225,17 @@ impl App {
     }
 
     pub(crate) fn permissions_event(&mut self, event: Event) -> Task<Message> {
+        // a Basic switch waits for a session that is still attaching (after a restart, say):
+        // a second restart or an activation on top of it leaves the session half started
+        if let Event::SetDevelopment(id, _) | Event::HostGroup(id, ..) = &event
+            && let Some(view) = self.views.get_mut(id)
+            && matches!(view.status, crate::Status::Connecting | crate::Status::Reconnecting(_) | crate::Status::Loading)
+        {
+            view.permissions.menu = false;
+            self.permission_serial += 1;
+            view.permissions.note(self.permission_serial, "The session is still starting; try again in a moment.".into(), true);
+            return Task::none();
+        }
         match event {
             Event::Filesystem(id) => {
                 if let Some(view) = self.views.get_mut(&id) { view.permissions.filesystem_open = !view.permissions.filesystem_open; }
@@ -479,7 +493,6 @@ impl App {
     }
 
     fn permission_done(&mut self, id: String, change: Change, outcome: Outcome) -> Task<Message> {
-        let running = self.running(&id);
         if outcome.is_done()
             && let Change::AutoAllow(enabled) = change
             && let Some(session) = self.all_sessions.iter_mut().find(|s| s.session_id == id)
@@ -500,7 +513,9 @@ impl App {
         if let Outcome::Done(value) = &outcome
             && let Ok(changed) = serde_json::from_value::<PermissionsChanged>(value.clone())
         {
-            restart_required = changed.restart_required && running;
+            // the daemon's word (it knows whether the jail runs; this window's session record
+            // can be seconds old, and a new session's says stopped until the next list)
+            restart_required = changed.restart_required;
             if let Some(views) = &mut perms.views {
                 views.preview = changed.preview;
             }
@@ -541,11 +556,31 @@ impl App {
         if let Some(view) = self.views.get_mut(&id) {
             view.permissions.note(serial, said, failed);
         }
-        if matches!(change, Change::Restart) && outcome.is_done() {
-            self.reattach(&id);
+        let mut reactivate = Task::none();
+        if matches!(change, Change::Restart) {
+            let operations = self.views.get_mut(&id).map(|v| std::mem::take(&mut v.permissions.reactivate)).unwrap_or_default();
+            if outcome.is_done() {
+                self.reattach(&id);
+                if !operations.is_empty()
+                    && let Some(view) = self.views.get_mut(&id)
+                {
+                    view.host_control.selected = operations.into_iter().collect();
+                    reactivate = self.host_control_event(crate::host_control::Event::Activate(id.clone()));
+                }
+            }
         }
         // the Development switch and the shield menu's choice go straight on to the restart it needs
         if matches!(change, Change::DevelopmentRestarting | Change::DevelopmentOff) && outcome.is_done() && restart_required {
+            // a restart ends Host control (the daemon revokes it when the jail stops): what the
+            // person had switched on comes back after it
+            let active: Vec<String> = self
+                .session(&id)
+                .and_then(|s| s.host_control.as_ref())
+                .map(|brief| brief.operations.clone())
+                .unwrap_or_default();
+            if let Some(view) = self.views.get_mut(&id) {
+                view.permissions.reactivate = active;
+            }
             return self.permissions_event(Event::Restart(id, Change::Restart));
         }
         let session = id.clone();
@@ -562,7 +597,7 @@ impl App {
         if matches!(outcome, Outcome::Refused { .. } | Outcome::NotSent(_)) {
             return expire;
         }
-        Task::batch([expire, self.list(), self.read_permissions(&id)])
+        Task::batch([expire, reactivate, self.list(), self.read_permissions(&id)])
     }
 }
 
@@ -578,7 +613,7 @@ pub fn indicator<'a>(view: &'a SessionView, session: Option<&Session>) -> Elemen
     let on = session.map(crate::host_control::groups_on).unwrap_or_default();
     let color = if on.contains(&crate::host_control::Group::Host) {
         P.warning
-    } else if !expanded.is_empty() || !on.is_empty() {
+    } else if !expanded.is_empty() || !on.is_empty() || view.permissions.development_on() {
         alpha(style::yellow(), 0.85)
     } else if view.permissions.open {
         P.accent
@@ -639,38 +674,6 @@ pub fn indicator<'a>(view: &'a SessionView, session: Option<&Session>) -> Elemen
 
 /// The Basic switch for the development permissions, in the panel and the shield menu.
 pub const DEVELOPMENT_SWITCH: &str = "Development";
-
-/// "Jailed · expanded access" over the composer, in the host terminal's warning treatment but
-/// naming the jail: the agent is still inside it. Pending changes without expanded access
-/// remain available through the shield tooltip and permissions panel.
-pub fn caption<'a>(view: &'a SessionView, session: Option<&Session>) -> Option<Element<'a, Message>> {
-    let running = session.is_some_and(|s| s.running);
-    let expanded = view.permissions.expanded(running);
-    let pending = view.permissions.restart_pending(running) || session.is_some_and(|s| s.policy_changed);
-    if expanded.is_empty() {
-        return None;
-    }
-    let mut said = format!("Jailed · expanded access · {}", expanded.join(" · "));
-    let color = P.warning;
-    if pending {
-        said.push_str(" · permission changes apply after a restart");
-    }
-    Some(
-        column![
-            rule::horizontal(1).style(style::rule_style(if expanded.is_empty() { P.border } else { P.warning })),
-            container(
-                text(said)
-                    .size(style::TINY)
-                    .color(color)
-                    .wrapping(text::Wrapping::None)
-            )
-            .width(Fill)
-            .clip(true)
-            .padding([2, 12]),
-        ]
-        .into(),
-    )
-}
 
 pub(crate) fn small<'a>(label: &'a str, message: Option<Message>) -> Element<'a, Message> {
     keys::press_maybe(
@@ -1369,7 +1372,6 @@ mod tests {
         assert_eq!(perms.expanded(false), vec!["Public web".to_string(), "1 approved host".to_string()]);
         assert_eq!(perms.agent_name.as_deref(), Some("Claude Code"));
         let mut ui = simulator(&app, (720.0, 860.0));
-        ui.find("Jailed · expanded access · 1 approved host · permission changes apply after a restart").unwrap();
         ui.find("Default · expanded access").unwrap();
         ui.find("needs restart").unwrap();
         ui.find("Restart now").unwrap();
@@ -1591,9 +1593,8 @@ mod tests {
         app.views.get_mut("demo").unwrap().permissions.views =
             Some(Views { preview, launch: Some(launch), agent_name: None });
         let mut ui = simulator(&app, (720.0, 860.0));
-        assert!(caption(&app.views["demo"], app.all_sessions.first()).is_none());
         assert!(ui.find("Default · jailed · permission changes apply after a restart").is_err());
-        assert!(ui.find("Jailed · expanded access").is_err(), "the running jail has no public web yet");
+        assert!(app.views["demo"].permissions.expanded(true).is_empty(), "the running jail has no public web yet");
     }
 
     /// Where the machine has a test desktop it is a row of its own (a switch), not folded with
@@ -1616,7 +1617,7 @@ mod tests {
         ui.find("Desktop development").unwrap();
         ui.find("Private D-Bus").unwrap();
         ui.find("GPU rendering").unwrap();
-        ui.find("Jailed · expanded access · Test desktop").unwrap();
+        assert!(ui.find("Jailed · expanded access · Test desktop").is_err(), "no caption: the shield says it");
     }
 
     /// A ghost's panel offers no choices: the daemon refuses them for ghosts anyway.

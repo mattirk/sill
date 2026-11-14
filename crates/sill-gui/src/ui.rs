@@ -1742,9 +1742,6 @@ impl App {
         if let Some(caption) = session.and_then(crate::host_control::caption) {
             composer = composer.push(caption);
         }
-        if let Some(caption) = crate::permissions::caption(view, session) {
-            composer = composer.push(caption);
-        }
         // the panel lays its two columns out by the width it actually gets
         let mut composer = composer
             .push(
