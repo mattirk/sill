@@ -48,8 +48,8 @@ part of this cleanup. Old workers are incompatible with private relay protocol 2
 
 Stable identity promotion still follows conformance and user testing. ACP v2 remains opt-in;
 real-agent validation and the release-contract decision are still outstanding. Historical
-protocols, old draft requirements and decisions are archived in
-[protocol-history.md](protocol-history.md); they do not override this baseline.
+protocols, old draft requirements and decisions are archived
+separately; they do not override this baseline.
 
 ## Transport
 
@@ -70,7 +70,7 @@ Unused tokens expire in 60 seconds; at most 64 wait at once. Descriptors never c
 Rust control calls default to a 120-second deadline (5 seconds for daemon status/shutdown);
 timeout closes the connection and does not establish whether a mutation took effect.
 
-The proposed [VM management API](managed-vms.md#vm-management-api-and-sfp) would serve a
+The proposed VM management API would serve a
 separate host-side VM manager, with its own protocol identity and version. SFP would still
 connect the frontend to the guest session daemon. Reusing SFP conventions for VM management
 does not add VM lifecycle methods to the current contract; that API remains unspecified.
@@ -421,7 +421,6 @@ proposal `{path, kind, on_host, initial_content?}` (`on_host`: the same path exi
 person's real home), `auth_methods` the agent's login methods `{id, name, description?}`,
 `login_method` set when the proposals come from a login, `login_files` the files it wrote under
 the proposed directories. The person's choice is saved with the baseline `_sill/agents.save`.
-[Design](agent-directories.md#directory-setup-by-probe-2026-11-08).
 
 Registry listing uses exclusive entry-ID keyset pagination with 1–128 entries (default 64),
 at most one newer version per entry and a 4 MiB entry payload budget per page. Pages reflect
@@ -450,7 +449,7 @@ Login/install streams carry UTF-8 newline-delimited tagged JSON, described by
   `invalid_state` without a port or when nothing listens). `_sill/operations.cancel
   {operation_id}` stops a running login, including one run by directory setup; it fails with
   code `cancelled` (`not_found` when no such login runs). A `busy` refusal of a job with an
-  operation names it in `details.operation_id`. [Design](login.md#the-browser-belongs-to-the-frontend-2026-11-11).
+  operation names it in `details.operation_id`.
 - `{type: "output", text}` for installer output.
 - `{type: "completed", agent_id}` establishes success. Read current agent configuration separately.
 - `{type: "failed", code: "operation_failed" | "cancelled", message}` establishes failure; filesystem changes
@@ -479,7 +478,7 @@ The public APIs below cover host/session administration, filesystem paths, Chang
 settings, policy and managed processes. There is no internal frontend RPC surface.
 
 The experimental native ACP v2 adapter is implemented behind `experimental_acp_v2 = true`, with
-ACP v1 retained as the default. See [native behavior and recovery evidence](sfp-operations.md#experimental-native-acp-v2).
+ACP v1 retained as the default.
 This milestone remains `sfp/1-dev.3`. **What stands between it and stable `sfp/1` (decided
 2026-11-03)** is only what could otherwise need `sfp/2`:
 
@@ -488,14 +487,14 @@ This milestone remains `sfp/1-dev.3`. **What stands between it and stable `sfp/1
   uploads and agent images), with the independent Python conformance suite rerun; then one
   coordinated cutover that sets the identity to `sfp/1`, bumps the private relay protocol,
   re-records [`sfp-1.schema.json`](sfp-1.schema.json) and moves this document's development notes to
-  [protocol-history.md](protocol-history.md).
+  the protocol history.
   Acceptance and the conformance rerun are complete as recorded below; only the coordinated
   cutover remains for that baseline. The policy inspection and import addition below (what
   remains of travelling policies since 2026-11-10) needs its own host/desktop acceptance before
   promotion.
 - **Not SFP release work:** the native ACP v2 adapter's own validation (a third-party v2
-  agent, upstream draft extensions, history replay after relay replacement; see
-  [sfp-operations.md](sfp-operations.md#experimental-native-acp-v2)). The adapter is opt-in and
+  agent, upstream draft extensions, history replay after relay replacement).
+  The adapter is opt-in and
   changes nothing on the SFP wire, so it ships, or doesn't, on its own schedule. Full replay
   after a relay replacement would improve behaviour within the existing contract: a new
   agent generation with explicit discontinuity is already the specified outcome. Performance
@@ -533,8 +532,7 @@ cutover, the identity check holds the baseline at `sfp/1-dev.3`. A deliberate pr
 break is recorded by deleting the file and rerunning the test. One such break: on 2026-11-07 the
 document was re-recorded after the GTK-only settings keys (`width`, `drawer_width`, `text_scale`,
 `host_terminal`) left the settings type with the GTK shelf. Another: on 2026-11-10 it was
-re-recorded when repository policy fragments were removed
-([history](development-history.md#repository-policy-fragments-removed-2026-11-10)). Gone:
+re-recorded when repository policy fragments were removed. Gone:
 the methods `_sill/policy.start` and `_sill/host_control.exception`; `fragment_ro`,
 `fragment_masks`, `sources` and `suggestions` of the policy view; `fragment` and `root` of
 `_sill/policy.check`; `conflicts`, `conflicts_error` and `exception` of the Host control state
@@ -601,13 +599,13 @@ named request/result records. They do not make the development identity a stable
 | `_sill/procs.running`, `_sill/procs.stop_command` | Need `sill.jail_processes`. What runs in the session's jail now, seen from outside the agent: commands (each tree once, at its root) and services (managed processes, programs listening on a port); empty when the jail is not running. Stop ends one command with its tree (asked, then killed after 3 s) by its root's pid in the jail; not proof of exit. |
 | `_sill/pins.list`, `_sill/pins.add`, `_sill/pins.remove`, `_sill/sessions.pin`, `_sill/sessions.unpin` | Global or exact-session pins; live byte-order keyset pages, 1–128 entries; global add canonicalizes. |
 | `_sill/agents.list`, `_sill/agents.get`, `_sill/agents.save`, `_sill/agents.remove`, `_sill/agents.available` | Explicit configured-agent definitions, ID keyset pages (1–128); save/remove user overrides; availability resolves the configured command on the daemon. |
-| `_sill/providers.list`, `_sill/providers.save`, `_sill/providers.remove`, `_sill/providers.test` | Need `sill.providers: 1` (2026-11-14, [model providers](model-providers.md)). Records on the daemon host for OpenAI-compatible endpoints. List → `{providers: [{provider, has_key, endpoint}], agents}`: never a key; `endpoint` is the one `host:port` sessions may reach, `agents` the ids the daemon hands providers to. Save `{provider, key?, clear_key?}` → `{endpoint}`: unknown record fields and loopback addresses are refused; at most 64 providers. Remove `{provider_id}` → `{removed}`, with the key. Test `{base_url, key?, provider_id?}` → `{models, endpoint}`: `GET <base_url>/models` from the daemon host with the given key or the saved one; changes nothing. |
+| `_sill/providers.list`, `_sill/providers.save`, `_sill/providers.remove`, `_sill/providers.test` | Need `sill.providers: 1` (2026-11-14). Records on the daemon host for OpenAI-compatible endpoints. List → `{providers: [{provider, has_key, endpoint}], agents}`: never a key; `endpoint` is the one `host:port` sessions may reach, `agents` the ids the daemon hands providers to. Save `{provider, key?, clear_key?}` → `{endpoint}`: unknown record fields and loopback addresses are refused; at most 64 providers. Remove `{provider_id}` → `{removed}`, with the key. Test `{base_url, key?, provider_id?}` → `{models, endpoint}`: `GET <base_url>/models` from the daemon host with the given key or the saved one; changes nothing. |
 | `_sill/agents.defaults.get`, `_sill/agents.defaults.set` | Named agent default controls; unknown agents refused. |
 | `_sill/registry.refresh`, `_sill/registry.installed`, `_sill/registry.uninstall`, `_sill/registry.icon` | Resolve daemon registry selectors; uninstall verifies installed version/source; icons return bounded base64 bytes, found by the entry's id alone (the selector's version and source are not checked: an installed version the index has moved past keeps its icon). |
 | `_sill/memory.list`, `_sill/memory.text`, `_sill/memory.search` | Live memory listing/search and paged show/transcript/export/recall text; search currently limited to 500 results. |
 | `_sill/memory.notes.list`, `_sill/memory.notes.add`, `_sill/memory.notes.remove`, `_sill/memory.refresh` | Paged notes and explicit mutations; additions are not safe to retry blindly. |
 | `_sill/changes.list`, `_sill/changes.diff`, `_sill/changes.keep`, `_sill/changes.revert`, `_sill/changes.undo`, `_sill/changes.git-revert`, `_sill/changes.history` | Named Changes records and exact paths; existing filesystem preconditions still apply; consult schemas for paging and selectors. |
-| `_sill/operations.get` | Durable login/install receipt recovery; see [operation recovery](sfp-operations.md). |
+| `_sill/operations.get` | Durable login/install receipt recovery. |
 
 Unless a method explicitly offers a durable retry identity, a lost mutation reply is uncertain:
 read back the target before deciding whether to retry. Desired-state writes can overwrite a
@@ -800,8 +798,7 @@ running-daemon replacement or repository commit is part of this source change.
 ### Policy inspection and import (development addition, 2026-11-04)
 
 Added with travelling policies; repository policy fragments, their one-build exception
-(`_sill/policy.start`) and their host suggestions were removed on 2026-11-10
-([history](development-history.md#repository-policy-fragments-removed-2026-11-10)). A jail is
+(`_sill/policy.start`) and their host suggestions were removed on 2026-11-10. A jail is
 built from its session's policy alone. The resolver freezes launch inputs, including agent
 endpoints.
 
@@ -833,9 +830,7 @@ proxy reloads those grants for new connections. Offline launch policies reject g
 Only `_sill/policy.save_host` changes agent-wide defaults. Import conflicts
 return `conflict`; build errors retain their diagnostics.
 
-Identity remains `sfp/1-dev.3`; this is not the stable `sfp/1` cutover. See
-[policy inspection](policy-inspection.md) for command examples, implementation limits
-and remaining human acceptance.
+Identity remains `sfp/1-dev.3`; this is not the stable `sfp/1` cutover.
 
 
 Session naming extension (2026-11-05): session administration records include optional `name`,
@@ -848,8 +843,7 @@ extension; clients default absent name fields to null.
 
 ### Workspaces (development addition, 2026-11-09)
 
-`sill.workspaces: 1` gates a session's own clone of each repository it pins
-([parallel-coding.md](parallel-coding.md) §12). A session's mode is fixed when it is made:
+`sill.workspaces: 1` gates a session's own clone of each repository it pins. A session's mode is fixed when it is made:
 `_sill/sessions.create` takes an optional `workspaces` (absent follows Settings → Automatic
 workspaces, `automatic_workspaces` in `_sill/settings.*`). The daemon makes a workspace session's
 workspaces when its jail starts; there is no create method.
@@ -880,7 +874,7 @@ later apply, which takes the copied files over. `_sill/workspaces.discard`
 resets the workspace to what the person has and keeps the work 7 days; `_sill/workspaces.undo` puts it
 back. `_sill/workspaces.changed` (notification, this capability only) invalidates one workspace.
 
-Mutations take an `operation_id` with the receipts of [sfp-operations.md](sfp-operations.md): an
+Mutations take an `operation_id` with a receipt: an
 identical retry never repeats the work, and `_sill/operations.get` reports the receipt. Refusals use
 `invalid_state` with the optional details `{reason, paths}`: `stale_revision`, `source_moved`,
 `source_overlap`, `untracked_collision`, `uncommitted`, `no_identity`, `workspace_detached`
@@ -974,8 +968,8 @@ together. The stable `sfp/1` cutover is still pending; identity remains `sfp/1-d
 
 ### Crosscheck (2026-11-14)
 
-Capability `sill.crosscheck: 1` adds a second opinion on the work waiting in a workspace
-([crosscheck.md](crosscheck.md)): one Reviewer, a saved agent with its options, reads a capture of
+Capability `sill.crosscheck: 1` adds a second opinion on the work waiting in a workspace:
+one Reviewer, a saved agent with its options, reads a capture of
 the work in a worker session of its own and reports a summary and a list of problems. A first
 build of 2026-11-13 under the same capability name, with other methods, was reset the same day
 and never released.

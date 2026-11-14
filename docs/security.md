@@ -120,8 +120,8 @@ agent declarations, with no adoption or credential discovery. Original host agen
 masked in both views; private roots bind through held, type-checked descriptors. A private
 agent binding may replace an agent-origin mask, never a policy secret mask. The immutable
 launch plan also supplies Changes classification and ghost credential authority. Host login
-uses private HOME/XDG storage and imports only declared files. See
-[design and validation](agent-directories.md). Earlier audit rows mentioning `shared_files`,
+uses private HOME/XDG storage and imports only declared files.
+Earlier audit rows mentioning `shared_files`,
 `seed_files` or adopted paths describe superseded implementation, not supported configuration.
 
 ## Proposed top three (as written before the fixes)
@@ -245,8 +245,7 @@ already read into a conversation. Existing host backups are not relocated by thi
 
 ## Policy path rules inside a pinned folder — 2026-11-10
 
-Found while testing the removal of repository policy fragments
-([history](development-history.md#repository-policy-fragments-removed-2026-11-10)). A
+Found while testing the removal of repository policy fragments. A
 fragment's `paths.mask` and `paths.ro` were laid after the pins and the workspace clones, in
 both views: the only route by which a rule for a path *inside a pinned folder* was enforced.
 Nothing on the machine used it, and it is gone. The policy's own `paths.mask` and `paths.ro`
