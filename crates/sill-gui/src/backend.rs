@@ -9,8 +9,18 @@ use crate::model::Conversation;
 #[derive(Debug)]
 pub enum Command {
     Refresh,
-    Attach { id: String, generation: u64 },
+    Attach {
+        id: String,
+        generation: u64,
+    },
     Reconnect(u64),
+    /// One request on the session's connection (submit, cancel, answer, a control). Its effect
+    /// arrives as conversation events; only a refusal comes back, as `Failed`.
+    Call {
+        method: &'static str,
+        params: serde_json::Value,
+        what: &'static str,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -20,10 +30,24 @@ pub enum Update {
     Event(Box<SessionEvent>),
     Status(String),
     Error(String),
+    /// A request the person made was refused or could not be sent; the connection stays.
+    Failed(String),
 }
 
 pub fn start(
     initial: Option<String>,
+) -> (
+    mpsc::Sender<Command>,
+    async_channel::Receiver<(u64, Update)>,
+) {
+    // Never connect_or_start: its executable would be sill-gui, not sill daemon.
+    start_with(initial, Client::connect)
+}
+
+/// `start` with the connection made by `connect` (a test's socket to a fake daemon).
+pub fn start_with(
+    initial: Option<String>,
+    connect: impl Fn() -> anyhow::Result<Client> + Send + 'static,
 ) -> (
     mpsc::Sender<Command>,
     async_channel::Receiver<(u64, Update)>,
@@ -33,7 +57,7 @@ pub fn start(
     std::thread::Builder::new()
         .name("sill-gui-sfp".into())
         .spawn(move || {
-            run(receiver, updates, initial);
+            run(receiver, updates, initial, connect);
         })
         .expect("start SFP worker");
     (commands, events)
@@ -43,6 +67,7 @@ fn run(
     commands: mpsc::Receiver<Command>,
     updates: async_channel::Sender<(u64, Update)>,
     initial: Option<String>,
+    connect: impl Fn() -> anyhow::Result<Client>,
 ) {
     let send = |generation, update| updates.send_blocking((generation, update)).is_ok();
     let mut generation = 0;
@@ -57,9 +82,8 @@ fn run(
             if !send(generation, Update::Status("Connecting…".into())) {
                 return;
             }
-            // Never invoke connect_or_start: its executable is sill-gui, not sill daemon.
             let connected = (|| -> anyhow::Result<Client> {
-                let c = Client::connect()?;
+                let c = connect()?;
                 let sessions = c.list_sessions()?;
                 if !send(generation, Update::Sessions(sessions)) {
                     anyhow::bail!("window closed");
@@ -98,7 +122,15 @@ fn run(
                             generation = next;
                         }
                         Ok(Command::Reconnect(next)) => generation = next,
-                        Ok(_) => {}
+                        Ok(Command::Call { what, .. }) => {
+                            if !send(
+                                generation,
+                                Update::Failed(format!("{what}: not connected to the daemon")),
+                            ) {
+                                return;
+                            }
+                        }
+                        Ok(Command::Refresh) => {}
                         Err(mpsc::RecvTimeoutError::Disconnected) => return,
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                     }
@@ -136,6 +168,20 @@ fn run(
                     continue;
                 }
             },
+            Ok(Command::Call {
+                method,
+                params,
+                what,
+            }) => {
+                if let Err(error) = client
+                    .as_ref()
+                    .unwrap()
+                    .call::<serde_json::Value>(method, params)
+                    && !send(generation, Update::Failed(format!("{what}: {error:#}")))
+                {
+                    return;
+                }
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }

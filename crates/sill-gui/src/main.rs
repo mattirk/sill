@@ -1,23 +1,34 @@
 mod backend;
 mod demo;
+mod fonts;
+mod icons;
 mod model;
 #[cfg(test)]
+mod snapshots;
+mod style;
+#[cfg(test)]
 mod tests;
+mod ui;
+mod viewer;
 
-use std::{collections::BTreeMap, sync::mpsc};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
-use iced::widget::{
-    button, column, container, markdown, pick_list, row, scrollable, text, text_editor,
+use iced::widget::{markdown, text_editor};
+use iced::{Font, Subscription, Task};
+use serde_json::json;
+use sill_proto::sfp::{
+    Answer, AnswerQuestion, CancelTurn, ConfigValue, Control, SessionControl, SessionEvent,
+    SubmissionKey, Submit,
 };
-use iced::{Element, Fill, Font, Subscription, Task, Theme};
-use sill_proto::sfp::SessionEvent;
 
 use backend::{Command, Update};
 use model::{Conversation, item_text};
 
 #[derive(Parser)]
-#[command(about = "Experimental read-only Iced conversation viewer for Sill")]
+#[command(about = "Experimental Iced conversation frontend for Sill (runs beside the shelf)")]
 struct Options {
     /// Attach to an existing session by exact ID, unique prefix or title.
     #[arg(long, conflicts_with = "demo")]
@@ -29,19 +40,19 @@ struct Options {
 
 fn main() -> iced::Result {
     let options = Options::parse();
+    fonts::install();
     iced::application(
         move || App::new(options.demo, options.session.clone()),
         App::update,
         App::view,
     )
     .title("Sill · Iced preview")
-    .theme(Theme::Dracula)
+    .theme(|_: &App| style::theme())
     .subscription(App::subscription)
-    .font(include_bytes!("../../sill/fonts/SourceSans3.ttf").as_slice())
-    .font(include_bytes!("../../sill/fonts/SourceSans3-Italic.ttf").as_slice())
-    .font(include_bytes!("../../sill/fonts/SourceCodePro.ttf").as_slice())
-    .default_font(Font::with_name("Source Sans 3"))
-    .window_size((760.0, 900.0))
+    .default_font(Font::with_name(fonts::SANS_FAMILY))
+    .window_size((720.0, 860.0))
+    // no title bar, like the shelf: the top bar's empty space moves the window, Ctrl+Q quits
+    .decorations(false)
     .run()
 }
 
@@ -49,16 +60,26 @@ fn main() -> iced::Result {
 struct SessionChoice {
     id: String,
     title: String,
+    agent: String,
 }
 
 impl std::fmt::Display for SessionChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{} · {}",
-            self.title,
-            self.id.chars().take(8).collect::<String>()
-        )
+        f.write_str(&self.title)
+    }
+}
+
+/// One entry of an ACP control's dropdown: a mode, an option's choice, or On/Off.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pick {
+    value: String,
+    title: String,
+    boolean: Option<bool>,
+}
+
+impl std::fmt::Display for Pick {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.title)
     }
 }
 
@@ -67,15 +88,30 @@ enum Message {
     Backend(u64, Update),
     Choose(SessionChoice),
     Refresh,
-    Reconnect,
     Copy(String),
     Link(String),
     ToggleText,
     RefreshText,
     TextAction(text_editor::Action),
     DemoTick,
+    Tick,
     Scrolled(bool),
     Latest,
+    Prompt(text_editor::Action),
+    Send,
+    Stop,
+    Answer {
+        question_id: String,
+        option_id: String,
+    },
+    Unqueue(String),
+    ToggleTool(String),
+    ToggleAnswered(String),
+    SetMode(Pick),
+    SetOption(String, Pick),
+    /// A press on the top bar's empty space: the window manager moves the window.
+    DragWindow,
+    Quit,
 }
 
 struct Rendered {
@@ -91,12 +127,35 @@ struct App {
     rendered: BTreeMap<String, Rendered>,
     status: String,
     error: Option<String>,
+    /// A request the person made that the daemon refused; shown until the next one.
+    failed: Option<String>,
     text_view: Option<text_editor::Content>,
+    prompt: text_editor::Content,
+    /// Tool rows opened to show their output and diff.
+    open_tools: BTreeSet<String>,
+    /// Answered questions opened to show what was asked.
+    open_answers: BTreeSet<String>,
     demo: bool,
     demo_step: usize,
     loading: bool,
     generation: u64,
     follow_tail: bool,
+    /// Set by each tick while the agent is busy; the spinner's angle comes from it.
+    now: Instant,
+}
+
+/// A fresh identity for a submission or an answer (1–128 bytes, unique for this daemon).
+fn request_id(kind: &str) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!(
+        "gui-{kind}-{}-{nanos:x}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 impl App {
@@ -109,16 +168,28 @@ impl App {
             rendered: BTreeMap::new(),
             status: "Connecting…".into(),
             error: None,
+            failed: None,
             text_view: None,
+            prompt: text_editor::Content::new(),
+            open_tools: BTreeSet::new(),
+            open_answers: BTreeSet::new(),
             demo,
             demo_step: 0,
             loading: false,
             generation: 0,
             follow_tail: true,
+            now: Instant::now(),
         };
         if demo {
             app.conversation = demo::conversation();
-            app.status = "Demo · streaming".into();
+            let choice = SessionChoice {
+                id: "demo".into(),
+                title: "witty-willow".into(),
+                agent: "claude".into(),
+            };
+            app.choices = vec![choice.clone()];
+            app.selected = Some(choice);
+            app.status = "Demo".into();
             app.sync_rendered();
             return (app, Task::none());
         }
@@ -136,11 +207,30 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        if self.demo && self.demo_step < demo::CHUNKS.len() {
-            iced::time::every(std::time::Duration::from_millis(600)).map(|_| Message::DemoTick)
-        } else {
-            Subscription::none()
+        let mut subscriptions = vec![];
+        if self.demo && self.demo_step <= demo::CHUNKS.len() {
+            subscriptions
+                .push(iced::time::every(Duration::from_millis(600)).map(|_| Message::DemoTick));
         }
+        // the spinner and the timer move only while the agent is busy
+        if self.busy() {
+            subscriptions.push(iced::time::every(Duration::from_millis(80)).map(|_| Message::Tick));
+        }
+        // sessions started or ended elsewhere appear and go
+        if !self.demo {
+            subscriptions
+                .push(iced::time::every(Duration::from_secs(15)).map(|_| Message::Refresh));
+        }
+        subscriptions.push(iced::keyboard::listen().filter_map(quit_key));
+        Subscription::batch(subscriptions)
+    }
+
+    /// The agent is working or waiting on a question.
+    fn busy(&self) -> bool {
+        self.conversation
+            .session
+            .as_ref()
+            .is_some_and(|s| s.activity == "working" || s.activity == "waiting")
     }
 
     fn command(&mut self, command: Command) {
@@ -153,6 +243,15 @@ impl App {
         }
     }
 
+    fn call(&mut self, method: &'static str, params: serde_json::Value, what: &'static str) {
+        self.failed = None;
+        self.command(Command::Call {
+            method,
+            params,
+            what,
+        });
+    }
+
     fn update(&mut self, message: Message) -> Task<Message> {
         if let Message::Backend(generation, _) = &message
             && *generation != self.generation
@@ -162,7 +261,10 @@ impl App {
         let scroll_to_tail = self.follow_tail
             && matches!(
                 &message,
-                Message::Backend(_, Update::Snapshot(_) | Update::Event(_)) | Message::DemoTick
+                Message::Backend(_, Update::Snapshot(_) | Update::Event(_))
+                    | Message::DemoTick
+                    | Message::Send
+                    | Message::Answer { .. }
             );
         match message {
             Message::Backend(_, Update::Sessions(sessions)) => {
@@ -172,8 +274,14 @@ impl App {
                     .map(|s| SessionChoice {
                         id: s.session_id,
                         title: s.title,
+                        agent: s.agent,
                     })
                     .collect();
+                if let Some(selected) = &self.selected
+                    && let Some(fresh) = self.choices.iter().find(|c| c.id == selected.id)
+                {
+                    self.selected = Some(fresh.clone());
+                }
             }
             Message::Backend(_, Update::Snapshot(snapshot)) => {
                 self.selected = self
@@ -201,7 +309,13 @@ impl App {
                 self.error = Some(error);
                 self.loading = false;
             }
+            Message::Backend(_, Update::Failed(failure)) => self.failed = Some(failure),
             Message::Choose(choice) => {
+                if self.selected.as_ref().is_some_and(|s| s.id == choice.id)
+                    && !self.conversation.session_id.is_empty()
+                {
+                    return Task::none();
+                }
                 self.generation += 1;
                 self.command(Command::Attach {
                     id: choice.id.clone(),
@@ -213,8 +327,11 @@ impl App {
                 self.conversation = Conversation::default();
                 self.rendered.clear();
                 self.text_view = None;
+                self.open_tools.clear();
+                self.open_answers.clear();
                 self.status = "Loading conversation…".into();
                 self.error = None;
+                self.failed = None;
             }
             Message::Refresh => self.command(Command::Refresh),
             Message::Scrolled(at_bottom) => self.follow_tail = at_bottom,
@@ -222,7 +339,6 @@ impl App {
                 self.follow_tail = true;
                 return iced::widget::operation::snap_to_end("conversation");
             }
-            Message::Reconnect => self.reconnect(),
             Message::Copy(value) => return iced::clipboard::write(value),
             Message::Link(url) => {
                 self.status = "Link copied".into();
@@ -252,18 +368,122 @@ impl App {
             Message::DemoTick => {
                 if let Some(chunk) = demo::CHUNKS.get(self.demo_step) {
                     self.accept(demo::append(self.conversation.seq + 1, chunk));
-                    self.demo_step += 1;
-                    if self.demo_step == demo::CHUNKS.len() {
-                        self.status = "Demo · finished".into();
+                } else if self.demo_step == demo::CHUNKS.len() {
+                    for event in demo::waiting(self.conversation.seq + 1) {
+                        self.accept(event);
                     }
                 }
+                self.demo_step += 1;
             }
+            Message::Tick => self.now = Instant::now(),
+            Message::Prompt(action) => self.prompt.perform(action),
+            Message::Send => self.send(),
+            Message::Stop => {
+                if let Some(turn_id) = self
+                    .conversation
+                    .session
+                    .as_ref()
+                    .and_then(|s| s.turn_id.clone())
+                    && !self.demo
+                {
+                    let params = CancelTurn {
+                        session_id: self.conversation.session_id.clone(),
+                        turn_id,
+                    };
+                    self.call("_sill/sessions.cancel", json!(params), "Stopping the turn");
+                }
+            }
+            Message::Answer {
+                question_id,
+                option_id,
+            } => {
+                if self.demo {
+                    for event in demo::answered(self.conversation.seq + 1, &option_id) {
+                        self.accept(event);
+                    }
+                } else {
+                    let params = AnswerQuestion {
+                        session_id: self.conversation.session_id.clone(),
+                        question_id,
+                        answer_id: request_id("answer"),
+                        answer: Answer::Permission { option_id },
+                    };
+                    self.call(
+                        "_sill/questions.answer",
+                        json!(params),
+                        "Answering the question",
+                    );
+                }
+            }
+            Message::Unqueue(submission_id) => {
+                let params = SubmissionKey {
+                    session_id: self.conversation.session_id.clone(),
+                    submission_id,
+                };
+                self.call(
+                    "_sill/submissions.cancel",
+                    json!(params),
+                    "Removing the queued prompt",
+                );
+            }
+            Message::ToggleTool(id) => toggle(&mut self.open_tools, id),
+            Message::ToggleAnswered(id) => toggle(&mut self.open_answers, id),
+            Message::SetMode(pick) => self.control(Control::SetMode {
+                mode_id: pick.value,
+            }),
+            Message::SetOption(option_id, pick) => {
+                let value = match pick.boolean {
+                    Some(value) => ConfigValue::Bool { value },
+                    None => ConfigValue::Id { value: pick.value },
+                };
+                self.control(Control::SetConfig { option_id, value });
+            }
+            Message::DragWindow => return iced::window::latest().and_then(iced::window::drag),
+            Message::Quit => return iced::exit(),
         }
         if scroll_to_tail && self.text_view.is_none() {
             iced::widget::operation::snap_to_end("conversation")
         } else {
             Task::none()
         }
+    }
+
+    /// The prompt goes to the agent (the daemon queues it while a turn runs); the composer clears.
+    fn send(&mut self) {
+        let text = self.prompt.text().trim_end().to_string();
+        if text.trim().is_empty() || self.conversation.session_id.is_empty() {
+            return;
+        }
+        self.prompt = text_editor::Content::new();
+        self.follow_tail = true;
+        if self.demo {
+            for event in demo::prompt(self.conversation.seq + 1, &text) {
+                self.accept(event);
+            }
+            return;
+        }
+        let params = Submit {
+            session_id: self.conversation.session_id.clone(),
+            submission_id: request_id("prompt"),
+            text,
+            attachments: vec![],
+        };
+        self.call("_sill/sessions.submit", json!(params), "Sending the prompt");
+    }
+
+    fn control(&mut self, control: Control) {
+        if self.demo {
+            return;
+        }
+        let params = SessionControl {
+            session_id: self.conversation.session_id.clone(),
+            control,
+        };
+        self.call(
+            "_sill/sessions.control",
+            json!(params),
+            "Changing the agent's setting",
+        );
     }
 
     fn reconnect(&mut self) {
@@ -287,6 +507,9 @@ impl App {
         self.rendered
             .retain(|id, _| self.conversation.items.contains_key(id));
         for item in self.conversation.items.values() {
+            if item.kind == "tool" {
+                continue; // a tool row is drawn from its fields, not as Markdown
+            }
             let source = item_text(item);
             match self.rendered.get_mut(&item.item_id) {
                 Some(cached) if cached.source == source => {}
@@ -306,145 +529,23 @@ impl App {
             }
         }
     }
+}
 
-    fn view(&self) -> Element<'_, Message> {
-        let mut header = row![
-            text("Sill").size(24),
-            text("Iced preview · read-only").size(14)
-        ]
-        .spacing(16)
-        .align_y(iced::Center);
-        if !self.demo {
-            header = header
-                .push(button("Refresh").on_press(Message::Refresh))
-                .push(button("Reconnect").on_press(Message::Reconnect));
+/// Ctrl+Q (Cmd+Q on a Mac) quits: with no title bar there is no close button.
+fn quit_key(event: iced::keyboard::Event) -> Option<Message> {
+    match event {
+        iced::keyboard::Event::KeyPressed { key, modifiers, .. }
+            if modifiers.command()
+                && matches!(key.as_ref(), iced::keyboard::Key::Character("q")) =>
+        {
+            Some(Message::Quit)
         }
-        let mut layout = column![header].spacing(12);
-        if !self.demo {
-            if self.loading {
-                layout = layout.push(text("Loading conversation…"));
-            } else {
-                layout = layout.push(
-                    pick_list(&self.choices[..], self.selected.as_ref(), Message::Choose)
-                        .placeholder("Choose a session")
-                        .width(Fill),
-                );
-            }
-        }
-        if let Some(error) = &self.error {
-            layout = layout.push(
-                container(iced_selection::text(error).size(14))
-                    .padding(10)
-                    .style(container::rounded_box),
-            );
-        }
-        let activity = self
-            .conversation
-            .session
-            .as_ref()
-            .map_or("", |s| s.activity.as_str());
-        layout =
-            layout.push(row![text(&self.status).size(13), text(activity).size(13)].spacing(12));
-        if !self.conversation.session_id.is_empty() {
-            layout = layout.push(
-                row![
-                    button(if self.text_view.is_some() {
-                        "Formatted view"
-                    } else {
-                        "Select transcript text"
-                    })
-                    .on_press(Message::ToggleText),
-                    button("Copy transcript")
-                        .on_press_with(|| Message::Copy(self.conversation.transcript())),
-                    button("Latest").on_press(Message::Latest),
-                ]
-                .spacing(8),
-            );
-        }
-        if let Some(content) = &self.text_view {
-            layout = layout
-                .push(
-                    row![
-                        text("Text captured when opened"),
-                        button("Refresh text").on_press(Message::RefreshText)
-                    ]
-                    .spacing(12),
-                )
-                .push(
-                    text_editor(content)
-                        .on_action(Message::TextAction)
-                        .height(Fill)
-                        .font(Font::MONOSPACE),
-                );
-        } else {
-            let settings = markdown::Settings::with_text_size(
-                16,
-                markdown::Style::from_palette(Theme::Dracula.palette()),
-            );
-            let mut feed = column![].spacing(18);
-            for item in self.conversation.visible_items() {
-                if let Some(cached) = self.rendered.get(&item.item_id) {
-                    let heading = row![
-                        text(&item.kind).size(13),
-                        button("Copy").on_press_with(|| Message::Copy(cached.source.clone()))
-                    ]
-                    .spacing(12)
-                    .align_y(iced::Center);
-                    let body = iced_selection::markdown(cached.markdown.items(), settings)
-                        .map(Message::Link);
-                    feed = feed.push(
-                        container(column![heading, body].spacing(8))
-                            .padding(14)
-                            .width(Fill)
-                            .style(container::rounded_box),
-                    );
-                }
-            }
-            for question in self
-                .conversation
-                .questions
-                .values()
-                .filter(|q| q.state == "open")
-            {
-                let mut card = column![text(&question.title).size(20)].spacing(8);
-                if let Some(description) = &question.description {
-                    card = card.push(iced_selection::text(description));
-                }
-                if let Some(subject) = &question.subject
-                    && let Some(text) = &subject.text
-                {
-                    card = card.push(iced_selection::text(text));
-                }
-                for option in &question.options {
-                    card = card.push(text(&option.title));
-                }
-                for field in &question.fields {
-                    card = card.push(text(&field.title));
-                }
-                card = card.push(text("Answer in the existing Sill shelf.").size(13));
-                feed = feed.push(
-                    container(card)
-                        .padding(16)
-                        .width(Fill)
-                        .style(container::rounded_box),
-                );
-            }
-            if self.conversation.session_id.is_empty() {
-                feed = feed.push(text(
-                    "Choose a session to view its conversation alongside the existing shelf.",
-                ));
-            }
-            layout = layout.push(
-                scrollable(feed)
-                    .id("conversation")
-                    .height(Fill)
-                    .on_scroll(|viewport| Message::Scrolled(viewport.relative_offset().y >= 0.99)),
-            );
-        }
-        container(layout)
-            .padding(20)
-            .width(Fill)
-            .height(Fill)
-            .into()
+        _ => None,
+    }
+}
+
+fn toggle(set: &mut BTreeSet<String>, id: String) {
+    if !set.remove(&id) {
+        set.insert(id);
     }
 }

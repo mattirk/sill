@@ -83,6 +83,10 @@ fn queued_prompt_becomes_visible_on_dispatch_and_question_resolves() {
     view.accept(event(&view, Event::SubmissionUpdated { submission }))
         .unwrap();
     assert!(view.visible_items().iter().any(|i| i.kind == "user"));
+    for event in demo::waiting(view.seq + 1) {
+        view.accept(event).unwrap();
+    }
+    assert!(view.questions.values().any(|q| q.state == "open"));
     let mut question = view.questions["demo-question"].clone();
     question.state = "answered".into();
     view.accept(event(&view, Event::QuestionUpdated { question }))
@@ -217,6 +221,7 @@ fn session_switch_ignores_old_snapshots_and_errors() {
     let _ = app.update(Message::Choose(SessionChoice {
         id: "new".into(),
         title: "New".into(),
+        agent: "codex".into(),
     }));
     let _ = app.update(Message::Backend(
         0,
@@ -247,4 +252,300 @@ fn transcript_selection_is_read_only_and_stable_during_streaming() {
             .contains("A streamed paragraph")
     );
     assert!(!app.text_view.as_ref().unwrap().text().starts_with('X'));
+}
+
+/// The app as a live client would be, its requests captured instead of sent.
+fn live_app() -> (App, std::sync::mpsc::Receiver<crate::backend::Command>) {
+    let (mut app, _) = App::new(true, None);
+    app.demo = false;
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.commands = Some(tx);
+    (app, rx)
+}
+
+fn sent(rx: &std::sync::mpsc::Receiver<crate::backend::Command>) -> (&'static str, Value) {
+    match rx.try_recv().expect("a request") {
+        crate::backend::Command::Call { method, params, .. } => (method, params),
+        other => panic!("expected a call, got {other:?}"),
+    }
+}
+
+/// Each action is one public SFP request of the exact shape the daemon accepts (its request
+/// structs refuse unknown fields): send, stop, answer, a mode, an option, unqueue.
+#[test]
+fn actions_send_the_protocol_requests() {
+    use iced::widget::text_editor::{Action, Edit};
+    let (mut app, rx) = live_app();
+    // an empty composer sends nothing
+    let _ = app.update(Message::Send);
+    assert!(rx.try_recv().is_err());
+    let _ = app.update(Message::Prompt(Action::Edit(Edit::Paste(
+        std::sync::Arc::new("hello agent\nsecond line".into()),
+    ))));
+    let _ = app.update(Message::Send);
+    let (method, params) = sent(&rx);
+    assert_eq!(method, "_sill/sessions.submit");
+    assert_eq!(params["session_id"], "demo");
+    assert_eq!(params["text"], "hello agent\nsecond line");
+    assert_eq!(params["attachments"], json!([]));
+    assert!(
+        params["submission_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("gui-prompt-")
+    );
+    serde_json::from_value::<Submit>(params).unwrap();
+    assert!(
+        app.prompt.text().trim().is_empty(),
+        "the composer clears on send"
+    );
+
+    let _ = app.update(Message::Stop);
+    let (method, params) = sent(&rx);
+    assert_eq!(method, "_sill/sessions.cancel");
+    assert_eq!(params, json!({"session_id":"demo", "turn_id":"demo-turn"}));
+
+    let _ = app.update(Message::Answer {
+        question_id: "q1".into(),
+        option_id: "allow".into(),
+    });
+    let (method, params) = sent(&rx);
+    assert_eq!(method, "_sill/questions.answer");
+    assert_eq!(
+        params["answer"],
+        json!({"type":"permission", "option_id":"allow"})
+    );
+    assert!(
+        params["answer_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("gui-answer-")
+    );
+    serde_json::from_value::<AnswerQuestion>(params).unwrap();
+
+    let pick = |value: &str, boolean| crate::Pick {
+        value: value.into(),
+        title: value.into(),
+        boolean,
+    };
+    let _ = app.update(Message::SetMode(pick("plan", None)));
+    let (method, params) = sent(&rx);
+    assert_eq!(method, "_sill/sessions.control");
+    assert_eq!(
+        params["control"],
+        json!({"type":"set_mode", "mode_id":"plan"})
+    );
+    let _ = app.update(Message::SetOption("web".into(), pick("true", Some(true))));
+    let (_, params) = sent(&rx);
+    assert_eq!(
+        params["control"],
+        json!({"type":"set_config", "option_id":"web", "value":{"type":"bool", "value":true}})
+    );
+    let _ = app.update(Message::SetOption("model".into(), pick("brisk", None)));
+    let (_, params) = sent(&rx);
+    assert_eq!(
+        params["control"]["value"],
+        json!({"type":"id", "value":"brisk"})
+    );
+
+    let _ = app.update(Message::Unqueue("s1".into()));
+    let (method, params) = sent(&rx);
+    assert_eq!(method, "_sill/submissions.cancel");
+    assert_eq!(params, json!({"session_id":"demo", "submission_id":"s1"}));
+}
+
+/// A refused request comes back as a failure the person sees; the connection stays and the
+/// next request goes out on it.
+#[test]
+fn a_refused_request_is_reported_and_the_connection_stays() {
+    let (socket, mut peer) = UnixStream::pair().unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let server = std::thread::spawn(move || {
+        let mut reader = BufReader::new(peer.try_clone().unwrap());
+        let list = read_request(&mut reader, "_sill/sessions.list");
+        reply(&mut peer, &list, json!({"sessions": [], "next": null}));
+        let submit = read_request(&mut reader, "_sill/sessions.submit");
+        assert_eq!(submit["params"]["text"], "hi");
+        writeln!(
+            peer,
+            "{}",
+            json!({"jsonrpc":"2.0", "id":submit["id"],
+                   "error":{"code":-32000, "message":"the session has ended"}})
+        )
+        .unwrap();
+        let cancel = read_request(&mut reader, "_sill/sessions.cancel");
+        reply(&mut peer, &cancel, json!({"requested": true}));
+        let again = read_request(&mut reader, "_sill/sessions.list");
+        reply(&mut peer, &again, json!({"sessions": [], "next": null}));
+    });
+    let socket = std::sync::Mutex::new(Some(socket));
+    let (commands, updates) = crate::backend::start_with(None, move || {
+        let stream = socket.lock().unwrap().take().expect("one connection");
+        Client::over(stream)
+    });
+    let next = |want: &dyn Fn(&Update) -> bool| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match updates.try_recv() {
+                Ok((_, update)) if want(&update) => return update,
+                Ok(_) => {}
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(_) => panic!("no such update in time"),
+            }
+        }
+    };
+    next(&|u| matches!(u, Update::Status(s) if s == "Connected"));
+    commands
+        .send(crate::backend::Command::Call {
+            method: "_sill/sessions.submit",
+            params: json!({"session_id":"x", "submission_id":"y", "text":"hi", "attachments":[]}),
+            what: "Sending the prompt",
+        })
+        .unwrap();
+    let Update::Failed(failure) = next(&|u| matches!(u, Update::Failed(_))) else {
+        unreachable!()
+    };
+    assert!(
+        failure.starts_with("Sending the prompt:") && failure.contains("the session has ended"),
+        "{failure}"
+    );
+    commands
+        .send(crate::backend::Command::Call {
+            method: "_sill/sessions.cancel",
+            params: json!({"session_id":"x", "turn_id":"t"}),
+            what: "Stopping the turn",
+        })
+        .unwrap();
+    commands.send(crate::backend::Command::Refresh).unwrap();
+    next(&|u| matches!(u, Update::Sessions(_)));
+    server.join().unwrap();
+}
+
+/// The bundled variable faces are found at ordinary and bold weights (before 2026-11-04 every
+/// "Source Code Pro" span fell back to another font: fontdb listed it only at 200).
+#[test]
+fn bundled_faces_resolve_at_normal_and_bold_weights() {
+    use iced::advanced::graphics::text::{cosmic_text::fontdb, font_system};
+    crate::fonts::install();
+    let mut system = font_system().write().unwrap();
+    for family in [crate::fonts::SANS_FAMILY, crate::fonts::MONO_FAMILY] {
+        for weight in [fontdb::Weight::NORMAL, fontdb::Weight::BOLD] {
+            let query = fontdb::Query {
+                families: &[fontdb::Family::Name(family)],
+                weight,
+                ..fontdb::Query::default()
+            };
+            let id = system.raw().db().query(&query).expect("a face");
+            let face = system.raw().db().face(id).unwrap();
+            assert!(face.families.iter().any(|(name, _)| name == family));
+            assert_eq!(face.weight, weight, "{family} at {weight:?}");
+        }
+    }
+}
+
+/// Enter sends from the focused composer; Shift+Enter is the editor's own new line.
+#[test]
+fn enter_sends_and_shift_enter_is_a_new_line() {
+    use iced::keyboard::{Key, Modifiers, key};
+    use iced::widget::text_editor::{Binding, KeyPress, Status};
+    let press = |modifiers| KeyPress {
+        key: Key::Named(key::Named::Enter),
+        modified_key: Key::Named(key::Named::Enter),
+        physical_key: key::Physical::Code(key::Code::Enter),
+        modifiers,
+        text: Some("\n".into()),
+        status: Status::Focused { is_hovered: false },
+    };
+    assert!(matches!(
+        crate::ui::enter_sends(press(Modifiers::empty())),
+        Some(Binding::Custom(Message::Send))
+    ));
+    assert!(matches!(
+        crate::ui::enter_sends(press(Modifiers::SHIFT)),
+        Some(Binding::Enter)
+    ));
+}
+
+/// The question card's buttons answer it: a click on "Yes" in the rendered view is the answer.
+#[test]
+fn clicking_an_option_answers_the_question() {
+    let (mut app, _) = App::new(true, None);
+    for _ in 0..=demo::CHUNKS.len() {
+        let _ = app.update(Message::DemoTick);
+    }
+    let mut ui =
+        iced_test::Simulator::with_size(crate::snapshots::settings(), (720.0, 860.0), app.view());
+    ui.click("Yes").unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages.iter().any(|m| matches!(m,
+            Message::Answer { question_id, option_id } if question_id == "demo-question" && option_id == "allow")),
+        "{messages:?}"
+    );
+}
+
+/// A stopped turn ends with a note; a completed one does not.
+#[test]
+fn a_stopped_turn_says_so() {
+    let mut view = demo::conversation();
+    let turn: Turn = serde_json::from_value(json!({
+        "turn_id":"demo-turn", "agent_generation_id":"demo-generation", "activity":"idle",
+        "outcome":"cancelled", "reason":{"code":"cancelled", "message":"stopped by the person"}
+    }))
+    .unwrap();
+    view.accept(event(&view, Event::TurnUpdated { turn: turn.clone() }))
+        .unwrap();
+    assert_eq!(view.turn_end("demo-turn").as_deref(), Some("stopped"));
+    let mut done = turn;
+    done.outcome = "completed".into();
+    view.accept(event(&view, Event::TurnUpdated { turn: done }))
+        .unwrap();
+    assert_eq!(view.turn_end("demo-turn"), None);
+}
+
+/// With no title bar, the top bar's empty space moves the window; a tab keeps its own click.
+#[test]
+fn the_top_bar_moves_the_window_and_tabs_keep_their_clicks() {
+    let (app, _) = App::new(true, None);
+    let mut ui =
+        iced_test::Simulator::with_size(crate::snapshots::settings(), (720.0, 860.0), app.view());
+    ui.point_at(iced::Point::new(450.0, 18.0));
+    let _ = ui.simulate(iced_test::simulator::click());
+    ui.click("witty-willow").unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        matches!(messages.first(), Some(Message::DragWindow)),
+        "{messages:?}"
+    );
+    assert!(
+        matches!(messages.get(1), Some(Message::Choose(choice)) if choice.title == "witty-willow"),
+        "{messages:?}"
+    );
+    assert_eq!(
+        messages.len(),
+        2,
+        "a tab click must not also move the window: {messages:?}"
+    );
+}
+
+/// Ctrl+Q quits; Q alone does not.
+#[test]
+fn ctrl_q_quits() {
+    use iced::keyboard::{Event, Key, Location, Modifiers, key};
+    let press = |modifiers| Event::KeyPressed {
+        key: Key::Character("q".into()),
+        modified_key: Key::Character("q".into()),
+        physical_key: key::Physical::Code(key::Code::KeyQ),
+        location: Location::Standard,
+        modifiers,
+        text: None,
+        repeat: false,
+    };
+    assert!(matches!(
+        crate::quit_key(press(Modifiers::CTRL)),
+        Some(Message::Quit)
+    ));
+    assert!(crate::quit_key(press(Modifiers::empty())).is_none());
 }

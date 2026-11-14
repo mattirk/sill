@@ -14,6 +14,8 @@ pub struct Conversation {
     pub items: BTreeMap<String, Item>,
     pub questions: BTreeMap<String, Question>,
     pub submissions: BTreeMap<String, Submission>,
+    /// Turn outcomes, for the note a stopped or failed turn ends with.
+    pub turns: BTreeMap<String, Turn>,
 }
 
 impl Conversation {
@@ -79,7 +81,9 @@ impl Conversation {
                         view.submissions
                             .insert(submission.submission_id.clone(), submission);
                     }
-                    Record::Turn { .. } => {}
+                    Record::Turn { turn } => {
+                        view.turns.insert(turn.turn_id.clone(), turn);
+                    }
                 }
             }
             page = part.next_page;
@@ -169,7 +173,9 @@ impl Conversation {
                 self.submissions
                     .insert(submission.submission_id.clone(), submission);
             }
-            Event::TurnUpdated { .. } => {}
+            Event::TurnUpdated { turn } => {
+                self.turns.insert(turn.turn_id.clone(), turn);
+            }
         }
         self.seq = seq;
         Ok(true)
@@ -197,6 +203,19 @@ impl Conversation {
                 .then_with(|| a.item_id.cmp(&b.item_id))
         });
         items
+    }
+
+    /// The note a turn ends with, when it did not complete: stopped by the person, or failed.
+    pub fn turn_end(&self, turn_id: &str) -> Option<String> {
+        let turn = self.turns.get(turn_id)?;
+        match turn.outcome.as_str() {
+            "cancelled" => Some("stopped".into()),
+            "failed" => Some(match &turn.reason {
+                Some(reason) => format!("failed: {}", reason.message),
+                None => "failed".into(),
+            }),
+            _ => None,
+        }
     }
 
     pub fn transcript(&self) -> String {

@@ -15,9 +15,10 @@ sill-proto.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
 clap.workspace = true
-iced = { version = "=0.14.0", default-features = false, features = ["tiny-skia", "x11", "wayland", "markdown", "highlighter", "advanced", "tokio"] }
+iced = { version = "=0.14.0", default-features = false, features = ["tiny-skia", "x11", "wayland", "markdown", "highlighter", "advanced", "tokio", "svg", "canvas"] }
 iced_selection = { version = "=0.5.0", features = ["markdown"] }
 async-channel = "2"
 
 [dev-dependencies]
 serde.workspace = true
+iced_test = "=0.14.0"
