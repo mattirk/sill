@@ -373,25 +373,38 @@ impl App {
         let mut tabs = row![].spacing(4);
         for category in Category::ALL {
             let selected = page.category == category;
-            tabs = tabs.push(keys::press(
+            // as the top bar's tabs, a line under the chosen one, in a quieter accent
+            // (the person, 2026-11-13)
+            let tab = keys::press(
                 button(text(category.to_string()).size(style::SMALL))
                     .padding([8, 12])
                     .style(move |_, status| button::Style {
                         text_color: if selected { P.fg } else { P.fg_dim },
-                        background: (selected
-                            || matches!(status, button::Status::Hovered | button::Status::Pressed))
-                        .then(|| alpha(P.fg, if selected { 0.10 } else { 0.05 }).into()),
+                        background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+                            .then(|| alpha(P.fg, 0.05).into()),
                         ..button::Style::default()
                     }),
                 event(Event::Category(category)),
-            ));
+            );
+            tabs = tabs.push(
+                column![
+                    tab,
+                    rule::horizontal(2).style(style::rule_style(if selected {
+                        alpha(P.accent, 0.45)
+                    } else {
+                        Color::TRANSPARENT
+                    })),
+                ]
+                .width(Shrink),
+            );
         }
         column![
             container(
                 container(tabs.wrap().vertical_spacing(4))
                     .width(Fill)
                     .max_width(MEASURE)
-                    .padding([8, 16])
+                    // the chosen tab's line sits on the rule under the row
+                    .padding(Padding { top: 8.0, right: 16.0, bottom: 0.0, left: 16.0 })
             )
             .center_x(Fill),
             rule::horizontal(1).style(style::rule_style(P.surface)),
