@@ -187,7 +187,11 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     let plus_menu = gtk::Box::new(gtk::Orientation::Vertical, 0);
     plus_pop.set_child(Some(&plus_menu));
     plus.set_popover(Some(&plus_pop));
-    top_actions.append(&plus);
+    // the timer slides out left of "+", so the buttons stay put; one action-group child, so a
+    // collapsed revealer leaves no extra gap
+    let lead = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    top_actions.append(&lead);
+    lead.append(&plus);
 
     let files_btn = super::icons::glyph_button("sill-files");
     files_btn.add_css_class("flat");
@@ -217,16 +221,12 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     session_timer.set_margin_end(6);
     session_timer.set_tooltip_text(Some("Time the agent has worked (excludes idle time and waiting for input)"));
     session_timer.set_visible(false);
-    // The right edge stays anchored at the indicator while the timer slides out to its left.
     let timer_reveal = gtk::Revealer::new();
     timer_reveal.set_transition_type(gtk::RevealerTransitionType::SlideLeft);
     timer_reveal.set_transition_duration(180);
     timer_reveal.set_child(Some(&session_timer));
-    // One action-group child: a collapsed revealer must not leave another gap.
-    let activity = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    activity.append(&timer_reveal);
-    activity.append(&status);
-    top_actions.append(&activity);
+    lead.prepend(&timer_reveal);
+    top_actions.append(&status);
 
     // --- pages
     let stack = gtk::Stack::new();
