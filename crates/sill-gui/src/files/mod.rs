@@ -16,7 +16,9 @@ use crate::{App, Message, SessionView, demo};
 mod edits;
 mod links;
 mod tree;
-pub(crate) mod ui;
+mod drawer_ui;
+mod reader_ui;
+mod ui;
 
 pub use edits::ReaderView;
 #[cfg(test)]

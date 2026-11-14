@@ -1186,7 +1186,7 @@ fn file_drawer_buttons_open_the_viewer_and_return_to_conversation() {
 
 #[test]
 fn diff_numbers_distinguish_context_changes_and_untracked_markdown() {
-    use crate::files::ui::numbered_diff;
+    use crate::diff_ui::numbered_diff;
     assert_eq!(
         numbered_diff("@@ -3,2 +5,3 @@\n keep\n-old\n+new\n+extra"),
         vec![

@@ -11,6 +11,7 @@ mod desktop;
 mod desktop_view;
 mod host_control;
 mod details;
+mod diff_ui;
 mod editor;
 mod fonts;
 mod forms;
