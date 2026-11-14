@@ -1408,8 +1408,10 @@ git -C "$S" fsck --full
         assert!(hosts.contains(&"/etc".to_string()) && hosts.contains(&"/home".to_string()) && hosts.contains(&"/usr".to_string()));
         assert!(!hosts.contains(&"/mnt".to_string()), "/mnt holds mounts, must be expanded");
         // (/mnt/data would be a layer on a machine where that directory exists; the test host has none)
-        assert!(!hosts.contains(&"/var".to_string()) && !hosts.contains(&"/mnt".to_string()));
-        assert!(!hosts.iter().any(|h| h.contains("sill")));
+        assert!(!hosts.contains(&"/var".to_string()));
+        // the state fs itself, not any path with "sill" in its name: /mnt is read from the real
+        // machine, and inside Sill's VM it has a real /mnt/sill-state that is rightly a layer
+        assert!(!hosts.iter().any(|h| Path::new(h).starts_with("/var/lib/sill")), "{hosts:?}");
         assert!(plan.expanded.contains(&PathBuf::from("/var")) && plan.expanded.contains(&PathBuf::from("/mnt")));
         let s = render(&plan.argv);
         assert!(s.contains("--tmpfs /var "));
