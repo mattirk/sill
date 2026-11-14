@@ -110,17 +110,12 @@ fn section_of(row: &gtk::TreeListRow) -> Option<String> {
     s.string().strip_prefix(SECTION).map(str::to_owned)
 }
 
-/// The glyph for a tree row: folder (open/closed; a root — a pinned folder — carries a mark, since
-/// it shows its name alone), else the file's kind by its extension — sill's own glyphs, so every
+/// The glyph for a tree row: folder (open/closed; a pinned root looks like any other folder, its
+/// icon's accent colour says it is pinned), else the file's kind by its extension — sill's own glyphs, so every
 /// machine shows the same tree (no icon theme, no MIME database).
-fn row_glyph(path: &Path, is_dir: bool, expanded: bool, root: bool) -> &'static str {
+fn row_glyph(path: &Path, is_dir: bool, expanded: bool) -> &'static str {
     if is_dir {
-        return match (root, expanded) {
-            (true, true) => "sill-folder-root-open",
-            (true, false) => "sill-folder-root",
-            (false, true) => "sill-folder-open",
-            (false, false) => "sill-files",
-        };
+        return if expanded { "sill-folder-open" } else { "sill-files" };
     }
     let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
     match ext.as_str() {
@@ -269,9 +264,6 @@ pub struct FolderTree {
     scope: RefCell<Option<PathBuf>>,
     store: Rc<Store>,
     badges: Rc<RefCell<BTreeMap<PathBuf, Badge>>>,
-    /// Each repository's main language (badge mark, tooltip), read with the badges when older than
-    /// a minute.
-    langs: Rc<RefCell<BTreeMap<PathBuf, (String, String, std::time::Instant)>>>,
     /// Every session's pending changes, with the session's id: the badges here, and the viewer asks
     /// the daemon for a pending path's diff.
     pub changes: Rc<RefCell<Vec<(String, Change)>>>,
@@ -330,7 +322,6 @@ impl FolderTree {
         root.append(&bar);
 
         let badges: Rc<RefCell<BTreeMap<PathBuf, Badge>>> = Rc::new(RefCell::new(BTreeMap::new()));
-        let langs: Rc<RefCell<BTreeMap<PathBuf, (String, String, std::time::Instant)>>> = Rc::new(RefCell::new(BTreeMap::new()));
         let pinned: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
         let elsewhere: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
         let roots = gio::ListStore::new::<gtk::StringObject>();
@@ -376,10 +367,8 @@ impl FolderTree {
             name.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
             let badge = gtk::Label::new(None);
             badge.add_css_class("sill-badge");
-            // a repository root: its main language's logo, in the badge's colour (text mark without one)
-            let logo = gtk::Image::new();
-            logo.add_css_class("sill-badge-logo");
-            logo.set_visible(false);
+            badge.set_xalign(1.0);
+            badge.set_halign(gtk::Align::End);
             let pin = gtk::Button::new();
             pin.add_css_class("flat");
             pin.add_css_class("sill-pin");
@@ -390,13 +379,12 @@ impl FolderTree {
                     t.toggle_pin(Path::new(b.widget_name().as_str()));
                 }
             });
-            // the pin sits between the name and the marks, so the badge and the language logo end
-            // the row at the tree's right edge
+            // the pin sits between the name and the badge, so the badge (`git master`) ends the row
+            // at the tree's right edge
             b.append(&icon);
             b.append(&name);
             b.append(&pin);
             b.append(&badge);
-            b.append(&logo);
             expander.set_child(Some(&b));
             item.set_child(Some(&expander));
         });
@@ -406,7 +394,6 @@ impl FolderTree {
         let bound: Rc<RefCell<Vec<gtk::ListItem>>> = Rc::new(RefCell::new(Vec::new()));
         let decorate: Rc<dyn Fn(&gtk::ListItem)> = {
             let badges = badges.clone();
-            let langs = langs.clone();
             let pinned = pinned.clone();
             let elsewhere = elsewhere.clone();
             let tree_rc = tree_rc.clone();
@@ -416,12 +403,11 @@ impl FolderTree {
                 let Some(expander) = item.child().and_downcast::<gtk::TreeExpander>() else { return };
                 expander.set_list_row(Some(&row));
                 let Some(b) = expander.child().and_downcast::<gtk::Box>() else { return };
-                let (Some(icon), Some(name), Some(pin), Some(badge), Some(logo)) = (
+                let (Some(icon), Some(name), Some(pin), Some(badge)) = (
                     b.first_child().and_downcast::<gtk::Image>(),
                     b.first_child().and_then(|w| w.next_sibling()).and_downcast::<gtk::Label>(),
                     b.first_child().and_then(|w| w.next_sibling()).and_then(|w| w.next_sibling()).and_downcast::<gtk::Button>(),
-                    b.last_child().and_then(|w| w.prev_sibling()).and_downcast::<gtk::Label>(),
-                    b.last_child().and_downcast::<gtk::Image>(),
+                    b.last_child().and_downcast::<gtk::Label>(),
                 ) else {
                     return;
                 };
@@ -441,7 +427,6 @@ impl FolderTree {
                     name.set_tooltip_text(None);
                     badge.set_text("");
                     badge.set_tooltip_text(None);
-                    logo.set_visible(false);
                     return;
                 }
                 let Some(path) = path_of(&row) else { return };
@@ -476,7 +461,7 @@ impl FolderTree {
                 } else {
                     icon.remove_css_class("sill-pinned");
                 }
-                let glyph = if link { "sill-link" } else { row_glyph(&path, is_dir, row.is_expanded(), is_root) };
+                let glyph = if link { "sill-link" } else { row_glyph(&path, is_dir, row.is_expanded()) };
                 icon.set_paintable(super::icons::stroke_texture(glyph, fg).as_ref());
                 let fname = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 for c in ["sill-changed", "sill-pending", "sill-below", "sill-dim", "sill-new"] {
@@ -542,9 +527,7 @@ impl FolderTree {
                     name.set_tooltip_text(Some(&tip));
                 }
                 let is_repo = is_dir && path.join(".git").exists();
-                // a repository root: `git <branch>` (the short hash when detached), then its main
-                // language (what most of the tracked code is)
-                let lang = if is_repo { langs.borrow().get(&path).map(|(mark, about, _)| (mark.clone(), about.clone())) } else { None };
+                // a repository root: `git <branch>` (the short hash when detached)
                 let head = if is_repo { head_label(&path) } else { None };
                 let mut parts: Vec<String> = Vec::new();
                 if !badge_text.is_empty() {
@@ -554,28 +537,6 @@ impl FolderTree {
                     parts.push("git".into());
                     if let Some((h, _)) = &head {
                         parts.push(h.clone());
-                    }
-                }
-                // the language: its logo in the badge's colour, the text mark when it has none
-                let logo_tex = lang.as_ref().and_then(|(mark, _)| {
-                    let name = changes::language_name_of_mark(mark)?;
-                    let mut color = super::icons::fg_for(&badge, &theme::current());
-                    if let Ok(accent) = gtk::gdk::RGBA::parse(theme::current().accent) {
-                        color = accent;
-                    }
-                    color.set_alpha(0.9);
-                    super::icons::language_texture(name, color)
-                });
-                match &logo_tex {
-                    Some(tex) => {
-                        logo.set_paintable(Some(tex));
-                        logo.set_visible(true);
-                    }
-                    None => {
-                        logo.set_visible(false);
-                        if let Some((mark, _)) = &lang {
-                            parts.push(mark.clone());
-                        }
                     }
                 }
                 // pinned: the icon's colour says so (the tooltip names another session's pin)
@@ -588,9 +549,6 @@ impl FolderTree {
                         Some((h, false)) => format!("git repository · on {h}"),
                         None => "git repository".into(),
                     });
-                }
-                if let Some((_, about)) = lang {
-                    tip.push(about);
                 }
                 if is_pinned {
                     tip.push("pinned to the current session".into());
@@ -665,7 +623,6 @@ impl FolderTree {
             scope: RefCell::new(None),
             store,
             badges,
-            langs,
             changes: Rc::new(RefCell::new(Vec::new())),
             pinned,
             elsewhere,
@@ -1038,40 +995,6 @@ impl FolderTree {
             (self.decorate)(&item);
         }
         self.view.queue_draw();
-        // each repository's main language, off the main thread (git ls-files), when a minute old
-        let stale: Vec<PathBuf> = {
-            let langs = self.langs.borrow();
-            repos.iter().filter(|r| langs.get(*r).is_none_or(|(_, _, at)| at.elapsed().as_secs() >= 60)).cloned().collect()
-        };
-        if !stale.is_empty() {
-            let (tx, rx) = async_channel::bounded::<Vec<(PathBuf, Option<changes::Language>)>>(1);
-            std::thread::spawn(move || {
-                let found: Vec<(PathBuf, Option<changes::Language>)> = stale.into_iter().map(|r| (r.clone(), changes::repo_language(&r))).collect();
-                let _ = tx.send_blocking(found);
-            });
-            let t = self.clone();
-            glib::spawn_future_local(async move {
-                let Ok(found) = rx.recv().await else { return };
-                let now = std::time::Instant::now();
-                {
-                    let mut langs = t.langs.borrow_mut();
-                    for (repo, l) in found {
-                        match l {
-                            Some(l) => {
-                                let about = format!("{}: {}% of the tracked code by size", l.name, l.percent);
-                                langs.insert(repo, (l.mark.to_string(), about, now));
-                            }
-                            None => {
-                                langs.remove(&repo);
-                            }
-                        }
-                    }
-                }
-                for item in t.bound.borrow().clone() {
-                    (t.decorate)(&item);
-                }
-            });
-        }
         // follow the disk: the listed directories, and each repository's .git (commits, checkouts)
         let mut watch: Vec<PathBuf> = self.listed.borrow().keys().cloned().collect();
         for r in &repos {

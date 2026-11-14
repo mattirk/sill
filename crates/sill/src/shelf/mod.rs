@@ -10,7 +10,6 @@ mod fonts;
 mod herring;
 mod hotkey;
 mod icons;
-mod lang_icons;
 mod markdown;
 mod processes;
 mod session;

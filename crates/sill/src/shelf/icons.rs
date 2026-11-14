@@ -1,9 +1,8 @@
 //! Icons for the menus: provider glyphs from simple-icons (CC0 1.0: Claude, OpenAI, Google Gemini)
-//! plus a neutral placeholder, line glyphs from lucide (ISC) for the pages, and the programming
-//! languages' logos ([`super::lang_icons`], simple-icons too) for the file tree. All are rendered on
-//! demand in the colour of the widget they sit in,
-//! so they read light on dark themes and dark on light ones. (GTK's own symbolic recolouring only
-//! covers icons from an icon theme; a texture made here follows the live foreground instead.)
+//! plus a neutral placeholder, line glyphs from lucide (ISC) for the pages and the file tree. All
+//! are rendered on demand in the colour of the widget they sit in, so they read light on dark
+//! themes and dark on light ones. (GTK's own symbolic recolouring only covers icons from an icon
+//! theme; a texture made here follows the live foreground instead.)
 
 use gtk4 as gtk;
 use gtk::gdk;
@@ -28,9 +27,6 @@ const STROKES: &[(&str, &str)] = &[
     // managed processes (lucide server): the controls row's indicator
     ("sill-processes", "M2 2h20v8h-20zM2 14h20v8h-20zM6 6L6.01 6M6 18L6.01 18"),
     ("sill-folder-open", "m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"),
-    // a root (pinned) folder: the same folders with a dot inside
-    ("sill-folder-root", "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2ZM12 12.3a1.2 1.2 0 1 0 0 2.4 1.2 1.2 0 1 0 0-2.4"),
-    ("sill-folder-root-open", "m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2M13 13.8a1.2 1.2 0 1 0 0 2.4 1.2 1.2 0 1 0 0-2.4"),
     // the glyphs that used to come from the desktop's icon theme (2026-11-01): close, refresh,
     // delete, the Changes page's folds, the ✓ of a choice, and the tree's file kinds
     ("sill-x", "M18 6 6 18M0 0m6 6 12 12"),
@@ -219,23 +215,6 @@ pub fn stroke_texture(name: &str, color: gdk::RGBA) -> Option<gdk::Texture> {
     }
     let (_, d) = STROKES.iter().find(|(n, _)| *n == name)?;
     let t = gdk::Texture::from_bytes(&glib::Bytes::from_owned(stroke_svg(d, color, 96).into_bytes())).ok()?;
-    CACHE.with(|c| c.borrow_mut().insert(key, t.clone()));
-    Some(t)
-}
-
-/// A programming language's logo in colour `color`, made once per language and colour and shared
-/// by every row; `None` for a language without one. Sized by the image's CSS icon size like
-/// [`scalable`].
-pub fn language_texture(name: &str, color: gdk::RGBA) -> Option<gdk::Texture> {
-    thread_local! {
-        static CACHE: std::cell::RefCell<std::collections::HashMap<String, gdk::Texture>> = Default::default();
-    }
-    let key = format!("{name} {}", hex(color));
-    if let Some(t) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
-        return Some(t);
-    }
-    let (_, d) = super::lang_icons::LANG_GLYPHS.iter().find(|(n, _)| *n == name)?;
-    let t = gdk::Texture::from_bytes(&glib::Bytes::from_owned(fill_svg(d, color, 96).into_bytes())).ok()?;
     CACHE.with(|c| c.borrow_mut().insert(key, t.clone()));
     Some(t)
 }

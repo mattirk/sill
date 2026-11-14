@@ -1348,7 +1348,6 @@ dropdown > popover listview > row:selected { background: alpha(@accent_bg_color,
    apart — and each line runs through the centre of its parent's icon (icons start at 8 + 16·depth) */
 .sill-files treeexpander > indent { -gtk-icon-size: 7px; min-width: 7px; min-height: 0; margin-left: 8px; border-left: 1px solid alpha(@view_fg_color, 0.14); }
 .sill-file-icon { opacity: 0.7; -gtk-icon-size: 0.95em; }
-.sill-badge-logo { -gtk-icon-size: 0.85em; margin-left: 2px; }
 .sill-changed { color: @warning_color; }
 .sill-below { color: @warning_color; }
 .sill-new { color: @success_color; }
