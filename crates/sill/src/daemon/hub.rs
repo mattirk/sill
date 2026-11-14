@@ -77,6 +77,7 @@ impl Hub {
         };
         hub.adopt_running();
         hub.sweep_dead_ghosts();
+        hub.sweep_orphan_runtime();
         Ok(hub)
     }
 
@@ -595,8 +596,10 @@ impl Hub {
             }
             r
         })?;
-        if ghost && let Ok(rt) = sill_core::shim::runtime_dir(id) {
-            let _ = std::fs::remove_dir_all(rt); // its log is there
+        // its runtime dir goes too: the jail's log (a ghost's), and `denied`, the hosts its proxy
+        // refused — a trace of what the session tried
+        if let Ok(rt) = sill_core::shim::runtime_dir(id) {
+            let _ = std::fs::remove_dir_all(rt);
         }
         refresh_memory();
         eprintln!("sill daemon: session {id} deleted");
@@ -689,6 +692,26 @@ impl Hub {
             eprintln!("sill daemon: ghost session {id} {}: deleting it", if ended { "ended before its deletion was done" } else { "has no jail any more" });
             if let Err(e) = self.delete_session(&id) {
                 eprintln!("sill daemon: deleting ghost {id}: {e:#}");
+            }
+        }
+    }
+
+    /// At start: runtime dirs of sessions that have no row any more and no live launcher — left by
+    /// deletions before the runtime dir went with them — are removed.
+    fn sweep_orphan_runtime(&self) {
+        let Ok(dir) = sill_proto::runtime_dir() else { return };
+        let Ok(rd) = std::fs::read_dir(&dir) else { return };
+        let rows: Vec<String> = self.with_store(|s| s.sessions()).unwrap_or_default().into_iter().map(|s| s.id).collect();
+        for e in rd.flatten() {
+            let Some(id) = e.file_name().to_str().map(str::to_string) else { continue };
+            if id == "dev" || !sill_core::session::valid_id(&id) || !e.path().is_dir() || rows.contains(&id) {
+                continue;
+            }
+            if sill_core::launcher::pid_file_alive(&e.path().join("launch.pid")) || self.children.lock().unwrap().contains_key(&id) {
+                continue;
+            }
+            if std::fs::remove_dir_all(e.path()).is_ok() {
+                eprintln!("sill daemon: removed the runtime dir of deleted session {id}");
             }
         }
     }
