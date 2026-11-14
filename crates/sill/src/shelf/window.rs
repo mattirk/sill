@@ -591,7 +591,9 @@ impl Shelf {
             b.set_child(Some(&h));
             b
         };
-        for (id, agent) in registry.iter().filter(|(_, a)| a.enabled) {
+        // only agents that can actually start here: enabled, and their command exists (a built-in
+        // whose package was removed on the Agents page drops out until it is installed again)
+        for (id, agent) in registry.iter().filter(|(_, a)| a.enabled && sill_core::registry::available(a, &home).is_some()) {
             let b = row(Some(agent), &agent.name);
             let s = self.clone();
             let pop = pop.clone();

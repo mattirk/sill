@@ -52,6 +52,7 @@ pub struct AgentsPage {
     note: gtk::Label,
     refresh_btn: gtk::Button,
     filter: Cell<Filter>,
+    show_untested: Cell<bool>,
     entries: RefCell<Vec<Entry>>,
     rows: RefCell<HashMap<String, Row>>,
     installing: RefCell<std::collections::HashSet<String>>,
@@ -88,6 +89,12 @@ impl AgentsPage {
             filters.append(b);
         }
         bar.append(&filters);
+        // untested entries are hidden until asked for (installed ones always show)
+        let more = gtk::ToggleButton::with_label("Untested");
+        more.add_css_class("sill-filter");
+        more.add_css_class("flat");
+        more.set_tooltip_text(Some("Also list agents nobody has tried inside sill yet"));
+        bar.append(&more);
         let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
         refresh.add_css_class("flat");
         refresh.set_tooltip_text(Some("Fetch the registry again"));
@@ -115,6 +122,7 @@ impl AgentsPage {
             note,
             refresh_btn: refresh.clone(),
             filter: Cell::new(Filter::All),
+            show_untested: Cell::new(false),
             entries: RefCell::new(Vec::new()),
             rows: RefCell::new(HashMap::new()),
             installing: RefCell::new(Default::default()),
@@ -140,6 +148,13 @@ impl AgentsPage {
         {
             let p = page.clone();
             refresh.connect_clicked(move |_| p.fetch());
+        }
+        {
+            let p = page.clone();
+            more.connect_toggled(move |b| {
+                p.show_untested.set(b.is_active());
+                p.rebuild();
+            });
         }
         {
             // worker → UI
@@ -224,6 +239,9 @@ impl AgentsPage {
             }
             let state = self.state_of(&e, &home);
             let installed = !matches!(state, State::Absent);
+            if !installed && !registry::is_tested(&e.id) && !self.show_untested.get() {
+                continue;
+            }
             match self.filter.get() {
                 Filter::Installed if !installed => continue,
                 Filter::NotInstalled if installed => continue,
@@ -258,6 +276,13 @@ impl AgentsPage {
         ver.add_css_class("dim-label");
         ver.add_css_class("sill-agent-version");
         top.append(&ver);
+        if !registry::is_tested(&e.id) {
+            let u = gtk::Label::new(Some("untested"));
+            u.add_css_class("dim-label");
+            u.add_css_class("sill-agent-version");
+            u.set_tooltip_text(Some("Not yet tried inside sill's jail: install, login and a prompt may need work"));
+            top.append(&u);
+        }
         if !e.description.is_empty() {
             col.set_tooltip_text(Some(&e.description));
         }

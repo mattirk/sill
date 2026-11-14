@@ -38,6 +38,146 @@ pub fn agent_home(home: &Path, agent_id: &str) -> PathBuf {
         .join(agent_id)
 }
 
+/// Parents under `~` that many programs share: an agent's entry below them is adopted one level
+/// down (`~/.config/<agent>`), never the parent itself.
+const SHARED_PARENTS: &[&str] = &[".config", ".local", ".cache"];
+
+/// Agent-owned paths that live in the sill-owned home without being listed in the registry:
+/// whatever the agent (or its host-side login) has put there. Each is (owned path, path under `~`).
+/// Top-level dot entries of the agent home map to `~/<name>`; entries one level below a shared
+/// parent map to `~/.config/<name>` and so on.
+pub fn adopted_binds(agent: &crate::agents::Agent, home: &Path) -> Vec<(PathBuf, PathBuf)> {
+    let base = agent_home(home, &agent.id);
+    let curated: Vec<String> = agent
+        .home_paths
+        .iter()
+        .filter_map(|p| Path::new(p).file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(&base) else { return out };
+    for e in rd.filter_map(Result::ok) {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !name.starts_with('.') || curated.contains(&name) {
+            continue;
+        }
+        if SHARED_PARENTS.contains(&name.as_str()) {
+            let parent = base.join(&name);
+            let Ok(rd2) = std::fs::read_dir(&parent) else { continue };
+            for c in rd2.filter_map(Result::ok) {
+                let cname = c.file_name().to_string_lossy().into_owned();
+                if name == ".local" && (cname == "share" || cname == "state" || cname == "bin") {
+                    // one more level: ~/.local/share/<agent>
+                    let Ok(rd3) = std::fs::read_dir(c.path()) else { continue };
+                    for g in rd3.filter_map(Result::ok) {
+                        let rel = Path::new(&name).join(&cname).join(g.file_name());
+                        out.push((base.join(&rel), home.join(&rel)));
+                    }
+                    continue;
+                }
+                let rel = Path::new(&name).join(&cname);
+                out.push((base.join(&rel), home.join(&rel)));
+            }
+        } else {
+            out.push((base.join(&name), home.join(&name)));
+        }
+    }
+    out
+}
+
+/// Every path under `~` that is the agent's own (registry `state_dirs` and `home_paths` plus the
+/// adopted ones), as `~/…` strings for [`crate::changes::is_agent_state`].
+pub fn state_paths(agent: &crate::agents::Agent, home: &Path) -> Vec<String> {
+    let mut v: Vec<String> = agent.state_dirs.iter().chain(agent.home_paths.iter()).cloned().collect();
+    for (_, inside) in adopted_binds(agent, home) {
+        if let Ok(rel) = inside.strip_prefix(home) {
+            v.push(format!("~/{}", rel.display()));
+        }
+    }
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// Move new agent-private paths out of a session's upper tree into the sill-owned home, so they
+/// persist across that agent's sessions, stay off the host and out of the ledger: the shallowest
+/// *new* path under a dot entry of `~` (`~/.foo`, `~/.config/foo`, `~/.gemini/foo` when `~/.gemini`
+/// already existed). Pinned folders are never touched. Returns what was adopted (paths under `~`);
+/// the binds take effect when the session starts again.
+pub fn adopt_agent_state(
+    agent: &crate::agents::Agent,
+    home: &Path,
+    changes: &[crate::ledger::Change],
+    pins: &[PathBuf],
+) -> Result<Vec<PathBuf>> {
+    use crate::ledger::Kind;
+    let base = agent_home(home, &agent.id);
+    let already: Vec<PathBuf> = adopted_binds(agent, home).into_iter().map(|(_, i)| i).collect();
+    let curated: Vec<PathBuf> = agent.home_paths.iter().map(|p| crate::paths::expand_home(p, home)).collect();
+    let added: std::collections::HashSet<&Path> =
+        changes.iter().filter(|c| c.kind == Kind::Added).map(|c| c.path.as_path()).collect();
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for c in changes {
+        let Ok(rel) = c.path.strip_prefix(home) else { continue };
+        let comps: Vec<String> = rel.components().map(|x| x.as_os_str().to_string_lossy().into_owned()).collect();
+        let Some(first) = comps.first() else { continue };
+        if !first.starts_with('.') {
+            continue;
+        }
+        if pins.iter().any(|p| c.path.starts_with(p)) || already.iter().chain(curated.iter()).any(|p| c.path.starts_with(p)) {
+            continue;
+        }
+        // the shallowest new ancestor (including the path itself)
+        let mut cur = home.to_path_buf();
+        let mut pick = None;
+        for comp in &comps {
+            cur = cur.join(comp);
+            if added.contains(cur.as_path()) {
+                pick = Some(cur.clone());
+                break;
+            }
+        }
+        let Some(pick) = pick else { continue };
+        // never adopt a shared parent itself (`~/.config` as a whole)
+        if pick.parent() == Some(home) && SHARED_PARENTS.contains(&comps[0].as_str()) {
+            continue;
+        }
+        if !candidates.contains(&pick) {
+            candidates.push(pick);
+        }
+    }
+    let mut adopted = Vec::new();
+    for host_path in candidates {
+        let Some(change) = changes.iter().find(|c| c.path == host_path) else { continue };
+        let rel = host_path.strip_prefix(home).unwrap_or(&host_path);
+        let dst = base.join(rel);
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        copy_tree(&change.upper, &dst)?;
+        adopted.push(host_path);
+    }
+    Ok(adopted)
+}
+
+/// Copy a file or directory tree (regular files and directories only; overlay whiteouts and
+/// special files are skipped), merging into an existing destination.
+fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
+    let meta = std::fs::symlink_metadata(src)?;
+    if meta.is_dir() {
+        std::fs::create_dir_all(dst)?;
+        for e in std::fs::read_dir(src)?.filter_map(Result::ok) {
+            copy_tree(&e.path(), &dst.join(e.file_name()))?;
+        }
+    } else if meta.is_file() {
+        std::fs::copy(src, dst)?;
+    } else if meta.file_type().is_symlink() {
+        let target = std::fs::read_link(src)?;
+        let _ = std::fs::remove_file(dst);
+        std::os::unix::fs::symlink(target, dst)?;
+    }
+    Ok(())
+}
+
 pub fn binds_for(
     agent: &crate::agents::Agent,
     policy: &Policy,
@@ -80,6 +220,12 @@ pub fn binds_for(
         // bwrap needs the mount point to exist inside: a missing ~/.claude.json would be created as
         // a copy-up in the overlay, which is harmless (it is skipped by the ledger as a bind)
         out.push((owned, inside));
+    }
+    // adopted agent state (see `adopted_binds`): the agent's own files that landed in its home
+    for (owned, inside) in adopted_binds(agent, home) {
+        if !out.iter().any(|(_, i)| *i == inside) {
+            out.push((owned, inside));
+        }
     }
     // the login file shared with the host (bound after the home so it wins)
     for p in &agent.shared_files {

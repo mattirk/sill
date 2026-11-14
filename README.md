@@ -122,16 +122,22 @@ one action per entry. *Install* puts the package under `~/.local/state/sill/tool
 over ACP for session resume, and writes `~/.config/sill/agents/<id>.toml`, so it appears in the `+` menu with
 its registry icon. Entries that are the built-ins' own packages (Claude Code, Codex, Gemini) keep the
 built-in's jail settings and only take the new command. The gear on an installed row edits its command,
-environment (API keys) and proxy domains; third-party agents start with an empty allow-list, so add their API
-domains there if one can't connect. The trash icon removes an install again.
+environment (API keys) and proxy domains. Third-party agents start with an empty allow-list: when one tries a
+host the proxy refuses, the conversation asks whether to allow that host (or its whole domain) for the agent,
+and the session restarts with it allowed. The trash icon removes an install again.
+
+**Agents' own files.** Each agent's state lives in `~/.local/state/sill/agents/<id>/`, never on the host and
+never in the change ledger. The built-ins declare their paths; anything else is learned: a new dot-path an agent
+creates under `~` (`~/.foo`, `~/.config/foo`) is adopted into its sill home after the turn and bound there in
+later sessions, and host-side logins of such agents write straight into that home.
 
 **Logging in.** When an agent refuses to open a session without a login, the conversation shows one button
 per method the agent offers. Claude Code's logins run in the shelf's terminal pane inside the jail. Codex
 with an API key: put `OPENAI_API_KEY` in its environment (the gear on the Agents page) and pick *API Key*. Codex with
 ChatGPT: pick *ChatGPT* (or run `sill login codex`); that login runs on this machine because its browser
 callback can't reach into the jail, but with `CODEX_HOME` pointing at the jail's own `~/.codex` copy, so
-nothing lands on the host; the session then restarts. Claude's credentials file is the one host file an
-agent shares (its refresh tokens rotate, so two copies would revoke each other).
+nothing lands on the host; the session then restarts. Claude Code logs in inside sill too (its terminal login in the
+shell pane), as a login of its own, separate from the host's Claude Code or Zed.
 
 ## Known limits
 
@@ -139,5 +145,8 @@ agent shares (its refresh tokens rotate, so two copies would revoke each other).
   unmapped id; SPEC §4.10 #16). Group-shared trees: `direct` or `ro` in the policy for now, or pin them.
 - The parked agent process costs ~1.6 % of a core; close the tab when idle until idle-stop exists.
 - HTTP CONNECT proxy only (no SOCKS5); programs that ignore `HTTPS_PROXY` have no network, by design.
-- Gemini is in the agent registry but untested (its OAuth login has no host-side path yet).
+- Gemini CLI's "Log in with Google" runs host-side like Codex's ChatGPT login, but Google stopped serving
+  personal accounts (free, AI Pro, Ultra) through Gemini CLI on 2026-06-18 and answers with "This client is no
+  longer supported for Gemini Code Assist for individuals". Use a Gemini API key (`GEMINI_API_KEY` in its
+  environment, then *Gemini API key*), or install Antigravity from the Agents page.
 - No terminal in the jail, no policies UI, no focus keeper yet (M3).

@@ -26,7 +26,7 @@ pub struct SessionView {
     /// The shell's pty is opened on first use and kept while hidden.
     shell_open: std::cell::Cell<bool>,
     /// The terminal is running a login; when it closes the session is opened again.
-    login_pending: std::cell::Cell<bool>,
+    login_pending: Rc<std::cell::Cell<bool>>,
     /// `Ready` arrived on the current connection.
     ready: std::cell::Cell<bool>,
     /// The connection died before `Ready` and the agent was restarted once already.
@@ -67,6 +67,9 @@ pub struct SessionView {
     live_pins: RefCell<Vec<std::path::PathBuf>>,
     /// Watches on pinned repos' `.git` (commits, index) so the chip numbers follow host activity too.
     git_monitors: RefCell<Vec<gtk::gio::FileMonitor>>,
+    /// Watches the session's runtime dir for `denied` (hosts the proxy refused).
+    denied_monitor: RefCell<Option<gtk::gio::FileMonitor>>,
+    denied_seen: RefCell<std::collections::HashSet<String>>,
     refresh_pending: std::cell::Cell<bool>,
     pub on_restart: RefCell<Option<Box<dyn Fn(&str)>>>,
 }
@@ -134,6 +137,136 @@ impl SessionView {
             });
             terminal.add_controller(click);
         }
+        // set while the pane runs a login (see shell_closed). Claude's code prompt never echoes
+        // what it receives (a Bun readline quirk, the same in any terminal), so a paste into it is
+        // acknowledged with a fading notice over the pane instead; the code itself stays unseen.
+        let login_pending = Rc::new(std::cell::Cell::new(false));
+        let toast = gtk::Label::new(None);
+        toast.add_css_class("sill-toast");
+        toast.set_halign(gtk::Align::End);
+        toast.set_valign(gtk::Align::Start);
+        toast.set_margin_top(6);
+        toast.set_margin_end(10);
+        toast.set_can_target(false);
+        let show_toast = {
+            let toast = toast.clone();
+            move |text: &str| {
+                toast.set_text(text);
+                toast.add_css_class("sill-toast-show");
+                let t = toast.clone();
+                glib::timeout_add_local_once(std::time::Duration::from_millis(1800), move || {
+                    t.remove_css_class("sill-toast-show");
+                });
+            }
+        };
+        // copy / paste: Ctrl+Shift+C / Ctrl+Shift+V as in every terminal, Ctrl+V pastes too (a
+        // login code is pasted, not typed), Ctrl+C with a selection copies instead of interrupting;
+        // a right-click menu for the mouse
+        {
+            // paste by reading the clipboard ourselves and feeding the text (bracketed paste and
+            // newline handling stay VTE's); its own paste_clipboard() quietly did nothing here.
+            // During a login the pane runs a line prompt that echoes keystrokes but shows nothing of
+            // a pasted block (a bracketed paste arrives as one chunk): then the text is typed in,
+            // one character at a time, so the person sees the code land.
+            let paste_into = {
+                let login_pending = login_pending.clone();
+                let show_toast = show_toast.clone();
+                move |t: &vte4::Terminal| {
+                    let t = t.clone();
+                    let in_login = login_pending.get();
+                    let show_toast = show_toast.clone();
+                    t.clipboard().read_text_async(None::<&gtk::gio::Cancellable>, move |res| {
+                        let Ok(Some(text)) = res else { return };
+                        if text.is_empty() {
+                            return;
+                        }
+                        if !in_login {
+                            t.paste_text(&text);
+                            return;
+                        }
+                        // a login code: typed in one character at a time (a bracketed block is
+                        // swallowed silently by the prompt) and acknowledged, not shown
+                        let chars: Vec<String> = text.trim().chars().filter(|c| !c.is_control()).map(|c| c.to_string()).collect();
+                        show_toast(&format!("pasted {} characters — press Enter", chars.len()));
+                        let i = std::cell::Cell::new(0usize);
+                        glib::timeout_add_local(std::time::Duration::from_millis(4), move || {
+                            let n = i.get();
+                            if n >= chars.len() {
+                                return glib::ControlFlow::Break;
+                            }
+                            t.feed_child(chars[n].as_bytes());
+                            i.set(n + 1);
+                            glib::ControlFlow::Continue
+                        });
+                    });
+                }
+            };
+            let keys = gtk::EventControllerKey::new();
+            keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+            let t = terminal.clone();
+            let paste = paste_into.clone();
+            keys.connect_key_pressed(move |_, key, _, state| {
+                let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
+                let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
+                let k = key.to_lower();
+                if ctrl && (k == gdk::Key::v || (shift && key == gdk::Key::Insert)) {
+                    paste(&t);
+                    return glib::Propagation::Stop;
+                }
+                if ctrl && k == gdk::Key::c && (shift || t.has_selection()) {
+                    t.copy_clipboard_format(vte4::Format::Text);
+                    if !shift {
+                        t.unselect_all();
+                    }
+                    return glib::Propagation::Stop;
+                }
+                glib::Propagation::Proceed
+            });
+            terminal.add_controller(keys);
+            let menu = gtk::Popover::new();
+            menu.add_css_class("sill-menu");
+            menu.set_has_arrow(false);
+            menu.set_parent(&terminal);
+            let mbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            let mut copy_btn = None;
+            for (label, copy) in [("Copy", true), ("Paste", false)] {
+                let b = gtk::Button::with_label(label);
+                b.add_css_class("flat");
+                b.add_css_class("sill-menu-item");
+                if let Some(l) = b.child().and_then(|c| c.downcast::<gtk::Label>().ok()) {
+                    l.set_xalign(0.0);
+                }
+                let t = terminal.clone();
+                let m = menu.clone();
+                let paste = paste_into.clone();
+                b.connect_clicked(move |_| {
+                    m.popdown();
+                    if copy {
+                        t.copy_clipboard_format(vte4::Format::Text);
+                    } else {
+                        paste(&t);
+                    }
+                });
+                if copy {
+                    copy_btn = Some(b.clone());
+                }
+                mbox.append(&b);
+            }
+            menu.set_child(Some(&mbox));
+            let right = gtk::GestureClick::new();
+            right.set_button(3);
+            let m = menu.clone();
+            let t = terminal.clone();
+            right.connect_pressed(move |g, _, x, y| {
+                if let Some(c) = &copy_btn {
+                    c.set_sensitive(t.has_selection());
+                }
+                m.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+                m.popup();
+                g.set_state(gtk::EventSequenceState::Claimed);
+            });
+            terminal.add_controller(right);
+        }
         let term_scroll = gtk::ScrolledWindow::builder()
             .child(&terminal)
             .hscrollbar_policy(gtk::PolicyType::Never)
@@ -146,7 +279,10 @@ impl SessionView {
         bottom.set_vhomogeneous(false);
         bottom.set_interpolate_size(true);
         bottom.add_named(&prompt_scroll, Some("prompt"));
-        bottom.add_named(&term_scroll, Some("shell"));
+        let term_overlay = gtk::Overlay::new();
+        term_overlay.set_child(Some(&term_scroll));
+        term_overlay.add_overlay(&toast);
+        bottom.add_named(&term_overlay, Some("shell"));
         bottom.set_visible_child_name("prompt");
 
         let prompt_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -175,7 +311,7 @@ impl SessionView {
             terminal: terminal.clone(),
             term_scroll: term_scroll.clone(),
             shell_open: std::cell::Cell::new(false),
-            login_pending: std::cell::Cell::new(false),
+            login_pending: login_pending.clone(),
             ready: std::cell::Cell::new(false),
             startup_retried: std::cell::Cell::new(false),
             force_restart: std::cell::Cell::new(false),
@@ -201,6 +337,8 @@ impl SessionView {
             on_shell: RefCell::new(None),
             live_pins: RefCell::new(Vec::new()),
             git_monitors: RefCell::new(Vec::new()),
+            denied_monitor: RefCell::new(None),
+            denied_seen: RefCell::new(Default::default()),
             refresh_pending: std::cell::Cell::new(false),
             on_restart: RefCell::new(None),
         });
@@ -355,6 +493,11 @@ impl SessionView {
         let cwd = self.store.pins(&self.id()).unwrap_or_default().into_iter().find(|p| p.is_dir()).unwrap_or(home);
         let cols = self.terminal.column_count().max(20) as u16;
         let rows = self.terminal.row_count().max(5) as u16;
+        // the pane is a VTE terminal: say so, whatever the jail's default is
+        let mut env = env.clone();
+        env.entry("TERM".into()).or_insert_with(|| "xterm-256color".into());
+        env.entry("COLORTERM".into()).or_insert_with(|| "truecolor".into());
+        let env = &env;
         let (fd, _pid) = c.open_pty(argv, env, Some(&cwd), cols, rows)?;
         let pty = vte4::Pty::foreign_sync(fd, None::<&gtk::gio::Cancellable>)?;
         self.terminal.set_pty(Some(&pty));
@@ -372,7 +515,12 @@ impl SessionView {
             self.conv.add_note(&format!("unknown agent {agent_id}"));
             return;
         };
-        if agent.host_login.contains(&m.id) {
+        // Host-side: the curated methods, and every protocol-level method of an agent installed
+        // from the registry. Those agents aren't described (no home paths, no method list), and a
+        // browser flow with a localhost callback silently hangs inside the jail; on the host it
+        // opens the browser and writes its login under ~ where every session's overlay sees it.
+        let unknown_agent = agent.home_paths.is_empty();
+        if agent.host_login.contains(&m.id) || (unknown_agent && m.terminal.is_none()) {
             self.login_on_host(agent, m);
             return;
         }
@@ -754,6 +902,84 @@ impl SessionView {
         });
     }
 
+    /// Watch `<runtime dir>/denied`: the proxy appends every host it refuses, and the person gets a
+    /// one-click way to allow it for this agent (SPEC §4.8). Third-party agents start with an
+    /// empty allow-list, so this is how their endpoints get in.
+    fn watch_denied(self: &Rc<Self>) {
+        self.denied_seen.borrow_mut().clear();
+        let Ok(rt) = sill_core::shim::runtime_dir(&self.id()) else { return };
+        let Ok(m) = gtk::gio::File::for_path(&rt).monitor_directory(gtk::gio::FileMonitorFlags::NONE, None::<&gtk::gio::Cancellable>) else {
+            return;
+        };
+        let v = self.clone();
+        m.connect_changed(move |_, f, _, _| {
+            if f.basename().is_some_and(|b| b == std::path::Path::new("denied")) {
+                v.check_denied();
+            }
+        });
+        *self.denied_monitor.borrow_mut() = Some(m);
+        self.check_denied();
+    }
+
+    fn check_denied(self: &Rc<Self>) {
+        let Ok(rt) = sill_core::shim::runtime_dir(&self.id()) else { return };
+        let Ok(text) = std::fs::read_to_string(rt.join("denied")) else { return };
+        let home = session::home().unwrap_or_default();
+        let quiet = sill_core::policy::Policy::load(&self.session.borrow().policy, &home)
+            .map(|p| p.network.quiet)
+            .unwrap_or_else(|_| sill_core::policy::quiet_default());
+        for host in text.lines().map(str::trim).filter(|h| !h.is_empty()) {
+            if !self.denied_seen.borrow_mut().insert(host.to_string()) {
+                continue;
+            }
+            // telemetry stays blocked without a question
+            if quiet.iter().any(|p| sill_core::proxy::host_matches(p, host)) {
+                continue;
+            }
+            let agent_name = agents::load(&session::home().unwrap_or_default())
+                .get(&self.session.borrow().agent)
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| self.session.borrow().agent.clone());
+            let mut actions: Vec<(String, Rc<dyn Fn()>)> = Vec::new();
+            let exact = host.to_string();
+            let v = self.clone();
+            actions.push((format!("Allow {host}"), Rc::new(move || v.allow_domain(&exact))));
+            let labels: Vec<&str> = host.split('.').collect();
+            if labels.len() >= 3 {
+                let wild = format!("*.{}", labels[1..].join("."));
+                let v = self.clone();
+                let w = wild.clone();
+                actions.push((format!("Allow {wild}"), Rc::new(move || v.allow_domain(&w))));
+            }
+            actions.push(("Keep blocked".into(), Rc::new(|| {})));
+            self.conv.add_actions(
+                &format!("{agent_name} tried to reach {host} and the proxy refused it: the host is not on this agent's allow-list."),
+                actions,
+            );
+        }
+    }
+
+    /// Add a host pattern to this agent's `domains` (its registry override) and rebuild the jail
+    /// so the proxy picks it up.
+    fn allow_domain(self: &Rc<Self>, pattern: &str) {
+        let home = session::home().unwrap_or_default();
+        let id = self.session.borrow().agent.clone();
+        let Some(mut agent) = agents::load(&home).remove(&id) else { return };
+        if !agent.domains.iter().any(|d| d == pattern) {
+            agent.domains.push(pattern.to_string());
+        }
+        match agents::save_override(&home, &agent) {
+            Ok(_) => {
+                self.conv.add_note(&format!("{pattern} allowed for {}; the session restarts", agent.name));
+                self.force_restart.set(true);
+                if let Some(cb) = self.on_restart.borrow().as_ref() {
+                    cb(&self.id());
+                }
+            }
+            Err(e) => self.conv.add_note(&format!("could not save: {e:#}")),
+        }
+    }
+
     /// Pins the jail was started with, for deciding whether a rebuild is needed.
     pub fn pins_changed(&self) -> bool {
         self.force_restart.get() || self.store.pins(&self.id()).unwrap_or_default() != *self.live_pins.borrow()
@@ -783,6 +1009,7 @@ impl SessionView {
         self.ready.set(false);
         match session::start(&s, &self.store, fresh) {
             Ok(d) => {
+                self.watch_denied();
                 let events = d.events.clone();
                 *self.driver.borrow_mut() = Some(d);
                 let v = self.clone();
@@ -988,8 +1215,32 @@ impl SessionView {
                 };
                 let plan = sill_core::changes::session_plan(policy.clone(), state_dir, &home, uid, &user, binds)?;
                 let changes = sill_core::changes::scan(&policy, &plan, None)?;
-                let pending = changes.iter().filter(|c| !c.ignored).count();
-                Ok(if pending > 0 { format!("{pending} change(s) pending in Changes") } else { String::new() })
+                // the agent's own new dot-paths move into its sill-owned home (SPEC §4.2)
+                let mut note = String::new();
+                if let Some(agent) = sill_core::agents::load(&home).get(&s.agent) {
+                    let pins = store2.as_ref().and_then(|st| st.pins(&s.id).ok()).unwrap_or_default();
+                    let adopted = sill_core::session::adopt_agent_state(agent, &home, &changes, &pins)?;
+                    if !adopted.is_empty() {
+                        let names: Vec<String> = adopted
+                            .iter()
+                            .map(|p| format!("~/{}", p.strip_prefix(&home).unwrap_or(p).display()))
+                            .collect();
+                        note = format!("{} kept as {}'s own state (in its jail home from the next start)", names.join(", "), agent.name);
+                    }
+                }
+                let state = sill_core::agents::load(&home).get(&s.agent).map(|a| sill_core::session::state_paths(a, &home)).unwrap_or_default();
+                let pending = changes
+                    .iter()
+                    .filter(|c| !c.ignored && !sill_core::changes::is_agent_state(&c.path, &state, &home))
+                    .count();
+                let mut msg = if pending > 0 { format!("{pending} change(s) pending in Changes") } else { String::new() };
+                if !note.is_empty() {
+                    if !msg.is_empty() {
+                        msg.push_str(" · ");
+                    }
+                    msg.push_str(&note);
+                }
+                Ok(msg)
             })();
             let _ = tx.send_blocking(msg.unwrap_or_else(|e| format!("ledger: {e:#}")));
         });

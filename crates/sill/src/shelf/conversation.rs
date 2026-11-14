@@ -288,6 +288,34 @@ impl Conversation {
         self.request_follow();
     }
 
+    /// A question from sill with a few actions (same look as a permission request). Each button
+    /// disables the row and runs its action.
+    pub fn add_actions(&self, message: &str, actions: Vec<(String, Rc<dyn Fn()>)>) {
+        self.finish_current();
+        let frame = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        frame.add_css_class("sill-permission");
+        let label = gtk::Label::new(Some(message));
+        label.set_xalign(0.0);
+        label.set_wrap(true);
+        label.set_selectable(true);
+        frame.append(&label);
+        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        for (text, act) in actions {
+            let b = gtk::Button::with_label(&text);
+            let buttons2 = buttons.clone();
+            let label2 = label.clone();
+            b.connect_clicked(move |_| {
+                buttons2.set_sensitive(false);
+                label2.set_text(&format!("{} → {}", label2.text(), text));
+                act();
+            });
+            buttons.append(&b);
+        }
+        frame.append(&buttons);
+        self.column.append(&frame);
+        self.request_follow();
+    }
+
     /// The agent wants a login first: one button per method it offers.
     pub fn add_auth(&self, message: &str, methods: Vec<sill_core::acp::AuthMethodInfo>, pick: Rc<dyn Fn(sill_core::acp::AuthMethodInfo)>) {
         self.finish_current();
@@ -461,6 +489,10 @@ button.sill-send.sill-stop { color: @error_color; background: alpha(@error_bg_co
 button.sill-send.sill-stop > image { margin: 0; padding: 0; }
 button.sill-send.sill-stop:hover { background: alpha(@error_bg_color, 0.45); }
 .sill-terminal { padding: 4px; }
+/* a notice over the terminal that fades away */
+.sill-toast { padding: 3px 10px; font-size: 90%; color: @view_fg_color; background: alpha(@accent_bg_color, 0.35);
+              opacity: 0; transition: opacity 700ms ease; }
+.sill-toast.sill-toast-show { opacity: 1; transition: opacity 120ms ease; }
 .sill-hotkey { padding: 4px 14px; font-family: monospace; }
 .sill-capturing { background: alpha(@accent_bg_color, 0.3); }
 .sill-prompt-box { border-radius: 0; border: none; border-top: 1px solid alpha(@view_fg_color, 0.15);

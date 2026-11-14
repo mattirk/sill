@@ -10,7 +10,8 @@ use std::path::Path;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ClientCapabilities, ContentBlock, InitializeRequest, RequestPermissionOutcome, RequestPermissionRequest,
+    CancelNotification, ClientCapabilities, ContentBlock, InitializeRequest, PromptRequest, PromptResponse, RequestPermissionOutcome,
+    RequestPermissionRequest,
     RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigOptionValue, SessionConfigSelectOptions, SessionModeState,
     SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason,
@@ -264,39 +265,39 @@ pub fn run_session(
                         Some(id) => match cx.load_session(id, &opts.cwd).block_task().start_session().await {
                             Ok(restored) => {
                                 let mut session = restored.into_session();
-                                drive(&mut session, true, &commands, &events_loop).await
+                                drive(&mut session, true, &auth_methods, &commands, &events_loop).await
                             }
                             Err(e) if e.code == ErrorCode::AuthRequired => Err(e),
                             Err(e) => {
                                 tracing::warn!("session/load failed, starting fresh: {e}");
-                                cx.build_session(&opts.cwd)
-                                    .block_task()
-                                    .run_until(async |mut s| drive(&mut s, false, &commands, &events_loop).await)
-                                    .await
+                                open_fresh(&cx, &opts.cwd, &auth_methods, &commands, &events_loop).await
                             }
                         },
-                        None => {
-                            cx.build_session(&opts.cwd)
-                                .block_task()
-                                .run_until(async |mut s| drive(&mut s, false, &commands, &events_loop).await)
-                                .await
-                        }
+                        None => open_fresh(&cx, &opts.cwd, &auth_methods, &commands, &events_loop).await,
                     };
                     match attempt {
                         Ok(()) => return Ok(()),
                         Err(e) if e.code == ErrorCode::AuthRequired => {
-                            let mut message = e.message.clone();
+                            // asked once; other commands (a prompt sent meanwhile) are dropped
+                            // without asking again, a failed login asks again with its reason
+                            let _ = events_loop
+                                .send(Event::AuthRequired { message: e.message.clone(), methods: auth_methods.clone() })
+                                .await;
                             loop {
-                                let _ = events_loop
-                                    .send(Event::AuthRequired { message: message.clone(), methods: auth_methods.clone() })
-                                    .await;
                                 match commands.recv().await {
                                     Ok(Command::Authenticate(id)) => {
                                         // agent-side login (API key from its environment, …): a
                                         // failure is shown with the choices again, not fatal
                                         match cx.send_request(AuthenticateRequest::new(id)).block_task().await {
                                             Ok(_) => break,
-                                            Err(err) => message = format!("login failed: {}", err.message),
+                                            Err(err) => {
+                                                let _ = events_loop
+                                                    .send(Event::AuthRequired {
+                                                        message: format!("login failed: {}", err.message),
+                                                        methods: auth_methods.clone(),
+                                                    })
+                                                    .await;
+                                            }
                                         }
                                     }
                                     Ok(Command::RetrySession) => break,
@@ -316,11 +317,52 @@ pub fn run_session(
     result.map_err(|e| anyhow!("acp: {e}"))
 }
 
+/// How long `session/new` may take before the agent is assumed to be waiting for a login it
+/// started on its own (Antigravity opens a browser flow at startup when it has no token and blocks
+/// the request until the callback arrives — which never happens inside the jail).
+const SESSION_OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// `session/new` and then the session loop; a request that doesn't come back in time turns into
+/// `auth_required`, so the person gets the login choices instead of a silent hang.
+async fn open_fresh(
+    cx: &agent_client_protocol::ConnectionTo<Agent>,
+    cwd: &Path,
+    auth_methods: &[AuthMethodInfo],
+    commands: &async_channel::Receiver<Command>,
+    events_loop: &async_channel::Sender<Event>,
+) -> Result<(), agent_client_protocol::Error> {
+    let opened = std::rc::Rc::new(std::cell::Cell::new(false));
+    let session = {
+        let opened = opened.clone();
+        cx.build_session(cwd).block_task().run_until(async move |mut s| {
+            opened.set(true);
+            drive(&mut s, false, auth_methods, commands, events_loop).await
+        })
+    };
+    let stall = async {
+        async_io::Timer::after(SESSION_OPEN_TIMEOUT).await;
+        if opened.get() {
+            std::future::pending::<()>().await;
+        }
+        let mut e = agent_client_protocol::Error::auth_required();
+        e.message = format!(
+            "the agent did not open a session within {} s — it is probably waiting for a login it started itself",
+            SESSION_OPEN_TIMEOUT.as_secs()
+        );
+        Err(e)
+    };
+    match futures::future::select(Box::pin(session), Box::pin(stall)).await {
+        futures::future::Either::Left((r, _)) => r,
+        futures::future::Either::Right((r, _)) => r,
+    }
+}
+
 /// Run an open session until `Command::Quit`, the commands channel closes, or the connection
 /// fails. Works for fresh and restored sessions alike (the restore's replay arrives as updates).
 async fn drive(
     session: &mut ActiveSession<'_, Agent>,
     resumed: bool,
+    auth_methods: &[AuthMethodInfo],
     commands: &async_channel::Receiver<Command>,
     events_loop: &async_channel::Sender<Event>,
 ) -> Result<(), agent_client_protocol::Error> {
@@ -334,31 +376,82 @@ async fn drive(
     let mut last_modes: Option<SessionModeState> = session.modes().cloned();
     let mut last_options: Vec<SessionConfigOption> = session.config_options().map(|o| o.to_vec()).unwrap_or_default();
 
+    // The prompt request is sent by us, not through `ActiveSession::send_prompt`: that one runs
+    // in an SDK task whose failure (Claude answers `auth_required` at prompt time, not at
+    // session/new) shuts the whole connection down. Held here, a refused prompt is just an
+    // error we can show, and the session lives on for the login and the retry.
+    type PromptFut = std::pin::Pin<Box<dyn std::future::Future<Output = Result<PromptResponse, agent_client_protocol::Error>>>>;
+    let mut pending: Option<PromptFut> = None;
     let mut in_turn = false;
     loop {
-        // wait for either a command or an update, whichever comes first; both futures are
-        // dropped before `session` is used again
+        // wait for a command, an update or the prompt's answer, whichever comes first; the
+        // borrowing futures are dropped before `session` is used again
         enum Next {
             Cmd(Option<Command>),
             Update(Result<SessionMessage, agent_client_protocol::Error>),
+            Prompt(Result<PromptResponse, agent_client_protocol::Error>),
         }
         let next = {
             let cmd_fut = Box::pin(commands.recv());
             let upd_fut = Box::pin(session.read_update());
-            match futures::future::select(cmd_fut, upd_fut).await {
-                futures::future::Either::Left((cmd, _)) => Next::Cmd(cmd.ok()),
-                futures::future::Either::Right((upd, _)) => Next::Update(upd),
+            let inner = futures::future::select(cmd_fut, upd_fut);
+            match pending.as_mut() {
+                Some(p) => match futures::future::select(inner, p).await {
+                    futures::future::Either::Left((futures::future::Either::Left((cmd, _)), _)) => Next::Cmd(cmd.ok()),
+                    futures::future::Either::Left((futures::future::Either::Right((upd, _)), _)) => Next::Update(upd),
+                    futures::future::Either::Right((r, _)) => Next::Prompt(r),
+                },
+                None => match inner.await {
+                    futures::future::Either::Left((cmd, _)) => Next::Cmd(cmd.ok()),
+                    futures::future::Either::Right((upd, _)) => Next::Update(upd),
+                },
             }
         };
         match next {
-            // a session is open: nothing to log in for, nothing to retry
-            Next::Cmd(Some(Command::Authenticate(_) | Command::RetrySession)) => {}
+            Next::Prompt(result) => {
+                pending = None;
+                in_turn = false;
+                match result {
+                    Ok(resp) => {
+                        let _ = events_loop.send(Event::Stopped(resp.stop_reason)).await;
+                    }
+                    Err(e) if e.code == ErrorCode::AuthRequired => {
+                        let _ = events_loop.send(Event::Stopped(StopReason::Cancelled)).await;
+                        let _ = events_loop
+                            .send(Event::AuthRequired { message: e.message.clone(), methods: auth_methods.to_vec() })
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = events_loop.send(Event::Other(format!("prompt failed: {e}"))).await;
+                        let _ = events_loop.send(Event::Stopped(StopReason::Cancelled)).await;
+                    }
+                }
+            }
+            // a session is open: a login runs through `authenticate` right here, a retry is a no-op
+            Next::Cmd(Some(Command::Authenticate(id))) => {
+                let conn = session.connection().clone();
+                match conn.send_request(AuthenticateRequest::new(id)).block_task().await {
+                    Ok(_) => {
+                        let _ = events_loop.send(Event::Other("logged in; send the message again".into())).await;
+                    }
+                    Err(e) => {
+                        let _ = events_loop
+                            .send(Event::AuthRequired { message: format!("login failed: {}", e.message), methods: auth_methods.to_vec() })
+                            .await;
+                    }
+                }
+            }
+            Next::Cmd(Some(Command::RetrySession)) => {}
             Next::Cmd(Some(Command::Prompt(text))) => {
                 if in_turn {
                     let _ = events_loop.send(Event::Other("busy: prompt dropped".into())).await;
                     continue;
                 }
-                session.send_prompt(text.as_str())?;
+                let sid = session.session_id().clone();
+                let conn = session.connection().clone();
+                pending = Some(Box::pin(async move {
+                    conn.send_request(PromptRequest::new(sid, vec![text.into()])).block_task().await
+                }));
                 in_turn = true;
                 let _ = events_loop.send(Event::TurnStarted).await;
             }

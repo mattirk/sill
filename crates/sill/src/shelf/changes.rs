@@ -216,7 +216,10 @@ impl ChangesPage {
             }
             // the agent's own files go last, collapsed: reviewable, but not in the way
             let home = session::home().unwrap_or_default();
-            let state_dirs = sill_core::agents::load(&home).get(&s.agent).map(|a| a.state_dirs.clone()).unwrap_or_default();
+            let state_dirs = sill_core::agents::load(&home)
+                .get(&s.agent)
+                .map(|a| sill_core::session::state_paths(a, &home))
+                .unwrap_or_default();
             let (agent_state, list): (Vec<Change>, Vec<Change>) =
                 list.into_iter().partition(|c| changes::is_agent_state(&c.path, &state_dirs, &home));
             let mut groups: Vec<(PathBuf, Vec<Change>, bool)> =

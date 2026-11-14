@@ -126,6 +126,14 @@ fn platform_key() -> &'static str {
     }
 }
 
+/// Registry ids known to work inside sill's jail end to end (install, login, a prompt). Everything
+/// else is still installable but hidden by default on the Agents page until someone tests it.
+pub const TESTED: &[&str] = &["claude-acp", "codex-acp", "antigravity-acp"];
+
+pub fn is_tested(id: &str) -> bool {
+    TESTED.contains(&id)
+}
+
 /// The built-in sill agent an entry is the package of, if any: it keeps the built-in's jail
 /// settings (home paths, login, domains) and only takes the command.
 pub fn builtin_for(entry: &Entry) -> Option<&'static str> {
@@ -276,6 +284,7 @@ pub fn install(home: &Path, entry: &Entry, log: &mut dyn FnMut(String)) -> Resul
             shared_files: vec![],
             host_login: vec![],
             home_env: None,
+            home_env_parent: false,
             icon: icon.map(|p| p.display().to_string()),
         },
     };

@@ -471,6 +471,10 @@ fn dev_cmd(cmd: DevCmd) -> Result<()> {
                     Event::Other(s) if verbose => {
                         let _ = writeln!(out, "\x1b[2m· {s}\x1b[0m");
                     }
+                    Event::AuthRequired { message, methods } => {
+                        let names: Vec<String> = methods.iter().map(|m| format!("{} ({})", m.name, m.id)).collect();
+                        let _ = writeln!(out, "\n\x1b[33mlogin needed: {message} — methods: {}\x1b[0m", names.join(", "));
+                    }
                     Event::UserText(_) | Event::Ready { .. } | Event::TurnStarted | Event::Controls(_) => {}
                     Event::Stopped(r) => {
                         let _ = writeln!(out, "\n\x1b[2m[stop: {r:?}]\x1b[0m");
@@ -555,7 +559,22 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
             rules.allow.extend(a.domains);
         }
         eprintln!("sill launch: proxy mode {:?}, {} allow patterns", rules.mode, rules.allow.len());
-        proxy_thread = Some(std::thread::spawn(move || sill_core::proxy::serve(listener, rules, |l| eprintln!("proxy: {l}"))));
+        // refused hosts also go to <runtime dir>/denied, one per line: the shelf watches it and
+        // offers to allow the host for this agent (SPEC §4.8)
+        let denied = rt.join("denied");
+        let _ = std::fs::remove_file(&denied);
+        proxy_thread = Some(std::thread::spawn(move || {
+            sill_core::proxy::serve(listener, rules, move |l| {
+                eprintln!("proxy: {l}");
+                if let Some(rest) = l.strip_prefix("deny ")
+                    && let Some(host) = rest.split(':').next()
+                    && let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&denied)
+                {
+                    use std::io::Write;
+                    let _ = writeln!(f, "{host}");
+                }
+            })
+        }));
         spec.proxy_socket = Some(proxy_sock);
     }
     let plan = spec.plan()?;
@@ -607,7 +626,14 @@ fn start_unit(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>) -> Resul
         env: jail.env.clone(),
         shim_bin,
         agent: None,
-        binds: vec![],
+        binds: jail
+            .binds
+            .iter()
+            .map(|b| match b.split_once('=') {
+                Some((h, j)) => Ok((PathBuf::from(h), PathBuf::from(j))),
+                None => bail!("--bind expects HOST=JAIL, got {b}"),
+            })
+            .collect::<Result<Vec<_>>>()?,
     };
     let sock = sill_core::session::ensure_started(&opts, &home()?, &std::env::current_exe()?)?;
     println!("session {session} started as unit {}.service; socket {}", sill_core::session::unit_name(session), sock.display());

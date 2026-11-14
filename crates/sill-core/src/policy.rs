@@ -37,6 +37,22 @@ pub struct Network {
     pub allow: Vec<String>,
     #[serde(default)]
     pub allow_local: Vec<String>,
+    /// Refused hosts the shelf does not ask about: telemetry and crash reporting the agent would
+    /// send anyway. Still refused, just quietly.
+    #[serde(default = "quiet_default")]
+    pub quiet: Vec<String>,
+}
+
+pub fn quiet_default() -> Vec<String> {
+    [
+        "*.datadoghq.com", "*.datadoghq.eu", "*.sentry.io", "sentry.io", "*.ingest.sentry.io", "*.statsig.com",
+        "*.segment.io", "*.segment.com", "*.mixpanel.com", "*.posthog.com", "*.amplitude.com", "*.bugsnag.com",
+        "*.launchdarkly.com", "*.google-analytics.com", "*.googletagmanager.com", "*.newrelic.com", "*.nr-data.net",
+        "*.honeycomb.io", "*.rollbar.com", "*.intercom.io",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]

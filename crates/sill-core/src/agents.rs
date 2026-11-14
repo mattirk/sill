@@ -56,6 +56,11 @@ pub struct Agent {
     /// lands there directly and the host never gets a `~/.codex` of its own.
     #[serde(default)]
     pub home_env: Option<String>,
+    /// `home_env` names the directory *containing* `home_paths[0]` rather than that path itself:
+    /// `GEMINI_CLI_HOME` is a `$HOME` replacement (`$GEMINI_CLI_HOME/.gemini`), `CODEX_HOME` is the
+    /// `~/.codex` directory.
+    #[serde(default)]
+    pub home_env_parent: bool,
     /// Symbolic icon name for the "+" menu and tabs (`sill-claude-symbolic`, any theme icon). Unknown
     /// or missing: a neutral placeholder.
     #[serde(default)]
@@ -107,9 +112,12 @@ pub fn builtin() -> Vec<Agent> {
             state_dirs: vec!["~/.claude".into(), "~/.claude.json".into()],
             home_paths: vec!["~/.claude".into(), "~/.claude.json".into()],
             seed_files: vec!["~/.claude.json".into()],
-            shared_files: vec!["~/.claude/.credentials.json".into()],
+            // sill's Claude logs in on its own (terminal login inside the jail, written to the sill-owned
+            // home): a separate grant from the host's Claude Code / Zed, so neither can revoke the other
+            shared_files: vec![],
             host_login: vec![],
             home_env: None,
+            home_env_parent: false,
             icon: Some("sill-claude-symbolic".into()),
         },
         Agent {
@@ -127,6 +135,7 @@ pub fn builtin() -> Vec<Agent> {
             shared_files: vec!["~/.codex/auth.json".into()],
             host_login: vec!["chat-gpt".into(), "chatgpt".into()],
             home_env: Some("CODEX_HOME".into()),
+            home_env_parent: false,
             icon: Some("sill-openai-symbolic".into()),
         },
         Agent {
@@ -142,8 +151,10 @@ pub fn builtin() -> Vec<Agent> {
             home_paths: vec!["~/.gemini".into()],
             seed_files: vec![],
             shared_files: vec!["~/.gemini/oauth_creds.json".into()],
-            host_login: vec![],
-            home_env: None,
+            // "Log in with Google" opens a browser and waits on a 127.0.0.1 callback port: host only
+            host_login: vec!["oauth-personal".into()],
+            home_env: Some("GEMINI_CLI_HOME".into()),
+            home_env_parent: true,
             icon: Some("sill-gemini-symbolic".into()),
         },
     ]
@@ -172,6 +183,7 @@ pub fn load(home: &Path) -> BTreeMap<String, Agent> {
                     }
                     if a.home_env.is_none() {
                         a.home_env = b.home_env.clone();
+                        a.home_env_parent = b.home_env_parent;
                     }
                 }
                 out.insert(a.id.clone(), a);

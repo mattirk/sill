@@ -256,7 +256,9 @@ impl JailSpec {
         env.insert("USER".into(), self.user.clone());
         env.insert("LOGNAME".into(), self.user.clone());
         env.insert("SHELL".into(), "/bin/bash".into());
-        env.insert("TERM".into(), std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".into()));
+        // under the shelf's systemd unit TERM arrives empty, which leaves TUIs (login prompts) unable
+        // to draw: an empty value counts as unset
+        env.insert("TERM".into(), std::env::var("TERM").ok().filter(|t| !t.is_empty()).unwrap_or_else(|| "xterm-256color".into()));
         if let Ok(lang) = std::env::var("LANG") {
             env.insert("LANG".into(), lang);
         }
