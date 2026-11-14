@@ -65,6 +65,7 @@ pub fn run() -> Result<()> {
     }
     // one daemon per store, whatever socket it listens on: two would be two writers of sill.db
     let _store_lock = lock_store()?;
+    exit_on_panic();
     let (listener, mode) = match activated_listener()? {
         Some(l) => (l, "socket-activated (sill.service)"),
         // systemd sets INVOCATION_ID for whatever it runs: the transient unit a client started
@@ -118,6 +119,24 @@ pub fn run() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// A panic anywhere in the daemon ends the whole process (docs/daemon.md §3.11): a connection
+/// thread that panics would otherwise leave its runner subscriptions and writer thread behind, and
+/// a panic under one of the hub's locks poisons it, so every later request panics too — a daemon
+/// that answers the socket and does nothing. A dead daemon is the case the design handles: the
+/// sessions are scopes of their own, `Restart=on-failure` (or the next client) starts a new one
+/// and it adopts them. Installed only here — the shelf and the CLI share this binary and keep
+/// Rust's default. `exit`, not `abort`: no core dump of the person's conversations, and a non-zero
+/// status is what the unit restarts on.
+fn exit_on_panic() {
+    std::panic::set_hook(Box::new(|info| {
+        let thread = std::thread::current();
+        let msg = info.payload().downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| info.payload().downcast_ref::<String>().cloned()).unwrap_or_default();
+        let at = info.location().map(|l| format!(" at {}:{}", l.file(), l.line())).unwrap_or_default();
+        eprintln!("sill daemon: panic in thread {}{at}: {msg}; leaving so the next daemon starts clean (sessions keep running)", thread.name().unwrap_or("?"));
+        std::process::exit(101);
+    }));
 }
 
 /// An exclusive lock beside `sill.db` for as long as this daemon runs (released by the kernel when
@@ -215,6 +234,11 @@ fn read_loop(stream: UnixStream, hub: &Arc<Hub>, conn: &Arc<Conn>) -> Result<()>
         let (Some(id), Some(method)) = (msg.id, msg.method.as_deref()) else {
             continue; // a notification, or a stray response
         };
+        // debug builds only: how tests/daemon.rs sees the panic hook end the process
+        #[cfg(debug_assertions)]
+        if method == "_sill/daemon.panic" {
+            panic!("asked to by a client (tests/daemon.rs)");
+        }
         let reply = match hub.dispatch(conn, method, msg.params.unwrap_or(serde_json::Value::Null)) {
             Ok(v) => Response::ok(id, v),
             Err(e) => Response::err(Some(id), e),
