@@ -60,6 +60,10 @@ pub struct Viewer {
     pub on_close: RefCell<Option<Box<dyn Fn()>>>,
     /// A file was written (Ctrl+S): the owner refreshes what shows its state (tree badges, chips).
     pub on_saved: RefCell<Option<Box<dyn Fn(&Path)>>>,
+    /// A session's log being shown: its history key (`log: <title>`) and where it comes from.
+    log: RefCell<Option<(PathBuf, sill_core::session::LogSource)>>,
+    /// The follow timer while a log is shown.
+    log_tick: RefCell<Option<glib::SourceId>>,
 }
 
 impl Viewer {
@@ -160,6 +164,8 @@ impl Viewer {
             weak: RefCell::new(Weak::new()),
             on_close: RefCell::new(None),
             on_saved: RefCell::new(None),
+            log: RefCell::new(None),
+            log_tick: RefCell::new(None),
         });
         *v.weak.borrow_mut() = Rc::downgrade(&v);
         {
@@ -281,8 +287,85 @@ impl Viewer {
         }
     }
 
+    /// A session's log on top of what is shown, followed while it is shown (Escape comes back).
+    pub fn open_log(&self, title: &str, src: sill_core::session::LogSource) {
+        self.drop_edits();
+        let key = PathBuf::from(format!("log: {title}"));
+        *self.log.borrow_mut() = Some((key.clone(), src));
+        let mut h = self.history.borrow_mut();
+        if h.last() != Some(&key) {
+            h.push(key.clone());
+        }
+        drop(h);
+        self.show(&key);
+    }
+
+    /// The log in the text view: read off the main thread now and every 2 s while shown; the view
+    /// stays at the end unless the person scrolled up.
+    fn show_log(&self, src: sill_core::session::LogSource) {
+        self.text.set_language(None);
+        self.text.set_highlight_syntax(false);
+        self.stack.set_visible_child_name("text");
+        self.say("following · Escape goes back");
+        let weak = self.weak.borrow().clone();
+        let s = src.clone();
+        let id = glib::timeout_add_seconds_local(2, move || match weak.upgrade() {
+            Some(v) if v.log_tick.borrow().is_some() => {
+                v.refresh_log(s.clone());
+                glib::ControlFlow::Continue
+            }
+            _ => glib::ControlFlow::Break,
+        });
+        *self.log_tick.borrow_mut() = Some(id);
+        self.refresh_log(src);
+    }
+
+    fn refresh_log(&self, src: sill_core::session::LogSource) {
+        let (tx, rx) = async_channel::bounded::<String>(1);
+        std::thread::spawn(move || {
+            let _ = tx.send_blocking(sill_core::session::read_log(&src, 2000));
+        });
+        let weak = self.weak.borrow().clone();
+        glib::spawn_future_local(async move {
+            if let Ok(text) = rx.recv().await
+                && let Some(v) = weak.upgrade()
+                && v.log_tick.borrow().is_some()
+            {
+                v.set_log_text(&text);
+            }
+        });
+    }
+
+    fn set_log_text(&self, text: &str) {
+        if self.text.text(&self.text.start_iter(), &self.text.end_iter(), true) == text {
+            return;
+        }
+        let at_end = self
+            .text_view
+            .parent()
+            .and_downcast::<gtk::ScrolledWindow>()
+            .map(|sw| {
+                let a = sw.vadjustment();
+                a.value() + a.page_size() >= a.upper() - 2.0
+            })
+            .unwrap_or(true);
+        self.text.set_text(text);
+        if at_end {
+            let mark = self.text.create_mark(None, &self.text.end_iter(), false);
+            self.text_view.scroll_to_mark(&mark, 0.0, true, 0.0, 1.0);
+        }
+    }
+
+    fn stop_follow(&self) {
+        if let Some(id) = self.log_tick.borrow_mut().take() {
+            id.remove();
+        }
+    }
+
     /// Forget everything and ask the owner to close.
     pub fn close(&self) {
+        self.stop_follow();
+        *self.log.borrow_mut() = None;
         self.drop_edits();
         self.history.borrow_mut().clear();
         if let Some(cb) = self.on_close.borrow().as_ref() {
@@ -354,10 +437,16 @@ impl Viewer {
 
     fn show(&self, path: &Path) {
         self.say("");
+        self.stop_follow();
         self.editable.set(false);
         self.edit.set_visible(false);
         self.text_view.set_wrap_mode(gtk::WrapMode::WordChar);
         self.update_title();
+        // a session's log under its history key, not a file
+        let log = self.log.borrow().as_ref().filter(|(k, _)| k == path).map(|(_, s)| s.clone());
+        if let Some(src) = log {
+            return self.show_log(src);
+        }
         if !path.is_file() {
             return self.say_only(&format!("{} is not a file (or is gone)", path.display()));
         }

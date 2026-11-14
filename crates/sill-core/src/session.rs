@@ -302,6 +302,57 @@ pub fn unit_name(session: &str) -> String {
     format!("sill-{session}")
 }
 
+/// Where a session's log is (SPEC §4.7): the unit's journal, or the detached session's files.
+#[derive(Debug, Clone)]
+pub enum LogSource {
+    Journal(String),
+    Files(Vec<PathBuf>),
+}
+
+pub fn log_source(session: &str) -> LogSource {
+    match crate::launcher::current().mode {
+        crate::launcher::Mode::Unit => LogSource::Journal(unit_name(session)),
+        crate::launcher::Mode::Direct => {
+            let rt = shim::runtime_dir(session).unwrap_or_default();
+            LogSource::Files(vec![rt.join("jail.log"), rt.join("proxy.log")])
+        }
+    }
+}
+
+/// The last `lines` of a log: `journalctl --user -u <unit>` (precise times, no hostname), or each
+/// file's tail under its name. Blocking: run it off the UI thread.
+pub fn read_log(src: &LogSource, lines: usize) -> String {
+    match src {
+        LogSource::Journal(unit) => {
+            let out = std::process::Command::new("journalctl")
+                .args(["--user", "-u", unit, "-n", &lines.to_string(), "--no-pager", "--no-hostname", "-o", "short-precise"])
+                .output();
+            match out {
+                Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+                Ok(o) => format!("journalctl: {}", String::from_utf8_lossy(&o.stderr).trim()),
+                Err(e) => format!("journalctl: {e}"),
+            }
+        }
+        LogSource::Files(files) => {
+            let mut out = String::new();
+            for f in files {
+                let text = std::fs::read_to_string(f).unwrap_or_default();
+                if text.is_empty() {
+                    continue;
+                }
+                let tail: Vec<&str> = text.lines().rev().take(lines).collect();
+                out.push_str(&format!("== {} ==\n", f.display()));
+                for l in tail.into_iter().rev() {
+                    out.push_str(l);
+                    out.push('\n');
+                }
+                out.push('\n');
+            }
+            if out.is_empty() { "no log yet".to_string() } else { out }
+        }
+    }
+}
+
 pub fn socket_path(session: &str) -> Result<PathBuf> {
     Ok(shim::runtime_dir(session)?.join("shim.sock"))
 }
@@ -539,4 +590,25 @@ pub fn stop(session: &str) -> Result<()> {
         let _ = std::fs::remove_file(rt.join(f));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A detached session's log: each file's tail under its name, empty or missing files skipped.
+    #[test]
+    fn read_log_tails_the_files() {
+        let dir = std::env::temp_dir().join(format!("sill-log-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let jail = dir.join("jail.log");
+        std::fs::write(&jail, (1..=10).map(|i| format!("line {i}\n")).collect::<String>()).unwrap();
+        std::fs::write(dir.join("proxy.log"), "").unwrap();
+        let src = LogSource::Files(vec![jail.clone(), dir.join("proxy.log"), dir.join("missing.log")]);
+        let text = read_log(&src, 3);
+        assert_eq!(text, format!("== {} ==\nline 8\nline 9\nline 10\n\n", jail.display()));
+        assert_eq!(read_log(&LogSource::Files(vec![dir.join("missing.log")]), 3), "no log yet");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

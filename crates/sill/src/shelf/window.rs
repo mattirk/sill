@@ -549,6 +549,15 @@ impl Shelf {
         self.place();
     }
 
+    /// A session's log in the viewer, followed (SPEC §4.7): the unit's journal, or the detached
+    /// session's log files.
+    fn open_log(&self, id: &str, title: &str) {
+        let unit = sill_core::session::unit_name(id);
+        self.viewer.open_log(&format!("{title} · {unit}"), sill_core::session::log_source(id));
+        self.viewer.root.set_visible(true);
+        self.viewer.focus();
+    }
+
     /// A terminal on the host (Ctrl+Shift+T, the shell button's right-click), in the folder the
     /// person is looking at: the tree's selection, else the session's first pinned folder, else home.
     /// A host process by design — outside the jail, nothing it does is recorded.
@@ -856,12 +865,28 @@ impl Shelf {
             sill_core::launcher::Mode::Unit => format!("unit {unit} · journalctl --user -u {unit}"),
             sill_core::launcher::Mode::Direct => format!("detached · $XDG_RUNTIME_DIR/sill/{id}/"),
         };
+        // the log, in the viewer and followed: the unit's journal, or the detached session's files
+        let log_btn = gtk::Button::with_label("Show, follow");
+        log_btn.set_halign(gtk::Align::Start);
+        log_btn.set_tooltip_text(Some("The session's log in the viewer, updated while shown (Escape comes back)"));
+        {
+            let shelf = self.clone();
+            let sid = id.to_string();
+            let title = s.title.clone();
+            let p = pop.clone();
+            log_btn.connect_clicked(move |_| {
+                p.popdown();
+                shelf.open_log(&sid, &title);
+            });
+        }
+        grid.attach(&key("Log"), 0, 4, 1, 1);
+        grid.attach(&log_btn, 1, 4, 1, 1);
         let foot = gtk::Label::new(Some(&whereabouts));
         foot.add_css_class("sill-menu-caption");
         foot.set_xalign(0.0);
         foot.set_selectable(true);
         foot.set_wrap(true);
-        grid.attach(&foot, 0, 4, 2, 1);
+        grid.attach(&foot, 0, 5, 2, 1);
         pop.set_child(Some(&grid));
         pop.popup();
     }
