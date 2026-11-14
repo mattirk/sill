@@ -103,7 +103,6 @@ impl App {
                 blocking(
                     move || match ws::apply(&actions, &workspace, &seen) {
                         Ok(ApplyOutcome::Applied) => ("Applied to your checkout.".to_string(), false),
-                        Ok(ApplyOutcome::Rebased) => ("Your checkout had moved: the work is rebased onto it. Look again, then Apply.".into(), false),
                         Ok(ApplyOutcome::Conflicts(paths)) => (format!("The rebase stopped on {}: resolve it in the session, or abort it there.", paths.join(", ")), true),
                         Err(e) => (ws::message(&e), true),
                     },
@@ -178,7 +177,6 @@ impl App {
                 blocking(
                     move || match ws::apply(&actions, &workspace, &seen) {
                         Ok(ApplyOutcome::Applied) => (workspace, "Applied to your checkout.".to_string(), false),
-                        Ok(ApplyOutcome::Rebased) => (workspace, "Your checkout had moved: the work is rebased onto it. Look again, then Apply.".into(), false),
                         Ok(ApplyOutcome::Conflicts(paths)) => (workspace, format!("The rebase onto your checkout stopped on {}: resolve it in the session, or Abort.", paths.join(", ")), true),
                         Err(e) => (workspace, ws::message(&e), true),
                     },
