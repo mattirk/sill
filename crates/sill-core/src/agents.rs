@@ -65,6 +65,12 @@ pub struct Agent {
     /// or missing: a neutral placeholder.
     #[serde(default)]
     pub icon: Option<String>,
+    /// Where the agent keeps its own memory (what it learned about the person and their projects),
+    /// as patterns under `~` that may glob (`~/.claude/projects/*/memory`), directories or files;
+    /// resolved inside the sill-owned home. The agents page offers to forget them in one click (sill's own memory,
+    /// docs/memory.md, remembers the sessions).
+    #[serde(default)]
+    pub memory_paths: Vec<String>,
 }
 
 fn yes() -> bool {
@@ -119,6 +125,7 @@ pub fn builtin() -> Vec<Agent> {
             home_env: None,
             home_env_parent: false,
             icon: Some("sill-claude-symbolic".into()),
+            memory_paths: vec!["~/.claude/projects/*/memory".into()],
         },
         Agent {
             id: "codex".into(),
@@ -137,6 +144,7 @@ pub fn builtin() -> Vec<Agent> {
             home_env: Some("CODEX_HOME".into()),
             home_env_parent: false,
             icon: Some("sill-openai-symbolic".into()),
+            memory_paths: vec!["~/.codex/memories".into()],
         },
         Agent {
             id: "gemini".into(),
@@ -156,6 +164,8 @@ pub fn builtin() -> Vec<Agent> {
             home_env: Some("GEMINI_CLI_HOME".into()),
             home_env_parent: true,
             icon: Some("sill-gemini-symbolic".into()),
+            // the `save_memory` tool appends to this one file
+            memory_paths: vec!["~/.gemini/GEMINI.md".into()],
         },
     ]
 }
@@ -185,10 +195,98 @@ pub fn load(home: &Path) -> BTreeMap<String, Agent> {
                         a.home_env = b.home_env.clone();
                         a.home_env_parent = b.home_env_parent;
                     }
+                    if a.memory_paths.is_empty() {
+                        a.memory_paths = b.memory_paths.clone();
+                    }
                 }
                 out.insert(a.id.clone(), a);
             }
         }
     }
     out
+}
+
+/// The agent's memory paths (directories or files) that exist in its sill-owned home (`memory_paths`,
+/// each `~/<dir>/…` mapped to `<agents_base>/<dir>/…` the way [`crate::session::binds_for`] lays the
+/// home out).
+pub fn memory_dirs_in(agent: &Agent, agents_base: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for p in &agent.memory_paths {
+        let Some(rel) = p.strip_prefix("~/") else { continue };
+        let pattern = agents_base.join(rel);
+        let s = pattern.to_string_lossy();
+        if s.contains(['*', '?', '[']) {
+            if let Ok(paths) = glob::glob(&s) {
+                out.extend(paths.filter_map(Result::ok));
+            }
+        } else if pattern.exists() {
+            out.push(pattern);
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Same, for the agent's home under `~`.
+pub fn memory_dirs(agent: &Agent, home: &Path) -> Vec<std::path::PathBuf> {
+    memory_dirs_in(agent, &crate::session::agent_home(home, &agent.id))
+}
+
+/// Delete the agent's memory paths; how many files went.
+pub fn forget_memory(agent: &Agent, home: &Path) -> anyhow::Result<usize> {
+    let mut n = 0;
+    for p in memory_dirs(agent, home) {
+        n += count_files(&p);
+        if p.is_dir() { std::fs::remove_dir_all(&p)? } else { std::fs::remove_file(&p)? }
+    }
+    Ok(n)
+}
+
+/// Files at a path: the file itself, or those below a directory, recursively.
+pub fn count_files(dir: &Path) -> usize {
+    if dir.is_file() {
+        return 1;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+    rd.filter_map(Result::ok)
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => count_files(&e.path()),
+            Ok(_) => 1,
+            Err(_) => 0,
+        })
+        .sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Claude's memory lives per project; the glob finds each, a plain path itself, nothing absent.
+    #[test]
+    fn memory_dirs_follow_the_patterns() {
+        let base = std::env::temp_dir().join(format!("sill-agents-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let claude = builtin().into_iter().find(|a| a.id == "claude").unwrap();
+        assert!(memory_dirs_in(&claude, &base).is_empty());
+        for proj in ["-home-x", "-home-y"] {
+            let m = base.join(".claude/projects").join(proj).join("memory");
+            std::fs::create_dir_all(&m).unwrap();
+            std::fs::write(m.join("MEMORY.md"), "").unwrap();
+        }
+        std::fs::create_dir_all(base.join(".claude/projects/-home-z")).unwrap(); // no memory yet
+        let dirs = memory_dirs_in(&claude, &base);
+        assert_eq!(dirs, vec![base.join(".claude/projects/-home-x/memory"), base.join(".claude/projects/-home-y/memory")]);
+        assert_eq!(dirs.iter().map(|d| count_files(d)).sum::<usize>(), 2);
+        let codex = builtin().into_iter().find(|a| a.id == "codex").unwrap();
+        std::fs::create_dir_all(base.join(".codex/memories/a")).unwrap();
+        assert_eq!(memory_dirs_in(&codex, &base), vec![base.join(".codex/memories")]);
+        let gemini = builtin().into_iter().find(|a| a.id == "gemini").unwrap();
+        assert!(memory_dirs_in(&gemini, &base).is_empty());
+        std::fs::create_dir_all(base.join(".gemini")).unwrap();
+        std::fs::write(base.join(".gemini/GEMINI.md"), "- likes tea\n").unwrap();
+        let g = memory_dirs_in(&gemini, &base);
+        assert_eq!(g, vec![base.join(".gemini/GEMINI.md")]);
+        assert_eq!(count_files(&g[0]), 1);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 }

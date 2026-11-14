@@ -283,6 +283,7 @@ pub fn install(home: &Path, entry: &Entry, log: &mut dyn FnMut(String)) -> Resul
             home_env: None,
             home_env_parent: false,
             icon: icon.map(|p| p.display().to_string()),
+            memory_paths: vec![],
         },
     };
     agents::save_override(home, &agent)?;

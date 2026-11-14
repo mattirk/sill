@@ -356,6 +356,9 @@ impl AgentsPage {
         }
         if !matches!(state, State::Absent) {
             state_box.append(&self.gear(e));
+            if let Some(b) = self.forget_button(e) {
+                state_box.append(&b);
+            }
         }
         match state {
             State::Managed(version) => {
@@ -422,6 +425,42 @@ impl AgentsPage {
             }
         });
         b
+    }
+
+    /// One click forgets the agent's own memory (what it noted about the person and their projects
+    /// in its sill-owned home); only when there is some. Sill's memory of the sessions stays.
+    fn forget_button(self: &Rc<Self>, e: &Entry) -> Option<gtk::Button> {
+        let home = session::home().ok()?;
+        let id = registry::builtin_for(e).map(str::to_string).unwrap_or_else(|| e.id.clone());
+        let agent = sill_core::agents::load(&home).remove(&id)?;
+        let dirs = sill_core::agents::memory_dirs(&agent, &home);
+        if dirs.is_empty() {
+            return None;
+        }
+        let files: usize = dirs.iter().map(|d| sill_core::agents::count_files(d)).sum();
+        let fg = icons::fg_for(&self.list, &theme::current());
+        let b = gtk::Button::new();
+        b.set_child(Some(&icons::named("sill-brain", fg, 13)));
+        b.add_css_class("flat");
+        b.add_css_class("sill-agent-link");
+        b.set_tooltip_text(Some(&format!(
+            "Forget {}'s own memory: {files} file{} under {} ({}). Sill's memory of the sessions stays.",
+            agent.name,
+            if files == 1 { "" } else { "s" },
+            sill_core::session::agent_home(&home, &agent.id).display(),
+            dirs.iter().filter_map(|d| d.strip_prefix(sill_core::session::agent_home(&home, &agent.id)).ok()).map(|d| d.display().to_string()).collect::<Vec<_>>().join(", ")
+        )));
+        let p = self.clone();
+        let e2 = e.clone();
+        b.connect_clicked(move |_| {
+            let msg = match sill_core::agents::forget_memory(&agent, &home) {
+                Ok(n) => format!("forgot {n} memory file{}", if n == 1 { "" } else { "s" }),
+                Err(err) => format!("forget failed: {err:#}"),
+            };
+            p.logs.borrow_mut().insert(e2.id.clone(), vec![msg]);
+            p.refresh_row(&e2, &home);
+        });
+        Some(b)
     }
 
     fn action_button(self: &Rc<Self>, e: &Entry, label: &str, class: &str) -> gtk::Button {
