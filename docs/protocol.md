@@ -431,10 +431,10 @@ tested, completing the shelf, line-client and stdio-client acceptance items abov
 The independent Python conformance suite was also rerun inside the jail: all five scenarios
 passed, including lifecycle/restart/question recovery and loopback OpenSSH terminal
 reconnection. The headless workspace and Python client unit suites passed too.
-See [verification and remaining cutover work](work-items.md#stable-sfp-release).
+See verification and remaining cutover work.
 The coordinated identity/relay/schema/documentation cutover remains pending; the current
 identity is still `sfp/1-dev.3`. The subsequent travelling-policy addition has its own
-[acceptance work](work-items.md#travelling-policies) before stable promotion.
+acceptance work before stable promotion.
 
 Snapshot capture still copies under the store lock; canonical history
 and idempotency identities remain proportional to retained sessions, and native v2 reconstruction
