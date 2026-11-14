@@ -178,6 +178,7 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     pages.set_vexpand(true);
 
     let top_actions = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    top_actions.add_css_class("sill-top-actions");
     bar.append(&top_actions);
     let plus = gtk::MenuButton::new();
     plus.set_child(Some(&super::icons::glyph_image("sill-plus")));
@@ -189,7 +190,19 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     let plus_menu = gtk::Box::new(gtk::Orientation::Vertical, 0);
     plus_pop.set_child(Some(&plus_menu));
     plus.set_popover(Some(&plus_pop));
-    top_actions.append(&plus);
+    let plus_overlay = gtk::Overlay::new();
+    plus_overlay.set_child(Some(&plus));
+    plus_overlay.set_overflow(gtk::Overflow::Visible);
+    top_actions.append(&plus_overlay);
+    let open_drawer = super::icons::glyph_button("sill-chevron-right");
+    open_drawer.add_css_class("flat");
+    open_drawer.add_css_class("sill-drawer-open");
+    open_drawer.set_halign(gtk::Align::End);
+    open_drawer.set_valign(gtk::Align::Center);
+    open_drawer.set_cursor_from_name(Some("pointer"));
+    plus_overlay.add_overlay(&open_drawer);
+    plus_overlay.set_measure_overlay(&open_drawer, false);
+    plus_overlay.set_clip_overlay(&open_drawer, false);
 
     let spinner = super::spinner::Spinner::new(); // not GtkSpinner: see spinner.rs
     let idle = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -230,6 +243,8 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     stack.add_named(&pages, Some("sessions"));
     let changes = ChangesPage::new(store.clone());
     let tree = FolderTree::new(store.clone());
+    tree.root.bind_property("visible", &open_drawer, "visible")
+        .invert_boolean().sync_create().build();
     let viewer = Viewer::new(tree.changes.clone());
     let agents_page = AgentsPage::new();
     let timer_auto = Rc::new(std::cell::Cell::new(super::remote::config::load().timer_auto.unwrap_or(false)));
@@ -410,6 +425,14 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
         });
     }
 
+    {
+        let weak = Rc::downgrade(&shelf);
+        open_drawer.connect_clicked(move |_| {
+            if let Some(s) = weak.upgrade() {
+                s.toggle_drawer();
+            }
+        });
+    }
     {
         let weak = Rc::downgrade(&shelf);
         expand.connect_clicked(move |_| {

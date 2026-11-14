@@ -1514,6 +1514,13 @@ button.sill-drawer-mode { font-size: 100%; padding: 5px; min-width: 0; min-heigh
 button.sill-drawer-mode:hover { background: alpha(@view_fg_color, 0.14); }
 button.sill-drawer-close { font-size: 90%; padding: 2px; min-width: 0; min-height: 0; }
 button.sill-drawer-close > image { -gtk-icon-size: 1em; }
+/* Float over the + box's right edge without contributing any width to the header. */
+.sill-top-actions button.sill-drawer-open { font-size: 90%; padding: 2px; margin-right: -4px; min-width: 0; min-height: 0; opacity: 0; background: transparent; }
+.sill-top-actions button.sill-drawer-open > image { -gtk-icon-size: 1em; }
+.sill-top-actions:hover button.sill-drawer-open,
+.sill-top-actions:focus-within button.sill-drawer-open { opacity: 0.5; }
+.sill-top-actions button.sill-drawer-open:hover,
+.sill-top-actions button.sill-drawer-open:focus-visible { opacity: 0.9; background: alpha(@view_fg_color, 0.07); }
 /* a session's page in the viewer (docs/memory.md §2.5): summary, notes, the facts */
 .sill-page { padding: 10px 16px 16px 16px; }
 .sill-page-title { font-size: 120%; font-weight: bold; }
