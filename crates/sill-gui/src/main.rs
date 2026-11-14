@@ -682,6 +682,8 @@ pub struct App {
     /// A ghost's tab whose × was pressed once.
     pub armed_close: Option<String>,
     pub selected: Option<String>,
+    /// Open tabs in activation order, most recently visited last.
+    tab_history: Vec<String>,
     /// `--session`, chosen when the first list arrives.
     initial: Option<String>,
     /// Trouble reading the daemon's session list.
@@ -817,6 +819,7 @@ impl App {
             pending_choose: None,
             armed_close: None,
             selected: None,
+            tab_history: Vec::new(),
             initial,
             list_error: None,
             listed: false,
@@ -867,6 +870,7 @@ impl App {
             app.tabs = vec![tab];
             app.views.insert("demo".into(), view);
             app.selected = Some("demo".into());
+            app.tab_history.push("demo".into());
             app.listed = true;
             let files = app.files_refresh("demo");
             return (app, Task::batch([file_task, files]));
@@ -3004,6 +3008,7 @@ impl App {
         // a session that ended or went: its view goes, and with it its lane and terminal
         let open: BTreeSet<&str> = self.tabs.iter().map(|t| t.id.as_str()).collect();
         self.views.retain(|id, _| open.contains(id.as_str()));
+        self.tab_history.retain(|id| open.contains(id.as_str()));
         // A stopped jail has no live processes or exposed ports, even while its tab (or an
         // externally ended session's unsaved source) remains open. Invalidate in-flight polls.
         for (id, view) in &mut self.views {
@@ -3061,9 +3066,10 @@ impl App {
             tasks.push(choose.chain(self.focus_prompt()));
         }
         if self.selected.is_none()
-            && let Some(tab) = self.tabs.iter().find(|t| t.running)
+            && let Some(id) = self.tab_history.last().cloned().or_else(|| {
+                self.tabs.iter().find(|t| t.running).map(|t| t.id.clone())
+            })
         {
-            let id = tab.id.clone();
             tasks.push(self.choose(id));
         }
         tasks.push(icons);
@@ -3083,6 +3089,8 @@ impl App {
         self.changes = None;
         self.settings_page = None;
         self.agents_page.shown = false;
+        self.tab_history.retain(|visited| visited != &id);
+        self.tab_history.push(id.clone());
         self.selected = Some(id.clone());
         let view = self
             .views

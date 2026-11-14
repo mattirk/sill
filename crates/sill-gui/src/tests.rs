@@ -3880,3 +3880,44 @@ fn markdown_link_click_navigates_and_secondary_click_copies() {
     assert!(ui.into_messages().any(|m| matches!(m, Message::Files(crate::files::Action::Link { session, source: from, target })
         if session == "demo" && from.display == source.display && target == "docs/next.md#heading")));
 }
+
+#[test]
+fn closing_tabs_returns_to_the_most_recent_open_tab() {
+    let (mut app, _) = App::new(true, None);
+    let records = || vec![
+        session_record("demo", "Demo", false, false),
+        session_record("middle", "Middle", false, false),
+        session_record("last", "Last", false, false),
+    ];
+    let _ = app.update(Message::Listed(Ok(records())));
+    let _ = app.choose("last".into());
+    let _ = app.choose("middle".into());
+    // Repeated activation and refreshes must not change the return order.
+    let _ = app.choose("middle".into());
+    let _ = app.update(Message::Listed(Ok(records())));
+    let mut remaining = records();
+    remaining.retain(|s| s.session_id != "middle");
+    let _ = app.update(Message::Listed(Ok(remaining.clone())));
+    assert_eq!(app.selected.as_deref(), Some("last"));
+    remaining.retain(|s| s.session_id != "last");
+    let _ = app.update(Message::Listed(Ok(remaining)));
+    assert_eq!(app.selected.as_deref(), Some("demo"));
+    let _ = app.update(Message::Listed(Ok(vec![])));
+    assert!(app.selected.is_none());
+    assert!(app.tab_history.is_empty());
+}
+
+#[test]
+fn closing_a_background_tab_preserves_selection_and_skips_it_in_history() {
+    let (mut app, _) = App::new(true, None);
+    add_session(&mut app, "middle");
+    add_session(&mut app, "last");
+    let _ = app.choose("middle".into());
+    let _ = app.choose("last".into());
+    let demo = session_record("demo", "Demo", false, false);
+    let last = session_record("last", "Last", false, false);
+    let _ = app.update(Message::Listed(Ok(vec![demo.clone(), last])));
+    assert_eq!(app.selected.as_deref(), Some("last"));
+    let _ = app.update(Message::Listed(Ok(vec![demo])));
+    assert_eq!(app.selected.as_deref(), Some("demo"));
+}
