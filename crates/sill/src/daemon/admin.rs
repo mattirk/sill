@@ -864,8 +864,19 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             if a.name.is_empty() || a.name.len() > 128 {
                 return Err(invalid("a process name is required"));
             }
-            if a.name.starts_with("host:") {
-                return Err(invalid("host processes require sill-host stop with an active stop grant; dismiss is unavailable"));
+            if let Some(id) = a.name.strip_prefix("host:") {
+                if m.ends_with("stop") {
+                    return Err(invalid("host processes require sill-host stop with an active stop grant"));
+                }
+                // the person clears an ended one from the list; the conversation keeps its notices
+                if !hub.with_store(|s| s.dismiss_host_process(&a.session_id, id))? {
+                    return Err(invalid("only an ended host process can be dismissed"));
+                }
+                if let Ok(log) = super::host_bridge::host_log(&a.session_id, id) {
+                    let _ = std::fs::remove_file(log);
+                }
+                super::host_bridge::publish(hub, &a.session_id);
+                return Ok(json!({}));
             }
             let mut c = sill_core::shim::Control::connect(&sill_core::session::socket_path(
                 &a.session_id,

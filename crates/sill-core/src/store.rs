@@ -493,6 +493,15 @@ impl Store {
         Ok(())
     }
 
+    /// Forget an ended host process's record (the person dismissed it). Not a running one, nor
+    /// one whose end is unknown: it may still be alive, and its record is how it is found.
+    pub fn dismiss_host_process(&self, session_id: &str, id: &str) -> Result<bool> {
+        Ok(self.conn.execute(
+            "DELETE FROM host_processes WHERE id = ?1 AND session_id = ?2 AND ended IS NOT NULL AND state <> 'unknown'",
+            params![id, session_id],
+        )? == 1)
+    }
+
     pub fn keep_host_process(&self, id: &str, kept: bool) -> Result<bool> {
         Ok(self.conn.execute("UPDATE host_processes SET kept = ?2 WHERE id = ?1", params![id, kept])? == 1)
     }
@@ -784,6 +793,31 @@ mod tests {
         assert_eq!(store.global_pins().unwrap(), vec![display_collision]);
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn only_an_ended_host_process_is_dismissed() {
+        let dir = std::env::temp_dir().join(format!("sill-store-host-dismiss-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("s.db")).unwrap();
+        let process = |id: &str| HostProcess {
+            id: id.into(), session_id: "s1".into(), generation: 1, pid: 10, start_ticks: 5, argv: vec!["true".into()],
+            cwd: PathBuf::from("/"), started: 1, ended: None, exit_code: None, kept: false, state: "running".into(),
+        };
+        for id in ["run", "done", "unknown"] {
+            store.add_host_process(&process(id)).unwrap();
+        }
+        store.end_host_process("done", "exited", Some(0)).unwrap();
+        store.end_host_process("unknown", "unknown", None).unwrap();
+        // a running one and one that may still be alive stay; another session cannot dismiss
+        assert!(!store.dismiss_host_process("s1", "run").unwrap());
+        assert!(!store.dismiss_host_process("s1", "unknown").unwrap());
+        assert!(!store.dismiss_host_process("s2", "done").unwrap());
+        assert!(store.dismiss_host_process("s1", "done").unwrap());
+        let left: Vec<String> = store.host_processes("s1").unwrap().into_iter().map(|p| p.id).collect();
+        assert_eq!(left, ["run", "unknown"]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
