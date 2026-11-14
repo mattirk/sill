@@ -40,7 +40,7 @@ impl Hub {
                         if held.len() >= 128 { return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Capacity, Some(128), "at most 128 global pins").into()); }
                         store.global_pin(&path)
                     })?;
-                    Ok(json!(api::GlobalPin { path: HostPath::from_path(&path) }))
+                    Ok(json!(api::Pinned { path: HostPath::from_path(&path) }))
                 }
                 "_sill/pins.remove" => {
                     let a: api::GlobalPin = args(params)?;

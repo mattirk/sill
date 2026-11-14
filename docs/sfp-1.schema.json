@@ -140,9 +140,9 @@
       "type": "object"
     },
     "Answer": {
+      "description": "Open in the schema because questions carry it in results and events; the daemon still refuses\nunknown fields in `questions.answer` (requests are strict).",
       "oneOf": [
         {
-          "additionalProperties": false,
           "properties": {
             "option_id": {
               "type": "string"
@@ -159,7 +159,6 @@
           "type": "object"
         },
         {
-          "additionalProperties": false,
           "properties": {
             "type": {
               "const": "form",
@@ -177,7 +176,6 @@
           "type": "object"
         },
         {
-          "additionalProperties": false,
           "properties": {
             "type": {
               "const": "cancel",
@@ -1033,7 +1031,7 @@
       "type": "object"
     },
     "Definition": {
-      "additionalProperties": false,
+      "description": "An agent definition: a result of `agents.get`/`agents.list` and the params of `agents.save`.\nOpen in the schema because it is a result too; the daemon still refuses unknown fields in\n`agents.save` (requests are strict).",
       "properties": {
         "command": {
           "items": {
@@ -3269,6 +3267,18 @@
       ],
       "type": "object"
     },
+    "Pinned": {
+      "description": "`pins.add`'s result: the canonical path pinned (open, unlike the request).",
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/HostPath"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
     "PolicyEntry": {
       "properties": {
         "dbus": {
@@ -4851,7 +4861,7 @@
       ]
     },
     "Settings": {
-      "additionalProperties": false,
+      "description": "A result: open to fields added later (clients ignore unknown fields in what the daemon sends).",
       "properties": {
         "auto_revert_minutes": {
           "default": null,
@@ -5929,7 +5939,6 @@
         "$ref": "#/$defs/TextClose"
       },
       "result": {
-        "additionalProperties": false,
         "type": "object"
       }
     },
@@ -5942,7 +5951,6 @@
         "$ref": "#/$defs/SessionKey"
       },
       "result": {
-        "additionalProperties": false,
         "type": "object"
       }
     },
@@ -5955,7 +5963,6 @@
         "$ref": "#/$defs/SessionKey"
       },
       "result": {
-        "additionalProperties": false,
         "type": "object"
       }
     },
@@ -6100,7 +6107,6 @@
         "$ref": "#/$defs/NetworkHost"
       },
       "result": {
-        "additionalProperties": false,
         "type": "object"
       }
     },
@@ -6125,7 +6131,6 @@
         "$ref": "#/$defs/Empty"
       },
       "result": {
-        "additionalProperties": false,
         "type": "object"
       }
     },
@@ -6450,7 +6455,7 @@
         "$ref": "#/$defs/GlobalPin"
       },
       "result": {
-        "$ref": "#/$defs/GlobalPin"
+        "$ref": "#/$defs/Pinned"
       }
     },
     {
@@ -6462,7 +6467,6 @@
         "$ref": "#/$defs/GlobalPin"
       },
       "result": {
-        "additionalProperties": false,
         "type": "object"
       }
     },
@@ -6475,7 +6479,6 @@
         "$ref": "#/$defs/SessionPin"
       },
       "result": {
-        "additionalProperties": false,
         "type": "object"
       }
     },
@@ -6488,7 +6491,6 @@
         "$ref": "#/$defs/SessionPin"
       },
       "result": {
-        "additionalProperties": false,
         "type": "object"
       }
     },
@@ -6597,7 +6599,7 @@
         "$ref": "#/$defs/Empty"
       },
       "result": {
-        "$ref": "#/$defs/Text2"
+        "$ref": "#/$defs/Text"
       }
     },
     {
@@ -6657,7 +6659,7 @@
         "$ref": "#/$defs/ProcessTail"
       },
       "result": {
-        "$ref": "#/$defs/Text2"
+        "$ref": "#/$defs/Text"
       }
     },
     {
@@ -6729,7 +6731,6 @@
         "$ref": "#/$defs/Update"
       },
       "result": {
-        "additionalProperties": false,
         "type": "object"
       }
     },
@@ -6754,7 +6755,6 @@
         "$ref": "#/$defs/SessionKey"
       },
       "result": {
-        "additionalProperties": false,
         "type": "object"
       }
     },
@@ -6779,7 +6779,6 @@
         "$ref": "#/$defs/SessionKey"
       },
       "result": {
-        "additionalProperties": false,
         "type": "object"
       }
     },
@@ -6900,7 +6899,6 @@
         "$ref": "#/$defs/Resize"
       },
       "result": {
-        "additionalProperties": false,
         "type": "object"
       }
     },
@@ -6925,7 +6923,6 @@
         "$ref": "#/$defs/TerminalKey"
       },
       "result": {
-        "additionalProperties": false,
         "type": "object"
       }
     },
@@ -6962,7 +6959,6 @@
         "$ref": "#/$defs/SessionControl"
       },
       "result": {
-        "additionalProperties": false,
         "type": "object"
       }
     },
@@ -7023,7 +7019,6 @@
         "$ref": "#/$defs/Detach"
       },
       "result": {
-        "additionalProperties": false,
         "type": "object"
       }
     },
@@ -7096,7 +7091,6 @@
         "$ref": "#/$defs/SessionEvent"
       },
       "result": {
-        "additionalProperties": false,
         "type": "object"
       }
     },
@@ -7131,7 +7125,6 @@
         "$ref": "#/$defs/Empty"
       },
       "result": {
-        "additionalProperties": false,
         "type": "object"
       }
     }

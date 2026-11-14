@@ -3,8 +3,10 @@ use std::collections::BTreeMap;
 use serde::{Serialize, Deserialize};
 use schemars::JsonSchema;
 use crate::sessions::HostPath;
+/// An agent definition: a result of `agents.get`/`agents.list` and the params of `agents.save`.
+/// Open in the schema because it is a result too; the daemon still refuses unknown fields in
+/// `agents.save` (requests are strict).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct Definition {
     pub id: String,
     pub name: String,

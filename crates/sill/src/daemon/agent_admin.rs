@@ -29,7 +29,7 @@ pub fn handle(hub:&Hub,m:&str,p:Value)->Option<Result<Value>>{
                 let more=agents.len()>n;agents.truncate(n);let next=more.then(||agents.last().unwrap().id.clone());json!(api::Page{agents,next})
             }
             "_sill/agents.save"=>{
-                let a:api::Definition=args(p)?;valid(&a.id)?;
+                let a:api::Definition=sill_proto::rpc::strict(p)?;valid(&a.id)?;
                 if a.command.is_empty()||a.command.iter().any(|v|v.contains('\0')){return Err(Error::invalid_params("nonempty command without NUL required").into());}
                 let agent=serde_json::from_value(json!(a))?;
                 json!(api::Saved{path:HostPath::from_path(&sill_core::agents::save_override(&home,&agent)?)})

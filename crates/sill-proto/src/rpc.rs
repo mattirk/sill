@@ -86,6 +86,19 @@ impl Error {
     }
 }
 
+/// Parse request params whose type is open in the schema (a result carries it too, and clients
+/// ignore unknown fields in results) while still refusing fields the type doesn't have: requests
+/// are strict. Top-level keys only; the type must serialize every field it has.
+pub fn strict<T: serde::de::DeserializeOwned + Serialize>(v: serde_json::Value) -> Result<T, Error> {
+    let parsed: T = serde_json::from_value(v.clone()).map_err(Error::invalid_params)?;
+    if let (Some(given), Ok(serde_json::Value::Object(known))) = (v.as_object(), serde_json::to_value(&parsed))
+        && let Some(k) = given.keys().find(|k| !known.contains_key(*k))
+    {
+        return Err(Error::invalid_params(format!("unknown field `{k}`")));
+    }
+    Ok(parsed)
+}
+
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.message)

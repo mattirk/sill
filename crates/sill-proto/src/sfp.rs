@@ -211,8 +211,10 @@ pub struct Question {
     pub delivery: Option<String>,
     pub reason: Option<Reason>,
 }
+/// Open in the schema because questions carry it in results and events; the daemon still refuses
+/// unknown fields in `questions.answer` (requests are strict).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum Answer {
     Permission { option_id: String },
     Form { values: BTreeMap<String, serde_json::Value> },

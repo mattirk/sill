@@ -476,8 +476,10 @@ not an SFP capability either.
 lifetime of v1; there are no `sfp/1.x` minor versions. A compatible addition is a new method,
 notification, optional request/result field, enum variant or error detail that an old peer can
 ignore or never sees. Each addition is advertised as a named capability (`name: version`) in
-`_sill/initialize`; a daemon uses it toward a client only when the client offered it, and a
-client calls it only when the daemon returned it. A missing capability disables that feature;
+`_sill/initialize`; a daemon sends a new notification or relies on new behaviour toward a client
+only when the client offered it, and a client calls it only when the daemon returned it. An
+optional result field may go to every client (see Unknown fields below); it is paired with a
+capability only when a client must act on it. A missing capability disables that feature;
 it is not a protocol mismatch and never triggers the explicit-replacement flow, which is
 reserved for a protocol-identity mismatch (`sfp/1` vs `sfp/2`). Changing the meaning of an
 existing field, making an optional field required, or removing anything requires `sfp/2`.
@@ -485,6 +487,16 @@ Optional SFP wire features a build or platform can disable need capabilities too
 An experimental agent adapter does not itself change the SFP wire contract. The daemon build version and protocol revision in `daemon.status` are
 diagnostics only; clients must not gate behaviour on them. Example: durable `operation_id`
 receipts for Changes mutations would be a capability such as `changes.operation_id: 1`.
+
+**Unknown fields (decided 2026-11-03).** Clients ignore fields they do not know in everything the
+daemon sends: results (an empty `{}` result included), notifications, error details and stream
+events. The schema says so: no type reachable from those forbids additional properties, and a
+`sill-proto` test (`what_the_daemon_sends_is_open_to_new_fields`) keeps it that way. Requests stay
+strict: the daemon refuses an unknown request field with `invalid_params`, so a client learns that
+the daemon lacks a field instead of having it dropped silently. Where a type is both a request and
+a result (`Answer`, an agent `Definition`), the schema shows it open and the daemon checks the
+request itself (`rpc::strict`); `pins.add` answers with its own `Pinned` type and text results use
+`Text`.
 
 JSON-RPC parse/invalid-request/method-not-found/invalid-params errors retain their standard numeric
 codes. Domain errors use numeric code `-32000` and

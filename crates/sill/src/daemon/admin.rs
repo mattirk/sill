@@ -320,7 +320,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
         }
         "_sill/settings.instructions.get" => {
             let _: sill_proto::Empty = args(p)?;
-            bounded(api::Text {
+            bounded(sill_proto::Text {
                 text: sill_core::instructions::load_global(),
             })
         }
@@ -405,7 +405,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             if n > 10000 {
                 return Err(invalid("lines exceeds 10000"));
             }
-            bounded(api::Text {
+            bounded(sill_proto::Text {
                 text: sill_core::shim::Control::connect(&sill_core::session::socket_path(
                     &a.session_id,
                 )?)?

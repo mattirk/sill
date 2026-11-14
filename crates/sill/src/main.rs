@@ -1274,7 +1274,7 @@ fn pin_cmd(cmd: PinCmd) -> Result<()> {
         }
         PinCmd::Add { path } => {
             let path = pin_cli_path(&path)?;
-            let added: api::GlobalPin = c.call("_sill/pins.add", api::GlobalPin { path: HostPath::from_path(&path) })?;
+            let added: api::Pinned = c.call("_sill/pins.add", api::GlobalPin { path: HostPath::from_path(&path) })?;
             println!("{} pinned globally", added.path.display);
         }
         PinCmd::Remove { path } => {

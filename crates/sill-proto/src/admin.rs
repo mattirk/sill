@@ -117,8 +117,9 @@ pub struct ProcessesPage {
     pub next: Option<String>,
 }
 
+/// A result: open to fields added later (clients ignore unknown fields in what the daemon sends).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct Settings {
     pub theme: String,
     pub width: Option<f64>,

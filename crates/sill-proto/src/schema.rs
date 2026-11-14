@@ -89,7 +89,7 @@ pub const METHODS: &[Method] = &[
     req::<crate::agent_admin::EntryKey, crate::agent_admin::Icon>("_sill/registry.icon", "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation."),
 
     req::<crate::pins::List, crate::pins::Page>("_sill/pins.list", "List global or session pins in bounded live byte-ordered pages."),
-    req::<crate::pins::GlobalPin, crate::pins::GlobalPin>("_sill/pins.add", "Ensure global pin membership; returns the canonical daemon-host path."),
+    req::<crate::pins::GlobalPin, crate::pins::Pinned>("_sill/pins.add", "Ensure global pin membership; returns the canonical daemon-host path."),
     req_empty::<crate::pins::GlobalPin>("_sill/pins.remove", "Ensure a path is not globally pinned; inspect membership after uncertainty."),
     req_empty::<crate::pins::SessionPin>("_sill/sessions.pin", "Ensure session pin membership; inspect membership after uncertainty."),
     req_empty::<crate::pins::SessionPin>("_sill/sessions.unpin", "Ensure a path is not pinned in a session; inspect membership after uncertainty."),
@@ -101,12 +101,12 @@ pub const METHODS: &[Method] = &[
     req::<crate::admin::FileWrite, crate::Empty>("_sill/files.write", "Atomically replace a daemon-host file with at most 1 MiB. Do not blindly retry; read the file after uncertainty."),
     req::<crate::Empty, crate::admin::Settings>("_sill/settings.get", "Read daemon settings."),
     req::<crate::admin::SettingsPatch, crate::Empty>("_sill/settings.patch", "Apply named settings changes. Read settings after an uncertain outcome before retrying."),
-    req::<crate::Empty, crate::admin::Text>("_sill/settings.instructions.get", "Read global instructions."),
+    req::<crate::Empty, crate::Text>("_sill/settings.instructions.get", "Read global instructions."),
     req::<crate::admin::Text, crate::Empty>("_sill/settings.instructions.set", "Replace global instructions (at most 1 MiB). Read back after uncertainty before retrying."),
     req::<crate::admin::NamesList, crate::admin::Names>("_sill/policy.list", "List available daemon policy names (4 MiB result bound)."),
     req::<crate::admin::PolicyKey, crate::admin::PolicyEntry>("_sill/policy.get", "Read a named daemon policy and desktop grants."),
     req::<crate::admin::ProcessesList, crate::admin::ProcessesPage>("_sill/procs.list", "List managed session processes in bounded live name-ordered pages."),
-    req::<crate::admin::ProcessTail, crate::admin::Text>("_sill/procs.tail", "Read at most 10000 lines and 4 MiB of managed-process output."),
+    req::<crate::admin::ProcessTail, crate::Text>("_sill/procs.tail", "Read at most 10000 lines and 4 MiB of managed-process output."),
     req::<crate::admin::ProcessKey, crate::Empty>("_sill/procs.stop", "Request stop of one named process. List its state after an uncertain outcome; do not blindly retry."),
     req::<crate::admin::ProcessKey, crate::Empty>("_sill/procs.dismiss", "Dismiss one named process. List after an uncertain outcome; do not blindly retry."),
     req::<crate::sessions::List, crate::sessions::Page>("_sill/sessions.list", "List sessions in bounded live pages ordered by immutable creation time and identity."),
@@ -161,7 +161,9 @@ pub fn document() -> Value {
                 "doc": m.doc,
                 "capabilities": {},
                 "params": m.params.map(|f| f(&mut g).to_value()),
-                "result": m.result.map(|f| f(&mut g).to_value()).unwrap_or(json!({"type": "object", "additionalProperties": false})),
+                // an empty answer is `{}` today; like every result it may gain fields (clients ignore
+                // unknown fields in what the daemon sends)
+                "result": m.result.map(|f| f(&mut g).to_value()).unwrap_or(json!({"type": "object"})),
             })
         })
         .collect();
@@ -226,6 +228,63 @@ mod tests {
                 panic!("the protocol changed compatibly; record it with SILL_SFP_SCHEMA_ACCEPT=1 cargo test -p sill-proto and commit {}", path.display());
             }
         }
+    }
+
+    /// docs/protocol.md "Unknown fields": clients ignore fields they don't know in what the daemon
+    /// sends, so nothing reachable from a result, a notification, an error or a stream may forbid
+    /// them in the schema (a strict client validating against it would refuse a later addition).
+    #[test]
+    fn what_the_daemon_sends_is_open_to_new_fields() {
+        let doc = document();
+        let defs = doc["$defs"].as_object().unwrap();
+        fn walk<'a>(node: &'a Value, defs: &'a serde_json::Map<String, Value>, seen: &mut Vec<String>, closed: &mut Vec<String>, at: &str) {
+            match node {
+                Value::Object(o) => {
+                    if o.get("additionalProperties") == Some(&Value::Bool(false)) {
+                        closed.push(at.to_string());
+                    }
+                    if let Some(name) = o.get("$ref").and_then(Value::as_str).and_then(|r| r.strip_prefix("#/$defs/")) {
+                        if !seen.iter().any(|s| s == name) {
+                            seen.push(name.to_string());
+                            walk(&defs[name], defs, seen, closed, name);
+                        }
+                    }
+                    for v in o.values() {
+                        walk(v, defs, seen, closed, at);
+                    }
+                }
+                Value::Array(a) => a.iter().for_each(|v| walk(v, defs, seen, closed, at)),
+                _ => {}
+            }
+        }
+        let (mut seen, mut closed) = (Vec::new(), Vec::new());
+        for m in doc["methods"].as_array().unwrap() {
+            let name = m["name"].as_str().unwrap();
+            if m["kind"] == "notification" {
+                walk(&m["params"], defs, &mut seen, &mut closed, name);
+            }
+            walk(&m["result"], defs, &mut seen, &mut closed, name);
+        }
+        walk(&doc["errors"], defs, &mut seen, &mut closed, "errors");
+        walk(&doc["streams"], defs, &mut seen, &mut closed, "streams");
+        closed.sort();
+        closed.dedup();
+        assert!(closed.is_empty(), "closed to new fields but sent by the daemon: {closed:?}");
+    }
+
+    /// Requests stay strict where the type is open because it is a result too.
+    #[test]
+    fn strict_params_refuse_unknown_fields() {
+        let ok: crate::sfp::Answer = crate::rpc::strict(json!({"type": "permission", "option_id": "yes"})).unwrap();
+        assert_eq!(ok, crate::sfp::Answer::Permission { option_id: "yes".into() });
+        let e = crate::rpc::strict::<crate::sfp::Answer>(json!({"type": "permission", "option_id": "yes", "extra": 1})).unwrap_err();
+        assert!(e.message.contains("extra"), "{}", e.message);
+        assert!(crate::rpc::strict::<crate::sfp::Answer>(json!({"type": "cancel"})).is_ok());
+        let def = json!({"id": "a", "name": "A", "command": ["a"]});
+        assert!(crate::rpc::strict::<crate::agent_admin::Definition>(def.clone()).is_ok());
+        let mut extra = def;
+        extra["typo"] = json!(true);
+        assert!(crate::rpc::strict::<crate::agent_admin::Definition>(extra).is_err());
     }
 
     #[test]
