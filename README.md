@@ -19,6 +19,9 @@ Sill reduces what an agent can do to your machine; it does not guarantee securit
 host's kernel unless you use the VM, pinned folders are written directly, and the code has not had an
 independent audit.
 
+Sill is developed with AI coding agents, run inside sill itself. The design, the direction and the
+review of what is merged are the author's. Review the code yourself before relying on it.
+
 ## Run
 
 **Linux desktop** — bubblewrap, cgroup v2, kernel ≥ 6.2, Rust ≥ 1.90:
