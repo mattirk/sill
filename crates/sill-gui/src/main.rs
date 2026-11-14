@@ -2428,7 +2428,16 @@ impl App {
                 page.armed_delete = false;
                 self.settings.settings_category = category;
                 crate::settings::save(&self.settings);
-                return iced::widget::operation::snap_to("settings", iced::widget::scrollable::RelativeOffset::START);
+                return operation::scroll_to(
+                    "settings",
+                    scrollable::AbsoluteOffset {
+                        x: 0.0,
+                        y: page.scroll_offsets.get(&category).copied().unwrap_or(0.0),
+                    },
+                );
+            }
+            Event::Scrolled(category, offset) => {
+                page.scroll_offsets.insert(category, offset);
             }
             Event::ToggleSection(title) => {
                 if !page.collapsed.remove(title) {

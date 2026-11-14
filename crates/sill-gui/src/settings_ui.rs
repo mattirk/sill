@@ -5,7 +5,7 @@
 //! Shelf width, Interface scale, the shortcuts, the window's modes and sizes) are in
 //! `~/.config/sill/sill-gui.toml`.
 use iced::widget::{
-    Column, button, column, container, pick_list, responsive, row, rule, scrollable, space, text,
+    Column, button, column, container, pick_list, row, rule, scrollable, space, text,
     text_editor, text_input, toggler,
 };
 use iced::{Alignment, Border, Color, Element, Fill, Padding, Shrink, Theme};
@@ -32,7 +32,7 @@ const SHELF_SHARES: &[(f32, &str)] = &[
 ];
 
 /// The Settings navigation choice, kept in this window's preferences.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Category {
     #[default]
@@ -67,6 +67,7 @@ impl std::fmt::Display for Category {
 
 pub struct SettingsPage {
     pub category: Category,
+    pub scroll_offsets: std::collections::BTreeMap<Category, f32>,
     pub autostart: Result<bool, String>,
     pub autostart_busy: bool,
     pub token: String,
@@ -94,6 +95,7 @@ impl Default for SettingsPage {
     fn default() -> Self {
         Self {
             category: Category::default(),
+            scroll_offsets: Default::default(),
             autostart: sill_proto::autostart_enabled().map_err(|e| e.to_string()),
             autostart_busy: false,
             token: sill_client::request_id("settings-page"),
@@ -122,6 +124,7 @@ impl Default for SettingsPage {
 #[derive(Debug, Clone)]
 pub enum Event {
     Category(Category),
+    Scrolled(Category, f32),
     Autostart(bool),
     AutostartDone(Result<(), String>),
     Policy(crate::policies::Event),
@@ -286,7 +289,7 @@ fn section<'a>(
         .width(Fill)
         .padding([10, 4])
         .style(|_, status| button::Style {
-            text_color: P.accent,
+            text_color: P.fg,
             background: matches!(status, button::Status::Hovered | button::Status::Pressed)
                 .then(|| alpha(P.fg, 0.07).into()),
             ..button::Style::default()
@@ -367,58 +370,34 @@ pub(crate) fn home_relative(path: &str) -> String {
 
 impl App {
     pub(crate) fn settings_view<'a>(&'a self, page: &'a SettingsPage) -> Element<'a, Message> {
-        // Use the space actually allotted to Settings, including interface scaling.
-        responsive(move |size| {
-            let navigation: Element<'a, Message> = if size.width < 760.0 {
-                container(
-                    pick_list(Category::ALL, Some(page.category), |category| {
-                        event(Event::Category(category))
-                    })
-                    .text_size(style::TEXT)
+        let mut tabs = row![].spacing(4);
+        for category in Category::ALL {
+            let selected = page.category == category;
+            tabs = tabs.push(keys::press(
+                button(text(category.to_string()).size(style::SMALL))
                     .padding([8, 12])
+                    .style(move |_, status| button::Style {
+                        text_color: if selected { P.fg } else { P.fg_dim },
+                        background: (selected
+                            || matches!(status, button::Status::Hovered | button::Status::Pressed))
+                        .then(|| alpha(P.fg, if selected { 0.10 } else { 0.05 }).into()),
+                        ..button::Style::default()
+                    }),
+                event(Event::Category(category)),
+            ));
+        }
+        column![
+            container(
+                container(tabs.wrap().vertical_spacing(4))
                     .width(Fill)
-                    .style(dropdown)
-                    .menu_style(style::control_menu),
-                )
-                .padding([8, 16])
-                .into()
-            } else {
-                let mut sidebar = Column::new().spacing(4).padding([12, 8]);
-                for category in Category::ALL {
-                    let selected = page.category == category;
-                    sidebar = sidebar.push(keys::press(
-                        button(text(category.to_string()).size(style::SMALL))
-                            .width(Fill)
-                            .padding([10, 12])
-                            .style(move |_, status| button::Style {
-                                text_color: if selected { P.accent } else { P.fg_dim },
-                                background: (selected
-                                    || matches!(
-                                        status,
-                                        button::Status::Hovered | button::Status::Pressed
-                                    ))
-                                .then(|| alpha(P.fg, if selected { 0.10 } else { 0.05 }).into()),
-                                ..button::Style::default()
-                            }),
-                        event(Event::Category(category)),
-                    ));
-                }
-                scrollable(sidebar).width(172).height(Fill).into()
-            };
-            // Responsive closures can rebuild; create the content from the current page.
-            let content = self.settings_content(page);
-            if size.width < 760.0 {
-                column![navigation, content].height(Fill).into()
-            } else {
-                row![
-                    navigation,
-                    rule::vertical(1).style(style::rule_style(P.surface)),
-                    content
-                ]
-                .height(Fill)
-                .into()
-            }
-        })
+                    .max_width(MEASURE)
+                    .padding([8, 16])
+            )
+            .center_x(Fill),
+            rule::horizontal(1).style(style::rule_style(P.surface)),
+            self.settings_content(page),
+        ]
+        .height(Fill)
         .into()
     }
 
@@ -442,11 +421,7 @@ impl App {
             .into(),
             Some(Ok(snapshot)) => self.settings_sections(page, snapshot),
         };
-        let mut page_column = column![
-            text(page.category.to_string())
-                .size(style::TEXT)
-                .font(bold())
-        ];
+        let mut page_column = Column::new();
         if page.category == Category::System {
             page_column = page_column.push(section(page, "Daemon", self.daemon_rows(page)));
         }
@@ -467,6 +442,9 @@ impl App {
         scrollable(container(page_column).center_x(Fill))
             .direction(scrollable::Direction::Vertical(style::bar()))
             .id("settings")
+            .on_scroll(move |viewport| {
+                event(Event::Scrolled(page.category, viewport.absolute_offset().y))
+            })
             .width(Fill)
             .height(Fill)
             .style(style::feed_scroll)
