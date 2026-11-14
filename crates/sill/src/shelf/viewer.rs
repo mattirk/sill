@@ -463,6 +463,12 @@ impl Viewer {
         if let Some(src) = log {
             return self.show_log(src);
         }
+        // a link under a pin's name is the agent's pointer anywhere on the host: not shown as the
+        // pin's file (security.md S9); the target itself can be opened by its own name
+        if std::fs::symlink_metadata(path).map(|m| m.is_symlink()).unwrap_or(false) {
+            let target = std::fs::read_link(path).map(|t| t.display().to_string()).unwrap_or_else(|_| "?".into());
+            return self.say_only(&format!("{} is a link → {target}: not shown under this name; open the target itself if you mean it", path.display()));
+        }
         if !path.is_file() {
             return self.say_only(&format!("{} is not a file (or is gone)", path.display()));
         }

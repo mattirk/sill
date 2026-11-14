@@ -66,6 +66,16 @@ fn row_glyph(path: &Path, is_dir: bool, expanded: bool) -> &'static str {
     }
 }
 
+/// A directory itself — not a link to one: the tree lists what is in a pin, never what a link in it
+/// points at elsewhere on the host (security.md S9).
+fn is_real_dir(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).map(|m| m.is_dir()).unwrap_or(false)
+}
+
+fn is_link(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).map(|m| m.is_symlink()).unwrap_or(false)
+}
+
 /// A directory's entries as full paths: directories first, dot files last, case-insensitive.
 /// `ghosts`: paths (below `dir`) that a session's overlay has and the host hasn't — listed as files
 /// too, so a change always has a row (a folder's dot never points at nothing).
@@ -73,7 +83,7 @@ fn list_dir(dir: &Path, ghosts: &[String]) -> Vec<String> {
     let mut entries: Vec<(bool, String)> = std::fs::read_dir(dir)
         .map(|rd| {
             rd.filter_map(Result::ok)
-                .map(|e| (e.path().is_dir(), e.file_name().to_string_lossy().into_owned()))
+                .map(|e| (e.file_type().map(|t| t.is_dir()).unwrap_or(false), e.file_name().to_string_lossy().into_owned()))
                 .collect()
         })
         .unwrap_or_default();
@@ -259,7 +269,7 @@ impl FolderTree {
             let badges = badges.clone();
             move |item| {
                 let path = PathBuf::from(item.downcast_ref::<gtk::StringObject>()?.string().as_str());
-                if !path.is_dir() {
+                if !is_real_dir(&path) {
                     return None;
                 }
                 let children = children_of(&path, &listed, &ghosts(&badges.borrow(), &path));
@@ -372,11 +382,13 @@ impl FolderTree {
                 }
                 icon.set_visible(true);
                 pin.set_visible(!home_caption);
-                let is_dir = path.is_dir();
+                let is_dir = is_real_dir(&path);
+                let link = is_link(&path);
                 // every row's icon is a sill glyph in the foreground colour (rows are rebound on a
-                // theme change, so they follow it)
+                // theme change, so they follow it); a link shows as one, whatever it points at
                 let fg = super::icons::fg_for(&icon, &theme::current());
-                icon.set_paintable(super::icons::stroke_texture(row_glyph(&path, is_dir, row.is_expanded()), fg).as_ref());
+                let glyph = if link { "sill-link" } else { row_glyph(&path, is_dir, row.is_expanded()) };
+                icon.set_paintable(super::icons::stroke_texture(glyph, fg).as_ref());
                 let fname = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 for c in ["sill-changed", "sill-pending", "sill-below", "sill-dim", "sill-pinned", "sill-new"] {
                     name.remove_css_class(c);
@@ -399,6 +411,10 @@ impl FolderTree {
                 // success), a session's unkept overlay change in the accent — not on the host, the
                 // tooltip says so —, a folder with changes below in a softer warning with the list
                 name.set_tooltip_text(None);
+                if link {
+                    let target = std::fs::read_link(&path).map(|t| t.display().to_string()).unwrap_or_else(|_| "?".into());
+                    name.set_tooltip_text(Some(&format!("a link → {target}: not followed here; open the target itself if you mean it")));
+                }
                 match &badge_entry {
                     Some(Badge::Session { session, .. }) => {
                         name.add_css_class("sill-pending");
