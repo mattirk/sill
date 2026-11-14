@@ -331,6 +331,23 @@ impl App {
                     }),
                 ),
                 setting(
+                    "Default page",
+                    Some("The page Escape opens from a conversation"),
+                    choice(
+                        ["Changes", "Agents", "Settings"],
+                        match s.default_page.as_deref() {
+                            Some("agents") => 1,
+                            Some("settings") => 2,
+                            _ => 0,
+                        },
+                        |i| {
+                            event(Event::Change(SettingChange::DefaultPage {
+                                value: Some(["changes", "agents", "settings"][i].into()),
+                            }))
+                        },
+                    ),
+                ),
+                setting(
                     "Shelf width",
                     Some("Shelf mode's share of the monitor (sill-gui)"),
                     choice(SHELF_SHARES.iter().map(|(_, l)| *l), share_at, |i| {

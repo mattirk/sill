@@ -21,6 +21,7 @@
 //! and Windows frontends too (`scripts/check-portable.sh`).
 
 pub mod actions;
+pub mod agents;
 pub mod changes;
 pub mod conversation;
 pub mod files;

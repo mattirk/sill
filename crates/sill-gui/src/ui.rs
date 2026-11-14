@@ -32,6 +32,9 @@ impl App {
     pub(crate) fn view(&self) -> Element<'_, Message> {
         let content = responsive(move |size| {
             // The sill pages take the conversation's place.
+            if self.agents_page.shown {
+                return self.agents_view();
+            }
             let page = match (&self.changes, &self.settings_page) {
                 (Some(page), _) => Some(self.changes_view(page)),
                 (None, Some(page)) => Some(self.settings_view(page)),
@@ -170,7 +173,7 @@ impl App {
 
     fn top_bar(&self, width: f32) -> Element<'_, Message> {
         // the herring opens the sill pages, underlined while one shows
-        let shown = self.changes.is_some() || self.settings_page.is_some();
+        let shown = self.backend_shown();
         let drawer_open = self.workspace.shown && !shown && self.current().is_some();
         // room on its right, as the shelf's status slot has (`.sill-status-slot`)
         let activity = container(self.activity()).padding(Padding {
@@ -204,7 +207,7 @@ impl App {
                 text(if shown {
                     "Back to the conversation"
                 } else {
-                    "Sill: Changes and Settings"
+                    "Sill: Changes, Agents and Settings"
                 })
                 .size(style::TINY),
             )
@@ -217,6 +220,7 @@ impl App {
             // the pages' own tabs in place of the sessions', as the shelf's backend
             for (page, glyph, title) in [
                 (crate::Page::Changes, "changes", "Changes"),
+                (crate::Page::Agents, "agents", "Agents"),
                 (crate::Page::Settings, "settings", "Settings"),
             ] {
                 tabs = tabs.push(self.page_tab(page, glyph, title));
@@ -301,6 +305,7 @@ impl App {
         title: &'static str,
     ) -> Element<'a, Message> {
         let active = match page {
+            crate::Page::Agents => self.agents_page.shown,
             crate::Page::Changes => self.changes.is_some(),
             crate::Page::Settings => self.settings_page.is_some(),
         };
@@ -747,13 +752,23 @@ impl App {
                 .width(Fill)
                 .style(style::fill(P.code_bg)),
             ),
-            "thought" => container(
-                selection::text(source)
-                    .size(style::SMALL)
-                    .style(style::selectable(alpha(P.fg, 0.55))),
-            )
-            .padding([0, 8])
-            .into(),
+            // the agent's reasoning: Markdown as the shelf draws it (Codex's summaries are bold
+            // titles after blank lines), smaller, dimmed and in italics
+            "thought" => match view.rendered.get(&item.item_id) {
+                Some(rendered) => container(markdown::view_with(
+                    rendered.markdown.items(),
+                    thought_settings(),
+                    &viewer::SillViewer,
+                ))
+                .padding([0, 8])
+                .width(Fill)
+                .style(|_| container::Style {
+                    text_color: Some(alpha(P.fg, 0.55)),
+                    ..container::Style::default()
+                })
+                .into(),
+                None => space().into(),
+            },
             "note" => container(
                 selection::text(format!("· {source}"))
                     .size(style::SMALL)
@@ -1729,6 +1744,27 @@ pub(crate) fn markdown_settings() -> markdown::Settings {
     settings.h6_size = style::TEXT.into();
     settings.code_size = style::MONO.into();
     settings.spacing = (style::TEXT * 0.8).into();
+    settings
+}
+
+/// A thought's Markdown: the conversation's, a size smaller and in italics (`.sill-thought`).
+fn thought_settings() -> markdown::Settings {
+    let mut style = markdown::Style::from_palette(style::theme().palette());
+    style.font = Font {
+        style: iced::font::Style::Italic,
+        ..Font::with_name(crate::fonts::SANS_FAMILY)
+    };
+    style.link_color = P.link;
+    style.inline_code_color = alpha(P.fg, 0.7);
+    style.inline_code_font = MONO_FONT;
+    style.code_block_font = MONO_FONT;
+    style.inline_code_highlight = Highlight {
+        background: P.code_bg.into(),
+        border: iced::Border::default(),
+    };
+    let mut settings = markdown::Settings::with_text_size(style::SMALL, style);
+    settings.code_size = (style::MONO * 0.9).into();
+    settings.spacing = (style::SMALL * 0.5).into();
     settings
 }
 

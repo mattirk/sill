@@ -1,3 +1,4 @@
+mod agents_ui;
 mod changes_ui;
 mod control;
 mod demo;
@@ -191,9 +192,10 @@ pub enum Act {
     Control,
 }
 
-/// The herring's pages (the shelf's backend pages; Agents to come).
+/// The herring's backend pages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
+    Agents,
     Changes,
     Settings,
 }
@@ -293,6 +295,7 @@ pub enum Message {
     /// The herring's pages: one shown in the conversation's place.
     ShowPage(Page),
     Settings(settings_ui::Event),
+    Agents(agents_ui::Event),
     /// The daemon's settings, read at the start and with each refresh: the theme, the timer.
     DaemonSettings(Result<sill_proto::admin::Settings, String>),
     /// A tab's ×: end its session (a ghost's needs a second press).
@@ -503,6 +506,7 @@ pub struct App {
     /// The Changes page, while shown in place of the conversation.
     pub changes: Option<changes_ui::ChangesPage>,
     pub settings_page: Option<settings_ui::SettingsPage>,
+    pub agents_page: agents_ui::AgentsPage,
     /// The herring's page last shown: what it opens next.
     pub last_page: Page,
     /// The daemon's settings as last read.
@@ -596,6 +600,7 @@ impl App {
             menu: None,
             changes: None,
             settings_page: None,
+            agents_page: agents_ui::AgentsPage::default(),
             last_page: Page::Changes,
             daemon_settings: None,
             pending_choose: None,
@@ -1060,7 +1065,7 @@ impl App {
 
     /// A backend page shows in the session's place.
     pub fn backend_shown(&self) -> bool {
-        self.changes.is_some() || self.settings_page.is_some()
+        self.changes.is_some() || self.settings_page.is_some() || self.agents_page.shown
     }
 
     /// Every message: its update, and the herring's stroke when the view went between the
@@ -1389,12 +1394,16 @@ impl App {
             Message::Menu(event) => return self.menu_event(event),
             // the herring: the pages, at the one last shown, or back to the conversation
             Message::ToggleChanges => {
-                if self.changes.take().is_some() | self.settings_page.take().is_some() {
+                if self.changes.take().is_some()
+                    | self.settings_page.take().is_some()
+                    | std::mem::take(&mut self.agents_page.shown)
+                {
                     return self.restore_scroll();
                 }
                 return self.show_page(self.last_page);
             }
             Message::ShowPage(page) => return self.show_page(page),
+            Message::Agents(event) => return self.agents_event(event),
             Message::Settings(event) => return self.settings_event(event),
             Message::DaemonSettings(Ok(settings)) => {
                 style::set_theme(&settings.theme);
@@ -1559,7 +1568,14 @@ impl App {
     fn show_page(&mut self, page: Page) -> Task<Message> {
         self.last_page = page;
         self.menu = None;
+        self.agents_page.shown = page == Page::Agents;
         match page {
+            Page::Agents => {
+                self.agents_page.auto_fetch_attempted = false;
+                self.changes = None;
+                self.settings_page = None;
+                self.agents_load(false)
+            }
             Page::Changes => {
                 self.settings_page = None;
                 if self.changes.is_some() {
@@ -2034,7 +2050,10 @@ impl App {
             return Task::none();
         }
         // the backend's page: back to the session
-        if self.changes.take().is_some() | self.settings_page.take().is_some() {
+        if self.changes.take().is_some()
+            | self.settings_page.take().is_some()
+            | std::mem::take(&mut self.agents_page.shown)
+        {
             return self.restore_scroll();
         }
         // the session's shell has the keys, Escape included (an editor in it needs it)
@@ -2056,13 +2075,14 @@ impl App {
     }
 
     /// The page Escape opens from the conversation: Settings → Default page (the shelf's
-    /// `default_page`; Changes unless set, and until the Agents page is here).
+    /// `default_page`; Changes unless set).
     fn default_page(&self) -> Page {
         match self
             .daemon_settings
             .as_ref()
             .and_then(|s| s.default_page.as_deref())
         {
+            Some("agents") => Page::Agents,
             Some("settings") => Page::Settings,
             _ => Page::Changes,
         }
@@ -2228,6 +2248,8 @@ impl App {
         }
         let again = self.selected.as_deref() == Some(id.as_str()) && self.changes.is_none();
         self.changes = None;
+        self.settings_page = None;
+        self.agents_page.shown = false;
         self.selected = Some(id.clone());
         let view = self
             .views

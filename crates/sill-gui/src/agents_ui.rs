@@ -1,0 +1,632 @@
+//! Registry browsing and agent administration. Jobs outlive navigation away from the page.
+use crate::{
+    App, Message, keys,
+    style::{self, P},
+};
+use iced::widget::{
+    button, column, container, pick_list, row, scrollable, text, text_input, toggler,
+};
+use iced::{Alignment, Element, Fill, Task};
+use sill_client::agents::{self, Entry};
+use sill_proto::agent_admin::Definition;
+use std::collections::{BTreeMap, BTreeSet};
+
+#[derive(Default)]
+pub struct AgentsPage {
+    pub shown: bool,
+    entries: Vec<Entry>,
+    search: String,
+    filter: Filter,
+    untested: bool,
+    loading: bool,
+    reload_after: bool,
+    pub auto_fetch_attempted: bool,
+    icons: BTreeMap<String, iced::widget::svg::Handle>,
+    icons_queued: BTreeSet<String>,
+    busy: BTreeSet<String>,
+    logs: BTreeMap<String, String>,
+    note: Option<String>,
+    armed: Option<String>,
+    editor: Option<Editor>,
+}
+struct Editor {
+    id: String,
+    definition: Definition,
+    command: String,
+    env: iced::widget::text_editor::Content,
+    domains: String,
+}
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Filter {
+    #[default]
+    All,
+    Installed,
+    Absent,
+}
+impl std::fmt::Display for Filter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::All => "All",
+            Self::Installed => "Installed",
+            Self::Absent => "Not installed",
+        })
+    }
+}
+#[derive(Debug, Clone)]
+pub enum Event {
+    Load(bool),
+    Loaded(Result<agents::Catalog, String>),
+    Search(String),
+    Filter(Filter),
+    Untested(bool),
+    Install(String, bool),
+    Remove(String),
+    Reset(String),
+    Edit(String),
+    CloseEditor,
+    Command(String),
+    Env(iced::widget::text_editor::Action),
+    Domains(String),
+    Enabled(bool),
+    Save,
+    Icon(String, Option<Vec<u8>>),
+    Log(String, String),
+    Done(String, Result<(), String>),
+}
+fn msg(e: Event) -> Message {
+    Message::Agents(e)
+}
+fn control(label: &str, event: Event) -> Element<'_, Message> {
+    keys::press(
+        button(text(label).size(style::SMALL))
+            .padding([6, 10])
+            .style(style::quiet),
+        msg(event),
+    )
+}
+impl App {
+    pub fn agents_load(&mut self, refresh: bool) -> Task<Message> {
+        if self.agents_page.loading {
+            self.agents_page.reload_after = true;
+            return Task::none();
+        }
+        let Some(connect) = self.connect.clone() else {
+            self.agents_page.note =
+                Some("The demo has no daemon; agent management needs a connection.".into());
+            return Task::none();
+        };
+        self.agents_page.loading = true;
+        if refresh {
+            self.agents_page.auto_fetch_attempted = true;
+        }
+        crate::blocking(
+            move || {
+                let client = connect().map_err(|e| format!("{e:#}"))?;
+                if refresh {
+                    agents::refresh(&client).map_err(|e| format!("{e:#}"))?;
+                }
+                agents::load(&client).map_err(|e| format!("{e:#}"))
+            },
+            |r| msg(Event::Loaded(r)),
+        )
+    }
+    fn agents_icons(&mut self) -> Task<Message> {
+        let p = &mut self.agents_page;
+        let selectors: Vec<_> = p
+            .entries
+            .iter()
+            .filter(|e| e.registry.has_icon && !p.icons_queued.contains(&e.registry.entry_id))
+            .map(|e| e.selector())
+            .collect();
+        if selectors.is_empty() {
+            return Task::none();
+        }
+        let Some(connect) = self.connect.clone() else {
+            return Task::none();
+        };
+        for s in &selectors {
+            p.icons_queued.insert(s.entry_id.clone());
+        }
+        let (tx, rx) = async_channel::bounded(32);
+        std::thread::spawn(move || {
+            let Ok(client) = connect() else {
+                return;
+            };
+            for selector in selectors {
+                let id = selector.entry_id.clone();
+                let bytes = agents::icon(&client, selector).ok().flatten();
+                if tx.send_blocking(Event::Icon(id, bytes)).is_err() {
+                    break;
+                }
+            }
+        });
+        Task::run(
+            iced::futures::stream::unfold(
+                rx,
+                |rx| async move { rx.recv().await.ok().map(|e| (e, rx)) },
+            ),
+            msg,
+        )
+    }
+    pub fn agents_event(&mut self, event: Event) -> Task<Message> {
+        let p = &mut self.agents_page;
+        match event {
+            Event::Load(refresh) => return self.agents_load(refresh),
+            Event::Loaded(result) => {
+                p.loading = false;
+                match result {
+                    Ok(catalog) => {
+                        let refresh_due = catalog.refresh_due && !p.auto_fetch_attempted;
+                        p.entries = catalog.entries;
+                        p.note = None;
+                        let icons = self.agents_icons();
+                        if refresh_due {
+                            return Task::batch([icons, self.agents_load(true)]);
+                        }
+                        if std::mem::take(&mut self.agents_page.reload_after) {
+                            return Task::batch([icons, self.agents_load(false)]);
+                        }
+                        return icons;
+                    }
+                    Err(e) => p.note = Some(e),
+                }
+                if std::mem::take(&mut p.reload_after) {
+                    return self.agents_load(false);
+                }
+            }
+            Event::Search(s) => p.search = s,
+            Event::Filter(f) => p.filter = f,
+            Event::Untested(v) => p.untested = v,
+            Event::Icon(id, bytes) => {
+                if let Some(bytes) = bytes {
+                    p.icons
+                        .insert(id, iced::widget::svg::Handle::from_memory(bytes));
+                }
+            }
+            Event::Log(id, line) => {
+                p.logs.insert(id, line.chars().take(16384).collect());
+            }
+            Event::Done(id, result) => {
+                p.busy.remove(&id);
+                p.logs
+                    .insert(id, result.err().unwrap_or_else(|| "Done".into()));
+                return self.agents_load(false);
+            }
+            Event::CloseEditor => p.editor = None,
+            Event::Edit(id) => {
+                if let Some(d) = p
+                    .entries
+                    .iter()
+                    .find(|e| e.registry.entry_id == id)
+                    .and_then(|e| e.definition.clone())
+                {
+                    p.editor = Some(Editor {
+                        id,
+                        command: serde_json::to_string(&d.command).unwrap(),
+                        env: iced::widget::text_editor::Content::with_text(
+                            &d.env
+                                .iter()
+                                .map(|(k, v)| format!("{k}={v}"))
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        ),
+                        domains: d.domains.join(", "),
+                        definition: d,
+                    });
+                }
+            }
+            Event::Command(s) => {
+                if let Some(e) = &mut p.editor {
+                    e.command = s;
+                }
+            }
+            Event::Env(s) => {
+                if let Some(e) = &mut p.editor {
+                    e.env.perform(s);
+                }
+            }
+            Event::Domains(s) => {
+                if let Some(e) = &mut p.editor {
+                    e.domains = s;
+                }
+            }
+            Event::Enabled(v) => {
+                if let Some(e) = &mut p.editor {
+                    e.definition.enabled = v;
+                }
+            }
+            Event::Save => {
+                let Some(editor) = &p.editor else {
+                    return Task::none();
+                };
+                let mut definition = editor.definition.clone();
+                definition.command = match serde_json::from_str::<Vec<String>>(&editor.command) {
+                    Ok(v) if !v.is_empty() && !v[0].is_empty() => v,
+                    _ => {
+                        p.note = Some("Command must be a JSON list of arguments, starting with the executable.".into());
+                        return Task::none();
+                    }
+                };
+                let mut env = BTreeMap::new();
+                for line in editor.env.text().lines().filter(|s| !s.trim().is_empty()) {
+                    let Some((k, v)) = line.split_once('=').filter(|(k, _)| !k.trim().is_empty())
+                    else {
+                        p.note = Some("Environment needs one NAME=value per line.".into());
+                        return Task::none();
+                    };
+                    env.insert(k.trim().into(), v.into());
+                }
+                definition.env = env;
+                definition.domains = editor
+                    .domains
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                let id = editor.id.clone();
+                return self.agent_call(
+                    id,
+                    "_sill/agents.save",
+                    serde_json::to_value(definition).unwrap(),
+                );
+            }
+            Event::Install(id, newer) => {
+                if p.busy.contains(&id) {
+                    return Task::none();
+                }
+                let Some(entry) = p.entries.iter().find(|e| e.registry.entry_id == id) else {
+                    return Task::none();
+                };
+                let entry = if newer {
+                    entry.registry.newer.as_deref().unwrap_or(&entry.registry)
+                } else {
+                    &entry.registry
+                }
+                .clone();
+                let key = format!("install:{id}:{}:{}", entry.version, entry.source);
+                if entry.source == "live" && p.armed.as_deref() != Some(&key) {
+                    p.armed = Some(key);
+                    p.logs.insert(id, format!("Unreviewed live index: {} v{}; {}. Press the same action again to confirm.", entry.name, entry.version, entry.install_spec));
+                    return Task::none();
+                }
+                p.armed = None;
+                let Some(connect) = self.connect.clone() else {
+                    return Task::none();
+                };
+                p.busy.insert(id.clone());
+                p.logs.insert(id.clone(), "Installing…".into());
+                let (tx, rx) = async_channel::bounded(64);
+                std::thread::spawn(move || {
+                    let result = connect()
+                        .and_then(|client| {
+                            agents::install(&client, &entry, |line| {
+                                let _ = tx.send_blocking(Event::Log(id.clone(), line));
+                            })
+                        })
+                        .map_err(|e| format!("{e:#}"));
+                    let _ = tx.send_blocking(Event::Done(id, result));
+                });
+                let stream = iced::futures::stream::unfold(rx, |rx| async move {
+                    rx.recv().await.ok().map(|e| (e, rx))
+                });
+                return Task::run(stream, msg);
+            }
+            Event::Remove(ref id) | Event::Reset(ref id) => {
+                let reset = matches!(event, Event::Reset(_));
+                let id = id.clone();
+                if p.busy.contains(&id) {
+                    return Task::none();
+                }
+                let key = format!("{}:{id}", if reset { "reset" } else { "remove" });
+                if p.armed.as_deref() != Some(&key) {
+                    p.armed = Some(key);
+                    p.logs.insert(id, if reset {"Reset stops running sessions and deletes this agent's Sill login, settings, history and saved API keys. Press Reset again to confirm."} else {"Remove the Sill-managed installation. Press Remove again to confirm."}.into());
+                    return Task::none();
+                }
+                p.armed = None;
+                let Some(entry) = p.entries.iter().find(|e| e.registry.entry_id == id) else {
+                    return Task::none();
+                };
+                let (method, params) = if reset {
+                    let Some(d) = &entry.definition else {
+                        return Task::none();
+                    };
+                    ("_sill/agents.reset", serde_json::json!({"agent_id":d.id}))
+                } else {
+                    let mut selector = entry.selector();
+                    if let Some(i) = &entry.installed {
+                        selector.version = i.version.clone();
+                        selector.source = i.source.clone();
+                    }
+                    (
+                        "_sill/registry.uninstall",
+                        serde_json::to_value(selector).unwrap(),
+                    )
+                };
+                return self.agent_call(id, method, params);
+            }
+        }
+        Task::none()
+    }
+    fn agent_call(
+        &mut self,
+        id: String,
+        method: &'static str,
+        params: serde_json::Value,
+    ) -> Task<Message> {
+        let Some(actions) = self.actions.clone() else {
+            return Task::none();
+        };
+        if !self.agents_page.busy.insert(id.clone()) {
+            return Task::none();
+        }
+        crate::blocking(
+            move || {
+                let outcome = actions.call(method, params);
+                if outcome.is_done() {
+                    Ok(())
+                } else {
+                    Err(outcome
+                        .problem()
+                        .unwrap_or("Unknown outcome; refresh before retrying")
+                        .to_string())
+                }
+            },
+            move |result| msg(Event::Done(id.clone(), result)),
+        )
+    }
+    pub fn agents_view(&self) -> Element<'_, Message> {
+        let p = &self.agents_page;
+        let mut body = column![
+            row![
+                text_input("Search agents…", &p.search)
+                    .on_input(|s| msg(Event::Search(s)))
+                    .padding(8),
+                pick_list(
+                    [Filter::All, Filter::Installed, Filter::Absent],
+                    Some(p.filter),
+                    |f| msg(Event::Filter(f))
+                ),
+                toggler(p.untested)
+                    .label("Untested")
+                    .on_toggle(|v| msg(Event::Untested(v))),
+                control("Refresh", Event::Load(true)),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .wrap()
+        ]
+        .spacing(12);
+        if p.loading {
+            body = body.push(text("Loading agents…").color(P.fg_dim));
+        }
+        if let Some(note) = &p.note {
+            body = body.push(text(note).color(P.error));
+            body = body.push(control("Try again", Event::Load(false)));
+        }
+        let needle = p.search.to_lowercase();
+        let mut count = 0;
+        for e in &p.entries {
+            if !p.untested && !e.present() && !e.tested() {
+                continue;
+            }
+            if (p.filter == Filter::Installed && !e.present())
+                || (p.filter == Filter::Absent && e.present())
+            {
+                continue;
+            }
+            let r = &e.registry;
+            if !format!("{} {} {}", r.name, r.entry_id, r.description)
+                .to_lowercase()
+                .contains(&needle)
+            {
+                continue;
+            }
+            count += 1;
+            let id = &r.entry_id;
+            let mut top = row![
+                match p.icons.get(id) {
+                    Some(handle) => iced::widget::svg(handle.clone())
+                        .width(16)
+                        .height(16)
+                        .style(style::icon(P.fg))
+                        .into(),
+                    None => crate::icons::tab_agent(
+                        r.builtin_agent_id.as_deref().unwrap_or(id),
+                        P.fg,
+                        false
+                    ),
+                },
+                text(&r.name).size(style::TEXT),
+                text(format!("v{} · {}", r.version, r.source))
+                    .size(style::SMALL)
+                    .color(P.fg_dim),
+                iced::widget::space().width(Fill)
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center);
+            if p.busy.contains(id) {
+                top = top.push(text("Working…").color(P.accent));
+            } else if let Some(installed) = &e.installed {
+                top = top.push(text(format!("Installed {}", installed.version)).size(style::SMALL));
+                if installed.version != r.version {
+                    top = top.push(control("Update", Event::Install(id.clone(), false)));
+                }
+                if r.newer.is_some() {
+                    top = top.push(control(
+                        "Newer (unreviewed)",
+                        Event::Install(id.clone(), true),
+                    ));
+                }
+                top = top.push(control("Remove", Event::Remove(id.clone())));
+            } else if e.available {
+                top = top.push(text("On this machine").size(style::SMALL));
+            } else if r.installable {
+                top = top.push(control("Install", Event::Install(id.clone(), false)));
+            } else {
+                top = top.push(text("No build for this host").size(style::SMALL));
+            }
+            let mut links = row![text(id).size(style::SMALL).color(P.fg_dim)].spacing(10);
+            for (label, url) in [
+                ("Copy source link", &r.repository),
+                ("Copy website link", &r.website),
+            ] {
+                if let Some(url) = url {
+                    links = links.push(keys::press(
+                        button(text(label).size(style::SMALL)).style(style::quiet),
+                        Message::Copy(url.clone()),
+                    ));
+                }
+            }
+            if e.definition.is_some() {
+                links = links
+                    .push(control("Settings", Event::Edit(id.clone())))
+                    .push(control("Reset", Event::Reset(id.clone())));
+            }
+            let mut card = column![
+                top.wrap(),
+                text(&r.description).size(style::SMALL).color(P.fg_dim),
+                links.wrap()
+            ]
+            .spacing(8);
+            if let Some(log) = p.logs.get(id) {
+                card = card.push(crate::selection::text(log.clone()).size(style::SMALL));
+            }
+            if let Some(editor) = p.editor.as_ref().filter(|editor| &editor.id == id) {
+                card = card.push(column![
+                    text("Command (JSON argument list)").size(style::SMALL),
+                    text_input("[\"executable\", \"argument\"]", &editor.command)
+                        .on_input(|s| msg(Event::Command(s)))
+                        .padding(7),
+                    text("Environment (NAME=value per line; may contain API keys)")
+                        .size(style::SMALL),
+                    iced::widget::text_editor(&editor.env)
+                        .on_action(|a| msg(Event::Env(a)))
+                        .height(100)
+                        .padding(7),
+                    text("Proxy domains (comma separated)").size(style::SMALL),
+                    text_input("example.com, api.example.com", &editor.domains)
+                        .on_input(|s| msg(Event::Domains(s)))
+                        .padding(7),
+                    toggler(editor.definition.enabled)
+                        .label("Offer in the new session menu")
+                        .on_toggle(|v| msg(Event::Enabled(v))),
+                    row![
+                        control("Save", Event::Save),
+                        control("Close", Event::CloseEditor)
+                    ]
+                    .spacing(10),
+                ]);
+            }
+            body = body.push(
+                container(card)
+                    .padding(14)
+                    .width(Fill)
+                    .style(style::fill(P.surface)),
+            );
+        }
+        if count == 0 && !p.loading {
+            body = body.push(text("No matching agents").color(P.fg_dim));
+        }
+        scrollable(container(body).max_width(960).padding(16).center_x(Fill))
+            .height(Fill)
+            .style(style::feed_scroll)
+            .into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn agents_navigation_returns_to_the_conversation_and_keeps_job_state() {
+        let (mut app, _) = App::new(true, None);
+        let _ = app.update(Message::ShowPage(crate::Page::Agents));
+        assert!(app.backend_shown());
+        assert!(app.agents_page.shown);
+        app.agents_page.busy.insert("test".into());
+        let _ = app.update(Message::Escape);
+        assert!(!app.backend_shown());
+        assert!(app.agents_page.busy.contains("test"));
+        let _ = app.update(msg(Event::Done(
+            "test".into(),
+            Err("install failed".into()),
+        )));
+        assert!(!app.agents_page.busy.contains("test"));
+        assert_eq!(app.agents_page.logs.get("test").unwrap(), "install failed");
+        assert!(
+            !app.backend_shown(),
+            "late completion must not reopen the page"
+        );
+    }
+    #[test]
+    fn live_install_requires_confirmation_before_starting_work() {
+        let (mut app, _) = App::new(true, None);
+        let registry = serde_json::from_value(serde_json::json!({
+            "entry_id":"live-agent", "name":"Live", "version":"1", "source":"live",
+            "installable":true, "description":"", "repository":null, "website":null,
+            "install_kind":"npx", "install_spec":"some-package@1", "package_name":"some-package",
+            "has_icon":false, "builtin_agent_id":null, "newer":null
+        }))
+        .unwrap();
+        app.agents_page.entries.push(Entry {
+            registry,
+            installed: None,
+            definition: None,
+            available: false,
+        });
+        let _ = app.update(msg(Event::Install("live-agent".into(), false)));
+        assert!(app.agents_page.busy.is_empty());
+        assert_eq!(
+            app.agents_page.armed.as_deref(),
+            Some("install:live-agent:1:live")
+        );
+        assert!(app.agents_page.logs["live-agent"].contains("some-package@1"));
+    }
+    #[test]
+    #[ignore = "writes Agents page PNGs for visual review"]
+    fn render_agents_page() {
+        let (mut app, _) = App::new(true, None);
+        app.agents_page.shown = true;
+        app.agents_page.untested = true;
+        for (id, name, source) in [
+            ("codex-acp", "Codex", "snapshot"),
+            ("example-agent", "Example agent with a longer name", "live"),
+        ] {
+            let registry = serde_json::from_value(serde_json::json!({
+                "entry_id":id,"name":name,"version":"1.2.3","source":source,
+                "installable":true,"description":"An agent that works with your code, tools and repository.",
+                "repository":"https://github.com/example/agent","website":null,
+                "install_kind":"npx","install_spec":"example@1.2.3","package_name":"example",
+                "has_icon":false,"builtin_agent_id":null,"newer":null
+            })).unwrap();
+            let definition = serde_json::from_value(serde_json::json!({
+                "id":id,"name":name,"command":["agent", "--acp"],"env":{"API_KEY":"example"}
+            }))
+            .unwrap();
+            app.agents_page.entries.push(Entry {
+                registry,
+                definition: Some(definition),
+                installed: None,
+                available: false,
+            });
+        }
+        let _ = app.update(msg(Event::Edit("codex-acp".into())));
+        crate::snapshots::render(&app, "agents");
+        crate::snapshots::render_size(&app, "agents-narrow", (480.0, 860.0));
+    }
+    #[test]
+    fn switching_backend_pages_and_sessions_leaves_agents() {
+        let (mut app, _) = App::new(true, None);
+        let _ = app.update(Message::ShowPage(crate::Page::Agents));
+        let _ = app.update(Message::ShowPage(crate::Page::Settings));
+        assert!(!app.agents_page.shown);
+        assert!(app.settings_page.is_some());
+        let _ = app.update(Message::ShowPage(crate::Page::Agents));
+        assert!(app.settings_page.is_none());
+        let id = app.tabs[0].id.clone();
+        let _ = app.update(Message::Choose(id));
+        assert!(!app.backend_shown());
+    }
+}

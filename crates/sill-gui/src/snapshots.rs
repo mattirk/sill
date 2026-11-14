@@ -220,3 +220,39 @@ fn render_changes() {
     )));
     render(&app, "14-changes");
 }
+
+#[test]
+#[ignore = "writes thought PNGs for review"]
+fn render_thoughts() {
+    use sill_proto::sfp::{Content, Item};
+    let (mut app, _) = App::new(true, None);
+    for _ in 0..=demo::CHUNKS.len() {
+        let _ = app.update(crate::Message::DemoTick);
+    }
+    let view = app.views.get_mut("demo").unwrap();
+    view.conversation.questions.clear();
+    // as Codex sends its reasoning summaries: bold titles after blank lines
+    for (seq, id, text) in [
+        (900, "t1", "\n\n**Checking entry icons**"),
+        (
+            901,
+            "t2",
+            "\n\n**Adding UI snapshot test**\n\n**Reviewing UI behavior**",
+        ),
+        (902, "t3", "The `render` path keeps *one* parse per item."),
+    ] {
+        view.conversation.insert_item(Item {
+            item_id: id.into(),
+            created_seq: seq.to_string(),
+            turn_id: Some("demo-turn".into()),
+            submission_id: None,
+            agent_generation_id: "demo-generation".into(),
+            kind: "thought".into(),
+            content: vec![Content::text(text)],
+            tool: None,
+        });
+        view.render(id);
+    }
+    view.follow_tail = true;
+    render(&app, "12-thoughts");
+}
