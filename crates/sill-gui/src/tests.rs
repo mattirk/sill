@@ -2621,7 +2621,8 @@ fn the_changes_page_groups_what_sessions_wrote() {
         "witty-willow",
         "no git",
         "Keep all",
-        "/home/demo/.config/app/settings.toml",
+        "settings.toml",
+        "/home/demo/.config/app",
         "changed on the host too",
         "Kept from witty-willow",
         "Undo",
@@ -2629,7 +2630,7 @@ fn the_changes_page_groups_what_sessions_wrote() {
         ui.find(shown)
             .unwrap_or_else(|_| panic!("{shown} is not shown"));
     }
-    ui.click("/home/demo/.config/app/settings.toml").unwrap();
+    ui.click("settings.toml").unwrap();
     let messages: Vec<Message> = ui.into_messages().collect();
     for message in messages {
         let task = app.update(message);

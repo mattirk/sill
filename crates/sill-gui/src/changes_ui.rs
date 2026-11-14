@@ -10,7 +10,7 @@ use iced::widget::{
 };
 use iced::{Alignment, Element, Fill, Padding};
 use sill_client::changes::{self, Entry, Group, Kind};
-use sill_client::files::{name, relative};
+use sill_client::files::{key, name, relative};
 use sill_proto::changes::HistoryEvent;
 
 use crate::style::{self, P, alpha};
@@ -87,6 +87,31 @@ fn badge<'a>(label: impl Into<String>, color: iced::Color) -> Element<'a, Messag
         .font(iced::Font::with_name(crate::fonts::MONO_FAMILY))
         .color(color)
         .into()
+}
+
+/// A changed file: its name, then its folder dimmed (and what was done, for a keep).
+fn path_label<'a>(shown: &str, what: Option<&str>) -> Element<'a, Message> {
+    let shown = crate::ui::one_line(shown, 200);
+    let (folder, file) = match shown.trim_end_matches('/').rsplit_once('/') {
+        Some((folder, file)) => (folder.to_string(), file.to_string()),
+        None => (String::new(), shown.clone()),
+    };
+    let dim = |value: String| {
+        text(value)
+            .size(style::SMALL)
+            .color(alpha(P.fg, 0.45))
+            .wrapping(text::Wrapping::None)
+    };
+    let mut line = row![text(file).size(style::SMALL).wrapping(text::Wrapping::None)]
+        .spacing(10)
+        .align_y(Alignment::Center);
+    if !folder.is_empty() {
+        line = line.push(dim(folder));
+    }
+    if let Some(what) = what {
+        line = line.push(dim(what.to_string()));
+    }
+    line.into()
 }
 
 /// `~/…` for a path under the daemon's home.
@@ -210,10 +235,41 @@ impl App {
         let mut header = row![].spacing(10).align_y(Alignment::Center);
         match &group.kind {
             Kind::Live { repo } => {
-                header = header
-                    .push(text(short(&repo.display)).size(style::TEXT))
-                    .push(badge("git", P.success))
-                    .push(badge("live", P.accent));
+                // a workspace's clone says whose work it is, not where sill keeps it
+                let workspace = page
+                    .workspaces
+                    .as_ref()
+                    .and_then(|w| w.as_ref().ok())
+                    .and_then(|(listed, _)| {
+                        listed.workspaces.iter().find(|w| key(&w.path) == key(repo))
+                    });
+                match workspace {
+                    Some(w) => {
+                        let session =
+                            self.all_sessions.iter().find(|s| s.session_id == w.session_id);
+                        if let Some(session) = session {
+                            header = header.push(
+                                iced::widget::svg(self.agent_icon(&session.agent))
+                                    .width(15)
+                                    .height(15)
+                                    .style(style::icon(P.fg)),
+                            );
+                        }
+                        let title = session
+                            .map(sill_client::sessions::display_title)
+                            .unwrap_or(&w.session_id);
+                        header = header
+                            .push(text(crate::ui::one_line(title, 40)).size(style::TEXT))
+                            .push(badge(name(&w.source), P.success))
+                            .push(badge("workspace", P.accent));
+                    }
+                    None => {
+                        header = header
+                            .push(text(short(&repo.display)).size(style::TEXT))
+                            .push(badge("git", P.success))
+                            .push(badge("live", P.accent));
+                    }
+                }
             }
             Kind::Session {
                 title, ghost, repo, ..
@@ -311,21 +367,17 @@ impl App {
             }
             Entry::Kept { .. } => ("K".into(), P.fg_dim),
         };
-        let shown = match (&group.kind, entry) {
-            (Kind::Live { repo }, _) => relative(changes::path(entry), repo),
-            (_, Entry::Kept { what, path, .. }) => format!("{} · {what}", short(&path.display)),
-            _ => short(&changes::path(entry).display),
+        let (shown, what) = match (&group.kind, entry) {
+            (Kind::Live { repo }, _) => (relative(changes::path(entry), repo), None),
+            (_, Entry::Kept { what, path, .. }) => (short(&path.display), Some(what.as_str())),
+            _ => (short(&changes::path(entry).display), None),
         };
         let open = page.open.contains_key(&key);
         let line = keys::press(
             button(
                 row![
                     text(letter).size(style::SMALL).color(color).width(26),
-                    container(
-                        text(crate::ui::one_line(&shown, 120))
-                            .size(style::SMALL)
-                            .wrapping(text::Wrapping::None),
-                    )
+                    container(path_label(&shown, what))
                     .width(Fill)
                     .clip(true),
                     crate::icons::glyph(
