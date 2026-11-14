@@ -159,6 +159,7 @@ pub struct Empty {}
 pub mod pins;
 
 pub mod agent_admin;
+pub mod providers;
 
 pub mod changes;
 

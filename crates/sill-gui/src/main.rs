@@ -1,4 +1,5 @@
 mod agents_ui;
+mod providers_ui;
 mod annotation;
 mod annotation_state;
 #[cfg(test)]

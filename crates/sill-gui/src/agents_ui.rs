@@ -32,6 +32,8 @@ pub struct AgentsPage {
     details: Option<String>,
     /// Directory proposals the person unticked, per agent, until Apply.
     unticked: BTreeMap<String, BTreeSet<String>>,
+    /// Model providers: a section in the row of each agent that takes them.
+    pub providers: crate::providers_ui::Providers,
 }
 struct Editor {
     id: String,
@@ -63,6 +65,7 @@ impl std::fmt::Display for Filter {
 pub enum Event {
     Load(bool),
     Loaded(Result<agents::Catalog, String>),
+    Providers(crate::providers_ui::Event),
     Search(String),
     Filter(Filter),
     Untested(bool),
@@ -362,7 +365,7 @@ impl App {
         if refresh {
             self.agents_page.auto_fetch_attempted = true;
         }
-        crate::blocking(
+        let catalog = crate::blocking(
             move || {
                 let client = connect().map_err(|e| format!("{e:#}"))?;
                 if refresh {
@@ -371,7 +374,21 @@ impl App {
                 agents::load(&client).map_err(|e| format!("{e:#}"))
             },
             |r| msg(Event::Loaded(r)),
-        )
+        );
+        Task::batch([catalog, self.providers_load()])
+    }
+    /// Show an agent's row expanded, whatever the search and the filters hide.
+    pub fn agents_reveal(&mut self, id: String) -> Task<Message> {
+        let p = &mut self.agents_page;
+        p.search.clear();
+        p.filter = Filter::All;
+        if p.entries.iter().any(|e| e.registry.entry_id == id && !e.present() && !e.tested()) {
+            p.untested = true;
+        }
+        if p.details.as_deref() == Some(&id) {
+            return Task::none();
+        }
+        self.agents_event(Event::Edit(id))
     }
     fn agents_icons(&mut self) -> Task<Message> {
         let p = &mut self.agents_page;
@@ -415,6 +432,7 @@ impl App {
         let p = &mut self.agents_page;
         match event {
             Event::Load(refresh) => return self.agents_load(refresh),
+            Event::Providers(event) => return self.providers_event(event),
             Event::Loaded(result) => {
                 p.loading = false;
                 match result {
@@ -930,6 +948,9 @@ impl App {
                             move |v| msg(Event::Latest(id.clone(), v))
                         }),
                 );
+                if let Some(section) = p.providers.section(id, &r.name, e.present()) {
+                    card = card.push(section);
+                }
             }
             if let Some(log) = p
                 .logs
@@ -971,6 +992,10 @@ impl App {
         }
         if count == 0 && !p.loading {
             body = body.push(text("No matching agents").color(P.fg_dim));
+        }
+        // not where a new user starts: one line under the catalogue for people who come looking
+        if let Some(agent) = p.providers.agent().and_then(|id| p.entries.iter().find(|e| e.registry.entry_id == id)) {
+            body = body.push(container(p.providers.footer(&agent.registry.name)).padding([10, 0]));
         }
         scrollable(container(body).max_width(960).padding(16).center_x(Fill))
             .height(Fill)

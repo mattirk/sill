@@ -5097,6 +5097,210 @@
       ],
       "type": "object"
     },
+    "Provider": {
+      "description": "A provider record: a result of `providers.list` and part of the params of `providers.save`.\nOpen in the schema because it is a result too; the daemon refuses unknown fields in a save.",
+      "properties": {
+        "api": {
+          "$ref": "#/$defs/ProviderApi"
+        },
+        "base_url": {
+          "description": "`http(s)://host[:port][/path]`. Loopback is refused: in a jail it is the jail's own.",
+          "type": "string"
+        },
+        "default_model": {
+          "description": "One of `models`: what a session starts with unless the person picked another.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "1–64 lowercase letters, digits and `-`.",
+          "type": "string"
+        },
+        "models": {
+          "default": [],
+          "description": "Model ids offered to agents, as the endpoint names them.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "api",
+        "base_url"
+      ],
+      "type": "object"
+    },
+    "ProviderApi": {
+      "description": "The API an endpoint speaks.",
+      "oneOf": [
+        {
+          "const": "openai",
+          "description": "OpenAI-compatible: `/chat/completions` and `/models` under the base URL.",
+          "type": "string"
+        }
+      ]
+    },
+    "ProviderEntry": {
+      "properties": {
+        "endpoint": {
+          "description": "The one `host:port` sessions are allowed to reach for it.",
+          "type": "string"
+        },
+        "has_key": {
+          "description": "A key is saved for it. The key itself is never returned.",
+          "type": "boolean"
+        },
+        "provider": {
+          "$ref": "#/$defs/Provider"
+        }
+      },
+      "required": [
+        "provider",
+        "has_key",
+        "endpoint"
+      ],
+      "type": "object"
+    },
+    "ProviderKey": {
+      "additionalProperties": false,
+      "properties": {
+        "provider_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider_id"
+      ],
+      "type": "object"
+    },
+    "ProviderRemoved": {
+      "properties": {
+        "removed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "removed"
+      ],
+      "type": "object"
+    },
+    "ProviderSave": {
+      "additionalProperties": false,
+      "properties": {
+        "clear_key": {
+          "default": false,
+          "description": "Forget the saved key (ignored when `key` is given).",
+          "type": "boolean"
+        },
+        "key": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Secret"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Replaces the saved key. Absent: the saved key stays."
+        },
+        "provider": {
+          "$ref": "#/$defs/Provider"
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "type": "object"
+    },
+    "ProviderSaved": {
+      "properties": {
+        "endpoint": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "endpoint"
+      ],
+      "type": "object"
+    },
+    "ProviderTest": {
+      "additionalProperties": false,
+      "properties": {
+        "base_url": {
+          "type": "string"
+        },
+        "key": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Secret"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The key to try. Absent: the key saved for `provider_id`, when that is given."
+        },
+        "provider_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "base_url"
+      ],
+      "type": "object"
+    },
+    "ProviderTested": {
+      "properties": {
+        "endpoint": {
+          "type": "string"
+        },
+        "models": {
+          "description": "The endpoint's model ids, sorted; at most 2000.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "models",
+        "endpoint"
+      ],
+      "type": "object"
+    },
+    "ProvidersListed": {
+      "properties": {
+        "agents": {
+          "description": "Registry ids of the agents the daemon can hand providers to (it has a translation for\nthem), installed or not.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "providers": {
+          "items": {
+            "$ref": "#/$defs/ProviderEntry"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "providers",
+        "agents"
+      ],
+      "type": "object"
+    },
     "Question": {
       "properties": {
         "agent_generation_id": {
@@ -7783,6 +7987,11 @@
         "version": 1
       },
       {
+        "doc": "_sill/providers.*: model providers, records on the daemon host for OpenAI-compatible endpoints. The daemon derives the configuration, the key and the network grant of agents it has a translation for (docs/model-providers.md).",
+        "name": "sill.providers",
+        "version": 1
+      },
+      {
         "doc": "The frontend displays Host control: the session's caption (a line in the control's colour for as long as it is active, with its words when it starts or its scope changes) and the window-level line naming every session with active control. It may activate and revoke (_sill/host_control.activate, revoke); attached to a session, it counts as displaying that session's control, which ends when the last such connection goes.",
         "name": "sill.host_control",
         "version": 1
@@ -8734,6 +8943,62 @@
       },
       "result": {
         "$ref": "#/$defs/Empty"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.providers": 1
+      },
+      "doc": "Model providers on the daemon host, each with whether a key is saved (never the key) and the host:port sessions may reach, and the agents the daemon hands providers to.",
+      "kind": "request",
+      "name": "_sill/providers.list",
+      "params": {
+        "$ref": "#/$defs/Empty"
+      },
+      "result": {
+        "$ref": "#/$defs/ProvidersListed"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.providers": 1
+      },
+      "doc": "Write a provider record; a key, when given, replaces the saved one. Running sessions of agents that use providers become outdated. Inspect the list after uncertainty before retrying.",
+      "kind": "request",
+      "name": "_sill/providers.save",
+      "params": {
+        "$ref": "#/$defs/ProviderSave"
+      },
+      "result": {
+        "$ref": "#/$defs/ProviderSaved"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.providers": 1
+      },
+      "doc": "Remove a provider record and its key. A provider already gone is not an error.",
+      "kind": "request",
+      "name": "_sill/providers.remove",
+      "params": {
+        "$ref": "#/$defs/ProviderKey"
+      },
+      "result": {
+        "$ref": "#/$defs/ProviderRemoved"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.providers": 1
+      },
+      "doc": "Ask an endpoint for its models from the daemon host, with the given key or the one saved for provider_id. Changes nothing; fails with the endpoint's own error.",
+      "kind": "request",
+      "name": "_sill/providers.test",
+      "params": {
+        "$ref": "#/$defs/ProviderTest"
+      },
+      "result": {
+        "$ref": "#/$defs/ProviderTested"
       }
     },
     {

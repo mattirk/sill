@@ -29,6 +29,7 @@ pub mod mounts;
 pub mod paths;
 pub mod permissions;
 pub mod policy;
+pub mod providers;
 pub mod proxy;
 pub mod registry;
 pub mod safe_fs;

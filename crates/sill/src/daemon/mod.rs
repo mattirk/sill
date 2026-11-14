@@ -35,6 +35,7 @@ mod admin;
 mod discovery;
 mod memory_api;
 mod agent_admin;
+mod providers;
 pub mod relay;
 pub use hub::Hub;
 

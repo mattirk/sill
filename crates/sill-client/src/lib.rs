@@ -29,6 +29,7 @@ pub mod lane;
 pub mod login;
 pub mod outbox;
 pub mod processes;
+pub mod providers;
 pub mod sessions;
 pub mod settings;
 pub mod supervision;

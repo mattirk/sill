@@ -248,6 +248,14 @@ pub fn session_base_policy(name: &str, home: &Path, ghost: bool, agent: Option<&
         if let Some(agent) = agent.and_then(|id| registry.get(id)) {
             policy.network.allow.extend(agent.domains.clone());
         }
+        // Model providers (docs/model-providers.md): each one's exact host and port, host-local
+        // or not, for agents sill hands providers to. Part of the base, so a provider added or
+        // removed makes a running jail outdated.
+        if let Some(id) = agent {
+            for endpoint in crate::providers::agent_endpoints(home, id)? {
+                if !policy.network.allow_local.contains(&endpoint) { policy.network.allow_local.push(endpoint); }
+            }
+        }
     }
     Ok(policy)
 }

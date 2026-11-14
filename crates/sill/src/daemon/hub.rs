@@ -445,6 +445,7 @@ impl Hub {
         }
         if let Some(result) = self.changes_public(m, params.clone()) { return result.map_err(super::sfp::failure); }
         if let Some(result) = super::agent_admin::handle(self, m, params.clone()) { return result.map_err(super::sfp::failure); }
+        if let Some(result) = super::providers::handle(m, params.clone()) { return result.map_err(super::sfp::failure); }
         if let Some(result) = super::host_control::handle(self, conn, m, params.clone()) {
             return result.map_err(|e| {
                 if let Some(e) = e.downcast_ref::<Error>() { return e.clone(); }
@@ -596,7 +597,10 @@ impl Hub {
                 // failed SDK connection. Restart it before opening a new stream.
                 if control.status()?.running { control.kill(3000)?; }
                 if !control.status()?.running {
-                    let mut env = agent.env.clone(); env.extend(agent.sandbox_off_env.clone());
+                    // model providers first (docs/model-providers.md): what the person set for the
+                    // agent itself wins over what sill derives
+                    let mut env = sill_core::providers::agent_env(&self.home, &agent.id)?;
+                    env.extend(agent.env.clone()); env.extend(agent.sandbox_off_env.clone());
                     control.spawn(&agent.command, &env, Some(&self.home))?;
                 }
                 // A new relay is a new stream epoch. Its cursor starts at zero; old transient
