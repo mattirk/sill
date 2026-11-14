@@ -143,6 +143,26 @@ pub fn read_root_entries() -> Result<Vec<RootEntry>> {
     Ok(out)
 }
 
+/// A folder bound into the jail in its own place: a pin, or a workspace's clone at its
+/// repository's path (`backing` is where its files really are; `borrowed` the object store's
+/// place in the jail, for a workspace).
+struct Bound {
+    at: PathBuf,
+    backing: PathBuf,
+    borrowed: Option<PathBuf>,
+}
+
+/// The jail's `objects/info/alternates` of a workspace at `source`: the borrowed store's path,
+/// from memory, read-only over the clone's own file.
+fn alternates(args: &mut Vec<OsString>, source: &Path, borrowed: &Path) -> Result<Arc<OwnedFd>> {
+    let memfd = rustix::fs::memfd_create("sill-alternates", rustix::fs::MemfdFlags::CLOEXEC)?;
+    rustix::io::write(&memfd, format!("{}\n", borrowed.display()).as_bytes())?;
+    rustix::fs::seek(&memfd, rustix::fs::SeekFrom::Start(0))?;
+    let memfd = Arc::new(rustix::io::fcntl_dupfd_cloexec(&memfd, 64)?);
+    args.extend([OsString::from("--ro-bind-data"), memfd.as_raw_fd().to_string().into(), source.join(".git/objects/info/alternates").into_os_string()]);
+    Ok(memfd)
+}
+
 /// Refuse a mount at `inside` that lies under a masked path (it would expose what the mask hides)
 /// or above one (it would bury the mask under a real tree).
 fn no_bind_across_mask(inside: &Path, masked: &[PathBuf]) -> Result<()> {
@@ -425,14 +445,15 @@ impl JailSpec {
         let config_dir = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| self.home.join(".config"));
         let state_base = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| self.home.join(".local/state"));
         let state_dir = state_base.join("sill");
-        let own: Vec<PathBuf> = [config_dir.join("sill"), state_dir.clone()]
+        // sill's own files: a session's mounts, allowed domains and binaries are made of them, so
+        // a pin never covers one, whatever else it may hold
+        let sill_own: Vec<PathBuf> = [config_dir.join("sill"), state_dir.clone()]
             .into_iter()
             // the user's journal is readable by ACL: every session's proxy lines and agent stderr (S15)
             .chain([PathBuf::from("/var/log/journal")])
             .chain(crate::paths::sill_backups(&state_base)?)
-            .chain(self.masks.iter().cloned())
-            .filter(|p| p.exists())
             .collect();
+        let own: Vec<PathBuf> = sill_own.iter().cloned().chain(self.masks.iter().cloned()).filter(|p| p.exists()).collect();
         let policy_masks: Vec<(PathBuf, bool)> = match &self.policy_paths {
             Some(paths) => paths.masks.iter().map(|m| Ok((m.path.to_path()?, m.kind == crate::agents::HomePathKind::Directory))).collect::<Result<_>>()?,
             None => p.paths.mask.iter().flat_map(|pat| expand_pattern(pat, &self.home)).chain(own).map(|p| { let dir = p.is_dir(); (p, dir) }).collect(),
@@ -486,7 +507,10 @@ impl JailSpec {
             }
         }
         // a bind inside a mask puts the masked thing back, a bind over a mask buries it: neither
-        // is mounted, whatever a policy, a pin or an agent override asks for (security.md S2)
+        // is mounted, whatever a policy or an agent override asks for (security.md S2). A pin is
+        // the one bind that may hold a path the policy masks: the mask is laid again after it
+        // (`apply_rules_inside_binds`). Inside a mask, or over sill's own files or another agent's,
+        // a pin is refused like the rest.
         let mut direct = Vec::new();
         let direct_paths = match &self.policy_paths {
             Some(paths) => paths.direct.iter().map(|p| p.to_path()).collect::<Result<Vec<_>>>()?,
@@ -502,16 +526,18 @@ impl JailSpec {
             push(&mut a, &[&"--bind", &path, &path]);
             direct.push(path);
         }
-        for path in ro_paths {
+        for path in ro_paths.iter().cloned() {
             no_bind_across_mask(&path, &masked)?;
             no_bind_across_mask(&path, &agent_masked)?;
             push(&mut a, &[&"--ro-bind", &path, &path]);
         }
         for (host, inside) in &self.binds {
             if host == inside {
-                // the host's own tree (a pin, a shared file): inside a mask it re-exposes, over a
-                // mask it buries — neither is mounted
-                no_bind_across_mask(inside, &masked)?;
+                // the host's own tree (a pin, a shared file): inside a mask it re-exposes
+                if let Some(m) = masked.iter().find(|m| is_under(inside, m)) {
+                    no_bind_across_mask(inside, std::slice::from_ref(m))?;
+                }
+                no_bind_across_mask(inside, &sill_own)?;
                 no_bind_across_mask(inside, &agent_masked)?;
                 push(&mut a, &[&"--bind", host, inside]);
             } else {
@@ -564,8 +590,12 @@ impl JailSpec {
             push(&mut a, &[&"--ro-bind", dir, &BRIDGE_DIR]);
         }
         a.extend(self.extra_args.iter().cloned());
-        masked.extend(agent_masked);
-        mount_fds.extend(self.apply_workspace_binds(&mut a, &masked, &mut direct, &mut warnings)?);
+        let policy_masked = masked.clone();
+        masked.extend(agent_masked.iter().cloned());
+        let (fds, mut bound) = self.apply_workspace_binds(&mut a, &masked, &mut direct, &mut warnings)?;
+        mount_fds.extend(fds);
+        bound.extend(self.binds.iter().filter(|(host, inside)| host == inside).map(|(_, inside)| Bound { at: inside.clone(), backing: inside.clone(), borrowed: None }));
+        mount_fds.extend(self.apply_rules_inside_binds(&mut a, &policy_masked, &ro_paths, &agent_masked, &bound, &mut warnings)?);
         // bwrap's root tmpfs is writable by default; make it read-only now that every mount is in place
         push(&mut a, &[&"--remount-ro", &"/"]);
         push(&mut a, &[&"--chdir", &self.cwd]);
@@ -585,7 +615,7 @@ impl JailSpec {
     /// path (from memory, read-only), while on the host it names the real store: one clone, valid
     /// in both views. Every directory is opened without following symlinks and bound from that
     /// descriptor, so a path swapped after planning cannot bind another tree.
-    fn apply_workspace_binds(&self, args: &mut Vec<OsString>, masked: &[PathBuf], direct: &mut Vec<PathBuf>, warnings: &mut Vec<String>) -> Result<Vec<Arc<OwnedFd>>> {
+    fn apply_workspace_binds(&self, args: &mut Vec<OsString>, masked: &[PathBuf], direct: &mut Vec<PathBuf>, warnings: &mut Vec<String>) -> Result<(Vec<Arc<OwnedFd>>, Vec<Bound>)> {
         use rustix::fs::{CWD, Mode, OFlags, ResolveFlags, openat2};
         let open = |p: &Path| -> Result<Arc<OwnedFd>> {
             let fd = openat2(CWD, p, OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty(), ResolveFlags::NO_SYMLINKS)
@@ -593,6 +623,7 @@ impl JailSpec {
             Ok(Arc::new(rustix::io::fcntl_dupfd_cloexec(&fd, 64)?))
         };
         let mut fds = Vec::new();
+        let mut bound = Vec::new();
         for (n, (source, clone, objects)) in self.workspace_mask.iter().enumerate() {
             if !source.is_absolute() || !clone.is_absolute() || !objects.starts_with(source) || objects == source {
                 bail!("workspace {}: the clone must be absolute and the object store inside the checkout", source.display());
@@ -607,13 +638,102 @@ impl JailSpec {
             let borrowed = PathBuf::from(format!("/.sill/borrowed/{n}"));
             let store = open(objects)?;
             args.extend([OsString::from("--ro-bind-fd"), store.as_raw_fd().to_string().into(), borrowed.clone().into_os_string()]);
-            let memfd = rustix::fs::memfd_create("sill-alternates", rustix::fs::MemfdFlags::CLOEXEC)?;
-            rustix::io::write(&memfd, format!("{}\n", borrowed.display()).as_bytes())?;
-            rustix::fs::seek(&memfd, rustix::fs::SeekFrom::Start(0))?;
-            let memfd = Arc::new(rustix::io::fcntl_dupfd_cloexec(&memfd, 64)?);
-            args.extend([OsString::from("--ro-bind-data"), memfd.as_raw_fd().to_string().into(), source.join(".git/objects/info/alternates").into_os_string()]);
+            let memfd = alternates(args, source, &borrowed)?;
             direct.push(source.clone());
             fds.extend([clone_fd, store, memfd]);
+            bound.push(Bound { at: source.clone(), backing: clone.clone(), borrowed: Some(borrowed) });
+        }
+        Ok((fds, bound))
+    }
+
+    /// The policy's `mask` and `ro` for paths inside a pinned folder or a workspace's repository
+    /// (security.md, "Policy path rules inside a pinned folder"). The pin's or the clone's bind
+    /// covers what was laid before it, so these rules are laid again here, last: read-only paths
+    /// bound from what the jail has there (the clone, in a workspace), then the masks.
+    ///
+    /// Every directory between the bound folder and a rule's path is first bound onto itself. A
+    /// mount point cannot be renamed or removed, so the agent cannot move a rule's path away for
+    /// the next build to miss: the way to it stays where the policy names it. Sources are opened
+    /// without following symlinks and bound by descriptor.
+    fn apply_rules_inside_binds(&self, args: &mut Vec<OsString>, masks: &[PathBuf], ro: &[PathBuf], agent_masked: &[PathBuf], bound: &[Bound], warnings: &mut Vec<String>) -> Result<Vec<Arc<OwnedFd>>> {
+        use rustix::fs::{CWD, Mode, OFlags, ResolveFlags, openat2};
+        // the innermost bound folder a path lies in, and where its files really are
+        let home_of = |p: &Path| bound.iter().filter(|b| is_under(p, &b.at)).max_by_key(|b| b.at.components().count());
+        let backing = |b: &Bound, p: &Path| b.backing.join(p.strip_prefix(&b.at).unwrap_or(Path::new("")));
+        let between = |b: &Bound, p: &Path| -> Vec<PathBuf> {
+            p.ancestors().skip(1).take_while(|d| is_under(d, &b.at) && *d != b.at).map(Path::to_path_buf).collect()
+        };
+        // path → read-only; BTreeMap order lays a folder before what is inside it
+        let mut binds: BTreeMap<PathBuf, bool> = BTreeMap::new();
+        let mut lay: Vec<(PathBuf, bool)> = Vec::new();
+        for m in masks {
+            let Some(b) = home_of(m).filter(|b| b.at != *m) else { continue };
+            // what the jail has at the path decides: nothing there, nothing of the host's to hide
+            let Ok(meta) = backing(b, m).symlink_metadata() else { continue };
+            if !meta.is_dir() && !meta.is_file() {
+                warnings.push(format!("masked {} is neither a file nor a folder in {}; not masked there", m.display(), b.at.display()));
+                continue;
+            }
+            lay.push((m.clone(), meta.is_dir()));
+            for d in between(b, m) {
+                binds.entry(d).or_insert(false);
+            }
+        }
+        for p in ro {
+            let Some(b) = home_of(p) else { continue };
+            binds.insert(p.clone(), true);
+            for d in between(b, p) {
+                binds.entry(d).or_insert(false);
+            }
+        }
+        // a folder on the way to a rule keeps the rule above it: read-only inside a read-only path
+        let read_only: Vec<PathBuf> = binds.iter().filter(|(_, ro)| **ro).map(|(p, _)| p.clone()).collect();
+        let mut fds = Vec::new();
+        let mut again = Vec::new();
+        for (path, _) in &binds {
+            let b = home_of(path).expect("a path inside a bound folder");
+            // binding a folder again shows the host's own tree below it: never over sill's own
+            // tree in a host path's place, a workspace or another agent's files
+            let buried = self.binds.iter().filter(|(host, inside)| host != inside).map(|(_, inside)| inside)
+                .chain(bound.iter().filter(|w| w.borrowed.is_some() && w.at != *path).map(|w| &w.at))
+                .chain(agent_masked)
+                .find(|t| is_under(t, path));
+            if let Some(t) = buried {
+                bail!("{}: a policy `mask` or `ro` path inside a pinned folder would cover {}; not mounted", path.display(), t.display());
+            }
+            let source = backing(b, path);
+            let fd = match openat2(CWD, &source, OFlags::PATH | OFlags::CLOEXEC, Mode::empty(), ResolveFlags::NO_SYMLINKS) {
+                Ok(fd) => Arc::new(rustix::io::fcntl_dupfd_cloexec(&fd, 64)?),
+                // a workspace's clone is the agent's to arrange: what is not there is not protected
+                Err(_) if b.borrowed.is_some() => {
+                    warnings.push(format!("{} is not in the workspace at {}; the policy's rule for it is not applied", path.display(), b.at.display()));
+                    continue;
+                }
+                Err(e) => return Err(e).with_context(|| format!("open {} (no symlinks) for the policy's rule inside a pinned folder", source.display())),
+            };
+            let flag = if read_only.iter().any(|r| is_under(path, r)) { "--ro-bind-fd" } else { "--bind-fd" };
+            args.extend([OsString::from(flag), fd.as_raw_fd().to_string().into(), path.as_os_str().to_owned()]);
+            fds.push(fd);
+            // the clone's own alternates file shows again below a folder bound here
+            again.extend(bound.iter().filter(|w| w.borrowed.is_some() && is_under(&w.at.join(".git/objects/info/alternates"), path)).map(|w| w.at.clone()));
+        }
+        again.sort();
+        again.dedup();
+        for w in bound.iter().filter(|w| again.contains(&w.at)) {
+            fds.push(alternates(args, &w.at, w.borrowed.as_ref().expect("a workspace"))?);
+        }
+        lay.sort();
+        let mut laid: Vec<PathBuf> = Vec::new();
+        for (path, is_dir) in lay {
+            if laid.iter().any(|p| is_under(&path, p)) {
+                continue;
+            }
+            if is_dir {
+                args.extend([OsString::from("--tmpfs"), path.clone().into_os_string()]);
+            } else {
+                args.extend([OsString::from("--ro-bind"), OsString::from("/dev/null"), path.clone().into_os_string()]);
+            }
+            laid.push(path);
         }
         Ok(fds)
     }
@@ -969,6 +1089,97 @@ if test "$2" = codex; then test "$(cat "$1/.codex/saved")" = saved-settings; fi
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A pin may hold paths the policy masks or makes read-only (security.md, "Policy path rules
+    /// inside a pinned folder"): the rules are laid again after the pin, the folders on the way to
+    /// them bound onto themselves so that they cannot be renamed away. Inside a mask, or over
+    /// sill's own files, a pin is still refused.
+    #[test]
+    fn policy_rules_inside_a_pin_are_laid_again_after_it() {
+        let tree = TempTree::new();
+        let repo = tree.0.join("repo");
+        std::fs::create_dir_all(repo.join("conf/deep")).unwrap();
+        std::fs::create_dir_all(repo.join("secrets")).unwrap();
+        std::fs::create_dir_all(repo.join("vendor/lib")).unwrap();
+        std::fs::write(repo.join("conf/deep/.env"), "secret").unwrap();
+        let (env, secrets, lib) = (repo.join("conf/deep/.env"), repo.join("secrets"), repo.join("vendor/lib"));
+        let mut s = spec();
+        s.masks = vec![env.clone(), secrets.clone()];
+        s.policy.paths.ro = vec![lib.display().to_string()];
+        s.binds = vec![(repo.clone(), repo.clone())];
+        let plan = s.plan().unwrap();
+        let a = &plan.argv;
+        let at = |flag: &str, dest: &Path| a.windows(3).rposition(|w| w[0] == flag && w[2] == dest).unwrap_or_else(|| panic!("{flag} {} not in {}", dest.display(), render(a)));
+        let pin = at("--bind", &repo);
+        // the way to each rule, top-down, then the read-only path, all by descriptor after the pin
+        let (conf, deep, vendor) = (at("--bind-fd", &repo.join("conf")), at("--bind-fd", &repo.join("conf/deep")), at("--bind-fd", &repo.join("vendor")));
+        let ro = at("--ro-bind-fd", &lib);
+        assert!(pin < conf && conf < deep && pin < vendor && vendor < ro, "{}", render(a));
+        // the masks last, over everything bound before them
+        let file = a.windows(3).rposition(|w| w[0] == "--ro-bind" && w[1] == "/dev/null" && w[2] == env).unwrap();
+        let dir = a.windows(2).rposition(|w| w[0] == "--tmpfs" && w[1] == secrets).unwrap();
+        assert!(file > deep && file > ro && dir > ro, "{}", render(a));
+        assert_eq!(plan.mount_fds.len(), 4);
+        assert!(plan.mount_fds.iter().all(|fd| fd.as_raw_fd() >= 64 && rustix::io::fcntl_getfd(fd.as_ref()).unwrap().contains(rustix::io::FdFlags::CLOEXEC)));
+        // a folder on the way to a rule inside a read-only path stays read-only
+        s.policy.paths.ro = vec![repo.join("vendor").display().to_string(), lib.display().to_string()];
+        let a = s.plan().unwrap().argv;
+        assert!(a.windows(3).any(|w| w[0] == "--ro-bind-fd" && w[2] == repo.join("vendor")) && !a.windows(3).any(|w| w[0] == "--bind-fd" && w[2] == repo.join("vendor")));
+        // sill's own tree in a host path's place below such a folder would be buried: refused
+        s.binds.push((tree.0.join("private"), repo.join("vendor/lib/cache")));
+        std::fs::create_dir_all(tree.0.join("private")).unwrap();
+        assert!(s.plan().unwrap_err().to_string().contains("would cover"));
+        s.binds.pop();
+        // a pin inside a mask re-exposes it, and one over sill's own files is never mounted
+        s.binds = vec![(secrets.clone(), secrets.clone())];
+        assert!(s.plan().unwrap_err().to_string().contains("sit inside"));
+        let state = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| s.home.join(".local/state"));
+        let over = state.parent().unwrap().to_path_buf();
+        s.binds = vec![(over.clone(), over)];
+        assert!(s.plan().unwrap_err().to_string().contains("cover the masked"));
+    }
+
+    /// The same rules in a workspace: they apply to the clone, which is what the jail has at the
+    /// repository's path. What the clone does not hold is not masked; a read-only repository keeps
+    /// the jail's alternates file.
+    #[test]
+    fn policy_rules_inside_a_workspace_apply_to_its_clone() {
+        let tree = TempTree::new();
+        let (source, clone) = (tree.0.join("src"), tree.0.join("ws/clone"));
+        let objects = source.join(".git/objects");
+        std::fs::create_dir_all(&objects).unwrap();
+        std::fs::create_dir_all(source.join("conf")).unwrap();
+        std::fs::create_dir_all(clone.join("conf")).unwrap();
+        std::fs::create_dir_all(clone.join(".git/objects/info")).unwrap();
+        for dir in [&source, &clone] {
+            std::fs::write(dir.join("conf/.env"), "secret").unwrap();
+        }
+        std::fs::write(source.join("only-in-the-checkout"), "x").unwrap();
+        let (env, absent) = (source.join("conf/.env"), source.join("only-in-the-checkout"));
+        let mut s = spec();
+        s.masks = vec![env.clone(), absent.clone()];
+        s.workspace_mask = vec![(source.clone(), clone.clone(), objects.clone())];
+        let plan = s.plan().unwrap();
+        let a = &plan.argv;
+        let bound = a.windows(3).position(|w| w[0] == "--bind-fd" && w[2] == source).unwrap();
+        let conf = a.windows(3).rposition(|w| w[0] == "--bind-fd" && w[2] == source.join("conf")).unwrap();
+        let mask = a.windows(3).rposition(|w| w[0] == "--ro-bind" && w[1] == "/dev/null" && w[2] == env).unwrap();
+        assert!(bound < conf && conf < mask, "{}", render(a));
+        // the folder on the way is the clone's, not the checkout's
+        let fd: i32 = a[conf + 1].to_str().unwrap().parse().unwrap();
+        assert_eq!(std::fs::read_link(format!("/proc/self/fd/{fd}")).unwrap(), clone.join("conf"));
+        assert_eq!(a.windows(3).filter(|w| w[2] == absent).count(), 1, "masked where the host has it, before the clone, and not again");
+        // the whole repository read-only: the clone bound again, the jail's alternates over it
+        s.masks.clear();
+        s.policy.paths.ro = vec![source.display().to_string()];
+        let plan = s.plan().unwrap();
+        let a = &plan.argv;
+        let ro = a.windows(3).rposition(|w| w[0] == "--ro-bind-fd" && w[2] == source).unwrap();
+        let alternates = a.windows(3).rposition(|w| w[0] == "--ro-bind-data" && w[2] == source.join(".git/objects/info/alternates")).unwrap();
+        assert!(bound < ro && ro < alternates, "{}", render(a));
+        let fd: i32 = a[ro + 1].to_str().unwrap().parse().unwrap();
+        assert_eq!(std::fs::read_link(format!("/proc/self/fd/{fd}")).unwrap(), clone);
+    }
+
     /// The real thing, in bubblewrap: a workspace made by `workspace::create`, its repository inside
     /// a writable ancestor pin. Inside, the repository's path is the clone: its files, its Git
     /// working through the borrowed store; the person's uncommitted file is not there, in either
@@ -1049,9 +1260,10 @@ git -C "$S" fsck --full
     }
 
     /// A sill-owned bind (private scratch, agent home) over a masked path is mounted, the mask laid
-    /// again on top; the host's own tree over a mask is still refused, as is any bind inside one.
+    /// again on top, and so it is after a pin of the host's own tree; any bind inside a mask is
+    /// refused.
     #[test]
-    fn own_tree_over_a_mask_is_remasked_host_tree_is_refused() {
+    fn a_tree_over_a_mask_is_remasked_and_none_is_bound_inside_one() {
         let dir = std::env::temp_dir().join(format!("sill-jail-remask-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("cache/other-agent")).unwrap();
@@ -1065,11 +1277,13 @@ git -C "$S" fsck --full
         assert!(r.contains(&bind), "the scratch is bound");
         let (b, m) = (r.find(&bind).unwrap(), r.rfind(&remask).unwrap());
         assert!(m > b, "the mask is laid again after the bind");
-        // the host's own tree over the same mask: refused
+        // the host's own tree (a pin) over the same mask: bound, the mask laid again after it
         let mut s = spec();
         s.masks = vec![dir.join("cache/other-agent")];
         s.binds = vec![(dir.join("cache"), dir.join("cache"))];
-        assert!(s.plan().is_err());
+        let r = render(&s.plan().unwrap().argv);
+        let pin = format!("--bind {0} {0} ", dir.join("cache").display());
+        assert!(r.rfind(&remask).unwrap() > r.find(&pin).unwrap(), "{r}");
         // sill's own tree inside a mask: refused
         let mut s = spec();
         s.masks = vec![dir.join("cache")];

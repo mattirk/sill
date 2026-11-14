@@ -250,10 +250,10 @@ Found while testing the removal of repository policy fragments
 fragment's `paths.mask` and `paths.ro` were laid after the pins and the workspace clones, in
 both views: the only route by which a rule for a path *inside a pinned folder* was enforced.
 Nothing on the machine used it, and it is gone. The policy's own `paths.mask` and `paths.ro`
-do not replace it. Probed in real jails of a throwaway daemon on the host, with the build
+did not replace it. Probed in real jails of a throwaway daemon on the host, with the build
 before the removal and the one after, with the same results:
 
-| A policy rule for a path inside a pinned folder | What happens |
+| A policy rule for a path inside a pinned folder | What happened |
 |---|---|
 | `mask`, the folder pinned live | **The jail is refused**: "not mounted — it would cover the masked …" (S2's rule: a pin never buries a mask). Safe; the folder cannot be pinned live with that policy. |
 | `mask`, the folder a workspace session's repository | **Not enforced.** The clone is bound in the repository's place after the masks and the mask is not laid again. The clone holds the checkout's ignored files (parallel-coding.md, "Folders: warm from the checkout"), so an ignored, masked `.env` was read inside the jail. In the read-only host view the checkout is hidden as a whole. |
@@ -264,19 +264,44 @@ clone's bind covers it; the write lands in the clone), and a path the *default* 
 that lies inside a pinned workspace repository — a home directory kept in Git and pinned would
 show the clone's copies of whatever its `.gitignore` ignores under `~/.ssh` and the like.
 
-By S2's own reasoning the workspace case is a gap rather than a choice: a tree of sill's own
+By S2's own reasoning the workspace case was a gap rather than a choice: a tree of sill's own
 bound in a host path's place gets the masks beneath it laid again on top, and inside a mask it
 is refused because "the copy was seeded from the host"; a workspace clone is seeded from the
-host too and gets neither.
+host too and got neither.
 
-No fix is made here; the choice is the person's
-([work items](work-items.md#open-follow-ups)):
+**Enforced the same day**, at the person's choice (`jail.rs`, `apply_rules_inside_binds`).
+After the pins and the workspace clones, last of all mounts:
 
-1. **Enforce.** After the pins and the workspace clones, lay the policy's masks again (in both
-   views) and bind its `ro` paths last, by descriptor, onto the clone where there is one. This
-   is what the removed fragment pass did (`apply_fragment_paths` in `jail.rs`, in the history
-   before the removal); a live pin could then hold a masked path instead of being refused.
-2. **Refuse.** A repository that contains a masked path gets no workspace (as its live pin is
-   refused), and a `ro` path inside a pin fails the build with a diagnostic.
-3. Leaving masked paths out of workspace seeding alone would cover ignored files only, not
-   tracked ones.
+- the policy's `ro` paths inside a pinned folder or a workspace's repository are bound
+  read-only again, from what the jail has there (the clone, in a workspace);
+- the policy's masks inside one are laid again (in the read-only host view they were never
+  covered: a pin is not bound there, and a workspace's checkout is hidden whole);
+- before both, **every folder between the bound folder and a rule's path is bound onto itself**.
+  A mount point cannot be renamed or removed. Without this an agent could move `conf/` away in
+  one build and read `conf2/.env` in the next, where no mask names it; with it the way to a rule
+  stays where the policy names it for as long as the agent's only reach is the jail.
+
+Sources are opened without following symlinks and bound by descriptor. A pin may now hold a
+path the policy masks; it is still refused inside a mask, and over sill's own files (its
+configuration, its state, the journal, its backups) or another agent's. A rule's folder that
+would cover sill's own tree in a host path's place (private scratch, an agent's home) or a
+workspace fails the build.
+
+| A policy rule for a path inside a pinned folder | Now |
+|---|---|
+| `mask`, the folder pinned live | Hidden in both views; the folder is writable beside it; the folders on the way cannot be moved. |
+| `mask`, the folder a workspace session's repository | The clone's copy is hidden; Git works; the checkout is untouched. |
+| `ro`, the folder pinned live or a workspace's repository | Writes refused; the path and the folders on the way cannot be moved. |
+
+What this does not do:
+
+- **A tracked file's content is in the repository's object store**, which a pin shows and a
+  workspace borrows: `git show HEAD:conf/.env` reads it whatever is masked. A mask inside a
+  repository hides what is not committed.
+- In a workspace the rules apply to what the clone holds when the jail is built. A masked path
+  the clone does not have is not masked there (nothing of the host's is at it), and one that is
+  neither a file nor a folder is left alone, with a warning in the jail's log.
+- A glob in a mask is expanded when the jail is built: a file that appears later at a path it
+  would match is not masked until the next build (as outside pins).
+- Paths created by the person's own tools on the host while the jail runs follow the host, as
+  everything in a live pin does.

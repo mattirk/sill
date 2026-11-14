@@ -56,10 +56,10 @@ def info(text):
 
 # --- environment -----------------------------------------------------------------------------
 
-def policy_text(name, mode="allow", allow=(ALLOWED,), extra_network="", permissions="", masks=()):
+def policy_text(name, mode="allow", allow=(ALLOWED,), extra_network="", permissions="", masks=(), ro=()):
     """A complete policy from the shipped default: its masks, hidden mounts and limits are kept
     (a policy without `hidden_mounts` cannot overlay a vfat /boot), the network replaced, `masks`
-    added to the paths it hides."""
+    added to the paths it hides and `ro` to those it makes read-only."""
     text = (REPO / "policies/default.toml").read_text()
     text = re.sub(r'^name = "default"', f'name = "{name}"', text, count=1, flags=re.M)
     text = re.sub(r'^mode = "allow".*$', f'mode = "{mode}"', text, count=1, flags=re.M)
@@ -69,6 +69,9 @@ def policy_text(name, mode="allow", allow=(ALLOWED,), extra_network="", permissi
         text, added = re.subn(r'^mask = \[', lambda m: "mask = [\n  " + "".join(json.dumps(str(p)) + ", " for p in masks),
                               text, count=1, flags=re.M)
         assert added == 1, "the shipped default policy has no paths.mask list"
+    if ro:
+        text, added = re.subn(r'^ro = \[\]', "ro = " + json.dumps([str(p) for p in ro]), text, count=1, flags=re.M)
+        assert added == 1, "the shipped default policy has no empty paths.ro list"
     if permissions:
         text += "\n[permissions]\n" + permissions + "\n"
     return text
@@ -1073,7 +1076,8 @@ PY
 
         # -- 20. hostile combinations (docs/permission-modes.md, implementation step 5) -----------
         # One session with every grant at once (test desktop, private bus, public web, a pinned
-        # folder, a file its policy masks, Host control active) next to a running Default session.
+        # folder holding a file its policy masks, Host control active) next to a running Default
+        # session.
         uid = os.getuid()
         plain = env.client(modes=False, name="plain")
         hc = Client(env.socket, capabilities=HOST, name="host-control")
@@ -1081,19 +1085,69 @@ PY
         vault.mkdir()
         (vault / "secret").write_text("masked-secret-text\n")
         (vault / "beside").write_text("beside the mask\n")
-        workdir = env.root / "combo-pinned"
-        workdir.mkdir()
-        # a mask is never buried: a pin that would cover one is refused, the jail does not start
-        crossing = create("pin-over-mask", env.policy("pin-over-mask", masks=[vault / "secret"]), pins=[vault])
+        # the policy's own rules for paths inside a pinned folder (docs/security.md): masked and
+        # read-only after the pin, and the way to them cannot be moved for the next build to miss
+        ruled = env.root / "ruled"
+        (ruled / "conf/deep").mkdir(parents=True)
+        (ruled / "keep").mkdir()
+        (ruled / "conf/deep/.env").write_text("ruled-secret-text\n")
+        (ruled / "keep/file").write_text("kept\n")
+        rs = create("ruled", env.policy("ruled", masks=[ruled / "conf/deep/.env"], ro=[ruled / "keep"]), pins=[ruled])
+        q = shlex.quote(str(ruled))
+        probe = f"""
+            cat {q}/conf/deep/.env /.sill/host{q}/conf/deep/.env 2>/dev/null
+            (echo new > {q}/keep/new) 2>/dev/null && echo WROTE-RO
+            (echo changed > {q}/keep/file) 2>/dev/null && echo CHANGED-RO
+            mv {q}/conf {q}/conf2 2>/dev/null && echo MOVED-CONF
+            mv {q}/conf/deep {q}/conf/deep2 2>/dev/null && echo MOVED-DEEP
+            mv {q}/conf/deep/.env {q}/conf/deep/env 2>/dev/null && echo MOVED-ENV
+            mv {q}/keep {q}/keep2 2>/dev/null && echo MOVED-KEEP
+            echo beside > {q}/conf/deep/beside && echo BESIDE
+            exit 0"""
+        intact = lambda: ((ruled / "conf/deep/.env").read_text() == "ruled-secret-text\n" and read(ruled / "keep/file") == "kept\n"
+                          and not (ruled / "keep/new").exists() and not (ruled / "conf2").exists() and not (ruled / "keep2").exists())
+        out = sh(c, rs, probe)[1] if start(rs) else "no start"
+        check("a masked file inside a pinned folder is hidden in both views; a read-only folder there refuses writes",
+              out == "BESIDE" and intact() and read(ruled / "conf/deep/beside") == "beside\n", out)
+        out = sh(c, rs, probe)[1] if restart(rs) else "no restart"
+        check("…the folders on the way to them cannot be moved, so the next build finds them the same", out == "BESIDE" and intact(), out)
+        # the same mask in a workspace session: the clone holds the checkout's ignored file, hidden too
+        wsrepo = env.root / "ws-repo"
+        (wsrepo / "conf").mkdir(parents=True)
+        git = lambda *args: subprocess.run(["git", "-C", str(wsrepo), "-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main", *args],
+                                           check=True, capture_output=True, env={**env.environment, "GIT_CONFIG_NOSYSTEM": "1"})
+        git("init", "-q")
+        (wsrepo / "tracked.txt").write_text("tracked\n")
+        (wsrepo / ".gitignore").write_text(".env\n")
+        git("add", ".")
+        git("commit", "-qm", "one")
+        (wsrepo / "conf/.env").write_text("workspace-secret-text\n")
+        wsc = Client(env.socket, capabilities={**MODES, "sill.workspaces": 1}, name="workspaces")
+        ws = wsc.call("_sill/sessions.create", {"create_id": "host-ws-rules", "agent": "stub", "workspaces": True,
+                                                "policy": str(env.policy("ws-rules", masks=[wsrepo / "conf/.env"])),
+                                                "pins": [host_path(wsrepo)]})["session_id"]
+        created.append(ws)
+        q = shlex.quote(str(wsrepo))
+        out = sh(c, ws, f"""
+            ls -A {q}/conf; cat {q}/conf/.env /.sill/host{q}/conf/.env 2>/dev/null
+            mv {q}/conf {q}/conf2 2>/dev/null && echo MOVED-CONF
+            git -C {q} status --short >/dev/null 2>&1 && echo GIT-WORKS
+            echo edited >> {q}/tracked.txt && echo EDITED
+            exit 0""")[1] if start(ws) else "no start"
+        check("a masked, ignored file inside a workspace's repository is in the clone and hidden; Git works, the checkout is untouched",
+              out.split() == [".env", "GIT-WORKS", "EDITED"] and read(wsrepo / "tracked.txt") == "tracked\n", out)
+        wsc.close()
+        # sill's own files are another matter: a pin that would cover them is refused, the jail does not start
+        crossing = create("pin-over-own", env.policy("own"), pins=[env.home / ".local"])
         failure = None
         try:
             c.call("_sill/sessions.start", {"session_id": crossing})
         except RpcError as error:
             failure = str(error)
-        check("a pin that would cover a masked path is refused, naming the mask",
-              failure is not None and "would cover the masked" in failure and str(vault / "secret") in failure
+        check("a pin that would cover sill's own state is refused, naming it",
+              failure is not None and "would cover the masked" in failure and str(env.home / ".local/state/sill") in failure
               and not get(crossing)["running"], failure or "start succeeded")
-        combo = create("combo", env.policy("combo", masks=[vault / "secret"]), pins=[workdir])
+        combo = create("combo", env.policy("combo", masks=[vault / "secret"]), pins=[vault])
         default = create("plain-default", env.policy("plain-default"))
         check("a session for every grant at once and a Default session start", start(combo) and start(default))
         c.call("_sill/permissions.apply_development", {"session_id": combo})
@@ -1113,8 +1167,8 @@ PY
               (get(combo).get("host_control") or {}).get("operations") == ["inspect", "launch", "stop"],
               json.dumps(get(combo).get("host_control")))
         check("its pinned folder is writable, and the file beside the masked one is readable",
-              sh(c, combo, f"echo written > {shlex.quote(str(workdir))}/written && cat {shlex.quote(str(vault))}/beside")[1] == "beside the mask"
-              and read(workdir / "written") == "written\n")
+              sh(c, combo, f"echo written > {shlex.quote(str(vault))}/written && cat {shlex.quote(str(vault))}/beside")[1] == "beside the mask"
+              and read(vault / "written") == "written\n")
         hits = Fixture.hits
 
         # the expanded session attacks: production Sill, other sessions, the real desktop, host
