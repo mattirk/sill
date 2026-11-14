@@ -133,6 +133,10 @@ pub struct FolderTree {
     /// A pin of this session changed: the window refreshes its chips and, for a folder, its jail.
     pub on_pin: RefCell<Option<Box<dyn Fn(&str)>>>,
     listed: Listed,
+    /// Watches on every listed directory and on the repositories' `.git`: the tree follows what
+    /// happens on disk (the agent's writes, hand edits, commits) while it is shown.
+    monitors: RefCell<BTreeMap<PathBuf, gio::FileMonitor>>,
+    refresh_pending: std::cell::Cell<bool>,
 }
 
 impl FolderTree {
@@ -165,11 +169,21 @@ impl FolderTree {
         let elsewhere: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
         let roots = gio::ListStore::new::<gtk::StringObject>();
         let listed: Listed = Rc::new(RefCell::new(BTreeMap::new()));
+        // the tree itself, for closures made before it exists (set below)
+        let tree_rc: Rc<RefCell<Option<std::rc::Weak<FolderTree>>>> = Rc::new(RefCell::new(None));
         let tree = gtk::TreeListModel::new(roots.clone(), false, false, {
             let listed = listed.clone();
+            let tree_rc = tree_rc.clone();
             move |item| {
                 let path = PathBuf::from(item.downcast_ref::<gtk::StringObject>()?.string().as_str());
-                if path.is_dir() { Some(children_of(&path, &listed).upcast()) } else { None }
+                if !path.is_dir() {
+                    return None;
+                }
+                let children = children_of(&path, &listed);
+                if let Some(t) = tree_rc.borrow().as_ref().and_then(|w| w.upgrade()) {
+                    t.watch_one(&path); // an opened directory is followed from now on
+                }
+                Some(children.upcast())
             }
         });
         let selection = gtk::SingleSelection::new(Some(tree.clone()));
@@ -200,7 +214,6 @@ impl FolderTree {
             expander.set_child(Some(&b));
             item.set_child(Some(&expander));
         });
-        let tree_rc: Rc<RefCell<Option<std::rc::Weak<FolderTree>>>> = Rc::new(RefCell::new(None));
         {
             let badges = badges.clone();
             let pinned = pinned.clone();
@@ -332,6 +345,8 @@ impl FolderTree {
             on_close: RefCell::new(None),
             on_pin: RefCell::new(None),
             listed,
+            monitors: RefCell::new(BTreeMap::new()),
+            refresh_pending: std::cell::Cell::new(false),
         });
         *tree_rc.borrow_mut() = Some(Rc::downgrade(&t));
         {
@@ -553,6 +568,54 @@ impl FolderTree {
             }
         }
         self.view.queue_draw();
+        // follow the disk: the listed directories, and each repository's .git (commits, checkouts)
+        let mut watch: Vec<PathBuf> = self.listed.borrow().keys().cloned().collect();
+        for r in &repos {
+            watch.push(r.join(".git"));
+            watch.push(r.join(".git/refs/heads"));
+        }
+        self.watch(watch);
+    }
+
+    /// Watch exactly these directories (non-recursive; the listed ones are what is on screen).
+    fn watch(self: &Rc<Self>, dirs: Vec<PathBuf>) {
+        let mut monitors = self.monitors.borrow_mut();
+        monitors.retain(|d, _| dirs.contains(d));
+        for d in dirs {
+            if monitors.contains_key(&d) || !d.is_dir() {
+                continue;
+            }
+            let Ok(m) = gio::File::for_path(&d).monitor_directory(gio::FileMonitorFlags::NONE, None::<&gio::Cancellable>) else { continue };
+            let weak = Rc::downgrade(self);
+            m.connect_changed(move |_, _, _, _| {
+                if let Some(t) = weak.upgrade() {
+                    t.refresh_soon();
+                }
+            });
+            monitors.insert(d, m);
+        }
+    }
+
+    /// A directory the person just opened: watched from now on (the next refresh would do it too).
+    fn watch_one(self: &Rc<Self>, dir: &Path) {
+        let mut dirs: Vec<PathBuf> = self.monitors.borrow().keys().cloned().collect();
+        dirs.push(dir.to_path_buf());
+        self.watch(dirs);
+    }
+
+    /// Coalesced refresh (monitors fire in bursts; an agent's edit lands here at once, SPEC §3.1);
+    /// nothing while the tree is hidden — showing it refreshes anyway.
+    pub fn refresh_soon(self: &Rc<Self>) {
+        if !self.root.is_visible() || self.refresh_pending.replace(true) {
+            return;
+        }
+        let t = self.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(250), move || {
+            t.refresh_pending.set(false);
+            if t.root.is_visible() {
+                t.refresh();
+            }
+        });
     }
 
     /// A scoped tree starts two levels open (build output and dot folders stay closed).

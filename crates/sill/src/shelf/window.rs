@@ -982,6 +982,11 @@ impl Shelf {
             }));
         }
         {
+            // an edit by the agent: the tree follows at once, not at the end of the turn
+            let shelf = self.clone();
+            *view.on_disk_change.borrow_mut() = Some(Box::new(move || shelf.tree.refresh_soon()));
+        }
+        {
             let shelf = self.clone();
             *view.on_title.borrow_mut() = Some(Box::new(move |id, title| shelf.tabs.set_title(id, title)));
         }

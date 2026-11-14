@@ -79,6 +79,8 @@ pub struct SessionView {
     /// Called when a turn ends (the window refreshes the ledger pages).
     pub on_busy: RefCell<Option<Box<dyn Fn(&str, bool)>>>,
     pub on_turn_end: RefCell<Option<Box<dyn Fn(&str)>>>,
+    /// The agent wrote a file: the window refreshes the tree at once (the chips refresh here).
+    pub on_disk_change: RefCell<Option<Box<dyn Fn()>>>,
     pub on_title: RefCell<Option<Box<dyn Fn(&str, &str)>>>,
     /// Click on a folder chip: the shelf shows that folder's tree beside the session.
     pub on_open_folder: RefCell<Option<Box<dyn Fn(&std::path::Path)>>>,
@@ -389,6 +391,7 @@ impl SessionView {
             replaying: RefCell::new(false),
             on_busy: RefCell::new(None),
             on_turn_end: RefCell::new(None),
+            on_disk_change: RefCell::new(None),
             on_title: RefCell::new(None),
             on_open_folder: RefCell::new(None),
             on_open_file: RefCell::new(None),
@@ -1171,10 +1174,19 @@ impl SessionView {
             return;
         }
         let v = self.clone();
-        glib::timeout_add_local_once(std::time::Duration::from_millis(400), move || {
+        glib::timeout_add_local_once(std::time::Duration::from_millis(250), move || {
             v.refresh_pending.set(false);
             v.refresh_pins();
         });
+    }
+
+    /// The agent wrote a file (a tool call with a diff): the chips' git numbers and the tree follow
+    /// now, not at the end of the turn.
+    fn disk_changed(self: &Rc<Self>) {
+        self.refresh_pins_soon();
+        if let Some(cb) = self.on_disk_change.borrow().as_ref() {
+            cb();
+        }
     }
 
     /// Chips under the session bar, one per pinned folder, with an unpin ×.
@@ -1772,10 +1784,16 @@ impl SessionView {
                 if let Ok(seq) = self.store.append_tool(&self.id(), title, status, kind, detail.as_deref(), diff.as_deref()) {
                     self.tool_seqs.borrow_mut().insert(id.clone(), seq);
                 }
+                if diff.is_some() {
+                    self.disk_changed();
+                }
             }
             Event::ToolCallUpdate { id, status, title, detail, diff } => {
                 if let Some(seq) = self.tool_seqs.borrow().get(id) {
                     let _ = self.store.update_tool(&self.id(), *seq, title.as_deref(), status.as_deref(), detail.as_deref(), diff.as_deref());
+                }
+                if diff.is_some() {
+                    self.disk_changed();
                 }
             }
             Event::Stopped(_) => {
