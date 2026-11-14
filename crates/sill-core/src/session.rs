@@ -88,6 +88,27 @@ pub fn adopted_binds(agent: &crate::agents::Agent, home: &Path) -> Vec<(PathBuf,
     out
 }
 
+/// The host paths every *other* registry agent owns — its `home_paths` and `shared_files` (the
+/// host's own `~/.codex/auth.json`, `~/.gemini/oauth_creds.json`), and whatever it adopted — that
+/// exist on the host: masked in `agent`'s jail, so one agent never sees another's credentials
+/// (SPEC §4.11 #8). With no current agent (`sill dev`), every agent's paths.
+pub fn other_agents_paths(registry: &std::collections::BTreeMap<String, crate::agents::Agent>, agent: Option<&str>, home: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for (id, a) in registry {
+        if Some(id.as_str()) == agent {
+            continue;
+        }
+        let own = a.home_paths.iter().chain(a.shared_files.iter()).map(|p| crate::paths::expand_home(p, home));
+        for p in own.chain(adopted_binds(a, home).into_iter().map(|(_, inside)| inside)) {
+            if p.exists() && !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 /// Every path under `~` that is the agent's own (registry `state_dirs` and `home_paths` plus the
 /// adopted ones), as `~/…` strings for [`crate::changes::is_agent_state`].
 pub fn state_paths(agent: &crate::agents::Agent, home: &Path) -> Vec<String> {
@@ -190,34 +211,39 @@ pub fn binds_for(
     pins: &[PathBuf],
 ) -> Result<Vec<(PathBuf, PathBuf)>> {
     use crate::paths::{expand_home, expand_pattern, layer_name};
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
     let mut out = Vec::new();
-    // agent home: ~/.local/state/sill/agents/<id>/<basename of the path>
+    // agent home: ~/.local/state/sill/agents/<id>/<basename of the path>. The agents' homes hold
+    // credentials: 0700 from the `agents/` directory down, whatever the umask, on every start (a
+    // home made before this was 0755/0664, SPEC §4.11 #8).
     let agents_base = agent_home(home, &agent.id);
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&agents_base)?;
+    for d in [agents_base.as_path()].into_iter().chain(agents_base.parent()) {
+        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))?;
+    }
     for p in &agent.home_paths {
         let inside = expand_home(p, home);
         let name = inside.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let owned = agents_base.join(&name);
         let host_is_dir = inside.is_dir();
         if !owned.exists() {
-            std::fs::create_dir_all(&agents_base)?;
             if host_is_dir || !inside.exists() {
-                std::fs::create_dir_all(&owned)?;
+                std::fs::DirBuilder::new().mode(0o700).create(&owned)?;
             } else {
                 // a file path (~/.claude.json): seed from the host or start empty
                 let content = std::fs::read(&inside).unwrap_or_else(|_| b"{}".to_vec());
-                std::fs::write(&owned, content)?;
+                let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&owned)?;
+                std::io::Write::write_all(&mut f, &content)?;
             }
             for seed in &agent.seed_files {
                 let src = expand_home(seed, home);
                 if let Ok(rel) = src.strip_prefix(&inside)
                     && owned.is_dir()
                     && src.is_file()
+                    && let Ok(content) = std::fs::read(&src)
                 {
-                    let dst = owned.join(rel);
-                    if let Some(parent) = dst.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                    let _ = std::fs::copy(&src, &dst);
+                    // the seed is the login: written 0600, never through a link
+                    let _ = crate::safe_fs::write_file_beneath(&owned, rel, &content, 0o600);
                 }
             }
         }

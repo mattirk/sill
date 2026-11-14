@@ -64,6 +64,9 @@ pub struct JailSpec {
     /// Extra read-write binds (host path, jail path): agent home, session-private scratch. Applied
     /// after the overlays and masks; nothing below them is recorded.
     pub binds: Vec<(PathBuf, PathBuf)>,
+    /// Masked on top of the policy's list: the other agents' paths (`session::other_agents_paths`),
+    /// so one agent's jail never shows another's credentials (SPEC §4.11 #8). Missing paths are skipped.
+    pub masks: Vec<PathBuf>,
     /// Extra arguments inserted before `--`.
     pub extra_args: Vec<OsString>,
     pub command: Vec<OsString>,
@@ -376,16 +379,22 @@ impl JailSpec {
 
         // masks (both views), direct, ro. Sill's own files are masked whatever the policy says: its
         // configuration (policies, agent overrides — a session's mounts and allowed domains are made
-        // of them), the session store and the staged binaries (security.md S2).
+        // of them), the session store and the staged binaries (security.md S2), and every agent's
+        // sill-owned home (`agents/`, the login scratch): the current agent gets its own bound at
+        // `~/.claude` etc. from the host side, the others' stay out of sight (SPEC §4.11 #8).
         let mut masked = Vec::new();
         let config_dir = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| self.home.join(".config"));
         let state_base = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| self.home.join(".local/state"));
-        let own: Vec<PathBuf> = [config_dir.join("sill"), state_base.join("sill/bin")]
+        let own: Vec<PathBuf> = [config_dir.join("sill"), state_base.join("sill/bin"), state_base.join("sill/agents"), state_base.join("sill/login")]
             .into_iter()
             .chain(["sill.db", "sill.db-wal", "sill.db-shm"].iter().map(|f| state_base.join("sill").join(f)))
+            .chain(self.masks.iter().cloned())
             .filter(|p| p.exists())
             .collect();
         for path in p.paths.mask.iter().flat_map(|pat| expand_pattern(pat, &self.home)).chain(own) {
+            if masked.contains(&path) {
+                continue;
+            }
             {
                 let is_dir = path.is_dir();
                 for target in [path.clone(), host_view(&path)] {
@@ -514,9 +523,27 @@ mod tests {
             proxy_socket: None,
             proxy_port: PROXY_PORT,
             binds: vec![],
+            masks: vec![],
             extra_args: vec![],
             command: vec!["true".into()],
         }
+    }
+
+    #[test]
+    fn extra_masks_are_applied_once_and_only_when_present() {
+        let dir = std::env::temp_dir().join(format!("sill-jail-masks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".codex")).unwrap();
+        std::fs::write(dir.join(".claude.json"), "{}").unwrap();
+        let mut s = spec();
+        s.masks = vec![dir.join(".codex"), dir.join(".claude.json"), dir.join(".gemini"), dir.join(".codex")];
+        let plan = s.plan().unwrap();
+        let r = render(&plan.argv);
+        assert!(r.contains(&format!("--tmpfs {} ", dir.join(".codex").display())));
+        assert!(r.contains(&format!("--ro-bind /dev/null {} ", dir.join(".claude.json").display())));
+        assert!(!r.contains(".gemini"), "a path that does not exist is not masked");
+        assert_eq!(plan.masked.iter().filter(|m| **m == dir.join(".codex")).count(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

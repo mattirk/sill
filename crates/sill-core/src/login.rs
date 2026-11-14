@@ -43,12 +43,21 @@ pub fn run(agent: &Agent, home: &Path, method: &str, mut report: impl FnMut(Line
         .map(|state| state.join("login").join(&agent.id))
         .context("state dir")?;
     let _ = std::fs::remove_dir_all(&scratch);
+    // what the login writes is a credential: the scratch is 0700 from `login/` down
+    let private = |dir: &Path| -> Result<()> {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).with_context(|| format!("create {}", dir.display()))?;
+        if let Some(parent) = dir.parent() {
+            let _ = std::fs::set_permissions(parent, std::os::unix::fs::PermissionsExt::from_mode(0o700));
+        }
+        Ok(())
+    };
     let mut copy_back: Option<PathBuf> = None;
     match (&agent.home_env, agent.home_paths.first()) {
         (Some(var), Some(first)) => {
             let name = Path::new(first).file_name().map(|n| n.to_os_string()).unwrap_or_default();
             let owned = scratch.join(name);
-            std::fs::create_dir_all(&owned).with_context(|| format!("create {}", owned.display()))?;
+            private(&owned)?;
             let target = if agent.home_env_parent { &scratch } else { &owned };
             env.insert(var.clone(), target.display().to_string());
             copy_back = Some(crate::session::agent_home(home, &agent.id));
@@ -71,7 +80,7 @@ pub fn run(agent: &Agent, home: &Path, method: &str, mut report: impl FnMut(Line
             // Only `$HOME` moves; the XDG dirs stay real, so a browser the agent launches by any
             // route (xdg-open, a bundled opener, Python's webbrowser) finds its own profile. The
             // price: an agent keeping its login under `$XDG_CONFIG_HOME` writes it to the host.
-            std::fs::create_dir_all(&scratch)?;
+            private(&scratch)?;
             let shim_dir = browser_shim(home)?;
             let path = std::env::var("PATH").unwrap_or_default();
             env.insert("PATH".into(), format!("{}:{path}", shim_dir.display()));

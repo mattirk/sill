@@ -35,6 +35,7 @@ pub fn session_plan(
         proxy_socket: None,
         proxy_port: jail::PROXY_PORT,
         binds,
+        masks: vec![], // the other agents' paths are tmpfs in the jail: nothing of theirs is in an upper tree
         extra_args: vec![],
         command: vec!["true".into()],
     };

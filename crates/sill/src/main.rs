@@ -585,6 +585,8 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
         command.extend(["--forward".into(), format!("127.0.0.1:{}={}", jail::PROXY_PORT, jail::PROXY_SOCKET).into()]);
     }
     let mut spec = build_spec(jail, command)?;
+    // the other agents' homes and login files stay out of this jail (SPEC §4.11 #8)
+    spec.masks = sill_core::session::other_agents_paths(&sill_core::agents::load(&spec.home), agent, &spec.home);
     let idle = spec.policy.limits.agent_idle_minutes as u64 * 60;
     spec.command.extend(["--agent-idle".into(), idle.to_string().into()]);
     // the shim, and the same binary as `sill-proc` on the jail's PATH (docs/tasks.md §2.4)
@@ -821,6 +823,7 @@ fn build_spec(a: JailArgs, command: Vec<OsString>) -> Result<JailSpec> {
         proxy_socket: a.proxy.map(std::path::absolute).transpose()?,
         proxy_port: jail::PROXY_PORT,
         binds,
+        masks: vec![],
         extra_args,
         command,
     })
