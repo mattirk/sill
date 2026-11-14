@@ -118,6 +118,8 @@ git archive --format=tar HEAD packaging/mac/guest | guest 'rm -rf guest && mkdir
 guest 'sudo install -D -m755 guest/packaging/mac/guest/sill-disks /usr/local/lib/sill/sill-disks &&
     sudo install -m644 guest/packaging/mac/guest/sill-disks.service /etc/systemd/system/ &&
     sudo sh -c "cat guest/packaging/mac/guest/fstab >> /etc/fstab" &&
+    sudo install -m644 guest/packaging/mac/guest/grub.cfg /etc/default/grub.d/sill.cfg &&
+    sudo update-grub 2>/dev/null &&
     sudo mkdir -p /mnt/sill-state && rm -rf guest &&
     sudo systemctl daemon-reload && sudo systemctl enable sill-disks.service &&
     sudo /usr/local/lib/sill/sill-disks && sudo mount -a && findmnt -n -o SOURCE,TARGET /home && findmnt -n -o SOURCE,TARGET /mnt/sill-state'
