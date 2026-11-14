@@ -204,6 +204,7 @@ impl Viewer {
                 let Some(p) = v.history.borrow().last().cloned() else { return };
                 if is_markdown(&p) {
                     if on {
+                        v.text_view.set_wrap_mode(gtk::WrapMode::WordChar); // prose: wraps, unlike code
                         v.stack.set_visible_child_name("text");
                         v.text_view.grab_focus();
                     } else {
@@ -594,6 +595,10 @@ impl Viewer {
         self.editable.set(meta.map(|m| !m.readonly).unwrap_or(false));
         self.edit.set_visible(self.editable.get());
         self.dirty.set(false);
+        if is_markdown(path) {
+            // Markdown's source is prose: it wraps in the editor, unlike code
+            self.text_view.set_wrap_mode(gtk::WrapMode::WordChar);
+        }
         if is_markdown(path) && !self.edit.is_active() {
             self.render_markdown(path);
             self.stack.set_visible_child_name("markdown");
