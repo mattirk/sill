@@ -1,7 +1,8 @@
 #!/bin/sh
 # Sill.app and Sill.dmg (docs/sill-stick.md section 9): the window, its icon and the VM's system
-# image in one app, signed for this Mac only (ad hoc, with the virtualization entitlement:
-# local signing first, the person's decision of 2026-11-12). Run on an Apple Silicon Mac after
+# image in one app, signed for this Mac only with the virtualization entitlement (local signing
+# first, the person's decision of 2026-11-12): with packaging/mac/signing-identity.sh's
+# certificate when there is one, else ad hoc. Run on an Apple Silicon Mac after
 # packaging/mac-image.sh. Output: dist/Sill.app, dist/Sill.dmg.
 #
 # The image travels compressed (Resources/vm/system.raw.gz): a sparse 16 GB file copied out of a
@@ -61,8 +62,15 @@ cat > "$app/Contents/Info.plist" <<EOF
 </dict>
 </plist>
 EOF
+# the local signing identity keeps macOS's consents across builds; ad hoc loses them each time
+identity=-
+if security find-identity -v -p codesigning 2>/dev/null | grep -q '"Sill local development"'; then
+    identity="Sill local development"
+else
+    echo 'Signing ad hoc: macOS will forget its consents for this build (packaging/mac/signing-identity.sh fixes it).'
+fi
 codesign --force --options runtime --entitlements packaging/mac/sill-vm.entitlements \
-    --sign - "$app" 2>/dev/null
+    --sign "$identity" "$app" 2>/dev/null
 codesign --verify --strict "$app"
 
 # the disk image: the app beside a link to Applications, to drag it there
