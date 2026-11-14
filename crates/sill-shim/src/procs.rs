@@ -240,6 +240,11 @@ impl Procs {
         Ok(info)
     }
 
+    /// The running managed processes' pids, with their names.
+    pub fn running_pids(&self) -> std::collections::HashMap<u32, String> {
+        self.0.lock().unwrap().procs.iter().filter(|p| matches!(p.state, ProcState::Running)).map(|p| (p.pid, p.name.clone())).collect()
+    }
+
     pub fn list(&self) -> Vec<Info> {
         self.0.lock().unwrap().procs.clone()
     }

@@ -597,6 +597,7 @@ named request/result records. They do not make the development identity a stable
 | `_sill/settings.instructions.get`, `_sill/settings.instructions.set` | Global instruction text, at most 1 MiB input. |
 | `_sill/policy.list`, `_sill/policy.get` | Policy names and the TOML policy document. |
 | `_sill/procs.list`, `_sill/procs.tail`, `_sill/procs.stop`, `_sill/procs.dismiss` | Session managed processes; bounded live pages, tail up to 10,000 lines; stop requests termination, not proof of exit. |
+| `_sill/procs.running`, `_sill/procs.stop_command` | Need `sill.jail_processes`. What runs in the session's jail now, seen from outside the agent: commands (each tree once, at its root) and services (managed processes, programs listening on a port); empty when the jail is not running. Stop ends one command with its tree (asked, then killed after 3 s) by its root's pid in the jail; not proof of exit. |
 | `_sill/pins.list`, `_sill/pins.add`, `_sill/pins.remove`, `_sill/sessions.pin`, `_sill/sessions.unpin` | Global or exact-session pins; live byte-order keyset pages, 1–128 entries; global add canonicalizes. |
 | `_sill/agents.list`, `_sill/agents.get`, `_sill/agents.save`, `_sill/agents.remove`, `_sill/agents.available` | Explicit configured-agent definitions, ID keyset pages (1–128); save/remove user overrides; availability resolves the configured command on the daemon. |
 | `_sill/agents.defaults.get`, `_sill/agents.defaults.set` | Named agent default controls; unknown agents refused. |

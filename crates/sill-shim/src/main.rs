@@ -19,6 +19,7 @@
 //! `sill-memory` (docs/memory.md §2.3): search, show and transcript over the read-only snapshot of
 //! sill's memory at `/.sill/memory/` ([`memory_cli`]; the queries are `sill_memory`'s).
 
+mod activity;
 mod bus;
 mod forward;
 mod images;
@@ -73,6 +74,10 @@ enum Request {
     WriteFile { path: PathBuf, content: String },
     /// Managed processes (docs/tasks.md §2.4): what the jail's `sill-proc` can do, for the daemon.
     ProcList,
+    /// What runs in the jail now, classed (`activity.rs`).
+    Activity,
+    /// Stop a command tree the agent started (its root's pid, as the activity report names it).
+    StopCommand { pid: u32 },
     ProcTail { name: String, #[serde(default = "default_lines")] lines: usize },
     ProcStop { name: String },
     ProcStopAll,
@@ -492,6 +497,8 @@ fn open_pty(argv: Vec<String>, env: BTreeMap<String, String>, cwd: Option<PathBu
     }
     let child = cmd.spawn().with_context(|| format!("spawn {prog} on pty"))?;
     let pid = child.id();
+    // the person's terminal leads its own session: what runs in it is theirs, not the agent's
+    activity::terminal_started(pid);
     drop(slave);
     std::thread::spawn(move || {
         let mut child = child;
@@ -503,6 +510,21 @@ fn open_pty(argv: Vec<String>, env: BTreeMap<String, String>, cwd: Option<PathBu
 fn handle_request(req: Request, shared: &Shared, procs: &procs::Procs) -> Reply {
     match req {
         Request::ProcList => Reply::from_value(procs.handle(procs::Op::List)),
+        Request::Activity => {
+            let agent = shared.0.lock().unwrap().pid;
+            let report = activity::report(agent, &procs.running_pids());
+            match serde_json::to_value(report) {
+                Ok(value) => Reply::ok().with("activity", value),
+                Err(e) => Reply::err(e.to_string()),
+            }
+        }
+        Request::StopCommand { pid } => {
+            let agent = shared.0.lock().unwrap().pid;
+            match activity::stop_command(pid, agent, &procs.running_pids()) {
+                Ok(()) => Reply::ok(),
+                Err(e) => Reply::err(e),
+            }
+        }
         Request::ProcTail { name, lines } => Reply::from_value(procs.handle(procs::Op::Tail { name, lines })),
         Request::ProcStop { name } => Reply::from_value(procs.handle(procs::Op::Stop { name })),
         Request::ProcStopAll => Reply::from_value(procs.handle(procs::Op::StopAll)),

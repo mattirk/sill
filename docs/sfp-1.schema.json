@@ -855,6 +855,25 @@
       ],
       "type": "object"
     },
+    "CommandKey": {
+      "additionalProperties": false,
+      "description": "A command running in the jail, by its root's pid there (`JailProcesses::commands`).",
+      "properties": {
+        "pid": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "pid"
+      ],
+      "type": "object"
+    },
     "Compacted": {
       "properties": {
         "compacted": {
@@ -3092,6 +3111,80 @@
         },
         "tool": {
           "$ref": "#/$defs/Tool"
+        }
+      },
+      "type": "object"
+    },
+    "JailProcess": {
+      "properties": {
+        "argv": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "count": {
+          "description": "Processes in its tree, itself included.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "description": "The managed process's name, for a service started with `sill-proc`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pid": {
+          "description": "The pid in the jail's own namespace.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "port": {
+          "description": "A port it listens on, the lowest when several.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "started_ms": {
+          "description": "Unix milliseconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "pid",
+        "argv",
+        "started_ms",
+        "count"
+      ],
+      "type": "object"
+    },
+    "JailProcesses": {
+      "description": "What runs in a session's jail now (docs/jail-processes.md), as sill sees it from outside the\nagent. Empty when the session's jail is not running.",
+      "properties": {
+        "commands": {
+          "default": [],
+          "description": "Programs the agent started that are running now, each the root of its own tree.",
+          "items": {
+            "$ref": "#/$defs/JailProcess"
+          },
+          "type": "array"
+        },
+        "services": {
+          "default": [],
+          "description": "Long-running programs: managed processes (`sill-proc`) and anything listening on a port.",
+          "items": {
+            "$ref": "#/$defs/JailProcess"
+          },
+          "type": "array"
         }
       },
       "type": "object"
@@ -7363,6 +7456,11 @@
         "version": 1
       },
       {
+        "doc": "_sill/procs.running: what runs in a session's jail now, commands apart from services, seen from outside the agent (docs/jail-processes.md); _sill/procs.stop_command stops one command with its tree.",
+        "name": "sill.jail_processes",
+        "version": 1
+      },
+      {
         "doc": "The frontend displays Host control: the permanent session caption and the window-level line naming every session with active control. It may activate and revoke (_sill/host_control.activate, revoke); attached to a session, it counts as displaying that session's control, which ends when the last such connection goes.",
         "name": "sill.host_control",
         "version": 1
@@ -8565,6 +8663,34 @@
       "name": "_sill/procs.stop",
       "params": {
         "$ref": "#/$defs/ProcessKey"
+      },
+      "result": {
+        "$ref": "#/$defs/Empty"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.jail_processes": 1
+      },
+      "doc": "What runs in the session's jail now: the commands the agent started, each tree once at its root, and services (managed processes and programs listening on a port). A reading of this moment; empty when the jail is not running.",
+      "kind": "request",
+      "name": "_sill/procs.running",
+      "params": {
+        "$ref": "#/$defs/SessionKey"
+      },
+      "result": {
+        "$ref": "#/$defs/JailProcesses"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.jail_processes": 1
+      },
+      "doc": "Stop a command running in the jail, with everything it started (asked, then made to after 3 s). The pid is the jail's, as _sill/procs.running names it.",
+      "kind": "request",
+      "name": "_sill/procs.stop_command",
+      "params": {
+        "$ref": "#/$defs/CommandKey"
       },
       "result": {
         "$ref": "#/$defs/Empty"

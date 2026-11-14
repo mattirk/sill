@@ -43,6 +43,25 @@ impl Proc {
     }
 }
 
+/// The shim's report of the jail's processes (sill-shim `activity.rs`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Activity {
+    #[serde(default)]
+    pub commands: Vec<Tree>,
+    #[serde(default)]
+    pub services: Vec<Tree>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Tree {
+    pub pid: u32,
+    pub argv: Vec<String>,
+    pub started_ms: u64,
+    pub count: u32,
+    pub port: Option<u16>,
+    pub name: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Status {
     pub running: bool,
@@ -207,6 +226,18 @@ impl Control {
 
     pub fn write_file(&mut self, path: &Path, content: &str) -> Result<()> {
         self.call(json!({ "op": "write_file", "path": path, "content": content }))?;
+        Ok(())
+    }
+
+    // --- what runs in the jail (docs/jail-processes.md)
+
+    pub fn activity(&mut self) -> Result<Activity> {
+        let r = self.call(json!({ "op": "activity" }))?;
+        Ok(serde_json::from_value(r.get("activity").cloned().unwrap_or_default())?)
+    }
+
+    pub fn stop_command(&mut self, pid: u32) -> Result<()> {
+        self.call(json!({ "op": "stop_command", "pid": pid }))?;
         Ok(())
     }
 

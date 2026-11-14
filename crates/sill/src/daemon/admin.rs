@@ -431,6 +431,8 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             | "_sill/procs.list"
             | "_sill/procs.tail"
             | "_sill/procs.stop"
+            | "_sill/procs.running"
+            | "_sill/procs.stop_command"
             | "_sill/procs.dismiss"
     ) {
         return None;
@@ -835,6 +837,26 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 )?)?
                 .proc_tail(&a.name, n as usize)?,
             })
+        }
+        "_sill/procs.running" => {
+            let a: sill_proto::sessions::SessionKey = args(p)?;
+            session(hub, &a.session_id)?;
+            // no jail to ask is nothing running, not an error
+            let report = sill_core::shim::Control::connect(&sill_core::session::socket_path(&a.session_id)?)
+                .and_then(|mut c| c.activity())
+                .unwrap_or_default();
+            let process = |t: sill_core::shim::Tree| api::JailProcess { pid: t.pid, argv: t.argv, started_ms: t.started_ms, count: t.count, name: t.name, port: t.port };
+            bounded(api::JailProcesses {
+                commands: report.commands.into_iter().map(process).collect(),
+                services: report.services.into_iter().map(process).collect(),
+            })
+        }
+        "_sill/procs.stop_command" => {
+            let a: api::CommandKey = args(p)?;
+            session(hub, &a.session_id)?;
+            let mut c = sill_core::shim::Control::connect(&sill_core::session::socket_path(&a.session_id)?)?;
+            c.stop_command(a.pid)?;
+            Ok(json!({}))
         }
         "_sill/procs.stop" | "_sill/procs.dismiss" => {
             let a: api::ProcessKey = args(p)?;

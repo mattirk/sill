@@ -154,6 +154,8 @@ pub const METHODS: &[Method] = &[
     req::<crate::admin::ProcessesList, crate::admin::ProcessesPage>("_sill/procs.list", "List managed session processes in bounded live name-ordered pages."),
     req::<crate::admin::ProcessTail, crate::Text>("_sill/procs.tail", "Read at most 10000 lines and 4 MiB of managed-process output."),
     req::<crate::admin::ProcessKey, crate::Empty>("_sill/procs.stop", "Request stop of one named process. List its state after an uncertain outcome; do not blindly retry."),
+    req_needing::<crate::sessions::SessionKey, crate::admin::JailProcesses>("_sill/procs.running", "sill.jail_processes", 1, "What runs in the session's jail now: the commands the agent started, each tree once at its root, and services (managed processes and programs listening on a port). A reading of this moment; empty when the jail is not running."),
+    req_needing::<crate::admin::CommandKey, crate::Empty>("_sill/procs.stop_command", "sill.jail_processes", 1, "Stop a command running in the jail, with everything it started (asked, then made to after 3 s). The pid is the jail's, as _sill/procs.running names it."),
     req::<crate::admin::ProcessKey, crate::Empty>("_sill/procs.dismiss", "Dismiss one named process. List after an uncertain outcome; do not blindly retry."),
     req::<crate::sessions::List, crate::sessions::Page>("_sill/sessions.list", "List sessions in bounded live pages ordered by immutable creation time and identity."),
     req::<crate::sessions::SessionKey, crate::sessions::Session>("_sill/sessions.get", "Read one exact session identity."),

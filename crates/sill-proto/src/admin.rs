@@ -228,6 +228,40 @@ pub struct Names {
     pub names: Vec<String>,
     pub next: Option<String>,
 }
+/// What runs in a session's jail now (docs/jail-processes.md), as sill sees it from outside the
+/// agent. Empty when the session's jail is not running.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+pub struct JailProcesses {
+    /// Programs the agent started that are running now, each the root of its own tree.
+    #[serde(default)]
+    pub commands: Vec<JailProcess>,
+    /// Long-running programs: managed processes (`sill-proc`) and anything listening on a port.
+    #[serde(default)]
+    pub services: Vec<JailProcess>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+pub struct JailProcess {
+    /// The pid in the jail's own namespace.
+    pub pid: u32,
+    pub argv: Vec<String>,
+    /// Unix milliseconds.
+    pub started_ms: u64,
+    /// Processes in its tree, itself included.
+    pub count: u32,
+    /// The managed process's name, for a service started with `sill-proc`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// A port it listens on, the lowest when several.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+}
+/// A command running in the jail, by its root's pid there (`JailProcesses::commands`).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CommandKey {
+    pub session_id: String,
+    pub pid: u32,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessKey {

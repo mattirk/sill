@@ -26,6 +26,7 @@ pub const CAPABILITIES: &[Capability] = &[
     Capability { name: "sill.network_quiet", version: 1, doc: "_sill/policy.quiet_host: stop showing a host's refusal banner in every session, without granting access." },
     Capability { name: "sill.usage", version: 1, doc: "_sill/usage.active_time: the time agents worked per hour, over all sessions, for a running-time chart." },
     Capability { name: "sill.login_browser", version: 1, doc: "Host logins hand their pages to the frontend (`open_url` login progress) instead of opening a browser on the daemon host; _sill/streams.login_callback relays the page's loopback callback from a frontend on another machine; _sill/operations.cancel stops a running login." },
+    Capability { name: "sill.jail_processes", version: 1, doc: "_sill/procs.running: what runs in a session's jail now, commands apart from services, seen from outside the agent (docs/jail-processes.md); _sill/procs.stop_command stops one command with its tree." },
     Capability { name: "sill.host_control", version: 1, doc: "The frontend displays Host control: the permanent session caption and the window-level line naming every session with active control. It may activate and revoke (_sill/host_control.activate, revoke); attached to a session, it counts as displaying that session's control, which ends when the last such connection goes." },
 ];
 

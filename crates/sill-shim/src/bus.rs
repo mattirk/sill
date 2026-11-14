@@ -74,6 +74,7 @@ pub fn start(socket: &Path) -> Result<()> {
         std::thread::sleep(Duration::from_millis(25));
     }
     let pid = child.id();
+    crate::activity::bus_started(pid);
     eprintln!("sill-shim: private bus: dbus-daemon pid {pid} on {}", socket.display());
     std::thread::spawn(move || match child.wait() {
         Ok(status) => eprintln!("sill-shim: private bus: dbus-daemon pid {pid} ended ({status})"),
