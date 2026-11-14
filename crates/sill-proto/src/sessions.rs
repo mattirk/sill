@@ -102,6 +102,10 @@ pub struct Create {
     pub remember_pins: bool,
     #[serde(default)]
     pub ghost: bool,
+    /// Work in workspaces for the session's pinned repositories (docs/parallel-coding.md §12);
+    /// absent follows Settings → Automatic workspaces. Needs `sill.workspaces`.
+    #[serde(default)]
+    pub workspaces: Option<bool>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

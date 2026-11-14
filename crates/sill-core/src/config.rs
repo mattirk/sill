@@ -32,6 +32,9 @@ pub struct Config {
     /// A new session starts with the pins of the latest session that had any (SPEC §3.2 Pins):
     /// the workspace carries over instead of being pinned again. Unset = off.
     pub remember_pins: Option<bool>,
+    /// Every new session works in workspaces for its pinned repositories; the `+` menu's button
+    /// beside the ghost makes the other kind (docs/parallel-coding.md §12). Unset = off.
+    pub automatic_workspaces: Option<bool>,
     /// Memory (docs/memory.md): when a session's tab closes, its agent is asked for a summary as its
     /// last turn (sill writes one from the facts when it can't be), kept with the session. Unset = on.
     pub memory: Option<bool>,
@@ -89,6 +92,10 @@ impl Config {
 
     pub fn drawer_follow_changes(&self) -> bool {
         self.drawer_follow_changes.unwrap_or(false)
+    }
+
+    pub fn automatic_workspaces(&self) -> bool {
+        self.automatic_workspaces.unwrap_or(false)
     }
 
     pub fn remember_pins(&self) -> bool {

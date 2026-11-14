@@ -245,78 +245,19 @@ fn summary_and_revision_follow_the_work() {
 }
 
 #[test]
-fn merge_fast_forwards_and_keeps_the_persons_edits() {
-    let d = tmp("merge");
-    let s = source(&d);
-    let (src, c) = make(&d, &s, "ab12");
-    agent_commit(&c.path);
-    let tip = git(&c.path, &["rev-parse", "HEAD"]);
-    write(&s.join("f1.txt"), "my unrelated edit\n");
-    write(&s.join("staged.txt"), "staged\n");
-    git(&s, &["add", "staged.txt"]);
-    let new = fast_forward(&s, &c.path, "ab12", "main", &src.head, &c.branch).unwrap().unwrap();
-    assert_eq!(new, tip);
-    assert_eq!(git(&s, &["rev-parse", "main"]), tip);
-    assert_eq!(std::fs::read_to_string(s.join("f2.txt")).unwrap(), "agent work\n");
-    assert!(git(&s, &["ls-files"]).contains("new.txt"));
-    assert_eq!(std::fs::read_to_string(s.join("f1.txt")).unwrap(), "my unrelated edit\n");
-    assert!(git(&s, &["diff", "--cached", "--name-only"]).contains("staged.txt"));
-    // the source holds the objects itself: no dependency on the clone
-    assert!(!s.join(".git/objects/info/alternates").exists());
-    assert_eq!(merge_applied(&s, "main", &src.head, &tip).unwrap(), Applied::Yes);
-    std::fs::remove_dir_all(&c.path).unwrap();
-    drop_anchors(&s, "ab12").unwrap();
-    git(&s, &["reflog", "expire", "--expire=now", "--all"]);
-    git(&s, &["gc", "-q", "--prune=now"]);
-    assert!(git_ok(&s, &["fsck", "--full"]));
-}
-
-#[test]
-fn merge_works_with_packed_refs() {
+fn apply_works_with_packed_refs() {
     let d = tmp("packed");
     let s = source(&d);
     let (src, c) = make(&d, &s, "ab12");
     agent_commit(&c.path);
     git(&s, &["pack-refs", "--all"]);
     assert!(!s.join(".git/refs/heads/main").exists());
-    let new = fast_forward(&s, &c.path, "ab12", "main", &src.head, &c.branch).unwrap().unwrap();
+    let was = super::flow::applied(&c.path).unwrap();
+    let new = super::flow::apply(&s, &c.path, "ab12", "main", &src.head, &c.branch, &was).unwrap().unwrap().tip;
     assert_eq!(git(&s, &["rev-parse", "main"]), new);
     assert!(git_ok(&s, &["fsck"]));
     // the view's link to packed-refs is intact: the real file is still a file
     assert!(s.join(".git/packed-refs").is_file() && !s.join(".git/packed-refs").is_symlink());
-}
-
-#[test]
-fn merge_stops_without_touching_the_source() {
-    let d = tmp("stops");
-    let s = source(&d);
-    let (src, c) = make(&d, &s, "ab12");
-    agent_commit(&c.path);
-    // an overlapping uncommitted edit
-    write(&s.join("f2.txt"), "the person's own f2\n");
-    let stop = fast_forward(&s, &c.path, "ab12", "main", &src.head, &c.branch).unwrap().unwrap_err();
-    assert_eq!(stop, Stop::Overlap(vec!["f2.txt".into()]));
-    assert_eq!(git(&s, &["rev-parse", "main"]), src.head);
-    assert_eq!(std::fs::read_to_string(s.join("f2.txt")).unwrap(), "the person's own f2\n");
-    git(&s, &["checkout", "-q", "--", "f2.txt"]);
-    // an untracked file in the way
-    write(&s.join("new.txt"), "mine\n");
-    let stop = fast_forward(&s, &c.path, "ab12", "main", &src.head, &c.branch).unwrap().unwrap_err();
-    assert_eq!(stop, Stop::Untracked(vec!["new.txt".into()]));
-    assert_eq!(std::fs::read_to_string(s.join("new.txt")).unwrap(), "mine\n");
-    std::fs::remove_file(s.join("new.txt")).unwrap();
-    // the source moved since review
-    write(&s.join("f3.txt"), "host work\n");
-    git(&s, &["commit", "-qam", "host"]);
-    let moved = git(&s, &["rev-parse", "main"]);
-    assert_eq!(fast_forward(&s, &c.path, "ab12", "main", &src.head, &c.branch).unwrap(), Err(Stop::SourceMoved));
-    // reviewed against the new tip but not rebased onto it
-    assert_eq!(fast_forward(&s, &c.path, "ab12", "main", &moved, &c.branch).unwrap(), Err(Stop::NeedsPrepare));
-    // another branch checked out
-    git(&s, &["checkout", "-q", "-b", "other"]);
-    assert_eq!(fast_forward(&s, &c.path, "ab12", "main", &moved, &c.branch).unwrap(), Err(Stop::SourceMoved));
-    git(&s, &["checkout", "-q", "main"]);
-    assert_eq!(git(&s, &["rev-parse", "main"]), moved);
 }
 
 #[test]
@@ -333,7 +274,8 @@ fn rebase_onto_a_moved_source_needs_no_fetch() {
     let before = git(&c.path, &["rev-parse", "HEAD"]);
     assert_eq!(git(&c.path, &["rev-parse", "refs/sill/pre-rebase"]), before);
     git(&c.path, &["rebase", "-q", "refs/sill/dest"]); // the helper jail's job; plain here
-    let new = fast_forward(&s, &c.path, "ab12", "main", &dest, &c.branch).unwrap().unwrap();
+    let was = super::flow::applied(&c.path).unwrap();
+    let new = super::flow::apply(&s, &c.path, "ab12", "main", &dest, &c.branch, &was).unwrap().unwrap().tip;
     assert_eq!(std::fs::read_to_string(s.join("f3.txt")).unwrap(), "host work\n");
     assert_eq!(std::fs::read_to_string(s.join("f2.txt")).unwrap(), "agent work\n");
     assert_eq!(git(&s, &["rev-parse", "main"]), new);
@@ -344,7 +286,7 @@ fn rebase_onto_a_moved_source_needs_no_fetch() {
 fn no_program_from_either_config_runs_on_the_host() {
     let d = tmp("canary");
     let s = source(&d);
-    let (src, c) = make(&d, &s, "ab12");
+    let (_, c) = make(&d, &s, "ab12");
     let log = d.0.join("ran.log");
     let canary = |name: &str| {
         let p = d.0.join(format!("c-{name}"));
@@ -379,8 +321,6 @@ fn no_program_from_either_config_runs_on_the_host() {
     let _ = summary(&c.path, &c.branch, &c.base).unwrap();
     let _ = revision(&c.path, &c.branch).unwrap();
     set_destination(&s, &c.path, "ab12", "main", &c.branch).unwrap();
-    fast_forward(&s, &c.path, "ab12", "main", &src.head, &c.branch).unwrap().unwrap();
-    let _ = merge_applied(&s, "main", &src.head, &git(&s, &["rev-parse", "main"])).unwrap();
     // the §12 flow too: an Apply of uncommitted work, a Discard, an Undo, a spare reused
     write(&c.path.join("f3.txt"), "agent uncommitted\n");
     write(&c.path.join("extra.txt"), "agent new\n");
@@ -403,42 +343,3 @@ fn no_program_from_either_config_runs_on_the_host() {
     assert!(ran.is_empty(), "programs ran on the host: {ran}");
 }
 
-#[test]
-fn retain_restore_and_expire() {
-    let d = tmp("retain");
-    let s = source(&d);
-    let (_, c) = make(&d, &s, "ab12");
-    agent_commit(&c.path);
-    write(&c.path.join("wip.txt"), "uncommitted\n");
-    let retained_root = d.0.join("ws/.retained");
-    let kept = retain(&c.path, &retained_root, "ab12").unwrap();
-    assert!(!c.path.exists() && kept.join("wip.txt").exists());
-    // something new at the old place: Undo does not overwrite it
-    std::fs::create_dir_all(&c.path).unwrap();
-    assert!(!restore(&kept, &c.path).unwrap());
-    std::fs::remove_dir(&c.path).unwrap();
-    assert!(restore(&kept, &c.path).unwrap());
-    assert_eq!(std::fs::read_to_string(c.path.join("wip.txt")).unwrap(), "uncommitted\n");
-    assert!(git_ok(&c.path, &["fsck"]));
-    let kept = retain(&c.path, &retained_root, "ab12").unwrap();
-    expire(&kept, &s, "ab12").unwrap();
-    assert!(!kept.exists());
-    assert_eq!(git(&s, &["for-each-ref", "refs/sill/"]), "");
-    expire(&kept, &s, "ab12").unwrap(); // again: nothing left to do
-}
-
-#[test]
-fn an_interrupted_merge_is_recognised() {
-    let d = tmp("applied");
-    let s = source(&d);
-    let (src, c) = make(&d, &s, "ab12");
-    agent_commit(&c.path);
-    let tip = git(&c.path, &["rev-parse", "HEAD"]);
-    assert_eq!(merge_applied(&s, "main", &src.head, &tip).unwrap(), Applied::No);
-    // the ref moved but the files never followed: a crash between the two steps
-    git(&s, &["fetch", "-q", c.path.to_str().unwrap(), &format!("{}:refs/x", c.branch)]);
-    git(&s, &["update-ref", "refs/heads/main", &tip, &src.head]);
-    assert_eq!(merge_applied(&s, "main", &src.head, &tip).unwrap(), Applied::Unclear);
-    git(&s, &["read-tree", "-m", "-u", &src.head, &tip]);
-    assert_eq!(merge_applied(&s, "main", &src.head, &tip).unwrap(), Applied::Yes);
-}

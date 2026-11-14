@@ -124,10 +124,10 @@ fn dirty(src: &Git) -> Result<Vec<(char, char, String)>> {
         let mut chars = e.chars();
         let (x, y) = (chars.next().unwrap(), chars.next().unwrap());
         let path = e[3..].to_string();
-        if x == 'R' || x == 'C' {
-            if let Some(from) = parts.next() {
-                entries.push((x, y, from.to_string()));
-            }
+        if (x == 'R' || x == 'C')
+            && let Some(from) = parts.next()
+        {
+            entries.push((x, y, from.to_string()));
         }
         entries.push((x, y, path));
     }
@@ -177,10 +177,10 @@ fn write_entry(git: &Git, root: &Path, path: &str, mode: &str, blob: &str) -> Re
             .with_context(|| format!("link {path}"))?;
         return Ok(());
     }
-    if let Ok(meta) = std::fs::symlink_metadata(root.join(rel)) {
-        if meta.file_type().is_symlink() {
-            crate::safe_fs::remove_file_beneath(root, rel)?;
-        }
+    if let Ok(meta) = std::fs::symlink_metadata(root.join(rel))
+        && meta.file_type().is_symlink()
+    {
+        crate::safe_fs::remove_file_beneath(root, rel)?;
     }
     crate::safe_fs::write_file_beneath(root, rel, &out.stdout, if mode == "100755" { 0o755 } else { 0o644 })
 }

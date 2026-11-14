@@ -1140,11 +1140,18 @@ impl Hub {
             if !ignore_roots.is_empty() { bail!("jail already running; stop it before ignoring a fragment for a new build"); }
             return Ok(Started { socket: sill_core::shim::runtime_dir(id)?.join("shim.sock"), fresh: false });
         }
+        // a workspace session's workspaces, made or kept, before its jail (docs/parallel-coding.md §12)
+        let workspace = if s.ghost {
+            workspace
+        } else {
+            self.workspaces_for_start(id).context("making the session's workspaces")?;
+            self.with_store(|store| store.workspace_mask(id))?
+        };
         let registry = sill_core::agents::load(&self.home)?;
         let Some(agent) = registry.get(&s.agent) else { bail!("unknown agent {}", s.agent) };
         // Diagnose unavailable capabilities before preparing host state or launch bindings.
         // ensure_started resolves and validates again at the actual enforcement boundary.
-        let resolved = sill_core::session::next_build(&s, &self.home, &pins, ignore_roots, workspace.as_ref())?;
+        let resolved = sill_core::session::next_build(&s, &self.home, &pins, ignore_roots, &workspace)?;
         resolved.policy.permissions.validate_launch(&resolved.policy.network)?;
         let uid = rustix::process::getuid().as_raw();
         let sdir = sill_core::session::state_dir(uid, id)?;
@@ -1164,7 +1171,7 @@ impl Hub {
             agent: Some(s.agent.clone()),
             binds,
             ghost: s.ghost,
-            workspace: if s.ghost { None } else { workspace },
+            workspace: if s.ghost { vec![] } else { workspace },
         };
         let started = sill_core::session::ensure_started(&opts, &self.home, &self.exe).context("starting the jail")?;
         // the pinned repositories' HEAD when this open period began (kept across restarts)

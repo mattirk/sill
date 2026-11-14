@@ -1,11 +1,14 @@
-//! Workspace records, the operation journal and the operations the person drives (§11).
+//! Workspace records, the operation journal and what the person does (docs/parallel-coding.md
+//! §12): a workspace per session and pinned repository, made when the session's jail starts;
+//! Apply and Discard as often as the person likes; Undo of discarded work for 7 days; a finished
+//! folder kept as the repository's warm spare.
 //!
-//! The daemon store keeps a row per workspace and a journal entry per mutation, written before
-//! any side effect. Git work runs outside the store lock ([`Host::db`] is taken only around
-//! reads and writes of rows). Receipts are the shared ones (`crate::operations`): an identical
-//! retry returns the workspace as it is now, never repeats the work. On startup [`reconcile`]
-//! settles every unfinished entry from what is on disk; what it cannot establish stays
-//! `interrupted` and is shown, never reset.
+//! The daemon store keeps a row per workspace, a row per discarded piece of work, the session's
+//! mode and the repositories it keeps live, and a journal entry per mutation written before any
+//! side effect. Git work runs outside the store lock ([`Host::db`] is held only around rows).
+//! Receipts are the shared ones (`crate::operations`): an identical retry never repeats work. On
+//! start [`reconcile`] settles unfinished entries from what is on disk; what it cannot establish
+//! stays `interrupted` and is shown, never reset.
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -17,9 +20,10 @@ use sha2::{Digest, Sha256};
 use sill_proto::sessions::HostPath;
 use sill_proto::workspaces as api;
 
+use super::flow;
 use crate::sfp::DomainError;
 
-/// How long a discarded clone is kept for Undo (§10 item 8).
+/// How long discarded work is kept for Undo (§10 item 8).
 pub const RETENTION: i64 = 7 * 86_400;
 /// The largest diff a `workspaces.diff` answers with.
 pub const DIFF_LIMIT: usize = 4 * 1024 * 1024;
@@ -31,24 +35,24 @@ pub enum Life {
     Missing,
     /// Ended: it will not write again.
     Ended,
-    /// Not running now, but may be started again.
-    Stopped,
-    /// Its jail runs: it can write.
-    Running,
+    /// Not ended: its jail may run or be started again.
+    Alive,
 }
 
 /// What the daemon provides.
 pub trait Host {
     /// Run `f` with the store; held only for the call.
     fn db<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T>;
-    /// A session pinned to `pin`, not started; `create_id` makes a retry return the same one.
-    fn new_session(&self, create_id: &str, agent: &str, policy: &str, pin: &Path) -> Result<String>;
     fn life(&self, session: &str) -> Life;
-    /// Run `argv` in a jail with `session`'s restrictions (its next build: masks, pins, the
-    /// workspace's source hidden), no network, working directory `cwd`: the workspace's own Git
-    /// runs there, never on the host.
+    /// The agent is in a turn: its files may change any moment.
+    fn busy(&self, session: &str) -> bool;
+    /// The session's own pinned folders (not the global ones).
+    fn session_pins(&self, session: &str) -> Result<Vec<PathBuf>>;
+    /// Run `argv` in a jail with `session`'s restrictions (its next build, the workspace at the
+    /// repository's path), no network, working directory `cwd`: the workspace's own Git runs
+    /// there, never on the host.
     fn run_jailed(&self, session: &str, cwd: &Path, argv: &[&str]) -> Result<std::process::Output>;
-    /// Where workspaces are made; retained ones go to `<root>/.retained`.
+    /// Where workspaces are made; spares go to `<root>/.spare`.
     fn root(&self) -> PathBuf;
     fn now(&self) -> i64 {
         crate::store::now()
@@ -67,8 +71,8 @@ fn refuse(reason: &str, message: impl Into<String>, paths: Vec<String>) -> anyho
     DomainError { code: "invalid_state", message: message.into(), details: Some(json!({"reason": reason, "paths": paths})) }.into()
 }
 
-fn not_found() -> anyhow::Error {
-    DomainError { code: "not_found", message: "no such workspace".into(), details: None }.into()
+fn not_found(what: &str) -> anyhow::Error {
+    DomainError { code: "not_found", message: format!("no such {what}"), details: None }.into()
 }
 
 fn key(operation_id: &str) -> String {
@@ -84,67 +88,96 @@ fn path(b: Vec<u8>) -> PathBuf {
 }
 
 pub fn init(conn: &Connection) -> Result<()> {
+    // a store from the first design (2026-11-09, before §12) holds no workspace worth keeping
+    let old: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspaces')
+           AND NOT EXISTS(SELECT 1 FROM pragma_table_info('workspaces') WHERE name='discards')",
+        [],
+        |r| r.get(0),
+    )?;
+    if old {
+        conn.execute_batch("DROP TABLE workspaces; DROP TABLE IF EXISTS workspace_journal;")?;
+    }
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS workspaces (
-            id TEXT PRIMARY KEY, name TEXT NOT NULL, source BLOB NOT NULL, source_branch TEXT NOT NULL,
-            base TEXT NOT NULL, branch TEXT NOT NULL, path BLOB NOT NULL, state TEXT NOT NULL,
-            prior_state TEXT, owner TEXT, session_id TEXT, reviewed TEXT, retained BLOB,
-            retained_until INTEGER, shallow INTEGER NOT NULL, created_by TEXT NOT NULL,
-            created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, session_id TEXT NOT NULL, source BLOB NOT NULL,
+            source_branch TEXT NOT NULL, base TEXT NOT NULL, branch TEXT NOT NULL, path BLOB NOT NULL,
+            state TEXT NOT NULL, shallow INTEGER NOT NULL, discards INTEGER NOT NULL,
+            created_by TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+            UNIQUE(session_id, source));
+         CREATE TABLE IF NOT EXISTS workspace_discards (
+            id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, session_id TEXT NOT NULL, name TEXT NOT NULL,
+            source BLOB NOT NULL, branch TEXT NOT NULL, snapshot TEXT NOT NULL, anchor TEXT NOT NULL,
+            until INTEGER NOT NULL, created_at INTEGER NOT NULL);
          CREATE TABLE IF NOT EXISTS workspace_journal (
             operation TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, kind TEXT NOT NULL,
             intent TEXT NOT NULL, state TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '',
-            started_at INTEGER NOT NULL);",
+            started_at INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS session_workspace_mode (session_id TEXT PRIMARY KEY, workspaces INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS session_live_repositories (
+            session_id TEXT NOT NULL, source BLOB NOT NULL, reason TEXT NOT NULL, PRIMARY KEY(session_id, source));",
     )?;
     crate::operations::Journal::new(conn)?;
     Ok(())
+}
+
+fn has_tables(conn: &Connection) -> Result<bool> {
+    Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_workspace_mode')", [], |r| r.get(0))?)
+}
+
+/// Record whether `session` works in workspaces (fixed when it is made, §12).
+pub fn set_mode(conn: &Connection, session: &str, workspaces: bool) -> Result<()> {
+    init(conn)?;
+    conn.execute(
+        "INSERT INTO session_workspace_mode(session_id, workspaces) VALUES(?1, ?2) ON CONFLICT(session_id) DO UPDATE SET workspaces=excluded.workspaces",
+        params![session, workspaces],
+    )?;
+    Ok(())
+}
+
+pub fn mode(conn: &Connection, session: &str) -> Result<bool> {
+    if !has_tables(conn)? {
+        return Ok(false);
+    }
+    Ok(conn.query_row("SELECT workspaces FROM session_workspace_mode WHERE session_id=?1", [session], |r| r.get(0)).optional()?.unwrap_or(false))
 }
 
 #[derive(Debug, Clone)]
 struct Row {
     id: String,
     name: String,
+    session_id: String,
     source: PathBuf,
     source_branch: String,
     base: String,
     branch: String,
     path: PathBuf,
     state: String,
-    prior_state: Option<String>,
-    owner: Option<String>,
-    session_id: Option<String>,
-    reviewed: Option<api::Revision>,
-    retained: Option<PathBuf>,
-    retained_until: Option<i64>,
     shallow: bool,
+    discards: i64,
     created_by: String,
     created_at: i64,
     updated_at: i64,
 }
 
-const COLUMNS: &str = "id,name,source,source_branch,base,branch,path,state,prior_state,owner,session_id,reviewed,retained,retained_until,shallow,created_by,created_at,updated_at";
+const COLUMNS: &str = "id,name,session_id,source,source_branch,base,branch,path,state,shallow,discards,created_by,created_at,updated_at";
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<Row> {
-    let reviewed: Option<String> = r.get(11)?;
     Ok(Row {
         id: r.get(0)?,
         name: r.get(1)?,
-        source: path(r.get(2)?),
-        source_branch: r.get(3)?,
-        base: r.get(4)?,
-        branch: r.get(5)?,
-        path: path(r.get(6)?),
-        state: r.get(7)?,
-        prior_state: r.get(8)?,
-        owner: r.get(9)?,
-        session_id: r.get(10)?,
-        reviewed: reviewed.and_then(|t| serde_json::from_str(&t).ok()),
-        retained: r.get::<_, Option<Vec<u8>>>(12)?.map(path),
-        retained_until: r.get(13)?,
-        shallow: r.get(14)?,
-        created_by: r.get(15)?,
-        created_at: r.get(16)?,
-        updated_at: r.get(17)?,
+        session_id: r.get(2)?,
+        source: path(r.get(3)?),
+        source_branch: r.get(4)?,
+        base: r.get(5)?,
+        branch: r.get(6)?,
+        path: path(r.get(7)?),
+        state: r.get(8)?,
+        shallow: r.get(9)?,
+        discards: r.get(10)?,
+        created_by: r.get(11)?,
+        created_at: r.get(12)?,
+        updated_at: r.get(13)?,
     })
 }
 
@@ -152,29 +185,27 @@ fn load(conn: &Connection, id: &str) -> Result<Option<Row>> {
     Ok(conn.query_row(&format!("SELECT {COLUMNS} FROM workspaces WHERE id=?1"), [id], row).optional()?)
 }
 
-fn by_creator(conn: &Connection, creator: &str) -> Result<Option<Row>> {
-    Ok(conn.query_row(&format!("SELECT {COLUMNS} FROM workspaces WHERE created_by=?1"), [creator], row).optional()?)
+fn of_session(conn: &Connection, session: &str) -> Result<Vec<Row>> {
+    let mut stmt = conn.prepare(&format!("SELECT {COLUMNS} FROM workspaces WHERE session_id=?1 ORDER BY created_at"))?;
+    let rows = stmt.query_map([session], row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 fn save(conn: &Connection, r: &Row) -> Result<()> {
     conn.execute(
-        &format!("INSERT OR REPLACE INTO workspaces({COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)"),
+        &format!("INSERT OR REPLACE INTO workspaces({COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)"),
         params![
             r.id,
             r.name,
+            r.session_id,
             bytes(&r.source),
             r.source_branch,
             r.base,
             r.branch,
             bytes(&r.path),
             r.state,
-            r.prior_state,
-            r.owner,
-            r.session_id,
-            r.reviewed.as_ref().map(|v| serde_json::to_string(v).unwrap()),
-            r.retained.as_deref().map(bytes),
-            r.retained_until,
             r.shallow,
+            r.discards,
             r.created_by,
             r.created_at,
             r.updated_at,
@@ -196,7 +227,7 @@ fn settle(conn: &Connection, op: &str, state: &str, detail: &str) -> Result<()> 
     Ok(())
 }
 
-fn interrupted(conn: &Connection, workspace: &str) -> Result<Option<api::WorkspaceOperation>> {
+fn shown_operation(conn: &Connection, workspace: &str) -> Result<Option<api::WorkspaceOperation>> {
     Ok(conn
         .query_row(
             "SELECT kind,state,detail FROM workspace_journal WHERE workspace_id=?1 AND state IN ('interrupted','conflict') ORDER BY started_at DESC LIMIT 1",
@@ -206,7 +237,78 @@ fn interrupted(conn: &Connection, workspace: &str) -> Result<Option<api::Workspa
         .optional()?)
 }
 
-/// A rebase stopped part way in the clone (the person, the agent or the helper left it so).
+fn record(conn: &Connection, r: &Row) -> Result<api::Workspace> {
+    Ok(api::Workspace {
+        workspace_id: r.id.clone(),
+        name: r.name.clone(),
+        session_id: r.session_id.clone(),
+        source: HostPath::from_path(&r.source),
+        source_branch: r.source_branch.clone(),
+        base: r.base.clone(),
+        branch: r.branch.clone(),
+        path: HostPath::from_path(&r.path),
+        state: if r.state == "result" { api::WorkspaceState::Result } else { api::WorkspaceState::Open },
+        operation: shown_operation(conn, &r.id)?,
+        limitations: if r.shallow { vec!["shallow_source".into()] } else { vec![] },
+        created_at: crate::sfp::timestamp(r.created_at),
+        updated_at: crate::sfp::timestamp(r.updated_at),
+    })
+}
+
+struct Discard {
+    id: String,
+    workspace_id: String,
+    session_id: String,
+    name: String,
+    source: PathBuf,
+    branch: String,
+    snapshot: String,
+    anchor: String,
+    until: i64,
+    created_at: i64,
+}
+
+fn discard_row(r: &rusqlite::Row) -> rusqlite::Result<Discard> {
+    Ok(Discard {
+        id: r.get(0)?,
+        workspace_id: r.get(1)?,
+        session_id: r.get(2)?,
+        name: r.get(3)?,
+        source: path(r.get(4)?),
+        branch: r.get(5)?,
+        snapshot: r.get(6)?,
+        anchor: r.get(7)?,
+        until: r.get(8)?,
+        created_at: r.get(9)?,
+    })
+}
+
+const DISCARD_COLUMNS: &str = "id,workspace_id,session_id,name,source,branch,snapshot,anchor,until,created_at";
+
+fn discard_record(d: &Discard) -> api::Discarded {
+    api::Discarded {
+        discard_id: d.id.clone(),
+        workspace_id: d.workspace_id.clone(),
+        name: d.name.clone(),
+        source: HostPath::from_path(&d.source),
+        until: crate::sfp::timestamp(d.until),
+        created_at: crate::sfp::timestamp(d.created_at),
+    }
+}
+
+fn receipts(conn: &Connection) -> Result<crate::operations::Journal<'_>> {
+    crate::operations::Journal::new(conn)
+}
+
+fn input<T: serde::Serialize>(a: &T) -> Result<Value> {
+    Ok(serde_json::to_value(a)?)
+}
+
+fn get_row<H: Host>(h: &H, id: &str) -> Result<Row> {
+    h.db(|c| load(c, id))?.ok_or_else(|| not_found("workspace"))
+}
+
+/// A stopped rebase in the clone (the agent, the person or the helper left it so).
 fn rebasing(clone: &Path) -> bool {
     clone.join(".git/rebase-merge").exists() || clone.join(".git/rebase-apply").exists()
 }
@@ -229,73 +331,220 @@ fn clear_conflict<H: Host>(h: &H, r: &Row) -> Result<()> {
     Ok(())
 }
 
-fn state(s: &str) -> api::WorkspaceState {
-    match s {
-        "open" => api::WorkspaceState::Open,
-        "merged" => api::WorkspaceState::Merged,
-        "discarded" => api::WorkspaceState::Discarded,
-        _ => api::WorkspaceState::Result,
-    }
+/// The repository's spare folder: the most recently finished one (§12).
+fn spare<H: Host>(h: &H, source: &Path) -> PathBuf {
+    flow::spare_path(&h.root(), source)
 }
 
-fn record(conn: &Connection, r: &Row) -> Result<api::Workspace> {
-    Ok(api::Workspace {
-        workspace_id: r.id.clone(),
-        name: r.name.clone(),
-        source: HostPath::from_path(&r.source),
-        source_branch: r.source_branch.clone(),
-        base: r.base.clone(),
-        branch: r.branch.clone(),
-        path: HostPath::from_path(&r.path),
-        state: state(&r.state),
-        owner_session: r.owner.clone(),
-        session_id: r.session_id.clone(),
-        reviewed: r.reviewed.clone(),
-        operation: interrupted(conn, &r.id)?,
-        retained_until: r.retained_until.map(crate::sfp::timestamp),
-        limitations: if r.shallow { vec!["shallow_source".into()] } else { vec![] },
-        created_at: crate::sfp::timestamp(r.created_at),
-        updated_at: crate::sfp::timestamp(r.updated_at),
+/// The workspace is done with: its folder becomes the repository's spare (the previous spare
+/// goes), its anchors go except those of discarded work, its row goes.
+fn free<H: Host>(h: &H, r: &Row) -> Result<()> {
+    if r.path.exists() {
+        let to = spare(h, &r.source);
+        if to.exists() {
+            std::fs::remove_dir_all(&to).with_context(|| format!("remove the old spare {}", to.display()))?;
+        }
+        std::fs::create_dir_all(to.parent().context("no parent")?)?;
+        std::fs::rename(&r.path, &to).with_context(|| format!("keep {} as the spare", r.path.display()))?;
+    }
+    if r.source.exists() {
+        for name in ["base", "dest", "incoming"] {
+            let _ = drop_ref(&r.source, &super::anchor_ref(&r.id, name));
+        }
+    }
+    h.db(|c| {
+        c.execute("DELETE FROM workspaces WHERE id=?1", [&r.id])?;
+        Ok(())
     })
 }
 
-fn receipts(conn: &Connection) -> Result<crate::operations::Journal<'_>> {
-    crate::operations::Journal::new(conn)
-}
-
-/// The request as its receipt fingerprints it: display text is not identity.
-fn input<T: serde::Serialize>(a: &T) -> Result<Value> {
-    let mut v = serde_json::to_value(a)?;
-    if let Some(source) = v.get_mut("source").and_then(|s| s.as_object_mut()) {
-        source.remove("display");
-    }
-    Ok(v)
-}
-
-fn get_row<H: Host>(h: &H, id: &str) -> Result<Row> {
-    h.db(|c| load(c, id))?.ok_or_else(not_found)
-}
-
-/// An open workspace whose owner ended (or went) has no writer: it is a result (§3).
-fn settle_owner<H: Host>(h: &H, r: &mut Row) -> Result<()> {
-    if r.state != "open" {
-        return Ok(());
-    }
-    let gone = r.owner.as_deref().is_none_or(|o| matches!(h.life(o), Life::Missing | Life::Ended));
-    if gone {
-        r.state = "result".into();
-        r.owner = None;
-        r.updated_at = h.now();
-        h.db(|c| save(c, r))?;
-    }
+fn drop_ref(repo: &Path, name: &str) -> Result<()> {
+    let git = crate::changes::Git::open(repo)?;
+    let mut c = git.cmd_write();
+    c.args(["update-ref", "-d", name]);
+    c.output()?;
     Ok(())
 }
 
-fn writing<H: Host>(h: &H, r: &Row) -> bool {
-    r.owner.as_deref().is_some_and(|o| h.life(o) == Life::Running)
+/// A workspace whose session ended: with work left, a result; with nothing, freed (§12).
+/// Returns the row still there.
+fn settle_session<H: Host>(h: &H, mut r: Row) -> Result<Option<Row>> {
+    if r.state == "open" && matches!(h.life(&r.session_id), Life::Missing | Life::Ended) {
+        if r.path.exists() && !rebasing(&r.path) && !flow::unapplied(&r.path)? {
+            free(h, &r)?;
+            return Ok(None);
+        }
+        r.state = "result".into();
+        r.updated_at = h.now();
+        h.db(|c| save(c, &r))?;
+    }
+    Ok(Some(r))
 }
 
-/// The clone's revision now, against the source's current branch, and whether it needs a rebase.
+/// After an Apply or Discard of a result: nothing left, so it is done with.
+fn settle_result<H: Host>(h: &H, r: Row) -> Result<Option<Row>> {
+    if r.state == "result" && !rebasing(&r.path) && !flow::unapplied(&r.path)? {
+        free(h, &r)?;
+        return Ok(None);
+    }
+    Ok(Some(r))
+}
+
+/// A repository's top: a folder with its own `.git` directory or file.
+fn repository_top(p: &Path) -> bool {
+    p.is_dir() && p.join(".git").exists()
+}
+
+/// Where a workspace session's jail puts its clone (§12): at the repository's own path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Layout {
+    pub source: PathBuf,
+    pub clone: PathBuf,
+    /// The source's own object store, borrowed read-only.
+    pub objects: PathBuf,
+}
+
+/// The workspaces `session`'s jail binds (from the store alone: what was made at its last start).
+pub fn session_layout(conn: &Connection, session: &str) -> Result<Vec<Layout>> {
+    if !has_tables(conn)? {
+        return Ok(vec![]);
+    }
+    Ok(of_session(conn, session)?
+        .into_iter()
+        .filter(|r| r.path.exists())
+        .map(|r| Layout { objects: r.source.join(".git/objects"), source: r.source, clone: r.path })
+        .collect())
+}
+
+/// At the start of `session`'s jail (§12): a workspace for each session-pinned repository, made
+/// fresh or from the repository's spare, or kept from the session's last start. A repository
+/// that cannot have one stays live, its reason recorded. Nothing for a live session.
+pub fn ensure_for_session<H: Host>(h: &H, session: &str) -> Result<Vec<Layout>> {
+    if !h.db(|c| mode(c, session))? {
+        return Ok(vec![]);
+    }
+    let _g = lock();
+    let mut layout = Vec::new();
+    for pin in h.session_pins(session)? {
+        if !repository_top(&pin) {
+            continue;
+        }
+        let Ok(source) = pin.canonicalize() else { continue };
+        let existing = h.db(|c| {
+            Ok(c.query_row(&format!("SELECT {COLUMNS} FROM workspaces WHERE session_id=?1 AND source=?2"), params![session, bytes(&source)], row).optional()?)
+        })?;
+        if let Some(mut r) = existing.filter(|r| r.path.exists()) {
+            if r.state != "open" {
+                r.state = "open".into();
+                r.updated_at = h.now();
+                h.db(|c| save(c, &r))?;
+            }
+            layout.push(Layout { objects: r.source.join(".git/objects"), source: r.source, clone: r.path });
+            continue;
+        }
+        let src = match super::inspect(&source)? {
+            Ok(s) => s,
+            Err(refusal) => {
+                h.db(|c| {
+                    c.execute(
+                        "INSERT OR REPLACE INTO session_live_repositories(session_id, source, reason) VALUES(?1,?2,?3)",
+                        params![session, bytes(&source), refusal.reason()],
+                    )?;
+                    Ok(())
+                })?;
+                continue;
+            }
+        };
+        let id = format!("ws-{}", crate::store::new_id());
+        let name = src.root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "work".into());
+        let at = super::path_for(&h.root(), &src, &id, &name);
+        let op = key(&format!("ensure:{session}:{id}"));
+        let now = h.now();
+        h.db(|c| intent(c, &op, &id, "create", &json!({"path": bytes(&at), "source": bytes(&src.root)}), now))?;
+        let spare = spare(h, &src.root);
+        let made = if spare.exists() {
+            flow::reuse(&spare, &src, &id, &name, &at, &op)
+        } else {
+            super::create(&src, &id, &name, &at, &op)
+        };
+        let made = match made {
+            Ok(m) => m,
+            Err(e) => {
+                let _ = super::remove_partial(&at, &op);
+                let _ = super::drop_anchors(&src.root, &id);
+                h.db(|c| settle(c, &op, "failed", &format!("{e:#}")))?;
+                return Err(e.context(format!("make the workspace of {}", src.root.display())));
+            }
+        };
+        let r = Row {
+            id: id.clone(),
+            name,
+            session_id: session.into(),
+            source: src.root.clone(),
+            source_branch: src.branch.clone(),
+            base: made.base,
+            branch: made.branch,
+            path: made.path,
+            state: "open".into(),
+            shallow: src.shallow,
+            discards: 0,
+            created_by: op.clone(),
+            created_at: now,
+            updated_at: now,
+        };
+        h.db(|c| {
+            let tx = c.unchecked_transaction()?;
+            save(c, &r)?;
+            settle(c, &op, "done", "")?;
+            c.execute("DELETE FROM session_live_repositories WHERE session_id=?1 AND source=?2", params![session, bytes(&src.root)])?;
+            tx.commit()?;
+            Ok(())
+        })?;
+        layout.push(Layout { objects: r.source.join(".git/objects"), source: r.source, clone: r.path });
+    }
+    Ok(layout)
+}
+
+/// A session's repositories as the window shows them (§12 gap 1): its workspaces, and the
+/// repositories it keeps live with why.
+pub fn session_view<H: Host>(h: &H, session: &str) -> Result<api::SessionView> {
+    let workspaces_mode = h.db(|c| mode(c, session))?;
+    let rows = h.db(|c| if has_tables(c)? { of_session(c, session) } else { Ok(vec![]) })?;
+    let mut workspaces = Vec::new();
+    for r in rows {
+        if let Some(r) = settle_session(h, r)? {
+            workspaces.push(h.db(|c| record(c, &r))?);
+        }
+    }
+    let live = h.db(|c| {
+        if !has_tables(c)? {
+            return Ok(vec![]);
+        }
+        let mut stmt = c.prepare("SELECT source, reason FROM session_live_repositories WHERE session_id=?1")?;
+        let rows = stmt.query_map([session], |r| Ok((path(r.get(0)?), r.get::<_, String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    })?;
+    let live = live
+        .into_iter()
+        .map(|(source, reason)| api::LiveRepository {
+            message: refusal_message(&reason),
+            source: HostPath::from_path(&source),
+            reason,
+        })
+        .collect();
+    Ok(api::SessionView { workspaces_mode, workspaces, live })
+}
+
+fn refusal_message(reason: &str) -> String {
+    use super::Refusal::*;
+    [NotARepository, NoCommits, LinkedWorktree, Submodules, PartialClone, Lfs, FilterDrivers, BorrowedObjects, DetachedHead, RefFormat]
+        .into_iter()
+        .find(|r| r.reason() == reason)
+        .map(|r| format!("Live: {}", r.message()))
+        .unwrap_or_else(|| format!("Live: {reason}"))
+}
+
+/// The clone's revision now, against the checkout's current branch, and whether it needs a rebase.
 fn revision_now(r: &Row) -> Result<(api::Revision, bool)> {
     let rev = super::revision(&r.path, &r.branch)?;
     let (branch, tip) = super::source_head(&r.source)?;
@@ -303,122 +552,44 @@ fn revision_now(r: &Row) -> Result<(api::Revision, bool)> {
     Ok((api::Revision { tip: rev.tip, worktree: rev.worktree, destination_branch: branch, destination_tip: tip }, needs_rebase))
 }
 
+/// What an Apply would bring: commits and changes since what the person has.
 fn summary(r: &Row) -> Result<api::Summary> {
-    let s = super::summary(&r.path, &r.branch, &r.base)?;
-    Ok(api::Summary {
-        commits: s.commits,
-        files: s.files,
-        added: s.added.to_string(),
-        removed: s.removed.to_string(),
-        uncommitted: s.uncommitted,
-        ignored: s.ignored,
-    })
+    let applied = flow::applied(&r.path)?;
+    let s = super::summary(&r.path, &r.branch, &applied)?;
+    Ok(api::Summary { commits: s.commits, files: s.files, added: s.added.to_string(), removed: s.removed.to_string(), uncommitted: s.uncommitted })
 }
 
-fn changed<H: Host>(h: &H, r: &Row, operation: Option<&str>, session_id: Option<String>) -> Result<api::Changed> {
+fn changed<H: Host>(h: &H, r: Option<&Row>, operation: Option<&str>, discarded: Option<api::Discarded>) -> Result<api::Changed> {
     h.db(|c| {
         Ok(api::Changed {
-            workspace: record(c, r)?,
+            workspace: r.map(|r| record(c, r)).transpose()?,
             operation: operation.map(|o| receipts(c)?.get(o)).transpose()?,
-            session_id,
+            discarded,
         })
     })
 }
 
-pub fn create<H: Host>(h: &H, a: &api::Create) -> Result<api::Created> {
-    const METHOD: &str = "_sill/workspaces.create";
-    let fingerprint = input(a)?;
-    let k = key(&a.operation_id);
-    let _g = lock();
-    if let Some(operation) = h.db(|c| receipts(c)?.existing(&a.operation_id, METHOD, &fingerprint))? {
-        let r = h.db(|c| by_creator(c, &k))?.ok_or_else(|| -> anyhow::Error {
-            DomainError { code: "gone", message: "the workspace this operation made is gone, or it did not complete".into(), details: None }.into()
-        })?;
-        return Ok(api::Created { workspace: h.db(|c| record(c, &r))?, session_id: r.session_id.clone().unwrap_or_default(), source_dirty: false, operation });
-    }
-    let name = a.name.trim();
-    if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
-        return Err(sill_proto::rpc::Error::invalid_params("name must contain 1–80 characters without control characters").into());
-    }
-    if a.agent.is_empty() || a.policy.is_empty() {
-        return Err(sill_proto::rpc::Error::invalid_params("agent and policy are required").into());
-    }
-    let src = match super::inspect(&a.source.to_path().map_err(sill_proto::rpc::Error::invalid_params)?)? {
-        Ok(s) => s,
-        Err(refusal) => return Err(refuse(refusal.reason(), refusal.message(), vec![])),
-    };
-    h.db(|c| receipts(c)?.begin(&a.operation_id, METHOD, &fingerprint))?;
-    let id = format!("ws-{}", crate::store::new_id());
-    let at = super::path_for(&h.root(), &src, &id, name);
-    let now = h.now();
-    h.db(|c| intent(c, &k, &id, "create", &json!({"path": bytes(&at), "source": bytes(&src.root)}), now))?;
-    let fail = |e: anyhow::Error| -> anyhow::Error {
-        let _ = super::remove_partial(&at, &k);
-        let _ = super::drop_anchors(&src.root, &id);
-        let _ = h.db(|c| {
-            settle(c, &k, "failed", &format!("{e:#}"))?;
-            receipts(c)?.finish(&a.operation_id, None, Some("operation_failed"))
-        });
-        e
-    };
-    let made = super::create(&src, &id, name, &at, &k).map_err(fail)?;
-    let session = h.new_session(&format!("workspace:{k}"), &a.agent, &a.policy, &made.path).map_err(fail)?;
-    let r = Row {
-        id: id.clone(),
-        name: name.into(),
-        source: src.root.clone(),
-        source_branch: src.branch.clone(),
-        base: made.base,
-        branch: made.branch,
-        path: made.path,
-        state: "open".into(),
-        prior_state: None,
-        owner: Some(session.clone()),
-        session_id: Some(session.clone()),
-        reviewed: None,
-        retained: None,
-        retained_until: None,
-        shallow: src.shallow,
-        created_by: k.clone(),
-        created_at: now,
-        updated_at: now,
-    };
-    h.db(|c| {
-        let tx = c.unchecked_transaction()?;
-        save(c, &r)?;
-        settle(c, &k, "done", "")?;
-        receipts(c)?.finish(&a.operation_id, None, None)?;
-        tx.commit()?;
-        Ok(())
-    })?;
-    Ok(api::Created {
-        workspace: h.db(|c| record(c, &r))?,
-        session_id: session,
-        source_dirty: src.dirty,
-        operation: h.db(|c| receipts(c)?.get(&a.operation_id))?,
-    })
-}
-
-/// Newest first; `after` is the previous page's `next`. Reading settles owners and expiries.
+/// Newest first; `after` is the previous page's `next`. Reading settles ended sessions and expiries.
 pub fn list<H: Host>(h: &H, a: &api::List) -> Result<api::Listed> {
     sweep(h)?;
     let limit = a.limit.unwrap_or(64);
     if !(1..=128).contains(&limit) {
         return Err(sill_proto::rpc::Error::invalid_params("limit must be 1–128").into());
     }
+    let bad = || -> anyhow::Error { DomainError { code: "invalid_cursor", message: "not a workspaces cursor".into(), details: None }.into() };
     let after = match &a.after {
         None => None,
         Some(cursor) => {
-            let (at, id) = cursor.split_once(':').ok_or_else(|| DomainError { code: "invalid_cursor", message: "not a workspaces cursor".into(), details: None })?;
-            Some((at.parse::<i64>().map_err(|_| DomainError { code: "invalid_cursor", message: "not a workspaces cursor".into(), details: None })?, id.to_string()))
+            let (at, id) = cursor.split_once(':').ok_or_else(bad)?;
+            Some((at.parse::<i64>().map_err(|_| bad())?, id.to_string()))
         }
     };
     let mut rows = h.db(|c| {
         let mut stmt = c.prepare(&format!(
-            "SELECT {COLUMNS} FROM workspaces WHERE ?1 IS NULL OR created_at < ?1 OR (created_at = ?1 AND id < ?2) ORDER BY created_at DESC, id DESC LIMIT ?3"
+            "SELECT {COLUMNS} FROM workspaces WHERE (?4 IS NULL OR session_id = ?4) AND (?1 IS NULL OR created_at < ?1 OR (created_at = ?1 AND id < ?2)) ORDER BY created_at DESC, id DESC LIMIT ?3"
         ))?;
         let rows = stmt
-            .query_map(params![after.as_ref().map(|a| a.0), after.as_ref().map(|a| a.1.clone()).unwrap_or_default(), limit + 1], row)?
+            .query_map(params![after.as_ref().map(|a| a.0), after.as_ref().map(|a| a.1.clone()).unwrap_or_default(), limit + 1, a.session_id], row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     })?;
@@ -428,134 +599,74 @@ pub fn list<H: Host>(h: &H, a: &api::List) -> Result<api::Listed> {
         format!("{}:{}", last.created_at, last.id)
     });
     let mut workspaces = Vec::new();
-    for mut r in rows {
-        settle_owner(h, &mut r)?;
-        workspaces.push(h.db(|c| record(c, &r))?);
+    for r in rows {
+        if let Some(r) = settle_session(h, r)? {
+            workspaces.push(h.db(|c| record(c, &r))?);
+        }
     }
-    Ok(api::Listed { workspaces, next })
+    let discarded = if a.after.is_none() {
+        h.db(|c| {
+            let mut stmt = c.prepare(&format!("SELECT {DISCARD_COLUMNS} FROM workspace_discards WHERE ?1 IS NULL OR session_id=?1 ORDER BY created_at DESC"))?;
+            let rows = stmt.query_map([&a.session_id], discard_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows.iter().map(discard_record).collect())
+        })?
+    } else {
+        vec![]
+    };
+    Ok(api::Listed { workspaces, discarded, next })
 }
 
 pub fn get<H: Host>(h: &H, id: &str) -> Result<api::Detail> {
-    let mut r = get_row(h, id)?;
-    settle_owner(h, &mut r)?;
-    let workspace = h.db(|c| record(c, &r))?;
-    if r.state == "discarded" || !r.path.exists() {
-        return Ok(api::Detail { workspace, revision: None, summary: None, needs_rebase: false });
-    }
+    let r = settle_session(h, get_row(h, id)?)?.ok_or_else(|| not_found("workspace"))?;
     let (revision, needs_rebase) = revision_now(&r)?;
-    Ok(api::Detail { workspace, revision: Some(revision), summary: Some(summary(&r)?), needs_rebase })
+    Ok(api::Detail { workspace: h.db(|c| record(c, &r))?, revision, summary: summary(&r)?, needs_rebase })
 }
 
 pub fn diff<H: Host>(h: &H, a: &api::DiffRequest) -> Result<api::DiffText> {
     let r = get_row(h, &a.workspace_id)?;
-    if r.state == "discarded" {
-        return Err(refuse("discarded", "the workspace is discarded", vec![]));
-    }
     let against = match a.against {
+        api::Against::Applied => flow::applied(&r.path)?,
         api::Against::Base => r.base.clone(),
-        api::Against::Destination => super::source_head(&r.source)?.1,
     };
     let (text, truncated) = super::diff(&r.path, &against, DIFF_LIMIT)?;
     Ok(api::DiffText { text, truncated })
 }
 
-pub fn finish<H: Host>(h: &H, id: &str) -> Result<api::Changed> {
-    let _g = lock();
-    let mut r = get_row(h, id)?;
-    settle_owner(h, &mut r)?;
-    if r.state == "open" {
-        if writing(h, &r) {
-            return Err(refuse("writer_active", "the session working in it is still running; stop it first", vec![]));
-        }
-        r.state = "result".into();
-        r.owner = None;
-        r.updated_at = h.now();
-        h.db(|c| save(c, &r))?;
-    }
-    changed(h, &r, None, None)
-}
-
-pub fn reopen<H: Host>(h: &H, a: &api::Reopen) -> Result<api::Changed> {
-    const METHOD: &str = "_sill/workspaces.reopen";
-    let fingerprint = input(a)?;
-    let k = key(&a.operation_id);
-    let _g = lock();
-    if h.db(|c| receipts(c)?.existing(&a.operation_id, METHOD, &fingerprint))?.is_some() {
-        let r = get_row(h, &a.workspace_id)?;
-        return changed(h, &r, Some(&a.operation_id), r.session_id.clone());
-    }
-    let mut r = get_row(h, &a.workspace_id)?;
-    settle_owner(h, &mut r)?;
-    if r.state != "result" && r.state != "open" {
-        return Err(refuse("state", "only a result can be reopened", vec![]));
-    }
-    h.db(|c| receipts(c)?.begin(&a.operation_id, METHOD, &fingerprint))?;
-    let live = r.session_id.clone().filter(|s| !matches!(h.life(s), Life::Missing | Life::Ended));
-    let session = match live {
-        Some(s) => s,
-        None => {
-            let (Some(agent), Some(policy)) = (a.agent.as_deref(), a.policy.as_deref()) else {
-                let _ = h.db(|c| receipts(c)?.finish(&a.operation_id, None, Some("invalid_state")));
-                return Err(sill_proto::rpc::Error::invalid_params("the last session ended: agent and policy are required for a new one").into());
-            };
-            h.new_session(&format!("workspace-reopen:{k}"), agent, policy, &r.path)?
-        }
-    };
-    r.state = "open".into();
-    r.owner = Some(session.clone());
-    r.session_id = Some(session.clone());
-    r.reviewed = None;
-    r.updated_at = h.now();
-    h.db(|c| {
-        save(c, &r)?;
-        receipts(c)?.finish(&a.operation_id, None, None)
-    })?;
-    changed(h, &r, Some(&a.operation_id), Some(session))
-}
-
-/// Record the destination (anchored, and visible in the clone) and the revision a Merge would
-/// apply. Repeatable: a retry recomputes.
+/// Rebase the result onto the checkout's current tip when it moved, in the helper jail, keeping
+/// uncommitted changes uncommitted (`--autostash`). Repeatable: a retry recomputes.
 pub fn prepare<H: Host>(h: &H, a: &api::Operate) -> Result<api::Prepared> {
     const METHOD: &str = "_sill/workspaces.prepare";
     let fingerprint = input(a)?;
     let _g = lock();
-    let mut r = get_row(h, &a.workspace_id)?;
-    settle_owner(h, &mut r)?;
-    if r.state == "open" {
-        return Err(refuse("writer_active", "a session is working in it; finish it first", vec![]));
-    }
-    if r.state != "result" {
-        return Err(refuse("state", "only a result can be merged", vec![]));
+    let r = settle_session(h, get_row(h, &a.workspace_id)?)?.ok_or_else(|| not_found("workspace"))?;
+    if h.busy(&r.session_id) {
+        return Err(refuse("writer_active", "The agent is working; wait for its turn to end.", vec![]));
     }
     clear_conflict(h, &r)?;
     if rebasing(&r.path) {
-        return Err(refuse("rebase_in_progress", "A rebase is stopped in the workspace: finish it there (Reopen) or abort it.", conflicted(&r.path)));
+        return Err(refuse("rebase_in_progress", "A rebase is stopped in the workspace: finish it there or abort it.", conflicted(&r.path)));
     }
     let (branch, _) = super::source_head(&r.source)?;
     if branch.is_empty() {
-        return Err(refuse("detached_head", "check out a branch in the source first", vec![]));
+        return Err(refuse("detached_head", "Check out a branch in your checkout first.", vec![]));
     }
-    // what a rebase would need, checked before anything is recorded or moved
-    let (current, needs_rebase) = revision_now(&r)?;
-    let mut helper = None;
-    if needs_rebase {
-        if !current.worktree.is_empty() {
-            return Err(refuse("uncommitted", "The workspace has uncommitted changes; a rebase needs them committed or removed.", super::summary(&r.path, &r.branch, &r.base)?.uncommitted));
-        }
-        let Some(session) = r.session_id.clone().filter(|s| h.life(s) != Life::Missing) else {
-            return Err(refuse("no_session", "The workspace's session is gone; reopen it to rebase.", vec![]));
-        };
-        helper = Some(session);
+    let (_, needs_rebase) = revision_now(&r)?;
+    if needs_rebase && h.life(&r.session_id) == Life::Missing {
+        return Err(refuse("no_session", "The workspace's session is gone, so it cannot be rebased.", vec![]));
     }
     let fresh = h.db(|c| receipts(c)?.begin(&a.operation_id, METHOD, &fingerprint))?.1;
     let dest = super::set_destination(&r.source, &r.path, &r.id, &branch, &r.branch)?;
     let mut conflicts = Vec::new();
-    if let Some(session) = helper {
-        let out = h.run_jailed(&session, &r.path, &["git", "rebase", "--no-autostash", "refs/sill/dest"])?;
+    if needs_rebase {
+        let out = h.run_jailed(&r.session_id, &r.source, &["git", "rebase", "--autostash", "refs/sill/dest"])?;
         if !out.status.success() {
             if rebasing(&r.path) {
                 conflicts = conflicted(&r.path);
-                let detail = format!("The rebase onto {branch} ({}) stopped: {}", &dest[..dest.len().min(12)], if conflicts.is_empty() { "see the workspace".into() } else { conflicts.join(", ") });
+                let detail = format!(
+                    "The rebase onto {branch} ({}) stopped: {}",
+                    &dest[..dest.len().min(12)],
+                    if conflicts.is_empty() { "see the workspace".into() } else { conflicts.join(", ") }
+                );
                 let k = key(&a.operation_id);
                 h.db(|c| {
                     intent(c, &k, &r.id, "rebase", &json!({"dest": dest}), h.now())?;
@@ -563,7 +674,7 @@ pub fn prepare<H: Host>(h: &H, a: &api::Operate) -> Result<api::Prepared> {
                 })?;
             } else {
                 let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                let hint = if r.shallow { " The source is shallow: fetch more history in it, then prepare again." } else { "" };
+                let hint = if r.shallow { " The checkout is shallow: fetch more history in it, then try again." } else { "" };
                 if fresh {
                     h.db(|c| receipts(c)?.finish(&a.operation_id, None, Some("invalid_state")))?;
                 }
@@ -572,17 +683,10 @@ pub fn prepare<H: Host>(h: &H, a: &api::Operate) -> Result<api::Prepared> {
         }
     }
     let (revision, needs_rebase) = revision_now(&r)?;
-    let changed = r.reviewed.as_ref() != Some(&revision);
-    r.reviewed = Some(revision.clone());
-    r.updated_at = h.now();
-    h.db(|c| {
-        save(c, &r)?;
-        if fresh {
-            receipts(c)?.finish(&a.operation_id, None, None)?;
-        }
-        Ok(())
-    })?;
-    Ok(api::Prepared { workspace: h.db(|c| record(c, &r))?, revision, changed, needs_rebase, conflicts })
+    if fresh {
+        h.db(|c| receipts(c)?.finish(&a.operation_id, None, None))?;
+    }
+    Ok(api::Prepared { workspace: h.db(|c| record(c, &r))?, revision, needs_rebase, conflicts })
 }
 
 /// Abort a rebase that stopped in the workspace, in the same helper jail.
@@ -591,80 +695,71 @@ pub fn abort<H: Host>(h: &H, a: &api::Operate) -> Result<api::Changed> {
     let r = get_row(h, &a.workspace_id)?;
     if !rebasing(&r.path) {
         clear_conflict(h, &r)?;
-        return changed(h, &r, None, None);
+        return changed(h, Some(&r), None, None);
     }
-    if writing(h, &r) {
-        return Err(refuse("writer_active", "a session is working in it; abort the rebase there", vec![]));
+    if h.busy(&r.session_id) {
+        return Err(refuse("writer_active", "The agent is working; abort the rebase after its turn.", vec![]));
     }
-    let Some(session) = r.session_id.clone().filter(|s| h.life(s) != Life::Missing) else {
-        return Err(refuse("no_session", "The workspace's session is gone; reopen it to abort the rebase there.", vec![]));
-    };
-    let out = h.run_jailed(&session, &r.path, &["git", "rebase", "--abort"])?;
+    let out = h.run_jailed(&r.session_id, &r.source, &["git", "rebase", "--abort"])?;
     if !out.status.success() {
         return Err(refuse("rebase_failed", format!("The rebase could not be aborted: {}", String::from_utf8_lossy(&out.stderr).trim()), vec![]));
     }
     clear_conflict(h, &r)?;
-    changed(h, &r, None, None)
+    changed(h, Some(&r), None, None)
 }
 
 fn stop_message(stop: &super::Stop) -> String {
     match stop {
-        super::Stop::SourceMoved => "The source's branch moved or changed since this was prepared; prepare again.".into(),
-        super::Stop::NeedsPrepare => "The result does not include the source's latest commits: rebase it in the workspace first.".into(),
-        super::Stop::Overlap(p) => format!("Your uncommitted edits touch files the result changes: {}", p.join(", ")),
-        super::Stop::Untracked(p) => format!("Untracked files in the source would be overwritten: {}", p.join(", ")),
+        super::Stop::SourceMoved => "Your checkout's branch moved or changed since you looked; look again.".into(),
+        super::Stop::NeedsPrepare => "Your checkout has commits the workspace does not: it needs a rebase first.".into(),
+        super::Stop::Overlap(p) => format!("Your own edits touch files the agent changed: {}", p.join(", ")),
+        super::Stop::Untracked(p) => format!("Untracked files of yours would be overwritten: {}", p.join(", ")),
     }
 }
 
-pub fn merge<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
-    const METHOD: &str = "_sill/workspaces.merge";
+/// Apply (§12): bring the workspace's commits and uncommitted changes into the person's checkout,
+/// exactly the revision they saw. The workspace goes on; what it has applied moves forward.
+pub fn apply<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
+    const METHOD: &str = "_sill/workspaces.apply";
     let fingerprint = input(a)?;
     let k = key(&a.operation_id);
     let _g = lock();
     if h.db(|c| receipts(c)?.existing(&a.operation_id, METHOD, &fingerprint))?.is_some() {
-        let r = get_row(h, &a.workspace_id)?;
-        return changed(h, &r, Some(&a.operation_id), None);
+        let r = h.db(|c| load(c, &a.workspace_id))?;
+        return changed(h, r.as_ref(), Some(&a.operation_id), None);
     }
-    let mut r = get_row(h, &a.workspace_id)?;
-    settle_owner(h, &mut r)?;
-    if r.state == "open" {
-        return Err(refuse("writer_active", "a session is working in it; finish it first", vec![]));
-    }
-    if r.state != "result" {
-        return Err(refuse("state", "only a result can be merged", vec![]));
+    let r = settle_session(h, get_row(h, &a.workspace_id)?)?.ok_or_else(|| not_found("workspace"))?;
+    if h.busy(&r.session_id) {
+        return Err(refuse("writer_active", "The agent is working; apply after its turn.", vec![]));
     }
     if rebasing(&r.path) {
-        return Err(refuse("rebase_in_progress", "A rebase is stopped in the workspace: finish it there (Reopen) or abort it.", conflicted(&r.path)));
+        return Err(refuse("rebase_in_progress", "A rebase is stopped in the workspace: finish it there or abort it.", conflicted(&r.path)));
     }
-    let (now_rev, _) = revision_now(&r)?;
+    let (now_rev, needs_rebase) = revision_now(&r)?;
     if now_rev != a.revision {
-        return Err(refuse("stale_revision", "The workspace or the source changed since you looked; review it again.", vec![]));
+        return Err(refuse("stale_revision", "The workspace or your checkout changed since you looked; look again.", vec![]));
     }
-    if !now_rev.worktree.is_empty() {
-        let s = super::summary(&r.path, &r.branch, &r.base)?;
-        return Err(refuse("uncommitted", "The workspace has uncommitted changes, which a Merge would leave behind; commit or remove them.", s.uncommitted));
+    if needs_rebase {
+        return Err(refuse("stale_revision", "Your checkout has commits the workspace does not: prepare (rebase) first.", vec![]));
     }
     if now_rev.destination_branch.is_empty() {
-        return Err(refuse("detached_head", "check out a branch in the source first", vec![]));
+        return Err(refuse("detached_head", "Check out a branch in your checkout first.", vec![]));
     }
+    let was = flow::applied(&r.path)?;
     h.db(|c| {
         receipts(c)?.begin(&a.operation_id, METHOD, &fingerprint)?;
-        intent(c, &k, &r.id, "merge", &json!({"branch": now_rev.destination_branch, "old": now_rev.destination_tip, "new": now_rev.tip}), h.now())
+        intent(c, &k, &r.id, "apply", &json!({"branch": now_rev.destination_branch, "old": now_rev.destination_tip, "tip": now_rev.tip}), h.now())
     })?;
-    let outcome = super::fast_forward(&r.source, &r.path, &r.id, &now_rev.destination_branch, &now_rev.destination_tip, &r.branch);
+    let outcome = flow::apply(&r.source, &r.path, &r.id, &now_rev.destination_branch, &now_rev.destination_tip, &r.branch, &was);
     match outcome {
-        Ok(Ok(_)) => {
-            r.state = "merged".into();
-            r.updated_at = h.now();
+        Ok(Ok(done)) => {
+            flow::set_applied(&r.path, &done.snapshot)?;
             h.db(|c| {
-                let tx = c.unchecked_transaction()?;
-                save(c, &r)?;
                 settle(c, &k, "done", "")?;
-                receipts(c)?.finish(&a.operation_id, None, None)?;
-                tx.commit()?;
-                Ok(())
+                receipts(c)?.finish(&a.operation_id, None, None)
             })?;
-            changed(h, &r, Some(&a.operation_id), None)
+            let r = settle_result(h, r)?;
+            changed(h, r.as_ref(), Some(&a.operation_id), None)
         }
         Ok(Err(stop)) => {
             let message = stop_message(&stop);
@@ -675,217 +770,193 @@ pub fn merge<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
             Err(refuse(stop.reason(), message, stop.paths().to_vec()))
         }
         Err(e) => {
-            // a Git failure part way: what happened is for reconcile to establish
-            let detail = after_merge(&r, &now_rev.destination_branch, &now_rev.destination_tip, &now_rev.tip, h, &k)?;
-            let _ = h.db(|c| receipts(c)?.finish(&a.operation_id, None, Some("operation_failed")));
+            let detail = "The Apply stopped part way: check your checkout's branch and the files it changed, then look again.";
+            let _ = h.db(|c| {
+                settle(c, &k, "interrupted", detail)?;
+                receipts(c)?.finish(&a.operation_id, None, Some("operation_failed"))
+            });
             Err(e.context(detail))
         }
     }
 }
 
-/// Settle a merge whose outcome is uncertain from the source as it is: applied, not applied,
-/// or interrupted (shown, never reset).
-fn after_merge<H: Host>(r: &Row, branch: &str, old: &str, new: &str, h: &H, k: &str) -> Result<String> {
-    let applied = super::merge_applied(&r.source, branch, old, new).unwrap_or(super::Applied::Unclear);
-    let mut r = r.clone();
-    let detail = match applied {
-        super::Applied::Yes => {
-            r.state = "merged".into();
-            r.updated_at = h.now();
-            h.db(|c| {
-                save(c, &r)?;
-                settle(c, k, "done", "")
-            })?;
-            "the merge had taken effect".to_string()
-        }
-        super::Applied::No => {
-            h.db(|c| settle(c, k, "failed", "the merge did not take effect"))?;
-            "the merge did not take effect".to_string()
-        }
-        super::Applied::Unclear => {
-            let d = format!("The Merge was interrupted: the source's {branch} should be at {old} (before) or {new} (after) with its files; check the source before going on.");
-            h.db(|c| settle(c, k, "interrupted", &d))?;
-            d
-        }
-    };
-    Ok(detail)
-}
-
+/// Discard (§12): the workspace back to what was last applied; the discarded work kept 7 days for
+/// Undo. Only exactly the revision the person saw.
 pub fn discard<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
     const METHOD: &str = "_sill/workspaces.discard";
     let fingerprint = input(a)?;
-    let k = key(&a.operation_id);
     let _g = lock();
     if h.db(|c| receipts(c)?.existing(&a.operation_id, METHOD, &fingerprint))?.is_some() {
-        let r = get_row(h, &a.workspace_id)?;
-        return changed(h, &r, Some(&a.operation_id), None);
+        let r = h.db(|c| load(c, &a.workspace_id))?;
+        return changed(h, r.as_ref(), Some(&a.operation_id), None);
     }
-    let mut r = get_row(h, &a.workspace_id)?;
-    settle_owner(h, &mut r)?;
-    if r.state == "discarded" {
-        return Err(refuse("state", "already discarded", vec![]));
+    let mut r = settle_session(h, get_row(h, &a.workspace_id)?)?.ok_or_else(|| not_found("workspace"))?;
+    if h.busy(&r.session_id) {
+        return Err(refuse("writer_active", "The agent is working; discard after its turn.", vec![]));
     }
-    if writing(h, &r) {
-        return Err(refuse("writer_active", "the session working in it is still running; stop it first", vec![]));
+    if rebasing(&r.path) {
+        return Err(refuse("rebase_in_progress", "A rebase is stopped in the workspace: finish it there or abort it first.", conflicted(&r.path)));
     }
     let now_rev = super::revision(&r.path, &r.branch)?;
     if now_rev.tip != a.revision.tip || now_rev.worktree != a.revision.worktree {
-        return Err(refuse("stale_revision", "The workspace changed since you looked; review what would be lost again.", vec![]));
+        return Err(refuse("stale_revision", "The workspace changed since you looked; look again at what would be discarded.", vec![]));
     }
-    let to = h.root().join(".retained").join(&r.id);
-    let until = h.now() + RETENTION;
-    h.db(|c| {
-        receipts(c)?.begin(&a.operation_id, METHOD, &fingerprint)?;
-        intent(c, &k, &r.id, "discard", &json!({"from": bytes(&r.path), "to": bytes(&to), "prior": r.state, "until": until}), h.now())
-    })?;
-    if let Err(e) = super::retain(&r.path, &h.root().join(".retained"), &r.id) {
-        let _ = h.db(|c| {
-            settle(c, &k, "failed", &format!("{e:#}"))?;
-            receipts(c)?.finish(&a.operation_id, None, Some("operation_failed"))
-        });
-        return Err(e);
-    }
-    discarded(&mut r, to, until, h.now());
+    h.db(|c| receipts(c)?.begin(&a.operation_id, METHOD, &fingerprint))?;
+    let n = (r.discards + 1).to_string();
+    let kept = match flow::discard(&r.source, &r.path, &r.id, &n, &r.branch) {
+        Ok(k) => k,
+        Err(e) => {
+            let _ = h.db(|c| receipts(c)?.finish(&a.operation_id, None, Some("operation_failed")));
+            return Err(e);
+        }
+    };
+    let d = Discard {
+        id: format!("wsd-{}", crate::store::new_id()),
+        workspace_id: r.id.clone(),
+        session_id: r.session_id.clone(),
+        name: r.name.clone(),
+        source: r.source.clone(),
+        branch: r.branch.clone(),
+        snapshot: kept,
+        anchor: super::anchor_ref(&r.id, &format!("discarded/{n}")),
+        until: h.now() + RETENTION,
+        created_at: h.now(),
+    };
+    r.discards += 1;
+    r.updated_at = h.now();
     h.db(|c| {
         let tx = c.unchecked_transaction()?;
         save(c, &r)?;
-        settle(c, &k, "done", "")?;
+        c.execute(
+            &format!("INSERT INTO workspace_discards({DISCARD_COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)"),
+            params![d.id, d.workspace_id, d.session_id, d.name, bytes(&d.source), d.branch, d.snapshot, d.anchor, d.until, d.created_at],
+        )?;
         receipts(c)?.finish(&a.operation_id, None, None)?;
         tx.commit()?;
         Ok(())
     })?;
-    changed(h, &r, Some(&a.operation_id), None)
+    let r = settle_result(h, r)?;
+    changed(h, r.as_ref(), Some(&a.operation_id), Some(discard_record(&d)))
 }
 
-fn discarded(r: &mut Row, to: PathBuf, until: i64, now: i64) {
-    r.prior_state = Some(if r.state == "merged" { "merged".into() } else { "result".into() });
-    r.state = "discarded".into();
-    r.owner = None;
-    r.retained = Some(to);
-    r.retained_until = Some(until);
-    r.reviewed = None;
-    r.updated_at = now;
-}
-
-pub fn undo<H: Host>(h: &H, a: &api::Operate) -> Result<api::Changed> {
+/// Undo a Discard: the work back into its workspace when nothing happened there since, or into a
+/// workspace of its own when its session's folder is gone (§12).
+pub fn undo<H: Host>(h: &H, a: &api::Undo) -> Result<api::Changed> {
     const METHOD: &str = "_sill/workspaces.undo";
     let fingerprint = input(a)?;
-    let k = key(&a.operation_id);
     let _g = lock();
+    let d = h
+        .db(|c| Ok(c.query_row(&format!("SELECT {DISCARD_COLUMNS} FROM workspace_discards WHERE id=?1"), [&a.discard_id], discard_row).optional()?))?
+        .ok_or_else(|| not_found("discarded work"))?;
     if h.db(|c| receipts(c)?.existing(&a.operation_id, METHOD, &fingerprint))?.is_some() {
-        let r = get_row(h, &a.workspace_id)?;
-        return changed(h, &r, Some(&a.operation_id), None);
+        let r = h.db(|c| load(c, &d.workspace_id))?;
+        return changed(h, r.as_ref(), Some(&a.operation_id), None);
     }
-    let mut r = get_row(h, &a.workspace_id)?;
-    if r.state != "discarded" {
-        return Err(refuse("state", "only a discarded workspace can be restored", vec![]));
+    if h.now() > d.until {
+        return Err(refuse("retention_expired", "The discarded work is no longer kept.", vec![]));
     }
-    let (Some(retained), Some(until)) = (r.retained.clone(), r.retained_until) else {
-        return Err(refuse("retention_expired", "nothing is retained", vec![]));
+    let existing = h.db(|c| load(c, &d.workspace_id))?.filter(|r| r.path.exists());
+    let r = match existing {
+        Some(r) => {
+            if h.busy(&r.session_id) {
+                return Err(refuse("writer_active", "The agent is working; undo after its turn.", vec![]));
+            }
+            h.db(|c| receipts(c)?.begin(&a.operation_id, METHOD, &fingerprint))?;
+            if !flow::undo(&r.path, &r.branch, &d.snapshot)? {
+                let _ = h.db(|c| receipts(c)?.finish(&a.operation_id, None, Some("invalid_state")));
+                return Err(refuse("changed_since", "The workspace has new work since the Discard; apply or discard it first.", vec![]));
+            }
+            r
+        }
+        None => {
+            // its folder went: a workspace of its own, a result for the person to decide on
+            let src = match super::inspect(&d.source)? {
+                Ok(s) => s,
+                Err(refusal) => return Err(refuse(refusal.reason(), refusal.message(), vec![])),
+            };
+            h.db(|c| receipts(c)?.begin(&a.operation_id, METHOD, &fingerprint))?;
+            let id = format!("ws-{}", crate::store::new_id());
+            let at = super::path_for(&h.root(), &src, &id, &d.name);
+            let op = key(&a.operation_id);
+            let spare = spare(h, &src.root);
+            let made = if spare.exists() { flow::reuse(&spare, &src, &id, &d.name, &at, &op)? } else { super::create(&src, &id, &d.name, &at, &op)? };
+            flow::reset_to(&made.path, &made.branch, &d.snapshot)?;
+            let now = h.now();
+            let r = Row {
+                id,
+                name: d.name.clone(),
+                session_id: d.session_id.clone(),
+                source: src.root.clone(),
+                source_branch: src.branch.clone(),
+                base: made.base,
+                branch: made.branch,
+                path: made.path,
+                state: "result".into(),
+                shallow: src.shallow,
+                discards: 0,
+                created_by: op,
+                created_at: now,
+                updated_at: now,
+            };
+            h.db(|c| save(c, &r))?;
+            r
+        }
     };
-    if h.now() > until || !retained.exists() {
-        return Err(refuse("retention_expired", "the retained copy is gone", vec![]));
-    }
-    if r.path.exists() {
-        return Err(refuse("path_taken", format!("something else is at {} now", r.path.display()), vec![r.path.display().to_string()]));
+    if d.source.exists() {
+        let _ = drop_ref(&d.source, &d.anchor);
     }
     h.db(|c| {
-        receipts(c)?.begin(&a.operation_id, METHOD, &fingerprint)?;
-        intent(c, &k, &r.id, "undo", &json!({"from": bytes(&retained), "to": bytes(&r.path)}), h.now())
+        c.execute("DELETE FROM workspace_discards WHERE id=?1", [&d.id])?;
+        receipts(c)?.finish(&a.operation_id, None, None)
     })?;
-    if !super::restore(&retained, &r.path)? {
-        h.db(|c| {
-            settle(c, &k, "failed", "path taken")?;
-            receipts(c)?.finish(&a.operation_id, None, Some("invalid_state"))
-        })?;
-        return Err(refuse("path_taken", format!("something else is at {} now", r.path.display()), vec![r.path.display().to_string()]));
-    }
-    restored(&mut r, h.now());
-    h.db(|c| {
-        let tx = c.unchecked_transaction()?;
-        save(c, &r)?;
-        settle(c, &k, "done", "")?;
-        receipts(c)?.finish(&a.operation_id, None, None)?;
-        tx.commit()?;
-        Ok(())
-    })?;
-    changed(h, &r, Some(&a.operation_id), None)
+    changed(h, Some(&r), Some(&a.operation_id), None)
 }
 
-fn restored(r: &mut Row, now: i64) {
-    r.state = r.prior_state.take().unwrap_or_else(|| "result".into());
-    r.retained = None;
-    r.retained_until = None;
-    r.updated_at = now;
-}
-
-/// The source repository `session` works on as a workspace, when it is one: the latest row naming
-/// it as owner or session. None in a store without workspaces.
-pub fn session_source(conn: &Connection, session: &str) -> Result<Option<PathBuf>> {
-    let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspaces')", [], |r| r.get(0))?;
-    if !exists {
-        return Ok(None);
-    }
-    Ok(conn
-        .query_row(
-            "SELECT source FROM workspaces WHERE owner=?1 OR session_id=?1 ORDER BY updated_at DESC LIMIT 1",
-            [session],
-            |r| r.get::<_, Vec<u8>>(0),
-        )
-        .optional()?
-        .map(path))
-}
-
-/// What the agent of a workspace session is told (§5): where it works, on which branch from which
-/// base, that the source checkout is hidden, and that the person merges. None for other sessions.
+/// What the agent of a workspace session is told (§12): its pinned repositories are its own copies
+/// at their usual paths; the person applies or discards; it does not push.
 pub fn session_notice(conn: &Connection, session: &str) -> Result<Option<String>> {
-    let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspaces')", [], |r| r.get(0))?;
-    if !exists {
+    if !has_tables(conn)? || !mode(conn, session)? {
         return Ok(None);
     }
-    let r = conn
-        .query_row(&format!("SELECT {COLUMNS} FROM workspaces WHERE owner=?1 OR session_id=?1 ORDER BY updated_at DESC LIMIT 1"), [session], row)
-        .optional()?;
-    Ok(r.filter(|r| r.state != "discarded").map(|r| {
-        format!(
-            "\n[This session works in a workspace: {path}, its own clone of {source} on branch {branch}, started from {base}. The source checkout is hidden from this jail — work and commit here; uncommitted work is not merged. The person reviews the result and merges it into the source, or discards it.]",
-            path = r.path.display(),
-            source = r.source.display(),
-            branch = r.branch,
-            base = &r.base[..r.base.len().min(12)],
-        )
-    }))
+    let rows = of_session(conn, session)?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let repos = rows.iter().map(|r| format!("{} (branch {})", r.source.display(), r.branch)).collect::<Vec<_>>().join(", ");
+    Ok(Some(format!(
+        "\n[This session works in workspaces: {repos} — each is your own copy of the repository at its usual path; the person's checkout is elsewhere and changes only when they apply your work. Commit or leave changes uncommitted as suits the work; the person applies both, or discards them. Do not push.]"
+    )))
 }
 
-/// The end of retention: retained clones past their time go, with their anchors and rows.
+/// The end of retention: discarded work past its time goes, with its anchor.
 pub fn sweep<H: Host>(h: &H) -> Result<Vec<String>> {
     let now = h.now();
     let due = h.db(|c| {
-        let mut stmt = c.prepare(&format!("SELECT {COLUMNS} FROM workspaces WHERE state='discarded' AND retained_until < ?1"))?;
-        let rows = stmt.query_map([now], row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        if !has_tables(c)? {
+            return Ok(vec![]);
+        }
+        let mut stmt = c.prepare(&format!("SELECT {DISCARD_COLUMNS} FROM workspace_discards WHERE until < ?1"))?;
+        let rows = stmt.query_map([now], discard_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     })?;
     let mut gone = Vec::new();
-    for r in due {
-        let _g = lock();
-        if let Some(retained) = &r.retained {
-            super::expire(retained, &r.source, &r.id).with_context(|| format!("expire {}", r.id))?;
-        } else if r.source.exists() {
-            super::drop_anchors(&r.source, &r.id)?;
+    for d in due {
+        if d.source.exists() {
+            let _ = drop_ref(&d.source, &d.anchor);
         }
         h.db(|c| {
-            c.execute("DELETE FROM workspaces WHERE id=?1", [&r.id])?;
+            c.execute("DELETE FROM workspace_discards WHERE id=?1", [&d.id])?;
             Ok(())
         })?;
-        gone.push(r.id);
+        gone.push(d.id);
     }
     Ok(gone)
 }
 
-/// At daemon start, before serving: settle every unfinished journal entry from what is on disk
-/// (§11 journal table), then expire what is due.
+/// At daemon start, before serving: settle unfinished journal entries from what is on disk, then
+/// settle ended sessions and expire what is due.
 pub fn reconcile<H: Host>(h: &H) -> Result<()> {
-    let _g = lock();
+    let guard = lock();
     let running: Vec<(String, String, String, String)> = h.db(|c| {
         let mut stmt = c.prepare("SELECT operation,workspace_id,kind,intent FROM workspace_journal WHERE state='running'")?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -893,13 +964,10 @@ pub fn reconcile<H: Host>(h: &H) -> Result<()> {
     })?;
     for (op, id, kind, intent_text) in running {
         let i: Value = serde_json::from_str(&intent_text).unwrap_or(Value::Null);
-        let p = |name: &str| -> PathBuf {
-            path(i[name].as_array().map(|a| a.iter().filter_map(|b| b.as_u64().map(|b| b as u8)).collect()).unwrap_or_default())
-        };
-        let row = h.db(|c| load(c, &id))?;
+        let p = |name: &str| -> PathBuf { path(i[name].as_array().map(|a| a.iter().filter_map(|b| b.as_u64().map(|b| b as u8)).collect()).unwrap_or_default()) };
         match kind.as_str() {
             "create" => {
-                if h.db(|c| by_creator(c, &op))?.is_some() {
+                if h.db(|c| load(c, &id))?.is_some() {
                     h.db(|c| settle(c, &op, "done", ""))?;
                 } else {
                     let _ = super::remove_partial(&p("path"), &op);
@@ -910,45 +978,18 @@ pub fn reconcile<H: Host>(h: &H) -> Result<()> {
                     h.db(|c| settle(c, &op, "failed", "interrupted by a restart; nothing was kept"))?;
                 }
             }
-            "merge" => {
-                let Some(r) = row else {
-                    h.db(|c| settle(c, &op, "failed", "the workspace is gone"))?;
-                    continue;
-                };
-                let s = |k: &str| i[k].as_str().unwrap_or_default().to_string();
-                after_merge(&r, &s("branch"), &s("old"), &s("new"), h, &op)?;
-            }
-            "discard" => {
-                let (from, to) = (p("from"), p("to"));
-                match row {
-                    Some(mut r) if to.exists() && !from.exists() => {
-                        r.state = i["prior"].as_str().unwrap_or("result").into();
-                        discarded(&mut r, to, i["until"].as_i64().unwrap_or(h.now() + RETENTION), h.now());
-                        h.db(|c| {
-                            save(c, &r)?;
-                            settle(c, &op, "done", "")
-                        })?;
-                    }
-                    _ => h.db(|c| settle(c, &op, "failed", "interrupted before the clone moved"))?,
-                }
-            }
-            "undo" => {
-                let (from, to) = (p("from"), p("to"));
-                match row {
-                    Some(mut r) if to.exists() && !from.exists() => {
-                        restored(&mut r, h.now());
-                        h.db(|c| {
-                            save(c, &r)?;
-                            settle(c, &op, "done", "")
-                        })?;
-                    }
-                    _ => h.db(|c| settle(c, &op, "failed", "interrupted before the clone moved back"))?,
-                }
-            }
-            _ => h.db(|c| settle(c, &op, "failed", "unknown operation"))?,
+            _ => h.db(|c| settle(c, &op, "interrupted", "Interrupted by a restart: check your checkout before going on."))?,
         }
     }
-    drop(_g);
+    drop(guard);
+    let rows = h.db(|c| {
+        let mut stmt = c.prepare(&format!("SELECT {COLUMNS} FROM workspaces"))?;
+        let rows = stmt.query_map([], row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    })?;
+    for r in rows {
+        settle_session(h, r)?;
+    }
     sweep(h)?;
     Ok(())
 }

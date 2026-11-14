@@ -29,12 +29,13 @@ pub struct PolicyPaths {
     pub read_only: Vec<HostPath>,
 }
 
-/// A workspace session's view of its source repository (docs/parallel-coding.md §4–5): the
-/// checkout is hidden in both views, only its object store comes back read-only at its own path,
-/// so the clone's alternates work alike on the host and in the jail.
+/// A workspace session's repository (docs/parallel-coding.md §12): its clone is bound at the
+/// repository's own path, the person's checkout hidden from the read-only host view too, and the
+/// checkout's object store borrowed read-only at a private path the clone's alternates name there.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkspaceMask {
+pub struct WorkspaceBind {
     pub source: HostPath,
+    pub clone: HostPath,
     pub objects: HostPath,
 }
 
@@ -49,7 +50,7 @@ pub struct Plan {
     pub policy_paths: PolicyPaths,
     pub view: FilesystemView,
     #[serde(default)]
-    pub workspace: Option<WorkspaceMask>,
+    pub workspaces: Vec<WorkspaceBind>,
 }
 
 /// No storage preparation, credential import or filesystem writes occur during resolution.
@@ -80,7 +81,7 @@ pub fn resolve(
             rules: vec![],
             unused: vec![],
         },
-        workspace: None,
+        workspaces: vec![],
     };
     plan.rule(
         home,
@@ -390,6 +391,25 @@ impl Plan {
             reason: reason.into(),
         });
     }
+    /// A workspace session's repositories (§12): a pin at or inside one is not bound — its clone
+    /// takes the repository's place — and the view says so.
+    pub fn set_workspaces(&mut self, binds: &[WorkspaceBind]) -> Result<()> {
+        let sources: Vec<PathBuf> = binds.iter().map(|b| b.source.to_path()).collect::<Result<_>>()?;
+        let covered = |t: &HostPath| t.to_path().is_ok_and(|t| sources.iter().any(|s| t.starts_with(s)));
+        self.bindings.retain(|b| b.declaration.is_some() || !covered(&b.target));
+        self.view.rules.retain(|r| r.behavior != "pin" || !covered(&r.target));
+        for b in binds {
+            self.rule(
+                &b.source.to_path()?,
+                Some(&b.clone.to_path()?),
+                "workspace",
+                "session workspace",
+                "This session's own copy of the repository; the person's checkout changes only when they apply its work.",
+            );
+        }
+        self.workspaces = binds.to_vec();
+        Ok(())
+    }
     pub fn add_fragments(&mut self, ro: &[PathBuf], masks: &[PathBuf]) {
         for path in ro {
             self.rule(
@@ -431,7 +451,7 @@ impl Plan {
             && self.bindings == other.bindings
             && self.agent_masks == other.agent_masks
             && self.view.rules == other.view.rules
-            && self.workspace == other.workspace
+            && self.workspaces == other.workspaces
     }
     pub fn prepare(&self) -> Result<()> {
         use std::os::unix::fs::DirBuilderExt;
@@ -483,7 +503,7 @@ impl Plan {
     }
     pub fn apply(&self, spec: &mut crate::jail::JailSpec) -> Result<()> {
         spec.binds = self.binds()?;
-        spec.workspace_mask = self.workspace.as_ref().map(|w| Ok::<_, anyhow::Error>((w.source.to_path()?, w.objects.to_path()?))).transpose()?;
+        spec.workspace_mask = self.workspaces.iter().map(|w| Ok::<_, anyhow::Error>((w.source.to_path()?, w.clone.to_path()?, w.objects.to_path()?))).collect::<Result<_>>()?;
         spec.policy_paths = Some(self.policy_paths.clone());
         spec.agent_masks = self
             .agent_masks

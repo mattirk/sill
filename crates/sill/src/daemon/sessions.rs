@@ -16,7 +16,7 @@ fn record(store: &Store, s: sill_core::store::Session) -> Result<api::Session> {
                 let resolution = sill_core::session::next_build_restrictions(&s, &home, &pins, &[])?;
                 let resolution = sill_core::session::apply_grants(resolution, &store.permission_choices(&s.id)?, store.network_hosts(&s.id)?);
                 let workspace = store.workspace_mask(&s.id)?;
-                sill_core::session::freeze_filesystem(resolution, &s.agent, &home, &sill_core::session::state_dir_path(rustix::process::getuid().as_raw(), &s.id)?, &pins, s.ghost, workspace.as_ref())
+                sill_core::session::freeze_filesystem(resolution, &s.agent, &home, &sill_core::session::state_dir_path(rustix::process::getuid().as_raw(), &s.id)?, &pins, s.ghost, &workspace)
             })();
             match (current, next) {
                 (Ok(current), Ok(next)) if next.filesystem.as_ref().is_some_and(|next| current.same_mounts(next)) => {},
@@ -99,6 +99,7 @@ pub(super) fn create(store: &Store, mut a: api::Create) -> Result<api::SessionKe
     if !a.follows.is_empty() {
         exact(store, &a.follows)?;
     }
+    let workspaces = !a.ghost && a.workspaces.unwrap_or_else(|| sill_core::config::load().automatic_workspaces());
     let session_id = Hub::create_session_row(
         store,
         NewSession {
@@ -111,6 +112,8 @@ pub(super) fn create(store: &Store, mut a: api::Create) -> Result<api::SessionKe
             ghost: a.ghost,
         },
     )?;
+    // a session's mode is fixed when it is made (docs/parallel-coding.md §12)
+    sill_core::workspace::records::set_mode(store.conn(), &session_id, workspaces)?;
     store.conn().execute(
         "INSERT INTO sfp_creates(create_id,fingerprint,session_id) VALUES (?1,?2,?3)",
         rusqlite::params![key, input, session_id],

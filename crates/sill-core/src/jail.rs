@@ -91,9 +91,9 @@ pub struct JailSpec {
     pub memory_dir: Option<PathBuf>,
     /// Host path of the Host control bridge directory, bound read-only at [`BRIDGE_DIR`].
     pub bridge_dir: Option<PathBuf>,
-    /// A workspace session's source checkout and its object store (docs/parallel-coding.md §4–5):
-    /// the checkout hidden in both views after every other mount, the store bound back read-only.
-    pub workspace_mask: Option<(PathBuf, PathBuf)>,
+    /// A workspace session's repositories (docs/parallel-coding.md §12): (the person's checkout,
+    /// the clone bound in its place, the checkout's object store to borrow read-only).
+    pub workspace_mask: Vec<(PathBuf, PathBuf, PathBuf)>,
     /// An inheritable fd holding the seccomp program (`seccomp::memfd`), given to bwrap as
     /// `--seccomp <fd>` when the policy's `jail.seccomp` is on (security.md S18); None = no filter.
     pub seccomp_fd: Option<i32>,
@@ -568,8 +568,8 @@ impl JailSpec {
         }
         a.extend(self.extra_args.iter().cloned());
         masked.extend(agent_masked);
+        mount_fds.extend(self.apply_workspace_binds(&mut a, &masked, &mut direct, &mut warnings)?);
         mount_fds.extend(self.apply_fragment_paths(&mut a, &mut masked)?);
-        mount_fds.extend(self.apply_workspace_mask(&mut a, &mut masked, &mut warnings)?);
         // bwrap's root tmpfs is writable by default; make it read-only now that every mount is in place
         push(&mut a, &[&"--remount-ro", &"/"]);
         push(&mut a, &[&"--chdir", &self.cwd]);
@@ -582,33 +582,54 @@ impl JailSpec {
         Ok(JailPlan { argv: a, mount_fds, layers, expanded, masked, direct, warnings })
     }
 
-    /// A workspace session (docs/parallel-coding.md §4–5): after every other mount — a pin of an
-    /// ancestor folder, a fragment rule — the source checkout is hidden in both views, so nothing
-    /// of it re-appears; its object store alone comes back read-only at its own path, which is the
-    /// path the clone's `objects/info/alternates` names on the host too; the mask is then made
-    /// read-only, since anything written there would vanish with it. The store is opened without
-    /// following symlinks and bound from that descriptor, so a swapped path cannot bind another tree.
-    fn apply_workspace_mask(&self, args: &mut Vec<OsString>, masked: &mut Vec<PathBuf>, warnings: &mut Vec<String>) -> Result<Vec<Arc<OwnedFd>>> {
-        let Some((source, objects)) = &self.workspace_mask else { return Ok(Vec::new()) };
-        if !source.is_absolute() || !objects.starts_with(source) || objects == source {
-            bail!("workspace mask: the object store {} must lie inside the source {}", objects.display(), source.display());
+    /// A workspace session (docs/parallel-coding.md §12): each clone bound read-write at its
+    /// repository's own path, after the pins (an ancestor pin is laid first) and before the
+    /// repository's fragment rules, which then apply to the clone. The person's checkout is hidden
+    /// in the read-only host view too. Its object store is borrowed read-only at
+    /// `/.sill/borrowed/<n>`, and the jail sees the clone's `objects/info/alternates` naming that
+    /// path (from memory, read-only), while on the host it names the real store: one clone, valid
+    /// in both views. Every directory is opened without following symlinks and bound from that
+    /// descriptor, so a path swapped after planning cannot bind another tree.
+    fn apply_workspace_binds(&self, args: &mut Vec<OsString>, masked: &[PathBuf], direct: &mut Vec<PathBuf>, warnings: &mut Vec<String>) -> Result<Vec<Arc<OwnedFd>>> {
+        use rustix::fs::{CWD, Mode, OFlags, ResolveFlags, openat2};
+        let open = |p: &Path| -> Result<Arc<OwnedFd>> {
+            let fd = openat2(CWD, p, OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty(), ResolveFlags::NO_SYMLINKS)
+                .with_context(|| format!("open {} (no symlinks)", p.display()))?;
+            Ok(Arc::new(rustix::io::fcntl_dupfd_cloexec(&fd, 64)?))
+        };
+        let mut fds = Vec::new();
+        for (n, (source, clone, objects)) in self.workspace_mask.iter().enumerate() {
+            if !source.is_absolute() || !clone.is_absolute() || !objects.starts_with(source) || objects == source {
+                bail!("workspace {}: the clone must be absolute and the object store inside the checkout", source.display());
+            }
+            if let Some(m) = masked.iter().find(|m| is_under(source, m) || is_under(clone, m)) {
+                warnings.push(format!("workspace {} is hidden by {}; not bound", source.display(), m.display()));
+                continue;
+            }
+            let clone_fd = open(clone)?;
+            args.extend([OsString::from("--bind-fd"), clone_fd.as_raw_fd().to_string().into(), source.as_os_str().to_owned()]);
+            args.extend([OsString::from("--tmpfs"), host_view(source).into_os_string()]);
+            let borrowed = PathBuf::from(format!("/.sill/borrowed/{n}"));
+            let store = open(objects)?;
+            args.extend([OsString::from("--ro-bind-fd"), store.as_raw_fd().to_string().into(), borrowed.clone().into_os_string()]);
+            let memfd = rustix::fs::memfd_create("sill-alternates", rustix::fs::MemfdFlags::CLOEXEC)?;
+            rustix::io::write(&memfd, format!("{}\n", borrowed.display()).as_bytes())?;
+            rustix::fs::seek(&memfd, rustix::fs::SeekFrom::Start(0))?;
+            let memfd = Arc::new(rustix::io::fcntl_dupfd_cloexec(&memfd, 64)?);
+            args.extend([OsString::from("--ro-bind-data"), memfd.as_raw_fd().to_string().into(), source.join(".git/objects/info/alternates").into_os_string()]);
+            direct.push(source.clone());
+            fds.extend([clone_fd, store, memfd]);
         }
-        if let Some(m) = masked.iter().find(|m| is_under(source, m)) {
-            warnings.push(format!("workspace source {} is already hidden by {}; its objects stay hidden too", source.display(), m.display()));
-            return Ok(Vec::new());
-        }
-        let store = rustix::fs::openat2(rustix::fs::CWD, objects,
-            rustix::fs::OFlags::PATH | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
-            rustix::fs::Mode::empty(), rustix::fs::ResolveFlags::NO_SYMLINKS)
-            .with_context(|| format!("open the workspace's borrowed object store {}", objects.display()))?;
-        let store = Arc::new(rustix::io::fcntl_dupfd_cloexec(&store, 64)?);
-        for target in [source.clone(), host_view(source)] {
-            args.extend([OsString::from("--tmpfs"), target.into_os_string()]);
-        }
-        args.extend([OsString::from("--ro-bind-fd"), store.as_raw_fd().to_string().into(), objects.as_os_str().to_owned()]);
-        args.extend([OsString::from("--remount-ro"), source.as_os_str().to_owned()]);
-        masked.push(source.clone());
-        Ok(vec![store])
+        Ok(fds)
+    }
+
+    /// Where a host path really comes from inside this jail: under a workspace's repository, the
+    /// same path in its clone.
+    fn backing(&self, path: &Path) -> PathBuf {
+        self.workspace_mask
+            .iter()
+            .find_map(|(source, clone, _)| path.strip_prefix(source).ok().map(|rel| clone.join(rel)))
+            .unwrap_or_else(|| path.to_path_buf())
     }
 
     /// Apply repository restrictions last: a writable pin must never cover a mask or undo a
@@ -684,7 +705,8 @@ impl JailSpec {
             // Open without following any symlink and retain the exact source inode. Reopening
             // a path in bubblewrap after planning could otherwise bind an unrelated host secret
             // substituted by a concurrent writer. Keep descriptor numbers away from shim fd 3.
-            let source = rustix::fs::openat2(rustix::fs::CWD, path,
+            // inside a workspace the rule applies to the clone, which is what the jail has there
+            let source = rustix::fs::openat2(rustix::fs::CWD, self.backing(path),
                 rustix::fs::OFlags::PATH | rustix::fs::OFlags::CLOEXEC,
                 rustix::fs::Mode::empty(), rustix::fs::ResolveFlags::NO_SYMLINKS)
                 .with_context(|| format!("open fragment read-only source {}", path.display()))?;
@@ -827,7 +849,7 @@ mod tests {
             fragment_masks: vec![],
             memory_dir: None,
             bridge_dir: None,
-            workspace_mask: None,
+            workspace_mask: vec![],
             seccomp_fd: None,
             extra_args: vec![],
             command: vec!["true".into()],
@@ -1158,51 +1180,58 @@ if test "$2" = codex; then test "$(cat "$1/.codex/saved")" = saved-settings; fi
         }
     }
 
-    /// A workspace session (docs/parallel-coding.md §4–5): the source is hidden in both views after
-    /// every other mount — here an ancestor pin — its object store bound back read-only by
-    /// descriptor at its own path, and the mask made read-only, all before `/` is.
+    /// A workspace session (docs/parallel-coding.md §12): after an ancestor pin, the clone is bound
+    /// at the repository's path, the checkout hidden in the host view, its object store borrowed at
+    /// `/.sill/borrowed/0` and the jail's alternates file written from memory; then the
+    /// repository's fragment rules, and `/` read-only last.
     #[test]
-    fn a_workspace_source_is_masked_after_every_other_mount() {
+    fn a_workspace_clone_takes_the_repositorys_place() {
         let dir = std::env::temp_dir().join(format!("sill-jail-ws-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let (projects, source) = (dir.join("projects"), dir.join("projects/src"));
+        let (projects, source, clone) = (dir.join("projects"), dir.join("projects/src"), dir.join("ws/clone"));
         let objects = source.join(".git/objects");
         std::fs::create_dir_all(&objects).unwrap();
+        std::fs::create_dir_all(clone.join("sub")).unwrap();
+        std::fs::create_dir_all(source.join("sub")).unwrap();
         let mut s = spec();
         s.binds = vec![(projects.clone(), projects.clone())];
-        s.workspace_mask = Some((source.clone(), objects.clone()));
+        s.workspace_mask = vec![(source.clone(), clone.clone(), objects.clone())];
+        s.fragment_ro = vec![source.join("sub")];
         let plan = s.plan().unwrap();
         let r = render(&plan.argv);
         let at = |needle: String| r.find(&needle).unwrap_or_else(|| panic!("{needle} not in {r}"));
-        let bind = at(format!("--bind {} {} ", projects.display(), projects.display()));
-        let mask = at(format!("--tmpfs {} ", source.display()));
-        let host = at(format!("--tmpfs {} ", host_view(&source).display()));
-        let store = r.find("--ro-bind-fd ").map(|i| (i, &r[i..])).filter(|(_, t)| t.contains(&format!(" {} ", objects.display()))).unwrap().0;
-        let ro = at(format!("--remount-ro {} ", source.display()));
+        let pin = at(format!("--bind {} {} ", projects.display(), projects.display()));
+        let bound = at(format!(" {} --tmpfs {} ", source.display(), host_view(&source).display()));
+        let store = at(" /.sill/borrowed/0 ".into());
+        let alternates = at(format!(" {} ", source.join(".git/objects/info/alternates").display()));
+        let fragment = r.rfind(&format!(" {} ", source.join("sub").display())).unwrap();
         let root = at("--remount-ro / ".into());
-        assert!(bind < mask && mask < store && host < store && store < ro && ro < root, "{r}");
-        assert!(plan.masked.contains(&source));
-        assert_eq!(plan.mount_fds.len(), 1, "the store is bound from a descriptor");
-        // a store outside the source is refused
-        s.workspace_mask = Some((source.clone(), dir.join("elsewhere")));
+        assert!(pin < bound && bound < store && store < alternates && alternates < fragment && fragment < root, "{r}");
+        assert!(r.contains("--bind-fd ") && r.contains("--ro-bind-data "));
+        assert!(plan.direct.contains(&source), "writes there are the clone's, not the overlay's");
+        // the clone, the store, the alternates data, the fragment rule: all by descriptor
+        assert_eq!(plan.mount_fds.len(), 4);
+        // a store outside the checkout is refused
+        s.workspace_mask = vec![(source.clone(), clone.clone(), dir.join("elsewhere"))];
+        s.fragment_ro = vec![];
         assert!(s.plan().is_err());
-        // a source the policy already hides stays hidden, objects included, with a warning
-        s.workspace_mask = Some((source.clone(), objects.clone()));
+        // a repository the policy already hides stays hidden, with a warning
+        s.workspace_mask = vec![(source.clone(), clone.clone(), objects.clone())];
         s.masks = vec![projects.clone()];
         s.binds = vec![];
         let plan = s.plan().unwrap();
-        assert!(!render(&plan.argv).contains("--ro-bind-fd"));
-        assert!(plan.warnings.iter().any(|w| w.contains("already hidden")));
+        assert!(!render(&plan.argv).contains("--bind-fd"));
+        assert!(plan.warnings.iter().any(|w| w.contains("hidden by")));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// The real thing, in bubblewrap: a workspace made by `workspace::create`, its source inside a
-    /// writable ancestor pin. Inside, the checkout, its uncommitted work and its refs are gone from
-    /// both views, the object store is there and read-only, the rest of the pin is writable, and
-    /// Git in the workspace works through the alternate.
+    /// The real thing, in bubblewrap: a workspace made by `workspace::create`, its repository inside
+    /// a writable ancestor pin. Inside, the repository's path is the clone: its files, its Git
+    /// working through the borrowed store; the person's uncommitted file is not there, in either
+    /// view; the store and the jail's alternates are read-only; the rest of the pin is writable.
     #[test]
     #[ignore = "host only: requires bubblewrap user namespaces and overlayfs"]
-    fn real_workspace_jail_hides_the_source_and_borrows_its_objects() {
+    fn real_workspace_jail_puts_the_clone_at_the_repositorys_path() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target")
             .join(format!("workspace-jail-{:032x}", rand::random::<u128>()));
         std::fs::create_dir_all(&root).unwrap();
@@ -1216,6 +1245,7 @@ if test "$2" = codex; then test "$(cat "$1/.codex/saved")" = saved-settings; fi
                 .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"]).args(args)
                 .env("GIT_CONFIG_NOSYSTEM", "1").output().unwrap();
             assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
         git(&source, &["init", "-q"]);
         std::fs::write(source.join("tracked.txt"), "tracked\n").unwrap();
@@ -1225,41 +1255,43 @@ if test "$2" = codex; then test "$(cat "$1/.codex/saved")" = saved-settings; fi
         let src = crate::workspace::inspect(&source).unwrap().unwrap();
         let ws = home.join(".local/share/sill/workspaces/src/try-ws1");
         crate::workspace::create(&src, "ws1", "try", &ws, "op").unwrap();
-        let before: Vec<_> = walk(&source.join(".git/objects"));
+        let host_alternates = std::fs::read_to_string(ws.join(".git/objects/info/alternates")).unwrap();
+        let before = walk(&source.join(".git/objects"));
         let mut s = spec();
         s.home = home.clone();
-        s.cwd = ws.clone();
+        s.cwd = source.clone();
         s.uid = rustix::process::getuid().as_raw();
         s.state_dir = tree.0.join("state");
         s.unsafe_state = true;
         s.mounts = crate::mounts::host_mounts().unwrap();
         s.root_entries = read_root_entries().unwrap();
-        s.binds = vec![(projects.clone(), projects.clone()), (ws.clone(), ws.clone())];
-        s.workspace_mask = Some((source.clone(), source.join(".git/objects")));
+        s.binds = vec![(projects.clone(), projects.clone())];
+        s.workspace_mask = vec![(source.clone(), ws.clone(), source.join(".git/objects"))];
         s.command = vec!["/bin/sh".into(), "-eu".into(), "-c".into(), r#"
-S=$1; W=$2; P=$3
-test ! -e "$S/tracked.txt"
+S=$1; P=$2
+test "$(cat "$S/tracked.txt")" = tracked
 test ! -e "$S/uncommitted.txt"
-test ! -e "$S/.git/HEAD"
-test ! -e "$S/.git/config"
-test ! -e "/.sill/host$S/tracked.txt"
-test -d "$S/.git/objects"
-if touch "$S/.git/objects/x" 2>/dev/null; then echo "the store is writable"; exit 1; fi
-if touch "$S/new" 2>/dev/null; then echo "the mask is writable"; exit 1; fi
+test ! -e "/.sill/host$S/uncommitted.txt"
+test "$(cat "$S/.git/objects/info/alternates")" = /.sill/borrowed/0
+if echo x > "$S/.git/objects/info/alternates" 2>/dev/null; then echo "alternates writable"; exit 1; fi
+if touch /.sill/borrowed/0/x 2>/dev/null; then echo "the store is writable"; exit 1; fi
 touch "$P/other-file"
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
-git -C "$W" log --oneline | grep -q one
-test "$(cat "$W/tracked.txt")" = tracked
-echo two > "$W/tracked.txt"
-git -C "$W" -c user.name=t -c user.email=t@t commit -qam two
-git -C "$W" fsck --full
-"#.into(), "workspace-fixture".into(), source.clone().into(), ws.clone().into(), projects.clone().into()];
+git -C "$S" log --oneline | grep -q one
+echo two > "$S/tracked.txt"
+git -C "$S" -c user.name=t -c user.email=t@t commit -qam two
+git -C "$S" fsck --full
+"#.into(), "workspace-fixture".into(), source.clone().into(), projects.clone().into()];
         let plan = s.plan().unwrap();
         prepare(&plan).unwrap();
         let output = plan.command().output().unwrap();
         assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         assert!(projects.join("other-file").exists(), "the ancestor pin is writable");
+        assert_eq!(std::fs::read_to_string(source.join("tracked.txt")).unwrap(), "tracked\n", "the person's checkout untouched");
         assert_eq!(std::fs::read_to_string(source.join("uncommitted.txt")).unwrap(), "the person's\n");
+        assert_eq!(std::fs::read_to_string(ws.join("tracked.txt")).unwrap(), "two\n", "the commit is the clone's");
+        assert_eq!(git(&ws, &["log", "-1", "--format=%s"]), "two");
+        assert_eq!(std::fs::read_to_string(ws.join(".git/objects/info/alternates")).unwrap(), host_alternates);
         assert_eq!(walk(&source.join(".git/objects")), before, "the source's store is unchanged");
     }
 

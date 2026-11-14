@@ -334,7 +334,7 @@ pub(super) fn session_with_pins(hub: &Hub, id: &str) -> Result<(sill_core::store
 fn preview(hub: &Hub, session_id: &str) -> Result<api::PolicyView> {
     let (row, pins) = session_with_pins(hub, session_id)?;
     let workspace = hub.with_store(|store| store.workspace_mask(session_id))?;
-    Ok(match sill_core::session::next_build(&row, &sill_core::changes::home()?, &pins, &[], workspace.as_ref()) {
+    Ok(match sill_core::session::next_build(&row, &sill_core::changes::home()?, &pins, &[], &workspace) {
         Ok(resolved) => policy_view("preview", session_id, &row.policy, resolved)?,
         Err(e) => api::PolicyView {
             filesystem: None,
@@ -396,7 +396,7 @@ fn session_uses_modes(hub: &Hub, id: &str) -> Result<bool> {
         if let Some(launch) = sill_core::session::policy_snapshot(id)? { return Ok(launch.policy.permissions.uses_modes()); }
     }
     let (pins, workspace) = hub.with_store(|store| Ok((store.jail_pins(id)?, store.workspace_mask(id)?)))?;
-    Ok(sill_core::session::next_build(&row, &sill_core::changes::home()?, &pins, &[], workspace.as_ref())?.policy.permissions.uses_modes())
+    Ok(sill_core::session::next_build(&row, &sill_core::changes::home()?, &pins, &[], &workspace)?.policy.permissions.uses_modes())
 }
 
 pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> {

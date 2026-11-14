@@ -1506,7 +1506,7 @@ fn start_session(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>) -> Re
         shim_bin,
         agent: None,
         ghost: jail.ghost,
-        workspace: None,
+        workspace: vec![],
         binds: jail
             .binds
             .iter()
@@ -1661,7 +1661,7 @@ fn session_cmd(cmd: SessionCmd) -> Result<()> {
             let create = sill_proto::sessions::Create {
                 create_id: sill_core::sfp::new_id(), agent, policy,
                 pins: pins.iter().map(|p| sill_proto::sessions::HostPath::from_path(p)).collect(),
-                memory_scope: String::new(), follows: String::new(), remember_pins: false, ghost,
+                memory_scope: String::new(), follows: String::new(), remember_pins: false, ghost, workspaces: None,
             };
             let k: sill_proto::sessions::SessionKey = c.call("_sill/sessions.create", create)?;
             let _: sill_proto::sessions::Started = c.call("_sill/sessions.start", &k)?;
@@ -1808,7 +1808,7 @@ fn build_spec(a: JailArgs, command: Vec<OsString>) -> Result<JailSpec> {
         masks: vec![],
         memory_dir: None,
         bridge_dir: None,
-        workspace_mask: None,
+        workspace_mask: vec![],
         seccomp_fd: None,
         extra_args,
         command,

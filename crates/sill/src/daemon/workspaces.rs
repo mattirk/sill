@@ -1,6 +1,7 @@
-//! `_sill/workspaces.*` (`sill.workspaces: 1`, docs/parallel-coding.md §11): the daemon's side of
-//! workspaces. Everything but the session and the store lives in `sill_core::workspace::records`;
-//! this module answers the methods, gives records a session and the store, and tells the
+//! `_sill/workspaces.*` (`sill.workspaces: 1`, docs/parallel-coding.md §12): the daemon's side of
+//! workspaces. Everything but sessions and the store lives in `sill_core::workspace::records`;
+//! this module answers the methods, makes a workspace session's workspaces when its jail starts,
+//! gives records the store, the sessions' state and the rebase helper jail, and tells the
 //! connections that asked for `_sill/workspaces.changed`.
 use std::path::{Path, PathBuf};
 
@@ -19,48 +20,40 @@ impl Host for Daemon<'_> {
         self.0.with_store(|s| f(s.conn()))
     }
 
-    fn new_session(&self, create_id: &str, agent: &str, policy: &str, pin: &Path) -> Result<String> {
-        let a = sill_proto::sessions::Create {
-            create_id: create_id.into(),
-            agent: agent.into(),
-            policy: policy.into(),
-            pins: vec![sill_proto::sessions::HostPath::from_path(pin)],
-            memory_scope: String::new(),
-            follows: String::new(),
-            remember_pins: false,
-            ghost: false,
-        };
-        Ok(self.0.with_store(|s| super::sessions::create(s, a))?.session_id)
-    }
-
     fn life(&self, session: &str) -> Life {
         match self.0.with_store(|s| s.session_exact(session)) {
             Ok(Some(row)) if row.ended_at.is_some() => Life::Ended,
-            Ok(Some(_)) if sill_core::session::is_running(session) => Life::Running,
-            Ok(Some(_)) => Life::Stopped,
+            Ok(Some(_)) => Life::Alive,
             Ok(None) => Life::Missing,
-            // unknown: treat it as able to write, which only ever refuses
-            Err(_) => Life::Running,
+            // unknown: treat it as alive, which only ever keeps work
+            Err(_) => Life::Alive,
         }
+    }
+
+    fn busy(&self, session: &str) -> bool {
+        self.0.runners.lock().unwrap().get(session).is_some_and(|r| r.alive() && r.busy())
+    }
+
+    fn session_pins(&self, session: &str) -> Result<Vec<PathBuf>> {
+        self.0.with_store(|s| s.pins(session))
     }
 
     fn root(&self) -> PathBuf {
         root()
     }
 
-    /// The rebase helper (§7 step 3): `sill jail run` with the session's next build — its masks,
-    /// pins, agent home and the workspace's hidden source — no network, a throwaway state
-    /// directory on the state filesystem, the resolution in a private file. Never while the
-    /// session's own jail runs: the helper must be the only writer.
+    /// The rebase helper: `sill jail run` with the session's next build — its masks, pins, agent
+    /// home and its workspaces at their repositories' paths — no network, a throwaway state
+    /// directory on the state filesystem, the resolution in a private file. The person only acts
+    /// between the agent's turns, so the helper is the only one writing the workspace then.
     fn run_jailed(&self, session: &str, cwd: &Path, argv: &[&str]) -> Result<std::process::Output> {
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
         let hub = self.0;
-        anyhow::ensure!(!sill_core::session::is_running(session), "the session's jail is running");
-        let (row, pins, mask) = hub.with_store(|s| {
+        let (row, pins, binds) = hub.with_store(|s| {
             let row = s.session_exact(session)?.ok_or_else(|| anyhow::anyhow!("no session {session}"))?;
             Ok((row, s.jail_pins(session)?, s.workspace_mask(session)?))
         })?;
-        let resolved = sill_core::session::next_build(&row, &hub.home, &pins, &[], mask.as_ref())?;
+        let resolved = sill_core::session::next_build(&row, &hub.home, &pins, &[], &binds)?;
         if let Some(plan) = &resolved.filesystem {
             plan.prepare()?;
         }
@@ -93,7 +86,7 @@ impl Host for Daemon<'_> {
     }
 }
 
-/// `$XDG_DATA_HOME/sill/workspaces`, usually `~/.local/share/sill/workspaces` (§3).
+/// `$XDG_DATA_HOME/sill/workspaces`, usually `~/.local/share/sill/workspaces`.
 fn root() -> PathBuf {
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
@@ -109,6 +102,18 @@ impl Hub {
         if let Err(e) = records::reconcile(&Daemon(self)) {
             eprintln!("sill daemon: workspaces: {e:#}");
         }
+    }
+
+    /// Before a session's jail starts (§12): its workspaces, made or kept. A failure keeps the
+    /// session from starting rather than letting it write into the person's checkout.
+    pub(super) fn workspaces_for_start(&self, session: &str) -> Result<()> {
+        let h = Daemon(self);
+        if !records::ensure_for_session(&h, session)?.is_empty() {
+            for w in records::session_view(&h, session)?.workspaces {
+                self.workspaces_changed(&w.workspace_id);
+            }
+        }
+        Ok(())
     }
 
     fn workspaces_changed(&self, workspace_id: &str) {
@@ -136,40 +141,30 @@ impl Hub {
         let result = (|| -> Result<(Value, Option<String>)> {
             Ok(match method {
                 "_sill/workspaces.list" => (json!(records::list(&h, &args(params)?)?), None),
+                "_sill/workspaces.session" => (json!(records::session_view(&h, &args::<api::SessionKey>(params)?.session_id)?), None),
                 "_sill/workspaces.get" => (json!(records::get(&h, &args::<api::Key>(params)?.workspace_id)?), None),
                 "_sill/workspaces.diff" => (json!(records::diff(&h, &args(params)?)?), None),
-                "_sill/workspaces.create" => {
-                    let made = records::create(&h, &args(params)?)?;
-                    let id = made.workspace.workspace_id.clone();
-                    (json!(made), Some(id))
-                }
-                "_sill/workspaces.finish" => {
-                    let a: api::Key = args(params)?;
-                    (json!(records::finish(&h, &a.workspace_id)?), Some(a.workspace_id))
-                }
-                "_sill/workspaces.reopen" => {
-                    let a: api::Reopen = args(params)?;
-                    (json!(records::reopen(&h, &a)?), Some(a.workspace_id))
-                }
                 "_sill/workspaces.prepare" => {
                     let a: api::Operate = args(params)?;
                     (json!(records::prepare(&h, &a)?), Some(a.workspace_id))
                 }
-                "_sill/workspaces.merge" => {
+                "_sill/workspaces.apply" => {
                     let a: api::Apply = args(params)?;
-                    (json!(records::merge(&h, &a)?), Some(a.workspace_id))
+                    (json!(records::apply(&h, &a)?), Some(a.workspace_id))
                 }
                 "_sill/workspaces.discard" => {
                     let a: api::Apply = args(params)?;
                     (json!(records::discard(&h, &a)?), Some(a.workspace_id))
                 }
+                "_sill/workspaces.undo" => {
+                    let a: api::Undo = args(params)?;
+                    let done = records::undo(&h, &a)?;
+                    let id = done.workspace.as_ref().map(|w| w.workspace_id.clone());
+                    (json!(done), id)
+                }
                 "_sill/workspaces.abort" => {
                     let a: api::Operate = args(params)?;
                     (json!(records::abort(&h, &a)?), Some(a.workspace_id))
-                }
-                "_sill/workspaces.undo" => {
-                    let a: api::Operate = args(params)?;
-                    (json!(records::undo(&h, &a)?), Some(a.workspace_id))
                 }
                 _ => return Err(Error::method_not_found(method).into()),
             })
@@ -177,7 +172,7 @@ impl Hub {
         Some(result.map(|(value, changed)| {
             if let Some(id) = changed {
                 self.workspaces_changed(&id);
-                // a merge moves a pinned checkout; a new workspace adds a repository
+                // an Apply changes a checkout the Changes page shows
                 self.changes_changed();
             }
             value

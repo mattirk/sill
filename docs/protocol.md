@@ -774,30 +774,32 @@ extension; clients default absent name fields to null.
 
 ### Workspaces (development addition, 2026-11-09)
 
-`sill.workspaces: 1` gates a session's own clone and branch of a repository
-([parallel-coding.md](parallel-coding.md) §11). `_sill/workspaces.list` (live keyset pages,
-newest first), `_sill/workspaces.get` (record, current `revision`, `summary`, `needs_rebase`) and
-`_sill/workspaces.diff` (against the base or the source's current tip, at most 4 MiB) read.
-`_sill/workspaces.create` makes the clone from the source's HEAD and a session pinned to it, not
-started. `_sill/workspaces.finish` and `_sill/workspaces.reopen` move between `open` and
-`result`. `_sill/workspaces.prepare` records the destination and returns the revision a Merge would
-apply. `_sill/workspaces.merge` fast-forwards the source for exactly that revision, keeping the
-person's other edits. `_sill/workspaces.discard` retains the whole clone for 7 days and
-`_sill/workspaces.undo` restores it. `_sill/workspaces.changed` (notification, this capability
-only) invalidates one workspace.
+`sill.workspaces: 1` gates a session's own clone of each repository it pins
+([parallel-coding.md](parallel-coding.md) §12). A session's mode is fixed when it is made:
+`_sill/sessions.create` takes an optional `workspaces` (absent follows Settings → Automatic
+workspaces, `automatic_workspaces` in `_sill/settings.*`). The daemon makes a workspace session's
+workspaces when its jail starts; there is no create method.
 
-Mutations other than `finish` take an `operation_id` with the receipts of
-[sfp-operations.md](sfp-operations.md): an identical retry returns the workspace as it is now,
-never repeats the work, and `_sill/operations.get` reports the receipt. Refusals use
-`invalid_state` with the new optional details `{reason, paths}`: for create the source's reason
-(`submodules`, `linked_worktree`, `partial_clone`, `lfs`, `filter_drivers`, `borrowed_objects`,
-`detached_head`, `ref_format`, `no_commits`, `not_a_repository`); otherwise `stale_revision`,
-`source_moved`, `source_overlap`, `untracked_collision`, `uncommitted`, `writer_active`,
-`path_taken`, `retention_expired`, `rebase_in_progress`, `rebase_failed`, `no_session` or `state`.
-When the source moved, `prepare` rebases the result in a helper jail built from the workspace
-session's next build (no network, the source hidden); a rebase that stops is left for the
-workspace (`conflicts`, and the workspace's `operation` reads `rebase`/`conflict`) and
-`_sill/workspaces.abort` undoes it in the same helper.
+`_sill/workspaces.session` gives a session's repositories as its jail has them (each workspace,
+and repositories kept live with their reason). `_sill/workspaces.list` (live keyset pages, newest
+first, optionally one session's; the first page lists discarded work still undoable),
+`_sill/workspaces.get` (record, current `revision`, what an Apply would bring, `needs_rebase`) and
+`_sill/workspaces.diff` (against what was applied, or against the base; at most 4 MiB) read.
+`_sill/workspaces.prepare` rebases onto a moved checkout in a helper jail built from the session's
+next build (no network), keeping uncommitted changes; a rebase that stops is left for the
+workspace (`conflicts`, `operation` reads `rebase`/`conflict`) and `_sill/workspaces.abort` undoes
+it. `_sill/workspaces.apply` brings exactly the revision the person saw — commits by fast-forward,
+uncommitted changes into the working tree — and the workspace goes on. `_sill/workspaces.discard`
+resets the workspace to what was applied and keeps the work 7 days; `_sill/workspaces.undo` puts it
+back. `_sill/workspaces.changed` (notification, this capability only) invalidates one workspace.
+
+Mutations take an `operation_id` with the receipts of [sfp-operations.md](sfp-operations.md): an
+identical retry never repeats the work, and `_sill/operations.get` reports the receipt. Refusals use
+`invalid_state` with the optional details `{reason, paths}`: `stale_revision`, `source_moved`,
+`source_overlap`, `untracked_collision`, `writer_active`, `rebase_in_progress`, `rebase_failed`,
+`changed_since`, `retention_expired`, `detached_head`, `no_session`. The workspace methods first
+recorded on 2026-11-09 (create, finish, reopen, merge) were replaced the same day, before any
+release, and removed from the recorded baseline.
 
 ### `_sill/repos.root` answers for a repository folder (2026-11-08)
 

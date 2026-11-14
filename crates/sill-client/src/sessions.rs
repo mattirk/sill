@@ -35,6 +35,7 @@ pub fn new_here(from: &Session) -> Request {
         follows: from.session_id.clone(),
         remember_pins: false,
         ghost: false,
+        workspaces: None,
     };
     ("_sill/sessions.create", json!(create))
 }
