@@ -290,6 +290,13 @@ fn restart_daemon(dev: bool) {
             systemctl(&["stop", "sill.socket"]);
         }
     }
+    if socket_unit && !dev {
+        // the socket unit still listens: a connect from here would only activate a fresh daemon
+        // to ask it to leave, and a second one after it (docs/daemon.md §3.9 item 8). The stop was
+        // synchronous; the next client's connection starts the daemon that stays.
+        systemctl(&["stop", "sill-daemon.service"]);
+        return;
+    }
     // a daemon a client started (transient unit sill-daemon, or bare): ask it to leave
     if let Ok(c) = sill_proto::Client::connect() {
         let _ = c.call::<serde_json::Value>(sill_proto::method::DAEMON_SHUTDOWN, sill_proto::Empty::default());

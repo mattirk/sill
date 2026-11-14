@@ -95,7 +95,6 @@ pub fn run() -> Result<()> {
         None => (bind_direct()?, "started bare by a client (no unit: see daemon.log)"),
     };
     let hub = Arc::new(Hub::new(mode)?);
-    hub.recover();
     {
         // the minute sweep: idle sessions end, memory's nightly run (docs/daemon.md §3.6)
         let hub = hub.clone();
@@ -133,6 +132,12 @@ pub fn run() -> Result<()> {
     std::fs::write(dir.join("daemon.pid"), std::process::id().to_string())?;
     notify("READY=1");
     eprintln!("sill daemon: {}, pid {}, {} sessions in the store, protocol {}", mode, std::process::id(), hub.session_count(), sill_proto::PROTOCOL);
+    {
+        // recovery after READY, on a thread (docs/daemon.md §3.9 item 3): reconnecting a relay can
+        // take seconds each, and the unit's start timeout must not depend on how many there are
+        let hub = hub.clone();
+        std::thread::Builder::new().name("sill-daemon-recover".into()).spawn(move || hub.recover())?;
+    }
     let me = rustix::process::geteuid();
     for conn in listener.incoming() {
         let conn = match conn {
@@ -238,7 +243,11 @@ fn activated_listener() -> Result<Option<UnixListener>> {
         bail!("sill.socket passed {fds} descriptors; one listening socket is expected");
     }
     // SAFETY: systemd put a listening socket on fd 3 before exec, and nothing else owns it.
-    Ok(Some(unsafe { UnixListener::from_raw_fd(3) }))
+    let l = unsafe { UnixListener::from_raw_fd(3) };
+    // systemd passes it without CLOEXEC: every relay and host shell would inherit the listener
+    // (docs/daemon.md §3.9 item 4)
+    rustix::io::fcntl_setfd(&l, rustix::io::FdFlags::CLOEXEC).context("CLOEXEC on the activated socket")?;
+    Ok(Some(l))
 }
 
 /// Our own socket at `socket_path`: refuses to replace a daemon that answers, replaces a stale file.

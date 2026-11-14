@@ -226,7 +226,13 @@ impl Hub {
                 continue;
             }
             let runner = self.runners.lock().unwrap().get(&id).filter(|r| r.alive()).cloned();
-            if runner.as_ref().is_none_or(|r| r.busy()) {
+            if runner.as_ref().is_some_and(|r| r.busy()) {
+                continue;
+            }
+            // no runner but a relay that answers: a conversation not yet recovered, whose turn
+            // state is unknown — not idle. No runner and no relay: a parked agent, idle since the
+            // last prompt, as before the relay existed.
+            if runner.is_none() && self.relay_answers(&id) {
                 continue;
             }
             let Ok(mut policy) = Policy::load(&s.policy, &self.home) else { continue };
@@ -579,19 +585,36 @@ impl Hub {
 
     /// Reconnect the ACP owner even when nobody has a window open. The relay retains the SDK's
     /// live prompt future and reply channels across the main daemon's restart.
+    /// After `READY=1`, on a thread (docs/daemon.md §3.9 item 3): reconnect the conversations
+    /// whose relay outlived the last daemon and still answers, and finish the ends the last daemon
+    /// had recorded but not applied (`daemon_ends`: sill's summary when the relay is gone). A jail
+    /// without a live relay and no end pending — its agent parked by the shim, or never started —
+    /// gets its runner on the first attach or prompt, as before the relay existed: a daemon
+    /// restart wakes no agent.
     pub fn recover(self: &Arc<Self>) {
-        let mut ids: Vec<String> = self.children.lock().unwrap().keys().cloned().collect();
-        if let Ok(dir) = sill_proto::runtime_dir() && let Ok(entries) = std::fs::read_dir(dir) {
-            for e in entries.flatten() {
-                if e.path().join("relay.sock").exists() {
-                    ids.push(e.file_name().to_string_lossy().into_owned());
-                }
-            }
-        }
-        ids.sort(); ids.dedup();
+        let Ok(dir) = sill_proto::runtime_dir() else { return };
+        let Ok(entries) = std::fs::read_dir(&dir) else { return };
+        let mut ids: Vec<String> = entries.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        ids.extend(self.ending.lock().unwrap().keys().cloned());
+        ids.sort();
+        ids.dedup();
         for id in ids {
-            if let Err(e) = self.ensure_runner(&id, false) {
-                eprintln!("sill daemon: recovering session {id}: {e:#}; its turn state remains unknown");
+            if !sill_core::session::valid_id(&id) {
+                continue;
+            }
+            let socket = dir.join(&id).join("relay.sock");
+            let relay_answers = socket.exists() && std::os::unix::net::UnixStream::connect(&socket).is_ok();
+            let end_pending = self.ending.lock().unwrap().contains_key(&id);
+            // a socket nobody answers is a relay that died: swept when the session next starts
+            if !relay_answers && !end_pending {
+                continue;
+            }
+            if self.runners.lock().unwrap().contains_key(&id) {
+                continue; // a frontend attached meanwhile
+            }
+            match self.ensure_runner(&id, false) {
+                Ok(_) => eprintln!("sill daemon: recovered session {id}'s conversation from its relay"),
+                Err(e) => eprintln!("sill daemon: recovering session {id}: {e:#}; its turn state remains unknown"),
             }
         }
     }
@@ -919,6 +942,11 @@ impl Hub {
         let binds = sill_core::session::binds_for(agent, &policy, &sdir, &self.home, &pins, s.ghost)?;
         let plan = sill_core::changes::session_plan(policy.clone(), sdir, &self.home, uid, user, binds)?;
         sill_core::changes::scan(&policy, &plan, None)
+    }
+
+    /// A relay for the session answers on its socket.
+    fn relay_answers(&self, id: &str) -> bool {
+        sill_proto::runtime_dir().map(|d| d.join(id).join("relay.sock")).is_ok_and(|s| s.exists() && std::os::unix::net::UnixStream::connect(&s).is_ok())
     }
 
     /// The row says ghost (a missing row: no).
