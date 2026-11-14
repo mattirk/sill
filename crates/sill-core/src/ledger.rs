@@ -41,6 +41,16 @@ pub fn scan(layers: &[Layer], opts: &ScanOptions) -> Result<Vec<Change>> {
         }
         walk(&l.upper, &l.host, &l.upper, opts, &mut out)?;
     }
+    // Mount setup can create parents for absent masked targets. Hide an added
+    // parent only when it contains no reportable change after applying skips.
+    let empty_mount_parents: Vec<PathBuf> = out.iter().filter(|c| {
+        c.kind == Kind::Added && c.file_type == FileType::Dir
+            && opts.skip.iter().any(|s| s.starts_with(&c.path))
+            && !out.iter().any(|child| child.path != c.path && child.path.starts_with(&c.path)
+                && !(child.kind == Kind::Added && child.file_type == FileType::Dir
+                    && opts.skip.iter().any(|s| s.starts_with(&child.path))))
+    }).map(|c| c.path.clone()).collect();
+    out.retain(|c| !empty_mount_parents.contains(&c.path));
     out.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(out)
 }
@@ -166,6 +176,9 @@ fn walk_new(upper_root: &Path, host_root: &Path, dir: &Path, opts: &ScanOptions,
         let upper = e.path();
         let rel = upper.strip_prefix(upper_root).expect("below upper root");
         let host = host_root.join(rel);
+        if opts.skip.iter().any(|s| host.starts_with(s)) {
+            continue;
+        }
         let Ok(md) = upper.symlink_metadata() else { continue };
         if md.file_type().is_char_device() && md.rdev() == 0 {
             continue;
@@ -249,6 +262,25 @@ fn same_content(a: &Path, am: &std::fs::Metadata, b: &Path, bm: &std::fs::Metada
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_directory_respects_masks_and_hides_mount_parents() {
+        let base = std::env::temp_dir().join(format!("sill-ledger-masks-{}", std::process::id()));
+        let upper = base.join("upper");
+        let host = base.join("host");
+        std::fs::create_dir_all(upper.join(".cargo")).unwrap();
+        std::fs::create_dir_all(&host).unwrap();
+        std::fs::write(upper.join(".cargo/credentials"), "").unwrap();
+        let layers = [Layer { host: host.clone(), upper: upper.clone(), work: base.join("work") }];
+        let opts = ScanOptions { skip: vec![host.join(".cargo/credentials")], ..Default::default() };
+        assert!(scan(&layers, &opts).unwrap().is_empty());
+        std::fs::write(upper.join(".cargo/config.toml"), "real change").unwrap();
+        let changes = scan(&layers, &opts).unwrap();
+        assert_eq!(changes.len(), 2);
+        assert!(changes.iter().any(|c| c.path == host.join(".cargo/config.toml")));
+        assert!(!changes.iter().any(|c| c.path == host.join(".cargo/credentials")));
+        std::fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn non_utf8_components_do_not_disappear_from_ignore_matching() {
