@@ -649,9 +649,18 @@ impl Hub {
                 std::thread::sleep(std::time::Duration::from_millis(25));
             }
         }
+        let mut evicted = false;
         let existing = if fresh { None } else {
             match super::relay::connect(&socket, Runner::cursor(&snapshot)) {
                 Ok(connection) => Some(connection),
+                // it answers but will not cooperate (another build's relay after a deploy, a
+                // cursor it lost): replaced, and the conversation starts again (§3.9 item 1)
+                Err(e) if e.downcast_ref::<super::relay::Refused>().is_some() => {
+                    eprintln!("sill daemon: session {id}: the ACP relay refused recovery ({e:#}); replacing it");
+                    super::relay::evict(&dir, id)?;
+                    evicted = true;
+                    None
+                }
                 Err(e) if std::os::unix::net::UnixStream::connect(&socket).is_ok() => return Err(e.context("existing ACP relay did not accept recovery; refusing to replace it")),
                 Err(_) => None,
             }
@@ -677,7 +686,8 @@ impl Hub {
                     Ok((s, agent))
                 })?;
                 let mut control = sill_core::shim::Control::connect(&started.socket)?;
-                if fresh && control.status()?.running { control.kill(3000)?; }
+                // an evicted relay's agent held the old SDK connection: it starts again too
+                if (fresh || evicted) && control.status()?.running { control.kill(3000)?; }
                 if !control.status()?.running {
                     let mut env = agent.env.clone(); env.extend(agent.sandbox_off_env.clone());
                     control.spawn(&agent.command, &env, Some(&self.home))?;
@@ -828,7 +838,7 @@ impl Hub {
         let relay_socket = sill_proto::runtime_dir()?.join(id).join("relay.sock");
         if !had_runner {
             let snapshot = self.with_store(|store| Runner::load(id, store))?;
-            super::relay::stop_unowned(&relay_socket, Runner::cursor(&snapshot))?;
+            super::relay::stop_unowned(&relay_socket, id, Runner::cursor(&snapshot))?;
         }
         // the history (SPEC §3.6): the pinned repositories' range and the deletion itself, before
         // the row goes; a ghost leaves neither

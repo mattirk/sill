@@ -258,6 +258,69 @@ fn a_checkpoint_adopted_as_the_end_survives_a_daemon_restart() {
     exercise_recovery(true, false);
 }
 
+/// The first deploy after the relay exists (docs/daemon.md §3.9 item 1): the surviving relay is
+/// another build's. Here it answers Hello the way relays did before the version existed — no
+/// `version`, which reads as 0 — from a listener in this test, with a process named like a relay
+/// behind `relay.pid`. The daemon must evict it, start a real relay and reach the agent.
+#[test]
+fn a_relay_of_another_version_is_evicted_and_replaced_at_recovery() {
+    let (mut fixture, _release, observed) = Fixture::new();
+    let runtime = fixture.dir.join("run/sill").join(&fixture.session);
+    // the fixture's real relay makes way for the old one: killed, its files gone
+    let _ = fixture.relay.kill();
+    let _ = fixture.relay.wait();
+    for f in ["relay.sock", "relay.pid", "relay.lock"] {
+        let _ = std::fs::remove_file(runtime.join(f));
+    }
+    // a process whose command line names it as this session's relay, for relay.pid; `; true`
+    // keeps the shell from exec-ing sleep in its place. The fake socket below goes when it dies,
+    // as a real relay's does with its process.
+    let mut stale = Command::new("sh").args(["-c", "sleep 30; true", "sill", "daemon", "relay", "--session", &fixture.session]).spawn().unwrap();
+    std::fs::write(runtime.join("relay.pid"), stale.id().to_string()).unwrap();
+    std::fs::write(runtime.join("relay.lock"), "").unwrap();
+    let socket_path = runtime.join("relay.sock");
+    let old = UnixListener::bind(&socket_path).unwrap();
+    old.set_nonblocking(true).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let serving = stop.clone();
+    let stale_pid = stale.id();
+    let listener = std::thread::spawn(move || {
+        let alive = |pid: u32| std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| !s.contains(") Z"));
+        while !serving.load(Ordering::Relaxed) {
+            if !alive(stale_pid) {
+                let _ = std::fs::remove_file(&socket_path);
+                break;
+            }
+            match old.accept() {
+                Ok((stream, _)) => {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut hello = String::new();
+                    let _ = reader.read_line(&mut hello);
+                    let mut writer = stream;
+                    let _ = writeln!(writer, "{}", json!({"Hello": {"acknowledged": 0, "last": 0}}));
+                    std::thread::sleep(Duration::from_millis(200)); // the daemon reads before this closes
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(5)),
+                Err(_) => break,
+            }
+        }
+    });
+    fixture.start();
+    // recovery runs after READY: the eviction, then a real relay that reaches the fake agent
+    assert_eq!(observed.recv_timeout(Duration::from_secs(15)).unwrap(), "initialize", "{}", fixture.logs());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while stale.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "the stale relay process was not killed; {}", fixture.logs());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let new_pid: u32 = std::fs::read_to_string(runtime.join("relay.pid")).unwrap().trim().parse().unwrap();
+    assert_ne!(new_pid, stale.id(), "relay.pid still names the evicted process");
+    let log = fixture.logs();
+    assert!(log.contains("relay protocol 0") && log.contains("replacing it") && log.contains("evicted ACP relay pid"), "{log}");
+    stop.store(true, Ordering::Relaxed);
+    let _ = listener.join();
+}
+
 #[test]
 fn a_lost_worker_finishes_the_persisted_end_instead_of_starting_another_summary() {
     exercise_recovery(false, true);

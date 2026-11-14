@@ -21,6 +21,25 @@ use sill_core::{acp, wire};
 const JOURNAL_BYTES: usize = 64 * 1024 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The relay's own protocol — the shape of `Input` and `Output`, which carry the wire types.
+/// Both hellos say it; a daemon that finds a relay of another version after a deploy replaces it
+/// (`evict`) instead of leaving the session with a worker it cannot talk to (docs/daemon.md §3.9
+/// item 1). Bump it with any change to the enums below or to the wire types they carry.
+pub(crate) const RELAY_PROTOCOL: u32 = 1;
+
+/// The relay answered but will not cooperate: another version, a cursor it no longer retains, an
+/// answer that is not a Hello. Not a transport failure — the socket answers — so the hub evicts it.
+#[derive(Debug)]
+pub(crate) struct Refused(pub String);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Delivered {
     /// Zero denotes an already-acknowledged open question, replayed as current state.
@@ -30,7 +49,8 @@ pub(crate) struct Delivered {
 
 #[derive(Serialize, Deserialize)]
 enum Input {
-    Hello { since: u64 },
+    /// `version` is absent from relays before 2026-11-03: it reads as 0, which no relay speaks.
+    Hello { since: u64, #[serde(default)] version: u32 },
     Command { id: u64, command: wire::Command },
     Answer { request: u64, answer: wire::Answer },
     Ack { seq: u64 },
@@ -38,7 +58,7 @@ enum Input {
 
 #[derive(Serialize, Deserialize)]
 enum Output {
-    Hello { acknowledged: u64, last: u64 },
+    Hello { acknowledged: u64, last: u64, #[serde(default)] version: u32 },
     Event(Delivered),
     Accepted { id: u64, error: Option<String> },
     Answered { request: u64, error: Option<String> },
@@ -257,10 +277,15 @@ fn serve(mut stream: UnixStream, shared: Arc<Shared>) -> Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut first = String::new();
     reader.read_line(&mut first)?;
-    let Input::Hello { since } = serde_json::from_str(&first)? else { bail!("a relay connection starts with Hello") };
+    let Input::Hello { since, version } = serde_json::from_str(&first)? else { bail!("a relay connection starts with Hello") };
     stream.set_read_timeout(None)?;
     let (generation, pending) = {
         let mut state = shared.state.lock().unwrap();
+        if version != RELAY_PROTOCOL {
+            // say which version this is, so the daemon knows it is looking at another build's relay
+            write_line(&mut stream, &Output::Hello { acknowledged: state.acknowledged, last: state.next_seq, version: RELAY_PROTOCOL })?;
+            bail!("a daemon of relay protocol {version} connected; this relay speaks {RELAY_PROTOCOL}");
+        }
         if since < state.acknowledged || since > state.next_seq {
             bail!("relay cursor {since} is outside retained range {}..{}", state.acknowledged, state.next_seq);
         }
@@ -269,7 +294,7 @@ fn serve(mut stream: UnixStream, shared: Arc<Shared>) -> Result<()> {
         }
         state.generation += 1;
         state.subscriber = Some(stream.try_clone()?);
-        write_line(&mut stream, &Output::Hello { acknowledged: state.acknowledged, last: state.next_seq })?;
+        write_line(&mut stream, &Output::Hello { acknowledged: state.acknowledged, last: state.next_seq, version: RELAY_PROTOCOL })?;
         let pending: Vec<_> = state.pending.values().filter(|p| p.seq <= since).map(|p| Delivered { seq: 0, event: p.event.clone() }).collect();
         shared.changed.notify_all();
         (state.generation, pending)
@@ -412,13 +437,22 @@ pub(super) fn connect(socket: &Path, since: u64) -> Result<(Arc<Client>, mpsc::R
     }
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
-    write_line(&mut stream, &Input::Hello { since })?;
+    write_line(&mut stream, &Input::Hello { since, version: RELAY_PROTOCOL })?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut first = String::new();
     reader.read_line(&mut first)?;
-    let Output::Hello { acknowledged, last } = serde_json::from_str(&first).context("the ACP relay did not accept the cursor")? else { bail!("the ACP relay did not accept Hello") };
+    // from here the relay answered: whatever is wrong with its answer is a refusal, not transport
+    if first.is_empty() {
+        return Err(Refused("the ACP relay closed the connection at Hello (its cursor range, or an older relay)".into()).into());
+    }
+    let Ok(Output::Hello { acknowledged, last, version }) = serde_json::from_str::<Output>(&first) else {
+        return Err(Refused("the ACP relay did not answer Hello with a Hello".into()).into());
+    };
+    if version != RELAY_PROTOCOL {
+        return Err(Refused(format!("the ACP relay speaks relay protocol {version}; this daemon speaks {RELAY_PROTOCOL}")).into());
+    }
     if since < acknowledged || since > last {
-        bail!("ACP relay cursor is no longer retained");
+        return Err(Refused(format!("the ACP relay no longer retains cursor {since} ({acknowledged}..{last})")).into());
     }
     stream.set_read_timeout(None)?;
     let client = Arc::new(Client { writer: Mutex::new(stream), waiters: Mutex::new(BTreeMap::new()), closed: AtomicBool::new(false) });
@@ -460,10 +494,16 @@ pub(super) fn connect(socket: &Path, since: u64) -> Result<(Arc<Client>, mpsc::R
 /// Stop an orphaned worker before its session/runtime is scrubbed. This uses the authenticated
 /// private socket, never a pid read from disk. Deletion deliberately discards the buffered events
 /// after acknowledging them; otherwise an Ended worker waits forever with ghost data in memory.
-pub(super) fn stop_unowned(socket: &Path, cursor: u64) -> Result<()> {
+pub(super) fn stop_unowned(socket: &Path, session: &str, cursor: u64) -> Result<()> {
     let (client, events) = match connect(socket, cursor) {
         Ok(connection) => connection,
         Err(error) if error.downcast_ref::<std::io::Error>().is_some_and(|error| matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused)) => return Ok(()),
+        Err(error) if error.downcast_ref::<Refused>().is_some() => {
+            // a worker this daemon cannot talk to goes the hard way; its journal was for a
+            // session being deleted anyway
+            eprintln!("sill daemon: session {session}: orphaned ACP relay refused ({error:#}); evicting it");
+            return evict(socket.parent().unwrap_or(Path::new(".")), session);
+        }
         Err(error) => return Err(error.context("connecting orphaned ACP worker before deletion")),
     };
     // A reserved terminal command id is greater than every persisted normal command, and remains
@@ -477,6 +517,58 @@ pub(super) fn stop_unowned(socket: &Path, cursor: u64) -> Result<()> {
         if matches!(event.event, wire::Event::Ended(_)) { break; }
     }
     wait_stopped(socket)
+}
+
+/// A relay that answers but will not cooperate — another build's after a deploy, a cursor it no
+/// longer retains — is replaced (docs/daemon.md §3.9 item 1): the process `relay.pid` names, once
+/// checked to be ours and this session's relay, gets TERM, then KILL, and its files go. Its
+/// journal is lost with it: the conversation starts again from the store (`session/load` where
+/// the agent has it), as after a lost worker.
+pub(super) fn evict(dir: &Path, session: &str) -> Result<()> {
+    use rustix::process::{Pid, Signal, kill_process};
+    let socket = dir.join("relay.sock");
+    let pid: Option<u32> = std::fs::read_to_string(dir.join("relay.pid")).ok().and_then(|t| t.trim().parse().ok());
+    let answers = || UnixStream::connect(&socket).is_ok();
+    if let Some(pid) = pid.filter(|p| is_relay_of(*p, session)) {
+        let p = Pid::from_raw(pid as i32).context("relay pid")?;
+        let _ = kill_process(p, Signal::TERM);
+        let deadline = std::time::Instant::now() + IO_TIMEOUT;
+        while std::time::Instant::now() < deadline && answers() && is_relay_of(pid, session) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if answers() && is_relay_of(pid, session) {
+            let _ = kill_process(p, Signal::KILL);
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while std::time::Instant::now() < deadline && is_relay_of(pid, session) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        eprintln!("sill daemon: session {session}: evicted ACP relay pid {pid}");
+    }
+    // the kernel closes a dead process's listener at once; a moment for that to show
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while answers() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if answers() {
+        bail!("the ACP relay of session {session} still answers at {} and relay.pid ({pid:?}) does not name it", socket.display());
+    }
+    for f in ["relay.sock", "relay.pid", "relay.lock"] {
+        let _ = std::fs::remove_file(dir.join(f));
+    }
+    Ok(())
+}
+
+/// `pid` is a live process of ours whose command line is a relay of `session`: what `relay.pid`
+/// is trusted to name, before a signal goes to it.
+fn is_relay_of(pid: u32, session: &str) -> bool {
+    let Ok(cmd) = std::fs::read(format!("/proc/{pid}/cmdline")) else { return false };
+    let mine = std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .ok()
+        .and_then(|s| s.lines().find(|l| l.starts_with("Uid:")).and_then(|l| l.split_whitespace().nth(1)?.parse::<u32>().ok()))
+        == Some(rustix::process::geteuid().as_raw());
+    let args: Vec<&[u8]> = cmd.split(|b| *b == 0).collect();
+    mine && args.contains(&&b"relay"[..]) && args.contains(&session.as_bytes())
 }
 
 pub(super) fn wait_stopped(socket: &Path) -> Result<()> {

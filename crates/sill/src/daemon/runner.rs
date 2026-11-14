@@ -625,7 +625,8 @@ mod tests {
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut hello = String::new();
             reader.read_line(&mut hello).unwrap();
-            stream.write_all(b"{\"Hello\":{\"acknowledged\":0,\"last\":0}}\n").unwrap();
+            // the fake relay speaks the current relay protocol
+            writeln!(stream, "{}", serde_json::json!({"Hello": {"acknowledged": 0, "last": 0, "version": relay::RELAY_PROTOCOL}})).unwrap();
             for line in reader.lines() {
                 let Ok(line) = line else { break };
                 let message: serde_json::Value = serde_json::from_str(&line).unwrap();
