@@ -104,10 +104,12 @@ fn main() -> iced::Result {
     )
     .title("Sill")
     .theme(|_: &App| style::theme())
+    // Interface scale (Settings): on top of the desktop's own, which iced multiplies in
+    .scale_factor(|app: &App| app.settings.scale())
     .subscription(App::subscription)
     .default_font(Font::with_name(fonts::SANS_FAMILY))
     .window(iced::window::Settings {
-        size: iced::Size::new(720.0, 860.0),
+        size: START_SIZE,
         // no title bar, like the shelf: the top bar's empty space moves the window
         decorations: false,
         visible: !options.hidden,
@@ -130,6 +132,9 @@ fn main() -> iced::Result {
     })
     .run()
 }
+
+/// The window's size as made, in its own units (iced makes it this much times Interface scale).
+const START_SIZE: iced::Size = iced::Size::new(720.0, 860.0);
 
 /// The shelf stays open all day: draw on the integrated GPU and never wake a discrete one, unless
 /// the person asks otherwise (`WGPU_POWER_PREF=high`). iced 0.14 asks wgpu for the
@@ -288,6 +293,12 @@ pub enum Message {
     Nothing,
     /// The monitor's size, once the window knows it: Shelf mode's width comes from it.
     Monitor(Option<iced::Size>),
+    /// The desktop's own scale for the window.
+    DesktopScale(f32),
+    /// Interface scale one preset larger (1) or smaller (-1), or back to 100 % (0).
+    ScaleStep(i32),
+    /// The working area's height in device pixels, where X11 tells it.
+    WorkHeight(Option<u32>),
     /// The pointer came over the top bar's activity, or left it: the timer shows meanwhile.
     ActivityHover(bool),
     /// Full conversation, and the drawer's edge dragged.
@@ -556,6 +567,10 @@ pub struct App {
     persist: bool,
     /// The monitor's logical size, once known.
     pub monitor: Option<iced::Size>,
+    /// The desktop's own scale for the window (iced multiplies Interface scale on top), and the
+    /// working area's height in device pixels (X11): Shelf mode's height, whatever the scale.
+    desktop_scale: Option<f32>,
+    work_height_px: Option<u32>,
     /// The window, once open, and its X11 id.
     pub window_id: Option<iced::window::Id>,
     pub xid: Option<u64>,
@@ -635,12 +650,14 @@ impl App {
             workspace,
             now: Instant::now(),
             demo_step: 0,
-            width: 720.0,
-            height: 860.0,
+            width: START_SIZE.width,
+            height: START_SIZE.height,
             layout: layout::Layout::default(),
             settings: settings::Settings::default(),
             persist: false,
             monitor: None,
+            desktop_scale: None,
+            work_height_px: None,
             window_id: None,
             xid: None,
             visible: !HIDDEN.load(std::sync::atomic::Ordering::Relaxed),
@@ -654,6 +671,11 @@ impl App {
             selecting: false,
         };
         if demo {
+            // the demo keeps its own state, but shows at the person's Interface scale (read
+            // only, never written; not in tests, which start from the defaults)
+            if !cfg!(test) {
+                app.settings.interface_scale = settings::load().interface_scale;
+            }
             let tab = Tab {
                 id: "demo".into(),
                 title: "witty-willow".into(),
@@ -676,6 +698,7 @@ impl App {
             app.settings = settings::load();
             app.persist = true;
         }
+
         app.layout.mode = app
             .settings
             .mode
@@ -829,8 +852,7 @@ impl App {
     /// The window's place kept (Drawer and Full mode), and the window unmapped.
     fn hidden(&mut self, at: Option<(i32, i32)>) -> Task<Message> {
         if self.layout.mode != layout::Mode::Shelf {
-            self.settings.work_width = Some(self.width);
-            self.settings.work_height = Some(self.height);
+            self.remember_work_size();
             if let Some((x, y)) = at {
                 self.settings.window_x = Some(x);
                 self.settings.window_y = Some(y);
@@ -866,6 +888,31 @@ impl App {
         blocking(self.placing(), |()| Message::Nothing)
     }
 
+    /// Interface scale changes now: everything inside the window grows or shrinks, the window
+    /// itself stays where it is, as large as it was. iced's sizes are in units of the scale, so
+    /// the window's and the monitor's are converted to the new one before anything is fitted
+    /// (Shelf mode would otherwise be held to its old width in new units), and the monitor is
+    /// read again once iced has the new scale.
+    fn set_scale(&mut self, scale: f32) -> Task<Message> {
+        let (old, new) = (self.settings.scale(), settings::valid_scale(scale));
+        if old == new {
+            return Task::none();
+        }
+        let ratio = old / new;
+        self.width *= ratio;
+        self.height *= ratio;
+        self.monitor = self
+            .monitor
+            .map(|m| iced::Size::new(m.width * ratio, m.height * ratio));
+        self.settings.interface_scale = Some(new);
+        self.save_settings();
+        let fit = self.fit_window(false);
+        match self.window_id {
+            Some(id) => fit.chain(iced::window::monitor_size(id).map(Message::Monitor)),
+            None => fit,
+        }
+    }
+
     fn set_always_on_top(&mut self, on: bool) -> Task<Message> {
         self.settings.always_on_top = Some(on);
         self.save_settings();
@@ -890,14 +937,33 @@ impl App {
         }
     }
 
+    /// The working size kept for Drawer and Full mode, in the units of Interface scale 100 %:
+    /// the window's size on the screen, whatever the scale is when it comes back.
+    fn remember_work_size(&mut self) {
+        let scale = self.settings.scale();
+        self.settings.work_width = Some(self.width * scale);
+        self.settings.work_height = Some(self.height * scale);
+    }
+
     /// The working size (Drawer and Full): as the window last had it, else half the monitor.
     fn work_size(&self) -> Option<iced::Size> {
-        let height = self.settings.work_height.unwrap_or(self.height);
+        let scale = self.settings.scale();
+        let height = self.settings.work_height.map_or(self.height, |h| h / scale);
         match self.settings.work_width {
-            Some(width) => Some(iced::Size::new(width, height)),
+            Some(width) => Some(iced::Size::new(width / scale, height)),
             None => self
                 .monitor
                 .map(|m| iced::Size::new((m.width * layout::WORK_SHARE).round(), height)),
+        }
+    }
+
+    /// Shelf mode's height in the window's units: the working area's full height (device pixels
+    /// over the desktop's scale and Interface scale), else the height it has. The window's start
+    /// height matched the working area only by chance, and only at 100 %.
+    fn shelf_height(&self) -> f32 {
+        match (self.work_height_px, self.desktop_scale) {
+            (Some(px), Some(desktop)) => px as f32 / (desktop * self.settings.scale()),
+            _ => self.height,
         }
     }
 
@@ -915,10 +981,11 @@ impl App {
                 return Task::none();
             };
             let width = (monitor.width * self.settings.shelf_share()).round();
-            let max = iced::Size::new(width, monitor.height.max(self.height));
-            let size = iced::Size::new(width.min(self.width.max(layout::MAIN_MIN)), self.height);
+            let height = self.shelf_height();
+            let max = iced::Size::new(width, monitor.height.max(height));
+            let size = iced::Size::new(width.min(self.width.max(layout::MAIN_MIN)), height);
             let size = if entering {
-                iced::Size::new(width, self.height)
+                iced::Size::new(width, height)
             } else {
                 size
             };
@@ -952,8 +1019,7 @@ impl App {
             return Task::none();
         }
         if old != Mode::Shelf {
-            self.settings.work_width = Some(self.width);
-            self.settings.work_height = Some(self.height);
+            self.remember_work_size();
         }
         if mode == Mode::Full {
             self.layout.before_full = old;
@@ -1303,8 +1369,7 @@ impl App {
             Message::Quit => {
                 if self.demo || self.window_id.is_none() {
                     if self.layout.mode != layout::Mode::Shelf {
-                        self.settings.work_width = Some(self.width);
-                        self.settings.work_height = Some(self.height);
+                        self.remember_work_size();
                     }
                     self.save_settings();
                     return iced::exit();
@@ -1373,6 +1438,11 @@ impl App {
                 return Task::batch([
                     iced::window::monitor_size(id).map(Message::Monitor),
                     iced::window::raw_id::<Message>(id).map(Message::XId),
+                    iced::window::scale_factor(id).map(Message::DesktopScale),
+                    blocking(
+                        || desktop::shelf_placement(1.0).map(|p| p.height),
+                        Message::WorkHeight,
+                    ),
                 ]);
             }
             Message::XId(xid) => {
@@ -1417,6 +1487,17 @@ impl App {
             Message::Nothing => {}
             Message::Monitor(size) => {
                 self.monitor = size;
+                return self.fit_window(false);
+            }
+            Message::ScaleStep(step) => {
+                return self.set_scale(settings::step_scale(self.settings.scale(), step));
+            }
+            Message::DesktopScale(scale) => {
+                self.desktop_scale = (scale.is_finite() && scale > 0.0).then_some(scale);
+                return self.fit_window(false);
+            }
+            Message::WorkHeight(height) => {
+                self.work_height_px = height;
                 return self.fit_window(false);
             }
             Message::Layout(action) => match action {
@@ -1783,6 +1864,7 @@ impl App {
                 };
                 return self.settings_load();
             }
+            Event::Scale(scale) => return self.set_scale(scale),
             Event::ShelfShare(share) => {
                 self.settings.shelf_width = Some(share);
                 self.save_settings();

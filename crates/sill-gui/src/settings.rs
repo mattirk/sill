@@ -23,11 +23,24 @@ pub struct Settings {
     /// its edge). Unset = the top-left of the working area.
     pub window_x: Option<i32>,
     pub window_y: Option<i32>,
+    /// Interface scale, a multiplier on the desktop's own scaling: 1.0 is the desktop's normal
+    /// size. Unset, unreadable or out of bounds = 1.0.
+    pub interface_scale: Option<f32>,
 }
+
+/// Interface scale's presets in Settings; 1.0 is the desktop's normal size.
+pub const SCALES: &[f32] = &[0.75, 0.9, 1.0, 1.1, 1.25, 1.5];
+/// The bounds a scale is held to (a hand-edited file included).
+const SCALE_BOUNDS: (f32, f32) = (0.5, 2.0);
 
 impl Settings {
     pub fn always_on_top(&self) -> bool {
         self.always_on_top.unwrap_or(true)
+    }
+
+    /// Interface scale: the saved value, 1.0 when there is none or it is not a usable number.
+    pub fn scale(&self) -> f32 {
+        valid_scale(self.interface_scale.unwrap_or(1.0))
     }
 
     /// Shelf mode's share of the monitor's width.
@@ -37,6 +50,31 @@ impl Settings {
             .map_or(crate::layout::SHELF_SHARE, |s| {
                 s.clamp(0.15, crate::layout::SHELF_MAX)
             })
+    }
+}
+
+/// The preset `step` places from `scale` (the nearest preset when it is between two), held to
+/// the ends; step 0 is 100 %.
+pub fn step_scale(scale: f32, step: i32) -> f32 {
+    if step == 0 {
+        return 1.0;
+    }
+    let at = (0..SCALES.len())
+        .min_by(|a, b| {
+            (SCALES[*a] - scale)
+                .abs()
+                .total_cmp(&(SCALES[*b] - scale).abs())
+        })
+        .unwrap_or(2) as i32;
+    SCALES[(at + step).clamp(0, SCALES.len() as i32 - 1) as usize]
+}
+
+/// `scale` when it is a finite number within bounds, else 1.0.
+pub fn valid_scale(scale: f32) -> f32 {
+    if scale.is_finite() && (SCALE_BOUNDS.0..=SCALE_BOUNDS.1).contains(&scale) {
+        scale
+    } else {
+        1.0
     }
 }
 
@@ -91,5 +129,44 @@ mod tests {
         assert_eq!(back.mode.as_deref(), Some("drawer"));
         assert_eq!(back.shelf_share(), 0.4, "a share past 40 % is no shelf");
         assert_eq!(Settings::default().shelf_share(), 0.35);
+    }
+
+    #[test]
+    fn interface_scale_defaults_to_the_desktop_size_and_is_bounded() {
+        assert_eq!(
+            Settings::default().scale(),
+            1.0,
+            "an existing file keeps today's size"
+        );
+        let at = |v: f32| {
+            Settings {
+                interface_scale: Some(v),
+                ..Settings::default()
+            }
+            .scale()
+        };
+        assert_eq!(at(1.25), 1.25);
+        for broken in [f32::NAN, f32::INFINITY, 0.0, -1.0, 9.0] {
+            assert_eq!(at(broken), 1.0, "{broken}");
+        }
+        let back: Settings = toml::from_str("interface_scale = 1.1").unwrap();
+        assert_eq!(back.scale(), 1.1);
+        let wrong: Settings = toml::from_str("interface_scale = \"big\"").unwrap_or_default();
+        assert_eq!(wrong.scale(), 1.0);
+        assert!(SCALES.contains(&1.0) && SCALES.iter().all(|s| valid_scale(*s) == *s));
+    }
+
+    #[test]
+    fn the_shortcuts_step_through_the_presets() {
+        assert_eq!(step_scale(1.0, 1), 1.1);
+        assert_eq!(step_scale(1.0, -1), 0.9);
+        assert_eq!(step_scale(1.5, 1), 1.5, "held at the largest");
+        assert_eq!(step_scale(0.75, -1), 0.75, "and the smallest");
+        assert_eq!(
+            step_scale(1.2, 1),
+            1.5,
+            "from between two, the nearest is the start"
+        );
+        assert_eq!(step_scale(1.25, 0), 1.0);
     }
 }

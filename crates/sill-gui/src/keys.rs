@@ -477,6 +477,11 @@ fn window_message(key: &Key, modifiers: Modifiers) -> Option<Message> {
         Key::Character(c) if modifiers.shift() && c.eq_ignore_ascii_case("d") => {
             Message::Layout(crate::layout::Action::ToggleShelf)
         }
+        // Interface scale, as browsers zoom: + (or =, shifted on some layouts) larger, - smaller,
+        // 0 back to 100 %
+        Key::Character("+" | "=") => Message::ScaleStep(1),
+        Key::Character("-") => Message::ScaleStep(-1),
+        Key::Character("0") if !modifiers.shift() => Message::ScaleStep(0),
         Key::Character(c) if !modifiers.shift() => match c {
             "t" | "T" => Message::NewSession,
             "w" | "W" => Message::CloseCurrent,

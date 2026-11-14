@@ -947,8 +947,83 @@ impl App {
 
     // --- the composer ---------------------------------------------------------------------------
 
-    fn composer<'a>(&'a self, view: &'a SessionView) -> Element<'a, Message> {
+    /// The composer's bar, `width` wide: the shell's button, the agent's controls (scrolling
+    /// sideways when they do not fit: Interface scale 150 % in Shelf mode) and send or stop,
+    /// which stay in reach.
+    fn composer_bar<'a>(&'a self, view: &'a SessionView, width: f32) -> Element<'a, Message> {
+        /// What the shell's and the send/stop buttons take with their spacing, and a margin.
+        const BUTTONS_ROOM: f32 = 60.0;
         let has_session = !view.conversation.session_id.is_empty() || self.demo;
+        let sendable = !view.draft.text().trim().is_empty();
+        let action: Element<'_, Message> = if view.conversation.busy() {
+            stop_button()
+        } else {
+            keys::press_maybe(
+                button(
+                    svg(icons::send())
+                        .width(12)
+                        .height(12)
+                        .style(move |theme, status| {
+                            // dark on the accent only when the button lights up: there is a prompt
+                            if sendable {
+                                style::send_arrow(theme, status)
+                            } else {
+                                style::send_arrow(theme, svg::Status::Idle)
+                            }
+                        }),
+                )
+                .padding(3)
+                .style(style::send),
+                sendable.then_some(Message::Send),
+            )
+        };
+        let shell = button(icons::glyph(
+            "terminal",
+            12.0,
+            if view.terminal_shown {
+                P.accent
+            } else {
+                P.fg_dim
+            },
+        ))
+        .padding([4, 6])
+        .style(style::quiet);
+        let shell = container(keys::press_maybe(
+            shell,
+            has_session.then_some(Message::ToggleTerminal),
+        ))
+        .id("terminal-button");
+        let shell = tooltip(
+            shell,
+            container(text("Terminal in the jail").size(style::SMALL))
+                .padding([4, 8])
+                .style(style::fill(P.code_bg)),
+            tooltip::Position::Top,
+        );
+        // the agent's controls sideways-scrolling between the shell's button and send/stop, which
+        // stay in reach however narrow the window (Interface scale 150 % in Shelf mode)
+        let mut agent_controls = row![].spacing(4).align_y(Alignment::Center);
+        for control in controls(view) {
+            agent_controls = agent_controls.push(control);
+        }
+        if let Some(usage) = usage(view) {
+            agent_controls = agent_controls
+                .push(container(text(usage).size(style::TINY).color(P.fg_dim)).padding([0, 6]));
+        }
+        let agent_controls = scrollable(agent_controls)
+            .direction(scrollable::Direction::Horizontal(style::bar()))
+            .anchor_right()
+            .style(style::feed_scroll)
+            .width(Shrink);
+        // as wide as its controls, up to the room the two buttons leave: past that it scrolls
+        let agent_controls = container(agent_controls).max_width((width - BUTTONS_ROOM).max(0.0));
+        row![shell, space().width(Fill), agent_controls, action]
+            .spacing(4)
+            .align_y(Alignment::Center)
+            .into()
+    }
+
+    fn composer<'a>(&'a self, view: &'a SessionView) -> Element<'a, Message> {
         let mut composer = Column::new().push(self.network_prompt(view));
         for submission in view
             .conversation
@@ -1044,63 +1119,8 @@ impl App {
             .height(Shrink)
             .max_height(220)
             .style(style::prompt);
-        let sendable = !view.draft.text().trim().is_empty();
-        let action: Element<'_, Message> = if view.conversation.busy() {
-            stop_button()
-        } else {
-            keys::press_maybe(
-                button(
-                    svg(icons::send())
-                        .width(12)
-                        .height(12)
-                        .style(move |theme, status| {
-                            // dark on the accent only when the button lights up: there is a prompt
-                            if sendable {
-                                style::send_arrow(theme, status)
-                            } else {
-                                style::send_arrow(theme, svg::Status::Idle)
-                            }
-                        }),
-                )
-                .padding(3)
-                .style(style::send),
-                sendable.then_some(Message::Send),
-            )
-        };
-        let shell = button(icons::glyph(
-            "terminal",
-            12.0,
-            if view.terminal_shown {
-                P.accent
-            } else {
-                P.fg_dim
-            },
-        ))
-        .padding([4, 6])
-        .style(style::quiet);
-        let shell = container(keys::press_maybe(
-            shell,
-            has_session.then_some(Message::ToggleTerminal),
-        ))
-        .id("terminal-button");
-        let shell = tooltip(
-            shell,
-            container(text("Terminal in the jail").size(style::SMALL))
-                .padding([4, 8])
-                .style(style::fill(P.code_bg)),
-            tooltip::Position::Top,
-        );
-        let mut bar = row![shell, space().width(Fill)]
-            .spacing(4)
-            .align_y(Alignment::Center);
-        for control in controls(view) {
-            bar = bar.push(control);
-        }
-        if let Some(usage) = usage(view) {
-            bar =
-                bar.push(container(text(usage).size(style::TINY).color(P.fg_dim)).padding([0, 6]));
-        }
-        bar = bar.push(action);
+        // the bar knows its width, so the agent's controls can give way to the buttons
+        let bar = responsive(move |size| self.composer_bar(view, size.width)).height(Shrink);
         // as in the shelf, the prompt folds away while the terminal is up in its place
         let terminal = view.terminal.as_ref().filter(|_| view.terminal_shown);
         let input: Element<'_, Message> = match terminal {

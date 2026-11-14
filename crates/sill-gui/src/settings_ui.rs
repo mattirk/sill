@@ -67,6 +67,8 @@ pub enum Event {
     /// A request done: what to say of it, or why it did not take effect.
     Done(Result<String, String>),
     ShelfShare(f32),
+    /// Interface scale (sill-gui's own, `crate::settings::SCALES`).
+    Scale(f32),
     Instructions(text_editor::Action),
     SaveInstructions,
     PinPath(String),
@@ -318,9 +320,41 @@ impl App {
         let share_at = settings::nearest(SHELF_SHARES, (share * 100.0) as i64, |(s, _)| {
             (s * 100.0) as i64
         });
+        let scales = crate::settings::SCALES;
+        let scale = self.settings.scale();
+        let scale_at = scales
+            .iter()
+            .position(|s| (s - scale).abs() < 0.001)
+            .unwrap_or_else(|| {
+                // a hand-edited value between presets shows as the nearest one
+                (0..scales.len())
+                    .min_by(|a, b| {
+                        (scales[*a] - scale)
+                            .abs()
+                            .total_cmp(&(scales[*b] - scale).abs())
+                    })
+                    .unwrap_or(2)
+            });
+        let scale_row = row![choice(
+            ["75 %", "90 %", "100 %", "110 %", "125 %", "150 %"],
+            scale_at,
+            move |i| event(Event::Scale(scales[i])),
+        ),]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        let scale_row = if scale == 1.0 {
+            scale_row
+        } else {
+            scale_row.push(quiet_button("Reset", Some(event(Event::Scale(1.0)))))
+        };
         page_column = page_column.push(section(
             "Appearance",
             vec![
+                setting(
+                    "Interface scale",
+                    Some("Text, icons and controls together, on top of the desktop's scaling (sill-gui)"),
+                    scale_row,
+                ),
                 setting(
                     "Theme",
                     None,

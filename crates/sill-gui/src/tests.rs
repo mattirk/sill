@@ -2113,7 +2113,13 @@ fn session_shortcuts_work_from_the_prompt() {
             Some(Message::SelectTab(at)) if at == digit - 1)
         );
     }
-    assert!(shortcut(press(ch("0"), Modifiers::CTRL)).is_none());
+    // Ctrl+0 is no tab: it puts Interface scale back to 100 %, as + and - step it
+    for (key, step) in [("0", 0), ("+", 1), ("=", 1), ("-", -1)] {
+        assert!(
+            matches!(shortcut(press(ch(key), Modifiers::CTRL)), Some(Message::ScaleStep(s)) if s == step),
+            "Ctrl+{key}"
+        );
+    }
     assert!(matches!(
         shortcut(press(ch("t"), both)),
         Some(Message::ToggleTerminal)
@@ -2964,4 +2970,49 @@ fn session_hotkeys_create_with_current_agent_and_close_current_session() {
     settle_task(&mut app, task);
     assert!(app.tabs.is_empty());
     server.join().unwrap();
+}
+
+/// Interface scale grows the content, not the window: the window's and the monitor's sizes are
+/// held in the scale's units, so a change converts them and Shelf mode is fitted to the same
+/// size on the screen; the working size is kept in 100 % units, so it comes back as large.
+#[test]
+fn interface_scale_keeps_the_window_and_the_working_size() {
+    let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+    let (mut app, _) = App::new(true, None);
+    app.width = 500.0;
+    app.height = 800.0;
+    app.monitor = Some(iced::Size::new(1440.0, 900.0));
+    let _ = app.update(Message::ScaleStep(1));
+    assert_eq!(app.settings.scale(), 1.1);
+    let _ = app.update(Message::ScaleStep(1));
+    assert_eq!(app.settings.scale(), 1.25);
+    assert!(
+        near(app.width, 400.0) && near(app.height, 640.0),
+        "500 × 800 at 100 % in 125 % units"
+    );
+    let monitor = app.monitor.unwrap();
+    assert!(
+        near(monitor.width, 1152.0) && near(monitor.height, 720.0),
+        "{monitor:?}"
+    );
+    app.remember_work_size();
+    assert!(
+        near(app.settings.work_width.unwrap(), 500.0)
+            && near(app.settings.work_height.unwrap(), 800.0),
+        "kept in 100 % units"
+    );
+    let _ = app.update(Message::ScaleStep(0));
+    assert!(near(app.width, 500.0) && near(app.height, 800.0));
+    let work = app.work_size().unwrap();
+    assert!(
+        near(work.width, 500.0) && near(work.height, 800.0),
+        "{work:?}"
+    );
+    // Shelf mode's height is the working area's, in the window's units at any scale
+    app.desktop_scale = Some(2.0);
+    app.work_height_px = Some(1720);
+    assert_eq!(app.shelf_height(), 860.0);
+    let _ = app.update(Message::ScaleStep(1));
+    let _ = app.update(Message::ScaleStep(1));
+    assert!(near(app.shelf_height(), 688.0));
 }
