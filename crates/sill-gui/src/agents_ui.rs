@@ -28,6 +28,7 @@ pub struct AgentsPage {
     note: Option<String>,
     armed: Option<String>,
     editor: Option<Editor>,
+    details: Option<String>,
 }
 struct Editor {
     id: String,
@@ -79,7 +80,7 @@ fn msg(e: Event) -> Message {
 fn control(label: &str, event: Event) -> Element<'_, Message> {
     keys::press(
         button(text(label).size(style::SMALL))
-            .padding([6, 10])
+            .padding([4, 8])
             .style(style::quiet),
         msg(event),
     )
@@ -192,8 +193,17 @@ impl App {
                     .insert(id, result.err().unwrap_or_else(|| "Done".into()));
                 return self.agents_load(false);
             }
-            Event::CloseEditor => p.editor = None,
+            Event::CloseEditor => {
+                p.editor = None;
+                p.details = None;
+            }
             Event::Edit(id) => {
+                p.editor = None;
+                if p.details.as_deref() == Some(&id) {
+                    p.details = None;
+                    return Task::none();
+                }
+                p.details = Some(id.clone());
                 if let Some(d) = p
                     .entries
                     .iter()
@@ -397,7 +407,7 @@ impl App {
             .align_y(Alignment::Center)
             .wrap()
         ]
-        .spacing(12);
+        .spacing(4);
         if p.loading {
             body = body.push(text("Loading agents…").color(P.fg_dim));
         }
@@ -438,59 +448,88 @@ impl App {
                         false
                     ),
                 },
-                text(&r.name).size(style::TEXT),
-                text(format!("v{} · {}", r.version, r.source))
-                    .size(style::SMALL)
-                    .color(P.fg_dim),
-                iced::widget::space().width(Fill)
+                text(&r.name).size(style::TEXT).width(Fill),
             ]
-            .spacing(10)
+            .spacing(8)
             .align_y(Alignment::Center);
             if p.busy.contains(id) {
-                top = top.push(text("Working…").color(P.accent));
+                top = top.push(text("Working…").size(style::SMALL).color(P.accent));
             } else if let Some(installed) = &e.installed {
-                top = top.push(text(format!("Installed {}", installed.version)).size(style::SMALL));
                 if installed.version != r.version {
                     top = top.push(control("Update", Event::Install(id.clone(), false)));
+                } else {
+                    top = top.push(text("Installed").size(style::SMALL).color(P.fg_dim));
                 }
-                if r.newer.is_some() {
-                    top = top.push(control(
-                        "Newer (unreviewed)",
-                        Event::Install(id.clone(), true),
-                    ));
-                }
-                top = top.push(control("Remove", Event::Remove(id.clone())));
             } else if e.available {
-                top = top.push(text("On this machine").size(style::SMALL));
+                top = top.push(text("On this machine").size(style::SMALL).color(P.fg_dim));
             } else if r.installable {
                 top = top.push(control("Install", Event::Install(id.clone(), false)));
-            } else {
-                top = top.push(text("No build for this host").size(style::SMALL));
             }
-            let mut links = row![text(id).size(style::SMALL).color(P.fg_dim)].spacing(10);
-            for (label, url) in [
-                ("Copy source link", &r.repository),
-                ("Copy website link", &r.website),
-            ] {
-                if let Some(url) = url {
-                    links = links.push(keys::press(
-                        button(text(label).size(style::SMALL)).style(style::quiet),
-                        Message::Copy(url.clone()),
-                    ));
+            let expanded = p.details.as_deref() == Some(id);
+            top = top.push(control(
+                if expanded {
+                    "Settings ▴"
+                } else {
+                    "Settings ▾"
+                },
+                Event::Edit(id.clone()),
+            ));
+            let mut card = column![top].spacing(6);
+            if expanded {
+                card = card.push(
+                    text(format!("{} · v{} · {}", id, r.version, r.source))
+                        .size(style::SMALL)
+                        .color(P.fg_dim),
+                );
+                card = card.push(text(&r.description).size(style::SMALL).color(P.fg_dim));
+                if !r.installable && !e.present() {
+                    card = card.push(
+                        text("No build for this host")
+                            .size(style::SMALL)
+                            .color(P.fg_dim),
+                    );
                 }
+                if let Some(installed) = &e.installed {
+                    card = card.push(
+                        text(format!(
+                            "Installed {} · {}",
+                            installed.version, installed.source
+                        ))
+                        .size(style::SMALL)
+                        .color(P.fg_dim),
+                    );
+                }
+                let mut links = row![].spacing(8).align_y(Alignment::Center);
+                for (label, url) in [
+                    ("Copy source link", &r.repository),
+                    ("Copy website link", &r.website),
+                ] {
+                    if let Some(url) = url {
+                        links = links.push(keys::press(
+                            button(text(label).size(style::SMALL)).style(style::quiet),
+                            Message::Copy(url.clone()),
+                        ));
+                    }
+                }
+                if e.installed.is_some() {
+                    if r.newer.is_some() {
+                        links = links.push(control(
+                            "Newer (unreviewed)",
+                            Event::Install(id.clone(), true),
+                        ));
+                    }
+                    links = links.push(control("Remove", Event::Remove(id.clone())));
+                }
+                if e.definition.is_some() {
+                    links = links.push(control("Reset", Event::Reset(id.clone())));
+                }
+                card = card.push(links.wrap());
             }
-            if e.definition.is_some() {
-                links = links
-                    .push(control("Settings", Event::Edit(id.clone())))
-                    .push(control("Reset", Event::Reset(id.clone())));
-            }
-            let mut card = column![
-                top.wrap(),
-                text(&r.description).size(style::SMALL).color(P.fg_dim),
-                links.wrap()
-            ]
-            .spacing(8);
-            if let Some(log) = p.logs.get(id) {
+            if let Some(log) = p
+                .logs
+                .get(id)
+                .filter(|log| expanded || log.as_str() != "Done")
+            {
                 card = card.push(crate::selection::text(log.clone()).size(style::SMALL));
             }
             if let Some(editor) = p.editor.as_ref().filter(|editor| &editor.id == id) {
@@ -521,7 +560,7 @@ impl App {
             }
             body = body.push(
                 container(card)
-                    .padding(14)
+                    .padding([6, 10])
                     .width(Fill)
                     .style(style::fill(P.surface)),
             );
@@ -583,6 +622,22 @@ mod tests {
             Some("install:live-agent:1:live")
         );
         assert!(app.agents_page.logs["live-agent"].contains("some-package@1"));
+        let _ = app.update(msg(Event::Edit("live-agent".into())));
+        assert_eq!(app.agents_page.details.as_deref(), Some("live-agent"));
+        let _ = app.update(msg(Event::Edit("live-agent".into())));
+        assert!(app.agents_page.details.is_none());
+        assert!(app.agents_page.editor.is_none());
+        app.agents_page.entries[0].definition = Some(
+            serde_json::from_value(serde_json::json!({
+                "id":"live-agent", "name":"Live", "command":["agent", "--acp"]
+            }))
+            .unwrap(),
+        );
+        let _ = app.update(msg(Event::Edit("live-agent".into())));
+        assert!(app.agents_page.editor.is_some());
+        let _ = app.update(msg(Event::Edit("live-agent".into())));
+        assert!(app.agents_page.editor.is_none());
+        assert!(app.agents_page.details.is_none());
     }
     #[test]
     #[ignore = "writes Agents page PNGs for visual review"]
@@ -612,9 +667,15 @@ mod tests {
                 available: false,
             });
         }
+        crate::snapshots::render(&app, "compact-agents");
+        crate::snapshots::render_size(&app, "narrow-compact-agents", (480.0, 860.0));
         let _ = app.update(msg(Event::Edit("codex-acp".into())));
+        assert!(app.agents_page.editor.is_some());
         crate::snapshots::render(&app, "agents");
         crate::snapshots::render_size(&app, "agents-narrow", (480.0, 860.0));
+        let _ = app.update(msg(Event::Edit("codex-acp".into())));
+        assert!(app.agents_page.editor.is_none());
+        assert!(app.agents_page.details.is_none());
     }
     #[test]
     fn switching_backend_pages_and_sessions_leaves_agents() {
