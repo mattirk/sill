@@ -27,6 +27,7 @@ pub mod files;
 pub mod lane;
 pub mod outbox;
 pub mod sessions;
+pub mod settings;
 pub mod supervision;
 pub mod terminal;
 

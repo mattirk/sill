@@ -33,8 +33,13 @@ impl App {
     pub(crate) fn view(&self) -> Element<'_, Message> {
         let content = responsive(move |size| {
             // the Changes page in the conversation's place; the strip keeps the session in reach
-            if let Some(page) = &self.changes {
-                let mut screen = column![self.changes_view(page)].height(Fill);
+            let page = match (&self.changes, &self.settings_page) {
+                (Some(page), _) => Some(self.changes_view(page)),
+                (None, Some(page)) => Some(self.settings_view(page)),
+                _ => None,
+            };
+            if let Some(page) = page {
+                let mut screen = column![page].height(Fill);
                 if let Some(view) = self.current() {
                     screen = screen.push(self.strip(view));
                 }
@@ -151,13 +156,14 @@ impl App {
     // --- top bar --------------------------------------------------------------------------------
 
     fn top_bar(&self, width: f32) -> Element<'_, Message> {
-        // the herring opens the sill pages (Changes so far), underlined while one shows
-        let shown = self.changes.is_some();
+        // the herring opens the sill pages, underlined while one shows
+        let shown = self.changes.is_some() || self.settings_page.is_some();
         let drawer_open = self.workspace.shown && !shown && self.current().is_some();
         // room on its right, as the shelf's status slot has (`.sill-status-slot`)
         let activity = container(self.activity()).padding([0, 8]);
         let mark = tooltip(
             keys::press(
+                // a box just round the mark, its underline as wide as the box (as a tab's)
                 button(
                     column![
                         container(
@@ -166,18 +172,18 @@ impl App {
                                 .height(18)
                                 .style(style::icon(P.fg)),
                         )
-                        .height(Fill)
-                        .align_y(Alignment::Center),
+                        .center(Fill),
                         rule::horizontal(2).style(style::rule_style(if shown {
                             P.accent
                         } else {
                             Color::TRANSPARENT
                         })),
                     ]
-                    .width(22)
+                    .width(Fill)
                     .height(Fill),
                 )
-                .padding([0, 12])
+                .padding(0)
+                .width(34)
                 .height(Fill)
                 .style(style::quiet),
                 Message::ToggleChanges,
@@ -186,7 +192,7 @@ impl App {
                 text(if shown {
                     "Back to the conversation"
                 } else {
-                    "Changes: what the sessions wrote"
+                    "Sill: Changes and Settings"
                 })
                 .size(style::TINY),
             )
@@ -195,8 +201,18 @@ impl App {
             tooltip::Position::Bottom,
         );
         let mut tabs = row![].spacing(2).height(Fill);
-        for tab in &self.tabs {
-            tabs = tabs.push(self.tab(tab));
+        if shown {
+            // the pages' own tabs in place of the sessions', as the shelf's backend
+            for (page, glyph, title) in [
+                (crate::Page::Changes, "changes", "Changes"),
+                (crate::Page::Settings, "settings", "Settings"),
+            ] {
+                tabs = tabs.push(self.page_tab(page, glyph, title));
+            }
+        } else {
+            for tab in &self.tabs {
+                tabs = tabs.push(self.tab(tab));
+            }
         }
         // the window has no title bar: a press here that no tab or button takes moves it
         mouse_area(
@@ -252,6 +268,44 @@ impl App {
             .style(style::fill(P.bg)),
         )
         .on_press(Message::DragWindow)
+        .into()
+    }
+
+    /// A page's tab: its glyph and title, underlined while it shows.
+    fn page_tab<'a>(
+        &'a self,
+        page: crate::Page,
+        glyph: &'static str,
+        title: &'static str,
+    ) -> Element<'a, Message> {
+        let active = match page {
+            crate::Page::Changes => self.changes.is_some(),
+            crate::Page::Settings => self.settings_page.is_some(),
+        };
+        let color = if active { P.fg } else { alpha(P.fg, 0.6) };
+        let label = keys::press(
+            button(
+                row![
+                    icons::glyph(glyph, 14.0, color),
+                    text(title).size(style::TEXT).color(color),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            )
+            .padding([4, 12])
+            .style(style::quiet),
+            Message::ShowPage(page),
+        );
+        column![
+            container(label).height(Fill).align_y(Alignment::Center),
+            rule::horizontal(2).style(style::rule_style(if active {
+                P.accent
+            } else {
+                Color::TRANSPARENT
+            })),
+        ]
+        .width(Shrink)
+        .height(Fill)
         .into()
     }
 
@@ -377,10 +431,16 @@ impl App {
         let working = attention
             .working_ms
             .filter(|_| attention.activity == Activity::Working);
+        // Settings → Timer autoshow (the demo shows it)
+        let auto = self
+            .daemon_settings
+            .as_ref()
+            .and_then(|s| s.timer_auto)
+            .unwrap_or(self.demo);
         let shown_ms = if self.activity_hovered {
             attention.worked_ms
         } else {
-            working
+            working.filter(|_| auto)
         };
         let clock = shown_ms.map(|ms| {
             let shown = view.clock_shown.get().unwrap_or_else(Instant::now);
@@ -1552,6 +1612,9 @@ fn plan(item: &Item) -> Element<'_, Message> {
     )
 }
 
+/// The room a control keeps at its right for its caret.
+const CARET_ROOM: f32 = 19.0;
+
 /// One ACP control: as wide as its selected label, as the shelf's dropdowns are. iced's pick
 /// list sizes its menu to the control, so a longer choice wraps in the open menu — a dropdown that
 /// sizes the two apart is still to be written.
@@ -1561,18 +1624,35 @@ fn control<'a>(
     on_select: impl Fn(Pick) -> Message + 'a,
 ) -> Element<'a, Message> {
     let label = selected.as_ref().map_or("", |p| p.title.as_str());
-    // the shelf's controls are 80 % of the body text (`.sill-controls`)
-    let width = text_width(label, style::TINY) + 12.0 + style::TINY + 4.0;
+    // the shelf's controls are 80 % of the body text (`.sill-controls`); room at the right for
+    // the caret
+    let width = text_width(label, style::TINY) + 6.0 + CARET_ROOM;
     let on_select = std::rc::Rc::new(on_select);
     let select = on_select.clone();
     let choices = picks.clone();
     let current = selected.clone();
     let list = pick_list(picks, selected, move |pick| select(pick))
         .text_size(style::TINY)
-        .padding([3, 6])
+        .padding(Padding {
+            top: 3.0,
+            bottom: 3.0,
+            left: 6.0,
+            right: CARET_ROOM,
+        })
         .width(width)
+        .handle(pick_list::Handle::None)
         .style(style::control)
         .menu_style(style::control_menu);
+    // a thin chevron in place of iced's filled triangle, quieter than the label; an image over
+    // the list's right edge, so a press still reaches the list
+    let caret = container(icons::glyph("chevron-down", 9.0, alpha(P.fg, 0.5)))
+        .padding(Padding {
+            right: 6.0,
+            ..Padding::ZERO
+        })
+        .align_right(width)
+        .center_y(Fill);
+    let list = stack![list, caret];
     // with the keyboard, Up and Down step through the choices (the menu is the pointer's)
     keys::focus(list)
         .on_key(move |key, _| {

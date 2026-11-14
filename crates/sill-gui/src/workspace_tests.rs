@@ -74,7 +74,7 @@ fn files<'a>(app: &'a App, session: &str) -> &'a sill_client::files::FilesState 
 }
 
 #[test]
-fn refresh_and_session_switch_keep_expansion_and_open_files() {
+fn refresh_and_session_switch_keep_expansion_and_the_open_file() {
     let mut app = app();
     let folder = path("/home/demo/project/src");
     let file = path("/home/demo/project/src/main.rs");

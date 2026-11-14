@@ -11,6 +11,7 @@ mod perf;
 mod rows;
 mod selection;
 mod settings;
+mod settings_ui;
 #[cfg(test)]
 mod snapshots;
 mod style;
@@ -135,6 +136,13 @@ pub enum Act {
     Control,
 }
 
+/// The herring's pages (the shelf's backend pages; Agents to come).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Page {
+    Changes,
+    Settings,
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     /// An update from a session's lane: the session, the lane it came from, the update.
@@ -200,7 +208,7 @@ pub enum Message {
     Focus(bool),
     /// Ctrl+Shift+Right (1) or Left (-1): the next or previous session.
     StepTab(i32),
-    /// Escape: the file closes, else the drawer's quick look, else the prompt takes the keys.
+    /// Escape: between the session and the backend.
     Escape,
     /// PageDown (true) or PageUp in the conversation or the open file.
     Page(bool),
@@ -209,6 +217,11 @@ pub enum Message {
     /// The herring: the Changes page, or back to the conversation.
     ToggleChanges,
     Changes(changes_ui::Event),
+    /// The herring's pages: one shown in the conversation's place.
+    ShowPage(Page),
+    Settings(settings_ui::Event),
+    /// The daemon's settings, read at the start and with each refresh: the theme, the timer.
+    DaemonSettings(Result<sill_proto::admin::Settings, String>),
     /// A tab's ×: end its session (a ghost's needs a second press).
     CloseTab(String),
     /// A form question: a field edited, the form sent, or declined.
@@ -416,6 +429,11 @@ pub struct App {
     pub menu: Option<menu::Menu>,
     /// The Changes page, while shown in place of the conversation.
     pub changes: Option<changes_ui::ChangesPage>,
+    pub settings_page: Option<settings_ui::SettingsPage>,
+    /// The herring's page last shown: what it opens next.
+    pub last_page: Page,
+    /// The daemon's settings as last read.
+    pub daemon_settings: Option<sill_proto::admin::Settings>,
     /// A session just created or reopened: chosen once the list shows it.
     pending_choose: Option<String>,
     /// A ghost's tab whose × was pressed once.
@@ -489,6 +507,9 @@ impl App {
             views: BTreeMap::new(),
             menu: None,
             changes: None,
+            settings_page: None,
+            last_page: Page::Changes,
+            daemon_settings: None,
             pending_choose: None,
             armed_close: None,
             selected: None,
@@ -543,7 +564,7 @@ impl App {
         let lanes = iced::futures::stream::unfold(rx, |rx| async move {
             rx.recv().await.ok().map(|update| (update, rx))
         });
-        let list = app.list();
+        let list = Task::batch([app.list(), app.read_daemon_settings()]);
         (
             app,
             Task::batch([
@@ -756,7 +777,7 @@ impl App {
             Message::Done(session, act, outcome) => return self.done(session, act, outcome),
             Message::Choose(id) => return self.choose(id),
             Message::Refresh => {
-                let mut tasks = vec![self.list()];
+                let mut tasks = vec![self.list(), self.read_daemon_settings()];
                 if self
                     .changes
                     .as_ref()
@@ -997,16 +1018,20 @@ impl App {
             }
             Message::Escape => return self.escape(),
             Message::Menu(event) => return self.menu_event(event),
+            // the herring: the pages, at the one last shown, or back to the conversation
             Message::ToggleChanges => {
-                if self.changes.take().is_some() {
+                if self.changes.take().is_some() | self.settings_page.take().is_some() {
                     return self.restore_scroll();
                 }
-                self.changes = Some(changes_ui::ChangesPage {
-                    loading: true,
-                    ..changes_ui::ChangesPage::default()
-                });
-                return self.changes_load();
+                return self.show_page(self.last_page);
             }
+            Message::ShowPage(page) => return self.show_page(page),
+            Message::Settings(event) => return self.settings_event(event),
+            Message::DaemonSettings(Ok(settings)) => {
+                style::set_theme(&settings.theme);
+                self.daemon_settings = Some(settings);
+            }
+            Message::DaemonSettings(Err(_)) => {}
             Message::Changes(event) => return self.changes_event(event),
             Message::CloseTab(id) => {
                 let ghost = self
@@ -1136,6 +1161,191 @@ impl App {
             },
             move |page| Message::Changes(Event::HistoryLoaded(page, append)),
         )
+    }
+
+    /// A page of the herring's in the conversation's place.
+    fn show_page(&mut self, page: Page) -> Task<Message> {
+        self.last_page = page;
+        self.menu = None;
+        match page {
+            Page::Changes => {
+                self.settings_page = None;
+                if self.changes.is_some() {
+                    return Task::none();
+                }
+                self.changes = Some(changes_ui::ChangesPage {
+                    loading: true,
+                    ..changes_ui::ChangesPage::default()
+                });
+                self.changes_load()
+            }
+            Page::Settings => {
+                self.changes = None;
+                self.settings_page = Some(settings_ui::SettingsPage::default());
+                self.settings_load()
+            }
+        }
+    }
+
+    fn read_daemon_settings(&self) -> Task<Message> {
+        let Some(actions) = self.actions.clone() else {
+            return Task::none();
+        };
+        blocking(
+            move || {
+                actions
+                    .reading(|client| {
+                        client.call::<sill_proto::admin::Settings>(
+                            "_sill/settings.get",
+                            sill_proto::Empty {},
+                        )
+                    })
+                    .map_err(|e| format!("{e:#}"))
+            },
+            Message::DaemonSettings,
+        )
+    }
+
+    fn settings_load(&self) -> Task<Message> {
+        let Some(actions) = self.actions.clone() else {
+            // the demo: the defaults, as a daemon that was never configured has them
+            let snapshot = sill_client::settings::Snapshot {
+                settings: sill_proto::admin::Settings {
+                    theme: style::theme_id().into(),
+                    ..Default::default()
+                },
+                instructions: "Commit after the person has tested a feature.".into(),
+                global_pins: vec![],
+            };
+            return Task::done(Message::Settings(settings_ui::Event::Loaded(Box::new(Ok(
+                snapshot,
+            )))));
+        };
+        blocking(
+            move || {
+                actions
+                    .reading(sill_client::settings::read)
+                    .map_err(|e| format!("{e:#}"))
+            },
+            |r| Message::Settings(settings_ui::Event::Loaded(Box::new(r))),
+        )
+    }
+
+    /// One request of the Settings page; `said` tells what it did, from its answer.
+    fn settings_call(
+        &self,
+        (method, params): sill_client::settings::Request,
+        said: fn(&serde_json::Value) -> String,
+    ) -> Task<Message> {
+        let Some(actions) = self.actions.clone() else {
+            return Task::done(Message::Settings(settings_ui::Event::Done(Err(
+                "The demo has no daemon: settings are examples here.".into(),
+            ))));
+        };
+        blocking(
+            move || match actions.call(method, params) {
+                sill_client::actions::Outcome::Done(value) => Ok(said(&value)),
+                other => Err(other.problem().unwrap_or("failed").to_string()),
+            },
+            |r| Message::Settings(settings_ui::Event::Done(r)),
+        )
+    }
+
+    fn settings_event(&mut self, event: settings_ui::Event) -> Task<Message> {
+        use settings_ui::Event;
+        use sill_client::settings;
+        let Some(page) = &mut self.settings_page else {
+            return Task::none();
+        };
+        match event {
+            Event::Loaded(loaded) => {
+                let loaded = *loaded;
+                if let Ok(snapshot) = &loaded {
+                    style::set_theme(&snapshot.settings.theme);
+                    self.daemon_settings = Some(snapshot.settings.clone());
+                    if !page.edited {
+                        page.instructions = text_editor::Content::with_text(&snapshot.instructions);
+                    }
+                }
+                page.snapshot = Some(loaded);
+            }
+            Event::Change(change) => {
+                page.armed_delete = false;
+                // the theme shows at once; the rest after the daemon has it
+                if let sill_proto::admin::SettingChange::Theme { value } = &change {
+                    style::set_theme(value);
+                }
+                return self.settings_call(settings::patch(change), |_| String::new());
+            }
+            Event::Done(result) => {
+                page.said = match result {
+                    Ok(said) => (!said.is_empty()).then_some(said),
+                    Err(why) => Some(format!("Not changed: {why}")),
+                };
+                return self.settings_load();
+            }
+            Event::ShelfShare(share) => {
+                self.settings.shelf_width = Some(share);
+                self.save_settings();
+                if self.layout.mode == layout::Mode::Shelf {
+                    return self.fit_window(true);
+                }
+            }
+            Event::Instructions(action) => {
+                if action.is_edit() {
+                    page.edited = true;
+                }
+                page.instructions.perform(action);
+            }
+            Event::SaveInstructions => {
+                let text = page.instructions.text();
+                page.edited = false;
+                return self.settings_call(settings::set_instructions(&text), |_| {
+                    "Instructions saved: agents get them when they start or next look".into()
+                });
+            }
+            Event::PinPath(value) => page.pin_path = value,
+            Event::AddPin => {
+                let path = page.pin_path.trim().to_string();
+                if !path.starts_with('/') {
+                    return Task::none();
+                }
+                page.pin_path.clear();
+                let path = sill_proto::sessions::HostPath::from_path(std::path::Path::new(&path));
+                return self.settings_call(settings::add_global_pin(path), |_| {
+                    "Pinned for every new session".into()
+                });
+            }
+            Event::RemovePin(path) => {
+                return self.settings_call(settings::remove_global_pin(path), |_| String::new());
+            }
+            Event::Compact => {
+                page.said = Some("Compacting…".into());
+                return self.settings_call(settings::compact(), |v| {
+                    let n = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("0").to_string();
+                    format!(
+                        "Compacted {} · {} trimmed · {} deleted",
+                        n("compacted"),
+                        n("trimmed"),
+                        n("deleted")
+                    )
+                });
+            }
+            Event::DeleteAll => {
+                if !std::mem::take(&mut page.armed_delete) {
+                    page.armed_delete = true;
+                    return Task::none();
+                }
+                return self.settings_call(settings::forget_ended(), |v| {
+                    format!(
+                        "Deleted {} ended sessions",
+                        v.get("deleted").and_then(|x| x.as_str()).unwrap_or("0")
+                    )
+                });
+            }
+            Event::ToggleWhere => page.where_open = !page.where_open,
+        }
+        Task::none()
     }
 
     fn changes_event(&mut self, event: changes_ui::Event) -> Task<Message> {
@@ -1402,39 +1612,46 @@ impl App {
         Task::none()
     }
 
-    /// Escape steps back, as in the shelf: the open file closes, then the
-    /// drawer; with nothing left to close, the prompt takes the keyboard.
+    /// Escape goes between the session and the backend, as the shelf's sessions ⇄ backend; an
+    /// open menu or file closes first, and the session's shell keeps Escape for itself.
     fn escape(&mut self) -> Task<Message> {
+        // a popup goes first
         if self.menu.take().is_some() {
             return Task::none();
         }
-        if self.changes.take().is_some() {
+        // the backend's page: back to the session
+        if self.changes.take().is_some() | self.settings_page.take().is_some() {
             return self.restore_scroll();
         }
-        // full conversation is left first, as in the shelf: back to where it came from
-        if self.layout.mode == layout::Mode::Full {
-            return self.set_mode(self.layout.before_full);
-        }
-        self.armed_close = None;
-        // the quick look closes; the drawer of Drawer mode stays
-        let drawer = self.workspace.shown && self.layout.mode != layout::Mode::Drawer;
-        let Some(view) = self.current_mut() else {
+        // the session's shell has the keys, Escape included (an editor in it needs it)
+        if self.current().is_some_and(|v| v.terminal_shown) {
             return Task::none();
-        };
-        if view.files.reader.is_some() {
+        }
+        // an open file closes first (the drawer stays: it is the mode's)
+        if let Some(view) = self.current_mut()
+            && view.files.reader.is_some()
+        {
             view.files.close_reader();
             view.reader = None;
             return self.restore_scroll();
         }
-        let terminal = view.terminal_shown;
-        if drawer {
-            self.workspace.shown = false;
-            return Task::none();
+        // the session: to the backend's default page — the drawer and the mode stay as they are
+        // (they have their own controls)
+        self.armed_close = None;
+        self.show_page(self.default_page())
+    }
+
+    /// The page Escape opens from the conversation: Settings → Default page (the shelf's
+    /// `default_page`; Changes unless set, and until the Agents page is here).
+    fn default_page(&self) -> Page {
+        match self
+            .daemon_settings
+            .as_ref()
+            .and_then(|s| s.default_page.as_deref())
+        {
+            Some("settings") => Page::Settings,
+            _ => Page::Changes,
         }
-        if terminal {
-            return Task::none();
-        }
-        operation::focus("prompt")
     }
 
     fn lane_update(&mut self, session: String, epoch: u64, update: lane::Update) -> Task<Message> {

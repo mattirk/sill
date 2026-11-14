@@ -1089,7 +1089,6 @@ fn file_drawer_buttons_open_the_viewer_and_return_to_conversation() {
         let _ = app.update(message);
     }
     assert!(demo_view(&app).files.reader.is_none());
-    assert!(!demo_view(&app).files.open_files.is_empty());
 }
 
 #[test]
@@ -1155,7 +1154,7 @@ fn a_drawer_over_the_conversation_keeps_its_place() {
 }
 
 /// The keys go between the modes: Ctrl+Shift+D from Shelf to Drawer and back, Ctrl+Shift+F into
-/// Full and back to where it came from, as Escape; putting Drawer mode's drawer away is Full; in
+/// Full and back to where it came from; putting Drawer mode's drawer away is Full; in
 /// Shelf mode a chip or the drawer's toggle is a quick look over the conversation.
 #[test]
 fn the_keys_go_between_shelf_drawer_and_full() {
@@ -1195,8 +1194,8 @@ fn the_keys_go_between_shelf_drawer_and_full() {
     let _ = app.update(press("F").unwrap());
     assert_eq!(app.layout.mode, Mode::Full);
     assert!(!app.workspace.shown);
-    let _ = app.update(Message::Escape);
-    assert_eq!(app.layout.mode, Mode::Drawer, "Escape leaves Full first");
+    let _ = app.update(press("F").unwrap());
+    assert_eq!(app.layout.mode, Mode::Drawer, "Ctrl+Shift+F leaves Full");
     // the drawer's own close in Drawer mode: the same window without it
     let _ = app.update(Message::Workspace(Files::ToggleDrawer));
     assert_eq!(app.layout.mode, Mode::Full);
@@ -1287,6 +1286,51 @@ fn a_long_conversation_builds_only_what_is_near_the_view() {
     });
     assert!(first && !last, "only the top is built");
     assert!((full - top.unwrap()).abs() < 1.0);
+}
+
+/// The herring opens the pages at the one last shown; the page tabs switch between them; Escape
+/// goes back to the conversation. The Settings page shows the daemon's settings, and a theme
+/// chosen there shows at once.
+#[test]
+fn the_herring_opens_changes_and_settings() {
+    use crate::Page;
+    let (mut app, _) = App::new(true, None);
+    let task = app.update(Message::ToggleChanges);
+    settle_task(&mut app, task);
+    assert!(app.changes.is_some() && app.settings_page.is_none());
+    let task = app.update(Message::ShowPage(Page::Settings));
+    settle_task(&mut app, task);
+    assert!(app.changes.is_none());
+    let page = app.settings_page.as_ref().unwrap();
+    assert!(
+        matches!(page.snapshot, Some(Ok(_))),
+        "read at once in the demo"
+    );
+    let mut ui = simulator(&app, (720.0, 860.0));
+    ui.find("Timer autoshow").unwrap();
+    ui.find("Global pins").unwrap();
+    ui.find("Compact after").unwrap();
+    drop(ui);
+    let _ = app.update(Message::Escape);
+    assert!(
+        app.settings_page.is_none(),
+        "Escape: back to the conversation"
+    );
+    let task = app.update(Message::ToggleChanges);
+    settle_task(&mut app, task);
+    assert!(
+        app.settings_page.is_some(),
+        "the herring opens the page last shown"
+    );
+    // the theme shows before the daemon answers
+    let before = crate::style::theme_id();
+    let _ = app.update(Message::Settings(crate::settings_ui::Event::Change(
+        sill_proto::admin::SettingChange::Theme {
+            value: "dracula".into(),
+        },
+    )));
+    assert_eq!(crate::style::theme_id(), "dracula");
+    crate::style::set_theme(before);
 }
 
 // --- selection ----------------------------------------------------------------------------------
@@ -2052,11 +2096,14 @@ fn stepping_tabs_wraps_round() {
     assert_eq!(app.selected.as_deref(), Some("other"));
 }
 
-/// Escape steps back as in the shelf: the open file, then the drawer's quick look.
+/// Escape goes between the session and the backend: an open file or menu closes first; the
+/// drawer and the mode stay as they are; the shell keeps Escape.
 #[test]
-fn escape_steps_back() {
+fn escape_toggles_session_and_backend() {
+    use crate::layout::Mode;
     use crate::workspace::Action;
     let (mut app, _) = App::new(true, None);
+    let _ = app.update(Message::Layout(crate::layout::Action::Mode(Mode::Full)));
     let _ = app.update(Message::Workspace(Action::ToggleDrawer));
     let _ = app.update(Message::Workspace(Action::Open {
         path: sill_proto::sessions::HostPath::from_path(std::path::Path::new(
@@ -2064,12 +2111,27 @@ fn escape_steps_back() {
         )),
         repo: None,
     }));
-    assert!(demo_view(&app).files.reader.is_some());
     let _ = app.update(Message::Escape);
-    assert!(demo_view(&app).files.reader.is_none(), "the file first");
-    assert!(app.workspace.shown);
+    assert!(
+        demo_view(&app).files.reader.is_none(),
+        "an open file closes first"
+    );
+    assert!(app.changes.is_none());
+    let task = app.update(Message::Escape);
+    settle_task(&mut app, task);
+    assert!(app.changes.is_some(), "then to the backend's default page");
     let _ = app.update(Message::Escape);
-    assert!(!app.workspace.shown, "then the drawer");
+    assert!(app.changes.is_none(), "and back");
+    assert!(app.workspace.shown, "the drawer stays");
+    assert_eq!(app.layout.mode, Mode::Full, "the mode stays");
+    // a menu closes first
+    let _ = app.update(Message::Menu(crate::menu::Event::Toggle));
+    let _ = app.update(Message::Escape);
+    assert!(app.menu.is_none() && app.changes.is_none());
+    // the shell keeps it
+    app.views.get_mut("demo").unwrap().terminal_shown = true;
+    let _ = app.update(Message::Escape);
+    assert!(app.changes.is_none(), "the shell has Escape");
 }
 
 // --- sessions, forms, held prompts ---------------------------------------------------------------

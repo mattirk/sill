@@ -30,7 +30,6 @@ pub enum Action {
         repo: Option<HostPath>,
     },
     CloseViewer,
-    CloseFile(String),
     RefreshFile,
     Source,
     Text(text_editor::Action),
@@ -265,12 +264,6 @@ impl App {
                     Action::CloseViewer => {
                         view.files.close_reader();
                         restore = true;
-                        vec![]
-                    }
-                    Action::CloseFile(key) => {
-                        let had = view.files.reader.is_some();
-                        view.files.close_file(&key);
-                        restore = had && view.files.reader.is_none();
                         vec![]
                     }
                     Action::RefreshFile => view.files.reload().into_iter().collect(),

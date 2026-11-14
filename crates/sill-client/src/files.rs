@@ -233,7 +233,6 @@ pub struct FilesState {
     pub paths: BTreeMap<String, HostPath>,
     pub expanded: BTreeSet<String>,
     pub repos: BTreeMap<String, Repo>,
-    pub open_files: Vec<HostPath>,
     pub reader: Option<Reader>,
     pub path_input: String,
     pub inspect_pending: Option<u64>,
@@ -457,9 +456,6 @@ impl FilesState {
     /// Show a file (or its diff in `repo`) in the reader; its text to load.
     pub fn open(&mut self, path: HostPath, repo: Option<HostPath>) -> Request {
         self.inspect_pending = None;
-        if !self.open_files.iter().any(|p| key(p) == key(&path)) {
-            self.open_files.push(path.clone());
-        }
         let source = repo.is_none() && !is_markdown(&path);
         self.reader = Some(Reader {
             path: path.clone(),
@@ -476,14 +472,6 @@ impl FilesState {
     pub fn close_reader(&mut self) {
         self.inspect_pending = None;
         self.reader = None;
-    }
-
-    /// Close an open-file chip, and the reader if it shows that file.
-    pub fn close_file(&mut self, id: &str) {
-        self.open_files.retain(|p| key(p) != id);
-        if self.reader.as_ref().is_some_and(|f| key(&f.path) == id) {
-            self.reader = None;
-        }
     }
 
     pub fn reload(&self) -> Option<Request> {

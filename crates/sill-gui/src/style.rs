@@ -34,39 +34,186 @@ const fn rgb(hex: u32) -> Color {
     )
 }
 
-#[allow(dead_code)] // until themes can be chosen
-pub const DRACULA: Palette = Palette {
-    bg: rgb(0x282a36),
-    surface: rgb(0x343746),
-    code_bg: rgb(0x21222c),
-    fg: rgb(0xf8f8f2),
-    fg_dim: rgb(0x6272a4),
-    accent: rgb(0xbd93f9),
-    warning: rgb(0xffb86c),
-    success: rgb(0x50fa7b),
-    error: rgb(0xff5555),
-    link: rgb(0x8be9fd),
-    border: rgb(0x44475a),
-};
+/// The shelf's themes, by id, with the same values (`shelf/theme.rs`); the daemon's `theme`
+/// setting picks one. Miasma is the one sill is developed in (the person, 2026-11-05).
+pub const THEMES: &[(&str, Palette)] = &[
+    (
+        "adwaita",
+        Palette {
+            bg: rgb(0x242424),
+            surface: rgb(0x303030),
+            code_bg: rgb(0x1e1e1e),
+            fg: rgb(0xffffff),
+            fg_dim: rgb(0x9d9d9d),
+            accent: rgb(0x78aeed),
+            warning: rgb(0xffa348),
+            success: rgb(0x8ff0a4),
+            error: rgb(0xff7b63),
+            link: rgb(0x78aeed),
+            border: rgb(0x3d3d3d),
+        },
+    ),
+    (
+        "adwaita-light",
+        Palette {
+            bg: rgb(0xfafafa),
+            surface: rgb(0xebebeb),
+            code_bg: rgb(0xf0f0f0),
+            fg: rgb(0x323232),
+            fg_dim: rgb(0x8b8b8b),
+            accent: rgb(0x1c71d8),
+            warning: rgb(0x9c6e03),
+            success: rgb(0x1b8553),
+            error: rgb(0xc01c28),
+            link: rgb(0x1c71d8),
+            border: rgb(0xd8d8d8),
+        },
+    ),
+    (
+        "dracula",
+        Palette {
+            bg: rgb(0x282a36),
+            surface: rgb(0x343746),
+            code_bg: rgb(0x21222c),
+            fg: rgb(0xf8f8f2),
+            fg_dim: rgb(0x6272a4),
+            accent: rgb(0xbd93f9),
+            warning: rgb(0xffb86c),
+            success: rgb(0x50fa7b),
+            error: rgb(0xff5555),
+            link: rgb(0x8be9fd),
+            border: rgb(0x44475a),
+        },
+    ),
+    (
+        "solarized-dark",
+        Palette {
+            bg: rgb(0x002b36),
+            surface: rgb(0x073642),
+            code_bg: rgb(0x00212b),
+            fg: rgb(0x93a1a1),
+            fg_dim: rgb(0x586e75),
+            accent: rgb(0x268bd2),
+            warning: rgb(0xb58900),
+            success: rgb(0x859900),
+            error: rgb(0xdc322f),
+            link: rgb(0x2aa198),
+            border: rgb(0x0a3f4d),
+        },
+    ),
+    (
+        "solarized-light",
+        Palette {
+            bg: rgb(0xfdf6e3),
+            surface: rgb(0xeee8d5),
+            code_bg: rgb(0xf3ecd8),
+            fg: rgb(0x586e75),
+            fg_dim: rgb(0x93a1a1),
+            accent: rgb(0x268bd2),
+            warning: rgb(0xb58900),
+            success: rgb(0x859900),
+            error: rgb(0xdc322f),
+            link: rgb(0x2aa198),
+            border: rgb(0xe0d9c4),
+        },
+    ),
+    (
+        "nord",
+        Palette {
+            bg: rgb(0x2e3440),
+            surface: rgb(0x3b4252),
+            code_bg: rgb(0x272c36),
+            fg: rgb(0xd8dee9),
+            fg_dim: rgb(0x7b88a1),
+            accent: rgb(0x88c0d0),
+            warning: rgb(0xebcb8b),
+            success: rgb(0xa3be8c),
+            error: rgb(0xbf616a),
+            link: rgb(0x81a1c1),
+            border: rgb(0x434c5e),
+        },
+    ),
+    (
+        "miasma",
+        Palette {
+            bg: rgb(0x222222),
+            surface: rgb(0x2b2b28),
+            code_bg: rgb(0x1c1c1c),
+            fg: rgb(0xc2c2b0),
+            fg_dim: rgb(0x787866),
+            accent: rgb(0xc9a554),
+            warning: rgb(0xb36d43),
+            success: rgb(0x5f875f),
+            error: rgb(0xbb7744),
+            link: rgb(0xd7c483),
+            border: rgb(0x363632),
+        },
+    ),
+    (
+        "gruvbox-dark",
+        Palette {
+            bg: rgb(0x282828),
+            surface: rgb(0x3c3836),
+            code_bg: rgb(0x1d2021),
+            fg: rgb(0xebdbb2),
+            fg_dim: rgb(0xa89984),
+            accent: rgb(0x83a598),
+            warning: rgb(0xfabd2f),
+            success: rgb(0xb8bb26),
+            error: rgb(0xfb4934),
+            link: rgb(0x8ec07c),
+            border: rgb(0x504945),
+        },
+    ),
+    (
+        "gruvbox-light",
+        Palette {
+            bg: rgb(0xfbf1c7),
+            surface: rgb(0xebdbb2),
+            code_bg: rgb(0xf2e5bc),
+            fg: rgb(0x3c3836),
+            fg_dim: rgb(0x7c6f64),
+            accent: rgb(0x076678),
+            warning: rgb(0xb57614),
+            success: rgb(0x79740e),
+            error: rgb(0x9d0006),
+            link: rgb(0x076678),
+            border: rgb(0xd5c4a1),
+        },
+    ),
+];
 
-/// xero's Miasma, as the shelf has it (`shelf/theme.rs`): muted earth tones, the gold as accent,
-/// the orange standing in for red.
-pub const MIASMA: Palette = Palette {
-    bg: rgb(0x222222),
-    surface: rgb(0x2b2b28),
-    code_bg: rgb(0x1c1c1c),
-    fg: rgb(0xc2c2b0),
-    fg_dim: rgb(0x787866),
-    accent: rgb(0xc9a554),
-    warning: rgb(0xb36d43),
-    success: rgb(0x5f875f),
-    error: rgb(0xbb7744),
-    link: rgb(0xd7c483),
-    border: rgb(0x363632),
-};
+/// The theme in use, an index into [`THEMES`]; Miasma until the daemon's setting says otherwise.
+static CURRENT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(6);
 
-/// The palette in use: Miasma, the theme sill is developed in (the person, 2026-11-05).
-pub const P: Palette = MIASMA;
+/// The palette in use, read where it is used (`P.fg`), so a theme change shows on the next frame.
+pub struct Current;
+
+impl std::ops::Deref for Current {
+    type Target = Palette;
+
+    fn deref(&self) -> &Palette {
+        &THEMES[CURRENT.load(std::sync::atomic::Ordering::Relaxed)].1
+    }
+}
+
+pub static P: Current = Current;
+
+/// Use the theme `id`; false (and no change) for an id sill does not know.
+pub fn set_theme(id: &str) -> bool {
+    match THEMES.iter().position(|(t, _)| *t == id) {
+        Some(index) => {
+            CURRENT.store(index, std::sync::atomic::Ordering::Relaxed);
+            true
+        }
+        None => false,
+    }
+}
+
+/// The id of the theme in use.
+pub fn theme_id() -> &'static str {
+    THEMES[CURRENT.load(std::sync::atomic::Ordering::Relaxed)].0
+}
 
 /// Body text, logical pixels: what the shelf's 13 pt base comes to at its "Smaller" text size on
 /// this desktop, measured against `docs/reference-ui/02` — one line of agent text there is 870 px
@@ -88,7 +235,7 @@ pub fn alpha(color: Color, a: f32) -> Color {
 
 pub fn theme() -> Theme {
     Theme::custom(
-        "Sill Miasma",
+        format!("Sill {}", theme_id()),
         iced::theme::Palette {
             background: P.bg,
             text: P.fg,

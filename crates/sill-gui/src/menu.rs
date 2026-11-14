@@ -240,7 +240,7 @@ impl App {
                     View::Full,
                     "maximize",
                     "Full",
-                    "the conversation across the whole window; Ctrl+Shift+F or Escape goes back (Ctrl+Shift+F)"
+                    "the conversation across the whole window; Ctrl+Shift+F goes back (Ctrl+Shift+F)"
                 ),
                 // not a mode: the window goes, the daemon and its sessions go on
                 tooltip(

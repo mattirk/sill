@@ -121,45 +121,10 @@ impl App {
                 root.path.display.clone(),
             ));
         }
-        for path in state.open_files.iter().filter(|p| !state.pinned(p)) {
-            let glyph = crate::icons::for_path(name(path), false, false);
-            let chip = row![
-                keys::press(
-                    button(
-                        row![
-                            crate::icons::glyph(glyph, 14.0, style::alpha(P.fg, 0.6)),
-                            text(short(name(path), 24)).size(style::TEXT),
-                        ]
-                        .spacing(6)
-                        .align_y(Alignment::Center)
-                    )
-                    .padding([3, 8])
-                    .style(style::quiet),
-                    msg(Action::Open {
-                        path: path.clone(),
-                        repo: None
-                    }),
-                ),
-                keys::press(
-                    button(crate::icons::glyph("x", 13.0, style::alpha(P.fg, 0.6)))
-                        .padding([4, 7])
-                        .style(style::quiet),
-                    msg(Action::CloseFile(key(path).into())),
-                ),
-            ]
-            .align_y(Alignment::Center);
-            chips = chips.push(tip(
-                container(chip).style(style::fill(style::alpha(P.fg, 0.07))),
-                path.display.clone(),
-            ));
-        }
         if state.roots_pending.is_some() {
             chips = chips.push(text("Loading pins…").size(style::TINY).color(P.fg_dim));
         }
-        if !state.roots.iter().any(|r| !r.global)
-            && state.open_files.is_empty()
-            && state.roots_pending.is_none()
-        {
+        if !state.roots.iter().any(|r| !r.global) && state.roots_pending.is_none() {
             chips = chips.push(action("+ Pin a folder or file", Action::ToggleDrawer));
         }
         let chips = container(
@@ -362,14 +327,7 @@ impl App {
                 ),
                 "Copy the text".into(),
             ))
-            .push(
-                container(glyph_action(
-                    "x",
-                    "Close (Escape steps back)",
-                    Action::CloseViewer,
-                ))
-                .id("close-file"),
-            );
+            .push(container(glyph_action("x", "Close", Action::CloseViewer)).id("close-file"));
         let body: Element<'_, Message> = if let Some(error) = &file.error {
             container(text(error).size(style::TEXT).color(P.error))
                 .padding(18)

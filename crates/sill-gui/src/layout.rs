@@ -65,7 +65,7 @@ impl Mode {
 #[derive(Debug)]
 pub struct Layout {
     pub mode: Mode,
-    /// The mode Full was entered from, where Ctrl+Shift+F and Escape go back to.
+    /// The mode Full was entered from, where Ctrl+Shift+F goes back to.
     pub before_full: Mode,
     /// The width the person dragged the drawer to; for this run of the window.
     pub drawer: Option<f32>,
