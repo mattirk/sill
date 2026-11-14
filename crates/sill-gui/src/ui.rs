@@ -1786,7 +1786,7 @@ impl App {
     fn composer<'a>(&'a self, view: &'a SessionView) -> Element<'a, Message> {
         let session = self.all_sessions.iter().find(|s| s.session_id == view.id);
         let mut composer = Column::new();
-        if let Some(caption) = session.and_then(crate::host_control::caption) {
+        if let Some(caption) = session.and_then(|s| crate::host_control::caption(s, &view.host_control)) {
             composer = composer.push(caption);
         }
         // the panel lays its two columns out by the width it actually gets

@@ -45,6 +45,28 @@ pub struct View {
     pub busy: bool,
     pub error: Option<String>,
     serial: u64,
+    /// The active control this window last saw on the session's record, and when it first did:
+    /// VM control's caption words go after `VM_CAPTION_SHOWN`.
+    seen: Option<(sill_proto::host_control::Brief, std::time::Instant)>,
+}
+
+/// How long VM control's caption says its words; its yellow line stays as long as the control.
+pub const VM_CAPTION_SHOWN: std::time::Duration = std::time::Duration::from_secs(120);
+
+impl View {
+    /// The session's record came: note when its control (this scope of it) was first seen.
+    pub fn saw(&mut self, brief: Option<&sill_proto::host_control::Brief>, now: std::time::Instant) {
+        match brief {
+            Some(brief) if self.seen.as_ref().is_some_and(|(seen, _)| seen == brief) => {}
+            Some(brief) => self.seen = Some((brief.clone(), now)),
+            None => self.seen = None,
+        }
+    }
+
+    /// Whether VM control's caption has said its words long enough. Not before `saw` noted it.
+    fn words_done(&self, now: std::time::Instant) -> bool {
+        self.seen.as_ref().is_some_and(|(_, since)| now.duration_since(*since) >= VM_CAPTION_SHOWN)
+    }
 }
 
 /// What the person can read of an operation name (and "Process ended" for a managed process's
@@ -436,9 +458,15 @@ pub fn notice_color(text: &str, color: iced::Color) -> iced::Color {
 }
 
 /// The permanent caption over the composer while the session has active Host control.
-pub fn caption<'a>(session: &Session) -> Option<Element<'a, Message>> {
+///
+/// Host control's caption stays as long as the control. VM control's words go after
+/// `VM_CAPTION_SHOWN` and its yellow line stays (the person, 2026-11-13).
+pub fn caption<'a>(session: &Session, view: &View) -> Option<Element<'a, Message>> {
     let brief = session.host_control.as_ref()?;
     let (words, color) = caption_words(&brief.operations);
+    if words == VM_CAPTION && view.words_done(std::time::Instant::now()) {
+        return Some(rule::horizontal(1).style(style::rule_style(color)).into());
+    }
     Some(
         column![
             rule::horizontal(1).style(style::rule_style(color)),
@@ -535,6 +563,26 @@ pub(crate) fn notice_summary(message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn vm_controls_caption_words_go_after_a_while_and_return_with_a_new_scope() {
+        use sill_proto::host_control::Brief;
+        let mut view = View::default();
+        let start = std::time::Instant::now();
+        let later = start + VM_CAPTION_SHOWN;
+        assert!(!view.words_done(later), "not before the control was seen");
+        let brief = Brief { generation: 1, operations: vec!["commands".into()] };
+        view.saw(Some(&brief), start);
+        assert!(!view.words_done(start + VM_CAPTION_SHOWN - std::time::Duration::from_secs(1)));
+        assert!(view.words_done(later));
+        // the same control seen again keeps its time; another scope starts over
+        view.saw(Some(&brief), later);
+        assert!(view.words_done(later));
+        view.saw(Some(&Brief { generation: 2, operations: vec!["commands".into(), "launch".into()] }), later);
+        assert!(!view.words_done(later));
+        view.saw(None, later);
+        assert!(!view.words_done(later + VM_CAPTION_SHOWN));
+    }
+
     #[test]
     fn mac_control_brings_mac_viewing_along_and_goes_with_it() {
         let (mut app, _) = crate::App::with(true, None, None);

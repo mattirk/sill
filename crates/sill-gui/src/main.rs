@@ -3206,6 +3206,12 @@ impl App {
         self.list_error = None;
         self.listed = true;
         self.all_sessions = sessions.clone();
+        let now = std::time::Instant::now();
+        for session in &sessions {
+            if let Some(view) = self.views.get_mut(&session.session_id) {
+                view.host_control.saw(session.host_control.as_ref(), now);
+            }
+        }
         let icons = self.agent_icons_load(sessions.iter().map(|s| s.agent.clone()).collect::<Vec<_>>());
         // Refreshes may arrive newest-first or in activity order. Existing tab positions are
         // stable; newly discovered/reopened sessions append, oldest first within the batch.
