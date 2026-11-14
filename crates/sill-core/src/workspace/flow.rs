@@ -542,6 +542,7 @@ pub fn apply(
     branch: &str,
     expected: &str,
     workspace_branch: &str,
+    copied: &Copied,
 ) -> Result<std::result::Result<Applied, Stop>> {
     let src = Git::open(source)?;
     let head = std::fs::read_to_string(src.dirs().0.join("HEAD"))?;
@@ -559,7 +560,45 @@ pub fn apply(
     if tip == expected {
         return Ok(Ok(Applied { before: expected.to_string(), tip }));
     }
-    let collisions = files_in_the_way(&src, &ws, source, expected, &tip)?;
+    // what an earlier copy left uncommitted in the checkout goes back to the branch's state
+    // first: the fast-forward writes it again, committed
+    let ours = match copied_in_the_way(&src, &ws, source, expected, &tip, copied)? {
+        Ok(ours) => ours,
+        Err(stop) => return Ok(Err(stop)),
+    };
+    for (path, _) in &ours {
+        match try_entry(&src, expected, path)? {
+            Some((mode, blob)) => write_entry(&src, source, path, &mode, &blob)?,
+            None => remove_entry(source, path)?,
+        }
+    }
+    let done = fast_forward(&src, &ws, source, id, branch, expected, workspace_branch, &tip);
+    if !matches!(done, Ok(Ok(_))) {
+        // nothing applied: the copy's files as they were
+        for (path, was) in &ours {
+            let _ = match was {
+                Some((mode, blob)) => write_entry(&ws, source, path, mode, blob),
+                None => remove_entry(source, path),
+            };
+        }
+    }
+    done
+}
+
+/// [`apply`]'s fast-forward itself, the checkout's files checked and written by Git.
+#[allow(clippy::too_many_arguments)]
+fn fast_forward(
+    src: &Git,
+    ws: &Git,
+    source: &Path,
+    id: &str,
+    branch: &str,
+    expected: &str,
+    workspace_branch: &str,
+    tip: &str,
+) -> Result<std::result::Result<Applied, Stop>> {
+    let tip = tip.to_string();
+    let collisions = files_in_the_way(src, ws, source, expected, &tip)?;
     if !collisions.is_empty() {
         return Ok(Err(Stop::Untracked(collisions)));
     }
@@ -593,6 +632,126 @@ pub fn apply(
         return Ok(Err(read_tree_stop(&String::from_utf8_lossy(&moved.stderr))));
     }
     Ok(Ok(Applied { before: expected.to_string(), tip }))
+}
+
+/// A file's mode and blob in `commit`, None where it has none.
+fn try_entry(git: &Git, commit: &str, path: &str) -> Result<Have> {
+    Ok(tree_entries(git, commit, &[path.to_string()])?.remove(path))
+}
+
+/// What "Apply without commit" wrote into the person's checkout ([`copy`]): each path's blob, None
+/// where it removed the file. Kept by sill, outside the workspace: a file of the checkout that
+/// still holds exactly this is the copy's and may be written over by the next copy or Apply; one
+/// that holds anything else is the person's.
+pub type Copied = BTreeMap<String, Option<String>>;
+
+/// The checkout's unstaged files, among `paths`, as they are on disk.
+fn unstaged(src: &Git, ws: &Git, source: &Path, paths: &std::collections::BTreeSet<String>) -> Result<Vec<(String, Have)>> {
+    let listed: Vec<String> = dirty(src)?
+        .into_iter()
+        .filter(|(x, _, p)| (*x == ' ' || *x == '?') && paths.contains(p))
+        .map(|(_, _, p)| p)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    worktree_entries(ws, source, &listed)
+}
+
+/// Before a fast-forward from `expected` to `tip`: the checkout's unstaged files that an earlier
+/// copy wrote — still holding what it wrote, or already what the commits bring — each with what
+/// it holds now, for [`apply`] to put back to the branch's state. A file the commits change that
+/// holds anything else is the person's own edit and stops the Apply, nothing written. Staged
+/// files are Git's to judge.
+fn copied_in_the_way(src: &Git, ws: &Git, source: &Path, expected: &str, tip: &str, copied: &Copied) -> Result<std::result::Result<Vec<(String, Have)>, Stop>> {
+    if copied.is_empty() {
+        return Ok(Ok(vec![]));
+    }
+    let brought: std::collections::BTreeSet<String> = diff_tree(ws, expected, tip)?.into_iter().map(|e| e.path).collect();
+    let paths: std::collections::BTreeSet<String> = brought.iter().chain(copied.keys()).cloned().collect();
+    let there = unstaged(src, ws, source, &paths)?;
+    let listed: Vec<String> = there.iter().map(|(p, _)| p.clone()).collect();
+    let (base, want) = (tree_entries(src, expected, &listed)?, tree_entries(ws, tip, &listed)?);
+    let (mut ours, mut overlap, mut untracked) = (Vec::new(), Vec::new(), Vec::new());
+    for (path, have) in there {
+        let blob = have.as_ref().map(|(_, b)| b);
+        if blob == base.get(&path).map(|(_, b)| b) {
+            continue;
+        }
+        let wrote = copied.get(&path).is_some_and(|w| w.as_ref() == blob);
+        if wrote || (copied.contains_key(&path) && blob == want.get(&path).map(|(_, b)| b)) {
+            ours.push((path, have));
+        } else if brought.contains(&path) {
+            if base.contains_key(&path) { overlap.push(path) } else { untracked.push(path) }
+        }
+    }
+    Ok(if !overlap.is_empty() {
+        Err(Stop::Overlap(overlap))
+    } else if !untracked.is_empty() {
+        Err(Stop::Untracked(untracked))
+    } else {
+        Ok(ours)
+    })
+}
+
+/// Apply without commit (2026-11-12): write the workspace's whole state — its commits and its
+/// uncommitted work, untracked files included — into the person's checkout as uncommitted
+/// changes, for them to try. No commit is made, the checkout's branch and index stay as they
+/// are, and the workspace is unchanged: its work is still there to Apply. Returns what it wrote,
+/// for the next copy or Apply to know the copy's files from the person's (`before`: what the
+/// last one wrote). A file of the person's — changed or untracked in the checkout, holding
+/// neither what the last copy wrote nor what this one would — stops it, nothing written.
+pub fn copy(source: &Path, clone: &Path, branch: &str, expected: &str, before: &Copied) -> Result<std::result::Result<Copied, Stop>> {
+    let src = Git::open(source)?;
+    let head = std::fs::read_to_string(src.dirs().0.join("HEAD"))?;
+    if head.trim() != format!("ref: refs/heads/{branch}") || rev(&src, &format!("refs/heads/{branch}"))? != expected {
+        return Ok(Err(Stop::SourceMoved));
+    }
+    let ws = Git::open(clone)?;
+    if !super::descends(clone, expected, &rev(&ws, "HEAD")?)? {
+        return Ok(Err(Stop::NeedsPrepare));
+    }
+    let state = worktree_tree(&ws, clone)?;
+    let changes: BTreeMap<String, Have> = diff_tree(&ws, expected, &state)?
+        .into_iter()
+        .filter(|e| e.mode != "160000")
+        .map(|e| (e.path, e.blob.map(|b| (e.mode, b))))
+        .collect();
+    // a path the last copy wrote that the workspace no longer changes goes back too
+    let paths: Vec<String> = changes.keys().chain(before.keys()).cloned().collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    let base = tree_entries(&ws, expected, &paths)?;
+    let (mut write, mut overlap, mut untracked) = (Vec::new(), Vec::new(), Vec::new());
+    for (path, have) in worktree_entries(&ws, source, &paths)? {
+        let want = changes.get(&path).cloned().unwrap_or_else(|| base.get(&path).cloned());
+        if have == want {
+            continue;
+        }
+        let blob = have.as_ref().map(|(_, b)| b);
+        let on_disk = std::fs::symlink_metadata(source.join(&path)).ok();
+        let clean = blob == base.get(&path).map(|(_, b)| b) && !on_disk.as_ref().is_some_and(|m| m.is_dir());
+        let wrote = before.get(&path).is_some_and(|w| w.as_ref() == blob);
+        // something on the way down to it that is no directory
+        let blocked = want.is_some() && Path::new(&path).ancestors().skip(1).any(|d| !d.as_os_str().is_empty() && std::fs::symlink_metadata(source.join(d)).is_ok_and(|m| !m.is_dir()));
+        if (clean || wrote) && !blocked {
+            write.push((path, want));
+        } else if base.contains_key(&path) {
+            overlap.push(path);
+        } else {
+            untracked.push(path);
+        }
+    }
+    if !overlap.is_empty() {
+        return Ok(Err(Stop::Overlap(overlap)));
+    }
+    if !untracked.is_empty() {
+        return Ok(Err(Stop::Untracked(untracked)));
+    }
+    for (path, want) in &write {
+        match want {
+            Some((mode, blob)) => write_entry(&ws, source, path, mode, blob)?,
+            None => remove_entry(source, path)?,
+        }
+    }
+    Ok(Ok(changes.into_iter().map(|(p, e)| (p, e.map(|(_, b)| b))).collect()))
 }
 
 /// Files of the person's that Git does not track, where the fast-forward from `expected` to `tip`

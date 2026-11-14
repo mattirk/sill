@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use iced::Task;
-use sill_client::workspaces::{self as ws, ApplyOutcome, Loaded};
+use sill_client::workspaces::{self as ws, ApplyOutcome, How, Loaded};
 use sill_proto::workspaces as api;
 
 use crate::{App, Message, blocking};
@@ -29,6 +29,11 @@ pub struct State {
     /// workspace and its state (`Detail::state_tree`) when the person clicked. It applies at the
     /// turn's end when that state is all committed and nothing else changed.
     pub committing: Option<(String, String)>,
+    /// The workspace whose commit turn has just ended well: the Apply that follows asks for no
+    /// second one, whatever the daemon says (2026-11-12, an Apply that asked after every turn).
+    pub committed: Option<String>,
+    /// The workspace whose Apply menu is open (the caret beside Apply).
+    pub menu: Option<String>,
 }
 
 impl State {
@@ -69,6 +74,10 @@ pub enum Event {
     PageDone(String, bool),
     Loaded(String, Result<Loaded, String>),
     Apply(String, String),
+    /// The caret beside Apply: show or hide the other ways to apply.
+    Menu(String, String),
+    /// Apply without commit: the workspace's state into the checkout, uncommitted, to try.
+    Copy(String, String),
     /// An Apply found uncommitted changes: ask the session's agent to commit them; the Apply
     /// follows at its turn's end.
     Commit(String, String),
@@ -197,7 +206,7 @@ impl App {
                 }
                 let (Some(actions), Some(seen)) = (self.actions.clone(), self.page_seen(&workspace)) else { return Task::none() };
                 blocking(
-                    move || match ws::apply(&actions, &workspace, &seen) {
+                    move || match ws::apply(&actions, &workspace, &seen, How::Commits) {
                         Ok(ApplyOutcome::Applied) => Event::PageDone("Applied to your checkout.".to_string(), false),
                         Ok(ApplyOutcome::Conflicts(paths)) => Event::PageDone(format!("The rebase stopped on {}: resolve it in the session, or abort it there.", paths.join(", ")), true),
                         Ok(ApplyOutcome::Uncommitted) => Event::PageCommit(workspace),
@@ -299,19 +308,49 @@ impl App {
                 if let Some(view) = self.views.get_mut(&session) {
                     view.workspaces.armed = None;
                     view.workspaces.apply_armed = None;
+                    view.workspaces.menu = None;
                 }
                 Task::none()
             }
             Event::Apply(session, workspace) => {
+                // one commit turn for an Apply: the one that follows it never asks for another
+                let after_commit = self.views.get_mut(&session).and_then(|v| v.workspaces.committed.take()).is_some_and(|w| w == workspace);
                 if self.ask_other_branch(&session, &workspace) {
                     return Task::none();
                 }
                 let Some((actions, seen)) = self.workspace_action(&session, &workspace) else { return Task::none() };
                 blocking(
-                    move || match ws::apply(&actions, &workspace, &seen) {
+                    move || match ws::apply(&actions, &workspace, &seen, How::Commits) {
                         Ok(ApplyOutcome::Applied) => Event::Done(session, workspace, "Applied to your checkout.".to_string(), false),
                         Ok(ApplyOutcome::Conflicts(paths)) => Event::Done(session, workspace, format!("The rebase onto your checkout stopped on {}: Resolve asks the agent, or Abort.", paths.join(", ")), true),
+                        Ok(ApplyOutcome::Uncommitted) if after_commit => {
+                            Event::Done(session, workspace, "Sill still finds uncommitted changes after the agent's commit, so nothing was applied: look at the workspace, then apply.".to_string(), true)
+                        }
                         Ok(ApplyOutcome::Uncommitted) => Event::Commit(session, workspace),
+                        Err(e) => Event::Done(session, workspace, ws::message(&e), true),
+                    },
+                    Message::Workspaces,
+                )
+            }
+            Event::Menu(session, workspace) => {
+                if let Some(view) = self.views.get_mut(&session) {
+                    view.workspaces.menu = if view.workspaces.menu.as_deref() == Some(workspace.as_str()) { None } else { Some(workspace) };
+                }
+                Task::none()
+            }
+            Event::Copy(session, workspace) => {
+                if let Some(view) = self.views.get_mut(&session) {
+                    view.workspaces.menu = None;
+                }
+                let Some((actions, seen)) = self.workspace_action(&session, &workspace) else { return Task::none() };
+                blocking(
+                    move || match ws::apply(&actions, &workspace, &seen, How::Uncommitted) {
+                        Ok(ApplyOutcome::Applied) => Event::Done(session, workspace, "Written into your checkout, uncommitted. The work is still here to apply.".to_string(), false),
+                        Ok(ApplyOutcome::Conflicts(paths)) => Event::Done(session, workspace, format!("The rebase onto your checkout stopped on {}: Resolve asks the agent, or Abort.", paths.join(", ")), true),
+                        // the checkout moved on: the rebase onto it takes commits
+                        Ok(ApplyOutcome::Uncommitted) => {
+                            Event::Done(session, workspace, "Your checkout has commits the workspace does not, and the rebase onto them needs its changes committed: ask the agent to commit, or use Apply.".to_string(), true)
+                        }
                         Err(e) => Event::Done(session, workspace, ws::message(&e), true),
                     },
                     Message::Workspaces,
@@ -340,7 +379,10 @@ impl App {
                 let now = loaded.detail(&workspace).map(|d| (d.summary.uncommitted.is_empty(), d.state_tree == seen));
                 view.workspaces.loaded = Some(loaded);
                 let said = match now {
-                    Some((true, true)) => return Task::done(Message::Workspaces(Event::Apply(session, workspace))),
+                    Some((true, true)) => {
+                        view.workspaces.committed = Some(workspace.clone());
+                        return Task::done(Message::Workspaces(Event::Apply(session, workspace)));
+                    }
                     Some((false, _)) => "The agent left changes uncommitted, so nothing was applied.",
                     Some((true, false)) => "The work changed while the agent committed it: look again, then apply.",
                     None => return Task::none(),

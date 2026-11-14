@@ -6652,7 +6652,7 @@
           "type": "string"
         },
         "uncommitted": {
-          "description": "Uncommitted paths, untracked included. Apply brings commits only: while there are any,\nthey are committed first — by the session's agent, asked by the frontend, or by sill for\na workspace no agent will write again.",
+          "description": "Uncommitted paths, untracked included. Apply brings commits only: while there are any,\nthey are committed first — by the session's agent, asked by the frontend, or by sill for\na workspace no agent will write again. `workspaces.copy` brings them as they are.",
           "items": {
             "type": "string"
           },
@@ -7216,6 +7216,7 @@
           "type": "string"
         },
         "branch": {
+          "description": "The branch the workspace's work is on: the one its HEAD names, the agent's own when it\nmade one.",
           "type": "string"
         },
         "created_at": {
@@ -7873,9 +7874,23 @@
       "capabilities": {
         "sill.workspaces": 1
       },
-      "doc": "Bring the workspace's commits into the person's checkout by fast-forward, exactly this revision; repeatable, the workspace goes on. Commits only: uncommitted work is refused as uncommitted while the session's agent can commit it, and committed by sill as the person otherwise. Refusals: invalid_state with reason stale_revision, source_moved, source_overlap, untracked_collision, uncommitted, no_identity, writer_active, rebase_in_progress.",
+      "doc": "Bring the workspace's commits into the person's checkout by fast-forward, exactly this revision; repeatable, the workspace goes on. Commits only: uncommitted work is refused as uncommitted while the session's agent can commit it, and committed by sill as the person otherwise. Refusals: invalid_state with reason stale_revision, source_moved, source_overlap, untracked_collision, uncommitted, no_identity, workspace_detached, writer_active, rebase_in_progress.",
       "kind": "request",
       "name": "_sill/workspaces.apply",
+      "params": {
+        "$ref": "#/$defs/Apply"
+      },
+      "result": {
+        "$ref": "#/$defs/Changed"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.workspaces": 1
+      },
+      "doc": "Apply without commit: write the workspace's whole state, committed or not, into the person's checkout as uncommitted changes for them to try, exactly this revision. No commit is made on either side and the workspace keeps its work for a later apply; repeatable. Refusals: invalid_state with reason stale_revision, source_moved, source_overlap, untracked_collision, workspace_detached, writer_active, rebase_in_progress.",
+      "kind": "request",
+      "name": "_sill/workspaces.copy",
       "params": {
         "$ref": "#/$defs/Apply"
       },

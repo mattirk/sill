@@ -568,7 +568,11 @@ fn render_workspaces() {
     let dir = sill_proto::admin::FileMetadata { file: false, directory: true, symlink: false, target: None, length: "0".into(), readonly: false };
     view.files.roots.push(sill_client::files::Root { path: host("/home/demo/vendored"), global: false, metadata: Some(dir), error: None });
     render(&app, "workspaces-1-shelf");
+    // the caret beside Apply: Apply without commit
+    app.views.get_mut("demo").unwrap().workspaces.menu = Some("ws-1".into());
+    render(&app, "workspaces-4-apply-menu");
     let view = app.views.get_mut("demo").unwrap();
+    view.workspaces.menu = None;
     view.workspaces.diff = Some(("ws-1".into(), Ok("diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,2 +1,3 @@\n fn main() {\n-    old();\n+    new();\n+    more();\n }\n".into())));
     view.workspaces.armed = Some("ws-1".into());
     render(&app, "workspaces-2-diff");

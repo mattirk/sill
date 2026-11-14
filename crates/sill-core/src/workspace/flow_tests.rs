@@ -68,7 +68,7 @@ fn head(s: &Path) -> String {
 
 /// Apply as the records do: from the source's tip.
 fn apply_now(s: &Path, c: &crate::workspace::Created) -> std::result::Result<Applied, Stop> {
-    apply(s, &c.path, "w1", "main", &head(s), &c.branch).unwrap()
+    apply(s, &c.path, "w1", "main", &head(s), &c.branch, &Default::default()).unwrap()
 }
 
 /// The agent commits everything in its workspace.
@@ -229,7 +229,7 @@ fn a_moved_checkout_asks_for_a_rebase_and_symlinks_stay_links() {
     write(&s.join("f3.txt"), "host\n");
     git(&s, &["commit", "-qam", "host"]);
     git(&c.path, &["commit", "--allow-empty", "-qm", "agent"]);
-    assert_eq!(apply(&s, &c.path, "w1", "main", &head(&s), &c.branch).unwrap(), Err(Stop::NeedsPrepare));
+    assert_eq!(apply(&s, &c.path, "w1", "main", &head(&s), &c.branch, &Default::default()).unwrap(), Err(Stop::NeedsPrepare));
     // a link the agent commits arrives as a link, its target not read
     let d2 = tmp("link");
     let (s2, _, c2) = setup(&d2);
@@ -248,7 +248,7 @@ fn a_moved_checkout_asks_for_a_rebase_and_symlinks_stay_links() {
     std::fs::remove_file(c2.path.join("sub")).unwrap();
     write(&c2.path.join("sub/escape.txt"), "x\n");
     commit(&c2, "sub is a directory");
-    let _ = apply(&s2, &c2.path, "w1", "main", &head(&s2), &c2.branch);
+    let _ = apply(&s2, &c2.path, "w1", "main", &head(&s2), &c2.branch, &Default::default());
     assert!(!outside.join("escape.txt").exists(), "nothing written through the link");
 }
 
@@ -361,14 +361,14 @@ fn two_workspaces_reach_the_checkout_one_after_the_other() {
     write(&b.path.join("f2.txt"), "session B\n");
     commit(&b, "B's work");
     apply_now(&s, &a).unwrap();
-    assert_eq!(apply(&s, &b.path, "w2", "main", &head(&s), &b.branch).unwrap(), Err(Stop::NeedsPrepare), "B is behind A's commit");
+    assert_eq!(apply(&s, &b.path, "w2", "main", &head(&s), &b.branch, &Default::default()).unwrap(), Err(Stop::NeedsPrepare), "B is behind A's commit");
     let m = mirror(&s, &b.path, &b.branch).unwrap();
     assert_eq!(git(&b.path, &["diff", "--name-only", &m.tree, &m.now]), "f2.txt", "B still offers its own work only");
     // the rebase is the helper jail's job; plain here
     git(&b.path, &["fetch", "-q", s.to_str().unwrap(), "main"]);
     git(&b.path, &["rebase", "-q", "FETCH_HEAD"]);
     assert_eq!(read(&b.path.join("f1.txt")), "session A\n", "B's workspace now has A's work");
-    apply(&s, &b.path, "w2", "main", &head(&s), &b.branch).unwrap().unwrap();
+    apply(&s, &b.path, "w2", "main", &head(&s), &b.branch, &Default::default()).unwrap().unwrap();
     assert_eq!((read(&s.join("f1.txt")), read(&s.join("f2.txt"))), ("session A\n".into(), "session B\n".into()));
     assert_eq!(git(&s, &["log", "-2", "--format=%s"]), "B's work\nA's work");
     assert_eq!(git(&s, &["status", "--porcelain"]), "");
@@ -387,7 +387,7 @@ fn two_workspaces_changing_the_same_line_conflict_in_the_second_workspace() {
     commit(&b, "B's work");
     apply_now(&s, &a).unwrap();
     let applied = head(&s);
-    assert_eq!(apply(&s, &b.path, "w2", "main", &applied, &b.branch).unwrap(), Err(Stop::NeedsPrepare));
+    assert_eq!(apply(&s, &b.path, "w2", "main", &applied, &b.branch, &Default::default()).unwrap(), Err(Stop::NeedsPrepare));
     git(&b.path, &["fetch", "-q", s.to_str().unwrap(), "main"]);
     let out = Command::new("git").arg("-C").arg(&b.path).args(["-c", "user.name=t", "-c", "user.email=t@t", "rebase", "FETCH_HEAD"]).output().unwrap();
     assert!(!out.status.success(), "the rebase stops");

@@ -141,6 +141,7 @@ pub fn init(conn: &Connection) -> Result<()> {
             operation TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, kind TEXT NOT NULL,
             intent TEXT NOT NULL, state TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '',
             started_at INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS workspace_copied (workspace_id TEXT PRIMARY KEY, files TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS session_workspace_mode (session_id TEXT PRIMARY KEY, workspaces INTEGER NOT NULL);
          CREATE TABLE IF NOT EXISTS session_live_repositories (
             session_id TEXT NOT NULL, source BLOB NOT NULL, reason TEXT NOT NULL, PRIMARY KEY(session_id, source));",
@@ -191,6 +192,30 @@ struct Row {
 const COLUMNS: &str = "id,name,session_id,source,source_branch,base,branch,path,state,shallow,discards,created_by,created_at,updated_at";
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<Row> {
+    stored_row(r).map(followed)
+}
+
+/// The workspace's work is on whichever branch its HEAD names (2026-11-12): an agent that ran
+/// `git checkout -b` is followed there, so everything that reads the workspace — the summary,
+/// the uncommitted check, Apply, the rebase — reads the same commits. Before, some read HEAD and
+/// some the branch sill made, and an Apply asked the agent to commit work that HEAD already had,
+/// again after every turn. A HEAD on no branch keeps the recorded one ([`on_a_branch`] refuses).
+fn followed(mut r: Row) -> Row {
+    if let Some(branch) = super::clone_branch(&r.path) {
+        r.branch = branch;
+    }
+    r
+}
+
+/// Apply needs the workspace on a branch: a detached HEAD's commits belong to none.
+fn on_a_branch(r: &Row) -> Result<()> {
+    if r.path.exists() && super::clone_branch(&r.path).is_none() {
+        return Err(refuse("workspace_detached", "The workspace is on no branch: ask the agent to check out a branch there, then apply.", vec![]));
+    }
+    Ok(())
+}
+
+fn stored_row(r: &rusqlite::Row) -> rusqlite::Result<Row> {
     Ok(Row {
         id: r.get(0)?,
         name: r.get(1)?,
@@ -259,6 +284,21 @@ fn settle(conn: &Connection, op: &str, state: &str, detail: &str) -> Result<()> 
 /// Other unfinished operations keep their own recovery paths.
 fn settle_notices(conn: &Connection, workspace: &str) -> Result<()> {
     conn.execute("UPDATE workspace_journal SET state='done' WHERE workspace_id=?1 AND (state='notice' OR (kind='apply' AND state='interrupted'))", [workspace])?;
+    Ok(())
+}
+
+/// What the workspace's last "Apply without commit" wrote into the checkout ([`flow::copy`]).
+fn copied(conn: &Connection, workspace: &str) -> Result<flow::Copied> {
+    let files: Option<String> = conn.query_row("SELECT files FROM workspace_copied WHERE workspace_id=?1", [workspace], |r| r.get(0)).optional()?;
+    Ok(files.and_then(|f| serde_json::from_str(&f).ok()).unwrap_or_default())
+}
+
+fn set_copied(conn: &Connection, workspace: &str, files: &flow::Copied) -> Result<()> {
+    if files.is_empty() {
+        conn.execute("DELETE FROM workspace_copied WHERE workspace_id=?1", [workspace])?;
+    } else {
+        conn.execute("INSERT OR REPLACE INTO workspace_copied(workspace_id, files) VALUES(?1, ?2)", params![workspace, serde_json::to_string(files)?])?;
+    }
     Ok(())
 }
 
@@ -404,6 +444,7 @@ fn free<H: Host>(h: &H, r: &Row) -> Result<()> {
     }
     h.db(|c| {
         c.execute("DELETE FROM workspaces WHERE id=?1", [&r.id])?;
+        c.execute("DELETE FROM workspace_copied WHERE workspace_id=?1", [&r.id])?;
         Ok(())
     })
 }
@@ -934,6 +975,7 @@ pub fn prepare<H: Host>(h: &H, a: &api::Operate) -> Result<api::Prepared> {
     if branch.is_empty() {
         return Err(refuse("detached_head", "Check out a branch in your checkout first.", vec![]));
     }
+    on_a_branch(&r)?;
     let (_, needs_rebase) = revision_now(&r)?;
     if needs_rebase && h.life(&r.session_id) == Life::Missing {
         return Err(refuse("no_session", "The workspace's session is gone, so it cannot be rebased.", vec![]));
@@ -1024,6 +1066,7 @@ pub fn apply<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
     if rebasing(&r.path) {
         return Err(refuse("rebase_in_progress", "A rebase is stopped in the workspace: finish it there or abort it.", conflicted(&r.path)));
     }
+    on_a_branch(&r)?;
     let (now_rev, needs_rebase) = revision_now(&r)?;
     if now_rev != a.revision {
         return Err(refuse("stale_revision", "The workspace or your checkout changed since you looked; look again.", vec![]));
@@ -1036,16 +1079,18 @@ pub fn apply<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
     }
     // what they saw, committed where it was not: the same files, at a new tip
     commit_leftovers(h, &r)?;
+    let wrote = h.db(|c| copied(c, &r.id))?;
     let (now_rev, _) = revision_now(&r)?;
     h.db(|c| {
         receipts(c)?.begin(&a.operation_id, METHOD, &fingerprint)?;
         intent(c, &k, &r.id, "apply", &json!({"branch": now_rev.destination_branch, "old": now_rev.destination_tip, "tip": now_rev.tip}), h.now())
     })?;
-    let outcome = flow::apply(&r.source, &r.path, &r.id, &now_rev.destination_branch, &now_rev.destination_tip, &r.branch);
+    let outcome = flow::apply(&r.source, &r.path, &r.id, &now_rev.destination_branch, &now_rev.destination_tip, &r.branch, &wrote);
     match outcome {
         Ok(Ok(_)) => {
             h.db(|c| {
                 settle(c, &k, "done", "")?;
+                set_copied(c, &r.id, &flow::Copied::new())?;
                 settle_notices(c, &r.id)?;
                 receipts(c)?.finish(&a.operation_id, None, None)
             })?;
@@ -1064,6 +1109,73 @@ pub fn apply<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
             let detail = "The Apply stopped part way: check your checkout's branch and the files it changed, then look again.";
             let _ = h.db(|c| {
                 settle(c, &k, "interrupted", detail)?;
+                receipts(c)?.finish(&a.operation_id, None, Some("operation_failed"))
+            });
+            Err(e.context(detail))
+        }
+    }
+}
+
+/// Apply without commit (2026-11-12): the workspace's whole state, committed or not, written
+/// into the person's checkout as uncommitted changes for them to try ([`flow::copy`]). Nothing
+/// is committed on either side, so no agent is asked to commit, and the workspace keeps its work
+/// for a later Apply. Exactly the revision they saw; a checkout that moved on is rebased onto
+/// first (prepare), as for Apply.
+pub fn copy<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
+    const METHOD: &str = "_sill/workspaces.copy";
+    let fingerprint = input(a)?;
+    let k = key(&a.operation_id);
+    let _g = lock();
+    if h.db(|c| receipts(c)?.existing(&a.operation_id, METHOD, &fingerprint))?.is_some() {
+        let r = h.db(|c| load(c, &a.workspace_id))?;
+        return changed(h, r.as_ref(), Some(&a.operation_id), None);
+    }
+    let r = settle_session(h, get_row(h, &a.workspace_id)?)?.ok_or_else(|| not_found("workspace"))?;
+    if h.busy(&r.session_id) {
+        return Err(refuse("writer_active", "The agent is working; apply after its turn.", vec![]));
+    }
+    if rebasing(&r.path) {
+        return Err(refuse("rebase_in_progress", "A rebase is stopped in the workspace: finish it there or abort it.", conflicted(&r.path)));
+    }
+    on_a_branch(&r)?;
+    let (now_rev, needs_rebase) = revision_now(&r)?;
+    if now_rev != a.revision {
+        return Err(refuse("stale_revision", "The workspace or your checkout changed since you looked; look again.", vec![]));
+    }
+    if needs_rebase {
+        return Err(refuse("stale_revision", "Your checkout has commits the workspace does not: prepare (rebase) first.", vec![]));
+    }
+    if now_rev.destination_branch.is_empty() {
+        return Err(refuse("detached_head", "Check out a branch in your checkout first.", vec![]));
+    }
+    let before = h.db(|c| copied(c, &r.id))?;
+    h.db(|c| {
+        receipts(c)?.begin(&a.operation_id, METHOD, &fingerprint)?;
+        intent(c, &k, &r.id, "copy", &json!({"branch": now_rev.destination_branch, "at": now_rev.destination_tip}), h.now())
+    })?;
+    match flow::copy(&r.source, &r.path, &now_rev.destination_branch, &now_rev.destination_tip, &before) {
+        Ok(Ok(wrote)) => {
+            h.db(|c| {
+                set_copied(c, &r.id, &wrote)?;
+                settle(c, &k, "done", "")?;
+                receipts(c)?.finish(&a.operation_id, None, None)
+            })?;
+            changed(h, Some(&r), Some(&a.operation_id), None)
+        }
+        Ok(Err(stop)) => {
+            let message = stop_message(&stop);
+            h.db(|c| {
+                settle(c, &k, "failed", &message)?;
+                receipts(c)?.finish(&a.operation_id, None, Some("invalid_state"))
+            })?;
+            Err(refuse(stop.reason(), message, stop.paths().to_vec()))
+        }
+        Err(e) => {
+            // some files may be written and the record is the last copy's: what it does not
+            // name is taken for the person's, so nothing is written over unasked
+            let detail = "Applying without commit stopped part way: check the files it changed in your checkout.";
+            let _ = h.db(|c| {
+                settle(c, &k, "failed", detail)?;
                 receipts(c)?.finish(&a.operation_id, None, Some("operation_failed"))
             });
             Err(e.context(detail))
@@ -1293,7 +1405,7 @@ pub fn session_notice(conn: &Connection, session: &str) -> Result<Option<String>
     }
     let repos = rows.iter().map(|r| format!("{} (branch {})", r.source.display(), r.branch)).collect::<Vec<_>>().join(", ");
     let mut notice = format!(
-        "\n[This session works in workspaces: {repos} — each is your own copy of the repository at its usual path; the person's checkout is elsewhere and changes only when they apply your work. Commit work that is ready for the person to try, with a message of your own: they apply your commits, never uncommitted changes, and when they apply while changes are uncommitted you are asked to commit them first. Do not push.]"
+        "\n[This session works in workspaces: {repos} — each is your own copy of the repository at its usual path; the person's checkout is elsewhere and changes only when they apply your work. Commit work that is ready for the person to try, with a message of your own: they apply the commits of the branch you have checked out, and when they apply while changes are uncommitted you are asked to commit them first. Stay on a branch: a detached HEAD cannot be applied. Do not push.]"
     );
     // the person's uncommitted work is not in the copy (§5): said, so the agent does not look
     // for code that is only in their checkout. A look that fails says nothing.

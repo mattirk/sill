@@ -179,6 +179,10 @@ impl Hub {
                     let a: api::Apply = args(params)?;
                     (json!(records::apply(&h, &a)?), Some(a.workspace_id))
                 }
+                "_sill/workspaces.copy" => {
+                    let a: api::Apply = args(params)?;
+                    (json!(records::copy(&h, &a)?), Some(a.workspace_id))
+                }
                 "_sill/workspaces.discard" => {
                     let a: api::Apply = args(params)?;
                     (json!(records::discard(&h, &a)?), Some(a.workspace_id))

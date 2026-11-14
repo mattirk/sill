@@ -571,6 +571,21 @@ pub fn set_destination(source: &Path, clone: &Path, id: &str, branch: &str, work
     Ok(tip)
 }
 
+/// The branch the clone's work is on: the one its HEAD names — an agent that made or switched to
+/// a branch of its own is followed there (2026-11-12), so the summary, the uncommitted check and
+/// Apply all read the same commits — or, while a rebase is stopped, the branch being rebased.
+/// None when HEAD is detached otherwise, or unreadable.
+pub fn clone_branch(clone: &Path) -> Option<String> {
+    let dot = clone.join(".git");
+    // the agent writes this folder: only a regular file is read
+    let text = |p: PathBuf| std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_file()).then(|| std::fs::read_to_string(p).ok()).flatten();
+    let named = |t: String| t.trim().strip_prefix("refs/heads/").filter(|b| !b.is_empty()).map(str::to_string);
+    if let Some(b) = text(dot.join("HEAD")).and_then(|t| named(t.trim().strip_prefix("ref: ").unwrap_or("").to_string())) {
+        return Some(b);
+    }
+    ["rebase-merge", "rebase-apply"].iter().find_map(|d| text(dot.join(d).join("head-name")).and_then(named))
+}
+
 /// The source's checked-out branch (empty when detached) and its tip.
 pub fn source_head(source: &Path) -> Result<(String, String)> {
     head_of(&Git::open(source)?)

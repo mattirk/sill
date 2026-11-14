@@ -52,6 +52,8 @@ pub struct Workspace {
     pub source: HostPath,
     pub source_branch: String,
     pub base: String,
+    /// The branch the workspace's work is on: the one its HEAD names, the agent's own when it
+    /// made one.
     pub branch: String,
     /// Where the clone is on the host.
     pub path: HostPath,
@@ -84,7 +86,7 @@ pub struct Summary {
     pub removed: String,
     /// Uncommitted paths, untracked included. Apply brings commits only: while there are any,
     /// they are committed first — by the session's agent, asked by the frontend, or by sill for
-    /// a workspace no agent will write again.
+    /// a workspace no agent will write again. `workspaces.copy` brings them as they are.
     pub uncommitted: Vec<String>,
 }
 

@@ -45,7 +45,8 @@ impl App {
             if state.running.as_deref() == Some(id.as_str()) {
                 line = line.push(text("Working…").size(style::TINY).color(P.fg_dim));
             }
-            if d.workspace.operation.as_ref().is_some_and(|o| o.state == "conflict") {
+            let rebase_stopped = d.workspace.operation.as_ref().is_some_and(|o| o.state == "conflict");
+            if rebase_stopped {
                 line = line.push(tooltip(
                     keys::press_maybe(
                         button(text("Resolve").size(style::SMALL)).padding([3, 10]).style(style::solid(P.accent)),
@@ -80,6 +81,14 @@ impl App {
                 } else {
                     line = line.push(apply);
                 }
+                line = line.push(tooltip(
+                    keys::press_maybe(
+                        button(text("▾").size(style::SMALL)).padding([3, 6]).style(style::solid(P.accent)),
+                        ev(Event::Menu(session.clone(), id.clone())),
+                    ),
+                    container(text("Other ways to apply").size(style::TINY)).padding(6).style(style::fill(P.surface)),
+                    tooltip::Position::Top,
+                ));
             }
             let discard = if state.armed.as_deref() == Some(id.as_str()) {
                 format!("Discard {}?", if d.summary.files > 0 { format!("{} file{}", d.summary.files, if d.summary.files == 1 { "" } else { "s" }) } else { "it".into() })
@@ -88,6 +97,20 @@ impl App {
             };
             line = line.push(quiet_button(discard, ev(Event::Discard(session.clone(), id.clone()))));
             shelf = shelf.push(line);
+            if state.menu.as_deref() == Some(id.as_str()) && !rebase_stopped {
+                shelf = shelf.push(
+                    row![
+                        text("Writes the changes into your checkout as they are, uncommitted, for you to try. Nothing is committed and the work stays here to apply; other sessions do not get it.")
+                            .size(style::TINY)
+                            .color(P.fg_dim)
+                            .width(Fill)
+                            .wrapping(text::Wrapping::WordOrGlyph),
+                        quiet_button("Apply without commit", ev(Event::Copy(session.clone(), id.clone()))),
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+                );
+            }
             let notice = state.notices.get(&id).map(|(said, bad)| (said.as_str(), if *bad { P.error } else { P.fg_dim }))
                 .or_else(|| d.workspace.operation.as_ref().map(|op| (op.detail.as_str(), P.warning)));
             if let Some((said, color)) = notice {

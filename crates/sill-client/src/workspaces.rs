@@ -113,6 +113,15 @@ pub fn diff(actions: &Actions, workspace_id: &str, path: Option<&sill_proto::ses
     Ok(if d.truncated { format!("{}\n… (cut at 4 MiB)", d.text) } else { d.text })
 }
 
+/// How the workspace's work reaches the checkout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum How {
+    /// Its commits, by fast-forward (`workspaces.apply`).
+    Commits,
+    /// Its whole state as uncommitted changes, to try (`workspaces.copy`): Apply without commit.
+    Uncommitted,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplyOutcome {
     Applied,
@@ -138,8 +147,8 @@ fn refused_for(e: &anyhow::Error, reason: &str) -> bool {
 /// rebase only puts the person's own commits under the agent's work (the person, 2026-11-09:
 /// Apply that only rebased looked as if it did nothing). A stopped rebase applies nothing, and
 /// neither does uncommitted work the agent is still there to commit ([`ApplyOutcome::Uncommitted`]).
-pub fn apply(actions: &Actions, workspace_id: &str, seen: &api::Revision) -> anyhow::Result<ApplyOutcome> {
-    actions.once(|c| match apply_steps(|method, params| c.call(method, params), workspace_id, seen) {
+pub fn apply(actions: &Actions, workspace_id: &str, seen: &api::Revision, how: How) -> anyhow::Result<ApplyOutcome> {
+    actions.once(|c| match apply_steps(|method, params| c.call(method, params), workspace_id, seen, how) {
         Err(e) if refused_for(&e, "uncommitted") => Ok(ApplyOutcome::Uncommitted),
         other => other,
     })
@@ -150,6 +159,7 @@ fn apply_steps(
     mut call: impl FnMut(&str, serde_json::Value) -> anyhow::Result<serde_json::Value>,
     workspace_id: &str,
     seen: &api::Revision,
+    how: How,
 ) -> anyhow::Result<ApplyOutcome> {
     let d: api::Detail = serde_json::from_value(call("_sill/workspaces.get", serde_json::json!(api::Key { workspace_id: workspace_id.into() }))?)?;
     // the person agreed to land on the branch they saw: a checkout switched since is looked at again
@@ -171,10 +181,11 @@ fn apply_steps(
         }
         revision = p.revision;
     }
-    call(
-        "_sill/workspaces.apply",
-        serde_json::json!(api::Apply { operation_id: crate::request_id("apply"), workspace_id: workspace_id.into(), revision }),
-    )?;
+    let (method, kind) = match how {
+        How::Commits => ("_sill/workspaces.apply", "apply"),
+        How::Uncommitted => ("_sill/workspaces.copy", "copy"),
+    };
+    call(method, serde_json::json!(api::Apply { operation_id: crate::request_id(kind), workspace_id: workspace_id.into(), revision }))?;
     Ok(ApplyOutcome::Applied)
 }
 
@@ -230,6 +241,10 @@ mod tests {
 
     /// The daemon's answers to `apply_steps`, and the calls it got.
     fn run_apply(needs_rebase: bool, conflicts: &[&str]) -> (anyhow::Result<ApplyOutcome>, Vec<(String, serde_json::Value)>) {
+        run_apply_as(needs_rebase, conflicts, How::Commits)
+    }
+
+    fn run_apply_as(needs_rebase: bool, conflicts: &[&str], how: How) -> (anyhow::Result<ApplyOutcome>, Vec<(String, serde_json::Value)>) {
         let path = |p: &str| serde_json::json!(sill_proto::sessions::HostPath::from_path(std::path::Path::new(p)));
         let workspace = serde_json::json!({"workspace_id": "ws-1", "name": "repo", "session_id": "s", "source": path("/home/me/repo"),
             "source_branch": "main", "base": "b0", "branch": "sill/repo-ws-1", "path": path("/ws/repo-ws-1"),
@@ -249,8 +264,19 @@ mod tests {
             },
             "ws-1",
             &seen,
+            how,
         );
         (out, calls)
+    }
+
+    #[test]
+    fn apply_without_commit_asks_for_a_copy_after_the_same_rebase() {
+        let (out, calls) = run_apply_as(false, &[], How::Uncommitted);
+        assert_eq!(out.unwrap(), ApplyOutcome::Applied);
+        assert_eq!(calls.iter().map(|(m, _)| m.as_str()).collect::<Vec<_>>(), ["_sill/workspaces.get", "_sill/workspaces.copy"]);
+        let (_, calls) = run_apply_as(true, &[], How::Uncommitted);
+        assert_eq!(calls.iter().map(|(m, _)| m.as_str()).collect::<Vec<_>>(), ["_sill/workspaces.get", "_sill/workspaces.prepare", "_sill/workspaces.copy"]);
+        assert_eq!(calls[2].1["revision"]["tip"], "t2");
     }
 
     #[test]
@@ -323,6 +349,7 @@ mod tests {
             },
             "ws-1",
             &seen,
+            How::Commits,
         );
         (out, calls)
     }

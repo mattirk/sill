@@ -1072,3 +1072,103 @@ fn successful_apply_or_discard_clears_interrupted_apply() {
         assert_eq!(read(&f.source.join("f1.txt")), if discard_work { "line 1\n" } else { "agent work\n" });
     }
 }
+
+/// The Apply loop of 2026-11-11: the agent ran `git checkout -b` and committed there. The
+/// summary read HEAD (clean) while Apply read the branch sill made (behind, so "uncommitted"),
+/// and the window asked the agent to commit after every turn. The workspace follows HEAD now.
+#[test]
+fn an_agent_on_a_branch_of_its_own_is_followed_there() {
+    let f = fixture("follow");
+    let w = session(&f, "s1");
+    let clone = clone_of(&w);
+    git(&clone, &["checkout", "-q", "-b", "agents-own"]);
+    write(&clone.join("f1.txt"), "on the agent's branch\n");
+    commit(&clone, "agent, on its own branch");
+    let d = get(&f.host, &w.workspace_id).unwrap();
+    assert_eq!(d.workspace.branch, "agents-own");
+    assert_eq!((d.summary.commits, d.summary.files), (1, 1));
+    assert!(d.summary.uncommitted.is_empty());
+    apply(&f.host, &apply_req("a1", &w, &d.revision)).unwrap();
+    assert_eq!(read(&f.source.join("f1.txt")), "on the agent's branch\n");
+    assert_eq!(git(&f.source, &["log", "-1", "--format=%s"]), "agent, on its own branch");
+    assert_eq!(get(&f.host, &w.workspace_id).unwrap().summary.files, 0);
+    // on no branch: refused as that, not as uncommitted work to ask the agent for
+    write(&clone.join("f1.txt"), "detached\n");
+    commit(&clone, "more");
+    git(&clone, &["checkout", "-q", "--detach"]);
+    let e = apply(&f.host, &apply_req("a2", &w, &rev(&f, &w))).unwrap_err();
+    assert_eq!(reason(&e), "workspace_detached");
+    assert_eq!(reason(&copy(&f.host, &apply_req("c0", &w, &rev(&f, &w))).unwrap_err()), "workspace_detached");
+    git(&clone, &["checkout", "-q", "agents-own"]);
+    apply(&f.host, &apply_req("a3", &w, &rev(&f, &w))).unwrap();
+    assert_eq!(read(&f.source.join("f1.txt")), "detached\n");
+}
+
+/// Apply without commit: the workspace's state arrives as uncommitted changes, no commit on
+/// either side and no agent asked; it repeats as the agent goes on, never writes over an edit
+/// of the person's, and a later Apply takes the copied files as the workspace's own.
+#[test]
+fn apply_without_commit_copies_the_state_and_a_later_apply_takes_it_over() {
+    let f = fixture("copy");
+    let w = session(&f, "s1");
+    let clone = clone_of(&w);
+    let start = git(&f.source, &["rev-parse", "HEAD"]);
+    write(&clone.join("f1.txt"), "committed\n");
+    commit(&clone, "agent");
+    write(&clone.join("f2.txt"), "uncommitted\n");
+    write(&clone.join("new.txt"), "untracked\n");
+    let before = rev(&f, &w);
+    copy(&f.host, &apply_req("c1", &w, &before)).unwrap();
+    assert_eq!(git(&f.source, &["rev-parse", "HEAD"]), start, "no commit arrives");
+    assert_eq!(git(&f.source, &["status", "--porcelain"]), "M f1.txt\n M f2.txt\n?? new.txt", "unstaged, the first line's space trimmed by the helper");
+    assert_eq!((read(&f.source.join("f1.txt")), read(&f.source.join("f2.txt")), read(&f.source.join("new.txt"))), ("committed\n".into(), "uncommitted\n".into(), "untracked\n".into()));
+    // the workspace is as it was: its work is still there to apply
+    let d = get(&f.host, &w.workspace_id).unwrap();
+    assert_eq!(d.revision, before);
+    assert_eq!((d.summary.commits, d.summary.files), (1, 3));
+    assert_eq!(d.checkout_only, 0, "what the copy wrote is not the person's own work");
+    // the agent goes on: one file changed again, one change taken back, one file removed
+    write(&clone.join("f1.txt"), "committed, improved\n");
+    git(&clone, &["checkout", "-q", "--", "f2.txt"]);
+    std::fs::remove_file(clone.join("new.txt")).unwrap();
+    copy(&f.host, &apply_req("c2", &w, &rev(&f, &w))).unwrap();
+    assert_eq!(read(&f.source.join("f1.txt")), "committed, improved\n");
+    assert_eq!(read(&f.source.join("f2.txt")), "line 2\n", "back as the branch has it");
+    assert!(!f.source.join("new.txt").exists());
+    // the person edits a copied file: theirs now, neither a copy nor an Apply writes over it
+    write(&f.source.join("f1.txt"), "the person's own edit\n");
+    write(&clone.join("f1.txt"), "committed, improved twice\n");
+    let e = copy(&f.host, &apply_req("c3", &w, &rev(&f, &w))).unwrap_err();
+    assert_eq!((reason(&e), paths(&e)), ("source_overlap".into(), vec!["f1.txt".to_string()]));
+    assert_eq!(read(&f.source.join("f1.txt")), "the person's own edit\n");
+    commit(&clone, "agent, twice");
+    let e = apply(&f.host, &apply_req("a1", &w, &rev(&f, &w))).unwrap_err();
+    assert_eq!(reason(&e), "source_overlap");
+    assert_eq!(read(&f.source.join("f1.txt")), "the person's own edit\n");
+    // put back to what the copy wrote, the Apply brings the commits over it and leaves it clean
+    write(&f.source.join("f1.txt"), "committed, improved\n");
+    write(&clone.join("added.txt"), "a new file\n");
+    copy(&f.host, &apply_req("c4", &w, &rev(&f, &w))).unwrap();
+    assert_eq!(read(&f.source.join("f1.txt")), "committed, improved twice\n");
+    commit(&clone, "agent, a new file");
+    apply(&f.host, &apply_req("a2", &w, &rev(&f, &w))).unwrap();
+    assert_eq!(git(&f.source, &["status", "--porcelain"]), "", "the copied files are the commits' now");
+    assert_eq!(git(&f.source, &["log", "-1", "--format=%s"]), "agent, a new file");
+    assert_eq!(read(&f.source.join("added.txt")), "a new file\n");
+    assert!(f.host.db(|c| copied(c, &w.workspace_id)).unwrap().is_empty(), "nothing of a copy is left to know");
+}
+
+/// A copy never writes over a file of the person's that Git does not track, ignored or not.
+#[test]
+fn apply_without_commit_stops_at_the_persons_untracked_file() {
+    let f = fixture("copy-untracked");
+    let w = session(&f, "s1");
+    let clone = clone_of(&w);
+    write(&f.source.join("notes.txt"), "the person's notes\n");
+    write(&clone.join("notes.txt"), "the agent's notes\n");
+    write(&clone.join("f1.txt"), "changed\n");
+    let e = copy(&f.host, &apply_req("c1", &w, &rev(&f, &w))).unwrap_err();
+    assert_eq!((reason(&e), paths(&e)), ("untracked_collision".into(), vec!["notes.txt".to_string()]));
+    assert_eq!(read(&f.source.join("notes.txt")), "the person's notes\n");
+    assert_eq!(read(&f.source.join("f1.txt")), "line 1\n", "nothing written");
+}

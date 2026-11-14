@@ -868,16 +868,21 @@ that `path` (added with it: one path's diff alone, matched literally) says what 
 `_sill/workspaces.prepare` rebases onto a moved checkout in a helper jail built from the session's
 next build (no network), keeping uncommitted changes; a rebase that stops is left for the
 workspace (`conflicts`, `operation` reads `rebase`/`conflict`) and `_sill/workspaces.abort` undoes
-it. `_sill/workspaces.apply` brings exactly the revision the person saw — commits by fast-forward,
-uncommitted changes into the working tree — and the workspace goes on. `_sill/workspaces.discard`
+it. `_sill/workspaces.apply` brings exactly the revision the person saw — its commits, by
+fast-forward — and the workspace goes on. `_sill/workspaces.copy` (added 2026-11-12, "Apply
+without commit") takes the same parameters and writes that revision's whole state, committed or
+not, into the checkout's working tree as uncommitted changes for the person to try: no commit on
+either side, the checkout's branch and index untouched, the workspace's work still there for a
+later apply, which takes the copied files over. `_sill/workspaces.discard`
 resets the workspace to what the person has and keeps the work 7 days; `_sill/workspaces.undo` puts it
 back. `_sill/workspaces.changed` (notification, this capability only) invalidates one workspace.
 
 Mutations take an `operation_id` with the receipts of [sfp-operations.md](sfp-operations.md): an
 identical retry never repeats the work, and `_sill/operations.get` reports the receipt. Refusals use
 `invalid_state` with the optional details `{reason, paths}`: `stale_revision`, `source_moved`,
-`source_overlap`, `untracked_collision`, `uncommitted`, `no_identity`, `writer_active`,
-`rebase_in_progress`, `rebase_failed`, `changed_since`, `retention_expired`, `detached_head`,
+`source_overlap`, `untracked_collision`, `uncommitted`, `no_identity`, `workspace_detached`
+(the workspace's HEAD is on no branch; its `branch` is otherwise the one its HEAD names,
+2026-11-12), `writer_active`, `rebase_in_progress`, `rebase_failed`, `changed_since`, `retention_expired`, `detached_head`,
 `no_session`. Apply brings commits only (2026-11-10): `uncommitted` means the workspace holds
 uncommitted changes its session's agent can still commit, and a frontend asks the agent to
 commit them, then applies if the detail's `state_tree` is unchanged; a workspace no agent will

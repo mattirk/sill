@@ -257,3 +257,57 @@ fn apply_onto_another_branch_asks_once_for_that_branch() {
     assert_eq!(state.notices.get("ws-1"), Some(&("Applied to your checkout.".to_string(), false)));
     assert_eq!(state.apply_armed, None);
 }
+
+/// The Apply loop of 2026-11-11: the daemon went on refusing as `uncommitted` although the
+/// agent's turn had left everything committed, and each Apply sent the agent another commit
+/// prompt. One commit turn for an Apply: the second refusal is said, not asked again.
+#[test]
+fn an_apply_asks_the_agent_to_commit_once() {
+    let (client, mut daemon) = daemon();
+    let mut app = live_app(vec![client]);
+    let mut idle = crate::SessionView::new("idle");
+    idle.workspaces.loaded = Some(uncommitted());
+    idle.workspaces.committing = Some(("ws-1".into(), "tree-1".into()));
+    app.views.insert("idle".into(), idle);
+    let server = std::thread::spawn(move || {
+        let get = daemon.expect("_sill/workspaces.get");
+        daemon.reply(&get, serde_json::to_value(&committed("tree-1").details[0]).unwrap());
+        let apply = daemon.expect("_sill/workspaces.apply");
+        daemon.refuse_for(&apply, "uncommitted", "The workspace has uncommitted changes.");
+    });
+    let task = app.update(Message::Workspaces(Event::Committed("idle".into(), Ok(committed("tree-1")))));
+    settle_task(&mut app, task);
+    server.join().unwrap();
+    let state = &app.views["idle"].workspaces;
+    assert!(state.committing.is_none() && state.committed.is_none(), "no second commit turn is waited for");
+    let (said, bad) = state.notices["ws-1"].clone();
+    assert!(bad && said.starts_with("Sill still finds uncommitted changes"), "{said}");
+}
+
+/// The caret beside Apply opens "Apply without commit": the workspace's state as it is, into the
+/// checkout uncommitted, with no commit asked of the agent.
+#[test]
+fn apply_without_commit_copies_what_the_person_saw() {
+    let (client, mut daemon) = daemon();
+    let mut app = live_app(vec![client]);
+    let mut idle = crate::SessionView::new("idle");
+    idle.workspaces.loaded = Some(uncommitted());
+    app.views.insert("idle".into(), idle);
+    let _ = app.update(Message::Workspaces(Event::Menu("idle".into(), "ws-1".into())));
+    assert_eq!(app.views["idle"].workspaces.menu.as_deref(), Some("ws-1"));
+    assert!(app.workspace_shelf(&app.views["idle"]).is_some());
+    let seen = serde_json::to_value(&uncommitted().details[0].revision).unwrap();
+    let server = std::thread::spawn(move || {
+        let get = daemon.expect("_sill/workspaces.get");
+        daemon.reply(&get, serde_json::to_value(&uncommitted().details[0]).unwrap());
+        let copy = daemon.expect("_sill/workspaces.copy");
+        assert_eq!(copy["params"]["revision"], seen);
+        daemon.reply(&copy, json!({"workspace": workspace(), "operation": null, "discarded": null}));
+    });
+    let task = app.update(Message::Workspaces(Event::Copy("idle".into(), "ws-1".into())));
+    settle_task(&mut app, task);
+    server.join().unwrap();
+    let state = &app.views["idle"].workspaces;
+    assert!(state.menu.is_none() && state.committing.is_none());
+    assert_eq!(state.notices.get("ws-1"), Some(&("Written into your checkout, uncommitted. The work is still here to apply.".to_string(), false)));
+}
