@@ -284,32 +284,40 @@ impl App {
             .style(style::fill(P.surface)),
             tooltip::Position::Bottom,
         );
-        let mut tabs = row![].spacing(2).height(Fill);
-        if shown {
-            // the pages' own tabs in place of the sessions'
-            for (page, glyph, title) in [
-                (crate::Page::Changes, "changes", "Changes"),
-                (crate::Page::Agents, "agents", "Agents"),
-                (crate::Page::Settings, "settings", "Settings"),
-            ] {
-                tabs = tabs.push(self.page_tab(page, glyph, title));
+        let tabs = responsive(move |size| {
+            let mut tabs = row![].spacing(2).height(Fill);
+            if shown {
+                for (page, glyph, title) in [
+                    (crate::Page::Changes, "changes", "Changes"),
+                    (crate::Page::Agents, "agents", "Agents"),
+                    (crate::Page::Settings, "settings", "Settings"),
+                ] {
+                    tabs = tabs.push(self.page_tab(page, glyph, title));
+                }
+            } else {
+                let count = self.tabs.len().max(1) as f32;
+                let width = ((size.width - 2.0 * (count - 1.0)) / count)
+                    .clamp(64.0, 220.0);
+                for tab in &self.tabs {
+                    tabs = tabs.push(self.tab(tab, width));
+                }
             }
-        } else {
-            for tab in &self.tabs {
-                tabs = tabs.push(self.tab(tab));
-            }
-        }
+            scrollable(tabs)
+                .width(Fill)
+                .height(Fill)
+                .direction(scrollable::Direction::Horizontal(style::bar()))
+                .style(style::feed_scroll)
+                .into()
+        })
+        .width(Fill)
+        .height(Fill);
         // the window has no title bar: a press here that no tab or button takes moves it (not in
         // Shelf mode, which is locked to its edge)
         let bar = mouse_area(
             container(
                 row![
                     container(mark).padding(Padding::from([0.0, 2.0])),
-                    scrollable(tabs)
-                        .width(Fill)
-                        .height(Fill)
-                        .direction(scrollable::Direction::Horizontal(style::bar()))
-                        .style(style::feed_scroll),
+                    tabs,
                     // Keep the timer open across the gap and + button, so the button does
                     // not move away as the pointer approaches it from the indicator.
                     mouse_area(
@@ -404,7 +412,7 @@ impl App {
 
     /// A tab: the agent glyph pulses in accent while working; question/problem marks follow
     /// the title. Dimmer when the session is not running.
-    fn tab<'a>(&'a self, tab: &'a Tab) -> Element<'a, Message> {
+    fn tab<'a>(&'a self, tab: &'a Tab, width: f32) -> Element<'a, Message> {
         let active = self.selected.as_deref() == Some(tab.id.as_str());
         let view = self.views.get(&tab.id);
         let live = view.is_some_and(|v| !v.status.ended()) || tab.running;
@@ -417,14 +425,20 @@ impl App {
         let working = attention
             .as_ref()
             .is_some_and(|a| a.activity == Activity::Working);
+        let compact = width < 110.0;
+        let title = self.session_name(&tab.id, &tab.title);
+        // Reserve room for the glyph, padding and controls before shortening the title.
+        let budget = ((width - if compact { 34.0 } else { 80.0 }) / 10.0)
+            .floor().max(2.0) as usize;
+        let short_title: String = title.chars().take(budget).collect();
         let mut label = row![
-            text(self.session_name(&tab.id, &tab.title))
+            text(short_title)
                 .size(style::TEXT)
                 .color(color),
         ]
         .spacing(8)
         .align_y(Alignment::Center);
-        if let Some(mark) = attention.as_ref().and_then(mark) {
+        if let Some(mark) = attention.as_ref().filter(|_| !compact).and_then(mark) {
             label = label.push(mark);
         }
         let agent = keys::press(
@@ -450,7 +464,7 @@ impl App {
                     (!editor.pending).then_some(Message::Name(crate::names::Event::Save)),
                 )
                 .size(style::TEXT)
-                .width((editor.text.chars().count() as f32 * 8.0 + 24.0).clamp(120.0, 320.0));
+                .width((width - 30.0).max(24.0));
             let input: Element<'a, Message> = input.into();
             if let Some(error) = &editor.error {
                 tooltip(
@@ -481,7 +495,7 @@ impl App {
         // Closing ends the session (a ghost asks once: it deletes it).
         // The 12px glyph plus its 6px padding on each side.
         const CLOSE_WIDTH: f32 = 24.0;
-        let label: Element<'a, Message> = if !self.demo {
+        let label: Element<'a, Message> = if !self.demo && !compact {
             let armed = self.armed_close.as_deref() == Some(tab.id.as_str());
             row![
                 label,
@@ -501,7 +515,7 @@ impl App {
             .align_y(Alignment::Center)
             .into()
         } else {
-            row![label, space().width(if self.demo { 0.0 } else { CLOSE_WIDTH })]
+            row![label]
                 .align_y(Alignment::Center)
                 .into()
         };
@@ -514,7 +528,7 @@ impl App {
             container(label).height(Fill).align_y(Alignment::Center),
             underline
         ]
-        .width(Shrink)
+        .width(width)
         .height(Fill);
         match attention.filter(|a| a.level() >= Level::Problem) {
             Some(attention) => tooltip(
