@@ -2040,8 +2040,8 @@ impl SessionView {
     /// A pasted image: PNG, inline, bounded by the daemon's decoded attachment limit.
     fn attach_texture(self: &Rc<Self>, tex: &gdk::Texture) {
         let png = tex.save_to_png_bytes();
-        if png.len() > 1 << 20 {
-            self.conv.add_note(&format!("image not attached: PNG is {:.2} MiB; inline images are limited to 1 MiB", png.len() as f64 / (1024.0 * 1024.0)));
+        if png.len() > sill_proto::initialize::MAX_INLINE_BYTES {
+            self.conv.add_note(&format!("image not attached: PNG is {:.2} MiB; image attachments are limited to 10 MiB per submission", png.len() as f64 / (1024.0 * 1024.0)));
             return;
         }
         let n = self.attachments.borrow().iter().filter(|a| a.mime.starts_with("image/")).count() + 1;
@@ -2072,8 +2072,8 @@ impl SessionView {
             }
         };
         if let Some(mime) = image_mime {
-            if bytes.len() > 1 << 20 {
-                self.conv.add_note(&format!("{name} not attached: larger than 1 MB"));
+            if bytes.len() > sill_proto::initialize::MAX_INLINE_BYTES {
+                self.conv.add_note(&format!("{name} not attached: larger than 10 MiB"));
                 return;
             }
             self.add_attachment(Attachment { name, mime: mime.into(), kind: AttachmentKind::Image { data_base64: sill_core::acp::base64(&bytes) } });
@@ -2087,6 +2087,17 @@ impl SessionView {
     }
 
     fn add_attachment(self: &Rc<Self>, a: Attachment) {
+        let image_bytes = |a: &Attachment| match &a.kind {
+            AttachmentKind::Image { data_base64 } => data_base64.len() / 4 * 3
+                - data_base64.bytes().rev().take_while(|b| *b == b'=').count(),
+            _ => 0,
+        };
+        let total = self.attachments.borrow().iter().map(image_bytes).sum::<usize>()
+            + image_bytes(&a);
+        if total > sill_proto::initialize::MAX_INLINE_BYTES {
+            self.conv.add_note("image not attached: images together exceed 10 MiB per submission; remove an image or use a smaller one");
+            return;
+        }
         if matches!(a.kind, AttachmentKind::Image { .. }) && !self.images_ok.get() {
             self.conv.add_note("this agent reports no image support; the image is sent anyway");
         }

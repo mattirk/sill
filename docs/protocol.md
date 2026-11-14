@@ -91,9 +91,10 @@ Fragments contain at most 256 KiB of UTF-8 before JSON escaping. Page tokens are
 The Rust and independent Python clients reconstruct fragments. Capture still holds the store
 lock while copying the history, and clients currently materialize the whole resulting view.
 
-Control messages are limited to 8 MiB including newline, prompt text to 1 MiB JSON-encoded,
-and initialization must arrive within ten seconds. Outbound connection queues have a 16 MiB
-byte budget as well as a message-count bound, with a 256 MiB daemon-wide queued-byte budget.
+Control messages are limited to 16 MiB including newline, prompt text to 1 MiB JSON-encoded,
+image attachments to 10 MiB decoded in total per submission (inline and uploaded),
+uploaded objects to 10 MiB each, and initialization must arrive within ten seconds.
+Outbound connection queues have a 16 MiB byte budget as well as a message-count bound, with a 256 MiB daemon-wide queued-byte budget.
 A slow consumer is disconnected and resynchronizes. An oversized committed live event also
 closes its connection; a reconnect selects a segmented snapshot instead of replaying that event.
 Agent text/thought output splits into items of at most 256 KiB.
@@ -267,7 +268,7 @@ minutes; the daemon holds at most 64 terminals. `exit_code` is known for host te
 `open` must not be blindly retried after connection loss (list by label instead); `close` is
 idempotent in effect (a repeat returns `not_found`).
 
-Transport bounds: messages are limited to 8 MiB; a connection must initialize (or claim a
+Transport bounds: messages are limited to 16 MiB; a connection must initialize (or claim a
 stream) within 10 s; the daemon serves at most 256 connections at once (control and streams)
 and refuses more; at most 64 stream tokens wait unclaimed, each for 60 s, dropped on the next
 token and by the minute sweep without a thread of their own.

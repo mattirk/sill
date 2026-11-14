@@ -6,7 +6,7 @@ use rusqlite::{OptionalExtension, params};
 use sill_core::{acp, store::Store};
 use sill_proto::{rpc::Error, sfp::{Upload, UploadCreate, UploadCreated, UploadGet}};
 
-pub const MAX_UPLOAD_BYTES: usize = 1024 * 1024;
+pub const MAX_UPLOAD_BYTES: usize = sill_proto::initialize::MAX_INLINE_BYTES;
 /// Images the agent produced: stored under this reserved prefix with a budget of their own, so
 /// agent output can never fill the space a person's uploads use (and the reverse).
 pub const AGENT_PREFIX: &str = "sill-agent-";
@@ -109,15 +109,15 @@ fn truncate(mut s: String, max: usize) -> String {
     s
 }
 
-/// Verify the reference without filesystem writes before accepting a submission.
-pub(super) fn validate(store: &Store, session_id: &str, upload_id: &str, name: &str, mime: &str) -> Result<()> {
+/// Verify the reference without filesystem writes; return image bytes for the submission budget.
+pub(super) fn validate(store: &Store, session_id: &str, upload_id: &str, name: &str, mime: &str) -> Result<usize> {
     session(store,session_id)?;
     initialize(store)?;
-    let metadata: Option<(String,String)> = store.conn().query_row("SELECT name,mime FROM sfp_uploads WHERE session_id=?1 AND upload_id=?2",
-        params![session_id,upload_id], |r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+    let metadata: Option<(String,String,i64)> = store.conn().query_row("SELECT name,mime,length(bytes) FROM sfp_uploads WHERE session_id=?1 AND upload_id=?2",
+        params![session_id,upload_id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
     let metadata=metadata.ok_or_else(||domain("not_found","upload not found in this session"))?;
-    if metadata != (name.into(),mime.into()) { return Err(Error::invalid_params("attachment metadata differs from immutable upload").into()); }
-    Ok(())
+    if (metadata.0.as_str(),metadata.1.as_str()) != (name,mime) { return Err(Error::invalid_params("attachment metadata differs from immutable upload").into()); }
+    Ok(if mime.starts_with("image/") { usize::try_from(metadata.2)? } else { 0 })
 }
 
 /// Materialize a new private copy for this dispatch. Do not use jail-modifiable bytes as the
@@ -267,6 +267,7 @@ mod tests {
     fn base64_decoding_enforces_padding_and_decoded_bounds() {
         for bytes in [b"".as_slice(),b"a",b"ab",b"abc",b"hello world"] { assert_eq!(decode(&acp::base64(bytes)).unwrap(),bytes); }
         for bad in ["a", "=AAA", "AA=A", "AB==", "AAB=", "AA==AAAA", "AA\n="] { assert!(decode(bad).is_err(),"{bad}"); }
+        assert_eq!(decode(&acp::base64(&vec![0;MAX_UPLOAD_BYTES])).unwrap().len(), MAX_UPLOAD_BYTES);
         assert!(decode(&acp::base64(&vec![0;MAX_UPLOAD_BYTES+1])).is_err());
     }
 }

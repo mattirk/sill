@@ -37,7 +37,9 @@ fn negotiate_supported(offer: &BTreeMap<String, u32>, supported: &[Capability]) 
         .filter(|(_, v)| *v > 0)
         .collect()
 }
-pub const MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+/// Decoded image bytes per submission and bytes per uploaded object.
+pub const MAX_INLINE_BYTES: usize = 10 * 1024 * 1024;
 pub const INITIALIZE_TIMEOUT_SECONDS: u64 = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -67,7 +69,7 @@ pub struct Limits {
 }
 impl Default for Limits {
     fn default() -> Self {
-        Self { max_message_bytes: MAX_MESSAGE_BYTES, max_inline_bytes: 1024 * 1024, max_text_bytes: 1024 * 1024, snapshot_ttl_seconds: 60, max_snapshot_record_bytes: 64*1024*1024, max_snapshot_bytes: 1024*1024*1024, max_snapshot_page_records: 128, retained_events: 4096, retained_event_bytes: 16*1024*1024, max_connection_queue_bytes: 16*1024*1024 }
+        Self { max_message_bytes: MAX_MESSAGE_BYTES, max_inline_bytes: MAX_INLINE_BYTES, max_text_bytes: 1024 * 1024, snapshot_ttl_seconds: 60, max_snapshot_record_bytes: 64*1024*1024, max_snapshot_bytes: 1024*1024*1024, max_snapshot_page_records: 128, retained_events: 4096, retained_event_bytes: 16*1024*1024, max_connection_queue_bytes: 16*1024*1024 }
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

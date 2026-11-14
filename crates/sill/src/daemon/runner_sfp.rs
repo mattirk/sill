@@ -322,10 +322,12 @@ fn validate_attachments(store:&Store,session_id:&str,input:&[p::Attachment])->Re
                 if !mime.starts_with("image/") {return Err(Error::domain("unsupported","inline attachments support images; upload other files first").into());}
                 size=size.saturating_add(super::super::uploads::decode(data_base64)?.len());
             }
-            p::Attachment::Uploaded {upload_id,name,mime}=>super::super::uploads::validate(store,session_id,upload_id,name,mime)?,
+            p::Attachment::Uploaded {upload_id,name,mime}=> {
+                size=size.saturating_add(super::super::uploads::validate(store,session_id,upload_id,name,mime)?);
+            }
         }
     }
-    if size>1024*1024 {return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Request, Some(1048576), "inline attachments exceed 1 MiB").into());}Ok(())
+    if size>sill_proto::initialize::MAX_INLINE_BYTES {return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Request, Some(sill_proto::initialize::MAX_INLINE_BYTES as u64), "image attachments exceed 10 MiB per submission").into());}Ok(())
 }
 /// Journal records reference attachment bytes and never carry them: every attach would otherwise
 /// download every screenshot ever sent, and enough of them exceed the snapshot limit.
@@ -352,6 +354,33 @@ mod tests {
     use serde_json::json;
     use std::io::{BufRead,BufReader,Write};
     use std::os::unix::net::UnixListener;
+    #[test]
+    fn image_budget_covers_inline_uploaded_and_mixed_submissions() {
+        let root = std::env::temp_dir().join(format!("sill-image-budget-{}", sill_core::sfp::new_id()));
+        let store = Store::open(&root.join("store.db")).unwrap();
+        let session = store.create("test", "default").unwrap();
+        let limit = sill_proto::initialize::MAX_INLINE_BYTES;
+        let data = acp::base64(&vec![0; limit]);
+        let inline = p::Attachment::Inline { name: "large.png".into(), mime: "image/png".into(), data_base64: data.clone() };
+        assert!(validate_attachments(&store, &session.id, &[inline.clone()]).is_ok());
+        let extra = p::Attachment::Inline { name: "extra.png".into(), mime: "image/png".into(), data_base64: "AA==".into() };
+        assert!(validate_attachments(&store, &session.id, &[inline.clone(), extra.clone()]).is_err());
+        // A maximum image plus a maximum text prompt fits the control transport.
+        let request = json!({"jsonrpc":"2.0", "id":1, "method":"session.submit", "params": {
+            "session_id":session.id, "submission_id":"large", "text":"x".repeat(1024*1024), "attachments":[inline]
+        }});
+        assert!(serde_json::to_vec(&request).unwrap().len() + 1 < sill_proto::initialize::MAX_MESSAGE_BYTES);
+        crate::daemon::uploads::create(&store, p::UploadCreate {
+            session_id:session.id.clone(), upload_id:"large".into(), name:"large.png".into(), mime:"image/png".into(), data_base64:data,
+        }).unwrap();
+        let uploaded = p::Attachment::Uploaded { upload_id:"large".into(), name:"large.png".into(), mime:"image/png".into() };
+        assert!(validate_attachments(&store, &session.id, &[uploaded.clone()]).is_ok());
+        assert!(validate_attachments(&store, &session.id, &[uploaded.clone(), extra]).is_err());
+        assert!(validate_attachments(&store, &session.id, &[uploaded.clone(), uploaded]).is_err());
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     struct Fixture {
         dir:std::path::PathBuf,
         store:Store,
