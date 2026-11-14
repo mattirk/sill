@@ -369,7 +369,8 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
             s.sync_pane();
             *s.tree.pin_target.borrow_mut() = Some(id.to_string());
             if s.tree.root.is_visible() {
-                s.tree.refresh(); // pinned-here badges follow the selected session
+                s.tree.refresh(); // pinned-here badges follow the selected session (and the first
+                // refresh homes the drawer on its pinned folder, FolderTree::refresh)
             }
             s.sync_status();
             s.focus_prompt();

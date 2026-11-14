@@ -31,8 +31,21 @@ fn is_noise(name: &str) -> bool {
     name.starts_with('.') || matches!(name, "target" | "node_modules" | "__pycache__" | "build" | "dist")
 }
 
+/// The global view's rows are grouped under captions (Pinned here · Repositories with changes ·
+/// Home): a caption is a root item whose string starts with this (no path starts with it).
+const SECTION: &str = "\u{1}";
+
+/// A row's path — `None` for a section caption.
 fn path_of(row: &gtk::TreeListRow) -> Option<PathBuf> {
-    row.item().and_downcast::<gtk::StringObject>().map(|s| PathBuf::from(s.string().as_str()))
+    let s = row.item().and_downcast::<gtk::StringObject>()?;
+    let s = s.string();
+    (!s.starts_with(SECTION)).then(|| PathBuf::from(s.as_str()))
+}
+
+/// A section caption's text, when the row is one.
+fn section_of(row: &gtk::TreeListRow) -> Option<String> {
+    let s = row.item().and_downcast::<gtk::StringObject>()?;
+    s.string().strip_prefix(SECTION).map(str::to_owned)
 }
 
 /// The glyph for a tree row: folder (open/closed), else the file's kind by its extension — sill's
@@ -183,6 +196,10 @@ pub struct FolderTree {
     message: gtk::Label,
     /// Session that receives pins (the selected tab), set by the window.
     pub pin_target: RefCell<Option<String>>,
+    /// Set by the first `set_scope` (a chip, "all", or the homing below): until then the drawer is
+    /// at its default, and the first refresh that finds the selected session's pinned folder scopes
+    /// to it — the drawer opens on the work, not on the global view with that folder collapsed.
+    homed: std::cell::Cell<bool>,
     pub on_open: RefCell<Option<Box<dyn Fn(&Path)>>>,
     pub on_close: RefCell<Option<Box<dyn Fn()>>>,
     /// A pin of this session changed: the window refreshes its chips and, for a folder, its jail.
@@ -287,11 +304,13 @@ impl FolderTree {
                     t.toggle_pin(Path::new(b.widget_name().as_str()));
                 }
             });
+            // the pin sits between the name and the marks, so the badge and the language logo end
+            // the row at the tree's right edge
             b.append(&icon);
             b.append(&name);
+            b.append(&pin);
             b.append(&badge);
             b.append(&logo);
-            b.append(&pin);
             expander.set_child(Some(&b));
             item.set_child(Some(&expander));
         });
@@ -308,17 +327,37 @@ impl FolderTree {
                 let Some(row) = item.item().and_downcast::<gtk::TreeListRow>() else { return };
                 let Some(expander) = item.child().and_downcast::<gtk::TreeExpander>() else { return };
                 expander.set_list_row(Some(&row));
-                let Some(path) = path_of(&row) else { return };
                 let Some(b) = expander.child().and_downcast::<gtk::Box>() else { return };
-                let (Some(icon), Some(name), Some(badge), Some(logo), Some(pin)) = (
+                let (Some(icon), Some(name), Some(pin), Some(badge), Some(logo)) = (
                     b.first_child().and_downcast::<gtk::Image>(),
                     b.first_child().and_then(|w| w.next_sibling()).and_downcast::<gtk::Label>(),
-                    b.first_child().and_then(|w| w.next_sibling()).and_then(|w| w.next_sibling()).and_downcast::<gtk::Label>(),
-                    b.first_child().and_then(|w| w.next_sibling()).and_then(|w| w.next_sibling()).and_then(|w| w.next_sibling()).and_downcast::<gtk::Image>(),
-                    b.last_child().and_downcast::<gtk::Button>(),
+                    b.first_child().and_then(|w| w.next_sibling()).and_then(|w| w.next_sibling()).and_downcast::<gtk::Button>(),
+                    b.last_child().and_then(|w| w.prev_sibling()).and_downcast::<gtk::Label>(),
+                    b.last_child().and_downcast::<gtk::Image>(),
                 ) else {
                     return;
                 };
+                // a section caption: dim text alone, nothing to click (rows are recycled, so a
+                // path row below puts everything back)
+                let section = section_of(&row);
+                item.set_selectable(section.is_none());
+                item.set_activatable(section.is_none());
+                icon.set_visible(section.is_none());
+                pin.set_visible(section.is_none());
+                if let Some(caption) = section {
+                    for c in ["sill-changed", "sill-pending", "sill-below", "sill-dim", "sill-pinned", "sill-new"] {
+                        name.remove_css_class(c);
+                    }
+                    name.add_css_class("sill-tree-section");
+                    name.set_text(&caption);
+                    name.set_tooltip_text(None);
+                    badge.set_text("");
+                    badge.set_tooltip_text(None);
+                    logo.set_visible(false);
+                    return;
+                }
+                name.remove_css_class("sill-tree-section");
+                let Some(path) = path_of(&row) else { return };
                 let is_dir = path.is_dir();
                 // every row's icon is a sill glyph in the foreground colour (rows are rebound on a
                 // theme change, so they follow it)
@@ -482,6 +521,7 @@ impl FolderTree {
             elsewhere,
             message,
             pin_target: RefCell::new(None),
+            homed: std::cell::Cell::new(false),
             on_open: RefCell::new(None),
             on_close: RefCell::new(None),
             on_pin: RefCell::new(None),
@@ -555,6 +595,7 @@ impl FolderTree {
         }
         self.all.set_visible(path.is_some());
         *self.scope.borrow_mut() = path;
+        self.homed.set(true);
         self.refresh();
     }
 
@@ -588,6 +629,15 @@ impl FolderTree {
     /// costs one or two scans, never a pile, and an older, slower scan can't land after a newer one.
     /// `refresh_soon` is the coalesced form for the bursty callers.
     pub fn refresh(self: &Rc<Self>) {
+        // the drawer's first look at a session with a pinned folder: that folder (see `homed`)
+        if !self.homed.get() && self.scope.borrow().is_none() {
+            let target = self.pin_target.borrow().clone();
+            let first = target.as_ref().and_then(|t| self.store.pins(t).ok()).unwrap_or_default().into_iter().find(|p| p.is_dir());
+            if let Some(dir) = first {
+                self.set_scope(Some(dir));
+                return;
+            }
+        }
         if self.scanning.replace(true) {
             self.again.set(true);
             return;
@@ -698,6 +748,8 @@ impl FolderTree {
             Some(s) => vec![s.clone()],
             None => pins.into_iter().filter(|p| p.is_dir()).collect(),
         };
+        // the global view's second group: every repository a session changed that isn't pinned here
+        let mut touched: Vec<PathBuf> = Vec::new();
         for c in all.iter().filter(|c| !c.ignored) {
             let mark = format!("{}{}", c.kind.letter(), if c.conflict { "!" } else { "" });
             let session = owners.get(&c.path).cloned().unwrap_or_default();
@@ -710,14 +762,33 @@ impl FolderTree {
             if scope.is_none()
                 && let Some(r) = changes::repo_root(&c.path)
                 && !roots.contains(&r)
+                && !touched.contains(&r)
             {
-                roots.push(r);
+                touched.push(r);
             }
         }
         roots.dedup();
-        if scope.is_none() && !roots.contains(&home) {
-            roots.push(home);
-        }
+        // the rows to show: the scoped folder alone, or the global view's groups under their
+        // captions (a group that is empty has no caption)
+        let text = |p: &PathBuf| p.to_string_lossy().into_owned();
+        let wanted: Vec<String> = match &scope {
+            Some(_) => roots.iter().map(text).collect(),
+            None => {
+                let mut w: Vec<String> = Vec::new();
+                let mut section = |caption: &str, paths: &[PathBuf]| {
+                    if !paths.is_empty() {
+                        w.push(format!("{SECTION}{caption}"));
+                        w.extend(paths.iter().map(text));
+                    }
+                };
+                section("Pinned here", &roots);
+                section("Repositories with changes", &touched);
+                if !roots.contains(&home) && !touched.contains(&home) {
+                    section("Home", std::slice::from_ref(&home));
+                }
+                w
+            }
+        };
         // the title says, on hover, when the badges were last read and where they come from
         let when = glib::DateTime::now_local().ok().and_then(|d| d.format("%H:%M:%S").ok()).map(|s| s.to_string()).unwrap_or_default();
         let from_sessions = all.iter().filter(|c| !c.ignored).count();
@@ -739,7 +810,6 @@ impl FolderTree {
         let current: Vec<String> = (0..self.roots.n_items())
             .filter_map(|i| self.roots.item(i).and_downcast::<gtk::StringObject>().map(|o| o.string().to_string()))
             .collect();
-        let wanted: Vec<String> = roots.iter().map(|r| r.to_string_lossy().into_owned()).collect();
         if current != wanted {
             self.roots.remove_all();
             for r in &wanted {

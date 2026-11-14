@@ -1237,6 +1237,8 @@ button.sill-install:hover { background: alpha(@accent_bg_color, 0.45); }
 .sill-files treeexpander { padding: 0; }
 /* the row's own height comes from its content, so the indents (and their lines) run edge to edge */
 .sill-tree-row { padding: 2px 0; }
+/* the global view's group captions (Pinned here · Repositories with changes · Home) */
+.sill-tree-section { font-size: 80%; opacity: 0.5; padding-top: 6px; }
 /* one faint guide line per level: 12 px per level with the line 4 px in, so the gaps panel edge →
    first line → … → last line → icon come out about the same (8 / 12 / 8 px) */
 .sill-files treeexpander > indent { -gtk-icon-size: 8px; min-width: 8px; min-height: 0; margin-left: 4px; border-left: 1px solid alpha(@view_fg_color, 0.14); }
