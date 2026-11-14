@@ -343,8 +343,9 @@ Public host streams are implemented (2026-11-03):
 | `_sill/agents.reset` | `{agent_id}` | `{removed, stopped}` (no stream) |
 | `_sill/registry.install` | `{entry_id, version, source, allow_unreviewed?, operation_id?}` | `{token, operation}` |
 | `_sill/registry.list` | `{after?, limit?}` | `{entries, next}` |
+| `_sill/agents.discover` | `{agent_id, method_id?, operation_id?}` | `{token, operation}` — needs `sill.agent_setup: 1` |
 
-These baseline methods need no optional capability. Login selects a configured agent on the daemon box, never a frontend
+These baseline methods need no optional capability (except `_sill/agents.discover`, 2026-11-08, below). Login selects a configured agent on the daemon box, never a frontend
 command. The agent validates the method during login; an unsupported method is a streamed failure.
 Install selects the exact ID, version and source (`snapshot` or `live`) from the daemon's current
 registry, retaining its reviewed lockfile/distribution. This selector is not a content hash of a
@@ -358,6 +359,21 @@ and start again when used), then it removes the agent's sill-owned home — logi
 history, memory — the copies in this daemon's ghost sessions and its saved API keys. `removed`
 counts the files, `stopped` names the sessions. The install, its definition and the host's own
 files are untouched; an unknown agent returns `not_found`.
+
+**Directory setup by probe (2026-11-08, capability `sill.agent_setup: 1`).** `_sill/agents.discover`
+finds where an agent sill installed keeps its state, as proposals for its `home_paths`, in a job
+with the same tagged progress and job key as install (`invalid_state` when the agent is not a
+sill install). Without `method_id`: one first start in the throwaway jail the install probe
+uses, with an empty readable home, `initialize` and `session/new`. With `method_id`: that login
+method run on the daemon host with an empty home exactly as a declared host login is; what it
+wrote is proposed, and the proposed directories are copied into the agent's sill-owned home so
+the login holds. Neither declares anything. `_sill/agents.discovered` `{agent_id}` returns
+`{discovery: {at, version, proposals, auth_methods, login_method?, login_files} | null}`, each
+proposal `{path, kind, on_host, initial_content?}` (`on_host`: the same path exists in the
+person's real home), `auth_methods` the agent's login methods `{id, name, description?}`,
+`login_method` set when the proposals come from a login, `login_files` the files it wrote under
+the proposed directories. The person's choice is saved with the baseline `_sill/agents.save`.
+[Design](agent-directories.md#directory-setup-by-probe-2026-11-08).
 
 Registry listing uses exclusive entry-ID keyset pagination with 1–128 entries (default 64),
 at most one newer version per entry and a 4 MiB entry payload budget per page. Pages reflect

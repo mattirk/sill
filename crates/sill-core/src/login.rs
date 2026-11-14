@@ -34,26 +34,124 @@ pub fn run(agent: &Agent, home: &Path, method: &str, report: impl FnMut(Line)) -
 pub fn run_into(agent: &Agent, home: &Path, extra_homes: &[(PathBuf, crate::credentials::Rules)], method: &str, mut report: impl FnMut(Line)) -> Result<()> {
     let paths = agent.ready(home)?;
     anyhow::ensure!(agent.host_login.iter().any(|m| m == method), "host login method is not explicitly declared");
+    let scratch = scratch_dir(home, &agent.id)?;
+    let result = login_in(agent, home, &scratch, paths, method, &mut report);
+    let copied = match &result {
+        Ok(()) => (|| -> Result<usize> {
+            let dst = crate::session::agent_home(home, &agent.id);
+            std::fs::create_dir_all(&dst)?;
+            crate::credentials::seed(&crate::credentials::Rules::for_agent(agent)?, &scratch, &dst)?;
+            let n = crate::credentials::files(agent, &scratch)?.iter().filter(|p| scratch.join(p).is_file()).count();
+            for (extra, frozen_rules) in extra_homes {
+                if extra.is_dir() {
+                    crate::credentials::seed(frozen_rules, &dst, extra)?;
+                }
+            }
+            Ok(n)
+        })()
+        .map(Some),
+        Err(_) => Ok(None),
+    };
+    // the scratch holds a credential: gone whatever happened
+    let _ = std::fs::remove_dir_all(&scratch);
+    result?;
+    if let Some(n) = copied? {
+        report(Line::Status(format!("{n} login file(s) copied into the session's home")));
+    }
+    Ok(())
+}
+
+/// Set up an agent that has no `home_paths` yet by logging in: `method` runs on the host with an
+/// empty home, as [`run_into`] does, and what the login wrote there is the proposal for the
+/// agent's directories and credential files (docs/agent-directories.md, "Directory setup by
+/// probe"). The proposed directories are copied whole into the agent's sill-owned home, so the
+/// login holds once the person applies the proposal; nothing is declared here.
+pub fn setup(agent: &Agent, home: &Path, method: &str, mut report: impl FnMut(Line)) -> Result<crate::registry::Discovery> {
+    anyhow::ensure!(agent.home_paths.is_none(), "agent {} is set up already", agent.id);
+    let scratch = scratch_dir(home, &agent.id)?;
+    let result = login_in(agent, home, &scratch, &[], method, &mut report).and_then(|()| {
+        let proposals = crate::registry::proposals_from(&scratch, home);
+        anyhow::ensure!(!proposals.is_empty(), "the login succeeded but wrote nothing under the home; there is nothing to keep");
+        let login_files = crate::registry::credential_candidates(&scratch, &proposals);
+        let dst = crate::session::agent_home(home, &agent.id);
+        for p in &proposals {
+            let rel = p.path.trim_start_matches("~/");
+            copy_private(&scratch.join(rel), &dst.join(rel)).with_context(|| format!("keep {}", p.path))?;
+            report(Line::Status(format!("kept {}{}", p.path, if p.kind == crate::agents::HomePathKind::Directory { "/" } else { "" })));
+        }
+        for f in &login_files {
+            report(Line::Status(format!("login file: ~/{f}")));
+        }
+        let earlier = crate::registry::discovered(home, &agent.id);
+        let discovery = crate::registry::Discovery {
+            at: crate::registry::now_secs(),
+            version: crate::registry::installed(home, &agent.id).map(|i| i.version).unwrap_or_default(),
+            proposals,
+            auth_methods: earlier.map(|d| d.auth_methods).unwrap_or_default(),
+            login_method: Some(method.to_string()),
+            login_files,
+            note: None,
+        };
+        crate::registry::record_discovery(home, &agent.id, &discovery)?;
+        Ok(discovery)
+    });
+    let _ = std::fs::remove_dir_all(&scratch);
+    result
+}
+
+/// The login's own home: empty before, removed after. 0700 from `login/` down: what the login
+/// writes is a credential.
+fn scratch_dir(home: &Path, id: &str) -> Result<PathBuf> {
+    let scratch = crate::session::agent_home(home, id)
+        .parent()
+        .and_then(Path::parent)
+        .map(|state| state.join("login").join(id))
+        .context("state dir")?;
+    let _ = std::fs::remove_dir_all(&scratch);
+    private(&scratch)?;
+    Ok(scratch)
+}
+
+fn private(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).with_context(|| format!("create {}", dir.display()))?;
+    if let Some(parent) = dir.parent() {
+        let _ = std::fs::set_permissions(parent, std::os::unix::fs::PermissionsExt::from_mode(0o700));
+    }
+    Ok(())
+}
+
+/// Copy a login's directory or file into the agent's home, private, refusing symlinks and special
+/// files. An existing file is replaced; other files already there stay.
+fn copy_private(src: &Path, dst: &Path) -> Result<()> {
+    let meta = std::fs::symlink_metadata(src)?;
+    if meta.file_type().is_symlink() {
+        bail!("{} is a symlink", src.display());
+    }
+    if meta.is_dir() {
+        private(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            copy_private(&entry.path(), &dst.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else if meta.is_file() {
+        if let Some(parent) = dst.parent() {
+            private(parent)?;
+        }
+        let bytes = std::fs::read(src)?;
+        crate::safe_fs::replace_private_beneath(dst.parent().context("parent")?, Path::new(dst.file_name().context("name")?), &bytes)?;
+        Ok(())
+    } else {
+        bail!("{} is not a file or directory", src.display())
+    }
+}
+
+/// Start the agent on the host with `scratch` as its home and run `method`'s `authenticate`.
+fn login_in(agent: &Agent, home: &Path, scratch: &Path, paths: &[crate::agents::HomePath], method: &str, report: &mut impl FnMut(Line)) -> Result<()> {
     let Some(prog) = agent.command.first() else { bail!("agent {} has no command", agent.id) };
     let mut env = agent.env.clone();
     let mut unset: Vec<&str> = Vec::new();
-    // the login's own home: empty before, copied into the jail's copy after, removed then
-    let scratch = crate::session::agent_home(home, &agent.id)
-        .parent()
-        .and_then(Path::parent)
-        .map(|state| state.join("login").join(&agent.id))
-        .context("state dir")?;
-    let _ = std::fs::remove_dir_all(&scratch);
-    // what the login writes is a credential: the scratch is 0700 from `login/` down
-    let private = |dir: &Path| -> Result<()> {
-        use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).with_context(|| format!("create {}", dir.display()))?;
-        if let Some(parent) = dir.parent() {
-            let _ = std::fs::set_permissions(parent, std::os::unix::fs::PermissionsExt::from_mode(0o700));
-        }
-        Ok(())
-    };
-    private(&scratch)?;
     let shim_dir = browser_shim(home)?;
     let path = std::env::var("PATH").unwrap_or_default();
     env.insert("PATH".into(), format!("{}:{path}", shim_dir.display()));
@@ -73,7 +171,6 @@ pub fn run_into(agent: &Agent, home: &Path, extra_homes: &[(PathBuf, crate::cred
     }
     unset.push("DBUS_SESSION_BUS_ADDRESS");
     env.insert("PYTHON_KEYRING_BACKEND".into(), "keyring.backends.fail.Keyring".into());
-    let copy_back = Some(crate::session::agent_home(home, &agent.id));
     let mut cmd = Command::new(prog);
     cmd.args(&agent.command[1..]).envs(&env).current_dir(home);
     for v in &unset {
@@ -115,7 +212,7 @@ pub fn run_into(agent: &Agent, home: &Path, extra_homes: &[(PathBuf, crate::cred
             else { json!({"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false},"clientInfo":{"name":"sill","version":env!("CARGO_PKG_VERSION")}}) };
         let init = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":params});
         writeln!(stdin, "{init}")?;
-        let resp = wait_response(&rx, &erx, 1, Duration::from_secs(30), &mut report)?;
+        let resp = wait_response(&rx, &erx, 1, Duration::from_secs(30), report)?;
         if v2 && resp.get("protocolVersion").and_then(Value::as_u64)!=Some(2) {
             bail!("the opted-in ACP v2 agent did not select protocolVersion 2");
         }
@@ -131,32 +228,11 @@ pub fn run_into(agent: &Agent, home: &Path, extra_homes: &[(PathBuf, crate::cred
         report(Line::Status(format!("logging in with {method}…")));
         let auth = json!({ "jsonrpc": "2.0", "id": 2, "method": if v2 {"auth/login"} else {"authenticate"}, "params": { "methodId": method } });
         writeln!(stdin, "{auth}")?;
-        wait_response(&rx, &erx, 2, TIMEOUT, &mut report)?;
+        wait_response(&rx, &erx, 2, TIMEOUT, report)?;
         Ok(())
     })();
     stop_agent(&mut child, &crate::registry::tools_dir(home));
-    let copied = match (&result, copy_back) {
-        (Ok(()), Some(dst)) => (|| -> Result<usize> {
-            std::fs::create_dir_all(&dst)?;
-            crate::credentials::seed(&crate::credentials::Rules::for_agent(agent)?, &scratch, &dst)?;
-            let n = crate::credentials::files(agent, &scratch)?.iter().filter(|p| scratch.join(p).is_file()).count();
-            for (extra, frozen_rules) in extra_homes {
-                if extra.is_dir() {
-                    crate::credentials::seed(frozen_rules, &dst, extra)?;
-                }
-            }
-            Ok(n)
-        })()
-        .map(Some),
-        _ => Ok(None),
-    };
-    // the scratch holds a credential: gone whatever happened
-    let _ = std::fs::remove_dir_all(&scratch);
-    result?;
-    if let Some(n) = copied? {
-        report(Line::Status(format!("{n} login file(s) copied into the session's home")));
-    }
-    Ok(())
+    result
 }
 
 /// End the login agent and the helpers it runs from sill's agent installs (Codex's `codex

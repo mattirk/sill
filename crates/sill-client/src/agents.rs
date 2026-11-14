@@ -10,10 +10,17 @@ pub struct Entry {
     pub installed: Option<api::Installed>,
     pub definition: Option<api::Definition>,
     pub available: bool,
+    /// What the agent's first-start probe found, while its definition still has no `home_paths`.
+    pub discovery: Option<api::Discovery>,
 }
 impl Entry {
     pub fn present(&self) -> bool {
         self.installed.is_some() || self.available
+    }
+    /// Installed by sill, but its definition does not say where it keeps its state yet: login and
+    /// launch are refused until the person sets it up (docs/agent-directories.md).
+    pub fn needs_setup(&self) -> bool {
+        self.installed.is_some() && self.definition.as_ref().is_some_and(|d| d.home_paths.is_none())
     }
     pub fn tested(&self) -> bool {
         ["claude-acp", "codex-acp", "antigravity-acp"].contains(&self.registry.entry_id.as_str())
@@ -99,12 +106,23 @@ pub fn load(client: &Client) -> Result<Catalog> {
             } else {
                 false
             };
-            entries.push(Entry {
+            let mut entry = Entry {
                 registry,
                 installed: installed.installed,
                 definition,
                 available,
-            });
+                discovery: None,
+            };
+            if entry.needs_setup() && client.has_capability("sill.agent_setup") {
+                let found: api::Discovered = client.call(
+                    "_sill/agents.discovered",
+                    api::AgentKey {
+                        agent_id: entry.registry.entry_id.clone(),
+                    },
+                )?;
+                entry.discovery = found.discovery;
+            }
+            entries.push(entry);
         }
         after = page.next;
         if after.is_none() {
@@ -127,26 +145,92 @@ pub fn refresh(client: &Client) -> Result<()> {
 pub fn install(
     client: &Client,
     entry: &host::RegistryEntry,
-    mut progress: impl FnMut(String),
+    progress: impl FnMut(String),
 ) -> Result<()> {
     let operation_id = crate::request_id("install");
+    run_job(
+        client,
+        "Install",
+        "_sill/registry.install",
+        host::RegistryInstall {
+            operation_id: Some(operation_id.clone()),
+            entry_id: entry.entry_id.clone(),
+            version: entry.version.clone(),
+            source: entry.source.clone(),
+            allow_unreviewed: entry.source == "live",
+        },
+        operation_id,
+        progress,
+    )
+}
+
+/// Propose the agent's directories (`sill.agent_setup`): without a method, one first start in a
+/// throwaway jail; with one, that login on the daemon host, whose files are kept. The result is
+/// read back with the catalog; like install, never replayed blindly.
+pub fn discover(client: &Client, agent_id: &str, method_id: Option<&str>, progress: impl FnMut(String)) -> Result<()> {
+    if !client.has_capability("sill.agent_setup") {
+        bail!("the daemon is older than this window and cannot probe agent directories; update and restart it");
+    }
+    let operation_id = crate::request_id("discover");
+    run_job(
+        client,
+        "Directory probe",
+        "_sill/agents.discover",
+        host::AgentDiscover {
+            operation_id: Some(operation_id.clone()),
+            agent_id: agent_id.to_string(),
+            method_id: method_id.map(str::to_string),
+        },
+        operation_id,
+        progress,
+    )
+}
+
+/// The definition with the person's approval applied: `home_paths` are every proposal but the
+/// unticked ones; when the proposals come from a login, its files under those directories are
+/// the `login_files`, and a browser login (an OAuth method, "log in with …") is a `host_login`
+/// method, since that is where it ran and where its callback can be reached. Nothing else changes.
+pub fn set_up(definition: &api::Definition, discovery: &api::Discovery, unticked: &std::collections::BTreeSet<String>) -> api::Definition {
+    let mut d = definition.clone();
+    let chosen: Vec<api::HomePath> = discovery
+        .proposals
+        .iter()
+        .filter(|p| !unticked.contains(&p.path))
+        .map(|p| api::HomePath {
+            path: p.path.clone(),
+            kind: p.kind,
+            initial_content: if p.kind == api::HomePathKind::File { p.initial_content.clone() } else { None },
+        })
+        .collect();
+    let roots: Vec<String> = chosen.iter().filter(|p| p.kind == api::HomePathKind::Directory).map(|p| format!("{}/", p.path.trim_start_matches("~/"))).collect();
+    d.login_files = discovery.login_files.iter().filter(|f| roots.iter().any(|r| f.starts_with(r))).cloned().collect();
+    if let Some(m) = &discovery.login_method {
+        let name = discovery.auth_methods.iter().find(|a| &a.id == m).map(|a| a.name.to_lowercase()).unwrap_or_default();
+        let lower = m.to_lowercase();
+        if (lower.contains("oauth") || lower.contains("browser") || name.contains("log in") || name.contains("login") || name.contains("sign in")) && !d.host_login.contains(m) {
+            d.host_login.push(m.clone());
+        }
+    }
+    d.home_paths = Some(chosen);
+    d
+}
+
+/// A host job with tagged progress: start it, follow its stream, and on stream loss read the
+/// durable receipt instead of retrying.
+fn run_job(
+    client: &Client,
+    what: &str,
+    method: &str,
+    params: impl serde::Serialize,
+    operation_id: String,
+    mut progress: impl FnMut(String),
+) -> Result<()> {
     let job: host::JobStream = client
-        .call(
-            "_sill/registry.install",
-            host::RegistryInstall {
-                operation_id: Some(operation_id.clone()),
-                entry_id: entry.entry_id.clone(),
-                version: entry.version.clone(),
-                source: entry.source.clone(),
-                allow_unreviewed: entry.source == "live",
-            },
-        )
-        .with_context(|| format!("Install operation {operation_id}; refresh before retrying"))?;
+        .call(method, params)
+        .with_context(|| format!("{what} operation {operation_id}; refresh before retrying"))?;
     if let Some(token) = job.token {
         let stream = sill_proto::transport::open_stream(&token).with_context(|| {
-            format!(
-                "Install operation {operation_id}; progress unavailable, refresh before retrying"
-            )
+            format!("{what} operation {operation_id}; progress unavailable, refresh before retrying")
         })?;
         struct Stop(std::sync::Arc<dyn Fn() + Send + Sync>);
         impl Drop for Stop {
@@ -175,10 +259,7 @@ pub fn install(
     if receipt.state == host::OperationState::Completed {
         return Ok(());
     }
-    bail!(
-        "Installation {:?}; operation {operation_id}. Refresh before retrying.",
-        receipt.state
-    )
+    bail!("{what} {:?}; operation {operation_id}. Refresh before retrying.", receipt.state)
 }
 
 /// A domain pattern for the compact Settings editor. Keep URLs and paths out of proxy rules.

@@ -17,7 +17,7 @@ fn select(home:&std::path::Path,a:&api::EntryKey)->Result<sill_core::registry::E
         .find(|e|e.id==a.entry_id&&e.version==a.version&&source(e.trust)==a.source).ok_or_else(||err("not_found","registry selector no longer exists"))
 }
 pub fn handle(hub:&Hub,m:&str,p:Value)->Option<Result<Value>>{
-    if !matches!(m,"_sill/agents.list"|"_sill/agents.get"|"_sill/agents.save"|"_sill/agents.remove"|"_sill/agents.available"|"_sill/agents.defaults.get"|"_sill/agents.defaults.set"|"_sill/registry.refresh"|"_sill/registry.installed"|"_sill/registry.uninstall"|"_sill/registry.icon"){return None;}
+    if !matches!(m,"_sill/agents.list"|"_sill/agents.get"|"_sill/agents.save"|"_sill/agents.remove"|"_sill/agents.available"|"_sill/agents.defaults.get"|"_sill/agents.defaults.set"|"_sill/agents.discovered"|"_sill/registry.refresh"|"_sill/registry.installed"|"_sill/registry.uninstall"|"_sill/registry.icon"){return None;}
     Some((||{
         if serde_json::to_vec(&p)?.len()>1024*1024{return Err(anyhow::Error::from(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Request, Some(1048576), "agent input exceeds 1 MiB")));}
         let home=sill_core::changes::home()?;
@@ -45,6 +45,13 @@ pub fn handle(hub:&Hub,m:&str,p:Value)->Option<Result<Value>>{
                 }
             }
             "_sill/agents.defaults.set"=>{let a:api::Defaults=args(p)?;valid(&a.agent_id)?;if !sill_core::agents::load(&home)?.contains_key(&a.agent_id){return Err(err("not_found","agent not found"));}hub.with_store(|s|s.set_agent_settings(&a.agent_id,&a.settings))?;json!({})}
+            "_sill/agents.discovered"=>{
+                let a:api::AgentKey=args(p)?;valid(&a.agent_id)?;
+                json!(api::Discovered{discovery:sill_core::registry::discovered(&home,&a.agent_id).map(|d|api::Discovery{at:d.at.to_string(),version:d.version,
+                    proposals:d.proposals.into_iter().map(|p|api::Proposal{path:p.path,kind:p.kind,on_host:p.on_host,initial_content:p.initial_content}).collect(),
+                    auth_methods:d.auth_methods.into_iter().map(|m|api::AuthMethodInfo{id:m.id,name:m.name,description:m.description}).collect(),
+                    login_method:d.login_method,login_files:d.login_files,note:d.note})})
+            }
             "_sill/registry.refresh"=>{let _:sill_proto::Empty=args(p)?;sill_core::registry::fetch(&home)?;json!({})}
             "_sill/registry.installed"=>{
                 let a:api::AgentKey=args(p)?;valid(&a.agent_id)?;

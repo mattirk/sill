@@ -326,6 +326,9 @@ pub fn activate(hub: &std::sync::Arc<Hub>, conn: &Conn, a: api::Activate) -> Res
 }
 
 /// End an activation for `reason`; a no-op without one.
+/// The reason recorded (state, log) when the last frontend displaying an activation left.
+const LAST_DISPLAYING_LEFT: &str = "the last frontend displaying it left";
+
 pub fn revoke(hub: &Hub, session: &str, reason: &str) -> Result<api::State> {
     let _gate = super::host_bridge::gate();
     let (ended, under_exception, withdrawn) = {
@@ -342,7 +345,9 @@ pub fn revoke(hub: &Hub, session: &str, reason: &str) -> Result<api::State> {
         super::host_bridge::cleanup(hub, session);
         eprintln!("sill daemon: session {session}: Host control revoked: {reason}");
         let exception = if under_exception { " Its repository exception ends with it." } else { "" };
-        note(hub, session, format!("Host control revoked: {reason}.{exception}"));
+        // the ordinary end (the window that showed it is gone) needs no explanation in the conversation
+        let why = if reason == LAST_DISPLAYING_LEFT { String::new() } else { format!(": {reason}") };
+        note(hub, session, format!("Host control revoked{why}.{exception}"));
     } else if withdrawn {
         note(hub, session, format!("Repository exception withdrawn before use: {reason}."));
     }
@@ -373,7 +378,7 @@ pub fn displaying_changed(hub: &Hub) {
     let active: Vec<(String, u64)> = table().lock().unwrap().active.iter().map(|(s, a)| (s.clone(), a.activator)).collect();
     for (session, activator) in active {
         if displaying(hub, &session, activator).is_empty() {
-            let _ = revoke(hub, &session, "the last frontend displaying it left");
+            let _ = revoke(hub, &session, LAST_DISPLAYING_LEFT);
         }
     }
 }

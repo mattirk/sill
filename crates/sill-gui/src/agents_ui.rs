@@ -30,6 +30,8 @@ pub struct AgentsPage {
     armed: Option<String>,
     editor: Option<Editor>,
     details: Option<String>,
+    /// Directory proposals the person unticked, per agent, until Apply.
+    unticked: BTreeMap<String, BTreeSet<String>>,
 }
 struct Editor {
     id: String,
@@ -80,6 +82,13 @@ pub enum Event {
     Icon(String, Option<Vec<u8>>),
     Log(String, String),
     Done(String, Result<(), String>),
+    /// Find the agent's directories: a first start in a throwaway jail, or (with a method) a
+    /// login on the daemon host whose files are kept.
+    Discover(String, Option<String>),
+    /// Tick or untick one proposed path.
+    Choose(String, String, bool),
+    /// Save the ticked proposals as the agent's `home_paths`.
+    ApplySetup(String),
 }
 fn msg(e: Event) -> Message {
     Message::Agents(e)
@@ -169,6 +178,84 @@ fn domain_controls(editor: &Editor) -> Element<'_, Message> {
         );
     }
     domains.into()
+}
+
+/// Where an agent without `home_paths` keeps its state. The login is what has to persist, and
+/// most agents write nothing before one: the card offers the agent's login methods; the chosen
+/// login runs on this machine with an empty home, what it wrote is listed with a tick each, and
+/// Apply declares it (the files are kept already). A bare first start is the fallback.
+fn setup_card<'a>(e: &'a Entry, unticked: Option<&'a BTreeSet<String>>) -> Element<'a, Message> {
+    let id = &e.registry.entry_id;
+    let mut card = column![].spacing(4);
+    let dim = |t: &'a str| text(t).size(style::SMALL).color(P.fg_dim);
+    match &e.discovery {
+        None => {
+            card = card.push(dim("Sill does not know yet where this agent keeps its login and settings. Find out by starting it once in a throwaway jail with an empty home; nothing is saved until you apply."));
+            card = card.push(control("Find directories", Event::Discover(id.clone(), None)));
+        }
+        Some(discovery) => {
+            let logged_in = discovery.login_method.is_some();
+            if logged_in {
+                let method = discovery.login_method.as_deref().unwrap_or_default();
+                let name = discovery.auth_methods.iter().find(|m| m.id == method).map(|m| m.name.as_str()).unwrap_or(method);
+                card = card.push(text(format!("Logged in with {name}. It keeps its login and settings here; ticked paths become this agent's own, kept across sessions in sill's storage.")).size(style::SMALL).color(P.fg_dim));
+            } else if let Some(note) = &discovery.note {
+                card = card.push(text(format!("The probe could not finish: {note}. Nothing to go on yet; probe again, or log in below if it offered a way.")).size(style::SMALL).color(P.warning));
+            } else if discovery.proposals.is_empty() {
+                card = card.push(dim("On its first start it created nothing under the home: it writes its state when it logs in. Log in once here, on this machine, and Sill keeps what the login writes."));
+            } else {
+                card = card.push(dim("On its first start it created these; ticked paths become this agent's own, kept across sessions in sill's storage. A login may add more: log in here to see."));
+            }
+            for proposal in &discovery.proposals {
+                let ticked = !unticked.is_some_and(|u| u.contains(&proposal.path));
+                let label = match proposal.kind {
+                    sill_proto::agent_admin::HomePathKind::Directory => format!("{}/", proposal.path),
+                    sill_proto::agent_admin::HomePathKind::File => proposal.path.clone(),
+                };
+                let mut line = row![
+                    iced::widget::checkbox(ticked)
+                        .label(label)
+                        .text_size(style::SMALL)
+                        .on_toggle({
+                            let id = id.clone();
+                            let path = proposal.path.clone();
+                            move |v| msg(Event::Choose(id.clone(), path.clone(), v))
+                        }),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center);
+                if proposal.on_host {
+                    line = line.push(
+                        text("exists on this machine: owning it hides the host's copy from this agent")
+                            .size(style::TINY)
+                            .color(P.warning),
+                    );
+                }
+                card = card.push(line);
+                let root = format!("{}/", proposal.path.trim_start_matches("~/"));
+                for file in discovery.login_files.iter().filter(|f| f.starts_with(&root)) {
+                    card = card.push(container(text(format!("login file: ~/{file}")).size(style::TINY).color(P.fg_dim)).padding([0, 28]));
+                }
+            }
+            let mut actions = row![].spacing(10);
+            if !discovery.proposals.is_empty() {
+                let chosen = discovery.proposals.iter().filter(|p| !unticked.is_some_and(|u| u.contains(&p.path))).count();
+                actions = actions.push(control(if chosen == 0 { "Apply: no persistent state" } else { "Apply" }, Event::ApplySetup(id.clone())));
+            }
+            if discovery.auth_methods.is_empty() && discovery.note.is_none() && !logged_in {
+                card = card.push(dim("It offered no login method at its first start, so there is nothing to log in with here."));
+            }
+            if !discovery.auth_methods.is_empty() {
+                actions = actions.push(dim(if logged_in { "Log in again:" } else { "Log in with:" }));
+                for m in &discovery.auth_methods {
+                    actions = actions.push(control(&m.name, Event::Discover(id.clone(), Some(m.id.clone()))));
+                }
+            }
+            actions = actions.push(control("Probe again", Event::Discover(id.clone(), None)));
+            card = card.push(actions.wrap());
+        }
+    }
+    container(card).padding([4, 0]).width(Fill).into()
 }
 
 impl App {
@@ -275,6 +362,9 @@ impl App {
             }
             Event::Done(id, result) => {
                 p.busy.remove(&id);
+                if result.is_ok() {
+                    p.unticked.remove(&id);
+                }
                 p.logs
                     .insert(id, result.err().unwrap_or_else(|| "Done".into()));
                 return self.agents_load(false);
@@ -397,6 +487,55 @@ impl App {
                     self.settings.supported_agents.insert(id);
                 }
                 self.save_settings();
+            }
+            Event::Choose(id, path, ticked) => {
+                let set = p.unticked.entry(id).or_default();
+                if ticked {
+                    set.remove(&path);
+                } else {
+                    set.insert(path);
+                }
+            }
+            Event::ApplySetup(id) => {
+                let Some(entry) = p.entries.iter().find(|e| e.registry.entry_id == id) else {
+                    return Task::none();
+                };
+                let (Some(definition), Some(discovery)) = (&entry.definition, &entry.discovery) else {
+                    return Task::none();
+                };
+                let unticked = p.unticked.get(&id).cloned().unwrap_or_default();
+                let definition = agents::set_up(definition, discovery, &unticked);
+                return self.agent_call(
+                    id,
+                    "_sill/agents.save",
+                    serde_json::to_value(definition).unwrap(),
+                );
+            }
+            Event::Discover(id, method) => {
+                if p.busy.contains(&id) {
+                    return Task::none();
+                }
+                let Some(connect) = self.connect.clone() else {
+                    return Task::none();
+                };
+                p.busy.insert(id.clone());
+                p.unticked.remove(&id);
+                p.logs.insert(id.clone(), if method.is_some() { "Logging in on this machine…".into() } else { "Starting it once in a throwaway jail…".into() });
+                let (tx, rx) = async_channel::bounded(64);
+                std::thread::spawn(move || {
+                    let result = connect()
+                        .and_then(|client| {
+                            agents::discover(&client, &id, method.as_deref(), |line| {
+                                let _ = tx.send_blocking(Event::Log(id.clone(), line));
+                            })
+                        })
+                        .map_err(|e| format!("{e:#}"));
+                    let _ = tx.send_blocking(Event::Done(id, result));
+                });
+                let stream = iced::futures::stream::unfold(rx, |rx| async move {
+                    rx.recv().await.ok().map(|e| (e, rx))
+                });
+                return Task::run(stream, msg);
             }
             Event::Install(id) => {
                 if p.busy.contains(&id) {
@@ -568,6 +707,8 @@ impl App {
             .align_y(Alignment::Center);
             if p.busy.contains(id) {
                 top = top.push(text("Working…").size(style::SMALL).color(P.accent));
+            } else if e.needs_setup() {
+                top = top.push(text("Needs setup").size(style::SMALL).color(P.warning));
             } else if let Some(installed) = &e.installed {
                 if installed.version != wanted.version {
                     top = top.push(control("Update", Event::Install(id.clone())));
@@ -589,6 +730,9 @@ impl App {
                 Event::Edit(id.clone()),
             ));
             let mut card = column![top].spacing(6);
+            if e.needs_setup() && !p.busy.contains(id) {
+                card = card.push(setup_card(e, p.unticked.get(id)));
+            }
             if expanded {
                 let mut versions = format!("{} · supported v{} ({})", id, r.version, r.source);
                 if let Some(newer) = &r.newer {
@@ -817,6 +961,7 @@ mod tests {
             installed: None,
             definition: None,
             available: false,
+            discovery: None,
         });
         let _ = app.update(msg(Event::Install("live-agent".into())));
         assert!(app.agents_page.busy.is_empty());
@@ -862,6 +1007,7 @@ mod tests {
             installed: None,
             definition: None,
             available: false,
+            discovery: None,
         });
         // Latest by default: the newer live version, which asks for confirmation first
         assert!(app.settings.prefers_latest("codex-acp"));
@@ -883,6 +1029,59 @@ mod tests {
         assert!(!app.agents_page.logs.contains_key("codex-acp"));
         let _ = app.update(msg(Event::Latest("codex-acp".into(), true)));
         assert!(app.settings.supported_agents.is_empty());
+    }
+    #[test]
+    fn directory_setup_saves_the_ticked_proposals_as_home_paths() {
+        use crate::tests::{connector, daemon, settle_task};
+        use serde_json::json;
+        let (mut app, _) = App::new(true, None);
+        let registry: RegistryEntry = serde_json::from_value(json!({
+            "entry_id":"antigravity-acp", "name":"Antigravity", "version":"1", "source":"snapshot",
+            "installable":true, "description":"", "repository":null, "website":null,
+            "install_kind":"npx", "install_spec":"antigravity@1", "package_name":"antigravity",
+            "has_icon":false, "builtin_agent_id":null, "newer":null
+        }))
+        .unwrap();
+        let definition: Definition = serde_json::from_value(json!({
+            "id":"antigravity-acp", "name":"Antigravity", "command":["antigravity-acp"]
+        }))
+        .unwrap();
+        assert!(definition.home_paths.is_none());
+        let installed = serde_json::from_value(json!({"version":"1","kind":"npx","command":["antigravity-acp"],"env":{},"source":"snapshot"})).unwrap();
+        let mut entry = Entry { registry, installed: Some(installed), definition: Some(definition), available: true, discovery: None };
+        assert!(entry.needs_setup());
+        // nothing discovered yet: Apply does nothing, the card offers Find directories
+        app.agents_page.entries.push(entry.clone());
+        let _ = app.update(msg(Event::ApplySetup("antigravity-acp".into())));
+        assert!(app.agents_page.busy.is_empty());
+        entry.discovery = Some(serde_json::from_value(json!({"at":"1", "version":"1", "proposals":[
+            {"path":"~/.antigravity", "kind":"directory", "on_host":false},
+            {"path":"~/.antigravity.json", "kind":"file", "on_host":false, "initial_content":"{}"},
+            {"path":"~/.cargo", "kind":"directory", "on_host":true}
+        ], "auth_methods":[{"id":"oauth-personal","name":"Log in with Google"}], "login_method":"oauth-personal",
+           "login_files":[".antigravity/oauth_creds.json", ".cargo/credentials.toml"]})).unwrap());
+        app.agents_page.entries[0] = entry;
+        let _ = app.update(msg(Event::Choose("antigravity-acp".into(), "~/.cargo".into(), false)));
+        let _ = app.update(msg(Event::Choose("antigravity-acp".into(), "~/.antigravity".into(), false)));
+        let _ = app.update(msg(Event::Choose("antigravity-acp".into(), "~/.antigravity".into(), true)));
+        let (client, mut daemon) = daemon();
+        app.actions = Some(sill_client::actions::Actions::new(connector(vec![client])));
+        let worker = std::thread::spawn(move || {
+            let req = daemon.expect("_sill/agents.save");
+            assert_eq!(req["params"]["id"], "antigravity-acp");
+            assert_eq!(req["params"]["command"], json!(["antigravity-acp"]));
+            assert_eq!(
+                req["params"]["home_paths"],
+                json!([{"path":"~/.antigravity","kind":"directory"}, {"path":"~/.antigravity.json","kind":"file","initial_content":"{}"}])
+            );
+            assert_eq!(req["params"]["login_files"], json!([".antigravity/oauth_creds.json"]), "only under ticked directories");
+            assert_eq!(req["params"]["host_login"], json!(["oauth-personal"]), "a browser login stays on the host");
+            daemon.reply(&req, json!({"path":{"host":"local","path":"/home/x/.config/sill/agents/antigravity-acp.toml"}}));
+        });
+        let task = app.update(msg(Event::ApplySetup("antigravity-acp".into())));
+        settle_task(&mut app, task);
+        worker.join().unwrap();
+        assert!(!app.agents_page.unticked.contains_key("antigravity-acp"), "a saved setup forgets the ticks");
     }
     #[test]
     #[ignore = "writes Agents page PNGs for visual review"]
@@ -911,6 +1110,7 @@ mod tests {
                 definition: Some(definition),
                 installed: None,
                 available: false,
+                discovery: None,
             });
         }
         crate::snapshots::render(&app, "compact-agents");

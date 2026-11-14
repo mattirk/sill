@@ -41,6 +41,8 @@ pub enum Event {
     Filter(String),
     More,
     New { agent: String, ghost: bool },
+    /// An agent without directory setup: open the Agents page to finish it.
+    Setup(String),
     Reopen(String),
     NewHere(String),
     Delete(String),
@@ -63,6 +65,31 @@ impl App {
             }
             Some(Ok(agents)) => {
                 for agent in agents {
+                    if agent.home_paths.is_none() {
+                        panel = panel.push(tooltip(
+                            keys::press(
+                                button(
+                                    row![
+                                        svg(icons::for_agent(&agent.id))
+                                            .width(15)
+                                            .height(15)
+                                            .style(style::icon(alpha(P.fg, 0.5))),
+                                        text(&agent.name).size(style::TEXT).color(alpha(P.fg, 0.5)),
+                                        text("needs setup").size(style::TINY).color(P.warning),
+                                    ]
+                                    .spacing(10)
+                                    .align_y(Alignment::Center),
+                                )
+                                .padding([6, 8])
+                                .width(Fill)
+                                .style(style::row_button),
+                                event(Event::Setup(agent.id.clone())),
+                            ),
+                            tip(format!("{} does not say yet where it keeps its settings and login. Set it up on the Agents page first.", agent.name)),
+                            tooltip::Position::Left,
+                        ));
+                        continue;
+                    }
                     let start = keys::press(
                         button(
                             row![

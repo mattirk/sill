@@ -84,3 +84,50 @@ pub struct Installation { pub installed:Option<Installed> }
 pub struct EntryKey { pub entry_id:String, pub version:String, pub source:String }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Icon { pub bytes_base64:Option<String> }
+/// A path an agent created under a fresh home on its first start: a proposal for its `home_paths`
+/// (`_sill/agents.discovered`; docs/agent-directories.md "Directory setup by probe").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Proposal {
+    /// `~/…`, as `home_paths` names it.
+    pub path: String,
+    pub kind: HomePathKind,
+    /// The same path exists in the person's real home on the daemon host: owning it hides the
+    /// host's copy from this agent.
+    pub on_host: bool,
+    /// A file: what the agent wrote, when small text; the file's initial content if declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_content: Option<String>,
+}
+/// A login method the agent offered at `initialize`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AuthMethodInfo {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+/// What the last discovery run found for an agent.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Discovery {
+    /// Unix seconds, decimal string.
+    pub at: String,
+    /// The installed version it ran.
+    pub version: String,
+    pub proposals: Vec<Proposal>,
+    /// The login methods the agent offers.
+    #[serde(default)]
+    pub auth_methods: Vec<AuthMethodInfo>,
+    /// Set when the proposals come from a login with this method (`_sill/agents.discover` with
+    /// `method_id`): the login's files are already in the agent's sill-owned home.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_method: Option<String>,
+    /// Files that login wrote under the proposed directories, relative to the home: candidates
+    /// for `login_files`.
+    #[serde(default)]
+    pub login_files: Vec<String>,
+    /// What went wrong on the way, when the probe could not complete (shown with the result).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Discovered { pub discovery: Option<Discovery> }

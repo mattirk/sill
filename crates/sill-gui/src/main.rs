@@ -2560,7 +2560,7 @@ impl App {
                         .map(|id| {
                             serde_json::from_value(json!({
                                 "id": id, "name": if *id == "claude" { "Claude Code" } else { "Codex" },
-                                "command": []
+                                "command": [], "home_paths": [{"path": format!("~/.{id}"), "kind": "directory"}]
                             }))
                             .expect("a demo agent")
                         })
@@ -2642,6 +2642,10 @@ impl App {
                 }
                 let (method, params) = sill_client::sessions::reopen(&id);
                 return self.act(&id, Act::Reopen(id.clone()), method, params);
+            }
+            Event::Setup(_) => {
+                self.menu = None;
+                return self.update(Message::ShowPage(Page::Agents));
             }
             Event::NewHere(id) => {
                 self.menu = None;

@@ -79,6 +79,32 @@
       ],
       "type": "object"
     },
+    "AgentDiscover": {
+      "additionalProperties": false,
+      "description": "Find an installed agent's directories (`_sill/agents.discovered`), as proposals for its\n`home_paths`. Without `method_id`: one first start in a throwaway jail with an empty home.\nWith it: that login method run on the daemon host with an empty home, as host logins are;\nwhat it wrote is proposed and copied into the agent's sill-owned home. Declares nothing.",
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "method_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation_id": {
+          "description": "Durable retry identity, scoped to this daemon store.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "agent_id"
+      ],
+      "type": "object"
+    },
     "AgentKey": {
       "additionalProperties": false,
       "properties": {
@@ -418,6 +444,28 @@
       "required": [
         "method_id",
         "title"
+      ],
+      "type": "object"
+    },
+    "AuthMethodInfo": {
+      "description": "A login method the agent offered at `initialize`.",
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
       ],
       "type": "object"
     },
@@ -1421,6 +1469,76 @@
       ],
       "type": "object"
     },
+    "Discovered": {
+      "properties": {
+        "discovery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Discovery"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Discovery": {
+      "description": "What the last discovery run found for an agent.",
+      "properties": {
+        "at": {
+          "description": "Unix seconds, decimal string.",
+          "type": "string"
+        },
+        "auth_methods": {
+          "default": [],
+          "description": "The login methods the agent offers.",
+          "items": {
+            "$ref": "#/$defs/AuthMethodInfo"
+          },
+          "type": "array"
+        },
+        "login_files": {
+          "default": [],
+          "description": "Files that login wrote under the proposed directories, relative to the home: candidates\nfor `login_files`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "login_method": {
+          "description": "Set when the proposals come from a login with this method (`_sill/agents.discover` with\n`method_id`): the login's files are already in the agent's sill-owned home.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "note": {
+          "description": "What went wrong on the way, when the probe could not complete (shown with the result).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposals": {
+          "items": {
+            "$ref": "#/$defs/Proposal"
+          },
+          "type": "array"
+        },
+        "version": {
+          "description": "The installed version it ran.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "at",
+        "version",
+        "proposals"
+      ],
+      "type": "object"
+    },
     "DomainData": {
       "description": "Public domain errors preserve unknown codes. Clients must not retry mutations on an\nunfamiliar error, timeout or disconnection.",
       "properties": {
@@ -2122,6 +2240,27 @@
       ],
       "type": "object"
     },
+    "FilesystemView": {
+      "properties": {
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/PathRule"
+          },
+          "type": "array"
+        },
+        "unused": {
+          "items": {
+            "$ref": "#/$defs/HostPath"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "rules",
+        "unused"
+      ],
+      "type": "object"
+    },
     "Find": {
       "additionalProperties": false,
       "properties": {
@@ -2501,6 +2640,35 @@
         "hits"
       ],
       "type": "object"
+    },
+    "HomePath": {
+      "description": "Exact persistent locations; absence of home_paths means setup is required.",
+      "properties": {
+        "initial_content": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/HomePathKind"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "HomePathKind": {
+      "enum": [
+        "directory",
+        "file"
+      ],
+      "type": "string"
     },
     "HostPath": {
       "description": "Exact bytes name a path on the daemon host. Display text is never operational.",
@@ -3505,6 +3673,39 @@
       ],
       "type": "object"
     },
+    "PathRule": {
+      "properties": {
+        "backing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HostPath"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "behavior": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/HostPath"
+        }
+      },
+      "required": [
+        "target",
+        "behavior",
+        "source",
+        "reason"
+      ],
+      "type": "object"
+    },
     "Peer": {
       "properties": {
         "name": {
@@ -3824,6 +4025,17 @@
           },
           "type": "array"
         },
+        "filesystem": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FilesystemView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Exact filesystem rules; None means no launch evidence was recorded."
+        },
         "fingerprint": {
           "type": [
             "string",
@@ -3883,17 +4095,6 @@
         },
         "view": {
           "type": "string"
-        },
-        "filesystem": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/FilesystemView"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Exact filesystem rules; None means no launch evidence was recorded."
         }
       },
       "required": [
@@ -4169,6 +4370,35 @@
           "type": "object"
         }
       ]
+    },
+    "Proposal": {
+      "description": "A path an agent created under a fresh home on its first start: a proposal for its `home_paths`\n(`_sill/agents.discovered`; docs/agent-directories.md \"Directory setup by probe\").",
+      "properties": {
+        "initial_content": {
+          "description": "A file: what the agent wrote, when small text; the file's initial content if declared.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/HomePathKind"
+        },
+        "on_host": {
+          "description": "The same path exists in the person's real home on the daemon host: owning it hides the\nhost's copy from this agent.",
+          "type": "boolean"
+        },
+        "path": {
+          "description": "`~/…`, as `home_paths` names it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "kind",
+        "on_host"
+      ],
+      "type": "object"
     },
     "Question": {
       "properties": {
@@ -6467,89 +6697,6 @@
         "size"
       ],
       "type": "object"
-    },
-    "FilesystemView": {
-      "type": "object",
-      "properties": {
-        "rules": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/PathRule"
-          }
-        },
-        "unused": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/HostPath"
-          }
-        }
-      },
-      "required": [
-        "rules",
-        "unused"
-      ]
-    },
-    "PathRule": {
-      "type": "object",
-      "properties": {
-        "target": {
-          "$ref": "#/$defs/HostPath"
-        },
-        "backing": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/HostPath"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "behavior": {
-          "type": "string"
-        },
-        "source": {
-          "type": "string"
-        },
-        "reason": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "target",
-        "behavior",
-        "source",
-        "reason"
-      ]
-    },
-    "HomePath": {
-      "type": "object",
-      "properties": {
-        "path": {
-          "type": "string"
-        },
-        "kind": {
-          "$ref": "#/$defs/HomePathKind"
-        },
-        "initial_content": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "path",
-        "kind"
-      ],
-      "description": "Exact persistent locations; absence of home_paths means setup is required."
-    },
-    "HomePathKind": {
-      "type": "string",
-      "enum": [
-        "directory",
-        "file"
-      ]
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -6568,6 +6715,11 @@
       {
         "doc": "_sill/desktop.capture and _sill/desktop.read: pictures of a session's test desktop, for a live view.",
         "name": "sill.desktop_view",
+        "version": 1
+      },
+      {
+        "doc": "_sill/agents.discover and _sill/agents.discovered: a first start in a throwaway jail proposes an installed agent's home_paths; the person approves them on the Agents page (saved with _sill/agents.save).",
+        "name": "sill.agent_setup",
         "version": 1
       },
       {
@@ -7262,6 +7414,20 @@
       }
     },
     {
+      "capabilities": {
+        "sill.agent_setup": 1
+      },
+      "doc": "What the agent's last first-start probe created under an empty home: proposals for its home_paths, or none when no probe has run.",
+      "kind": "request",
+      "name": "_sill/agents.discovered",
+      "params": {
+        "$ref": "#/$defs/AgentKey"
+      },
+      "result": {
+        "$ref": "#/$defs/Discovered"
+      }
+    },
+    {
       "capabilities": {},
       "doc": "Daemon-owned agent administration; inspect current state before retrying an uncertain mutation.",
       "kind": "request",
@@ -7736,6 +7902,20 @@
       "name": "_sill/agents.login",
       "params": {
         "$ref": "#/$defs/AgentLogin"
+      },
+      "result": {
+        "$ref": "#/$defs/JobStream"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.agent_setup": 1
+      },
+      "doc": "Start the agent once in a throwaway jail with an empty home and record what it creates as home_paths proposals, with tagged progress. Declares nothing. Disconnect does not cancel; do not blindly retry.",
+      "kind": "request",
+      "name": "_sill/agents.discover",
+      "params": {
+        "$ref": "#/$defs/AgentDiscover"
       },
       "result": {
         "$ref": "#/$defs/JobStream"

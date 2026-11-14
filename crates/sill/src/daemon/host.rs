@@ -127,7 +127,7 @@ fn start(hub: &Hub, id: String, method: &str, input: Value, key: String, run: im
 }
 
 pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
-    if !matches!(method, "_sill/streams.port" | "_sill/agents.login" | "_sill/agents.reset" | "_sill/registry.install" | "_sill/registry.list" | "_sill/operations.get") { return None; }
+    if !matches!(method, "_sill/streams.port" | "_sill/agents.login" | "_sill/agents.discover" | "_sill/agents.reset" | "_sill/registry.install" | "_sill/registry.list" | "_sill/operations.get") { return None; }
     Some((|| {
         match method {
             "_sill/operations.get" => {
@@ -162,6 +162,31 @@ pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
                             sill_core::login::Line::Stderr(s) => api::Progress::Stderr { text: text(s) },
                         });
                     })?;
+                    Ok(agent.id)
+                })?))
+            }
+            "_sill/agents.discover" => {
+                let a: api::AgentDiscover = args(params)?;
+                let (id, input) = identity(&a.operation_id, &a)?;
+                if let Some(result) = existing(hub, &id, method, &input)? { return Ok(json!(result)); }
+                valid_id(&a.agent_id)?;
+                let home = sill_core::changes::home()?;
+                let agent = sill_core::agents::load(&home)?.remove(&a.agent_id).ok_or_else(|| domain("not_found", "agent not found"))?;
+                if sill_core::registry::installed(&home, &agent.id).is_none() { return Err(domain("invalid_state", "the agent is not installed by sill; discovery runs the installed command")); }
+                if let Some(m) = &a.method_id && (m.is_empty() || m.len() > 256 || m.chars().any(char::is_control)) { return Err(invalid("invalid method_id")); }
+                // the same key as its install: never two first starts, or one during an install
+                Ok(json!(start(hub, id, method, input, format!("install:{}", agent.id), move |progress| {
+                    match &a.method_id {
+                        None => { sill_core::registry::discover(&home, &agent, &mut |s| progress.send(api::Progress::Output { text: text(s) }))?; }
+                        Some(m) => {
+                            sill_core::login::setup(&agent, &home, m, |line| {
+                                progress.send(match line {
+                                    sill_core::login::Line::Status(s) => api::Progress::Status { text: text(s) },
+                                    sill_core::login::Line::Stderr(s) => api::Progress::Stderr { text: text(s) },
+                                });
+                            })?;
+                        }
+                    }
                     Ok(agent.id)
                 })?))
             }

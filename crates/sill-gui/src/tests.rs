@@ -2298,6 +2298,28 @@ fn the_menu_opens_on_hover_and_closes_when_the_pointer_leaves() {
 }
 
 #[test]
+fn an_agent_without_directory_setup_is_dimmed_in_the_menu_and_opens_the_agents_page() {
+    use crate::menu::Event;
+    let (mut app, _) = App::new(true, None);
+    let _ = app.update(Message::Menu(Event::Toggle));
+    let agents = vec![
+        serde_json::from_value(serde_json::json!({"id": "claude", "name": "Claude Code", "command": ["claude-acp"], "home_paths": [{"path": "~/.claude", "kind": "directory"}]})).unwrap(),
+        serde_json::from_value(serde_json::json!({"id": "antigravity-acp", "name": "Antigravity", "command": ["antigravity-acp"]})).unwrap(),
+    ];
+    app.menu.as_mut().unwrap().agents = Some(Ok(agents));
+    let mut ui = simulator(&app, (720.0, 860.0));
+    ui.find("needs setup").unwrap();
+    ui.click("Antigravity").unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(matches!(&messages[..], [Message::Menu(Event::Setup(id))] if id == "antigravity-acp"), "{messages:?}");
+    for m in messages {
+        let _ = app.update(m);
+    }
+    assert!(app.menu.is_none(), "the menu closes");
+    assert!(app.agents_page.shown, "the Agents page opens instead of a session");
+}
+
+#[test]
 fn the_menu_lists_agents_and_sessions_to_reopen() {
     use crate::menu::Event;
     let (mut app, _) = App::new(true, None);

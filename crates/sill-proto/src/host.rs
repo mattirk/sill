@@ -19,6 +19,19 @@ pub struct AgentLogin {
     pub agent_id: String,
     pub method_id: String,
 }
+/// Find an installed agent's directories (`_sill/agents.discovered`), as proposals for its
+/// `home_paths`. Without `method_id`: one first start in a throwaway jail with an empty home.
+/// With it: that login method run on the daemon host with an empty home, as host logins are;
+/// what it wrote is proposed and copied into the agent's sill-owned home. Declares nothing.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentDiscover {
+    /// Durable retry identity, scoped to this daemon store.
+    pub operation_id: Option<String>,
+    pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method_id: Option<String>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentReset {

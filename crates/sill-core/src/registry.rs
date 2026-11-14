@@ -371,8 +371,14 @@ pub fn install(home: &Path, entry: &Entry, log: &mut dyn FnMut(String)) -> Resul
     };
     let icon = fetch_icon(home, entry);
     let supports_load = if builtin_for(entry).is_none() {
-        log("installed; directory setup required before login, launch or capability probing".into());
-        false
+        // no definition yet: the same first start also shows which directories it wants
+        match discover_into(home, &entry.id, &entry.version, &command, &env, log) {
+            Ok((_, supports_load)) => supports_load,
+            Err(e) => {
+                log(format!("directory discovery (in a throwaway jail) failed: {e:#}; use Find directories on the Agents page"));
+                false
+            }
+        }
     } else { match probe_load_session(&command, &env, home) {
         Ok(b) => b,
         Err(e) => {
@@ -687,18 +693,39 @@ fn resolve_program(name: &str, home: &Path) -> Option<PathBuf> {
 /// throwaway jail, not on the host: no network, no capabilities, the system read-only, the home
 /// hidden but for the tools dir and the runtime the command needs (security.md S3).
 fn probe_load_session(command: &[String], env: &BTreeMap<String, String>, home: &Path) -> Result<bool> {
+    let (mut b, _, _seccomp) = throwaway_jail(command, env, home, None)?;
+    let mut child = b.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().context("bwrap")?;
+    let result = acp_first_start(&mut child, home, false).map(|(supports_load, _)| supports_load);
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
+/// The throwaway jail both probes run in. `scratch` (a fresh host directory) stands in for the
+/// home when given, so what the agent writes there can be read afterwards; otherwise the home is
+/// an empty tmpfs. The second value: the directories under the home bound into the jail (the
+/// tools dir and the command's runtime), relative to the home — bwrap creates them as
+/// mountpoints, so they are not the agent's own writes.
+fn throwaway_jail(command: &[String], env: &BTreeMap<String, String>, home: &Path, scratch: Option<&Path>) -> Result<(Command, Vec<PathBuf>, Option<std::os::fd::OwnedFd>)> {
     let Some(first) = command.first() else { bail!("no command") };
     let prog = resolve_program(first, home).with_context(|| format!("{first}: not found"))?;
     let tools = tools_dir(home);
     let mut b = Command::new("bwrap");
-    b.args(["--unshare-all", "--disable-userns", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--clearenv"]);
+    b.args(["--unshare-all", "--unshare-user", "--disable-userns", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--clearenv"]);
     b.args(["--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/run"]);
     b.arg("--tmpfs").arg(crate::jail::STATE_FS); // other sessions' upper trees
-    let seccomp = crate::seccomp::memfd(false)?; // alive until the spawn
+    let seccomp = crate::seccomp::memfd(false)?; // the caller keeps it alive until the spawn
     if let Some(f) = &seccomp {
         b.arg("--seccomp").arg(std::os::fd::AsRawFd::as_raw_fd(f).to_string());
     }
-    b.arg("--tmpfs").arg(home);
+    match scratch {
+        Some(dir) => { b.arg("--bind").arg(dir).arg(home); }
+        None => { b.arg("--tmpfs").arg(home); }
+    }
+    let mut bound = Vec::new();
+    if tools.starts_with(home) {
+        bound.push(tools.strip_prefix(home).unwrap().to_path_buf());
+    }
     b.arg("--ro-bind").arg(&tools).arg(&tools);
     // the runtime the command needs may live under the home (nvm's node, a venv): just those dirs
     let mut path_dirs: Vec<PathBuf> = ["/usr/local/bin", "/usr/bin", "/bin"].iter().map(PathBuf::from).collect();
@@ -711,6 +738,7 @@ fn probe_load_session(command: &[String], env: &BTreeMap<String, String>, home: 
     for d in needed {
         if d.starts_with(home) && !d.starts_with(&tools) {
             b.arg("--ro-bind").arg(&d).arg(&d);
+            bound.push(d.strip_prefix(home).unwrap().to_path_buf());
         }
         if !path_dirs.contains(&d) {
             path_dirs.push(d);
@@ -722,7 +750,13 @@ fn probe_load_session(command: &[String], env: &BTreeMap<String, String>, home: 
         b.arg("--setenv").arg(k).arg(v);
     }
     b.arg("--").arg(&prog).args(&command[1..]);
-    let mut child = b.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().context("bwrap")?;
+    Ok((b, bound, seccomp))
+}
+
+/// `initialize` the agent over its stdio (20 s); with `open_session`, also `session/new` in the
+/// home (10 s, its answer not required) and a moment for it to finish writing. Returns whether
+/// it advertises `loadSession`, and the login methods it offers.
+fn acp_first_start(child: &mut std::process::Child, home: &Path, open_session: bool) -> Result<(bool, Vec<AuthMethodInfo>)> {
     let mut stdin = child.stdin.take().unwrap();
     let stdout = BufReader::new(child.stdout.take().unwrap());
     let init = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
@@ -741,23 +775,322 @@ fn probe_load_session(command: &[String], env: &BTreeMap<String, String>, home: 
             }
         }
     });
-    let deadline = std::time::Instant::now() + Duration::from_secs(20);
-    let result = loop {
-        let now = std::time::Instant::now();
-        if now >= deadline {
-            break Err(anyhow!("no answer to initialize"));
-        }
-        match rx.recv_timeout(deadline - now) {
-            Ok(v) if v.get("id").and_then(|i| i.as_u64()) == Some(1) => {
-                break Ok(v.pointer("/result/agentCapabilities/loadSession").and_then(|b| b.as_bool()).unwrap_or(false));
+    let wait_for = |id: u64, limit: Duration| -> Result<serde_json::Value> {
+        let deadline = std::time::Instant::now() + limit;
+        loop {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                bail!("no answer within {} s", limit.as_secs());
             }
-            Ok(_) => {}
-            Err(_) => break Err(anyhow!("agent exited during initialize")),
+            match rx.recv_timeout(deadline - now) {
+                Ok(v) if v.get("id").and_then(|i| i.as_u64()) == Some(id) => break Ok(v),
+                Ok(_) => {}
+                Err(_) => bail!("agent exited"),
+            }
         }
     };
-    let _ = child.kill();
-    let _ = child.wait();
-    result
+    let answer = wait_for(1, Duration::from_secs(20)).context("initialize")?;
+    let supports_load = answer.pointer("/result/agentCapabilities/loadSession").and_then(|b| b.as_bool()).unwrap_or(false);
+    let methods = answer.pointer("/result/authMethods").and_then(|m| m.as_array()).into_iter().flatten().filter_map(|m| Some(AuthMethodInfo {
+        id: m.get("id").and_then(|v| v.as_str())?.to_string(),
+        name: m.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        description: m.get("description").and_then(|v| v.as_str()).map(str::to_string),
+    })).collect();
+    if open_session {
+        let new = serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "session/new", "params": { "cwd": home, "mcpServers": [] }});
+        let _ = writeln!(stdin, "{new}");
+        let _ = wait_for(2, Duration::from_secs(10)); // a refusal (not logged in) still made it write its state
+        std::thread::sleep(Duration::from_secs(2));
+    }
+    Ok((supports_load, methods))
+}
+
+// --- directory discovery -----------------------------------------------------------------------------
+
+/// A path an agent created under a fresh home on its first start: a proposal for its `home_paths`
+/// (docs/agent-directories.md, "Directory setup by probe").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Proposal {
+    /// `~/…`, as `home_paths` names it.
+    pub path: String,
+    pub kind: agents::HomePathKind,
+    /// The same path exists in the person's real home: owning it hides the host's copy from this
+    /// agent (and is what the person may not want for a shared cache).
+    pub on_host: bool,
+    /// A file: what the agent wrote, when it is small text. It becomes the file's initial content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_content: Option<String>,
+}
+
+/// A login method the agent offered at `initialize`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthMethodInfo {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// What the last discovery found, kept beside `installed.json` until the definition is set up.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Discovery {
+    /// Unix seconds.
+    pub at: u64,
+    /// The installed version it ran.
+    pub version: String,
+    pub proposals: Vec<Proposal>,
+    /// The login methods the agent offers (from the first start's `initialize`).
+    #[serde(default)]
+    pub auth_methods: Vec<AuthMethodInfo>,
+    /// The proposals come from a login with this method (`login::setup`), not from a bare
+    /// first start; its files are already in the agent's sill-owned home.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_method: Option<String>,
+    /// Files the login wrote under the proposed directories, relative to the home: candidates
+    /// for `login_files`.
+    #[serde(default)]
+    pub login_files: Vec<String>,
+    /// What went wrong on the way (the first start did not answer `initialize`, …): shown with
+    /// the result, since a probe that failed quietly looks like one that found nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+pub fn now_secs() -> u64 {
+    SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+pub fn record_discovery(home: &Path, id: &str, discovery: &Discovery) -> Result<()> {
+    let dir = tools_dir(home).join(id);
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("discovered.json"), serde_json::to_string_pretty(discovery)?)?;
+    Ok(())
+}
+
+const MAX_INITIAL_CONTENT: u64 = 64 * 1024;
+
+pub fn discovered(home: &Path, id: &str) -> Option<Discovery> {
+    let text = std::fs::read_to_string(tools_dir(home).join(id).join("discovered.json")).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Start an installed agent once in the throwaway jail with a fresh, readable home, and record
+/// what it created there as proposals. Nothing is declared: the person chooses on the Agents page.
+pub fn discover(home: &Path, agent: &Agent, log: &mut dyn FnMut(String)) -> Result<Discovery> {
+    let version = installed(home, &agent.id).map(|i| i.version).unwrap_or_default();
+    discover_into(home, &agent.id, &version, &agent.command, &agent.env, log).map(|(d, _)| d)
+}
+
+fn discover_into(home: &Path, id: &str, version: &str, command: &[String], env: &BTreeMap<String, String>, log: &mut dyn FnMut(String)) -> Result<(Discovery, bool)> {
+    let dir = tools_dir(home).join(id);
+    std::fs::create_dir_all(&dir)?;
+    let scratch = dir.join("probe-home");
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir(&scratch)?;
+    log("first start in a throwaway jail with an empty home, to see which directories it creates".into());
+    let result = (|| {
+        let (mut b, bound, _seccomp) = throwaway_jail(command, env, home, Some(&scratch))?;
+        let mut child = b.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().context("bwrap")?;
+        let started = acp_first_start(&mut child, home, true);
+        let _ = child.kill();
+        let _ = child.wait();
+        let (supports_load, methods, note) = match started {
+            Ok((l, m)) => (l, m, None),
+            Err(e) => {
+                let note = format!("the agent did not complete its first start in the throwaway jail: {e:#}");
+                log(format!("{note}; proposing what it wrote anyway"));
+                (false, vec![], Some(note))
+            }
+        };
+        for rel in &bound {
+            remove_empty_chain(&scratch, rel);
+        }
+        Ok::<_, anyhow::Error>((proposals_from(&scratch, home), supports_load, methods, note))
+    })();
+    let _ = std::fs::remove_dir_all(&scratch);
+    let (proposals, supports_load, auth_methods, note) = result?;
+    if proposals.is_empty() {
+        log("it created nothing under the home before a login".into());
+    }
+    for p in &proposals {
+        log(format!("created {}{}", p.path, if p.on_host { " (exists on this machine)" } else { "" }));
+    }
+    if !auth_methods.is_empty() {
+        log(format!("login methods: {}", auth_methods.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", ")));
+    }
+    let discovery = Discovery { at: now_secs(), version: version.to_string(), proposals, auth_methods, login_method: None, login_files: vec![], note };
+    record_discovery(home, id, &discovery)?;
+    Ok((discovery, supports_load))
+}
+
+/// bwrap made `rel` (and its parents) under `scratch` as a mountpoint; take the empty chain away.
+fn remove_empty_chain(scratch: &Path, rel: &Path) {
+    let mut p = scratch.join(rel);
+    while p != scratch && std::fs::remove_dir(&p).is_ok() {
+        match p.parent() { Some(parent) => p = parent.to_path_buf(), None => break }
+    }
+}
+
+/// Container directories whose children, not themselves, are an agent's own (`~/.config` is a
+/// shared parent `home_paths` refuses).
+const CONTAINERS: &[&str] = &[".config", ".local", ".local/share", ".local/state"];
+/// Never an agent's persistent state: tool caches (session-private already), shell leftovers.
+const IGNORED: &[&str] = &[".cache", ".npm", ".bun", ".yarn", ".pnpm-store", ".local/bin", ".local/share/pnpm", ".local/share/Trash",
+    ".bash_history", ".node_repl_history", ".python_history", ".lesshst", ".wget-hsts", ".Xauthority", ".sudo_as_admin_successful"];
+
+/// The proposals in a home tree an agent wrote: its top-level entries, and inside the container
+/// directories their children. A directory holding nothing but one directory stands for that
+/// one (Antigravity writes under `~/.gemini/antigravity-acp/`: that, not Gemini CLI's
+/// `~/.gemini`). Sorted by path.
+pub fn proposals_from(scratch: &Path, real_home: &Path) -> Vec<Proposal> {
+    fn single_child_dir(dir: &Path) -> Option<PathBuf> {
+        let mut entries = std::fs::read_dir(dir).ok()?.flatten();
+        let only = entries.next()?;
+        if entries.next().is_some() || !only.file_type().ok()?.is_dir() {
+            return None;
+        }
+        Some(only.path())
+    }
+    fn walk(scratch: &Path, real_home: &Path, rel: &Path, out: &mut Vec<Proposal>) {
+        let Ok(rd) = std::fs::read_dir(scratch.join(rel)) else { return };
+        for entry in rd.flatten() {
+            let child = rel.join(entry.file_name());
+            let text = child.to_string_lossy();
+            if IGNORED.contains(&text.as_ref()) {
+                continue;
+            }
+            let Ok(meta) = std::fs::symlink_metadata(entry.path()) else { continue };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() && CONTAINERS.contains(&text.as_ref()) {
+                walk(scratch, real_home, &child, out);
+                continue;
+            }
+            let kind = if meta.is_dir() { agents::HomePathKind::Directory } else if meta.is_file() { agents::HomePathKind::File } else { continue };
+            let initial_content = (kind == agents::HomePathKind::File && meta.len() <= MAX_INITIAL_CONTENT)
+                .then(|| std::fs::read_to_string(entry.path()).ok()).flatten();
+            let mut child = child;
+            if kind == agents::HomePathKind::Directory {
+                while let Some(only) = single_child_dir(&scratch.join(&child)) {
+                    child = child.join(only.file_name().unwrap());
+                }
+            }
+            let text = child.to_string_lossy();
+            out.push(Proposal { path: format!("~/{text}"), kind, on_host: real_home.join(&child).exists(), initial_content });
+        }
+    }
+    let mut out = Vec::new();
+    walk(scratch, real_home, Path::new(""), &mut out);
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    out
+}
+
+/// Names a login never is: logs, databases and their journals, temporary files.
+fn incidental(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [".log", ".sqlite", ".sqlite-wal", ".sqlite-shm", ".db", ".db-journal", ".tmp", ".lock", ".pid"].iter().any(|e| lower.ends_with(e))
+        || lower.starts_with("tmp") || lower.contains(".log.")
+}
+
+/// The regular files under the proposed directories in `scratch`, relative to the home: what a
+/// login wrote, as candidates for `login_files`. Sorted.
+pub fn credential_candidates(scratch: &Path, proposals: &[Proposal]) -> Vec<String> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let Ok(meta) = std::fs::symlink_metadata(entry.path()) else { continue };
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if meta.is_dir() {
+                if !incidental(&name) && !["logs", "log", "tmp", "cache"].contains(&name.as_str()) {
+                    walk(root, &entry.path(), out);
+                }
+            } else if meta.is_file() && !incidental(&name) {
+                if let Ok(rel) = entry.path().strip_prefix(root) {
+                    out.push(rel.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for p in proposals.iter().filter(|p| p.kind == agents::HomePathKind::Directory) {
+        walk(scratch, &scratch.join(p.path.trim_start_matches("~/")), &mut out);
+    }
+    out.sort();
+    out
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn proposals_are_top_level_entries_and_container_children_with_host_presence() {
+        let t = std::env::temp_dir().join(format!("sill-discover-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&t);
+        let scratch = t.join("scratch");
+        let real = t.join("real");
+        for d in [".antigravity/logs", ".config/antigravity", ".config/sill", ".local/share/agent", ".local/state/sill/tools/x", ".cache/stuff", ".npm/_cacache", ".local/bin"] {
+            fs::create_dir_all(scratch.join(d)).unwrap();
+        }
+        fs::write(scratch.join(".antigravity/settings.json"), "{}").unwrap();
+        fs::write(scratch.join(".agentrc"), "{\"a\":1}").unwrap();
+        fs::write(scratch.join(".bash_history"), "ls").unwrap();
+        fs::write(scratch.join(".config/antigravity/prefs"), "x").unwrap();
+        fs::create_dir_all(real.join(".config/sill")).unwrap();
+        // what bwrap made for a mount, emptied again
+        remove_empty_chain(&scratch, Path::new(".local/state/sill/tools/x"));
+        let found = proposals_from(&scratch, &real);
+        let paths: Vec<_> = found.iter().map(|p| p.path.as_str()).collect();
+        assert_eq!(paths, ["~/.agentrc", "~/.antigravity", "~/.config/antigravity", "~/.config/sill", "~/.local/share/agent"]);
+        assert_eq!(found[0].kind, agents::HomePathKind::File);
+        assert_eq!(found[0].initial_content.as_deref(), Some("{\"a\":1}"));
+        assert_eq!(found[1].kind, agents::HomePathKind::Directory);
+        assert!(found[1].initial_content.is_none());
+        assert!(found[3].on_host, "~/.config/sill exists in the real home");
+        assert!(!found[1].on_host);
+        // a directory holding only one directory stands for that one, and the login's files are found under it
+        let login = t.join("login");
+        for d in [".gemini/antigravity-acp/logs", ".config", ".local/share", ".cache"] {
+            fs::create_dir_all(login.join(d)).unwrap();
+        }
+        fs::write(login.join(".gemini/antigravity-acp/oauth_creds.json"), "{}").unwrap();
+        fs::write(login.join(".gemini/antigravity-acp/settings.json"), "{}").unwrap();
+        fs::write(login.join(".gemini/antigravity-acp/logs/agent.log"), "x").unwrap();
+        fs::write(login.join(".gemini/antigravity-acp/state.sqlite"), "x").unwrap();
+        let found = proposals_from(&login, &real);
+        assert_eq!(found.iter().map(|p| p.path.as_str()).collect::<Vec<_>>(), ["~/.gemini/antigravity-acp"]);
+        assert_eq!(credential_candidates(&login, &found), [".gemini/antigravity-acp/oauth_creds.json", ".gemini/antigravity-acp/settings.json"]);
+        fs::remove_dir_all(&t).unwrap();
+    }
+
+    /// The real probe around an agent sill installed on this host, named by `SILL_PROBE_AGENT`
+    /// (its id under the tools dir): prints what it found. Needs bubblewrap user namespaces.
+    #[test]
+    #[ignore = "host only: runs an installed agent in the throwaway jail"]
+    fn real_discovery_of_an_installed_agent() {
+        let Ok(id) = std::env::var("SILL_PROBE_AGENT") else { return };
+        let home = PathBuf::from(std::env::var("HOME").unwrap());
+        let mut agent = agents::load(&home).unwrap().remove(&id).expect("an installed agent");
+        agent.home_paths = None;
+        let found = discover(&home, &agent, &mut |line| eprintln!("  {line}")).unwrap();
+        eprintln!("{}", serde_json::to_string_pretty(&found).unwrap());
+        assert!(found.note.is_none(), "the first start did not complete: {:?}", found.note);
+    }
+
+    #[test]
+    fn proposals_become_valid_home_paths() {
+        let t = std::env::temp_dir().join(format!("sill-discover-valid-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&t);
+        fs::create_dir_all(t.join("s/.agent")).unwrap();
+        fs::write(t.join("s/.agent.json"), "{}").unwrap();
+        let mut a = agents::builtin().remove(0);
+        a.login_files.clear();
+        a.home_env = None;
+        a.home_paths = Some(proposals_from(&t.join("s"), &t.join("none")).iter().map(|p| agents::HomePath { path: p.path.clone(), kind: p.kind, initial_content: p.initial_content.clone() }).collect());
+        a.validate().unwrap();
+        fs::remove_dir_all(&t).unwrap();
+    }
 }
 
 #[cfg(test)]
