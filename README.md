@@ -4,7 +4,7 @@ A shelf for AI agents on your own Linux machine: an ACP client, a jail the host 
 of every change the agent makes. See [SPEC.md](SPEC.md) for the design; this file is the practical side.
 
 Status: **M2** (2026-10-28). Sessions with tabs, persistence and resume; folder pins per session (live,
-host = jail); the `sill ▾` dropdown with the global Changes page (keep / revert / conflicts), the file tree,
+host = jail); the herring (top left) opening the backend with the global Changes page (keep / revert / conflicts), the file tree,
 Settings. Next: M3 — a terminal inside the session's jail, policies UI, more agents.
 
 ## Layout
@@ -96,9 +96,9 @@ sill toggle                                # show/hide — bind to Alt+Space (Ci
 sill restart --dev                         # run the build in target/ instead of the installed one
 ```
 
-- **`sill`** (top left) flips between the sessions and the backend: the session tabs give way to page tabs
+- The **herring** (top left; *sill* is Swedish for herring) flips between the sessions and the backend: the session tabs give way to page tabs
   (Changes · Files · Agents · Settings), opening on the default page (Changes; Settings → Default page).
-  `sill` again returns to the session; Escape does the same flip either way. The folder button opens the
+  the herring again returns to the session; Escape does the same flip either way (the fish flicks its tail on both). The folder button opens the
   file tree beside the session (the shelf widens for it; again or Escape closes it); a pinned folder's
   chip opens the tree scoped to that folder. A file opens in the viewer over the session: read, or
   *Edit* and Ctrl+S.
@@ -115,7 +115,7 @@ sill restart --dev                         # run the build in target/ instead of
   prompt show each pin with its +/−/untracked counts; the pins are also named in every prompt as the place
   to work. Everything *unpinned* is overlaid: the agent sees the whole machine and can write anywhere, but
   the writes land in the session's upper tree and wait in Changes. Nothing is kept automatically.
-- The **`sill ▾`** button switches pages: *Sessions*, *Changes* (every session's pending overlay changes,
+- The **herring** button switches pages: *Sessions*, *Changes* (every session's pending overlay changes,
   grouped by session and repo: diff, Keep, Revert, Keep all; conflicts — edited on the host meanwhile —
   marked `!` and left out of Keep all), *Files* (tree of touched repos with badges), *Settings*. Escape
   goes back, then hides.
@@ -148,7 +148,7 @@ Each agent runs completely inside sill: its own paths (`~/.claude` and `~/.claud
 per-session directories on the state filesystem, never on the host. Delete
 `~/.local/state/sill/agents/<id>` to make the agent log in again.
 
-**Agents page** (sill ▾ → Agents): the ACP registry (`cdn.agentclientprotocol.com`, cached in
+**Agents page** (herring → Agents): the ACP registry (`cdn.agentclientprotocol.com`, cached in
 `~/.cache/sill`, refreshed when older than six hours) with search, an All / Installed / Not installed filter and
 one action per entry. *Install* puts the package under `~/.local/state/sill/tools/<id>/` (npm with
 `--ignore-scripts`, uv with its own tool dir, or the Linux binary with its checksum verified), probes it once
@@ -190,7 +190,9 @@ rebuilt automatically. Restarting the shelf alone does not touch running session
 
 ## Look
 
-Sill's look is its own and the same on every machine: its icons are drawn glyphs, every theme is a
+Sill's look is its own and the same on every machine: its icons are drawn glyphs (the mark too — a herring
+silhouette, `packaging/icons/herring/herring-silhouette.svg`, drawn with cairo in the top-left corner and on
+the app icon's sill), every theme is a
 complete palette (nothing follows the desktop's GTK theme, icon theme or dark/light setting), and the
 text is set in two faces embedded in the binary — **Source Sans 3** for everything proportional,
 **Source Code Pro** for terminals, code and the editor (both by Adobe, SIL Open Font License 1.1;
