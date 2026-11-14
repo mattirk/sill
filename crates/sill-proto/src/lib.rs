@@ -11,6 +11,7 @@ pub mod client;
 pub mod initialize;
 pub mod rpc;
 pub mod schema;
+pub mod schema_compat;
 pub mod wire;
 pub mod sfp;
 pub mod sessions;

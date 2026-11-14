@@ -143,7 +143,7 @@ pub const METHODS: &[Method] = &[
     req::<crate::sfp::SubmissionKey, crate::sfp::Submission>("_sill/submissions.resume", "Resume a held queued submission, retaining acceptance order."),
     req::<crate::sfp::AnswerQuestion, crate::sfp::Question>("_sill/questions.answer", "Record the first valid answer with a durable idempotency key."),
     notification::<crate::sfp::SessionEvent>("_sill/session.event", "A committed ordered session event."),
-    req::<crate::Empty, Value>(method::DAEMON_SCHEMA, "The daemon protocol schema and method capabilities, for remote negotiation."),
+    req::<crate::Empty, Value>(method::DAEMON_SCHEMA, "The Sill Frontend Protocol schema and method capabilities, for remote negotiation."),
     req::<crate::Empty, crate::DaemonStatus>(method::DAEMON_STATUS, "Version, protocol, pid, mode and session counts of the daemon."),
     req_empty::<crate::Empty>(method::DAEMON_SHUTDOWN, "Ask the daemon to leave; sessions keep running and the next daemon adopts them."),
 ];
@@ -183,7 +183,7 @@ pub fn document() -> Value {
     let defs = g.take_definitions(true);
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "sill daemon protocol",
+        "title": "Sill Frontend Protocol (SFP)",
         "protocol": crate::initialize::PROTOCOL_ID,
         "limits": crate::initialize::Limits::default(),
         "transport": "JSON-RPC 2.0, one message per line, over the unix socket at $XDG_RUNTIME_DIR/sill/daemon.sock (docs/protocol.md)",
@@ -203,6 +203,30 @@ pub fn document() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The freeze guard (docs/protocol.md "Freeze guard"). Breaking the recorded document fails
+    /// and cannot be accepted; an additive change fails until recorded with
+    /// `SILL_SFP_SCHEMA_ACCEPT=1`, so every extension shows up in review as a diff of the file.
+    #[test]
+    fn the_protocol_only_grows_from_the_recorded_sfp_1_document() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/sfp-1.schema.json");
+        let current = document();
+        let pretty = serde_json::to_string_pretty(&current).unwrap() + "\n";
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            std::fs::write(&path, pretty).unwrap();
+            panic!("recorded a new baseline at {}; review and commit it", path.display());
+        };
+        let recorded: Value = serde_json::from_str(&text).unwrap();
+        let breaks = crate::schema_compat::breaking_changes(&recorded, &current);
+        assert!(breaks.is_empty(), "incompatible with the recorded sfp/1 protocol (that is sfp/2):\n  {}", breaks.join("\n  "));
+        if recorded != current {
+            if std::env::var_os("SILL_SFP_SCHEMA_ACCEPT").is_some() {
+                std::fs::write(&path, pretty).unwrap();
+            } else {
+                panic!("the protocol changed compatibly; record it with SILL_SFP_SCHEMA_ACCEPT=1 cargo test -p sill-proto and commit {}", path.display());
+            }
+        }
+    }
 
     #[test]
     fn every_method_is_listed_once_and_the_document_builds() {

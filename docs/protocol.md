@@ -343,12 +343,42 @@ settings, policy and managed processes. There is no internal frontend RPC surfac
 
 The experimental native ACP v2 adapter is implemented behind `experimental_acp_v2 = true`, with
 ACP v1 retained as the default. See [native behavior and recovery evidence](sfp-operations.md#experimental-native-acp-v2).
-This milestone remains `sfp/1-dev.3`: real third-party v2 interoperability, historical replay
-after relay replacement, remaining performance validation and user acceptance testing remain
-before a stable freeze. Snapshot capture still copies under the store lock; canonical history
+This milestone remains `sfp/1-dev.3`. **What stands between it and stable `sfp/1` (decided
+2026-11-03)** is only what could otherwise need `sfp/2`:
+
+- **SFP release work:** user acceptance on the shelf, `sill attach` line mode and one client
+  over `sill daemon --stdio` (restart mid-turn, a question answered after reconnecting,
+  uploads and agent images), with the independent Python conformance suite rerun; then one
+  coordinated cutover that sets the identity to `sfp/1`, bumps the private relay protocol,
+  re-records [`sfp-1.schema.json`](sfp-1.schema.json) and moves this document's development notes to
+  [protocol-history.md](protocol-history.md).
+- **Not SFP release work:** the native ACP v2 adapter's own validation (a third-party v2
+  agent, upstream draft extensions, history replay after relay replacement; see
+  [sfp-operations.md](sfp-operations.md#experimental-native-acp-v2)). The adapter is opt-in and
+  changes nothing on the SFP wire, so it ships, or doesn't, on its own schedule. Full replay
+  after a relay replacement would improve behaviour within the existing contract: a new
+  agent generation with explicit discontinuity is already the specified outcome. Performance
+  is likewise not a gate (see the benchmark disposition below).
+
+Snapshot capture still copies under the store lock; canonical history
 and idempotency identities remain proportional to retained sessions, and native v2 reconstruction
 currently caches retained source payloads. The implemented quotas are intentional bounds, not a
 promise of unlimited history or automatic eviction of retry identities.
+
+### Freeze guard
+
+[`docs/sfp-1.schema.json`](sfp-1.schema.json) is the recorded protocol document, and a
+`sill-proto` test compares `sill daemon schema` against it on every `cargo test`
+(`schema_compat.rs`). Types are matched through the `$ref`s that methods, errors and streams
+reach, not by definition name. A change that would need `sfp/2` fails, and nothing can
+accept it: a removed or renamed method, field, variant, enum value, error code, capability
+or limit; a changed type; a field that became required or is no longer always present; a new
+method without a capability requirement. A compatible change fails too, until it is recorded
+with `SILL_SFP_SCHEMA_ACCEPT=1 cargo test -p sill-proto`, so every extension appears in review
+as a diff of the file. Documentation text is ignored. The guard cannot see which capability
+an added optional field or variant belongs to; that pairing remains a review rule. Until the
+cutover, the identity check holds the baseline at `sfp/1-dev.3`. A deliberate pre-freeze
+break is recorded by deleting the file and rerunning the test.
 
 ### Snapshot benchmark and disposition (2026-11-03)
 
