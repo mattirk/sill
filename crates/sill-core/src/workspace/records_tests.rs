@@ -696,6 +696,35 @@ fn work_from_before_the_pin_is_carried_into_a_new_workspace_uncommitted() {
     assert_eq!(read(&clone.join("f1.txt")), "agent\n");
 }
 
+/// A build the agent ran before the pin leaves thousands of ignored files in the overlay: more
+/// path bytes than a pipe holds, in and out of `check-ignore`. The carry must not wait on it.
+#[test]
+fn work_from_before_the_pin_is_carried_past_a_builds_worth_of_ignored_files() {
+    let f = fixture("carry-build");
+    let up = overlay(&f, 0);
+    let t = unix_now() + 100;
+    agent_wrote(&up, "f1.txt", "agent\n", t);
+    let deep = "debug/incremental/a-rather-long-directory-name-as-cargo-makes-them-0123456789abcdef";
+    std::fs::create_dir_all(up.join("target").join(deep)).unwrap();
+    for i in 0..3000 {
+        std::fs::write(up.join("target").join(deep).join(format!("object-file-{i:05}.rcgu.o")), "o").unwrap();
+    }
+    let (done, wait) = std::sync::mpsc::channel();
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            let w = session(&f, "s1");
+            let _ = done.send(w);
+        });
+        let w = wait.recv_timeout(std::time::Duration::from_secs(60)).unwrap_or_else(|_| {
+            // abort: the scope would otherwise wait on the stuck git forever
+            std::process::abort()
+        });
+        assert_eq!(read(&clone_of(&w).join("f1.txt")), "agent\n");
+        assert!(!up.join("f1.txt").exists());
+        assert!(up.join("target").join(deep).join("object-file-00000.rcgu.o").exists());
+    });
+}
+
 #[test]
 fn work_from_before_the_pin_conflicting_with_a_moved_checkout_stops_a_rebase_for_resolve() {
     let f = fixture("carry-conflict");

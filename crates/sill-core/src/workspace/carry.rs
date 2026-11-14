@@ -97,14 +97,13 @@ fn ignored(clone: &Git, paths: &[String]) -> Result<Vec<String>> {
     let mut c = clone.cmd();
     c.args(["check-ignore", "-z", "--stdin"]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     let mut child = c.spawn()?;
-    {
-        let mut stdin = child.stdin.take().expect("piped");
-        for p in paths {
-            stdin.write_all(p.as_bytes())?;
-            stdin.write_all(b"\0")?;
-        }
-    }
+    let mut stdin = child.stdin.take().expect("piped");
+    let input: Vec<u8> = paths.iter().flat_map(|p| p.bytes().chain([0])).collect();
+    // git answers as it reads: written from a thread so neither side waits on a full pipe (a
+    // build's output in the overlay is thousands of ignored paths, far more than a pipe holds)
+    let writer = std::thread::spawn(move || stdin.write_all(&input));
     let out = child.wait_with_output()?;
+    let _ = writer.join();
     // 1: none ignored
     if !out.status.success() && out.status.code() != Some(1) {
         bail!("check-ignore: {}", String::from_utf8_lossy(&out.stderr).trim());
@@ -155,7 +154,7 @@ pub fn pending(source: &Path, clone: &Path, upper: &Path, started: i64) -> Resul
     }
     let (mut paths, opaque, earliest) = walk(upper)?;
     let git = Git::open(clone)?;
-    let skip = ignored(&git, &paths)?;
+    let skip: std::collections::HashSet<String> = ignored(&git, &paths)?.into_iter().collect();
     paths.retain(|p| !skip.contains(p));
     if paths.is_empty() && opaque.is_empty() {
         return Ok(None);
