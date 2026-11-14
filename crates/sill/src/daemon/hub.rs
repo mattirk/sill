@@ -220,6 +220,8 @@ impl Hub {
     /// closing its tab would (`sessions.end`, reason `idle`; 0 = never) — attached or not, the
     /// daemon's sessions are its own. Then memory's nightly run when it is due.
     pub fn sweep(self: &Arc<Self>) {
+        super::streams::reap();
+        super::terminals::reap();
         let now = sill_core::store::now();
         let mut ids: Vec<String> = self.children.lock().unwrap().keys().cloned().collect();
         ids.extend(self.runners.lock().unwrap().keys().cloned());
@@ -843,6 +845,7 @@ impl Hub {
         if !sill_core::session::valid_id(id) {
             bail!("not a session id");
         }
+        super::terminals::forget_session(id);
         let ghost = self.is_ghost(id);
         let had_runner = self.runners.lock().unwrap().contains_key(id);
         let relay_socket = sill_proto::runtime_dir()?.join(id).join("relay.sock");

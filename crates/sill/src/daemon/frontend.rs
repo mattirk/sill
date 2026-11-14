@@ -176,12 +176,6 @@ pub fn dispatch(hub: &Hub, params: Value) -> Result<Value> {
             let session = session_row(hub, &session)?;
             json!(sill_core::session::policy_of(&session, &home)?.processes)
         },
-        Request::OpenPty { session, argv, env, cwd, cols, rows } => {
-            if let Some(id) = &session { session_row(hub, id)?; }
-            json!(super::streams::open_pty(session.as_deref(), &argv, &env, cwd.as_deref(), cols, rows)?)
-        },
-        Request::ResizePty { token, cols, rows } => { super::streams::resize(&token, cols, rows)?; json!(null) },
-        Request::PtyCwd { token } => json!(super::streams::cwd(&token)?),
         Request::OpenPort { session, port } => { session_row(hub, &session)?; json!(super::streams::port(&session, port)?) },
         Request::HostLogin { agent, method } => {
             let agent = sill_core::agents::load(&home).remove(&agent).context("unknown agent")?;

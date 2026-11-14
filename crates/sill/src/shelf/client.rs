@@ -109,6 +109,11 @@ fn lane(lane: &'static Lane) -> Result<Arc<Client>> {
     Ok(c)
 }
 
+/// Actions a lost reply does not show as undone: sent again they could happen twice.
+fn no_blind_retry(method: &str) -> bool {
+    matches!(method, "_sill/sessions.update" | "_sill/sessions.start" | "_sill/sessions.stop" | "_sill/sessions.end" | "_sill/sessions.checkpoint" | "_sill/terminals.open")
+}
+
 /// One request on a lane; on a connection the daemon has closed, once more on a fresh one.
 fn call_on<T: DeserializeOwned>(l: &'static Lane, method: &str, params: impl Serialize + Clone) -> Result<T> {
     let c = lane(l)?;
@@ -120,7 +125,7 @@ fn call_on<T: DeserializeOwned>(l: &'static Lane, method: &str, params: impl Ser
                 *s = None;
             }
             drop(s);
-            if matches!(method, "_sill/sessions.update" | "_sill/sessions.start" | "_sill/sessions.stop" | "_sill/sessions.end" | "_sill/sessions.checkpoint") {
+            if no_blind_retry(method) {
                 return Err(e.context("The session action may have taken effect; inspect its state before trying again"));
             }
             lane(l)?.call(method, params)
@@ -205,6 +210,9 @@ pub fn call<T: DeserializeOwned>(method: &str, params: impl Serialize + Clone) -
     match c.call(method, params.clone()) {
         Err(e) if Client::is_closed(&e) => {
             forget(&c);
+            if no_blind_retry(method) {
+                return Err(e.context("The action may have taken effect; inspect its state before trying again"));
+            }
             connected()?.call(method, params)
         }
         r => r,

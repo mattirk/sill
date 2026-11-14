@@ -1,4 +1,6 @@
-//! VTE consumes a local PTY. Its raw slave relays bytes to the PTY owned by the daemon host.
+//! VTE consumes a local PTY. Its raw slave relays bytes to a terminal the daemon host owns
+//! (docs/protocol.md, terminals): dropping the bridge only detaches, so the shell can be found
+//! again by its label and attached to after the shelf or its connection comes back.
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
@@ -7,25 +9,65 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
-use sill_core::frontend::{Opened, Request};
+use sill_proto::terminals as api;
 
 pub struct PtyBridge {
-    pub token: String,
+    pub terminal_id: String,
     master: Option<OwnedFd>,
     interrupt: Arc<dyn Fn() + Send + Sync>,
     closed: Arc<AtomicBool>,
 }
 
+/// What became of a terminal whose stream ended.
+pub enum Fate { Running, Exited, Gone }
+
+fn key(id: &str) -> api::TerminalKey { api::TerminalKey { terminal_id: id.to_string() } }
+
 impl PtyBridge {
-    pub fn open(session: Option<&str>, argv: &[String], env: &BTreeMap<String, String>, cwd: Option<&Path>, cols: u16, rows: u16) -> Result<Self> {
-        let opened: Opened = super::remote::request(Request::OpenPty {
-            session: session.map(str::to_string), argv: argv.into(), env: env.clone(), cwd: cwd.map(Path::to_path_buf), cols, rows,
+    /// A new terminal (in `session`'s jail, else on the daemon host), attached.
+    pub fn open(session: Option<&str>, label: &str, argv: &[String], env: &BTreeMap<String, String>, cwd: Option<&Path>, cols: u16, rows: u16) -> Result<Self> {
+        let t: api::Terminal = super::client::call("_sill/terminals.open", api::Open {
+            session_id: session.map(str::to_string), label: label.into(), argv: argv.into(), env: env.clone(),
+            cwd: cwd.map(sill_proto::sessions::HostPath::from_path), cols, rows,
         })?;
-        let stream = sill_proto::transport::open_stream(&opened.token)?;
-        Self::bridge(opened, stream, cols, rows)
+        Self::attach(&t.terminal_id, cols, rows)
     }
 
-    fn bridge(opened: Opened, stream: sill_proto::transport::RawStream, cols: u16, rows: u16) -> Result<Self> {
+    /// The running terminal this frontend opened under `label`, if the daemon still has one.
+    pub fn find(session: Option<&str>, label: &str) -> Option<String> {
+        let all: api::Terminals = super::client::call("_sill/terminals.list", api::List { session_id: session.map(str::to_string) }).ok()?;
+        all.terminals.into_iter().rev().find(|t| t.label == label && t.state == "running").map(|t| t.terminal_id)
+    }
+
+    /// Attach to an existing terminal: its recent output arrives first. When older output was
+    /// already dropped, `term` is told so before the replay starts.
+    pub fn reattach(terminal_id: &str, term: &vte4::Terminal, cols: u16, rows: u16) -> Result<Self> {
+        use vte4::TerminalExt;
+        let t: api::Terminal = super::client::call("_sill/terminals.get", key(terminal_id))?;
+        term.reset(true, true);
+        if t.discarded_bytes != "0" {
+            term.feed(b"\x1b[2m[earlier output was not kept]\x1b[0m\r\n");
+        }
+        Self::attach(terminal_id, cols, rows)
+    }
+
+    /// Attach a stream to a terminal; its recent output arrives first.
+    pub fn attach(terminal_id: &str, cols: u16, rows: u16) -> Result<Self> {
+        let stream: api::Stream = super::client::call("_sill/terminals.attach", key(terminal_id))?;
+        let raw = sill_proto::transport::open_stream(&stream.token)?;
+        Self::bridge(terminal_id.to_string(), raw, cols, rows)
+    }
+
+    /// After the stream ended: did the terminal exit, or only the stream?
+    pub fn fate(terminal_id: &str) -> Fate {
+        match super::client::call::<api::Terminal>("_sill/terminals.get", key(terminal_id)) {
+            Ok(t) if t.state == "running" => Fate::Running,
+            Ok(_) => Fate::Exited,
+            Err(_) => Fate::Gone,
+        }
+    }
+
+    fn bridge(terminal_id: String, stream: sill_proto::transport::RawStream, cols: u16, rows: u16) -> Result<Self> {
         use rustix::pty::{OpenptFlags, grantpt, ioctl_tiocgptpeer, openpt, unlockpt};
         use rustix::termios::{OptionalActions, Winsize, tcgetattr, tcsetattr, tcsetwinsize};
         let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC).context("local terminal bridge")?;
@@ -77,7 +119,7 @@ impl PtyBridge {
             flag.store(true, Ordering::Release);
             stop();
         })?;
-        Ok(Self { token: opened.token, master: Some(master), interrupt, closed })
+        Ok(Self { terminal_id, master: Some(master), interrupt, closed })
     }
 
     pub fn closed(&self) -> bool { self.closed.load(Ordering::Acquire) }
@@ -85,11 +127,21 @@ impl PtyBridge {
     pub fn take_fd(&mut self) -> OwnedFd { self.master.take().expect("a terminal bridge's fd is taken once") }
 
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-        let _: serde_json::Value = super::remote::request(Request::ResizePty { token: self.token.clone(), cols, rows })?;
+        let _: serde_json::Value = super::client::call("_sill/terminals.resize", api::Resize { terminal_id: self.terminal_id.clone(), cols, rows })?;
         Ok(())
     }
 
-    pub fn cwd(&self) -> Result<Option<PathBuf>> { super::remote::request(Request::PtyCwd { token: self.token.clone() }) }
+    pub fn cwd(&self) -> Result<Option<PathBuf>> {
+        let c: api::Cwd = super::client::call("_sill/terminals.cwd", key(&self.terminal_id))?;
+        Ok(c.cwd.and_then(|p| p.to_path().ok()))
+    }
+
+    /// End the terminal itself, not only this view of it.
+    pub fn close(self) {
+        if let Err(e) = super::client::call::<serde_json::Value>("_sill/terminals.close", key(&self.terminal_id)) {
+            eprintln!("sill: closing terminal {}: {e:#}", self.terminal_id);
+        }
+    }
 }
 
 impl Drop for PtyBridge {
@@ -113,7 +165,7 @@ mod tests {
             interrupt: Arc::new(move || { let _ = close.shutdown(std::net::Shutdown::Both); }),
             shutdown_write: Arc::new(|| {}),
         };
-        let mut bridge = PtyBridge::bridge(Opened { token: "test".into(), pid: 1 }, stream, 80, 24).unwrap();
+        let mut bridge = PtyBridge::bridge("test".into(), stream, 80, 24).unwrap();
         let mut terminal = std::fs::File::from(bridge.take_fd());
         let bytes = [b'\r', b'\n', 3, 0xff];
         terminal.write_all(&bytes).unwrap();

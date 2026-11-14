@@ -122,11 +122,51 @@ the session. Every Python request/result/event is checked against the exported s
 negotiating internal APIs or reading the database. Rust tests also cover create rollback,
 conflicting/repeated IDs, deletion tombstones, paging and lifecycle metadata across restart.
 
+Public terminals are implemented too (2026-11-03):
+
+| Method | Request | Result |
+|---|---|---|
+| `_sill/terminals.open` | `{session_id?, label?, argv?, env?, cwd?, cols, rows}` | terminal record |
+| `_sill/terminals.list` | `{session_id?}` | `{terminals}` |
+| `_sill/terminals.get` | `{terminal_id}` | terminal record |
+| `_sill/terminals.attach` | `{terminal_id}` | `{token}` |
+| `_sill/terminals.resize` | `{terminal_id, cols, rows}` | `{}` |
+| `_sill/terminals.cwd` | `{terminal_id}` | `{cwd}` |
+| `_sill/terminals.close` | `{terminal_id}` | `{}` |
+
+The daemon owns each PTY master. A terminal runs in a session's jail (`session_id`) or on the
+daemon host; empty `argv` runs the login shell; `cwd` is a host path record in the jail's or
+the host's namespace. `label` (at most 128 bytes) is the frontend's own name for finding the
+terminal again; the shelf uses `shell` in a session and `host:<session id>` on the host.
+
+`attach` returns a one-use byte-stream token (§1). The stream carries, in order, the replay
+buffer — the last 256 KiB of output, trimmed to start on a line — and then live output; bytes
+written to it are keystrokes. The replay is taken and the viewer subscribed under one lock, so
+nothing is missed or doubled between them. `discarded_bytes` in the record counts output no longer
+kept: nonzero means a replay starts partway (the shelf says so in the terminal). Raw bytes are
+unframed; the stream's end means the viewer detached, fell behind, or the terminal exited or was
+closed, and `get` tells which (`state`, `exit_code`). Closing the stream only detaches. At most
+8 viewers attach to one terminal; all receive output, any may type, and the last resize wins. A
+viewer whose 256-chunk queue fills is cut off rather than slowing the terminal; it attaches
+again and gets the replay.
+
+A terminal lives until its program exits, its jail stops, `close` hangs it up (the daemon
+drops the master), its session is deleted, or the daemon leaves: the daemon holds the master,
+so a daemon restart still ends every terminal. An exited terminal remains readable for 10
+minutes; the daemon holds at most 64 terminals. `exit_code` is known for host terminals only.
+`open` must not be blindly retried after connection loss (list by label instead); `close` is
+idempotent in effect (a repeat returns `not_found`).
+
+Transport bounds: messages are limited to 8 MiB; a connection must initialize (or claim a
+stream) within 10 s; the daemon serves at most 256 connections at once (control and streams)
+and refuses more; at most 64 stream tokens wait unclaimed, each for 60 s, dropped on the next
+token and by the minute sweep without a thread of their own.
+
 Host/session administration and presentation operations still awaiting public SFP schemas are
 under `_sill/internal/…`, marked `x-sill-internal` in the exported schema. These are temporary
 same-build implementation APIs, not protocol 6 compatibility handlers. The old `_sill/…` names
 are removed when their public replacement is not yet implemented. Public host methods, lossless
-path contracts, persistent terminal replay, full mutation recovery, retention bounds, and the
+path contracts, full mutation recovery, retention bounds, and the
 experimental ACP v2 adapter remain implementation work before `sfp/1` can be declared complete.
 
 **Direction agreed 2026-11-03:** the public frontend contract is named **Sill Frontend Protocol
@@ -184,10 +224,11 @@ daemon answers is named here.
 - **Timeouts**: a single Rust client deadline covers outbound queuing, sending and the answer
   (120 s by default, 5 s for `daemon.status` and `daemon.shutdown`). Timeout closes the transport
   so a blocked send cannot strand subsequent calls. Long browser login and registry install progress use streams.
-- **Byte streams**: `frontend.request` operations `OpenPty`, `OpenPort`, `HostLogin` and `Install` return a
-  one-use token. Open the same transport again, write `{"_sill_stream":"TOKEN"}\n`, then exchange
-  raw bytes. Tokens expire after 60 s if unused. `ResizePty`/`PtyCwd` use the original control
-  connection and token; descriptors never cross the frontend protocol.
+- **Byte streams**: `_sill/terminals.attach` and the `frontend.request` operations `OpenPort`,
+  `HostLogin` and `Install` return a one-use token. Open the same transport again, write
+  `{"_sill_stream":"TOKEN"}\n`, then exchange raw bytes. Tokens expire after 60 s if unused; at
+  most 64 wait at once. Terminal resize and cwd use the control connection and the terminal ID
+  (§ public terminals); descriptors never cross the frontend protocol.
 
 ## 2. Methods
 
@@ -377,6 +418,8 @@ Design SFP for the following semantics now, while retaining ACP v1 support:
    question resolution and retry rules for mutating operations beyond prompts.
 3. Specify byte-stream framing, token ownership/expiry, backpressure, end-of-stream, cancellation,
    reconnection and PTY resize/exit semantics. Socket and SSH clients must observe the same contract.
+   *Status 2026-11-03:* terminals are specified and implemented (public terminals above); port,
+   login and install streams are not.
 4. Specify negotiation, extension rules, lifecycle ownership and migration from development
    protocol 6. A running daemon's compatibility must be evaluated independently of its build ID.
    On incompatibility, explain the mismatch and require explicit action before replacing or
@@ -394,7 +437,8 @@ Design SFP for the following semantics now, while retaining ACP v1 support:
    idle-handshake deadlines, connection limits and pending-stream limits. Bound stream-expiry
    bookkeeping as well; a thread per pending token must not allow unbounded resource growth.
    Verify rejection and cleanup when limits or deadlines are reached, alongside the existing
-   bounded outbound queues.
+   bounded outbound queues. *Status 2026-11-03:* connection, pending-token and terminal bounds
+   are enforced; token and terminal limits are tested, the connection limit is not yet.
 8. Specify the transport trust contract. Unix-socket peer credentials and SSH authenticate the
    user account; authenticated frontends currently receive the daemon's full authority, including
    host operations. Feature negotiation is not authorization. Keep the daemon socket and its

@@ -14,6 +14,7 @@ pub mod schema;
 pub mod wire;
 pub mod sfp;
 pub mod sessions;
+pub mod terminals;
 pub mod transport;
 
 pub use client::Client;

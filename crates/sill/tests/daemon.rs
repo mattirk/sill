@@ -168,32 +168,113 @@ fn frontend_store_and_settings_are_daemon_owned() {
     assert!(request(&mut c, Request::Upload { session: "abcdef01".into(), name: "../bad".into(), bytes: vec![] }).get("error").is_some());
 }
 
-#[test]
-fn a_terminal_is_a_one_use_byte_stream_with_resize() {
-    use sill_core::frontend::Request;
-    let d = Daemon::start();
-    let mut c = d.connect().unwrap();
-    let open = c.call(sill_core::frontend::METHOD, serde_json::to_value(Request::OpenPty {
-        session: None,
-        argv: vec!["/bin/sh".into(), "-c".into(), "read line; stty size; printf 'stream:%s\\n' \"$line\"".into()],
-        env: Default::default(), cwd: Some(d.dir.join("home")), cols: 80, rows: 24,
-    }).unwrap()).unwrap();
-    let token = open["result"]["token"].as_str().expect("pty token").to_string();
-    let resize = c.call(sill_core::frontend::METHOD, serde_json::to_value(Request::ResizePty { token: token.clone(), cols: 92, rows: 41 }).unwrap()).unwrap();
-    assert!(resize.get("error").is_none(), "{resize}");
+/// Attach a stream to a terminal; the token line and first keystrokes go in one write.
+fn attach_terminal(d: &Daemon, c: &mut Conn, id: &str, input: &str) -> UnixStream {
+    let r = c.call("_sill/terminals.attach", json!({"terminal_id": id})).unwrap();
+    let token = r["result"]["token"].as_str().unwrap_or_else(|| panic!("attach: {r}")).to_string();
     let mut stream = UnixStream::connect(d.socket()).unwrap();
     stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    // Token and first keystrokes may arrive in one read; the daemon must retain buffered bytes.
-    stream.write_all(format!("{}\nhello\n", json!({"_sill_stream":token})).as_bytes()).unwrap();
-    let mut output = String::new();
-    std::io::Read::read_to_string(&mut stream, &mut output).unwrap();
-    assert!(output.contains("41 92"), "{output:?}");
-    assert!(output.contains("stream:hello"), "{output:?}");
+    stream.write_all(format!("{}\n{input}", json!({"_sill_stream": token})).as_bytes()).unwrap();
     let mut second = UnixStream::connect(d.socket()).unwrap();
     second.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    second.write_all(format!("{}\n", json!({"_sill_stream":token})).as_bytes()).unwrap();
+    second.write_all(format!("{}\n", json!({"_sill_stream": token})).as_bytes()).unwrap();
     let mut byte = [0];
     assert_eq!(std::io::Read::read(&mut second, &mut byte).unwrap(), 0, "token cannot be reused");
+    stream
+}
+
+fn read_until(stream: &mut UnixStream, needle: &str) -> String {
+    let mut output = Vec::new();
+    let mut bytes = [0u8; 4096];
+    while !String::from_utf8_lossy(&output).contains(needle) {
+        match std::io::Read::read(stream, &mut bytes) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => output.extend_from_slice(&bytes[..n]),
+        }
+    }
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+#[test]
+fn a_terminal_outlives_its_stream_and_replays_on_attach() {
+    let d = Daemon::start();
+    let mut c = d.connect().unwrap();
+    let home = d.dir.join("home");
+    let open = c.call("_sill/terminals.open", json!({
+        "label": "test", "argv": ["/bin/sh", "-c", "while read line; do [ \"$line\" = size ] && stty size; [ \"$line\" = quit ] && exit 3; printf 'echo:%s\\n' \"$line\"; done"],
+        "cwd": sill_proto::sessions::HostPath::from_path(&home), "cols": 80, "rows": 24,
+    })).unwrap();
+    let id = open["result"]["terminal_id"].as_str().unwrap_or_else(|| panic!("open: {open}")).to_string();
+    assert_eq!(open["result"]["state"], "running");
+    let resize = c.call("_sill/terminals.resize", json!({"terminal_id": id, "cols": 92, "rows": 41})).unwrap();
+    assert!(resize.get("error").is_none(), "{resize}");
+
+    let mut first = attach_terminal(&d, &mut c, &id, "hello\nsize\n");
+    let seen = read_until(&mut first, "41 92");
+    assert!(seen.contains("echo:hello") && seen.contains("41 92"), "{seen:?}");
+    drop(first);
+    std::thread::sleep(Duration::from_millis(300));
+
+    // closing the stream detached: the shell still runs and its output comes back first
+    let list = c.call("_sill/terminals.list", json!({})).unwrap();
+    assert_eq!(list["result"]["terminals"][0]["state"], "running", "{list}");
+    assert_eq!(list["result"]["terminals"][0]["label"], "test");
+    let mut second = attach_terminal(&d, &mut c, &id, "again\n");
+    let seen = read_until(&mut second, "echo:again");
+    assert!(seen.contains("echo:hello"), "replay missing: {seen:?}");
+    assert!(seen.contains("echo:again"), "{seen:?}");
+
+    // the program's exit ends the stream; the terminal stays readable with its exit code
+    second.write_all(b"quit\n").unwrap();
+    let mut rest = Vec::new();
+    let _ = std::io::Read::read_to_end(&mut second, &mut rest);
+    let mut state = json!(null);
+    for _ in 0..50 {
+        state = c.call("_sill/terminals.get", json!({"terminal_id": id})).unwrap();
+        if state["result"]["exit_code"] == 3 { break }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(state["result"]["state"], "exited", "{state}");
+    assert_eq!(state["result"]["exit_code"], 3, "{state}");
+
+    // close forgets it
+    assert!(c.call("_sill/terminals.close", json!({"terminal_id": id})).unwrap().get("error").is_none());
+    let gone = c.call("_sill/terminals.get", json!({"terminal_id": id})).unwrap();
+    assert_eq!(gone["error"]["data"]["code"], "not_found", "{gone}");
+}
+
+#[test]
+fn unclaimed_stream_tokens_are_bounded() {
+    let d = Daemon::start();
+    let mut c = d.connect().unwrap();
+    let open = c.call("_sill/terminals.open", json!({"argv": ["/bin/sh", "-c", "exec sleep 600"], "cols": 80, "rows": 24})).unwrap();
+    let id = open["result"]["terminal_id"].as_str().unwrap().to_string();
+    for i in 0..64 {
+        let r = c.call("_sill/terminals.attach", json!({"terminal_id": id})).unwrap();
+        assert!(r["result"]["token"].is_string(), "token {i}: {r}");
+    }
+    let refused = c.call("_sill/terminals.attach", json!({"terminal_id": id})).unwrap();
+    assert_eq!(refused["error"]["data"]["code"], "limit_exceeded", "{refused}");
+    c.call("_sill/terminals.close", json!({"terminal_id": id})).unwrap();
+}
+
+#[test]
+fn closing_a_terminal_hangs_up_its_shell_and_ends_streams() {
+    let d = Daemon::start();
+    let mut c = d.connect().unwrap();
+    let open = c.call("_sill/terminals.open", json!({"argv": ["/bin/sh", "-c", "echo up; exec sleep 600"], "cols": 80, "rows": 24})).unwrap();
+    let id = open["result"]["terminal_id"].as_str().unwrap_or_else(|| panic!("open: {open}")).to_string();
+    let pid = open["result"]["pid"].as_u64().unwrap();
+    let mut stream = attach_terminal(&d, &mut c, &id, "");
+    assert!(read_until(&mut stream, "up").contains("up"));
+    assert!(c.call("_sill/terminals.close", json!({"terminal_id": id})).unwrap().get("error").is_none());
+    let mut rest = Vec::new();
+    let _ = std::io::Read::read_to_end(&mut stream, &mut rest);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::path::Path::new(&format!("/proc/{pid}")).exists() && std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| !s.contains(") Z ")) {
+        assert!(std::time::Instant::now() < deadline, "the shell survived its terminal's close");
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 impl Drop for Daemon {

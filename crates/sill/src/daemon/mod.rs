@@ -23,6 +23,7 @@ mod uploads;
 mod sfp_adapter;
 mod runner;
 mod streams;
+mod terminals;
 mod context;
 mod frontend;
 pub mod relay;
@@ -165,8 +166,14 @@ pub fn run() -> Result<()> {
                 continue;
             }
         }
+        // every connection is a thread: a bound keeps a runaway client from exhausting them
+        let Some(slot) = ConnSlot::take() else {
+            eprintln!("sill daemon: refused a connection: {MAX_CONNECTIONS} already open");
+            continue;
+        };
         let hub = hub.clone();
         if let Err(e) = std::thread::Builder::new().name("sill-daemon-conn".into()).spawn(move || {
+            let _slot = slot;
             if let Err(e) = serve(conn, hub) {
                 eprintln!("sill daemon: connection: {e:#}");
             }
@@ -175,6 +182,21 @@ pub fn run() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Open connections at once, control and byte streams together.
+const MAX_CONNECTIONS: usize = 256;
+static OPEN_CONNECTIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// One of [`MAX_CONNECTIONS`], given back when the connection's thread ends.
+struct ConnSlot;
+impl ConnSlot {
+    fn take() -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        OPEN_CONNECTIONS.try_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < MAX_CONNECTIONS).then_some(n + 1)).ok().map(|_| ConnSlot)
+    }
+}
+impl Drop for ConnSlot {
+    fn drop(&mut self) { OPEN_CONNECTIONS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel); }
 }
 
 /// `sd_notify` without libsystemd: a datagram to `$NOTIFY_SOCKET` (a path, or abstract with a

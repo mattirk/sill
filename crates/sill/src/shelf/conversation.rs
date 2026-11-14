@@ -1233,7 +1233,27 @@ impl Conversation {
         l.set_xalign(0.0);
         l.set_wrap(true);
         l.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        l.set_selectable(true);
         self.place(&l);
+        self.request_follow();
+    }
+
+    /// A failure sill or the agent reports: selectable, with a copy button, so the exact text
+    /// can be pasted into a report.
+    pub fn add_error(&self, text: &str) {
+        self.finish_current();
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        row.add_css_class("sill-error-note");
+        let l = gtk::Label::new(Some(text));
+        l.set_xalign(0.0);
+        l.set_hexpand(true);
+        l.set_wrap(true);
+        l.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        l.set_selectable(true);
+        row.append(&l);
+        let t = text.to_string();
+        row.append(&markdown::copy_button(Rc::new(move || t.clone())));
+        self.place(&row);
         self.request_follow();
     }
 
@@ -1249,7 +1269,10 @@ impl Conversation {
             Event::UserText(t) => self.add_user(&t),
             Event::UserMessage { text, attachments } => self.add_user_full(&text, &attachments),
             Event::Plan(entries) => self.set_plan(&entries),
-            Event::Notice { title, description, .. } => self.add_note(&match description { Some(d) if !d.is_empty() => format!("{title}\n{d}"), _ => title }),
+            Event::Notice { severity, title, description } => {
+                let text = match description { Some(d) if !d.is_empty() => format!("{title}\n{d}"), _ => title };
+                if severity == "error" { self.add_error(&text) } else { self.add_note(&text) }
+            }
             Event::Commands(_) | Event::AgentTitle(_) => {}
             Event::Text(t) => self.append_markdown(&self.current, "sill-agent", &t),
             Event::Thought(t) => self.append_markdown(&self.current_thought, "sill-thought", &t),
@@ -1277,7 +1300,7 @@ impl Conversation {
                 self.finish_current();
                 match err {
                     Some(e) => {
-                        self.add_note(&format!("session ended: {e}"));
+                        self.add_error(&format!("session ended: {e}"));
                         self.status.set_text("session ended");
                     }
                     None => self.status.set_text("session closed"),
@@ -1467,6 +1490,14 @@ popover.sill-session-menu > contents { padding: 10px 12px; min-width: 260px; }
 .sill-menu-more { font-size: 80%; padding: 2px 10px; min-height: 0; opacity: 0.5; background: transparent; border: none; box-shadow: none; }
 .sill-menu-more:hover { opacity: 1; }
 .sill-menu-more label { padding: 0; }
+.sill-error-note {
+    color: @error_color;
+    background: alpha(@error_color, 0.08);
+    border-left: 3px solid @error_color;
+    padding: 6px 6px 6px 12px;
+    margin-top: 6px;
+    margin-bottom: 4px;
+}
 .sill-summary-note {
     font-weight: 600;
     color: @accent_color;

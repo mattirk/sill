@@ -62,6 +62,8 @@ pub struct SessionView {
     shell_bridge: RefCell<Option<super::streams::PtyBridge>>,
     host_bridge: RefCell<Option<super::streams::PtyBridge>>,
     host_cwd: RefCell<Option<std::path::PathBuf>>,
+    /// When a pane last attached again to its running terminal (see `reattach`).
+    last_reattach: std::cell::Cell<Option<std::time::Instant>>,
     /// The terminal is running a login; when it closes the session is opened again.
     login_pending: Rc<std::cell::Cell<bool>>,
     /// `Ready` arrived on the current connection.
@@ -463,6 +465,7 @@ impl SessionView {
             host_open: std::cell::Cell::new(false),
             shell_bridge: RefCell::new(None),
             host_bridge: RefCell::new(None),
+            last_reattach: std::cell::Cell::new(None),
             host_cwd: RefCell::new(None),
             login_pending: login_pending.clone(),
             ready: std::cell::Cell::new(false),
@@ -567,8 +570,8 @@ impl SessionView {
                 }
                 let shell_closed = v.shell_bridge.borrow().as_ref().is_some_and(|b| b.closed());
                 let host_closed = v.host_bridge.borrow().as_ref().is_some_and(|b| b.closed());
-                if shell_closed { v.shell_closed(); }
-                if host_closed { v.host_shell_closed(); }
+                if shell_closed && !v.reattach(&v.terminal, &v.shell_bridge) { v.shell_closed(); }
+                if host_closed && !v.reattach(&v.host_term, &v.host_bridge) { v.host_shell_closed(); }
                 glib::ControlFlow::Continue
             });
         }
@@ -822,12 +825,17 @@ impl SessionView {
                 .or_else(|| session::home().ok());
             let env = [("TERM".into(), "xterm-256color".into()), ("COLORTERM".into(), "truecolor".into()),
                 ("SILL_HOST_SHELL".into(), "1".into()), (changes::HOST_SHELL_GIT_ENV.0.into(), changes::HOST_SHELL_GIT_ENV.1.into())].into();
-            match super::streams::PtyBridge::open(None, &[], &env, dir.as_deref(), self.host_term.column_count().max(20) as u16, self.host_term.row_count().max(5) as u16) {
+            let (cols, rows) = (self.host_term.column_count().max(20) as u16, self.host_term.row_count().max(5) as u16);
+            let label = format!("host:{}", self.id());
+            // the shelf came back (or its connection did): the shell it left is still running
+            let found = super::streams::PtyBridge::find(None, &label).and_then(|t| super::streams::PtyBridge::reattach(&t, &self.host_term, cols, rows).ok());
+            let opened = match found { Some(b) => Ok(b), None => super::streams::PtyBridge::open(None, &label, &[], &env, dir.as_deref(), cols, rows) };
+            match opened {
                 Ok(mut bridge) => match vte4::Pty::foreign_sync(bridge.take_fd(), None::<&gtk::gio::Cancellable>) {
                     Ok(pty) => { self.host_term.set_pty(Some(&pty)); *self.host_bridge.borrow_mut() = Some(bridge); }
-                    Err(e) => { self.conv.add_note(&format!("host shell: {e}")); return; }
+                    Err(e) => { self.conv.add_error(&format!("host shell: {e}")); return; }
                 },
-                Err(e) => { self.conv.add_note(&format!("host shell: {e:#}")); return; }
+                Err(e) => { self.conv.add_error(&format!("host shell: {e:#}")); return; }
             }
             self.host_open.set(true);
         }
@@ -838,6 +846,33 @@ impl SessionView {
         }
         self.bottom.set_visible_child_name("host");
         self.host_term.grab_focus();
+    }
+
+    /// A pane's stream ended. When the terminal itself still runs (the daemon cut a slow viewer
+    /// off, the connection came back), attach again: the screen is redrawn from its recent output
+    /// and a size nudge makes a full-screen program repaint. False when it is really gone.
+    fn reattach(&self, term: &vte4::Terminal, slot: &RefCell<Option<super::streams::PtyBridge>>) -> bool {
+        let Some(id) = slot.borrow().as_ref().map(|b| b.terminal_id.clone()) else { return false };
+        // one attempt per few seconds: a stream that ends at once again is not worth a loop
+        let now = std::time::Instant::now();
+        if self.last_reattach.get().is_some_and(|t| now.duration_since(t) < std::time::Duration::from_secs(3)) { return false; }
+        if !matches!(super::streams::PtyBridge::fate(&id), super::streams::Fate::Running) { return false; }
+        self.last_reattach.set(Some(now));
+        let (cols, rows) = (term.column_count().max(20) as u16, term.row_count().max(5) as u16);
+        let Ok(mut bridge) = super::streams::PtyBridge::reattach(&id, term, cols, rows) else { return false };
+        let Ok(pty) = vte4::Pty::foreign_sync(bridge.take_fd(), None::<&gtk::gio::Cancellable>) else { return false };
+        term.set_pty(Some(&pty));
+        bridge.resize(cols, rows.saturating_sub(1).max(1)).ok();
+        bridge.resize(cols, rows).ok();
+        *slot.borrow_mut() = Some(bridge);
+        true
+    }
+
+    /// End the pane terminals themselves (closing the tab), not only this view of them.
+    fn close_terminals(&self) {
+        for slot in [&self.shell_bridge, &self.host_bridge] {
+            if let Some(b) = slot.borrow_mut().take() { close_in_background(b); }
+        }
     }
 
     /// A pane's pty is done with: clear the screen and leave the dead pty attached until the next
@@ -873,7 +908,7 @@ impl SessionView {
             match self.open_shell() {
                 Ok(()) => self.shell_open.set(true),
                 Err(e) => {
-                    self.conv.add_note(&format!("shell: {e:#}"));
+                    self.conv.add_error(&format!("shell: {e:#}"));
                     self.show_shell(false);
                     return;
                 }
@@ -1008,11 +1043,23 @@ impl SessionView {
         env.entry("TERM".into()).or_insert_with(|| "xterm-256color".into());
         env.entry("COLORTERM".into()).or_insert_with(|| "truecolor".into());
         let env = &env;
-        let mut bridge = super::streams::PtyBridge::open(Some(&self.id()), argv, env, Some(&cwd), cols, rows)?;
+        // the plain shell the pane had before the shelf or its connection went is still running
+        let found = argv.is_empty().then(|| super::streams::PtyBridge::find(Some(&self.id()), "shell")).flatten();
+        let attached = found.and_then(|t| super::streams::PtyBridge::reattach(&t, &self.terminal, cols, rows).ok());
+        let fresh = attached.is_none();
+        let mut bridge = match attached {
+            Some(b) => b,
+            None => super::streams::PtyBridge::open(Some(&self.id()), "shell", argv, env, Some(&cwd), cols, rows)?,
+        };
         let pty = vte4::Pty::foreign_sync(bridge.take_fd(), None::<&gtk::gio::Cancellable>)?;
-        *self.shell_bridge.borrow_mut() = Some(bridge);
+        // a login command replaces the pane's shell: that one ends, it does not linger unseen
+        let id = bridge.terminal_id.clone();
+        let old = self.shell_bridge.borrow_mut().replace(bridge);
+        if let Some(old) = old && old.terminal_id != id {
+            close_in_background(old);
+        }
         self.terminal.set_pty(Some(&pty));
-        self.terminal.feed(b"\x1b[2J\x1b[H");
+        if fresh { self.terminal.feed(b"\x1b[2J\x1b[H"); }
         Ok(())
     }
 
@@ -1050,7 +1097,7 @@ impl SessionView {
                 self.conv.add_note("finish the login in the terminal below (Ctrl+click opens a link); the session continues when it closes");
                 self.show_shell(true);
             }
-            Err(err) => self.conv.add_note(&format!("login: {err:#}")),
+            Err(err) => self.conv.add_error(&format!("login: {err:#}")),
         }
     }
 
@@ -1096,7 +1143,7 @@ impl SessionView {
                         break;
                     }
                     Err(e) => {
-                        v.conv.add_note(&format!("login failed: {e}"));
+                        v.conv.add_error(&format!("login failed: {e}"));
                         v.status.set_text("login needed");
                         v.command(Command::RetrySession);
                         break;
@@ -1629,7 +1676,7 @@ impl SessionView {
             x.connect_clicked(move |_| {
                 let Some(v) = weak.upgrade() else { return };
                 if let Err(e) = super::client::pin(&v.id(), &p, false) {
-                    v.conv.add_note(&format!("unpin: {e:#}"));
+                    v.conv.add_error(&format!("unpin: {e:#}"));
                 }
                 v.refresh_pins();
                 // a folder pin is a mount: the jail is rebuilt (after the current turn if busy);
@@ -1805,7 +1852,7 @@ impl SessionView {
                 self.force_restart.set(true);
                 self.request_restart();
             }
-            Err(e) => self.conv.add_note(&format!("could not save: {e:#}")),
+            Err(e) => self.conv.add_error(&format!("could not save: {e:#}")),
         }
     }
 
@@ -1839,7 +1886,7 @@ impl SessionView {
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(e) => {
-                self.conv.add_note(&format!("could not read {}: {e}", path.display()));
+                self.conv.add_error(&format!("could not read {}: {e}", path.display()));
                 return;
             }
         };
@@ -1854,7 +1901,7 @@ impl SessionView {
         let upload_id = sill_core::sfp_client::new_id();
         match super::client::quick::<serde_json::Value>("_sill/uploads.create", serde_json::json!({"session_id":self.id(),"upload_id":upload_id,"name":name,"mime":"application/octet-stream","data_base64":sill_core::acp::base64(&bytes)})) {
             Ok(_) => self.add_attachment(Attachment { name, mime: "application/octet-stream".into(), kind: AttachmentKind::File { jail_path: upload_id.into() } }),
-            Err(e) => self.conv.add_note(&format!("could not attach {name}: {e:#}")),
+            Err(e) => self.conv.add_error(&format!("could not attach {name}: {e:#}")),
         }
     }
 
@@ -2026,7 +2073,7 @@ impl SessionView {
                 Ok(d) => v.connected(d),
                 Err(e) => {
                     v.status.set_text("failed to start");
-                    v.conv.add_note(&format!("could not start the session: {e}"));
+                    v.conv.add_error(&format!("could not start the session: {e}"));
                     // the prompt that waited for this goes back where it was typed
                     if let Some(text) = v.pending_prompt.borrow_mut().take() {
                         v.prompt.buffer().set_text(&text);
@@ -2085,7 +2132,7 @@ impl SessionView {
         glib::spawn_future_local(async move {
             let Ok(Err(e)) = rx.recv().await else { return };
             let Some(v) = weak.upgrade() else { return };
-            v.conv.add_note(&format!("no checkpoint: {e:#}"));
+            v.conv.add_error(&format!("no checkpoint: {e:#}"));
             if let Some(cb) = v.checkpoint.borrow_mut().take() {
                 cb(None, None);
             }
@@ -2344,6 +2391,7 @@ impl SessionView {
             id.remove();
         }
         self.bridges.borrow_mut().clear();
+        self.close_terminals();
         for m in self.git_monitors.borrow_mut().drain(..) {
             m.cancel();
         }
@@ -2444,7 +2492,7 @@ impl SessionView {
                 self.conv.add_note(&note);
                 self.bridges.borrow_mut().insert(port, b);
             }
-            Err(e) => self.conv.add_note(&format!("{name}: port {port} could not be exposed: {e:#}")),
+            Err(e) => self.conv.add_error(&format!("{name}: port {port} could not be exposed: {e:#}")),
         }
         self.show_procs();
     }
@@ -2597,7 +2645,7 @@ impl SessionView {
             let r = rx.recv().await;
             let Some(v) = weak.upgrade() else { return };
             if let Ok(Err(e)) = r {
-                v.conv.add_note(&format!("process: {e}"));
+                v.conv.add_error(&format!("process: {e}"));
             }
             v.poll_procs();
         });
@@ -2678,4 +2726,9 @@ fn compact_dropdown(d: &gtk::DropDown) {
 /// The auto-allow lock: open when requests are answered by sill, closed when they wait.
 fn lock_glyph(open: bool, color: gtk::gdk::RGBA) -> gtk::Image {
     super::icons::scalable(if open { "sill-lock-open" } else { "sill-lock" }, color)
+}
+
+/// `terminals.close` off the main loop: the daemon answers quickly, but the GTK thread never waits.
+fn close_in_background(bridge: super::streams::PtyBridge) {
+    let _ = std::thread::Builder::new().name("sill-terminal-close".into()).spawn(move || bridge.close());
 }

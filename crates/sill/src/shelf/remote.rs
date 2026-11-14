@@ -61,7 +61,7 @@ pub fn request<T: DeserializeOwned>(r: Request) -> Result<T> {
         drop(slot);
         // These can create processes or start an install. A lost reply is not permission to run
         // them twice; the caller reports the interrupted operation instead.
-        if !matches!(&r, Request::OpenPty { .. } | Request::OpenPort { .. } | Request::HostLogin { .. } | Request::Install(_)) {
+        if !matches!(&r, Request::OpenPort { .. } | Request::HostLogin { .. } | Request::Install(_)) {
             result = connect()?.call_within(sill_core::frontend::METHOD, &r, timeout);
         }
     }
@@ -71,7 +71,7 @@ pub fn request<T: DeserializeOwned>(r: Request) -> Result<T> {
     } else if !matches!(&r, Request::Read { .. } | Request::Find { .. } | Request::Export | Request::Icon(_) |
         Request::EntryCount { .. } | Request::Entries { .. } | Request::Search { .. } | Request::GitStatus { .. } |
         Request::GitSummary { .. } | Request::ChangedLines { .. } | Request::Denied { .. } | Request::ProcList { .. } |
-        Request::ProcTail { .. } | Request::ReadLog { .. } | Request::ResolveImage { .. } | Request::PtyCwd { .. }) {
+        Request::ProcTail { .. } | Request::ReadLog { .. } | Request::ResolveImage { .. }) {
         // Changes made by this frontend should be visible on its very next read.
         invalidate();
     }
