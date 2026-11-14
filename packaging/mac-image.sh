@@ -144,9 +144,9 @@ guest 'curl -fsSL https://sh.rustup.rs | sh -s -- -y -q --profile minimal >/dev/
 guest '. ~/.cargo/env && cd src && SILL_STATE_DIR=/mnt/sill-state ./packaging/deploy-server.sh'
 
 # a disk that failed under the guest loses writes quietly: refuse such an image
-if guest 'sudo dmesg | grep -qiE "I/O error|EXT4-fs error"'; then
-    guest 'sudo dmesg | grep -iE "I/O error|EXT4-fs error" | head -5' >&2
-    echo 'The guest saw disk errors; not keeping this image.' >&2
+if guest 'sudo dmesg | grep -qiE "I/O error|EXT4-fs error|Oops|Internal error"'; then
+    guest 'sudo dmesg | grep -iE "I/O error|EXT4-fs error|Oops|Internal error" | head -5' >&2
+    echo 'The guest saw disk or kernel errors; not keeping this image.' >&2
     exit 1
 fi
 echo 'Cleaning up'
