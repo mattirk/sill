@@ -366,6 +366,8 @@ pub fn expose(path: &Path) -> Result<PathBuf, String> {
     let (Some(dir), Some(shared)) = (DIR.get(), SHARED.get()) else {
         return Err("Sill's VM is not in use.".into());
     };
+    // after a start, stop or restart under way: the folders are read and mounted at a start
+    let _acting = shared.acting.lock().unwrap();
     let vm = shared.vm.lock().unwrap().clone().ok_or("Sill's VM is not running.")?;
     let path = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if !mac_folder(&path) {
@@ -403,6 +405,8 @@ pub fn unshare(path: &Path) -> Result<(), String> {
     let (Some(dir), Some(shared)) = (DIR.get(), SHARED.get()) else {
         return Err("Sill's VM is not in use.".into());
     };
+    // after a start, stop or restart under way: the folders are read and mounted at a start
+    let _acting = shared.acting.lock().unwrap();
     let mut folders = load_folders(dir);
     let slot = folders
         .iter()

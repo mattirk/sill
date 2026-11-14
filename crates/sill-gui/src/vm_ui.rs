@@ -304,6 +304,10 @@ impl App {
                 );
             }
             Event::RemoveFolder(path) => {
+                // not while something else is under way: the press would be lost
+                if self.vm.busy.is_some() || self.vm_phase().is_some_and(|p| p.moving()) {
+                    return Task::none();
+                }
                 if self.vm.armed_remove.as_ref() != Some(&path) {
                     self.vm.armed_remove = Some(path);
                     return Task::none();
@@ -311,9 +315,6 @@ impl App {
                 self.vm.armed_remove = None;
                 if self.demo {
                     self.vm.said = Some(Err(DEMO.into()));
-                    return Task::none();
-                }
-                if self.vm.busy.is_some() {
                     return Task::none();
                 }
                 self.vm.busy = Some("Unsharing…");
@@ -506,13 +507,18 @@ impl App {
                 );
             }
             let remove: Element<'_, Message> = if armed {
-                quiet_button("Unshare?", Some(msg(Event::RemoveFolder(path.clone()))))
+                quiet_button("Unshare?", idle.then(|| msg(Event::RemoveFolder(path.clone()))))
             } else {
-                crate::keys::press(
-                    iced::widget::button(crate::icons::glyph("minus", 13.0, alpha(P.fg, 0.7)))
-                        .padding([6, 8])
-                        .style(style::quiet),
-                    msg(Event::RemoveFolder(path.clone())),
+                // waits while the VM restarts or another change is under way
+                crate::keys::press_maybe(
+                    iced::widget::button(crate::icons::glyph(
+                        "minus",
+                        13.0,
+                        alpha(P.fg, if idle { 0.7 } else { 0.25 }),
+                    ))
+                    .padding([6, 8])
+                    .style(style::quiet),
+                    idle.then(|| msg(Event::RemoveFolder(path.clone()))),
                 )
             };
             folders = folders.push(row![line, remove].spacing(8).align_y(Alignment::Center));
@@ -531,7 +537,7 @@ impl App {
         folders = folders.push(
             row![quiet_button(
                 "Share a folder…",
-                (vm.busy.is_none() && phase == Phase::Ready && !full).then(|| msg(Event::AddFolder)),
+                (idle && phase == Phase::Ready && !full).then(|| msg(Event::AddFolder)),
             )]
             .padding(iced::Padding {
                 top: 6.0,
