@@ -485,10 +485,12 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
         window.add_controller(f2);
     }
 
-    // open the most recent session, or create one with claude
+    // open the most recent session that is still going, or a new one with claude. An ended session
+    // is not reopened by itself: opening a tab starts its jail and agent, and the person closed it
+    // (it comes back from the "+" menu)
     {
         let sessions = store.sessions().unwrap_or_default();
-        match sessions.into_iter().next() {
+        match sessions.into_iter().find(|s| s.ended_at.is_none()) {
             Some(s) => shelf.open_session(s),
             None => {
                 if let Ok(s) = create_session(&store, "claude", "default") {

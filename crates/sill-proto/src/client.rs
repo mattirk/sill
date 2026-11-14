@@ -55,24 +55,37 @@ impl Client {
         // child of a shelf would live — and die — in the shelf's unit); `systemctl --user stop
         // sill-daemon` ends it and sessions stay, they are scopes of their own. Where that fails —
         // no user manager, or a unit of that name still loaded — the daemon is spawned bare.
+        let mut why_bare = String::from("no systemd user instance");
         let unit_started = systemd_user_usable() && {
             let _ = std::process::Command::new("systemctl")
                 .args(["--user", "reset-failed", "--quiet", "sill-daemon.service"])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status();
-            std::process::Command::new("systemd-run")
+            match std::process::Command::new("systemd-run")
                 .args(["--user", "--unit", "sill-daemon", "--collect", "--quiet", "-p", "Slice=app.slice"])
                 .args(["--setenv=HOME", "--setenv=USER", "--setenv=TERM", "--setenv=LANG"])
                 .arg("--")
                 .arg(&exe)
                 .arg("daemon")
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
+                .stdin(std::process::Stdio::null())
+                .output()
+            {
+                Ok(o) if o.status.success() => true,
+                Ok(o) => {
+                    why_bare = format!("systemd-run: {}", String::from_utf8_lossy(&o.stderr).trim());
+                    false
+                }
+                Err(e) => {
+                    why_bare = format!("systemd-run: {e}");
+                    false
+                }
+            }
         };
         if !unit_started {
-            let log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("daemon.log"))?;
+            let mut log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("daemon.log"))?;
+            // the person sees why in the daemon's own log, not on a CLI command's stderr
+            let _ = std::io::Write::write_all(&mut log, format!("sill client: starting the daemon bare ({why_bare})\n").as_bytes());
             let mut cmd = std::process::Command::new(&exe);
             cmd.arg("daemon").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(log);
             // its own session: no terminal hangup reaches it, and it is nobody's job

@@ -957,7 +957,7 @@ fn daemon_cmd(cmd: Option<DaemonCmd>) -> Result<()> {
             let c = sill_proto::Client::connect_or_start()?;
             let s: sill_proto::DaemonStatus = c.call(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default())?;
             println!("sill daemon {} (protocol {}), pid {}, {} mode, up since {}", s.version, s.protocol, s.pid, s.mode, sill_memory::datetime(s.started));
-            println!("sessions: {}", s.launcher);
+            println!("jails:    {}", s.launcher);
             println!("socket:   {}", s.socket);
             println!("sessions: {} in the store, {} running", s.sessions, s.running);
             Ok(())
