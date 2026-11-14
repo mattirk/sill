@@ -129,6 +129,10 @@ fn run(dir: &std::path::Path) -> Result<(), String> {
     if let Err(e) = serve_mac(dir, &vm) {
         eprintln!("sill-gui: Mac operations: {e}");
     }
+    // the person's git identity, so commits made in the VM (agents' in their jails too) are theirs
+    if let Err(e) = share_git_identity(dir) {
+        eprintln!("sill-gui: git identity: {e}");
+    }
     set(Phase::Ready);
     Ok(())
 }
@@ -534,6 +538,32 @@ fn mount_folders(dir: &Path, folders: &[Option<PathBuf>]) -> Result<(), String> 
     );
     guest(dir, &remote, &lines)
         .map_err(|said| format!("Sill could not put the folders in place in its VM: {said}"))
+}
+
+/// Who the person's commits are by on the Mac: git's own answer (`user.name` and `user.email`,
+/// else what git makes of the account), read as values only.
+fn mac_git_identity() -> Option<(String, String)> {
+    let out = std::process::Command::new("/usr/bin/git").args(["var", "GIT_AUTHOR_IDENT"]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // "Name <email> 1700000000 +0200"
+    let ident = String::from_utf8_lossy(&out.stdout);
+    let (name, rest) = ident.trim().split_once(" <")?;
+    let (email, _) = rest.split_once('>')?;
+    (!name.trim().is_empty() && !email.trim().is_empty()).then(|| (name.trim().to_string(), email.trim().to_string()))
+}
+
+/// Give the VM's account the person's git identity, at every start: the VM has no account
+/// details git could make one from, so a commit there failed with no author (the person,
+/// 2026-11-13). Written to the VM user's global config, which the jails see through their home.
+fn share_git_identity(dir: &Path) -> Result<(), String> {
+    let (name, email) = mac_git_identity().ok_or("git on the Mac has no identity to share")?;
+    if name.contains('\n') || email.contains('\n') {
+        return Err("the identity spans lines".into());
+    }
+    let remote = "IFS= read -r n && IFS= read -r e && git config --global user.name \"$n\" && git config --global user.email \"$e\"";
+    guest(dir, remote, &format!("{name}\n{email}\n"))
 }
 
 /// Unmount a shared folder's Mac path in the guest, if it is mounted there; the path on stdin.
