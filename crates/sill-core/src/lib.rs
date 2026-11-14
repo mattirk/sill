@@ -38,6 +38,7 @@ pub mod shim;
 pub mod store;
 pub mod title;
 pub mod wire;
+pub mod workspace;
 pub mod sfp;
 pub mod sfp_client;
 

@@ -108,6 +108,10 @@ static GIT_VIEWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::n
 pub struct Git {
     work_tree: PathBuf,
     dir: PathBuf,
+    /// The repository's own git directory (a linked worktree's, for its index).
+    gitdir: PathBuf,
+    /// Where objects and refs live: the git directory, or the main one of a linked worktree.
+    common: PathBuf,
 }
 
 impl Git {
@@ -135,8 +139,8 @@ impl Git {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
         std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
-        let view = Git { work_tree: repo.to_path_buf(), dir };
-        for (base, name) in [(&common, "objects"), (&common, "refs"), (&common, "packed-refs"), (&common, "info"), (&common, "shallow"), (&gitdir, "index")] {
+        let view = Git { work_tree: repo.to_path_buf(), dir, gitdir: gitdir.clone(), common: common.clone() };
+        for (base, name) in [(&common, "objects"), (&common, "refs"), (&common, "packed-refs"), (&common, "info"), (&common, "shallow"), (&common, "logs"), (&gitdir, "index")] {
             let src = base.join(name);
             if src.exists() {
                 std::os::unix::fs::symlink(&src, view.dir.join(name))?;
@@ -165,6 +169,56 @@ impl Git {
             .env_remove("GIT_COMMON_DIR")
             .current_dir(&self.work_tree);
         c
+    }
+
+    /// A `git` on this view that may write: objects, loose refs and reflogs land in the
+    /// repository through the view's links, and the index is named directly so that git's lock
+    /// file is renamed onto the real index rather than over the view's link. Nothing runs from
+    /// the repository's config, as for [`Git::cmd`]; automatic gc and maintenance are off, and
+    /// `file://` transport is allowed for an import from another view. A ref git would rewrite
+    /// by replacing `packed-refs` would replace the view's link instead: callers update loose refs
+    /// only (`update-ref`, `read-tree`, `fetch` into a new ref).
+    pub fn cmd_write(&self) -> std::process::Command {
+        let mut c = std::process::Command::new("git");
+        c.arg("--git-dir").arg(&self.dir).arg("--work-tree").arg(&self.work_tree);
+        for kv in [
+            "core.fsmonitor=false",
+            "core.hooksPath=/dev/null",
+            "diff.external=",
+            "submodule.recurse=false",
+            "core.pager=cat",
+            "protocol.allow=never",
+            "protocol.file.allow=always",
+            "gc.auto=0",
+            "maintenance.auto=false",
+            "fetch.writeCommitGraph=false",
+            "core.logAllRefUpdates=true",
+        ] {
+            c.arg("-c").arg(kv);
+        }
+        c.env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_INDEX_FILE", self.gitdir.join("index"))
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .current_dir(&self.work_tree);
+        c
+    }
+
+    /// The view's own git directory: a sanitized stand-in another git may read (an import's source).
+    pub fn view_dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// The repository's real object store.
+    pub fn objects(&self) -> PathBuf {
+        self.common.join("objects")
+    }
+
+    /// The repository's real git directory and the one objects and refs live in.
+    pub fn dirs(&self) -> (&Path, &Path) {
+        (&self.gitdir, &self.common)
     }
 
     /// `diff` arguments that keep git from calling out: no external diff, no textconv, no submodules.
