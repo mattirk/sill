@@ -105,6 +105,9 @@ pub struct SessionView {
     store: Rc<Store>,
     /// Markdown of the agent message being streamed (persisted at turn end).
     agent_md: RefCell<String>,
+    /// The session is ending and its agent writes the summary (docs/memory.md §2.2): what gets the
+    /// answer when the turn stops — or None when the agent is gone or too slow.
+    summarizing: RefCell<Option<Box<dyn FnOnce(Option<String>)>>>,
     /// Stored entry `seq` per live tool-call id, so title/status updates reach the transcript too.
     tool_seqs: RefCell<HashMap<String, i64>>,
     /// After a resume with replay: ignore replayed events until the first turn starts.
@@ -429,6 +432,7 @@ impl SessionView {
             driver: RefCell::new(None),
             store,
             agent_md: RefCell::new(String::new()),
+            summarizing: RefCell::new(None),
             tool_seqs: RefCell::new(HashMap::new()),
             replaying: RefCell::new(false),
             on_busy: RefCell::new(None),
@@ -1971,6 +1975,18 @@ impl SessionView {
         self.restart_for_jail();
     }
 
+    /// Which earlier sessions the agent is told about (docs/memory.md §2.3), from the session menu:
+    /// stored; the changed standing block goes with the next prompt, no restart.
+    pub fn set_memory_scope(&self, scope: &str) {
+        if self.session.borrow().memory_scope == scope {
+            return;
+        }
+        let _ = self.store.set_memory_scope(&self.id(), scope);
+        self.session.borrow_mut().memory_scope = scope.to_string();
+        let resolved = sill_core::memory::Scope::resolve(scope, !self.store.pins(&self.id()).unwrap_or_default().is_empty());
+        self.conv.add_note(&format!("memory: {}; the agent is told with the next prompt", resolved.id()));
+    }
+
     /// The session's policy, from the session menu; the jail is rebuilt with it.
     pub fn set_policy(self: &Rc<Self>, name: &str) {
         if self.session.borrow().policy == name {
@@ -2069,7 +2085,59 @@ impl SessionView {
         }
     }
 
+    /// The agent is up and between turns: it can be asked one more thing.
+    pub fn agent_idle(&self) -> bool {
+        self.driver.borrow().is_some() && self.ready.get() && !self.busy.get()
+    }
+
+    /// Ask the agent for the session's summary as its last turn (docs/memory.md §2.2): the prompt
+    /// goes as a plain turn — no standing block, no user entry (a note marks it in the transcript),
+    /// the answer shows and is stored like any agent message — and `then` gets its text when the
+    /// turn stops, None when the agent is gone, busy, or has not answered within 90 seconds (the
+    /// turn is cancelled then; the caller writes the mechanical summary).
+    pub fn ask_summary(self: &Rc<Self>, prompt: &str, then: Box<dyn FnOnce(Option<String>)>) {
+        let Some(d) = self.driver.borrow().as_ref().map(|d| d.commands.clone()) else {
+            then(None);
+            return;
+        };
+        if !self.agent_idle() || d.try_send(Command::Prompt(prompt.to_string(), vec![])).is_err() {
+            then(None);
+            return;
+        }
+        self.conv.add_note("the session ends: the agent writes its summary for memory");
+        let _ = self.store.append(&self.id(), "note", "the session ends: the agent writes its summary for memory", "");
+        *self.summarizing.borrow_mut() = Some(then);
+        let weak = Rc::downgrade(self);
+        glib::timeout_add_local_once(std::time::Duration::from_secs(90), move || {
+            let Some(v) = weak.upgrade() else { return };
+            let cb = v.summarizing.borrow_mut().take();
+            if let Some(cb) = cb {
+                if let Some(d) = v.driver.borrow().as_ref() {
+                    let _ = d.commands.try_send(Command::Cancel);
+                }
+                cb(None);
+            }
+        });
+    }
+
     /// Send a prompt; false if the agent is busy or the session is down.
+    /// The summary turn is running (the tab was closed, the agent is writing).
+    pub fn summary_pending(&self) -> bool {
+        self.summarizing.borrow().is_some()
+    }
+
+    /// The tab was closed again while the agent writes its summary: the turn is cancelled and what
+    /// it wrote so far is the summary, marked as cut short (None when it had written nothing).
+    pub fn cut_summary_short(&self) {
+        let Some(cb) = self.summarizing.borrow_mut().take() else { return };
+        if let Some(d) = self.driver.borrow().as_ref() {
+            let _ = d.commands.try_send(Command::Cancel);
+        }
+        let partial = self.agent_md.borrow().trim().to_string();
+        let answer = (!partial.is_empty()).then(|| format!("{partial}\n(cut short: the tab was closed again while the agent wrote this)"));
+        glib::idle_add_local_once(move || cb(answer));
+    }
+
     pub fn send(self: &Rc<Self>, text: &str) -> bool {
         let trace = std::env::var_os("SILL_TRACE").is_some();
         let t0 = std::time::Instant::now();
@@ -2102,7 +2170,16 @@ impl SessionView {
             .ok()
             .and_then(|h| sill_core::policy::Policy::load(&self.session.borrow().policy, &h).ok().map(|p| sill_core::instructions::facts_block(&p, &h)))
             .unwrap_or_default();
-        let standing = sill_core::instructions::standing_block(&facts, &sill_core::instructions::load_global());
+        // what earlier sessions in these folders did (docs/memory.md §2.3): changes only when one
+        // in scope ends or the scope changes, so the block stays the same across prompts
+        let memory = match session::home() {
+            Ok(h) => {
+                let pins = self.store.pins(&self.id()).unwrap_or_default();
+                sill_core::memory::recall(&self.store, &self.session.borrow(), &pins, &h, sill_core::config::load().memory_recall())
+            }
+            Err(_) => String::new(),
+        };
+        let standing = sill_core::instructions::standing_block(&facts, &memory, &sill_core::instructions::load_global());
         let standing_due = self.sent_standing.borrow().as_deref() != Some(standing.as_str());
         let outgoing = format!("{}{}", self.context_prefix(standing_due.then_some(standing.as_str())), text);
         lap("prefix");
@@ -2239,7 +2316,13 @@ impl SessionView {
                 if let Some(cb) = self.on_busy.borrow().as_ref() {
                     cb(&self.id(), false);
                 }
+                // the summary turn: its text goes to whoever asked, once this event is handled
+                let answer = self.agent_md.borrow().clone();
                 self.flush_agent();
+                let summary_cb = self.summarizing.borrow_mut().take();
+                if let Some(cb) = summary_cb {
+                    glib::idle_add_local_once(move || cb(Some(answer)));
+                }
                 let id = self.id();
                 let weak = Rc::downgrade(self);
                 glib::idle_add_local_once(move || {
@@ -2282,6 +2365,11 @@ impl SessionView {
                 }
                 self.flush_agent();
                 *self.driver.borrow_mut() = None;
+                // an agent that went away mid-summary: the mechanical one it is
+                let summary_cb = self.summarizing.borrow_mut().take();
+                if let Some(cb) = summary_cb {
+                    glib::idle_add_local_once(move || cb(None));
+                }
             }
             _ => {}
         }

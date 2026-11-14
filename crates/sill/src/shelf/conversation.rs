@@ -1189,6 +1189,8 @@ popover.sill-menu > contents { padding: 4px; min-width: 180px; }
 .sill-menu-item:hover .sill-menu-icon { opacity: 1; }
 .sill-menu-sep { margin: 4px 6px; opacity: 0.5; }
 .sill-menu-caption { font-size: 80%; opacity: 0.5; padding: 2px 10px; }
+.sill-menu-sub { font-size: 80%; }
+.sill-menu-search { margin: 2px 6px 4px; }
 /* session menu (tab glyph / right-click): key–value rows, the jail's whereabouts as a caption */
 popover.sill-session-menu > contents { padding: 10px 12px; min-width: 260px; }
 .sill-session-key { opacity: 0.6; }

@@ -16,6 +16,7 @@ pub mod keep;
 pub mod launcher;
 pub mod ledger;
 pub mod login;
+pub mod memory;
 pub mod mounts;
 pub mod paths;
 pub mod policy;

@@ -24,6 +24,17 @@ pub struct Session {
     pub agent_settings: AgentSettings,
     /// Desktop access override: "" (the global default), "none", "x11", "x11+dbus" (SPEC §4.2).
     pub desktop: String,
+    /// When the session ended — its tab closed (docs/memory.md §2.1); None while it is open.
+    pub ended_at: Option<i64>,
+    /// What came of it, written at the end: by its agent (`summary_kind` "agent") or by sill from
+    /// the facts ("auto"); empty until the first end.
+    pub summary: String,
+    pub summary_kind: String,
+    /// Which earlier sessions its agent is told about (docs/memory.md §2.3): "here", "everywhere",
+    /// "off"; "" = the default from the pins (`sill_memory::Scope::resolve`).
+    pub memory_scope: String,
+    /// The ended session this one was opened from with *New here*: its summary leads the recall.
+    pub follows: String,
 }
 
 /// The agent controls as set by the person (SPEC §3.2): mode id and config option values. Kept twice:
@@ -105,7 +116,9 @@ impl Store {
                  session_id TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL,
                  kind TEXT NOT NULL, text TEXT NOT NULL, extra TEXT NOT NULL DEFAULT '',
                  PRIMARY KEY (session_id, seq));
-             CREATE TABLE IF NOT EXISTS agent_settings (agent TEXT PRIMARY KEY, settings TEXT NOT NULL);",
+             CREATE TABLE IF NOT EXISTS agent_settings (agent TEXT PRIMARY KEY, settings TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS memories (
+                 session_id TEXT NOT NULL, ts INTEGER NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL);",
         )?;
         // additive migrations
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN auto_allow INTEGER NOT NULL DEFAULT 0", []);
@@ -115,6 +128,14 @@ impl Store {
         let _ = conn.execute("ALTER TABLE entries ADD COLUMN tool_kind TEXT NOT NULL DEFAULT ''", []);
         let _ = conn.execute("ALTER TABLE entries ADD COLUMN detail TEXT NOT NULL DEFAULT ''", []);
         let _ = conn.execute("ALTER TABLE entries ADD COLUMN diff TEXT NOT NULL DEFAULT ''", []);
+        // memory M0 (2026-11-01): when a session ended and what came of it
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN ended_at INTEGER", []);
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN summary TEXT NOT NULL DEFAULT ''", []);
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN summary_kind TEXT NOT NULL DEFAULT ''", []);
+        // memory M1: recall scope, New here, and the searchable text kept by triggers
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN memory_scope TEXT NOT NULL DEFAULT ''", []);
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN follows TEXT NOT NULL DEFAULT ''", []);
+        sill_memory::install(&conn).context("memory index")?;
         Ok(Self { conn })
     }
 
@@ -161,7 +182,7 @@ impl Store {
 
     pub fn sessions(&self) -> Result<Vec<Session>> {
         let mut st = self.conn.prepare(
-            "SELECT id, agent, title, created_at, last_used, acp_session_id, policy, auto_allow, agent_settings, desktop FROM sessions ORDER BY last_used DESC",
+            "SELECT id, agent, title, created_at, last_used, acp_session_id, policy, auto_allow, agent_settings, desktop, ended_at, summary, summary_kind, memory_scope, follows FROM sessions ORDER BY last_used DESC",
         )?;
         let rows = st.query_map([], |r| {
             Ok(Session {
@@ -175,6 +196,11 @@ impl Store {
                 auto_allow: r.get::<_, i32>(7)? != 0,
                 agent_settings: serde_json::from_str(&r.get::<_, String>(8)?).unwrap_or_default(),
                 desktop: r.get(9)?,
+                ended_at: r.get(10)?,
+                summary: r.get(11)?,
+                summary_kind: r.get(12)?,
+                memory_scope: r.get(13)?,
+                follows: r.get(14)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -192,6 +218,11 @@ impl Store {
             auto_allow: false,
             agent_settings: self.agent_settings(agent), // the agent type's default
             desktop: String::new(),
+            ended_at: None,
+            summary: String::new(),
+            summary_kind: String::new(),
+            memory_scope: String::new(),
+            follows: String::new(),
         };
         self.conn.execute(
             "INSERT INTO sessions (id, agent, title, created_at, last_used, acp_session_id, policy, agent_settings) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7)",
@@ -215,7 +246,61 @@ impl Store {
         Ok(())
     }
 
+    /// The session ended: when, and what came of it (docs/memory.md §2.2); `kind` is "agent" or "auto".
+    pub fn end(&self, id: &str, summary: &str, kind: &str) -> Result<()> {
+        self.conn.execute("UPDATE sessions SET ended_at = ?2, summary = ?3, summary_kind = ?4 WHERE id = ?1", params![id, now(), summary, kind])?;
+        Ok(())
+    }
+
+    /// The session's recall scope (docs/memory.md §2.3); "" = the default from its pins.
+    pub fn set_memory_scope(&self, id: &str, scope: &str) -> Result<()> {
+        self.conn.execute("UPDATE sessions SET memory_scope = ?2 WHERE id = ?1", params![id, scope])?;
+        Ok(())
+    }
+
+    /// The session was opened from `from` with *New here*: that one's summary leads its recall.
+    pub fn set_follows(&self, id: &str, from: &str) -> Result<()> {
+        self.conn.execute("UPDATE sessions SET follows = ?2 WHERE id = ?1", params![id, from])?;
+        Ok(())
+    }
+
+    /// The connection, for the memory queries (`sill_memory`), which read the same tables on the
+    /// host as in the jail's snapshot.
+    pub fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
+    /// An ended session opened again: open until it ends next; the summary stays until replaced.
+    pub fn reopen(&self, id: &str) -> Result<()> {
+        self.conn.execute("UPDATE sessions SET ended_at = NULL WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// The first thing the person asked in a session, if anything.
+    pub fn first_user_text(&self, id: &str) -> Result<Option<String>> {
+        let mut st = self.conn.prepare("SELECT text FROM entries WHERE session_id = ?1 AND kind = 'user' ORDER BY seq LIMIT 1")?;
+        let mut rows = st.query(params![id])?;
+        Ok(match rows.next()? {
+            Some(r) => Some(r.get(0)?),
+            None => None,
+        })
+    }
+
+    /// A memory entry on a session: a `note` the person wrote (docs/memory.md §2.2).
+    pub fn add_memory(&self, id: &str, kind: &str, text: &str) -> Result<()> {
+        self.conn.execute("INSERT INTO memories (session_id, ts, kind, text) VALUES (?1, ?2, ?3, ?4)", params![id, now(), kind, text])?;
+        Ok(())
+    }
+
+    /// (ts, kind, text) of a session's memory entries, oldest first.
+    pub fn memories(&self, id: &str) -> Result<Vec<(i64, String, String)>> {
+        let mut st = self.conn.prepare("SELECT ts, kind, text FROM memories WHERE session_id = ?1 ORDER BY ts, rowid")?;
+        let rows = st.query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     pub fn delete(&self, id: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM memories WHERE session_id = ?1", params![id])?;
         self.conn.execute("DELETE FROM entries WHERE session_id = ?1", params![id])?;
         self.conn.execute("DELETE FROM session_pins WHERE session_id = ?1", params![id])?;
         self.conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
@@ -395,6 +480,36 @@ mod tests {
         let back = store.sessions().unwrap().into_iter().find(|s| s.id == fresh.id).unwrap();
         assert_eq!(back.agent_settings.config.get("effort").map(String::as_str), Some("high"));
         assert!(store.create("gemini", "default").unwrap().agent_settings.config.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_session_ends_reopens_and_its_memory_goes_with_it() {
+        let dir = std::env::temp_dir().join(format!("sill-store-memory-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("s.db")).unwrap();
+        let s = store.create("claude", "default").unwrap();
+        let get = |id: &str| store.sessions().unwrap().into_iter().find(|s| s.id == id).unwrap();
+        assert!(get(&s.id).ended_at.is_none());
+        assert_eq!(store.first_user_text(&s.id).unwrap(), None);
+        store.append(&s.id, "agent", "hello", "").unwrap();
+        store.append(&s.id, "user", "fix the proxy", "").unwrap();
+        store.append(&s.id, "user", "and the tests", "").unwrap();
+        assert_eq!(store.first_user_text(&s.id).unwrap().as_deref(), Some("fix the proxy"));
+        store.end(&s.id, "fixed the proxy\nin proxy.rs", "agent").unwrap();
+        let e = get(&s.id);
+        assert!(e.ended_at.is_some());
+        assert_eq!((e.summary.as_str(), e.summary_kind.as_str()), ("fixed the proxy\nin proxy.rs", "agent"));
+        // reopened: open again, the summary stays until the next end replaces it
+        store.reopen(&s.id).unwrap();
+        let r = get(&s.id);
+        assert!(r.ended_at.is_none());
+        assert_eq!(r.summary, "fixed the proxy\nin proxy.rs");
+        store.add_memory(&s.id, "note", "the person's note").unwrap();
+        assert_eq!(store.memories(&s.id).unwrap().iter().map(|m| m.2.as_str()).collect::<Vec<_>>(), ["the person's note"]);
+        store.delete(&s.id).unwrap();
+        assert!(store.memories(&s.id).unwrap().is_empty());
+        assert!(store.sessions().unwrap().iter().all(|x| x.id != s.id));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

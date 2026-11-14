@@ -1743,9 +1743,18 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sill-memory",
  "similar",
  "toml",
  "tracing",
+]
+
+[[package]]
+name = "sill-memory"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "rusqlite",
 ]
 
 [[package]]
@@ -1763,6 +1772,7 @@ dependencies = [
  "serde_json",
  "shell-words",
  "sill-core",
+ "sill-memory",
  "sourceview5",
  "toml",
  "vte4",
@@ -1775,9 +1785,11 @@ name = "sill-shim"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "rusqlite",
  "rustix",
  "serde",
  "serde_json",
+ "sill-memory",
 ]
 
 [[package]]

@@ -107,6 +107,7 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
             return error_window(app, &format!("sill cannot open its session store:\n{e:#}"));
         }
     };
+    refresh_memory(); // the jail's snapshot follows the store from the start
 
     let window = gtk::ApplicationWindow::builder()
         .application(app)
@@ -1000,6 +1001,34 @@ impl Shelf {
         }
         grid.attach(&key("Desktop"), 0, 3, 1, 1);
         grid.attach(&desk, 1, 3, 1, 1);
+        // memory scope (docs/memory.md §2.3): which earlier sessions the agent is told about
+        let scopes = ["", "here", "everywhere", "off"];
+        let pinned = !self.store.pins(id).unwrap_or_default().is_empty();
+        let scope_default = format!("default ({})", sill_core::memory::Scope::resolve("", pinned).id());
+        let mem = gtk::DropDown::from_strings(&[scope_default.as_str(), "here", "everywhere", "off"]);
+        mem.set_selected(scopes.iter().position(|c| *c == s.memory_scope).unwrap_or(0) as u32);
+        if sill_core::config::load().memory() {
+            mem.set_tooltip_text(Some("Earlier sessions the agent is told about when it starts. here: the last ones in the pinned folders, their parents and children, nearest first. everywhere: the last ones on this machine. off: none. The default is here with pins, everywhere without. Either way the agent can search all of memory with sill-memory."));
+        } else {
+            mem.set_sensitive(false);
+            mem.set_tooltip_text(Some("Memory is off (Settings)"));
+        }
+        {
+            let shelf = self.clone();
+            let sid = id.to_string();
+            mem.connect_selected_notify(move |d| {
+                let Some(scope) = scopes.get(d.selected() as usize) else { return };
+                let view = shelf.views.borrow().get(&sid).cloned();
+                match view {
+                    Some(v) => v.set_memory_scope(scope),
+                    None => {
+                        let _ = shelf.store.set_memory_scope(&sid, scope);
+                    }
+                }
+            });
+        }
+        grid.attach(&key("Memory"), 0, 4, 1, 1);
+        grid.attach(&mem, 1, 4, 1, 1);
         // where the jail runs (SPEC §4.7 launcher modes), copyable
         let unit = sill_core::session::unit_name(id);
         let whereabouts = match sill_core::launcher::current().mode {
@@ -1020,14 +1049,14 @@ impl Shelf {
                 shelf.open_log(&sid, &title);
             });
         }
-        grid.attach(&key("Log"), 0, 4, 1, 1);
-        grid.attach(&log_btn, 1, 4, 1, 1);
+        grid.attach(&key("Log"), 0, 5, 1, 1);
+        grid.attach(&log_btn, 1, 5, 1, 1);
         let foot = gtk::Label::new(Some(&whereabouts));
         foot.add_css_class("sill-menu-caption");
         foot.set_xalign(0.0);
         foot.set_selectable(true);
         foot.set_wrap(true);
-        grid.attach(&foot, 0, 5, 2, 1);
+        grid.attach(&foot, 0, 6, 2, 1);
         pop.set_child(Some(&grid));
         pop.popup();
     }
@@ -1088,6 +1117,19 @@ impl Shelf {
             });
             return;
         }
+        // an ended session comes back: open again, its last summary shown first
+        let note = match (&note, s.ended_at) {
+            (None, Some(t)) if !s.summary.is_empty() => {
+                let _ = self.store.reopen(&id);
+                Some(format!("resumed; the session ended {} with this summary:\n{}", sill_core::memory::date(t), s.summary))
+            }
+            _ => {
+                if s.ended_at.is_some() {
+                    let _ = self.store.reopen(&id);
+                }
+                note
+            }
+        };
         let view = SessionView::new(s.clone(), self.store.clone());
         if let Some(n) = &note {
             view.conv.add_note(n);
@@ -1193,9 +1235,47 @@ impl Shelf {
         });
     }
 
+    /// The tab closes: the session ends (docs/memory.md §2.2). With memory on, its agent — when
+    /// it is up, idle and has said anything — writes the summary as its last turn while the tab
+    /// stays; then the end is recorded, the view goes and the jail stops. Without the agent, or
+    /// with memory off, sill's own summary from the facts, and the same end at once.
     fn close_session(self: &Rc<Self>, id: &str) {
-        self.close_view(id);
-        stop_then(id, || {});
+        let view = self.views.borrow().get(id).cloned();
+        // closed again while the summary is written: end now with what the agent has so far
+        if let Some(v) = view.as_ref().filter(|v| v.summary_pending()) {
+            self.set_status("the session ends: summary cut short");
+            v.cut_summary_short();
+            return;
+        }
+        let stored = self.store.sessions().unwrap_or_default().into_iter().find(|s| s.id == id);
+        let (Some(view), Some(stored)) = (view, stored) else {
+            self.close_view(id);
+            stop_then(id, || {});
+            return;
+        };
+        let home = session::home().unwrap_or_default();
+        let kept_dir = sill_core::session::state_dir(session::uid(), id).map(|d| d.join("kept")).unwrap_or_default();
+        let facts = sill_core::memory::collect(&self.store, &stored, &kept_dir);
+        let prompt = sill_core::memory::summary_prompt(&facts, &home);
+        let shelf = self.clone();
+        let sid = id.to_string();
+        let finish = move |answer: Option<String>| {
+            let (summary, kind) = match answer.map(|a| a.trim().to_string()).filter(|a| !a.is_empty()) {
+                Some(a) => (a, "agent"),
+                None => (sill_core::memory::auto_summary(&facts, sill_core::store::now(), &home), "auto"),
+            };
+            let _ = shelf.store.end(&sid, &summary, kind);
+            refresh_memory();
+            shelf.close_view(&sid);
+            stop_then(&sid, || {});
+        };
+        let said_anything = self.store.count_kind(id, "agent").unwrap_or(0) > 0;
+        if sill_core::config::load().memory() && said_anything && view.agent_idle() {
+            self.set_status("the session ends: its summary is being written");
+            view.ask_summary(&prompt, Box::new(finish));
+        } else {
+            finish(None);
+        }
     }
 
     /// Drop the tab and the view; the jail is stopped separately (it can take seconds).
@@ -1224,26 +1304,43 @@ impl Shelf {
         let registry = agents::load(&home);
         // a quiet row: icon, name, nothing else; the glyph takes the menu's own text colour
         let color = menu.color();
-        let row = |agent: Option<&agents::Agent>, text: &str| -> gtk::Button {
+        // `sub`: a dim second line under the name (an ended session's summary, docs/memory.md §2.5)
+        let row = |agent: Option<&agents::Agent>, text: &str, sub: Option<&str>| -> gtk::Button {
             let b = gtk::Button::new();
             b.add_css_class("flat");
             b.add_css_class("sill-menu-item");
             let h = gtk::Box::new(gtk::Orientation::Horizontal, 10);
             let i = super::icons::image(agent, color, 15);
             i.add_css_class("sill-menu-icon");
+            i.set_valign(gtk::Align::Start);
             let l = gtk::Label::new(Some(text));
             l.set_xalign(0.0);
             l.set_hexpand(true);
             l.set_ellipsize(gtk::pango::EllipsizeMode::End);
             h.append(&i);
-            h.append(&l);
+            match sub {
+                Some(sub) => {
+                    let v = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                    v.set_hexpand(true);
+                    let s = gtk::Label::new(Some(sub));
+                    s.set_xalign(0.0);
+                    s.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                    s.set_max_width_chars(44);
+                    s.add_css_class("dim-label");
+                    s.add_css_class("sill-menu-sub");
+                    v.append(&l);
+                    v.append(&s);
+                    h.append(&v);
+                }
+                None => h.append(&l),
+            }
             b.set_child(Some(&h));
             b
         };
         // only agents that can actually start here: enabled, and their command exists (a built-in
         // whose package was removed on the Agents page drops out until it is installed again)
         for (id, agent) in registry.iter().filter(|(_, a)| a.enabled && sill_core::registry::available(a, &home).is_some()) {
-            let b = row(Some(agent), &agent.name);
+            let b = row(Some(agent), &agent.name, None);
             let s = self.clone();
             let pop = pop.clone();
             let id = id.clone();
@@ -1291,6 +1388,7 @@ impl Shelf {
                         stop_then(&id.clone(), move || {
                             let _ = sill_core::session::remove_state(session::uid(), &id);
                             let _ = s.store.delete(&id);
+                            refresh_memory();
                         });
                     }
                 });
@@ -1299,9 +1397,27 @@ impl Shelf {
             head_row.append(&head);
             head_row.append(&all);
             menu.append(&head_row);
+            // search over memory (docs/memory.md §2.5): titles, summaries, notes, the person's
+            // prompts, with folder: agent: since: — the list keeps the hits, best first
+            let search = gtk::SearchEntry::new();
+            search.add_css_class("sill-menu-search");
+            search.set_tooltip_text(Some("Search the sessions' titles, summaries, notes and your prompts. folder:~/path, agent:claude and since:30d narrow it."));
+            menu.append(&search);
+            let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            let none = gtk::Label::new(Some("nothing found"));
+            none.add_css_class("sill-menu-caption");
+            none.set_xalign(0.0);
+            none.set_visible(false);
+            menu.append(&list);
+            menu.append(&none);
+            let mut lines: Vec<(String, gtk::Box)> = Vec::new();
             for sess in stored {
                 let line = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-                let b = row(registry.get(&sess.agent), &sess.title);
+                let sub = sess.ended_at.filter(|_| !sess.summary.is_empty()).map(|t| format!("{} · {}", sill_core::memory::date(t), sill_core::memory::first_line(&sess.summary)));
+                let b = row(registry.get(&sess.agent), &sess.title, sub.as_deref());
+                if !sess.summary.is_empty() {
+                    b.set_tooltip_text(Some(&sess.summary));
+                }
                 b.set_hexpand(true);
                 let del = super::icons::glyph_button("sill-trash");
                 del.add_css_class("flat");
@@ -1327,15 +1443,88 @@ impl Shelf {
                         stop_then(&id, move || {
                             let _ = sill_core::session::remove_state(session::uid(), &id2);
                             let _ = s.store.delete(&id2);
+                            refresh_memory();
                         });
                     });
                 }
                 line.append(&b);
+                // an ended session: a new one in the same folders, told this one's summary first
+                if sess.ended_at.is_some() && !sess.summary.is_empty() {
+                    let here = super::icons::glyph_button("sill-plus");
+                    here.add_css_class("flat");
+                    here.add_css_class("sill-menu-trash");
+                    here.set_tooltip_text(Some("New here: a new session with the same agent, policy and pins, told this one's summary first"));
+                    let s = self.clone();
+                    let pop = pop.clone();
+                    let sess = sess.clone();
+                    here.connect_clicked(move |_| {
+                        pop.popdown();
+                        s.new_here(&sess);
+                    });
+                    line.append(&here);
+                }
                 line.append(&del);
-                menu.append(&line);
+                list.append(&line);
+                lines.push((sess.id.clone(), line));
+            }
+            {
+                let shelf = self.clone();
+                let list = list.clone();
+                let none = none.clone();
+                search.connect_search_changed(move |e| {
+                    let text = e.text().to_string();
+                    let q = sill_memory::Query::parse(&text, &home);
+                    if q.is_empty() {
+                        for (_, line) in &lines {
+                            line.set_visible(true);
+                        }
+                        none.set_visible(false);
+                        return;
+                    }
+                    let hits = sill_memory::search(shelf.store.conn(), &q, sill_core::store::now(), 500).unwrap_or_default();
+                    let mut prev: Option<gtk::Box> = None;
+                    for h in &hits {
+                        if let Some((_, line)) = lines.iter().find(|(id, _)| *id == h.session.id) {
+                            list.reorder_child_after(line, prev.as_ref());
+                            prev = Some(line.clone());
+                        }
+                    }
+                    let mut shown = 0;
+                    for (id, line) in &lines {
+                        let hit = hits.iter().any(|h| h.session.id == *id);
+                        line.set_visible(hit);
+                        shown += hit as usize;
+                    }
+                    none.set_visible(shown == 0);
+                });
             }
         }
     }
+
+    /// *New here* on an ended session (docs/memory.md §2.5): a new session with its agent, policy,
+    /// desktop access, memory scope and pins, whose recall leads with that session's summary.
+    fn new_here(self: &Rc<Self>, from: &Session) {
+        let Ok(s) = self.store.create(&from.agent, &from.policy) else { return };
+        for p in self.store.pins(&from.id).unwrap_or_default() {
+            let _ = self.store.pin(&s.id, &p);
+        }
+        let _ = self.store.set_desktop(&s.id, &from.desktop);
+        let _ = self.store.set_memory_scope(&s.id, &from.memory_scope);
+        let _ = self.store.set_follows(&s.id, &from.id);
+        let Some(s) = self.store.sessions().unwrap_or_default().into_iter().find(|x| x.id == s.id) else { return };
+        let note = format!("new here, after “{}” ({}): its summary goes to the agent first", from.title, from.ended_at.map(sill_core::memory::date).unwrap_or_default());
+        self.open_session_with(s, Some(note));
+    }
+}
+
+/// Write the jail's memory snapshot anew off the GTK thread (docs/memory.md §2.3): when a session
+/// ends or is deleted, at start, when memory is switched. Removes it with memory off.
+pub fn refresh_memory() {
+    std::thread::spawn(|| {
+        if let Err(e) = sill_core::memory::refresh_snapshot() {
+            eprintln!("memory snapshot: {e:#}");
+        }
+    });
 }
 
 /// What the shelf shows when it cannot run at all: the reason, in a window, instead of a crash.

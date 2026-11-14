@@ -112,12 +112,47 @@ enum Cmd {
         #[arg(long)]
         method: Option<String>,
     },
+    /// What sill remembers of ended sessions (docs/memory.md)
+    Memory {
+        #[command(subcommand)]
+        cmd: MemoryCmd,
+    },
     /// Show a policy as sill reads it
     Policy {
         /// name (searched in ~/.config/sill/policies, /etc/sill/policies, built-in) or path
         #[arg(default_value = "default")]
         name: String,
     },
+}
+
+#[derive(Subcommand)]
+enum MemoryCmd {
+    /// Ended sessions, newest first: id, date, agent, title, the summary's first line
+    List,
+    /// One session's summary and facts (ID: an id, its first characters, or the exact title)
+    Show { id: Vec<String> },
+    /// Sessions whose title, summary, notes or prompts hold every word (also folder:PATH agent:NAME since:30d)
+    Search {
+        words: Vec<String>,
+        #[arg(long)]
+        folder: Option<String>,
+        #[arg(long)]
+        agent: Option<String>,
+        /// 30d, 12h, 2w …
+        #[arg(long)]
+        since: Option<String>,
+    },
+    /// One session's conversation: the person's and the agent's text, a tool call per line
+    Transcript {
+        id: Vec<String>,
+        /// only the messages holding every one of these words (agents' text included)
+        #[arg(long)]
+        grep: Option<String>,
+    },
+    /// What a session's agent is told about earlier sessions when it starts (the recall block)
+    Recall { id: Vec<String> },
+    /// Write the jail's read-only snapshot anew (the shelf does this when a session ends)
+    Refresh,
 }
 
 #[derive(Subcommand)]
@@ -259,6 +294,82 @@ struct RunArgs {
     command: Vec<OsString>,
 }
 
+fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
+    let store = sill_core::store::Store::open_default()?;
+    let home = home()?;
+    let conn = store.conn();
+    let find = |key: &[String]| -> Result<sill_memory::SessionInfo> {
+        let key = key.join(" ");
+        sill_memory::find_session(conn, &key)?.with_context(|| format!("no session {key}"))
+    };
+    match cmd {
+        MemoryCmd::List => {
+            let mut ended: Vec<_> = sill_memory::sessions(conn)?.into_iter().filter(|s| s.ended_at.is_some()).collect();
+            ended.sort_by_key(|s| std::cmp::Reverse(s.ended_at));
+            if ended.is_empty() {
+                println!("no ended sessions yet (a session ends when its tab is closed)");
+            }
+            for s in ended {
+                println!("{}  {}  {:<8} {}  — {}", s.id, sill_memory::date(s.ended_at.unwrap_or(0)), s.agent, s.title, sill_memory::first_line(&s.summary));
+            }
+        }
+        MemoryCmd::Show { id } => {
+            let s = find(&id)?;
+            print!("{}", sill_memory::show(conn, &s, &sill_core::memory::kept_of(&s.id), &home)?);
+        }
+        MemoryCmd::Search { words, folder, agent, since } => {
+            let mut text = words;
+            if let Some(f) = folder {
+                text.push(format!("folder:{f}"));
+            }
+            if let Some(a) = agent {
+                text.push(format!("agent:{a}"));
+            }
+            if let Some(s) = since {
+                if sill_memory::parse_age(&s).is_none() {
+                    bail!("--since expects 30d, 12h, 2w …");
+                }
+                text.push(format!("since:{s}"));
+            }
+            let q = sill_memory::Query::parse(&text.join(" "), &home);
+            if q.is_empty() {
+                bail!("search for what?");
+            }
+            let hits = sill_memory::search(conn, &q, sill_core::store::now(), 50)?;
+            if hits.is_empty() {
+                println!("nothing found");
+            }
+            for h in hits {
+                print!("{}", sill_memory::hit_lines(&h, &home));
+            }
+        }
+        MemoryCmd::Transcript { id, grep } => {
+            let s = find(&id)?;
+            print!("{}", sill_memory::transcript(conn, &s, grep.as_deref())?);
+        }
+        MemoryCmd::Recall { id } => {
+            let s = find(&id)?;
+            let Some(full) = store.sessions()?.into_iter().find(|x| x.id == s.id) else { bail!("no session {}", s.id) };
+            let pins = store.pins(&s.id)?;
+            let block = sill_core::memory::recall(&store, &full, &pins, &home, sill_core::config::load().memory_recall());
+            let scope = sill_memory::Scope::resolve(&full.memory_scope, !pins.is_empty());
+            println!("scope: {}{}", scope.id(), if full.memory_scope.is_empty() { " (the default)" } else { "" });
+            println!("{}", if block.is_empty() { "(nothing: memory is off)" } else { block.as_str() });
+        }
+        MemoryCmd::Refresh => {
+            drop(store);
+            sill_core::memory::refresh_snapshot()?;
+            let path = sill_core::memory::snapshot_dir().join(sill_memory::SNAPSHOT_FILE);
+            if path.is_file() {
+                println!("{}", path.display());
+            } else {
+                println!("memory is off: no snapshot");
+            }
+        }
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
@@ -267,6 +378,7 @@ fn main() -> Result<()> {
             print!("{}", toml::to_string_pretty(&p)?);
             Ok(())
         }
+        Cmd::Memory { cmd } => memory_cmd(cmd),
         Cmd::Jail { cmd } => jail_cmd(cmd),
         Cmd::Dev { cmd } => dev_cmd(cmd),
         Cmd::Launch { session, jail, shim, agent, detached, cgroup_root } => launch(&session, jail, shim, agent.as_deref(), detached, cgroup_root),
@@ -590,7 +702,19 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
     let idle = spec.policy.limits.agent_idle_minutes as u64 * 60;
     spec.command.extend(["--agent-idle".into(), idle.to_string().into()]);
     // the shim, and the same binary as `sill-proc` on the jail's PATH (docs/tasks.md §2.4)
-    spec.extra_args = vec!["--ro-bind".into(), shim_bin.clone().into(), "/.sill/shim".into(), "--ro-bind".into(), shim_bin.into(), "/.sill/bin/sill-proc".into()];
+    spec.extra_args = vec!["--ro-bind".into(), shim_bin.clone().into(), "/.sill/shim".into(), "--ro-bind".into(), shim_bin.clone().into(), "/.sill/bin/sill-proc".into()];
+    // memory (docs/memory.md §2.3): the snapshot's directory read-only, and the shim as
+    // `sill-memory` to read it; made here if the shelf has not written one yet, so the first
+    // snapshot shows up in jails already running
+    if sill_core::config::load().memory() {
+        let dir = sill_core::memory::snapshot_dir();
+        if std::fs::create_dir_all(&dir).is_ok() {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+            spec.memory_dir = Some(dir);
+            spec.extra_args.extend(["--ro-bind".into(), shim_bin.into(), "/.sill/bin/sill-memory".into()]);
+        }
+    }
 
     let shim_sock = rt.join("shim.sock");
     let proxy_sock = rt.join("proxy.sock");
@@ -834,6 +958,7 @@ fn build_spec(a: JailArgs, command: Vec<OsString>) -> Result<JailSpec> {
         proxy_port: jail::PROXY_PORT,
         binds,
         masks: vec![],
+        memory_dir: None,
         extra_args,
         command,
     })

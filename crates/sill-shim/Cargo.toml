@@ -12,3 +12,5 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rustix.workspace = true
+sill-memory.workspace = true
+rusqlite.workspace = true

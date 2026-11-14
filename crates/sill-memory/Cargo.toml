@@ -1,0 +1,12 @@
+[package]
+name = "sill-memory"
+description = "sill: memory queries (docs/memory.md) — search, show, transcript — shared by the host and the jail's sill-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+rusqlite.workspace = true

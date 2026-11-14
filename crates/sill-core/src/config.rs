@@ -40,6 +40,12 @@ pub struct Config {
     /// A tray icon (StatusNotifierItem) while the shelf runs: click shows or hides it, the menu
     /// quits. Unset = on; the panel must speak the protocol (SPEC §4.6).
     pub tray: Option<bool>,
+    /// Memory (docs/memory.md): when a session's tab closes, its agent is asked for a summary as its
+    /// last turn (sill writes one from the facts when it can't be), kept with the session. Unset = on.
+    pub memory: Option<bool>,
+    /// How many earlier sessions a new agent is told about (docs/memory.md §2.3); unset = 3, 0 =
+    /// none (search still works).
+    pub memory_recall: Option<u32>,
 }
 
 /// Terminals the shelf knows, in preference order: (program, command line). Programs that start
@@ -120,11 +126,20 @@ impl Config {
         }
     }
 
-    /// Minutes before an unkept change outside git is reverted; 0 = never.
+    /// Memory on unless turned off (docs/memory.md).
+    pub fn memory(&self) -> bool {
+        self.memory.unwrap_or(true)
+    }
+
+    pub fn memory_recall(&self) -> usize {
+        self.memory_recall.unwrap_or(3).min(20) as usize
+    }
+
     pub fn tray(&self) -> bool {
         self.tray.unwrap_or(true)
     }
 
+    /// Minutes before an unkept change outside git is reverted; 0 = never.
     pub fn auto_revert_minutes(&self) -> u32 {
         self.auto_revert_minutes.unwrap_or(AUTO_REVERT_DEFAULT)
     }

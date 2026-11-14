@@ -67,6 +67,9 @@ pub struct JailSpec {
     /// Masked on top of the policy's list: the other agents' paths (`session::other_agents_paths`),
     /// so one agent's jail never shows another's credentials (SPEC §4.11 #8). Missing paths are skipped.
     pub masks: Vec<PathBuf>,
+    /// The memory snapshot's directory (docs/memory.md §2.3), bound read-only at
+    /// `sill_memory::JAIL_DIR` for the jail's `sill-memory`; None = no memory in this jail.
+    pub memory_dir: Option<PathBuf>,
     /// Extra arguments inserted before `--`.
     pub extra_args: Vec<OsString>,
     pub command: Vec<OsString>,
@@ -385,7 +388,7 @@ impl JailSpec {
         let mut masked = Vec::new();
         let config_dir = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| self.home.join(".config"));
         let state_base = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| self.home.join(".local/state"));
-        let own: Vec<PathBuf> = [config_dir.join("sill"), state_base.join("sill/bin"), state_base.join("sill/agents"), state_base.join("sill/login")]
+        let own: Vec<PathBuf> = [config_dir.join("sill"), state_base.join("sill/bin"), state_base.join("sill/agents"), state_base.join("sill/login"), state_base.join("sill/memory")]
             .into_iter()
             .chain(["sill.db", "sill.db-wal", "sill.db-shm"].iter().map(|f| state_base.join("sill").join(f)))
             .chain(self.masks.iter().cloned())
@@ -453,6 +456,10 @@ impl JailSpec {
 
         if let Some(sock) = &self.proxy_socket {
             push(&mut a, &[&"--ro-bind", sock, &PROXY_SOCKET]);
+        }
+        // the memory snapshot: its directory, so a snapshot renamed into it later shows too
+        if let Some(dir) = self.memory_dir.as_ref().filter(|d| d.is_dir()) {
+            push(&mut a, &[&"--ro-bind", dir, &sill_memory::JAIL_DIR]);
         }
         a.extend(self.extra_args.iter().cloned());
         // bwrap's root tmpfs is writable by default; make it read-only now that every mount is in place
@@ -546,9 +553,27 @@ mod tests {
             proxy_port: PROXY_PORT,
             binds: vec![],
             masks: vec![],
+            memory_dir: None,
             extra_args: vec![],
             command: vec!["true".into()],
         }
+    }
+
+    /// The memory snapshot's directory is bound read-only where `sill-memory` looks, when given
+    /// and present; its host path is masked like the rest of sill's state.
+    #[test]
+    fn memory_snapshot_is_bound_read_only() {
+        let dir = std::env::temp_dir().join(format!("sill-jail-memory-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut s = spec();
+        s.memory_dir = Some(dir.clone());
+        assert!(!render(&s.plan().unwrap().argv).contains(sill_memory::JAIL_DIR), "absent: not bound");
+        std::fs::create_dir_all(&dir).unwrap();
+        let r = render(&s.plan().unwrap().argv);
+        assert!(r.contains(&format!("--ro-bind {} {}", dir.display(), sill_memory::JAIL_DIR)), "{r}");
+        s.memory_dir = None;
+        assert!(!render(&s.plan().unwrap().argv).contains(sill_memory::JAIL_DIR));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

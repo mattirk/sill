@@ -148,13 +148,16 @@ pub fn save_global(text: &str) -> Result<PathBuf> {
 }
 
 /// The block sent to the agent: [`BASE`], the session's [`facts_block`] (empty when the policy
-/// could not be read), then the person's instructions when there are any — each layer a bracketed
-/// block on lines of its own, like the pin context.
-pub fn standing_block(facts: &str, global: &str) -> String {
+/// could not be read), the memory of earlier sessions (`memory::recall`, empty with nothing to
+/// say), then the person's instructions when there are any — each layer a bracketed block on lines
+/// of its own, like the pin context.
+pub fn standing_block(facts: &str, memory: &str, global: &str) -> String {
     let mut out = format!("{BASE}\n");
-    if !facts.is_empty() {
-        out.push_str(facts);
-        out.push('\n');
+    for layer in [facts, memory] {
+        if !layer.is_empty() {
+            out.push_str(layer);
+            out.push('\n');
+        }
     }
     let g = global.trim();
     if !g.is_empty() {
@@ -170,14 +173,14 @@ mod tests {
     #[test]
     fn base_alone_when_the_person_wrote_nothing() {
         for g in ["", "  \n\t"] {
-            assert_eq!(standing_block("", g), format!("{BASE}\n"));
+            assert_eq!(standing_block("", "", g), format!("{BASE}\n"));
         }
     }
 
     #[test]
     fn the_persons_text_follows_the_base_trimmed() {
-        let b = standing_block("[facts]", "\n\nAnswer in Finnish.\nRun `cargo test` before you say done.\n\n");
-        assert!(b.starts_with(&format!("{BASE}\n[facts]\n[Standing instructions from the person")));
+        let b = standing_block("[facts]", "[memory]", "\n\nAnswer in Finnish.\nRun `cargo test` before you say done.\n\n");
+        assert!(b.starts_with(&format!("{BASE}\n[facts]\n[memory]\n[Standing instructions from the person")));
         assert!(b.ends_with(":\nAnswer in Finnish.\nRun `cargo test` before you say done.]\n"));
     }
 

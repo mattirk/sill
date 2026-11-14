@@ -344,7 +344,8 @@ mod tests {
     #[test]
     fn no_icon_theme_lookups() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/shelf");
-        let forbidden = ["from_icon_name(", "set_icon_name(", "ThemedIcon", "content_type_get_symbolic_icon", "IconTheme"];
+        // `IconTheme::` and not `IconTheme`: the tray speaks dbusmenu, whose `IconThemePath` property is a D-Bus name, not a lookup
+        let forbidden = ["from_icon_name(", "set_icon_name(", "ThemedIcon", "content_type_get_symbolic_icon", "IconTheme::", "gtk::IconTheme"];
         for e in std::fs::read_dir(&dir).unwrap().flatten() {
             let text = std::fs::read_to_string(e.path()).unwrap_or_default();
             let code_only = text.split("#[cfg(test)]").next().unwrap_or(""); // not this list itself

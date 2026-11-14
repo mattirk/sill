@@ -15,7 +15,9 @@
 //! Plain std threads: the shim has nothing to do but wait on file descriptors.
 //!
 //! The same binary is `sill-proc` inside the jail (docs/tasks.md §2.4): run under that name (or
-//! as `sill-shim proc …`) it is the client of the managed-process service in [`procs`].
+//! as `sill-shim proc …`) it is the client of the managed-process service in [`procs`]. And it is
+//! `sill-memory` (docs/memory.md §2.3): search, show and transcript over the read-only snapshot of
+//! sill's memory at `/.sill/memory/` ([`memory_cli`]; the queries are `sill_memory`'s).
 
 mod forward;
 mod procs;
@@ -151,6 +153,35 @@ impl State {
 
 type Shared = Arc<(Mutex<State>, Condvar)>;
 
+/// `sill-memory …` in the jail: the snapshot the shelf wrote, read-only; exit status 1 on an error,
+/// 2 when this jail has no memory (memory off, or a session started before it was turned on).
+fn memory_cli(args: &[String]) -> i32 {
+    let dir = std::env::var_os("SILL_MEMORY_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(sill_memory::JAIL_DIR));
+    let conn = match sill_memory::open_snapshot(&dir) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            eprintln!("sill-memory: no memory here yet ({} has no snapshot: memory is off, or no session has ended since it was turned on)", dir.display());
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("sill-memory: {e:#}");
+            return 1;
+        }
+    };
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    match sill_memory::cli(args, &conn, &home, now, |id| sill_memory::snapshot_kept(&conn, id)) {
+        Ok(out) => {
+            print!("{out}");
+            0
+        }
+        Err(e) => {
+            eprintln!("sill-memory: {e:#}");
+            1
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     // `sill-proc …` (the binary under that name in the jail) or `sill-shim proc …`: the client
@@ -160,6 +191,12 @@ fn main() -> Result<()> {
     }
     if args.first().map(String::as_str) == Some("proc") {
         std::process::exit(procs::cli(args.split_off(1)));
+    }
+    if Path::new(&me).file_name().and_then(|n| n.to_str()) == Some("sill-memory") {
+        std::process::exit(memory_cli(&args));
+    }
+    if args.first().map(String::as_str) == Some("memory") {
+        std::process::exit(memory_cli(&args[1..]));
     }
     // --forward 127.0.0.1:3128=/.sill/proxy.sock : TCP → Unix forwarder for the session proxy (SPEC §4.8)
     while let Some(i) = args.iter().position(|a| a == "--forward") {

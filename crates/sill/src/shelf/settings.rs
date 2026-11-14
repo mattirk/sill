@@ -74,6 +74,19 @@ pub fn build() -> gtk::Box {
     });
     root.append(&row("Tray icon", &tray));
 
+    // memory (docs/memory.md): a summary at the end of every session
+    let memory = gtk::Switch::new();
+    memory.set_active(sill_core::config::load().memory());
+    memory.set_halign(gtk::Align::Start);
+    memory.set_valign(gtk::Align::Center);
+    memory.set_tooltip_text(Some("When a session's tab is closed, its agent writes a short summary as its last turn (what was asked, done, decided, left open), kept with the session and shown in the Reopen list; sill writes one from the facts when the agent can't be asked. Off: sessions end without a summary, as before."));
+    memory.connect_state_set(|_, on| {
+        let _ = sill_core::config::update(|c| c.memory = Some(on));
+        super::window::refresh_memory(); // written, or removed with memory off
+        glib::Propagation::Proceed
+    });
+    root.append(&row("Memory", &memory));
+
     // host terminal (Ctrl+Shift+H): a command line; empty = the first installed known terminal
     let term = gtk::Entry::new();
     term.set_hexpand(true);

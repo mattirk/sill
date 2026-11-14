@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/sill-core", "crates/sill-shim", "crates/sill"]
+members = ["crates/sill-core", "crates/sill-memory", "crates/sill-shim", "crates/sill"]
 
 [workspace.package]
 version = "0.0.1"
@@ -11,6 +11,8 @@ rust-version = "1.90"
 
 [workspace.dependencies]
 sill-core = { path = "crates/sill-core" }
+sill-memory = { path = "crates/sill-memory" }
+rusqlite = { version = "0.41.0", features = ["bundled"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
