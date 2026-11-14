@@ -124,6 +124,12 @@ impl Drawer {
         self.files.as_ref().is_some_and(|f| f.set_aliases(session, pairs))
     }
 
+    /// The path a session's file is read from and saved to: its workspace copy in a workspace
+    /// session, the path itself otherwise.
+    pub(crate) fn workspace_path(&self, session: &str, path: &sill_proto::sessions::HostPath) -> sill_proto::sessions::HostPath {
+        self.files.as_ref().map_or_else(|| path.clone(), |f| f.workspace_path(session, path))
+    }
+
     pub fn new(connect: Option<Connector>) -> (Self, Task<Message>) {
         let Some(connect) = connect else {
             return (

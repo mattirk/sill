@@ -281,7 +281,8 @@ impl App {
         reader.notice = None;
         let key = reader.key.clone();
         let params = serde_json::to_value(sill_proto::admin::FileWrite {
-            path: file.path.clone(),
+            // where the text was read from: the session's workspace copy, not the person's checkout
+            path: self.drawer.workspace_path(&id, &file.path),
             bytes_base64: sill_proto::admin::encode_bytes(text.as_bytes()),
         })
         .unwrap();

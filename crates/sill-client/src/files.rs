@@ -234,6 +234,14 @@ impl Files {
         self.aliases.set(session, pairs)
     }
 
+    /// Where a session's file is: in its workspace for a path under a workspace session's
+    /// repository, the path itself otherwise. What is written must go where it was read from:
+    /// a save sent to the repository's own path changed the person's checkout, with the agent's
+    /// uncommitted text in it (2026-11-14).
+    pub fn workspace_path(&self, session: &str, path: &HostPath) -> HostPath {
+        alias(path, &self.aliases.of(session), true)
+    }
+
     /// False when the worker has gone.
     pub fn send(&self, session: &str, serial: u64, request: Request) -> bool {
         self.requests

@@ -420,6 +420,19 @@ fn aliased_paths_read_the_workspace_and_answer_under_the_repository() {
     assert!(table.of("s").is_empty());
 }
 
+/// A file saved from the reader goes where it was read from: the workspace copy, never the
+/// person's checkout (which a save reached on 2026-11-14, carrying the agent's uncommitted text).
+#[test]
+fn a_saved_file_goes_to_the_workspace_it_was_read_from() {
+    let files = Files::start(std::sync::Arc::new(|| anyhow::bail!("no daemon")), |_| true);
+    let file = path_of("/home/me/repo/README.md");
+    assert_eq!(files.workspace_path("s", &file).to_path().unwrap(), std::path::Path::new("/home/me/repo/README.md"));
+    files.set_aliases("s", vec![(std::path::PathBuf::from("/home/me/repo"), std::path::PathBuf::from("/ws/repo-1"))]);
+    assert_eq!(files.workspace_path("s", &file).to_path().unwrap(), std::path::Path::new("/ws/repo-1/README.md"));
+    assert_eq!(files.workspace_path("other", &file).to_path().unwrap(), std::path::Path::new("/home/me/repo/README.md"), "another session's files are its own");
+    assert_eq!(files.workspace_path("s", &path_of("/home/me/notes.md")).to_path().unwrap(), std::path::Path::new("/home/me/notes.md"));
+}
+
 /// The Diff view's per-file counts come with every look at the repository (docs/sill-gui.md
 /// "Diff"): a file that stays modified — edited further, or committed and edited again — shows
 /// its lines as they are, with the totals they add up to. Outside the Diff view no file is counted.
