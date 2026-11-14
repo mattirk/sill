@@ -362,6 +362,16 @@ fn clear_conflict<H: Host>(h: &H, r: &Row) -> Result<()> {
     Ok(())
 }
 
+/// A rebase that is over leaves no commit of the workspace's uncommitted work behind
+/// (`flow::commit_uncommitted`): it comes off, between the agent's turns. For a caller holding
+/// the mutation lock.
+fn settle_uncommitted<H: Host>(h: &H, r: &Row) -> Result<()> {
+    if !rebasing(&r.path) && flow::uncommitted_pending(&r.path) && !h.busy(&r.session_id) {
+        flow::restore_uncommitted(&r.path, &r.branch)?;
+    }
+    Ok(())
+}
+
 /// The workspace is done with: its folder goes (nothing in it is left to apply, and the next
 /// workspace takes its build output from the checkout, §12), its anchors go except those of
 /// discarded work, its row goes.
@@ -370,7 +380,7 @@ fn free<H: Host>(h: &H, r: &Row) -> Result<()> {
         super::remove_folder(&r.path).with_context(|| format!("remove {}", r.path.display()))?;
     }
     if r.source.exists() {
-        for name in ["base", "dest", "incoming"] {
+        for name in ["base", "dest", "incoming", "restored"] {
             let _ = drop_ref(&r.source, &super::anchor_ref(&r.id, name));
         }
     }
@@ -774,6 +784,15 @@ fn detail<H: Host>(h: &H, r: Row) -> Result<Settled> {
     };
     // a stopped rebase the agent or the person finished in the workspace is no longer one: the
     // shelf offers Apply again, not Resolve and Abort for a rebase that is over
+    // and the commit its rebase carried the uncommitted work in comes off, once no mutation
+    // is running in the workspace (the lock; a look is never made under it)
+    let l = if flow::uncommitted_pending(&r.path) {
+        let _g = lock();
+        settle_uncommitted(h, &r)?;
+        look(&r)?
+    } else {
+        l
+    };
     clear_conflict(h, &r)?;
     let workspace = h.db(|c| record(c, &r))?;
     let Some(m) = l else { return Ok(Settled::Record(workspace)) };
@@ -874,6 +893,7 @@ pub fn prepare<H: Host>(h: &H, a: &api::Operate) -> Result<api::Prepared> {
     if h.busy(&r.session_id) {
         return Err(refuse("writer_active", "The agent is working; wait for its turn to end.", vec![]));
     }
+    settle_uncommitted(h, &r)?;
     clear_conflict(h, &r)?;
     if rebasing(&r.path) {
         return Err(refuse("rebase_in_progress", "A rebase is stopped in the workspace: finish it there or abort it.", conflicted(&r.path)));
@@ -890,7 +910,12 @@ pub fn prepare<H: Host>(h: &H, a: &api::Operate) -> Result<api::Prepared> {
     let dest = super::set_destination(&r.source, &r.path, &r.id, &branch, &r.branch)?;
     let mut conflicts = Vec::new();
     if needs_rebase {
-        let out = h.run_jailed(&r.session_id, &r.source, &["git", "rebase", "--autostash", "refs/sill/dest"])?;
+        // uncommitted work rides the rebase as a commit and comes off after it: a conflict in it
+        // stops the rebase like any other (never `--autostash`, whose conflict git reports clean)
+        flow::commit_uncommitted(&r.path, &r.branch)?;
+        let out = h.run_jailed(&r.session_id, &r.source, &["git", "rebase", "refs/sill/dest"]);
+        settle_uncommitted(h, &r)?;
+        let out = out?;
         if !out.status.success() {
             if rebasing(&r.path) {
                 conflicts = conflicted(&r.path);
@@ -926,6 +951,7 @@ pub fn abort<H: Host>(h: &H, a: &api::Operate) -> Result<api::Changed> {
     let _g = lock();
     let r = get_row(h, &a.workspace_id)?;
     if !rebasing(&r.path) {
+        settle_uncommitted(h, &r)?;
         clear_conflict(h, &r)?;
         return changed(h, Some(&r), None, None);
     }
@@ -936,6 +962,7 @@ pub fn abort<H: Host>(h: &H, a: &api::Operate) -> Result<api::Changed> {
     if !out.status.success() {
         return Err(refuse("rebase_failed", format!("The rebase could not be aborted: {}", String::from_utf8_lossy(&out.stderr).trim()), vec![]));
     }
+    settle_uncommitted(h, &r)?;
     clear_conflict(h, &r)?;
     changed(h, Some(&r), None, None)
 }
@@ -964,6 +991,7 @@ pub fn apply<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
     if h.busy(&r.session_id) {
         return Err(refuse("writer_active", "The agent is working; apply after its turn.", vec![]));
     }
+    settle_uncommitted(h, &r)?;
     if rebasing(&r.path) {
         return Err(refuse("rebase_in_progress", "A rebase is stopped in the workspace: finish it there or abort it.", conflicted(&r.path)));
     }
@@ -1034,6 +1062,7 @@ pub fn discard<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
             vec![],
         ));
     }
+    settle_uncommitted(h, &r)?;
     if rebasing(&r.path) {
         return Err(refuse(
             "rebase_in_progress",
@@ -1146,6 +1175,9 @@ pub fn undo<H: Host>(h: &H, a: &api::Undo) -> Result<api::Changed> {
                 ));
             }
             h.db(|c| receipts(c)?.begin(&a.operation_id, METHOD, &fingerprint))?;
+            // the workspace's branch is about to name the discarded commits again: kept in the
+            // checkout's store under the workspace's own anchor before the discard's one goes
+            super::anchor(&r.source, &r.id, "restored", &d.snapshot)?;
             if !flow::undo(&r.source, &r.path, &r.branch, &d.snapshot)? {
                 let _ = h.db(|c| receipts(c)?.finish(&a.operation_id, None, Some("invalid_state")));
                 return Err(refuse(
@@ -1184,6 +1216,10 @@ pub fn undo<H: Host>(h: &H, a: &api::Undo) -> Result<api::Changed> {
             let at = super::path_for(&h.root(), &src, &id, &d.name);
             let op = key(&a.operation_id);
             let made = super::create(&src, &id, &d.name, &at, &op)?;
+            // the discarded commits are in the checkout's store alone, and the new clone's
+            // branch names them: its own anchor keeps them there once the discard's is dropped
+            // (2026-11-10; before, the checkout's next `git gc` could take them from under it)
+            super::anchor(&src.root, &id, "restored", &d.snapshot)?;
             flow::reset_to_snapshot(&made.path, &made.branch, &d.snapshot)?;
             let now = h.now();
             let r = Row {

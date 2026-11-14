@@ -88,65 +88,156 @@ fn worktree_tree(git: &Git, root: &Path) -> Result<String> {
 pub(super) type Have = Option<(String, String)>;
 
 /// The files at `paths` below `root` as git would store them, their blobs written into `store`'s
-/// own object store: one `hash-object` for all regular files, read with `root`'s attributes so
-/// the person's clean filters run as for their own commits; a link's target is the blob, never
-/// followed; nothing (None) where there is no file or link. A file that goes while being read
-/// counts as gone.
+/// own object store, read with `root`'s attributes so they are stored as the person's own commits
+/// would store them; a link's target is the blob, never followed; nothing (None) where there is
+/// no file or link.
+///
+/// `root` is a tree an agent may be writing (its workspace), and the paths come from it, so no
+/// file is read by its path: each is opened below `root` with no link followed at any component
+/// and git hashes the opened descriptor. A path below a link — a directory the agent replaced
+/// by a link to anywhere on the host — is gone, as git itself counts it, and what the link points
+/// at is never read (2026-11-10; before, `hash-object` followed it and wrote the file it reached
+/// into the workspace's store). Files no attribute converts — nearly all — are hashed by one
+/// `hash-object` per 128; one with `text`, `eol`, `ident`, `filter` or an encoding set is hashed
+/// on its own with its path named.
 pub(super) fn worktree_entries(
     store: &Git,
     root: &Path,
     paths: &[String],
 ) -> Result<Vec<(String, Have)>> {
-    use std::os::unix::fs::PermissionsExt;
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags, RawMode, ResolveFlags, fstat, openat2, readlinkat, statat};
+    use rustix::io::Errno;
+    use std::os::fd::{AsRawFd, OwnedFd};
     let mut out: Vec<(String, Have)> = Vec::with_capacity(paths.len());
     let mut files = Vec::new();
-    for p in paths {
-        let full = root.join(p);
-        let entry = match std::fs::symlink_metadata(&full) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(e).with_context(|| format!("read {}", full.display())),
-            Ok(m) if m.file_type().is_symlink() => {
-                let target = std::fs::read_link(&full)?;
-                Some((
-                    "120000".to_string(),
-                    hash_stdin(store, target.as_os_str().as_encoded_bytes())?,
-                ))
-            }
-            Ok(m) if m.is_file() => {
-                files.push(out.len());
-                Some((
-                    (if m.permissions().mode() & 0o111 != 0 {
-                        "100755"
-                    } else {
-                        "100644"
-                    })
-                    .to_string(),
-                    String::new(),
-                ))
-            }
-            Ok(_) => None,
+    // a link or a file where a directory was, or nothing: the path is gone
+    let gone = |e: &Errno| matches!(*e, Errno::NOENT | Errno::NOTDIR | Errno::LOOP | Errno::XDEV);
+    let parent = |p: &str| -> Result<Option<(OwnedFd, std::ffi::OsString)>> {
+        let rel = Path::new(p);
+        let name = rel.file_name().with_context(|| format!("{p}: no file name"))?.to_os_string();
+        match crate::safe_fs::open_dir_beneath(root, rel.parent().unwrap_or(Path::new("")), false) {
+            Ok(dir) => Ok(Some((dir, name))),
+            Err(e) if e.chain().any(|e| e.downcast_ref::<Errno>().is_some_and(gone)) => Ok(None),
+            Err(e) => Err(e.context(format!("read {}", root.join(p).display()))),
+        }
+    };
+    for (i, p) in paths.iter().enumerate() {
+        let entry = match parent(p)? {
+            None => None,
+            Some((dir, name)) => match statat(&dir, &name, AtFlags::SYMLINK_NOFOLLOW) {
+                Err(e) if gone(&e) => None,
+                Err(e) => return Err(e).with_context(|| format!("read {}", root.join(p).display())),
+                Ok(st) => match FileType::from_raw_mode(st.st_mode as RawMode) {
+                    FileType::Symlink => {
+                        let target = readlinkat(&dir, &name, Vec::new()).with_context(|| format!("read the link {}", root.join(p).display()))?;
+                        Some(("120000".to_string(), hash_stdin(store, target.as_bytes())?))
+                    }
+                    FileType::RegularFile => {
+                        files.push(i);
+                        Some((String::new(), String::new()))
+                    }
+                    _ => None,
+                },
+            },
         };
         out.push((p.clone(), entry));
     }
-    let hash = |indices: &[usize]| -> Result<Vec<String>> {
-        let mut c = store.cmd_write_over(root);
-        c.args(["hash-object", "-w", "--"]);
-        for &i in indices {
-            c.arg(&paths[i]);
+    let converted = converted_paths(store, root, &files.iter().map(|&i| paths[i].as_str()).collect::<Vec<_>>())?;
+    for chunk in files.chunks(128) {
+        // opened now, no link followed; a file that went or changed kind since is gone
+        let mut open: Vec<(usize, std::sync::Arc<OwnedFd>)> = Vec::new();
+        for &i in chunk {
+            out[i].1 = None;
+            let Some((dir, name)) = parent(&paths[i])? else { continue };
+            let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+            let fd = match openat2(&dir, &name, flags, Mode::empty(), ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS) {
+                Ok(fd) => fd,
+                Err(e) if gone(&e) => continue,
+                Err(e) => return Err(e).with_context(|| format!("read {}", root.join(&paths[i]).display())),
+            };
+            let st = fstat(&fd)?;
+            if FileType::from_raw_mode(st.st_mode as RawMode) != FileType::RegularFile {
+                continue;
+            }
+            out[i].1 = Some(((if st.st_mode & 0o111 != 0 { "100755" } else { "100644" }).to_string(), String::new()));
+            // clear of the descriptors a child gets as its own
+            open.push((i, std::sync::Arc::new(rustix::io::fcntl_dupfd_cloexec(&fd, 64)?)));
         }
-        let ids: Vec<String> = ok(c, "hash-object")?.lines().map(str::to_string).collect();
-        if ids.len() != indices.len() {
-            bail!("hash-object: {} ids for {} files", ids.len(), indices.len());
+        let hash = |named: Option<&str>, fds: &[std::sync::Arc<OwnedFd>]| -> Result<Vec<String>> {
+            use std::os::unix::process::CommandExt;
+            let mut c = store.cmd_write_over(root);
+            c.args(["hash-object", "-w"]);
+            match named {
+                Some(path) => c.arg(format!("--path={path}")),
+                None => c.arg("--no-filters"),
+            };
+            c.arg("--");
+            for fd in fds {
+                c.arg(format!("/dev/fd/{}", fd.as_raw_fd()));
+            }
+            let inherited = fds.to_vec();
+            // SAFETY: fcntl is async-signal-safe; the descriptors stay owned by the closure.
+            unsafe {
+                c.pre_exec(move || {
+                    for fd in &inherited {
+                        rustix::io::fcntl_setfd(fd.as_ref(), rustix::io::FdFlags::empty())?;
+                    }
+                    Ok(())
+                });
+            }
+            let ids: Vec<String> = ok(c, "hash-object")?.lines().map(str::to_string).collect();
+            if ids.len() != fds.len() {
+                bail!("hash-object: {} ids for {} files", ids.len(), fds.len());
+            }
+            Ok(ids)
+        };
+        let (plain, special): (Vec<_>, Vec<_>) = open.into_iter().partition(|(i, _)| !converted.contains(paths[*i].as_str()));
+        let ids = if plain.is_empty() { vec![] } else { hash(None, &plain.iter().map(|(_, fd)| fd.clone()).collect::<Vec<_>>())? };
+        for ((i, _), id) in plain.iter().zip(ids) {
+            out[*i].1.as_mut().expect("opened").1 = id;
         }
-        Ok(ids)
-    };
-    for chunk in files.chunks(256) {
-        let ids = hash(chunk)?.into_iter().map(Some).collect::<Vec<_>>();
-        for (&i, id) in chunk.iter().zip(ids) {
-            out[i].1 = id.map(|id| (out[i].1.take().unwrap().0, id));
+        for (i, fd) in special {
+            out[i].1.as_mut().expect("opened").1 = hash(Some(&paths[i]), &[fd])?.remove(0);
         }
     }
     Ok(out)
+}
+
+/// Of `paths` below `root`, those an attribute makes git convert on the way in (`text`, `eol`,
+/// `ident`, a filter, an encoding): one `check-attr` for all. The view sets no `core.autocrlf`,
+/// so a path with none of them is stored byte for byte.
+fn converted_paths<'a>(store: &Git, root: &Path, paths: &[&'a str]) -> Result<std::collections::BTreeSet<&'a str>> {
+    use std::io::Write;
+    let mut found = std::collections::BTreeSet::new();
+    if paths.is_empty() {
+        return Ok(found);
+    }
+    let mut c = store.cmd_write_over(root);
+    c.args(["check-attr", "-z", "--stdin", "text", "eol", "crlf", "ident", "filter", "working-tree-encoding"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = c.spawn()?;
+    let mut stdin = child.stdin.take().context("no stdin")?;
+    let input: Vec<u8> = paths.iter().flat_map(|p| p.bytes().chain([0])).collect();
+    // git answers as it reads: written from a thread so neither side waits on a full pipe
+    let writer = std::thread::spawn(move || stdin.write_all(&input));
+    let out = child.wait_with_output()?;
+    let _ = writer.join();
+    if !out.status.success() {
+        bail!("check-attr: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let fields: Vec<&str> = text.split('\0').collect();
+    let known: std::collections::BTreeSet<&'a str> = paths.iter().copied().collect();
+    for f in fields.chunks(3).filter(|f| f.len() == 3) {
+        if !matches!(f[2], "unspecified" | "unset")
+            && let Some(p) = known.get(f[0])
+        {
+            found.insert(*p);
+        }
+    }
+    Ok(found)
 }
 
 /// `bytes` as a blob in `store`.
@@ -473,6 +564,30 @@ pub fn apply(
             if x == '?' { untracked.push(path) } else { overlap.push(path) }
         }
     }
+    // a file of the person's that their `status` does not list — an ignored one — where the
+    // uncommitted part would write (the workspace un-ignored the path, or staged it by force):
+    // what is on disk decides, not what status says. Theirs unless it already holds what would
+    // be written or what the last Apply wrote. A path tracked at either tip is `read-tree`'s.
+    let uncommitted = diff_tree(&ws, &tip, &snap)?;
+    {
+        let listed: std::collections::BTreeSet<&str> = paths.iter().map(String::as_str).collect();
+        let there: Vec<String> = uncommitted
+            .iter()
+            .filter(|e| e.blob.is_some() && !listed.contains(e.path.as_str()) && std::fs::symlink_metadata(source.join(&e.path)).is_ok())
+            .map(|e| e.path.clone())
+            .collect();
+        if !there.is_empty() {
+            let (old, new) = (tree_entries(&src, expected, &there)?, tree_entries(&ws, &tip, &there)?);
+            let rest: Vec<String> = there.into_iter().filter(|p| !old.contains_key(p) && !new.contains_key(p)).collect();
+            let (want, was) = (tree_entries(&ws, &snap, &rest)?, tree_entries(&ws, applied, &rest)?);
+            for (p, have) in worktree_entries(&ws, source, &rest)? {
+                let holds = |tree: &BTreeMap<String, (String, String)>| have.as_ref().is_some_and(|(_, b)| tree.get(&p).is_some_and(|(_, t)| t == b));
+                if !holds(&want) && !holds(&was) {
+                    untracked.push(p);
+                }
+            }
+        }
+    }
     if !overlap.is_empty() {
         return Ok(Err(Stop::Overlap(overlap)));
     }
@@ -539,13 +654,73 @@ pub fn apply(
         }
     }
     // the uncommitted part, written into the working tree as it is in the snapshot
-    for e in diff_tree(&ws, &tip, &snap)? {
+    for e in uncommitted {
         match &e.blob {
             Some(blob) => write_entry(&ws, source, &e.path, &e.mode, blob)?,
             None => remove_entry(source, &e.path)?,
         }
     }
     Ok(Ok(Applied { before: expected.to_string(), tip, snapshot: snap }))
+}
+
+/// The commit a rebase carries a workspace's uncommitted work in ([`commit_uncommitted`]).
+const WIP: &str = "refs/sill/wip";
+const WIP_SUBJECT: &str = "sill: uncommitted work";
+
+/// Before a rebase: the clone's uncommitted work — tracked changes and untracked files that are
+/// not ignored — as a commit at its branch's tip, so the rebase carries it like any other commit
+/// and a conflict in it stops the rebase, for Resolve or Abort. False when there is none.
+/// [`restore_uncommitted`] takes the commit off again once the rebase is over (2026-11-10;
+/// before, `rebase --autostash`: a conflict when the stash went back left git's markers in the
+/// files with the rebase reported clean, and the Apply that followed wrote them into the
+/// person's checkout).
+pub fn commit_uncommitted(clone: &Path, workspace_branch: &str) -> Result<bool> {
+    let git = Git::open(clone)?;
+    if dirty(&git)?.is_empty() {
+        return Ok(false);
+    }
+    let wip = snapshot(clone, WIP_SUBJECT)?;
+    for name in [WIP.to_string(), format!("refs/heads/{workspace_branch}")] {
+        let mut c = git.cmd_write();
+        c.args(["update-ref", "-m", WIP_SUBJECT, &name, &wip]);
+        ok(c, "keep the uncommitted work")?;
+    }
+    let mut c = git.cmd_write();
+    c.args(["read-tree", &wip]);
+    ok(c, "index the uncommitted work")?;
+    Ok(true)
+}
+
+/// Whether a rebase's commit of uncommitted work is still to take off ([`restore_uncommitted`]).
+pub fn uncommitted_pending(clone: &Path) -> bool {
+    clone.join(".git").join(WIP).exists()
+        || std::fs::read_to_string(clone.join(".git/packed-refs")).is_ok_and(|t| t.lines().any(|l| l.ends_with(WIP)))
+}
+
+/// After the rebase — gone through, aborted, or finished in the workspace: the commit
+/// [`commit_uncommitted`] made, now at the branch's tip, comes off and its changes are in the
+/// files, uncommitted, as before. Nothing where none was made. A tip that is not that commit
+/// (the agent built on it) stays as it is.
+pub fn restore_uncommitted(clone: &Path, workspace_branch: &str) -> Result<()> {
+    let git = Git::open(clone)?;
+    if try_rev(&git, WIP)?.is_none() {
+        return Ok(());
+    }
+    let branch = format!("refs/heads/{workspace_branch}");
+    let mut c = git.cmd();
+    c.args(["log", "-1", "--format=%ae%n%s", &branch]);
+    if ok(c, "the tip")? == format!("{}\n{WIP_SUBJECT}", IDENT[1].1) {
+        let parent = rev(&git, &format!("{branch}^"))?;
+        let mut c = git.cmd_write();
+        c.args(["update-ref", "-m", "sill: uncommitted again", &branch, &parent]);
+        ok(c, "take the commit off")?;
+        let mut c = git.cmd_write();
+        c.args(["read-tree", &parent]);
+        ok(c, "reset the index")?;
+    }
+    let mut c = git.cmd_write();
+    c.args(["update-ref", "-d", WIP]);
+    ok(c, "drop the kept commit").map(drop)
 }
 
 /// The mode of `path` in `commit`'s tree.

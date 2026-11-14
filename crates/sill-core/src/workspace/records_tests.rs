@@ -803,3 +803,146 @@ fn discard_interrupted_after_reset_keeps_undo_across_recovery() {
     .unwrap();
     assert_eq!(read(&clone_of(&w).join("f1.txt")), "precious\n");
 }
+
+fn readable(clone: &Path, oid: &str) -> bool {
+    Command::new("git").arg("-C").arg(clone).args(["cat-file", "-e", oid]).env("GIT_CONFIG_NOSYSTEM", "1").output().unwrap().status.success()
+}
+
+/// A look reads the workspace's files, and the agent chooses what is at their paths: a directory
+/// replaced by a link out of the workspace must not make the look read what the link reaches —
+/// a host file the jail hides — into the workspace's store, where the agent could read it.
+#[test]
+fn a_link_planted_in_the_workspace_reads_nothing_outside_it() {
+    let f = fixture("link-out");
+    let w = session(&f, "s1");
+    let clone = clone_of(&w);
+    let hidden = f.dir.join("hidden");
+    write(&hidden.join("key"), "TOP SECRET KEY\n");
+    let oid = git(&f.source, &["hash-object", hidden.join("key").to_str().unwrap()]);
+    // a tracked path d/key, then d replaced by a link; and an untracked link to the file itself
+    write(&clone.join("d/key"), "x\n");
+    git(&clone, &["add", "d/key"]);
+    std::fs::remove_dir_all(clone.join("d")).unwrap();
+    std::os::unix::fs::symlink(&hidden, clone.join("d")).unwrap();
+    std::os::unix::fs::symlink(hidden.join("key"), clone.join("direct")).unwrap();
+    let d = get(&f.host, &w.workspace_id).unwrap();
+    assert!(!readable(&clone, &oid), "the file behind the link is not in the workspace's store");
+    let text = diff(&f.host, &api::DiffRequest { workspace_id: w.workspace_id.clone(), against: api::Against::Applied }).unwrap().text;
+    assert!(!text.contains("TOP SECRET"), "{text}");
+    // the links themselves are the work: applied as links
+    apply(&f.host, &apply_req("a1", &w, &d.revision)).unwrap();
+    assert!(std::fs::symlink_metadata(f.source.join("d")).unwrap().file_type().is_symlink());
+    assert!(!readable(&f.source, &oid) && !readable(&clone, &oid));
+}
+
+/// Files are hashed from their descriptors, still as git would store them at their paths: an
+/// attribute's end-of-line conversion applies, and the executable bit is kept.
+#[test]
+fn files_read_by_descriptor_are_stored_as_git_stores_them() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fixture("attrs");
+    write(&f.source.join(".gitattributes"), "*.bat text eol=crlf\n");
+    git(&f.source, &["add", "."]);
+    git(&f.source, &["commit", "-qm", "attributes"]);
+    let w = session(&f, "s1");
+    let clone = clone_of(&w);
+    write(&clone.join("run.bat"), "echo one\r\necho two\r\n");
+    write(&clone.join("plain.txt"), "kept\r\nas it is\r\n");
+    write(&clone.join("tool.sh"), "#!/bin/sh\n");
+    std::fs::set_permissions(clone.join("tool.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let tree = flow::state_tree(&clone).unwrap();
+    let staged = |path: &str| git(&clone, &["hash-object", path]);
+    for path in ["run.bat", "plain.txt", "tool.sh"] {
+        assert_eq!(git(&clone, &["rev-parse", &format!("{tree}:{path}")]), staged(path), "{path}");
+    }
+    assert_eq!(git(&clone, &["cat-file", "-p", &format!("{tree}:run.bat")]), "echo one\necho two", "stored with LF");
+    assert!(git(&clone, &["ls-tree", &tree, "tool.sh"]).starts_with("100755"));
+}
+
+/// An ignored file of the person's is not in their `status`; the workspace un-ignoring its path,
+/// or staging it by force, must not make Apply write over it.
+#[test]
+fn apply_stops_at_an_ignored_file_of_the_persons() {
+    for forced in [false, true] {
+        let f = fixture("ignored");
+        write(&f.source.join(".gitignore"), "target/\nlocal.env\n");
+        git(&f.source, &["commit", "-qam", "ignore local.env"]);
+        write(&f.source.join("local.env"), "PERSON=only copy\n");
+        let w = session(&f, "s1");
+        let clone = clone_of(&w);
+        write(&clone.join("local.env"), "AGENT=1\n");
+        write(&clone.join("f1.txt"), "agent\n");
+        if forced {
+            git(&clone, &["add", "-f", "local.env"]);
+        } else {
+            write(&clone.join(".gitignore"), "target/\n");
+        }
+        let e = apply(&f.host, &apply_req("a1", &w, &rev(&f, &w))).unwrap_err();
+        assert_eq!((reason(&e), paths(&e)), ("untracked_collision".to_string(), vec!["local.env".to_string()]), "forced={forced}");
+        assert_eq!(read(&f.source.join("local.env")), "PERSON=only copy\n");
+        assert_eq!(read(&f.source.join("f1.txt")), "line 1\n", "nothing written");
+        // the same content there already is no collision
+        write(&f.source.join("local.env"), "AGENT=1\n");
+        apply(&f.host, &apply_req("a2", &w, &rev(&f, &w))).unwrap();
+        assert_eq!(read(&f.source.join("f1.txt")), "agent\n");
+    }
+}
+
+/// Uncommitted work of the agent's that conflicts with a commit of the person's stops the rebase
+/// like a commit would: no conflict markers reach the checkout, Abort puts the work back
+/// uncommitted, and a rebase finished in the workspace leaves it uncommitted too.
+#[test]
+fn uncommitted_work_in_conflict_stops_the_rebase() {
+    let f = fixture("wip-conflict");
+    let w = session(&f, "s1");
+    let clone = clone_of(&w);
+    write(&clone.join("f1.txt"), "agent uncommitted\n");
+    write(&clone.join("new.txt"), "untracked\n");
+    write(&f.source.join("f1.txt"), "host\n");
+    git(&f.source, &["commit", "-qam", "host"]);
+    let prepare_now = |op: &str| prepare(&f.host, &api::Operate { operation_id: op.into(), workspace_id: w.workspace_id.clone() }).unwrap();
+    let p = prepare_now("p1");
+    assert_eq!(p.conflicts, vec!["f1.txt".to_string()]);
+    assert_eq!(p.workspace.operation.as_ref().map(|o| o.state.as_str()), Some("conflict"));
+    assert_eq!(reason(&apply(&f.host, &apply_req("a0", &w, &p.revision)).unwrap_err()), "rebase_in_progress");
+    assert_eq!(read(&f.source.join("f1.txt")), "host\n");
+    // Abort: as before the rebase, nothing committed
+    abort(&f.host, &api::Operate { operation_id: "x".into(), workspace_id: w.workspace_id.clone() }).unwrap();
+    assert_eq!(read(&clone.join("f1.txt")), "agent uncommitted\n");
+    assert_eq!(git(&clone, &["log", "-1", "--format=%s"]), "start");
+    assert_eq!(git(&clone, &["status", "--porcelain"]), "M f1.txt\n?? new.txt", "unstaged again (the helper trims the leading space)");
+    // again, resolved in the workspace as the agent would
+    prepare_now("p2");
+    write(&clone.join("f1.txt"), "host and agent\n");
+    git(&clone, &["add", "f1.txt"]);
+    git(&clone, &["-c", "core.editor=true", "rebase", "--continue"]);
+    let d = get(&f.host, &w.workspace_id).unwrap();
+    assert!(d.workspace.operation.is_none() && !d.needs_rebase);
+    assert_eq!(d.summary.commits, 0, "the carried commit is off again");
+    assert_eq!(git(&clone, &["log", "-1", "--format=%s"]), "host");
+    apply(&f.host, &apply_req("a1", &w, &d.revision)).unwrap();
+    assert_eq!(read(&f.source.join("f1.txt")), "host and agent\n");
+    assert_eq!(read(&f.source.join("new.txt")), "untracked\n");
+    assert_eq!(git(&f.source, &["log", "-1", "--format=%s"]), "host", "applied uncommitted");
+}
+
+/// Work put back by Undo into a workspace of its own lives in the checkout's store: the
+/// checkout's gc must not take it from under the workspace.
+#[test]
+fn undone_work_in_a_new_workspace_survives_the_checkouts_gc() {
+    let f = fixture("undo-gc");
+    let w = session(&f, "s1");
+    let clone = clone_of(&w);
+    write(&clone.join("f1.txt"), "agent commit\n");
+    git(&clone, &["commit", "-qam", "agent"]);
+    let d = discard(&f.host, &apply_req("d1", &w, &rev(&f, &w))).unwrap().discarded.unwrap();
+    f.host.lives.lock().unwrap().insert("s1".into(), Life::Ended);
+    list(&f.host, &api::List { session_id: None, after: None, limit: None }).unwrap();
+    assert!(!clone.exists());
+    let w2 = undo(&f.host, &api::Undo { operation_id: "u1".into(), discard_id: d.discard_id }).unwrap().workspace.unwrap();
+    git(&f.source, &["gc", "-q", "--prune=now"]);
+    assert_eq!(git(&clone_of(&w2), &["log", "-1", "--format=%s"]), "agent");
+    // applied, the workspace is done with and its anchors go
+    apply(&f.host, &apply_req("a1", &w2, &rev(&f, &w2))).unwrap();
+    assert_eq!(git(&f.source, &["for-each-ref", "--format=%(refname)", "refs/sill/"]), "");
+}
