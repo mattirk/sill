@@ -1264,6 +1264,7 @@ button.sill-action:checked { background: alpha(@view_fg_color, 0.09); border-bot
 .sill-pins { padding: 6px 0; }
 .sill-chip { background: alpha(@view_fg_color, 0.07); padding: 0 2px 0 0; }
 .sill-chip-open { padding: 3px 8px; min-height: 0; }
+.sill-chip-glyph { -gtk-icon-size: 0.9em; opacity: 0.6; }
 .sill-apply { color: @warning_color; padding: 0 8px; min-height: 0; }
 .sill-git-add { color: @success_color; font-size: 90%; }
 .sill-git-del { color: @error_color; font-size: 90%; }

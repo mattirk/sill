@@ -1453,15 +1453,18 @@ impl SessionView {
             let lbox = gtk::Box::new(gtk::Orientation::Horizontal, 6);
             let is_dir = p.is_dir();
             let shown = p.to_string_lossy().replace(&home, "~");
-            // a folder chip says where it is; a file chip just its name (the path is the tooltip)
-            let name = if is_dir { shown.clone() } else { p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(shown.clone()) };
+            // a glyph says folder or file, the name alone says which; the whole path is the tooltip
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(shown.clone());
+            let glyph = super::icons::glyph_image(if is_dir { "sill-files" } else { "sill-file" });
+            glyph.add_css_class("sill-chip-glyph");
+            lbox.append(&glyph);
             lbox.append(&gtk::Label::new(Some(&name)));
             summaries.push((p.clone(), lbox.clone()));
             l.set_child(Some(&lbox));
             l.add_css_class("flat");
             l.add_css_class("sill-chip-open");
             l.set_tooltip_text(Some(&if is_dir {
-                "Show the folder's tree · +lines −lines vs HEAD, ?untracked files".to_string()
+                format!("{shown} · show the folder's tree · +lines −lines vs HEAD, ?untracked files")
             } else {
                 format!("{shown} · open the file (Escape returns)")
             }));
@@ -1534,9 +1537,9 @@ impl SessionView {
                         wanted.push((format!("?{untracked}"), "dim-label"));
                     }
                 }
-                // the labels after the name
+                // the labels after the glyph and the name
                 let mut current: Vec<gtk::Widget> = Vec::new();
-                let mut c = lbox.first_child().and_then(|n| n.next_sibling());
+                let mut c = lbox.first_child().and_then(|g| g.next_sibling()).and_then(|n| n.next_sibling());
                 while let Some(w) = c {
                     c = w.next_sibling();
                     current.push(w);
