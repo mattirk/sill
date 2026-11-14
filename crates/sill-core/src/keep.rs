@@ -8,6 +8,13 @@
 //! - deletions (whiteouts) remove the host path; directories are created with the upper's mode;
 //! - mode is preserved, setuid/setgid bits are stripped unless `allow_special`; ownership is left to
 //!   whoever runs this (the person; root-owned targets go through a separate sudo helper later);
+//! - the host path is looked at before the previous version is saved and again just before it is
+//!   replaced or removed: an edit on the host in between (the person saving in an editor while the
+//!   list was open) stops the keep instead of being overwritten (SPEC §4.11 #16); a file is written
+//!   to a temporary next to the target and renamed over it, so the host never sees a half-written
+//!   file and nothing is left behind when a step fails. The rename gives the path a new inode: other
+//!   hard links to the old file keep the old content (a keep must not write through a link into
+//!   another path), and extended attributes of the old file are not carried over;
 //! - **undo** (SPEC §4.4): with `KeepOptions::undo` set to the session's `kept/` directory, the host's
 //!   previous version is saved there before anything is touched and a line in `kept/log.jsonl` says
 //!   what was done; [`undo`] puts the previous version back, refusing if the host changed since.
@@ -54,6 +61,30 @@ pub struct Kept {
 
 const LOG: &str = "log.jsonl";
 const PRIOR: &str = "prior";
+
+/// What tells a host path's state apart between the review and the write: a change in any of
+/// these means the host moved on and the keep stops (SPEC §4.11 #16). `None` = absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Snapshot {
+    dev: u64,
+    ino: u64,
+    mode: u32,
+    size: u64,
+    mtime: (i64, i64),
+}
+
+fn snapshot(host: &Path) -> Option<Snapshot> {
+    let m = host.symlink_metadata().ok()?;
+    Some(Snapshot { dev: m.dev(), ino: m.ino(), mode: m.mode(), size: m.len(), mtime: (m.mtime(), m.mtime_nsec()) })
+}
+
+/// The host still is what it was when the keep started.
+fn still(host: &Path, before: Option<Snapshot>) -> Result<()> {
+    if snapshot(host) != before {
+        bail!("{} changed on the host while it was being kept; review it again", host.display());
+    }
+    Ok(())
+}
 
 /// Why keep refuses a path outright, or `None`. What the shelf itself runs or reads — its
 /// configuration (policies, agent overrides: a session's mounts and allowed domains are made of
@@ -244,12 +275,15 @@ pub fn keep(change: &Change, opts: &KeepOptions) -> Result<&'static str> {
     if parent != Path::new("/") {
         let _ = open_nofollow(parent, OFlags::PATH | OFlags::DIRECTORY, Mode::empty())?;
     }
+    // the host as it is now: the previous version saved next is this one, and the write below
+    // happens only if it still is
+    let before = snapshot(host);
     // the previous version first: if it can't be saved, nothing is kept
     let prior = match &opts.undo {
         Some(dir) => Some(Prior::save(dir, change)?),
         None => None,
     };
-    let (what, hash) = match apply(change, opts) {
+    let (what, hash) = match apply(change, opts, before) {
         Ok(done) => done,
         Err(e) => {
             if let Some(p) = prior {
@@ -264,10 +298,11 @@ pub fn keep(change: &Change, opts: &KeepOptions) -> Result<&'static str> {
     Ok(what)
 }
 
-fn apply(change: &Change, opts: &KeepOptions) -> Result<(&'static str, Option<String>)> {
+fn apply(change: &Change, opts: &KeepOptions, before: Option<Snapshot>) -> Result<(&'static str, Option<String>)> {
     let host = &change.path;
     match change.kind {
         Kind::Deleted => {
+            still(host, before)?;
             match host.symlink_metadata() {
                 Ok(md) if md.is_dir() => std::fs::remove_dir_all(host)?,
                 Ok(_) => std::fs::remove_file(host)?,
@@ -310,10 +345,18 @@ fn apply(change: &Change, opts: &KeepOptions) -> Result<(&'static str, Option<St
                 let _ = std::fs::remove_file(&tmp);
                 bail!("{} changed since it was reviewed (hash {}… ≠ {}…)", host.display(), &hash[..12], &expected[..12]);
             }
-            if host.symlink_metadata().map(|m| m.is_dir()).unwrap_or(false) {
-                std::fs::remove_dir_all(host)?;
+            // the last look before the host changes: whatever fails from here on leaves no temp file
+            let placed = (|| -> Result<()> {
+                still(host, before)?;
+                if host.symlink_metadata().map(|m| m.is_dir()).unwrap_or(false) {
+                    std::fs::remove_dir_all(host)?;
+                }
+                std::fs::rename(&tmp, host).with_context(|| format!("rename into {}", host.display()))
+            })();
+            if let Err(e) = placed {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
             }
-            std::fs::rename(&tmp, host).with_context(|| format!("rename into {}", host.display()))?;
             Ok((if change.kind == Kind::Added { "added" } else { "updated" }, Some(hash)))
         }
     }
@@ -480,6 +523,15 @@ mod tests {
         let bad = KeepOptions { expected_hash: Some("00".repeat(32)), ..Default::default() };
         assert!(keep(&change, &bad).is_err());
         assert_eq!(std::fs::read_dir(dir.join("host")).unwrap().count(), 1);
+        // the host edited after the scan but before the write: refused, nothing left behind
+        std::fs::write(dir.join("host/a.txt"), "edited meanwhile\n").unwrap();
+        let raced = Change { kind: Kind::Modified, ..change.clone() };
+        let opts_race = KeepOptions { undo: Some(dir.join("kept")), ..Default::default() };
+        // `before` is taken inside keep(); simulate the race with a snapshot that is already stale
+        assert!(apply(&raced, &opts_race, None).is_err());
+        assert_eq!(std::fs::read_to_string(dir.join("host/a.txt")).unwrap(), "edited meanwhile\n");
+        assert_eq!(std::fs::read_dir(dir.join("host")).unwrap().count(), 1);
+        assert_eq!(keep(&raced, &KeepOptions::default()).unwrap(), "updated");
         // parent reached through a symlink: refused
         std::os::unix::fs::symlink(dir.join("host"), dir.join("link")).unwrap();
         let via_link = Change { path: dir.join("link/a.txt"), ..change.clone() };
