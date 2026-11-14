@@ -16,16 +16,17 @@ use sill_core::agents;
 use sill_core::store::{Session, Store};
 
 use super::changes::ChangesPage;
-use super::conversation::CSS;
 use super::files::FilesPage;
 use super::session_view::SessionView;
+use super::tabs::TabStrip;
 use super::{session, settings, x11};
 
 pub struct Shelf {
     pub window: adw::ApplicationWindow,
     store: Rc<Store>,
     stack: gtk::Stack,
-    tab_view: adw::TabView,
+    tabs: Rc<TabStrip>,
+    pages: gtk::Stack,
     status: gtk::Label,
     views: RefCell<HashMap<String, Rc<SessionView>>>,
     changes: Rc<ChangesPage>,
@@ -33,13 +34,11 @@ pub struct Shelf {
 }
 
 pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
-    let css = gtk::CssProvider::new();
-    css.load_from_string(CSS);
-    gtk::style_context_add_provider_for_display(
-        &gdk::Display::default().expect("display"),
-        &css,
-        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
+    let config = sill_core::config::load();
+    super::theme::apply(&super::theme::by_id(&config.theme));
+    if let Some(w) = config.width {
+        x11::set_width_fraction(w);
+    }
     let store = Rc::new(Store::open_default().expect("open session store"));
 
     let window = adw::ApplicationWindow::builder()
@@ -67,13 +66,10 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
     action.set_popover(Some(&popover));
     bar.append(&action);
 
-    let tab_view = adw::TabView::new();
-    let tab_bar = adw::TabBar::new();
-    tab_bar.set_view(Some(&tab_view));
-    tab_bar.set_autohide(false);
-    tab_bar.set_expand_tabs(false);
-    tab_bar.set_hexpand(true);
-    bar.append(&tab_bar);
+    let tabs = TabStrip::new();
+    bar.append(&tabs.root);
+    let pages = gtk::Stack::new();
+    pages.set_vexpand(true);
 
     let plus = gtk::MenuButton::new();
     plus.set_icon_name("list-add-symbolic");
@@ -93,7 +89,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
     let stack = gtk::Stack::new();
     stack.set_transition_type(gtk::StackTransitionType::Crossfade);
     stack.set_vexpand(true);
-    stack.add_named(&tab_view, Some("sessions"));
+    stack.add_named(&pages, Some("sessions"));
     let changes = ChangesPage::new(store.clone());
     stack.add_named(&changes.root, Some("changes"));
     let files = FilesPage::new(store.clone());
@@ -109,7 +105,8 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         window: window.clone(),
         store: store.clone(),
         stack: stack.clone(),
-        tab_view: tab_view.clone(),
+        tabs: tabs.clone(),
+        pages: pages.clone(),
         status: status.clone(),
         views: RefCell::new(HashMap::new()),
         changes: changes.clone(),
@@ -136,24 +133,40 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         plus_pop.connect_show(move |pop| s.fill_plus_menu(&plus_menu, pop));
     }
 
-    // selected tab → status label follows it
+    // tab strip callbacks
     {
         let s = shelf.clone();
-        tab_view.connect_selected_page_notify(move |_| s.sync_status());
+        *tabs.on_select.borrow_mut() = Some(Box::new(move |id| {
+            s.pages.set_visible_child_name(id);
+            s.sync_status();
+            s.focus_prompt();
+        }));
     }
-    // closing a tab: quit its driver and stop its unit; the stored session stays (reopen from "+")
     {
         let s = shelf.clone();
-        tab_view.connect_close_page(move |tv, page| {
-            if let Some(id) = page_session_id(page) {
-                if let Some(v) = s.views.borrow_mut().remove(&id) {
-                    v.quit();
-                }
-                let _ = sill_core::session::stop(&id);
+        *tabs.on_rename.borrow_mut() = Some(Box::new(move |id, title| {
+            let _ = s.store.set_title(id, title);
+            if let Some(v) = s.views.borrow().get(id) {
+                v.session.borrow_mut().title = title.to_string();
             }
-            tv.close_page_finish(page, true);
-            glib::Propagation::Stop
+        }));
+    }
+    {
+        // closing a tab: quit its driver and stop its unit; the stored session stays (reopen from "+")
+        let s = shelf.clone();
+        *tabs.on_close.borrow_mut() = Some(Box::new(move |id| s.close_session(id)));
+    }
+    {
+        let s = shelf.clone();
+        let f2 = gtk::EventControllerKey::new();
+        f2.connect_key_pressed(move |_, key, _, _| {
+            if key == gdk::Key::F2 {
+                s.tabs.edit_selected();
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
         });
+        window.add_controller(f2);
     }
 
     // open the most recent session, or create one with claude
@@ -209,10 +222,6 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
     window.upcast()
 }
 
-fn page_session_id(page: &adw::TabPage) -> Option<String> {
-    page.keyword().map(|k| k.to_string())
-}
-
 impl Shelf {
     fn show_page(&self, name: &str) {
         self.stack.set_visible_child_name(name);
@@ -225,8 +234,7 @@ impl Shelf {
     }
 
     fn focus_prompt(&self) {
-        if let Some(page) = self.tab_view.selected_page()
-            && let Some(id) = page_session_id(&page)
+        if let Some(id) = self.tabs.selected()
             && let Some(v) = self.views.borrow().get(&id)
         {
             v.focus_prompt();
@@ -234,8 +242,7 @@ impl Shelf {
     }
 
     fn sync_status(&self) {
-        if let Some(page) = self.tab_view.selected_page()
-            && let Some(id) = page_session_id(&page)
+        if let Some(id) = self.tabs.selected()
             && let Some(v) = self.views.borrow().get(&id)
         {
             self.status.set_text(&v.status.text());
@@ -244,15 +251,13 @@ impl Shelf {
 
     fn open_session(self: &Rc<Self>, s: Session) {
         let id = s.id.clone();
-        if let Some(page) = self.find_page(&id) {
-            self.tab_view.set_selected_page(&page);
+        if self.tabs.has(&id) {
+            self.tabs.select(&id);
             return;
         }
         let view = SessionView::new(s.clone(), self.store.clone());
-        let page = self.tab_view.append(&view.root);
-        page.set_title(&s.title);
-        page.set_keyword(&id);
-        page.set_tooltip(&format!("{} · {}", s.agent, s.id));
+        self.pages.add_named(&view.root, Some(&id));
+        self.tabs.add(&id, &s.title);
         {
             let shelf = self.clone();
             *view.on_turn_end.borrow_mut() = Some(Box::new(move |_id| {
@@ -263,31 +268,33 @@ impl Shelf {
         }
         {
             let shelf = self.clone();
-            *view.on_title.borrow_mut() = Some(Box::new(move |id, title| {
-                if let Some(p) = shelf.find_page(id) {
-                    p.set_title(title);
-                }
-            }));
+            *view.on_title.borrow_mut() = Some(Box::new(move |id, title| shelf.tabs.set_title(id, title)));
         }
         {
             // the top-bar status mirrors the selected view's status
             let shelf = self.clone();
             let vid = id.clone();
             view.status.connect_notify_local(Some("label"), move |l, _| {
-                if let Some(page) = shelf.tab_view.selected_page()
-                    && page_session_id(&page).as_deref() == Some(vid.as_str())
-                {
+                if shelf.tabs.selected().as_deref() == Some(vid.as_str()) {
                     shelf.status.set_text(&l.text());
                 }
             });
         }
-        self.views.borrow_mut().insert(id, view);
-        self.tab_view.set_selected_page(&page);
+        self.views.borrow_mut().insert(id.clone(), view);
+        self.tabs.select(&id);
         self.sync_status();
     }
 
-    fn find_page(&self, id: &str) -> Option<adw::TabPage> {
-        (0..self.tab_view.n_pages()).map(|i| self.tab_view.nth_page(i)).find(|p| page_session_id(p).as_deref() == Some(id))
+    fn close_session(self: &Rc<Self>, id: &str) {
+        if let Some(v) = self.views.borrow_mut().remove(id) {
+            v.quit();
+            self.pages.remove(&v.root);
+        }
+        let _ = sill_core::session::stop(id);
+        self.tabs.remove(id);
+        if self.tabs.selected().is_none() {
+            self.status.set_text("");
+        }
     }
 
     fn fill_plus_menu(self: &Rc<Self>, menu: &gtk::Box, pop: &gtk::Popover) {
@@ -317,7 +324,7 @@ impl Shelf {
             .sessions()
             .unwrap_or_default()
             .into_iter()
-            .filter(|s| self.find_page(&s.id).is_none())
+            .filter(|s| !self.tabs.has(&s.id))
             .collect();
         if !stored.is_empty() {
             let head = gtk::Label::new(Some("Reopen"));

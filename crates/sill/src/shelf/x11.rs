@@ -9,8 +9,17 @@ use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt, EventMask, PropMode};
 use x11rb::wrapper::ConnectionExt as _;
 
-/// Fraction of the work area width the shelf takes.
+/// Fraction of the work area width the shelf takes (settings override).
 pub const WIDTH_FRACTION: f64 = 0.38;
+thread_local! {
+    static WIDTH: std::cell::Cell<f64> = const { std::cell::Cell::new(WIDTH_FRACTION) };
+}
+pub fn set_width_fraction(f: f64) {
+    WIDTH.with(|w| w.set(f.clamp(0.2, 0.8)));
+}
+pub fn width_fraction() -> f64 {
+    WIDTH.with(|w| w.get())
+}
 
 pub struct Placement {
     pub x: i32,
@@ -34,7 +43,7 @@ pub fn work_area(window: &gtk::Window) -> Option<Placement> {
         let g = m.geometry();
         Some((g.x(), g.y(), g.width() as u32, g.height() as u32))
     })?;
-    let width = (w as f64 * WIDTH_FRACTION).round() as u32;
+    let width = (w as f64 * width_fraction()).round() as u32;
     Some(Placement { x, y, width, height: h })
 }
 

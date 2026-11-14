@@ -22,8 +22,39 @@ const TAGS: &[(&str, &[(&str, &str)])] = &[
     ("thought", &[("style", "italic")]),
 ];
 
+thread_local! {
+    /// Every buffer with our tags, so a theme change can recolour text already on screen.
+    static BUFFERS: std::cell::RefCell<Vec<gtk::glib::WeakRef<gtk::TextBuffer>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Recolour the theme-dependent tags of all live buffers.
+pub fn retheme() {
+    let colors = super::theme::tag_colors();
+    BUFFERS.with(|b| {
+        let mut list = b.borrow_mut();
+        list.retain(|w| w.upgrade().is_some());
+        for w in list.iter() {
+            let Some(buffer) = w.upgrade() else { continue };
+            let table = buffer.tag_table();
+            if let Some(t) = table.lookup("code") {
+                t.set_background(Some(&colors.code_bg));
+            }
+            if let Some(t) = table.lookup("codeblock") {
+                t.set_paragraph_background(Some(&colors.code_bg));
+            }
+            if let Some(t) = table.lookup("link") {
+                t.set_foreground(Some(&colors.link));
+            }
+        }
+    });
+}
+
 pub fn install_tags(buffer: &gtk::TextBuffer) {
+    let colors = super::theme::tag_colors();
     let table = buffer.tag_table();
+    if table.lookup("code").is_none() {
+        BUFFERS.with(|b| b.borrow_mut().push(buffer.downgrade()));
+    }
     for (name, _) in TAGS {
         if table.lookup(name).is_some() {
             continue;
@@ -36,15 +67,15 @@ pub fn install_tags(buffer: &gtk::TextBuffer) {
             "h4" | "bold" => tag.set_weight(700),
             "italic" | "thought" => tag.set_style(gtk::pango::Style::Italic),
             "strike" => tag.set_strikethrough(true),
-            "code" => { tag.set_family(Some("monospace")); tag.set_background(Some("rgba(127,127,127,0.18)")); }
+            "code" => { tag.set_family(Some("monospace")); tag.set_background(Some(&colors.code_bg)); }
             "codeblock" => {
                 tag.set_family(Some("monospace"));
                 tag.set_left_margin(12);
                 tag.set_right_margin(12);
-                tag.set_paragraph_background(Some("rgba(127,127,127,0.14)"));
+                tag.set_paragraph_background(Some(&colors.code_bg));
             }
             "quote" => { tag.set_left_margin(16); tag.set_style(gtk::pango::Style::Italic); }
-            "link" => { tag.set_underline(gtk::pango::Underline::Single); tag.set_foreground(Some("#3584e4")); }
+            "link" => { tag.set_underline(gtk::pango::Underline::Single); tag.set_foreground(Some(&colors.link)); }
             _ => {}
         }
         table.add(&tag);

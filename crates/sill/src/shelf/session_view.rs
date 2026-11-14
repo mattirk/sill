@@ -52,11 +52,11 @@ impl SessionView {
             .max_content_height(220)
             .propagate_natural_height(true)
             .child(&prompt)
-            .margin_start(12)
-            .margin_end(12)
-            .margin_bottom(12)
+            .margin_start(0)
+            .margin_end(0)
+            .margin_bottom(0)
             .build();
-        prompt_scroll.add_css_class("frame");
+        prompt_scroll.add_css_class("sill-prompt-box");
 
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.append(&conv.root);

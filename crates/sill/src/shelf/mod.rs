@@ -8,6 +8,8 @@ mod markdown;
 mod session;
 mod session_view;
 mod settings;
+mod tabs;
+mod theme;
 mod window;
 mod x11;
 
@@ -51,6 +53,18 @@ pub fn run(cwd: Option<PathBuf>, hidden: bool) -> Result<()> {
         }
     });
     app.add_action(&toggle);
+    // `sill theme NAME`: switch the running shelf's theme (also what the Settings dropdown does)
+    let set_theme = gio::SimpleAction::new("set-theme", Some(gtk::glib::VariantTy::STRING));
+    set_theme.connect_activate(|_, param| {
+        if let Some(id) = param.and_then(|p| p.str()) {
+            let t = theme::by_id(id);
+            theme::apply(&t);
+            let mut c = sill_core::config::load();
+            c.theme = t.id.to_string();
+            let _ = sill_core::config::save(&c);
+        }
+    });
+    app.add_action(&set_theme);
     // no command-line parsing by GTK: we were started by clap
     let code = app.run_with_args::<&str>(&[]);
     if code != glib_exit_ok() {
@@ -61,6 +75,21 @@ pub fn run(cwd: Option<PathBuf>, hidden: bool) -> Result<()> {
 
 fn glib_exit_ok() -> gtk::glib::ExitCode {
     gtk::glib::ExitCode::SUCCESS
+}
+
+/// `sill theme NAME`: ask the running shelf to switch theme (saved for next start too).
+pub fn set_theme(name: &str) -> Result<()> {
+    let app = gio::Application::new(Some(APP_ID), gio::ApplicationFlags::empty());
+    app.register(None::<&gio::Cancellable>)?;
+    if !app.is_remote() {
+        // no shelf running: just save it
+        let t = theme::by_id(name);
+        let mut c = sill_core::config::load();
+        c.theme = t.id.to_string();
+        return sill_core::config::save(&c);
+    }
+    app.activate_action("set-theme", Some(&name.to_variant()));
+    Ok(())
 }
 
 /// `sill toggle`: ask the running shelf to show/hide itself.

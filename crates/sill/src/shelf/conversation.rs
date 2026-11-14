@@ -252,10 +252,27 @@ impl Conversation {
 }
 
 pub const CSS: &str = r#"
-.sill-user { background: alpha(@accent_bg_color, 0.18); border-radius: 10px; padding: 6px 10px; }
-.sill-agent { background: alpha(@view_fg_color, 0.05); border-radius: 10px; }
-.sill-thought { background: transparent; color: alpha(@view_fg_color, 0.6); font-size: 90%; }
-.sill-tool { background: alpha(@view_fg_color, 0.07); border-radius: 8px; padding: 6px 10px; }
-.sill-permission { background: alpha(@warning_bg_color, 0.2); border-radius: 8px; padding: 8px 10px; }
-.sill-prompt { border-radius: 8px; }
+/* flat and square: no bubbles, no rounded corners, hierarchy by tone and a thin left rule */
+window, .background { border-radius: 0; }
+tabbar tab, tabbar .tab { border-radius: 0; }
+.boxed-list, .boxed-list row, .frame, scrolledwindow.frame { border-radius: 0; }
+popover > contents { border-radius: 0; }
+button { border-radius: 0; }
+entry { border-radius: 0; }
+
+.sill-user { background: alpha(@view_fg_color, 0.07); border-radius: 0; padding: 8px 12px; }
+.sill-user text { background: transparent; }
+.sill-agent { background: transparent; border-radius: 0; }
+.sill-agent text { background: transparent; }
+.sill-thought { background: transparent; color: alpha(@view_fg_color, 0.55); font-size: 90%; }
+.sill-thought text { background: transparent; }
+.sill-tool { background: alpha(@view_fg_color, 0.045); border-radius: 0; padding: 6px 10px;
+             border-left: 2px solid alpha(@accent_bg_color, 0.8); }
+.sill-permission { background: alpha(@warning_bg_color, 0.10); border-radius: 0; padding: 8px 10px;
+                   border-left: 2px solid @warning_bg_color; }
+.sill-permission button { border-radius: 0; }
+.sill-prompt { border-radius: 0; }
+.sill-prompt text { background: transparent; }
+.sill-prompt-box { border-radius: 0; border: none; border-top: 1px solid alpha(@view_fg_color, 0.15);
+                   background: alpha(@view_fg_color, 0.035); }
 "#;

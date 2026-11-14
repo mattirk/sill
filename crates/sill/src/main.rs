@@ -72,6 +72,8 @@ enum Cmd {
     },
     /// Show/hide the running shelf (bind this to a hotkey)
     Toggle,
+    /// Switch the shelf's colour theme: adwaita | dracula | solarized-dark | solarized-light | nord
+    Theme { name: String },
     /// Show a policy as sill reads it
     Policy {
         /// name (searched in ~/.config/sill/policies, /etc/sill/policies, built-in) or path
@@ -199,6 +201,7 @@ fn main() -> Result<()> {
         Cmd::Launch { session, jail, shim } => launch(&session, jail, shim),
         Cmd::Shelf { cwd, hidden } => shelf::run(cwd, hidden),
         Cmd::Toggle => shelf::toggle(),
+        Cmd::Theme { name } => shelf::set_theme(&name),
         Cmd::Proxy { fd, socket, policy } => {
             let policy = Policy::load(&policy, &home()?)?;
             let listener = match socket {
