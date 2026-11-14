@@ -101,6 +101,23 @@ pub fn builtin() -> Vec<Theme> {
             accent: "#076678", warning: "#b57614", success: "#79740e", error: "#9d0006", link: "#076678",
             border: "#d5c4a1",
         },
+        // cocopon's Iceberg Dark (iceberg.vim): Normal page, CursorLine surfaces, the split's
+        // darker ground for code, Comment dim; blue (Function) accent, orange (Title) warning,
+        // green (Special) success, red (Error), cyan (String) links, Visual for borders
+        Theme {
+            id: "iceberg-dark", name: "Iceberg Dark", dark: true,
+            bg: "#161821", surface: "#1e2132", code_bg: "#0f1117", fg: "#c6c8d1", fg_dim: "#6b7089",
+            accent: "#84a0c6", warning: "#e2a478", success: "#b4be82", error: "#e27878", link: "#89b8c2",
+            border: "#272c42",
+        },
+        // Iceberg Light (iceberg.vim's light background): the same roles; code between the page
+        // and the CursorLine surface, as the other light themes have it; the split's colour for borders
+        Theme {
+            id: "iceberg-light", name: "Iceberg Light", dark: false,
+            bg: "#e8e9ec", surface: "#dcdfe7", code_bg: "#e1e3ea", fg: "#33374c", fg_dim: "#8389a3",
+            accent: "#2d539e", warning: "#c57339", success: "#668e3d", error: "#cc517a", link: "#3f83a6",
+            border: "#cad0de",
+        },
     ]
 }
 

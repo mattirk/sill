@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
-    /// Colour theme id (`adwaita`, `dracula`, `solarized-dark`, `solarized-light`, `nord`).
+    /// Colour theme id (`adwaita`, `dracula`, `nord`, `gruvbox-dark`, `iceberg-light`, …: the shelf's `theme::builtin`).
     pub theme: String,
     /// Fraction of the work area the shelf takes (0.2–0.8).
     pub width: Option<f64>,

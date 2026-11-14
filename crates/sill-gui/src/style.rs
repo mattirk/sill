@@ -1,7 +1,7 @@
 //! Sill's look in iced, taken from the GTK shelf: the theme palette (`shelf/theme.rs`) and the
 //! conversation's rules (`shelf/conversation.rs` CSS) — flat and square, no bubbles or rounded
-//! corners, hierarchy by tone and a thin left rule. Dracula and Miasma so far; the other shelf
-//! themes are the same struct with other values.
+//! corners, hierarchy by tone and a thin left rule. Every shelf theme is here, the same struct
+//! with other values.
 use iced::widget::{
     button, container, overlay::menu, pick_list, rule, scrollable, svg, text_editor,
 };
@@ -179,6 +179,38 @@ pub const THEMES: &[(&str, Palette)] = &[
             error: rgb(0x9d0006),
             link: rgb(0x076678),
             border: rgb(0xd5c4a1),
+        },
+    ),
+    (
+        "iceberg-dark",
+        Palette {
+            bg: rgb(0x161821),
+            surface: rgb(0x1e2132),
+            code_bg: rgb(0x0f1117),
+            fg: rgb(0xc6c8d1),
+            fg_dim: rgb(0x6b7089),
+            accent: rgb(0x84a0c6),
+            warning: rgb(0xe2a478),
+            success: rgb(0xb4be82),
+            error: rgb(0xe27878),
+            link: rgb(0x89b8c2),
+            border: rgb(0x272c42),
+        },
+    ),
+    (
+        "iceberg-light",
+        Palette {
+            bg: rgb(0xe8e9ec),
+            surface: rgb(0xdcdfe7),
+            code_bg: rgb(0xe1e3ea),
+            fg: rgb(0x33374c),
+            fg_dim: rgb(0x8389a3),
+            accent: rgb(0x2d539e),
+            warning: rgb(0xc57339),
+            success: rgb(0x668e3d),
+            error: rgb(0xcc517a),
+            link: rgb(0x3f83a6),
+            border: rgb(0xcad0de),
         },
     ),
 ];

@@ -364,3 +364,18 @@ fn render_login() {
     ));
     render(&app, "14-login-key");
 }
+
+#[test]
+#[ignore = "writes the demo conversation in Iceberg Dark and Light for review"]
+fn render_iceberg() {
+    let (mut app, _) = App::new(true, None);
+    for _ in 0..=demo::CHUNKS.len() {
+        let _ = app.update(crate::Message::DemoTick);
+    }
+    let before = crate::style::theme_id().to_owned();
+    for id in ["iceberg-dark", "iceberg-light"] {
+        assert!(crate::style::set_theme(id));
+        render(&app, id);
+    }
+    crate::style::set_theme(&before);
+}
