@@ -116,7 +116,13 @@ impl View {
             }
             Event::SubmissionUpdated { submission } => {
                 let was_held = self.submissions.get(&submission.submission_id).is_some_and(|s| s.held && s.outcome == "pending");
-                if !self.submissions.contains_key(&submission.submission_id) && submission.delivery == "queued" && self.session.as_ref().is_some_and(|s|s.activity != "idle") {
+                let new_queued = !self.submissions.contains_key(&submission.submission_id) && submission.delivery == "queued";
+                // the queue keeps its order: a held prompt ahead holds everything behind it, which
+                // otherwise just waits with the agent idle
+                let held_ahead = self.submissions.values().any(|s| s.held && s.outcome == "pending");
+                if new_queued && held_ahead {
+                    events.push(wire::Event::Note("This prompt waits behind the held prompt above: send or discard that one first".into()));
+                } else if new_queued && self.session.as_ref().is_some_and(|s|s.activity != "idle") {
                     events.push(wire::Event::Note("Prompt queued until the agent is ready".into()));
                 }
                 if submission.held && submission.outcome == "pending" && !was_held {
@@ -443,6 +449,15 @@ mod tests {
         session.authentication=None; session.activity="idle".into();
         let ready=view.accept(notification("3",Event::SessionUpdated {session})).unwrap();
         assert!(ready.iter().any(|e|matches!(e,wire::Event::Other(t) if t=="sill:authenticated")));
+    }
+    #[test]
+    fn a_prompt_behind_a_held_one_says_why_it_waits() {
+        let mut view=View {session_id:"s".into(),subscription_id:"sub".into(),..Default::default()};
+        let sub=|id:&str,held:bool| Submission { submission_id:id.into(),session_id:"s".into(),accepted_seq:"1".into(),agent_generation_id:"g".into(),text:"t".into(),attachments:vec![],
+            acceptance:"accepted".into(),delivery:"queued".into(),held,hold_reason:None,insertion:"pending".into(),outcome:"pending".into(),reason:None };
+        view.accept(notification("1",Event::SubmissionUpdated {submission:sub("first",true)})).unwrap();
+        let shown=view.accept(notification("2",Event::SubmissionUpdated {submission:sub("second",false)})).unwrap();
+        assert!(shown.iter().any(|e|matches!(e,wire::Event::Note(n) if n.contains("waits behind the held prompt"))), "{shown:?}");
     }
     #[test]
     fn missing_patch_target_requires_resynchronization() {
