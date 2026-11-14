@@ -23,7 +23,7 @@ const ITEM_PATH: &str = "/StatusNotifierItem";
 const MENU_PATH: &str = "/StatusNotifierItem/Menu";
 const WATCHER: &str = "org.kde.StatusNotifierWatcher";
 /// The logo, rendered to pixmaps at these sizes: panels pick the nearest and scale.
-const LOGO: &str = include_str!("../../../../packaging/icons/sill.svg");
+const LOGO: &str = include_str!("../../../../packaging/icons/sill-tray.svg");
 const SIZES: [i32; 4] = [22, 24, 32, 48];
 /// The moving icon: this many frames round one wave, this long each (≈ 8/s, a 1.5 s swell).
 const FRAMES: usize = 12;
@@ -195,7 +195,7 @@ pub fn set_busy(on: bool) {
 }
 
 /// The logo at `phase` (0..1) of its swell: the sill a low wave travelling right, the fish lifted
-/// by the crest under it and leaning into the slope. Same plate, colours and sizes as `sill.svg`.
+/// by the crest under it and leaning into the slope. Same plate, colours and sizes as `sill-tray.svg`.
 fn frame_svg(phase: f64) -> String {
     let t = 2.0 * PI * phase;
     // one and a half waves along the sill, 0.9 px high: a ripple, not a sea

@@ -114,6 +114,14 @@ fn main() -> iced::Result {
         } else {
             iced::window::Level::Normal
         },
+        // the application icon, for the panel's window list and the window switcher
+        icon: tray::rgba(tray::APP_ICON, 128)
+            .and_then(|rgba| iced::window::icon::from_rgba(rgba, 128, 128).ok()),
+        // the window's class, `sill` as `sill.desktop`: the panel and menu match the window to it
+        platform_specific: iced::window::settings::PlatformSpecific {
+            application_id: "sill".into(),
+            ..Default::default()
+        },
         ..iced::window::Settings::default()
     })
     .run()
@@ -532,6 +540,8 @@ pub struct App {
     /// The tray icon while the shared `tray` setting has it, and where its clicks go.
     tray: Option<tray::Tray>,
     tray_asked: Option<async_channel::Sender<tray::Asked>>,
+    /// What the tray was last told: an agent works.
+    tray_busy: bool,
     /// The pointer is over the top bar's activity (the shelf shows the timer then).
     pub activity_hovered: bool,
     /// When the view last went between the session and the backend: the herring swims a stroke.
@@ -609,6 +619,7 @@ impl App {
             hotkey_status: None,
             tray: None,
             tray_asked: None,
+            tray_busy: false,
             activity_hovered: false,
             herring_flick: None,
             selecting: false,
@@ -1059,6 +1070,14 @@ impl App {
         if before != self.backend_shown() {
             self.herring_flick = Some(Instant::now());
         }
+        // the tray moves while any session's agent works
+        let busy = self.views.values().any(|v| v.conversation.busy());
+        if busy != self.tray_busy {
+            self.tray_busy = busy;
+            if let Some(tray) = &self.tray {
+                tray.set_busy(busy);
+            }
+        }
         task
     }
 
@@ -1387,6 +1406,9 @@ impl App {
                 if want && self.tray.is_none() {
                     if let Some(asked) = self.tray_asked.clone() {
                         self.tray = tray::start(asked);
+                        if let Some(tray) = &self.tray {
+                            tray.set_busy(self.tray_busy);
+                        }
                     }
                 } else if !want && let Some(tray) = self.tray.take() {
                     tray.shutdown();
