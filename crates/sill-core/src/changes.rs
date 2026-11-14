@@ -180,8 +180,15 @@ impl Git {
     /// by replacing `packed-refs` would replace the view's link instead: callers update loose refs
     /// only (`update-ref`, `read-tree`, `fetch` into a new ref).
     pub fn cmd_write(&self) -> std::process::Command {
+        self.cmd_write_over(&self.work_tree)
+    }
+
+    /// As [`Git::cmd_write`], run over another working tree `work_tree`: that tree's files read
+    /// with its attributes, into this repository's store (a workspace's clone hashing the person's
+    /// checkout as their own commit would store it).
+    pub fn cmd_write_over(&self, work_tree: &Path) -> std::process::Command {
         let mut c = std::process::Command::new("git");
-        c.arg("--git-dir").arg(&self.dir).arg("--work-tree").arg(&self.work_tree);
+        c.arg("--git-dir").arg(&self.dir).arg("--work-tree").arg(work_tree);
         for kv in [
             "core.fsmonitor=false",
             "core.hooksPath=/dev/null",
@@ -203,7 +210,7 @@ impl Git {
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
             .env_remove("GIT_COMMON_DIR")
-            .current_dir(&self.work_tree);
+            .current_dir(work_tree);
         c
     }
 

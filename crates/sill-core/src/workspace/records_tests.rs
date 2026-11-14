@@ -446,3 +446,28 @@ fn every_clone_there_is_known_and_a_freed_one_is_not() {
     ensure_for_session(&f.host, "s1").unwrap();
     assert!(f.host.db(|c| all_clones(c)).unwrap().is_empty(), "freed to the spare: no longer a clone of anyone's");
 }
+
+/// One request tells the window everything about a session's workspaces: the view carries each
+/// workspace's detail, the same as `get` gives, from one look; the list does too. A workspace
+/// whose repository is gone is listed without a detail.
+#[test]
+fn the_session_view_and_the_list_carry_each_workspaces_detail() {
+    let f = fixture("details");
+    let w = session(&f, "s1");
+    write(&clone_of(&w).join("f1.txt"), "work\n");
+    let view = session_view(&f.host, "s1").unwrap();
+    assert_eq!(view.details.len(), 1);
+    let d = &view.details[0];
+    assert_eq!(d.workspace.workspace_id, w.workspace_id);
+    assert_eq!(d.summary.files, 1);
+    assert_eq!(d.revision, get(&f.host, &w.workspace_id).unwrap().revision);
+    let listed = list(&f.host, &api::List { session_id: Some("s1".into()), after: None, limit: None }).unwrap();
+    assert_eq!(listed.details.len(), 1);
+    assert_eq!(listed.details[0].summary.files, 1);
+    // the repository gone: the record stays, nothing to look at
+    std::fs::rename(&f.source, f.dir.join("elsewhere")).unwrap();
+    let view = session_view(&f.host, "s1").unwrap();
+    assert_eq!(view.workspaces.len(), 1);
+    assert!(view.details.is_empty());
+    assert!(get(&f.host, &w.workspace_id).is_err());
+}

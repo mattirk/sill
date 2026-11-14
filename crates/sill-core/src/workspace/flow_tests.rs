@@ -225,7 +225,7 @@ fn discard_returns_to_what_was_applied_and_undo_brings_it_back() {
 /// What Apply would bring, as the paths of the mirror's difference to the workspace.
 fn pending(s: &Path, c: &crate::workspace::Created) -> Vec<String> {
     let m = mirror(s, &c.path, &c.branch).unwrap();
-    git(&c.path, &["diff", "--name-only", &m.commit, &m.now]).lines().map(str::to_string).collect()
+    git(&c.path, &["diff", "--name-only", &m.tree, &m.now]).lines().map(str::to_string).collect()
 }
 
 /// The person reverts an applied file in their checkout and the agent reverts it in the
@@ -358,4 +358,123 @@ fn a_reused_folder_keeps_build_output_but_nothing_a_session_planted() {
     assert_eq!(git(&to, &["status", "--porcelain"]), "");
     assert!(!unapplied(&s, &to, &made.branch).unwrap());
     git(&to, &["fsck"]);
+}
+
+/// A file the person deleted in their checkout, uncommitted, that the agent never touched: not
+/// the agent's, so nothing is offered (both sides lacking it is not the agent's content there).
+#[test]
+fn a_file_the_person_deleted_that_the_agent_never_touched_is_not_offered() {
+    let d = tmp("mirror-deleted");
+    let (s, _, c) = setup(&d);
+    std::fs::remove_file(s.join("f3.txt")).unwrap();
+    assert_eq!(pending(&s, &c), Vec::<String>::new());
+    assert!(!unapplied(&s, &c.path, &c.branch).unwrap());
+    // the same with a staged edit of another file alongside
+    write(&s.join("f2.txt"), "theirs\n");
+    git(&s, &["add", "f2.txt"]);
+    assert_eq!(pending(&s, &c), Vec::<String>::new());
+}
+
+/// The snapshot's tree is what `git add -A` into a private index would stage, on a messy tree:
+/// staged and unstaged edits, a staged edit reverted in the file, deletions staged and not, a
+/// rename, an untracked nested directory, a link, an exec bit, an ignored file beside a modified
+/// tracked one under the ignored pattern, odd names, and an in-repository clean conversion
+/// (`ident`), which the files pass through as for a commit.
+#[test]
+fn a_snapshot_is_what_add_dash_a_would_stage() {
+    let d = tmp("snap-parity");
+    let (_, _, c) = setup(&d);
+    let w = &c.path;
+    write(&w.join(".gitattributes"), "*.id ident\n");
+    write(&w.join("keys.id"), "$Id$\n");
+    write(&w.join("target/tracked.txt"), "tracked under an ignored pattern\n");
+    git(w, &["add", "-f", ".gitattributes", "keys.id", "target/tracked.txt"]);
+    git(w, &["commit", "-qm", "more"]);
+    // the mess
+    write(&w.join("f1.txt"), "staged\n");
+    git(w, &["add", "f1.txt"]);
+    write(&w.join("f1.txt"), "staged then edited again\n");
+    write(&w.join("f2.txt"), "staged\n");
+    git(w, &["add", "f2.txt"]);
+    write(&w.join("f2.txt"), "line 2\n"); // back to HEAD's content in the file
+    git(w, &["rm", "-q", "f3.txt"]);
+    std::fs::remove_file(w.join("target/tracked.txt")).unwrap();
+    git(w, &["mv", "keys.id", "moved.id"]);
+    write(&w.join("moved.id"), "$Id: 0123456789abcdef $\n");
+    write(&w.join("deep/er/new.txt"), "nested untracked\n");
+    write(&w.join("with space.txt"), "odd name\n");
+    write(&w.join("ünï.txt"), "odd name\n");
+    write(&w.join("target/out.o"), "ignored\n");
+    std::os::unix::fs::symlink("f1.txt", w.join("link")).unwrap();
+    write(&w.join("run.sh"), "#!/bin/sh\n");
+    std::fs::set_permissions(w.join("run.sh"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    write(&w.join("staged-new.txt"), "staged new\n");
+    git(w, &["add", "staged-new.txt"]);
+    let before = git(w, &["status", "--porcelain"]);
+    // the oracle: git's own staging of everything, in a private index
+    let index = d.0.join("oracle-index");
+    let oracle = |args: &[&str]| {
+        let out = Command::new("git").arg("-C").arg(w).args(args).env("GIT_INDEX_FILE", &index).env("GIT_CONFIG_NOSYSTEM", "1").output().unwrap();
+        assert!(out.status.success(), "oracle git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    oracle(&["read-tree", "HEAD"]);
+    oracle(&["add", "-A", "--", ":/"]);
+    let expected = oracle(&["write-tree"]);
+    let snap = snapshot(w, "x").unwrap();
+    assert_eq!(git(w, &["rev-parse", &format!("{snap}^{{tree}}")]), expected, "\n{}\n", git(w, &["diff", "--stat", &expected, &snap]));
+    assert_eq!(git(w, &["status", "--porcelain"]), before, "index and files untouched");
+    assert_eq!(git(w, &["show", &format!("{snap}:moved.id")]), "$Id$", "the clean conversion ran");
+    assert_eq!(git(w, &["ls-tree", &snap, "run.sh"]).split(' ').next().unwrap(), "100755");
+    assert_eq!(git(w, &["ls-tree", &snap, "link"]).split(' ').next().unwrap(), "120000");
+    assert_eq!(git(w, &["ls-tree", "--name-only", &snap, "target/"]), "", "ignored and deleted alike: nothing under target");
+}
+
+/// A look leaves no commit behind, only trees and blobs; prune drops what nothing reaches and is
+/// older than an hour, and nothing else: not the fresh look, not the reachable, not the store
+/// the clone borrows.
+#[test]
+fn looks_leave_no_commits_and_prune_drops_their_leavings_after_an_hour() {
+    let d = tmp("prune");
+    let (s, _, c) = setup(&d);
+    let commits = |p: &Path| git(p, &["rev-list", "--all", "--count"]);
+    let before = commits(&c.path);
+    write(&c.path.join("f1.txt"), "work\n");
+    for _ in 0..3 {
+        assert!(unapplied(&s, &c.path, &c.branch).unwrap());
+    }
+    assert_eq!(commits(&c.path), before, "looks make no commits");
+    let m = mirror(&s, &c.path, &c.branch).unwrap();
+    let loose = |p: &Path| -> Vec<PathBuf> {
+        let mut v = Vec::new();
+        for dir in std::fs::read_dir(p.join(".git/objects")).unwrap().flatten().filter(|e| e.file_name().len() == 2) {
+            v.extend(std::fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.path()));
+        }
+        v
+    };
+    assert!(!loose(&c.path).is_empty(), "the look's trees are in the clone's own store");
+    let source_objects = loose(&s).len();
+    // everything an hour old: the looks' leavings go, what a ref reaches stays
+    let of = |id: &str| c.path.join(".git/objects").join(&id[..2]).join(&id[2..]);
+    let age = |p: &Path| std::fs::File::open(p).unwrap().set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600)).unwrap();
+    for p in loose(&c.path) {
+        age(&p);
+    }
+    let applied = applied(&c.path).unwrap();
+    prune(&c.path).unwrap();
+    assert!(!of(&m.now).exists(), "an hour-old look's tree goes");
+    assert!(of(&applied).exists(), "the applied snapshot is reachable, so kept");
+    assert_eq!(loose(&s).len(), source_objects, "the borrowed store is untouched");
+    // a fresh look's trees stay
+    let m = mirror(&s, &c.path, &c.branch).unwrap();
+    prune(&c.path).unwrap();
+    assert!(of(&m.now).exists(), "a fresh look's tree stays");
+    assert_eq!(git(&c.path, &["cat-file", "-t", &m.tree]), "tree", "the person's side here is HEAD's own tree, borrowed");
+    // what the branch reaches stays however old
+    write(&c.path.join("f2.txt"), "committed\n");
+    git(&c.path, &["commit", "-qam", "agent"]);
+    let kept = git(&c.path, &["rev-parse", "HEAD^{tree}"]);
+    age(&of(&kept));
+    prune(&c.path).unwrap();
+    assert!(of(&kept).exists(), "reachable, so kept");
 }

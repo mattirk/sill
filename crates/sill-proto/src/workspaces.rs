@@ -97,6 +97,10 @@ pub struct List {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Listed {
     pub workspaces: Vec<Workspace>,
+    /// Each workspace's current state, one look at the daemon: absent for a workspace whose folder
+    /// or repository is gone.
+    #[serde(default)]
+    pub details: Vec<Detail>,
     /// Discarded work still undoable (first page only).
     pub discarded: Vec<Discarded>,
     pub next: Option<String>,
@@ -108,6 +112,10 @@ pub struct SessionView {
     /// True when the session works in workspaces (Automatic workspaces, or chosen at its start).
     pub workspaces_mode: bool,
     pub workspaces: Vec<Workspace>,
+    /// Each workspace's current state, one look at the daemon: absent for a workspace whose folder
+    /// or repository is gone.
+    #[serde(default)]
+    pub details: Vec<Detail>,
     /// Repositories the session pins live although it works in workspaces: the reason.
     pub live: Vec<LiveRepository>,
 }

@@ -782,8 +782,11 @@ workspaces when its jail starts; there is no create method.
 
 `_sill/workspaces.session` gives a session's repositories as its jail has them (each workspace,
 and repositories kept live with their reason). `_sill/workspaces.list` (live keyset pages, newest
-first, optionally one session's; the first page lists discarded work still undoable),
-`_sill/workspaces.get` (record, current `revision`, what an Apply would bring, `needs_rebase`) and
+first, optionally one session's; the first page lists discarded work still undoable). Both carry
+`details`, each listed workspace's state as `get` gives it, from the same look (added 2026-11-09;
+a workspace whose folder or repository is gone has none, and a client asks `get` for what is
+missing). `_sill/workspaces.get` (record, current `revision`, what an Apply would bring,
+`needs_rebase`) and
 `_sill/workspaces.diff` (against what the person has — their checkout on the agent's paths — or
 against the base; at most 4 MiB) read.
 `_sill/workspaces.prepare` rebases onto a moved checkout in a helper jail built from the session's

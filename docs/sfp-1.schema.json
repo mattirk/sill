@@ -3475,6 +3475,14 @@
     },
     "Listed": {
       "properties": {
+        "details": {
+          "default": [],
+          "description": "Each workspace's current state, one look at the daemon: absent for a workspace whose folder\nor repository is gone.",
+          "items": {
+            "$ref": "#/$defs/Detail"
+          },
+          "type": "array"
+        },
         "discarded": {
           "description": "Discarded work still undoable (first page only).",
           "items": {
@@ -5761,6 +5769,14 @@
     "SessionView": {
       "description": "A session's pinned repositories as its jail has them: each a workspace, or live with why.",
       "properties": {
+        "details": {
+          "default": [],
+          "description": "Each workspace's current state, one look at the daemon: absent for a workspace whose folder\nor repository is gone.",
+          "items": {
+            "$ref": "#/$defs/Detail"
+          },
+          "type": "array"
+        },
         "live": {
           "description": "Repositories the session pins live although it works in workspaces: the reason.",
           "items": {

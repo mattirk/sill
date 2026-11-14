@@ -52,13 +52,33 @@ pub fn message(e: &anyhow::Error) -> String {
     e.root_cause().to_string()
 }
 
+/// The details the daemon sent with the list, and one `get` for each workspace it left out (a
+/// daemon from before the lists carried details).
+fn details(
+    mut call: impl FnMut(&str) -> anyhow::Result<api::Detail>,
+    workspaces: &[api::Workspace],
+    sent: Vec<api::Detail>,
+    skip_failures: bool,
+) -> anyhow::Result<Vec<api::Detail>> {
+    let mut details = sent;
+    for w in workspaces {
+        if details.iter().any(|d| d.workspace.workspace_id == w.workspace_id) {
+            continue;
+        }
+        match call(&w.workspace_id) {
+            Ok(d) => details.push(d),
+            Err(_) if skip_failures => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(details)
+}
+
 pub fn load(actions: &Actions, session: &str) -> anyhow::Result<Loaded> {
     actions.reading(|c| {
-        let view: api::SessionView = c.call("_sill/workspaces.session", api::SessionKey { session_id: session.into() })?;
-        let mut details = Vec::new();
-        for w in &view.workspaces {
-            details.push(c.call("_sill/workspaces.get", api::Key { workspace_id: w.workspace_id.clone() })?);
-        }
+        let mut view: api::SessionView = c.call("_sill/workspaces.session", api::SessionKey { session_id: session.into() })?;
+        let sent = std::mem::take(&mut view.details);
+        let details = details(|id| c.call("_sill/workspaces.get", api::Key { workspace_id: id.into() }), &view.workspaces, sent, false)?;
         Ok(Loaded { view, details })
     })
 }
@@ -66,13 +86,9 @@ pub fn load(actions: &Actions, session: &str) -> anyhow::Result<Loaded> {
 /// Every workspace and the discarded work still undoable, with each workspace's state.
 pub fn all(actions: &Actions) -> anyhow::Result<(api::Listed, Vec<api::Detail>)> {
     actions.reading(|c| {
-        let listed: api::Listed = c.call("_sill/workspaces.list", api::List { session_id: None, after: None, limit: Some(128) })?;
-        let mut details = Vec::new();
-        for w in &listed.workspaces {
-            if let Ok(d) = c.call::<api::Detail>("_sill/workspaces.get", api::Key { workspace_id: w.workspace_id.clone() }) {
-                details.push(d);
-            }
-        }
+        let mut listed: api::Listed = c.call("_sill/workspaces.list", api::List { session_id: None, after: None, limit: Some(128) })?;
+        let sent = std::mem::take(&mut listed.details);
+        let details = details(|id| c.call("_sill/workspaces.get", api::Key { workspace_id: id.into() }), &listed.workspaces, sent, true)?;
         Ok((listed, details))
     })
 }

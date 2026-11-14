@@ -13,7 +13,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -340,6 +340,8 @@ fn spare<H: Host>(h: &H, source: &Path) -> PathBuf {
 /// goes), its anchors go except those of discarded work, its row goes.
 fn free<H: Host>(h: &H, r: &Row) -> Result<()> {
     if r.path.exists() {
+        // nothing runs in it any more: what its looks left goes
+        let _ = flow::prune(&r.path);
         let to = spare(h, &r.source);
         if to.exists() {
             std::fs::remove_dir_all(&to).with_context(|| format!("remove the old spare {}", to.display()))?;
@@ -366,24 +368,51 @@ fn drop_ref(repo: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// One look at a workspace (§12): the person's side read from their checkout, serving the
+/// settling and the summary alike, so a request looks once. None when the folder or the checkout
+/// is gone: nothing can be read, and the work is kept.
+fn look(r: &Row) -> Result<Option<flow::Mirror>> {
+    if !r.path.exists() || !r.source.exists() {
+        return Ok(None);
+    }
+    flow::mirror(&r.source, &r.path, &r.branch).map(Some)
+}
+
+/// Whether the workspace is kept rather than freed: work to apply, a stopped rebase, or nothing
+/// readable.
+fn keeps_work(r: &Row, l: &Option<flow::Mirror>) -> bool {
+    rebasing(&r.path) || l.as_ref().is_none_or(|m| m.changed)
+}
+
+/// An open workspace whose session has ended.
+fn ending<H: Host>(h: &H, r: &Row) -> bool {
+    r.state == "open" && matches!(h.life(&r.session_id), Life::Missing | Life::Ended)
+}
+
 /// A workspace whose session ended: with work left, a result; with nothing, freed (§12).
 /// Returns the row still there.
-fn settle_session<H: Host>(h: &H, mut r: Row) -> Result<Option<Row>> {
-    if r.state == "open" && matches!(h.life(&r.session_id), Life::Missing | Life::Ended) {
-        if r.path.exists() && !rebasing(&r.path) && !unapplied(&r)? {
-            free(h, &r)?;
-            return Ok(None);
-        }
-        r.state = "result".into();
-        r.updated_at = h.now();
-        h.db(|c| save(c, &r))?;
+fn settle_session<H: Host>(h: &H, r: Row) -> Result<Option<Row>> {
+    if !ending(h, &r) {
+        return Ok(Some(r));
     }
+    let l = look(&r)?;
+    settle_ended(h, r, &l)
+}
+
+fn settle_ended<H: Host>(h: &H, mut r: Row, l: &Option<flow::Mirror>) -> Result<Option<Row>> {
+    if !keeps_work(&r, l) {
+        free(h, &r)?;
+        return Ok(None);
+    }
+    r.state = "result".into();
+    r.updated_at = h.now();
+    h.db(|c| save(c, &r))?;
     Ok(Some(r))
 }
 
 /// A workspace whose pin was removed: freed when nothing is left to apply, else a result.
 fn settle_unpinned<H: Host>(h: &H, mut r: Row) -> Result<()> {
-    if r.path.exists() && !rebasing(&r.path) && !unapplied(&r)? {
+    if !keeps_work(&r, &look(&r)?) {
         return free(h, &r);
     }
     r.state = "result".into();
@@ -393,7 +422,7 @@ fn settle_unpinned<H: Host>(h: &H, mut r: Row) -> Result<()> {
 
 /// After an Apply or Discard of a result: nothing left, so it is done with.
 fn settle_result<H: Host>(h: &H, r: Row) -> Result<Option<Row>> {
-    if r.state == "result" && !rebasing(&r.path) && !unapplied(&r)? {
+    if r.state == "result" && !keeps_work(&r, &look(&r)?) {
         free(h, &r)?;
         return Ok(None);
     }
@@ -482,6 +511,8 @@ pub fn ensure_for_session<H: Host>(h: &H, session: &str) -> Result<Vec<Layout>> 
             Ok(c.query_row(&format!("SELECT {COLUMNS} FROM workspaces WHERE session_id=?1 AND source=?2"), params![session, bytes(&source)], row).optional()?)
         })?;
         if let Some(mut r) = existing.filter(|r| r.path.exists()) {
+            // before the jail runs in it: what the looks since its last start left goes
+            let _ = flow::prune(&r.path);
             if r.state != "open" {
                 r.state = "open".into();
                 r.updated_at = h.now();
@@ -558,10 +589,15 @@ pub fn ensure_for_session<H: Host>(h: &H, session: &str) -> Result<Vec<Layout>> 
 pub fn session_view<H: Host>(h: &H, session: &str) -> Result<api::SessionView> {
     let workspaces_mode = h.db(|c| mode(c, session))?;
     let rows = h.db(|c| if has_tables(c)? { of_session(c, session) } else { Ok(vec![]) })?;
-    let mut workspaces = Vec::new();
+    let (mut workspaces, mut details) = (Vec::new(), Vec::new());
     for r in rows {
-        if let Some(r) = settle_session(h, r)? {
-            workspaces.push(h.db(|c| record(c, &r))?);
+        match detail(h, r)? {
+            Settled::Freed => {}
+            Settled::Record(w) => workspaces.push(w),
+            Settled::Full(d) => {
+                workspaces.push(d.workspace.clone());
+                details.push(d);
+            }
         }
     }
     let live = h.db(|c| {
@@ -580,7 +616,7 @@ pub fn session_view<H: Host>(h: &H, session: &str) -> Result<api::SessionView> {
             reason,
         })
         .collect();
-    Ok(api::SessionView { workspaces_mode, workspaces, live })
+    Ok(api::SessionView { workspaces_mode, workspaces, details, live })
 }
 
 fn refusal_message(reason: &str) -> String {
@@ -600,19 +636,37 @@ fn revision_now(r: &Row) -> Result<(api::Revision, bool)> {
     Ok((api::Revision { tip: rev.tip, worktree: rev.worktree, destination_branch: branch, destination_tip: tip }, needs_rebase))
 }
 
-/// Whether the workspace has anything left to bring. A checkout that is gone keeps the work.
-fn unapplied(r: &Row) -> Result<bool> {
-    if !r.source.exists() {
-        return Ok(true);
-    }
-    flow::unapplied(&r.source, &r.path, &r.branch)
+/// What an Apply would bring: commits and changes since what the person has (`m`).
+fn summary(r: &Row, m: &flow::Mirror) -> Result<api::Summary> {
+    let s = super::summary_to(&r.path, &r.branch, &m.upstream, &m.tree, Some(&m.now))?;
+    Ok(api::Summary { commits: s.commits, files: s.files, added: s.added.to_string(), removed: s.removed.to_string(), uncommitted: s.uncommitted })
 }
 
-/// What an Apply would bring: commits and changes since what the person has.
-fn summary(r: &Row) -> Result<api::Summary> {
-    let m = flow::mirror(&r.source, &r.path, &r.branch)?;
-    let s = super::summary_to(&r.path, &r.branch, &m.commit, Some(&m.now))?;
-    Ok(api::Summary { commits: s.commits, files: s.files, added: s.added.to_string(), removed: s.removed.to_string(), uncommitted: s.uncommitted })
+/// A workspace after one look (`detail`).
+enum Settled {
+    /// Its session had ended with nothing left: the folder is the spare now.
+    Freed,
+    /// Its folder or checkout is gone: the record alone.
+    Record(api::Workspace),
+    Full(api::Detail),
+}
+
+/// The workspace's record, revision and what an Apply would bring, from one look that also
+/// settles an ended session's workspace.
+fn detail<H: Host>(h: &H, r: Row) -> Result<Settled> {
+    let l = look(&r)?;
+    let r = if ending(h, &r) {
+        match settle_ended(h, r, &l)? {
+            Some(r) => r,
+            None => return Ok(Settled::Freed),
+        }
+    } else {
+        r
+    };
+    let workspace = h.db(|c| record(c, &r))?;
+    let Some(m) = l else { return Ok(Settled::Record(workspace)) };
+    let (revision, needs_rebase) = revision_now(&r)?;
+    Ok(Settled::Full(api::Detail { workspace, revision, summary: summary(&r, &m)?, needs_rebase }))
 }
 
 fn changed<H: Host>(h: &H, r: Option<&Row>, operation: Option<&str>, discarded: Option<api::Discarded>) -> Result<api::Changed> {
@@ -654,10 +708,15 @@ pub fn list<H: Host>(h: &H, a: &api::List) -> Result<api::Listed> {
         let last = rows.last().unwrap();
         format!("{}:{}", last.created_at, last.id)
     });
-    let mut workspaces = Vec::new();
+    let (mut workspaces, mut details) = (Vec::new(), Vec::new());
     for r in rows {
-        if let Some(r) = settle_session(h, r)? {
-            workspaces.push(h.db(|c| record(c, &r))?);
+        match detail(h, r)? {
+            Settled::Freed => {}
+            Settled::Record(w) => workspaces.push(w),
+            Settled::Full(d) => {
+                workspaces.push(d.workspace.clone());
+                details.push(d);
+            }
         }
     }
     let discarded = if a.after.is_none() {
@@ -669,13 +728,15 @@ pub fn list<H: Host>(h: &H, a: &api::List) -> Result<api::Listed> {
     } else {
         vec![]
     };
-    Ok(api::Listed { workspaces, discarded, next })
+    Ok(api::Listed { workspaces, details, discarded, next })
 }
 
 pub fn get<H: Host>(h: &H, id: &str) -> Result<api::Detail> {
-    let r = settle_session(h, get_row(h, id)?)?.ok_or_else(|| not_found("workspace"))?;
-    let (revision, needs_rebase) = revision_now(&r)?;
-    Ok(api::Detail { workspace: h.db(|c| record(c, &r))?, revision, summary: summary(&r)?, needs_rebase })
+    match detail(h, get_row(h, id)?)? {
+        Settled::Full(d) => Ok(d),
+        Settled::Freed => Err(not_found("workspace")),
+        Settled::Record(w) => bail!("{}: the workspace's folder or its repository is gone", w.name),
+    }
 }
 
 pub fn diff<H: Host>(h: &H, a: &api::DiffRequest) -> Result<api::DiffText> {
@@ -683,9 +744,9 @@ pub fn diff<H: Host>(h: &H, a: &api::DiffRequest) -> Result<api::DiffText> {
     let (against, now) = match a.against {
         api::Against::Applied => {
             let m = flow::mirror(&r.source, &r.path, &r.branch)?;
-            (m.commit, m.now)
+            (m.tree, m.now)
         }
-        api::Against::Base => (r.base.clone(), flow::snapshot(&r.path, "sill: diff")?),
+        api::Against::Base => (r.base.clone(), flow::state_tree(&r.path)?),
     };
     let (text, truncated) = super::diff_to(&r.path, &against, Some(&now), DIFF_LIMIT)?;
     Ok(api::DiffText { text, truncated })
@@ -939,7 +1000,7 @@ pub fn undo<H: Host>(h: &H, a: &api::Undo) -> Result<api::Changed> {
             let op = key(&a.operation_id);
             let spare = spare(h, &src.root);
             let made = if spare.exists() { flow::reuse(&spare, &src, &id, &d.name, &at, &op)? } else { super::create(&src, &id, &d.name, &at, &op)? };
-            flow::reset_to(&made.path, &made.branch, &d.snapshot)?;
+            flow::reset_to_snapshot(&made.path, &made.branch, &d.snapshot)?;
             let now = h.now();
             let r = Row {
                 id,

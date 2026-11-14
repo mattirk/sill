@@ -4,12 +4,15 @@
 //!
 //! A **snapshot** is a commit of a clone's whole state — its HEAD plus every tracked change and
 //! every untracked file that is not ignored — made with a private index, so the clone's own index
-//! and files are untouched. The **mirror** ([`mirror`]) is the person's side: the clone's state
-//! with the agent's paths as the checkout has them, read fresh from the checkout at every look;
-//! what Apply would bring and what Discard resets to. `refs/sill/applied` in the clone is the
-//! snapshot of the last Apply (at creation, of the base), kept to tell the agent's earlier Apply
-//! from the person's own edit of a dirty file. All Git here runs through the hardened view
-//! ([`Git`]); nothing in either repository's config runs.
+//! and files are untouched; it costs what is dirty, not the repository's size. The **mirror**
+//! ([`mirror`]) is the person's side: the clone's state with the agent's paths as the checkout
+//! has them, read fresh from the checkout at every look; what Apply would bring and what Discard
+//! resets to. A look makes trees only, no commits, and what it leaves behind is pruned when the
+//! folder changes hands ([`prune`]). `refs/sill/applied` in the clone is the snapshot of the last
+//! Apply (at creation, of the base), kept to tell the agent's earlier Apply from the person's own
+//! edit of a dirty file. All Git here runs through the hardened view ([`Git`]); nothing in
+//! either repository's config runs.
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -43,22 +46,174 @@ fn try_rev(git: &Git, what: &str) -> Result<Option<String>> {
 /// A commit of the clone's whole state on top of its HEAD (see the module docs).
 pub fn snapshot(clone: &Path, message: &str) -> Result<String> {
     let git = Git::open(clone)?;
-    let index = git.dirs().0.join(format!("sill-snapshot-index-{}", std::process::id()));
+    let tree = worktree_tree(&git, clone)?;
+    let mut c = git.cmd_write();
+    for (k, v) in IDENT {
+        c.env(k, v);
+    }
+    c.args(["commit-tree", &tree, "-p", "HEAD", "-m", message]);
+    ok(c, "snapshot: commit")
+}
+
+/// The tree of the clone's whole state now, no commit made: for a look.
+pub fn state_tree(clone: &Path) -> Result<String> {
+    worktree_tree(&Git::open(clone)?, clone)
+}
+
+/// Drop the objects of the clone's own store that nothing reaches any more — the trees and blobs
+/// its looks left — keeping the last hour's. For when nothing else runs in the clone: the folder
+/// changing hands, a jail starting. The borrowed store is never touched.
+pub fn prune(clone: &Path) -> Result<()> {
+    let git = Git::open(clone)?;
+    let mut c = git.cmd_write();
+    c.args(["prune", "--expire=1.hour.ago"]);
+    ok(c, "prune").map(drop)
+}
+
+/// A tree of the working tree as `git add -A` would stage it, the index untouched: HEAD's tree
+/// with every path `status` lists — tracked changes, deletions, untracked files that are not
+/// ignored — read from the files; what `status` does not list is as HEAD has it. Costs what is
+/// dirty, not the repository's size.
+fn worktree_tree(git: &Git, root: &Path) -> Result<String> {
+    let mut paths: Vec<String> = dirty(git)?.into_iter().map(|(_, _, p)| p).collect();
+    paths.sort();
+    paths.dedup();
+    // a directory listed is a repository nested without being a submodule: kept as HEAD has it
+    paths.retain(|p| !std::fs::symlink_metadata(root.join(p)).is_ok_and(|m| m.is_dir()));
+    let entries = worktree_entries(git, root, &paths)?;
+    build_tree(git, "HEAD", &entries)
+}
+
+/// A tree entry as git stores one: mode and blob; None where there is no file.
+type Have = Option<(String, String)>;
+
+/// The files at `paths` below `root` as git would store them, their blobs written into `store`'s
+/// own object store: one `hash-object` for all regular files, read with `root`'s attributes so
+/// the person's clean filters run as for their own commits; a link's target is the blob, never
+/// followed; nothing (None) where there is no file or link. A file that goes while being read
+/// counts as gone.
+fn worktree_entries(store: &Git, root: &Path, paths: &[String]) -> Result<Vec<(String, Have)>> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut out: Vec<(String, Have)> = Vec::with_capacity(paths.len());
+    let mut files = Vec::new();
+    for p in paths {
+        let full = root.join(p);
+        let entry = match std::fs::symlink_metadata(&full) {
+            Err(_) => None,
+            Ok(m) if m.file_type().is_symlink() => {
+                let target = std::fs::read_link(&full)?;
+                Some(("120000".to_string(), hash_stdin(store, target.as_os_str().as_encoded_bytes())?))
+            }
+            Ok(m) if m.is_file() => {
+                files.push(out.len());
+                Some(((if m.permissions().mode() & 0o111 != 0 { "100755" } else { "100644" }).to_string(), String::new()))
+            }
+            Ok(_) => None,
+        };
+        out.push((p.clone(), entry));
+    }
+    let hash = |indices: &[usize]| -> Result<Vec<String>> {
+        let mut c = store.cmd_write_over(root);
+        c.args(["hash-object", "-w", "--"]);
+        for &i in indices {
+            c.arg(&paths[i]);
+        }
+        let ids: Vec<String> = ok(c, "hash-object")?.lines().map(str::to_string).collect();
+        if ids.len() != indices.len() {
+            bail!("hash-object: {} ids for {} files", ids.len(), indices.len());
+        }
+        Ok(ids)
+    };
+    for chunk in files.chunks(256) {
+        let ids = match hash(chunk) {
+            Ok(ids) => ids.into_iter().map(Some).collect::<Vec<_>>(),
+            // one of them went: read them one by one
+            Err(_) => chunk.iter().map(|&i| hash(&[i]).ok().map(|mut v| v.remove(0))).collect(),
+        };
+        for (&i, id) in chunk.iter().zip(ids) {
+            out[i].1 = id.map(|id| (out[i].1.take().unwrap().0, id));
+        }
+    }
+    Ok(out)
+}
+
+/// `bytes` as a blob in `store`.
+fn hash_stdin(store: &Git, bytes: &[u8]) -> Result<String> {
+    use std::io::Write;
+    let mut c = store.cmd_write();
+    c.args(["hash-object", "-w", "--stdin"]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let mut child = c.spawn()?;
+    child.stdin.take().context("no stdin")?.write_all(bytes)?;
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        bail!("hash-object: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// The files and links of `commit`'s tree at `paths`: mode and blob of each that is there (a
+/// directory or a gitlink at a path is no file). One `ls-tree` for all.
+fn tree_entries(git: &Git, commit: &str, paths: &[String]) -> Result<BTreeMap<String, (String, String)>> {
+    let mut out = BTreeMap::new();
+    for chunk in paths.chunks(256) {
+        let mut c = git.cmd();
+        c.args(["ls-tree", "-z", commit, "--"]);
+        for p in chunk {
+            c.arg(p);
+        }
+        for e in ok_raw(c, "ls-tree")?.split('\0').filter(|e| !e.is_empty()) {
+            let Some((meta, path)) = e.split_once('\t') else { continue };
+            let f: Vec<&str> = meta.split(' ').collect();
+            if f.len() >= 3 && f[1] == "blob" {
+                out.insert(path.to_string(), (f[0].to_string(), f[2].to_string()));
+            }
+        }
+    }
+    Ok(out)
+}
+
+static INDEXES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The tree of `base` with `entries` put in place of its own at their paths (None: the path
+/// removed), made through a private index: the repository's index is untouched.
+fn build_tree(git: &Git, base: &str, entries: &[(String, Have)]) -> Result<String> {
+    let n = INDEXES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let index = git.dirs().0.join(format!("sill-index-{}-{n}", std::process::id()));
     let _ = std::fs::remove_file(&index);
     let with = |args: &[&str]| {
         let mut c = git.cmd_write();
         c.env("GIT_INDEX_FILE", &index);
-        for (k, v) in IDENT {
-            c.env(k, v);
-        }
         c.args(args);
         c
     };
     let made = (|| {
-        ok(with(&["read-tree", "HEAD"]), "snapshot: read HEAD")?;
-        ok(with(&["add", "-A", "--", ":/"]), "snapshot: add")?;
-        let tree = ok(with(&["write-tree"]), "snapshot: write tree")?;
-        ok(with(&["commit-tree", &tree, "-p", "HEAD", "-m", message]), "snapshot: commit")
+        ok(with(&["read-tree", base]), "read the tree")?;
+        if !entries.is_empty() {
+            use std::io::Write;
+            // a removal names the null id, as long as this repository's ids are
+            let width = match entries.iter().find_map(|(_, e)| e.as_ref().map(|(_, b)| b.len())) {
+                Some(w) => w,
+                None => rev(git, base)?.len(),
+            };
+            let none = "0".repeat(width);
+            let mut c = with(&["update-index", "-z", "--index-info"]);
+            c.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+            let mut child = c.spawn()?;
+            {
+                let mut stdin = child.stdin.take().context("no stdin")?;
+                for (path, entry) in entries {
+                    match entry {
+                        Some((mode, blob)) => write!(stdin, "{mode} {blob}\t{path}\0")?,
+                        None => write!(stdin, "0 {none}\t{path}\0")?,
+                    }
+                }
+            }
+            let out = child.wait_with_output()?;
+            if !out.status.success() {
+                bail!("update-index: {}", String::from_utf8_lossy(&out.stderr).trim());
+            }
+        }
+        ok(with(&["write-tree"]), "write the tree")
     })();
     let _ = std::fs::remove_file(&index);
     made
@@ -87,22 +242,24 @@ pub fn applied(clone: &Path) -> Result<String> {
 /// (2026-11-09; the recorded last Apply had, twice). `refs/sill/applied` stays only to tell the
 /// agent's earlier Apply from the person's own edit of a dirty file.
 pub struct Mirror {
-    /// A commit of the person's side in the clone's own store, its parent `upstream`: so
-    /// `rev-list commit..branch` is the workspace's own commits.
-    pub commit: String,
+    /// The tree of the person's side, in the clone's own store.
+    pub tree: String,
     /// Where the workspace's own commits start: the checkout's tip when the workspace has it,
-    /// else their common ancestor (a rebase is due).
+    /// else their common ancestor (a rebase is due). `rev-list upstream..branch` is the
+    /// workspace's own commits.
     pub upstream: String,
-    /// The workspace's state now, as a snapshot.
+    /// The tree of the workspace's state now.
     pub now: String,
+    /// Whether the workspace differs from the person's side at all: anything to apply.
+    pub changed: bool,
 }
 
 pub fn mirror(source: &Path, clone: &Path, workspace_branch: &str) -> Result<Mirror> {
     let ws = Git::open(clone)?;
     let src = Git::open(source)?;
     let tip = rev(&ws, &format!("refs/heads/{workspace_branch}"))?;
-    let (_, dest) = super::source_head(source)?;
-    let upstream = if super::descends(clone, &dest, &tip)? {
+    let (_, dest) = super::head_of(&src)?;
+    let upstream = if super::descends_in(&ws, &dest, &tip)? {
         dest
     } else {
         let mut c = ws.cmd();
@@ -110,98 +267,43 @@ pub fn mirror(source: &Path, clone: &Path, workspace_branch: &str) -> Result<Mir
         let out = run(c)?;
         if out.status.success() { String::from_utf8_lossy(&out.stdout).trim().to_string() } else { rev(&ws, "refs/sill/base")? }
     };
-    let now = snapshot(clone, "sill: check")?;
+    let now = worktree_tree(&ws, clone)?;
     let applied = rev(&ws, APPLIED)?;
-    // the agent's paths: changed since upstream, or dirty in the checkout with the agent's content
+    // the agent's paths: changed since upstream…
     let mut paths: Vec<String> = diff_tree(&ws, &upstream, &now)?.into_iter().filter(|e| e.mode != "160000").map(|e| e.path).collect();
-    for (x, _, path) in dirty(&src)? {
-        let staged = x != ' ' && x != '?';
-        if !staged && !paths.contains(&path) && worktree_blob(&src, source, &path)? == try_rev(&ws, &format!("{applied}:{path}"))? {
-            paths.push(path);
+    // …or dirty in the checkout, unstaged, holding what the agent's earlier Apply wrote there
+    let unstaged: Vec<String> =
+        dirty(&src)?.into_iter().filter(|(x, _, p)| (*x == ' ' || *x == '?') && !paths.contains(p)).map(|(_, _, p)| p).collect();
+    let mut host: BTreeMap<String, Have> =
+        worktree_entries(&ws, source, &paths.iter().chain(&unstaged).cloned().collect::<Vec<_>>())?.into_iter().collect();
+    let was = tree_entries(&ws, &applied, &unstaged)?;
+    for p in unstaged {
+        if same_blob(host.get(&p), was.get(&p)) {
+            paths.push(p);
         }
     }
     // what the checkout has on them, where that differs from the workspace
-    let mut entries: Vec<(String, Option<(String, String)>)> = Vec::new();
-    for path in paths {
-        let host = host_entry(&ws, source, &path)?;
-        let ours = try_rev(&ws, &format!("{now}:{path}"))?.map(|b| (tree_mode(&ws, &now, &path).unwrap_or_else(|| "100644".into()), b));
-        if host != ours {
-            entries.push((path, host));
-        }
-    }
-    let index = ws.dirs().0.join(format!("sill-mirror-index-{}", std::process::id()));
-    let _ = std::fs::remove_file(&index);
-    let with = |args: &[&str]| {
-        let mut c = ws.cmd_write();
-        c.env("GIT_INDEX_FILE", &index);
-        for (k, v) in IDENT {
-            c.env(k, v);
-        }
-        c.args(args);
-        c
-    };
-    let made = (|| {
-        ok(with(&["read-tree", &now]), "mirror: read the workspace")?;
-        if !entries.is_empty() {
-            use std::io::Write;
-            let mut c = with(&["update-index", "-z", "--index-info"]);
-            c.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
-            let mut child = c.spawn()?;
-            {
-                let mut stdin = child.stdin.take().context("no stdin")?;
-                let none = "0".repeat(applied.len());
-                for (path, entry) in &entries {
-                    match entry {
-                        Some((mode, blob)) => write!(stdin, "{mode} {blob}\t{path}\0")?,
-                        None => write!(stdin, "0 {none}\t{path}\0")?,
-                    }
-                }
-            }
-            let out = child.wait_with_output()?;
-            if !out.status.success() {
-                bail!("mirror: {}", String::from_utf8_lossy(&out.stderr).trim());
-            }
-        }
-        let tree = ok(with(&["write-tree"]), "mirror: write tree")?;
-        ok(with(&["commit-tree", &tree, "-p", &upstream, "-m", "sill: mirror"]), "mirror: commit")
-    })();
-    let _ = std::fs::remove_file(&index);
-    Ok(Mirror { commit: made?, upstream, now })
+    let ours = tree_entries(&ws, &now, &paths)?;
+    let entries: Vec<(String, Have)> = paths
+        .into_iter()
+        .filter_map(|p| {
+            let theirs = host.remove(&p).flatten();
+            (theirs.as_ref() != ours.get(&p)).then_some((p, theirs))
+        })
+        .collect();
+    let tree = build_tree(&ws, &now, &entries)?;
+    Ok(Mirror { changed: tree != now, tree, upstream, now })
 }
 
-/// The checkout's entry at `path`, its blob written into the clone's own store: mode and blob, or
-/// None when there is no file there (a link's target is the blob, never followed).
-fn host_entry(ws: &Git, root: &Path, path: &str) -> Result<Option<(String, String)>> {
-    use std::os::unix::fs::PermissionsExt;
-    let full = root.join(path);
-    let Ok(meta) = std::fs::symlink_metadata(&full) else { return Ok(None) };
-    if meta.file_type().is_symlink() {
-        use std::io::Write;
-        let target = std::fs::read_link(&full)?;
-        let mut c = ws.cmd_write();
-        c.args(["hash-object", "-w", "--no-filters", "--stdin"]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped());
-        let mut child = c.spawn()?;
-        child.stdin.take().context("no stdin")?.write_all(target.as_os_str().as_encoded_bytes())?;
-        let out = child.wait_with_output()?;
-        if !out.status.success() {
-            bail!("hash-object: {}", String::from_utf8_lossy(&out.stderr).trim());
-        }
-        return Ok(Some(("120000".into(), String::from_utf8_lossy(&out.stdout).trim().to_string())));
-    }
-    if !meta.is_file() {
-        return Ok(None);
-    }
-    let mode = if meta.permissions().mode() & 0o111 != 0 { "100755" } else { "100644" };
-    let mut c = ws.cmd_write();
-    c.args(["hash-object", "-w", "--no-filters", "--"]).arg(&full);
-    Ok(Some((mode.into(), ok(c, "hash-object")?)))
+/// Whether a working tree's entry holds the blob a tree has at the path: the same content, or
+/// nothing on both sides (a deletion the agent applied is the agent's too).
+fn same_blob(theirs: Option<&Have>, tree: Option<&(String, String)>) -> bool {
+    theirs.and_then(|h| h.as_ref()).map(|(_, b)| b) == tree.map(|(_, b)| b)
 }
 
 /// Whether the workspace has anything to bring: its state against the person's side ([`mirror`]).
 pub fn unapplied(source: &Path, clone: &Path, workspace_branch: &str) -> Result<bool> {
-    let m = mirror(source, clone, workspace_branch)?;
-    let git = Git::open(clone)?;
-    Ok(rev(&git, &format!("{}^{{tree}}", m.commit))? != rev(&git, &format!("{}^{{tree}}", m.now))?)
+    Ok(mirror(source, clone, workspace_branch)?.changed)
 }
 
 /// One entry of `git diff-tree -r -z`: new mode and blob (None when deleted) and the path.
@@ -233,9 +335,10 @@ fn diff_tree(git: &Git, from: &str, to: &str) -> Result<Vec<Entry>> {
     Ok(entries)
 }
 
-/// The person's checkout's dirty entries: (index status, worktree status, path), untracked as `??`.
-fn dirty(src: &Git) -> Result<Vec<(char, char, String)>> {
-    let mut c = src.cmd();
+/// A working tree's dirty entries: (index status, worktree status, path), untracked as `??`,
+/// a rename's both paths.
+fn dirty(git: &Git) -> Result<Vec<(char, char, String)>> {
+    let mut c = git.cmd();
     c.args(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=all"]);
     let out = ok_raw(c, "status")?;
     let mut parts = out.split('\0');
@@ -255,27 +358,6 @@ fn dirty(src: &Git) -> Result<Vec<(char, char, String)>> {
         entries.push((x, y, path));
     }
     Ok(entries)
-}
-
-/// The blob id of `path` in the person's working tree as Git would store it (no filters), or None.
-fn worktree_blob(src: &Git, root: &Path, path: &str) -> Result<Option<String>> {
-    let full = root.join(path);
-    let Ok(meta) = std::fs::symlink_metadata(&full) else { return Ok(None) };
-    let mut c = src.cmd();
-    if meta.file_type().is_symlink() {
-        use std::io::Write;
-        let target = std::fs::read_link(&full)?;
-        c.args(["hash-object", "--no-filters", "--stdin"]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped());
-        let mut child = c.spawn()?;
-        child.stdin.take().unwrap().write_all(target.as_os_str().as_encoded_bytes())?;
-        let out = child.wait_with_output()?;
-        return Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_string()));
-    }
-    if !meta.is_file() {
-        return Ok(None);
-    }
-    c.args(["hash-object", "--no-filters", "--"]).arg(path);
-    Ok(Some(ok(c, "hash-object")?))
 }
 
 /// Write the tree entry `blob` (mode `mode`, read from `git`) to `path` below `root`, never
@@ -356,10 +438,13 @@ pub fn apply(
         diff_tree(&ws, expected, &snap)?.into_iter().chain(diff_tree(&ws, applied, &snap)?).map(|e| e.path).collect();
     // the person's own dirty files against the agent's earlier Apply
     let (mut ours, mut overlap, mut untracked) = (Vec::new(), Vec::new(), Vec::new());
-    for (x, _y, path) in dirty(&src)? {
+    let entries = dirty(&src)?;
+    let paths: Vec<String> = entries.iter().map(|(_, _, p)| p.clone()).collect();
+    let theirs: BTreeMap<String, Have> = worktree_entries(&ws, source, &paths)?.into_iter().collect();
+    let was = tree_entries(&ws, applied, &paths)?;
+    for (x, _y, path) in entries {
         let staged = x != ' ' && x != '?';
-        let was_applied = try_rev(&ws, &format!("{applied}:{path}"))?;
-        let is_ours = !staged && worktree_blob(&src, source, &path)? == was_applied;
+        let is_ours = !staged && same_blob(theirs.get(&path), was.get(&path));
         if is_ours {
             ours.push(path);
         } else if changed.contains(&path) {
@@ -449,25 +534,31 @@ fn tree_mode(git: &Git, commit: &str, path: &str) -> Option<String> {
     out.split_whitespace().next().map(str::to_string)
 }
 
-/// Put the clone into the state of snapshot `snap` (§12 Discard, Undo): its branch at the
-/// snapshot's parent, the files as in the snapshot, the snapshot's own changes uncommitted, other
-/// untracked files gone, ignored files kept.
-pub fn reset_to(clone: &Path, workspace_branch: &str, snap: &str) -> Result<()> {
+/// Put the clone into the state of snapshot `snap` (§12 Undo): its branch at the snapshot's
+/// parent, the files as in the snapshot ([`reset_to`]).
+pub fn reset_to_snapshot(clone: &Path, workspace_branch: &str, snap: &str) -> Result<()> {
+    let at = rev(&Git::open(clone)?, &format!("{snap}^"))?;
+    reset_to(clone, workspace_branch, snap, &at)
+}
+
+/// Put the clone into the state of tree-ish `state` with its branch at commit `at` (§12 Discard,
+/// Undo): the files as in `state`, its differences from `at` uncommitted, other untracked files
+/// gone, ignored files kept.
+pub fn reset_to(clone: &Path, workspace_branch: &str, state: &str, at: &str) -> Result<()> {
     let gitdir = clone.join(".git");
     std::fs::write(gitdir.join("HEAD"), format!("ref: refs/heads/{workspace_branch}\n"))?;
     let git = Git::open(clone)?;
-    let base = rev(&git, &format!("{snap}^"))?;
     let mut c = git.cmd_write();
-    c.args(["update-ref", "-m", "sill: reset"]).arg(format!("refs/heads/{workspace_branch}")).arg(&base);
+    c.args(["update-ref", "-m", "sill: reset"]).arg(format!("refs/heads/{workspace_branch}")).arg(at);
     ok(c, "reset the branch")?;
     let mut c = git.cmd_write();
-    c.args(["read-tree", "--reset", "-u", snap]);
+    c.args(["read-tree", "--reset", "-u", state]);
     ok(c, "reset the files")?;
     let mut c = git.cmd_write();
     c.args(["clean", "-fdq"]);
     ok(c, "remove untracked files")?;
     let mut c = git.cmd_write();
-    c.args(["read-tree", &base]);
+    c.args(["read-tree", at]);
     ok(c, "reset the index")?;
     Ok(())
 }
@@ -494,7 +585,7 @@ pub fn discard(source: &Path, clone: &Path, id: &str, n: &str, workspace_branch:
     ok(c, "keep the discarded work")?;
     drop(ws);
     let m = mirror(source, clone, workspace_branch)?;
-    reset_to(clone, workspace_branch, &m.commit)?;
+    reset_to(clone, workspace_branch, &m.tree, &m.upstream)?;
     let ws = Git::open(clone)?;
     let mut c = ws.cmd_write();
     c.args(["update-ref", "-d", "refs/sill/discarding"]);
@@ -508,7 +599,7 @@ pub fn undo(source: &Path, clone: &Path, workspace_branch: &str, discarded: &str
     if unapplied(source, clone, workspace_branch)? {
         return Ok(false);
     }
-    reset_to(clone, workspace_branch, discarded)?;
+    reset_to_snapshot(clone, workspace_branch, discarded)?;
     Ok(true)
 }
 

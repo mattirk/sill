@@ -368,19 +368,20 @@ fn status_paths(git: &Git, ignored: bool) -> Result<Vec<String>> {
 
 /// The clone's result against `base`.
 pub fn summary(clone: &Path, branch: &str, base: &str) -> Result<Summary> {
-    summary_to(clone, branch, base, None)
+    summary_to(clone, branch, base, base, None)
 }
 
-/// Count changes against a full snapshot when supplied, including untracked files.
-fn summary_to(clone: &Path, branch: &str, base: &str, target: Option<&str>) -> Result<Summary> {
+/// The branch's commits since `commits_from`, and the changes from tree-ish `from` to `to` (the
+/// working tree when None): against a full snapshot, untracked files count.
+fn summary_to(clone: &Path, branch: &str, commits_from: &str, from: &str, to: Option<&str>) -> Result<Summary> {
     let git = Git::open(clone)?;
     let mut c = git.cmd();
-    c.args(["rev-list", "--count"]).arg(format!("{base}..refs/heads/{branch}"));
+    c.args(["rev-list", "--count"]).arg(format!("{commits_from}..refs/heads/{branch}"));
     let commits = ok(c, "rev-list")?.parse().unwrap_or(0);
     let mut c = git.cmd();
-    c.args(["diff", "--numstat", "-z"]).args(Git::DIFF_SAFE).arg(base);
-    if let Some(target) = target {
-        c.arg(target);
+    c.args(["diff", "--numstat", "-z"]).args(Git::DIFF_SAFE).arg(from);
+    if let Some(to) = to {
+        c.arg(to);
     }
     let numstat = ok(c, "diff --numstat")?;
     let (mut files, mut added, mut removed) = (0, 0, 0);
@@ -458,7 +459,10 @@ pub fn set_destination(source: &Path, clone: &Path, id: &str, branch: &str, work
 
 /// The source's checked-out branch (empty when detached) and its tip.
 pub fn source_head(source: &Path) -> Result<(String, String)> {
-    let git = Git::open(source)?;
+    head_of(&Git::open(source)?)
+}
+
+pub(crate) fn head_of(git: &Git) -> Result<(String, String)> {
     let head = std::fs::read_to_string(git.dirs().0.join("HEAD"))?;
     let branch = head.trim().strip_prefix("ref: refs/heads/").unwrap_or("").to_string();
     let mut c = git.cmd();
@@ -468,7 +472,10 @@ pub fn source_head(source: &Path) -> Result<(String, String)> {
 
 /// Whether `ancestor` is reachable from `tip` in the clone (borrowed objects included).
 pub fn descends(clone: &Path, ancestor: &str, tip: &str) -> Result<bool> {
-    let git = Git::open(clone)?;
+    descends_in(&Git::open(clone)?, ancestor, tip)
+}
+
+pub(crate) fn descends_in(git: &Git, ancestor: &str, tip: &str) -> Result<bool> {
     let mut c = git.cmd();
     c.args(["merge-base", "--is-ancestor", ancestor, tip]);
     Ok(run(c)?.status.success())
