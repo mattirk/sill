@@ -302,3 +302,32 @@ fn render_source_editing() {
     render(&app, "unsaved-source");
     render_size(&app, "narrow-unsaved-source", (480.0, 860.0));
 }
+
+#[test]
+#[ignore = "writes timer boundary PNGs for visual review"]
+fn render_timer_boundaries() {
+    let (mut app, _) = App::new(true, None);
+    app.activity_hovered = true;
+    for (seconds, name) in [
+        (599u64, "timer-09m59"),
+        (600, "timer-10m00"),
+        (1200, "timer-20m00"),
+        (3599, "timer-59m59"),
+        (3600, "timer-01h00"),
+        (36000, "timer-10h00"),
+        (360000, "timer-100h00"),
+    ] {
+        let state = app
+            .views
+            .get_mut("demo")
+            .unwrap()
+            .conversation
+            .session
+            .as_mut()
+            .unwrap();
+        state.active_ms = seconds * 1000;
+        state.active_since_ms = None;
+        state.activity = "idle".into();
+        render(&app, name);
+    }
+}

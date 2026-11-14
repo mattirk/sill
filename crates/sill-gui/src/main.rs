@@ -963,8 +963,8 @@ impl App {
             subscriptions
                 .push(iced::time::every(Duration::from_millis(600)).map(|_| Message::DemoTick));
         }
-        // while the agent is busy: the summaries' clocks and the timer's width, once a second
-        // (the spinner and the timer draw themselves every frame, without a new view)
+        // While busy, update the timer label and its width together once a second.
+        // The spinner and timer reveal animate between these samples.
         if self.current().is_some_and(|v| v.conversation.busy()) {
             subscriptions.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick));
         }

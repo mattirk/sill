@@ -614,6 +614,30 @@ mod tests {
         assert_eq!(Journal::new(&reopened).unwrap().session(&f.id).unwrap().active_ms, 4500);
     }
 
+    #[test]
+    fn active_time_survives_a_generation_change_with_stale_producer_totals() {
+        let f = Fixture::new();
+        let mut previous = f.journal().session(&f.id).unwrap();
+        previous.active_ms = 9000;
+        previous.activity = "working".into();
+        previous.active_since_ms = Some(1000);
+        let mut replacement = previous.clone();
+        replacement.agent_generation_id = "replacement".into();
+        replacement.active_ms = 0;
+        replacement.active_since_ms = None;
+        update_active_time(&previous, &mut replacement, 3000);
+        assert_eq!((replacement.active_ms, replacement.active_since_ms), (11000, Some(3000)));
+        let mut waiting = replacement.clone();
+        waiting.activity = "waiting".into();
+        update_active_time(&replacement, &mut waiting, 4000);
+        assert_eq!((waiting.active_ms, waiting.active_since_ms), (12000, None));
+        let mut resumed = waiting.clone();
+        resumed.activity = "working".into();
+        resumed.active_ms = 0;
+        update_active_time(&waiting, &mut resumed, 7000);
+        assert_eq!((resumed.active_ms, resumed.active_since_ms), (12000, Some(7000)));
+    }
+
     struct Fixture { dir:std::path::PathBuf, store:Store, id:String }
     impl Fixture {
         fn new() -> Self {

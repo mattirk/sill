@@ -130,10 +130,19 @@ impl Attention {
     }
 }
 
-/// m:ss of `ms`.
+/// m:ss below an hour, then h:mm:ss. Hours are never wrapped or truncated.
 pub fn clock(ms: u64) -> String {
     let seconds = ms / 1000;
-    format!("{}:{:02}", seconds / 60, seconds % 60)
+    if seconds >= 3600 {
+        format!(
+            "{}:{:02}:{:02}",
+            seconds / 3600,
+            (seconds / 60) % 60,
+            seconds % 60
+        )
+    } else {
+        format!("{}:{:02}", seconds / 60, seconds % 60)
+    }
 }
 
 #[cfg(test)]
@@ -141,6 +150,24 @@ mod tests {
     use super::*;
     use serde_json::json;
     use sill_proto::sfp::*;
+
+    #[test]
+    fn clock_preserves_minutes_and_grows_into_hours() {
+        for (seconds, expected) in [
+            (0, "0:00"),
+            (599, "9:59"),
+            (600, "10:00"),
+            (1199, "19:59"),
+            (1200, "20:00"),
+            (3599, "59:59"),
+            (3600, "1:00:00"),
+            (35999, "9:59:59"),
+            (36000, "10:00:00"),
+            (360000, "100:00:00"),
+        ] {
+            assert_eq!(clock(seconds * 1000), expected);
+        }
+    }
 
     #[test]
     fn a_question_outranks_a_failure_which_outranks_work() {

@@ -472,15 +472,11 @@ impl App {
         let clock = shown_ms.map(|ms| {
             let shown = view.clock_shown.get().unwrap_or_else(Instant::now);
             view.clock_shown.set(Some(shown));
-            let now = Instant::now();
             Clock {
-                base: now.checked_sub(Duration::from_millis(ms)).unwrap_or(now),
                 ticking: attention.working_ms.is_some(),
                 ms,
                 shown,
-                width: text_width(&clock(ms).replace(char::is_numeric, "0"), style::TEXT)
-                    .max(text_width("00:00", style::TEXT))
-                    + 2.0,
+                width: clock_width(ms),
             }
         });
         if clock.is_none() {
@@ -1683,13 +1679,17 @@ fn ended<'a>(said: String) -> Element<'a, Message> {
 
 /// The width `content` takes in the prose face at `size`, laid out the way text widgets do.
 fn text_width(content: &str, size: f32) -> f32 {
+    text_width_in_font(content, size, Font::with_name(crate::fonts::SANS_FAMILY))
+}
+
+fn text_width_in_font(content: &str, size: f32, font: Font) -> f32 {
     use iced::advanced::text::Paragraph as _;
     let paragraph = iced::advanced::graphics::text::Paragraph::with_text(iced::advanced::Text {
         content,
         bounds: iced::Size::INFINITE,
         size: size.into(),
         line_height: text::LineHeight::default(),
-        font: Font::with_name(crate::fonts::SANS_FAMILY),
+        font,
         align_x: text::Alignment::Default,
         align_y: iced::alignment::Vertical::Top,
         shaping: text::Shaping::Advanced,
@@ -1932,11 +1932,16 @@ const SPIN_ARC: f32 = 1.3 * std::f32::consts::PI / 2.0;
 const CLOCK_GAP: f32 = 8.0;
 const CLOCK_SLIDE: Duration = Duration::from_millis(260);
 
-/// The timer: the time worked — going on from `base` while the agent works (`ticking`), else
-/// `ms` — `width` wide, in view since `shown`.
+/// Fit the current label in its actual drawing font; grow only when it gains digits.
+fn clock_width(ms: u64) -> f32 {
+    let label = clock(ms).replace(char::is_numeric, "0");
+    text_width_in_font(&label, style::TEXT, MONO_FONT) + 2.0
+}
+
+/// Label and width come from the same per-second sample. The canvas animates the
+/// reveal/spinner between ticks without advancing text beyond its allocated width.
 #[derive(Clone, Copy)]
 struct Clock {
-    base: Instant,
     ticking: bool,
     ms: u64,
     shown: Instant,
@@ -2045,18 +2050,13 @@ impl canvas::Program<Message> for Busy {
             let end = shown_clock.width;
             let from = bounds.width - SPIN_SIZE / 2.0;
             let x = from + (end - from) * eased;
-            let ms = if shown_clock.ticking {
-                now.saturating_duration_since(shown_clock.base).as_millis() as u64
-            } else {
-                shown_clock.ms
-            };
             let visible = Rectangle::new(
                 iced::Point::ORIGIN,
                 iced::Size::new(bounds.width - SPIN_SIZE - 1.0, bounds.height),
             );
             frame.with_clip(visible, |frame| {
                 frame.fill_text(canvas::Text {
-                    content: clock(ms),
+                    content: clock(shown_clock.ms),
                     position: iced::Point::new(x, bounds.height / 2.0),
                     color: alpha(P.fg_dim, eased),
                     size: style::TEXT.into(),
@@ -2075,4 +2075,32 @@ impl canvas::Program<Message> for Busy {
 fn spin_epoch() -> Instant {
     static START: OnceLock<Instant> = OnceLock::new();
     *START.get_or_init(Instant::now)
+}
+
+#[cfg(test)]
+mod timer_tests {
+    use super::*;
+    #[test]
+    fn timer_slot_fits_every_digit_at_minutes_and_hours_boundaries() {
+        crate::fonts::install();
+        for seconds in [
+            0u64, 599, 600, 1199, 1200, 3599, 3600, 35999, 36000, 359999, 360000,
+        ] {
+            let ms = seconds * 1000;
+            for delta in [0, 999] {
+                let shown = clock(ms + delta);
+                let actual = text_width_in_font(&shown, style::TEXT, MONO_FONT);
+                assert!(
+                    clock_width(ms) >= actual + 1.0,
+                    "{shown} clips in {} px (needs {actual})",
+                    clock_width(ms)
+                );
+            }
+        }
+        assert!(clock_width(599000) < clock_width(600000));
+        assert!(clock_width(3599000) < clock_width(3600000));
+        assert_eq!(clock_width(600000), clock_width(3599000));
+        assert!(clock_width(35999000) < clock_width(36000000));
+        assert!(clock_width(360000000) > clock_width(36000000));
+    }
 }
