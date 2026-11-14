@@ -1578,6 +1578,7 @@ button.sill-md-image:hover { opacity: 0.85; }
 .sill-viewer { background: @window_bg_color; }
 .sill-viewer-bar { padding: 3px 6px 3px 12px; border-bottom: 1px solid alpha(@view_fg_color, 0.12); }
 .sill-viewer-btn { padding: 2px 8px; min-height: 0; min-width: 0; font-size: 90%; }
+.sill-viewer-btn.sill-drawer-switch { padding-right: 3px; }
 /* a session's page in the viewer (docs/memory.md §2.5): summary, notes, the facts */
 .sill-page { padding: 10px 16px 16px 16px; }
 .sill-page-title { font-size: 120%; font-weight: bold; }

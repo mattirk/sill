@@ -305,8 +305,12 @@ impl FolderTree {
         close.add_css_class("sill-viewer-btn");
         close.set_tooltip_text(Some("Close the tree (Ctrl+Shift+F)"));
         bar.append(&search);
-        bar.append(&switch);
-        bar.append(&close);
+        // the view switch sits close to the cross: the two are the drawer's own controls
+        switch.add_css_class("sill-drawer-switch");
+        let ends = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        ends.append(&switch);
+        ends.append(&close);
+        bar.append(&ends);
         root.append(&bar);
 
         let badges: Rc<RefCell<BTreeMap<PathBuf, Badge>>> = Rc::new(RefCell::new(BTreeMap::new()));
