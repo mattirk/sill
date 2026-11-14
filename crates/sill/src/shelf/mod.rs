@@ -60,9 +60,6 @@ pub fn trace_ts() -> String {
 }
 
 pub fn run(cwd: Option<PathBuf>, hidden: bool) -> Result<()> {
-    // The shelf is a client of the public protocol only (docs/protocol.md §7.2): it never
-    // negotiates `sill.internal`, so a leftover internal call fails instead of working quietly.
-    sill_proto::Client::offer_internal(false);
     let cwd = match cwd {
         Some(c) => std::path::absolute(c)?,
         None if sill_proto::transport::selected()?.is_some() => remote::home()?,

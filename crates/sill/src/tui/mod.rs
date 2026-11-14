@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use sill_proto::wire::{Answer, Command, Event, FieldKind, PermissionOptionKind};
-use sill_proto::{Attach, Client, Key, method};
+use sill_proto::Client;
 
 /// Whether `> ` is on the screen waiting for a line: a note that arrives then (the daemon's
 /// "N changes pending" after a turn) takes the line over and the mark is shown again after it.
@@ -26,8 +26,8 @@ pub fn line_mode(key: &str, fresh: bool, verbose: bool) -> Result<()> {
     let s = c.resolve_session(key)?;
     let id = s.session_id;
     if fresh {
-        c.call::<serde_json::Value>(method::SESSIONS_ATTACH, Attach { key:id.clone(),fresh:true })?;
-        c.call::<serde_json::Value>(method::SESSIONS_DETACH, Key { key:id.clone() })?;
+        // a new agent conversation in the same session, as the shelf's "fresh" does
+        c.call::<serde_json::Value>("_sill/sessions.reset", sill_proto::sessions::SessionKey { session_id: id.clone() })?;
     }
     eprintln!("sill: {} — {}; /cancel stops the turn, /quit detaches", id, s.title);
     let pending: Arc<Mutex<Option<Pending>>> = Arc::default();

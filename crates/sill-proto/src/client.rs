@@ -31,7 +31,9 @@ struct Outbound {
     deadline: Instant,
 }
 
-static OFFER_INTERNAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// Off by default: every first-party client (shelf, CLI, line mode) is built on the public
+/// protocol. Same-build tests and diagnostics that exercise `_sill/internal/` turn it on.
+static OFFER_INTERNAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub struct Client {
     writer: SyncSender<Outbound>,
@@ -164,8 +166,8 @@ impl Client {
         }
     }
 
-    /// Whether new connections offer `sill.internal`. A frontend built on the public protocol only
-    /// (the shelf) turns it off once at startup, so any leftover internal call fails loudly.
+    /// Whether new connections offer `sill.internal`. Off unless a same-build test or diagnostic
+    /// turns it on, so a leftover internal call from a frontend fails loudly.
     pub fn offer_internal(on: bool) { OFFER_INTERNAL.store(on, std::sync::atomic::Ordering::Relaxed); }
 
     /// Initialize a raw control connection. `connect*` and `ssh` do this automatically.

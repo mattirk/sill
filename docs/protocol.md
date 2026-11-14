@@ -672,7 +672,7 @@ The sfp/1 baseline contract needs no capability. The registry at freeze:
 
 | Capability | Version | Meaning |
 |---|---|---|
-| `sill.internal` | 1 | Same-build `_sill/internal/` adapters. Not a compatibility contract; independent clients do not offer it. |
+| `sill.internal` | 1 | Same-build `_sill/internal/` adapters, used only by the daemon's own tests. Not a compatibility contract; no client offers it. |
 
 Agent abilities (`steering`, `images`) are not handshake capabilities: they are reported in
 session state, may change with the agent, and use the same open-map rule (unknown keys ignored).
@@ -1136,11 +1136,13 @@ wire contracts. Their public equivalents or diagnostic purposes are:
 | `Kept`, old Changes/history helpers | Public bounded `changes.list`, `changes.history`, `changes.diff`, keep/revert/undo methods. |
 | Old file search and git presentation helpers | Public exact-path `files.find`, `repos.root/head/summary/changed_lines/status`. |
 
-**Shelf is a public-only client (2026-11-03).** It does not offer `sill.internal`, so any internal
-call from it fails with `unsupported`. Its conversation, "show earlier" history (paged locally
+**First-party clients are public-only (2026-11-03).** `sill_proto::Client` does not offer
+`sill.internal` unless a same-build test or diagnostic turns it on (`Client::offer_internal`), so
+an internal call from Shelf, the CLI or line mode (`sill attach`) fails with `unsupported`. Its conversation, "show earlier" history (paged locally
 from the attach snapshot), Changes tree, diffs and counts, kept-path counts, process logs and
-process port policy, and policy-freshness check all use public methods. The CLI and the TUI
-still use internal adapters; migrating them is the remaining part of §7.10 step 4.
+process port policy, and policy-freshness check all use public methods. `sill attach --fresh`
+uses public `sessions.reset`. §7.10 step 4 (migrate shelf and CLI) is done; the internal adapters
+remain only for same-build tests of the legacy surface, and may be removed after the freeze.
 
 New public functionality must get explicit schemas and bounds rather than being added to the
 opaque internal frontend dispatcher. Unknown public method names never fall back to internal
