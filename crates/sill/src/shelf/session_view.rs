@@ -2097,7 +2097,12 @@ impl SessionView {
             self.conv.add_note("session is not running");
             return false;
         };
-        let standing = sill_core::instructions::standing_block(&sill_core::instructions::load_global());
+        // sill's facts about this jail come from the session's policy (none if it can't be read)
+        let facts = session::home()
+            .ok()
+            .and_then(|h| sill_core::policy::Policy::load(&self.session.borrow().policy, &h).ok().map(|p| sill_core::instructions::facts_block(&p, &h)))
+            .unwrap_or_default();
+        let standing = sill_core::instructions::standing_block(&facts, &sill_core::instructions::load_global());
         let standing_due = self.sent_standing.borrow().as_deref() != Some(standing.as_str());
         let outgoing = format!("{}{}", self.context_prefix(standing_due.then_some(standing.as_str())), text);
         lap("prefix");
