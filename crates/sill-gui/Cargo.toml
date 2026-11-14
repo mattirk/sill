@@ -3,7 +3,6 @@ name = "sill-gui"
 description = "sill: the desktop window (iced), a client of the daemon's public protocol"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 

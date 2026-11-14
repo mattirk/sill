@@ -3,7 +3,6 @@ name = "sill"
 description = "sill: the `sill` command and the daemon (the desktop window is the sill-gui crate)"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 

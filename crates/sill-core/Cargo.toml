@@ -3,7 +3,6 @@ name = "sill-core"
 description = "sill: policies, jail builder, ledger, session store (library)"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
