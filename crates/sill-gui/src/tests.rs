@@ -736,3 +736,66 @@ fn the_terminal_button_opens_the_shell_and_takes_the_keys() {
         "hiding only detaches the view"
     );
 }
+
+#[test]
+fn file_drawer_buttons_open_the_viewer_and_return_to_conversation() {
+    use crate::workspace::Action;
+    let (mut app, _) = App::new(true, None);
+    let _ = app.update(Message::Workspace(Action::ToggleDrawer));
+    let mut ui =
+        iced_test::Simulator::with_size(crate::snapshots::settings(), (1000.0, 860.0), app.view());
+    ui.click("README.md").unwrap();
+    let messages: Vec<_> = ui.into_messages().collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::Workspace(Action::Open { .. })))
+    );
+    for message in messages {
+        let _ = app.update(message);
+    }
+    assert!(app.workspace.state().unwrap().viewer.is_some());
+    let mut ui =
+        iced_test::Simulator::with_size(crate::snapshots::settings(), (1000.0, 860.0), app.view());
+    ui.click("‹ Conversation").unwrap();
+    for message in ui.into_messages() {
+        let _ = app.update(message);
+    }
+    assert!(app.workspace.state().unwrap().viewer.is_none());
+    assert!(!app.workspace.state().unwrap().open_files.is_empty());
+}
+
+#[test]
+fn diff_numbers_distinguish_context_changes_and_untracked_markdown() {
+    use crate::workspace_ui::numbered_diff;
+    assert_eq!(
+        numbered_diff("@@ -3,2 +5,3 @@\n keep\n-old\n+new\n+extra"),
+        vec![
+            (None, None, "@@ -3,2 +5,3 @@"),
+            (Some(3), Some(5), " keep"),
+            (Some(4), None, "-old"),
+            (None, Some(6), "+new"),
+            (None, Some(7), "+extra")
+        ]
+    );
+    assert!(
+        numbered_diff("(untracked)\n- list item\n+ another item")
+            .iter()
+            .all(|(old, new, _)| old.is_none() && new.is_none())
+    );
+}
+
+#[test]
+fn narrow_drawer_opens_files_in_the_full_content_area() {
+    use crate::workspace::Action;
+    let (mut app, _) = App::new(true, None);
+    let _ = app.update(Message::Workspace(Action::ToggleDrawer));
+    let mut ui =
+        iced_test::Simulator::with_size(crate::snapshots::settings(), (480.0, 700.0), app.view());
+    ui.click("README.md").unwrap();
+    for message in ui.into_messages() {
+        let _ = app.update(message);
+    }
+    assert!(!app.workspace.shown);
+    assert!(app.workspace.state().unwrap().viewer.is_some());
+}

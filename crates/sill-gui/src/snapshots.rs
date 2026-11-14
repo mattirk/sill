@@ -22,9 +22,12 @@ pub fn settings() -> Settings {
 
 /// Render `app`'s view as `name` (any earlier image of that name is replaced).
 pub fn render(app: &App, name: &str) {
+    render_size(app, name, (720.0, 860.0));
+}
+
+pub fn render_size(app: &App, name: &str, size: (f32, f32)) {
     let dir = dir();
     std::fs::create_dir_all(&dir).unwrap();
-    // matches_image writes the file only when none exists; the renderer's name is appended
     for entry in std::fs::read_dir(&dir).unwrap().flatten() {
         if entry
             .file_name()
@@ -34,7 +37,7 @@ pub fn render(app: &App, name: &str) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
-    let mut ui = iced_test::Simulator::with_size(settings(), (720.0, 860.0), app.view());
+    let mut ui = iced_test::Simulator::with_size(settings(), size, app.view());
     let snapshot = ui.snapshot(&crate::style::theme()).unwrap();
     assert!(snapshot.matches_image(dir.join(name)).unwrap());
 }
@@ -93,4 +96,31 @@ fn calibrate() {
         let snapshot = ui.snapshot(&crate::style::theme()).unwrap();
         assert!(snapshot.matches_image(dir().join(name)).unwrap());
     }
+}
+
+#[test]
+#[ignore = "writes file-workflow PNGs for review"]
+fn render_files() {
+    use crate::{Message, workspace::Action};
+    use sill_proto::sessions::HostPath;
+    let path = |s: &str| HostPath::from_path(std::path::Path::new(s));
+    let (mut app, _) = App::new(true, None);
+    let _ = app.update(Message::Workspace(Action::ToggleDrawer));
+    let _ = app.update(Message::Workspace(Action::Toggle(path(
+        "/home/demo/project/src",
+    ))));
+    render_size(&app, "6-drawer", (1000.0, 860.0));
+    render(&app, "7-drawer-small");
+    let _ = app.update(Message::Workspace(Action::Open {
+        path: path("/home/demo/project/README.md"),
+        repo: None,
+    }));
+    render_size(&app, "8-file", (1000.0, 860.0));
+    let _ = app.update(Message::Workspace(Action::DiffMode(true)));
+    let _ = app.update(Message::Workspace(Action::Open {
+        path: path("/home/demo/project/README.md"),
+        repo: Some(path("/home/demo/project")),
+    }));
+    render_size(&app, "9-diff", (1000.0, 860.0));
+    render_size(&app, "10-narrow-drawer", (480.0, 700.0));
 }

@@ -11,6 +11,8 @@ mod terminal;
 mod tests;
 mod ui;
 mod viewer;
+mod workspace;
+mod workspace_ui;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc;
@@ -86,6 +88,7 @@ impl std::fmt::Display for Pick {
 
 #[derive(Debug, Clone)]
 enum Message {
+    Workspace(workspace::Action),
     Backend(u64, Update),
     Choose(SessionChoice),
     Refresh,
@@ -96,7 +99,7 @@ enum Message {
     TextAction(text_editor::Action),
     DemoTick,
     Tick,
-    Scrolled(bool),
+    Scrolled(bool, f32),
     Latest,
     Prompt(text_editor::Action),
     Send,
@@ -129,6 +132,7 @@ struct Rendered {
 }
 
 struct App {
+    workspace: workspace::Workspace,
     commands: Option<mpsc::Sender<Command>>,
     choices: Vec<SessionChoice>,
     selected: Option<SessionChoice>,
@@ -149,6 +153,7 @@ struct App {
     loading: bool,
     generation: u64,
     follow_tail: bool,
+    scroll_offset: f32,
     /// Set by each tick while the agent is busy; the spinner's angle comes from it.
     now: Instant,
     /// The session's jail shell; kept attached while hidden, dropped (detached) on switching.
@@ -173,7 +178,9 @@ fn request_id(kind: &str) -> String {
 
 impl App {
     fn new(demo: bool, initial: Option<String>) -> (Self, Task<Message>) {
+        let (workspace, file_task) = workspace::Workspace::new(demo);
         let mut app = Self {
+            workspace,
             commands: None,
             choices: Vec::new(),
             selected: None,
@@ -191,6 +198,7 @@ impl App {
             loading: false,
             generation: 0,
             follow_tail: true,
+            scroll_offset: 0.0,
             now: Instant::now(),
             terminal: None,
             terminal_shown: false,
@@ -207,7 +215,8 @@ impl App {
             app.selected = Some(choice);
             app.status = "Demo".into();
             app.sync_rendered();
-            return (app, Task::none());
+            app.workspace.select("demo");
+            return (app, file_task);
         }
         let (commands, events) = backend::start(initial);
         app.commands = Some(commands);
@@ -216,9 +225,12 @@ impl App {
         });
         (
             app,
-            Task::run(stream, |(generation, update)| {
-                Message::Backend(generation, update)
-            }),
+            Task::batch([
+                file_task,
+                Task::run(stream, |(generation, update)| {
+                    Message::Backend(generation, update)
+                }),
+            ]),
         )
     }
 
@@ -283,6 +295,28 @@ impl App {
                     | Message::Answer { .. }
             );
         match message {
+            Message::Workspace(action) => {
+                let restore = matches!(
+                    action,
+                    workspace::Action::CloseViewer
+                        | workspace::Action::CloseFile(_)
+                        | workspace::Action::ToggleDrawer
+                );
+                self.workspace.update(action);
+                if restore && self.workspace.state().is_none_or(|s| s.viewer.is_none()) {
+                    return if self.follow_tail {
+                        iced::widget::operation::snap_to_end("conversation")
+                    } else {
+                        iced::widget::operation::scroll_to(
+                            "conversation",
+                            iced::widget::scrollable::AbsoluteOffset {
+                                x: 0.0,
+                                y: self.scroll_offset,
+                            },
+                        )
+                    };
+                }
+            }
             Message::Backend(_, Update::Sessions(sessions)) => {
                 self.choices = sessions
                     .into_iter()
@@ -305,6 +339,9 @@ impl App {
                     .iter()
                     .find(|s| s.id == snapshot.session_id)
                     .cloned();
+                if self.workspace.active != snapshot.session_id {
+                    self.workspace.select(&snapshot.session_id);
+                }
                 self.conversation = *snapshot;
                 self.rendered.clear();
                 self.text_view = None;
@@ -337,9 +374,11 @@ impl App {
                     id: choice.id.clone(),
                     generation: self.generation,
                 });
+                self.workspace.select(&choice.id);
                 self.selected = Some(choice);
                 self.loading = true;
                 self.follow_tail = true;
+                self.scroll_offset = 0.0;
                 self.conversation = Conversation::default();
                 self.rendered.clear();
                 self.text_view = None;
@@ -351,8 +390,16 @@ impl App {
                 self.error = None;
                 self.failed = None;
             }
-            Message::Refresh => self.command(Command::Refresh),
-            Message::Scrolled(at_bottom) => self.follow_tail = at_bottom,
+            Message::Refresh => {
+                self.command(Command::Refresh);
+                if self.workspace.shown {
+                    self.workspace.update(workspace::Action::Refresh);
+                }
+            }
+            Message::Scrolled(at_bottom, offset) => {
+                self.follow_tail = at_bottom;
+                self.scroll_offset = offset;
+            }
             Message::Latest => {
                 self.follow_tail = true;
                 return iced::widget::operation::snap_to_end("conversation");

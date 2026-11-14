@@ -8,8 +8,8 @@ use std::time::Instant;
 use iced::keyboard::{Key, key::Named};
 use iced::widget::markdown::{self, Highlight};
 use iced::widget::{
-    Column, button, canvas, center, column, container, mouse_area, pick_list, right, row, rule,
-    scrollable, space, stack, svg, text, text_editor, tooltip,
+    Column, button, canvas, center, column, container, mouse_area, pick_list, responsive, right,
+    row, rule, scrollable, space, stack, svg, text, text_editor, tooltip,
 };
 use iced::{
     Alignment, Color, Element, Fill, Font, Padding, Radians, Rectangle, Renderer, Shrink, Theme,
@@ -23,11 +23,39 @@ const MONO_FONT: Font = Font::with_name(crate::fonts::MONO_FAMILY);
 
 impl App {
     pub(crate) fn view(&self) -> Element<'_, Message> {
-        let body = match &self.text_view {
-            Some(content) => self.transcript_view(content),
-            None => self.feed(),
-        };
-        column![self.top_bar(), body, self.composer()].into()
+        let content = responsive(move |size| {
+            let body = match self.file_view() {
+                Some(view) => view,
+                None => {
+                    let conversation = match &self.text_view {
+                        Some(content) => self.transcript_view(content),
+                        None => self.feed(),
+                    };
+                    column![conversation, self.composer()].height(Fill).into()
+                }
+            };
+            let main = column![self.file_chips(), body].width(Fill).height(Fill);
+            if self.workspace.shown {
+                if size.width < 600.0 {
+                    return self.file_drawer().map(|message| match message {
+                        Message::Workspace(crate::workspace::Action::Open { path, repo }) => {
+                            Message::Workspace(crate::workspace::Action::OpenAndHide { path, repo })
+                        }
+                        message => message,
+                    });
+                }
+                row![
+                    main,
+                    rule::vertical(1).style(style::rule_style(P.border)),
+                    container(self.file_drawer()).width((size.width * 0.28).clamp(205.0, 320.0))
+                ]
+                .height(Fill)
+                .into()
+            } else {
+                main.into()
+            }
+        });
+        column![self.top_bar(), content].into()
     }
 
     // --- top bar --------------------------------------------------------------------------------
@@ -56,10 +84,27 @@ impl App {
             container(
                 row![
                     container(mark).padding(Padding::from([0.0, 14.0])),
-                    tabs,
+                    scrollable(tabs)
+                        .width(Fill)
+                        .height(Fill)
+                        .direction(scrollable::Direction::Horizontal(
+                            scrollable::Scrollbar::default()
+                        ))
+                        .style(style::feed_scroll),
                     space().width(Fill),
                     self.activity(),
                     select,
+                    button(
+                        text(if self.workspace.shown {
+                            "›"
+                        } else {
+                            "Files ‹"
+                        })
+                        .size(style::SMALL)
+                    )
+                    .padding([2, 8])
+                    .style(style::quiet)
+                    .on_press(Message::Workspace(crate::workspace::Action::ToggleDrawer)),
                 ]
                 .spacing(6)
                 .align_y(Alignment::Center),
@@ -237,7 +282,12 @@ impl App {
             .height(Fill)
             .width(Fill)
             .style(style::feed_scroll)
-            .on_scroll(|viewport| Message::Scrolled(viewport.relative_offset().y >= 0.99));
+            .on_scroll(|viewport| {
+                Message::Scrolled(
+                    viewport.relative_offset().y >= 0.99,
+                    viewport.absolute_offset().y,
+                )
+            });
         if self.follow_tail {
             return scroll.into();
         }
@@ -818,7 +868,7 @@ pub(crate) fn enter_sends(
     text_editor::Binding::from_key_press(key_press)
 }
 
-fn markdown_settings() -> markdown::Settings {
+pub(crate) fn markdown_settings() -> markdown::Settings {
     let mut style = markdown::Style::from_palette(style::theme().palette());
     // iced's Markdown takes the generic sans-serif family, not the app's default font
     style.font = Font::with_name(crate::fonts::SANS_FAMILY);
