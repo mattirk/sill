@@ -672,6 +672,10 @@ impl App {
                 self.question(view, question),
             );
         }
+        // the agent asks for a login: its card, after everything else
+        if let Some(card) = self.login_card(view) {
+            feed = feed.push(rows::key("login"), card);
+        }
         if let Some(error) = view.status.problem() {
             feed = feed.push(rows::key("problem"), note(error, P.error));
         }
@@ -1151,15 +1155,34 @@ impl App {
             Status::Failed(error) => ended(format!("The shell could not be opened: {error}")),
             Status::Ended => ended("The shell ended.".into()),
         };
-        column![
+        let mut pane_column = column![
             rule::horizontal(1).style(style::rule_style(P.success)),
             container(caption).padding([2, 12]),
             container(body)
                 .height(300)
                 .width(Fill)
                 .style(style::fill(P.bg)),
-        ]
-        .into()
+        ];
+        // what was pasted, under the terminal and over the controls, shown whether or not the
+        // program echoes it (a login's code)
+        if let Some(pasted) = &pane.pasted {
+            pane_column = pane_column.push(
+                container(
+                    text(format!(
+                        "Pasted {} characters: {}",
+                        pasted.chars().count(),
+                        one_line(pasted, 200)
+                    ))
+                    .size(style::TINY)
+                    .color(alpha(P.fg, 0.75))
+                    .wrapping(text::Wrapping::None),
+                )
+                .width(Fill)
+                .clip(true)
+                .padding([3, 12]),
+            );
+        }
+        pane_column.into()
     }
 }
 
@@ -1778,7 +1801,7 @@ fn thought_settings() -> markdown::Settings {
 }
 
 /// `content` behind a left rule `width` wide in `color`: how the shelf marks a block's kind.
-fn ruled<'a>(
+pub(crate) fn ruled<'a>(
     width: f32,
     color: Color,
     content: impl Into<Element<'a, Message>>,

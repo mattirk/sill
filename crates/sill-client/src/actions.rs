@@ -152,6 +152,17 @@ impl Actions {
         }
     }
 
+    /// Requests that may change something, made once over this connection (a fresh one when it
+    /// closed): never repeated, as a read is, when the connection turns out lost.
+    pub fn once<T>(&self, work: impl FnOnce(&Client) -> anyhow::Result<T>) -> anyhow::Result<T> {
+        let client = self.client()?;
+        let result = work(&client);
+        if !client.is_open() {
+            self.forget(&client);
+        }
+        result
+    }
+
     /// The sessions the daemon has, newest first.
     pub fn sessions(&self) -> anyhow::Result<Vec<sill_proto::sessions::Session>> {
         let client = self.client()?;

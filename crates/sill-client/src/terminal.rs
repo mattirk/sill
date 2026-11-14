@@ -7,6 +7,7 @@
 //! threads leave, even if the connection is still being made — and the shell keeps running, to be
 //! found again. A terminal takes at most eight viewers, so a link that outlived its pane would
 //! eventually lock the person out of their own shell.
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -245,6 +246,18 @@ pub fn jail_shell(
     connect: crate::Connector,
     session_id: String,
 ) -> impl FnOnce(u16, u16) -> anyhow::Result<Connection> + Send + 'static {
+    jail_terminal(connect, session_id, LABEL, vec![], BTreeMap::new())
+}
+
+/// A terminal in the session's jail running `argv` (empty: the login shell) with `env` added,
+/// under `label`: the running one of that label when there is one, else a new one.
+pub fn jail_terminal(
+    connect: crate::Connector,
+    session_id: String,
+    label: &'static str,
+    argv: Vec<String>,
+    env: BTreeMap<String, String>,
+) -> impl FnOnce(u16, u16) -> anyhow::Result<Connection> + Send + 'static {
     move |cols, rows| {
         let client = connect()?;
         let listed: api::Terminals = client.call(
@@ -257,19 +270,20 @@ pub fn jail_shell(
             .terminals
             .into_iter()
             .rev()
-            .find(|t| t.label == LABEL && t.state == "running");
+            .find(|t| t.label == label && t.state == "running");
         let terminal = match found {
             Some(t) => t,
             None => client.call(
                 "_sill/terminals.open",
                 api::Open {
                     session_id: Some(session_id),
-                    label: LABEL.into(),
-                    argv: vec![],
+                    label: label.into(),
+                    argv,
                     // the frontend emulates xterm, whatever the jail's default is
                     env: [("TERM", "xterm-256color"), ("COLORTERM", "truecolor")]
                         .into_iter()
                         .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .chain(env)
                         .collect(),
                     cwd: None,
                     cols,

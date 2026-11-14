@@ -331,3 +331,36 @@ fn render_timer_boundaries() {
         render(&app, name);
     }
 }
+
+#[test]
+#[ignore = "writes login card PNGs for review"]
+fn render_login() {
+    let (mut app, _) = App::new(true, None);
+    for _ in 0..=demo::CHUNKS.len() {
+        let _ = app.update(crate::Message::DemoTick);
+    }
+    let view = app.views.get_mut("demo").unwrap();
+    view.conversation.questions.clear();
+    view.conversation.session.as_mut().unwrap().authentication = Some(
+        serde_json::from_value(serde_json::json!({
+            "message": "Authentication required",
+            "methods": [
+                {"method_id": "claude-ai-login", "title": "Claude Subscription",
+                 "description": "Use Claude subscription", "terminal": {"args": [], "env": {}}},
+                {"method_id": "console-login", "title": "Anthropic Console",
+                 "description": "Use Anthropic Console (API usage billing)",
+                 "terminal": {"args": [], "env": {}}},
+                {"method_id": "key", "title": "API key", "description": null,
+                 "terminal": null, "api_key": "anthropic"}
+            ]
+        }))
+        .unwrap(),
+    );
+    view.follow_tail = true;
+    render(&app, "13-login");
+    let _ = app.update(crate::Message::Login(
+        "demo".into(),
+        crate::login_ui::Event::Pick("key".into()),
+    ));
+    render(&app, "14-login-key");
+}

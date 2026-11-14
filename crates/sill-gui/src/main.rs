@@ -10,6 +10,7 @@ mod hotkey;
 mod icons;
 mod keys;
 mod layout;
+mod login_ui;
 mod menu;
 #[cfg(test)]
 mod perf;
@@ -190,6 +191,7 @@ pub enum Act {
     Answer(String),
     Unqueue,
     SendNow,
+    Login,
     Control,
 }
 
@@ -231,6 +233,8 @@ pub enum Message {
     Unqueue(String),
     /// A queued prompt goes now: the agent's turn stops and it is sent first.
     SendNow(String),
+    /// The login card of a session (`login_ui`).
+    Login(String, login_ui::Event),
     ToggleTool(String),
     ToggleAnswered(String),
     SetMode(Pick),
@@ -346,6 +350,8 @@ pub struct SessionView {
     pub terminal: Option<terminal::Pane>,
     pub terminal_shown: bool,
     terminal_generation: u64,
+    /// The agent's login under way, if any (`login_ui`).
+    login: login_ui::Login,
     pub files: FilesState,
     pub reader: Option<workspace::ReaderView>,
     /// The failed turn the person has looked at, so its mark goes.
@@ -377,6 +383,7 @@ impl SessionView {
             terminal: None,
             terminal_shown: false,
             terminal_generation: 0,
+            login: login_ui::Login::default(),
             files: FilesState::default(),
             reader: None,
             seen_failure: None,
@@ -1163,6 +1170,7 @@ impl App {
                     json!(params),
                 );
             }
+            Message::Login(session, event) => return self.login_event(session, event),
             Message::SendNow(submission_id) => {
                 let (Some(view), Some(actions)) = (self.current(), self.actions.clone()) else {
                     return Task::none();
@@ -1273,11 +1281,20 @@ impl App {
                 }
             }
             Message::Terminal(session, generation, event) => {
+                // a login's terminal closing lets the session go on (`login_ui`)
+                let closed = match &event {
+                    terminal::Event::Ended => Some(None),
+                    terminal::Event::Failed(why) => Some(Some(why.clone())),
+                    _ => None,
+                };
                 if let Some(view) = self.views.get_mut(&session)
                     && generation == view.terminal_generation
                     && let Some(pane) = &mut view.terminal
                 {
                     pane.accept(event);
+                }
+                if let Some(failed) = closed {
+                    return self.login_terminal_closed(&session, generation, failed);
                 }
             }
             Message::TermAction(action) => {
@@ -1293,6 +1310,10 @@ impl App {
                     terminal::Action::Paste => {
                         return iced::clipboard::read().map(Message::TermPaste);
                     }
+                    terminal::Action::PastePrimary => {
+                        return iced::clipboard::read_primary().map(Message::TermPaste);
+                    }
+                    terminal::Action::Open(url) => terminal::open_link(url),
                     action => pane.perform(action),
                 }
             }
@@ -2371,6 +2392,7 @@ impl App {
                         Act::Answer(_) => "Answering the question",
                         Act::Unqueue => "Removing the queued prompt",
                         Act::SendNow => "Sending the queued prompt now",
+                        Act::Login => "Logging in",
                         Act::Control => "Changing the agent's setting",
                         Act::Send(_) | Act::Check(_) => unreachable!(),
                     };
@@ -2402,6 +2424,12 @@ impl App {
         view.draft = text_editor::Content::new();
         view.follow_tail = true;
         view.failed = None;
+        let logged_in = view
+            .conversation
+            .session
+            .as_ref()
+            .is_some_and(|s| s.authentication.is_none());
+        view.login.settle(logged_in);
         if demo {
             for event in demo::prompt(view.conversation.seq + 1, &text) {
                 view.accept(event);

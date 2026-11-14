@@ -9,6 +9,7 @@ description = "Whole machine overlaid, secrets masked, network allow-list"
 mode = "allow"            # none | all | allow
 allow = [
   "api.anthropic.com", "*.anthropic.com", "claude.ai", "*.claude.ai",   # Claude Code
+  "claude.com", "*.claude.com",                                         # its login and token renewal
   "statsig.anthropic.com", "*.sentry.io",
   "registry.npmjs.org", "*.npmjs.org",                                  # ACP adapters via npx
   "github.com", "*.github.com", "*.githubusercontent.com",

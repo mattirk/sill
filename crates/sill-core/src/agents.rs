@@ -118,7 +118,9 @@ pub fn builtin() -> Vec<Agent> {
             env: Default::default(),
             supports_load: true,
             experimental_acp_v2: false,
-            domains: vec!["api.anthropic.com".into(), "*.anthropic.com".into(), "claude.ai".into(), "*.claude.ai".into()],
+            // claude.com: its login exchanges the code and renews the token at platform.claude.com
+            // (refused there, a login never finished and an expired token was not renewed, 2026-11-05)
+            domains: vec!["api.anthropic.com".into(), "*.anthropic.com".into(), "claude.ai".into(), "*.claude.ai".into(), "claude.com".into(), "*.claude.com".into()],
             sandbox_off_env: Default::default(),
             state_dirs: vec!["~/.claude".into(), "~/.claude.json".into()],
             home_paths: vec!["~/.claude".into(), "~/.claude.json".into()],

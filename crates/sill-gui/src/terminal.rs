@@ -51,6 +51,10 @@ pub enum Action {
     Blur,
     Copy,
     Paste,
+    /// Paste the mouse's selection (the primary selection), as a middle click does.
+    PastePrimary,
+    /// Open a link in the browser: Ctrl+click on it.
+    Open(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,6 +121,9 @@ pub struct Pane {
     pub rows: u16,
     pub status: Status,
     pub focused: bool,
+    /// The text pasted last, until the next key: a program may not show what it reads (a login's
+    /// code prompt), so the pane says what went in.
+    pub pasted: Option<String>,
     cache: canvas::Cache,
 }
 
@@ -159,6 +166,7 @@ impl Pane {
             rows,
             status: Status::Opening,
             focused: true,
+            pasted: None,
             cache: canvas::Cache::new(),
         };
         (pane, receiver)
@@ -194,7 +202,8 @@ impl Pane {
                 }
             }
             Action::Blur => self.focused = false,
-            Action::Copy | Action::Paste => {} // the clipboard is the window's: see `selection`
+            // the clipboard and the browser are the window's: see `selection`, `open_link`
+            Action::Copy | Action::Paste | Action::PastePrimary | Action::Open(_) => {}
         }
         self.cache.clear();
     }
@@ -206,6 +215,7 @@ impl Pane {
             term.scroll_display(Scroll::Bottom);
             term.selection = None;
         }
+        self.pasted = None;
         self.link.input(bytes);
         self.cache.clear();
     }
@@ -220,6 +230,7 @@ impl Pane {
             text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
         };
         self.input(bytes);
+        self.pasted = Some(text.to_string());
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
@@ -375,6 +386,8 @@ pub fn grid_size(size: Size) -> (u16, u16) {
 #[derive(Default)]
 pub struct Gesture {
     selecting: bool,
+    /// The keyboard's modifiers: a click is a link's with Ctrl held.
+    modifiers: Modifiers,
 }
 
 impl canvas::Program<Action> for Pane {
@@ -394,6 +407,23 @@ impl canvas::Program<Action> for Pane {
                 let (cols, rows) = grid_size(bounds.size());
                 ((cols, rows) != (self.cols, self.rows))
                     .then(|| canvas::Action::publish(Action::Resize(cols, rows)))
+            }
+            E::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
+                state.modifiers = *modifiers;
+                None
+            }
+            // Ctrl+click on a link opens it (a login's link, longer than the pane is wide)
+            E::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
+                if state.modifiers.control()
+                    && let Some(at) = cursor.position_in(bounds)
+                    && let Some(url) = self.link_at(self.cell_at(at).0) =>
+            {
+                publish(Action::Open(url))
+            }
+            E::Mouse(mouse::Event::ButtonPressed(mouse::Button::Middle))
+                if cursor.is_over(bounds) && self.status == Status::Running =>
+            {
+                publish(Action::PastePrimary)
             }
             E::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 match cursor.position_in(bounds) {
@@ -456,7 +486,16 @@ impl canvas::Program<Action> for Pane {
                     Key::Character(c) if shortcut && c.eq_ignore_ascii_case("c") => {
                         publish(Action::Copy)
                     }
-                    Key::Character(c) if shortcut && c.eq_ignore_ascii_case("v") => {
+                    // Ctrl+Shift+V as terminals have it; Ctrl+V and Shift+Insert too, as the
+                    // rest of the window pastes (a login's code)
+                    Key::Character(c)
+                        if modifiers.control()
+                            && !modifiers.alt()
+                            && c.eq_ignore_ascii_case("v") =>
+                    {
+                        publish(Action::Paste)
+                    }
+                    Key::Named(Named::Insert) if modifiers.shift() && !modifiers.control() => {
                         publish(Action::Paste)
                     }
                     Key::Named(Named::PageUp) if modifiers.shift() => {
@@ -498,10 +537,16 @@ impl canvas::Program<Action> for Pane {
 
     fn mouse_interaction(
         &self,
-        _state: &Gesture,
+        state: &Gesture,
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
+        if state.modifiers.control()
+            && let Some(at) = cursor.position_in(bounds)
+            && self.link_at(self.cell_at(at).0).is_some()
+        {
+            return mouse::Interaction::Pointer;
+        }
         if cursor.is_over(bounds) {
             mouse::Interaction::Text
         } else {
@@ -525,6 +570,107 @@ impl Pane {
         };
         let line = Line(row as i32 - term.grid().display_offset() as i32);
         (Point::new(line, Column(column)), side)
+    }
+
+    /// The web link at `point`: the cell's own (OSC 8), else an `http(s)://` address written
+    /// there, read across wrapped lines (a login's link is longer than the pane is wide).
+    pub fn link_at(&self, point: Point) -> Option<String> {
+        let term = self.term.lock();
+        let grid = term.grid();
+        if point.line < grid.topmost_line() || point.line > grid.bottommost_line() {
+            return None;
+        }
+        if let Some(link) = grid[point].hyperlink() {
+            return web(link.uri());
+        }
+        let columns = term.columns();
+        let wraps = |line: Line| {
+            grid[line][Column(columns - 1)]
+                .flags
+                .contains(Flags::WRAPLINE)
+        };
+        let mut first = point.line;
+        while first > grid.topmost_line() && wraps(Line(first.0 - 1)) {
+            first = Line(first.0 - 1);
+        }
+        let mut last = point.line;
+        while last < grid.bottommost_line() && wraps(last) {
+            last = Line(last.0 + 1);
+        }
+        let mut chars = vec![];
+        let mut at = 0;
+        for line in first.0..=last.0 {
+            for column in 0..columns {
+                let cell = &grid[Line(line)][Column(column)];
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                if Line(line) == point.line && column == point.column.0 {
+                    at = chars.len();
+                }
+                chars.push(cell.c);
+            }
+        }
+        link_in(&chars, at)
+    }
+}
+
+/// The `http(s)://` address in `chars` that `at` is on, if any.
+fn link_in(chars: &[char], at: usize) -> Option<String> {
+    let part = |c: char| !c.is_whitespace() && c != '\0' && !"<>\"'`".contains(c);
+    if !chars.get(at).is_some_and(|c| part(*c)) {
+        return None;
+    }
+    let mut start = at;
+    while start > 0 && part(chars[start - 1]) {
+        start -= 1;
+    }
+    let mut end = at;
+    while end + 1 < chars.len() && part(chars[end + 1]) {
+        end += 1;
+    }
+    let word: String = chars[start..=end].iter().collect();
+    let begin = word.find("https://").or_else(|| word.find("http://"))?;
+    // the press is on the address, not on what runs into it from the left
+    let before = word[..begin].chars().count();
+    if at - start < before {
+        return None;
+    }
+    let url = word[begin..].trim_end_matches(|c| ".,;:!?)]}".contains(c));
+    web(url)
+}
+
+/// `url` when it is a web address: only those open from a terminal's output.
+fn web(url: &str) -> Option<String> {
+    let lower = url.to_ascii_lowercase();
+    (lower.starts_with("https://") || lower.starts_with("http://")).then(|| url.to_string())
+}
+
+/// Open `url` in the person's browser, off the GUI thread; a failure is said on stderr.
+pub fn open_link(url: String) {
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", ""]);
+        c
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut command = std::process::Command::new("xdg-open");
+    command
+        .arg(&url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    match command.spawn() {
+        // reaped off the GUI thread, so it leaves no zombie
+        Ok(mut child) => {
+            let _ = std::thread::Builder::new()
+                .name("sill-gui-open".into())
+                .spawn(move || child.wait());
+        }
+        Err(e) => eprintln!("sill-gui: opening {url}: {e}"),
     }
 }
 
@@ -846,4 +992,74 @@ pub fn encode(
     }
     text.filter(|t| !t.is_empty() && !t.chars().any(char::is_control))
         .map(esc)
+}
+
+#[cfg(all(test, unix))]
+mod link_tests {
+    use super::*;
+
+    fn chars(s: &str) -> Vec<char> {
+        s.chars().collect()
+    }
+
+    #[test]
+    fn a_link_is_found_where_it_is_pressed() {
+        let line = chars("Browser didn't open? Use https://claude.ai/oauth?code=1&state=x. Then");
+        let on = line.iter().position(|c| *c == 'o').unwrap() + 30;
+        assert_eq!(
+            link_in(&line, on).as_deref(),
+            Some("https://claude.ai/oauth?code=1&state=x"),
+            "the sentence's full stop is not the link's"
+        );
+        assert_eq!(link_in(&line, 3), None, "a press on the words before it");
+        let run_in = chars("(see:https://a.example/x)");
+        assert_eq!(
+            link_in(&run_in, 2),
+            None,
+            "text running into it is not the link"
+        );
+        assert_eq!(link_in(&run_in, 10).as_deref(), Some("https://a.example/x"));
+        assert_eq!(
+            link_in(&chars("file:///etc/passwd"), 3),
+            None,
+            "web links only"
+        );
+        assert_eq!(web("javascript:alert(1)"), None);
+    }
+
+    /// A paste is said in the pane's strip until the next key, whatever the program shows.
+    #[test]
+    fn a_paste_is_shown_until_the_next_key() {
+        let (mut pane, _events) = Pane::open(40, 12, demo_shell);
+        crate::tests::settle(&pane, "project$");
+        pane.paste("code#123");
+        assert_eq!(pane.pasted.as_deref(), Some("code#123"));
+        crate::tests::settle(&pane, "code#123");
+        pane.input(b"x".to_vec());
+        assert_eq!(pane.pasted, None);
+    }
+
+    /// A login link longer than the pane is wide is one link across its wrapped lines.
+    #[test]
+    fn a_wrapped_link_is_read_whole() {
+        let url = format!(
+            "https://claude.ai/oauth/authorize?code=true&state={}",
+            "a".repeat(60)
+        );
+        let (mut pane, _events) = Pane::open(40, 12, demo_shell);
+        crate::tests::settle(&pane, "project$");
+        pane.input(url.clone().into_bytes());
+        crate::tests::settle(&pane, "aaaa");
+        // the prompt line, then the link's rest on the lines under it
+        let line = (0..12)
+            .find(|l| {
+                pane.screen()
+                    .lines()
+                    .nth(*l)
+                    .is_some_and(|t| t.ends_with("aaaa"))
+            })
+            .unwrap();
+        let found = pane.link_at(Point::new(Line(line as i32), Column(5)));
+        assert_eq!(found.as_deref(), Some(url.as_str()));
+    }
 }

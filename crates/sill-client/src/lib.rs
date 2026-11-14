@@ -26,6 +26,7 @@ pub mod changes;
 pub mod conversation;
 pub mod files;
 pub mod lane;
+pub mod login;
 pub mod outbox;
 pub mod sessions;
 pub mod settings;
