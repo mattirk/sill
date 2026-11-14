@@ -1,6 +1,12 @@
-//! The ACP agent registry (SPEC §4.1): the index published by the protocol project, cached under
-//! `~/.cache/sill/registry.json`, and installs from it into a sill-owned tools directory
-//! (`~/.local/state/sill/tools/<id>/`) that never touches the person's own npm/uv/bin setup. An
+//! The ACP agent registry (SPEC §4.1): a **snapshot** of the protocol project's registry compiled
+//! into sill (`registry/snapshot.json`, built from the registry's git repository at one commit by
+//! `sill registry snapshot`, with a full npm lockfile per package — security.md S13), the **live**
+//! index the project publishes for what is newer (cached under `~/.local/state/sill/registry/`,
+//! masked in every jail), and installs into a sill-owned tools directory
+//! (`~/.local/state/sill/tools/<id>/`) that never touches the person's own npm/uv/bin setup. A
+//! snapshot entry installs exactly what the snapshot pinned (`npm ci` against its lockfile, `uv`
+//! with `--no-build` and an `==` pin, a binary with its sha256); a live-only entry is installable
+//! after the person confirms, with the index's exact version and no lockfile. An
 //! installed entry becomes a registry override (`~/.config/sill/agents/<id>.toml`), so it shows up
 //! in the "+" menu like the built-ins; entries that are the built-ins' own packages (Claude Code,
 //! Codex, Gemini) keep the built-in's curated jail settings and only get their command replaced.
@@ -17,6 +23,41 @@ use serde::{Deserialize, Serialize};
 use crate::agents::{self, Agent};
 
 pub const URL: &str = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
+/// The registry's source: one `<id>/agent.json` per agent, what the published index is built from.
+pub const REPO: &str = "agentclientprotocol/registry";
+
+/// Where an entry's description of itself comes from, which decides how it is installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Trust {
+    /// The live index: nothing but TLS to the CDN vouches for it.
+    #[default]
+    Live,
+    /// The snapshot compiled into this build, reviewed with the commit that updated it.
+    Snapshot,
+}
+
+/// The compiled-in snapshot (`registry/snapshot.json`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct Snapshot {
+    pub source: String,
+    pub commit: String,
+    pub date: String,
+    pub agents: Vec<Entry>,
+}
+
+const SNAPSHOT_JSON: &str = include_str!("../registry/snapshot.json");
+
+pub fn snapshot() -> &'static Snapshot {
+    static S: std::sync::OnceLock<Snapshot> = std::sync::OnceLock::new();
+    S.get_or_init(|| {
+        let mut s: Snapshot = serde_json::from_str(SNAPSHOT_JSON).expect("registry/snapshot.json");
+        for a in &mut s.agents {
+            a.trust = Trust::Snapshot;
+        }
+        s
+    })
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Registry {
@@ -26,7 +67,7 @@ pub struct Registry {
     pub agents: Vec<Entry>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {
     pub id: String,
     pub name: String,
@@ -46,9 +87,19 @@ pub struct Entry {
     pub icon: Option<String>,
     #[serde(default)]
     pub distribution: Distribution,
+    /// Snapshot only: the `package-lock.json` and `package.json` an `npx` entry is installed from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub npm_lock: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub npm_manifest: Option<serde_json::Value>,
+    #[serde(skip)]
+    pub trust: Trust,
+    /// A snapshot entry's newer version in the live index, when there is one (unverified).
+    #[serde(skip)]
+    pub newer: Option<Box<Entry>>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Distribution {
     #[serde(default)]
     pub npx: Option<PackageDist>,
@@ -58,7 +109,7 @@ pub struct Distribution {
     pub binary: Option<BTreeMap<String, BinaryDist>>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageDist {
     pub package: String,
     #[serde(default)]
@@ -67,7 +118,7 @@ pub struct PackageDist {
     pub env: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BinaryDist {
     pub archive: String,
     #[serde(default)]
@@ -88,6 +139,9 @@ pub struct Installed {
     pub command: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Where the install came from: the snapshot, or the live index after a confirmation.
+    #[serde(default)]
+    pub trust: Trust,
 }
 
 impl Entry {
@@ -110,6 +164,17 @@ impl Entry {
         let p = self.distribution.npx.as_ref().or(self.distribution.uvx.as_ref())?;
         Some(strip_version(&p.package))
     }
+
+    /// The package spec as it will be installed (`@scope/name@1.2.3`, `name==1.2.3`, or the
+    /// archive URL), for showing before a confirmation.
+    pub fn install_spec(&self) -> String {
+        match self.how() {
+            Some("npx") => self.distribution.npx.as_ref().map(|d| d.package.clone()).unwrap_or_default(),
+            Some("uvx") => self.distribution.uvx.as_ref().map(|d| d.package.clone()).unwrap_or_default(),
+            Some(_) => self.distribution.binary.as_ref().and_then(|b| b.get(platform_key())).map(|b| b.archive.clone()).unwrap_or_default(),
+            None => String::new(),
+        }
+    }
 }
 
 fn strip_version(spec: &str) -> String {
@@ -117,6 +182,25 @@ fn strip_version(spec: &str) -> String {
         Some(i) if i > 0 => spec[..i].to_string(),
         _ => spec.to_string(),
     }
+}
+
+/// The exact version an npm spec pins (`@scope/name@1.2.3` → `1.2.3`); none for a bare name, a
+/// range or a tag — what the registry's own schema requires, and what an install is held to.
+fn npm_exact_version(spec: &str) -> Option<&str> {
+    let i = spec.rfind('@').filter(|&i| i > 0)?;
+    let v = &spec[i + 1..];
+    let mut parts = v.split('.');
+    let numeric = |s: Option<&str>| s.is_some_and(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()));
+    // `1.2.3` or `1.2.3-pre.1`: three numeric parts, the last may carry a prerelease
+    let third = parts.nth(2).map(|t| t.split('-').next().unwrap_or(""));
+    (numeric(Some(v.split('.').next().unwrap_or(""))) && numeric(v.split('.').nth(1)) && numeric(third) && !v.contains(['^', '~', '>', '<', '*', ' ', 'x', 'X'])).then_some(v)
+}
+
+/// The exact version a Python spec pins (`name==1.2.3` → `1.2.3`).
+fn uv_exact_version(spec: &str) -> Option<&str> {
+    let (_, v) = spec.split_once("==")?;
+    let v = v.trim();
+    (!v.is_empty() && !v.contains(['*', ',', ' ', '<', '>', '!'])).then_some(v)
 }
 
 fn platform_key() -> &'static str {
@@ -148,8 +232,14 @@ pub fn builtin_for(entry: &Entry) -> Option<&'static str> {
 
 // --- locations ------------------------------------------------------------------------------------
 
+/// The live index and icons: under the state directory, which every jail masks (security.md S13 —
+/// a cache the agent could write would be the index the next Install reads).
 fn cache_dir(home: &Path) -> PathBuf {
-    std::env::var("XDG_CACHE_HOME").map(PathBuf::from).unwrap_or_else(|_| home.join(".cache")).join("sill")
+    std::env::var("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join(".local/state"))
+        .join("sill")
+        .join("registry")
 }
 
 pub fn cache_path(home: &Path) -> PathBuf {
@@ -178,6 +268,30 @@ pub fn load_cached(home: &Path) -> Option<(Registry, SystemTime)> {
     let reg = serde_json::from_str::<Registry>(&text).ok()?;
     let when = std::fs::metadata(&p).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
     Some((reg, when))
+}
+
+/// What the Agents page lists: the snapshot's entries, each carrying the live index's newer
+/// version as `newer` when it has one, then the live entries the snapshot does not know, as
+/// [`Trust::Live`]. The time the live index was fetched, if it is cached.
+pub fn merged(home: &Path) -> (Vec<Entry>, Option<SystemTime>) {
+    let mut out: Vec<Entry> = snapshot().agents.clone();
+    let Some((live, when)) = load_cached(home) else { return (out, None) };
+    for mut l in live.agents {
+        l.trust = Trust::Live;
+        match out.iter_mut().find(|s| s.id == l.id) {
+            Some(s) => {
+                // most agent.json files name no icon; the published index adds one
+                if s.icon.is_none() {
+                    s.icon = l.icon.clone();
+                }
+                if l.version != s.version && !l.version.is_empty() {
+                    s.newer = Some(Box::new(l));
+                }
+            }
+            None => out.push(l),
+        }
+    }
+    (out, Some(when))
 }
 
 /// Download the index into the cache (curl: it honours the proxy variables and system CAs).
@@ -241,8 +355,15 @@ pub fn install(home: &Path, entry: &Entry, log: &mut dyn FnMut(String)) -> Resul
     let dir = tools_dir(home).join(&entry.id);
     std::fs::create_dir_all(&dir)?;
     let how = entry.how().ok_or_else(|| anyhow!("no way to install {} on this platform", entry.name))?;
+    log(match entry.trust {
+        Trust::Snapshot => format!("from sill's registry snapshot ({} @ {})", snapshot().source, &snapshot().commit[..snapshot().commit.len().min(12)]),
+        Trust::Live => "from the live index: version pinned as the index names it, nothing else verified".to_string(),
+    });
     let (command, env) = match how {
-        "npx" => install_npm(&dir, entry.distribution.npx.as_ref().unwrap(), log)?,
+        "npx" => match entry.trust {
+            Trust::Snapshot => install_npm_locked(&dir, entry, log)?,
+            Trust::Live => install_npm(&dir, entry.distribution.npx.as_ref().unwrap(), log)?,
+        },
         "uvx" => install_uv(&dir, entry.distribution.uvx.as_ref().unwrap(), log)?,
         _ => install_binary(&dir, &entry.distribution.binary.as_ref().unwrap()[platform_key()], log)?,
     };
@@ -256,7 +377,7 @@ pub fn install(home: &Path, entry: &Entry, log: &mut dyn FnMut(String)) -> Resul
     };
     log(format!("probe: {}", if supports_load { "resumes sessions" } else { "no session resume" }));
 
-    let installed = Installed { version: entry.version.clone(), kind: how.to_string(), command: command.clone(), env: env.clone() };
+    let installed = Installed { version: entry.version.clone(), kind: how.to_string(), command: command.clone(), env: env.clone(), trust: entry.trust };
     std::fs::write(dir.join("installed.json"), serde_json::to_string_pretty(&installed)?)?;
 
     let agent = match builtin_for(entry) {
@@ -331,7 +452,9 @@ fn run_logged(cmd: &mut Command, log: &mut dyn FnMut(String)) -> Result<()> {
     Ok(())
 }
 
+/// A live-index `npx` entry: the index's exact version, dependencies resolved by npm now.
 fn install_npm(dir: &Path, d: &PackageDist, log: &mut dyn FnMut(String)) -> Result<(Vec<String>, BTreeMap<String, String>)> {
+    let version = npm_exact_version(&d.package).ok_or_else(|| anyhow!("{}: the index pins no exact version; refusing to install whatever npm resolves", d.package))?.to_string();
     // no lifecycle scripts: nothing from the package runs on the host at install time
     let mut cmd = Command::new("npm");
     cmd.args(["install", "--prefix"])
@@ -340,22 +463,53 @@ fn install_npm(dir: &Path, d: &PackageDist, log: &mut dyn FnMut(String)) -> Resu
         .arg(&d.package)
         .current_dir(dir);
     run_logged(&mut cmd, log).context("npm install")?;
-    // npm treats a failed fetch of an optional dependency as no error and says nothing at
-    // --loglevel=error; the platform packages that carry an agent's native binary are optional
-    // (`@anthropic-ai/claude-agent-sdk-linux-x64`, ~50 MB), so one dropped download leaves an
-    // install that starts fine and fails at the first session. Verify, retry once, then refuse.
+    npm_retry_optionals(dir, &mut cmd, log)?;
+    npm_command(dir, d, &version)
+}
+
+/// A snapshot `npx` entry: `npm ci` against the lockfile the snapshot carries, so every package in
+/// the tree is the one the snapshot's commit reviewed, by integrity hash.
+fn install_npm_locked(dir: &Path, entry: &Entry, log: &mut dyn FnMut(String)) -> Result<(Vec<String>, BTreeMap<String, String>)> {
+    let d = entry.distribution.npx.as_ref().unwrap();
+    let (Some(lock), Some(manifest)) = (&entry.npm_lock, &entry.npm_manifest) else {
+        bail!("the snapshot carries no lockfile for {}: rebuild it with `sill registry snapshot`", entry.id);
+    };
+    let version = npm_exact_version(&d.package).ok_or_else(|| anyhow!("{}: no exact version in the snapshot", d.package))?.to_string();
+    std::fs::write(dir.join("package.json"), serde_json::to_string_pretty(manifest)?)?;
+    std::fs::write(dir.join("package-lock.json"), serde_json::to_string(lock)?)?;
+    let mut cmd = Command::new("npm");
+    cmd.args(["ci", "--no-audit", "--no-fund", "--ignore-scripts", "--loglevel=error"]).current_dir(dir);
+    run_logged(&mut cmd, log).context("npm ci")?;
+    npm_retry_optionals(dir, &mut cmd, log)?;
+    npm_command(dir, d, &version)
+}
+
+/// npm treats a failed fetch of an optional dependency as no error and says nothing at
+/// --loglevel=error; the platform packages that carry an agent's native binary are optional
+/// (`@anthropic-ai/claude-agent-sdk-linux-x64`, ~50 MB), so one dropped download leaves an
+/// install that starts fine and fails at the first session. Verify, retry once, then refuse.
+fn npm_retry_optionals(dir: &Path, cmd: &mut Command, log: &mut dyn FnMut(String)) -> Result<()> {
     let mut missing = missing_platform_optionals(dir)?;
     if !missing.is_empty() {
         log(format!("optional platform package(s) not installed: {}; retrying", missing.join(", ")));
-        run_logged(&mut cmd, log).context("npm install (retry)")?;
+        run_logged(cmd, log).context("npm install (retry)")?;
         missing = missing_platform_optionals(dir)?;
     }
     if !missing.is_empty() {
         bail!("platform package(s) missing after npm install: {}", missing.join(", "));
     }
+    Ok(())
+}
+
+/// The installed package's executable (checked to be the pinned version) plus the entry's args.
+fn npm_command(dir: &Path, d: &PackageDist, version: &str) -> Result<(Vec<String>, BTreeMap<String, String>)> {
     let name = strip_version(&d.package);
     let pkg_json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("node_modules").join(&name).join("package.json")).context("package.json")?)?;
+    let got = pkg_json.get("version").and_then(|v| v.as_str()).unwrap_or("");
+    if got != version {
+        bail!("npm installed {name} {got}, not the pinned {version}");
+    }
     let bin_name = match pkg_json.get("bin") {
         Some(serde_json::Value::String(_)) => name.rsplit('/').next().unwrap_or(&name).to_string(),
         Some(serde_json::Value::Object(m)) => {
@@ -438,8 +592,10 @@ fn missing_platform_optionals(dir: &Path) -> Result<Vec<String>> {
 
 fn install_uv(dir: &Path, d: &PackageDist, log: &mut dyn FnMut(String)) -> Result<(Vec<String>, BTreeMap<String, String>)> {
     let bin_dir = dir.join("bin");
+    uv_exact_version(&d.package).ok_or_else(|| anyhow!("{}: no `==` version pin; refusing to install whatever uv resolves", d.package))?;
+    // wheels only: an sdist's build backend is arbitrary code, and this runs on the host
     let mut cmd = Command::new("uv");
-    cmd.args(["tool", "install", "--force"])
+    cmd.args(["tool", "install", "--force", "--no-build"])
         .arg(&d.package)
         .env("UV_TOOL_DIR", dir.join("uv"))
         .env("UV_TOOL_BIN_DIR", &bin_dir)
@@ -629,5 +785,184 @@ mod platform_optional_tests {
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
+    }
+}
+
+// --- the snapshot builder (`sill registry snapshot`) ---------------------------------------------
+
+/// Build `registry/snapshot.json` from the registry repository's `main` at its current commit:
+/// every `<id>/agent.json` not in `quarantine.json`, the `preview` channel dropped, icons as URLs
+/// at that commit, and for every `npx` entry a lockfile resolved now with `npm install
+/// --package-lock-only` (no package code runs). Entries whose spec pins no exact version are kept
+/// for the list but get no lockfile, so they cannot be installed from the snapshot. The result is
+/// for review and commit: the commit that updates the snapshot is what vouches for it.
+pub fn build_snapshot(out: &Path, log: &mut dyn FnMut(String)) -> Result<()> {
+    let api = format!("https://api.github.com/repos/{REPO}");
+    let head: serde_json::Value = serde_json::from_slice(&curl(&format!("{api}/commits/main"))?).context("commit json")?;
+    let commit = head["sha"].as_str().context("commit sha")?.to_string();
+    let date = head["commit"]["committer"]["date"].as_str().unwrap_or("").to_string();
+    log(format!("{REPO} @ {commit} ({date})"));
+    let raw = |path: &str| format!("https://raw.githubusercontent.com/{REPO}/{commit}/{path}");
+    let quarantine: BTreeMap<String, String> = serde_json::from_slice(&curl(&raw("quarantine.json"))?).unwrap_or_default();
+    let tree: Vec<serde_json::Value> = serde_json::from_slice(&curl(&format!("{api}/contents?ref={commit}"))?).context("repo contents")?;
+    let mut agents: Vec<Entry> = Vec::new();
+    for item in tree {
+        let (Some(kind), Some(name)) = (item["type"].as_str(), item["name"].as_str()) else { continue };
+        if kind != "dir" || name.starts_with('.') {
+            continue;
+        }
+        if let Some(why) = quarantine.get(name) {
+            log(format!("{name}: quarantined upstream ({why}), skipped"));
+            continue;
+        }
+        let bytes = match curl(&raw(&format!("{name}/agent.json"))) {
+            Ok(b) => b,
+            Err(e) => {
+                log(format!("{name}: no agent.json ({e:#}), skipped"));
+                continue;
+            }
+        };
+        let mut e: Entry = serde_json::from_slice(&bytes).with_context(|| format!("{name}/agent.json"))?;
+        if e.id != name {
+            log(format!("{name}: agent.json says id {}, skipped", e.id));
+            continue;
+        }
+        if let Some(icon) = &e.icon
+            && let Some(rel) = icon.strip_prefix("./")
+        {
+            e.icon = Some(raw(&format!("{name}/{rel}")));
+        }
+        if let Some(d) = &e.distribution.npx {
+            match npm_exact_version(&d.package) {
+                Some(_) => match npm_lockfile(&d.package) {
+                    Ok((manifest, lock)) => {
+                        log(format!("{name}: {} locked ({} packages)", d.package, lock["packages"].as_object().map(|m| m.len()).unwrap_or(0)));
+                        e.npm_manifest = Some(manifest);
+                        e.npm_lock = Some(lock);
+                    }
+                    Err(err) => log(format!("{name}: {} — no lockfile ({err:#}); listed, not installable from the snapshot", d.package)),
+                },
+                None => log(format!("{name}: {} pins no exact version; listed, not installable from the snapshot", d.package)),
+            }
+        }
+        if let Some(d) = &e.distribution.uvx
+            && uv_exact_version(&d.package).is_none()
+        {
+            log(format!("{name}: {} pins no exact version; listed, not installable", d.package));
+        }
+        agents.push(e);
+    }
+    agents.sort_by(|a, b| a.id.cmp(&b.id));
+    #[derive(Serialize)]
+    struct Out<'a> {
+        source: &'a str,
+        commit: &'a str,
+        date: &'a str,
+        agents: &'a [Entry],
+    }
+    let text = serde_json::to_string_pretty(&Out { source: REPO, commit: &commit, date: &date, agents: &agents })?;
+    std::fs::write(out, text.as_bytes())?;
+    log(format!("{}: {} agents, {} KiB", out.display(), agents.len(), text.len() / 1024));
+    Ok(())
+}
+
+fn curl(url: &str) -> Result<Vec<u8>> {
+    let out = Command::new("curl").args(["-fsSL", "--max-time", "60"]).arg(url).output().context("run curl")?;
+    if !out.status.success() {
+        bail!("{url}: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(out.stdout)
+}
+
+/// Resolve a package's dependency tree without installing it: the `package.json` and
+/// `package-lock.json` npm writes in an empty directory.
+fn npm_lockfile(spec: &str) -> Result<(serde_json::Value, serde_json::Value)> {
+    let dir = std::env::temp_dir().join(format!("sill-lock-{}-{}", std::process::id(), spec.replace(['/', '@'], "_")));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    let out = Command::new("npm")
+        .args(["install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"])
+        .arg(spec)
+        .current_dir(&dir)
+        .stdin(Stdio::null())
+        .output()
+        .context("run npm")?;
+    let r = (|| -> Result<_> {
+        if !out.status.success() {
+            bail!("npm: {}", String::from_utf8_lossy(&out.stderr).trim());
+        }
+        let manifest: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("package.json"))?)?;
+        let lock: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("package-lock.json"))?)?;
+        Ok((manifest, lock))
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    r
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn exact_versions() {
+        assert_eq!(npm_exact_version("@agentclientprotocol/claude-agent-acp@0.99.1"), Some("0.99.1"));
+        assert_eq!(npm_exact_version("cline@3.0.74"), Some("3.0.74"));
+        assert_eq!(npm_exact_version("@agentclientprotocol/codex-acp@2.5.1-preview.13"), Some("2.5.1-preview.13"));
+        assert_eq!(npm_exact_version("@scope/name"), None);
+        assert_eq!(npm_exact_version("name@latest"), None);
+        assert_eq!(npm_exact_version("name@^1.2.3"), None);
+        assert_eq!(npm_exact_version("name@1.2"), None);
+        assert_eq!(uv_exact_version("fast-agent-acp==0.10.1"), Some("0.10.1"));
+        assert_eq!(uv_exact_version("minion-code"), None);
+        assert_eq!(uv_exact_version("minion-code>=0.1"), None);
+    }
+
+    #[test]
+    fn snapshot_parses_and_pins() {
+        let s = snapshot();
+        assert!(!s.commit.is_empty());
+        for a in &s.agents {
+            assert_eq!(a.trust, Trust::Snapshot);
+            if let Some(d) = &a.distribution.npx
+                && a.npm_lock.is_some()
+            {
+                let v = npm_exact_version(&d.package).expect("pinned");
+                assert_eq!(a.version, v, "{}", a.id);
+                let name = strip_version(&d.package);
+                let locked = a.npm_lock.as_ref().unwrap()["packages"][format!("node_modules/{name}")]["version"].as_str();
+                assert_eq!(locked, Some(v), "{}: lockfile pins the entry's version", a.id);
+                assert!(a.npm_manifest.as_ref().unwrap()["dependencies"][&name].is_string(), "{}: manifest names the package", a.id);
+            }
+        }
+        assert!(s.agents.iter().any(|a| a.id == "claude-acp" && a.npm_lock.is_some()));
+    }
+
+    #[test]
+    fn merged_marks_live_entries() {
+        let dir = std::env::temp_dir().join(format!("sill-reg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = dir.join("home");
+        let cache = cache_path(&home);
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        let snap = snapshot();
+        let known = &snap.agents[0];
+        let live = serde_json::json!({ "version": "1", "agents": [
+            { "id": known.id, "name": known.name, "version": "999.0.0", "icon": "https://example/x.svg", "distribution": { "npx": { "package": "x@999.0.0" } } },
+            { "id": "brand-new", "name": "New", "version": "1.0.0", "distribution": { "npx": { "package": "new@1.0.0" } } }
+        ]});
+        std::fs::write(&cache, live.to_string()).unwrap();
+        let (entries, when) = merged(&home);
+        assert!(when.is_some());
+        assert_eq!(entries.len(), snap.agents.len() + 1);
+        let k = entries.iter().find(|e| e.id == known.id).unwrap();
+        assert_eq!(k.trust, Trust::Snapshot);
+        assert_eq!(k.version, known.version, "the snapshot's version stays");
+        assert_eq!(k.newer.as_ref().map(|n| n.version.as_str()), Some("999.0.0"));
+        assert_eq!(k.newer.as_ref().unwrap().trust, Trust::Live);
+        assert_eq!(k.icon.as_deref(), known.icon.as_deref().or(Some("https://example/x.svg")), "the live icon fills a missing one");
+        let n = entries.iter().find(|e| e.id == "brand-new").unwrap();
+        assert_eq!(n.trust, Trust::Live);
+        assert_eq!(n.install_spec(), "new@1.0.0");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

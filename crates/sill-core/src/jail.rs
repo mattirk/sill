@@ -394,7 +394,7 @@ impl JailSpec {
         let mut masked = Vec::new();
         let config_dir = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| self.home.join(".config"));
         let state_base = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| self.home.join(".local/state"));
-        let own: Vec<PathBuf> = [config_dir.join("sill"), state_base.join("sill/bin"), state_base.join("sill/agents"), state_base.join("sill/login"), state_base.join("sill/memory")]
+        let own: Vec<PathBuf> = [config_dir.join("sill"), state_base.join("sill/bin"), state_base.join("sill/agents"), state_base.join("sill/login"), state_base.join("sill/memory"), state_base.join("sill/registry")]
             .into_iter()
             .chain(["sill.db", "sill.db-wal", "sill.db-shm"].iter().map(|f| state_base.join("sill").join(f)))
             // the user's journal is readable by ACL: every session's proxy lines and agent stderr (S15)

@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime};
 use gtk4 as gtk;
 use gtk::glib;
 use gtk::prelude::*;
-use sill_core::registry::{self, Entry};
+use sill_core::registry::{self, Entry, Trust};
 
 use super::{icons, session, settings, theme};
 
@@ -24,8 +24,8 @@ enum Filter {
 
 /// What a row shows about an entry's state here.
 enum State {
-    /// Installed by sill (tools dir), with the version it has.
-    Managed(String),
+    /// Installed by sill (tools dir), with the version it has and where that came from.
+    Managed(String, Trust),
     /// A built-in whose command is already on this machine (not by sill).
     System(PathBuf),
     Absent,
@@ -60,6 +60,8 @@ pub struct AgentsPage {
     tx: async_channel::Sender<Progress>,
     fetching: Cell<bool>,
     icons_queued: RefCell<std::collections::HashSet<String>>,
+    /// The live-index entry whose Install was clicked once: the next click installs it.
+    confirm: RefCell<Option<String>>,
 }
 
 impl AgentsPage {
@@ -130,6 +132,7 @@ impl AgentsPage {
             logs: RefCell::new(HashMap::new()),
             tx,
             fetching: Cell::new(false),
+            confirm: RefCell::new(None),
             icons_queued: RefCell::new(Default::default()),
         });
 
@@ -169,16 +172,26 @@ impl AgentsPage {
         page
     }
 
-    /// Show what is cached; fetch when there is nothing or it is older than six hours.
+    /// Show the snapshot plus what is cached of the live index; fetch the live index when there is
+    /// nothing or it is older than six hours.
     pub fn refresh(self: &Rc<Self>) {
         let home = session::home().unwrap_or_default();
-        match registry::load_cached(&home) {
-            Some((reg, when)) => {
-                *self.entries.borrow_mut() = reg.agents;
-                self.rebuild();
+        let (entries, when) = registry::merged(&home);
+        *self.entries.borrow_mut() = entries;
+        self.rebuild();
+        self.set_note("");
+        let snap = registry::snapshot();
+        let n = self.entries.borrow().len();
+        match when {
+            Some(when) => {
                 let age = SystemTime::now().duration_since(when).unwrap_or_default();
-                self.set_note("");
-                self.refresh_btn.set_tooltip_text(Some(&format!("{} agents, fetched {} · fetch again", self.entries.borrow().len(), ago(age))));
+                self.refresh_btn.set_tooltip_text(Some(&format!(
+                    "{n} agents: {} in sill's snapshot ({} @ {}), the live index fetched {} · fetch again",
+                    snap.agents.len(),
+                    snap.source,
+                    &snap.commit[..snap.commit.len().min(12)],
+                    ago(age)
+                )));
                 if age > Duration::from_secs(6 * 3600) {
                     self.fetch();
                 }
@@ -208,7 +221,7 @@ impl AgentsPage {
 
     fn state_of(&self, entry: &Entry, home: &std::path::Path) -> State {
         if let Some(i) = registry::installed(home, &entry.id) {
-            return State::Managed(i.version);
+            return State::Managed(i.version, i.trust);
         }
         if let Some(id) = registry::builtin_for(entry)
             && let Some(agent) = sill_core::agents::load(home).get(id)
@@ -282,6 +295,22 @@ impl AgentsPage {
             u.add_css_class("dim-label");
             u.add_css_class("sill-agent-version");
             u.set_tooltip_text(Some("Not yet tried inside sill's jail: install, login and a prompt may need work"));
+            top.append(&u);
+        }
+        if e.trust == Trust::Live {
+            let u = gtk::Label::new(Some("unverified"));
+            u.add_css_class("dim-label");
+            u.add_css_class("sill-agent-version");
+            u.set_tooltip_text(Some(&format!(
+                "From the live index only, not in sill's reviewed snapshot: an install takes {} as the index names it (exact version, no lockfile) and asks you to confirm",
+                e.install_spec()
+            )));
+            top.append(&u);
+        } else if let Some(n) = &e.newer {
+            let u = gtk::Label::new(Some(&format!("v{} in the live index", n.version)));
+            u.add_css_class("dim-label");
+            u.add_css_class("sill-agent-version");
+            u.set_tooltip_text(Some(&format!("Newer than sill's snapshot (v{}), unverified: installing it takes {} as the index names it and asks you to confirm", e.version, n.install_spec())));
             top.append(&u);
         }
         if !e.description.is_empty() {
@@ -362,14 +391,22 @@ impl AgentsPage {
             }
         }
         match state {
-            State::Managed(version) => {
-                let update = version != e.version;
+            State::Managed(version, trust) => {
+                // the snapshot's version is the update, unless the live version is what is installed
+                let update = version != e.version && e.newer.as_ref().is_none_or(|n| n.version != version);
                 let l = gtk::Label::new(Some(if update { "update available" } else { "installed" }));
                 l.add_css_class("dim-label");
-                l.set_tooltip_text(Some(&format!("installed by sill: v{version}")));
+                l.set_tooltip_text(Some(&match trust {
+                    Trust::Snapshot => format!("installed by sill from its snapshot: v{version}"),
+                    Trust::Live => format!("installed by sill from the live index (unverified): v{version}"),
+                }));
                 state_box.append(&l);
                 if update {
                     state_box.append(&self.action_button(e, &format!("Update to v{}", e.version), "sill-install"));
+                } else if let Some(n) = &e.newer
+                    && n.version != version
+                {
+                    state_box.append(&self.action_button(n, &format!("Update to v{} (unverified)", n.version), "sill-install"));
                 }
                 let rm = super::icons::glyph_button("sill-trash");
                 rm.add_css_class("flat");
@@ -474,7 +511,28 @@ impl AgentsPage {
         }));
         let p = self.clone();
         let e2 = e.clone();
-        b.connect_clicked(move |_| p.install(&e2));
+        b.connect_clicked(move |b| {
+            // a live-index entry: nothing reviewed vouches for it, so the first click only says
+            // what would be installed and the second does it (security.md S13)
+            if e2.trust == Trust::Live && p.confirm.borrow().as_deref() != Some(e2.id.as_str()) {
+                *p.confirm.borrow_mut() = Some(e2.id.clone());
+                b.set_label("Confirm");
+                let msg = format!(
+                    "{} v{} is not in sill's reviewed snapshot. Install takes {} exactly as the live index names it (no lockfile, dependencies resolved now). Click again to confirm.",
+                    e2.name,
+                    e2.version,
+                    e2.install_spec()
+                );
+                p.logs.borrow_mut().insert(e2.id.clone(), vec![msg.clone()]);
+                if let Some(r) = p.rows.borrow().get(&e2.id) {
+                    r.log.set_text(&msg);
+                    r.log.set_visible(true);
+                }
+                return;
+            }
+            p.confirm.borrow_mut().take();
+            p.install(&e2);
+        });
         b
     }
 

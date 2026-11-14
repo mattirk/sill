@@ -117,6 +117,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: MemoryCmd,
     },
+    /// The ACP agent registry sill installs from (security.md S13)
+    Registry {
+        #[command(subcommand)]
+        cmd: RegistryCmd,
+    },
     /// Show a policy as sill reads it
     Policy {
         /// name (searched in ~/.config/sill/policies, /etc/sill/policies, built-in) or path
@@ -157,6 +162,17 @@ enum MemoryCmd {
     Compact,
     /// One Markdown file per session into a folder: facts, summary, notes, the conversation
     Export { dir: PathBuf },
+}
+
+#[derive(Subcommand)]
+enum RegistryCmd {
+    /// Rebuild the compiled-in snapshot from the registry repository's current commit: every
+    /// agent.json plus a resolved npm lockfile per package; review the diff, then commit it
+    Snapshot {
+        /// where to write (default: crates/sill-core/registry/snapshot.json of this checkout)
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -399,6 +415,10 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Memory { cmd } => memory_cmd(cmd),
+        Cmd::Registry { cmd: RegistryCmd::Snapshot { out } } => {
+            let out = out.unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sill-core/registry/snapshot.json"));
+            sill_core::registry::build_snapshot(&out, &mut |line| eprintln!("{line}"))
+        }
         Cmd::Jail { cmd } => jail_cmd(cmd),
         Cmd::Dev { cmd } => dev_cmd(cmd),
         Cmd::Launch { session, jail, shim, agent, detached, cgroup_root } => launch(&session, jail, shim, agent.as_deref(), detached, cgroup_root),
