@@ -1708,6 +1708,8 @@ impl Shelf {
             l.set_xalign(0.0);
             l.set_hexpand(true);
             l.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            // caps the menu's width: a long session title truncates instead of widening it
+            l.set_max_width_chars(24);
             h.append(&i);
             match sub {
                 Some(sub) => {
@@ -1716,7 +1718,7 @@ impl Shelf {
                     let s = gtk::Label::new(Some(sub));
                     s.set_xalign(0.0);
                     s.set_ellipsize(gtk::pango::EllipsizeMode::End);
-                    s.set_max_width_chars(44);
+                    s.set_max_width_chars(24);
                     s.add_css_class("dim-label");
                     s.add_css_class("sill-menu-sub");
                     v.append(&l);
@@ -1806,7 +1808,7 @@ impl Shelf {
                 let sub = if sess.ghost {
                     Some("ghost · still running".to_string())
                 } else {
-                    sess.ended_at.filter(|_| !sess.summary.is_empty()).map(|t| format!("{} · {}", sill_core::memory::date(t), sill_core::memory::first_line(&sess.summary)))
+                    sess.ended_at.filter(|_| !sess.summary.is_empty()).map(|t| sill_core::memory::date(t))
                 };
                 let b = row(registry.get(&sess.agent), &sess.title, sub.as_deref());
                 if !sess.summary.is_empty() {
