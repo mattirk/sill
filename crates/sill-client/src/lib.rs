@@ -63,19 +63,11 @@ pub fn request_id(kind: &str) -> String {
     )
 }
 
-/// The connection went with this request: it may or may not have reached the daemon. Reads the
-/// whole error chain — a connection lost after sending arrives wrapped in the method's context,
-/// which `Client::is_closed` (outermost message only) does not see.
+/// The connection went with this request (or the daemon did not answer it in time): it may or
+/// may not have reached the daemon. `Client::is_closed` reads the whole error chain, so a
+/// connection lost after sending is seen even wrapped in the method's context.
 pub fn connection_lost(error: &anyhow::Error) -> bool {
-    let message = format!("{error:#}");
-    [
-        "closed the connection",
-        "went away",
-        "writing to the daemon",
-        "did not answer",
-    ]
-    .iter()
-    .any(|m| message.contains(m))
+    sill_proto::Client::is_closed(error)
 }
 
 /// The domain code of a daemon refusal (`not_found`, `stale_answer`, `limit_exceeded`…), if the

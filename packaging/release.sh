@@ -17,6 +17,10 @@ if [ "${1:-}" != "--no-build" ]; then
 fi
 for b in sill sill-shim sill-gui; do
     [ -x "target/release/$b" ] || { echo "target/release/$b missing" >&2; exit 1; }
+    # the desktop libraries (Wayland, xkbcommon, X11, Vulkan) are dlopen'd at run time; a binary that
+    # links more than libc is a stale build from before the GTK removal
+    extra=$(ldd "target/release/$b" | awk '{print $1}' | grep -v -e linux-vdso -e ld-linux -e '^libc\.so' -e '^libm\.so' -e '^libgcc_s' || true)
+    [ -z "$extra" ] || { echo "target/release/$b links $(echo $extra): stale build, run without --no-build" >&2; exit 1; }
 done
 rm -rf "dist/$NAME"
 mkdir -p "dist/$NAME/policies" "dist/$NAME/systemd/user" "dist/$NAME/icons"

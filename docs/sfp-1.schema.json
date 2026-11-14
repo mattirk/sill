@@ -6865,7 +6865,7 @@
     },
     {
       "capabilities": {},
-      "doc": "Read daemon-host file/repository information with exact path bytes and bounded results.",
+      "doc": "The repository containing the path: the nearest directory with `.git`, the path itself when it is a directory; null outside any repository.",
       "kind": "request",
       "name": "_sill/repos.root",
       "params": {

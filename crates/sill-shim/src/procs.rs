@@ -34,6 +34,14 @@ pub fn socket_path() -> PathBuf {
 
 /// A log is kept to this many bytes: when it grows past, the older half goes.
 const LOG_CAP: u64 = 2 << 20;
+/// One line is held to this many bytes: past it the line is cut, marked with [`LINE_CUT`], and
+/// the rest dropped up to the next newline — so a producer that never writes one, or writes a
+/// huge one, costs a bounded amount of memory here and in `last_line`.
+const LINE_CAP: usize = 64 << 10;
+/// Appended to a line that went past [`LINE_CAP`].
+const LINE_CUT: &str = " […cut]";
+/// Output is read from the pipe in pieces of this size.
+const READ_CHUNK: usize = 16 << 10;
 /// SIGTERM, then this long, then SIGKILL.
 const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
@@ -199,10 +207,7 @@ impl Procs {
                     .append(true)
                     .open(&log)
                     .ok();
-                for line in BufReader::new(std::fs::File::from(read_end))
-                    .lines()
-                    .map_while(Result::ok)
-                {
+                capture_lines(std::fs::File::from(read_end), |line| {
                     if let Some(f) = file.as_mut() {
                         let _ = writeln!(f, "{line}");
                         if f.metadata().map(|m| m.len() > LOG_CAP).unwrap_or(false) {
@@ -215,7 +220,7 @@ impl Procs {
                     if let Some(p) = t.procs.iter_mut().find(|p| p.name == name) {
                         p.last_line = line;
                     }
-                }
+                });
             });
         }
         // the exit
@@ -386,6 +391,57 @@ impl Procs {
             });
         }
         Ok(())
+    }
+}
+
+/// Read `source` to its end in [`READ_CHUNK`] pieces, handing each line (newline and a trailing
+/// `\r` removed, invalid UTF-8 made lossy) to `on_line`. No more than [`LINE_CAP`] bytes of a line
+/// are ever held: a longer one is cut there, marked, and the remainder dropped to its newline.
+fn capture_lines(mut source: impl Read, mut on_line: impl FnMut(String)) {
+    let mut buf = vec![0u8; READ_CHUNK];
+    let mut line: Vec<u8> = Vec::new();
+    let mut cut = false; // the current line went past the cap; dropping until its newline
+    let mut finish = |line: &mut Vec<u8>, cut: &mut bool| {
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        let mut s = String::from_utf8_lossy(line).into_owned();
+        if *cut {
+            s.push_str(LINE_CUT);
+        }
+        on_line(s);
+        line.clear();
+        *cut = false;
+    };
+    let take = |line: &mut Vec<u8>, cut: &mut bool, bytes: &[u8]| {
+        if *cut {
+            return;
+        }
+        let room = LINE_CAP - line.len();
+        if bytes.len() > room {
+            line.extend_from_slice(&bytes[..room]);
+            *cut = true;
+        } else {
+            line.extend_from_slice(bytes);
+        }
+    };
+    loop {
+        let n = match source.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        let mut rest = &buf[..n];
+        while let Some(i) = rest.iter().position(|b| *b == b'\n') {
+            take(&mut line, &mut cut, &rest[..i]);
+            finish(&mut line, &mut cut);
+            rest = &rest[i + 1..];
+        }
+        take(&mut line, &mut cut, rest);
+    }
+    if !line.is_empty() || cut {
+        finish(&mut line, &mut cut); // an unterminated last line
     }
 }
 
@@ -703,6 +759,79 @@ mod tests {
             1
         );
         assert_eq!(cli(vec!["bogus".into()]), 1); // the client itself is exercised by hand (see docs/tasks.md §2.4)
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A reader that hands out at most `n` bytes per read, so lines straddle reads.
+    struct Dribble<'a>(&'a [u8], usize);
+    impl Read for Dribble<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.0.len().min(self.1).min(buf.len());
+            buf[..n].copy_from_slice(&self.0[..n]);
+            self.0 = &self.0[n..];
+            Ok(n)
+        }
+    }
+
+    fn captured(source: impl Read) -> Vec<String> {
+        let mut out = Vec::new();
+        capture_lines(source, |l| out.push(l));
+        out
+    }
+
+    #[test]
+    fn ordinary_lines_are_captured_unchanged() {
+        let text = b"a\nbb\r\n\nccc\xff\nlast";
+        let want = ["a", "bb", "", "ccc\u{fffd}", "last"];
+        assert_eq!(captured(&text[..]), want, "in one read");
+        assert_eq!(captured(Dribble(text, 1)), want, "a byte at a time");
+        assert_eq!(captured(Dribble(text, 3)), want, "three at a time");
+        assert_eq!(captured(&b""[..]), Vec::<String>::new());
+        assert_eq!(captured(&b"\n"[..]), [""]);
+        // a line at the cap is whole; one byte more is cut and marked, the next line intact
+        let mut text = vec![b'x'; LINE_CAP];
+        text.push(b'\n');
+        text.extend(vec![b'y'; LINE_CAP + 1]);
+        text.extend(b"\nz\n");
+        let got = captured(Dribble(&text, 7000));
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0].len(), LINE_CAP);
+        assert_eq!(got[1], format!("{}{LINE_CUT}", "y".repeat(LINE_CAP)));
+        assert_eq!(got[2], "z");
+    }
+
+    #[test]
+    fn a_newline_free_producer_stays_bounded() {
+        // 5 MiB without a newline: one line comes out, cut at the cap
+        let got = captured(std::io::repeat(b'x').take(5 << 20));
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].len(), LINE_CAP + LINE_CUT.len());
+        assert!(got[0].ends_with(LINE_CUT));
+        // and the same through a real process: the record and its log are bounded too
+        let d = fresh("nonl");
+        let procs = Procs::at(d.clone());
+        procs
+            .start(
+                "flood",
+                vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "head -c 5000000 /dev/zero | tr '\\0' x".into(),
+                ],
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(wait_for(|| {
+            let p = procs.list();
+            p[0].state == ProcState::Exited(0) && !p[0].last_line.is_empty()
+        }));
+        let last = procs.list()[0].last_line.clone();
+        assert_eq!(last.len(), LINE_CAP + LINE_CUT.len());
+        assert!(last.ends_with(LINE_CUT));
+        let log_len = std::fs::metadata(d.join("proc/flood.log")).unwrap().len();
+        assert!(log_len <= LINE_CAP as u64 + LINE_CUT.len() as u64 + 1, "{log_len}");
+        assert_eq!(procs.tail("flood", 10).unwrap(), last);
         let _ = std::fs::remove_dir_all(&d);
     }
 }

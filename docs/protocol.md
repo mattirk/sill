@@ -767,6 +767,15 @@ characters. A name change does not alter `title`; it updates a known summary-sig
 Older sessions without a preserved name return null. The exported schema includes this additive
 extension; clients default absent name fields to null.
 
+### `_sill/repos.root` answers for a repository folder (2026-11-08)
+
+The repository containing the path: the nearest directory with `.git`, the path itself included
+when it is a directory; a file or a missing path is looked up from its parent; `null` outside any
+repository. Before, the search always began at the parent and a frontend asking about a folder
+that is itself a repository got `null` unless it asked through a made-up child path; sill-gui's
+workaround is gone. Additive on the wire (an answer where there was `null`); the recorded document
+changed only in the method's description. Identity remains `sfp/1-dev.3`.
+
 ### Host control activation (2026-11-07)
 
 Capability `sill.host_control` (frontend-declared: a program that shows the permanent "HOST

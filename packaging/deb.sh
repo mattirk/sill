@@ -14,6 +14,13 @@ DEB_ARCH=$(dpkg --print-architecture)
 if [ "${1:-}" != "--no-build" ]; then
     cargo build --release
 fi
+for b in sill sill-shim sill-gui; do
+    [ -x "target/release/$b" ] || { echo "target/release/$b missing" >&2; exit 1; }
+    # the desktop libraries (Wayland, xkbcommon, X11, Vulkan) are dlopen'd at run time; a binary that
+    # links more than libc is a stale build from before the GTK removal
+    extra=$(ldd "target/release/$b" | awk '{print $1}' | grep -v -e linux-vdso -e ld-linux -e '^libc\.so' -e '^libm\.so' -e '^libgcc_s' || true)
+    [ -z "$extra" ] || { echo "target/release/$b links $(echo $extra): stale build, run without --no-build" >&2; exit 1; }
+done
 PKG="dist/deb/sill_${VER}_${DEB_ARCH}"
 rm -rf "$PKG"
 mkdir -p "$PKG/DEBIAN" "$PKG/usr/bin" "$PKG/etc/sill/policies" "$PKG/etc/systemd/user" \
@@ -28,6 +35,10 @@ install -m 644 packaging/icons/sill.svg "$PKG/usr/share/sill/sill.svg"
 install -m 644 packaging/icons/sill.svg "$PKG/usr/share/icons/hicolor/scalable/apps/sill.svg"
 install -m 644 README.md SPEC.md "$PKG/usr/share/doc/sill/"
 SIZE=$(du -sk "$PKG" --exclude=DEBIAN | cut -f1)
+# Depends: the binaries link only libc (ldd), the desktop libraries are dlopen'd (winit, x11rb, wgpu),
+# so the list is by hand from `strings target/release/sill-gui | grep -o 'lib.*\.so\.[0-9]*'`:
+# Wayland + xkbcommon and the X11 client libraries (either session), the Vulkan loader and a driver
+# for the GPU renderer (iced draws in software without them), EGL for wgpu's GL fallback.
 cat > "$PKG/DEBIAN/control" <<CTL
 Package: sill
 Version: $VER
@@ -36,8 +47,8 @@ Priority: optional
 Architecture: $DEB_ARCH
 Maintainer: Matti Rita-Kasari <matti@rita-kasari.fi>
 Installed-Size: $SIZE
-Depends: bubblewrap, e2fsprogs, libxkbcommon0, libwayland-client0
-Recommends: systemd, libvulkan1
+Depends: bubblewrap, e2fsprogs, libwayland-client0, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libx11-xcb1, libxcb1, libxcursor1, libxi6
+Recommends: systemd, libvulkan1, mesa-vulkan-drivers, libegl1, libwayland-egl1
 Suggests: weston, xwayland, dbus
 Homepage: https://github.com/mattirk/sill
 Description: AI agents in a jail the host controls

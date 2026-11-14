@@ -289,9 +289,10 @@ pub fn group_by_repo(changes: &[Change]) -> BTreeMap<PathBuf, Vec<Change>> {
     out
 }
 
-/// Nearest ancestor containing `.git` (on the host).
+/// The repository `path` is in: the nearest directory containing `.git`, `path` itself included
+/// when it is a directory (a file, or a path that is gone, is looked up from its parent).
 pub fn repo_root(path: &Path) -> Option<PathBuf> {
-    let mut p = path.parent()?;
+    let mut p = if path.is_dir() { path } else { path.parent()? };
     loop {
         if p.join(".git").exists() {
             return Some(p.to_path_buf());
@@ -589,6 +590,24 @@ pub fn home() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A folder that is itself a repository answers for itself; a file, a missing path and a
+    /// nested folder answer with the enclosing one; outside any repository, nothing.
+    #[test]
+    fn repo_root_of_the_repository_folder_is_itself() {
+        let dir = std::env::temp_dir().join(format!("sill-repo-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/main.rs"), "").unwrap();
+        assert_eq!(repo_root(&repo).as_deref(), Some(repo.as_path()));
+        assert_eq!(repo_root(&repo.join("src")).as_deref(), Some(repo.as_path()));
+        assert_eq!(repo_root(&repo.join("src/main.rs")).as_deref(), Some(repo.as_path()));
+        assert_eq!(repo_root(&repo.join("src/gone.rs")).as_deref(), Some(repo.as_path()));
+        assert_eq!(repo_root(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The ghost hour: due by the upper entry's last write, a directory waits for its newer
     /// contents, deepest first.

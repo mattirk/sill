@@ -16,7 +16,25 @@ use serde_json::Value;
 
 use crate::rpc::{Error, Incoming, Request};
 
-type Pending = Arc<Mutex<HashMap<u64, Sender<Result<Value, Error>>>>>;
+type Pending = Arc<Mutex<HashMap<u64, Sender<Result<Value>>>>>;
+
+/// The connection is gone: the daemon closed it, a write failed, or a call timed out and the
+/// client discarded it. A request may or may not have reached the daemon. Sits anywhere in a
+/// call's error chain; `Client::is_closed` finds it there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionLost(pub String);
+
+impl std::fmt::Display for ConnectionLost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ConnectionLost {}
+
+fn lost<T>(message: impl Into<String>) -> Result<T> {
+    Err(ConnectionLost(message.into()).into())
+}
 
 /// The longest any request legitimately takes (an attach that starts a jail and an agent on a
 /// slow disk), with room; past it the daemon is stuck and the person is told so.
@@ -206,9 +224,18 @@ impl Client {
         !self.closed.load(Ordering::Acquire)
     }
 
-    /// The connection is gone (the daemon left or restarted): the caller connects again.
+    /// The connection is gone (the daemon left or restarted, a write failed, a call timed out):
+    /// the caller connects again. Reads the whole error chain, so a connection lost after a
+    /// request was sent is seen on that request's error (wrapped in its method's context), not
+    /// only on the next call's.
     pub fn is_closed(e: &anyhow::Error) -> bool {
-        e.to_string().contains("closed the connection") || e.to_string().contains("went away") || e.to_string().contains("writing to the daemon")
+        e.chain().any(|cause| {
+            cause.downcast_ref::<ConnectionLost>().is_some()
+                || cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                    use std::io::ErrorKind::*;
+                    matches!(io.kind(), BrokenPipe | ConnectionReset | ConnectionAborted | UnexpectedEof | NotConnected)
+                })
+        })
     }
 
     /// Raw duplex transport; call `initialize` before sending control requests.
@@ -238,7 +265,7 @@ impl Client {
                         let tx = p2.lock().unwrap().remove(&id);
                         if let Some(tx) = tx {
                             let _ = tx.send(match msg.error {
-                                Some(e) => Err(e),
+                                Some(e) => Err(anyhow::Error::new(e)),
                                 None => Ok(msg.result.unwrap_or(Value::Null)),
                             });
                         }
@@ -296,7 +323,7 @@ impl Client {
     /// at once or not at all.
     pub fn call_within<T: DeserializeOwned>(&self, method: &str, params: impl Serialize, timeout: Duration) -> Result<T> {
         let deadline = Instant::now() + timeout;
-        if self.closed.load(Ordering::Acquire) { bail!("the daemon closed the connection"); }
+        if self.closed.load(Ordering::Acquire) { return lost("the daemon closed the connection"); }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let req = Request::new(Some(id), method, serde_json::to_value(params)?);
         let mut line = serde_json::to_vec(&req)?;
@@ -311,7 +338,7 @@ impl Client {
                 Ok(()) => break,
                 Err(TrySendError::Disconnected(_)) => {
                     self.pending.lock().unwrap().remove(&id);
-                    bail!("writing to the daemon: connection closed");
+                    return lost("writing to the daemon: connection closed");
                 }
                 Err(TrySendError::Full(unsent)) => {
                     out = unsent;
@@ -320,8 +347,8 @@ impl Client {
             }
         }
         let v = match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(v) => v.map_err(anyhow::Error::new).with_context(|| format!("{method}"))?,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => bail!("the daemon went away"),
+            Ok(v) => v.with_context(|| format!("{method}"))?,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return lost("the daemon went away"),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return self.timed_out(id, method, timeout),
         };
         serde_json::from_value(v).with_context(|| format!("{method}: unexpected answer shape"))
@@ -334,7 +361,7 @@ impl Client {
         self.closed.store(true, Ordering::Release);
         (self.interrupt)();
         fail_pending(&self.pending, "the daemon closed the connection after a call timed out");
-        bail!("the daemon did not answer {method} in {} s: it is stuck; `sill restart` (or `systemctl --user restart sill`) starts a fresh one, sessions survive it", timeout.as_secs_f64())
+        lost(format!("the daemon did not answer {method} in {} s: it is stuck; `sill restart` (or `systemctl --user restart sill`) starts a fresh one, sessions survive it", timeout.as_secs_f64()))
     }
 
 }
@@ -374,7 +401,7 @@ impl Drop for Client {
 
 fn fail_pending(pending: &Pending, message: &str) {
     for (_, tx) in pending.lock().unwrap().drain() {
-        let _ = tx.send(Err(Error::new(Error::INTERNAL, message)));
+        let _ = tx.send(lost(message));
     }
 }
 
@@ -446,5 +473,55 @@ mod tests {
         assert_eq!(error.downcast_ref::<Error>().unwrap().data.as_ref().unwrap()["code"], "incompatible");
         drop(client);
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn a_peer_closing_after_the_request_was_sent_reports_closed_on_that_call() {
+        let (socket, server) = UnixStream::pair().unwrap();
+        let worker = std::thread::spawn(move || {
+            let mut input = BufReader::new(server);
+            let mut line = String::new();
+            input.read_line(&mut line).unwrap();
+            // the daemon went away without answering: drop the socket
+        });
+        let client = Client::over(socket).unwrap();
+        let error = client.call::<Value>("request", ()).unwrap_err();
+        assert!(Client::is_closed(&error), "{error:#}");
+        assert!(format!("{error:#}").contains("closed the connection"), "{error:#}");
+        assert!(!client.is_open());
+        assert!(Client::is_closed(&client.call::<Value>("next", ()).unwrap_err()));
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn a_domain_error_from_the_daemon_is_not_closed() {
+        let (socket, server) = UnixStream::pair().unwrap();
+        let mut output = server.try_clone().unwrap();
+        let worker = std::thread::spawn(move || {
+            let mut input = BufReader::new(server);
+            let mut line = String::new();
+            input.read_line(&mut line).unwrap();
+            let req: Value = serde_json::from_str(&line).unwrap();
+            let error = Error::domain("not_found", "no such session");
+            writeln!(output, "{}", serde_json::json!({"jsonrpc":"2.0","id":req["id"],"error":error})).unwrap();
+            line.clear();
+            assert_eq!(input.read_line(&mut line).unwrap(), 0);
+        });
+        let client = Client::over(socket).unwrap();
+        let error = client.call::<Value>("session.get", ()).unwrap_err();
+        assert!(!Client::is_closed(&error), "{error:#}");
+        assert_eq!(error.downcast_ref::<Error>().unwrap().data.as_ref().unwrap()["code"], "not_found");
+        assert!(client.is_open());
+        drop(client);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn is_closed_sees_a_connection_lost_under_added_context() {
+        let error = anyhow::Error::from(ConnectionLost("the daemon closed the connection".into())).context("session.list");
+        assert!(Client::is_closed(&error));
+        let io = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::BrokenPipe)).context("writing");
+        assert!(Client::is_closed(&io));
+        assert!(!Client::is_closed(&anyhow::anyhow!("session.list").context("the daemon closed the connection, or so it says")));
     }
 }

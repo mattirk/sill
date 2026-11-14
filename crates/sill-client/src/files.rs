@@ -857,14 +857,8 @@ pub fn execute(client: &Client, session: &str, request: &Request) -> anyhow::Res
                 .collect(),
         ),
         Request::Repo(path) => {
-            // the daemon looks for `.git` from the path's parent up (`changes::repo_root`, made for
-            // files), so a folder that is itself a repository is asked about through a child
-            let inside = path
-                .to_path()
-                .map(|p| HostPath::from_path(&p.join("x")))
-                .unwrap_or_else(|_| path.clone());
             let root: discovery::Root =
-                client.call("_sill/repos.root", discovery::PathKey { path: inside })?;
+                client.call("_sill/repos.root", discovery::PathKey { path: path.clone() })?;
             let mut head = String::new();
             let mut entries = Vec::new();
             let mut summary = String::new();
