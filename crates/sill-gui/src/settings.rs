@@ -25,7 +25,8 @@ pub struct Settings {
     pub displays: BTreeMap<String, DisplayPrefs>,
     /// The drawer's width as last dragged, logical pixels.
     pub drawer_width: Option<f32>,
-    /// The window stays above others. Unset = on.
+    /// The window stays above others. Unset = on, except on the Mac, where sill is a normal
+    /// window (the person, 2026-11-13).
     pub always_on_top: Option<bool>,
     /// Interface scale, a multiplier on the desktop's own scaling: 1.0 is the desktop's normal
     /// size. Unset, unreadable or out of bounds = 1.0.
@@ -63,7 +64,7 @@ impl Settings {
     }
 
     pub fn always_on_top(&self) -> bool {
-        self.always_on_top.unwrap_or(true)
+        self.always_on_top.unwrap_or(!cfg!(target_os = "macos"))
     }
 
     /// Interface scale: the saved value, 1.0 when there is none or it is not a usable number.
