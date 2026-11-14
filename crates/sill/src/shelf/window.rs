@@ -1525,28 +1525,34 @@ impl Shelf {
             b.set_child(Some(&h));
             b
         };
-        // a ghost (docs/memory.md §3.1): chosen here, before the agent, and fixed from then on
-        let ghost = gtk::CheckButton::with_label("ghost — leaves no session behind");
-        ghost.add_css_class("sill-menu-item");
-        ghost.set_tooltip_text(Some(GHOST_TIP));
         // only agents that can actually start here: enabled, and their command exists (a built-in
-        // whose package was removed on the Agents page drops out until it is installed again)
+        // whose package was removed on the Agents page drops out until it is installed again).
+        // The row starts a normal session; the ghost glyph at its right a ghost (docs/memory.md
+        // §3.1), fixed from then on.
         for (id, agent) in registry.iter().filter(|(_, a)| a.enabled && sill_core::registry::available(a, &home).is_some()) {
+            let line = gtk::Box::new(gtk::Orientation::Horizontal, 0);
             let b = row(Some(agent), &agent.name, None);
-            let s = self.clone();
-            let pop = pop.clone();
-            let id = id.clone();
-            let ghost = ghost.clone();
-            b.connect_clicked(move |_| {
-                pop.popdown();
-                match create_session(&s.store, &id, "default", ghost.is_active()) {
-                    Ok(sess) => s.open_session(sess),
-                    Err(e) => s.set_status(&format!("new session: {e:#}")),
-                }
-            });
-            menu.append(&b);
+            b.set_hexpand(true);
+            let g = super::icons::glyph_button("sill-ghost");
+            g.add_css_class("flat");
+            g.add_css_class("sill-menu-ghost");
+            g.set_tooltip_text(Some(&format!("{} as a ghost — leaves no session behind: {}", agent.name, GHOST_TIP.trim_start_matches("Ghost — leaves no session behind: "))));
+            for (button, ghost) in [(&b, false), (&g, true)] {
+                let s = self.clone();
+                let pop = pop.clone();
+                let id = id.clone();
+                button.connect_clicked(move |_| {
+                    pop.popdown();
+                    match create_session(&s.store, &id, "default", ghost) {
+                        Ok(sess) => s.open_session(sess),
+                        Err(e) => s.set_status(&format!("new session: {e:#}")),
+                    }
+                });
+            }
+            line.append(&b);
+            line.append(&g);
+            menu.append(&line);
         }
-        menu.append(&ghost);
         let stored: Vec<Session> = self
             .store
             .sessions()
