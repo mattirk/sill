@@ -4200,3 +4200,39 @@ const JUMP: iced::keyboard::Modifiers = if cfg!(target_os = "macos") {
 } else {
     iced::keyboard::Modifiers::CTRL
 };
+
+/// A model's raw reasoning is folded to one line that opens to it; a short thought (Codex's
+/// summary titles) is shown as it is.
+#[test]
+fn a_long_thought_folds_to_its_last_line() {
+    use crate::ui::{is_long_thought, thought_line};
+    assert!(!is_long_thought("\n\n**Adding UI snapshot test**\n\n**Reviewing UI behavior**"));
+    let raw = "Let me look at the feed.\n\nHmm, wait. Actually the heights are measured.\n\nOK so the row is measured.\n\nSo I will fold the `thought` to *one* line.\n";
+    assert!(is_long_thought(raw));
+    assert_eq!(thought_line(raw), "So I will fold the thought to one line.");
+    // Codex's summaries: the latest title, not the prose under it
+    assert_eq!(thought_line("**Checking icons**\n\nprose\n\n**Adding a test**\n\nmore prose"), "Adding a test");
+
+    let (mut app, _) = App::new(true, None);
+    for _ in 0..=demo::CHUNKS.len() {
+        let _ = app.update(Message::DemoTick);
+    }
+    let view = app.views.get_mut("demo").unwrap();
+    view.conversation.questions.clear();
+    view.conversation.insert_item(Item {
+        item_id: "raw".into(),
+        created_seq: "900".into(),
+        turn_id: Some("demo-turn".into()),
+        submission_id: None,
+        agent_generation_id: "demo-generation".into(),
+        kind: "thought".into(),
+        content: vec![Content::text(raw)],
+        tool: None,
+    });
+    view.render("raw");
+    view.follow_tail = true;
+    let mut ui = simulator(&app, (1200.0, 860.0));
+    ui.click("So I will fold the thought to one line.").unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(matches!(messages.as_slice(), [Message::ToggleTool(id)] if id == "raw"));
+}

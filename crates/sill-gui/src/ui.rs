@@ -958,6 +958,7 @@ impl App {
                         &item.kind,
                         source,
                         tool,
+                        view.open_tools.contains(&item.item_id),
                         asked,
                         turn_end(index, item),
                     ),
@@ -1201,21 +1202,36 @@ impl App {
             ),
             // the agent's reasoning: Markdown (Codex's summaries are bold
             // titles after blank lines), smaller, dimmed and in italics
+            // A long one (a model's raw reasoning, whoever sends it) is folded to a line.
             "thought" => match view.rendered.get(&item.item_id) {
-                Some(rendered) => container(markdown::view_with(
-                    rendered.markdown.items(),
-                    thought_settings(),
-                    &viewer::SillViewer {
-                        media: Some((&view.id, &view.media)),
-                    },
-                ))
-                .padding([0, 8])
-                .width(Fill)
-                .style(|_| container::Style {
-                    text_color: Some(alpha(P.fg, 0.55)),
-                    ..container::Style::default()
-                })
-                .into(),
+                Some(rendered) => {
+                    let whole = || -> Element<'a, Message> {
+                        container(markdown::view_with(
+                            rendered.markdown.items(),
+                            thought_settings(),
+                            &viewer::SillViewer {
+                                media: Some((&view.id, &view.media)),
+                            },
+                        ))
+                        .padding([0, 8])
+                        .width(Fill)
+                        .style(|_| container::Style {
+                            text_color: Some(alpha(P.fg, 0.55)),
+                            ..container::Style::default()
+                        })
+                        .into()
+                    };
+                    if !is_long_thought(source) {
+                        return whole();
+                    }
+                    let open = view.open_tools.contains(&item.item_id);
+                    let line = folded_thought(&item.item_id, source, open);
+                    if open {
+                        Column::new().push(line).push(whole()).spacing(4).into()
+                    } else {
+                        line
+                    }
+                }
                 None => space().into(),
             },
             "note" => container(
@@ -2902,6 +2918,51 @@ pub(crate) fn is_long_notice(message: &str) -> bool {
     message.len() > LONG_NOTICE || message.lines().count() > 3
 }
 const LONG_NOTICE: usize = 240;
+
+/// A thought long enough to bury the conversation: more than a few lines of reasoning. Codex's
+/// summary titles and other short thoughts stay as they are.
+pub(crate) fn is_long_thought(source: &str) -> bool {
+    source.len() > LONG_NOTICE || source.lines().filter(|l| !l.trim().is_empty()).count() > 3
+}
+
+/// The line a folded thought shows: its latest title (a line that is all `**bold**`, as Codex
+/// heads its summaries), else its last line, which while the agent thinks is where it is now.
+pub(crate) fn thought_line(source: &str) -> String {
+    let lines = || source.lines().rev().map(str::trim).filter(|l| !l.is_empty());
+    let title = lines().find(|l| l.len() > 4 && l.starts_with("**") && l.ends_with("**"));
+    let line = title.or_else(|| lines().next()).unwrap_or("");
+    let plain = line.trim_start_matches(['#', '>', '-', ' ']).replace(['*', '`'], "");
+    one_line(&plain, 160)
+}
+
+/// A long thought's line: pressable, with a chevron; the thought itself goes under it when open
+/// (the same open set as tool calls, `Message::ToggleTool`).
+fn folded_thought<'a>(item_id: &str, source: &str, open: bool) -> Element<'a, Message> {
+    let color = alpha(P.fg, 0.55);
+    let line = button(
+        row![
+            text(if open { "▾" } else { "▸" }).size(style::SMALL).color(color).width(14),
+            container(
+                text(thought_line(source))
+                    .size(style::SMALL)
+                    .font(Font {
+                        style: iced::font::Style::Italic,
+                        ..Font::with_name(crate::fonts::SANS_FAMILY)
+                    })
+                    .color(color)
+                    .wrapping(text::Wrapping::None),
+            )
+            .width(Fill)
+            .clip(true),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+    )
+    .padding([3, 6])
+    .width(Fill)
+    .style(style::row_button);
+    keys::press(line, Message::ToggleTool(item_id.to_owned()))
+}
 
 /// A long notice: one pressable line with a chevron, the whole text under it when open (the
 /// same open set as tool calls, `Message::ToggleTool`).

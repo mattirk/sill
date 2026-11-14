@@ -239,6 +239,12 @@ fn render_thoughts() {
             "\n\n**Adding UI snapshot test**\n\n**Reviewing UI behavior**",
         ),
         (902, "t3", "The `render` path keeps *one* parse per item."),
+        // a model's raw reasoning: folded to its last line
+        (
+            903,
+            "t4",
+            "The user wants the row folded. Let me look at the feed.\n\nHmm, wait. The feed has rows, and rows have heights. Actually the heights are measured. Let me re-read.\n\nOK so the row is measured after layout, and the signature says when to measure again.\n\nSo I will add the open state to the signature and fold the thought to one line.",
+        ),
     ] {
         view.conversation.insert_item(Item {
             item_id: id.into(),
