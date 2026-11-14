@@ -610,7 +610,10 @@ impl FolderTree {
         }
         *self.elsewhere.borrow_mut() = elsewhere;
         *self.pinned.borrow_mut() = target_pins;
-        let (tx, rx) = async_channel::bounded::<(Vec<Change>, BTreeMap<PathBuf, String>)>(1);
+        let scope = self.scope.borrow().clone();
+        let pins_for_git = pins.clone();
+        type Statuses = Vec<(PathBuf, Vec<(PathBuf, String)>)>;
+        let (tx, rx) = async_channel::bounded::<(Vec<Change>, BTreeMap<PathBuf, String>, Statuses)>(1);
         std::thread::spawn(move || {
             let mut all = Vec::new();
             let mut owners: BTreeMap<PathBuf, String> = BTreeMap::new(); // path → the session that changed it
@@ -631,12 +634,30 @@ impl FolderTree {
                 }
                 all.extend(found);
             }
-            let _ = tx.send_blocking((all, owners));
+            // git working-tree status of every repo in view (pins, repos with session changes, the
+            // scope's repo) — here, not on the GTK thread: `git status` on a big tree takes a while
+            // (SPEC §4.11 #13)
+            let mut repos: Vec<PathBuf> = pins_for_git.iter().filter(|p| p.join(".git").exists()).cloned().collect();
+            for c in &all {
+                if let Some(r) = changes::repo_root(&c.path)
+                    && !repos.contains(&r)
+                {
+                    repos.push(r);
+                }
+            }
+            if let Some(s) = &scope
+                && let Some(r) = changes::repo_root(&s.join("x"))
+                && !repos.contains(&r)
+            {
+                repos.push(r);
+            }
+            let statuses: Statuses = repos.into_iter().map(|r| (changes::git_status(&r), r)).map(|(st, r)| (r, st)).collect();
+            let _ = tx.send_blocking((all, owners, statuses));
         });
         let t = self.clone();
         glib::spawn_future_local(async move {
-            if let Ok((all, owners)) = rx.recv().await {
-                t.apply(all, owners, pins);
+            if let Ok((all, owners, statuses)) = rx.recv().await {
+                t.apply(all, owners, pins, statuses);
             }
             t.scanning.set(false);
             if t.again.replace(false) {
@@ -645,32 +666,19 @@ impl FolderTree {
         });
     }
 
-    fn apply(self: &Rc<Self>, all: Vec<Change>, owners: BTreeMap<PathBuf, String>, pins: Vec<PathBuf>) {
+    fn apply(self: &Rc<Self>, all: Vec<Change>, owners: BTreeMap<PathBuf, String>, pins: Vec<PathBuf>, statuses: Vec<(PathBuf, Vec<(PathBuf, String)>)>) {
         let home = session::home().unwrap_or_default();
         let mut badges: BTreeMap<PathBuf, Badge> = BTreeMap::new();
-        // git working-tree status of every repo in view (pins, repos with session changes, the scope's
-        // repo): M/A/D/R from `git status`, `?` for untracked; the session ledger's letters win below
-        let mut repos: Vec<PathBuf> = pins.iter().filter(|p| p.join(".git").exists()).cloned().collect();
-        for c in &all {
-            if let Some(r) = changes::repo_root(&c.path)
-                && !repos.contains(&r)
-            {
-                repos.push(r);
-            }
-        }
+        // git working-tree status of every repo in view, as the scan thread read it: M/A/D/R from
+        // `git status`, `?` for untracked; the session ledger's letters win below
         let scope = self.scope.borrow().clone();
-        if let Some(s) = &scope
-            && let Some(r) = changes::repo_root(&s.join("x"))
-            && !repos.contains(&r)
-        {
-            repos.push(r);
-        }
+        let repos: Vec<PathBuf> = statuses.iter().map(|(r, _)| r.clone()).collect();
         let mut from_git = 0usize;
-        for repo in &repos {
-            for (rel, st) in changes::git_status(repo) {
+        for (repo, status) in &statuses {
+            for (rel, st) in status {
                 from_git += 1;
                 let path = repo.join(rel);
-                badges.insert(path.clone(), Badge::Git(st));
+                badges.insert(path.clone(), Badge::Git(st.clone()));
                 let mut d = path.parent();
                 while let Some(dir) = d {
                     if dir == repo.as_path() {

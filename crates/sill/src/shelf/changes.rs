@@ -44,6 +44,9 @@ enum Row {
     Kept { host: PathBuf, prior: PathBuf },
 }
 
+/// A pinned repository with git's view of its working tree: (repo, `git_status` rows).
+type LiveRepo = (PathBuf, Vec<(PathBuf, String)>);
+
 /// A scanned session: its changes, split into the agent's own state and the rest, and its keeps.
 struct Scanned {
     session: Session,
@@ -159,15 +162,21 @@ impl ChangesPage {
         self.busy.borrow().as_ref().map(|f| f(sid)).unwrap_or(false)
     }
 
-    /// Scan every stored session's upper trees off the GTK thread (fast: only touched files are
-    /// read), then hand the result to `done`.
-    fn scan(&self, done: impl FnOnce(Vec<Scanned>) + 'static) {
+    /// Scan every stored session's upper trees and the pinned repositories' git status off the
+    /// GTK thread (the scan is fast — only touched files are read — `git status` on a big tree is
+    /// not, SPEC §4.11 #13), then hand the result to `done`.
+    fn scan(&self, done: impl FnOnce(Vec<LiveRepo>, Vec<Scanned>) + 'static) {
         let sessions = self.store.sessions().unwrap_or_default();
         let home = session::home().unwrap_or_default();
         let uid = session::uid();
         let user = std::env::var("USER").unwrap_or_default();
-        let (tx, rx) = async_channel::bounded::<Vec<Scanned>>(1);
+        // pinned folders: live (host = jail); git repositories among them show git's view
+        let mut pinned: Vec<PathBuf> = sessions.iter().flat_map(|s| self.store.pins(&s.id).unwrap_or_default()).filter(|p| p.join(".git").exists()).collect();
+        pinned.sort();
+        pinned.dedup();
+        let (tx, rx) = async_channel::bounded::<(Vec<LiveRepo>, Vec<Scanned>)>(1);
         std::thread::spawn(move || {
+            let live: Vec<LiveRepo> = pinned.into_iter().map(|r| (changes::git_status(&r), r)).filter(|(st, _)| !st.is_empty()).map(|(st, r)| (r, st)).collect();
             let mut out = Vec::new();
             for s in sessions {
                 let Ok(policy) = sill_core::policy::Policy::load(&s.policy, &home) else { continue };
@@ -194,18 +203,18 @@ impl ChangesPage {
                 let (agent_state, changes) = list.into_iter().partition(|c| changes::is_agent_state(&c.path, &state_dirs, &home));
                 out.push(Scanned { session: s, changes, agent_state, kept_dir, kept });
             }
-            let _ = tx.send_blocking(out);
+            let _ = tx.send_blocking((live, out));
         });
         glib::spawn_future_local(async move {
-            if let Ok(groups) = rx.recv().await {
-                done(groups);
+            if let Ok((live, groups)) = rx.recv().await {
+                done(live, groups);
             }
         });
     }
 
     pub fn refresh(self: &Rc<Self>) {
         let p = self.clone();
-        self.scan(move |groups| p.populate(groups));
+        self.scan(move |live, groups| p.populate(live, groups));
     }
 
     /// Auto-revert (SPEC §4.4): once a minute, every overlay change outside any git repository
@@ -218,27 +227,44 @@ impl ChangesPage {
             return;
         }
         let p = self.clone();
-        self.scan(move |groups| {
-            let mut n = 0;
+        self.scan(move |_, groups| {
+            // what is due is decided here; the reverts themselves run off the GTK thread
+            let mut jobs: Vec<(String, Vec<Change>)> = Vec::new();
             for g in &groups {
                 if p.is_busy(&g.session.id) {
                     continue;
                 }
-                let running = sill_core::session::is_running(&g.session.id);
                 // deepest paths first, so directories go after their contents
-                let mut due: Vec<&Change> = g.changes.iter().filter(|c| auto_reverts(c) && revert_due(c, minutes).is_some_and(|d| d.is_zero())).collect();
+                let mut due: Vec<Change> = g.changes.iter().filter(|c| auto_reverts(c) && revert_due(c, minutes).is_some_and(|d| d.is_zero())).cloned().collect();
                 due.sort_by_key(|c| std::cmp::Reverse(c.path.components().count()));
-                for c in due {
-                    let ok = if running { session::revert(&g.session.id, &c.path).is_ok() } else { remove_upper_entry(&c.upper).is_ok() };
-                    if ok {
-                        n += 1;
-                    }
+                if !due.is_empty() {
+                    jobs.push((g.session.id.clone(), due));
                 }
             }
-            if n > 0 {
-                p.message.set_text(&format!("auto-reverted {n} path(s) outside git"));
-                p.refresh();
+            if jobs.is_empty() {
+                return;
             }
+            offload(
+                move || {
+                    let mut n = 0;
+                    for (sid, due) in &jobs {
+                        let running = sill_core::session::is_running(sid);
+                        for c in due {
+                            let ok = if running { session::revert(sid, &c.path).is_ok() } else { remove_upper_entry(&c.upper).is_ok() };
+                            if ok {
+                                n += 1;
+                            }
+                        }
+                    }
+                    n
+                },
+                move |n| {
+                    if n > 0 {
+                        p.message.set_text(&format!("auto-reverted {n} path(s) outside git"));
+                        p.refresh();
+                    }
+                },
+            );
         });
     }
 
@@ -302,7 +328,7 @@ impl ChangesPage {
         row
     }
 
-    fn populate(self: &Rc<Self>, groups: Vec<Scanned>) {
+    fn populate(self: &Rc<Self>, live: Vec<LiveRepo>, groups: Vec<Scanned>) {
         while let Some(child) = self.list.first_child() {
             self.list.remove(&child);
         }
@@ -312,21 +338,7 @@ impl ChangesPage {
         let mut total = 0;
         let mut conflicts = 0;
         // pinned folders first: live (host = jail); git repositories among them show git's view
-        let mut live: Vec<PathBuf> = self
-            .store
-            .sessions()
-            .unwrap_or_default()
-            .iter()
-            .flat_map(|s| self.store.pins(&s.id).unwrap_or_default())
-            .filter(|p| p.join(".git").exists())
-            .collect();
-        live.sort();
-        live.dedup();
-        for repo in live {
-            let status = changes::git_status(&repo);
-            if status.is_empty() {
-                continue;
-            }
+        for (repo, status) in live {
             let hrow = self.header_row(&short_path(&repo), Some(&repo.display().to_string()), &[("git", "sill-badge-git"), ("live", "sill-badge-live")], vec![]);
             self.list.append(&hrow);
             self.rows.borrow_mut().push(Row::Header);
@@ -343,12 +355,19 @@ impl ChangesPage {
                     let p = self.clone();
                     let repo = repo.clone();
                     let rel = rel.clone();
-                    revert_b.connect_clicked(move |_| match changes::git_revert(&repo, &rel) {
-                        Ok(what) => {
-                            p.message.set_text(&format!("{}: {what}", rel.display()));
-                            p.refresh();
-                        }
-                        Err(e) => p.message.set_text(&format!("revert failed: {e:#}")),
+                    revert_b.connect_clicked(move |b| {
+                        b.set_sensitive(false);
+                        let (p, repo, rel, shown) = (p.clone(), repo.clone(), rel.clone(), rel.display().to_string());
+                        offload(
+                            move || changes::git_revert(&repo, &rel).map_err(|e| format!("{e:#}")),
+                            move |r| match r {
+                                Ok(what) => {
+                                    p.message.set_text(&format!("{shown}: {what}"));
+                                    p.refresh();
+                                }
+                                Err(e) => p.message.set_text(&format!("revert failed: {e}")),
+                            },
+                        );
                     });
                 }
                 let row = self.change_row(&st, class, &rel.display().to_string(), None, vec![revert_b]);
@@ -390,18 +409,22 @@ impl ChangesPage {
                     let p = self.clone();
                     let items: Vec<Change> = changes_in_repo.clone();
                     let opts = KeepOptions { undo: Some(kept_dir.clone()), ..Default::default() };
-                    keep_all.connect_clicked(move |_| {
-                        let mut n = 0;
-                        for c in &items {
-                            if c.conflict || c.ignored || keep::protected(&c.path).is_some() {
-                                continue;
-                            }
-                            if keep::keep(c, &opts).is_ok() {
-                                n += 1;
-                            }
-                        }
-                        p.message.set_text(&format!("kept {n} file(s)"));
-                        p.refresh();
+                    keep_all.connect_clicked(move |b| {
+                        b.set_sensitive(false);
+                        let (p, items, opts) = (p.clone(), items.clone(), opts.clone());
+                        offload(
+                            move || {
+                                items
+                                    .iter()
+                                    .filter(|c| !c.conflict && !c.ignored && keep::protected(&c.path).is_none())
+                                    .filter(|c| keep::keep(c, &opts).is_ok())
+                                    .count()
+                            },
+                            move |n| {
+                                p.message.set_text(&format!("kept {n} file(s)"));
+                                p.refresh();
+                            },
+                        );
                     });
                 }
                 let revert_all = gtk::Button::with_label("Revert all");
@@ -411,17 +434,26 @@ impl ChangesPage {
                     let p = self.clone();
                     let sid = s.id.clone();
                     let items: Vec<Change> = changes_in_repo.clone();
-                    revert_all.connect_clicked(move |_| {
-                        let running = sill_core::session::is_running(&sid);
-                        let (mut n, mut failed) = (0, 0);
-                        let mut sorted = items.clone();
-                        sorted.sort_by_key(|c| std::cmp::Reverse(c.path.components().count()));
-                        for c in &sorted {
-                            let ok = if running { session::revert(&sid, &c.path).is_ok() } else { remove_upper_entry(&c.upper).is_ok() };
-                            if ok { n += 1 } else { failed += 1 }
-                        }
-                        p.message.set_text(&if failed == 0 { format!("reverted {n} path(s)") } else { format!("reverted {n} path(s), {failed} failed") });
-                        p.refresh();
+                    revert_all.connect_clicked(move |b| {
+                        b.set_sensitive(false);
+                        let (p, sid, items) = (p.clone(), sid.clone(), items.clone());
+                        offload(
+                            move || {
+                                let running = sill_core::session::is_running(&sid);
+                                let (mut n, mut failed) = (0, 0);
+                                let mut sorted = items;
+                                sorted.sort_by_key(|c| std::cmp::Reverse(c.path.components().count()));
+                                for c in &sorted {
+                                    let ok = if running { session::revert(&sid, &c.path).is_ok() } else { remove_upper_entry(&c.upper).is_ok() };
+                                    if ok { n += 1 } else { failed += 1 }
+                                }
+                                (n, failed)
+                            },
+                            move |(n, failed)| {
+                                p.message.set_text(&if failed == 0 { format!("reverted {n} path(s)") } else { format!("reverted {n} path(s), {failed} failed") });
+                                p.refresh();
+                            },
+                        );
                     });
                 }
                 let mut actions: Vec<gtk::Widget> = vec![keep_all.upcast(), revert_all.upcast()];
@@ -470,12 +502,19 @@ impl ChangesPage {
                         let p = self.clone();
                         let c2 = c.clone();
                         let opts = KeepOptions { undo: Some(kept_dir.clone()), ..Default::default() };
-                        keep_b.connect_clicked(move |_| match keep::keep(&c2, &opts) {
-                            Ok(what) => {
-                                p.message.set_text(&format!("kept {}: {what}", c2.path.display()));
-                                p.refresh();
-                            }
-                            Err(e) => p.message.set_text(&format!("keep failed: {e:#}")),
+                        keep_b.connect_clicked(move |b| {
+                            b.set_sensitive(false);
+                            let (p, c, opts, shown) = (p.clone(), c2.clone(), opts.clone(), c2.path.display().to_string());
+                            offload(
+                                move || keep::keep(&c, &opts).map_err(|e| format!("{e:#}")),
+                                move |r| match r {
+                                    Ok(what) => {
+                                        p.message.set_text(&format!("kept {shown}: {what}"));
+                                        p.refresh();
+                                    }
+                                    Err(e) => p.message.set_text(&format!("keep failed: {e}")),
+                                },
+                            );
                         });
                     }
                     {
@@ -483,21 +522,28 @@ impl ChangesPage {
                         let sid = s.id.clone();
                         let path = c.path.clone();
                         let upper = c.upper.clone();
-                        revert_b.connect_clicked(move |_| {
-                            // running session: revert inside the jail; stopped session (overlay not
-                            // mounted): dropping the upper entry is the revert
-                            let result = if sill_core::session::is_running(&sid) {
-                                session::revert(&sid, &path)
-                            } else {
-                                remove_upper_entry(&upper).map(|_| "dropped from the session's record".to_string())
-                            };
-                            match result {
-                                Ok(what) => {
-                                    p.message.set_text(&format!("reverted {}: {what}", path.display()));
-                                    p.refresh();
-                                }
-                                Err(e) => p.message.set_text(&format!("revert failed: {e:#}")),
-                            }
+                        revert_b.connect_clicked(move |b| {
+                            b.set_sensitive(false);
+                            let (p, sid, path, upper, shown) = (p.clone(), sid.clone(), path.clone(), upper.clone(), path.display().to_string());
+                            offload(
+                                move || {
+                                    // running session: revert inside the jail; stopped session (overlay
+                                    // not mounted): dropping the upper entry is the revert
+                                    if sill_core::session::is_running(&sid) {
+                                        session::revert(&sid, &path)
+                                    } else {
+                                        remove_upper_entry(&upper).map(|_| "dropped from the session's record".to_string())
+                                    }
+                                    .map_err(|e| format!("{e:#}"))
+                                },
+                                move |r| match r {
+                                    Ok(what) => {
+                                        p.message.set_text(&format!("reverted {shown}: {what}"));
+                                        p.refresh();
+                                    }
+                                    Err(e) => p.message.set_text(&format!("revert failed: {e}")),
+                                },
+                            );
                         });
                     }
                     let row = self.change_row(&letter, class, &display_path(&c.path, &repo), note, vec![keep_b, revert_b]);
@@ -527,13 +573,22 @@ impl ChangesPage {
                     let p = self.clone();
                     let dir = kept_dir.clone();
                     let items = g.kept.clone();
-                    undo_all.connect_clicked(move |_| {
-                        let (mut n, mut failed) = (0, 0);
-                        for k in &items {
-                            if keep::undo(&dir, k, false).is_ok() { n += 1 } else { failed += 1 }
-                        }
-                        p.message.set_text(&if failed == 0 { format!("undid {n} keep(s)") } else { format!("undid {n} keep(s), {failed} changed on the host since") });
-                        p.refresh();
+                    undo_all.connect_clicked(move |b| {
+                        b.set_sensitive(false);
+                        let (p, dir, items) = (p.clone(), dir.clone(), items.clone());
+                        offload(
+                            move || {
+                                let (mut n, mut failed) = (0, 0);
+                                for k in &items {
+                                    if keep::undo(&dir, k, false).is_ok() { n += 1 } else { failed += 1 }
+                                }
+                                (n, failed)
+                            },
+                            move |(n, failed)| {
+                                p.message.set_text(&if failed == 0 { format!("undid {n} keep(s)") } else { format!("undid {n} keep(s), {failed} changed on the host since") });
+                                p.refresh();
+                            },
+                        );
                     });
                 }
                 let t = gtk::ToggleButton::new();
@@ -558,17 +613,25 @@ impl ChangesPage {
                         let dir = kept_dir.clone();
                         let k2 = k.clone();
                         // a refusal (edited on the host since) turns the button into "Undo anyway"
-                        let forced = Cell::new(false);
-                        undo_b.connect_clicked(move |b| match keep::undo(&dir, &k2, forced.get()) {
-                            Ok(what) => {
-                                p.message.set_text(&format!("undid {}: {what}", k2.path.display()));
-                                p.refresh();
-                            }
-                            Err(e) => {
-                                forced.set(true);
-                                b.set_label("Undo anyway");
-                                p.message.set_text(&format!("undo failed: {e:#}"));
-                            }
+                        let forced = Rc::new(Cell::new(false));
+                        undo_b.connect_clicked(move |b| {
+                            b.set_sensitive(false);
+                            let (p, dir, k, force, forced, b, shown) = (p.clone(), dir.clone(), k2.clone(), forced.get(), forced.clone(), b.clone(), k2.path.display().to_string());
+                            offload(
+                                move || keep::undo(&dir, &k, force).map_err(|e| format!("{e:#}")),
+                                move |r| match r {
+                                    Ok(what) => {
+                                        p.message.set_text(&format!("undid {shown}: {what}"));
+                                        p.refresh();
+                                    }
+                                    Err(e) => {
+                                        forced.set(true);
+                                        b.set_label("Undo anyway");
+                                        b.set_sensitive(true);
+                                        p.message.set_text(&format!("undo failed: {e}"));
+                                    }
+                                },
+                            );
                         });
                     }
                     let row = self.change_row(letter, class, &short_path(&k.path), Some(format!("kept {}", human_ago(k.ts))), vec![undo_b]);
@@ -591,6 +654,21 @@ impl ChangesPage {
             format!("{total} pending change(s){}", if conflicts > 0 { format!(", {conflicts} conflict(s)") } else { String::new() })
         });
     }
+}
+
+/// Run `work` on a thread — a keep, a revert, an undo: file copies and shim calls that must not
+/// hold the GTK loop (SPEC §4.11 #13) — then `done` with its result on the main loop. The button
+/// that started it is left insensitive; the refresh that follows rebuilds the rows.
+fn offload<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static, done: impl FnOnce(T) + 'static) {
+    let (tx, rx) = async_channel::bounded::<T>(1);
+    std::thread::spawn(move || {
+        let _ = tx.send_blocking(work());
+    });
+    glib::spawn_future_local(async move {
+        if let Ok(r) = rx.recv().await {
+            done(r);
+        }
+    });
 }
 
 /// Does auto-revert apply to this change? Only overlay changes outside any git repository; a

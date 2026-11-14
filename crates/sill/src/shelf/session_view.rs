@@ -136,6 +136,11 @@ pub struct SessionView {
     denied_seen: RefCell<std::collections::HashSet<String>>,
     refresh_pending: std::cell::Cell<bool>,
     pub on_restart: RefCell<Option<Box<dyn Fn(&str)>>>,
+    /// A start is under way on a worker thread (`connect`); a second call meanwhile runs once more
+    /// after it (`Some(fresh)`); a prompt typed meanwhile waits here and goes when the agent is up.
+    connecting: std::cell::Cell<bool>,
+    connect_again: std::cell::Cell<Option<bool>>,
+    pending_prompt: RefCell<Option<String>>,
 }
 
 impl SessionView {
@@ -432,6 +437,9 @@ impl SessionView {
             denied_seen: RefCell::new(Default::default()),
             refresh_pending: std::cell::Cell::new(false),
             on_restart: RefCell::new(None),
+            connecting: std::cell::Cell::new(false),
+            connect_again: std::cell::Cell::new(None),
+            pending_prompt: RefCell::new(None),
         });
 
         // how messages find their images, and where a click on one goes — before the transcript is shown
@@ -1903,34 +1911,71 @@ impl SessionView {
         self.session.borrow().id.clone()
     }
 
+    /// Start (or reconnect to) the session's jail and agent on a worker thread — `systemd-run`,
+    /// the wait for the shim socket and the control calls take seconds at times, and the GTK loop
+    /// must not wait for them (SPEC §4.11 #13) — then wire the driver up on the main loop.
     fn connect(self: &Rc<Self>, fresh: bool) {
+        if self.connecting.replace(true) {
+            // once more after the one under way (a restart asked for while starting)
+            self.connect_again.set(Some(fresh || self.connect_again.get().unwrap_or(false)));
+            return;
+        }
         let s = self.session.borrow().clone();
-        *self.live_pins.borrow_mut() = self.store.pins(&s.id).unwrap_or_default();
+        let pins = self.store.pins(&s.id).unwrap_or_default();
+        *self.live_pins.borrow_mut() = pins.clone();
         self.jail.borrow_mut().take(); // the overlay is planned again with the current pins
         self.ready.set(false);
         self.sent_standing.borrow_mut().take(); // a new agent process: the standing block goes again
-        match session::start(&s, &self.store, fresh) {
-            Ok(d) => {
-                self.start_proc_polling();
-                if !self.mode_noted.replace(true)
-                    && let Some(n) = session::mode_note()
-                {
-                    self.conv.add_note(&n);
-                }
-                self.watch_denied();
-                let events = d.events.clone();
-                *self.driver.borrow_mut() = Some(d);
-                let v = self.clone();
-                glib::spawn_future_local(async move {
-                    while let Ok(ev) = events.recv().await {
-                        v.handle(ev);
+        self.status.set_text("starting");
+        let (tx, rx) = async_channel::bounded::<Result<session::Driver, String>>(1);
+        std::thread::Builder::new()
+            .name(format!("sill-start-{}", s.id))
+            .spawn(move || {
+                let _ = tx.send_blocking(session::start(&s, pins, fresh).map_err(|e| format!("{e:#}")));
+            })
+            .ok();
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let Ok(r) = rx.recv().await else { return };
+            let Some(v) = weak.upgrade() else { return };
+            v.connecting.set(false);
+            match r {
+                Ok(d) => v.connected(d),
+                Err(e) => {
+                    v.status.set_text("failed to start");
+                    v.conv.add_note(&format!("could not start the session: {e}"));
+                    // the prompt that waited for this goes back where it was typed
+                    if let Some(text) = v.pending_prompt.borrow_mut().take() {
+                        v.prompt.buffer().set_text(&text);
                     }
-                });
+                }
             }
-            Err(e) => {
-                self.status.set_text("failed to start");
-                self.conv.add_note(&format!("could not start the session: {e:#}"));
+            if let Some(again) = v.connect_again.take() {
+                v.connect(again);
             }
+        });
+    }
+
+    /// The jail and the agent are up: events flow to `handle`, the prompt that waited goes.
+    fn connected(self: &Rc<Self>, d: session::Driver) {
+        self.start_proc_polling();
+        if !self.mode_noted.replace(true)
+            && let Some(n) = session::mode_note()
+        {
+            self.conv.add_note(&n);
+        }
+        self.watch_denied();
+        let events = d.events.clone();
+        *self.driver.borrow_mut() = Some(d);
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            while let Ok(ev) = events.recv().await {
+                let Some(v) = weak.upgrade() else { break };
+                v.handle(ev);
+            }
+        });
+        if let Some(text) = self.pending_prompt.borrow_mut().take() {
+            self.send(&text);
         }
     }
 
@@ -1944,7 +1989,19 @@ impl SessionView {
             }
         };
         if self.driver.borrow().is_none() {
-            self.connect(false); // after Ended: the shim respawns the agent and session/load resumes
+            // after Ended, or while the jail is still starting: the shim respawns the agent and
+            // session/load resumes; the prompt goes as soon as the agent is up (`connected`)
+            let mut pending = self.pending_prompt.borrow_mut();
+            *pending = Some(match pending.take() {
+                Some(earlier) => format!("{earlier}\n\n{text}"),
+                None => text.to_string(),
+            });
+            drop(pending);
+            self.conv.add_note("the session is starting; the prompt is sent when the agent is up");
+            if !self.connecting.get() {
+                self.connect(false);
+            }
+            return true;
         }
         let Some(d) = self.driver.borrow().as_ref().map(|d| d.commands.clone()) else {
             self.conv.add_note("session is not running");

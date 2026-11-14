@@ -23,16 +23,17 @@ pub fn uid() -> u32 {
     rustix::process::getuid().as_raw()
 }
 
-/// Start (or reconnect to) a stored session. The jail's cwd is the home directory (SPEC §3.1).
-/// `fresh`: an agent still running in the jail is stopped and started again instead of being
-/// reattached (for adapters that refuse a second `initialize`, Codex's "Already initialized").
-pub fn start(s: &store::Session, store: &store::Store, fresh: bool) -> Result<Driver> {
+/// Start (or reconnect to) a stored session with its `pins`. The jail's cwd is the home directory
+/// (SPEC §3.1). `fresh`: an agent still running in the jail is stopped and started again instead
+/// of being reattached (for adapters that refuse a second `initialize`, Codex's "Already
+/// initialized"). Blocking — `systemd-run`, the wait for the shim socket, the control calls — so
+/// the view runs it on a worker thread (SPEC §4.11 #13).
+pub fn start(s: &store::Session, pins: Vec<PathBuf>, fresh: bool) -> Result<Driver> {
     let home = home()?;
     let registry = agents::load(&home);
     let Some(agent) = registry.get(&s.agent) else { bail!("unknown agent {}", s.agent) };
     let sdir = state_dir(uid(), &s.id)?;
     let policy = sill_core::policy::Policy::load(&s.policy, &home)?;
-    let pins = store.pins(&s.id).unwrap_or_default();
     let binds = sill_core::session::binds_for(agent, &policy, &sdir, &home, &pins)?;
     let opts = StartOptions {
         session: s.id.clone(),
