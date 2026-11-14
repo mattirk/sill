@@ -94,15 +94,23 @@ fn fill_svg(d: &str, color: gdk::RGBA, size: i32) -> String {
 /// A sill glyph (stroke or filled) with no size of its own: the widget's CSS `-gtk-icon-size` sizes
 /// it, so a control sized in `em` keeps its glyph in proportion on every display and text scale.
 /// Rendered large enough to stay crisp at 2× for any sensible em.
+///
+/// Centred, not filling: GTK measures a texture image at the icon size but *paints* it over its
+/// whole allocation, so inside a 2 em button the glyph would fill the 2 em (2026-11-01: the row's
+/// glyphs were twice their size, the send arrow touched its square's edges). With centre alignment
+/// the image is allocated its natural size — the icon size — and painted there.
 pub fn scalable(name: &str, color: gdk::RGBA) -> gtk::Image {
     const SIZE: i32 = 96;
-    if let Some((_, d)) = STROKES.iter().find(|(n, _)| *n == name) {
-        return texture(stroke_svg(d, color, SIZE));
-    }
-    if let Some((_, d)) = FILLED.iter().find(|(n, _)| *n == name) {
-        return texture(fill_svg(d, color, SIZE));
-    }
-    gtk::Image::from_icon_name(name)
+    let image = if let Some((_, d)) = STROKES.iter().find(|(n, _)| *n == name) {
+        texture(stroke_svg(d, color, SIZE))
+    } else if let Some((_, d)) = FILLED.iter().find(|(n, _)| *n == name) {
+        texture(fill_svg(d, color, SIZE))
+    } else {
+        gtk::Image::from_icon_name(name)
+    };
+    image.set_halign(gtk::Align::Center);
+    image.set_valign(gtk::Align::Center);
+    image
 }
 
 /// A sill line glyph (`sill-sessions`, `sill-files`, …) in colour `color`.
