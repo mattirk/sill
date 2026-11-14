@@ -29,6 +29,8 @@ use crate::{App, Message, Pick, SessionView, Tab, icons, keys, rows, selection, 
 const MONO_FONT: Font = Font::with_name(crate::fonts::MONO_FAMILY);
 /// The window's resize edges, over its outer pixels: wide enough (the person, 2026-11-07).
 const EDGE: f32 = 5.0;
+/// A pasted image's thumbnail in the conversation: this share of the conversation's width.
+const THUMBNAIL_SHARE: f32 = 0.3;
 
 impl App {
     pub(crate) fn view(&self) -> Element<'_, Message> {
@@ -870,13 +872,12 @@ impl App {
         if !empty_user {
             body = body.push(self.item_body(view, item));
         }
-        let mut photos = row![].spacing(6);
-        let mut count = 0;
+        // the person's pasted images, drawn as a strip of thumbnails under their words
+        let mut thumbs: Vec<String> = Vec::new();
         let keys = crate::media::item_keys(item);
         for key in &keys {
             if item.kind == "user" {
-                photos = photos.push(crate::media::thumbnail(&view.media, key, 72.0, 52.0));
-                count += 1;
+                thumbs.push(key.clone());
             } else {
                 body = body.push(crate::media::picture(&view.media, &view.id, key));
             }
@@ -890,9 +891,7 @@ impl App {
                 if crate::media::is_image(attachment) {
                     let key = crate::media::key(attachment);
                     if !keys.contains(&key) {
-                        photos =
-                            photos.push(crate::media::thumbnail(&view.media, &key, 72.0, 52.0));
-                        count += 1;
+                        thumbs.push(key);
                     }
                 } else {
                     body = body.push(
@@ -903,14 +902,25 @@ impl App {
                 }
             }
         }
-        if count > 0 {
+        if !thumbs.is_empty() {
+            // each thumbnail a share of the conversation's width (the person, 2026-11-09), in the
+            // shape the fixed 72×52 ones had; the row heights' layout key already covers the width
             body = body.push(
-                container(
-                    scrollable(photos)
-                        .direction(scrollable::Direction::Horizontal(style::bar()))
-                        .style(style::feed_scroll),
-                )
-                .padding([2, 14]),
+                responsive(move |size| {
+                    let width = (size.width * THUMBNAIL_SHARE).max(72.0);
+                    let height = width * 52.0 / 72.0;
+                    let photos = thumbs.iter().fold(row![].spacing(6), |photos, key| {
+                        photos.push(crate::media::thumbnail(&view.media, key, width, height))
+                    });
+                    container(
+                        scrollable(photos)
+                            .direction(scrollable::Direction::Horizontal(style::bar()))
+                            .style(style::feed_scroll),
+                    )
+                    .padding([2, 14])
+                    .into()
+                })
+                .height(Shrink),
             );
         }
         body.spacing(6).into()
