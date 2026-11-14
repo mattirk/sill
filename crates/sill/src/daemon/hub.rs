@@ -15,7 +15,8 @@ use sill_core::session::StartOptions;
 use sill_core::store::Store;
 use sill_proto::rpc::Error;
 use sill_proto::{
-    Attach, DaemonStatus, End, Ending, Key, LogRequest, MemorySearch, MemorySession, Session, SessionAnswer, SessionCommand, Started, Text, Transcript, method,
+    AgentSettingsSet, Attach, Compacted, Count, DaemonStatus, End, Ending, Key, LogRequest, MemorySearch, MemorySession, NewSession, Note, Pin, Session,
+    SessionAnswer, SessionCommand, SessionSet, Started, Text, Transcript, method,
 };
 
 use super::Conn;
@@ -208,6 +209,67 @@ impl Hub {
                 let k: Key = args(params)?;
                 self.retire_runner(&k.key);
                 sill_core::session::stop(&k.key).map_err(|e| Error::failed(format!("{e:#}")))?;
+                Ok(json!({}))
+            }
+            method::SESSIONS_NEW => {
+                let n: NewSession = args(params)?;
+                to_value(Key { key: self.new_session(n).map_err(|e| Error::failed(format!("{e:#}")))? })
+            }
+            method::SESSIONS_SET => {
+                let r: SessionSet = args(params)?;
+                let set: sill_core::wire::SessionSet = serde_json::from_value(r.set).map_err(Error::invalid_params)?;
+                self.set_session(&r.key, set).map_err(|e| Error::failed(format!("{e:#}")))?;
+                Ok(json!({}))
+            }
+            method::SESSIONS_DELETE => {
+                let k: Key = args(params)?;
+                self.delete_session(&k.key).map_err(|e| Error::failed(format!("{e:#}")))?;
+                Ok(json!({}))
+            }
+            method::SESSIONS_PIN | method::SESSIONS_UNPIN => {
+                let p: Pin = args(params)?;
+                self.with_session(&p.key, |s, id| if m == method::SESSIONS_PIN { s.pin(id, &p.path) } else { s.unpin(id, &p.path) })
+                    .map_err(|e| Error::failed(format!("{e:#}")))?;
+                Ok(json!({}))
+            }
+            method::MEMORY_NOTE_ADD => {
+                let n: Note = args(params)?;
+                self.with_session(&n.key, |s, id| s.add_memory(id, "note", &n.text)).map_err(|e| Error::failed(format!("{e:#}")))?;
+                refresh_memory();
+                Ok(json!({}))
+            }
+            method::MEMORY_NOTE_REMOVE => {
+                let n: Note = args(params)?;
+                self.with_session(&n.key, |s, id| s.remove_memory(id, n.ts, &n.text)).map_err(|e| Error::failed(format!("{e:#}")))?;
+                refresh_memory();
+                Ok(json!({}))
+            }
+            method::MEMORY_COMPACT => {
+                let uid = rustix::process::getuid().as_raw();
+                let done = self
+                    .with_store(|s| {
+                        let done = sill_core::memory::compact_all(s, sill_core::store::now(), &|id| {
+                            let _ = sill_core::session::remove_state(uid, id);
+                        })?;
+                        s.vacuum()?;
+                        Ok(done)
+                    })
+                    .map_err(|e| Error::failed(format!("{e:#}")))?;
+                refresh_memory();
+                to_value(Compacted { compacted: done.compacted, trimmed: done.trimmed, deleted: done.deleted })
+            }
+            method::MEMORY_FORGET => {
+                let ended: Vec<String> = self.with_store(|s| s.sessions()).map_err(|e| Error::failed(format!("{e:#}")))?.into_iter().filter(|s| s.ended_at.is_some()).map(|s| s.id).collect();
+                for id in &ended {
+                    self.delete_session(id).map_err(|e| Error::failed(format!("{e:#}")))?;
+                }
+                self.with_store(|s| s.vacuum()).ok();
+                to_value(Count { n: ended.len() })
+            }
+            method::AGENTS_SET_SETTINGS => {
+                let a: AgentSettingsSet = args(params)?;
+                let settings: sill_core::store::AgentSettings = serde_json::from_value(a.settings).map_err(Error::invalid_params)?;
+                self.with_store(|s| s.set_agent_settings(&a.agent, &settings)).map_err(|e| Error::failed(format!("{e:#}")))?;
                 Ok(json!({}))
             }
             method::SESSIONS_END => {
@@ -408,6 +470,88 @@ impl Hub {
         std::thread::Builder::new().name(format!("sill-conv-{id}")).spawn(move || runner.run(hub, ev_rx))?;
         eprintln!("sill daemon: session {id} conversation started{}", if fresh { " (agent restarted)" } else { "" });
         self.presence(id);
+        Ok(())
+    }
+
+    /// A store write on a session that exists (the id checked first: a write to a missing row
+    /// would silently touch nothing).
+    fn with_session<T>(&self, id: &str, f: impl FnOnce(&Store, &str) -> Result<T>) -> Result<T> {
+        if !sill_core::session::valid_id(id) {
+            bail!("not a session id");
+        }
+        let store = self.store.lock().unwrap();
+        if !store.sessions()?.iter().any(|s| s.id == id) {
+            bail!("no session {id}");
+        }
+        f(&store, id)
+    }
+
+    /// A new session row (what `Store::create` and the shelf's `create_session` / `new_here` did).
+    fn new_session(&self, n: NewSession) -> Result<String> {
+        let store = self.store.lock().unwrap();
+        let s = store.create(&n.agent, &n.policy)?;
+        let pins = if n.pins.is_empty() && n.remember_pins {
+            // the pins of the latest session that had any (the sessions come newest first)
+            store.sessions()?.into_iter().filter(|x| x.id != s.id).find_map(|x| store.pins(&x.id).ok().filter(|p| !p.is_empty())).unwrap_or_default()
+        } else {
+            n.pins
+        };
+        for p in &pins {
+            store.pin(&s.id, p)?;
+        }
+        if !n.desktop.is_empty() {
+            store.set_desktop(&s.id, &n.desktop)?;
+        }
+        if !n.memory_scope.is_empty() {
+            store.set_memory_scope(&s.id, &n.memory_scope)?;
+        }
+        if !n.follows.is_empty() {
+            store.set_follows(&s.id, &n.follows)?;
+        }
+        Ok(s.id)
+    }
+
+    fn set_session(&self, id: &str, set: sill_core::wire::SessionSet) -> Result<()> {
+        use sill_core::wire::SessionSet as S;
+        let summary = matches!(set, S::Summary { .. } | S::Title { .. });
+        self.with_session(id, |s, id| match set {
+            S::Title { title, kind } => s.set_title(id, &title, &kind),
+            S::AutoAllow(on) => s.set_auto_allow(id, on),
+            S::Desktop(d) => s.set_desktop(id, &d),
+            S::MemoryScope(m) => s.set_memory_scope(id, &m),
+            S::Policy(p) => s.set_policy(id, &p),
+            S::Summary { text, kind } => s.set_summary(id, &text, &kind),
+            S::Settings(a) => s.set_session_settings(id, &a),
+            S::Reopen => s.reopen(id),
+        })?;
+        if summary {
+            refresh_memory();
+        }
+        Ok(())
+    }
+
+    /// The trash can: the conversation and jail go, then the session's state on the host and its
+    /// row; pins of deleted sessions are pruned so they do not haunt the tree.
+    fn delete_session(&self, id: &str) -> Result<()> {
+        if !sill_core::session::valid_id(id) {
+            bail!("not a session id");
+        }
+        self.retire_runner(id);
+        self.ending.lock().unwrap().remove(id);
+        if let Err(e) = sill_core::session::stop(id) {
+            eprintln!("sill daemon: stopping session {id} for deletion: {e:#}");
+        }
+        let uid = rustix::process::getuid().as_raw();
+        if let Err(e) = sill_core::session::remove_state(uid, id) {
+            eprintln!("sill daemon: removing session {id}'s state: {e:#}");
+        }
+        self.with_store(|s| {
+            s.delete(id)?;
+            s.prune_pins()?;
+            Ok(())
+        })?;
+        refresh_memory();
+        eprintln!("sill daemon: session {id} deleted");
         Ok(())
     }
 

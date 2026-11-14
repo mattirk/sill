@@ -103,7 +103,7 @@ pub fn build(store: Rc<Store>, s: &Session, view: Option<Rc<SessionView>>, chang
     let from_agent = Rc::new(Cell::new(false));
     let pending: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
     {
-        let (store, id, stored, from_agent, pending, changed, set_by) = (store.clone(), id.clone(), stored.clone(), from_agent.clone(), pending.clone(), changed.clone(), set_by.clone());
+        let (id, stored, from_agent, pending, changed, set_by) = (id.clone(), stored.clone(), from_agent.clone(), pending.clone(), changed.clone(), set_by.clone());
         buf.connect_changed(move |b| {
             if from_agent.get() {
                 return;
@@ -112,14 +112,15 @@ pub fn build(store: Rc<Store>, s: &Session, view: Option<Rc<SessionView>>, chang
                 t.remove();
             }
             let b = b.clone();
-            let (store, id, stored, pending2, changed, set_by) = (store.clone(), id.clone(), stored.clone(), pending.clone(), changed.clone(), set_by.clone());
+            let (id, stored, pending2, changed, set_by) = (id.clone(), stored.clone(), pending.clone(), changed.clone(), set_by.clone());
             let src = glib::timeout_add_local_once(std::time::Duration::from_millis(SAVE_AFTER_MS), move || {
                 pending2.borrow_mut().take();
                 let now_text = b.text(&b.start_iter(), &b.end_iter(), false).to_string();
                 if now_text == *stored.borrow() {
                     return;
                 }
-                if store.set_summary(&id, &now_text, "person").is_ok() {
+                super::client::set(&id, sill_core::wire::SessionSet::Summary { text: now_text.clone(), kind: "person".into() });
+                {
                     *stored.borrow_mut() = now_text.clone();
                     set_by("person", now_text.trim().is_empty());
                     changed();
@@ -208,7 +209,7 @@ pub fn build(store: Rc<Store>, s: &Session, view: Option<Rc<SessionView>>, chang
     let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
     page.append(&list);
     let add_row = {
-        let (store, id, list, changed) = (store.clone(), id.clone(), list.clone(), changed.clone());
+        let (id, list, changed) = (id.clone(), list.clone(), changed.clone());
         Rc::new(move |ts: i64, note: String| {
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
             row.add_css_class("sill-page-note");
@@ -227,9 +228,9 @@ pub fn build(store: Rc<Store>, s: &Session, view: Option<Rc<SessionView>>, chang
             x.set_valign(gtk::Align::Start);
             x.set_tooltip_text(Some("Remove this note"));
             {
-                let (store, id, list, row, changed) = (store.clone(), id.clone(), list.clone(), row.clone(), changed.clone());
+                let (id, list, row, changed) = (id.clone(), list.clone(), row.clone(), changed.clone());
                 x.connect_clicked(move |_| {
-                    if store.remove_memory(&id, ts, &note).is_ok() {
+                    if super::client::note_remove(&id, ts, &note).is_ok() {
                         list.remove(&row);
                         changed();
                     }
@@ -250,13 +251,13 @@ pub fn build(store: Rc<Store>, s: &Session, view: Option<Rc<SessionView>>, chang
     entry.set_placeholder_text(Some("a note on this session"));
     entry.set_margin_top(6);
     {
-        let (store, id, add_row, changed) = (store.clone(), id.clone(), add_row.clone(), changed.clone());
+        let (id, add_row, changed) = (id.clone(), add_row.clone(), changed.clone());
         entry.connect_activate(move |e| {
             let text = e.text().trim().to_string();
             if text.is_empty() {
                 return;
             }
-            if store.add_memory(&id, "note", &text).is_ok() {
+            if super::client::note_add(&id, &text).is_ok() {
                 add_row(sill_core::store::now(), text);
                 e.set_text("");
                 changed();

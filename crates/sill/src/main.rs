@@ -331,9 +331,15 @@ struct RunArgs {
 
 fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
     let home = home()?;
-    // the readers go through the daemon (docs/daemon.md decision 13); what writes or recovers
-    // opens the store itself below
+    // the readers go through the daemon (docs/daemon.md decision 13), and so does compaction (the
+    // daemon is the store's only writer, M1c); recall, export and refresh read the store below
     match cmd {
+        MemoryCmd::Compact => {
+            let c = sill_proto::Client::connect_or_start()?;
+            let done: sill_proto::Compacted = c.call(sill_proto::method::MEMORY_COMPACT, sill_proto::Empty::default())?;
+            println!("{} compacted, {} trimmed to summary and prompts, {} deleted", done.compacted, done.trimmed, done.deleted);
+            return Ok(());
+        }
         MemoryCmd::List => {
             let c = sill_proto::Client::connect_or_start()?;
             let rows: Vec<sill_proto::MemorySession> = c.call(sill_proto::method::MEMORY_LIST, sill_proto::Empty::default())?;
@@ -372,7 +378,7 @@ fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
         sill_memory::find_session(conn, &key)?.with_context(|| format!("no session {key}"))
     };
     match cmd {
-        MemoryCmd::List | MemoryCmd::Show { .. } | MemoryCmd::Search { .. } | MemoryCmd::Transcript { .. } => unreachable!(),
+        MemoryCmd::List | MemoryCmd::Show { .. } | MemoryCmd::Search { .. } | MemoryCmd::Transcript { .. } | MemoryCmd::Compact => unreachable!(),
         MemoryCmd::Recall { id } => {
             let s = find(&id)?;
             let Some(full) = store.sessions()?.into_iter().find(|x| x.id == s.id) else { bail!("no session {}", s.id) };
@@ -381,18 +387,6 @@ fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
             let scope = sill_memory::Scope::resolve(&full.memory_scope, !pins.is_empty());
             println!("scope: {}{}", scope.id(), if full.memory_scope.is_empty() { " (the default)" } else { "" });
             println!("{}", if block.is_empty() { "(nothing: memory is off)" } else { block.as_str() });
-        }
-        MemoryCmd::Compact => {
-            let uid = rustix::process::getuid().as_raw();
-            let done = sill_core::memory::compact_all(&store, sill_core::store::now(), &|id| {
-                let _ = sill_core::session::remove_state(uid, id);
-            })?;
-            if done != sill_core::memory::Compaction::default() {
-                store.vacuum()?;
-            }
-            drop(store);
-            sill_core::memory::refresh_snapshot()?;
-            println!("{} compacted, {} trimmed to summary and prompts, {} deleted", done.compacted, done.trimmed, done.deleted);
         }
         MemoryCmd::Export { dir } => {
             let n = sill_core::memory::export_all(&store, &dir, &home)?;

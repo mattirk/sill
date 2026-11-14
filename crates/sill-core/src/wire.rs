@@ -87,6 +87,22 @@ pub enum Event {
     Summarized { text: Option<String>, title: Option<String> },
 }
 
+/// One change to a session's row (`_sill/sessions.set`): what the shelf wrote to the store itself
+/// before the daemon was its only writer. `kind` as in `Session::title_kind` / `summary_kind`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SessionSet {
+    Title { title: String, kind: String },
+    AutoAllow(bool),
+    Desktop(String),
+    MemoryScope(String),
+    Policy(String),
+    Summary { text: String, kind: String },
+    /// The session's own agent settings (mode, model, options — SPEC §3.2).
+    Settings(crate::store::AgentSettings),
+    /// An ended session comes back: `ended_at` cleared.
+    Reopen,
+}
+
 /// The answer to a question: the chosen permission option (None = cancel), or the form's values
 /// (None = cancel).
 #[derive(Debug, Clone, Serialize, Deserialize)]

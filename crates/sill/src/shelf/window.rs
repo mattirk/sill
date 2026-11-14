@@ -412,7 +412,7 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     {
         let s = shelf.clone();
         *tabs.on_rename.borrow_mut() = Some(Box::new(move |id, title| {
-            let _ = s.store.set_title(id, title, "person");
+            super::client::set(id, sill_core::wire::SessionSet::Title { title: title.to_string(), kind: "person".into() });
             if let Some(v) = s.views.borrow().get(id) {
                 let mut sess = v.session.borrow_mut();
                 sess.title = title.to_string();
@@ -971,7 +971,7 @@ impl Shelf {
             name.connect_activate(move |e| {
                 let title = e.text().trim().to_string();
                 if !title.is_empty() {
-                    let _ = shelf.store.set_title(&sid, &title, "person");
+                    super::client::set(&sid, sill_core::wire::SessionSet::Title { title: title.clone(), kind: "person".into() });
                     shelf.tabs.set_title(&sid, &title);
                     if let Some(v) = shelf.views.borrow().get(&sid) {
                         let mut sess = v.session.borrow_mut();
@@ -1079,9 +1079,7 @@ impl Shelf {
                 let view = shelf.views.borrow().get(&sid).cloned();
                 match view {
                     Some(v) => v.set_memory_scope(scope),
-                    None => {
-                        let _ = shelf.store.set_memory_scope(&sid, scope);
-                    }
+                    None => super::client::set(&sid, sill_core::wire::SessionSet::MemoryScope(scope.to_string())),
                 }
             });
         }
@@ -1190,12 +1188,12 @@ impl Shelf {
         // an ended session comes back: open again, its last summary shown first
         let note = match (&note, s.ended_at) {
             (None, Some(t)) if !s.summary.is_empty() => {
-                let _ = self.store.reopen(&id);
+                super::client::set(&id, sill_core::wire::SessionSet::Reopen);
                 Some(format!("resumed; the session ended {} with this summary:\n{}", sill_core::memory::date(t), s.summary))
             }
             _ => {
                 if s.ended_at.is_some() {
-                    let _ = self.store.reopen(&id);
+                    super::client::set(&id, sill_core::wire::SessionSet::Reopen);
                 }
                 note
             }
@@ -1585,7 +1583,6 @@ impl Shelf {
                     });
                 }
                 {
-                    let s = self.clone();
                     let pop = pop.clone();
                     let id = sess.id.clone();
                     // one click arms it, the next deletes: a slip on an ended row would lose its summary
@@ -1596,13 +1593,7 @@ impl Shelf {
                             return;
                         }
                         pop.popdown();
-                        let s = s.clone();
-                        let id2 = id.clone();
-                        stop_then(&id, move || {
-                            let _ = sill_core::session::remove_state(session::uid(), &id2);
-                            let _ = s.store.delete(&id2);
-                            refresh_memory();
-                        });
+                        delete_then(&id, move || refresh_memory());
                     });
                 }
                 line.append(&b);
@@ -1695,14 +1686,23 @@ impl Shelf {
     /// *New here* on an ended session (docs/memory.md §2.5): a new session with its agent, policy,
     /// desktop access, memory scope and pins, whose recall leads with that session's summary.
     fn new_here(self: &Rc<Self>, from: &Session) {
-        let Ok(s) = self.store.create(&from.agent, &from.policy) else { return };
-        for p in self.store.pins(&from.id).unwrap_or_default() {
-            let _ = self.store.pin(&s.id, &p);
-        }
-        let _ = self.store.set_desktop(&s.id, &from.desktop);
-        let _ = self.store.set_memory_scope(&s.id, &from.memory_scope);
-        let _ = self.store.set_follows(&s.id, &from.id);
-        let Some(s) = self.store.sessions().unwrap_or_default().into_iter().find(|x| x.id == s.id) else { return };
+        let new = sill_proto::NewSession {
+            agent: from.agent.clone(),
+            policy: from.policy.clone(),
+            pins: self.store.pins(&from.id).unwrap_or_default(),
+            desktop: from.desktop.clone(),
+            memory_scope: from.memory_scope.clone(),
+            follows: from.id.clone(),
+            remember_pins: false,
+        };
+        let id = match super::client::new_session(new) {
+            Ok(id) => id,
+            Err(e) => {
+                self.set_status(&format!("new session: {e:#}"));
+                return;
+            }
+        };
+        let Some(s) = self.store.sessions().unwrap_or_default().into_iter().find(|x| x.id == id) else { return };
         let note = format!("new here, after “{}” ({}): its summary goes to the agent first", from.title, from.ended_at.map(sill_core::memory::date).unwrap_or_default());
         self.open_session_with(s, Some(note));
     }
@@ -1712,14 +1712,14 @@ impl Shelf {
 /// is on (the sessions come newest first) — the same workspace without pinning it again. *New
 /// here* copies its own source's pins and does not come this way.
 fn create_session(store: &Store, agent: &str, policy: &str) -> anyhow::Result<Session> {
-    let s = store.create(agent, policy)?;
-    if sill_core::config::load().remember_pins() {
-        let from = store.sessions().unwrap_or_default().into_iter().filter(|x| x.id != s.id).find_map(|x| store.pins(&x.id).ok().filter(|p| !p.is_empty()));
-        for p in from.unwrap_or_default() {
-            let _ = store.pin(&s.id, &p);
-        }
-    }
-    Ok(s)
+    let new = sill_proto::NewSession {
+        agent: agent.to_string(),
+        policy: policy.to_string(),
+        remember_pins: sill_core::config::load().remember_pins(),
+        ..Default::default()
+    };
+    let id = super::client::new_session(new)?;
+    store.sessions()?.into_iter().find(|x| x.id == id).ok_or_else(|| anyhow::anyhow!("the new session {id} is not in the store"))
 }
 
 /// Write the jail's memory snapshot anew off the GTK thread (docs/memory.md §2.3): when a session
@@ -1757,6 +1757,26 @@ fn stop_then(id: &str, then: impl FnOnce() + 'static) {
         .spawn(move || {
             if let Err(e) = super::client::call::<serde_json::Value>(sill_proto::method::SESSIONS_STOP, sill_proto::Key { key: id.clone() }) {
                 eprintln!("sill: stopping session {id}: {e:#}");
+            }
+            let _ = tx.send_blocking(());
+        })
+        .ok();
+    glib::spawn_future_local(async move {
+        let _ = rx.recv().await;
+        then();
+    });
+}
+
+/// Delete a session through the daemon on a worker thread (jail stop, state, row) and run `then`
+/// on the main loop when it is gone.
+fn delete_then(id: &str, then: impl FnOnce() + 'static) {
+    let id = id.to_string();
+    let (tx, rx) = async_channel::bounded::<()>(1);
+    std::thread::Builder::new()
+        .name(format!("sill-delete-{id}"))
+        .spawn(move || {
+            if let Err(e) = super::client::delete(&id) {
+                eprintln!("sill: deleting session {id}: {e:#}");
             }
             let _ = tx.send_blocking(());
         })

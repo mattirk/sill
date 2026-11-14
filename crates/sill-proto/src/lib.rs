@@ -46,6 +46,22 @@ pub mod method {
     pub const SESSIONS_END: &str = "_sill/sessions.end";
     /// *Summarize now*: the summary turn without the end; the answer comes as a `Summarized` event.
     pub const SESSIONS_CHECKPOINT: &str = "_sill/sessions.checkpoint";
+    /// The writes that were the shelf's (M1c): `sill.db` has one writer, the daemon.
+    pub const SESSIONS_NEW: &str = "_sill/sessions.new";
+    /// One field of a session's row; params [`SessionSet`] with a `sill_core::wire::SessionSet`.
+    pub const SESSIONS_SET: &str = "_sill/sessions.set";
+    /// Stop the jail, remove the session's state and its row.
+    pub const SESSIONS_DELETE: &str = "_sill/sessions.delete";
+    pub const SESSIONS_PIN: &str = "_sill/sessions.pin";
+    pub const SESSIONS_UNPIN: &str = "_sill/sessions.unpin";
+    pub const MEMORY_NOTE_ADD: &str = "_sill/memory.note_add";
+    pub const MEMORY_NOTE_REMOVE: &str = "_sill/memory.note_remove";
+    /// Compaction and retention now (docs/memory.md §2.4); answers [`Compacted`].
+    pub const MEMORY_COMPACT: &str = "_sill/memory.compact";
+    /// Delete every ended session; answers [`Count`].
+    pub const MEMORY_FORGET: &str = "_sill/memory.forget";
+    /// An agent type's default settings (`sill_core::store::AgentSettings` as JSON).
+    pub const AGENTS_SET_SETTINGS: &str = "_sill/agents.set_settings";
     pub const MEMORY_LIST: &str = "_sill/memory.list";
     pub const MEMORY_SHOW: &str = "_sill/memory.show";
     pub const MEMORY_SEARCH: &str = "_sill/memory.search";
@@ -198,6 +214,70 @@ pub struct Ending {
     pub pending: bool,
     /// The session was deleted (nothing was asked in it) instead of remembered.
     pub deleted: bool,
+}
+
+/// `_sill/sessions.new`: a session row. `pins` are copied as given; with `remember_pins` and none
+/// given, the pins of the latest session that had any (Settings → Remember pins). Answers [`Key`]
+/// with the new id.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NewSession {
+    pub agent: String,
+    pub policy: String,
+    #[serde(default)]
+    pub pins: Vec<PathBuf>,
+    #[serde(default)]
+    pub desktop: String,
+    #[serde(default)]
+    pub memory_scope: String,
+    /// The ended session this one follows (*New here*).
+    #[serde(default)]
+    pub follows: String,
+    #[serde(default)]
+    pub remember_pins: bool,
+}
+
+/// `_sill/sessions.set`: `set` is a `sill_core::wire::SessionSet` as JSON.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSet {
+    pub key: String,
+    pub set: serde_json::Value,
+}
+
+/// `_sill/sessions.pin|unpin`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Pin {
+    pub key: String,
+    pub path: PathBuf,
+}
+
+/// `_sill/memory.note_add`; `_sill/memory.note_remove` with `ts` (a note is its time and text).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Note {
+    pub key: String,
+    pub text: String,
+    #[serde(default)]
+    pub ts: i64,
+}
+
+/// `_sill/agents.set_settings`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSettingsSet {
+    pub agent: String,
+    pub settings: serde_json::Value,
+}
+
+/// `_sill/memory.compact`'s answer.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Compacted {
+    pub compacted: usize,
+    pub trimmed: usize,
+    pub deleted: usize,
+}
+
+/// A count (`_sill/memory.forget`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Count {
+    pub n: usize,
 }
 
 /// `_sill/session.event`: `event` is a `sill_core::wire::Event` as JSON.

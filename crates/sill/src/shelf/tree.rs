@@ -815,7 +815,7 @@ impl FolderTree {
             return;
         };
         let was = self.pinned.borrow().contains(&path.to_path_buf());
-        let r = if was { self.store.unpin(&sid, path) } else { self.store.pin(&sid, path) };
+        let r = super::client::pin(&sid, path, !was);
         match r {
             Ok(()) => {
                 self.say(&format!("{} {}", if was { "unpinned" } else { "pinned" }, path.display()));
@@ -847,7 +847,6 @@ impl FolderTree {
             self.again.set(true);
             return;
         }
-        let _ = self.store.prune_pins(); // pins of deleted sessions would otherwise haunt the tree
         let sessions = self.store.sessions().unwrap_or_default();
         let home = session::home().unwrap_or_default();
         let uid = session::uid();

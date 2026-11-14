@@ -56,6 +56,89 @@ fn connected() -> Result<Arc<Client>> {
     Ok(c)
 }
 
+/// A second connection for the shelf's own writes (`sessions.set`, pins, notes…): the first one
+/// carries attaches, which the daemon answers in order and which can take seconds while a jail
+/// starts; a write from the main loop must not wait behind one.
+static WRITER: OnceLock<Mutex<Option<Arc<Client>>>> = OnceLock::new();
+
+fn writer() -> Result<Arc<Client>> {
+    let slot = WRITER.get_or_init(|| Mutex::new(None));
+    let mut s = slot.lock().unwrap();
+    if let Some(c) = s.as_ref() {
+        return Ok(c.clone());
+    }
+    let c = Arc::new(Client::connect_or_start()?);
+    *s = Some(c.clone());
+    Ok(c)
+}
+
+/// One write; on a connection the daemon has closed, once more on a fresh one.
+fn write<T: DeserializeOwned>(method: &str, params: impl Serialize + Clone) -> Result<T> {
+    let c = writer()?;
+    match c.call(method, params.clone()) {
+        Err(e) if Client::is_closed(&e) => {
+            let slot = WRITER.get_or_init(|| Mutex::new(None));
+            let mut s = slot.lock().unwrap();
+            if s.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, &c)) {
+                *s = None;
+            }
+            drop(s);
+            writer()?.call(method, params)
+        }
+        r => r,
+    }
+}
+
+/// One field of a session's row (docs/daemon.md §7 M1c: the daemon is the store's only writer).
+/// An error is logged, not raised: the view has already changed what it shows.
+pub fn set(id: &str, set: sill_core::wire::SessionSet) {
+    let what = format!("{set:?}");
+    match serde_json::to_value(&set).map_err(anyhow::Error::from).and_then(|set| write::<serde_json::Value>(sill_proto::method::SESSIONS_SET, sill_proto::SessionSet { key: id.to_string(), set })) {
+        Ok(_) => {}
+        Err(e) => eprintln!("sill: session {id} {what}: {e:#}"),
+    }
+}
+
+/// A new session row; its id.
+pub fn new_session(n: sill_proto::NewSession) -> Result<String> {
+    Ok(write::<sill_proto::Key>(sill_proto::method::SESSIONS_NEW, n)?.key)
+}
+
+/// The trash can: jail, state and row go. Blocking for as long as the stop takes.
+pub fn delete(id: &str) -> Result<()> {
+    write::<serde_json::Value>(sill_proto::method::SESSIONS_DELETE, sill_proto::Key { key: id.to_string() })?;
+    Ok(())
+}
+
+pub fn pin(id: &str, path: &std::path::Path, on: bool) -> Result<()> {
+    let m = if on { sill_proto::method::SESSIONS_PIN } else { sill_proto::method::SESSIONS_UNPIN };
+    write::<serde_json::Value>(m, sill_proto::Pin { key: id.to_string(), path: path.to_path_buf() })?;
+    Ok(())
+}
+
+pub fn note_add(id: &str, text: &str) -> Result<()> {
+    write::<serde_json::Value>(sill_proto::method::MEMORY_NOTE_ADD, sill_proto::Note { key: id.to_string(), text: text.to_string(), ts: 0 })?;
+    Ok(())
+}
+
+pub fn note_remove(id: &str, ts: i64, text: &str) -> Result<()> {
+    write::<serde_json::Value>(sill_proto::method::MEMORY_NOTE_REMOVE, sill_proto::Note { key: id.to_string(), text: text.to_string(), ts })?;
+    Ok(())
+}
+
+pub fn set_agent_settings(agent: &str, settings: &sill_core::store::AgentSettings) -> Result<()> {
+    write::<serde_json::Value>(sill_proto::method::AGENTS_SET_SETTINGS, sill_proto::AgentSettingsSet { agent: agent.to_string(), settings: serde_json::to_value(settings)? })?;
+    Ok(())
+}
+
+pub fn compact() -> Result<sill_proto::Compacted> {
+    write(sill_proto::method::MEMORY_COMPACT, sill_proto::Empty::default())
+}
+
+pub fn forget_ended() -> Result<usize> {
+    Ok(write::<sill_proto::Count>(sill_proto::method::MEMORY_FORGET, sill_proto::Empty::default())?.n)
+}
+
 fn forget(c: &Arc<Client>) {
     let mut s = slot().lock().unwrap();
     if s.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, c)) {

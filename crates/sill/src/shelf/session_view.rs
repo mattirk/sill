@@ -1060,14 +1060,12 @@ impl SessionView {
         let agent = {
             let mut s = self.session.borrow_mut();
             f(&mut s.agent_settings);
-            if let Err(e) = self.store.set_session_settings(&s.id, &s.agent_settings) {
-                eprintln!("sill: could not remember session {} settings: {e:#}", s.id);
-            }
+            super::client::set(&s.id, wire::SessionSet::Settings(s.agent_settings.clone()));
             s.agent.clone()
         };
         let mut d = self.store.agent_settings(&agent);
         f(&mut d);
-        if let Err(e) = self.store.set_agent_settings(&agent, &d) {
+        if let Err(e) = super::client::set_agent_settings(&agent, &d) {
             eprintln!("sill: could not remember {agent} default settings: {e:#}");
         }
     }
@@ -1365,7 +1363,7 @@ impl SessionView {
                 let Some(v) = weak.upgrade() else { return };
                 let state = t.is_active();
                 v.auto_allow.set(state);
-                let _ = v.store.set_auto_allow(&v.id(), state);
+                super::client::set(&v.id(), wire::SessionSet::AutoAllow(state));
                 v.session.borrow_mut().auto_allow = state;
             });
             *self.lock_btn.borrow_mut() = Some(t.clone());
@@ -1596,7 +1594,9 @@ impl SessionView {
             let weak = Rc::downgrade(self);
             x.connect_clicked(move |_| {
                 let Some(v) = weak.upgrade() else { return };
-                let _ = v.store.unpin(&v.id(), &p);
+                if let Err(e) = super::client::pin(&v.id(), &p, false) {
+                    v.conv.add_note(&format!("unpin: {e:#}"));
+                }
                 v.refresh_pins();
                 // a folder pin is a mount: the jail is rebuilt (after the current turn if busy);
                 // a file pin is only a chip
@@ -2014,7 +2014,7 @@ impl SessionView {
             return;
         }
         let label = sill_core::config::DESKTOP_CHOICES.iter().find(|(i, _)| *i == id).map(|(_, l)| *l).unwrap_or(id);
-        let _ = self.store.set_desktop(&self.id(), id);
+        super::client::set(&self.id(), wire::SessionSet::Desktop(id.to_string()));
         self.session.borrow_mut().desktop = id.to_string();
         self.conv.add_note(&format!("desktop access: {label}; the session restarts"));
         self.restart_for_jail();
@@ -2026,7 +2026,7 @@ impl SessionView {
         if self.session.borrow().memory_scope == scope {
             return;
         }
-        let _ = self.store.set_memory_scope(&self.id(), scope);
+        super::client::set(&self.id(), wire::SessionSet::MemoryScope(scope.to_string()));
         self.session.borrow_mut().memory_scope = scope.to_string();
         let resolved = sill_core::memory::Scope::resolve(scope, !self.store.pins(&self.id()).unwrap_or_default().is_empty());
         self.conv.add_note(&format!("recall: {}; told with the next prompt", resolved.label()));
@@ -2037,7 +2037,7 @@ impl SessionView {
         if self.session.borrow().policy == name {
             return;
         }
-        let _ = self.store.set_policy(&self.id(), name);
+        super::client::set(&self.id(), wire::SessionSet::Policy(name.to_string()));
         self.session.borrow_mut().policy = name.to_string();
         self.conv.add_note(&format!("policy: {name}; the session restarts"));
         self.restart_for_jail();

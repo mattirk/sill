@@ -335,18 +335,8 @@ pub fn build() -> gtk::Widget {
         b.set_sensitive(false);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let uid = rustix::process::getuid().as_raw();
-            let r = (|| -> anyhow::Result<sill_core::memory::Compaction> {
-                let store = sill_core::store::Store::open_default()?;
-                let done = sill_core::memory::compact_all(&store, sill_core::store::now(), &|id| {
-                    let _ = sill_core::session::remove_state(uid, id);
-                })?;
-                store.vacuum()?;
-                drop(store);
-                sill_core::memory::refresh_snapshot()?;
-                Ok(done)
-            })();
-            let _ = tx.send(r);
+            // the daemon's (docs/daemon.md §7 M1c): compaction, retention, vacuum, the snapshot
+            let _ = tx.send(super::client::compact());
         });
         glib::timeout_add_local(std::time::Duration::from_millis(200), move || match rx.try_recv() {
             Ok(r) => {
@@ -405,19 +395,7 @@ pub fn build() -> gtk::Widget {
         let b = b.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let uid = rustix::process::getuid().as_raw();
-            let r = (|| -> anyhow::Result<usize> {
-                let store = sill_core::store::Store::open_default()?;
-                let ended: Vec<String> = store.sessions()?.into_iter().filter(|s| s.ended_at.is_some()).map(|s| s.id).collect();
-                for id in &ended {
-                    let _ = sill_core::session::remove_state(uid, id);
-                    store.delete(id)?;
-                }
-                store.vacuum()?;
-                drop(store);
-                sill_core::memory::refresh_snapshot()?;
-                Ok(ended.len())
-            })();
+            let r = super::client::forget_ended();
             let _ = tx.send(r);
         });
         glib::timeout_add_local(std::time::Duration::from_millis(200), move || match rx.try_recv() {
