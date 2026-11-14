@@ -5,8 +5,8 @@
 //! Shelf width, Interface scale, the shortcuts, the window's modes and sizes) are in
 //! `~/.config/sill/sill-gui.toml`.
 use iced::widget::{
-    Column, button, column, container, pick_list, row, rule, scrollable, space, text, text_editor,
-    text_input, toggler,
+    Column, button, column, container, pick_list, responsive, row, rule, scrollable, space, text,
+    text_editor, text_input, toggler,
 };
 use iced::{Alignment, Border, Color, Element, Fill, Padding, Shrink, Theme};
 use sill_client::settings::{self, Snapshot};
@@ -31,7 +31,42 @@ const SHELF_SHARES: &[(f32, &str)] = &[
     (0.4, "40 %"),
 ];
 
+/// The Settings navigation choice, kept in this window's preferences.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Category {
+    #[default]
+    Interface,
+    Sessions,
+    AgentBehaviour,
+    MemoryHistory,
+    System,
+}
+
+impl Category {
+    const ALL: [Self; 5] = [
+        Self::Interface,
+        Self::Sessions,
+        Self::AgentBehaviour,
+        Self::MemoryHistory,
+        Self::System,
+    ];
+}
+
+impl std::fmt::Display for Category {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Interface => "Interface",
+            Self::Sessions => "Sessions",
+            Self::AgentBehaviour => "Agent behaviour",
+            Self::MemoryHistory => "Memory & history",
+            Self::System => "System",
+        })
+    }
+}
+
 pub struct SettingsPage {
+    pub category: Category,
     pub autostart: Result<bool, String>,
     pub autostart_busy: bool,
     pub token: String,
@@ -58,12 +93,18 @@ pub struct SettingsPage {
 impl Default for SettingsPage {
     fn default() -> Self {
         Self {
+            category: Category::default(),
             autostart: sill_proto::autostart_enabled().map_err(|e| e.to_string()),
             autostart_busy: false,
             token: sill_client::request_id("settings-page"),
             load_token: String::new(),
             policies: crate::policies::State::default(),
-            collapsed: std::collections::BTreeSet::from(["Keyboard shortcuts", "Policies", "Daemon technical details", RUNNING_TIME]),
+            collapsed: std::collections::BTreeSet::from([
+                "Keyboard shortcuts",
+                "Policies",
+                "Daemon technical details",
+                RUNNING_TIME,
+            ]),
             shortcuts: None,
             snapshot: None,
             instructions: text_editor::Content::new(),
@@ -80,6 +121,7 @@ impl Default for SettingsPage {
 
 #[derive(Debug, Clone)]
 pub enum Event {
+    Category(Category),
     Autostart(bool),
     AutostartDone(Result<(), String>),
     Policy(crate::policies::Event),
@@ -325,6 +367,62 @@ pub(crate) fn home_relative(path: &str) -> String {
 
 impl App {
     pub(crate) fn settings_view<'a>(&'a self, page: &'a SettingsPage) -> Element<'a, Message> {
+        // Use the space actually allotted to Settings, including interface scaling.
+        responsive(move |size| {
+            let navigation: Element<'a, Message> = if size.width < 760.0 {
+                container(
+                    pick_list(Category::ALL, Some(page.category), |category| {
+                        event(Event::Category(category))
+                    })
+                    .text_size(style::TEXT)
+                    .padding([8, 12])
+                    .width(Fill)
+                    .style(dropdown)
+                    .menu_style(style::control_menu),
+                )
+                .padding([8, 16])
+                .into()
+            } else {
+                let mut sidebar = Column::new().spacing(4).padding([12, 8]);
+                for category in Category::ALL {
+                    let selected = page.category == category;
+                    sidebar = sidebar.push(keys::press(
+                        button(text(category.to_string()).size(style::SMALL))
+                            .width(Fill)
+                            .padding([10, 12])
+                            .style(move |_, status| button::Style {
+                                text_color: if selected { P.accent } else { P.fg_dim },
+                                background: (selected
+                                    || matches!(
+                                        status,
+                                        button::Status::Hovered | button::Status::Pressed
+                                    ))
+                                .then(|| alpha(P.fg, if selected { 0.10 } else { 0.05 }).into()),
+                                ..button::Style::default()
+                            }),
+                        event(Event::Category(category)),
+                    ));
+                }
+                scrollable(sidebar).width(172).height(Fill).into()
+            };
+            // Responsive closures can rebuild; create the content from the current page.
+            let content = self.settings_content(page);
+            if size.width < 760.0 {
+                column![navigation, content].height(Fill).into()
+            } else {
+                row![
+                    navigation,
+                    rule::vertical(1).style(style::rule_style(P.surface)),
+                    content
+                ]
+                .height(Fill)
+                .into()
+            }
+        })
+        .into()
+    }
+
+    fn settings_content<'a>(&'a self, page: &'a SettingsPage) -> Element<'a, Message> {
         let body: Element<'a, Message> = match &page.snapshot {
             None => container(
                 text("Reading the settings…")
@@ -344,9 +442,16 @@ impl App {
             .into(),
             Some(Ok(snapshot)) => self.settings_sections(page, snapshot),
         };
-        let mut page_column = column![section(page, "Daemon", self.daemon_rows(page))];
+        let mut page_column = column![
+            text(page.category.to_string())
+                .size(style::TEXT)
+                .font(bold())
+        ];
+        if page.category == Category::System {
+            page_column = page_column.push(section(page, "Daemon", self.daemon_rows(page)));
+        }
         // the Mac window's own VM: apart from the daemon's settings, which come from inside it
-        if self.vm_shown() {
+        if page.category == Category::System && self.vm_shown() {
             page_column = page_column.push(section(page, VIRTUAL_MACHINE, self.vm_rows()));
         }
         if let Some(said) = &page.said {
@@ -362,6 +467,7 @@ impl App {
         scrollable(container(page_column).center_x(Fill))
             .direction(scrollable::Direction::Vertical(style::bar()))
             .id("settings")
+            .width(Fill)
             .height(Fill)
             .style(style::feed_scroll)
             .into()
@@ -376,43 +482,44 @@ impl App {
         let change = |c: SettingChange| event(Event::Change(c));
         let mut page_column = Column::new();
 
-        // ---- Appearance
-        let theme = settings::THEMES
-            .iter()
-            .position(|(id, _)| *id == style::theme_id())
-            .unwrap_or(0);
-        let share = self.shelf_share();
-        let share_at = settings::nearest(SHELF_SHARES, (share * 100.0) as i64, |(s, _)| {
-            (s * 100.0) as i64
-        });
-        let scales = crate::settings::SCALES;
-        let scale = self.settings.scale();
-        let scale_at = scales
-            .iter()
-            .position(|s| (s - scale).abs() < 0.001)
-            .unwrap_or_else(|| {
-                // a hand-edited value between presets shows as the nearest one
-                (0..scales.len())
-                    .min_by(|a, b| {
-                        (scales[*a] - scale)
-                            .abs()
-                            .total_cmp(&(scales[*b] - scale).abs())
-                    })
-                    .unwrap_or(2)
+        if page.category == Category::Interface {
+            // ---- Appearance
+            let theme = settings::THEMES
+                .iter()
+                .position(|(id, _)| *id == style::theme_id())
+                .unwrap_or(0);
+            let share = self.shelf_share();
+            let share_at = settings::nearest(SHELF_SHARES, (share * 100.0) as i64, |(s, _)| {
+                (s * 100.0) as i64
             });
-        let scale_row = row![choice(
-            ["75 %", "90 %", "100 %", "110 %", "125 %", "150 %"],
-            scale_at,
-            move |i| event(Event::Scale(scales[i])),
-        ),]
-        .spacing(8)
-        .align_y(Alignment::Center);
-        let scale_row = if scale == 1.0 {
-            scale_row
-        } else {
-            scale_row.push(quiet_button("Reset", Some(event(Event::Scale(1.0)))))
-        };
-        page_column = page_column.push(section(
+            let scales = crate::settings::SCALES;
+            let scale = self.settings.scale();
+            let scale_at = scales
+                .iter()
+                .position(|s| (s - scale).abs() < 0.001)
+                .unwrap_or_else(|| {
+                    // a hand-edited value between presets shows as the nearest one
+                    (0..scales.len())
+                        .min_by(|a, b| {
+                            (scales[*a] - scale)
+                                .abs()
+                                .total_cmp(&(scales[*b] - scale).abs())
+                        })
+                        .unwrap_or(2)
+                });
+            let scale_row = row![choice(
+                ["75 %", "90 %", "100 %", "110 %", "125 %", "150 %"],
+                scale_at,
+                move |i| event(Event::Scale(scales[i])),
+            ),]
+            .spacing(8)
+            .align_y(Alignment::Center);
+            let scale_row = if scale == 1.0 {
+                scale_row
+            } else {
+                scale_row.push(quiet_button("Reset", Some(event(Event::Scale(1.0)))))
+            };
+            page_column = page_column.push(section(
             page,
             "Appearance",
             vec![
@@ -457,70 +564,74 @@ impl App {
             ],
         ));
 
-        let bindings = page.shortcuts.as_ref().unwrap_or(&self.settings.shortcuts);
-        let mut rows = Vec::new();
-        for (i, (id, label, _)) in crate::shortcuts::ACTIONS.iter().enumerate() {
-            rows.push(setting(
-                label,
-                None,
-                text_input("Disabled", &crate::keys::label(crate::shortcuts::value(bindings, i)))
+            let bindings = page.shortcuts.as_ref().unwrap_or(&self.settings.shortcuts);
+            let mut rows = Vec::new();
+            for (i, (id, label, _)) in crate::shortcuts::ACTIONS.iter().enumerate() {
+                rows.push(setting(
+                    label,
+                    None,
+                    text_input(
+                        "Disabled",
+                        &crate::keys::label(crate::shortcuts::value(bindings, i)),
+                    )
                     .width(180)
                     .padding(7)
                     .size(style::SMALL)
                     .on_input(move |value| event(Event::ShortcutInput((*id).into(), value))),
-            ));
-        }
-        let error = crate::shortcuts::validate(bindings).err();
-        let mut controls = column![text(format!("Use {} or Alt with a key, optionally Shift. Blank disables a shortcut. Use Plus for +.", crate::keys::PRIMARY)).size(style::SMALL)];
-        if let Some(why) = &error {
-            controls = controls.push(text(why.clone()).size(style::SMALL).color(P.error));
-        }
-        controls = controls.push(
-            row![
-                quiet_button(
-                    "Apply",
-                    (page.shortcuts.is_some() && error.is_none())
-                        .then(|| event(Event::ApplyShortcuts))
-                ),
-                quiet_button("Reset defaults", Some(event(Event::ResetShortcuts))),
-            ]
-            .spacing(8),
-        );
-        rows.push(wide("Shortcut bindings", None, controls));
-        page_column = page_column.push(section(page, "Keyboard shortcuts", rows));
+                ));
+            }
+            let error = crate::shortcuts::validate(bindings).err();
+            let mut controls = column![text(format!("Use {} or Alt with a key, optionally Shift. Blank disables a shortcut. Use Plus for +.", crate::keys::PRIMARY)).size(style::SMALL)];
+            if let Some(why) = &error {
+                controls = controls.push(text(why.clone()).size(style::SMALL).color(P.error));
+            }
+            controls = controls.push(
+                row![
+                    quiet_button(
+                        "Apply",
+                        (page.shortcuts.is_some() && error.is_none())
+                            .then(|| event(Event::ApplyShortcuts))
+                    ),
+                    quiet_button("Reset defaults", Some(event(Event::ResetShortcuts))),
+                ]
+                .spacing(8),
+            );
+            rows.push(wide("Shortcut bindings", None, controls));
+            page_column = page_column.push(section(page, "Keyboard shortcuts", rows));
 
-        // ---- Window
-        let spec = page.hotkey.clone().unwrap_or_else(|| {
-            s.hotkey
-                .clone()
-                .unwrap_or_else(|| crate::hotkey::DEFAULT.into())
-        });
-        let typed_ok = crate::hotkey::validate(&spec).err();
-        let saved = s.hotkey.as_deref().unwrap_or(crate::hotkey::DEFAULT);
-        let mut hotkey = column![
-            row![
-                text_input("<Control>Tab", &spec)
-                    .size(style::SMALL)
-                    .padding(7)
-                    .width(180)
-                    .on_input(|v| event(Event::HotkeyInput(v)))
-                    .on_submit(event(Event::ApplyHotkey)),
-                quiet_button(
-                    "Apply",
-                    (typed_ok.is_none() && spec.trim() != saved).then(|| event(Event::ApplyHotkey)),
-                ),
+            // ---- Window
+            let spec = page.hotkey.clone().unwrap_or_else(|| {
+                s.hotkey
+                    .clone()
+                    .unwrap_or_else(|| crate::hotkey::DEFAULT.into())
+            });
+            let typed_ok = crate::hotkey::validate(&spec).err();
+            let saved = s.hotkey.as_deref().unwrap_or(crate::hotkey::DEFAULT);
+            let mut hotkey = column![
+                row![
+                    text_input("<Control>Tab", &spec)
+                        .size(style::SMALL)
+                        .padding(7)
+                        .width(180)
+                        .on_input(|v| event(Event::HotkeyInput(v)))
+                        .on_submit(event(Event::ApplyHotkey)),
+                    quiet_button(
+                        "Apply",
+                        (typed_ok.is_none() && spec.trim() != saved)
+                            .then(|| event(Event::ApplyHotkey)),
+                    ),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
             ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-        ]
-        .spacing(6);
-        if let Some(why) = typed_ok {
-            hotkey = hotkey.push(text(format!("{why:#}")).size(style::SMALL).color(P.error));
-        }
-        if let Some(status) = &self.hotkey_status {
-            hotkey = hotkey.push(text(status).size(style::SMALL).color(P.fg_dim));
-        }
-        page_column = page_column.push(section(
+            .spacing(6);
+            if let Some(why) = typed_ok {
+                hotkey = hotkey.push(text(format!("{why:#}")).size(style::SMALL).color(P.error));
+            }
+            if let Some(status) = &self.hotkey_status {
+                hotkey = hotkey.push(text(status).size(style::SMALL).color(P.fg_dim));
+            }
+            page_column = page_column.push(section(
             page,
             "Window",
             vec![
@@ -547,59 +658,49 @@ impl App {
                 ),
             ],
         ));
+        }
 
-        // ---- Sessions
-        let minutes = s
-            .auto_revert_minutes
-            .unwrap_or(settings::AUTO_REVERT_DEFAULT);
-        let revert_at = settings::nearest(settings::AUTO_REVERT, minutes as i64, |c| c.0 as i64);
-        let mut pins = Column::new().spacing(4);
-        for pin in &snapshot.global_pins {
+        if page.category == Category::Sessions {
+            // ---- Sessions
+            let minutes = s
+                .auto_revert_minutes
+                .unwrap_or(settings::AUTO_REVERT_DEFAULT);
+            let revert_at =
+                settings::nearest(settings::AUTO_REVERT, minutes as i64, |c| c.0 as i64);
+            let mut pins = Column::new().spacing(4);
+            for pin in &snapshot.global_pins {
+                pins = pins.push(
+                    row![
+                        text(home_relative(&pin.display))
+                            .size(style::TEXT)
+                            .width(Fill),
+                        keys::press(
+                            button(crate::icons::glyph("minus", 13.0, alpha(P.fg, 0.7)))
+                                .padding([6, 8])
+                                .style(style::quiet),
+                            event(Event::RemovePin(pin.clone())),
+                        ),
+                    ]
+                    .align_y(Alignment::Center),
+                );
+            }
+            if snapshot.global_pins.is_empty() {
+                pins = pins.push(text("None").size(style::SMALL).color(P.fg_dim));
+            }
+            let path = page.pin_path.trim();
             pins = pins.push(
                 row![
-                    text(home_relative(&pin.display))
-                        .size(style::TEXT)
-                        .width(Fill),
-                    keys::press(
-                        button(crate::icons::glyph("minus", 13.0, alpha(P.fg, 0.7)))
-                            .padding([6, 8])
-                            .style(style::quiet),
-                        event(Event::RemovePin(pin.clone())),
-                    ),
+                    text_input("Absolute path of a folder or file", &page.pin_path)
+                        .size(style::SMALL)
+                        .padding(7)
+                        .on_input(|v| event(Event::PinPath(v)))
+                        .on_submit(event(Event::AddPin)),
+                    quiet_button("Add", path.starts_with('/').then(|| event(Event::AddPin))),
                 ]
+                .spacing(8)
                 .align_y(Alignment::Center),
             );
-        }
-        if snapshot.global_pins.is_empty() {
-            pins = pins.push(text("None").size(style::SMALL).color(P.fg_dim));
-        }
-        let path = page.pin_path.trim();
-        pins = pins.push(
-            row![
-                text_input("Absolute path of a folder or file", &page.pin_path)
-                    .size(style::SMALL)
-                    .padding(7)
-                    .on_input(|v| event(Event::PinPath(v)))
-                    .on_submit(event(Event::AddPin)),
-                quiet_button("Add", path.starts_with('/').then(|| event(Event::AddPin))),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-        );
-        page_column = page_column.push(section(
-            page,
-            "Network",
-            vec![setting(
-                "Dismissed network prompts",
-                Some("Restore prompts hidden with Don’t ask again across all sessions. Network access stays unchanged."),
-                quiet_button(
-                    "Restore all",
-                    (!s.network_quiet_hosts.is_empty())
-                        .then(|| event(Event::RestoreNetworkPrompts)),
-                ),
-            )],
-        ));
-        page_column = page_column.push(section(
+            page_column = page_column.push(section(
             page,
             "Sessions",
             vec![
@@ -649,16 +750,18 @@ impl App {
                 ),
             ],
         ));
+        }
 
-        // ---- Instructions
-        let editor = text_editor(&page.instructions)
-            .on_action(|a| event(Event::Instructions(a)))
-            .height(Shrink)
-            .min_height(120)
-            .padding(10)
-            .size(style::TEXT)
-            .style(style::reader);
-        page_column = page_column.push(section(
+        if page.category == Category::AgentBehaviour {
+            // ---- Instructions
+            let editor = text_editor(&page.instructions)
+                .on_action(|a| event(Event::Instructions(a)))
+                .height(Shrink)
+                .min_height(120)
+                .padding(10)
+                .size(style::TEXT)
+                .style(style::reader);
+            page_column = page_column.push(section(
             page,
             "Instructions",
             vec![wide(
@@ -678,183 +781,206 @@ impl App {
             )],
         ));
 
-        page_column = page_column.push(section(
-            page,
-            "Policies",
-            vec![wide("", None, page.policies.view())],
-        ));
-        if !page.policies.status.is_empty() {
-            page_column = page_column.push(
-                text(&page.policies.status)
-                    .size(style::SMALL)
-                    .color(P.fg_dim),
-            );
-        }
-
-        // ---- Memory
-        let recall = s.memory_recall.unwrap_or(settings::RECALL_DEFAULT);
-        let recall_at = settings::nearest(settings::RECALL, recall as i64, |c| c.0 as i64);
-        let duration = |value: Option<&str>, default: u32| {
-            settings::nearest(
-                settings::DURATIONS,
-                settings::days(value, default) as i64,
-                |d| d.2 as i64,
-            )
-        };
-        let duration_choice = |at: usize, make: fn(Option<String>) -> SettingChange| {
-            choice(settings::DURATIONS.iter().map(|d| d.1), at, move |i| {
-                event(Event::Change(make(Some(
-                    settings::DURATIONS[i].0.to_string(),
-                ))))
-            })
-        };
-        let actions = row![
-            quiet_button("Compact now", Some(event(Event::Compact))),
-            keys::press(
-                button(
-                    text(if page.armed_delete {
-                        "Delete every ended session?"
-                    } else {
-                        "Delete all…"
-                    })
-                    .size(style::TEXT)
-                    .color(if page.armed_delete { P.error } else { P.fg }),
-                )
-                .padding([6, 14])
-                .style(|_, status| button::Style {
-                    background: Some(
-                        alpha(
-                            P.fg,
-                            if matches!(status, button::Status::Hovered) {
-                                0.12
-                            } else {
-                                0.07
-                            },
-                        )
-                        .into(),
-                    ),
-                    ..button::Style::default()
-                }),
-                event(Event::DeleteAll),
-            ),
-        ]
-        .spacing(8);
-        page_column = page_column.push(section(
-            page,
-            "Memory",
-            vec![
-                setting(
-                    "Memory",
-                    Some("A summary when a session's tab closes"),
-                    switch(s.memory.unwrap_or(true), move |v| {
-                        change(SettingChange::Memory { value: Some(v) })
-                    }),
-                ),
-                setting(
-                    "Recall",
-                    Some("Earlier sessions a new agent is told about"),
-                    choice(
-                        settings::RECALL.iter().map(|(_, l)| *l),
-                        recall_at,
-                        move |i| {
-                            change(SettingChange::MemoryRecall {
-                                value: Some(settings::RECALL[i].0),
-                            })
-                        },
-                    ),
-                ),
-                setting(
-                    "Ghosts see memory",
-                    Some("Ghost sessions read earlier sessions (never write)"),
-                    switch(s.ghost_memory.unwrap_or(false), move |v| {
-                        change(SettingChange::GhostMemory { value: Some(v) })
-                    }),
-                ),
-                setting(
-                    "Compact after",
-                    Some("After the end: thoughts, tool outputs and diffs go"),
-                    duration_choice(
-                        duration(s.compact_after.as_deref(), settings::COMPACT_DEFAULT),
-                        |value| SettingChange::CompactAfter { value },
-                    ),
-                ),
-                setting(
-                    "Full text for",
-                    Some("Then the agent's messages go too; summary, notes and prompts stay"),
-                    duration_choice(
-                        duration(
-                            s.keep_full_transcripts.as_deref(),
-                            settings::FULL_TEXT_DEFAULT,
-                        ),
-                        |value| SettingChange::KeepFullTranscripts { value },
-                    ),
-                ),
-                setting(
-                    "Delete after",
-                    Some("Then the session is deleted outright"),
-                    duration_choice(
-                        duration(s.delete_after.as_deref(), settings::DELETE_DEFAULT),
-                        |value| SettingChange::DeleteAfter { value },
-                    ),
-                ),
-                container(actions).padding([12, 16]).into(),
-            ],
-        ));
-
-        // ---- Where things are: reference, folded
-        let fold = keys::press(
-            button(
-                row![
-                    crate::icons::glyph(
-                        if page.where_open {
-                            "chevron-down"
-                        } else {
-                            "chevron-right"
-                        },
-                        13.0,
-                        P.accent,
-                    ),
-                    text("Where things are")
+            page_column = page_column.push(section(
+                page,
+                "Policies",
+                vec![wide("", None, page.policies.view())],
+            ));
+            if !page.policies.status.is_empty() {
+                page_column = page_column.push(
+                    text(&page.policies.status)
                         .size(style::SMALL)
-                        .color(P.accent)
-                        .font(bold()),
-                ]
-                .spacing(6)
-                .align_y(Alignment::Center),
-            )
-            .padding(Padding {
-                top: 18.0,
-                bottom: 8.0,
-                left: 4.0,
-                right: 8.0,
-            })
-            .style(style::quiet),
-            event(Event::ToggleWhere),
-        );
-        page_column = page_column.push(fold);
-        if page.where_open {
-            let mut card = Column::new();
-            for (key, value) in where_things_are() {
-                card = card.push(
-                    container(
-                        row![
-                            text(key).size(style::SMALL).color(P.fg_dim).width(110),
-                            crate::selection::text(value)
-                                .size(style::SMALL)
-                                .style(style::selectable(P.fg)),
-                        ]
-                        .spacing(12),
-                    )
-                    .padding([8, 16]),
+                        .color(P.fg_dim),
                 );
             }
-            page_column = page_column.push(container(card).style(style::fill(P.surface)));
-        }
-        let page_column = page_column.push(section(
+            page_column = page_column.push(section(
             page,
-            RUNNING_TIME,
-            vec![crate::usage::view(snapshot.active_hours.as_deref())],
+            "Network",
+            vec![setting(
+                "Dismissed network prompts",
+                Some("Restore prompts hidden with Don’t ask again across all sessions. Network access stays unchanged."),
+                quiet_button(
+                    "Restore all",
+                    (!s.network_quiet_hosts.is_empty())
+                        .then(|| event(Event::RestoreNetworkPrompts)),
+                ),
+            )],
         ));
+        }
+
+        if page.category == Category::MemoryHistory {
+            // ---- Memory
+            let recall = s.memory_recall.unwrap_or(settings::RECALL_DEFAULT);
+            let recall_at = settings::nearest(settings::RECALL, recall as i64, |c| c.0 as i64);
+            let duration = |value: Option<&str>, default: u32| {
+                settings::nearest(
+                    settings::DURATIONS,
+                    settings::days(value, default) as i64,
+                    |d| d.2 as i64,
+                )
+            };
+            let duration_choice = |at: usize, make: fn(Option<String>) -> SettingChange| {
+                choice(settings::DURATIONS.iter().map(|d| d.1), at, move |i| {
+                    event(Event::Change(make(Some(
+                        settings::DURATIONS[i].0.to_string(),
+                    ))))
+                })
+            };
+            let actions = row![
+                quiet_button("Compact now", Some(event(Event::Compact))),
+                keys::press(
+                    button(
+                        text(if page.armed_delete {
+                            "Delete every ended session?"
+                        } else {
+                            "Delete all…"
+                        })
+                        .size(style::TEXT)
+                        .color(if page.armed_delete {
+                            P.error
+                        } else {
+                            P.fg
+                        }),
+                    )
+                    .padding([6, 14])
+                    .style(|_, status| button::Style {
+                        background: Some(
+                            alpha(
+                                P.fg,
+                                if matches!(status, button::Status::Hovered) {
+                                    0.12
+                                } else {
+                                    0.07
+                                },
+                            )
+                            .into(),
+                        ),
+                        ..button::Style::default()
+                    }),
+                    event(Event::DeleteAll),
+                ),
+            ]
+            .spacing(8);
+            page_column = page_column.push(section(
+                page,
+                "Memory",
+                vec![
+                    setting(
+                        "Memory",
+                        Some("A summary when a session's tab closes"),
+                        switch(s.memory.unwrap_or(true), move |v| {
+                            change(SettingChange::Memory { value: Some(v) })
+                        }),
+                    ),
+                    setting(
+                        "Recall",
+                        Some("Earlier sessions a new agent is told about"),
+                        choice(
+                            settings::RECALL.iter().map(|(_, l)| *l),
+                            recall_at,
+                            move |i| {
+                                change(SettingChange::MemoryRecall {
+                                    value: Some(settings::RECALL[i].0),
+                                })
+                            },
+                        ),
+                    ),
+                    setting(
+                        "Ghosts see memory",
+                        Some("Ghost sessions read earlier sessions (never write)"),
+                        switch(s.ghost_memory.unwrap_or(false), move |v| {
+                            change(SettingChange::GhostMemory { value: Some(v) })
+                        }),
+                    ),
+                    setting(
+                        "Compact after",
+                        Some("After the end: thoughts, tool outputs and diffs go"),
+                        duration_choice(
+                            duration(s.compact_after.as_deref(), settings::COMPACT_DEFAULT),
+                            |value| SettingChange::CompactAfter { value },
+                        ),
+                    ),
+                    setting(
+                        "Full text for",
+                        Some("Then the agent's messages go too; summary, notes and prompts stay"),
+                        duration_choice(
+                            duration(
+                                s.keep_full_transcripts.as_deref(),
+                                settings::FULL_TEXT_DEFAULT,
+                            ),
+                            |value| SettingChange::KeepFullTranscripts { value },
+                        ),
+                    ),
+                    setting(
+                        "Delete after",
+                        Some("Then the session is deleted outright"),
+                        duration_choice(
+                            duration(s.delete_after.as_deref(), settings::DELETE_DEFAULT),
+                            |value| SettingChange::DeleteAfter { value },
+                        ),
+                    ),
+                    container(actions).padding([12, 16]).into(),
+                ],
+            ));
+
+            page_column = page_column.push(section(
+                page,
+                RUNNING_TIME,
+                vec![crate::usage::view(snapshot.active_hours.as_deref())],
+            ));
+        }
+
+        if page.category == Category::System {
+            // ---- Where things are: reference, folded
+            let fold = keys::press(
+                button(
+                    row![
+                        crate::icons::glyph(
+                            if page.where_open {
+                                "chevron-down"
+                            } else {
+                                "chevron-right"
+                            },
+                            13.0,
+                            P.accent,
+                        ),
+                        text("Where things are")
+                            .size(style::SMALL)
+                            .color(P.accent)
+                            .font(bold()),
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+                )
+                .padding(Padding {
+                    top: 18.0,
+                    bottom: 8.0,
+                    left: 4.0,
+                    right: 8.0,
+                })
+                .style(style::quiet),
+                event(Event::ToggleWhere),
+            );
+            page_column = page_column.push(fold);
+            if page.where_open {
+                let mut card = Column::new();
+                for (key, value) in where_things_are() {
+                    card = card.push(
+                        container(
+                            row![
+                                text(key).size(style::SMALL).color(P.fg_dim).width(110),
+                                crate::selection::text(value)
+                                    .size(style::SMALL)
+                                    .style(style::selectable(P.fg)),
+                            ]
+                            .spacing(12),
+                        )
+                        .padding([8, 16]),
+                    );
+                }
+                page_column = page_column.push(container(card).style(style::fill(P.surface)));
+            }
+        }
         crate::selection::area(page_column)
             .on_copy(Message::Copy)
             .into()
@@ -873,11 +999,11 @@ fn where_things_are() -> Vec<(&'static str, String)> {
         ),
         (
             "Instructions",
-            format!("{home}/.config/sill/instructions.md — the box above"),
+            format!("{home}/.config/sill/instructions.md — Agent behaviour → Instructions"),
         ),
         (
             "Policy",
-            "~/.config/sill/policies/, then /etc/sill/policies/, then the built-in default; the Policies section above".into(),
+            "~/.config/sill/policies/, then /etc/sill/policies/, then the built-in default; Agent behaviour → Policies".into(),
         ),
         (
             "Sessions",

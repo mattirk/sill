@@ -2290,7 +2290,10 @@ impl App {
             }
             Page::Settings => {
                 self.changes = None;
-                self.settings_page = Some(settings_ui::SettingsPage::default());
+                self.settings_page = Some(settings_ui::SettingsPage {
+                    category: self.settings.settings_category,
+                    ..settings_ui::SettingsPage::default()
+                });
                 Task::batch([self.settings_load(), self.vm_event(vm_ui::Event::Read)])
             }
         }
@@ -2414,6 +2417,13 @@ impl App {
                     Err(why) => format!("Autostart change failed: {why}"),
                 });
                 return self.daemon_event(daemon_ui::Event::Check);
+            }
+            Event::Category(category) => {
+                page.category = category;
+                page.armed_delete = false;
+                self.settings.settings_category = category;
+                crate::settings::save(&self.settings);
+                return iced::widget::operation::snap_to("settings", iced::widget::scrollable::RelativeOffset::START);
             }
             Event::ToggleSection(title) => {
                 if !page.collapsed.remove(title) {

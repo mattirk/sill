@@ -59,7 +59,10 @@ impl App {
                     Task::none()
                 };
                 if let Some(page) = &mut self.settings_page {
+                    page.category = crate::settings_ui::Category::System;
                     page.collapsed.remove("Daemon");
+                    self.settings.settings_category = page.category;
+                    crate::settings::save(&self.settings);
                 }
                 Task::batch([
                     task,

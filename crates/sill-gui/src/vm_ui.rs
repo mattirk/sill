@@ -688,6 +688,9 @@ mod tests {
         let (mut app, _) = App::new(true, None);
         let _ = app.update(Message::ShowPage(crate::Page::Settings));
         let _ = app.vm_event(Event::Read);
+        if let Some(page) = &mut app.settings_page {
+            page.category = crate::settings_ui::Category::System;
+        }
         crate::snapshots::render(&app, "vm-settings");
         let _ = app.vm_event(Event::RemoveFolder(PathBuf::from("/Volumes/Backup/photos")));
         if let Some(info) = &mut app.vm.info {
