@@ -30,6 +30,8 @@ const SHELF_SHARES: &[(f32, &str)] = &[
 ];
 
 pub struct SettingsPage {
+    pub collapsed: std::collections::BTreeSet<&'static str>,
+    pub shortcuts: Option<crate::shortcuts::Bindings>,
     /// What the daemon said; `None` while it is read.
     pub snapshot: Option<Result<Snapshot, String>>,
     pub instructions: text_editor::Content,
@@ -48,6 +50,8 @@ pub struct SettingsPage {
 impl Default for SettingsPage {
     fn default() -> Self {
         Self {
+            collapsed: std::collections::BTreeSet::from(["Keyboard shortcuts"]),
+            shortcuts: None,
             snapshot: None,
             instructions: text_editor::Content::new(),
             edited: false,
@@ -62,6 +66,7 @@ impl Default for SettingsPage {
 
 #[derive(Debug, Clone)]
 pub enum Event {
+    ToggleSection(&'static str),
     Loaded(Box<Result<Snapshot, String>>),
     Change(SettingChange),
     /// A request done: what to say of it, or why it did not take effect.
@@ -69,6 +74,9 @@ pub enum Event {
     ShelfShare(f32),
     /// Interface scale (sill-gui's own, `crate::settings::SCALES`).
     Scale(f32),
+    ShortcutInput(String, String),
+    ApplyShortcuts,
+    ResetShortcuts,
     Instructions(text_editor::Action),
     SaveInstructions,
     PinPath(String),
@@ -187,25 +195,47 @@ fn quiet_button<'a>(label: &'a str, message: Option<Message>) -> Element<'a, Mes
     )
 }
 
-/// A section: its title over a card of `rows`, separated by thin lines.
-fn section<'a>(title: &'a str, rows: Vec<Element<'a, Message>>) -> Element<'a, Message> {
-    let mut card = Column::new();
-    for (index, row) in rows.into_iter().enumerate() {
-        if index > 0 {
-            card = card.push(rule::horizontal(1).style(style::rule_style(P.bg)));
-        }
-        card = card.push(row);
-    }
-    column![
-        container(text(title).size(style::SMALL).color(P.accent).font(bold())).padding(Padding {
-            top: 18.0,
-            bottom: 8.0,
-            left: 4.0,
-            right: 0.0,
+/// Collapsed cards omit their controls from layout and keyboard focus traversal.
+fn section<'a>(
+    page: &SettingsPage,
+    title: &'static str,
+    rows: Vec<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let collapsed = page.collapsed.contains(title);
+    let header = keys::press(
+        button(
+            row![
+                text(if collapsed { "▸" } else { "▾" }).size(style::SMALL),
+                text(title).size(style::SMALL).font(bold()),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        )
+        .width(Fill)
+        .padding([10, 4])
+        .style(|_, status| button::Style {
+            text_color: P.accent,
+            background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+                .then(|| alpha(P.fg, 0.07).into()),
+            ..button::Style::default()
         }),
-        container(card).style(style::fill(P.surface)),
-    ]
-    .into()
+        event(Event::ToggleSection(title)),
+    );
+    let mut group = column![container(header).padding(Padding {
+        top: 8.0,
+        ..Padding::default()
+    })];
+    if !collapsed {
+        let mut card = Column::new();
+        for (index, row) in rows.into_iter().enumerate() {
+            if index > 0 {
+                card = card.push(rule::horizontal(1).style(style::rule_style(P.bg)));
+            }
+            card = card.push(row);
+        }
+        group = group.push(container(card).style(style::fill(P.surface)));
+    }
+    group.into()
 }
 
 fn bold() -> iced::Font {
@@ -348,6 +378,7 @@ impl App {
             scale_row.push(quiet_button("Reset", Some(event(Event::Scale(1.0)))))
         };
         page_column = page_column.push(section(
+            page,
             "Appearance",
             vec![
                 setting(
@@ -391,6 +422,38 @@ impl App {
             ],
         ));
 
+        let bindings = page.shortcuts.as_ref().unwrap_or(&self.settings.shortcuts);
+        let mut rows = Vec::new();
+        for (i, (id, label, _)) in crate::shortcuts::ACTIONS.iter().enumerate() {
+            rows.push(setting(
+                label,
+                None,
+                text_input("Disabled", crate::shortcuts::value(bindings, i))
+                    .width(180)
+                    .padding(7)
+                    .size(style::SMALL)
+                    .on_input(move |value| event(Event::ShortcutInput((*id).into(), value))),
+            ));
+        }
+        let error = crate::shortcuts::validate(bindings).err();
+        let mut controls = column![text("Use Ctrl or Alt with a key, optionally Shift. Blank disables a shortcut. Use Plus for +.").size(style::SMALL)];
+        if let Some(why) = &error {
+            controls = controls.push(text(why.clone()).size(style::SMALL).color(P.error));
+        }
+        controls = controls.push(
+            row![
+                quiet_button(
+                    "Apply",
+                    (page.shortcuts.is_some() && error.is_none())
+                        .then(|| event(Event::ApplyShortcuts))
+                ),
+                quiet_button("Reset defaults", Some(event(Event::ResetShortcuts))),
+            ]
+            .spacing(8),
+        );
+        rows.push(wide("Shortcut bindings", None, controls));
+        page_column = page_column.push(section(page, "Keyboard shortcuts", rows));
+
         // ---- Window
         let spec = page.hotkey.clone().unwrap_or_else(|| {
             s.hotkey
@@ -423,6 +486,7 @@ impl App {
             hotkey = hotkey.push(text(status).size(style::SMALL).color(P.fg_dim));
         }
         page_column = page_column.push(section(
+            page,
             "Window",
             vec![
                 setting(
@@ -510,6 +574,7 @@ impl App {
             .align_y(Alignment::Center),
         );
         page_column = page_column.push(section(
+            page,
             "Sessions",
             vec![
                 setting(
@@ -566,6 +631,7 @@ impl App {
             .size(style::TEXT)
             .style(style::reader);
         page_column = page_column.push(section(
+            page,
             "Instructions",
             vec![wide(
                 "",
@@ -633,6 +699,7 @@ impl App {
         ]
         .spacing(8);
         page_column = page_column.push(section(
+            page,
             "Memory",
             vec![
                 setting(

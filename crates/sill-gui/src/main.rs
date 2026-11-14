@@ -19,6 +19,7 @@ mod rows;
 mod selection;
 mod settings;
 mod settings_ui;
+mod shortcuts;
 #[cfg(test)]
 mod snapshots;
 mod style;
@@ -1065,7 +1066,7 @@ impl App {
             subscriptions
                 .push(iced::time::every(Duration::from_secs(15)).map(|_| Message::Refresh));
         }
-        subscriptions.push(iced::keyboard::listen().filter_map(keys::shortcut));
+        subscriptions.push(iced::keyboard::listen().filter_map(keys::navigation));
         subscriptions.push(iced::window::resize_events().map(|(_, size)| Message::Resized(size)));
         subscriptions.push(self.layout.subscription());
         // the monitor's size once the window is there: Shelf mode's width comes from it
@@ -1837,6 +1838,11 @@ impl App {
             return Task::none();
         };
         match event {
+            Event::ToggleSection(title) => {
+                if !page.collapsed.remove(title) {
+                    page.collapsed.insert(title);
+                }
+            }
             Event::Loaded(loaded) => {
                 let loaded = *loaded;
                 if let Ok(snapshot) = &loaded {
@@ -1863,6 +1869,28 @@ impl App {
                     Err(why) => Some(format!("Not changed: {why}")),
                 };
                 return self.settings_load();
+            }
+            Event::ShortcutInput(id, value) => {
+                page.shortcuts
+                    .get_or_insert_with(|| self.settings.shortcuts.clone())
+                    .insert(id, value);
+            }
+            Event::ApplyShortcuts => {
+                if let Some(draft) = &page.shortcuts {
+                    match crate::shortcuts::validate(draft) {
+                        Ok(()) => {
+                            self.settings.shortcuts = draft.clone();
+                            page.shortcuts = None;
+                            self.save_settings();
+                        }
+                        Err(why) => page.said = Some(why),
+                    }
+                }
+            }
+            Event::ResetShortcuts => {
+                page.shortcuts = None;
+                self.settings.shortcuts.clear();
+                self.save_settings();
             }
             Event::Scale(scale) => return self.set_scale(scale),
             Event::ShelfShare(share) => {

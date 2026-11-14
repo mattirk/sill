@@ -3016,3 +3016,32 @@ fn interface_scale_keeps_the_window_and_the_working_size() {
     let _ = app.update(Message::ScaleStep(1));
     assert!(near(app.shelf_height(), 688.0));
 }
+
+#[test]
+fn configured_shortcuts_intercept_inputs_and_release_old_bindings() {
+    use iced::keyboard::{Key, Modifiers};
+    let bindings = crate::shortcuts::Bindings::from([
+        ("new_session".into(), "Alt+N".into()),
+        ("close_session".into(), String::new()),
+    ]);
+    let input = iced::widget::text_input("", "")
+        .id("custom-edit")
+        .on_input(Message::Copy);
+    let view = crate::keys::configured_shortcuts(input, &bindings);
+    let mut ui =
+        iced_test::Simulator::with_size(crate::snapshots::settings(), (600.0, 100.0), view);
+    ui.click(iced::widget::Id::new("custom-edit")).unwrap();
+    ui.send(hotkey(Key::Character("n".into()), Modifiers::ALT));
+    ui.send(hotkey(Key::Character("t".into()), Modifiers::CTRL));
+    ui.send(hotkey(Key::Character("w".into()), Modifiers::CTRL));
+    let messages: Vec<_> = ui.into_messages().collect();
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|m| matches!(m, Message::NewSession))
+            .count(),
+        1
+    );
+    assert!(!messages.iter().any(|m| matches!(m, Message::CloseCurrent)));
+    assert!(crate::keys::from_text(&Key::Character("t".into()), Modifiers::CTRL, true).is_none());
+}

@@ -74,9 +74,21 @@ impl<'a, M> Focus<'a, M> {
 
 /// Reserved window shortcuts run before focused text fields and the shell. This wrapper
 /// does not join focus traversal; ordinary editing keys go straight to the child.
+#[cfg(test)]
 pub fn intercept_shortcuts<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     let mut wrapper = focus(content);
     wrapper.before_children = Some(Rc::new(window_message));
+    wrapper.into()
+}
+
+pub fn configured_shortcuts<'a>(
+    content: impl Into<Element<'a, Message>>,
+    bindings: &'a crate::shortcuts::Bindings,
+) -> Element<'a, Message> {
+    let mut wrapper = focus(content);
+    wrapper.before_children = Some(Rc::new(move |key, modifiers| {
+        crate::shortcuts::message(bindings, key, modifiers)
+    }));
     wrapper.into()
 }
 
@@ -463,44 +475,13 @@ pub fn page(ids: &[&'static str], down: bool) -> Task<Message> {
 }
 
 /// Window shortcuts shared by the root, editors and shell; word-selection keys stay local.
+#[cfg(test)]
 fn window_message(key: &Key, modifiers: Modifiers) -> Option<Message> {
-    if !modifiers.command() || modifiers.alt() {
-        return None;
-    }
-    Some(match key.as_ref() {
-        Key::Character(c) if modifiers.shift() && c.eq_ignore_ascii_case("f") => {
-            Message::Layout(crate::layout::Action::ToggleFull)
-        }
-        Key::Character(c) if modifiers.shift() && c.eq_ignore_ascii_case("t") => {
-            Message::ToggleTerminal
-        }
-        Key::Character(c) if modifiers.shift() && c.eq_ignore_ascii_case("d") => {
-            Message::Layout(crate::layout::Action::ToggleShelf)
-        }
-        // Interface scale, as browsers zoom: + (or =, shifted on some layouts) larger, - smaller,
-        // 0 back to 100 %
-        Key::Character("+" | "=") => Message::ScaleStep(1),
-        Key::Character("-") => Message::ScaleStep(-1),
-        Key::Character("0") if !modifiers.shift() => Message::ScaleStep(0),
-        Key::Character(c) if !modifiers.shift() => match c {
-            "t" | "T" => Message::NewSession,
-            "w" | "W" => Message::CloseCurrent,
-            "," => Message::StepTab(-1),
-            "." => Message::StepTab(1),
-            "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" => {
-                Message::SelectTab(c.as_bytes()[0] as usize - b'1' as usize)
-            }
-            _ => return None,
-        },
-        _ => return None,
-    })
-}
-
-pub fn window_shortcut(key: &Key, modifiers: Modifiers) -> bool {
-    window_message(key, modifiers).is_some()
+    crate::shortcuts::message(&crate::shortcuts::Bindings::new(), key, modifiers)
 }
 
 /// What a key no control took means to the window.
+#[cfg(test)]
 pub fn shortcut(event: keyboard::Event) -> Option<Message> {
     let keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
         return None;
@@ -508,6 +489,23 @@ pub fn shortcut(event: keyboard::Event) -> Option<Message> {
     if let Some(message) = window_message(&key, modifiers) {
         return Some(message);
     }
+    navigation(keyboard::Event::KeyPressed {
+        key: key.clone(),
+        modified_key: key,
+        physical_key: keyboard::key::Physical::Unidentified(
+            keyboard::key::NativeCode::Unidentified,
+        ),
+        location: keyboard::Location::Standard,
+        modifiers,
+        text: None,
+        repeat: false,
+    })
+}
+
+pub fn navigation(event: keyboard::Event) -> Option<Message> {
+    let keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
+        return None;
+    };
     let (ctrl, shift) = (modifiers.command(), modifiers.shift());
     Some(match key.as_ref() {
         Key::Named(Named::Tab) if !ctrl && !modifiers.alt() => Message::Focus(!shift),
@@ -521,23 +519,10 @@ pub fn shortcut(event: keyboard::Event) -> Option<Message> {
     })
 }
 
-/// Window shortcuts and, in the prompt, paging the conversation. Ctrl+Shift+Left/Right
-/// stays with the editor for selecting by words.
+/// Prompt paging; configured window shortcuts are handled by the root wrapper.
+/// Ctrl+Shift+Left/Right stays with the editor for selecting by words.
 /// Tab, Shift+Tab and Escape need nothing: an editor lets them through.
 pub fn from_text(key: &Key, modifiers: Modifiers, paging: bool) -> Option<Message> {
-    if window_shortcut(key, modifiers) {
-        return shortcut(keyboard::Event::KeyPressed {
-            key: key.clone(),
-            modified_key: key.clone(),
-            physical_key: keyboard::key::Physical::Unidentified(
-                keyboard::key::NativeCode::Unidentified,
-            ),
-            location: keyboard::Location::Standard,
-            modifiers,
-            text: None,
-            repeat: false,
-        });
-    }
     match key.as_ref() {
         Key::Named(Named::PageUp) if paging && !modifiers.command() => Some(Message::Page(false)),
         Key::Named(Named::PageDown) if paging && !modifiers.command() => Some(Message::Page(true)),

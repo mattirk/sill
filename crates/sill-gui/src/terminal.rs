@@ -476,11 +476,7 @@ impl canvas::Program<Action> for Pane {
                 modifiers,
                 text,
                 ..
-            }) if self.focused
-                && self.status == Status::Running
-                // Reserved window shortcuts pass the shell by.
-                && !crate::keys::window_shortcut(key, *modifiers) =>
-            {
+            }) if self.focused && self.status == Status::Running => {
                 let shortcut = modifiers.control() && modifiers.shift();
                 match key.as_ref() {
                     Key::Character(c) if shortcut && c.eq_ignore_ascii_case("c") => {

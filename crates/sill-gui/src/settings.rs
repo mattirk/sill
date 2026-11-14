@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    pub shortcuts: crate::shortcuts::Bindings,
     /// Shelf mode's width, as a share of the monitor's (0.15–0.4). Unset = 35 %.
     pub shelf_width: Option<f32>,
     /// The mode the window was last in: `shelf`, `drawer` or `full`.
@@ -88,10 +89,14 @@ fn path() -> Option<PathBuf> {
 
 /// The settings, or the defaults when there are none or they cannot be read.
 pub fn load() -> Settings {
-    path()
+    let mut settings: Settings = path()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|text| toml::from_str(&text).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if crate::shortcuts::validate(&settings.shortcuts).is_err() {
+        settings.shortcuts.clear();
+    }
+    settings
 }
 
 /// Write the settings; a failure is reported on stderr, the window goes on.
