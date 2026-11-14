@@ -1,6 +1,7 @@
 //! sill-gui's own settings, `~/.config/sill/sill-gui.toml`: the window's modes and sizes. A file of
 //! its own, not a table in `sill.toml`: the daemon writes that file from its own settings and would
 //! drop a table it does not know.
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -9,27 +10,38 @@ use serde::{Deserialize, Serialize};
 #[serde(default)]
 pub struct Settings {
     pub shortcuts: crate::shortcuts::Bindings,
-    /// Shelf mode's width, as a share of the monitor's (0.15–0.4). Unset = 35 %.
+    /// Shelf mode's width as a share of the main display's usable width (0.15–0.4), on displays
+    /// without one of their own (`displays`). Unset = 35 %.
     pub shelf_width: Option<f32>,
     /// The mode the window was last in: `shelf`, `drawer` or `full`.
     pub mode: Option<String>,
-    /// The working size (Drawer and Full), logical pixels, as the window last had it.
-    pub work_width: Option<f32>,
-    /// Window dimensions as fractions of the primary working area.
-    pub window_width_share: Option<f32>,
-    pub window_height_share: Option<f32>,
-    pub work_height: Option<f32>,
+    /// The display Drawer and Full mode were left on, by name (`DP-1`): where they come back.
+    /// Unset = the main display.
+    pub display: Option<String>,
+    /// What each display keeps, by name: written as the person resizes and moves the window
+    /// (`geometry.rs`).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub displays: BTreeMap<String, DisplayPrefs>,
     /// The drawer's width as last dragged, logical pixels.
     pub drawer_width: Option<f32>,
     /// The window stays above others. Unset = on.
     pub always_on_top: Option<bool>,
-    /// Where the window was left in Drawer and Full mode, device pixels (Shelf mode is always on
-    /// its edge). Unset = the top-left of the working area.
-    pub window_x: Option<i32>,
-    pub window_y: Option<i32>,
     /// Interface scale, a multiplier on the desktop's own scaling: 1.0 is the desktop's normal
     /// size. Unset, unreadable or out of bounds = 1.0.
     pub interface_scale: Option<f32>,
+}
+
+/// One display's window: the Shelf's width and the free window's (Drawer and Full) size and place,
+/// all shares of the display's usable area — device pixels over device pixels, so Interface scale
+/// never enters. Unset = Shelf width's default; half the width, the full height, at the top-left.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DisplayPrefs {
+    pub shelf_width: Option<f32>,
+    pub work_width: Option<f32>,
+    pub work_height: Option<f32>,
+    pub work_x: Option<f32>,
+    pub work_y: Option<f32>,
 }
 
 /// Interface scale's presets in Settings; 1.0 is the desktop's normal size.
@@ -47,14 +59,26 @@ impl Settings {
         valid_scale(self.interface_scale.unwrap_or(1.0))
     }
 
-    /// Shelf mode's share of the monitor's width.
+    /// Shelf mode's share of the main display's width, where the display has none of its own.
     pub fn shelf_share(&self) -> f32 {
-        self.shelf_width
-            .filter(|s| s.is_finite())
-            .map_or(crate::layout::SHELF_SHARE, |s| {
-                s.clamp(0.15, crate::layout::SHELF_MAX)
-            })
+        shelf_share(self.shelf_width).unwrap_or(crate::layout::SHELF_SHARE)
     }
+
+    /// Shelf mode's share of `display`'s width: its own, else the default.
+    pub fn shelf_share_on(&self, display: &str) -> f32 {
+        self.displays
+            .get(display)
+            .and_then(|prefs| shelf_share(prefs.shelf_width))
+            .unwrap_or_else(|| self.shelf_share())
+    }
+}
+
+/// A kept Shelf share, held to 15–40 % (a hand-edited file included); `None` when it is no number.
+fn shelf_share(share: Option<f32>) -> Option<f32> {
+    use crate::layout::{SHELF_MAX, SHELF_MIN};
+    share
+        .filter(|s| s.is_finite())
+        .map(|s| s.clamp(SHELF_MIN, SHELF_MAX))
 }
 
 /// The preset `step` places from `scale` (the nearest preset when it is between two), held to
@@ -126,17 +150,36 @@ mod tests {
 
     #[test]
     fn settings_read_back_and_the_shelf_share_stays_sensible() {
-        let settings = Settings {
+        let mut settings = Settings {
             shelf_width: Some(0.9),
             mode: Some("drawer".into()),
-            work_width: Some(1200.0),
+            display: Some("eDP-1".into()),
             ..Settings::default()
         };
+        settings.displays.insert(
+            "DP-1".into(),
+            DisplayPrefs {
+                shelf_width: Some(0.3),
+                work_width: Some(0.6),
+                ..DisplayPrefs::default()
+            },
+        );
         let text = toml::to_string_pretty(&settings).unwrap();
+        assert!(text.contains("[displays.DP-1]"), "{text}");
         let back: Settings = toml::from_str(&text).unwrap();
         assert_eq!(back.mode.as_deref(), Some("drawer"));
+        assert_eq!(back.display.as_deref(), Some("eDP-1"));
+        assert_eq!(back.displays, settings.displays);
         assert_eq!(back.shelf_share(), 0.4, "a share past 40 % is no shelf");
+        assert_eq!(back.shelf_share_on("DP-1"), 0.3, "the display's own");
+        assert_eq!(back.shelf_share_on("HDMI-1"), 0.4, "else the default");
         assert_eq!(Settings::default().shelf_share(), 0.35);
+        // the single-monitor keys before 2026-11-07 are dropped, not read
+        let old: Settings =
+            toml::from_str("window_x = 300\nwindow_width_share = 0.5\nmode = \"full\"").unwrap();
+        assert_eq!(old.mode.as_deref(), Some("full"));
+        assert!(old.displays.is_empty());
+        assert!(!toml::to_string_pretty(&old).unwrap().contains("window_x"));
     }
 
     #[test]

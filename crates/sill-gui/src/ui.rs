@@ -27,6 +27,8 @@ use crate::style::{self, P, alpha};
 use crate::{App, Message, Pick, SessionView, Tab, icons, keys, rows, selection, viewer};
 
 const MONO_FONT: Font = Font::with_name(crate::fonts::MONO_FAMILY);
+/// The window's resize edges, over its outer pixels: wide enough (the person, 2026-11-07).
+const EDGE: f32 = 5.0;
 
 impl App {
     pub(crate) fn view(&self) -> Element<'_, Message> {
@@ -113,10 +115,10 @@ impl App {
                     .width(if horizontal {
                         Fill
                     } else {
-                        iced::Length::Fixed(5.0)
+                        iced::Length::Fixed(EDGE)
                     })
                     .height(if horizontal {
-                        iced::Length::Fixed(5.0)
+                        iced::Length::Fixed(EDGE)
                     } else {
                         Fill
                     }),
@@ -127,6 +129,16 @@ impl App {
             } else {
                 iced::mouse::Interaction::ResizingHorizontally
             })
+        };
+        // where two edges meet: both ways at once (the same 5 px, no larger target)
+        let corner = |direction, falling| {
+            mouse_area(container(space()).width(EDGE).height(EDGE))
+                .on_press(Message::ResizeWindow(direction))
+                .interaction(if falling {
+                    iced::mouse::Interaction::ResizingDiagonallyDown
+                } else {
+                    iced::mouse::Interaction::ResizingDiagonallyUp
+                })
         };
         // the window-level Host control line: every session with active control, whichever shows
         let mut window = column![bar];
@@ -163,12 +175,37 @@ impl App {
         if let Some(menu) = &self.menu {
             layers = layers.push(self.session_menu(menu));
         }
-        // Resize targets overlay the outer pixels; they must not inset the content.
-        layers = layers
-            .push(container(edge(iced::window::Direction::West, false)).align_left(Fill))
-            .push(container(edge(iced::window::Direction::East, false)).align_right(Fill))
-            .push(container(edge(iced::window::Direction::North, true)).align_top(Fill))
-            .push(container(edge(iced::window::Direction::South, true)).align_bottom(Fill));
+        // Resize targets overlay the outer pixels; they must not inset the content. Shelf mode is
+        // locked to its edge at the full height: only its right edge, corners included, changes
+        // its width. A free window has every edge, and its corners resize both ways.
+        use iced::window::Direction;
+        layers = layers.push(container(edge(Direction::East, false)).align_right(Fill));
+        if self.layout.mode != layout::Mode::Shelf {
+            layers = layers
+                .push(container(edge(Direction::West, false)).align_left(Fill))
+                .push(container(edge(Direction::North, true)).align_top(Fill))
+                .push(container(edge(Direction::South, true)).align_bottom(Fill))
+                .push(
+                    container(corner(Direction::NorthWest, true))
+                        .align_left(Fill)
+                        .align_top(Fill),
+                )
+                .push(
+                    container(corner(Direction::NorthEast, false))
+                        .align_right(Fill)
+                        .align_top(Fill),
+                )
+                .push(
+                    container(corner(Direction::SouthWest, false))
+                        .align_left(Fill)
+                        .align_bottom(Fill),
+                )
+                .push(
+                    container(corner(Direction::SouthEast, true))
+                        .align_right(Fill)
+                        .align_bottom(Fill),
+                );
+        }
         keys::configured_shortcuts(layers, &self.settings.shortcuts)
     }
 
@@ -274,8 +311,9 @@ impl App {
                 tabs = tabs.push(self.tab(tab));
             }
         }
-        // the window has no title bar: a press here that no tab or button takes moves it
-        mouse_area(
+        // the window has no title bar: a press here that no tab or button takes moves it (not in
+        // Shelf mode, which is locked to its edge)
+        let bar = mouse_area(
             container(
                 row![
                     container(mark).padding(Padding::from([0.0, 2.0])),
@@ -330,9 +368,11 @@ impl App {
             })
             .width(Fill)
             .style(style::fill(P.bg)),
-        )
-        .on_press(Message::DragWindow)
-        .into()
+        );
+        if self.layout.mode == layout::Mode::Shelf {
+            return bar.into();
+        }
+        bar.on_press(Message::DragWindow).into()
     }
 
     /// A page's tab: its glyph and title, underlined while it shows.

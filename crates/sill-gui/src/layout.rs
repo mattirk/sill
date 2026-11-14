@@ -1,14 +1,14 @@
 //! How the window is divided, in three modes (docs/sill-gui.md, *Window and layout modes*):
 //!
-//! - **Shelf**: the minimal conversation, at most a share of the monitor wide (35 % by default, 40 % at most),
-//!   the drawer a quick look over it (Ctrl+Shift+F);
+//! - **Shelf**: the minimal conversation on the main display's left edge, a share of its width
+//!   (35 % by default, 15–40 %), the drawer a quick look over it (Ctrl+Shift+F);
 //! - **Drawer**: the conversation with the drawer always beside it, at the working size;
 //! - **Full**: the conversation alone across the working size, without the reading measure.
 //!
 //! Ctrl+Shift+D goes from Shelf to Drawer and back to Shelf from Drawer or Full; Ctrl+Shift+F goes
 //! into Full and back to the mode it came from. Only Shelf has a size rule of its own; the working size is whatever the
-//! window manager or the person made it. When a window cannot fit the drawer beside the
-//! conversation (a narrow tile), the drawer opens over it.
+//! window manager or the person made it (where the window goes: `geometry.rs`). When a window
+//! cannot fit the drawer beside the conversation (a narrow tile), the drawer opens over it.
 use iced::{Event, Subscription, mouse};
 
 use crate::Message;
@@ -25,11 +25,12 @@ pub const UNCOVERED: f32 = 48.0;
 pub const MEASURE: f32 = 800.0;
 /// The grip between the conversation and the drawer.
 pub const HANDLE: f32 = 7.0;
-/// Shelf mode's share of the monitor's width, until set otherwise, and the most it may be
-/// (the person, 2026-11-05).
+/// Shelf mode's share of the main display's usable width, until set otherwise, and the least
+/// and the most it may be (the person, 2026-11-05; the bounds of dragging its edge, 2026-11-07).
 pub const SHELF_SHARE: f32 = 0.35;
+pub const SHELF_MIN: f32 = 0.15;
 pub const SHELF_MAX: f32 = 0.4;
-/// The working size's share of the monitor's width before the person has made one.
+/// The working size's share of the display's usable width before the person has made one.
 pub const WORK_SHARE: f32 = 0.5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

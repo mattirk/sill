@@ -10,6 +10,7 @@ mod details;
 mod editor;
 mod fonts;
 mod forms;
+mod geometry;
 mod herring;
 mod hotkey;
 mod icons;
@@ -285,11 +286,18 @@ pub enum Message {
     RetrySend(String),
     CheckSend(String),
     DiscardSend(String),
-    /// A press on the top bar's empty space: the window manager moves the window.
+    /// A press on the top bar's empty space: the window manager moves the window (not in Shelf
+    /// mode, which is locked to its edge).
     DragWindow,
     ResizeWindow(iced::window::Direction),
-    DisplayPoll,
-    DisplayGeometry(Option<(desktop::Placement, u32, u32)>),
+    /// Time to read the displays and the window again (`geometry.rs`).
+    GeometryTick,
+    /// The displays and the window as read, and why they were.
+    Geometry(Read, Option<(Vec<geometry::Display>, Option<geometry::Rect>)>),
+    /// The window was placed: the displays it was placed with, and where it went.
+    Placed(Option<(Vec<geometry::Display>, Option<geometry::Target>)>),
+    /// The window manager moved the window.
+    Moved,
     Quit,
     Media(media::Event),
     AttachmentPaths(String, String, Option<Vec<std::path::PathBuf>>),
@@ -307,8 +315,8 @@ pub enum Message {
     Resized(iced::Size),
     /// The window is open: ask for its monitor's size.
     Opened(iced::window::Id),
-    /// The window's X11 id, for placing and activating it.
-    XId(u64),
+    /// The window's X11 id, for placing and activating it; none when it is no X11 window.
+    XId(Option<u64>),
     /// From the control socket: show, hide, toggle, quit.
     Control(control::Command),
     /// From the hotkey's thread: a press, or how the grab stands.
@@ -319,20 +327,12 @@ pub enum Message {
     CloseRequested,
     /// From the tray icon.
     Tray(tray::Asked),
-    /// Where the window was when it hid (Drawer and Full mode keep it).
-    Hidden(Option<(i32, i32)>),
-    /// Where the window was when it went into Shelf mode.
-    Remember(Option<(i32, i32)>),
     /// Work done off the window's thread that needs no answer.
     Nothing,
-    /// The monitor's size, once the window knows it: Shelf mode's width comes from it.
+    /// The monitor's size as iced reports it: Shelf mode's width where there is no X11.
     Monitor(Option<iced::Size>),
-    /// The desktop's own scale for the window.
-    DesktopScale(f32),
     /// Interface scale one preset larger (1) or smaller (-1), or back to 100 % (0).
     ScaleStep(i32),
-    /// The working area's height in device pixels, where X11 tells it.
-    WorkHeight(Option<u32>),
     /// The pointer came over the top bar's activity, or left it: the timer shows meanwhile.
     ActivityHover(bool),
     /// Full conversation, and the drawer's edge dragged.
@@ -657,17 +657,15 @@ pub struct App {
     /// sill-gui's own settings (`settings.rs`); saved only when `persist` (not in the demo).
     pub settings: settings::Settings,
     persist: bool,
-    /// The monitor's logical size, once known.
+    /// The monitor's size in the window's units, as iced reports it: Shelf mode's width where
+    /// there is no X11 to place the window with.
     pub monitor: Option<iced::Size>,
-    /// The desktop's own scale for the window (iced multiplies Interface scale on top), and the
-    /// working area's height in device pixels (X11): Shelf mode's height, whatever the scale.
-    desktop_scale: Option<f32>,
-    work_height_px: Option<u32>,
-    display_area: Option<desktop::Placement>,
-    display_settling: u8,
-    /// The window, once open, and its X11 id.
+    /// Where the window goes and what the person made of it (`geometry.rs`).
+    pub geometry: geometry::Controller,
+    /// The window, once open, and its X11 id; `no_x11` once it is known to have none.
     pub window_id: Option<iced::window::Id>,
     pub xid: Option<u64>,
+    no_x11: bool,
     /// The window is shown (not hidden by the hotkey, `sill toggle` or Close).
     pub visible: bool,
     /// The global hotkey's thread (none in the demo and the tests), and how its grab stands.
@@ -685,6 +683,27 @@ pub struct App {
     /// A selection is being dragged in the conversation: following the tail would pull the text
     /// from under the pointer, so new text does not scroll it until the drag ends.
     pub selecting: bool,
+}
+
+/// Why the window's geometry was read: the regular look, or the last one before the window
+/// hides or leaves a mode (the person's change is kept then, not waited for).
+#[derive(Debug, Clone, Copy)]
+pub enum Read {
+    Poll,
+    Hide,
+    Leave(layout::Mode),
+}
+
+/// The window's X11 id, when it is an X11 window: on Wayland iced's raw id is a surface's address,
+/// which X11 calls must never be given (they could move another client's window).
+fn x11_window(window: &dyn iced::window::Window) -> Option<u64> {
+    use iced::window::raw_window_handle::RawWindowHandle;
+    match window.window_handle().ok()?.as_raw() {
+        // X ids are 32 bits, whatever Xlib's long is
+        RawWindowHandle::Xlib(handle) => Some(u64::from(handle.window as u32)),
+        RawWindowHandle::Xcb(handle) => Some(u64::from(handle.window.get())),
+        _ => None,
+    }
 }
 
 /// Run `work` on a thread of its own; its result comes back as a message.
@@ -762,12 +781,10 @@ impl App {
             settings: settings::Settings::default(),
             persist: false,
             monitor: None,
-            desktop_scale: None,
-            work_height_px: None,
-            display_area: None,
-            display_settling: 0,
+            geometry: geometry::Controller::default(),
             window_id: None,
             xid: None,
+            no_x11: false,
             visible: !HIDDEN.load(std::sync::atomic::Ordering::Relaxed),
             hotkey: None,
             hotkey_status: None,
@@ -863,44 +880,24 @@ impl App {
         )
     }
 
-    /// Where the window goes when shown, off the window's thread: Shelf mode on its edge, sized;
-    /// otherwise where it was left, else the working area's top-left. Set before the window is
-    /// mapped and again after, so the window manager neither places it nor moves it back.
-    fn placing(&self) -> impl Fn() + Send + Clone + 'static {
-        let xid = self.xid;
-        let shelf = (self.layout.mode == layout::Mode::Shelf).then(|| self.settings.shelf_share());
-        let left = self.settings.window_x.zip(self.settings.window_y);
-        let shares = (
-            self.settings
-                .window_width_share
-                .unwrap_or(0.5)
-                .clamp(0.05, 1.0),
-            self.settings
-                .window_height_share
-                .unwrap_or(1.0)
-                .clamp(0.05, 1.0),
-        );
+    /// Put the window where it belongs in its mode (`geometry::target`), off the window's thread:
+    /// the displays read as they are now, the window placed and held to its mode's limits. What
+    /// it was placed with comes back (`Message::Placed`).
+    fn placing(
+        &self,
+    ) -> impl Fn() -> Option<(Vec<geometry::Display>, Option<geometry::Target>)>
+    + Send
+    + Clone
+    + 'static {
+        let (xid, mode, settings) = (self.xid, self.layout.mode, self.settings.clone());
         move || {
-            let Some(xid) = xid else { return };
-            desktop::stamp(xid);
-            match shelf {
-                Some(share) => {
-                    if let Some(p) = desktop::shelf_placement(share) {
-                        desktop::pre_place(xid, p.x, p.y, Some((p.width, p.height)));
-                    }
-                }
-                None => {
-                    if let Some((x, y)) = left.or_else(desktop::work_origin) {
-                        let size = desktop::shelf_placement(1.0).map(|p| {
-                            (
-                                (p.width as f32 * shares.0).round() as u32,
-                                (p.height as f32 * shares.1).round() as u32,
-                            )
-                        });
-                        desktop::pre_place(xid, x, y, size);
-                    }
-                }
+            let xid = xid?;
+            let displays = desktop::displays()?;
+            let target = geometry::target(mode, &settings, &displays);
+            if let Some(t) = &target {
+                desktop::place(xid, t.rect, t.limits);
             }
+            Some((displays, target))
         }
     }
 
@@ -911,50 +908,58 @@ impl App {
             return Task::none();
         };
         self.visible = true;
-        self.display_settling = 2;
         let xid = self.xid;
         let place = self.placing();
         let again = place.clone();
-        blocking(place, |()| Message::Nothing)
-            .chain(iced::window::set_mode(id, iced::window::Mode::Windowed))
-            .chain(blocking(
-                move || {
-                    let Some(xid) = xid else { return };
-                    // the window manager maps it first; then it is placed again and activated —
-                    // asked again a moment later, should the first ask come before it was managed
-                    std::thread::sleep(std::time::Duration::from_millis(60));
-                    again();
+        blocking(
+            move || {
+                if let Some(xid) = xid {
+                    desktop::stamp(xid);
+                }
+                place()
+            },
+            Message::Placed,
+        )
+        .chain(iced::window::set_mode(id, iced::window::Mode::Windowed))
+        .chain(blocking(
+            move || {
+                let xid = xid?;
+                // the window manager maps it first; then it is placed again and activated —
+                // asked again a moment later, should the first ask come before it was managed
+                std::thread::sleep(std::time::Duration::from_millis(60));
+                let placed = again();
+                desktop::activate(xid, time);
+                // the window manager now and then lets the request go by, or gives the focus
+                // back to the window before: asked again, and the focus set directly, until
+                // the window is active — for a little over a second, never once it is
+                let mut asks = 1;
+                for wait in [200u64, 250, 300, 400] {
+                    std::thread::sleep(std::time::Duration::from_millis(wait));
+                    if desktop::is_active(xid) {
+                        break;
+                    }
+                    asks += 1;
                     desktop::activate(xid, time);
-                    // the window manager now and then lets the request go by, or gives the focus
-                    // back to the window before: asked again, and the focus set directly, until
-                    // the window is active — for a little over a second, never once it is
-                    let mut asks = 1;
-                    for wait in [200u64, 250, 300, 400] {
-                        std::thread::sleep(std::time::Duration::from_millis(wait));
+                    desktop::focus(xid);
+                }
+                // to the journal when it took more than one ask: how often the window
+                // manager lets a request go by
+                if asks > 1 {
+                    eprintln!(
+                        "sill-gui: brought up: {} after {asks} asks",
                         if desktop::is_active(xid) {
-                            break;
+                            "active"
+                        } else {
+                            "still not active"
                         }
-                        asks += 1;
-                        desktop::activate(xid, time);
-                        desktop::focus(xid);
-                    }
-                    // to the journal when it took more than one ask: how often the window
-                    // manager lets a request go by
-                    if asks > 1 {
-                        eprintln!(
-                            "sill-gui: brought up: {} after {asks} asks",
-                            if desktop::is_active(xid) {
-                                "active"
-                            } else {
-                                "still not active"
-                            }
-                        );
-                    }
-                },
-                |()| Message::Nothing,
-            ))
-            // and the keyboard in the session's prompt
-            .chain(self.focus_prompt())
+                    );
+                }
+                placed
+            },
+            Message::Placed,
+        ))
+        // and the keyboard in the session's prompt
+        .chain(self.focus_prompt())
     }
 
     /// The prompt takes the keyboard, where a session's conversation is shown.
@@ -965,28 +970,24 @@ impl App {
         operation::focus("prompt")
     }
 
-    /// Hide the window; it goes on, and the hotkey or `sill toggle` shows it again. Where it was
-    /// is read first, to show it there again.
+    /// Hide the window; it goes on, and the hotkey or `sill toggle` shows it again. The window is
+    /// read first: a change the person made to it is kept before it goes.
     fn hide(&mut self) -> Task<Message> {
         if self.window_id.is_none() {
             return Task::none();
         }
         self.visible = false;
         match self.xid {
-            Some(xid) => blocking(move || desktop::position(xid), Message::Hidden),
-            None => self.hidden(None),
+            Some(xid) => blocking(
+                move || desktop::snapshot(xid),
+                |read| Message::Geometry(Read::Hide, read),
+            ),
+            None => self.hidden(),
         }
     }
 
-    /// The window's place kept (Drawer and Full mode), and the window unmapped.
-    fn hidden(&mut self, at: Option<(i32, i32)>) -> Task<Message> {
-        if self.layout.mode != layout::Mode::Shelf {
-            self.remember_work_size();
-            if let Some((x, y)) = at {
-                self.settings.window_x = Some(x);
-                self.settings.window_y = Some(y);
-            }
-        }
+    /// The settings saved, and the window unmapped.
+    fn hidden(&mut self) -> Task<Message> {
         self.save_settings();
         match self.window_id {
             Some(id) => iced::window::set_mode(id, iced::window::Mode::Hidden),
@@ -1009,19 +1010,90 @@ impl App {
         )
     }
 
-    /// The window where it goes (`placing`), while it is shown (X11).
-    fn place_window(&self) -> Task<Message> {
+    /// The window where it belongs (`placing`) on X11; elsewhere Shelf mode's width rule
+    /// (`fit_without_x11`).
+    fn place(&self) -> Task<Message> {
         if self.xid.is_none() {
-            return Task::none();
+            return self.fit_without_x11(true);
         }
-        blocking(self.placing(), |()| Message::Nothing)
+        blocking(self.placing(), Message::Placed)
+    }
+
+    /// The displays and the window as read (`Message::Geometry`): the regular look, or the last
+    /// one before the window hides or leaves a mode, when the person's change is kept at once.
+    fn geometry_read(
+        &mut self,
+        why: Read,
+        read: Option<(Vec<geometry::Display>, Option<geometry::Rect>)>,
+    ) -> Task<Message> {
+        match why {
+            Read::Poll => {
+                // hidden since it was asked: showing reads the displays afresh
+                let Some((displays, window)) = read.filter(|_| self.visible) else {
+                    return Task::none();
+                };
+                let target = geometry::target(self.layout.mode, &self.settings, &displays);
+                match self
+                    .geometry
+                    .observe(displays, window, target.as_ref(), Instant::now())
+                {
+                    geometry::Step::Nothing => {}
+                    geometry::Step::Place => return self.place(),
+                    geometry::Step::Keep(rect) => self.keep(self.layout.mode, rect),
+                }
+                Task::none()
+            }
+            Read::Hide => {
+                self.flush_geometry(self.layout.mode, read.and_then(|(_, window)| window));
+                // shown again while it was read: it stays
+                if self.visible {
+                    self.save_settings();
+                    return Task::none();
+                }
+                self.hidden()
+            }
+            Read::Leave(old) => {
+                self.flush_geometry(old, read.and_then(|(_, window)| window));
+                // out of Shelf mode the window stays on the display it was on: the main one
+                if old == layout::Mode::Shelf
+                    && let Some(main) = geometry::main_display(&self.geometry.displays)
+                {
+                    self.settings.display = Some(main.name.clone());
+                }
+                self.save_settings();
+                self.place()
+            }
+        }
+    }
+
+    /// The person's own geometry in `mode`, kept (`geometry::remember`).
+    fn keep(&mut self, mode: layout::Mode, rect: geometry::Rect) {
+        if geometry::remember(mode, &mut self.settings, &self.geometry.displays, rect) {
+            self.save_settings();
+        }
+    }
+
+    /// The person's last change kept before the window hides, changes mode or quits: `window` as
+    /// read now, else as last seen.
+    fn flush_geometry(&mut self, mode: layout::Mode, window: Option<geometry::Rect>) {
+        if let Some(rect) = self.geometry.flush(window, Instant::now()) {
+            self.keep(mode, rect);
+        }
+    }
+
+    /// Shelf mode's share on the main display, as Settings shows it.
+    pub fn shelf_share(&self) -> f32 {
+        geometry::main_display(&self.geometry.displays).map_or_else(
+            || self.settings.shelf_share(),
+            |main| self.settings.shelf_share_on(&main.name),
+        )
     }
 
     /// Interface scale changes now: everything inside the window grows or shrinks, the window
     /// itself stays where it is, as large as it was. iced's sizes are in units of the scale, so
-    /// the window's and the monitor's are converted to the new one before anything is fitted
-    /// (Shelf mode would otherwise be held to its old width in new units), and the monitor is
-    /// read again once iced has the new scale.
+    /// the window's and the monitor's are converted to the new one. On X11 the window's place,
+    /// size and limits are device pixels and stay as they are; without X11 Shelf mode is fitted
+    /// again once iced reports the monitor in the new units.
     fn set_scale(&mut self, scale: f32) -> Task<Message> {
         let (old, new) = (self.settings.scale(), settings::valid_scale(scale));
         if old == new {
@@ -1035,10 +1107,9 @@ impl App {
             .map(|m| iced::Size::new(m.width * ratio, m.height * ratio));
         self.settings.interface_scale = Some(new);
         self.save_settings();
-        let fit = self.fit_window(false);
         match self.window_id {
-            Some(id) => fit.chain(iced::window::monitor_size(id).map(Message::Monitor)),
-            None => fit,
+            Some(id) if self.no_x11 => iced::window::monitor_size(id).map(Message::Monitor),
+            _ => Task::none(),
         }
     }
 
@@ -1066,108 +1137,43 @@ impl App {
         }
     }
 
-    /// The working size kept for Drawer and Full mode, in the units of Interface scale 100 %:
-    /// the window's size on the screen, whatever the scale is when it comes back.
-    fn remember_work_size(&mut self) {
-        // X11 geometry polling records physical proportions independently of UI scaling.
-        if self.display_area.is_some() {
-            return;
-        }
-        if let Some(m) = self.monitor {
-            self.settings.window_width_share = Some((self.width / m.width).clamp(0.05, 1.0));
-            self.settings.window_height_share = Some((self.height / m.height).clamp(0.05, 1.0));
-        }
-    }
-
-    /// The working size (Drawer and Full): as the window last had it, else half the monitor.
-    fn work_size(&self) -> Option<iced::Size> {
-        self.monitor.map(|m| {
-            iced::Size::new(
-                m.width
-                    * self
-                        .settings
-                        .window_width_share
-                        .unwrap_or(layout::WORK_SHARE)
-                        .clamp(0.05, 1.0),
-                m.height
-                    * self
-                        .settings
-                        .window_height_share
-                        .unwrap_or(1.0)
-                        .clamp(0.05, 1.0),
-            )
-        })
-    }
-
-    /// Shelf mode's height in the window's units: the working area's full height (device pixels
-    /// over the desktop's scale and Interface scale), else the height it has. The window's start
-    /// height matched the working area only by chance, and only at 100 %.
-    fn shelf_height(&self) -> f32 {
-        match (self.work_height_px, self.desktop_scale) {
-            (Some(px), Some(desktop)) => px as f32 / (desktop * self.settings.scale()),
-            _ => self.height,
-        }
-    }
-
-    /// The window's size rule for the mode it is in: Shelf mode is at most its share of the
-    /// monitor and held there (a maximum the window manager may honour; a tiling one decides for
-    /// itself); the other modes have the working size and no maximum.
-    fn fit_window(&self, entering: bool) -> Task<Message> {
-        // nothing to fit before the window knows its monitor (and no window in tests)
-        if self.monitor.is_none() {
+    /// Without X11 (Wayland) there are no displays to read and no place to set: Shelf mode is held
+    /// to its share of the monitor iced reports (a maximum the compositor may honour), and Drawer
+    /// and Full get half its width when entered. Nothing is kept per display.
+    fn fit_without_x11(&self, entering: bool) -> Task<Message> {
+        let (Some(id), Some(monitor), true) = (self.window_id, self.monitor, self.no_x11) else {
             return Task::none();
-        }
-        let mut tasks = vec![];
+        };
         if self.layout.mode == layout::Mode::Shelf {
-            let Some(monitor) = self.monitor else {
-                return Task::none();
-            };
             let width = (monitor.width * self.settings.shelf_share()).round();
-            let height = self.shelf_height();
-            let max = iced::Size::new(width, monitor.height.max(height));
-            let size = iced::Size::new(width.min(self.width.max(layout::MAIN_MIN)), height);
-            let size = if entering {
-                iced::Size::new(width, height)
-            } else {
-                size
-            };
-            tasks.push(
-                iced::window::latest()
-                    .and_then(move |id| iced::window::set_max_size(id, Some(max))),
+            let max = iced::Size::new(
+                (monitor.width * layout::SHELF_MAX).round(),
+                monitor.height.max(self.height),
             );
-            tasks.push(iced::window::latest().and_then(move |id| iced::window::resize(id, size)));
-        } else {
-            tasks.push(iced::window::latest().and_then(|id| iced::window::set_max_size(id, None)));
-            if entering && let Some(size) = self.work_size() {
-                tasks.push(
-                    iced::window::latest().and_then(move |id| iced::window::resize(id, size)),
-                );
-            }
+            return iced::window::set_max_size(id, Some(max))
+                .chain(iced::window::resize(id, iced::Size::new(width, self.height)));
         }
-        // into a mode, the window goes where it belongs there: Shelf mode on its edge, its full
-        // working height; Drawer and Full where the window was left
-        if entering {
-            return Task::batch(tasks).chain(self.place_window());
+        let unlimited = iced::window::set_max_size(id, None);
+        if !entering {
+            return unlimited;
         }
-        Task::batch(tasks)
+        let width = (monitor.width * layout::WORK_SHARE).round();
+        unlimited.chain(iced::window::resize(id, iced::Size::new(width, self.height)))
     }
 
-    /// Into `mode`: the drawer in Drawer mode only (a quick look elsewhere closes), the window's
-    /// size from Shelf to working and back; Drawer ⇄ Full keep the window as it is.
+    /// Into `mode`: the drawer in Drawer mode only (a quick look elsewhere closes), the window
+    /// from the Shelf's edge to its working size and place and back; Drawer ⇄ Full keep the
+    /// window as it is.
     fn set_mode(&mut self, mode: layout::Mode) -> Task<Message> {
         use layout::Mode;
         let old = self.layout.mode;
         if old == mode {
             return Task::none();
         }
-        if old != Mode::Shelf {
-            self.remember_work_size();
-        }
         if mode == Mode::Full {
             self.layout.before_full = old;
         }
         self.layout.mode = mode;
-        self.display_settling = 2;
         let opening = mode == Mode::Drawer && !self.workspace.shown;
         self.workspace.shown = mode == Mode::Drawer;
         self.save_settings();
@@ -1176,13 +1182,14 @@ impl App {
             tasks.push(self.files_refresh(&id));
         }
         if (old == Mode::Shelf) != (mode == Mode::Shelf) {
-            // into Shelf mode: where the window was is kept for when it comes out
-            match self.xid.filter(|_| mode == Mode::Shelf) {
-                Some(xid) => tasks.push(
-                    blocking(move || desktop::position(xid), Message::Remember)
-                        .chain(self.fit_window(true)),
-                ),
-                None => tasks.push(self.fit_window(true)),
+            // the window read first, so what the person made of it in the old mode is kept; then
+            // placed where the new mode has it
+            match self.xid {
+                Some(xid) => tasks.push(blocking(
+                    move || desktop::snapshot(xid),
+                    move |read| Message::Geometry(Read::Leave(old), read),
+                )),
+                None => tasks.push(self.place()),
             }
         }
         Task::batch(tasks)
@@ -1227,10 +1234,24 @@ impl App {
             subscriptions
                 .push(iced::time::every(Duration::from_secs(15)).map(|_| Message::Refresh));
         }
-        subscriptions
-            .push(iced::time::every(Duration::from_millis(500)).map(|_| Message::DisplayPoll));
+        // the displays and the window, read often while the window settles or the person drags
+        // it (`geometry.rs`)
+        if self.visible && self.xid.is_some() {
+            let every = if self.geometry.busy(Instant::now()) {
+                200
+            } else {
+                1000
+            };
+            subscriptions.push(
+                iced::time::every(Duration::from_millis(every)).map(|_| Message::GeometryTick),
+            );
+        }
         subscriptions.push(iced::keyboard::listen().filter_map(keys::navigation));
         subscriptions.push(iced::window::resize_events().map(|(_, size)| Message::Resized(size)));
+        subscriptions.push(iced::event::listen_with(|event, _status, _window| {
+            matches!(event, iced::Event::Window(iced::window::Event::Moved(_)))
+                .then_some(Message::Moved)
+        }));
         subscriptions.push(self.layout.subscription());
         // the monitor's size once the window is there: Shelf mode's width comes from it
         subscriptions.push(iced::window::open_events().map(Message::Opened));
@@ -1575,70 +1596,44 @@ impl App {
                 }
             }
             Message::ResizeWindow(direction) => {
+                // Shelf mode is locked to its edge: only its right edge is the person's
+                if self.layout.mode == layout::Mode::Shelf
+                    && !matches!(direction, iced::window::Direction::East)
+                {
+                    return Task::none();
+                }
                 return iced::window::latest()
                     .and_then(move |id| iced::window::drag_resize(id, direction));
             }
-            Message::DisplayPoll => {
+            Message::GeometryTick => {
                 if let Some(xid) = self.xid {
                     return blocking(
-                        move || desktop::window_geometry(xid),
-                        Message::DisplayGeometry,
+                        move || desktop::snapshot(xid),
+                        |read| Message::Geometry(Read::Poll, read),
                     );
                 }
             }
-            Message::DisplayGeometry(Some((area, width, height))) => {
-                if self.display_area != Some(area) {
-                    self.display_area = Some(area);
-                    self.display_settling = 2;
-                    if self.layout.mode != layout::Mode::Shelf {
-                        let w = (area.width as f32
-                            * self
-                                .settings
-                                .window_width_share
-                                .unwrap_or(0.5)
-                                .clamp(0.05, 1.0))
-                        .round() as u32;
-                        let h = (area.height as f32
-                            * self
-                                .settings
-                                .window_height_share
-                                .unwrap_or(1.0)
-                                .clamp(0.05, 1.0))
-                        .round() as u32;
-                        if let Some(xid) = self.xid {
-                            return blocking(
-                                move || desktop::pre_place(xid, area.x, area.y, Some((w, h))),
-                                |_| Message::Nothing,
-                            );
-                        }
-                    } else {
-                        return self.place_window();
-                    }
-                } else if self.display_settling > 0 {
-                    self.display_settling -= 1;
-                } else if self.visible && self.layout.mode != layout::Mode::Shelf {
-                    let w = (width as f32 / area.width as f32).clamp(0.05, 1.0);
-                    let h = (height as f32 / area.height as f32).clamp(0.05, 1.0);
-                    if self.settings.window_width_share != Some(w)
-                        || self.settings.window_height_share != Some(h)
-                    {
-                        self.settings.window_width_share = Some(w);
-                        self.settings.window_height_share = Some(h);
-                        self.save_settings();
-                    }
+            Message::Geometry(why, read) => return self.geometry_read(why, read),
+            Message::Placed(placed) => {
+                if let Some((displays, target)) = placed {
+                    self.geometry
+                        .placed(displays, target.map(|t| t.rect), Instant::now());
                 }
             }
-            Message::DisplayGeometry(None) => {}
-            Message::DragWindow => return iced::window::latest().and_then(iced::window::drag),
+            Message::Moved => self.geometry.stir(Instant::now()),
+            Message::DragWindow => {
+                if self.layout.mode == layout::Mode::Shelf {
+                    return Task::none();
+                }
+                return iced::window::latest().and_then(iced::window::drag);
+            }
             // the window goes; the daemon and its sessions go on (the tray icon and the hotkey
             // will bring the window back, docs/sill-gui.md)
             // Close and Ctrl+Q hide the window: it stays, so the hotkey and `sill toggle` bring
             // it back (the demo, with neither, quits)
             Message::Quit => {
                 if self.demo || self.window_id.is_none() {
-                    if self.layout.mode != layout::Mode::Shelf {
-                        self.remember_work_size();
-                    }
+                    self.flush_geometry(self.layout.mode, None);
                     self.save_settings();
                     return iced::exit();
                 }
@@ -1718,24 +1713,21 @@ impl App {
             Message::Resized(size) => {
                 self.width = size.width;
                 self.height = size.height;
+                self.geometry.stir(Instant::now());
             }
             Message::ActivityHover(on) => self.activity_hovered = on,
             Message::Opened(id) => {
                 self.window_id = Some(id);
                 return Task::batch([
                     iced::window::monitor_size(id).map(Message::Monitor),
-                    iced::window::raw_id::<Message>(id).map(Message::XId),
-                    iced::window::scale_factor(id).map(Message::DesktopScale),
-                    blocking(
-                        || desktop::shelf_placement(1.0).map(|p| p.height),
-                        Message::WorkHeight,
-                    ),
+                    iced::window::run(id, x11_window).map(Message::XId),
                 ]);
             }
             Message::XId(xid) => {
-                self.xid = Some(xid);
+                self.xid = xid;
+                self.no_x11 = xid.is_none();
                 if self.visible {
-                    return self.place_window();
+                    return self.place();
                 }
             }
             Message::Control(command) => match command {
@@ -1743,6 +1735,8 @@ impl App {
                 control::Command::Hide => return self.hide(),
                 control::Command::Toggle(time) => return self.toggle(time),
                 control::Command::Quit => {
+                    self.flush_geometry(self.layout.mode, None);
+                    self.save_settings();
                     let _ = self.hide();
                     return iced::exit();
                 }
@@ -1756,36 +1750,22 @@ impl App {
                 return if active { self.hide() } else { self.show(time) };
             }
             Message::CloseRequested => return self.hide(),
-            Message::Hidden(at) => return self.hidden(at),
-            Message::Remember(at) => {
-                if let Some((x, y)) = at {
-                    self.settings.window_x = Some(x);
-                    self.settings.window_y = Some(y);
-                    self.save_settings();
-                }
-            }
             Message::Tray(tray::Asked::Toggle) => return self.toggle(0),
             Message::Tray(tray::Asked::Quit) => {
                 if let Some(tray) = self.tray.take() {
                     tray.shutdown();
                 }
+                self.flush_geometry(self.layout.mode, None);
+                self.save_settings();
                 return self.hide().chain(iced::exit());
             }
             Message::Nothing => {}
             Message::Monitor(size) => {
                 self.monitor = size;
-                return self.fit_window(false);
+                return self.fit_without_x11(false);
             }
             Message::ScaleStep(step) => {
                 return self.set_scale(settings::step_scale(self.settings.scale(), step));
-            }
-            Message::DesktopScale(scale) => {
-                self.desktop_scale = (scale.is_finite() && scale > 0.0).then_some(scale);
-                return self.fit_window(false);
-            }
-            Message::WorkHeight(height) => {
-                self.work_height_px = height;
-                return self.fit_window(false);
             }
             Message::Layout(action) => match action {
                 layout::Action::Mode(_)
@@ -2231,10 +2211,15 @@ impl App {
             }
             Event::Scale(scale) => return self.set_scale(scale),
             Event::ShelfShare(share) => {
+                // the main display's width, and the default for displays without their own
                 self.settings.shelf_width = Some(share);
+                if let Some(main) = geometry::main_display(&self.geometry.displays) {
+                    let prefs = self.settings.displays.entry(main.name.clone()).or_default();
+                    prefs.shelf_width = Some(share);
+                }
                 self.save_settings();
                 if self.layout.mode == layout::Mode::Shelf {
-                    return self.fit_window(true);
+                    return self.place();
                 }
             }
             Event::Instructions(action) => {

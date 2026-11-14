@@ -1,142 +1,171 @@
-//! The window on an X11 desktop:
+//! The window on an X11 desktop — the platform side of `geometry.rs`:
 //!
-//! - **where it goes:** Shelf mode on the primary monitor's left edge at its full working height
-//!   (panels excluded); Drawer and Full where the window was left — set before the window is
-//!   mapped, as the user's choice in its size hints, so the window manager does not place it;
+//! - **the displays and the window:** RandR's monitors (name, primary, bounds), each one's usable
+//!   area from the window manager's work areas, and the window's own geometry, in device pixels;
+//! - **placing it:** its place, size and size limits, set as the user's choice in its size hints,
+//!   so the window manager neither places it itself on mapping nor holds it to an old limit;
 //! - **coming up with the focus:** the window dated as just used (`_NET_WM_USER_TIME`), a
 //!   pager's `_NET_ACTIVE_WINDOW` request at the server's time now, and, should the window manager
 //!   let that go by, the focus set directly (the window asks again until it is active).
 //!
-//! Each call opens its own short X connection; without X11 (Wayland) they do nothing.
+//! Each call opens its own short X connection; without X11 (Wayland) there is no window id to
+//! pass them (`main.rs` asks iced for an X11 handle only).
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{
     AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt, CreateWindowAux, EventMask,
     PropMode, WindowClass,
 };
+use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
-/// A window's place on the screen, in device pixels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Placement {
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-}
+use crate::geometry::{Display, Limits, Rect};
 
-fn connect() -> Option<(x11rb::rust_connection::RustConnection, usize)> {
+fn connect() -> Option<(RustConnection, usize)> {
     std::env::var_os("DISPLAY")?;
     x11rb::connect(None).ok()
 }
 
-/// The primary monitor (RandR; the first when none is marked primary), in device pixels.
-fn primary_monitor() -> Option<(i32, i32, u32, u32)> {
-    use x11rb::protocol::randr::ConnectionExt as _;
-    let (conn, screen) = connect()?;
-    let root = conn.setup().roots[screen].root;
-    let reply = conn.randr_get_monitors(root, true).ok()?.reply().ok()?;
-    let m = reply
-        .monitors
-        .iter()
-        .find(|m| m.primary)
-        .or_else(|| reply.monitors.first())?;
-    Some((m.x as i32, m.y as i32, m.width as u32, m.height as u32))
-}
-
-/// `_NET_WORKAREA` of the current desktop: the screen without the panels (over every monitor).
-fn net_workarea() -> Option<(i32, i32, u32, u32)> {
-    let (conn, screen) = connect()?;
-    let root = conn.setup().roots[screen].root;
-    let atom = |name: &[u8]| {
-        conn.intern_atom(false, name)
-            .ok()?
-            .reply()
-            .ok()
-            .map(|r| r.atom)
-    };
-    let workarea = atom(b"_NET_WORKAREA")?;
-    let current = atom(b"_NET_CURRENT_DESKTOP")?;
-    let desktop = conn
-        .get_property(false, root, current, AtomEnum::CARDINAL, 0, 1)
+fn atom(conn: &RustConnection, name: &[u8]) -> Option<u32> {
+    conn.intern_atom(false, name)
         .ok()?
         .reply()
-        .ok()?
-        .value32()?
-        .next()
-        .unwrap_or(0) as usize;
+        .ok()
+        .map(|r| r.atom)
+}
+
+/// A CARDINAL list property of the root window.
+fn cardinals(conn: &RustConnection, root: u32, name: &[u8]) -> Option<Vec<u32>> {
+    let property = atom(conn, name)?;
     let reply = conn
-        .get_property(false, root, workarea, AtomEnum::CARDINAL, 0, 1024)
+        .get_property(false, root, property, AtomEnum::CARDINAL, 0, 1024)
         .ok()?
         .reply()
         .ok()?;
-    let v: Vec<u32> = reply.value32()?.collect();
-    let i = desktop * 4;
-    (v.len() >= i + 4).then(|| (v[i] as i32, v[i + 1] as i32, v[i + 2], v[i + 3]))
+    Some(reply.value32()?.collect())
 }
 
-/// Where Shelf mode goes: the primary monitor's working area, its left edge, `share` of its width.
-pub fn shelf_placement(share: f32) -> Option<Placement> {
-    let (mx, my, mw, mh) = primary_monitor()?;
-    let (x, y, w, h) = match net_workarea() {
-        Some((wx, wy, ww, wh)) => {
-            let (x0, y0) = (mx.max(wx), my.max(wy));
-            let x1 = (mx + mw as i32).min(wx + ww as i32);
-            let y1 = (my + mh as i32).min(wy + wh as i32);
-            if x1 > x0 && y1 > y0 {
-                (x0, y0, (x1 - x0) as u32, (y1 - y0) as u32)
-            } else {
-                (mx, my, mw, mh)
+fn rects(values: &[u32]) -> Vec<Rect> {
+    let (areas, _) = values.as_chunks::<4>();
+    areas
+        .iter()
+        .map(|&[x, y, width, height]| Rect {
+            x: x as i32,
+            y: y as i32,
+            width,
+            height,
+        })
+        .collect()
+}
+
+/// The current desktop's work areas: one per monitor where the window manager gives them
+/// (`_GTK_WORKAREAS_D<n>`, Mutter's and Muffin's), else the one over all (`_NET_WORKAREA`).
+fn work_areas(conn: &RustConnection, root: u32) -> Vec<Rect> {
+    let desktop = cardinals(conn, root, b"_NET_CURRENT_DESKTOP")
+        .and_then(|v| v.first().copied())
+        .unwrap_or(0) as usize;
+    if let Some(areas) = cardinals(conn, root, format!("_GTK_WORKAREAS_D{desktop}").as_bytes())
+        && !areas.is_empty()
+    {
+        return rects(&areas);
+    }
+    cardinals(conn, root, b"_NET_WORKAREA")
+        .map(|v| rects(&v).into_iter().skip(desktop).take(1).collect())
+        .unwrap_or_default()
+}
+
+fn read_displays(conn: &RustConnection, root: u32) -> Option<Vec<Display>> {
+    use x11rb::protocol::randr::ConnectionExt as _;
+    let reply = conn.randr_get_monitors(root, true).ok()?.reply().ok()?;
+    let areas = work_areas(conn, root);
+    let displays = reply
+        .monitors
+        .iter()
+        .map(|m| {
+            let name = conn
+                .get_atom_name(m.name)
+                .ok()
+                .and_then(|c| c.reply().ok())
+                .map(|r| String::from_utf8_lossy(&r.name).into_owned())
+                .unwrap_or_else(|| format!("{}x{}+{}+{}", m.width, m.height, m.x, m.y));
+            let bounds = Rect {
+                x: m.x as i32,
+                y: m.y as i32,
+                width: m.width as u32,
+                height: m.height as u32,
+            };
+            Display {
+                name,
+                primary: m.primary,
+                bounds,
+                work: crate::geometry::usable(bounds, &areas),
             }
-        }
-        None => (mx, my, mw, mh),
-    };
-    Some(Placement {
-        x,
-        y,
-        width: (w as f32 * share).round() as u32,
-        height: h,
-    })
+        })
+        .collect::<Vec<_>>();
+    (!displays.is_empty()).then_some(displays)
 }
 
-/// The top-left of the primary monitor's working area: where a window goes until it is moved.
-pub fn work_origin() -> Option<(i32, i32)> {
-    shelf_placement(1.0).map(|p| (p.x, p.y))
-}
-
-/// Where the window `xid` is on the screen (its top-left, in device pixels).
-pub fn position(xid: u64) -> Option<(i32, i32)> {
-    let (conn, screen) = connect()?;
-    let root = conn.setup().roots[screen].root;
-    let r = conn
+/// Where the window `xid` is on the screen and how large, device pixels.
+fn window_rect(conn: &RustConnection, root: u32, xid: u64) -> Option<Rect> {
+    let geometry = conn.get_geometry(xid as u32).ok()?.reply().ok()?;
+    let at = conn
         .translate_coordinates(xid as u32, root, 0, 0)
         .ok()?
         .reply()
         .ok()?;
-    Some((r.dst_x as i32, r.dst_y as i32))
+    Some(Rect {
+        x: at.dst_x as i32,
+        y: at.dst_y as i32,
+        width: geometry.width as u32,
+        height: geometry.height as u32,
+    })
 }
 
-/// Put the window `xid` at `x`, `y` — sized `size` when given — and say so in its size hints as
-/// the user's choice, so the window manager maps it there instead of placing it itself (what
-/// put it 50 px from the edge on every show).
-pub fn pre_place(xid: u64, x: i32, y: i32, size: Option<(u32, u32)>) {
+/// The displays as the desktop has them now.
+pub fn displays() -> Option<Vec<Display>> {
+    let (conn, screen) = connect()?;
+    let root = conn.setup().roots[screen].root;
+    read_displays(&conn, root)
+}
+
+/// The displays and the window `xid` as they are now, in one connection.
+pub fn snapshot(xid: u64) -> Option<(Vec<Display>, Option<Rect>)> {
+    let (conn, screen) = connect()?;
+    let root = conn.setup().roots[screen].root;
+    let displays = read_displays(&conn, root)?;
+    Some((displays, window_rect(&conn, root, xid)))
+}
+
+/// Put the window `xid` at `rect`, held to `limits` (none: no limits), and say so in its size
+/// hints as the user's choice, so the window manager maps it there instead of placing it itself
+/// (what put it 50 px from the edge on every show). The hints go first: a limit left from another
+/// mode would otherwise hold the new size to it.
+pub fn place(xid: u64, rect: Rect, limits: Option<Limits>) {
     use x11rb::properties::{WmSizeHints, WmSizeHintsSpecification};
     let Some((conn, _)) = connect() else { return };
-    let mut aux = ConfigureWindowAux::new().x(x).y(y);
-    if let Some((w, h)) = size {
-        aux = aux.width(w).height(h);
-    }
-    let _ = conn.configure_window(xid as u32, &aux);
     let mut hints = WmSizeHints::get_normal_hints(&conn, xid as u32)
         .ok()
         .and_then(|c| c.reply().ok())
         .flatten()
         .unwrap_or_default();
-    hints.position = Some((WmSizeHintsSpecification::UserSpecified, x, y));
-    if let Some((w, h)) = size {
-        hints.size = Some((WmSizeHintsSpecification::UserSpecified, w as i32, h as i32));
-    }
+    let size = |(w, h): (u32, u32)| (w as i32, h as i32);
+    hints.position = Some((WmSizeHintsSpecification::UserSpecified, rect.x, rect.y));
+    hints.size = Some((
+        WmSizeHintsSpecification::UserSpecified,
+        rect.width as i32,
+        rect.height as i32,
+    ));
+    hints.min_size = limits.map(|l| size(l.min));
+    hints.max_size = limits.map(|l| size(l.max));
     let _ = hints.set_normal_hints(&conn, xid as u32);
+    let _ = conn.configure_window(
+        xid as u32,
+        &ConfigureWindowAux::new()
+            .x(rect.x)
+            .y(rect.y)
+            .width(rect.width)
+            .height(rect.height),
+    );
     let _ = conn.flush();
 }
 
@@ -184,7 +213,7 @@ pub fn is_active(xid: u64) -> bool {
 
 /// The X server's time now, as GDK finds it: a property touched on a window of our own reports
 /// it. For an activation that no key press of ours dated (`sill toggle` from a desktop shortcut).
-fn server_time(conn: &x11rb::rust_connection::RustConnection, root: u32) -> Option<u32> {
+fn server_time(conn: &RustConnection, root: u32) -> Option<u32> {
     let window = conn.generate_id().ok()?;
     conn.create_window(
         0,
@@ -228,7 +257,7 @@ fn server_time(conn: &x11rb::rust_connection::RustConnection, root: u32) -> Opti
 /// The window's own user time, set as a toolkit's present does: the window manager weighs a
 /// window's last use against the focused one's, and gave the focus back to the other window when
 /// ours looked older (a window brought up from hidden, 2026-11-05).
-fn set_user_time(conn: &x11rb::rust_connection::RustConnection, xid: u64, time: u32) {
+fn set_user_time(conn: &RustConnection, xid: u64, time: u32) {
     if let Ok(c) = conn.intern_atom(false, b"_NET_WM_USER_TIME")
         && let Ok(r) = c.reply()
     {
@@ -284,12 +313,4 @@ pub fn activate(xid: u64, time: u32) {
         );
         let _ = conn.flush();
     }
-}
-
-/// Primary working area and current client size, all in physical pixels.
-pub fn window_geometry(xid: u64) -> Option<(Placement, u32, u32)> {
-    let area = shelf_placement(1.0)?;
-    let (conn, _) = connect()?;
-    let geometry = conn.get_geometry(xid as u32).ok()?.reply().ok()?;
-    Some((area, geometry.width as u32, geometry.height as u32))
 }

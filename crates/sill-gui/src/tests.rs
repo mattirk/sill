@@ -841,7 +841,8 @@ fn a_stopped_turn_says_so() {
 /// With no title bar, the top bar's empty space moves the window; a tab keeps its own click.
 #[test]
 fn the_top_bar_moves_the_window_and_tabs_keep_their_clicks() {
-    let (app, _) = App::new(true, None);
+    let (mut app, _) = App::new(true, None);
+    app.layout.mode = crate::layout::Mode::Drawer;
     let mut ui = simulator(&app, (720.0, 860.0));
     ui.point_at(iced::Point::new(450.0, 18.0));
     let _ = ui.simulate(iced_test::simulator::click());
@@ -860,6 +861,47 @@ fn the_top_bar_moves_the_window_and_tabs_keep_their_clicks() {
         2,
         "a tab click must not also move the window: {messages:?}"
     );
+}
+
+/// Shelf mode is locked to its edge: the top bar does not move it and only the right edge,
+/// corners included, resizes it. A free window has every edge, and corners resize both ways.
+#[test]
+fn shelf_mode_is_locked_to_its_edge_and_free_windows_have_corners() {
+    use iced::window::Direction;
+    let press = |app: &App, x: f32, y: f32| -> Vec<Message> {
+        let mut ui = simulator(app, (720.0, 860.0));
+        ui.point_at(iced::Point::new(x, y));
+        let _ = ui.simulate(iced_test::simulator::click());
+        ui.into_messages().collect()
+    };
+    let resized = |messages: &[Message]| {
+        messages.iter().find_map(|m| match m {
+            Message::ResizeWindow(direction) => Some(*direction),
+            _ => None,
+        })
+    };
+    let (mut app, _) = App::new(true, None);
+    assert_eq!(app.layout.mode, crate::layout::Mode::Shelf);
+    let bar = press(&app, 450.0, 18.0);
+    assert!(!bar.iter().any(|m| matches!(m, Message::DragWindow)), "{bar:?}");
+    assert!(resized(&press(&app, 2.0, 400.0)).is_none(), "no left edge");
+    assert!(resized(&press(&app, 400.0, 2.0)).is_none(), "no top edge");
+    assert!(resized(&press(&app, 400.0, 858.0)).is_none(), "no bottom edge");
+    for y in [2.0, 400.0, 858.0] {
+        assert!(
+            matches!(resized(&press(&app, 718.0, y)), Some(Direction::East)),
+            "the right edge, its corners included, changes the width only ({y})"
+        );
+    }
+    app.layout.mode = crate::layout::Mode::Drawer;
+    let at = |x, y| resized(&press(&app, x, y));
+    assert!(matches!(at(2.0, 400.0), Some(Direction::West)));
+    assert!(matches!(at(400.0, 2.0), Some(Direction::North)));
+    assert!(matches!(at(2.0, 2.0), Some(Direction::NorthWest)));
+    assert!(matches!(at(718.0, 2.0), Some(Direction::NorthEast)));
+    assert!(matches!(at(2.0, 858.0), Some(Direction::SouthWest)));
+    assert!(matches!(at(718.0, 858.0), Some(Direction::SouthEast)));
+    assert!(matches!(at(718.0, 400.0), Some(Direction::East)));
 }
 
 /// Ctrl+Q quits; Q alone does not.
@@ -3004,15 +3046,21 @@ fn session_hotkeys_create_with_current_agent_and_close_current_session() {
 }
 
 /// Interface scale grows the content, not the window: the window's and the monitor's sizes are
-/// held in the scale's units, so a change converts them and Shelf mode is fitted to the same
-/// size on the screen; the working size is kept in 100 % units, so it comes back as large.
+/// held in the scale's units, so a change converts them; what each display keeps is device pixels
+/// over device pixels, so a change leaves it as it is.
 #[test]
-fn interface_scale_keeps_the_window_and_the_working_size() {
+fn interface_scale_keeps_the_window_and_what_the_displays_keep() {
     let near = |a: f32, b: f32| (a - b).abs() < 0.01;
     let (mut app, _) = App::new(true, None);
     app.width = 500.0;
     app.height = 800.0;
     app.monitor = Some(iced::Size::new(1440.0, 900.0));
+    let kept = crate::settings::DisplayPrefs {
+        shelf_width: Some(0.3),
+        work_width: Some(0.6),
+        ..Default::default()
+    };
+    app.settings.displays.insert("DP-1".into(), kept.clone());
     let _ = app.update(Message::ScaleStep(1));
     assert_eq!(app.settings.scale(), 1.1);
     let _ = app.update(Message::ScaleStep(1));
@@ -3026,26 +3074,10 @@ fn interface_scale_keeps_the_window_and_the_working_size() {
         near(monitor.width, 1152.0) && near(monitor.height, 720.0),
         "{monitor:?}"
     );
-    app.remember_work_size();
-    assert!(
-        near(app.settings.window_width_share.unwrap(), 500.0 / 1440.0)
-            && near(app.settings.window_height_share.unwrap(), 800.0 / 900.0),
-        "kept as monitor proportions"
-    );
+    assert_eq!(app.settings.displays["DP-1"], kept);
     let _ = app.update(Message::ScaleStep(0));
     assert!(near(app.width, 500.0) && near(app.height, 800.0));
-    let work = app.work_size().unwrap();
-    assert!(
-        near(work.width, 500.0) && near(work.height, 800.0),
-        "{work:?}"
-    );
-    // Shelf mode's height is the working area's, in the window's units at any scale
-    app.desktop_scale = Some(2.0);
-    app.work_height_px = Some(1720);
-    assert_eq!(app.shelf_height(), 860.0);
-    let _ = app.update(Message::ScaleStep(1));
-    let _ = app.update(Message::ScaleStep(1));
-    assert!(near(app.shelf_height(), 688.0));
+    assert_eq!(app.settings.displays["DP-1"], kept);
 }
 
 #[test]
@@ -3597,24 +3629,76 @@ fn prompt_undo_and_redo_shortcuts() {
     }
 }
 
+/// The window's geometry through the app (`geometry.rs`): Sill's own placement is not taken for
+/// the person's; the person's resize is kept for the display it is on; a display change puts the
+/// window where it belongs without keeping what the window manager did meanwhile; Shelf mode
+/// keeps only its width, for the main display.
 #[test]
-fn display_changes_preserve_proportions_and_manual_resizes_update_them() {
+fn the_window_keeps_what_the_person_made_of_it_per_display() {
+    use crate::geometry::{Controller, Display, Rect, target};
+    use crate::layout::Mode;
+    let rect = |x, y, width, height| Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+    let laptop = Display {
+        name: "eDP-1".into(),
+        primary: true,
+        bounds: rect(0, 0, 1920, 1080),
+        work: rect(0, 0, 1920, 1040),
+    };
+    let external = Display {
+        name: "DP-1".into(),
+        primary: false,
+        bounds: rect(1920, 0, 2560, 1440),
+        work: rect(1920, 0, 2560, 1440),
+    };
+    let both = vec![laptop.clone(), external];
+    let poll = |app: &mut App, displays: &[Display], window: Rect| {
+        let read = Some((displays.to_vec(), Some(window)));
+        let _ = app.update(Message::Geometry(crate::Read::Poll, read));
+    };
     let (mut app, _) = App::new(true, None);
-    app.layout.mode = crate::layout::Mode::Drawer;
+    app.geometry = Controller::immediate();
     app.visible = true;
-    let area = crate::desktop::Placement { x: 0, y: 0, width: 1920, height: 1080 };
-    let _ = app.update(Message::DisplayGeometry(Some((area, 720, 860))));
-    assert_eq!(app.settings.window_width_share, None);
-    for _ in 0..3 {
-        let _ = app.update(Message::DisplayGeometry(Some((area, 960, 1080))));
-    }
-    assert_eq!(app.settings.window_width_share, Some(0.5));
-    assert_eq!(app.settings.window_height_share, Some(1.0));
-    let _ = app.update(Message::DisplayGeometry(Some((area, 1152, 864))));
-    assert_eq!(app.settings.window_width_share, Some(0.6));
-    assert_eq!(app.settings.window_height_share, Some(0.8));
-    let larger = crate::desktop::Placement { width: 3840, height: 2160, ..area };
-    let _ = app.update(Message::DisplayGeometry(Some((larger, 1152, 864))));
-    assert_eq!(app.settings.window_width_share, Some(0.6));
-    assert_eq!(app.settings.window_height_share, Some(0.8));
+    app.layout.mode = Mode::Drawer;
+    // placed by Sill: half the main display, its usable height
+    let placed = target(Mode::Drawer, &app.settings, &both).unwrap();
+    assert_eq!(placed.rect, rect(0, 0, 960, 1040));
+    let _ = app.update(Message::Placed(Some((both.clone(), Some(placed.clone())))));
+    poll(&mut app, &both, placed.rect);
+    poll(&mut app, &both, placed.rect);
+    assert!(app.settings.displays.is_empty(), "Sill's own placement is not kept");
+    // the person drags it onto the external display and sizes it there
+    let dragged = rect(2560, 360, 1280, 720);
+    poll(&mut app, &both, dragged);
+    poll(&mut app, &both, dragged);
+    let kept = &app.settings.displays["DP-1"];
+    assert_eq!(
+        (kept.work_width, kept.work_height, kept.work_x, kept.work_y),
+        (Some(0.5), Some(0.5), Some(0.25), Some(0.25))
+    );
+    assert_eq!(app.settings.display.as_deref(), Some("DP-1"));
+    // the external display unplugged: the window manager's move is not kept, and the external
+    // display's preferences stay for when it is back
+    poll(&mut app, &[laptop], rect(0, 0, 1280, 720));
+    assert_eq!(app.settings.display.as_deref(), Some("DP-1"));
+    assert!(!app.settings.displays.contains_key("eDP-1"));
+    // Shelf mode keeps only its width, for the main display
+    app.layout.mode = Mode::Shelf;
+    let shelf = target(Mode::Shelf, &app.settings, &both).unwrap();
+    assert_eq!(shelf.rect, rect(0, 0, 672, 1040));
+    let _ = app.update(Message::Placed(Some((both.clone(), Some(shelf.clone())))));
+    poll(&mut app, &both, shelf.rect);
+    let narrower = Rect {
+        width: 576,
+        ..shelf.rect
+    };
+    poll(&mut app, &both, narrower);
+    poll(&mut app, &both, narrower);
+    assert_eq!(app.settings.displays["eDP-1"].shelf_width, Some(0.3));
+    assert_eq!(app.settings.displays["eDP-1"].work_width, None, "no working size");
+    assert_eq!(app.shelf_share(), 0.3, "Settings shows the main display's");
 }

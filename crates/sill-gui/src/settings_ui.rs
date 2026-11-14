@@ -19,7 +19,7 @@ use crate::{App, Message, keys};
 /// The page's reading width.
 const MEASURE: f32 = 680.0;
 
-/// Shelf mode's width, a share of the monitor (sill-gui's own setting).
+/// Shelf mode's width, a share of the main display (sill-gui's own setting).
 const SHELF_SHARES: &[(f32, &str)] = &[
     (0.2, "20 %"),
     (0.25, "25 %"),
@@ -366,7 +366,7 @@ impl App {
             .iter()
             .position(|(id, _)| *id == style::theme_id())
             .unwrap_or(0);
-        let share = self.settings.shelf_share();
+        let share = self.shelf_share();
         let share_at = settings::nearest(SHELF_SHARES, (share * 100.0) as i64, |(s, _)| {
             (s * 100.0) as i64
         });
@@ -434,7 +434,7 @@ impl App {
                 ),
                 setting(
                     "Shelf width",
-                    Some("Shelf mode's share of the monitor (sill-gui)"),
+                    Some("Shelf mode's share of the main display; dragging its right edge sets it too (sill-gui)"),
                     choice(SHELF_SHARES.iter().map(|(_, l)| *l), share_at, |i| {
                         event(Event::ShelfShare(SHELF_SHARES[i].0))
                     }),
