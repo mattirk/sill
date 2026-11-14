@@ -306,13 +306,27 @@ pub fn command(id: &str, cmd: &sill_core::wire::Command) -> Result<()> {
     let view = subs().lock().unwrap().get(id).map(|s|s.view.clone());
     let view = view.as_ref().map(|v|v.lock().unwrap());
     let (method, params) = sill_core::sfp_client::command_request(id, cmd, view.as_deref())?;
+    let queued = if matches!(cmd, sill_core::wire::Command::Cancel) {
+        view.as_ref().map(|v| v.queued_submission_ids()).unwrap_or_default()
+    } else { Vec::new() };
     drop(view);
+    // Clear waiting work before asking the agent to stop: stopping first could allow
+    // completion to dispatch the next prompt. Cancellation only accepts unsent work.
+    let mut queue_errors = Vec::new();
+    for submission_id in queued {
+        if let Err(e) = cancel_submission(id, &submission_id) {
+            queue_errors.push(format!("{submission_id}: {e:#}"));
+        }
+    }
     if method == "_sill/sessions.submit" {
         // Retrying this exact intent is safe: params retains the generated submission ID.
         call::<serde_json::Value>(method, params)?;
     } else {
         // An uncertain control RPC is not permission to repeat authentication or session retry.
         connected()?.call::<serde_json::Value>(method, params)?;
+    }
+    if !queue_errors.is_empty() {
+        anyhow::bail!("stop requested, but could not remove some queued prompts: {}", queue_errors.join("; "));
     }
     Ok(())
 }

@@ -44,6 +44,7 @@ pub struct SessionView {
     /// What goes with the next prompt (SPEC §3.2 attachments) and the strip showing it.
     attachments: RefCell<Vec<Attachment>>,
     attach_strip: gtk::Box,
+    prompt_queue: gtk::Box,
     /// The agent accepts image blocks (from `initialize`).
     images_ok: std::cell::Cell<bool>,
     /// The slash commands the agent offers, and the list that completes them as `/` is typed.
@@ -463,6 +464,15 @@ impl SessionView {
         let attach_strip = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         attach_strip.add_css_class("sill-attach-strip");
         attach_strip.set_visible(false);
+        let prompt_queue = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        prompt_queue.add_css_class("sill-prompt-queue");
+        prompt_queue.set_visible(false);
+        let queue_scroll = gtk::ScrolledWindow::new();
+        queue_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        queue_scroll.set_max_content_height(100);
+        queue_scroll.set_propagate_natural_height(true);
+        queue_scroll.set_child(Some(&prompt_queue));
+        prompt_queue.bind_property("visible", &queue_scroll, "visible").sync_create().build();
         prompt_box.append(&attach_strip);
         prompt_box.append(&bottom);
         prompt_box.append(&controls_row);
@@ -477,6 +487,7 @@ impl SessionView {
         // the conversation with its prompt; the shelf lays its viewer over this and its tree beside it
         let chat = gtk::Box::new(gtk::Orientation::Vertical, 0);
         chat.append(&conv.root);
+        chat.append(&queue_scroll);
         chat.append(&prompt_box);
         chat.set_vexpand(true);
 
@@ -490,6 +501,7 @@ impl SessionView {
             prompt: prompt.clone(),
             attachments: RefCell::new(Vec::new()),
             attach_strip,
+            prompt_queue,
             images_ok: std::cell::Cell::new(true),
             commands: RefCell::new(Vec::new()),
             command_pop: {
@@ -1709,7 +1721,7 @@ impl SessionView {
                 let t = theme::current();
                 let red = gtk::gdk::RGBA::parse(t.error).unwrap_or_else(|_| super::icons::fg_for(b, &t));
                 b.set_child(Some(&super::icons::scalable("sill-stop", red)));
-                b.set_tooltip_text(Some("Stop the agent; Enter queues the text you have typed"));
+                b.set_tooltip_text(Some("Stop the agent and cancel all queued prompts; Enter queues text"));
                 b.add_css_class("sill-stop");
             } else {
                 b.set_child(Some(&super::icons::scalable("sill-send", super::icons::fg_for(b, &theme::current()))));
@@ -1719,7 +1731,7 @@ impl SessionView {
         }
     }
 
-    /// Ask the agent to stop the running turn.
+    /// Stop the running turn and cancel unsent queued prompts.
     pub fn cancel(&self) {
         if let Some(d) = self.driver.borrow().as_ref() {
             let _ = d.commands.try_send(Command::Cancel);
@@ -2388,6 +2400,77 @@ impl SessionView {
         self.checkpoint.borrow().is_some()
     }
 
+    fn show_prompt_queue(self: &Rc<Self>, rows: Vec<serde_json::Value>) {
+        while let Some(child) = self.prompt_queue.first_child() {
+            self.prompt_queue.remove(&child);
+        }
+        self.conv.set_held_prompts(rows.iter().filter(|r| r["held"].as_bool() == Some(true)).count());
+        self.prompt_queue.set_visible(!rows.is_empty());
+        if rows.is_empty() { return; }
+        self.prompt_queue.set_margin_start(12);
+        self.prompt_queue.set_margin_end(12);
+        self.prompt_queue.set_margin_top(4);
+        self.prompt_queue.set_margin_bottom(4);
+        for (index, item) in rows.into_iter().enumerate() {
+            let Some(id) = item["submission_id"].as_str() else { continue };
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            let text = item["text"].as_str().unwrap_or("");
+            let count = item["attachments"].as_u64().unwrap_or(0);
+            let held = item["held"].as_bool().unwrap_or(false);
+            let preview = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let suffix = if count > 0 { format!(" · {count} attachments") } else { String::new() };
+            let label = gtk::Label::new(Some(&format!("{}. {}{suffix}{}", index + 1, preview, if held { " · held" } else { "" })));
+            label.add_css_class("dim-label");
+            label.set_xalign(0.0);
+            label.set_hexpand(true);
+            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            label.set_width_chars(1);
+            label.set_tooltip_text(Some(&format!("{text}\n{}", item["reason"].as_str().unwrap_or("Waiting for the agent to be ready"))));
+            row.append(&label);
+            if held {
+                let resume = gtk::Button::from_icon_name("media-playback-start-symbolic");
+                resume.add_css_class("flat");
+                resume.set_tooltip_text(Some("Resume held prompt"));
+                self.queue_action(&resume, id.to_string(), true);
+                row.append(&resume);
+            }
+            let remove = gtk::Button::from_icon_name("window-close-symbolic");
+            remove.add_css_class("flat");
+            if let Some(image) = remove.child().and_downcast::<gtk::Image>() { image.set_pixel_size(10); }
+            remove.set_tooltip_text(Some("Cancel this prompt if it has not been dispatched"));
+            self.queue_action(&remove, id.to_string(), false);
+            row.append(&remove);
+            self.prompt_queue.append(&row);
+        }
+    }
+
+    fn queue_action(self: &Rc<Self>, button: &gtk::Button, submission: String, resume: bool) {
+        let weak = Rc::downgrade(self);
+        button.connect_clicked(move |button| {
+            let Some(view) = weak.upgrade() else { return };
+            let sid = view.id();
+            let sub = submission.clone();
+            let weak = weak.clone();
+            let button = button.clone();
+            button.set_sensitive(false);
+            glib::spawn_future_local(async move {
+                let result = gtk::gio::spawn_blocking(move || {
+                    if resume { super::client::resume_submission(&sid, &sub) }
+                    else { super::client::cancel_submission(&sid, &sub) }
+                }).await;
+                let error = match result {
+                    Ok(Ok(())) => return, // The canonical update removes or refreshes the row.
+                    Ok(Err(e)) => format!("{e:#}"),
+                    Err(_) => "request worker failed".to_string(),
+                };
+                button.set_sensitive(true);
+                if let Some(view) = weak.upgrade() {
+                    view.conv.add_error(&format!("{} queued prompt: {error}", if resume { "resume" } else { "remove" }));
+                }
+            });
+        });
+    }
+
     /// Submit a prompt; the daemon queues it while the agent is working.
     pub fn send(self: &Rc<Self>, text: &str) -> bool {
         let trace = std::env::var_os("SILL_TRACE").is_some();
@@ -2500,63 +2583,14 @@ impl SessionView {
                 self.status.set_text("logged in");
                 return;
             }
-            Event::Other(t) if t.starts_with("sill:held:") => {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t["sill:held:".len()..])
-                    && let Some(sub_id) = v["submission_id"].as_str().map(str::to_string)
-                {
-                    let text = v["text"].as_str().unwrap_or("");
-                    let reason = v["reason"].as_str().unwrap_or("");
-                    let sid_resume = self.id();
-                    let sub_resume = sub_id.clone();
-                    let weak_resume = Rc::downgrade(self);
-                    let on_resume = Rc::new(move || {
-                        let (sid, sub, weak) = (sid_resume.clone(), sub_resume.clone(), weak_resume.clone());
-                        let retry_id = sub.clone();
-                        glib::spawn_future_local(async move {
-                            let res = gtk::gio::spawn_blocking(move || super::client::resume_submission(&sid, &sub)).await;
-                            let error = match res {
-                                Ok(Ok(())) => return,
-                                Ok(Err(e)) => format!("{e:#}"),
-                                Err(_) => "request worker failed".to_string(),
-                            };
-                            if let Some(v) = weak.upgrade() {
-                                v.conv.retry_held(&retry_id);
-                                v.conv.add_error(&format!("resume prompt: {error}"));
-                            }
-                        });
-                    });
-                    let sid_cancel = self.id();
-                    let sub_cancel = sub_id.clone();
-                    let weak_cancel = Rc::downgrade(self);
-                    let on_cancel = Rc::new(move || {
-                        let (sid, sub, weak) = (sid_cancel.clone(), sub_cancel.clone(), weak_cancel.clone());
-                        let retry_id = sub.clone();
-                        glib::spawn_future_local(async move {
-                            let res = gtk::gio::spawn_blocking(move || super::client::cancel_submission(&sid, &sub)).await;
-                            let error = match res {
-                                Ok(Ok(())) => return,
-                                Ok(Err(e)) => format!("{e:#}"),
-                                Err(_) => "request worker failed".to_string(),
-                            };
-                            if let Some(v) = weak.upgrade() {
-                                v.conv.retry_held(&retry_id);
-                                v.conv.add_error(&format!("discard prompt: {error}"));
-                            }
-                        });
-                    });
-                    self.conv.add_held(&sub_id, text, reason, on_resume, on_cancel);
+            Event::Other(t) if t.starts_with("sill:queue:") => {
+                if let Ok(rows) = serde_json::from_str::<Vec<serde_json::Value>>(&t["sill:queue:".len()..]) {
+                    self.show_prompt_queue(rows);
                 }
                 return;
             }
-            Event::Other(t) if t.starts_with("sill:held-resolved:") => {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t["sill:held-resolved:".len()..])
-                    && let Some(sub_id) = v["submission_id"].as_str()
-                {
-                    let status = v["status"].as_str().unwrap_or("done");
-                    self.conv.resolve_held(sub_id, status);
-                }
-                return;
-            }
+            // Held prompts now have their actions in the queue above the input.
+            Event::Other(t) if t.starts_with("sill:held:") || t.starts_with("sill:held-resolved:") => return,
             Event::Other(t) if t == "sill:reconnecting" => {
                 self.status.set_text("reconnecting");
                 return;

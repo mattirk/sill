@@ -49,6 +49,12 @@ impl View {
     pub fn question_id(&self, request: u64) -> Option<&str> {
         self.requests.iter().find_map(|(id, n)| (*n == request).then_some(id.as_str()))
     }
+    /// Only prompts which the daemon still knows have not been dispatched.
+    pub fn queued_submission_ids(&self) -> Vec<String> {
+        self.submissions.values().filter(|s|
+            s.delivery == "queued" && s.insertion == "pending" && s.outcome == "pending"
+        ).map(|s| s.submission_id.clone()).collect()
+    }
     pub fn held_submission_ids(&self) -> Vec<String> {
         self.submissions.values().filter(|s| s.held && s.outcome == "pending").map(|s| s.submission_id.clone()).collect()
     }
@@ -139,6 +145,7 @@ impl View {
                 }
                 if submission.insertion == "unknown" || submission.outcome == "unknown" { events.push(wire::Event::Note("Prompt outcome is uncertain; it will not be resent automatically".into())); }
                 self.submissions.insert(submission.submission_id.clone(),submission);
+                events.push(self.queue_event());
             }
         }
         self.seq = seq;
@@ -179,7 +186,24 @@ impl View {
                 out.push(wire::Event::Note("Prompt queued until the agent is ready".into()));
             }
         }
+        out.push(self.queue_event());
         out
+    }
+    /// A complete replacement so reconnects also clear stale rows. Only submissions still
+    /// known to be unsent have actions; dispatch removes the row before agent insertion.
+    fn queue_event(&self) -> wire::Event {
+        let mut queued: Vec<_> = self.submissions.values().filter(|s|
+            s.delivery == "queued" && s.insertion == "pending" && s.outcome == "pending"
+        ).collect();
+        queued.sort_by_key(|s| s.accepted_seq.parse::<u64>().unwrap_or_default());
+        let rows: Vec<_> = queued.iter().map(|s| serde_json::json!({
+            "submission_id": s.submission_id,
+            "text": s.text.chars().take(2000).collect::<String>(),
+            "attachments": s.attachments.len(),
+            "held": s.held,
+            "reason": s.hold_reason.as_ref().map(|r| r.message.as_str()),
+        })).collect();
+        wire::Event::Other(format!("sill:queue:{}", serde_json::json!(rows)))
     }
     /// What went with a user item: its submission's attachments. Data appears only in records
     /// from before attachments became uploads; otherwise a frontend fetches by upload ID.
@@ -475,6 +499,40 @@ mod tests {
         view.accept(notification("1",Event::SubmissionUpdated {submission:sub("first",true)})).unwrap();
         let shown=view.accept(notification("2",Event::SubmissionUpdated {submission:sub("second",false)})).unwrap();
         assert!(shown.iter().any(|e|matches!(e,wire::Event::Note(n) if n.contains("waits behind the held prompt"))), "{shown:?}");
+    }
+    #[test]
+    fn queue_reconstructs_acceptance_order_and_removes_dispatched_or_cancelled_prompts() {
+        let mut view = View { session_id: "s".into(), subscription_id: "sub".into(), ..Default::default() };
+        let make = |id: &str, seq: &str| Submission {
+            submission_id: id.into(), session_id: "s".into(), accepted_seq: seq.into(),
+            agent_generation_id: "g".into(), text: id.into(), attachments: vec![],
+            acceptance: "accepted".into(), delivery: "queued".into(), held: false,
+            hold_reason: None, insertion: "pending".into(), outcome: "pending".into(), reason: None,
+        };
+        let rows = |events: Vec<wire::Event>| -> Vec<serde_json::Value> {
+            events.into_iter().find_map(|e| match e {
+                wire::Event::Other(t) => t.strip_prefix("sill:queue:").map(|s| serde_json::from_str(s).unwrap()),
+                _ => None,
+            }).expect("complete queue update")
+        };
+        let mut first = make("z-first", "2");
+        first.held = true;
+        let mut second = make("a-second", "10");
+        view.accept(notification("1", Event::SubmissionUpdated { submission: second.clone() })).unwrap();
+        let live = rows(view.accept(notification("2", Event::SubmissionUpdated { submission: first.clone() })).unwrap());
+        assert_eq!(live.iter().map(|r| r["submission_id"].as_str().unwrap()).collect::<Vec<_>>(), ["z-first", "a-second"]);
+        assert_eq!(live[0]["held"], true);
+        assert_eq!(view.queued_submission_ids().len(), 2, "Stop includes held and ordinary queued prompts");
+        assert_eq!(rows(view.render_snapshot()), live, "reconnect preserves the full queue");
+        first.outcome = "cancelled".into();
+        let remaining = rows(view.accept(notification("3", Event::SubmissionUpdated { submission: first })).unwrap());
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(view.queued_submission_ids(), ["a-second"]);
+        assert_eq!(remaining[0]["submission_id"], "a-second");
+        second.delivery = "direct".into();
+        assert!(rows(view.accept(notification("4", Event::SubmissionUpdated { submission: second })).unwrap()).is_empty());
+        assert!(rows(view.render_snapshot()).is_empty(), "reconnect clears stale rows");
+        assert!(view.queued_submission_ids().is_empty(), "Stop never removes dispatched or already cancelled prompts");
     }
     #[test]
     fn missing_patch_target_requires_resynchronization() {
