@@ -35,7 +35,7 @@ impl Host for Daemon<'_> {
     }
 
     fn busy(&self, session: &str) -> bool {
-        self.0.runners.lock().unwrap().get(session).is_some_and(|r| r.alive() && r.busy())
+        self.0.runner(session).is_ok_and(|r| r.busy())
     }
 
     fn session_pins(&self, session: &str) -> Result<Vec<PathBuf>> {

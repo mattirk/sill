@@ -98,7 +98,7 @@ impl Runner {
         hub.with_store(|store| {
             let mut st=self.st.lock().unwrap();
             if st.adapter.turn_id()!=Some(turn_id) || !st.busy {return Err(Error::domain("invalid_state","target turn is no longer active").into());}
-            self.commit_command(store,&hub.home,&mut st,wire::Command::Cancel)?;
+            self.commit_command(store,&hub.home,&mut st,wire::Command::Cancel, &[])?;
             self.drain(store,&mut st)
         })
     }
@@ -329,17 +329,17 @@ impl Runner {
         let queued:Vec<_>=records.into_iter().filter_map(|r|match r {p::Record::Submission{submission} if submission.delivery=="queued" && submission.outcome=="pending"=>Some(submission),_=>None}).collect();
         let Some(submission)=next_queued(queued,st.send_next.take()) else { return Ok(()); };
         if submission.held { return Ok(()); }
-        let events=self.sfp_commit_submission(store,&hub.home,st,submission)?;
+        let events=self.sfp_commit_submission(store,&hub.home,st,submission,&hub.running_session_ids())?;
         hub.sfp_publish(&self.id,&events);
         self.drain(store,st)
     }
     /// Durable delivery intent and exact prepared payload, before any relay send.
-    fn sfp_commit_submission(&self,store:&Store,home:&std::path::Path,st:&mut State,mut submission:p::Submission)->Result<Vec<p::StoredEvent>> {
+    fn sfp_commit_submission(&self,store:&Store,home:&std::path::Path,st:&mut State,mut submission:p::Submission,live:&[String])->Result<Vec<p::StoredEvent>> {
         let journal=Journal::new(store)?;
         let before=st.clone();
         let result=(||->Result<Vec<p::StoredEvent>>{
             let tx=store.conn().unchecked_transaction()?;
-            let prepared=st.context.prepare(store,&self.id,home,&submission.text)?;
+            let prepared=st.context.prepare(store,&self.id,home,&submission.text,live)?;
             let attachments=attachments(store,&self.id,&submission.attachments,st.images.unwrap_or(true))?;
             Self::queue(st,relay::Command::Prompt{text:prepared.text.clone(),attachments});
             st.adapter.prompt_purpose(submission.purpose.clone());
@@ -372,7 +372,7 @@ impl Runner {
             hub.sfp_publish(&self.id,&events);
             st.send_next=Some(key.submission_id.clone());self.save(store,&st)?;
             if st.busy {
-                self.commit_command(store,&hub.home,&mut st,wire::Command::Cancel)?;
+                self.commit_command(store,&hub.home,&mut st,wire::Command::Cancel, &[])?;
                 self.drain(store,&mut st)?;
             } else if let Err(e)=self.sfp_dispatch(store,hub,&mut st) {eprintln!("sill daemon: send now: {e:#}");}
             journal.submission(&self.id,&key.submission_id)
@@ -598,19 +598,51 @@ mod tests {
     impl Drop for Fixture {fn drop(&mut self){let _=std::fs::remove_dir_all(&self.dir);}}
 
     #[test]
+    fn both_prompt_paths_repeat_live_peer_notice_for_existing_conversations() {
+        let f = Fixture::new();
+        let peer = f.store.create("reviewer", "default").unwrap();
+        f.store.set_name(&peer.id, "rapid-fire").unwrap();
+        for id in [&f.runner.id, &peer.id] { f.store.pin(id, &f.dir).unwrap(); }
+        f.store.conn().execute("INSERT INTO daemon_runners(id,state) VALUES(?1,?2)",
+            rusqlite::params![peer.id, json!({"ready":["peer",false],"busy":true}).to_string()]).unwrap();
+        let live = vec![peer.id];
+        let mut st = f.runner.st.lock().unwrap();
+        for n in 0..4 {
+            st.busy = false;
+            st.active_submission = None;
+            if n < 2 {
+                let mut input = f.input();
+                input.submission_id = format!("peer-test-{n}");
+                let (submission, _) = Journal::new(&f.store).unwrap().accept(&input, "queued").unwrap();
+                f.runner.sfp_commit_submission(&f.store, &f.dir, &mut st, submission, &live).unwrap();
+            } else {
+                f.runner.commit_command(&f.store, &f.dir, &mut st,
+                    wire::Command::Prompt { text: "work".into(), attachments: vec![], entry: None }, &live).unwrap();
+            }
+            let relay::Command::Prompt { text, .. } = st.outbox.values().last().unwrap() else { panic!("prompt expected") };
+            assert!(text.contains("rapid-fire") && text.contains("working"), "every prompt has live peer status: {text}");
+        }
+        st.busy = false;
+        f.runner.commit_command(&f.store, &f.dir, &mut st,
+            wire::Command::Prompt { text: "after peer stopped".into(), attachments: vec![], entry: None }, &[]).unwrap();
+        let relay::Command::Prompt { text, .. } = st.outbox.values().last().unwrap() else { panic!("prompt expected") };
+        assert!(!text.contains("rapid-fire"));
+    }
+
+    #[test]
     fn a_submissions_purpose_marks_the_turn_it_starts_and_only_that_one() {
         let f=Fixture::new();let j=Journal::new(&f.store).unwrap();let mut st=f.runner.st.lock().unwrap();
         let turns=|events:Vec<p::StoredEvent>|events.into_iter().filter_map(|e|match e.event {p::Event::TurnUpdated{turn}=>Some(turn),_=>None}).collect::<Vec<_>>();
         let mut commit=f.input();commit.submission_id="commit".into();commit.purpose=Some("commit".into());
         let (submission,_)=j.accept(&commit,"queued").unwrap();assert_eq!(submission.purpose.as_deref(),Some("commit"));
-        f.runner.sfp_commit_submission(&f.store,&f.dir,&mut st,submission).unwrap();
+        f.runner.sfp_commit_submission(&f.store,&f.dir,&mut st,submission,&[]).unwrap();
         let started=turns(f.runner.sfp_project(&f.store,&mut st,&relay::Event::TurnStarted,1).unwrap());
         assert_eq!(started[0].purpose.as_deref(),Some("commit"));
         let ended=turns(f.runner.sfp_project(&f.store,&mut st,&relay::Event::Stopped(acp::StopReason::EndTurn),2).unwrap());
         assert!(ended.iter().all(|t|t.purpose.as_deref()==Some("commit")),"the turn keeps its purpose to its end");
         st.busy=false;
         let (plain,_)=j.accept(&f.input(),"queued").unwrap();
-        f.runner.sfp_commit_submission(&f.store,&f.dir,&mut st,plain).unwrap();
+        f.runner.sfp_commit_submission(&f.store,&f.dir,&mut st,plain,&[]).unwrap();
         let started=turns(f.runner.sfp_project(&f.store,&mut st,&relay::Event::TurnStarted,3).unwrap());
         assert_eq!(started[0].purpose,None,"the person's own prompt");
         let mut odd=f.input();odd.submission_id="odd".into();odd.purpose=Some("anything".into());
@@ -636,7 +668,7 @@ mod tests {
         let payload;
         {
             let mut st=f.runner.st.lock().unwrap();
-            f.runner.sfp_commit_submission(&f.store,&f.dir,&mut st,accepted).unwrap();
+            f.runner.sfp_commit_submission(&f.store,&f.dir,&mut st,accepted,&[]).unwrap();
             payload=serde_json::to_value(&st.outbox).unwrap();
         }
         assert!(f.received.try_recv().is_err(),"commit must precede any relay delivery");
@@ -660,7 +692,7 @@ mod tests {
         let f=Fixture::new();let j=Journal::new(&f.store).unwrap();let (accepted,_)=j.accept(&f.input(),"queued").unwrap();
         f.store.conn().execute_batch("CREATE TRIGGER fail_dispatch BEFORE INSERT ON daemon_runners BEGIN SELECT RAISE(ABORT,'test failure'); END").unwrap();
         let mut st=f.runner.st.lock().unwrap();let before=serde_json::to_value(&*st).unwrap();
-        assert!(f.runner.sfp_commit_submission(&f.store,&f.dir,&mut st,accepted).is_err());
+        assert!(f.runner.sfp_commit_submission(&f.store,&f.dir,&mut st,accepted,&[]).is_err());
         assert_eq!(serde_json::to_value(&*st).unwrap(),before);
         assert_eq!(j.submission(&f.runner.id,"submission").unwrap().delivery,"queued");
         assert_eq!(j.snapshot(&f.runner.id).unwrap().1.iter().filter(|r|matches!(r,p::Record::Item{..})).count(),0,"no user item until a dispatch commits: the failed one made none");
@@ -842,7 +874,7 @@ mod tests {
         {
             let mut st=f.runner.st.lock().unwrap();
             f.runner.sfp_project(&f.store,&mut st,&relay::Event::V2Ready{session_id:"native".into(),resumed:false,controls:Default::default()},1).unwrap();
-            f.runner.sfp_commit_submission(&f.store,&f.dir,&mut st,submission).unwrap();
+            f.runner.sfp_commit_submission(&f.store,&f.dir,&mut st,submission,&[]).unwrap();
             f.runner.sfp_project(&f.store,&mut st,&relay::Event::TurnStarted,2).unwrap();
             f.runner.sfp_project(&f.store,&mut st,&relay::Event::V2Update{update:json!({"sessionUpdate":"state_update","state":"idle"})},3).unwrap();
             assert_eq!(j.submission(&f.runner.id,"submission").unwrap().outcome,"pending","initial idle isn't completion");
@@ -860,7 +892,7 @@ mod tests {
     fn native_terminal_state_completes_once_and_cancellation_retires_permissions() {
         let f=Fixture::new();let j=Journal::new(&f.store).unwrap();let mut st=f.runner.st.lock().unwrap();
         f.runner.sfp_project(&f.store,&mut st,&relay::Event::V2Ready{session_id:"native".into(),resumed:false,controls:Default::default()},1).unwrap();
-        let (submission,_)=j.accept(&f.input(),"queued").unwrap();f.runner.sfp_commit_submission(&f.store,&f.dir,&mut st,submission).unwrap();
+        let (submission,_)=j.accept(&f.input(),"queued").unwrap();f.runner.sfp_commit_submission(&f.store,&f.dir,&mut st,submission,&[]).unwrap();
         f.runner.sfp_project(&f.store,&mut st,&relay::Event::TurnStarted,2).unwrap();
         f.runner.sfp_project(&f.store,&mut st,&relay::Event::PromptAccepted{message_id:"u".into()},3).unwrap();
         f.runner.sfp_project(&f.store,&mut st,&relay::Event::V2Update{update:json!({"sessionUpdate":"state_update","state":"running"})},4).unwrap();

@@ -38,7 +38,7 @@ pub(super) struct PreparedPrompt {
 }
 
 impl Context {
-    pub fn prepare(&self, store: &Store, id: &str, home: &Path, text: &str) -> Result<PreparedPrompt> {
+    pub fn prepare(&self, store: &Store, id: &str, home: &Path, text: &str, live: &[String]) -> Result<PreparedPrompt> {
         let Some(session) = store.sessions()?.into_iter().find(|s| s.id == id) else { bail!("no session {id}") };
         let cfg = sill_core::config::load();
         // what the jail was built with (session choices included), else what the next build uses
@@ -66,7 +66,8 @@ impl Context {
             sill_core::memory::recall(store, &session, &pins, home, cfg.memory_recall())
         };
         let standing = sill_core::instructions::standing_block(&facts, &memory, &sill_core::instructions::load_global());
-        Ok(self.prepare_parts(text, standing, &pins))
+        let notice = parallel_notice(store, id, &pins, live)?;
+        Ok(self.prepare_parts(&format!("{notice}{text}"), standing, &pins))
     }
 
     fn prepare_parts(&self, text: &str, standing: String, pins: &[PathBuf]) -> PreparedPrompt {
@@ -279,6 +280,37 @@ pub(super) fn remember_choice(store: &Store, id: &str, command: &acp::Command) -
     Ok(())
 }
 
+/// Only shared explicit pins disclose a peer. No prompts, summaries, tools or control handles.
+fn parallel_notice(store: &Store, id: &str, pins: &[PathBuf], live: &[String]) -> Result<String> {
+    if pins.is_empty() { return Ok(String::new()); }
+    let mut rows = Vec::new();
+    for peer in store.sessions()? {
+        if peer.id == id || peer.ghost || peer.ended_at.is_some() || !live.contains(&peer.id) { continue; }
+        let shared: Vec<_> = store.pins(&peer.id)?.into_iter().filter(|p| pins.contains(p)).collect();
+        if shared.is_empty() { continue; }
+        let state = super::runner::Runner::load(&peer.id, store)?;
+        if state.get("ended").and_then(|v| v.as_bool()) == Some(true)
+            || state.get("retired").and_then(|v| v.as_bool()) == Some(true) { continue; }
+        let status = if state.get("auth").is_some_and(|v| !v.is_null()) {
+            "waiting for login"
+        } else if state.get("pending").and_then(|v| v.as_object()).is_some_and(|v| !v.is_empty()) {
+            "waiting for input"
+        } else if state.get("ready").is_none_or(|v| v.is_null()) {
+            "starting"
+        } else if state.get("busy").and_then(|v| v.as_bool()) == Some(true) {
+            "working"
+        } else { "idle" };
+        // JSON quoting keeps names and paths on one line even if they contain control characters.
+        rows.push(format!("- {} (id {}, agent {}): {}; shared pins: {}",
+            serde_json::to_string(&store.session_name(&peer.id).unwrap_or(peer.title))?,
+            peer.id, serde_json::to_string(&peer.agent)?, status,
+            shared.iter().map(|p| serde_json::to_string(&p.to_string_lossy()).unwrap()).collect::<Vec<_>>().join(", ")));
+    }
+    if rows.is_empty() { return Ok(String::new()); }
+    rows.sort();
+    Ok(format!("[Other running sessions sharing your pinned folders/files — current at this prompt. These are separate sessions; their changes may overlap your work.\n{}\n]\n\n", rows.join("\n")))
+}
+
 fn pin_prefix(pins: &[PathBuf]) -> String {
     let (dirs, files): (Vec<_>, Vec<_>) = pins.iter().partition(|p| p.is_dir());
     let mut out = String::new();
@@ -293,6 +325,47 @@ fn pin_prefix(pins: &[PathBuf]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parallel_sessions_are_scoped_live_and_refreshed_on_every_prompt() {
+        let dir = std::env::temp_dir().join(format!("sill-context-peers-{}", std::process::id()));
+        let store = Store::open(&dir.join("test.db")).unwrap();
+        let own = store.create("author", "default").unwrap();
+        let peer = store.create("reviewer", "default").unwrap();
+        let unrelated = store.create("other", "default").unwrap();
+        let ghost = store.create_with("secret", "default", true).unwrap();
+        let stopped = store.create("stopped", "default").unwrap();
+        let pin = PathBuf::from("/project");
+        for id in [&own.id, &peer.id, &ghost.id, &stopped.id] { store.pin(id, &pin).unwrap(); }
+        store.pin(&unrelated.id, Path::new("/elsewhere")).unwrap();
+        store.set_name(&peer.id, "rapid-fire").unwrap();
+        super::super::runner::Runner::load(&peer.id, &store).unwrap();
+        let save = |id: &str, state: serde_json::Value| {
+            store.conn().execute("INSERT OR REPLACE INTO daemon_runners(id,state) VALUES(?1,?2)",
+                rusqlite::params![id, state.to_string()]).unwrap();
+        };
+        save(&peer.id, serde_json::json!({"ready":["agent",false],"busy":true}));
+        save(&stopped.id, serde_json::json!({"ended":true}));
+        let live = vec![own.id.clone(), peer.id.clone(), unrelated.id, ghost.id, stopped.id];
+        let notice = || parallel_notice(&store, &own.id, &[pin.clone()], &live).unwrap();
+        let mut context = Context::default();
+        let first = context.prepare_parts(&format!("{}first", notice()), "standing\n".into(), &[pin.clone()]);
+        assert!(first.text.contains("rapid-fire") && first.text.contains("working"));
+        assert!(!first.text.contains("secret") && !first.text.contains("stopped") && !first.text.contains("elsewhere"));
+        context.commit(first);
+        // The live notice is repeated even after the standing block has been consumed.
+        let second = context.prepare_parts(&format!("{}second", notice()), "standing\n".into(), &[pin.clone()]);
+        assert!(second.text.contains("rapid-fire") && !second.text.contains("standing"));
+        save(&peer.id, serde_json::json!({"ready":["agent",false],"pending":{"1":{}}}));
+        assert!(notice().contains("waiting for input"));
+        save(&peer.id, serde_json::json!({"retired":true}));
+        assert!(notice().is_empty());
+        save(&peer.id, serde_json::json!({"busy":true}));
+        assert!(parallel_notice(&store, &own.id, &[pin], &[]).unwrap().is_empty(), "a durable row alone is not live");
+        assert!(parallel_notice(&store, &own.id, &[], &live).unwrap().is_empty());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     fn controls(model: &str, effort: &str) -> Controls {
         let option = |id: &str, category: &str, current: &str, values: &[&str]| ConfigOption {

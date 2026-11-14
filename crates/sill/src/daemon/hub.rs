@@ -72,6 +72,8 @@ pub struct Hub {
     /// wait threads take an entry out when its process ends.
     children: Arc<Mutex<HashMap<String, u32>>>,
     /// Session id → the conversation the daemon runs for it (docs/daemon.md §3.3).
+    // Release this registry lock before locking runner state: prompt dispatch reads membership
+    // while holding its own state lock, and reads peer status from the durable store.
     runners: Mutex<HashMap<String, Arc<Runner>>>,
     /// Starting a conversation (jail, agent, ACP) is one at a time: two attaches of one session
     /// must not start two agents.
@@ -248,6 +250,12 @@ impl Hub {
         Ok(())
     }
 
+    /// Membership only: callers already hold the store and may hold their own runner lock.
+    /// Never lock another runner here; its durable state supplies the status at dispatch.
+    pub(super) fn running_session_ids(&self) -> Vec<String> {
+        self.runners.lock().unwrap().keys().cloned().collect()
+    }
+
     /// The minute sweep finished (its heartbeat, read by `health`).
     pub fn swept(&self) {
         *self.swept.lock().unwrap() = std::time::Instant::now();
@@ -358,7 +366,8 @@ impl Hub {
             if s.ended_at.is_some() || self.ending.lock().unwrap().contains_key(&id) || self.persisted_end(&id).ok().flatten().is_some() {
                 continue;
             }
-            let runner = self.runners.lock().unwrap().get(&id).filter(|r| r.alive()).cloned();
+            let runner = self.runners.lock().unwrap().get(&id).cloned();
+            let runner = runner.filter(|r| r.alive());
             if runner.as_ref().is_some_and(|r| r.busy()) {
                 continue;
             }
@@ -418,8 +427,9 @@ impl Hub {
     }
 
     pub(super) fn runner(&self, id: &str) -> Result<Arc<Runner>, Error> {
-        match self.runners.lock().unwrap().get(id) {
-            Some(r) if r.alive() => Ok(r.clone()),
+        let runner = self.runners.lock().unwrap().get(id).cloned();
+        match runner {
+            Some(r) if r.alive() => Ok(r),
             _ => Err(Error::failed("the session is not running")),
         }
     }
@@ -522,7 +532,8 @@ impl Hub {
             }
         }
         let _one_at_a_time = self.starting.lock().unwrap();
-        let running = self.runners.lock().unwrap().get(id).filter(|r| r.alive()).cloned();
+        let running = self.runners.lock().unwrap().get(id).cloned();
+        let running = running.filter(|r| r.alive());
         if !fresh && let Some(r) = running { return Ok(r); }
         if fresh { self.retire_runner(id); }
         let dir = sill_proto::runtime_dir()?.join(id);
@@ -751,7 +762,8 @@ impl Hub {
         let uid = rustix::process::getuid().as_raw();
         let user = std::env::var("USER").unwrap_or_else(|_| uid.to_string());
         for s in ghosts {
-            let runner = self.runners.lock().unwrap().get(&s.id).filter(|r| r.alive()).cloned();
+            let runner = self.runners.lock().unwrap().get(&s.id).cloned();
+            let runner = runner.filter(|r| r.alive());
             if runner.as_ref().is_some_and(|r| r.busy()) || !sill_core::session::is_running(&s.id) {
                 continue;
             }
@@ -966,7 +978,8 @@ impl Hub {
         if !open || !sill_core::session::is_running(id) {
             return;
         }
-        let busy = self.runners.lock().unwrap().get(id).is_some_and(|r| r.alive() && r.busy());
+        let runner = self.runners.lock().unwrap().get(id).cloned();
+        let busy = runner.is_some_and(|r| r.alive() && r.busy());
         let procs: Vec<String> = sill_core::shim::runtime_dir(id)
             .and_then(|d| sill_core::shim::Control::connect(&d.join("shim.sock")))
             .and_then(|mut c| c.proc_list())
@@ -998,7 +1011,8 @@ impl Hub {
     /// Stop each running session of `agent` as `sessions.stop` does; their ids.
     pub(super) fn stop_sessions_of(&self, agent: &str) -> Vec<String> {
         let rows = self.store.lock().unwrap().sessions().unwrap_or_default();
-        let running: Vec<String> = self.runners.lock().unwrap().iter().filter(|(_, r)| r.alive()).map(|(id, _)| id.clone()).collect();
+        let runners: Vec<_> = self.runners.lock().unwrap().values().cloned().collect();
+        let running: Vec<String> = runners.into_iter().filter(|r| r.alive()).map(|r| r.id.clone()).collect();
         let mut stopped = Vec::new();
         for id in running {
             if !rows.iter().any(|s| s.id == id && s.agent == agent) {
@@ -1044,7 +1058,8 @@ impl Hub {
         if !sill_core::session::valid_id(id) {
             bail!("not a session id");
         }
-        let runner = self.runners.lock().unwrap().get(id).filter(|r| r.alive()).cloned();
+        let runner = self.runners.lock().unwrap().get(id).cloned();
+        let runner = runner.filter(|r| r.alive());
         if let Some(r) = &runner {
             match r.summarizing() {
                 Some(SummaryKind::End) => return Ok(Ending { pending: true, deleted: false }),

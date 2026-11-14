@@ -163,7 +163,7 @@ impl Hub {
         let (uid, user) = who();
         let sessions: Vec<Session> = self.with_store(|s| s.sessions()).unwrap_or_default().into_iter().filter(|s| !s.ghost).collect();
         for s in sessions {
-            if self.children.lock().unwrap().contains_key(&s.id) && self.runners.lock().unwrap().get(&s.id).is_none_or(|r| !r.alive() || r.busy()) {
+            if self.children.lock().unwrap().contains_key(&s.id) && self.runner(&s.id).map_or(true, |r| r.busy()) {
                 continue;
             }
             let Ok(filesystem) = sill_core::session::recorded_filesystem(&s.id) else { continue };

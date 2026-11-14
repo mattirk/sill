@@ -550,7 +550,7 @@ impl Runner {
     pub fn command(&self, hub: &Hub, cmd: wire::Command) -> Result<()> {
         hub.with_store(|store| {
             let mut st = self.st.lock().unwrap();
-            self.commit_command(store, &hub.home, &mut st, cmd)?;
+            self.commit_command(store, &hub.home, &mut st, cmd, &hub.running_session_ids())?;
             let events = self.sfp_controls_state(store, &st)?;
             hub.sfp_publish(&self.id, &events);
             // Once committed, a transport failure keeps the outbox and busy state for recovery.
@@ -560,7 +560,7 @@ impl Runner {
         })
     }
 
-    fn commit_command(&self, store: &Store, home: &std::path::Path, st: &mut State, cmd: wire::Command) -> Result<Option<String>> {
+    fn commit_command(&self, store: &Store, home: &std::path::Path, st: &mut State, cmd: wire::Command, live: &[String]) -> Result<Option<String>> {
         // what is the daemon's — the transcript entry — stays here; the rest goes to the relay
         let entry = match &cmd { wire::Command::Prompt { entry, .. } => entry.clone(), _ => None };
         let mut cmd = relay::Command::from(cmd);
@@ -572,7 +572,7 @@ impl Runner {
                 if st.ready.is_none() { bail!("the agent is starting or needs a login"); }
                 if st.busy { bail!("the agent is busy; wait for the turn to end"); }
                 if st.context.restoring() { bail!("the agent is still confirming its settings; send again when it is ready"); }
-                let p = st.context.prepare(store, &self.id, home, text)?;
+                let p = st.context.prepare(store, &self.id, home, text, live)?;
                 *text = p.text.clone();
                 prepared = Some(p);
                 st.busy = true;
@@ -852,17 +852,17 @@ mod tests {
         let before = serde_json::to_value(&*state).unwrap();
         store.conn().execute_batch("CREATE TRIGGER reject_user BEFORE INSERT ON entries WHEN NEW.kind='user' BEGIN SELECT RAISE(ABORT,'reject user for test'); END").unwrap();
         let prompt = || wire::Command::Prompt { text: "work".into(), attachments: vec![], entry: Some(Entry::User { text: "work".into(), names: vec![] }) };
-        assert!(runner.commit_command(&store, &dir, &mut state, prompt()).is_err());
+        assert!(runner.commit_command(&store, &dir, &mut state, prompt(), &[]).is_err());
         assert_eq!(serde_json::to_value(&*state).unwrap(), before);
         assert_eq!(store.entry_count(&session.id).unwrap(), 0);
         assert!(Runner::load(&session.id, &store).unwrap().is_null());
         store.conn().execute_batch("DROP TRIGGER reject_user; CREATE TRIGGER reject_snapshot BEFORE INSERT ON daemon_runners BEGIN SELECT RAISE(ABORT,'reject snapshot for test'); END").unwrap();
-        assert!(runner.commit_command(&store, &dir, &mut state, wire::Command::SetMode("auto".into())).is_err());
+        assert!(runner.commit_command(&store, &dir, &mut state, wire::Command::SetMode("auto".into()), &[]).is_err());
         assert_eq!(serde_json::to_value(&*state).unwrap(), before);
         assert!(store.agent_settings("fake-agent").mode.is_none());
         assert!(store.sessions().unwrap().into_iter().find(|s| s.id == session.id).unwrap().agent_settings.mode.is_none());
         store.conn().execute_batch("DROP TRIGGER reject_snapshot").unwrap();
-        assert_eq!(runner.commit_command(&store, &dir, &mut state, prompt()).unwrap().as_deref(), Some("work"));
+        assert_eq!(runner.commit_command(&store, &dir, &mut state, prompt(), &[]).unwrap().as_deref(), Some("work"));
         assert!(state.busy);
         assert_eq!(state.outbox.len(), 1);
         assert_eq!(store.entry_count(&session.id).unwrap(), 1);
