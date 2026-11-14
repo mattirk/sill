@@ -47,8 +47,13 @@ pub fn prepare(dir: &Path, image_dir: &Path) -> Result<Prepared> {
             bail!("ssh-keygen could not make the VM's key");
         }
     }
-    if !dir.join("seed.iso").exists() {
-        seed(dir)?;
+    // made again when what it says changed (2026-11-13: no sudo, root's key for the mounter):
+    // the guest takes a new seed as a new instance and sets the account up by it
+    let user_data = user_data(&std::fs::read_to_string(dir.join("key.pub"))?);
+    let said = dir.join("seed.user-data");
+    if !dir.join("seed.iso").exists() || std::fs::read_to_string(&said).unwrap_or_default() != user_data {
+        seed(dir, &user_data)?;
+        std::fs::write(&said, &user_data)?;
     }
     std::fs::write(dir.join("ssh_config"), ssh_config(dir))?;
     private_disks(dir)?;
@@ -126,20 +131,39 @@ fn unpack_sparse(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The NoCloud seed: the account's key, and an instance id of this VM's own, so the image's
+/// The guest's root helper for the Mac's folders, installed by the image build
+/// (`packaging/mac/guest/sill-mac-folders`).
+pub const MOUNTER: &str = "/usr/local/lib/sill/sill-mac-folders";
+
+/// What the seed tells cloud-init: the account with the VM's key and **no sudo**, and the same
+/// key for root bound to the folder mounter alone (no shell, pty or forwarding). Mounting the
+/// Mac's folders is all Sill.app does as root in its VM; with sudo, anything that got out of a
+/// jail was root there (docs/sill-mac.md, finding 15). `write_files` runs before the account is
+/// made, so root's key is there by the time the account's lets Sill in.
+fn user_data(key: &str) -> String {
+    let key = key.trim();
+    format!(
+        "#cloud-config\n\
+         users:\n\
+         \x20 - name: {USER}\n\
+         \x20   shell: /bin/bash\n\
+         \x20   ssh_authorized_keys:\n\
+         \x20     - {key}\n\
+         write_files:\n\
+         \x20 - path: /root/.ssh/authorized_keys\n\
+         \x20   permissions: '0600'\n\
+         \x20   content: |\n\
+         \x20     command=\"{MOUNTER}\",restrict {key}\n"
+    )
+}
+
+/// The NoCloud seed: `user_data`, and an instance id of this VM's own, so the image's
 /// first boot here sets the account up and later images keep it.
-fn seed(dir: &Path) -> Result<()> {
-    let key = std::fs::read_to_string(dir.join("key.pub"))?;
+fn seed(dir: &Path, user_data: &str) -> Result<()> {
     let work = dir.join("seed");
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work)?;
-    std::fs::write(
-        work.join("user-data"),
-        format!(
-            "#cloud-config\nusers:\n  - name: {USER}\n    shell: /bin/bash\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    ssh_authorized_keys:\n      - {}\n",
-            key.trim()
-        ),
-    )?;
+    std::fs::write(work.join("user-data"), user_data)?;
     let instance = format!(
         "sill-app-{:x}",
         std::time::SystemTime::now()
@@ -254,6 +278,19 @@ mod tests {
         }
         assert!(!dir.join("state.raw").exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_seed_gives_the_account_no_sudo_and_root_only_the_mounter() {
+        let said = super::user_data("ssh-ed25519 AAAA sill-app\n");
+        assert!(!said.contains("sudo"), "{said}");
+        assert!(said.contains("\n      - ssh-ed25519 AAAA sill-app\n"), "{said}");
+        assert!(
+            said.ends_with("\n      command=\"/usr/local/lib/sill/sill-mac-folders\",restrict ssh-ed25519 AAAA sill-app\n"),
+            "{said}"
+        );
+        // root's key appears nowhere without the command it is bound to
+        assert_eq!(said.matches("ssh-ed25519").count(), 2);
     }
 
     #[test]

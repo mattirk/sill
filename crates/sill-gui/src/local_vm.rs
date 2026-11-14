@@ -542,10 +542,8 @@ fn sync_folders(dir: &Path, vm: &sill_vm::Vm) -> Result<(), String> {
     mount_folders(dir, &folders)
 }
 
-/// The guest's root helper, sent with each use (`packaging/mac/guest/sill-mac-folders`).
-const MOUNTER: &str = include_str!("../../../packaging/mac/guest/sill-mac-folders");
-
-/// Mount each shared folder at its Mac path inside the VM, as root over the VM's SSH.
+/// Mount each shared folder at its Mac path inside the VM: the image's root helper
+/// (`packaging/mac/guest/sill-mac-folders`), the folders on its stdin.
 fn mount_folders(dir: &Path, folders: &[Option<PathBuf>]) -> Result<(), String> {
     let lines: String = folders
         .iter()
@@ -558,13 +556,8 @@ fn mount_folders(dir: &Path, folders: &[Option<PathBuf>]) -> Result<(), String> 
     if lines.is_empty() {
         return Ok(());
     }
-    // the script travels in the command (base64, no quoting to get wrong), the folders on stdin
-    let remote = format!(
-        "f=$(mktemp) && echo {} | base64 -d > \"$f\" && sudo sh \"$f\"; s=$?; rm -f \"$f\"; exit $s",
-        base64(MOUNTER.as_bytes())
-    );
-    guest(dir, &remote, &lines)
-        .map_err(|said| format!("Sill could not put the folders in place in its VM: {said}"))
+    as_root(dir, "mount", &lines)
+        .map_err(|said| format!("Sill could not put the folders in place in its VM: {}", older_image(said)))
 }
 
 /// Who the person's commits are by on the Mac: git's own answer (`user.name` and `user.email`,
@@ -595,18 +588,43 @@ fn share_git_identity(dir: &Path) -> Result<(), String> {
 
 /// Unmount a shared folder's Mac path in the guest, if it is mounted there; the path on stdin.
 fn unmount_folder(dir: &Path, path: &Path) -> Result<(), String> {
-    let remote = "IFS= read -r p && case \"$p\" in /Users/?*|/Volumes/?*) ;; *) exit 2 ;; esac \
-                  && if findmnt -n --mountpoint \"$p\" >/dev/null 2>&1; then sudo umount -l -- \"$p\"; fi";
-    guest(dir, remote, &format!("{}\n", path.display()))
-        .map_err(|said| format!("Sill could not unmount {} in its VM: {said}", path.display()))
+    as_root(dir, "unmount", &format!("{}\n", path.display()))
+        .map_err(|said| format!("Sill could not unmount {} in its VM: {}", path.display(), older_image(said)))
 }
 
-/// Run `remote` in the guest over the VM's SSH, `input` on its stdin; why it failed, if it did.
+/// What the helper's absence means: an image from before it was part of the image (2026-11-13),
+/// when the VM's account had sudo and the helper travelled with each use.
+fn older_image(said: String) -> String {
+    // no helper there (sh and bash say it differently), or root's SSH never given the key
+    let no_helper = said.contains("sill-mac-folders: not found") || said.contains("sill-mac-folders: No such file");
+    if no_helper || said.contains("Permission denied") {
+        format!("{said} (this VM's system image is older than this Sill: build the image again, packaging/mac-image.sh)")
+    } else {
+        said
+    }
+}
+
+/// Run the guest's root helper (`sill-mac-folders`) with `request`, `input` on its stdin. The
+/// VM's account has no sudo: root's SSH lets the VM's key in for that helper alone
+/// (`setup::user_data`), so `request` only chooses between what the helper does.
+fn as_root(dir: &Path, request: &str, input: &str) -> Result<(), String> {
+    ssh(dir, Some("root"), request, input)
+}
+
+/// Run `remote` in the guest as the VM's account, `input` on its stdin; why it failed, if it did.
 fn guest(dir: &Path, remote: &str, input: &str) -> Result<(), String> {
-    let mut child = std::process::Command::new("ssh")
-        .arg("-F")
-        .arg(dir.join("ssh_config"))
-        .args(["-T", "-o", "BatchMode=yes", setup::HOST])
+    ssh(dir, None, remote, input)
+}
+
+/// Over the VM's SSH, as `user` or the VM's account.
+fn ssh(dir: &Path, user: Option<&str>, remote: &str, input: &str) -> Result<(), String> {
+    let mut command = std::process::Command::new("ssh");
+    command.arg("-F").arg(dir.join("ssh_config")).args(["-T", "-o", "BatchMode=yes"]);
+    if let Some(user) = user {
+        command.args(["-l", user]);
+    }
+    let mut child = command
+        .arg(setup::HOST)
         .arg(remote)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
@@ -622,24 +640,6 @@ fn guest(dir: &Path, remote: &str, input: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn base64(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let n = (u32::from(chunk[0]) << 16)
-            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
-            | u32::from(*chunk.get(2).unwrap_or(&0));
-        for i in 0..4 {
-            if i <= chunk.len() {
-                out.push(TABLE[(n >> (18 - 6 * i) & 63) as usize] as char);
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -651,15 +651,6 @@ mod tests {
         for refused in ["/Users", "/usr/local", "/private/tmp", "/opt/homebrew", "/"] {
             assert!(!super::mac_folder(Path::new(refused)), "{refused}");
         }
-    }
-
-    #[test]
-    fn base64_is_standard() {
-        assert_eq!(super::base64(b""), "");
-        assert_eq!(super::base64(b"f"), "Zg==");
-        assert_eq!(super::base64(b"fo"), "Zm8=");
-        assert_eq!(super::base64(b"foo"), "Zm9v");
-        assert_eq!(super::base64(b"sill\n"), "c2lsbAo=");
     }
 
     #[test]

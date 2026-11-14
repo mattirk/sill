@@ -55,6 +55,7 @@ hostname: sill-box
 users:
   - name: sill
     shell: /bin/bash
+    # for this build only: removed at its end
     sudo: ALL=(ALL) NOPASSWD:ALL
     ssh_authorized_keys:
       - $(cat "$work/key.pub")
@@ -151,6 +152,7 @@ let_in
 echo 'Setting up the data disks'
 git archive --format=tar HEAD packaging/mac/guest | guest 'rm -rf guest && mkdir guest && tar -x -C guest'
 guest 'sudo install -D -m755 guest/packaging/mac/guest/sill-disks /usr/local/lib/sill/sill-disks &&
+    sudo install -D -m755 -o root -g root guest/packaging/mac/guest/sill-mac-folders /usr/local/lib/sill/sill-mac-folders &&
     sudo install -m644 guest/packaging/mac/guest/sill-disks.service /etc/systemd/system/ &&
     sudo sh -c "cat guest/packaging/mac/guest/fstab >> /etc/fstab" &&
     sudo install -m644 guest/packaging/mac/guest/grub.cfg /etc/default/grub.d/sill.cfg &&
@@ -237,8 +239,21 @@ guest 'sudo cloud-init clean --logs --machine-id && rm -f ~/.bash_history &&
     sudo rm -rf /mnt/root/home/sill && sudo cp -a /home/sill /mnt/root/home/ &&
     sudo rm -f /mnt/root/home/sill/.ssh/authorized_keys &&
     sudo umount /mnt/root && sudo rmdir /mnt/root'
-guest 'sudo fstrim -a >/dev/null 2>&1 || true'
-power_off
+# last, as root in one go: the account's sudo was the build's alone. The app's seed gives none,
+# and what Sill.app does as root there goes through root's SSH and the folder mounter
+# (docs/sill-mac.md, finding 15). An image whose account can still become root is not kept.
+left=$(guest 'sudo sh -c "fstrim -a >/dev/null 2>&1
+    rm -f /etc/sudoers.d/90-cloud-init-users
+    if runuser -u sill -- sudo -n true 2>/dev/null; then echo sill-still-root; fi
+    test -x /usr/local/lib/sill/sill-mac-folders || echo sill-no-mounter
+    systemctl poweroff"' 2>&1) || true
+touch "$work/go"
+wait $vm || true
+vm=
+case "$left" in
+    *sill-still-root*) echo 'The account still has sudo; not keeping this image.' >&2; exit 1 ;;
+    *sill-no-mounter*) echo 'The folder mounter is not in the image; not keeping it.' >&2; exit 1 ;;
+esac
 trap - EXIT
 
 mv "$work/system.raw" "$out/system.raw"
