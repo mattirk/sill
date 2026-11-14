@@ -95,6 +95,9 @@ enum Cmd {
         /// stop the service and run THIS binary instead (try a build without installing it)
         #[arg(long)]
         dev: bool,
+        /// (internal) already running outside the shelf's process group — do not detach again
+        #[arg(long, hide = true)]
+        detached: bool,
     },
     /// Switch the shelf's colour theme: adwaita | dracula | solarized-dark | solarized-light | nord
     Theme { name: String },
@@ -270,7 +273,7 @@ fn main() -> Result<()> {
         Cmd::Init(a) => init::run(a),
         Cmd::Shelf { cwd, hidden } => shelf::run(cwd, hidden),
         Cmd::Toggle => shelf::toggle(),
-        Cmd::Restart { hidden, dev } => shelf::restart(hidden, dev),
+        Cmd::Restart { hidden, dev, detached } => shelf::restart(hidden, dev, detached),
         Cmd::Theme { name } => shelf::set_theme(&name),
         Cmd::Hotkey { spec } => shelf::set_hotkey(&spec),
         Cmd::Login { agent, method } => {

@@ -1,6 +1,6 @@
 #!/bin/sh
 # Build, install and restart sill on this machine, then check that the shelf on screen is the build
-# just made. Run it in a host terminal (Ctrl+Shift+T) — not in a session's shell: sudo is refused
+# just made. Run it in a host terminal (Ctrl+Shift+H) — not in a session's shell: sudo is refused
 # inside the jail by design (SPEC §4.2).
 #
 #   packaging/deploy.sh             # cargo build --release, sudo sill init, sill restart, verify
@@ -8,7 +8,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 if [ -d /.sill ]; then
-    echo "deploy.sh: this is a sill jail; run it in a host terminal (Ctrl+Shift+T)" >&2
+    echo "deploy.sh: this is a sill jail; run it in a host terminal (Ctrl+Shift+H)" >&2
     exit 1
 fi
 PREFIX=${PREFIX:-/usr/local}

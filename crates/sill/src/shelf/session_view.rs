@@ -90,6 +90,9 @@ pub struct SessionView {
     /// A file to show in the shelf's viewer (a file chip, an image in a message); `full` = a pinned
     /// file, shown over the whole shelf with the tree closed.
     pub on_open_file: RefCell<Option<Box<dyn Fn(&std::path::Path)>>>,
+    /// The terminal panes (`shell`, `host`): hosted by the window across its whole width while
+    /// [`Self::pane_shown`] names one.
+    pub pane: gtk::Stack,
     /// Shell toggle in the controls row (M3 wires the terminal pane to it).
     pub on_shell: RefCell<Option<Box<dyn Fn(bool)>>>,
     /// The shell button's right-click "terminal on the host": the window opens it (Ctrl+Shift+H) —
@@ -276,15 +279,29 @@ impl SessionView {
             terminal.add_controller(right);
         }
         let bottom = gtk::Stack::new();
-        bottom.set_transition_type(gtk::StackTransitionType::Crossfade);
-        // not homogeneous: the prompt keeps its own (small) height, the terminal its third of the shelf
+        // no transition: the prompt folds away in the same frame the terminal pane appears below,
+        // one relayout the conversation follows to its end, instead of a slide on top of a jump
+        bottom.set_transition_type(gtk::StackTransitionType::None);
         bottom.set_vhomogeneous(false);
-        bottom.set_interpolate_size(true);
         bottom.add_named(&prompt_scroll, Some("prompt"));
+        // the terminals live in `pane`, which the window shows across its whole width under the
+        // tree and the main pane; `bottom` keeps an empty page per terminal so its visible child
+        // still says what the slot shows (the prompt folds away while a terminal is up)
+        let pane = gtk::Stack::new();
+        pane.set_vhomogeneous(false);
         let term_overlay = gtk::Overlay::new();
         term_overlay.set_child(Some(&term_scroll));
         term_overlay.add_overlay(&toast);
-        bottom.add_named(&term_overlay, Some("shell"));
+        // the jail shell under a caption and rule in the success colour: the counterpart of the
+        // host shell's warning-coloured one, so the colour says at a glance which side a shell is on
+        let term_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let term_caption = gtk::Label::new(Some("jail · inside the session"));
+        term_caption.add_css_class("sill-jail-caption");
+        term_caption.set_xalign(0.0);
+        term_box.append(&term_caption);
+        term_box.append(&term_overlay);
+        pane.add_named(&term_box, Some("shell"));
+        bottom.add_named(&gtk::Box::new(gtk::Orientation::Vertical, 0), Some("shell"));
         // the host shell: the same kind of pane, marked as host above it
         let (host_term, host_scroll) = Self::host_terminal_pane();
         let host_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -293,7 +310,8 @@ impl SessionView {
         host_caption.set_xalign(0.0);
         host_box.append(&host_caption);
         host_box.append(&host_scroll);
-        bottom.add_named(&host_box, Some("host"));
+        pane.add_named(&host_box, Some("host"));
+        bottom.add_named(&gtk::Box::new(gtk::Orientation::Vertical, 0), Some("host"));
         bottom.set_visible_child_name("prompt");
 
         let prompt_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -332,6 +350,7 @@ impl SessionView {
             attach_strip,
             images_ok: std::cell::Cell::new(true),
             bottom,
+            pane,
             terminal: terminal.clone(),
             term_scroll: term_scroll.clone(),
             shell_open: std::cell::Cell::new(false),
@@ -621,7 +640,8 @@ impl SessionView {
                 vte4::PtyFlags::DEFAULT,
                 Some(&dir.to_string_lossy()),
                 &[&shell, "-l"],
-                &["TERM=xterm-256color", "COLORTERM=truecolor"],
+                // SILL_HOST_SHELL: `sill restart` run here knows to step outside the shelf first
+                &["TERM=xterm-256color", "COLORTERM=truecolor", "SILL_HOST_SHELL=1"],
                 glib::SpawnFlags::DEFAULT,
                 || {},
                 -1,
@@ -636,7 +656,8 @@ impl SessionView {
             );
             self.host_open.set(true);
         }
-        let h = self.root.height();
+        // a third of the window (the pane sits under the view now, so the view's own height shrinks)
+        let h = self.root.root().map(|r| r.height()).unwrap_or(0);
         if h > 0 {
             self.host_scroll.set_min_content_height(h / 3);
         }
@@ -674,8 +695,8 @@ impl SessionView {
                 }
             }
         }
-        // a third of the shelf's height for the terminal (the scrolled window owns the size)
-        let h = self.root.height();
+        // a third of the window (the pane sits under the view now, so the view's own height shrinks)
+        let h = self.root.root().map(|r| r.height()).unwrap_or(0);
         if h > 0 {
             self.term_scroll.set_min_content_height(h / 3);
         }
@@ -1586,10 +1607,14 @@ impl SessionView {
         }
     }
 
-    /// `f(true)` when a terminal pane (jail or host shell) takes the bottom slot, `f(false)` when
-    /// the prompt is back.
-    pub fn connect_pane(&self, f: impl Fn(bool) + 'static) {
-        self.bottom.connect_visible_child_name_notify(move |b| f(b.visible_child_name().as_deref() != Some("prompt")));
+    /// The terminal pane the bottom slot shows (`shell`, `host`), `None` while it is the prompt.
+    pub fn pane_shown(&self) -> Option<String> {
+        self.bottom.visible_child_name().map(|n| n.to_string()).filter(|n| n != "prompt")
+    }
+
+    /// `f` whenever the bottom slot switches between the prompt and a terminal pane.
+    pub fn connect_pane(&self, f: impl Fn() + 'static) {
+        self.bottom.connect_visible_child_name_notify(move |_| f());
     }
 
     /// The session's overlay, planned once per jail.

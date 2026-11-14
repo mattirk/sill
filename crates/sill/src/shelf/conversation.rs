@@ -963,6 +963,8 @@ button.sill-md-image:hover { opacity: 0.85; }
 .sill-md-changed { border-left: 3px solid @success_color; }
 /* the host shell pane: the same terminal, under a warning-coloured caption and rule */
 .sill-host-caption { font-size: 85%; color: @warning_color; padding: 3px 10px; border-top: 2px solid alpha(@warning_color, 0.8); }
+/* the jail shell pane: the same, in the success colour */
+.sill-jail-caption { font-size: 85%; color: @success_color; padding: 3px 10px; border-top: 2px solid alpha(@success_color, 0.8); }
 .sill-tool-rows { margin-left: 10px; border-left: 1px solid alpha(@view_fg_color, 0.12); }
 .sill-tool-rows .sill-tool { border-left: none; }
 .sill-permission { background: alpha(@warning_bg_color, 0.10); border-radius: 0; padding: 8px 10px;

@@ -206,7 +206,13 @@ fn quit_running_shelf() -> Result<()> {
 /// exit, leaving the old build on screen) and starts the unit again (the installed binary); `--dev`
 /// instead stops the service and runs *this* executable detached, for trying a build without
 /// installing it.
-pub fn restart(hidden: bool, dev: bool) -> Result<()> {
+pub fn restart(hidden: bool, dev: bool, detached: bool) -> Result<()> {
+    // run from the shelf's own host shell (a child of the shelf: the unit's cgroup, its pty), the
+    // stop below would take this command down with the shelf before it starts anything — so the
+    // work is handed to a copy outside: its own scope, its own session, its output in shelf.log
+    if !detached && inside_shelf() {
+        return restart_detached(hidden, dev);
+    }
     let unit_known = std::process::Command::new("systemctl")
         .args(["--user", "cat", "sill-shelf.service"])
         .stdout(std::process::Stdio::null())
@@ -277,6 +283,42 @@ pub fn restart(hidden: bool, dev: bool) -> Result<()> {
     }
     cmd.spawn()?;
     println!("shelf restarted");
+    Ok(())
+}
+
+/// Is this process a descendant of the running shelf — in its host shell (which the shelf marks
+/// with `SILL_HOST_SHELL`) or anywhere in the user service's cgroup?
+fn inside_shelf() -> bool {
+    std::env::var_os("SILL_HOST_SHELL").is_some()
+        || std::fs::read_to_string("/proc/self/cgroup").is_ok_and(|c| c.contains("sill-shelf.service"))
+}
+
+/// Run `sill restart` again outside the shelf: in a transient scope of its own (not the unit's
+/// cgroup, so the stop doesn't reach it), in a new session (no controlling pty to hang up when the
+/// shelf's terminal goes), logging to shelf.log.
+fn restart_detached(hidden: bool, dev: bool) -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let log_path = sill_core::store::default_path()?.with_file_name("shelf.log");
+    let log = std::fs::OpenOptions::new().create(true).append(true).open(&log_path)?;
+    let mut args: Vec<std::ffi::OsString> = vec!["--user".into(), "--scope".into(), "--quiet".into(), "--".into()];
+    args.extend(["setsid".into(), "-f".into(), exe.into_os_string(), "restart".into(), "--detached".into()]);
+    if hidden {
+        args.push("--hidden".into());
+    }
+    if dev {
+        args.push("--dev".into());
+    }
+    let st = std::process::Command::new("systemd-run")
+        .args(&args)
+        .stdin(std::process::Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log)
+        .status()
+        .map_err(|e| anyhow::anyhow!("systemd-run (the restart must run outside the shelf's cgroup): {e}"))?;
+    if !st.success() {
+        bail!("systemd-run failed ({st}); run `sill restart` from a terminal that is not the shelf's");
+    }
+    println!("restarting outside the shelf; its output goes to {}", log_path.display());
     Ok(())
 }
 

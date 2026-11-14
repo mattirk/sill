@@ -52,9 +52,9 @@ pub struct Shelf {
     /// The file tree (a drawer beside the main pane) and the viewer (over it), SPEC §3.1.
     tree: Rc<FolderTree>,
     viewer: Rc<Viewer>,
-    /// The tree's scope while a terminal pane has its width: the drawer closes when the selected
-    /// session shows a shell and opens again, as it was, when the prompt is back.
-    tree_lent: RefCell<Option<Option<PathBuf>>>,
+    /// The selected session's terminal pane, across the whole width under the tree and the main
+    /// pane (one child per open session, named by its id); hidden while the prompt shows.
+    pane_host: gtk::Stack,
 }
 
 /// Start the host terminal detached from the shelf: `{cwd}` in the command line is the directory,
@@ -165,12 +165,19 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
     let stack = gtk::Stack::new();
     stack.set_transition_type(gtk::StackTransitionType::Crossfade);
     stack.set_vexpand(true);
+    // the window's minimum height is the shown page's, not the tallest page's: with a terminal pane
+    // under the pages, the Settings page's rows would otherwise push the window past the screen
+    stack.set_vhomogeneous(false);
     stack.add_named(&pages, Some("sessions"));
     let changes = ChangesPage::new(store.clone());
     let tree = FolderTree::new(store.clone());
     let viewer = Viewer::new(tree.changes.clone());
     let agents_page = AgentsPage::new();
-    let settings_page = settings::build();
+    let settings_page = gtk::ScrolledWindow::builder()
+        .child(&settings::build())
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(true)
+        .build();
     // backend pages: the page tabs in the bar say where you are, "sill" or Escape goes back
     for (name, body) in [
         ("changes", changes.root.clone().upcast::<gtk::Widget>()),
@@ -195,9 +202,14 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
     body.append(&main);
     body.append(&tree.root);
     body.set_vexpand(true);
+    // a terminal pane spans the window: under the tree and the main pane alike
+    let pane_host = gtk::Stack::new();
+    pane_host.set_vhomogeneous(false);
+    pane_host.set_visible(false);
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
     column.append(&bar);
     column.append(&body);
+    column.append(&pane_host);
     window.set_content(Some(&column));
 
     let shelf = Rc::new(Shelf {
@@ -220,7 +232,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         agents: agents_page.clone(),
         tree: tree.clone(),
         viewer: viewer.clone(),
-        tree_lent: RefCell::new(None),
+        pane_host: pane_host.clone(),
     });
     {
         // auto-revert (SPEC §4.4): the Changes page sweeps once a minute; a session that is mid-turn
@@ -330,6 +342,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         let s = shelf.clone();
         *tabs.on_select.borrow_mut() = Some(Box::new(move |id| {
             s.pages.set_visible_child_name(id);
+            s.sync_pane();
             *s.tree.pin_target.borrow_mut() = Some(id.to_string());
             if s.tree.root.is_visible() {
                 s.tree.refresh(); // pinned-here badges follow the selected session
@@ -619,30 +632,31 @@ impl Shelf {
         if !self.tree.root.is_visible() {
             return;
         }
-        self.hide_tree();
+        self.tree.root.set_visible(false);
+        self.place();
         self.focus_prompt();
     }
 
-    fn hide_tree(&self) {
-        self.tree.root.set_visible(false);
-        self.place();
-    }
-
-    /// The selected session's bottom slot changed: a terminal pane takes the whole width — the tree
-    /// closes while it shows and comes back, as it was, with the prompt (`tree_lent`).
-    fn pane_shown(&self, id: &str, shown: bool) {
-        if self.tabs.selected().as_deref() != Some(id) {
-            return;
-        }
-        if shown {
-            if self.tree.root.is_visible() {
-                *self.tree_lent.borrow_mut() = Some(self.tree.scope());
-                self.hide_tree();
+    /// Show the selected session's terminal pane across the window, or none while its prompt shows.
+    fn sync_pane(&self) {
+        let shown = self.tabs.selected().and_then(|id| {
+            let views = self.views.borrow();
+            let v = views.get(&id)?;
+            v.pane_shown().map(|name| (id, name, v.pane.clone()))
+        });
+        let was = self.pane_host.is_visible();
+        match shown {
+            Some((id, name, pane)) => {
+                pane.set_visible_child_name(&name);
+                self.pane_host.set_visible_child_name(&id);
+                self.pane_host.set_visible(true);
             }
-        } else if let Some(scope) = self.tree_lent.borrow_mut().take()
-            && !self.tree.root.is_visible()
-        {
-            self.toggle_tree(scope);
+            None => self.pane_host.set_visible(false),
+        }
+        // the slot changes the window's natural height; keep the window at the work area (as the
+        // tree does with its width) instead of letting GTK grow it past the bottom of the screen
+        if was != self.pane_host.is_visible() {
+            self.place();
         }
     }
 
@@ -1010,6 +1024,7 @@ impl Shelf {
             view.conv.add_note(n);
         }
         self.pages.add_named(&view.root, Some(&id));
+        self.pane_host.add_named(&view.pane, Some(&id));
         self.tabs.add(&id, &s.title);
         self.refresh_tab(&s);
         {
@@ -1059,8 +1074,7 @@ impl Shelf {
             let shelf = self.clone();
             *view.on_open_file.borrow_mut() = Some(Box::new(move |p| shelf.open_file(p)));
             let shelf = self.clone();
-            let vid = id.clone();
-            view.connect_pane(move |shown| shelf.pane_shown(&vid, shown));
+            view.connect_pane(move || shelf.sync_pane());
             let shelf = self.clone();
             *view.on_host_terminal.borrow_mut() = Some(Box::new(move |window| shelf.open_host_terminal(window)));
         }
@@ -1113,8 +1127,10 @@ impl Shelf {
         if let Some(v) = self.views.borrow_mut().remove(id) {
             v.quit();
             self.pages.remove(&v.root);
+            self.pane_host.remove(&v.pane);
         }
         self.tabs.remove(id);
+        self.sync_pane();
         if self.tabs.selected().is_none() {
             self.set_status("");
         }
