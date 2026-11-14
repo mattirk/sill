@@ -310,9 +310,9 @@ pub fn recall(store: &Store, s: &Session, pins: &[PathBuf], home: &Path, n: usiz
     if scope == Scope::Off || n == 0 {
         return String::new(); // no block at all, not even the pointer at sill-memory (§4)
     }
-    let all = sill_memory::sessions(store.conn()).unwrap_or_default();
     let follows = Some(s.follows.as_str()).filter(|f| !f.is_empty());
-    let picked = sill_memory::recall_pick(&all, &s.id, pins, scope, n, follows);
+    let candidates = sill_memory::recall_candidates(store.conn(), &s.id, pins, scope, n, follows).unwrap_or_default();
+    let picked = candidates.iter().collect::<Vec<_>>();
     let searchable = snapshot_dir().join(sill_memory::SNAPSHOT_FILE).is_file();
     sill_memory::recall_block(&picked, scope, searchable, home, |id| kept_of(id).len())
 }

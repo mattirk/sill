@@ -5,6 +5,8 @@ use serde_json::{Value, json};
 use sill_core::frontend::{DirEntry, ExportFile, Metadata, Request};
 use super::Hub;
 
+pub(super) static CONFIG: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn dispatch(hub: &Hub, params: Value) -> Result<Value> {
     let request: Request = serde_json::from_value(params)?;
     let home = sill_core::changes::home()?;
@@ -40,7 +42,6 @@ pub fn dispatch(hub: &Hub, params: Value) -> Result<Value> {
         Request::Config => json!(sill_core::config::load()),
         Request::SetConfig(config) => { sill_core::config::save(&config)?; json!(null) },
         Request::PatchConfig { fields } => {
-            static CONFIG: std::sync::Mutex<()> = std::sync::Mutex::new(());
             let _guard = CONFIG.lock().unwrap();
             let mut value = serde_json::to_value(sill_core::config::load())?;
             let object = value.as_object_mut().context("settings are not an object")?;
@@ -172,10 +173,13 @@ fn session_row(hub: &Hub, id: &str) -> Result<sill_core::store::Session> {
 }
 
 fn resolve_image(hub: &Hub, session: &str, src: &str, home: &Path) -> Result<Option<std::path::PathBuf>> {
-    use std::path::{Component, PathBuf};
-    use std::os::unix::fs::FileTypeExt;
     let src = src.strip_prefix("file://").unwrap_or(src);
     if src.contains("://") { return Ok(None) }
+    resolve_image_path(hub,session,Path::new(src),home)
+}
+pub(super) fn resolve_image_path(hub:&Hub,session:&str,src:&Path,home:&Path)->Result<Option<std::path::PathBuf>> {
+    use std::path::{Component,PathBuf};
+    use std::os::unix::fs::FileTypeExt;
     let raw = PathBuf::from(src);
     let raw = if raw.is_absolute() { raw } else { home.join(raw) };
     let mut p = PathBuf::from("/");
@@ -208,7 +212,7 @@ fn metadata(path: &Path) -> Result<Metadata> {
     Ok(Metadata { file: m.is_file(), directory: m.is_dir(), symlink: m.is_symlink(), target: if m.is_symlink() { std::fs::read_link(path).ok() } else { None }, length: m.len(), readonly: m.permissions().readonly() })
 }
 
-fn head_label(repo: &Path) -> Option<(String, bool)> {
+pub(super) fn head_label(repo: &Path) -> Option<(String, bool)> {
     let dot = repo.join(".git");
     let gitdir = if dot.is_file() {
         let text = std::fs::read_to_string(&dot).ok()?;
@@ -223,7 +227,7 @@ fn head_label(repo: &Path) -> Option<(String, bool)> {
     })
 }
 
-fn find_files(bases: &[std::path::PathBuf], q: &str, cap: usize, visits: usize) -> (Vec<std::path::PathBuf>, bool) {
+pub(super) fn find_files(bases: &[std::path::PathBuf], q: &str, cap: usize, visits: usize) -> (Vec<std::path::PathBuf>, bool) {
     let mut found = Vec::new();
     let mut seen = 0;
     let mut cut = false;
@@ -306,7 +310,7 @@ mod tests {
     }
 }
 
-fn git_summary(path: &std::path::Path) -> Option<(u64, u64, u64)> {
+pub(super) fn git_summary(path: &std::path::Path) -> Option<(u64, u64, u64)> {
     let (repo, spec): (std::path::PathBuf, Option<std::path::PathBuf>) = if path.is_dir() {
         (path.to_path_buf(), None)
     } else {

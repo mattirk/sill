@@ -1,5 +1,6 @@
 """Run with python3 -m unittest discover -s scripts -p 'test_sfp_client.py'."""
 import unittest
+import json
 from sfp_client import Client, View, sequence
 
 
@@ -57,6 +58,28 @@ class ViewTests(unittest.TestCase):
         self.assertNotIn(("question", "obsolete"), replacement.records)
         replacement.apply(event(11, {"type": "item.text_appended", "item_id": "i", "block_id": "b", "text": "!"}))
         self.assertEqual(replacement.records[("item", "i")]["item"]["content"][0]["text"], "hello!")
+
+    def test_fragmented_snapshot_uses_utf8_byte_offsets_and_rejects_gaps(self):
+        record = {"type": "item", "item": item()}
+        record["item"]["content"][0]["text"] = "🦀 hello"
+        text = json.dumps(record, ensure_ascii=False)
+        split = text.index("🦀") + 1
+        class FragmentClient(Client):
+            def __init__(self, gap=False):
+                self.page, self.gap = 0, gap
+            def call(self, method, params):
+                at = {"session_id": "s", "seq": "10"}
+                if method == "_sill/sessions.attach":
+                    return {"mode": "snapshot", "subscription_id": "sub", "snapshot": {"token": "t", "at": at}}
+                self.page += 1
+                first = self.page == 1
+                offset = 0 if first else len(text[:split].encode("utf-8")) + int(self.gap)
+                return {"at": at, "records": [], "next_page": "1" if first else None,
+                        "fragment": {"record": "0", "offset": str(offset), "json": text[:split] if first else text[split:], "last": not first}}
+        _, view = FragmentClient().attach("s")
+        self.assertEqual(view.records[("item", "i")], record)
+        with self.assertRaises(ValueError):
+            FragmentClient(gap=True).attach("s")
 
 
 class PresentationTests(unittest.TestCase):

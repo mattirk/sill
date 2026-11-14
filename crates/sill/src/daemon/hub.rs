@@ -25,8 +25,12 @@ use super::runner::{Runner, SummaryDone, SummaryKind};
 // the Changes page's methods: a child module, so it reaches the hub's own fields
 #[path = "changes.rs"]
 mod changes;
+#[path = "changes_public.rs"]
+mod changes_public;
 #[path = "sessions.rs"]
 mod sessions;
+#[path = "pins.rs"]
+mod pins;
 
 /// What an end that waits for the agent's summary needs once the answer is in (the facts as they
 /// were when the end was asked for; the row's summary is replaced only when memory is on).
@@ -83,6 +87,7 @@ pub(super) fn probe<T>(m: &Mutex<T>, deadline: std::time::Instant) -> bool {
 impl Hub {
     pub fn new(mode: &'static str) -> Result<Hub> {
         let store = Store::open_default()?;
+        sill_core::operations::Journal::new(store.conn())?.recover()?;
         store.conn().execute_batch("CREATE TABLE IF NOT EXISTS daemon_ends (id TEXT PRIMARY KEY, context TEXT NOT NULL); CREATE TABLE IF NOT EXISTS daemon_runners (id TEXT PRIMARY KEY, state TEXT NOT NULL);
             CREATE TRIGGER IF NOT EXISTS daemon_state_cleanup AFTER DELETE ON sessions BEGIN
                 DELETE FROM daemon_runners WHERE id=OLD.id;
@@ -194,7 +199,7 @@ impl Hub {
     /// `changes.changed` to every frontend: a sweep reverted, a keep was made (by any client), a
     /// session went or a turn ended — whatever shows the overlays rescans.
     pub fn changes_changed(&self) {
-        let req = sill_proto::rpc::Request::new(None, method::CHANGES_CHANGED, json!({}));
+        let req = sill_proto::rpc::Request::new(None, "_sill/changes.changed", json!({}));
         let Ok(line) = serde_json::to_string(&req) else { return };
         let conns: Vec<Arc<Conn>> = self.conns.lock().unwrap().iter().filter_map(|w| w.upgrade()).collect();
         for c in conns {
@@ -204,6 +209,7 @@ impl Hub {
 
     /// A connection closed: it is subscribed nowhere any more.
     pub fn disconnect(&self, conn: u64) {
+        super::memory_api::disconnect(conn);
         let public_ids=self.sfp.lock().unwrap().sessions_for(conn);
         self.sfp.lock().unwrap().disconnect(conn);
         self.conns.lock().unwrap().retain(|w| w.upgrade().is_some_and(|c| c.id != conn));
@@ -244,6 +250,8 @@ impl Hub {
     /// closing its tab would (`sessions.end`, reason `idle`; 0 = never) — attached or not, the
     /// daemon's sessions are its own. Then memory's nightly run when it is due.
     pub fn sweep(self: &Arc<Self>) {
+        super::memory_api::sweep();
+        self.sfp.lock().unwrap().expire();
         super::streams::reap();
         super::terminals::reap();
         let now = sill_core::store::now();
@@ -313,6 +321,15 @@ impl Hub {
     }
 
     pub fn dispatch(self: &Arc<Self>, conn: &Arc<Conn>, m: &str, params: Value) -> Result<Value, Error> {
+        if let Some(result) = self.changes_public(m, params.clone()) { return result.map_err(super::sfp::failure); }
+        if let Some(result) = super::agent_admin::handle(self, m, params.clone()) { return result.map_err(super::sfp::failure); }
+        if let Some(result) = super::admin::handle(self, conn.id, m, params.clone()) {
+            return result.map_err(|e| {
+                if let Some(e) = e.downcast_ref::<Error>() { return e.clone(); }
+                if let Some(e) = e.downcast_ref::<sill_core::sfp::DomainError>() { return Error::domain(e.code, &e.message); }
+                Error::domain("operation_failed", format!("{e:#}"))
+            });
+        }
         match m {
             method::DAEMON_STATUS => to_value(self.status()?),
             method::DAEMON_SHUTDOWN => Ok(json!({})),
@@ -571,14 +588,14 @@ impl Hub {
         let sessions = self.sessions()?;
         Ok(DaemonStatus {
             version: env!("CARGO_PKG_VERSION").to_string(),
-            protocol: sill_proto::PROTOCOL,
+            protocol: sill_proto::initialize::PROTOCOL_ID.into(),
             pid: std::process::id(),
-            started: self.started,
+            started: sill_core::sfp::timestamp(self.started),
             mode: self.mode.to_string(),
             launcher: self.launcher.describe(),
             limits: self.launcher.has_limits(),
             journal: self.launcher.journal,
-            socket: sill_proto::socket_path().map(|p| p.display().to_string()).unwrap_or_default(),
+            socket: sill_proto::sessions::HostPath::from_path(&sill_proto::socket_path().map_err(Error::failed)?),
             running: sessions.iter().filter(|s| s.running).count(),
             sessions: sessions.len(),
         })
@@ -735,7 +752,8 @@ impl Hub {
                     .arg("--agent-socket").arg(&started.socket).arg("--cwd").arg(&self.home)
                     .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(log)
                     .env_remove("SILL_SESSION").env_remove("NOTIFY_SOCKET").env_remove("LISTEN_PID").env_remove("LISTEN_FDS");
-                if agent.supports_load && let Some(resume) = s.acp_session_id { cmd.arg("--resume").arg(resume); }
+                if agent.experimental_acp_v2 { cmd.arg("--experimental-acp-v2"); }
+                if (agent.supports_load || agent.experimental_acp_v2) && let Some(resume) = s.acp_session_id { cmd.arg("--resume").arg(resume); }
                 use std::os::unix::process::CommandExt;
                 unsafe { cmd.pre_exec(|| { rustix::process::setsid().map_err(std::io::Error::from)?; Ok(()) }); }
                 let mut child = cmd.spawn()?;
@@ -864,7 +882,7 @@ impl Hub {
 
     /// The trash can: the conversation and jail go, then the session's state on the host and its
     /// row; pins of deleted sessions are pruned so they do not haunt the tree.
-    fn delete_session(&self, id: &str) -> Result<()> {
+    pub(super) fn delete_session(&self, id: &str) -> Result<()> {
         if !sill_core::session::valid_id(id) {
             bail!("not a session id");
         }

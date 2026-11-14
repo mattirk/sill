@@ -109,9 +109,11 @@ fn hex(digest: &[u8]) -> String {
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-pub fn sha256_file(path: &Path) -> Result<String> {
+pub fn sha256_file(path: &Path) -> Result<String> { sha256_reader(std::fs::File::open(path)?) }
+
+/// Hash a stream with bounded working memory (also supports anonymous snapshot files).
+pub fn sha256_reader(mut f: impl std::io::Read) -> Result<String> {
     use sha2::{Digest, Sha256};
-    let mut f = std::fs::File::open(path)?;
     let mut h = Sha256::new();
     let mut buf = vec![0u8; 1 << 16];
     loop {
@@ -479,8 +481,10 @@ fn remove_if_exists(p: &Path) -> Result<()> {
 }
 
 fn temp_name(host: &Path) -> PathBuf {
-    let name = host.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    host.with_file_name(format!(".{name}.sill-keep.{}", std::process::id()))
+    let mut name = std::ffi::OsString::from(".");
+    name.push(host.file_name().unwrap_or_default());
+    name.push(format!(".sill-keep.{}", std::process::id()));
+    host.with_file_name(name)
 }
 
 #[cfg(test)]
@@ -490,6 +494,30 @@ mod tests {
 
     fn change(path: PathBuf, upper: PathBuf, kind: Kind) -> Change {
         Change { path, upper, kind, file_type: FileType::File, size: 0, conflict: false, ignored: false }
+    }
+
+    #[test]
+    fn non_utf8_keep_journal_recovers_exact_path_for_undo() {
+        use std::os::unix::ffi::OsStringExt;
+        let dir = std::env::temp_dir().join(format!("sill-keep-byte-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (upper, host, kept) = (dir.join("upper"), dir.join("host"), dir.join("kept"));
+        std::fs::create_dir_all(&upper).unwrap();
+        std::fs::create_dir_all(&host).unwrap();
+        let name = std::ffi::OsString::from_vec(b"file\xff\nname".to_vec());
+        std::fs::write(host.join(&name), "old").unwrap();
+        std::fs::write(upper.join(&name), "new").unwrap();
+        let opts = KeepOptions { undo: Some(kept.clone()), ..Default::default() };
+        keep(&change(host.join(&name), upper.join(&name), Kind::Modified), &opts).unwrap();
+        let recs = undoable(&kept);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].path, host.join(&name));
+        assert_eq!(std::fs::read(host.join(&name)).unwrap(), b"new");
+        undo(&kept, &recs[0], false).unwrap();
+        assert_eq!(std::fs::read(host.join(&name)).unwrap(), b"old");
+        assert!(undoable(&kept).is_empty());
+        assert_eq!(list(&kept)[0].path, host.join(&name));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

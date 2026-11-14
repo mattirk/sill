@@ -113,7 +113,13 @@ pub fn install(conn: &Connection) -> Result<()> {
 }
 
 pub fn record(conn: &Connection, e: &Event) -> Result<()> {
-    let paths: Vec<String> = e.paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    use std::os::unix::ffi::OsStrExt;
+    let mut paths = Vec::new();
+    for path in &e.paths {
+        anyhow::ensure!(!path.as_os_str().as_bytes().contains(&0), "history path contains NUL");
+        paths.extend_from_slice(path.as_os_str().as_bytes());
+        paths.push(0);
+    }
     conn.execute(
         "INSERT INTO history (ts, kind, session_id, session_title, agent, ghost, path, what, hash_new, hash_old, count, paths, kept_id,
              repo, head_start, head_end, commits, files)
@@ -125,14 +131,14 @@ pub fn record(conn: &Connection, e: &Event) -> Result<()> {
             e.session_title,
             e.agent,
             e.ghost as i32,
-            e.path.to_string_lossy(),
+            sql_path(&e.path),
             e.what,
             e.hash_new,
             e.hash_old,
             e.count,
-            paths.join("\n"),
+            paths,
             e.kept_id,
-            (e.kind == Kind::Pinned).then(|| e.path.to_string_lossy().into_owned()),
+            (e.kind == Kind::Pinned).then(|| sql_path(&e.path)),
             e.head_start,
             e.head_end,
             e.commits,
@@ -147,6 +153,9 @@ pub fn record(conn: &Connection, e: &Event) -> Result<()> {
 pub struct Filter {
     /// Unix time; only events at or after it.
     pub since: Option<i64>,
+    /// Exclusive newest-first keyset cursor (timestamp, event identity).
+    #[serde(default)]
+    pub before: Option<(i64, i64)>,
     /// Events on this path or below it (a sweep's or a fold's listed paths count too).
     pub path: Option<PathBuf>,
     pub agent: Option<String>,
@@ -157,49 +166,75 @@ pub struct Filter {
     pub limit: usize,
 }
 
+pub(crate) fn sql_path(path: &Path) -> rusqlite::types::Value {
+    use std::os::unix::ffi::OsStrExt;
+    match path.to_str() {
+        Some(text) => rusqlite::types::Value::Text(text.into()),
+        None => rusqlite::types::Value::Blob(path.as_os_str().as_bytes().to_vec()),
+    }
+}
+fn path_from_bytes(bytes: &[u8]) -> PathBuf {
+    use std::os::unix::ffi::OsStringExt;
+    std::ffi::OsString::from_vec(bytes.to_vec()).into()
+}
+pub(crate) fn read_path(r: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<PathBuf> {
+    use rusqlite::types::ValueRef;
+    match r.get_ref(column)? {
+        ValueRef::Text(bytes) | ValueRef::Blob(bytes) => Ok(path_from_bytes(bytes)),
+        value => Err(rusqlite::Error::InvalidColumnType(column, "path".into(), value.data_type())),
+    }
+}
+fn read_paths(r: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<Vec<PathBuf>> {
+    use rusqlite::types::ValueRef;
+    // Legacy TEXT rows were newline-delimited; BLOB is the new NUL-delimited encoding.
+    // A NUL cannot occur in a Unix filename, but newlines and arbitrary bytes can.
+    let (bytes, separator) = match r.get_ref(column)? {
+        ValueRef::Text(bytes) => (bytes, b'\n'),
+        ValueRef::Blob(bytes) => (bytes, 0),
+        value => return Err(rusqlite::Error::InvalidColumnType(column, "paths".into(), value.data_type())),
+    };
+    Ok(bytes.split(|b| *b == separator).filter(|b| !b.is_empty()).map(path_from_bytes).collect())
+}
+
 pub fn query(conn: &Connection, f: &Filter) -> Result<Vec<Event>> {
-    let path = f.path.as_ref().map(|p| p.to_string_lossy().trim_end_matches('/').to_string());
     let mut st = conn.prepare(
         "SELECT id, ts, kind, session_id, session_title, agent, ghost, path, what, hash_new, hash_old, count, paths, kept_id,
                 head_start, head_end, commits, files
          FROM history
          WHERE (?1 IS NULL OR ts >= ?1)
-           AND (?2 IS NULL OR path = ?2 OR substr(path, 1, length(?2) + 1) = ?2 || '/'
-                -- a pinned repository holds the paths below it
-                OR (kind = 'pinned' AND substr(?2, 1, length(path) + 1) = path || '/')
-                -- a sweep by what it lists, not by its prefix (one file's prefix may be ~)
-                OR instr(char(10) || paths || char(10), char(10) || ?2 || char(10)) > 0
-                OR instr(char(10) || paths, char(10) || ?2 || '/') > 0)
-           AND (?3 IS NULL OR agent = ?3)
-           AND (?4 IS NULL OR kind = ?4)
-           AND (?5 IS NULL OR session_id = ?5)
-         ORDER BY ts DESC, id DESC LIMIT ?6",
+           AND (?2 IS NULL OR agent = ?2)
+           AND (?3 IS NULL OR kind = ?3)
+           AND (?4 IS NULL OR session_id = ?4)
+           AND (?5 IS NULL OR ts < ?5 OR (ts = ?5 AND id < ?6))
+         ORDER BY ts DESC, id DESC",
     )?;
-    let limit = if f.limit == 0 { 500 } else { f.limit } as i64;
-    let rows = st.query_map(params![f.since, path, f.agent, f.kind.map(|k| k.id()), f.session, limit], |r| {
-        let paths: String = r.get(12)?;
+    let limit = if f.limit == 0 { 500 } else { f.limit };
+    let rows = st.query_map(params![f.since, f.agent, f.kind.map(|k| k.id()), f.session, f.before.map(|x|x.0), f.before.map(|x|x.1)], |r| {
         Ok(Event {
-            id: r.get(0)?,
-            ts: r.get(1)?,
+            id: r.get(0)?, ts: r.get(1)?,
             kind: Kind::parse(&r.get::<_, String>(2)?).unwrap_or(Kind::Folded),
-            session_id: r.get(3)?,
-            session_title: r.get(4)?,
-            agent: r.get(5)?,
-            ghost: r.get::<_, i32>(6)? != 0,
-            path: PathBuf::from(r.get::<_, String>(7)?),
-            what: r.get(8)?,
-            hash_new: r.get(9)?,
-            hash_old: r.get(10)?,
-            count: r.get(11)?,
-            paths: paths.lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect(),
-            kept_id: r.get(13)?,
-            head_start: r.get(14)?,
-            head_end: r.get(15)?,
-            commits: r.get(16)?,
-            files: r.get(17)?,
+            session_id: r.get(3)?, session_title: r.get(4)?, agent: r.get(5)?,
+            ghost: r.get::<_, i32>(6)? != 0, path: read_path(r, 7)?,
+            what: r.get(8)?, hash_new: r.get(9)?, hash_old: r.get(10)?, count: r.get(11)?,
+            paths: read_paths(r, 12)?, kept_id: r.get(13)?, head_start: r.get(14)?,
+            head_end: r.get(15)?, commits: r.get(16)?, files: r.get(17)?,
         })
     })?;
-    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    // Match decoded paths component-wise, never a lossy string or a newline substring.
+    // Iterate lazily so filtering a large ledger does not materialize it in memory.
+    let mut out = Vec::new();
+    for row in rows {
+        let event = row?;
+        if let Some(path) = &f.path {
+            let matches = event.path.starts_with(path)
+                || (event.kind == Kind::Pinned && path.starts_with(&event.path))
+                || event.paths.iter().any(|p| p.starts_with(path));
+            if !matches { continue; }
+        }
+        out.push(event);
+        if out.len() == limit { break; }
+    }
+    Ok(out)
 }
 
 /// Retention (SPEC §3.6 decision 4): a session's rows become one `Folded` row — how many of each
@@ -283,6 +318,30 @@ fn short(h: Option<&str>) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_paths_newlines_legacy_rows_and_keyset_pages() {
+        use std::os::unix::ffi::OsStringExt;
+        let c = Connection::open_in_memory().unwrap();
+        install(&c).unwrap();
+        let exact = PathBuf::from(std::ffi::OsString::from_vec(b"/files/\xff\nname".to_vec()));
+        let mut sweep = Event::new(Kind::AutoReverted, Path::new("/files"), 20);
+        sweep.paths = vec![exact.clone(), "/files/two\nlines".into()];
+        record(&c, &sweep).unwrap();
+        record(&c, &Event::new(Kind::Kept, &exact, 20)).unwrap();
+        c.execute("INSERT INTO history(ts,kind,path,paths) VALUES (10,'auto-reverted','/legacy','/legacy/a'||char(10)||'/legacy/b')", []).unwrap();
+        let all = query(&c, &Filter::default()).unwrap();
+        assert_eq!(all[0].path, exact);
+        assert_eq!(all[1].paths, sweep.paths);
+        assert_eq!(all[2].paths, vec![PathBuf::from("/legacy/a"), PathBuf::from("/legacy/b")]);
+        let found = query(&c, &Filter { path: Some(exact.clone()), ..Default::default() }).unwrap();
+        assert_eq!(found.len(), 2);
+        assert!(query(&c, &Filter { path: Some("/files/\u{fffd}\nname".into()), ..Default::default() }).unwrap().is_empty());
+        let first = query(&c, &Filter { limit: 1, ..Default::default() }).unwrap();
+        let next = query(&c, &Filter { before: Some((first[0].ts, first[0].id)), limit: 1, ..Default::default() }).unwrap();
+        assert_eq!(first[0].ts, next[0].ts);
+        assert_ne!(first[0].id, next[0].id);
+    }
 
     #[test]
     fn record_query_fold() {

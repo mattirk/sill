@@ -6,7 +6,7 @@ use crate::rpc::Error;
 
 pub const METHOD: &str = "_sill/initialize";
 /// Development implementation; the complete sfp/1-draft.1 contract is not frozen or advertised.
-pub const PROTOCOL_ID: &str = "sfp/1-dev.1";
+pub const PROTOCOL_ID: &str = "sfp/1-dev.2";
 pub const INTERNAL_CAPABILITY: &str = "sill.internal";
 pub const MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
 pub const INITIALIZE_TIMEOUT_SECONDS: u64 = 10;
@@ -29,10 +29,16 @@ pub struct Limits {
     pub max_inline_bytes: usize,
     pub max_text_bytes: usize,
     pub snapshot_ttl_seconds: u64,
+    pub max_snapshot_record_bytes: usize,
+    pub max_snapshot_bytes: usize,
+    pub max_snapshot_page_records: usize,
+    pub retained_events: usize,
+    pub retained_event_bytes: usize,
+    pub max_connection_queue_bytes: usize,
 }
 impl Default for Limits {
     fn default() -> Self {
-        Self { max_message_bytes: MAX_MESSAGE_BYTES, max_inline_bytes: 1024 * 1024, max_text_bytes: 1024 * 1024, snapshot_ttl_seconds: 60 }
+        Self { max_message_bytes: MAX_MESSAGE_BYTES, max_inline_bytes: 1024 * 1024, max_text_bytes: 1024 * 1024, snapshot_ttl_seconds: 60, max_snapshot_record_bytes: 64*1024*1024, max_snapshot_bytes: 1024*1024*1024, max_snapshot_page_records: 128, retained_events: 4096, retained_event_bytes: 16*1024*1024, max_connection_queue_bytes: 16*1024*1024 }
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

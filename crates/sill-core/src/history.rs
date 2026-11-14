@@ -44,11 +44,11 @@ fn range(repo: &Path, a: &str, b: &str) -> (i64, i64) {
     let commits = count(&["rev-list", "--count", &format!("{a}..{b}")]);
     let files = git
         .cmd()
-        .args(["diff", "--name-only", "--no-ext-diff", "--no-textconv", a, b])
+        .args(["diff", "--name-only", "-z", "--no-ext-diff", "--no-textconv", a, b])
         .output()
         .ok()
         .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).lines().filter(|l| !l.is_empty()).count() as i64)
+        .map(|o| o.stdout.split(|b| *b == 0).filter(|l| !l.is_empty()).count() as i64)
         .unwrap_or(0);
     (commits, files)
 }
@@ -63,7 +63,7 @@ pub fn note_pin_starts(store: &Store, s: &Session) -> Result<()> {
         if let Some(h) = head(&repo) {
             store.conn().execute(
                 "INSERT OR IGNORE INTO pin_heads (session_id, repo, head, ts) VALUES (?1, ?2, ?3, ?4)",
-                params![s.id, repo.to_string_lossy(), h, crate::store::now()],
+                params![s.id, crate::store::sql_path(&repo), h, crate::store::now()],
             )?;
         }
     }
@@ -75,7 +75,7 @@ pub fn note_pin_starts(store: &Store, s: &Session) -> Result<()> {
 pub fn close_pins(store: &Store, s: &Session) -> Result<usize> {
     let starts: Vec<(PathBuf, String)> = {
         let mut st = store.conn().prepare("SELECT repo, head FROM pin_heads WHERE session_id = ?1")?;
-        st.query_map(params![s.id], |r| Ok((PathBuf::from(r.get::<_, String>(0)?), r.get::<_, String>(1)?)))?.collect::<std::result::Result<_, _>>()?
+        st.query_map(params![s.id], |r| Ok((crate::store::read_sql_path(r, 0)?, r.get::<_, String>(1)?)))?.collect::<std::result::Result<_, _>>()?
     };
     let mut n = 0;
     for (repo, start) in starts {

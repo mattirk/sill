@@ -18,6 +18,7 @@ use sill_core::policy::Policy;
 use sill_core::shim;
 
 mod daemon;
+mod changes_client;
 mod init;
 #[cfg(feature = "shelf")]
 mod shelf;
@@ -219,6 +220,7 @@ enum DaemonCmd {
         #[arg(long)] agent_socket: PathBuf,
         #[arg(long)] cwd: PathBuf,
         #[arg(long)] resume: Option<String>,
+        #[arg(long)] experimental_acp_v2: bool,
     },
     /// Version, mode, uptime and sessions of the running daemon (starts one when none runs)
     Status,
@@ -483,16 +485,18 @@ struct RunArgs {
 
 fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
     if sill_proto::transport::selected()?.is_some() {
-        use sill_core::frontend::{Request, ExportFile};
+        use sill_core::frontend::ExportFile;
         let c = sill_proto::Client::connect_or_start()?;
         match &cmd {
             MemoryCmd::Recall { id } => {
-                let text: String = c.call(sill_core::frontend::METHOD, Request::Recall { key: id.join(" ") })?;
+                let id=c.resolve_session(&id.join(" "))?.session_id;
+                let text=c.memory_text(id,sill_proto::memory::Format::Recall,None)?;
                 print!("{text}");
                 return Ok(());
             }
             MemoryCmd::Export { dir } => {
-                let files: Vec<ExportFile> = c.call(sill_core::frontend::METHOD, Request::Export)?;
+                let mut files=Vec::<ExportFile>::new();
+                for s in c.list_sessions()? {if s.ghost {continue;}files.push(ExportFile {name:format!("{}.md",s.session_id),text:c.memory_text(s.session_id,sill_proto::memory::Format::Export,None)?});}
                 std::fs::create_dir_all(dir)?;
                 for file in &files {
                     let name = Path::new(&file.name);
@@ -503,7 +507,7 @@ fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
                 return Ok(());
             }
             MemoryCmd::Refresh => {
-                c.call::<serde_json::Value>(sill_core::frontend::METHOD, Request::RefreshSnapshot)?;
+                c.call::<serde_json::Value>("_sill/memory.refresh", sill_proto::Empty::default())?;
                 println!("the box's memory snapshot refreshed");
                 return Ok(());
             }
@@ -516,37 +520,40 @@ fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
     match cmd {
         MemoryCmd::Compact => {
             let c = sill_proto::Client::connect_or_start()?;
-            let done: sill_proto::Compacted = c.call(sill_proto::method::MEMORY_COMPACT, sill_proto::Empty::default())?;
+            let done: sill_proto::memory::Compacted = c.call("_sill/memory.compact", sill_proto::Empty::default())?;
             println!("{} compacted, {} trimmed to summary and prompts, {} deleted", done.compacted, done.trimmed, done.deleted);
             return Ok(());
         }
         MemoryCmd::List => {
             let c = sill_proto::Client::connect_or_start()?;
-            let rows: Vec<sill_proto::MemorySession> = c.call(sill_proto::method::MEMORY_LIST, sill_proto::Empty::default())?;
+            let mut rows=Vec::new();let mut after=None;
+            loop {let page:sill_proto::memory::Page=c.call("_sill/memory.list",sill_proto::memory::List {after,limit:Some(128)})?;rows.extend(page.sessions);after=page.next;if after.is_none(){break;}}
+            rows.sort_by(|a,b|b.ended_at.parse::<i64>().unwrap_or(0).cmp(&a.ended_at.parse::<i64>().unwrap_or(0)));
             if rows.is_empty() {
                 println!("no ended sessions yet (a session ends when its tab is closed)");
             }
             for s in rows {
-                println!("{}  {}  {:<8} {}  — {}", s.id, sill_memory::date(s.ended_at), s.agent, s.title, s.summary);
+                println!("{}  {}  {:<8} {}  — {}", s.session_id, sill_memory::date(s.ended_at.parse()?), s.agent, s.title, s.summary);
             }
             return Ok(());
         }
         MemoryCmd::Show { id } => {
             let c = sill_proto::Client::connect_or_start()?;
-            let t: sill_proto::Text = c.call(sill_proto::method::MEMORY_SHOW, sill_proto::Key { key: id.join(" ") })?;
-            print!("{}", t.text);
+            let id=c.resolve_session(&id.join(" "))?.session_id;
+            print!("{}",c.memory_text(id,sill_proto::memory::Format::Show,None)?);
             return Ok(());
         }
         MemoryCmd::Search { words, folder, agent, since } => {
             let c = sill_proto::Client::connect_or_start()?;
-            let t: sill_proto::Text = c.call(sill_proto::method::MEMORY_SEARCH, sill_proto::MemorySearch { words, folder, agent, since })?;
-            print!("{}", t.text);
+            let mut terms=words;if let Some(f)=folder {terms.push(format!("folder:{f}"));}if let Some(a)=agent {terms.push(format!("agent:{a}"));}if let Some(s)=since {anyhow::ensure!(sill_memory::parse_age(&s).is_some(),"since expects 30d, 12h, 2w …");terms.push(format!("since:{s}"));}
+            let hits:sill_proto::memory::Hits=c.call("_sill/memory.search",sill_proto::memory::Search {query:terms.join(" "),after:None,limit:Some(50)})?;
+            if hits.hits.is_empty(){println!("nothing found");}for h in hits.hits {print!("{}",h.text);}
             return Ok(());
         }
         MemoryCmd::Transcript { id, grep } => {
             let c = sill_proto::Client::connect_or_start()?;
-            let t: sill_proto::Text = c.call(sill_proto::method::MEMORY_TRANSCRIPT, sill_proto::Transcript { key: id.join(" "), grep })?;
-            print!("{}", t.text);
+            let id=c.resolve_session(&id.join(" "))?.session_id;
+            print!("{}",c.memory_text(id,sill_proto::memory::Format::Transcript,grep)?);
             return Ok(());
         }
         _ => {}
@@ -596,7 +603,8 @@ fn main() -> Result<()> {
         Cmd::Policy { name } => {
             if sill_proto::transport::selected()?.is_some() {
                 let c = sill_proto::Client::connect_or_start()?;
-                let text: String = c.call(sill_core::frontend::METHOD, sill_core::frontend::Request::PolicyText { name })?;
+                let policy:sill_proto::admin::PolicyEntry=c.call("_sill/policy.get",sill_proto::admin::PolicyKey {name})?;
+                let text=policy.text;
                 print!("{text}");
                 return Ok(());
             }
@@ -905,7 +913,7 @@ fn dev_cmd(cmd: DevCmd) -> Result<()> {
                         let names: Vec<String> = methods.iter().map(|m| format!("{} ({})", m.name, m.id)).collect();
                         let _ = writeln!(out, "\n\x1b[33mlogin needed: {message} — methods: {}\x1b[0m", names.join(", "));
                     }
-                    Event::UserText(_) | Event::Ready { .. } | Event::TurnStarted | Event::Controls(_) => {}
+                    Event::UserText(_) | Event::Ready { .. } | Event::V2PermissionsCancelled | Event::V2Ready { .. } | Event::V2Update { .. } | Event::PromptAccepted { .. } | Event::V2PromptFailed { .. } | Event::V2PermissionRequest { .. } | Event::TurnStarted | Event::Controls(_) => {}
                     Event::Stopped(r) => {
                         let _ = writeln!(out, "\n\x1b[2m[stop: {r:?}]\x1b[0m");
                     }
@@ -1170,8 +1178,8 @@ fn shell_words(s: &str) -> Vec<String> {
 // --- shared --------------------------------------------------------------------------------------
 
 fn changes_cmd(cmd: ChangesCmd) -> Result<()> {
-    use sill_proto::method as m;
     let c = sill_proto::Client::connect_or_start()?;
+    let call = |method: &str, params: serde_json::Value| c.call::<serde_json::Value>(method, params);
     let session = |key: &str| -> Result<String> { Ok(c.resolve_session(key)?.session_id) };
     let abs = |paths: Vec<PathBuf>| -> Result<Vec<PathBuf>> {
         let cwd = std::env::current_dir()?;
@@ -1188,7 +1196,7 @@ fn changes_cmd(cmd: ChangesCmd) -> Result<()> {
     };
     match cmd {
         ChangesCmd::List => {
-            let l: sill_core::wire::ChangesList = c.call(m::CHANGES_LIST, sill_proto::Empty::default())?;
+            let l: sill_core::wire::ChangesList = changes_client::list(&call)?;
             for r in &l.live {
                 println!("{} (pinned, git)", r.repo.display());
                 for (rel, st) in &r.status {
@@ -1209,16 +1217,16 @@ fn changes_cmd(cmd: ChangesCmd) -> Result<()> {
         }
         ChangesCmd::Diff { session: key, path } => {
             let path = abs(vec![path])?.remove(0);
-            let t: sill_proto::Text = c.call(m::CHANGES_DIFF, sill_core::wire::DiffOf::Change { session: session(&key)?, path })?;
+            let t: sill_proto::Text = changes_client::diff(&call, sill_core::wire::DiffOf::Change { session: session(&key)?, path })?;
             print!("{}", t.text);
             Ok(())
         }
         ChangesCmd::Keep { session: key, paths } => {
             // what the person names is what is kept: no listed hash to hold it to
             let items = abs(paths)?.into_iter().map(|p| (p, None)).collect();
-            report(c.call(m::CHANGES_KEEP, sill_proto::ChangesKeep { session: session(&key)?, items })?)
+            report(changes_client::keep(&call, sill_proto::ChangesKeep { session: session(&key)?, items })?)
         }
-        ChangesCmd::Revert { session: key, paths } => report(c.call(m::CHANGES_REVERT, sill_proto::ChangesPaths { session: session(&key)?, paths: abs(paths)? })?),
+        ChangesCmd::Revert { session: key, paths } => report(changes_client::revert(&call, sill_proto::ChangesPaths { session: session(&key)?, paths: abs(paths)? })?),
         ChangesCmd::History { since, path, agent, kind, session: key } => {
             let since = match since {
                 Some(v) => Some(sill_core::store::now() - sill_memory::parse_age(&v).context("--since expects 7d, 12h, 2w …")?),
@@ -1236,8 +1244,8 @@ fn changes_cmd(cmd: ChangesCmd) -> Result<()> {
                 Some(k) => Some(session(&k)?),
                 None => None,
             };
-            let f = sill_core::history::Filter { since, path, agent, kind, session, limit: 0 };
-            let rows: Vec<sill_core::history::Event> = c.call(m::CHANGES_HISTORY, f)?;
+            let f = sill_core::history::Filter { since, path, agent, kind, session, limit: 0, before: None };
+            let rows: Vec<sill_core::history::Event> = changes_client::history(&call, f)?;
             if rows.is_empty() {
                 println!("nothing in the history");
             }
@@ -1247,31 +1255,44 @@ fn changes_cmd(cmd: ChangesCmd) -> Result<()> {
             }
             Ok(())
         }
-        ChangesCmd::Undo { session: key, ids, force } => report(c.call(m::CHANGES_UNDO, sill_proto::ChangesUndo { session: session(&key)?, ids, force })?),
+        ChangesCmd::Undo { session: key, ids, force } => report(changes_client::undo(&call, sill_proto::ChangesUndo { session: session(&key)?, ids, force })?),
     }
 }
 
 fn pin_cmd(cmd: PinCmd) -> Result<()> {
     let c = sill_proto::Client::connect_or_start()?;
+    use sill_proto::{pins as api, sessions::HostPath};
     match cmd {
         PinCmd::List => {
-            let pins: Vec<PathBuf> = c.call(sill_proto::method::PINS_LIST, sill_proto::Empty::default())?;
-            for p in pins {
-                println!("{}", p.display());
+            let mut after = None;
+            loop {
+                let page: api::Page = c.call("_sill/pins.list", api::List { after, ..Default::default() })?;
+                for p in page.pins { println!("{}", p.display); }
+                after = page.next;
+                if after.is_none() { break; }
             }
         }
         PinCmd::Add { path } => {
-            let path = path.canonicalize().with_context(|| format!("pin {}", path.display()))?;
-            let _: serde_json::Value = c.call(sill_proto::method::PINS_ADD, sill_proto::GlobalPin { path: path.clone() })?;
-            println!("{} pinned globally", path.display());
+            let path = pin_cli_path(&path)?;
+            let added: api::GlobalPin = c.call("_sill/pins.add", api::GlobalPin { path: HostPath::from_path(&path) })?;
+            println!("{} pinned globally", added.path.display);
         }
         PinCmd::Remove { path } => {
-            let path = path.canonicalize().unwrap_or(path);
-            let _: serde_json::Value = c.call(sill_proto::method::PINS_REMOVE, sill_proto::GlobalPin { path: path.clone() })?;
+            let path = pin_cli_path(&path)?;
+            let _: serde_json::Value = c.call("_sill/pins.remove", api::GlobalPin { path: HostPath::from_path(&path) })?;
             println!("{} removed from the global pins", path.display());
         }
     }
     Ok(())
+}
+
+/// Relative CLI paths are local only; a remote daemon requires an absolute host path.
+fn pin_cli_path(path: &std::path::Path) -> Result<PathBuf> {
+    if sill_proto::transport::selected()?.is_some() {
+        anyhow::ensure!(path.is_absolute(), "remote pins require an absolute path on the daemon host");
+        return Ok(path.to_owned());
+    }
+    Ok(path.canonicalize().unwrap_or(if path.is_absolute() { path.to_owned() } else { std::env::current_dir()?.join(path) }))
 }
 
 fn session_cmd(cmd: SessionCmd) -> Result<()> {
@@ -1307,14 +1328,14 @@ fn session_cmd(cmd: SessionCmd) -> Result<()> {
 
 fn daemon_cmd(cmd: Option<DaemonCmd>) -> Result<()> {
     match cmd {
-        Some(DaemonCmd::Relay { session, socket, agent_socket, cwd, resume }) => daemon::relay::run(&session, &socket, &agent_socket, &cwd, resume),
+        Some(DaemonCmd::Relay { session, socket, agent_socket, cwd, resume, experimental_acp_v2 }) => daemon::relay::run(&session, &socket, &agent_socket, &cwd, resume, experimental_acp_v2),
         None => daemon::run(),
         Some(DaemonCmd::Status) => {
             let c = sill_proto::Client::connect_or_start()?;
             let s: sill_proto::DaemonStatus = c.call_within(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default(), sill_proto::client::QUICK_TIMEOUT)?;
-            println!("sill daemon {} ({}), pid {}, {}, up since {}", s.version, sill_proto::initialize::PROTOCOL_ID, s.pid, s.mode, sill_memory::datetime(s.started));
+            println!("sill daemon {} ({}), pid {}, {}, up since {}", s.version, sill_proto::initialize::PROTOCOL_ID, s.pid, s.mode, s.started);
             println!("jails:    {}", s.launcher);
-            println!("socket:   {}", s.socket);
+            println!("socket:   {}", s.socket.display);
             println!("sessions: {} in the store, {} running", s.sessions, s.running);
             Ok(())
         }

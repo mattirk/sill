@@ -1,8 +1,8 @@
 # sill — Sill Frontend Protocol (SFP)
 
 **Implementation in progress, 2026-11-03:** the current control connection uses
-`_sill/initialize` with identity **`sfp/1-dev.1`**. This development identity implements the
-conversation slice described below; it does not claim the complete `sfp/1-draft.1` baseline or
+`_sill/initialize` with identity **`sfp/1-dev.2`**. This development identity implements the
+conversation and host administration surfaces described below; it does not claim the complete `sfp/1-draft.1` baseline or
 stable `sfp/1`. Clients and daemon upgrade together. A mismatch requires explicit replacement;
 a failed handshake never authorizes restarting a daemon. Private relay continuity is retained
 where its protocol remains compatible.
@@ -17,12 +17,32 @@ records/events use named objects and `type` tags. `scripts/sfp_client.py` is an 
 consumer and schema validator (install `scripts/requirements-sfp.txt`).
 
 Conversation changes, public sequence, source deduplication and runner state commit before SFP
-publication and relay ACK. Snapshots have connection-bound 60-second leases, at most 128 records
-and 4 MiB per page, 32 MiB per snapshot, eight leases per connection and a 128 MiB aggregate
-snapshot limit. Replay above 4096 events selects a snapshot. Current development storage retains
-all public events; retention/compaction is unfinished. Agent text/thought output splits into items of at most 256 KiB. A large tool or other record
-exceeding the page limit returns `limit_exceeded`; segmentation of those records remains freeze work. Control messages are
-limited to 8 MiB including newline, prompt text to 1 MiB JSON-encoded and initialization must arrive within ten seconds.
+publication and relay ACK. Replay retains a contiguous suffix of at most 4096 events and 16 MiB
+per session. Older cursors automatically select a replacement snapshot; foreign/future cursors
+remain errors. Canonical records, submission/answer retry identities and source deduplication
+survive replay compaction. New source receipts coalesce adjacent sequence ranges without filling unseen gaps; legacy individual receipts remain readable. This bounds replay storage, not the retained conversation or identity
+ledgers; those remain proportional to session history.
+
+Snapshots use private, automatically deleted SQLite temporary files with a 2 MiB cache per
+lease instead of retaining the entire conversation in memory. Leases are connection-bound, expire after
+60 seconds without a successful page read, and have a 30-minute absolute lifetime. Each page
+returns its renewed `expires_at`. There are at most eight per connection and 64 daemon-wide, 1 GiB serialized data per snapshot and 2 GiB aggregate.
+Replacement capture reserves space alongside the previous lease until it succeeds. If that
+exceeds the aggregate quota, detach the old subscription to release its lease before attaching again.
+Pages contain at most 128 ordinary records and approximately 1 MiB of record JSON. Larger
+records (up to 64 MiB) use consecutive `fragment: {record, offset, json, last}` pages with empty
+`records`: concatenate `json` through `last`, validating the same record identifier and decimal
+UTF-8 byte offset, then decode one record. No ordinary record may interrupt a fragment sequence.
+Fragments contain at most 256 KiB of UTF-8 before JSON escaping. Page tokens are opaque to clients.
+The Rust and independent Python clients reconstruct fragments. Capture still holds the store
+lock while copying the history, and clients currently materialize the whole resulting view.
+
+Control messages are limited to 8 MiB including newline, prompt text to 1 MiB JSON-encoded,
+and initialization must arrive within ten seconds. Outbound connection queues have a 16 MiB
+byte budget as well as a message-count bound, with a 256 MiB daemon-wide queued-byte budget.
+A slow consumer is disconnected and resynchronizes. An oversized committed live event also
+closes its connection; a reconnect selects a segmented snapshot instead of replaying that event.
+Agent text/thought output splits into items of at most 256 KiB.
 
 ACP v1 queues submissions during activity; it does not advertise steering. Prepared payload and
 relay command ID are persisted before sending. A successful ACP prompt result establishes
@@ -37,20 +57,17 @@ conversations, but ambiguous cancellation or answer-delivery evidence is reporte
 Uploads are immutable session-scoped objects with client IDs and bounded base64 data. Inline
 attachments currently support images; file attachments reference uploaded objects. Upload IDs
 retain content identity independently of their staged jail file. The daemon stores an inline
-attachment as an upload when it accepts the submission (`inline-<index>-<submission_id>`), so
+attachment as an upload when it accepts the submission (a reserved `sill-inline-` identity), so
 submission records reference attachment bytes and never carry them; a frontend fetches what it
 displays with `_sill/uploads.get`. Records journaled before this change may still hold inline data.
 An uploaded PNG, JPEG, GIF or WebP reaches the agent as an image block when the agent advertised
 image support; any other upload, and every upload to an agent without it, is a staged file.
 
-Known follow-ups in this area: inline upload IDs (`inline-<index>-<submission_id>`, cut to 128
-bytes) share the client's upload ID namespace, so a client upload of that name or two long
-submission IDs with a common 119-byte prefix fail with `id_conflict`; the shelf fetches every
-displayed upload again whenever it rebuilds a view, although uploads are immutable and could be
-cached by session and upload ID; and the adapter's once-per-update-kind log set
-(`AdapterState.unhandled`) is persisted with the adapter state, so it logs once per session rather
-than once per daemon run (`#[serde(skip)]` would fix it). The plan's step marks (✓ ◐ ○) are
-written in both `sfp_client::plan_text` and `Conversation::set_plan`.
+Inline upload IDs now hash the complete submission identity and index under the reserved
+`sill-inline-` prefix. Public upload creation rejects that prefix; retries of previously accepted
+submissions retain their original references. Session uploads are bounded at 4096 objects and
+256 MiB of decoded bytes; identical retries still work at the limit. Shelf upload caching and
+some presentation duplication remain UI optimizations rather than compatibility blockers.
 
 A login method in `session.authentication` with `api_key` set (the provider the agent names,
 from ACP `_meta["api-key"]`) takes a key the person types: send it as `api_key` with the
@@ -115,9 +132,7 @@ observed through the journaled summary/session update. Update input is limited t
 
 Pins use `{bytes_base64, display}` host paths: exact absolute Linux bytes are authoritative,
 not the frontend's filesystem or the display text. At most 128 pins and 4096 decoded bytes per
-path are accepted. The existing pin storage/jail pipeline still requires UTF-8: non-UTF-8 input
-currently returns `unsupported`, never a lossy replacement. Completing that pipeline remains
-part of the lossless-path milestone.
+path are accepted. Pin storage and jail setup preserve non-UTF-8 bytes. Existing UTF-8 TEXT rows remain readable; new non-UTF-8 pins use BLOB identities. Changes history and kept journals also preserve exact new paths, including newlines. Previously lossy historical values cannot be reconstructed.
 
 Independent lifecycle conformance (with `jsonschema` installed in a venv):
 
@@ -176,9 +191,9 @@ Public host streams are implemented (2026-11-03):
 | Method | Request | Result |
 |---|---|---|
 | `_sill/streams.port` | `{session_id, port}` | `{token}` |
-| `_sill/agents.login` | `{agent_id, method_id}` | `{token}` |
+| `_sill/agents.login` | `{agent_id, method_id, operation_id?}` | `{token, operation}` |
 | `_sill/agents.reset` | `{agent_id}` | `{removed, stopped}` (no stream) |
-| `_sill/registry.install` | `{entry_id, version, source, allow_unreviewed?}` | `{token}` |
+| `_sill/registry.install` | `{entry_id, version, source, allow_unreviewed?, operation_id?}` | `{token, operation}` |
 | `_sill/registry.list` | `{after?, limit?}` | `{entries, next}` |
 
 These methods need no `sill.internal` capability. The former `OpenPort`, `HostLogin`, and
@@ -227,19 +242,62 @@ finishes, including after disconnect. Login retains its existing agent-response 
 (30 seconds for initialization, ten minutes for authentication); installers have no new overall
 deadline. Cancellation and reconnect/replay are unsupported for these two job streams.
 Closing or never claiming their stream **does not cancel the job**. EOF without a terminal event,
-a lost token/reply, or daemon death leaves the outcome unknown. Do not blindly retry these three
-opening methods after timeout/connection loss; inspect host state before an explicit retry.
-Stream tokens and active jobs are in memory and do not survive daemon restart. Schema/argument
+a lost token/reply, or daemon death does not establish the outcome. Login/install callers that
+retained an `operation_id` recover it through `_sill/operations.get` or an identical opening
+request: the latter returns the receipt with `token: null`, never a duplicate job. Without that
+identity, inspect host state before an explicit retry. Port opens must not be blindly retried.
+Stream tokens and active jobs are in memory; durable receipts survive daemon restart and unfinished
+jobs become `unknown`. Schema/argument
 validation, selector/policy refusal and job/token-limit refusal start no job. A failure after job
 start or a lost reply provides no such guarantee. The Python client's `registry`, `login` and
 `install` commands exercise public selectors and validate every progress event against the schema.
 
-Host/session administration and presentation operations still awaiting public SFP schemas are
-under `_sill/internal/…`, marked `x-sill-internal` in the exported schema. These are temporary
-same-build implementation APIs, not protocol 6 compatibility handlers. The old `_sill/…` names
-are removed when their public replacement is not yet implemented. Remaining public host methods, lossless
-path contracts, full mutation recovery, retention bounds, and the
-experimental ACP v2 adapter remain implementation work before `sfp/1` can be declared complete.
+The public APIs below now cover host/session administration, filesystem paths, Changes, memory,
+settings, policy and managed processes. Remaining `_sill/internal/…` methods are marked
+`x-sill-internal` and classified in the inventory at the end of this document; they are same-build
+presentation/diagnostic adapters or legacy aliases, not a compatibility contract.
+
+The experimental native ACP v2 adapter is implemented behind `experimental_acp_v2 = true`, with
+ACP v1 retained as the default. See [native behavior and recovery evidence](sfp-operations.md#experimental-native-acp-v2).
+This milestone remains `sfp/1-dev.2`: real third-party v2 interoperability, historical replay
+after relay replacement, large-session performance review and user acceptance testing remain
+before a stable freeze. Snapshot capture still copies under the store lock; canonical history
+and idempotency identities remain proportional to retained sessions, and native v2 reconstruction
+currently caches retained source payloads. The implemented quotas are intentional bounds, not a
+promise of unlimited history or automatic eviction of retry identities.
+
+### Additional development public APIs (2026-11-03)
+
+`_sill/changes.changed` is the public invalidation notification for Changes views.
+`_sill/files.image` provides bounded session image reads; `_sill/policy.denied`,
+`_sill/policy.remember_denied`, and `_sill/policy.allow_host` expose network permission state and explicit decisions.
+
+These APIs need no `sill.internal` capability. The exported schema is authoritative for their
+named request/result records. They do not make the development identity a stable `sfp/1` release.
+
+| Methods | Contract |
+|---|---|
+| `_sill/files.home`, `_sill/files.metadata`, `_sill/files.list` | Exact daemon-host paths; live directory keyset pages (1–128); byte identities, display text ignored. |
+| `_sill/files.read`, `_sill/files.write` | Base64 regular-file data; reads use decimal byte offsets and chunks up to 1 MiB; writes atomically replace up to 1 MiB. Reads refuse symlinks. |
+| `_sill/settings.get`, `_sill/settings.patch` | Explicit settings record and tagged changes; unknown change kinds rejected; at most 64 changes and 1 MiB input. |
+| `_sill/settings.instructions.get`, `_sill/settings.instructions.set` | Global instruction text, at most 1 MiB input. |
+| `_sill/policy.list`, `_sill/policy.get` | Policy names and TOML policy document with desktop flags. |
+| `_sill/procs.list`, `_sill/procs.tail`, `_sill/procs.stop`, `_sill/procs.dismiss` | Session managed processes; bounded live pages, tail up to 10,000 lines; stop requests termination, not proof of exit. |
+| `_sill/pins.list`, `_sill/pins.add`, `_sill/pins.remove`, `_sill/sessions.pin`, `_sill/sessions.unpin` | Global or exact-session pins; live byte-order keyset pages, 1–128 entries; global add canonicalizes. |
+| `_sill/agents.list`, `_sill/agents.get`, `_sill/agents.save`, `_sill/agents.remove`, `_sill/agents.available` | Explicit configured-agent definitions, ID keyset pages (1–128); save/remove user overrides; availability resolves the configured command on the daemon. |
+| `_sill/agents.defaults.get`, `_sill/agents.defaults.set` | Named agent default controls; unknown agents refused. |
+| `_sill/registry.refresh`, `_sill/registry.installed`, `_sill/registry.uninstall`, `_sill/registry.icon` | Resolve daemon registry selectors; uninstall verifies installed version/source; icons return bounded base64 bytes. |
+| `_sill/memory.list`, `_sill/memory.text`, `_sill/memory.search` | Live memory listing/search and paged show/transcript/export/recall text; search currently limited to 500 results. |
+| `_sill/memory.notes.list`, `_sill/memory.notes.add`, `_sill/memory.notes.remove`, `_sill/memory.refresh` | Paged notes and explicit mutations; additions are not safe to retry blindly. |
+| `_sill/changes.list`, `_sill/changes.diff`, `_sill/changes.keep`, `_sill/changes.revert`, `_sill/changes.undo`, `_sill/changes.git-revert`, `_sill/changes.history` | Named Changes records and exact paths; existing filesystem preconditions still apply; consult schemas for paging and selectors. |
+| `_sill/operations.get` | Durable login/install receipt recovery; see [operation recovery](sfp-operations.md). |
+
+Unless a method explicitly offers a durable retry identity, a lost mutation reply is uncertain:
+read back the target before deciding whether to retry. Desired-state writes can overwrite a
+concurrent edit; a retry is not permission to do so. Shelf no longer blindly retries mutations
+through its frontend data connection. Most public data responses have a 4 MiB payload ceiling.
+The public files methods identify the daemon **host** namespace; they do not yet provide a
+complete merged-session filesystem API. Memory text uses connection-bound immutable disk leases built by streaming formatters against a separate read-only SQLite snapshot; subsequent pages seek within the spool. `_sill/memory.text.close` releases a lease early.
 
 **Direction agreed 2026-11-03:** the public frontend contract is named **Sill Frontend Protocol
 (SFP)**. SFP v1 is a design target, not an implemented or frozen public release. Sections 1–5
@@ -947,3 +1005,97 @@ Session state includes `active_ms` (completed working intervals in milliseconds)
 The journal accumulates only `working` activity in an open session; waiting for input,
 idle, unknown, and ended states stop the clock. Snapshots preserve the total across
 frontend reconnects. Older state defaults to zero; past work is not reconstructed.
+
+
+### Public host data and memory details (development implementation)
+
+The exported schema now describes `files.home/metadata/list/read/write/image`,
+`settings.get/patch`, `settings.instructions.get/set`, `policy.list/get/denied/remember_denied/allow_host`,
+`procs.list/tail/stop/dismiss`, and `memory.list/text/search/notes.list/notes.add/notes.remove/compact/forget/refresh`.
+They require no `sill.internal` capability. Shelf uses the public file, settings, instructions,
+network-denial, process and memory operations; CLI memory readers use the same public contract.
+
+- `files.*` paths name the daemon host. `files.image` instead names an absolute path in the
+  identified session's filesystem view and only accepts image extensions. Directory pagination
+  is live, ordered by exact path bytes; `after` is an exclusive direct-child path. Pages default
+  to 64 entries and allow 1–128. Metadata describes the link itself and carries an absolute link
+  target separately. Reads refuse symlinks and special files, including FIFOs.
+- File and image reads return at most 1 MiB as base64. Preserve the returned `revision` for later
+  chunks; inode, device, size, modification and change timestamps detect changes and produce
+  `invalid_cursor`. This detects edits rather than providing an immutable file snapshot. Whole-file
+  writes atomically replace at most 1 MiB and are not blindly retried after uncertainty; inspect
+  file contents first. Larger writes need a future upload-to-file contract.
+- Settings patches contain a bounded list of named, typed changes. Unknown change kinds are
+  rejected. Settings updates serialize with legacy patch writers. Instruction writes are capped
+  at 1 MiB. Network-host changes preserve daemon validation and apply to agent defaults.
+- Process lists are live, name-ordered pages of 1–128 entries. A process's `cwd` identifies its
+  session filesystem, while the enclosing request supplies `session_id`. Process stop targets one
+  explicit nonempty name; listing state resolves uncertainty. Tails allow up to 10,000 lines.
+- Memory lists contain ended non-ghost sessions, ordered by immutable identity. Notes are live
+  pages ordered by their exclusive row cursor. Notes are removed by exact timestamp and text;
+  note creation must not be automatically retried. Search pages cover at most the best 500 hits.
+  Search requests are capped at 4096 bytes and pages at 128 hits.
+- `memory.text` renders `show`, `transcript`, `export` or `recall` from an immutable disk spool,
+  built once through streaming formatters over a separate read-only SQLite snapshot. It does not
+  hold the daemon store mutex while exporting. Pages contain at most 1 MiB of UTF-8 text; later
+  offsets carry the returned `snapshot_id` and SHA-256 `fingerprint`. Live edits cannot alter an
+  existing snapshot. Leases belong to their control connection, expire after 60 idle seconds
+  (extended on valid page reads, up to 30 minutes total), and are closed on disconnect or by
+  `_sill/memory.text.close`. At most four leases per connection and 32 globally consume at most
+  512 MiB of anonymous disk files, with 256 MiB per file and a 30-second construction budget.
+  Individual legacy records above 64 MiB return `limit_exceeded`. Temporary files are unlinked
+  immediately, so failures and daemon crashes cannot leave exported content on disk.
+- Host data responses are bounded at 4 MiB. Policy names and network denial lists are live keyset pages of at most 128 entries;
+  denial cursors order unique `(kind, host)` pairs across denied, acknowledged and quiet hosts.
+  Logs are scanned with bounded line buffers and bounded candidate sets. Oversized individual
+  records return `limit_exceeded`.
+
+Legacy `frontend.request` transcript entries, counts, rich registry presentation and rendering
+helpers remain explicitly internal presentation adapters. Independent clients use canonical SFP
+conversation records/snapshots and public memory text/export rather than the historical ACP-shaped
+entry structs. Their presence does not make their opaque schemas part of the public contract.
+All unknown errors, timeouts and disconnects forbid automatic mutation retries. The schema exports
+JSON-RPC error records, stable domain codes, incompatibility details and stale-answer resolution.
+
+Additional public method names in this development revision: `_sill/files.find`, `_sill/memory.compact`, `_sill/memory.forget`, `_sill/repos.changed_lines`, `_sill/repos.head`, `_sill/repos.root`, `_sill/repos.status`, `_sill/repos.summary`, `_sill/sessions.delete`, `_sill/sessions.log`, `_sill/sessions.reset`.
+
+`_sill/daemon.status` reports the development protocol identity, RFC 3339 startup time and exact daemon socket path. `_sill/daemon.shutdown` requests daemon exit; it is never automatically retried after uncertainty.
+
+### Remaining internal method inventory
+
+The remaining `_sill/internal/` methods are explicit same-build adapters, not additional public
+wire contracts. Their public equivalents or diagnostic purposes are:
+
+| Internal surface | Public equivalent or reason it remains internal |
+|---|---|
+| Historical session CRUD/control aliases | Public `sessions.*`, `submissions.*`, `questions.answer`; exact identities and explicit retry rules apply there. |
+| Stored ACP-era transcript entries/counts/replay | Shelf's legacy rendering cache; independent clients use canonical SFP snapshots/events and public `memory.text` transcript/export. |
+| Rich registry presentation records | Shelf's current card layout; public `registry.list` selects versions/sources and public agent/registry administration supplies installability, definitions, installed status and icons. |
+| `sessions.jail_view` | Unused frontend compatibility diagnostic exposing overlay implementation paths. Public host files and session-scoped `files.image` cover the existing file/image consumers without making storage layout a contract. |
+| `JailOutdated` | Same-build session-policy freshness presentation. Public session metadata, policy reads and explicit stop/start let independent clients apply changed policy. |
+| `ReadLog` and old session log helpers | Daemon/session implementation diagnostics. Public `sessions.log` and `procs.tail` expose the supported user-facing log access. |
+| `ProcessPolicy` | Current process-panel presentation defaults. Public named process methods preserve their own bounds and target semantics. |
+| `Kept`, old Changes/history helpers | Public bounded `changes.list`, `changes.history`, `changes.diff`, keep/revert/undo methods. |
+| Old file search and git presentation helpers | Public exact-path `files.find`, `repos.root/head/summary/changed_lines/status`. |
+
+New public functionality must get explicit schemas and bounds rather than being added to the
+opaque internal frontend dispatcher. Unknown public method names never fall back to internal
+handlers or acquire the `sill.internal` capability implicitly.
+
+### Development milestone validation
+
+The headless workspace suite covers persistence, relay adoption, login, paths, queues, snapshots,
+public administration and native ACP v2 SDK exchanges. The full GTK frontend also compiles.
+Run `cargo test --workspace --no-default-features` and `cargo check -p sill-shelf`.
+
+With Python `jsonschema` installed (set `SILL_SFP_PYTHON` to that environment's interpreter),
+`cargo test -p sill-shelf --no-default-features -- --ignored` runs the independent Python
+administration, Changes, host stream and lifecycle/recovery scenarios plus real OpenSSH
+control/terminal reconnection. The SSH test needs `ssh`, `sshd` and `ssh-keygen`; it uses only
+throwaway keys, a loopback listener and temporary daemon state, and shuts them down afterwards.
+`python3 -m unittest discover -s scripts -p test_sfp_client.py` checks client reconstruction,
+including fragmented UTF-8 records and safe handling of unknown state events.
+
+Daemon and frontend binaries must be rebuilt together for this development identity. A failed
+handshake does not automatically stop or replace an existing daemon. No application installation,
+running-daemon replacement or repository commit is part of this source change.

@@ -224,6 +224,13 @@ pub fn form_fields(schema: &ElicitationSchema) -> Vec<FormField> {
 /// What the caller sees while a session runs.
 #[derive(Debug)]
 pub enum Event {
+    /// Native ACP v2 evidence. Message identities and patch semantics are retained to SFP.
+    V2Ready { session_id: String, resumed: bool, controls: Controls },
+    V2Update { update: serde_json::Value },
+    V2PermissionsCancelled,
+    PromptAccepted { message_id: String },
+    V2PromptFailed { code: String, message: String },
+    V2PermissionRequest { tool_call_id: Option<String>, title: String, subject: Option<serde_json::Value>, options: Vec<PermissionOption>, reply: oneshot::Sender<Option<String>> },
     /// The ACP session is up: (agent session id, resumed with history replay?).
     Ready { session_id: String, resumed: bool, controls: Controls },
     /// What the agent accepts in a prompt (from `initialize`), before Ready.

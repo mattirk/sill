@@ -390,7 +390,7 @@ pub fn build(timer_auto: Rc<std::cell::Cell<bool>>) -> gtk::Widget {
         dialog.select_folder(parent.as_ref(), None::<&gtk::gio::Cancellable>, move |res| {
             let Ok(f) = res else { return };
             let Some(dir) = f.path() else { return };
-            let r = super::remote::request::<Vec<sill_core::frontend::ExportFile>>(sill_core::frontend::Request::Export).and_then(|files| {
+            let r = super::remote::export_memory().and_then(|files| {
                 for file in &files {
                     let name = std::path::Path::new(&file.name).file_name().ok_or_else(|| anyhow::anyhow!("invalid export filename"))?;
                     sill_core::safe_fs::replace_file(&dir, name, file.text.as_bytes())?;

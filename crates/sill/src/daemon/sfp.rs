@@ -10,7 +10,8 @@ use super::{Conn, Hub};
 
 const PAGE_RECORDS: usize = 128;
 const MAX_SNAPSHOTS: usize = 8;
-const MAX_SNAPSHOT_BYTES: usize = 32 * 1024 * 1024;
+const PAGE_BYTES: usize = 1024 * 1024;
+const MAX_SNAPSHOT_BYTES: usize = 1024 * 1024 * 1024;
 const REPLAY_LIMIT: usize = 4096;
 #[derive(Default)]
 pub(super) struct Subscriptions {
@@ -19,9 +20,10 @@ pub(super) struct Subscriptions {
 }
 struct Subscription { id: String, conn: Arc<Conn> }
 struct Snapshot {
-    conn: u64, session: String, at: Cursor, records: Vec<Record>, pages: HashMap<usize,usize>, bytes: usize, expires: Instant,
+    conn: u64, session: String, at: Cursor, spool: rusqlite::Connection, page_count: usize, bytes: usize, expires: Instant, deadline: Instant,
 }
 impl Subscriptions {
+    pub fn expire(&mut self) { self.snapshots.retain(|_,s| s.expires > Instant::now()); }
     pub fn sessions_for(&self, conn:u64)->Vec<String>{self.active.keys().filter(|(c,_)|*c==conn).map(|(_,s)|s.clone()).collect()}
     pub fn count(&self, session: &str) -> usize { self.active.keys().filter(|(_,s)|s==session).count() }
     pub fn disconnect(&mut self, conn: u64) {
@@ -74,7 +76,7 @@ impl Hub {
             if let Some((deleted,reason))=ended {session.lifecycle="ended".into();session.activity="idle".into();session.end_reason=Some(reason.into());session.deleted=deleted;}
             let mut events=vec![];
             if ended.is_some() {
-                let (_,records)=journal.snapshot(session_id)?;
+                let records=journal.active_records(session_id)?;
                 for record in records {
                     match record {
                         Record::Submission{mut submission} if submission.outcome=="pending"=>{
@@ -147,13 +149,17 @@ impl Hub {
                 let through = journal.cursor(&a.session_id).map_err(failure)?;
                 let replay = a.since.as_ref().map(|since| {
                     if since.session_id != a.session_id { return Err(domain("invalid_cursor", "cursor belongs to another session").into()); }
-                    journal.replay(&a.session_id, since, REPLAY_LIMIT + 1)
-                }).transpose().map_err(failure)?;
+                    match journal.replay(&a.session_id, since, REPLAY_LIMIT + 1) {
+                        Ok(events) => Ok(Some(events)),
+                        Err(e) if e.downcast_ref::<sill_core::sfp::DomainError>().is_some_and(|e|e.code=="cursor_expired") => Ok(None),
+                        Err(e) => Err(e),
+                    }
+                }).transpose().map_err(failure)?.flatten();
                 let sub_id = id();
                 let mut subscriptions = self.sfp.lock().unwrap();
                 subscriptions.snapshots.retain(|_,s| s.expires > Instant::now());
                 let (reply, tail) = if let (Some(after),Some(events)) = (&a.since,replay) {
-                    if events.len() <= REPLAY_LIMIT {
+                    if events.len() <= REPLAY_LIMIT && events.iter().all(|e| serde_json::to_vec(e).is_ok_and(|b| b.len() < sill_proto::initialize::MAX_MESSAGE_BYTES - 4096)) {
                         (Attached::Replay { subscription_id: sub_id.clone(), after: after.clone(), through }, events)
                     } else {
                         (snapshot(&journal, conn.id, &a.session_id, &sub_id, &mut subscriptions)?,vec![])
@@ -177,10 +183,13 @@ impl Hub {
                 let a: SnapshotRequest = args(params)?;
                 let mut all = self.sfp.lock().unwrap();
                 all.snapshots.retain(|_,s| s.expires > Instant::now());
-                let s = all.snapshots.get(&a.token).filter(|s|s.conn == conn.id).ok_or_else(|| domain("snapshot_expired","snapshot lease is unavailable"))?;
+                let s = all.snapshots.get_mut(&a.token).filter(|s|s.conn == conn.id).ok_or_else(|| domain("snapshot_expired","snapshot lease is unavailable"))?;
                 let page = match a.page { Some(p) => p.parse::<usize>().map_err(|_| Error::invalid_params("invalid page"))?, None=>0 };
-                let end = *s.pages.get(&page).ok_or_else(||Error::invalid_params("invalid page"))?;
-                Ok(json!(SnapshotPage{ at:s.at.clone(),records:s.records[page..end].to_vec(),next_page:(end<s.records.len()).then(||end.to_string()) }))
+                let mut result = s.page(page)?;
+                let remaining = s.deadline.saturating_duration_since(Instant::now()).min(Duration::from_secs(60));
+                s.expires = Instant::now() + remaining;
+                result.expires_at = Some(sill_core::sfp::timestamp(sill_core::store::now()+remaining.as_secs() as i64));
+                Ok(json!(result))
             })(),
             "_sill/sessions.detach" => (|| {
                 let a:Detach = args(params)?;
@@ -213,7 +222,11 @@ impl Hub {
                     let journal=Journal::new(store)?;
                     match journal.submission(&a.session_id,&a.submission_id) {
                         // compare what was accepted: inline attachments as the uploads they became
-                        Ok(_)=>journal.accept(&super::runner::inline_as_uploads(store,a.clone())?,"queued").map(|(s,_)|Some(s)),
+                        Ok(_)=>{
+                            let tx=store.conn().unchecked_transaction()?;
+                            let (submission,_)=journal.accept(&super::runner::inline_as_uploads(store,a.clone())?,"queued")?;
+                            tx.commit()?;Ok(Some(submission))
+                        },
                         Err(e) if e.downcast_ref::<sill_core::sfp::DomainError>().is_some_and(|e|e.code=="not_found")=>Ok(None),
                         Err(e)=>Err(e),
                     }
@@ -240,22 +253,63 @@ impl Hub {
     }
     fn runner_for_sfp(&self, id:&str)->Result<Arc<super::runner::Runner>,Error> { self.runner(id) }
 }
+impl Snapshot {
+    fn page(&self, index: usize) -> Result<SnapshotPage, Error> {
+        if index >= self.page_count { return Err(Error::invalid_params("invalid page")); }
+        let json: String = self.spool.query_row("SELECT json FROM pages WHERE id=?1", [index as i64], |r| r.get(0)).map_err(Error::failed)?;
+        let mut page: SnapshotPage = serde_json::from_str(&json).map_err(Error::failed)?;
+        page.at = self.at.clone();
+        page.next_page = (index + 1 < self.page_count).then(|| (index + 1).to_string());
+        Ok(page)
+    }
+}
 fn snapshot(journal:&Journal<'_>, conn:u64, session:&str, sub:&str, all:&mut Subscriptions)->Result<Attached,Error> {
     if all.snapshots.values().filter(|s|s.conn==conn && s.session!=session).count() >= MAX_SNAPSHOTS { return Err(domain("limit_exceeded","too many snapshots")); }
-    let (at,records)=journal.snapshot(session).map_err(failure)?;
-    let bytes=serde_json::to_vec(&records).map_err(Error::failed)?.len();
-    if bytes > MAX_SNAPSHOT_BYTES || all.snapshots.values().filter(|s|s.conn!=conn || s.session!=session).map(|s|s.bytes).sum::<usize>() + bytes > 128*1024*1024 { return Err(domain("limit_exceeded","snapshot exceeds development limit")); }
-    let mut pages=HashMap::new();let mut start=0;let mut page_bytes=0;
-    for (i,record) in records.iter().enumerate() {
-        let n=serde_json::to_vec(record).map_err(Error::failed)?.len();
-        if n>4*1024*1024 {return Err(domain("limit_exceeded","snapshot record exceeds development page limit"));}
-        if i>start && (i-start>=PAGE_RECORDS || page_bytes+n>4*1024*1024) {pages.insert(start,i);start=i;page_bytes=0;}
-        page_bytes+=n;
-    }
-    pages.insert(start,records.len());
+    if all.snapshots.values().filter(|s|s.conn!=conn || s.session!=session).count()>=64 {return Err(domain("limit_exceeded","too many active snapshots"));}
+    // SQLite's empty filename creates a private, automatically deleted temporary database.
+    // Bound its cache; unlike the former Vec this does not retain the full history in RAM.
+    let spool = rusqlite::Connection::open("").map_err(Error::failed)?;
+    spool.execute_batch("PRAGMA cache_size=-2048; CREATE TABLE pages(id INTEGER PRIMARY KEY,json TEXT NOT NULL); BEGIN").map_err(Error::failed)?;
+    let at=journal.cursor(session).map_err(failure)?;
+    let mut page_count=0usize;
+    let mut bytes=0usize;
+    // Keep the previous lease usable until replacement succeeds, and reserve its disk use
+    // throughout capture. Excluding it would allow a replacement to exceed the aggregate cap.
+    let existing_bytes: usize=all.snapshots.values().map(|s|s.bytes).sum();
+    let mut save = |records: Vec<Record>, fragment: Option<RecordFragment>| -> anyhow::Result<()> {
+        let page=SnapshotPage{at:at.clone(),records,fragment,next_page:None,expires_at:None};
+        let json=serde_json::to_string(&page)?;
+        bytes=bytes.saturating_add(json.len());
+        if bytes > MAX_SNAPSHOT_BYTES || existing_bytes.saturating_add(bytes)>2*MAX_SNAPSHOT_BYTES {
+            return Err(domain("limit_exceeded","snapshot disk quota exceeded").into());
+        }
+        spool.execute("INSERT INTO pages VALUES (?1,?2)",rusqlite::params![page_count as i64,json])?;
+        page_count+=1; Ok(())
+    };
+    let mut records=Vec::new(); let mut page_bytes=0usize; let mut record_index=0usize;
+    journal.visit_snapshot(session, |json| {
+        if json.len()>64*1024*1024 {return Err(domain("limit_exceeded","record exceeds 64 MiB").into());}
+        if json.len()>PAGE_BYTES {
+            if !records.is_empty() { save(std::mem::take(&mut records),None)?; page_bytes=0; }
+            let mut offset=0;
+            while offset<json.len() {
+                let mut end=(offset+256*1024).min(json.len());
+                while !json.is_char_boundary(end) {end-=1;}
+                save(vec![],Some(RecordFragment{record:record_index.to_string(),offset:offset.to_string(),json:json[offset..end].into(),last:end==json.len()}))?;
+                offset=end;
+            }
+        } else {
+            if records.len()>=PAGE_RECORDS || page_bytes+json.len()>PAGE_BYTES {save(std::mem::take(&mut records),None)?;page_bytes=0;}
+            page_bytes+=json.len(); records.push(serde_json::from_str(&json)?);
+        }
+        record_index+=1; Ok(())
+    }).map_err(failure)?;
+    if !records.is_empty() { save(records,None).map_err(failure)?; }
+    drop(save);
+    spool.execute_batch("COMMIT").map_err(Error::failed)?;
     let token=id();
     let expires_at=sill_core::sfp::timestamp(sill_core::store::now()+60);
-    all.snapshots.insert(token.clone(),Snapshot{conn,session:session.into(),at:at.clone(),records,pages,bytes,expires:Instant::now()+Duration::from_secs(60)});
+    all.snapshots.insert(token.clone(),Snapshot{conn,session:session.into(),at:at.clone(),spool,page_count,bytes,expires:Instant::now()+Duration::from_secs(60),deadline:Instant::now()+Duration::from_secs(1800)});
     Ok(Attached::Snapshot{subscription_id:sub.into(),snapshot:SnapshotLease{token,at,expires_at}})
 }
 

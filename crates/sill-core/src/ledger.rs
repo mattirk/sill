@@ -210,13 +210,13 @@ fn is_opaque(dir: &Path) -> bool {
 /// `target/` matches any path with a `target` directory component; `.cargo/registry/` needs the two
 /// consecutive components. A pattern without a trailing slash matches a file or directory name.
 pub fn is_ignored(rel: &Path, patterns: &[String]) -> bool {
-    let comps: Vec<&str> = rel.iter().filter_map(|c| c.to_str()).collect();
+    let comps: Vec<&std::ffi::OsStr> = rel.iter().collect();
     patterns.iter().any(|pat| {
         let parts: Vec<&str> = pat.split('/').filter(|s| !s.is_empty()).collect();
         if parts.is_empty() {
             return false;
         }
-        comps.windows(parts.len()).any(|w| w == parts.as_slice())
+        comps.windows(parts.len()).any(|w| w.iter().zip(&parts).all(|(actual, expected)| *actual == *expected))
     })
 }
 
@@ -249,6 +249,13 @@ fn same_content(a: &Path, am: &std::fs::Metadata, b: &Path, bm: &std::fs::Metada
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_utf8_components_do_not_disappear_from_ignore_matching() {
+        use std::os::unix::ffi::OsStringExt;
+        let path = PathBuf::from(std::ffi::OsString::from_vec(b".cargo/\xff/registry".to_vec()));
+        assert!(!is_ignored(&path, &[".cargo/registry/".into()]));
+    }
 
     #[test]
     fn ignore_patterns() {

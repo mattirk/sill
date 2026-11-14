@@ -45,10 +45,6 @@ fn create(store: &Store, mut a: api::Create) -> Result<api::SessionKey> {
         .iter()
         .map(|p| p.to_path().map_err(Error::invalid_params))
         .collect::<Result<Vec<_>, _>>()?;
-    // The storage and jail pin pipeline is still UTF-8. Never substitute display text.
-    if pins.iter().any(|p| p.to_str().is_none()) {
-        return Err(Error::domain("unsupported", "non-UTF-8 pins require the forthcoming lossless host-path storage migration").into());
-    }
     for p in &mut a.pins {
         p.display.clear();
     }
@@ -104,6 +100,7 @@ fn create(store: &Store, mut a: api::Create) -> Result<api::SessionKey> {
 }
 impl Hub {
     pub(in crate::daemon) fn public_sessions(self: &Arc<Self>, method: &str, params: Value) -> Option<Result<Value, Error>> {
+        if let Some(result) = self.public_pins(method, params.clone()) { return Some(result); }
         let result = || -> Result<Value> {
             match method {
                 "_sill/sessions.list" => {
@@ -213,6 +210,28 @@ impl Hub {
                         deleted: e.deleted
                     }))
                 }
+                "_sill/sessions.delete" => {
+                    let a: api::SessionKey = args(params)?;
+                    self.with_store(|s| exact(s, &a.session_id))?;
+                    self.delete_session(&a.session_id)?;
+                    Ok(json!({}))
+                }
+                "_sill/sessions.reset" => {
+                    let a: api::SessionKey = args(params)?;
+                    let row = self.with_store(|s| exact(s, &a.session_id))?;
+                    if row.ended_at.is_some() { return Err(Error::domain("invalid_state", "reopen the session before resetting its agent").into()); }
+                    self.ensure_runner(&a.session_id, true)?;
+                    Ok(json!({}))
+                }
+                "_sill/sessions.log" => {
+                    let a: api::Log = args(params)?;
+                    self.with_store(|s| exact(s, &a.session_id))?;
+                    let n = a.lines.unwrap_or(100);
+                    if n == 0 || n > 20000 { return Err(Error::invalid_params("lines must be 1–20000").into()); }
+                    let text = sill_core::session::read_log(&sill_core::session::log_source(&a.session_id), n as usize);
+                    if serde_json::to_vec(&text)?.len()>4*1024*1024 { return Err(Error::domain("limit_exceeded", "log exceeds 4 MiB; request fewer lines").into()); }
+                    Ok(json!(sill_proto::Text { text }))
+                }
                 "_sill/sessions.start" | "_sill/sessions.stop" | "_sill/sessions.checkpoint" => {
                     let a: api::SessionKey = args(params)?;
                     let row = self.with_store(|s| exact(s, &a.session_id))?;
@@ -241,7 +260,7 @@ impl Hub {
                 _ => unreachable!(),
             }
         };
-        if !["list", "get", "create", "update", "start", "stop", "end", "checkpoint"]
+        if !["list", "get", "create", "update", "start", "stop", "end", "checkpoint", "delete", "reset", "log"]
             .iter()
             .any(|n| method == format!("_sill/sessions.{n}"))
         {
@@ -283,10 +302,15 @@ mod tests {
             store.conn().query_row("SELECT count(*) FROM sfp_creates", [], |r| r.get::<_, i64>(0)).unwrap(),
             1
         );
-        let mut bad = input;
-        bad.create_id = "invalid-bytes".into();
-        bad.pins[0].bytes_base64 = "L/8=".into();
-        assert_eq!(failure(create(&store, bad).unwrap_err()).data.unwrap()["code"], "unsupported");
+        store.conn().execute_batch("DROP TRIGGER reject_pin").unwrap();
+        let mut non_utf8 = input;
+        non_utf8.create_id = "exact-bytes".into();
+        non_utf8.pins[0].bytes_base64 = "L/8=".into();
+        non_utf8.pins[0].display = "/not-the-path".into();
+        let exact = non_utf8.pins[0].to_path().unwrap();
+        let created = create(&store, non_utf8.clone()).unwrap();
+        assert_eq!(store.pins(&created.session_id).unwrap(), vec![exact]);
+        assert_eq!(create(&store, non_utf8).unwrap().session_id, created.session_id);
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -80,7 +80,7 @@ pub struct JailSpec {
 
 #[derive(Debug, Clone)]
 pub struct RootEntry {
-    pub name: String,
+    pub name: OsString,
     pub symlink: Option<PathBuf>,
     pub is_dir: bool,
     /// The user can list it (overlayfs needs a readable lower; `/root` usually isn't).
@@ -110,7 +110,7 @@ pub fn read_root_entries() -> Result<Vec<RootEntry>> {
     let mut out = Vec::new();
     for e in std::fs::read_dir("/").context("read /")? {
         let e = e?;
-        let name = e.file_name().to_string_lossy().into_owned();
+        let name = e.file_name();
         let md = e.path().symlink_metadata()?;
         let symlink = if md.file_type().is_symlink() { Some(std::fs::read_link(e.path())?) } else { None };
         let readable = md.is_dir() && std::fs::read_dir(e.path()).is_ok();
@@ -149,7 +149,7 @@ impl JailSpec {
         let real = mounts::real_mounts(&self.mounts);
         let mut layers: Vec<Layer> = Vec::new();
         let mut ro_binds: Vec<PathBuf> = Vec::new();
-        let mut symlinks: Vec<(PathBuf, String)> = Vec::new();
+        let mut symlinks: Vec<(PathBuf, PathBuf)> = Vec::new();
         let mut expanded: Vec<PathBuf> = Vec::new();
         let has_submount = |path: &Path| {
             self.mounts.iter().any(|m| m.mount_point != path && is_under(&m.mount_point, path))
@@ -166,7 +166,7 @@ impl JailSpec {
             is_state_fs: &dyn Fn(&Path) -> bool,
             layers: &mut Vec<Layer>,
             ro_binds: &mut Vec<PathBuf>,
-            symlinks: &mut Vec<(PathBuf, String)>,
+            symlinks: &mut Vec<(PathBuf, PathBuf)>,
             expanded: &mut Vec<PathBuf>,
             warnings: &mut Vec<String>,
         ) {
@@ -194,7 +194,7 @@ impl JailSpec {
                 let Ok(md) = child.symlink_metadata() else { continue };
                 if md.file_type().is_symlink() {
                     if let Ok(t) = std::fs::read_link(&child) {
-                        symlinks.push((t, child.to_string_lossy().trim_start_matches('/').to_string()));
+                        symlinks.push((t, child.strip_prefix("/").unwrap_or(&child).to_path_buf()));
                     }
                 } else if md.is_dir() {
                     if std::fs::read_dir(&child).is_err() {
@@ -209,13 +209,13 @@ impl JailSpec {
         for e in &self.root_entries {
             let path = PathBuf::from("/").join(&e.name);
             if let Some(target) = &e.symlink {
-                symlinks.push((target.clone(), e.name.clone()));
+                symlinks.push((target.clone(), PathBuf::from(&e.name)));
                 continue;
             }
-            if !e.is_dir || SKIP.contains(&e.name.as_str()) || FRESH.contains(&e.name.as_str()) {
+            if !e.is_dir || SKIP.iter().any(|n| e.name == *n) || FRESH.iter().any(|n| e.name == *n) {
                 continue;
             }
-            if RO_BIND.contains(&e.name.as_str()) {
+            if RO_BIND.iter().any(|n| e.name == *n) {
                 ro_binds.push(path);
                 continue;
             }
@@ -227,6 +227,14 @@ impl JailSpec {
         }
         // parents before children (mount order)
         layers.sort_by(|a, b| a.host.cmp(&b.host));
+        // Preserve legacy state names, but never let distinct host roots reuse an upper
+        // tree (for example /a/b and /a%b both historically flatten to a%b).
+        let mut owners = BTreeMap::new();
+        for layer in &layers {
+            if let Some(previous) = owners.insert(layer.upper.clone(), layer.host.clone()) {
+                if previous != layer.host { bail!("overlay state name collision between {} and {}; conflicting mount layouts are unsupported", previous.display(), layer.host.display()); }
+            }
+        }
 
         // --- state dir safety
         let state_in_tree = layers
@@ -312,8 +320,8 @@ impl JailSpec {
         }
 
         // root symlinks, fresh dirs, /sys
-        for (target, name) in symlinks.iter().filter(|(_, n)| !n.contains('/')) {
-            push(&mut a, &[&"--symlink", target, &format!("/{name}")]);
+        for (target, name) in symlinks.iter().filter(|(_, n)| n.components().count() == 1) {
+            push(&mut a, &[&"--symlink", target, &Path::new("/").join(name)]);
         }
         push(&mut a, &[&"--proc", &"/proc", &"--dev", &"/dev", &"--tmpfs", &"/tmp", &"--tmpfs", &"/run"]);
         // expanded directories (contain a mount point): tmpfs, then their children below
@@ -321,8 +329,8 @@ impl JailSpec {
         for d in &expanded {
             push(&mut a, &[&"--tmpfs", d]);
         }
-        for (target, name) in symlinks.iter().filter(|(_, n)| n.contains('/')) {
-            push(&mut a, &[&"--symlink", target, &format!("/{name}")]);
+        for (target, name) in symlinks.iter().filter(|(_, n)| n.components().count() > 1) {
+            push(&mut a, &[&"--symlink", target, &Path::new("/").join(name)]);
         }
         push(&mut a, &[&"--dir", &format!("/run/user/{}", self.uid)]);
         // optional desktop access (policy [jail] x11 / dbus): the sockets and the variables that point at them
@@ -562,7 +570,7 @@ mod tests {
         let root_entries = ["bin", "boot", "dev", "etc", "home", "lib", "mnt", "proc", "run", "sys", "tmp", "usr", "var"]
             .iter()
             .map(|n| RootEntry {
-                name: n.to_string(),
+                name: (*n).into(),
                 symlink: matches!(*n, "bin" | "lib").then(|| PathBuf::from(format!("usr/{n}"))),
                 is_dir: !matches!(*n, "bin" | "lib"),
                 readable: !matches!(*n, "bin" | "lib"),
@@ -591,9 +599,35 @@ mod tests {
         }
     }
 
-    /// The memory snapshot's directory is bound read-only where `sill-memory` looks, when given
-    /// and present; its host path is masked like the rest of sill's state.
     #[test]
+    fn distinct_mount_roots_cannot_alias_an_overlay_state_directory() {
+        let dir = std::env::temp_dir().join(format!("sill-layer-alias-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a/b")).unwrap();
+        std::fs::create_dir_all(dir.join("a%b")).unwrap();
+        let mut s = spec();
+        // A temporary mount's children are expanded exactly as a host /mnt tree is.
+        s.root_entries = vec![RootEntry { name: dir.strip_prefix("/").unwrap().as_os_str().to_os_string(), symlink: None, is_dir: true, readable: true }];
+        s.mounts = vec![Mount {mount_point:dir.join("a/b"),fstype:"ext4".into(),source:"test".into()}];
+        assert!(s.plan().unwrap_err().to_string().contains("overlay state name collision"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn non_utf8_mount_and_bind_arguments_remain_exact() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        let exact = PathBuf::from(OsString::from_vec(b"/pin/\xff".to_vec()));
+        let mut s = spec();
+        s.binds.push((exact.clone(), exact.clone()));
+        let plan = s.plan().unwrap();
+        assert!(plan.argv.windows(3).any(|args| args[0] == "--bind" && args[1] == exact && args[2] == exact));
+        let layer = s.layer_for(&exact);
+        assert_eq!(layer.upper.file_name().unwrap().as_bytes(), b"pin%\xff");
+        s.root_entries.push(RootEntry { name: OsString::from_vec(b"link\xff".to_vec()), symlink: Some(exact.clone()), is_dir: false, readable: false });
+        let plan = s.plan().unwrap();
+        assert!(plan.argv.windows(3).any(|args| args[0] == "--symlink" && args[1] == exact && args[2].as_bytes() == b"/link\xff"));
+    }
+
     /// Behind the proxy, Node's own `fetch` is told to use it (Gemini CLI went direct and hung),
     /// and the jail's own loopback stays direct.
     #[test]

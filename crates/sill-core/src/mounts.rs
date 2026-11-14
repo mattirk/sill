@@ -22,46 +22,45 @@ const REAL_FS: &[&str] = &[
 ];
 
 pub fn parse_mountinfo(text: &str) -> Vec<Mount> {
+    parse_mountinfo_bytes(text.as_bytes())
+}
+
+/// Kernel mountinfo contains raw filename bytes as well as octal escapes.
+fn parse_mountinfo_bytes(text: &[u8]) -> Vec<Mount> {
+    use std::os::unix::ffi::OsStringExt;
     let mut out = Vec::new();
-    for line in text.lines() {
-        // mountinfo: id parent major:minor root mount_point opts [optional...] - fstype source superopts
-        let Some((pre, post)) = line.split_once(" - ") else { continue };
-        let pre: Vec<&str> = pre.split(' ').collect();
-        let post: Vec<&str> = post.split(' ').collect();
-        if pre.len() < 5 || post.len() < 2 {
-            continue;
-        }
+    for line in text.split(|b| *b == b'\n') {
+        let Some(separator) = line.windows(3).position(|s| s == b" - ") else { continue };
+        let pre: Vec<_> = line[..separator].split(|b| *b == b' ').collect();
+        let post: Vec<_> = line[separator + 3..].split(|b| *b == b' ').collect();
+        if pre.len() < 5 || post.len() < 2 { continue; }
         out.push(Mount {
-            mount_point: PathBuf::from(unescape(pre[4])),
-            fstype: post[0].to_string(),
-            source: unescape(post[1]),
+            mount_point: std::ffi::OsString::from_vec(unescape_bytes(pre[4])).into(),
+            fstype: String::from_utf8_lossy(post[0]).into_owned(),
+            source: String::from_utf8_lossy(&unescape_bytes(post[1])).into_owned(),
         });
     }
     out
 }
 
-/// mountinfo escapes space, tab, newline and backslash as octal (`\040`).
-fn unescape(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
+/// mountinfo escapes space, tab, newline and backslash as octal (`\\040`).
+fn unescape_bytes(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'\\' && i + 3 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 4], 8) {
-                out.push(v);
-                i += 4;
-                continue;
-            }
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 3 < bytes.len() && bytes[i+1..i+4].iter().all(|b| (b'0'..=b'7').contains(b)) {
+            let value = (bytes[i+1] - b'0') as u16 * 64 + (bytes[i+2] - b'0') as u16 * 8 + (bytes[i+3] - b'0') as u16;
+            if value <= 255 { out.push(value as u8); i += 4; continue; }
         }
-        out.push(b[i]);
+        out.push(bytes[i]);
         i += 1;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    out
 }
 
 pub fn host_mounts() -> Result<Vec<Mount>> {
-    let text = std::fs::read_to_string("/proc/self/mountinfo").context("read /proc/self/mountinfo")?;
-    Ok(parse_mountinfo(&text))
+    let bytes = std::fs::read("/proc/self/mountinfo").context("read /proc/self/mountinfo")?;
+    Ok(parse_mountinfo_bytes(&bytes))
 }
 
 /// Mounts with a persistent filesystem, excluding `/` itself, sorted by path so parents precede children.
@@ -90,6 +89,14 @@ pub fn is_mount_point(all: &[Mount], path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_and_octal_mount_paths_preserve_filename_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let mounts = parse_mountinfo_bytes(b"1 0 8:1 / /raw/\xff rw - ext4 /dev/a rw\n2 0 8:2 / /octal/\\377 rw - ext4 /dev/b rw\n");
+        assert_eq!(mounts[0].mount_point.as_os_str().as_bytes(), b"/raw/\xff");
+        assert_eq!(mounts[1].mount_point.as_os_str().as_bytes(), b"/octal/\xff");
+    }
 
     #[test]
     fn parses_and_filters() {

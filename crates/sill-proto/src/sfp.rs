@@ -198,6 +198,9 @@ pub struct Question {
     pub kind: String,
     pub title: String,
     pub description: Option<String>,
+    /// Display-only permission subject. Unknown fields never imply an authorization decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<Content>,
     pub tool_item_id: Option<String>,
     pub options: Vec<PermissionOption>,
     pub fields: Vec<FormField>,
@@ -266,7 +269,41 @@ pub struct SnapshotLease { pub token: String, pub at: Cursor, pub expires_at: St
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SnapshotRequest { pub token: String, #[serde(default)] pub page: Option<String> }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct SnapshotPage { pub at: Cursor, pub records: Vec<Record>, pub next_page: Option<String> }
+pub struct SnapshotPage {
+    pub at: Cursor, pub records: Vec<Record>, pub next_page: Option<String>,
+    /// A large record's JSON is delivered in consecutive UTF-8 fragments. No ordinary
+    /// records are interleaved. Concatenate through `last` before decoding the record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fragment: Option<RecordFragment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RecordFragment { pub record: String, pub offset: String, pub json: String, pub last: bool }
+
+#[derive(Default)]
+pub struct SnapshotDecoder { pending: Option<(String, String)> }
+impl SnapshotDecoder {
+    pub fn records(&mut self, page: &SnapshotPage) -> Result<Vec<Record>, String> {
+        if let Some(f) = &page.fragment {
+            if !page.records.is_empty() { return Err("fragment interleaved with records".into()); }
+            let (id, data) = self.pending.get_or_insert_with(|| (f.record.clone(), String::new()));
+            if id != &f.record || f.offset != data.len().to_string() { return Err("noncontiguous record fragment".into()); }
+            if data.len().saturating_add(f.json.len()) > 64 * 1024 * 1024 { return Err("record exceeds 64 MiB".into()); }
+            data.push_str(&f.json);
+            if f.last {
+                let record = serde_json::from_str(data).map_err(|e| format!("invalid fragmented record: {e}"))?;
+                self.pending = None;
+                return Ok(vec![record]);
+            }
+            if page.next_page.is_none() { return Err("incomplete fragmented record".into()); }
+            Ok(vec![])
+        } else {
+            if self.pending.is_some() { return Err("incomplete fragmented record".into()); }
+            Ok(page.records.clone())
+        }
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Detach { pub session_id: String, pub subscription_id: String }
 
@@ -318,3 +355,20 @@ mod tests {
         assert!(serde_json::from_str::<ItemPatch>(r#"{"tool":null}"#).is_err());
     }
 }
+
+#[cfg(test)]
+mod snapshot_decoder_tests {
+    use super::*;
+    #[test]
+    fn fragments_reject_gaps_interleaving_and_incomplete_final_pages() {
+        let mut page=SnapshotPage{expires_at:None,at:Cursor{session_id:"s".into(),seq:"0".into()},records:vec![],next_page:Some("1".into()),fragment:Some(RecordFragment{record:"0".into(),offset:"0".into(),json:"🦀".into(),last:false})};
+        let mut decoder=SnapshotDecoder::default();assert!(decoder.records(&page).unwrap().is_empty());
+        page.fragment.as_mut().unwrap().offset="1".into();assert!(decoder.records(&page).is_err());
+        page.fragment.as_mut().unwrap().offset="4".into();page.next_page=None;assert!(decoder.records(&page).is_err());
+        page.fragment=None;assert!(decoder.records(&page).is_err());
+    }
+}
+
+/// Cancellation acknowledges a request, never proof that the agent stopped.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CancellationRequested { pub requested: bool }

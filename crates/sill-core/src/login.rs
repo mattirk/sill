@@ -138,23 +138,26 @@ pub fn run_into(agent: &Agent, home: &Path, extra_homes: &[PathBuf], method: &st
     });
 
     let result = (|| -> Result<()> {
-        let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
-            "protocolVersion": 1,
-            "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false },
-            "clientInfo": { "name": "sill", "version": env!("CARGO_PKG_VERSION") },
-        }});
+        let v2 = agent.experimental_acp_v2;
+        let params = if v2 { json!({"protocolVersion":2,"info":{"name":"sill","version":env!("CARGO_PKG_VERSION")},"capabilities":{}}) }
+            else { json!({"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false},"clientInfo":{"name":"sill","version":env!("CARGO_PKG_VERSION")}}) };
+        let init = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":params});
         writeln!(stdin, "{init}")?;
         let resp = wait_response(&rx, &erx, 1, Duration::from_secs(30), &mut report)?;
-        let methods: Vec<String> = resp
-            .get("authMethods")
-            .and_then(|m| m.as_array())
-            .map(|a| a.iter().filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(str::to_string)).collect())
-            .unwrap_or_default();
-        if !methods.is_empty() && !methods.iter().any(|m| m == method) {
+        if v2 && resp.get("protocolVersion").and_then(Value::as_u64)!=Some(2) {
+            bail!("the opted-in ACP v2 agent did not select protocolVersion 2");
+        }
+        let offered = resp.get("authMethods").and_then(Value::as_array);
+        let id_field = if v2 { "methodId" } else { "id" };
+        let methods: Vec<String> = offered.into_iter().flatten().filter_map(|m|m.get(id_field).and_then(Value::as_str).map(str::to_string)).collect();
+        if (v2 || !methods.is_empty()) && !methods.iter().any(|m|m==method) {
             bail!("{prog} offers no login method {method:?} (it has: {})", methods.join(", "));
         }
+        if v2 && !offered.into_iter().flatten().any(|m|m.get(id_field).and_then(Value::as_str)==Some(method) && m.get("type").and_then(Value::as_str)==Some("agent")) {
+            bail!("login method {method:?} is not an agent-driven ACP v2 login");
+        }
         report(Line::Status(format!("logging in with {method}…")));
-        let auth = json!({ "jsonrpc": "2.0", "id": 2, "method": "authenticate", "params": { "methodId": method } });
+        let auth = json!({ "jsonrpc": "2.0", "id": 2, "method": if v2 {"auth/login"} else {"authenticate"}, "params": { "methodId": method } });
         writeln!(stdin, "{auth}")?;
         wait_response(&rx, &erx, 2, TIMEOUT, &mut report)?;
         Ok(())
@@ -328,6 +331,30 @@ mod login_copy_tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn v2_host_login_negotiates_and_uses_only_an_offered_agent_method() {
+        let home=dir("v2-host");
+        let script=home.join("agent.py");
+        std::fs::write(&script,r#"import json,sys
+request=json.loads(sys.stdin.readline())
+assert request['params']['protocolVersion']==2
+assert 'info' in request['params'] and 'clientInfo' not in request['params']
+print(json.dumps({'jsonrpc':'2.0','id':1,'result':{'protocolVersion':int(sys.argv[1]),'info':{'name':'fixture','version':'1'},'capabilities':{},'authMethods':[{'type':sys.argv[2],'methodId':'browser','name':'Browser'}]}}),flush=True)
+request=json.loads(sys.stdin.readline())
+assert request['method']=='auth/login' and request['params']=={'methodId':'browser'}
+print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{}}),flush=True)
+"#).unwrap();
+        let mut agent=crate::agents::builtin().into_iter().find(|a|a.id=="codex").unwrap();
+        agent.experimental_acp_v2=true;
+        agent.command=vec!["/usr/bin/python3".into(),script.to_string_lossy().into_owned(),"2".into(),"agent".into()];
+        run(&agent,&home,"browser",|_|{}).unwrap();
+        agent.command[2]="1".into();
+        assert!(run(&agent,&home,"browser",|_|{}).unwrap_err().to_string().contains("protocolVersion 2"));
+        agent.command[2]="2".into();agent.command[3]="future".into();
+        assert!(run(&agent,&home,"browser",|_|{}).unwrap_err().to_string().contains("not an agent-driven"));
+        let _=std::fs::remove_dir_all(home);
     }
 
     #[test]

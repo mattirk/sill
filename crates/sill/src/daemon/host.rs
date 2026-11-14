@@ -23,9 +23,9 @@ fn valid_id(id: &str) -> Result<()> {
     Ok(())
 }
 fn jobs() -> &'static Mutex<HashSet<String>> { static JOBS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new(); JOBS.get_or_init(Default::default) }
-struct Job(String);
+pub(super) struct Job(String);
 impl Job {
-    fn reserve(key: String) -> Result<Self> {
+    pub(super) fn reserve(key: String) -> Result<Self> {
         let mut jobs = jobs().lock().unwrap();
         if jobs.contains(&key) { return Err(domain("busy", "this host operation is already running")); }
         if jobs.len() >= api::MAX_JOBS { return Err(domain("limit_exceeded", "too many host jobs")); }
@@ -74,28 +74,63 @@ fn text(mut value: String) -> String {
     }
     value
 }
-fn start(key: String, run: impl FnOnce(&mut ProgressWriter) -> Result<String> + Send + 'static) -> Result<api::HostStream> {
+fn identity<T: serde::Serialize>(requested: &Option<String>, input: &T) -> Result<(String, Value)> {
+    let id = requested.clone().unwrap_or_else(|| format!("{}{}{}{}", sill_core::store::new_id(), sill_core::store::new_id(), sill_core::store::new_id(), sill_core::store::new_id()));
+    let mut input = serde_json::to_value(input)?;
+    input.as_object_mut().unwrap().remove("operation_id");
+    Ok((id, input))
+}
+fn existing(hub: &Hub, id: &str, method: &str, input: &Value) -> Result<Option<api::JobStream>> {
+    hub.with_store(|s| Ok(sill_core::operations::Journal::new(s.conn())?.existing(id, method, input)?.map(|operation| api::JobStream { token: None, operation })))
+}
+fn start(hub: &Hub, id: String, method: &str, input: Value, key: String, run: impl FnOnce(&mut ProgressWriter) -> Result<String> + Send + 'static) -> Result<api::JobStream> {
     let job = Job::reserve(key)?;
     let (reader, writer) = UnixStream::pair()?;
     writer.set_write_timeout(Some(std::time::Duration::from_secs(1)))?;
     let token = super::streams::socket(reader)?;
+    // Open the worker's database before accepting or running any external effect.
+    let accepted = (|| {
+        let store = sill_core::store::Store::open_default()?;
+        let (operation, fresh) = hub.with_store(|s| sill_core::operations::Journal::new(s.conn())?.begin(&id, method, &input))?;
+        Ok::<_, anyhow::Error>((store, operation, fresh))
+    })();
+    let (store, operation, fresh) = match accepted {
+        Ok(result) => result,
+        Err(error) => { super::streams::discard(&token); return Err(error); }
+    };
+    if !fresh { super::streams::discard(&token); return Ok(api::JobStream { token: None, operation }); }
+    let operation_id = id.clone();
     let spawned = std::thread::Builder::new().name("sill-host-job".into()).spawn(move || {
         let _job = job;
         let mut progress = ProgressWriter(Some(writer));
-        let event = match run(&mut progress) {
-            Ok(agent_id) => api::Progress::Completed { agent_id },
-            Err(e) => api::Progress::Failed { code: "operation_failed".into(), message: text(format!("{e:#}")) },
+        let (agent_id, code, event) = match run(&mut progress) {
+            Ok(agent_id) => (Some(agent_id.clone()), None, api::Progress::Completed { agent_id }),
+            Err(e) => (None, Some("operation_failed"), api::Progress::Failed { code: "operation_failed".into(), message: text(format!("{e:#}")) }),
         };
+        let saved = sill_core::operations::Journal::new(store.conn()).and_then(|j| j.finish(&operation_id, agent_id.as_deref(), code));
+        if let Err(error) = saved {
+            // No terminal progress event may claim a durable outcome that wasn't recorded.
+            eprintln!("sill host operation outcome persistence failed: {error:#}");
+            return;
+        }
         progress.send(event);
     });
-    if let Err(error) = spawned { super::streams::discard(&token); return Err(error.into()); }
-    Ok(api::HostStream { token })
+    if let Err(error) = spawned {
+        super::streams::discard(&token);
+        hub.with_store(|s| sill_core::operations::Journal::new(s.conn())?.finish(&id, None, Some("not_started")))?;
+        return Err(error.into());
+    }
+    Ok(api::JobStream { token: Some(token), operation })
 }
 
 pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
-    if !matches!(method, "_sill/streams.port" | "_sill/agents.login" | "_sill/agents.reset" | "_sill/registry.install" | "_sill/registry.list") { return None; }
+    if !matches!(method, "_sill/streams.port" | "_sill/agents.login" | "_sill/agents.reset" | "_sill/registry.install" | "_sill/registry.list" | "_sill/operations.get") { return None; }
     Some((|| {
         match method {
+            "_sill/operations.get" => {
+                let a: api::OperationKey = args(params)?;
+                hub.with_store(|s| Ok(json!(sill_core::operations::Journal::new(s.conn())?.get(&a.operation_id)?)))
+            }
             "_sill/streams.port" => {
                 let a: api::PortOpen = args(params)?;
                 if !sill_core::session::valid_id(&a.session_id) || a.port == 0 { return Err(invalid("valid session_id and nonzero port required")); }
@@ -109,12 +144,14 @@ pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
             }
             "_sill/agents.login" => {
                 let a: api::AgentLogin = args(params)?;
+                let (id, input) = identity(&a.operation_id, &a)?;
+                if let Some(result) = existing(hub, &id, method, &input)? { return Ok(json!(result)); }
                 valid_id(&a.agent_id)?;
                 if a.method_id.is_empty() || a.method_id.len() > 256 || a.method_id.chars().any(char::is_control) { return Err(invalid("invalid method_id")); }
                 let home = sill_core::changes::home()?;
                 let agent = sill_core::agents::load(&home).remove(&a.agent_id).ok_or_else(|| domain("not_found", "agent not found"))?;
                 let ghosts = hub.ghost_homes_of(&agent.id);
-                Ok(json!(start(format!("login:{}", agent.id), move |progress| {
+                Ok(json!(start(hub, id, method, input, format!("login:{}", agent.id), move |progress| {
                     sill_core::login::run_into(&agent, &home, &ghosts, &a.method_id, |line| {
                         progress.send(match line {
                             sill_core::login::Line::Status(s) => api::Progress::Status { text: text(s) },
@@ -142,9 +179,11 @@ pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
             }
             "_sill/registry.install" => {
                 let a: api::RegistryInstall = args(params)?;
+                let (id, input) = identity(&a.operation_id, &a)?;
+                if let Some(result) = existing(hub, &id, method, &input)? { return Ok(json!(result)); }
                 let home = sill_core::changes::home()?;
                 let entry = select(&home, &a)?;
-                Ok(json!(start(format!("install:{}", entry.id), move |progress| {
+                Ok(json!(start(hub, id, method, input, format!("install:{}", entry.id), move |progress| {
                     let agent = sill_core::registry::install(&home, &entry, &mut |s| progress.send(api::Progress::Output { text: text(s) }))?;
                     Ok(agent.id)
                 })?))
@@ -183,7 +222,7 @@ mod tests {
     fn selection_preserves_reviewed_metadata_and_refuses_unknown_sources() {
         let home = std::env::temp_dir().join(format!("sill-host-select-{}", std::process::id()));
         let entry = sill_core::registry::snapshot().agents.iter().find(|e| e.npm_lock.is_some()).unwrap();
-        let mut request = api::RegistryInstall { entry_id: entry.id.clone(), version: entry.version.clone(), source: "snapshot".into(), allow_unreviewed: false };
+        let mut request = api::RegistryInstall { operation_id: None, entry_id: entry.id.clone(), version: entry.version.clone(), source: "snapshot".into(), allow_unreviewed: false };
         let resolved = select(&home, &request).unwrap();
         assert_eq!(resolved.trust, sill_core::registry::Trust::Snapshot);
         assert_eq!(resolved.npm_lock, entry.npm_lock);

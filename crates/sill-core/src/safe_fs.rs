@@ -97,7 +97,9 @@ pub fn replace_file(dir: &Path, name: &std::ffi::OsStr, bytes: &[u8]) -> Result<
         Ok(st) => st.st_mode as RawMode & 0o7777,
         Err(_) => 0o644,
     };
-    let tmp = format!(".{}.sill-save.{}", name.to_string_lossy(), std::process::id());
+    // A unique ASCII sibling avoids concurrent writers sharing a temp file, preserves
+    // arbitrary target bytes, and works even when the target is already NAME_MAX long.
+    let tmp = format!(".sill-save-{:032x}", rand::random::<u128>());
     let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let fd = openat2(&d, tmp.as_str(), flags, Mode::from_raw_mode(mode), RESOLVE)
         .with_context(|| format!("create {} in {}", tmp, dir.display()))?;
@@ -216,6 +218,27 @@ mod tests {
         assert_eq!(std::fs::read(outside.join("t")).unwrap(), b"t");
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn concurrent_replacements_keep_whole_values_and_exact_long_names() {
+        use std::os::unix::ffi::OsStringExt;
+        let root = scratch("concurrent-replace");
+        let name = std::ffi::OsString::from_vec(vec![0xff; 255]);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let workers: Vec<_> = (0..8u8).map(|byte| {
+            let root = root.clone(); let name = name.clone(); let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                replace_file(&root, &name, &vec![byte; 65536]).unwrap();
+            })
+        }).collect();
+        for worker in workers { worker.join().unwrap(); }
+        let bytes = std::fs::read(root.join(&name)).unwrap();
+        assert_eq!(bytes.len(), 65536);
+        assert!(bytes.iter().all(|byte| *byte == bytes[0]));
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

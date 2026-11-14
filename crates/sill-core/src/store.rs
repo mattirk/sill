@@ -7,6 +7,24 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 
+// Preserve existing TEXT identities; only paths that cannot be represented as UTF-8 use
+// SQLite BLOBs. SQLite's dynamic typing keeps old databases readable without rewriting pins.
+pub(crate) fn sql_path(path: &Path) -> rusqlite::types::Value {
+    use std::os::unix::ffi::OsStrExt;
+    match path.to_str() {
+        Some(text) => rusqlite::types::Value::Text(text.into()),
+        None => rusqlite::types::Value::Blob(path.as_os_str().as_bytes().to_vec()),
+    }
+}
+pub(crate) fn read_sql_path(row: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    use rusqlite::types::ValueRef;
+    match row.get_ref(column)? {
+        ValueRef::Text(bytes) | ValueRef::Blob(bytes) => Ok(std::ffi::OsString::from_vec(bytes.to_vec()).into()),
+        value => Err(rusqlite::Error::InvalidColumnType(column, "path".into(), value.data_type())),
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Session {
     pub id: String,
@@ -91,6 +109,13 @@ pub fn new_id() -> String {
 }
 
 impl Store {
+    /// A read-only snapshot reader, without schema setup or writer-side maintenance.
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        let conn=Connection::open_with_flags(path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY|rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.execute_batch("PRAGMA query_only=ON; BEGIN")?;
+        Ok(Self {conn})
+    }
     pub fn open(path: &Path) -> Result<Self> {
         // the person's state is 0700/0600 whatever the umask says (security.md S21): the dir here,
         // the database after SQLite made it — the -wal/-shm files copy the main file's mode
@@ -412,14 +437,14 @@ impl Store {
 
     pub fn pins(&self, session_id: &str) -> Result<Vec<PathBuf>> {
         let mut st = self.conn.prepare("SELECT path FROM session_pins WHERE session_id = ?1 ORDER BY path")?;
-        let rows = st.query_map(params![session_id], |r| r.get::<_, String>(0))?;
-        Ok(rows.filter_map(Result::ok).map(PathBuf::from).collect())
+        let rows = st.query_map(params![session_id], |r| read_sql_path(r, 0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn pin(&self, session_id: &str, path: &Path) -> Result<()> {
         self.conn.execute(
             "INSERT OR IGNORE INTO session_pins (session_id, path) VALUES (?1, ?2)",
-            params![session_id, path.to_string_lossy()],
+            params![session_id, sql_path(path)],
         )?;
         Ok(())
     }
@@ -427,17 +452,17 @@ impl Store {
     /// The user's global pins (docs/pins.md): bound in every non-ghost jail, never a chip.
     pub fn global_pins(&self) -> Result<Vec<PathBuf>> {
         let mut st = self.conn.prepare("SELECT path FROM global_pins ORDER BY path")?;
-        let rows = st.query_map([], |r| r.get::<_, String>(0))?;
-        Ok(rows.filter_map(Result::ok).map(PathBuf::from).collect())
+        let rows = st.query_map([], |r| read_sql_path(r, 0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn global_pin(&self, path: &Path) -> Result<()> {
-        self.conn.execute("INSERT OR IGNORE INTO global_pins (path, added_at) VALUES (?1, ?2)", params![path.to_string_lossy(), now()])?;
+        self.conn.execute("INSERT OR IGNORE INTO global_pins (path, added_at) VALUES (?1, ?2)", params![sql_path(path), now()])?;
         Ok(())
     }
 
     pub fn global_unpin(&self, path: &Path) -> Result<()> {
-        self.conn.execute("DELETE FROM global_pins WHERE path = ?1", params![path.to_string_lossy()])?;
+        self.conn.execute("DELETE FROM global_pins WHERE path = ?1", params![sql_path(path)])?;
         Ok(())
     }
 
@@ -460,7 +485,7 @@ impl Store {
     }
 
     pub fn unpin(&self, session_id: &str, path: &Path) -> Result<()> {
-        self.conn.execute("DELETE FROM session_pins WHERE session_id = ?1 AND path = ?2", params![session_id, path.to_string_lossy()])?;
+        self.conn.execute("DELETE FROM session_pins WHERE session_id = ?1 AND path = ?2", params![session_id, sql_path(path)])?;
         Ok(())
     }
 
@@ -528,6 +553,13 @@ impl Store {
         )?)
     }
 
+    /// Stream legacy transcript rows without materializing the full conversation.
+    pub fn visit_entries(&self, session_id:&str, mut visit:impl FnMut(Entry)->Result<()>) -> Result<()> {
+        let mut st=self.conn.prepare("SELECT seq, ts, kind, text, extra, tool_kind, detail, diff, call_id, parent FROM entries WHERE session_id=?1 ORDER BY seq")?;
+        for row in st.query_map(params![session_id],Self::entry_row)? {visit(row?)?;}
+        Ok(())
+    }
+
     pub fn entries(&self, session_id: &str) -> Result<Vec<Entry>> {
         let mut st = self.conn.prepare("SELECT seq, ts, kind, text, extra, tool_kind, detail, diff, call_id, parent FROM entries WHERE session_id = ?1 ORDER BY seq")?;
         let rows = st.query_map(params![session_id], Self::entry_row)?;
@@ -590,6 +622,37 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pins_preserve_non_utf8_bytes_and_existing_text_rows_across_reopen() {
+        use std::os::unix::ffi::OsStringExt;
+        let dir = std::env::temp_dir().join(format!("sill-store-byte-pins-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("store.db");
+        let exact = PathBuf::from(std::ffi::OsString::from_vec(b"/pin/\xff".to_vec()));
+        let display_collision = PathBuf::from("/pin/\u{fffd}");
+        {
+            let store = Store::open(&file).unwrap();
+            store.pin("s1", &exact).unwrap();
+            store.pin("s1", &display_collision).unwrap();
+            store.pin("s1", &exact).unwrap();
+            store.global_pin(&exact).unwrap();
+            store.global_pin(&display_collision).unwrap();
+        }
+        let store = Store::open(&file).unwrap();
+        let pins = store.pins("s1").unwrap();
+        assert_eq!(pins.len(), 2);
+        assert!(pins.contains(&exact));
+        assert!(pins.contains(&display_collision));
+        assert_eq!(store.conn().query_row("SELECT typeof(path) FROM session_pins WHERE path = ?1", ["/pin/\u{fffd}"], |r| r.get::<_, String>(0)).unwrap(), "text");
+        store.unpin("s1", &exact).unwrap();
+        store.global_unpin(&exact).unwrap();
+        assert_eq!(store.pins("s1").unwrap(), vec![display_collision.clone()]);
+        assert_eq!(store.global_pins().unwrap(), vec![display_collision]);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn global_pins_join_a_sessions_jail_but_not_its_focus() {

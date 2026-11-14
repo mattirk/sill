@@ -153,11 +153,11 @@ impl Runner {
         let interrupted=matches!(event,relay::Event::Stopped(acp::StopReason::Other(reason)) if reason=="_sill_prompt_error")
             || matches!(event,relay::Event::Stopped(acp::StopReason::Cancelled)) && !cancel_evidence
             || matches!(event,relay::Event::AuthRequired{..}) && (st.ready.is_some() || st.active_submission.is_some())
-            || matches!(event,relay::Event::Ended(_));
+            || matches!(event,relay::Event::Ended(_) | relay::Event::V2PromptFailed{..});
         if interrupted {
             let reason=if matches!(event,relay::Event::AuthRequired{..}) {"authentication_required"}
                 else if matches!(event,relay::Event::Ended(_)) {"agent_lost"} else {"adapter_error"};
-            let (_,records)=journal.snapshot(&self.id)?;
+            let records=journal.active_records(&self.id)?;
             for record in records {
                 match record {
                     p::Record::Submission{mut submission} if submission.delivery=="queued" && submission.insertion=="pending" && submission.outcome=="pending" => {
@@ -184,9 +184,39 @@ impl Runner {
             events.retain(|e|!matches!(e,p::Event::SessionUpdated{..}));
             events.push(p::Event::SessionUpdated{session:next});
         }
+        if matches!(event,relay::Event::V2PermissionsCancelled) {
+            let records=journal.active_records(&self.id)?;
+            let mut next=events.iter().rev().find_map(|e|match e{p::Event::SessionUpdated{session}=>Some(session.clone()),_=>None}).unwrap_or_else(||session.clone());
+            for record in records {if let p::Record::Question{mut question}=record {
+                if question.agent_generation_id!=st.generation_id {continue;}
+                if let Some(request)=st.adapter.request_for_question(&question.question_id){st.answer_outbox.remove(&request);}
+                if question.state=="open" {
+                    question.state="cancelled".into();question.reason=Some(p::Reason{code:"cancelled".into(),message:"Session cancellation cancelled the native permission handler".into()});
+                    next.question_ids.retain(|id|id!=&question.question_id);events.push(p::Event::QuestionUpdated{question});
+                } else if question.state=="answered" && question.delivery.as_deref()==Some("pending") {question.delivery=Some("unknown".into());events.push(p::Event::QuestionUpdated{question});}
+            }}
+            events.retain(|e|!matches!(e,p::Event::SessionUpdated{..}));events.push(p::Event::SessionUpdated{session:next});
+        }
         if let Some(id)=st.active_submission.clone() {
             let mut submission=journal.submission(&self.id,&id)?;
             match event {
+                relay::Event::PromptAccepted{..}=>{
+                    submission.insertion="confirmed".into();
+                    events.push(p::Event::SubmissionUpdated{submission});
+                }
+                relay::Event::V2Update{..}=>{
+                    if let Some(turn)=events.iter().find_map(|e|match e {p::Event::TurnUpdated{turn} if turn.outcome!="pending"=>Some(turn),_=>None}) {
+                        submission.outcome=if submission.insertion=="confirmed" {turn.outcome.clone()} else {"unknown".into()};
+                        submission.reason=turn.reason.clone();
+                        events.push(p::Event::SubmissionUpdated{submission});st.active_submission=None;
+                    }
+                }
+                relay::Event::V2PromptFailed{code,message}=>{
+                    if submission.insertion!="confirmed" {submission.insertion=if code=="not_dispatched" {"rejected"} else {"unknown"}.into();}
+                    submission.outcome=if code=="not_dispatched" {"failed"} else {"unknown"}.into();
+                    submission.reason=Some(p::Reason{code:code.clone(),message:message.clone()});
+                    events.push(p::Event::SubmissionUpdated{submission});st.active_submission=None;
+                }
                 // ACP v1 run loop emits TurnStarted when it begins this command's prompt call;
                 // it does not prove remote insertion. Completion is stronger evidence below.
                 relay::Event::Stopped(reason)=>{
@@ -196,7 +226,7 @@ impl Runner {
                     events.push(p::Event::SubmissionUpdated{submission}); st.active_submission=None;
                 }
                 relay::Event::Ended(_) | relay::Event::AuthRequired{..}=>{
-                    submission.insertion="unknown".into(); submission.outcome="unknown".into();
+                    if submission.insertion!="confirmed" {submission.insertion="unknown".into();} submission.outcome="unknown".into();
                     submission.reason=Some(p::Reason{code:"adapter_interrupted".into(),message:"No conclusive prompt result from the agent".into()});
                     events.push(p::Event::SubmissionUpdated{submission}); st.active_submission=None;
                 }
@@ -213,11 +243,13 @@ impl Runner {
             let mut st=self.st.lock().unwrap();
             self.sfp_initialize_locked(store,hub,&st)?;
             if st.ended || st.retired {return Err(Error::domain("invalid_state","the agent connection ended; explicitly restart the session before submitting new work").into());}
+            let tx=store.conn().unchecked_transaction()?;
             validate_attachments(store,&self.id,&input.attachments)?;
             let input=inline_as_uploads(store,input)?;
             let journal=Journal::new(store)?;
             // Accept records even while the adapter is starting/busy; dispatch owns readiness.
             let (submission,events)=journal.accept(&input,"queued")?;
+            tx.commit()?;
             hub.sfp_publish(&self.id,&events);
             // Once accepted, delivery failure cannot turn success into an ambiguous rejection.
             if let Err(e)=self.sfp_dispatch(store,hub,&mut st) { eprintln!("sill daemon: SFP dispatch {}: {e:#}",self.id); }
@@ -227,7 +259,7 @@ impl Runner {
     pub(super) fn sfp_dispatch(&self,store:&Store,hub:&Hub,st:&mut State)->Result<()> {
         if !dispatch_ready(st) { return Ok(()); }
         let journal=Journal::new(store)?;
-        let (_,records)=journal.snapshot(&self.id)?;
+        let records=journal.active_records(&self.id)?;
         let mut queued:Vec<_>=records.into_iter().filter_map(|r|match r {p::Record::Submission{submission} if submission.delivery=="queued" && submission.outcome=="pending"=>Some(submission),_=>None}).collect();
         queued.sort_by_key(|s|s.accepted_seq.parse::<u64>().unwrap_or(u64::MAX));
         let Some(submission)=queued.into_iter().next() else { return Ok(()); };
@@ -293,7 +325,7 @@ impl Runner {
         match result{Ok(x)=>Ok(x),Err(e)=>{*st=before;Err(e)}}
     }
     pub(super) fn sfp_auto_answer(&self,store:&Store,hub:&Hub,st:&mut State,event:&relay::Event)->Result<()> {
-        if let relay::Event::PermissionRequest{request,options,..}=event {
+        if let relay::Event::PermissionRequest{request,options,..} | relay::Event::V2PermissionRequest{request,options,..}=event {
             let Some(question_id)=st.adapter.question_id(*request).map(str::to_owned) else{return Ok(())};
             let journal=Journal::new(store)?;
             if journal.question(&self.id,&question_id)?.state!="open" {return Ok(());}
@@ -344,6 +376,7 @@ fn attachments(store:&Store,session_id:&str,input:&[p::Attachment],images:bool)-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::io::{BufRead,BufReader,Write};
     use std::os::unix::net::UnixListener;
     struct Fixture {
@@ -628,6 +661,63 @@ mod tests {
         assert!(f.runner.sfp_project(&f.store,&mut st,&dump,1).unwrap().is_empty());
         let failure=relay::Event::Other("set mode failed: internal error".into());
         assert_eq!(f.runner.sfp_project(&f.store,&mut st,&failure,2).unwrap().len(),1);
+    }
+
+    #[test]
+    fn native_acceptance_survives_restart_without_claiming_completion_or_losing_insertion() {
+        let f=Fixture::with_evidence(true);let j=Journal::new(&f.store).unwrap();
+        let (submission,_)=j.accept(&f.input(),"queued").unwrap();
+        {
+            let mut st=f.runner.st.lock().unwrap();
+            f.runner.sfp_project(&f.store,&mut st,&relay::Event::V2Ready{session_id:"native".into(),resumed:false,controls:Default::default()},1).unwrap();
+            f.runner.sfp_commit_submission(&f.store,&f.dir,&mut st,submission).unwrap();
+            f.runner.sfp_project(&f.store,&mut st,&relay::Event::TurnStarted,2).unwrap();
+            f.runner.sfp_project(&f.store,&mut st,&relay::Event::V2Update{update:json!({"sessionUpdate":"state_update","state":"idle"})},3).unwrap();
+            assert_eq!(j.submission(&f.runner.id,"submission").unwrap().outcome,"pending","initial idle isn't completion");
+            f.runner.sfp_project(&f.store,&mut st,&relay::Event::PromptAccepted{message_id:"user-native".into()},4).unwrap();
+            let receipt=j.submission(&f.runner.id,"submission").unwrap();assert_eq!(receipt.insertion,"confirmed");assert_eq!(receipt.outcome,"pending");
+            f.runner.save(&f.store,&st).unwrap();
+        }
+        let (store,runner)=f.reopened();let journal=Journal::new(&store).unwrap();
+        let mut st=runner.st.lock().unwrap();
+        assert!(st.adapter.is_v2());assert_eq!(st.active_submission.as_deref(),Some("submission"));
+        runner.sfp_project(&store,&mut st,&relay::Event::Ended(Some("lost".into())),5).unwrap();
+        let receipt=journal.submission(&runner.id,"submission").unwrap();assert_eq!(receipt.insertion,"confirmed");assert_eq!(receipt.outcome,"unknown");
+    }
+    #[test]
+    fn native_terminal_state_completes_once_and_cancellation_retires_permissions() {
+        let f=Fixture::with_evidence(true);let j=Journal::new(&f.store).unwrap();let mut st=f.runner.st.lock().unwrap();
+        f.runner.sfp_project(&f.store,&mut st,&relay::Event::V2Ready{session_id:"native".into(),resumed:false,controls:Default::default()},1).unwrap();
+        let (submission,_)=j.accept(&f.input(),"queued").unwrap();f.runner.sfp_commit_submission(&f.store,&f.dir,&mut st,submission).unwrap();
+        f.runner.sfp_project(&f.store,&mut st,&relay::Event::TurnStarted,2).unwrap();
+        f.runner.sfp_project(&f.store,&mut st,&relay::Event::PromptAccepted{message_id:"u".into()},3).unwrap();
+        f.runner.sfp_project(&f.store,&mut st,&relay::Event::V2Update{update:json!({"sessionUpdate":"state_update","state":"running"})},4).unwrap();
+        f.runner.sfp_project(&f.store,&mut st,&relay::Event::V2PermissionRequest{request:7,tool_call_id:None,title:"Run?".into(),subject:Some(json!({"type":"command","command":"echo fixture","cwd":"/tmp"})),options:vec![]},5).unwrap();
+        let question=st.adapter.question_id(7).unwrap().to_string();
+        f.runner.sfp_project(&f.store,&mut st,&relay::Event::V2PermissionsCancelled,6).unwrap();
+        assert_eq!(j.question(&f.runner.id,&question).unwrap().state,"cancelled");
+        assert!(j.session(&f.runner.id).unwrap().question_ids.is_empty());
+        let idle=relay::Event::V2Update{update:json!({"sessionUpdate":"state_update","state":"idle","stopReason":"cancelled"})};
+        f.runner.sfp_project(&f.store,&mut st,&idle,7).unwrap();
+        let receipt=j.submission(&f.runner.id,"submission").unwrap();assert_eq!(receipt.insertion,"confirmed");assert_eq!(receipt.outcome,"cancelled");assert!(st.active_submission.is_none());
+        assert!(f.runner.sfp_project(&f.store,&mut st,&idle,8).unwrap().is_empty(),"repeated idle is idempotent");
+    }
+
+    #[test]
+    fn repeated_native_idle_does_not_append_duplicate_memory_text() {
+        let f=Fixture::with_evidence(true);let mut st=f.runner.st.lock().unwrap();
+        let events=[
+            relay::Event::V2Ready{session_id:"native".into(),resumed:false,controls:Default::default()},
+            relay::Event::TurnStarted,
+            relay::Event::PromptAccepted{message_id:"user".into()},
+            relay::Event::V2Update{update:json!({"sessionUpdate":"state_update","state":"running"})},
+            relay::Event::V2Update{update:json!({"sessionUpdate":"agent_message","messageId":"answer","content":[{"type":"text","text":"old"}]})},
+            relay::Event::V2Update{update:json!({"sessionUpdate":"agent_message","messageId":"answer","content":[{"type":"text","text":"final"}]})},
+            relay::Event::V2Update{update:json!({"sessionUpdate":"state_update","state":"idle","stopReason":"end_turn"})},
+            relay::Event::V2Update{update:json!({"sessionUpdate":"state_update","state":"idle","stopReason":"end_turn"})},
+        ];
+        for (index,event) in events.into_iter().enumerate(){f.runner.sfp_project(&f.store,&mut st,&event,index as u64+1).unwrap();f.runner.handle_locked(&f.store,&mut st,event,false).unwrap();}
+        let entries=f.store.entries(&f.runner.id).unwrap();let agent=entries.iter().filter(|e|e.kind=="agent").collect::<Vec<_>>();assert_eq!(agent.len(),1);assert_eq!(agent[0].text,"final");
     }
 
 }

@@ -83,6 +83,7 @@ struct State {
     turns: u32,
     /// The agent's text since the last tool call or turn end (not yet in the store).
     agent_md: String,
+    native_flushed_turn: Option<String>,
     /// Tool call id → its entry's `seq`, for the updates.
     tool_seqs: HashMap<String, i64>,
     /// Questions waiting for an answer: the event as sent, and where the answer goes.
@@ -142,7 +143,7 @@ impl Runner {
         while let Ok(delivery) = events.recv() {
             let seq = delivery.seq;
             let end = matches!(delivery.event, relay::Event::Ended(_));
-            let stopped = matches!(delivery.event, relay::Event::Stopped(_));
+            let mut stopped = false;
             let auto = hub.auto_allow(&self.id);
             let done = hub.with_store(|store| {
                 let tx = store.conn().unchecked_transaction()?;
@@ -166,6 +167,8 @@ impl Runner {
                     }
                     None => self.sfp_project(store, &mut st, &delivery.event, seq)?,
                 };
+                stopped = matches!(delivery.event, relay::Event::Stopped(_))
+                    || matches!(&delivery.event,relay::Event::V2Update{..}) && public_events.iter().any(|event|matches!(&event.event,sill_proto::sfp::Event::TurnUpdated{turn} if turn.outcome!="pending"));
                 let done = self.handle_locked(store, &mut st, delivery.event.clone(), false)?;
                 if seq > 0 { st.cursor = seq; }
                 if let Some(done) = &done { st.completed = Some(done.clone()); }
@@ -203,7 +206,7 @@ impl Runner {
         let mut done = None;
         let id = self.id.clone();
         match &ev {
-            relay::Event::Ready { session_id, resumed, controls } => {
+            relay::Event::Ready { session_id, resumed, controls } | relay::Event::V2Ready { session_id, resumed, controls } => {
                 store.set_acp_session_id(&id, session_id)?;
                 st.context.ready(*resumed);
                 self.restore(store, st, controls, true)?;
@@ -213,6 +216,7 @@ impl Runner {
                 // the session opened: a login asked for before is done (an agent that wants one
                 // per prompt asks again there). Kept, it held every prompt in the queue.
                 st.auth = None;
+                if matches!(&ev,relay::Event::V2Ready{resumed:true,..}) { st.busy=true; }
             }
             relay::Event::Capabilities { images } => st.images = Some(*images),
             relay::Event::Controls(c) => { self.restore(store, st, c, false)?; st.controls = Some(c.clone()); },
@@ -241,6 +245,26 @@ impl Runner {
             // some agents echo the prompt back during the turn; the frontend shows what it sent
             relay::Event::UserText(_) => return Ok(None),
             relay::Event::Text(t) => st.agent_md.push_str(t),
+            relay::Event::V2Update { update } => {
+                let native_turn=st.adapter.v2_last_turn().map(str::to_owned);
+                let unflushed=native_turn.is_some() && native_turn!=st.native_flushed_turn;
+                if unflushed && let Some(text)=st.adapter.v2_turn_text() {st.agent_md=text;}
+                if update["sessionUpdate"]=="state_update" {
+                    let state=update["state"].as_str().unwrap_or("unknown");
+                    // The projector only removes a pending native turn after observing active work.
+                    if state=="idle" && st.adapter.turn_id().is_none() {
+                        st.busy=false;st.cancel_sent=false;st.last_turn_end=Some(sill_core::store::now());
+                        if unflushed {
+                            flush(store,&id,st)?;st.native_flushed_turn=native_turn;
+                            if let Some((kind,text,_))=st.summary.take(){done=Some(SummaryDone{kind,text:Some(text.trim().to_string())});}
+                        }
+                    } else if state!="idle" {st.busy=true;}
+                }
+            }
+            relay::Event::V2PromptFailed { .. } => {
+                // A failed RPC alone is not a foreground-idle observation.
+                st.busy=true;
+            }
             relay::Event::ToolCall { id: call, title, status, kind, detail, diff, parent } => {
                 flush(store, &id, st)?;
                 if let Ok(seq) = store.append_tool(&id, title, status, kind, detail.as_deref(), diff.as_deref()) {
@@ -298,13 +322,16 @@ impl Runner {
             other => other,
         };
         match &ev {
-            relay::Event::PermissionRequest { request, .. } | relay::Event::Elicitation { request, .. } => { st.pending.insert(*request, ev.clone()); }
+            relay::Event::PermissionRequest { request, .. } | relay::Event::V2PermissionRequest { request, .. } | relay::Event::Elicitation { request, .. } => { st.pending.insert(*request, ev.clone()); }
             relay::Event::Resolved { request } => { st.pending.remove(request); }
+            relay::Event::V2PermissionsCancelled => {st.pending.retain(|_,p|!matches!(p,relay::Event::V2PermissionRequest{..}));}
             relay::Event::AuthRequired { .. } => st.auth = Some(ev.clone()),
             _ => {}
         }
         // the daemon's boundary: frontends get the protocol's event, never the relay's
-        broadcast(&self.id, &mut st.subs, &ev.into());
+        if !matches!(&ev,relay::Event::V2PermissionsCancelled|relay::Event::V2Update{..}|relay::Event::PromptAccepted{..}) {
+            broadcast(&self.id, &mut st.subs, &ev.into());
+        }
         Ok(done)
     }
 
@@ -598,7 +625,7 @@ impl Runner {
         let answer = relay::Answer::from(answer);
         let mut st = self.st.lock().unwrap();
         let Some(question) = st.pending.get(&request) else { bail!("no open question {request} (answered already?)") };
-        if !matches!((question, &answer), (relay::Event::PermissionRequest { .. }, relay::Answer::Permission(_)) | (relay::Event::Elicitation { .. }, relay::Answer::Form(_))) {
+        if !matches!((question, &answer), (relay::Event::PermissionRequest { .. } | relay::Event::V2PermissionRequest { .. }, relay::Answer::Permission(_)) | (relay::Event::Elicitation { .. }, relay::Answer::Form(_))) {
             bail!("the answer is not of the question's kind");
         }
         self.relay.answer(request, answer)?;

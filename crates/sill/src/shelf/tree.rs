@@ -867,7 +867,7 @@ impl FolderTree {
             {
                 repos.push(r);
             }
-            let statuses: Statuses = repos.into_iter().map(|r| (super::remote::request(sill_core::frontend::Request::GitStatus { repo: r.clone() }).unwrap_or_default(), r)).map(|(st, r)| (r, st)).collect();
+            let statuses: Statuses = repos.into_iter().map(|r| (super::remote::git_status(&r).unwrap_or_default(), r)).map(|(st, r)| (r, st)).collect();
             let _ = tx.send_blocking((pairs, owners, statuses));
         });
         let t = self.clone();

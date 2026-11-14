@@ -396,6 +396,7 @@ pub fn install(home: &Path, entry: &Entry, log: &mut dyn FnMut(String)) -> Resul
             command,
             env,
             supports_load,
+            experimental_acp_v2: false,
             domains: vec![],
             sandbox_off_env: Default::default(),
             state_dirs: vec![],

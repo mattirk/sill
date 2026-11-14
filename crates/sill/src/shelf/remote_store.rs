@@ -26,11 +26,31 @@ impl Store {
         out.sort_by(|a,b|b.last_used.cmp(&a.last_used).then_with(||b.id.cmp(&a.id)));
         Ok(out)
     }
-    pub fn pins(&self, id: &str) -> Result<Vec<PathBuf>> { super::remote::request(Request::Pins { session: id.into(), global: false }) }
-    pub fn global_pins(&self) -> Result<Vec<PathBuf>> { super::remote::request(Request::GlobalPins) }
+    pub fn pins(&self, id: &str) -> Result<Vec<PathBuf>> { self.pin_list(Some(id.into())) }
+    pub fn global_pins(&self) -> Result<Vec<PathBuf>> { self.pin_list(None) }
+    fn pin_list(&self, session_id: Option<String>) -> Result<Vec<PathBuf>> {
+        let mut after = None;
+        let mut out = Vec::new();
+        loop {
+            let page: sill_proto::pins::Page = super::client::call("_sill/pins.list", sill_proto::pins::List { session_id: session_id.clone(), after, limit: Some(128) })?;
+            out.extend(page.pins.iter().map(|p| p.to_path()).collect::<Result<Vec<_>>>()?);
+            after = page.next;
+            if after.is_none() { return Ok(out); }
+        }
+    }
     pub fn entries_before(&self, id: &str, before: Option<i64>, limit: usize) -> Result<Vec<Entry>> {
         super::remote::request(Request::Entries { session: id.into(), before, limit })
     }
-    pub fn memories(&self, id: &str) -> Result<Vec<(i64, String, String)>> { super::remote::request(Request::Memories { session: id.into() }) }
-    pub fn search(&self, text: &str, limit: usize) -> Result<Vec<String>> { super::remote::request(Request::Search { text: text.into(), limit }) }
+    pub fn memories(&self, id: &str) -> Result<Vec<(i64, String, String)>> {
+        let mut after=None;let mut out=Vec::new();loop {
+            let page:sill_proto::memory::Notes=super::client::call("_sill/memory.notes.list",sill_proto::memory::NotesList {session_id:id.into(),after,limit:Some(128)})?;
+            for n in page.notes {out.push((n.timestamp.parse()?,n.kind,n.text));}after=page.next;if after.is_none(){return Ok(out);}
+        }
+    }
+    pub fn search(&self, text: &str, limit: usize) -> Result<Vec<String>> {
+        let mut after=None;let mut out=Vec::new();while out.len()<limit.min(500) {
+            let page:sill_proto::memory::Hits=super::client::call("_sill/memory.search",sill_proto::memory::Search {query:text.into(),after,limit:Some((limit.min(500)-out.len()).min(128) as u16)})?;
+            out.extend(page.hits.into_iter().map(|h|h.session_id));after=page.next;if after.is_none(){break;}
+        }Ok(out)
+    }
 }

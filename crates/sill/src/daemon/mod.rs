@@ -10,7 +10,7 @@ use std::io::{BufReader, Write};
 use std::os::fd::FromRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
 
 use anyhow::{Context, Result, bail};
@@ -27,6 +27,10 @@ mod terminals;
 mod host;
 mod context;
 mod frontend;
+mod admin;
+mod discovery;
+mod memory_api;
+mod agent_admin;
 pub mod relay;
 pub use hub::Hub;
 
@@ -42,12 +46,24 @@ const EXIT_STUCK: i32 = 102;
 const QUEUE: usize = 20_000;
 
 /// One frontend connection, as the hub and the runners see it: where its lines go.
-enum WriteItem { Line(String), Flush(std::sync::mpsc::Sender<()>) }
+const CONNECTION_QUEUE_BYTES: usize = 16 * 1024 * 1024;
+const GLOBAL_QUEUE_BYTES: usize = 256 * 1024 * 1024;
+static QUEUED_BYTES: AtomicUsize = AtomicUsize::new(0);
+struct QueuedLine { text: String, bytes: usize, connection: Arc<AtomicUsize> }
+impl Drop for QueuedLine {
+    fn drop(&mut self) { self.connection.fetch_sub(self.bytes, Ordering::Relaxed); QUEUED_BYTES.fetch_sub(self.bytes, Ordering::Relaxed); }
+}
+#[allow(deprecated)] // fetch_update also supports the workspace's Rust 1.90 minimum.
+fn reserve_bytes(counter: &AtomicUsize, bytes: usize, limit: usize) -> bool {
+    counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(bytes).filter(|v| *v <= limit)).is_ok()
+}
+enum WriteItem { Line(QueuedLine), Flush(std::sync::mpsc::Sender<()>) }
 
 pub struct Conn {
     pub id: u64,
     internal: AtomicBool,
     tx: SyncSender<WriteItem>,
+    queued_bytes: Arc<AtomicUsize>,
     /// To cut a stuck connection off.
     sock: UnixStream,
 }
@@ -55,7 +71,21 @@ pub struct Conn {
 impl Conn {
     /// Queue one line; false when the connection is gone or stuck (it is cut off then).
     pub fn send(&self, line: String) -> bool {
-        match self.tx.try_send(WriteItem::Line(line)) {
+        if line.len().saturating_add(1) > sill_proto::initialize::MAX_MESSAGE_BYTES {
+            // A committed oversized event is recovered through a segmented snapshot.
+            let _ = self.sock.shutdown(std::net::Shutdown::Both);
+            return false;
+        }
+        let bytes = line.len() + 1;
+        if !reserve_bytes(&self.queued_bytes, bytes, CONNECTION_QUEUE_BYTES) {
+            let _ = self.sock.shutdown(std::net::Shutdown::Both); return false;
+        }
+        if !reserve_bytes(&QUEUED_BYTES, bytes, GLOBAL_QUEUE_BYTES) {
+            self.queued_bytes.fetch_sub(bytes, Ordering::Relaxed);
+            let _ = self.sock.shutdown(std::net::Shutdown::Both); return false;
+        }
+        let queued = QueuedLine { text: line, bytes, connection: self.queued_bytes.clone() };
+        match self.tx.try_send(WriteItem::Line(queued)) {
             Ok(()) => true,
             Err(TrySendError::Full(_)) => {
                 eprintln!("sill daemon: connection {} is not reading; dropping it", self.id);
@@ -319,14 +349,14 @@ fn serve(stream: UnixStream, hub: Arc<Hub>) -> Result<()> {
     { reader.get_ref().set_read_timeout(None)?; return streams::claim(token, reader); }
     let stream = reader.get_ref();
     let (tx, rx) = sync_channel::<WriteItem>(QUEUE);
-    let conn = Arc::new(Conn { id: NEXT_CONN.fetch_add(1, Ordering::Relaxed), internal: AtomicBool::new(false), tx, sock: stream.try_clone()? });
+    let conn = Arc::new(Conn { id: NEXT_CONN.fetch_add(1, Ordering::Relaxed), internal: AtomicBool::new(false), tx, queued_bytes: Arc::new(AtomicUsize::new(0)), sock: stream.try_clone()? });
     let mut writer = stream.try_clone()?;
     std::thread::Builder::new().name(format!("sill-daemon-write-{}", conn.id)).spawn(move || {
         for item in rx {
             match item {
                 WriteItem::Line(mut line) => {
-                    line.push('\n');
-                    if writer.write_all(line.as_bytes()).is_err() { let _ = writer.shutdown(std::net::Shutdown::Both); break; }
+                    line.text.push('\n');
+                    if writer.write_all(line.text.as_bytes()).is_err() { let _ = writer.shutdown(std::net::Shutdown::Both); break; }
                 }
                 WriteItem::Flush(done) => { if writer.flush().is_ok() { let _ = done.send(()); } }
             }
@@ -376,7 +406,7 @@ fn read_loop(mut reader: BufReader<UnixStream>, first: String, hub: &Arc<Hub>, c
                     let internal=initialized.capabilities.get(sill_proto::initialize::INTERNAL_CAPABILITY)==Some(&1);
                     conn.internal.store(internal,Ordering::Release);
                     conn.reply(&Response::ok(id, serde_json::to_value(initialized)?));
-                    if internal { hub.connected(conn); }
+                    hub.connected(conn);
                 }
                 Err(error) => conn.reply(&Response::err(Some(id), error)),
             }
@@ -418,4 +448,34 @@ fn read_loop(mut reader: BufReader<UnixStream>, first: String, hub: &Arc<Hub>, c
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod queue_budget_tests {
+    use super::*;
+    #[test]
+    fn byte_reservations_are_bounded_and_failed_reservations_leave_accounting_unchanged() {
+        let count=AtomicUsize::new(0);
+        assert!(reserve_bytes(&count,7,10));
+        assert!(!reserve_bytes(&count,4,10));
+        assert_eq!(count.load(Ordering::Relaxed),7);
+        assert!(reserve_bytes(&count,3,10));
+        assert!(!reserve_bytes(&count,usize::MAX,10));
+        assert_eq!(count.load(Ordering::Relaxed),10);
+    }
+
+    #[test]
+    fn failed_sends_and_abandoned_queues_release_their_byte_reservations() {
+        let (sock,_peer)=UnixStream::pair().unwrap();
+        let (tx,rx)=sync_channel(1);
+        let conn=Conn{id:0,internal:AtomicBool::new(false),tx,queued_bytes:Arc::new(AtomicUsize::new(0)),sock};
+        assert!(conn.send("queued".into()));
+        assert_eq!(conn.queued_bytes.load(Ordering::Relaxed),7);
+        assert!(!conn.send("cannot fit".into()),"full channel refuses and releases the new reservation");
+        assert_eq!(conn.queued_bytes.load(Ordering::Relaxed),7);
+        drop(rx);
+        assert_eq!(conn.queued_bytes.load(Ordering::Relaxed),0,"abandoning the writer releases queued data");
+        assert!(!conn.send("disconnected".into()));
+        assert_eq!(conn.queued_bytes.load(Ordering::Relaxed),0,"disconnected sends leave no reservation");
+    }
 }

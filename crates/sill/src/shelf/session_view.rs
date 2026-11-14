@@ -1173,7 +1173,7 @@ impl SessionView {
             .spawn(move || {
                 let r = (|| -> anyhow::Result<()> {
                     use std::io::BufRead;
-                    let opened: sill_proto::host::HostStream = super::client::call("_sill/agents.login", sill_proto::host::AgentLogin { agent_id: agent.id, method_id: method })?;
+                    let opened: sill_proto::host::HostStream = super::client::call("_sill/agents.login", sill_proto::host::AgentLogin { operation_id: None, agent_id: agent.id, method_id: method })?;
                     let stream = sill_proto::transport::open_stream(&opened.token)?;
                     struct Close(std::sync::Arc<dyn Fn() + Send + Sync>);
                     impl Drop for Close { fn drop(&mut self) { (self.0)(); } }
@@ -2036,7 +2036,7 @@ impl SessionView {
     /// the session's overlay copy when it has one (a regular file — a whiteout means deleted), else
     /// the host file. Images only.
     fn resolve_jail_path(&self, src: &str) -> Option<std::path::PathBuf> {
-        let bytes: Option<Vec<u8>> = remote::request(Request::ResolveImage { session: self.id(), path: src.into() }).ok()?;
+        let bytes = Some(remote::session_image(&self.id(),src).ok()?);
         let bytes = bytes?;
         let key = format!("{}:{}:{}", std::env::var("SILL_BOX").unwrap_or_default(), self.id(), src);
         remote::cache_image(&key, &bytes, std::path::Path::new(src).extension().and_then(|s| s.to_str()).unwrap_or("img"))
@@ -2568,7 +2568,7 @@ impl SessionView {
         let session = self.id();
         let (tx, rx) = async_channel::bounded::<Option<Vec<sill_core::shim::Proc>>>(1);
         std::thread::spawn(move || {
-            let list = remote::request(Request::ProcList { session }).ok();
+            let list = remote::processes(&session).ok();
             let _ = tx.send_blocking(list);
         });
         let weak = Rc::downgrade(self);
@@ -2790,7 +2790,7 @@ impl SessionView {
 /// (+insertions, −deletions, untracked files) vs HEAD: of a pinned folder's working tree, or of a
 /// pinned file alone (in the repository that holds it, found by walking up); None outside a repo.
 fn git_summary(path: &std::path::Path) -> Option<(u64,u64,u64)> {
-    remote::request(Request::GitSummary { path: path.into() }).ok().flatten()
+    remote::git_summary(path)
 }
 
 /// Let a dropdown shrink: its button shows the selection in a label that ellipsizes, so a tight row

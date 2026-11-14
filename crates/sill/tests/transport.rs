@@ -147,3 +147,12 @@ fn stdio_does_not_replace_an_existing_daemon_with_another_protocol() {
     reader.join().unwrap();
     server.join().unwrap();
 }
+
+#[test]
+#[ignore = "requires OpenSSH client/server and Python jsonschema; creates disposable loopback credentials"]
+fn real_ssh_control_and_terminal_reconnection() {
+    let output = Command::new(std::env::var("SILL_SFP_PYTHON").unwrap_or_else(|_| "python3".into()))
+        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/sfp_ssh_scenario.py"))
+        .arg(env!("CARGO_BIN_EXE_sill")).output().unwrap();
+    assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+}

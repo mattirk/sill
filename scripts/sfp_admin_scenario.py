@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""Independent public administration/schema checks in an isolated daemon fixture."""
+import base64
+import sys
+from sfp_client import Client, RpcError
+
+with_client = Client(sys.argv[1])
+try:
+    c = with_client
+    # No internal capability; traverse every configured definition using public schemas.
+    after, agents = None, []
+    while True:
+        page = c.call("_sill/agents.list", {"after": after, "limit": 1})
+        agents.extend(page["agents"])
+        after = page["next"]
+        if after is None:
+            break
+    assert agents and [a["id"] for a in agents] == sorted(set(a["id"] for a in agents))
+    agent = c.call("_sill/agents.get", {"agent_id": agents[0]["id"]})
+    custom = dict(agent, id="sfp-conformance", name="Conformance fixture", command=["/bin/false"])
+    c.call("_sill/agents.save", custom)
+    assert c.call("_sill/agents.get", {"agent_id": custom["id"]}) == custom
+    c.call("_sill/agents.defaults.set", {"agent_id": custom["id"], "settings": {"mode": None, "config": {}}})
+    assert c.call("_sill/agents.remove", {"agent_id": custom["id"]})["removed"]
+    assert not c.call("_sill/agents.remove", {"agent_id": custom["id"]})["removed"]
+    try:
+        c.call("_sill/agents.get", {"agent_id": "../escape"})
+        raise AssertionError("unsafe agent identity accepted")
+    except RpcError:
+        pass
+    home = c.call("_sill/files.home", {})
+    raw = base64.b64decode(home["bytes_base64"]) + b"/conformance-\xff"
+    path = {"bytes_base64": base64.b64encode(raw).decode(), "display": "deliberately not the operational path"}
+    c.call("_sill/files.write", {"path": path, "bytes_base64": base64.b64encode(b"\x00\xffhello").decode()})
+    data = c.call("_sill/files.read", {"path": path, "offset": "1", "length": 3})
+    assert base64.b64decode(data["bytes_base64"]) == b"\xffhe" and data["next_offset"] == "4"
+    assert c.call("_sill/files.metadata", {"path": path})["length"] == "7"
+    c.call("_sill/settings.instructions.set", {"text": "Conformance instructions"})
+    assert c.call("_sill/settings.instructions.get", {})["text"] == "Conformance instructions"
+    policies = c.call("_sill/policy.list", {"limit": 1})
+    assert len(policies["names"]) <= 1
+    session = c.call("_sill/sessions.create", {"create_id": "memory-spool", "agent": "claude", "policy": "default"})["session_id"]
+    c.call("_sill/memory.notes.add", {"session_id": session, "text": "immutable original note"})
+    first = c.call("_sill/memory.text", {"session_id": session, "format": "show", "length": 8})
+    c.call("_sill/memory.notes.add", {"session_id": session, "text": "later mutation"})
+    request = {"session_id": session, "format": "show", "snapshot_id": first["snapshot_id"], "fingerprint": first["fingerprint"], "offset": first["next"]}
+    foreign = Client(sys.argv[1])
+    try:
+        try:
+            foreign.call("_sill/memory.text", request)
+            raise AssertionError("foreign connection consumed memory snapshot")
+        except RpcError as error:
+            assert error.code == "snapshot_expired"
+    finally:
+        foreign.close()
+    text = first["text"]
+    while request["offset"] is not None:
+        page = c.call("_sill/memory.text", request)
+        text += page["text"]
+        request["offset"] = page["next"]
+    assert "immutable original note" in text and "later mutation" not in text
+    c.call("_sill/memory.text.close", {"snapshot_id": first["snapshot_id"]})
+    try:
+        c.call("_sill/memory.text", dict(request, offset="0"))
+        raise AssertionError("closed memory snapshot remained available")
+    except RpcError as error:
+        assert error.code == "snapshot_expired"
+    c.call("_sill/policy.denied", {"session_id": session, "limit": 1})
+finally:
+    with_client.close()

@@ -39,11 +39,12 @@ impl Response {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Error {
     pub code: i64,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<DomainData>")]
     pub data: Option<Value>,
 }
 
@@ -94,4 +95,15 @@ pub struct Incoming {
     pub result: Option<Value>,
     #[serde(default)]
     pub error: Option<Error>,
+}
+
+/// Public domain errors preserve unknown codes. Clients must not retry mutations on an
+/// unfamiliar error, timeout or disconnection.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DomainData { pub code: String, #[serde(skip_serializing_if="Option::is_none")] pub details: Option<DomainDetails> }
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum DomainDetails {
+    Incompatible { supported_protocols: Vec<String> },
+    StaleAnswer { question: crate::sfp::Question },
 }

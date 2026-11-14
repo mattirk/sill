@@ -16,6 +16,8 @@ pub mod sfp;
 pub mod sessions;
 pub mod terminals;
 pub mod host;
+pub mod admin;
+pub mod memory;
 pub mod transport;
 
 pub use client::Client;
@@ -28,8 +30,8 @@ pub mod method {
     pub const SESSION_REPLAY: &str = "_sill/internal/session.replay";
     pub const FRONTEND_REQUEST: &str = "_sill/internal/frontend.request";
     pub const DAEMON_SCHEMA: &str = "_sill/daemon.schema";
-    pub const DAEMON_STATUS: &str = "_sill/internal/daemon.status";
-    pub const DAEMON_SHUTDOWN: &str = "_sill/internal/daemon.shutdown";
+    pub const DAEMON_STATUS: &str = "_sill/daemon.status";
+    pub const DAEMON_SHUTDOWN: &str = "_sill/daemon.shutdown";
     pub const SESSIONS_LIST: &str = "_sill/internal/sessions.list";
     pub const SESSIONS_GET: &str = "_sill/internal/sessions.get";
     /// Start a stored session's jail (or find it running): `Key` → `Started`.
@@ -121,10 +123,10 @@ pub fn runtime_dir() -> Result<PathBuf> {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DaemonStatus {
     pub version: String,
-    pub protocol: u32,
+    pub protocol: String,
     pub pid: u32,
-    /// Unix seconds.
-    pub started: i64,
+    /// UTC RFC 3339.
+    pub started: String,
     /// `unit` (socket-activated systemd user service) or `direct` (spawned by its first client).
     pub mode: String,
     /// The session launcher the daemon found (`launcher::describe`).
@@ -133,7 +135,7 @@ pub struct DaemonStatus {
     pub limits: bool,
     /// Session logs are journald streams (`journalctl --user -t sill-<id>`), else files.
     pub journal: bool,
-    pub socket: String,
+    pub socket: sessions::HostPath,
     /// Sessions in the store, and how many of them have a live jail.
     pub sessions: usize,
     pub running: usize,
@@ -384,3 +386,11 @@ pub struct Text {
 /// No parameters.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Empty {}
+
+pub mod pins;
+
+pub mod agent_admin;
+
+pub mod changes;
+
+pub mod discovery;

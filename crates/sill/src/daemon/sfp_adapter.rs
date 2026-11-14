@@ -7,11 +7,14 @@ use serde::{Deserialize, Serialize};
 use sill_core::acp;
 use sill_proto::sfp;
 use super::relay;
+#[path="sfp_adapter_v2.rs"]
+mod v2;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct AdapterState {
     generation: String,
+    v2: v2::State,
     turn: Option<sfp::Turn>,
     text_item: Option<String>,
     thought_item: Option<String>,
@@ -47,6 +50,30 @@ impl AdapterState {
         let mut out = Vec::new();
         let mut next = session.clone();
         match event {
+            relay::Event::V2Ready { resumed, controls, .. } => {
+                self.v2.enabled = true;
+                self.replaying = *resumed;
+                next.controls = Some(session_controls(controls));
+                next.authentication = None;
+                next.activity = if *resumed { "unknown" } else { "idle" }.into();
+                next.lifecycle = "open".into();
+                next.capabilities.insert("steering".into(), false);
+            }
+            relay::Event::V2Update { update } => self.project_v2(&mut next, update, &mut out),
+            relay::Event::V2PermissionsCancelled => {}, // Runner reconciles durable winning answers.
+
+            relay::Event::PromptAccepted { message_id } => { self.v2.accepted_message = Some(message_id.clone()); }
+            relay::Event::V2PromptFailed { code, message } => {
+                if let Some(mut turn) = self.turn.take() {
+                    turn.activity = "unknown".into(); turn.outcome = "unknown".into();
+                    turn.reason = Some(sfp::Reason { code: code.clone(), message: message.clone() });
+                    out.push(sfp::Event::TurnUpdated { turn });
+                }
+                next.turn_id = None; next.activity = "unknown".into();
+            }
+            relay::Event::V2PermissionRequest { request, tool_call_id, title, subject, options } => {
+                self.v2_permission(&mut next, *request, tool_call_id.as_deref(), title, subject.as_ref(), options, &mut out);
+            }
             relay::Event::Ready { resumed, controls, .. } => {
                 next.controls = Some(session_controls(controls));
                 next.authentication = None;
@@ -58,15 +85,18 @@ impl AdapterState {
             relay::Event::Capabilities { images } => { next.capabilities.insert("images".into(), *images); }
             relay::Event::TurnStarted => {
                 self.replaying = false;
+                self.v2.active_seen = false;
+                self.v2.accepted_message = None;
                 next.authentication = None;
                 self.text_item = None;
                 self.thought_item = None;
                 self.plan_item = None;
                 self.subagent_items.clear();
-                let turn = sfp::Turn { turn_id: id("turn"), agent_generation_id: self.generation.clone(), activity: "working".into(), outcome: "pending".into(), reason: None };
+                let turn = sfp::Turn { turn_id: id("turn"), agent_generation_id: self.generation.clone(), activity: if self.is_v2() { "unknown" } else { "working" }.into(), outcome: "pending".into(), reason: None };
                 next.turn_id = Some(turn.turn_id.clone());
-                next.activity = "working".into();
+                next.activity = turn.activity.clone();
                 self.turn = Some(turn.clone());
+                if self.is_v2() { self.v2.last_turn = Some(turn.turn_id.clone()); }
                 out.push(sfp::Event::TurnUpdated { turn });
             }
             relay::Event::UserText(_) => {
@@ -124,7 +154,7 @@ impl AdapterState {
                 if !self.questions.contains_key(request) {
                     let question_id = id("question");
                     self.questions.insert(*request, question_id.clone());
-                    let question = sfp::Question { question_id: question_id.clone(), agent_generation_id: self.generation.clone(), kind: "permission".into(), title: title.clone(), description: None,
+                    let question = sfp::Question { question_id: question_id.clone(), agent_generation_id: self.generation.clone(), kind: "permission".into(), title: title.clone(), description: None, subject: None,
                         tool_item_id: self.tools.get(tool_call_id).map(|(id, _)| id.clone()), options: options.iter().map(|o| sfp::PermissionOption { option_id: o.id.clone(), title: o.name.clone(), kind: permission_kind(&o.kind) }).collect(), fields: vec![],
                         state: "open".into(), answer_id: None, answer: None, delivery: None, reason: None };
                     out.push(sfp::Event::QuestionUpdated { question });
@@ -136,7 +166,7 @@ impl AdapterState {
                 if !self.questions.contains_key(request) {
                     let question_id = id("question");
                     self.questions.insert(*request, question_id.clone());
-                    let question = sfp::Question { question_id: question_id.clone(), agent_generation_id: self.generation.clone(), kind: "form".into(), title: message.clone(), description: None, tool_item_id: None, options: vec![], fields: fields.iter().map(form_field).collect(), state: "open".into(), answer_id: None, answer: None, delivery: None, reason: None };
+                    let question = sfp::Question { question_id: question_id.clone(), agent_generation_id: self.generation.clone(), kind: "form".into(), title: message.clone(), description: None, subject: None, tool_item_id: None, options: vec![], fields: fields.iter().map(form_field).collect(), state: "open".into(), answer_id: None, answer: None, delivery: None, reason: None };
                     out.push(sfp::Event::QuestionUpdated { question });
                     next.question_ids.push(question_id);
                     next.activity = "waiting".into();
@@ -154,7 +184,7 @@ impl AdapterState {
                         out.push(sfp::Event::QuestionUpdated { question });
                     }
                     next.question_ids.retain(|id| id != question_id);
-                    if next.question_ids.is_empty() { next.activity = if self.turn.is_some() { "working" } else { "idle" }.into(); }
+                    if next.question_ids.is_empty() { next.activity = if self.is_v2() { "unknown" } else if self.turn.is_some() { "working" } else { "idle" }.into(); }
                 }
             }
             relay::Event::Stopped(reason) => {

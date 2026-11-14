@@ -303,7 +303,7 @@ pub fn git_status(repo: &Path) -> Vec<(PathBuf, String)> {
             continue;
         }
         let (x, y) = (entry[0] as char, entry[1] as char);
-        let rel = String::from_utf8_lossy(&entry[3..]).into_owned();
+        let rel = <std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(entry[3..].to_vec());
         if x == 'R' || x == 'C' {
             let _ = it.next();
         }
@@ -642,6 +642,19 @@ mod tests {
         let c = Change { upper: dir.join("new.txt"), ..c };
         assert!(unified_diff(&c).unwrap().contains("+new"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn git_status_retains_non_utf8_and_newline_filenames() {
+        use std::os::unix::ffi::OsStringExt;
+        let dir = std::env::temp_dir().join(format!("sill-git-byte-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(std::process::Command::new("git").arg("-C").arg(&dir).args(["init", "-q"]).status().unwrap().success());
+        let rel = PathBuf::from(std::ffi::OsString::from_vec(b"file\xff\nname".to_vec()));
+        std::fs::write(dir.join(&rel), "content").unwrap();
+        assert_eq!(git_status(&dir), vec![(rel, "?".into())]);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// The language is the one with most tracked bytes; docs and config don't count.

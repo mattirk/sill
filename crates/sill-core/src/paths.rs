@@ -30,10 +30,13 @@ pub fn expand_pattern(pattern: &str, home: &Path) -> Vec<PathBuf> {
 /// Name of the upper/work directory for a host mount point or top-level directory.
 /// `/etc` → `etc`, `/mnt/disk` → `mnt%disk`. Flat on purpose: one overlay's upper must never sit inside
 /// another's (SPEC §4.9).
-pub fn layer_name(mount_point: &Path) -> String {
-    let s = mount_point.to_string_lossy();
-    let trimmed = s.trim_start_matches('/');
-    if trimmed.is_empty() { "root".into() } else { trimmed.replace('/', "%") }
+pub fn layer_name(mount_point: &Path) -> std::ffi::OsString {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    let bytes = mount_point.as_os_str().as_bytes();
+    let trimmed = bytes.iter().position(|b| *b != b'/').map(|i| &bytes[i..]).unwrap_or_default();
+    if trimmed.is_empty() { "root".into() } else {
+        std::ffi::OsString::from_vec(trimmed.iter().map(|b| if *b == b'/' { b'%' } else { *b }).collect())
+    }
 }
 
 /// Whether `child` is `parent` or lies below it.

@@ -23,6 +23,9 @@ pub struct Agent {
     /// Advertises `loadSession`: conversations can be resumed with history replay.
     #[serde(default)]
     pub supports_load: bool,
+    /// Explicit opt-in to the experimental ACP v2 adapter; ACP v1 remains the default.
+    #[serde(default)]
+    pub experimental_acp_v2: bool,
     /// Domains the agent needs beyond the policy's allow-list (merged into the proxy rules).
     #[serde(default)]
     pub domains: Vec<String>,
@@ -92,9 +95,7 @@ pub fn save_override(home: &Path, agent: &Agent) -> anyhow::Result<std::path::Pa
         std::fs::create_dir_all(parent)?;
     }
     let text = toml::to_string_pretty(agent)?;
-    let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, &path)?;
+    crate::safe_fs::replace_file(path.parent().expect("override parent"), path.file_name().expect("override filename"), text.as_bytes())?;
     Ok(path)
 }
 
@@ -116,6 +117,7 @@ pub fn builtin() -> Vec<Agent> {
             command: vec!["claude-agent-acp".into()],
             env: Default::default(),
             supports_load: true,
+            experimental_acp_v2: false,
             domains: vec!["api.anthropic.com".into(), "*.anthropic.com".into(), "claude.ai".into(), "*.claude.ai".into()],
             sandbox_off_env: Default::default(),
             state_dirs: vec!["~/.claude".into(), "~/.claude.json".into()],
@@ -138,6 +140,7 @@ pub fn builtin() -> Vec<Agent> {
             command: vec!["codex-acp".into()],
             env: Default::default(),
             supports_load: true,
+            experimental_acp_v2: false,
             domains: vec!["api.openai.com".into(), "*.openai.com".into(), "chatgpt.com".into(), "*.chatgpt.com".into()],
             sandbox_off_env: Default::default(),
             state_dirs: vec!["~/.codex".into()],
@@ -160,6 +163,7 @@ pub fn builtin() -> Vec<Agent> {
             command: vec!["gemini".into(), "--experimental-acp".into()],
             env: Default::default(),
             supports_load: false,
+            experimental_acp_v2: false,
             domains: vec!["*.googleapis.com".into(), "*.google.com".into()],
             sandbox_off_env: Default::default(),
             state_dirs: vec!["~/.gemini".into()],

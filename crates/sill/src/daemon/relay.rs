@@ -52,6 +52,12 @@ impl std::error::Error for Refused {}
 /// reply channel, and `Resolved` once the relay delivered the answer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum Event {
+    V2Ready { session_id: String, resumed: bool, controls: acp::Controls },
+    V2Update { update: serde_json::Value },
+    V2PermissionsCancelled,
+    PromptAccepted { message_id: String },
+    V2PromptFailed { code: String, message: String },
+    V2PermissionRequest { request: u64, tool_call_id: Option<String>, title: String, subject: Option<serde_json::Value>, options: Vec<acp::PermissionOption> },
     Ready { session_id: String, resumed: bool, controls: acp::Controls },
     Capabilities { images: bool },
     Controls(acp::Controls),
@@ -150,6 +156,12 @@ impl Reply {
 fn event_from_acp(event: acp::Event, request: u64) -> (Event, Option<Reply>) {
     use acp::Event as A;
     let event = match event {
+        A::V2Ready {session_id,resumed,controls} => Event::V2Ready {session_id,resumed,controls},
+        A::V2Update {update} => Event::V2Update {update},
+        A::V2PermissionsCancelled => Event::V2PermissionsCancelled,
+        A::PromptAccepted {message_id} => Event::PromptAccepted {message_id},
+        A::V2PromptFailed {code,message} => Event::V2PromptFailed {code,message},
+        A::V2PermissionRequest {tool_call_id,title,subject,options,reply} => return (Event::V2PermissionRequest {request,tool_call_id,title,subject,options},Some(Reply::Permission(reply))),
         A::Ready { session_id, resumed, controls } => Event::Ready { session_id, resumed, controls },
         A::Capabilities { images } => Event::Capabilities { images },
         A::Controls(c) => Event::Controls(c),
@@ -189,7 +201,7 @@ pub(crate) struct Delivered {
 #[derive(Serialize, Deserialize)]
 enum Input {
     /// `version` is absent from relays before 2026-11-03: it reads as 0, which no relay speaks.
-    Hello { since: u64, #[serde(default)] version: u32 },
+    Hello { since: u64, #[serde(default)] version: u32, #[serde(default)] supports_native_v2: bool },
     Command { id: u64, command: Command },
     Answer { request: u64, answer: Answer },
     Ack { seq: u64 },
@@ -223,6 +235,7 @@ struct Pending {
 
 #[derive(Default)]
 struct State {
+    native_v2: bool,
     journal: VecDeque<JournalEntry>,
     bytes: usize,
     next_seq: u64,
@@ -265,6 +278,9 @@ impl Shared {
         if state.stopping {
             return;
         }
+        if matches!(&event,acp::Event::V2PermissionsCancelled) {
+            state.pending.retain(|_,p|!matches!(&p.event,Event::V2PermissionRequest{..}));
+        }
         state.next_request += 1;
         let request = state.next_request;
         let (event, reply) = event_from_acp(event, request);
@@ -285,7 +301,7 @@ impl Shared {
             return Ok(());
         }
         let Some(pending) = state.pending.get(&request) else { bail!("no open question {request}") };
-        if !matches!((&pending.event, &answer), (Event::PermissionRequest { .. }, Answer::Permission(_)) | (Event::Elicitation { .. }, Answer::Form(_))) {
+        if !matches!((&pending.event, &answer), (Event::PermissionRequest { .. } | Event::V2PermissionRequest { .. }, Answer::Permission(_)) | (Event::Elicitation { .. }, Answer::Form(_))) {
             bail!("the answer is not of the question's kind");
         }
         let pending = state.pending.remove(&request).unwrap();
@@ -311,17 +327,17 @@ impl Shared {
 
 /// Run the worker against the session's shim. Its lifetime is the ACP conversation plus delivery
 /// of its final Ended event; dropping the daemon connection never closes the agent connection.
-pub(crate) fn run(session: &str, socket: &Path, agent_socket: &Path, cwd: &Path, resume: Option<String>) -> Result<()> {
+pub(crate) fn run(session: &str, socket: &Path, agent_socket: &Path, cwd: &Path, resume: Option<String>, experimental_acp_v2: bool) -> Result<()> {
     super::exit_on_panic();
-    run_with(session, socket, cwd, resume, || sill_core::shim::agent_stream(agent_socket))
+    run_with(session, socket, cwd, resume, experimental_acp_v2, || sill_core::shim::agent_stream(agent_socket))
 }
 
 #[cfg(test)]
 fn run_stream(session: &str, socket: &Path, stream: UnixStream, cwd: &Path, resume: Option<String>) -> Result<()> {
-    run_with(session, socket, cwd, resume, || Ok(stream))
+    run_with(session, socket, cwd, resume, false, || Ok(stream))
 }
 
-fn run_with(session: &str, socket: &Path, cwd: &Path, resume: Option<String>, open: impl FnOnce() -> Result<UnixStream>) -> Result<()> {
+fn run_with(session: &str, socket: &Path, cwd: &Path, resume: Option<String>, experimental_acp_v2: bool, open: impl FnOnce() -> Result<UnixStream>) -> Result<()> {
     if let Some(dir) = socket.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -345,10 +361,10 @@ fn run_with(session: &str, socket: &Path, cwd: &Path, resume: Option<String>, op
     let (commands, command_rx) = async_channel::unbounded();
     // Backpressure the SDK too: an absent daemon cannot grow an unbounded second queue.
     let (events, event_rx) = async_channel::bounded(256);
-    let shared = Arc::new(Shared { state: Mutex::new(State::default()), changed: Condvar::new(), commands });
+    let shared = Arc::new(Shared { state: Mutex::new(State {native_v2:experimental_acp_v2,..Default::default()}), changed: Condvar::new(), commands });
     let opts = acp::SessionOptions { cwd: cwd.to_path_buf(), auto: acp::AutoPermission::Ask, resume };
     let worker = std::thread::Builder::new().name(format!("sill-relay-acp-{session}")).spawn(move || {
-        let _ = acp::run_session(stream, opts, command_rx, events);
+        let _ = if experimental_acp_v2 { sill_core::acp_v2::run_session(stream, opts, command_rx, events) } else { acp::run_session(stream, opts, command_rx, events) };
     })?;
     let state = shared.clone();
     let collector = std::thread::Builder::new().name(format!("sill-relay-events-{session}")).spawn(move || {
@@ -423,10 +439,16 @@ fn serve(mut stream: UnixStream, shared: Arc<Shared>) -> Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut first = String::new();
     reader.read_line(&mut first)?;
-    let Input::Hello { since, version } = serde_json::from_str(&first)? else { bail!("a relay connection starts with Hello") };
+    let Input::Hello { since, version, supports_native_v2 } = serde_json::from_str(&first)? else { bail!("a relay connection starts with Hello") };
     stream.set_read_timeout(None)?;
     let (generation, pending) = {
         let mut state = shared.state.lock().unwrap();
+        if state.native_v2 && !supports_native_v2 {
+            // An old daemon cannot decode native events. Refuse before attaching or replacing
+            // the current subscriber, while protocol-1 v1 workers remain adoptable unchanged.
+            write_line(&mut stream,&Output::Hello{acknowledged:state.acknowledged,last:state.next_seq,version:2,outcome_evidence:true,api_keys:true})?;
+            bail!("native ACP v2 relay requires supports_native_v2");
+        }
         if version != RELAY_PROTOCOL {
             // say which version this is, so the daemon knows it is looking at another build's relay
             write_line(&mut stream, &Output::Hello { acknowledged: state.acknowledged, last: state.next_seq, version: RELAY_PROTOCOL, outcome_evidence: true, api_keys: true })?;
@@ -587,7 +609,7 @@ pub(super) fn connect(socket: &Path, since: u64) -> Result<(Arc<Client>, mpsc::R
     }
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
-    write_line(&mut stream, &Input::Hello { since, version: RELAY_PROTOCOL })?;
+    write_line(&mut stream, &Input::Hello { since, version: RELAY_PROTOCOL, supports_native_v2:true })?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut first = String::new();
     reader.read_line(&mut first)?;
@@ -891,7 +913,7 @@ mod tests {
         let socket = dir.join("relay.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let opened = AtomicBool::new(false);
-        let result = run_with("test", &socket, Path::new("/tmp"), None, || {
+        let result = run_with("test", &socket, Path::new("/tmp"), None, false, || {
             opened.store(true, Ordering::Relaxed);
             bail!("must not open the agent stream")
         });
@@ -901,4 +923,27 @@ mod tests {
         drop(listener);
         std::fs::remove_dir_all(dir).unwrap();
     }
+    #[test]
+    fn native_v2_worker_refuses_legacy_daemon_before_replacing_subscriber() {
+        let (commands,_)=async_channel::unbounded();
+        let shared=Arc::new(Shared{state:Mutex::new(State{native_v2:true,..Default::default()}),changed:Condvar::new(),commands});
+        let (mut client,server)=UnixStream::pair().unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let state=shared.clone();let worker=std::thread::spawn(move||serve(server,state));
+        message(&mut client,json!({"Hello":{"since":0,"version":RELAY_PROTOCOL}}));
+        let response=read(&mut BufReader::new(client));assert_eq!(response["Hello"]["version"],2);
+        assert!(worker.join().unwrap().is_err());assert!(shared.state.lock().unwrap().subscriber.is_none());
+        let offered=serde_json::to_value(Input::Hello{since:0,version:RELAY_PROTOCOL,supports_native_v2:true}).unwrap();
+        assert_eq!(offered["Hello"]["supports_native_v2"],true);
+    }
+    #[test]
+    fn native_cancellation_removes_pending_handlers_without_false_answer_confirmation() {
+        let (commands,_)=async_channel::unbounded();let shared=Shared{state:Mutex::new(State::default()),changed:Condvar::new(),commands};
+        let (reply,_)=futures::channel::oneshot::channel();
+        shared.take_event(acp::Event::V2PermissionRequest{tool_call_id:None,title:"Run?".into(),subject:None,options:vec![],reply});
+        shared.take_event(acp::Event::V2PermissionsCancelled);
+        let state=shared.state.lock().unwrap();assert!(state.pending.is_empty());assert!(state.answered.is_empty());
+        assert!(matches!(state.journal.back().unwrap().delivered.event,Event::V2PermissionsCancelled));
+    }
+
 }

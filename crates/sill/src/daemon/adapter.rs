@@ -36,7 +36,10 @@ impl From<wire::Answer> for Answer {
 impl From<Event> for wire::Event {
     fn from(event: Event) -> Self {
         match event {
-            Event::Ready { session_id, resumed, controls } => wire::Event::Ready { session_id, resumed, controls: controls.into() },
+            Event::V2PermissionsCancelled | Event::V2Update { .. } | Event::PromptAccepted { .. } => wire::Event::Other("Native ACP v2 update; use the SFP conversation subscription".into()),
+            Event::V2PromptFailed { message, .. } => wire::Event::Other(message),
+            Event::V2PermissionRequest { request, tool_call_id, title, options, .. } => wire::Event::PermissionRequest { request, tool_call_id:tool_call_id.unwrap_or_default(), title, options:options.into_iter().map(Into::into).collect() },
+            Event::Ready { session_id, resumed, controls } | Event::V2Ready { session_id, resumed, controls } => wire::Event::Ready { session_id, resumed, controls: controls.into() },
             Event::Capabilities { images } => wire::Event::Capabilities { images },
             Event::Controls(c) => wire::Event::Controls(c.into()),
             Event::TurnStarted => wire::Event::TurnStarted,

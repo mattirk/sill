@@ -1430,6 +1430,7 @@ impl Conversation {
     /// Apply one session event.
     pub fn handle(&self, ev: Event) {
         match ev {
+            Event::V2PermissionsCancelled | Event::V2Ready { .. } | Event::V2Update { .. } | Event::PromptAccepted { .. } | Event::V2PromptFailed { .. } | Event::V2PermissionRequest { .. } => {},
             Event::Usage { .. } => {} // the view shows it in the controls row
             Event::Controls(_) | Event::AuthRequired { .. } => {}
             Event::Ready { session_id, resumed, .. } => {

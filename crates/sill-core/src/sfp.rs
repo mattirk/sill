@@ -19,6 +19,9 @@ fn error(code: &'static str, message: impl Into<String>) -> anyhow::Error {
 #[derive(Debug, Clone)]
 pub struct Source { pub generation_id: String, pub seq: u64 }
 
+pub const RETAINED_EVENTS: i64 = 4096;
+pub const RETAINED_EVENT_BYTES: i64 = 16 * 1024 * 1024;
+
 pub struct Journal<'a> { store: &'a Store }
 impl<'a> Journal<'a> {
     pub fn new(store: &'a Store) -> Result<Self> {
@@ -32,11 +35,14 @@ impl<'a> Journal<'a> {
             session_id TEXT NOT NULL, item_id TEXT NOT NULL, block_id TEXT NOT NULL,
             retired INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(session_id,item_id,block_id));
           CREATE TABLE IF NOT EXISTS sfp_events (
-            session_id TEXT NOT NULL, seq INTEGER NOT NULL, json TEXT NOT NULL,
+            session_id TEXT NOT NULL, seq INTEGER NOT NULL, json TEXT NOT NULL, bytes INTEGER NOT NULL,
             PRIMARY KEY(session_id,seq));
           CREATE TABLE IF NOT EXISTS sfp_sources (
             session_id TEXT NOT NULL, generation_id TEXT NOT NULL, source_seq TEXT NOT NULL,
             PRIMARY KEY(session_id,generation_id,source_seq));
+          CREATE TABLE IF NOT EXISTS sfp_source_ranges (
+            session_id TEXT NOT NULL, generation_id TEXT NOT NULL, first TEXT NOT NULL, last TEXT NOT NULL,
+            PRIMARY KEY(session_id,generation_id,first));
           CREATE TABLE IF NOT EXISTS sfp_answers (
             session_id TEXT NOT NULL, answer_id TEXT NOT NULL, question_id TEXT NOT NULL, input TEXT NOT NULL,
             PRIMARY KEY(session_id,answer_id));
@@ -51,7 +57,19 @@ impl<'a> Journal<'a> {
             DELETE FROM sfp_sources WHERE session_id=OLD.id;
             DELETE FROM sfp_answers WHERE session_id=OLD.id;
             DELETE FROM sfp_submission_inputs WHERE session_id=OLD.id;
+          END;
+          CREATE TRIGGER IF NOT EXISTS sfp_delete_source_ranges AFTER DELETE ON sessions BEGIN
+            DELETE FROM sfp_source_ranges WHERE session_id=OLD.id;
           END;")?;
+        let sized:bool=store.conn().query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('sfp_events') WHERE name='bytes')",[],|r|r.get(0))?;
+        if !sized {
+            Self { store }.atomic(|| {
+                store.conn().execute_batch("ALTER TABLE sfp_events ADD COLUMN bytes INTEGER NOT NULL DEFAULT 0;
+                    UPDATE sfp_events SET bytes=length(CAST(json AS BLOB));")?;
+                Ok(())
+            })?;
+        }
+        store.conn().execute_batch("CREATE INDEX IF NOT EXISTS sfp_event_sizes ON sfp_events(session_id,seq DESC,bytes)")?;
         Ok(Self { store })
     }
 
@@ -93,14 +111,15 @@ impl<'a> Journal<'a> {
                 // Existing rows have stable storage identities but cannot prove agent replay
                 // continuity. Import once under a distinct historical generation, never by text.
                 let imported_generation = format!("history-{}", new_id());
-                let events: Vec<Event> = self.store.entries(session_id)?.into_iter().map(|row| {
+                self.store.visit_entries(session_id, |row| {
                     let tool = (row.kind == "tool").then(|| Tool { title:row.text.clone(), kind:row.tool_kind,
                         status:row.extra, detail:row.detail, diff:row.diff, parent_item_id:None });
-                    Event::ItemCreated { item:Item { item_id:format!("history-{}",new_id()), created_seq:String::new(),
+                    let event=Event::ItemCreated { item:Item { item_id:format!("history-{}",new_id()), created_seq:String::new(),
                         turn_id:None, submission_id:None, agent_generation_id:imported_generation.clone(),
-                        kind:row.kind, content:if tool.is_some() { vec![] } else { vec![Content::text(row.text)] }, tool } }
-                }).collect();
-                self.append(session_id,None,&events)?;
+                        kind:row.kind, content:if tool.is_some() { vec![] } else { vec![Content::text(row.text)] }, tool } };
+                    self.append(session_id,None,&[event])?;
+                    Ok(())
+                })?;
             }
             self.session(session_id)
         })
@@ -117,7 +136,7 @@ impl<'a> Journal<'a> {
             // The replacement agent announces its own commands; the old ones may not exist there.
             session.commands.clear();
             let mut events=vec![Event::SessionUpdated { session }];
-            let (_,records)=self.snapshot(session_id)?;
+            let records=self.active_records(session_id)?;
             let mut interrupted=false;
             let mut held=false;
             for record in records {
@@ -179,8 +198,23 @@ impl<'a> Journal<'a> {
     }
 
     pub fn source_seen(&self, session_id: &str, source: &Source) -> Result<bool> {
-        Ok(self.store.conn().query_row("SELECT EXISTS(SELECT 1 FROM sfp_sources WHERE session_id=?1 AND generation_id=?2 AND source_seq=?3)",
-            params![session_id, source.generation_id, source.seq.to_string()], |r| r.get(0))?)
+        // Old per-event receipts stay readable; new receipts coalesce only adjacent sequences.
+        // Never infer that a missing lower sequence was seen merely from a high-water mark.
+        let key=format!("{:020}",source.seq);
+        Ok(self.store.conn().query_row("SELECT EXISTS(SELECT 1 FROM sfp_sources WHERE session_id=?1 AND generation_id=?2 AND source_seq=?3)
+            OR EXISTS(SELECT 1 FROM sfp_source_ranges WHERE session_id=?1 AND generation_id=?2 AND first<=?4 AND last>=?4)",
+            params![session_id, source.generation_id, source.seq.to_string(),key], |r| r.get(0))?)
+    }
+    fn remember_source(&self, session_id:&str, source:&Source) -> Result<()> {
+        let low=format!("{:020}",source.seq.saturating_sub(1));
+        let high=format!("{:020}",source.seq.saturating_add(1));
+        let mut stmt=self.store.conn().prepare("SELECT first,last FROM sfp_source_ranges WHERE session_id=?1 AND generation_id=?2 AND first<=?3 AND last>=?4")?;
+        let ranges=stmt.query_map(params![session_id,source.generation_id,high,low],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut first=source.seq;let mut last=source.seq;
+        for (a,b) in ranges {first=first.min(a.parse()?);last=last.max(b.parse()?);}
+        self.store.conn().execute("DELETE FROM sfp_source_ranges WHERE session_id=?1 AND generation_id=?2 AND first<=?3 AND last>=?4",params![session_id,source.generation_id,high,low])?;
+        self.store.conn().execute("INSERT INTO sfp_source_ranges VALUES (?1,?2,?3,?4)",params![session_id,source.generation_id,format!("{first:020}"),format!("{last:020}")])?;
+        Ok(())
     }
 
     /// Deduplication and state changes share one transaction, including batches which emit no
@@ -213,20 +247,30 @@ impl<'a> Journal<'a> {
                     _ => {}
                 }
                 self.apply(session_id, seq, &event)?;
-                self.store.conn().execute("INSERT INTO sfp_events(session_id,seq,json) VALUES (?1,?2,?3)", params![session_id, seq, serde_json::to_string(&event)?])?;
+                let json=serde_json::to_string(&event)?;
+                self.store.conn().execute("INSERT INTO sfp_events(session_id,seq,json,bytes) VALUES (?1,?2,?3,?4)", params![session_id, seq, json, json.len() as i64])?;
                 output.push(StoredEvent { seq: seq.to_string(), event });
             }
             self.store.conn().execute("UPDATE sfp_sessions SET seq=?2 WHERE session_id=?1", params![session_id, seq])?;
             if let Some(s) = source {
-                self.store.conn().execute("INSERT INTO sfp_sources VALUES (?1,?2,?3)", params![session_id, s.generation_id, s.seq.to_string()])?;
+                self.remember_source(session_id, &s)?;
             }
+            // Keep a contiguous replay suffix bounded by both count and serialized bytes.
+            // Canonical records and retry identities are deliberately independent of replay.
+            self.store.conn().execute("DELETE FROM sfp_events WHERE session_id=?1 AND seq IN (
+                SELECT seq FROM (SELECT seq, ROW_NUMBER() OVER (ORDER BY seq DESC) AS n,
+                    SUM(bytes) OVER (ORDER BY seq DESC) AS total_bytes
+                    FROM sfp_events WHERE session_id=?1)
+                WHERE n>?2 OR total_bytes>?3)", params![session_id, RETAINED_EVENTS, RETAINED_EVENT_BYTES])?;
             Ok(output)
         })
     }
 
     fn put(&self, session_id: &str, kind: &str, id: &str, seq: i64, record: &Record) -> Result<()> {
+        let json = serde_json::to_string(record)?;
+        if json.len() > 64 * 1024 * 1024 { return Err(error("limit_exceeded", "record exceeds 64 MiB")); }
         self.store.conn().execute("INSERT INTO sfp_records(session_id,kind,id,created_seq,json) VALUES (?1,?2,?3,?4,?5)
-            ON CONFLICT(session_id,kind,id) DO UPDATE SET json=excluded.json", params![session_id,kind,id,seq,serde_json::to_string(record)?])?;
+            ON CONFLICT(session_id,kind,id) DO UPDATE SET json=excluded.json", params![session_id,kind,id,seq,json])?;
         Ok(())
     }
     fn record(&self, session_id: &str, kind: &str, id: &str) -> Result<Record> {
@@ -305,6 +349,20 @@ impl<'a> Journal<'a> {
         Ok(())
     }
 
+    /// Only workflow state can affect dispatch/recovery. Historical content must never be
+    /// loaded simply to select the next submission or retire an interrupted worker.
+    pub fn active_records(&self, session_id:&str)->Result<Vec<Record>> {
+        self.exists(session_id)?;
+        let mut stmt=self.store.conn().prepare("SELECT json FROM sfp_records WHERE session_id=?1 AND removed=0 AND kind IN ('submission','turn','question') AND (
+            (kind='submission' AND json_extract(json,'$.submission.outcome')='pending') OR
+            (kind='turn' AND json_extract(json,'$.turn.outcome')='pending') OR
+            (kind='question' AND (json_extract(json,'$.question.state')='open' OR json_extract(json,'$.question.delivery')='pending')))
+            ORDER BY created_seq,kind,id")?;
+        let mut records=Vec::new();
+        for row in stmt.query_map([session_id],|r|r.get::<_,String>(0))? {records.push(serde_json::from_str(&row?)?);}
+        Ok(records)
+    }
+
     /// Immutable materialization for a connection-bound snapshot lease. The caller retains these
     /// records until its lease expires; later writes cannot alter any page.
     pub fn snapshot(&self, session_id: &str) -> Result<(Cursor,Vec<Record>)> {
@@ -317,11 +375,25 @@ impl<'a> Journal<'a> {
         })
     }
 
+    /// Stream an immutable capture to a caller-owned spool while the store lock is held.
+    /// Only one serialized record is resident at a time.
+    pub fn visit_snapshot(&self, session_id: &str, mut visit: impl FnMut(String) -> Result<()>) -> Result<Cursor> {
+        let at = self.cursor(session_id)?;
+        visit(serde_json::to_string(&Record::Session { session: self.session(session_id)? })?)?;
+        let mut stmt = self.store.conn().prepare("SELECT json FROM sfp_records WHERE session_id=?1 AND removed=0 ORDER BY created_seq,kind,id")?;
+        for row in stmt.query_map([session_id], |r| r.get::<_, String>(0))? { visit(row?)?; }
+        Ok(at)
+    }
+
     pub fn replay(&self, session_id: &str, since: &Cursor, limit: usize) -> Result<Vec<StoredEvent>> {
         if since.session_id != session_id { return Err(error("invalid_cursor", "cursor belongs to another session")); }
         let seq = sequence(&since.seq)?;
         let last = sequence(&self.cursor(session_id)?.seq)?;
         if seq > last { return Err(error("invalid_cursor", "cursor is ahead of the daemon")); }
+        let first: Option<i64> = self.store.conn().query_row("SELECT MIN(seq) FROM sfp_events WHERE session_id=?1", [session_id], |r| r.get(0))?;
+        if seq < first.map(|n| n - 1).unwrap_or(last) {
+            return Err(error("cursor_expired", "replay was compacted; obtain a replacement snapshot"));
+        }
         let mut stmt = self.store.conn().prepare("SELECT seq,json FROM sfp_events WHERE session_id=?1 AND seq>?2 ORDER BY seq LIMIT ?3")?;
         let mut events = vec![];
         for row in stmt.query_map(params![session_id,seq,limit.min(65536) as i64], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?)))? {
@@ -480,6 +552,7 @@ pub fn timestamp(seconds:i64) -> String {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     #[test]
     fn active_time_excludes_waits_and_survives_storage() {
@@ -524,10 +597,61 @@ mod tests {
     impl Drop for Fixture { fn drop(&mut self) { let _=std::fs::remove_dir_all(&self.dir); } }
     fn item(id:&str)->Item { Item {item_id:id.into(),created_seq:String::new(),turn_id:None,submission_id:None,agent_generation_id:"g1".into(),kind:"agent".into(),content:vec![Content::text("hello")],tool:None} }
     fn question(id:&str)->Question {
-        Question {question_id:id.into(),agent_generation_id:"g1".into(),kind:"permission".into(),title:"Run?".into(),description:None,tool_item_id:None,
+        Question {question_id:id.into(),agent_generation_id:"g1".into(),kind:"permission".into(),title:"Run?".into(),description:None,subject:None,tool_item_id:None,
             options:vec![PermissionOption {option_id:"yes".into(),title:"Yes".into(),kind:"allow_once".into()}],fields:vec![],state:"open".into(),answer_id:None,answer:None,delivery:None,reason:None}
     }
     fn code(e:anyhow::Error)->String { e.downcast_ref::<DomainError>().unwrap().code.into() }
+
+    #[test]
+    fn legacy_event_size_migration_is_atomic_and_counts_utf8_bytes() {
+        let dir=std::env::temp_dir().join(format!("sill-event-migration-{}",new_id()));
+        let store=Store::open(&dir.join("s.db")).unwrap();
+        store.conn().execute_batch("CREATE TABLE sfp_events(session_id TEXT NOT NULL,seq INTEGER NOT NULL,json TEXT NOT NULL,PRIMARY KEY(session_id,seq))").unwrap();
+        let json="{\"text\":\"🦀\"}";
+        store.conn().execute("INSERT INTO sfp_events VALUES ('s',1,?1)",[json]).unwrap();
+        {
+            let tx=store.conn().unchecked_transaction().unwrap();Journal::new(&store).unwrap();tx.rollback().unwrap();
+        }
+        assert!(!store.conn().query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('sfp_events') WHERE name='bytes')",[],|r|r.get::<_,bool>(0)).unwrap());
+        Journal::new(&store).unwrap();
+        assert_eq!(store.conn().query_row("SELECT bytes FROM sfp_events",[],|r|r.get::<_,i64>(0)).unwrap(),json.len() as i64);
+        drop(store);std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn source_receipts_coalesce_without_filling_unseen_gaps() {
+        let f=Fixture::new();let j=f.journal();
+        for seq in [1,3,4] {j.append(&f.id,Some(Source{generation_id:"g1".into(),seq}),&[]).unwrap();}
+        assert!(!j.source_seen(&f.id,&Source{generation_id:"g1".into(),seq:2}).unwrap());
+        let count=|| f.store.conn().query_row("SELECT count(*) FROM sfp_source_ranges",[],|r|r.get::<_,i64>(0)).unwrap();
+        assert_eq!(count(),2);
+        j.append(&f.id,Some(Source{generation_id:"g1".into(),seq:2}),&[]).unwrap();assert_eq!(count(),1);
+        for seq in 1..=4 {assert!(j.source_seen(&f.id,&Source{generation_id:"g1".into(),seq}).unwrap());}
+        let tx=f.store.conn().unchecked_transaction().unwrap();
+        j.append(&f.id,Some(Source{generation_id:"g1".into(),seq:5}),&[]).unwrap();tx.rollback().unwrap();
+        assert!(!j.source_seen(&f.id,&Source{generation_id:"g1".into(),seq:5}).unwrap());
+        f.store.conn().execute("INSERT INTO sfp_sources VALUES (?1,'g1','7')",[&f.id]).unwrap();
+        assert!(j.source_seen(&f.id,&Source{generation_id:"g1".into(),seq:7}).unwrap());
+        f.store.delete(&f.id).unwrap();assert_eq!(count(),0);
+    }
+
+    #[test]
+    fn compaction_expires_cursors_but_preserves_state_and_retry_identity() {
+        let f=Fixture::new(); let j=f.journal();
+        let input=f.submit("retained-retry");
+        let accepted=j.accept(&input,"queued").unwrap().0;
+        let events:Vec<_>=(0..RETAINED_EVENTS+5).map(|n| Event::ItemCreated{item:item(&format!("i{n}"))}).collect();
+        j.append(&f.id,Some(Source{generation_id:"g1".into(),seq:1}),&events).unwrap();
+        let cursor=Cursor{session_id:f.id.clone(),seq:"0".into()};
+        assert_eq!(code(j.replay(&f.id,&cursor,10).unwrap_err()),"cursor_expired");
+        let count:i64=f.store.conn().query_row("SELECT COUNT(*) FROM sfp_events",[],|r|r.get(0)).unwrap();
+        assert_eq!(count,RETAINED_EVENTS);
+        assert_eq!(j.accept(&input,"queued").unwrap().0,accepted);
+        assert!(j.source_seen(&f.id,&Source{generation_id:"g1".into(),seq:1}).unwrap());
+        assert_eq!(j.item(&f.id,"i0").unwrap().content[0].text.as_deref(),Some("hello"));
+        let last=j.cursor(&f.id).unwrap();
+        assert!(j.replay(&f.id,&last,10).unwrap().is_empty());
+    }
 
     #[test]
     fn source_dedup_and_snapshot_survive_reopen() {
@@ -641,6 +765,25 @@ mod tests {
         j.ensure(&session.id,"new").unwrap();assert_eq!(j.snapshot(&session.id).unwrap(),first);
         f.store.delete(&session.id).unwrap();assert_eq!(code(j.cursor(&session.id).unwrap_err()),"not_found");
         let count:i64=f.store.conn().query_row("SELECT count(*) FROM sfp_records WHERE session_id=?1",[&session.id],|r|r.get(0)).unwrap();assert_eq!(count,0);
+    }
+    #[test]
+    fn streamed_transcript_import_rolls_back_all_rows_on_a_later_failure() {
+        let f=Fixture::new();let session=f.store.create("test","default").unwrap();
+        f.store.append(&session.id,"user","first","").unwrap();
+        f.store.append(&session.id,"assistant","second","").unwrap();
+        f.store.conn().execute_batch("CREATE TEMP TRIGGER fail_import BEFORE INSERT ON sfp_records
+            WHEN NEW.kind='item' AND json_extract(NEW.json,'$.item.content[0].text')='second'
+            BEGIN SELECT RAISE(ABORT,'injected later row failure'); END").unwrap();
+        let j=f.journal();assert!(j.ensure(&session.id,"g").is_err());
+        for table in ["sfp_sessions","sfp_records","sfp_events"] {
+            let count:i64=f.store.conn().query_row(&format!("SELECT count(*) FROM {table} WHERE session_id=?1"),[&session.id],|r|r.get(0)).unwrap();
+            assert_eq!(count,0,"partial import in {table}");
+        }
+        assert_eq!(f.store.entries(&session.id).unwrap().len(),2,"legacy rows remain available after failure");
+        f.store.conn().execute_batch("DROP TRIGGER fail_import").unwrap();
+        j.ensure(&session.id,"g").unwrap();
+        let text=j.snapshot(&session.id).unwrap().1.into_iter().filter_map(|r|match r {Record::Item{item}=>item.content[0].text.clone(),_=>None}).collect::<Vec<_>>();
+        assert_eq!(text,vec!["first","second"]);
     }
     #[test]
     fn timestamp_is_rfc3339() {

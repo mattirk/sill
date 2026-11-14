@@ -22,10 +22,11 @@ impl View {
         let Attached::Snapshot { subscription_id, snapshot } = attached else { bail!("snapshot attach unexpectedly returned replay"); };
         let mut replacement = Self { subscription_id, session_id: session_id.into(), seq: snapshot.at.seq.parse()?, ..Default::default() };
         let mut page = None;
+        let mut decoder = SnapshotDecoder::default();
         loop {
             let part: SnapshotPage = client.call("_sill/sessions.snapshot", SnapshotRequest { token: snapshot.token.clone(), page })?;
             if part.at != snapshot.at { bail!("snapshot cursor changed between pages"); }
-            for record in part.records {
+            for record in decoder.records(&part).map_err(anyhow::Error::msg)? {
                 match record {
                     Record::Session { session } => replacement.session = Some(session),
                     Record::Item { item } => { replacement.items.insert(item.item_id.clone(), item); }
@@ -187,7 +188,7 @@ impl View {
     fn render_question(&mut self, question: &Question) -> Vec<wire::Event> {
         let request = *self.requests.entry(question.question_id.clone()).or_insert_with(|| { self.next_request += 1; self.next_request });
         match question.kind.as_str() {
-            "permission" => vec![wire::Event::PermissionRequest { request, tool_call_id: question.tool_item_id.clone().unwrap_or_else(|| question.question_id.clone()), title: question.title.clone(), options: question.options.iter().map(|o| wire::PermissionOption { id: o.option_id.clone(), name: o.title.clone(), kind: match o.kind.as_str() { "allow_once" => wire::PermissionOptionKind::AllowOnce, "allow_always" => wire::PermissionOptionKind::AllowAlways, "reject_once" => wire::PermissionOptionKind::RejectOnce, "reject_always" => wire::PermissionOptionKind::RejectAlways, other => wire::PermissionOptionKind::Other(other.into()) } }).collect() }],
+            "permission" => vec![wire::Event::PermissionRequest { request, tool_call_id: question.tool_item_id.clone().unwrap_or_else(|| question.question_id.clone()), title: question.subject.as_ref().and_then(|s|s.text.as_ref()).or(question.description.as_ref()).filter(|s|!s.is_empty()).map(|subject|format!("{}\n\n{}",question.title,subject)).unwrap_or_else(||question.title.clone()), options: question.options.iter().map(|o| wire::PermissionOption { id: o.option_id.clone(), name: o.title.clone(), kind: match o.kind.as_str() { "allow_once" => wire::PermissionOptionKind::AllowOnce, "allow_always" => wire::PermissionOptionKind::AllowAlways, "reject_once" => wire::PermissionOptionKind::RejectOnce, "reject_always" => wire::PermissionOptionKind::RejectAlways, other => wire::PermissionOptionKind::Other(other.into()) } }).collect() }],
             "form" => {
                 let mut fields = Vec::new();
                 for f in &question.fields {
@@ -309,6 +310,14 @@ mod tests {
     use super::*;
     fn item() -> Item { Item { item_id:"item".into(),created_seq:"1".into(),turn_id:None,submission_id:None,agent_generation_id:"g".into(),kind:"agent".into(),content:vec![Content::text("hello")],tool:None } }
     fn notification(seq:&str,event:Event)->SessionEvent { SessionEvent {session_id:"s".into(),subscription_id:"sub".into(),seq:seq.into(),event} }
+    #[test]
+    fn permission_subject_is_visible_without_a_tool_reference() {
+        let mut view=View::default();
+        let question=Question {question_id:"q".into(),agent_generation_id:"g".into(),kind:"permission".into(),title:"Connect".into(),description:None,subject:Some(Content::text("Host: example.test")),tool_item_id:None,options:vec![],fields:vec![],state:"open".into(),answer_id:None,answer:None,delivery:None,reason:None};
+        let events=view.render_question(&question);
+        assert!(matches!(&events[0],wire::Event::PermissionRequest{title,..}if title.contains("Connect")&&title.contains("example.test")));
+    }
+
     #[test]
     fn replay_duplicates_are_ignored_and_gaps_do_not_advance_cursor() {
         let mut view=View {session_id:"s".into(),subscription_id:"sub".into(),..Default::default()};

@@ -17,7 +17,7 @@ import socket
 import sys
 import uuid
 
-PROTOCOL = "sfp/1-dev.1"
+PROTOCOL = "sfp/1-dev.2"
 MAX_FRAME = 8 * 1024 * 1024
 MAX_PENDING = 4096
 IDENTITY = {"session": "session_id", "item": "item_id", "turn": "turn_id",
@@ -200,6 +200,10 @@ class Client:
         while True:
             message = self.read()
             if "method" in message and "id" not in message:
+                if message["method"] == "_sill/changes.changed":
+                    self.validate(message["method"], "params", message["params"])
+                    self.changes_dirty = True
+                    continue
                 if len(self.pending) >= MAX_PENDING:
                     raise ValueError("snapshot tail overflow; abandon sync and reattach")
                 self.pending.append(message)
@@ -207,6 +211,10 @@ class Client:
             if message.get("id") != request_id:
                 raise ValueError("unexpected response ID")
             if "error" in message:
+                if self.schema is not None and "errors" in self.schema:
+                    shape = self.schema["errors"]["shape"]
+                    error_schema = {"$schema": "https://json-schema.org/draft/2020-12/schema", "$defs": self.schema["$defs"], **shape}
+                    self.validator(error_schema).validate(message["error"])
                 raise RpcError(message["error"])
             self.validate(method, "result", message["result"])
             return message["result"]
@@ -244,11 +252,16 @@ class Client:
                     return
 
     def event(self):
-        message = self.pending.pop(0) if self.pending else self.read()
-        if message.get("method") != "_sill/session.event":
-            raise ValueError(f"unexpected notification {message.get('method')}")
-        self.validate(message["method"], "params", message["params"])
-        return message["params"]
+        while True:
+            message = self.pending.pop(0) if self.pending else self.read()
+            if message.get("method") == "_sill/changes.changed":
+                self.validate(message["method"], "params", message["params"])
+                self.changes_dirty = True
+                continue
+            if message.get("method") != "_sill/session.event":
+                raise ValueError(f"unexpected notification {message.get('method')}")
+            self.validate(message["method"], "params", message["params"])
+            return message["params"]
 
     def attach(self, session_id, view=None):
         params = {"session_id": session_id}
@@ -262,13 +275,33 @@ class Client:
             lease = attached["snapshot"]
             records = []
             page = None
+            fragment_id, fragment_text = None, ""
             while True:
                 response = self.call("_sill/sessions.snapshot", {"token": lease["token"], "page": page})
                 if response["at"] != lease["at"] or response["at"]["session_id"] != session_id:
                     raise ValueError("snapshot pages have different boundaries")
-                records.extend(response["records"])
+                fragment = response.get("fragment")
+                if fragment is not None:
+                    if response["records"]:
+                        raise ValueError("fragment interleaved with records")
+                    if fragment_id is None:
+                        fragment_id = fragment["record"]
+                    if fragment_id != fragment["record"] or fragment["offset"] != str(len(fragment_text.encode("utf-8"))):
+                        raise ValueError("noncontiguous record fragment")
+                    fragment_text += fragment["json"]
+                    if len(fragment_text.encode("utf-8")) > 64 * 1024 * 1024:
+                        raise ValueError("record exceeds 64 MiB")
+                    if fragment["last"]:
+                        records.append(json.loads(fragment_text))
+                        fragment_id, fragment_text = None, ""
+                else:
+                    if fragment_id is not None:
+                        raise ValueError("incomplete fragmented record")
+                    records.extend(response["records"])
                 page = response["next_page"]
                 if page is None:
+                    if fragment_id is not None:
+                        raise ValueError("incomplete fragmented record")
                     break
             view = View(session_id, lease["at"]["seq"], records)
         elif attached["mode"] == "replay":
@@ -338,7 +371,11 @@ def main():
     login = commands.add_parser("login")
     login.add_argument("agent_id")
     login.add_argument("method_id")
+    login.add_argument("--operation-id")
     install = commands.add_parser("install")
+    install.add_argument("--operation-id")
+    operation = commands.add_parser("operation")
+    operation.add_argument("operation_id")
     install.add_argument("entry_id")
     install.add_argument("version")
     install.add_argument("--source", choices=("snapshot", "live"), default="snapshot")
@@ -356,6 +393,8 @@ def main():
                 after = page["next"]
                 if after is None:
                     break
+        elif args.command == "operation":
+            print(json.dumps(client.call("_sill/operations.get", {"operation_id": args.operation_id}), ensure_ascii=False))
         elif args.command in ("login", "install"):
             if args.command == "login":
                 method = "_sill/agents.login"
@@ -363,7 +402,13 @@ def main():
             else:
                 method = "_sill/registry.install"
                 params = {"entry_id": args.entry_id, "version": args.version, "source": args.source, "allow_unreviewed": args.allow_unreviewed}
+            import uuid
+            params["operation_id"] = args.operation_id or str(uuid.uuid4())
+            print("operation_id=" + params["operation_id"], file=sys.stderr, flush=True)
             opened = client.call(method, params)
+            if opened["token"] is None:
+                print(json.dumps(opened["operation"], ensure_ascii=False))
+                return
             for event in client.progress(opened["token"]):
                 print(json.dumps(event, ensure_ascii=False), flush=True)
                 if event["type"] == "failed":

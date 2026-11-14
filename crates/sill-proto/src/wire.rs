@@ -159,6 +159,8 @@ pub struct Kept {
     pub id: String,
     pub ts: i64,
     /// Host path.
+    #[serde(with = "stored_path")]
+    #[schemars(with = "stored_path::Encoding")]
     pub path: PathBuf,
     /// What keep did: `added` `updated` `removed` `symlink` `directory`.
     pub what: String,
@@ -169,6 +171,32 @@ pub struct Kept {
     pub hash: Option<String>,
     #[serde(default)]
     pub undone_at: Option<i64>,
+}
+
+// Storage compatibility: retain strings in existing journals, encode only non-UTF-8
+// paths as explicit bytes. Public SFP methods use HostPath instead of this storage shape.
+mod stored_path {
+    use super::*;
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    #[serde(untagged)]
+    pub enum Encoding { Text(String), Bytes { bytes_base64: String } }
+    pub fn serialize<S: serde::Serializer>(path: &PathBuf, serializer: S) -> Result<S::Ok, S::Error> {
+        use std::os::unix::ffi::OsStrExt;
+        match path.to_str() {
+            Some(text) => Encoding::Text(text.into()),
+            None => Encoding::Bytes { bytes_base64: STANDARD.encode(path.as_os_str().as_bytes()) },
+        }.serialize(serializer)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<PathBuf, D::Error> {
+        use std::os::unix::ffi::OsStringExt;
+        let bytes = match Encoding::deserialize(deserializer)? {
+            Encoding::Text(text) => text.into_bytes(),
+            Encoding::Bytes { bytes_base64 } => STANDARD.decode(bytes_base64).map_err(serde::de::Error::custom)?,
+        };
+        if bytes.contains(&0) { return Err(serde::de::Error::custom("stored path contains NUL")); }
+        Ok(std::ffi::OsString::from_vec(bytes).into())
+    }
 }
 
 /// What an overlay change did to a path.

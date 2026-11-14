@@ -23,6 +23,10 @@ fn session(store: &Store, id: &str) -> Result<sill_core::store::Session> {
 }
 
 pub(super) fn create(store: &Store, request: UploadCreate) -> Result<UploadCreated> {
+    if request.upload_id.starts_with("sill-inline-") { return Err(Error::invalid_params("sill-inline- is reserved for inline attachments").into()); }
+    create_owned(store, request)
+}
+fn create_owned(store: &Store, request: UploadCreate) -> Result<UploadCreated> {
     session(store, &request.session_id)?;
     if request.upload_id.is_empty() || request.upload_id.len() > 128 || request.upload_id.chars().any(char::is_control) {
         return Err(Error::invalid_params("upload_id must contain 1–128 bytes without control characters").into());
@@ -43,6 +47,8 @@ pub(super) fn create(store: &Store, request: UploadCreate) -> Result<UploadCreat
     if let Some((name,mime,old_bytes)) = old {
         if name != request.name || mime != request.mime || bytes != old_bytes { return Err(domain("id_conflict", "upload ID already identifies different input")); }
     } else {
+        let (count,total):(i64,i64)=store.conn().query_row("SELECT count(*),coalesce(sum(length(bytes)),0) FROM sfp_uploads WHERE session_id=?1",[&request.session_id],|r|Ok((r.get(0)?,r.get(1)?)))?;
+        if count>=4096 || total.saturating_add(bytes.len() as i64)>256*1024*1024 {return Err(domain("limit_exceeded","session uploads exceed 4096 objects or 256 MiB"));}
         store.conn().execute("INSERT INTO sfp_uploads(session_id,upload_id,name,mime,bytes) VALUES (?1,?2,?3,?4,?5)",
             params![request.session_id,request.upload_id,request.name,request.mime,bytes])?;
     }
@@ -61,11 +67,19 @@ pub(super) fn get(store: &Store, request: UploadGet) -> Result<Upload> {
 /// An inline attachment becomes an upload named by its submission and position, so the journal
 /// references it and a retry of the same submission finds the same object.
 pub(super) fn from_inline(store: &Store, session_id: &str, submission_id: &str, index: usize, name: &str, mime: &str, data_base64: &str) -> Result<(String, String)> {
-    let upload_id = truncate(format!("inline-{index}-{submission_id}"), 128);
+    // Preserve the original reference when retrying an already accepted legacy submission.
+    // New references hash the *whole* submission ID and occupy a reserved namespace.
+    let journal = sill_core::sfp::Journal::new(store)?;
+    let previous = match journal.submission(session_id, submission_id) {
+        Ok(s) => s.attachments.get(index).and_then(|a| match a { sill_proto::sfp::Attachment::Uploaded {upload_id,..} => Some(upload_id.clone()), _=>None }),
+        Err(e) if e.downcast_ref::<sill_core::sfp::DomainError>().is_some_and(|e|e.code=="not_found") => None,
+        Err(e) => return Err(e),
+    };
+    let upload_id = previous.unwrap_or_else(|| format!("sill-inline-{}-{index}", sill_core::sfp::create_fingerprint(submission_id)));
     // inline names are labels ("screenshot-1.png (1180×518)"); an upload's is a file name
     let name = truncate(name.chars().map(|c| if c == '/' || c.is_control() { '_' } else { c }).collect(), 255);
     let name = if name.is_empty() || name == "." || name == ".." { "image".to_string() } else { name };
-    create(store, UploadCreate { session_id: session_id.into(), upload_id: upload_id.clone(), name: name.clone(), mime: mime.into(), data_base64: data_base64.into() })?;
+    create_owned(store, UploadCreate { session_id: session_id.into(), upload_id: upload_id.clone(), name: name.clone(), mime: mime.into(), data_base64: data_base64.into() })?;
     Ok((upload_id, name))
 }
 
@@ -166,6 +180,50 @@ mod tests {
         assert_eq!(store.conn().query_row("SELECT count(*) FROM sfp_uploads",[],|r|r.get::<_,i64>(0)).unwrap(),0);
         drop(store); std::fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn inline_ids_do_not_collide_on_long_submission_prefixes_or_client_uploads() {
+        let root=std::env::temp_dir().join(format!("sill-inline-test-{}",super::super::sfp::id()));
+        let store=Store::open(&root.join("store.db")).unwrap();let session=store.create("test","default").unwrap();
+        let prefix="x".repeat(127);
+        let a=from_inline(&store,&session.id,&format!("{prefix}a"),0,"image.png","image/png","YQ==").unwrap();
+        let b=from_inline(&store,&session.id,&format!("{prefix}b"),0,"image.png","image/png","Yg==").unwrap();
+        assert_ne!(a.0,b.0);assert!(a.0.len()<=128);
+        assert!(create(&store,UploadCreate{session_id:session.id,upload_id:a.0,name:"image.png".into(),mime:"image/png".into(),data_base64:"YQ==".into()}).is_err());
+        drop(store);std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retrying_accepted_legacy_inline_input_keeps_the_original_upload_identity() {
+        let root=std::env::temp_dir().join(format!("sill-legacy-inline-test-{}",super::super::sfp::id()));
+        let store=Store::open(&root.join("store.db")).unwrap();let session=store.create("test","default").unwrap();
+        let request=UploadCreate{session_id:session.id.clone(),upload_id:"legacy-submission-0".into(),name:"image.png".into(),mime:"image/png".into(),data_base64:"YQ==".into()};
+        create_owned(&store,request.clone()).unwrap();
+        let journal=sill_core::sfp::Journal::new(&store).unwrap();journal.ensure(&session.id,"g").unwrap();
+        let input=sill_proto::sfp::Submit{session_id:session.id.clone(),submission_id:"submission".into(),text:"work".into(),attachments:vec![sill_proto::sfp::Attachment::Uploaded{upload_id:request.upload_id.clone(),name:request.name.clone(),mime:request.mime.clone()}]};
+        journal.accept(&input,"queued").unwrap();
+        let (upload_id,name)=from_inline(&store,&session.id,"submission",0,&request.name,&request.mime,&request.data_base64).unwrap();
+        assert_eq!((upload_id,name),(request.upload_id,request.name));
+        assert_eq!(store.conn().query_row("SELECT count(*) FROM sfp_uploads",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        let error=from_inline(&store,&session.id,"submission",0,"image.png","image/png","Yg==").unwrap_err();
+        assert_eq!(error.downcast_ref::<Error>().unwrap().data.as_ref().unwrap()["code"],"id_conflict");
+        drop(store);std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn full_upload_quota_allows_identical_retries_and_rejects_new_objects_atomically() {
+        let root=std::env::temp_dir().join(format!("sill-upload-quota-test-{}",super::super::sfp::id()));
+        let store=Store::open(&root.join("store.db")).unwrap();let session=store.create("test","default").unwrap();
+        let mut request=UploadCreate{session_id:session.id.clone(),upload_id:"existing".into(),name:"notes.txt".into(),mime:"text/plain".into(),data_base64:"YQ==".into()};
+        let accepted=create(&store,request.clone()).unwrap();
+        store.conn().execute("WITH RECURSIVE ids(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM ids WHERE n<4095) INSERT INTO sfp_uploads SELECT ?1,'filled-'||n,'empty','text/plain',x'' FROM ids",[&session.id]).unwrap();
+        assert_eq!(create(&store,request.clone()).unwrap(),accepted);
+        request.upload_id="new".into();
+        let error=create(&store,request).unwrap_err();
+        assert_eq!(error.downcast_ref::<Error>().unwrap().data.as_ref().unwrap()["code"],"limit_exceeded");
+        assert_eq!(store.conn().query_row("SELECT count(*) FROM sfp_uploads",[],|r|r.get::<_,i64>(0)).unwrap(),4096);
+        drop(store);std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn base64_decoding_enforces_padding_and_decoded_bounds() {
         for bytes in [b"".as_slice(),b"a",b"ab",b"abc",b"hello world"] { assert_eq!(decode(&acp::base64(bytes)).unwrap(),bytes); }

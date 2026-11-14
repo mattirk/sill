@@ -138,7 +138,7 @@ pub fn write_snapshot(src: &Path, dir: &Path, kept: &[(String, PathBuf, String)]
         {
             let mut st = tx.prepare("INSERT INTO kept VALUES (?1, ?2, ?3)")?;
             for (id, path, what) in kept {
-                st.execute(params![id, path.to_string_lossy(), what])?;
+                st.execute(params![id, history::sql_path(path), what])?;
             }
         }
         tx.commit()?;
@@ -204,7 +204,14 @@ fn session_row(r: &rusqlite::Row) -> rusqlite::Result<SessionInfo> {
 
 fn pins_of(conn: &Connection, id: &str) -> Result<Vec<PathBuf>> {
     let mut st = conn.prepare_cached("SELECT path FROM session_pins WHERE session_id = ?1 ORDER BY path")?;
-    let rows = st.query_map(params![id], |r| r.get::<_, String>(0).map(PathBuf::from))?;
+    let rows = st.query_map(params![id], |r| {
+        use std::os::unix::ffi::OsStringExt;
+        use rusqlite::types::ValueRef;
+        match r.get_ref(0)? {
+            ValueRef::Text(bytes) | ValueRef::Blob(bytes) => Ok(PathBuf::from(std::ffi::OsString::from_vec(bytes.to_vec()))),
+            value => Err(rusqlite::Error::InvalidColumnType(0, "path".into(), value.data_type())),
+        }
+    })?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
 
@@ -247,7 +254,7 @@ pub fn find_session(conn: &Connection, key: &str) -> Result<Option<SessionInfo>>
 /// What a snapshot says a session kept (the host reads the journals instead).
 pub fn snapshot_kept(conn: &Connection, id: &str) -> Vec<(PathBuf, String)> {
     let Ok(mut st) = conn.prepare("SELECT path, what FROM kept WHERE session_id = ?1") else { return Vec::new() };
-    st.query_map(params![id], |r| Ok((PathBuf::from(r.get::<_, String>(0)?), r.get::<_, String>(1)?)))
+    st.query_map(params![id], |r| Ok((history::read_path(r, 0)?, r.get::<_, String>(1)?)))
         .map(|rows| rows.filter_map(Result::ok).collect())
         .unwrap_or_default()
 }
@@ -422,6 +429,27 @@ pub fn recall_pick<'a>(all: &'a [SessionInfo], me: &str, pins: &[PathBuf], scope
     pool.into_iter().take(n).map(|(_, s)| s).collect()
 }
 
+/// Choose recall candidates using bounded memory rather than loading all session summaries.
+pub fn recall_candidates(conn:&Connection,me:&str,pins:&[PathBuf],scope:Scope,n:usize,first:Option<&str>)->Result<Vec<SessionInfo>> {
+    let n=n.min(20);if n==0||scope==Scope::Off{return Ok(Vec::new());}
+    let mut chosen=Vec::new();
+    let mut st=conn.prepare(&format!("SELECT {SESSION_COLS} FROM sessions WHERE ended_at IS NOT NULL AND id<>?1 ORDER BY last_used DESC"))?;
+    let rows=st.query_map([me],session_row)?;
+    for row in rows {let mut candidate=row?;candidate.pins=pins_of(conn,&candidate.id)?;
+        // Preserve exactly the lines recall_block can quote, plus one character when needed
+        // to preserve its ellipsis, without retaining every selected full summary in memory.
+        let mut excerpt=String::new();let mut remaining=RECALL_CHARS;
+        for line in candidate.summary.lines().map(str::trim_end).filter(|l|!l.trim().is_empty()).take(15) {
+            if remaining==0{break;}let len=line.chars().count();
+            excerpt.extend(line.chars().take(remaining+1));excerpt.push('\n');
+            if len>remaining{break;}remaining-=len;
+        }
+        candidate.summary=excerpt;
+        chosen.push(candidate);
+        chosen=recall_pick(&chosen,me,pins,scope,n,first).into_iter().cloned().collect();
+    }Ok(chosen)
+}
+
 /// The most of one summary a recall block quotes.
 const RECALL_CHARS: usize = 1500;
 
@@ -550,36 +578,37 @@ pub struct Hit {
 /// Sessions matching `q`, best match first (FTS5 rank); with no words, the filters alone over every
 /// session, most recently used first. At most `limit`.
 pub fn search(conn: &Connection, q: &Query, now: i64, limit: usize) -> Result<Vec<Hit>> {
-    let all = sessions(conn)?;
-    let by_id = |id: &str| all.iter().find(|s| s.id == id);
-    let mut out: Vec<Hit> = Vec::new();
+    let mut out=Vec::new();search_visit(conn,q,now,limit,|hit|{out.push(hit);Ok(true)})?;Ok(out)
+}
+
+/// Visit ranked matching sessions one at a time; false stops before another row is materialized.
+pub fn search_visit(conn:&Connection,q:&Query,now:i64,limit:usize,mut visit:impl FnMut(Hit)->Result<bool>)->Result<()> {
+    let mut seen=std::collections::HashSet::new();
     match q.fts() {
-        None => {
-            for s in all.iter().filter(|s| q.admits(s, now)).take(limit) {
-                out.push(Hit { session: s.clone(), kind: String::new(), snippet: String::new() });
-            }
-        }
-        Some(expr) => {
-            let mut st = conn.prepare(
-                "SELECT t.session_id, t.kind, snippet(memory_fts, 0, '[', ']', '…', 12) FROM memory_fts JOIN memory_text t ON t.id = memory_fts.rowid
-                 WHERE memory_fts MATCH ?1 ORDER BY rank LIMIT 2000",
-            )?;
-            let rows = st.query_map(params![expr], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
+        None=>{
+            let mut st=conn.prepare(&format!("SELECT {SESSION_COLS} FROM sessions ORDER BY last_used DESC"))?;
+            let rows=st.query_map([],session_row)?;
             for row in rows {
-                let (id, kind, snippet) = row?;
-                if out.len() >= limit {
-                    break;
-                }
-                if out.iter().any(|h| h.session.id == id) {
-                    continue;
-                }
-                if let Some(s) = by_id(&id).filter(|s| q.admits(s, now)) {
-                    out.push(Hit { session: s.clone(), kind, snippet: snippet.replace('\n', " ") });
+                if seen.len()>=limit{break;}
+                let mut session=row?;session.pins=pins_of(conn,&session.id)?;
+                if q.admits(&session,now){seen.insert(session.id.clone());if !visit(Hit {session,kind:String::new(),snippet:String::new()})?{break;}}
+            }
+        },
+        Some(expr)=>{
+            let mut st=conn.prepare("SELECT t.session_id,t.kind,snippet(memory_fts,0,'[',']','…',12) FROM memory_fts JOIN memory_text t ON t.id=memory_fts.rowid WHERE memory_fts MATCH ?1 ORDER BY rank LIMIT 2000")?;
+            let mut by_id=conn.prepare(&format!("SELECT {SESSION_COLS} FROM sessions WHERE id=?1"))?;
+            let rows=st.query_map(params![expr],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?;
+            for row in rows {
+                if seen.len()>=limit{break;}
+                let (id,kind,snippet)=row?;if seen.contains(&id){continue;}
+                use rusqlite::OptionalExtension;
+                if let Some(mut session)=by_id.query_row([&id],session_row).optional()? {
+                    session.pins=pins_of(conn,&id)?;
+                    if q.admits(&session,now){seen.insert(id);if !visit(Hit {session,kind,snippet:snippet.replace('\n'," ")})?{break;}}
                 }
             }
         }
-    }
-    Ok(out)
+    }Ok(())
 }
 
 /// Who wrote a summary, from `summary_kind`: the agent, sill, or the person who edited it.
@@ -626,7 +655,14 @@ pub fn brief(summary: &str, max: usize) -> String {
 
 /// A session's record as text: the facts, the summary, the notes.
 pub fn show(conn: &Connection, s: &SessionInfo, kept: &[(PathBuf, String)], home: &Path) -> Result<String> {
-    let mut out = format!(
+    let mut out=String::new();
+    show_to(conn, s, kept, home, &mut out)?;
+    Ok(out)
+}
+
+/// Stream formatted memory without accumulating the complete output.
+pub fn show_to(conn: &Connection, s: &SessionInfo, kept: &[(PathBuf, String)], home: &Path, out: &mut impl std::fmt::Write) -> Result<()> {
+    write!(out,
         "{}  “{}”  {}  started {}{}\n",
         s.id,
         s.title,
@@ -636,32 +672,42 @@ pub fn show(conn: &Connection, s: &SessionInfo, kept: &[(PathBuf, String)], home
             Some(t) => format!(", ended {} ({})", datetime(t), duration(t - s.created_at)),
             None => ", still open".to_string(),
         }
-    );
+    )?;
     if !s.pins.is_empty() {
-        out.push_str(&format!("pinned: {}\n", s.pins.iter().map(|p| tilde(p, home)).collect::<Vec<_>>().join(", ")));
+        write!(out, "pinned: {}\n", s.pins.iter().map(|p| tilde(p, home)).collect::<Vec<_>>().join(", "))?;
     }
     if !kept.is_empty() {
-        out.push_str(&format!("kept to the host ({}): {}\n", kept.len(), kept.iter().map(|(p, w)| format!("{w} {}", tilde(p, home))).collect::<Vec<_>>().join(", ")));
+        write!(out, "kept to the host ({}): {}\n", kept.len(), kept.iter().map(|(p, w)| format!("{w} {}", tilde(p, home))).collect::<Vec<_>>().join(", "))?;
     }
-    out.push_str(&format!("{} prompts, {} tool calls (times are UTC)\n", count_kind(conn, &s.id, "user"), count_kind(conn, &s.id, "tool")));
+    write!(out, "{} prompts, {} tool calls (times are UTC)\n", count_kind(conn, &s.id, "user"), count_kind(conn, &s.id, "tool"))?;
     if s.summary.trim().is_empty() {
-        out.push_str("\nno summary yet\n");
+        out.write_str("\nno summary yet\n")?;
     } else {
-        out.push_str(&format!("\nsummary ({}):\n{}\n", summary_by(&s.summary_kind), s.summary.trim_end()));
+        write!(out, "\nsummary ({}):\n{}\n", summary_by(&s.summary_kind), s.summary.trim_end())?;
     }
-    for (ts, kind, text) in notes(conn, &s.id)? {
-        out.push_str(&format!("\n{kind} {}:\n{}\n", date(ts), text.trim_end()));
+    let mut note_query=conn.prepare("SELECT ts,kind,text FROM memories WHERE session_id=?1 ORDER BY ts,rowid")?;
+    let note_rows=note_query.query_map(params![s.id], |r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?;
+    for row in note_rows {
+        let (ts,kind,text)=row?;
+        write!(out, "\n{kind} {}:\n{}\n", date(ts), text.trim_end())?;
     }
-    Ok(out)
+    Ok(())
 }
 
 /// A session's conversation, oldest first: the person's and the agent's text with times (UTC), a
 /// tool call as one line. With `grep`, only the messages holding every one of its words (any case).
 pub fn transcript(conn: &Connection, s: &SessionInfo, grep: Option<&str>) -> Result<String> {
+    let mut out=String::new();
+    transcript_to(conn, s, grep, &mut out)?;
+    Ok(out)
+}
+
+/// Stream formatted memory without accumulating the complete output.
+pub fn transcript_to(conn: &Connection, s: &SessionInfo, grep: Option<&str>, out: &mut impl std::fmt::Write) -> Result<()> {
     let words: Vec<String> = grep.map(|g| g.split_whitespace().map(str::to_lowercase).collect()).unwrap_or_default();
     let mut st = conn.prepare("SELECT seq, ts, kind, text FROM entries WHERE session_id = ?1 AND kind IN ('user', 'agent', 'tool') ORDER BY seq")?;
     let rows = st.query_map(params![s.id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)))?;
-    let mut out = format!("{}  “{}”  {}, times UTC\n", s.id, s.title, s.agent);
+    write!(out, "{}  “{}”  {}, times UTC\n", s.id, s.title, s.agent)?;
     let mut shown = 0;
     for row in rows {
         let (seq, ts, kind, text) = row?;
@@ -675,64 +721,77 @@ pub fn transcript(conn: &Connection, s: &SessionInfo, grep: Option<&str>) -> Res
         let at = datetime(ts);
         let at = if words.is_empty() { at[11..].to_string() } else { format!("{at} #{seq}") };
         match kind.as_str() {
-            "tool" => out.push_str(&format!("{at}   tool: {}\n", text.lines().next().unwrap_or(""))),
+            "tool" => write!(out, "{at}   tool: {}\n", text.lines().next().unwrap_or(""))?,
             _ => {
                 let who = if kind == "user" { "person" } else { "agent" };
                 let mut lines = text.trim().lines();
-                out.push_str(&format!("{at} {who}: {}\n", lines.next().unwrap_or("")));
+                write!(out, "{at} {who}: {}\n", lines.next().unwrap_or(""))?;
                 for l in lines {
-                    out.push_str(&format!("    {l}\n"));
+                    write!(out, "    {l}\n")?;
                 }
             }
         }
     }
     if shown == 0 {
-        out.push_str(if words.is_empty() { "(no messages)\n" } else { "(no message holds all of those words)\n" });
+        out.write_str(if words.is_empty() { "(no messages)\n" } else { "(no message holds all of those words)\n" })?;
     }
-    Ok(out)
+    Ok(())
 }
 
 /// One session as a Markdown file (docs/memory.md §2.5 Export): the facts, the summary, the notes,
 /// then the conversation as it stands (compacted or not) — the person's data in a form that
 /// outlives sill.
 pub fn export_markdown(conn: &Connection, s: &SessionInfo, kept: &[(PathBuf, String)], home: &Path) -> Result<String> {
-    let mut out = format!("# {}\n\n", s.title);
-    out.push_str(&format!("- session `{}`, agent {}\n- started {}", s.id, s.agent, datetime(s.created_at)));
+    let mut out=String::new();
+    export_markdown_to(conn, s, kept, home, &mut out)?;
+    Ok(out)
+}
+
+/// Stream formatted memory without accumulating the complete output.
+pub fn export_markdown_to(conn: &Connection, s: &SessionInfo, kept: &[(PathBuf, String)], home: &Path, out: &mut impl std::fmt::Write) -> Result<()> {
+    write!(out, "# {}\n\n", s.title)?;
+    write!(out, "- session `{}`, agent {}\n- started {}", s.id, s.agent, datetime(s.created_at))?;
     match s.ended_at {
-        Some(t) => out.push_str(&format!(", ended {} ({})\n", datetime(t), duration(t - s.created_at))),
-        None => out.push_str(", still open\n"),
+        Some(t) => write!(out, ", ended {} ({})\n", datetime(t), duration(t - s.created_at))?,
+        None => out.write_str(", still open\n")?,
     }
     if !s.pins.is_empty() {
-        out.push_str(&format!("- pinned: {}\n", s.pins.iter().map(|p| format!("`{}`", tilde(p, home))).collect::<Vec<_>>().join(", ")));
+        write!(out, "- pinned: {}\n", s.pins.iter().map(|p| format!("`{}`", tilde(p, home))).collect::<Vec<_>>().join(", "))?;
     }
     if !kept.is_empty() {
-        out.push_str(&format!("- kept to the host: {}\n", kept.iter().map(|(p, w)| format!("{w} `{}`", tilde(p, home))).collect::<Vec<_>>().join(", ")));
+        write!(out, "- kept to the host: {}\n", kept.iter().map(|(p, w)| format!("{w} `{}`", tilde(p, home))).collect::<Vec<_>>().join(", "))?;
     }
-    out.push_str(&format!("- {} prompts, {} tool calls; times UTC\n", count_kind(conn, &s.id, "user"), count_kind(conn, &s.id, "tool")));
+    write!(out, "- {} prompts, {} tool calls; times UTC\n", count_kind(conn, &s.id, "user"), count_kind(conn, &s.id, "tool"))?;
     if !s.summary.trim().is_empty() {
-        out.push_str(&format!("\n## Summary ({})\n\n{}\n", summary_by(&s.summary_kind), s.summary.trim_end()));
+        write!(out, "\n## Summary ({})\n\n{}\n", summary_by(&s.summary_kind), s.summary.trim_end())?;
     }
-    let notes = notes(conn, &s.id)?;
-    if !notes.is_empty() {
-        out.push_str("\n## Notes\n");
-        for (ts, kind, text) in notes {
-            out.push_str(&format!("\n**{kind}, {}**\n\n{}\n", date(ts), text.trim_end()));
+    let mut note_query=conn.prepare("SELECT ts,kind,text FROM memories WHERE session_id=?1 ORDER BY ts,rowid")?;
+    let mut notes=note_query.query(params![s.id])?;
+    let mut heading=false;
+    while let Some(row)=notes.next()? {
+        let (ts,kind,text)=(row.get::<_,i64>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?);
+        if !heading { heading=true;
+        out.write_str("\n## Notes\n")?;
+        }
+        {
+            write!(out, "\n**{kind}, {}**\n\n{}\n", date(ts), text.trim_end())?;
         }
     }
-    out.push_str("\n## Conversation\n");
+    out.write_str("\n## Conversation\n")?;
     let mut st = conn.prepare("SELECT ts, kind, text FROM entries WHERE session_id = ?1 AND kind IN ('user', 'agent', 'tool') ORDER BY seq")?;
     let rows = st.query_map(params![s.id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
     for row in rows {
         let (ts, kind, text) = row?;
         let at = &datetime(ts)[11..];
         match kind.as_str() {
-            "tool" => out.push_str(&format!("\n*{at} tool: {}*\n", text.lines().next().unwrap_or(""))),
-            "user" => out.push_str(&format!("\n### {at} person\n\n{}\n", text.trim())),
-            _ => out.push_str(&format!("\n### {at} agent\n\n{}\n", text.trim())),
+            "tool" => write!(out, "\n*{at} tool: {}*\n", text.lines().next().unwrap_or(""))?,
+            "user" => write!(out, "\n### {at} person\n\n{}\n", text.trim())?,
+            _ => write!(out, "\n### {at} agent\n\n{}\n", text.trim())?,
         }
     }
-    Ok(out)
+    Ok(())
 }
+
 
 /// A file name for a session's export: date, id, the title's words.
 pub fn export_name(s: &SessionInfo) -> String {
@@ -852,6 +911,19 @@ pub fn cli(args: &[String], conn: &Connection, home: &Path, now: i64, kept: impl
 mod tests {
     use super::*;
 
+    #[test]
+    fn memory_pin_queries_accept_legacy_text_and_exact_blob_paths() {
+        use std::os::unix::ffi::OsStrExt;
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE session_pins(session_id TEXT, path TEXT)").unwrap();
+        conn.execute("INSERT INTO session_pins VALUES ('s', ?1)", ["/text"]).unwrap();
+        conn.execute("INSERT INTO session_pins VALUES ('s', ?1)", [b"/raw/\xff".as_slice()]).unwrap();
+        let pins = pins_of(&conn, "s").unwrap();
+        assert_eq!(pins.len(), 2);
+        assert!(pins.iter().any(|p| p.as_os_str().as_bytes() == b"/raw/\xff"));
+        assert!(pins.iter().any(|p| p == Path::new("/text")));
+    }
+
     /// A ghost session is in nobody's memory, not even the jail's snapshot while it runs.
     #[test]
     fn the_snapshot_leaves_ghosts_out() {
@@ -927,6 +999,21 @@ mod tests {
         }
         if let Some((t, summary)) = ended {
             c.execute("UPDATE sessions SET ended_at = ?2, summary = ?3, summary_kind = 'agent', last_used = ?2 WHERE id = ?1", params![id, t, summary]).unwrap();
+        }
+    }
+
+    #[test]
+    fn streaming_recall_selection_preserves_rendered_output() {
+        let c=store_like();let home=Path::new("/home/me");
+        for i in 0..40 {let summary=format!("  Indented line {i}\n\n{}\nlast", "word ".repeat(400));session(&c,&format!("pick{i:04}"),"candidate",&["/home/me/project"],Some((2000+i,&summary)));}
+        let all=sessions(&c).unwrap();
+        for first in [None,Some("pick0001")] {
+            let old=recall_pick(&all,"current",&[],Scope::Everywhere,3,first);
+            let selected=recall_candidates(&c,"current",&[],Scope::Everywhere,3,first).unwrap();
+            assert_eq!(old.iter().map(|s|&s.id).collect::<Vec<_>>(),selected.iter().map(|s|&s.id).collect::<Vec<_>>());
+            let new=selected.iter().collect::<Vec<_>>();
+            assert_eq!(recall_block(&old,Scope::Everywhere,true,home,|_|0),recall_block(&new,Scope::Everywhere,true,home,|_|0));
+            assert!(selected.iter().all(|s|s.summary.chars().count()<=1516));
         }
     }
 

@@ -279,6 +279,15 @@ pub fn available(home: &Path) -> Vec<String> {
     names
 }
 
+/// A bounded live name page, independent of how many policy files exist on disk.
+pub fn available_page(home:&Path,after:Option<&str>,limit:usize)->(Vec<String>,bool) {
+    let mut names=std::collections::BTreeSet::new();
+    let mut add=|name:String|{if after.is_none_or(|a|name.as_str()>a){names.insert(name);if names.len()>limit+1{names.pop_last();}}};
+    add("default".into());
+    for dir in search_dirs(home) {let Ok(entries)=std::fs::read_dir(dir) else {continue};for e in entries.flatten(){let p=e.path();if p.extension().is_some_and(|x|x=="toml")&&let Some(name)=p.file_stem().and_then(|s|s.to_str()){add(name.into());}}}
+    let more=names.len()>limit;if more{names.pop_last();}(names.into_iter().collect(),more)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

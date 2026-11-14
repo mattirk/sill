@@ -216,3 +216,24 @@ impl crate::Client {
         Ok(first)
     }
 }
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+    #[test]
+    fn exact_path_bytes_survive_wire_roundtrip_and_ignore_display() {
+        use std::os::unix::ffi::OsStringExt;
+        let path = PathBuf::from(std::ffi::OsString::from_vec(b"/pin/\xff".to_vec()));
+        let mut wire = HostPath::from_path(&path);
+        wire.display = "/different".into();
+        let decoded: HostPath = serde_json::from_slice(&serde_json::to_vec(&wire).unwrap()).unwrap();
+        assert_eq!(decoded.to_path().unwrap(), path);
+        for bytes in [b"relative".as_slice(), b"/nul\0path", b""] {
+            assert!(HostPath { bytes_base64: STANDARD.encode(bytes), display: "/valid".into() }.to_path().is_err());
+        }
+    }
+}
+
+#[derive(Debug,Clone,serde::Serialize,serde::Deserialize,schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Log { pub session_id:String, pub lines:Option<u16> }

@@ -57,9 +57,19 @@ fn keeps_in_bulk(r: &ChangeRow) -> bool {
 }
 
 /// One daemon call off the GTK thread, `done` with its result on the main loop.
-fn ask<T: serde::de::DeserializeOwned + Send + 'static>(method: &'static str, params: impl serde::Serialize + Clone + Send + 'static, done: impl FnOnce(anyhow::Result<T>) + 'static) {
-    offload(move || super::client::call::<T>(method, params), done);
+fn public_call(method: &str, params: serde_json::Value) -> anyhow::Result<serde_json::Value> { super::client::call(method, params) }
+fn ask_list(done: impl FnOnce(anyhow::Result<ChangesList>) + 'static) { offload(move || crate::changes_client::list(&public_call), done); }
+macro_rules! ask_change {
+    ($name:ident, $fun:ident, $input:ty, $output:ty) => {
+        fn $name(params: $input, done: impl FnOnce(anyhow::Result<$output>) + 'static) { offload(move || crate::changes_client::$fun(&public_call, params), done); }
+    }
 }
+ask_change!(ask_diff, diff, DiffOf, sill_proto::Text);
+ask_change!(ask_history, history, Filter, Vec<Event>);
+ask_change!(ask_git_revert, git_revert, sill_proto::GitRevert, sill_proto::Text);
+ask_change!(ask_keep, keep, sill_proto::ChangesKeep, Done);
+ask_change!(ask_revert, revert, sill_proto::ChangesPaths, Done);
+ask_change!(ask_undo, undo, sill_proto::ChangesUndo, Done);
 
 /// What a keep, revert or undo did, as the line under the bar.
 fn said(verb: &str, d: &Done) -> String {
@@ -205,7 +215,7 @@ impl ChangesPage {
                     }
                 };
                 let p2 = p.clone();
-                ask::<sill_proto::Text>(sill_proto::method::CHANGES_DIFF, of, move |r| {
+                ask_diff( of, move |r| {
                     p2.diff.set_text(&match r {
                         Ok(t) => t.text,
                         Err(e) => format!("diff: {e:#}"),
@@ -231,7 +241,7 @@ impl ChangesPage {
             return;
         }
         let p = self.clone();
-        ask::<ChangesList>(sill_proto::method::CHANGES_LIST, sill_proto::Empty::default(), move |r| {
+        ask_list( move |r| {
             match r {
                 Ok(list) => p.populate(list.live, list.sessions),
                 Err(e) => p.message.set_text(&format!("changes: {e:#}")),
@@ -261,7 +271,7 @@ impl ChangesPage {
         });
         let f = Filter { path, limit: 1000, ..Default::default() };
         let p = self.clone();
-        ask::<Vec<Event>>(sill_proto::method::CHANGES_HISTORY, f, move |r| match r {
+        ask_history( f, move |r| match r {
             Ok(rows) => p.populate_history(rows),
             Err(e) => p.message.set_text(&format!("history: {e:#}")),
         });
@@ -332,7 +342,7 @@ impl ChangesPage {
         if let (HKind::Kept, Some(session), Some(id)) = (e.kind, &e.session_id, &e.kept_id) {
             let p = self.clone();
             let of = DiffOf::Kept { session: session.clone(), id: id.clone() };
-            ask::<sill_proto::Text>(sill_proto::method::CHANGES_DIFF, of, move |r| {
+            ask_diff( of, move |r| {
                 // the payload went with its session: the description stays
                 if let Ok(t) = r {
                     p.diff.set_text(&format!("{text}\n{}", t.text));
@@ -431,7 +441,7 @@ impl ChangesPage {
                     revert_b.connect_clicked(move |b| {
                         b.set_sensitive(false);
                         let (p, shown) = (p.clone(), shown.clone());
-                        ask::<sill_proto::Text>(sill_proto::method::CHANGES_GIT_REVERT, req.clone(), move |r| match r {
+                        ask_git_revert( req.clone(), move |r| match r {
                             Ok(t) => {
                                 p.message.set_text(&format!("{shown}: {}", t.text));
                                 p.refresh();
@@ -494,7 +504,7 @@ impl ChangesPage {
                         b.set_sensitive(false);
                         let p = p.clone();
                         let req = sill_proto::ChangesKeep { session: sid.clone(), items: picked.clone() };
-                        ask::<Done>(sill_proto::method::CHANGES_KEEP, req, move |r| {
+                        ask_keep( req, move |r| {
                             p.message.set_text(&match r {
                                 Ok(d) if skipped == 0 => format!("kept {} file(s){}", d.done.len(), if d.failed.is_empty() { String::new() } else { format!(", {} failed", d.failed.len()) }),
                                 Ok(d) => format!("kept {} file(s); {skipped} left for a click of their own (deletions, type changes, links, conflicts)", d.done.len()),
@@ -513,7 +523,7 @@ impl ChangesPage {
                     revert_all.connect_clicked(move |b| {
                         b.set_sensitive(false);
                         let p = p.clone();
-                        ask::<Done>(sill_proto::method::CHANGES_REVERT, req.clone(), move |r| {
+                        ask_revert( req.clone(), move |r| {
                             p.message.set_text(&match r {
                                 Ok(d) => said("reverted", &d),
                                 Err(e) => format!("revert failed: {e:#}"),
@@ -575,7 +585,7 @@ impl ChangesPage {
                         keep_b.connect_clicked(move |b| {
                             b.set_sensitive(false);
                             let p = p.clone();
-                            ask::<Done>(sill_proto::method::CHANGES_KEEP, req.clone(), move |r| match r {
+                            ask_keep( req.clone(), move |r| match r {
                                 Ok(d) if d.failed.is_empty() => {
                                     p.message.set_text(&said("kept", &d));
                                     p.refresh();
@@ -591,7 +601,7 @@ impl ChangesPage {
                         revert_b.connect_clicked(move |b| {
                             b.set_sensitive(false);
                             let p = p.clone();
-                            ask::<Done>(sill_proto::method::CHANGES_REVERT, req.clone(), move |r| match r {
+                            ask_revert( req.clone(), move |r| match r {
                                 Ok(d) if d.failed.is_empty() => {
                                     p.message.set_text(&said("reverted", &d));
                                     p.refresh();
@@ -630,7 +640,7 @@ impl ChangesPage {
                     undo_all.connect_clicked(move |b| {
                         b.set_sensitive(false);
                         let p = p.clone();
-                        ask::<Done>(sill_proto::method::CHANGES_UNDO, req.clone(), move |r| {
+                        ask_undo( req.clone(), move |r| {
                             p.message.set_text(&match r {
                                 Ok(d) if d.failed.is_empty() => format!("undid {} keep(s)", d.done.len()),
                                 Ok(d) => format!("undid {} keep(s), {} changed on the host since", d.done.len(), d.failed.len()),
@@ -666,7 +676,7 @@ impl ChangesPage {
                             b.set_sensitive(false);
                             let (p, forced, b) = (p.clone(), forced.clone(), b.clone());
                             let req = sill_proto::ChangesUndo { session: sid.clone(), ids: vec![id.clone()], force: forced.get() };
-                            ask::<Done>(sill_proto::method::CHANGES_UNDO, req, move |r| match r {
+                            ask_undo( req, move |r| match r {
                                 Ok(d) if d.failed.is_empty() => {
                                     p.message.set_text(&said("undid", &d));
                                     p.refresh();

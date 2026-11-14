@@ -14,6 +14,8 @@ pub struct PortOpen {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentLogin {
+    /// Durable retry identity, scoped to this daemon store.
+    pub operation_id: Option<String>,
     pub agent_id: String,
     pub method_id: String,
 }
@@ -35,6 +37,8 @@ pub struct AgentResetDone {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RegistryInstall {
+    /// Durable retry identity, scoped to this daemon store.
+    pub operation_id: Option<String>,
     pub entry_id: String,
     pub version: String,
     /// `snapshot` or `live`. Unknown sources are refused.
@@ -81,4 +85,26 @@ pub enum Progress {
     Output { text: String },
     Completed { agent_id: String },
     Failed { code: String, message: String },
+}
+
+/// A durable receipt survives stream loss and daemon restart. Unknown never authorizes replay.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Operation {
+    pub operation_id: String,
+    pub method: String,
+    pub state: OperationState,
+    pub agent_id: Option<String>,
+    pub code: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationState { Running, Completed, Failed, Unknown }
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperationKey { pub operation_id: String }
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct JobStream {
+    /// Present for a newly started job only. Repeated requests recover the receipt, not output.
+    pub token: Option<String>,
+    pub operation: Operation,
 }

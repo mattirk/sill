@@ -111,7 +111,15 @@ fn lane(lane: &'static Lane) -> Result<Arc<Client>> {
 
 /// Actions a lost reply does not show as undone: sent again they could happen twice.
 fn no_blind_retry(method: &str) -> bool {
-    matches!(method, "_sill/sessions.update" | "_sill/sessions.start" | "_sill/sessions.stop" | "_sill/sessions.end" | "_sill/sessions.checkpoint" | "_sill/terminals.open" | "_sill/streams.port" | "_sill/agents.login" | "_sill/registry.install")
+    // Unknown/new methods default to no retry. Only explicitly read-only calls may be replayed.
+    !matches!(method,
+        "_sill/daemon.schema" | "_sill/sessions.list" | "_sill/sessions.get" |
+        "_sill/operations.get" | "_sill/registry.list" | "_sill/terminals.list" | "_sill/terminals.get" | "_sill/terminals.cwd" |
+        "_sill/changes.list" | "_sill/changes.diff" | "_sill/changes.history" |
+        "_sill/pins.list" | "_sill/files.list" | "_sill/files.read" | "_sill/files.stat" |
+        "_sill/settings.get" | "_sill/policy.list" | "_sill/policy.get" | "_sill/agents.list" | "_sill/agents.get" |
+        "_sill/memory.list" | "_sill/memory.show" | "_sill/memory.search" | "_sill/memory.transcript" |
+        "_sill/procs.list" | "_sill/procs.tail" | "_sill/uploads.get")
 }
 
 /// One request on a lane; on a connection the daemon has closed, once more on a fresh one.
@@ -162,39 +170,39 @@ pub fn new_session(n: sill_proto::NewSession) -> Result<String> {
 
 /// The trash can: jail, state and row go. Blocking for as long as the stop takes.
 pub fn delete(id: &str) -> Result<()> {
-    write::<serde_json::Value>(sill_proto::method::SESSIONS_DELETE, sill_proto::Key { key: id.to_string() })?;
+    write::<serde_json::Value>("_sill/sessions.delete", sill_proto::sessions::SessionKey { session_id: id.to_string() })?;
     Ok(())
 }
 
 pub fn pin(id: &str, path: &std::path::Path, on: bool) -> Result<()> {
-    let m = if on { sill_proto::method::SESSIONS_PIN } else { sill_proto::method::SESSIONS_UNPIN };
-    write::<serde_json::Value>(m, sill_proto::Pin { key: id.to_string(), path: path.to_path_buf() })?;
+    let m = if on { "_sill/sessions.pin" } else { "_sill/sessions.unpin" };
+    write::<serde_json::Value>(m, sill_proto::pins::SessionPin { session_id: id.to_string(), path: sill_proto::sessions::HostPath::from_path(path) })?;
     Ok(())
 }
 
 /// A global pin added or removed (docs/pins.md); the daemon canonicalizes and refuses nested ones.
 pub fn global_pin(path: &std::path::Path, on: bool) -> Result<()> {
-    let m = if on { sill_proto::method::PINS_ADD } else { sill_proto::method::PINS_REMOVE };
-    write::<serde_json::Value>(m, sill_proto::GlobalPin { path: path.to_path_buf() })?;
+    let m = if on { "_sill/pins.add" } else { "_sill/pins.remove" };
+    write::<serde_json::Value>(m, sill_proto::pins::GlobalPin { path: sill_proto::sessions::HostPath::from_path(path) })?;
     Ok(())
 }
 
 pub fn note_add(id: &str, text: &str) -> Result<()> {
-    write::<serde_json::Value>(sill_proto::method::MEMORY_NOTE_ADD, sill_proto::Note { key: id.to_string(), text: text.to_string(), ts: 0 })?;
+    write::<serde_json::Value>("_sill/memory.notes.add", sill_proto::memory::AddNote {session_id:id.into(),text:text.into()})?;
     Ok(())
 }
 
 pub fn note_remove(id: &str, ts: i64, text: &str) -> Result<()> {
-    write::<serde_json::Value>(sill_proto::method::MEMORY_NOTE_REMOVE, sill_proto::Note { key: id.to_string(), text: text.to_string(), ts })?;
+    write::<serde_json::Value>("_sill/memory.notes.remove", sill_proto::memory::RemoveNote {session_id:id.into(),text:text.into(),timestamp:ts.to_string()})?;
     Ok(())
 }
 
 pub fn compact() -> Result<sill_proto::Compacted> {
-    write(sill_proto::method::MEMORY_COMPACT, sill_proto::Empty::default())
+    let d:sill_proto::memory::Compacted=write("_sill/memory.compact",sill_proto::Empty::default())?;Ok(sill_proto::Compacted {compacted:d.compacted.parse()?,trimmed:d.trimmed.parse()?,deleted:d.deleted.parse()?})
 }
 
 pub fn forget_ended() -> Result<usize> {
-    Ok(write::<sill_proto::Count>(sill_proto::method::MEMORY_FORGET, sill_proto::Empty::default())?.n)
+    Ok(write::<sill_proto::memory::Forgotten>("_sill/memory.forget",sill_proto::Empty::default())?.deleted.parse()?)
 }
 
 fn forget(c: &Arc<Client>) {
@@ -226,7 +234,7 @@ pub fn status() -> Result<sill_proto::DaemonStatus> {
 
 /// A session's log tail, as text — the viewer's reader.
 pub fn session_log(id: &str, lines: usize) -> String {
-    match call::<sill_proto::Text>(sill_proto::method::SESSIONS_LOG, sill_proto::LogRequest { key: id.to_string(), lines }) {
+    match call::<sill_proto::Text>("_sill/sessions.log", sill_proto::sessions::Log { session_id: id.to_string(), lines:Some(lines.clamp(1,20000) as u16) }) {
         Ok(t) => t.text,
         Err(e) => format!("{e:#}"),
     }
@@ -238,8 +246,7 @@ pub fn session_log(id: &str, lines: usize) -> String {
 pub fn attach(id: &str, fresh: bool, events: async_channel::Sender<Event>) -> Result<u64> {
     if fresh {
         let c = connected()?;
-        c.call::<serde_json::Value>(sill_proto::method::SESSIONS_ATTACH, sill_proto::Attach { key: id.into(), fresh: true })?;
-        c.call::<serde_json::Value>(sill_proto::method::SESSIONS_DETACH, sill_proto::Key { key: id.into() })?;
+        c.call::<serde_json::Value>("_sill/sessions.reset", sill_proto::sessions::SessionKey { session_id: id.into() })?;
     }
     let view = Arc::new(Mutex::new(sill_core::sfp_client::View::default()));
     let generation = NEXT_SUB.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -330,7 +337,7 @@ fn dispatch(c: Arc<Client>) {
     loop {
         let next = c.notifications.lock().unwrap().recv();
         let Ok((method, params)) = next else { break };
-        if method == sill_proto::method::CHANGES_CHANGED {
+        if method == "_sill/changes.changed" {
             super::remote::invalidate();
             lifecycle(String::new(), Lifecycle::ChangesChanged);
             continue;
