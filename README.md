@@ -1,6 +1,6 @@
 # sill
 
-**A shelf for AI coding agents.** Sill runs Claude Code, Codex, Gemini or any
+**A shelf for AI coding agents.** Sill runs Claude Code, Codex, Kimi Code or any
 [ACP](https://agentclientprotocol.com) agent in a jail on your own machine or remote box. The agent sees
 the whole machine, but what it may change, reach and keep is up to you.
 
