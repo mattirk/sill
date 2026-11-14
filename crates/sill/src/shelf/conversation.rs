@@ -1308,7 +1308,7 @@ dropdown > popover listview > row:selected { background: alpha(@accent_bg_color,
 .sill-new { color: @success_color; }
 .sill-pending { color: @accent_color; }
 .sill-dim { opacity: 0.45; }
-.sill-pinned { color: @accent_color; }
+.sill-file-icon.sill-pinned { opacity: 1; }
 .sill-editor gutter { border: none; }
 /* fixed-width text anywhere GTK's own `.monospace` class marks it (the editor, change rows) */
 .monospace, textview.monospace { font-family: monospace; }

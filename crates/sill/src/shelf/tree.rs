@@ -433,7 +433,7 @@ impl FolderTree {
                 icon.set_visible(section.is_none());
                 pin.set_visible(section.is_none());
                 if let Some(caption) = section {
-                    for c in ["sill-changed", "sill-pending", "sill-below", "sill-dim", "sill-pinned", "sill-new"] {
+                    for c in ["sill-changed", "sill-pending", "sill-below", "sill-dim", "sill-new"] {
                         name.remove_css_class(c);
                     }
                     name.add_css_class("sill-tree-section");
@@ -463,12 +463,23 @@ impl FolderTree {
                 let searching = tree_rc.borrow().as_ref().and_then(|w| w.upgrade()).is_some_and(|t| !t.query.borrow().is_empty());
                 let is_root = row.depth() == 0 && !home_caption && !searching;
                 // every row's icon is a sill glyph in the foreground colour (rows are rebound on a
-                // theme change, so they follow it); a link shows as one, whatever it points at
-                let fg = super::icons::fg_for(&icon, &theme::current());
+                // theme change, so they follow it); a link shows as one, whatever it points at. A
+                // pinned row's icon is in the accent, at full strength — the name's colour is the
+                // change's alone
+                let is_pinned = pinned.borrow().contains(&path);
+                let mut fg = super::icons::fg_for(&icon, &theme::current());
+                if is_pinned {
+                    if let Ok(accent) = gtk::gdk::RGBA::parse(theme::current().accent) {
+                        fg = accent;
+                    }
+                    icon.add_css_class("sill-pinned");
+                } else {
+                    icon.remove_css_class("sill-pinned");
+                }
                 let glyph = if link { "sill-link" } else { row_glyph(&path, is_dir, row.is_expanded(), is_root) };
                 icon.set_paintable(super::icons::stroke_texture(glyph, fg).as_ref());
                 let fname = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                for c in ["sill-changed", "sill-pending", "sill-below", "sill-dim", "sill-pinned", "sill-new"] {
+                for c in ["sill-changed", "sill-pending", "sill-below", "sill-dim", "sill-new"] {
                     name.remove_css_class(c);
                 }
                 if is_noise(&fname) {
@@ -530,10 +541,6 @@ impl FolderTree {
                     };
                     name.set_tooltip_text(Some(&tip));
                 }
-                let is_pinned = pinned.borrow().contains(&path);
-                if is_pinned {
-                    name.add_css_class("sill-pinned");
-                }
                 let is_repo = is_dir && path.join(".git").exists();
                 // a repository root: `git <branch>` (the short hash when detached), then its main
                 // language (what most of the tracked code is)
@@ -571,7 +578,7 @@ impl FolderTree {
                         }
                     }
                 }
-                // pinned: the name's colour says so (the tooltip names another session's pin)
+                // pinned: the icon's colour says so (the tooltip names another session's pin)
                 let is_elsewhere = !is_pinned && elsewhere.borrow().contains(&path);
                 badge.set_text(&parts.join(" "));
                 let mut tip: Vec<String> = Vec::new();

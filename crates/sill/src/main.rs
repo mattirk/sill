@@ -63,13 +63,13 @@ enum Cmd {
         #[arg(long)]
         cgroup_root: Option<PathBuf>,
     },
-    /// Set the machine up (root): checks, binaries, policy, state filesystem, cgroup delegation;
-    /// `--user` sets up the shelf autostart for this account instead (SPEC §4.12)
     /// The daemon (docs/daemon.md): run it (what sill.service does), or ask the running one
     Daemon {
         #[command(subcommand)]
         cmd: Option<DaemonCmd>,
     },
+    /// Set the machine up (root): checks, binaries, policy, state filesystem, cgroup delegation;
+    /// `--user` sets up the shelf autostart for this account instead (SPEC §4.12)
     Init(init::InitArgs),
     /// Serve a session's network proxy (SPEC §4.8) on an inherited listening socket
     Proxy {
