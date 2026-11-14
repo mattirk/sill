@@ -726,3 +726,45 @@ fn looks_leave_no_commits_and_prune_drops_their_leavings_after_an_hour() {
     prune(&c.path).unwrap();
     assert!(of(&kept).exists(), "reachable, so kept");
 }
+
+#[test]
+fn rebased_checkout_does_not_offer_the_same_patch_again() {
+    let d = tmp("mirror-rebased");
+    let (s, _, c) = setup(&d);
+    let base = head(&s);
+    write(&c.path.join("f1.txt"), "agent work\n");
+    commit(&c, "agent");
+    apply_now(&s, &c).unwrap();
+    let applied = head(&s);
+    git(&s, &["checkout", "-qb", "upstream", &base]);
+    write(&s.join("upstream.txt"), "upstream work\n");
+    git(&s, &["add", "."]);
+    git(&s, &["commit", "-qm", "upstream"]);
+    git(&s, &["checkout", "-q", "main"]);
+    git(&s, &["rebase", "upstream"]);
+    assert_ne!(head(&s), applied);
+    assert!(!unapplied(&s, &c.path, &c.branch).unwrap());
+    assert!(pending(&s, &c).is_empty());
+    // Both uncommitted and committed follow-up work remain visible.
+    write(&c.path.join("f2.txt"), "follow-up\n");
+    assert_eq!(pending(&s, &c), ["f2.txt"]);
+    commit(&c, "follow-up");
+    assert_eq!(pending(&s, &c), ["f2.txt"]);
+    let m = mirror(&s, &c.path, &c.branch).unwrap();
+    assert_eq!(git(&c.path, &["rev-list", "--count", &format!("{}..HEAD", m.upstream)]), "1");
+}
+
+#[test]
+fn equivalent_later_patch_does_not_hide_an_unmatched_prefix() {
+    let d = tmp("mirror-partial-equivalence");
+    let (s, _, c) = setup(&d);
+    write(&c.path.join("f1.txt"), "not applied\n");
+    commit(&c, "first");
+    write(&c.path.join("f2.txt"), "already present\n");
+    commit(&c, "second");
+    let second = git(&c.path, &["rev-parse", "HEAD"]);
+    git(&s, &["fetch", c.path.to_str().unwrap(), &c.branch]);
+    git(&s, &["cherry-pick", &second]);
+    assert!(unapplied(&s, &c.path, &c.branch).unwrap());
+    assert_eq!(pending(&s, &c), ["f1.txt", "f2.txt"]);
+}

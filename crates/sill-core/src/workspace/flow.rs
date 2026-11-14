@@ -381,7 +381,8 @@ pub struct Mirror {
     /// The tree of the person's side: `upstream`'s.
     pub tree: String,
     /// Where the workspace's own commits start: the checkout's tip when the workspace has it,
-    /// else their common ancestor (a rebase is due). `rev-list upstream..branch` is the
+    /// else their common ancestor advanced over a linear prefix of patch-equivalent commits
+    /// already in the checkout (a rebase is due). `rev-list upstream..branch` is the
     /// workspace's own commits.
     pub upstream: String,
     /// The tree of the workspace's state now.
@@ -401,13 +402,17 @@ pub fn mirror(source: &Path, clone: &Path, workspace_branch: &str) -> Result<Mir
     let tip = rev(&ws, &format!("refs/heads/{workspace_branch}"))?;
     let (_, dest) = super::head_of(&src)?;
     let upstream = if super::descends_in(&ws, &dest, &tip)? {
-        dest
+        dest.clone()
     } else {
         let mut c = ws.cmd();
         c.args(["merge-base", &dest, &tip]);
         let out = run(c)?;
         if out.status.success() { String::from_utf8_lossy(&out.stdout).trim().to_string() } else { rev(&ws, "refs/sill/base")? }
     };
+    // A checkout rebase rewrites identities without removing the agent's patches.
+    // Advance only over a contiguous, linear prefix already present there. Never skip
+    // an unmatched commit or a merge: later work must stay visible in the summary.
+    let upstream = equivalent_prefix(&ws, &dest, &tip, upstream)?;
     let now = worktree_tree(&ws, clone)?;
     let tree = rev(&ws, &format!("{upstream}^{{tree}}"))?;
     let committed = now == rev(&ws, &format!("{tip}^{{tree}}"))?;
@@ -417,6 +422,30 @@ pub fn mirror(source: &Path, clone: &Path, workspace_branch: &str) -> Result<Mir
     let here = tree_entries(&ws, &now, &dirty_paths)?;
     let checkout_only: Vec<String> = dirty_paths.into_iter().filter(|p| !same_blob(host.get(p), here.get(p))).collect();
     Ok(Mirror { changed: tree != now, tree, upstream, now, committed, checkout_only })
+}
+
+fn equivalent_prefix(ws: &Git, dest: &str, tip: &str, mut upstream: String) -> Result<String> {
+    if upstream == tip || super::descends_in(ws, dest, tip)? {
+        return Ok(upstream);
+    }
+    let mut c = ws.cmd();
+    c.args(["cherry", dest, tip, &upstream]);
+    let cherry = ok(c, "compare rebased workspace patches")?;
+    let equivalent: std::collections::BTreeSet<_> =
+        cherry.lines().filter_map(|line| line.strip_prefix("- ")).collect();
+    if equivalent.is_empty() {
+        return Ok(upstream);
+    }
+    let mut c = ws.cmd();
+    c.args(["rev-list", "--reverse", "--topo-order", "--parents", &format!("{upstream}..{tip}")]);
+    for line in ok(c, "list workspace patch prefix")?.lines() {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        if fields.len() != 2 || fields[1] != upstream || !equivalent.contains(fields[0]) {
+            break;
+        }
+        upstream = fields[0].to_string();
+    }
+    Ok(upstream)
 }
 
 /// Whether a working tree's entry holds the blob a tree has at the path: the same content, or
