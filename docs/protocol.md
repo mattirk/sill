@@ -162,9 +162,16 @@ input returns the original identity across disconnect/restart; changed input ret
 `id_conflict`. Creation, configuration and the retry receipt are one transaction. Display-path
 text is excluded from retry identity. Deleting a session clears its identity from the receipt;
 a subsequent retry returns `gone`, never creates another session. Receipts retain only SHA-256
-fingerprints of the key and input and the live session ID. They currently have no time expiry;
-the ledger is bounded at 65,536 entries (further new IDs return `limit_exceeded`). Receipt
-retention/compaction remains freeze work. Creation does not start a jail or agent.
+fingerprints of the key and input and the live session ID.
+
+**Receipt retention (settled for sfp/1, 2026-11-03):** creation receipts never expire;
+there is no retry window. The daemon-store ledger retains at most 65,536 entries, including
+deletion tombstones. New IDs at capacity return `limit_exceeded`; deleting a session does not
+free ledger capacity. Existing IDs are resolved before the capacity check: identical retries
+return the original session or `gone`, and conflicting input still returns `id_conflict`.
+This matches the permanent-receipt policy for login/install operations. Automatic expiration
+or eviction must not allow an old retry to create another session. Creation does not start
+a jail or agent.
 
 Other lifecycle mutations **must not be blindly retried** after timeout/connection loss: read
 metadata and conversation state first; uncertainty does not establish that nothing happened.
@@ -303,11 +310,50 @@ settings, policy and managed processes. There is no internal frontend RPC surfac
 The experimental native ACP v2 adapter is implemented behind `experimental_acp_v2 = true`, with
 ACP v1 retained as the default. See [native behavior and recovery evidence](sfp-operations.md#experimental-native-acp-v2).
 This milestone remains `sfp/1-dev.3`: real third-party v2 interoperability, historical replay
-after relay replacement, large-session performance review and user acceptance testing remain
+after relay replacement, remaining performance validation and user acceptance testing remain
 before a stable freeze. Snapshot capture still copies under the store lock; canonical history
 and idempotency identities remain proportional to retained sessions, and native v2 reconstruction
 currently caches retained source payloads. The implemented quotas are intentional bounds, not a
 promise of unlimited history or automatic eviction of retry identities.
+
+### Snapshot benchmark and disposition (2026-11-03)
+
+Measured inside a sill jail using the optimized `local` profile. The opt-in
+`daemon::sfp::tests::snapshot_capture_benchmark` seeds canonical history through the real
+journal and calls the production snapshot capture code. A competing journal write to a
+second session waits on the same store mutex arrangement used by the daemon.
+
+| Text payload | Items | Capture | Competing write lock wait | Page decode | Process peak RSS |
+|---|---:|---:|---:|---:|---:|
+| 10 MiB | 129 | 47 ms | 47 ms | 11 ms | 30.4 MiB |
+| 100 MiB | 1,569 | 231 ms | 231 ms | 40 ms | 35.9 MiB |
+| 500 MiB | 7,969 | 1.682 s | 1.682 s | 249 ms | 61.4 MiB |
+
+These are single-run observations, not latency guarantees. Each size ran in a separate
+process; peak RSS includes fixture generation and decoding. The fixture uses ordinary
+64 KiB text records and one 2 MiB UTF-8 record to exercise fragmentation. Sizes describe
+text payload, not total database size or uploads. Every item is checked for exact text
+and uniqueness after decoding; all cases passed. The six existing snapshot regressions
+also passed.
+
+Reproduce each size separately (replace `100` with `10` or `500`):
+
+```sh
+SILL_SFP_BENCH_MIB=100 cargo test --profile local -p sill-shelf --no-default-features snapshot_capture_benchmark -- --ignored --nocapture --test-threads=1
+```
+
+**Decision:** defer the shared-lock redesign. The 500 MiB fixture is an extreme text-history
+stress case, not evidence of a typical workload; actual user session sizes have not been
+measured. The benchmark demonstrates scaling and a known cross-session stall, not a
+correctness failure or an independently established sfp/1 release blocker. Retain this
+benchmark for future comparisons. A redesign must preserve atomic snapshot/live handoff,
+lease quotas and bounded buffering.
+
+This is a direct capture benchmark, not a running-daemon or Python-client workload.
+Decoding streams records rather than retaining a full frontend view. It does not measure
+network download, concurrent live output, slow/multiple readers, restart recovery or native
+ACP v2 projector growth. Temporary storage and filesystem cache are not included in process
+RSS. Those remain separate validation areas; no production locking change was made.
 
 ### Additional development public APIs (2026-11-03)
 

@@ -108,3 +108,82 @@ fn replacement_capture_counts_old_lease_and_failure_preserves_it() {
     all.remove(1,&f.session);
     snapshot(&j,1,&f.session,"replacement",&mut all).unwrap();
 }
+
+/// Explicit benchmark, excluded even from the optional conformance run unless sized.
+/// Run one size per process so Linux VmHWM is meaningful:
+/// SILL_SFP_BENCH_MIB=100 cargo test -p sill-shelf --no-default-features
+///     snapshot_capture_benchmark -- --ignored --nocapture --test-threads=1
+#[test]
+#[ignore = "large-session benchmark; requires SILL_SFP_BENCH_MIB"]
+fn snapshot_capture_benchmark() {
+    let Ok(size) = std::env::var("SILL_SFP_BENCH_MIB") else {
+        eprintln!("benchmark skipped: set SILL_SFP_BENCH_MIB");
+        return;
+    };
+    let mib: usize = size.parse().expect("integer MiB");
+    assert!((4..=500).contains(&mib), "use 4..=500 MiB");
+    let mut f = Fixture::new();
+    let other = f.store.create_with("test", "default", false).unwrap().id;
+    let j = Journal::new(&f.store).unwrap();
+    j.ensure(&other, "generation").unwrap();
+    // Ordinary 64 KiB records plus a fragmented 2 MiB UTF-8 record. Write through
+    // the journal, including event compaction and canonical persistence.
+    let ordinary = "x".repeat(64 * 1024);
+    let large = "🦀".repeat(512 * 1024);
+    let count = (mib - 2) * 16 + 1;
+    let seed = Instant::now();
+    for i in 0..count {
+        let Event::ItemCreated { mut item } = f.note(i) else { unreachable!() };
+        item.content = vec![Content::text(if i == 0 { &large } else { &ordinary })];
+        j.append(&f.session, None, &[Event::ItemCreated { item }]).unwrap();
+    }
+    let seeded = seed.elapsed();
+    let at = j.cursor(&f.session).unwrap();
+    // Same shared-store serialization as Hub. The competing writer is released
+    // only after capture owns the lock; this measures a worst-case collision.
+    let write_event = f.note(count);
+    let shared = std::sync::Mutex::new(&mut f.store);
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let shared_ref = &shared;
+        let writer = scope.spawn(move || {
+            ready_rx.recv().unwrap();
+            let start = Instant::now();
+            let store = shared_ref.lock().unwrap();
+            let waited = start.elapsed();
+            Journal::new(&store).unwrap().append(&other, None, &[write_event]).unwrap();
+            (waited, start.elapsed())
+        });
+        let store = shared.lock().unwrap();
+        let mut all = Subscriptions::default();
+        let start = Instant::now();
+        ready_tx.send(()).unwrap();
+        let Attached::Snapshot { snapshot: lease, .. } = snapshot(
+            &Journal::new(&store).unwrap(), 1, &f.session, "bench", &mut all,
+        ).unwrap() else { unreachable!() };
+        let capture = start.elapsed();
+        drop(store);
+        let (waited, write) = writer.join().unwrap();
+        let saved = &all.snapshots[&lease.token];
+        assert_eq!(saved.at, at);
+        let read = Instant::now();
+        let mut decoder = SnapshotDecoder::default();
+        let mut seen = std::collections::HashSet::new();
+        for index in 0..saved.page_count {
+            for record in decoder.records(&saved.page(index).unwrap()).unwrap() {
+                if let Record::Item { item } = record {
+                    assert!(seen.insert(item.item_id.clone()), "duplicate item");
+                    let expected = if item.item_id == "item-0" { &large } else { &ordinary };
+                    assert_eq!(item.content[0].text.as_deref(), Some(expected.as_str()));
+                }
+            }
+        }
+        assert_eq!(seen.len(), count);
+        let decode = read.elapsed();
+        let db_bytes: u64 = std::fs::read_dir(&f.root).unwrap().map(|p| p.unwrap().metadata().unwrap().len()).sum();
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        let peak = status.lines().find(|l| l.starts_with("VmHWM:")).unwrap_or("VmHWM: unavailable");
+        println!("SFP_BENCH mib={mib} items={count} seed_s={:.3} capture_s={:.3} other_wait_s={:.3} other_write_s={:.3} decode_s={:.3} pages={} spool_bytes={} db_bytes={db_bytes} {peak}",
+            seeded.as_secs_f64(), capture.as_secs_f64(), waited.as_secs_f64(), write.as_secs_f64(), decode.as_secs_f64(), saved.page_count, saved.bytes);
+    });
+}

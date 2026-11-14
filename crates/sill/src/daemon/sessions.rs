@@ -275,6 +275,48 @@ impl Hub {
 mod tests {
     use super::*;
     #[test]
+    fn full_create_ledger_preserves_retries_conflicts_and_tombstones_after_reopen() {
+        let dir = std::env::temp_dir().join(format!("sill-create-capacity-{}", crate::daemon::sfp::id()));
+        let path = dir.join("store.db");
+        let store = Store::open(&path).unwrap();
+        let input = api::Create {
+            create_id: "durable".into(), agent: "test".into(), policy: "default".into(),
+            ..Default::default()
+        };
+        let first = create(&store, input.clone()).unwrap();
+        // Fill the remaining slots with tombstones, without creating 65k sessions.
+        store.conn().execute_batch("WITH RECURSIVE n(x) AS (
+            VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<65535
+        ) INSERT INTO sfp_creates SELECT 'fixture-' || x, 'fixture', NULL FROM n;").unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        let code = |result: Result<api::SessionKey>| {
+            let error = result.err().expect("request must fail");
+            failure(error).data.unwrap()["code"].as_str().unwrap().to_owned()
+        };
+        let mut fresh = input.clone();
+        fresh.create_id = "new-id".into();
+        let error = failure(create(&store, fresh.clone()).err().unwrap());
+        assert_eq!(error.data.as_ref().unwrap()["code"], "limit_exceeded");
+        assert_eq!(error.data.unwrap()["details"]["scope"], "capacity");
+        assert_eq!(create(&store, input.clone()).unwrap().session_id, first.session_id);
+        let mut conflict = input.clone();
+        conflict.agent = "different".into();
+        assert_eq!(code(create(&store, conflict.clone())), "id_conflict");
+        assert_eq!(store.sessions().unwrap().len(), 1);
+        store.delete(&first.session_id).unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(code(create(&store, input)), "gone");
+        assert_eq!(code(create(&store, conflict)), "id_conflict");
+        assert_eq!(code(create(&store, fresh)), "limit_exceeded");
+        assert!(store.sessions().unwrap().is_empty());
+        assert_eq!(store.conn().query_row("SELECT count(*) FROM sfp_creates", [], |r| r.get::<_, i64>(0)).unwrap(), 65536);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn creation_is_atomic_and_paths_never_use_display_text() {
         let dir = std::env::temp_dir().join(format!("sill-create-test-{}", crate::daemon::sfp::id()));
         let store = Store::open(&dir.join("store.db")).unwrap();
