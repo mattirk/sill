@@ -17,6 +17,7 @@ fn record(store: &Store, s: sill_core::store::Session) -> Result<api::Session> {
             }
         }),
         name: store.session_name(&s.id),
+        host_control: crate::daemon::host_control::brief(&s.id),
         pins: store.pins(&s.id)?.iter().map(|p| api::HostPath::from_path(p)).collect(),
         session_id: s.id,
         agent: s.agent,
@@ -261,6 +262,7 @@ impl Hub {
                             }))
                         }
                         "_sill/sessions.stop" => {
+                            crate::daemon::host_control::session_ended(self, &a.session_id, "the session stopped");
                             self.retire_runner(&a.session_id);
                             sill_core::session::stop(&a.session_id)?;
                             Ok(json!({}))

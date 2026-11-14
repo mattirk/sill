@@ -525,7 +525,7 @@ pub fn caption<'a>(view: &'a SessionView, session: Option<&Session>) -> Option<E
     )
 }
 
-fn small<'a>(label: &'a str, message: Option<Message>) -> Element<'a, Message> {
+pub(crate) fn small<'a>(label: &'a str, message: Option<Message>) -> Element<'a, Message> {
     keys::press_maybe(
         button(text(label).size(style::TINY))
             .padding([2, 8])
@@ -544,14 +544,14 @@ const RESTART_SLOT: f32 = 92.0;
 
 /// An on/off switch in a fixed slot: the warning colour when on (expanded access), dimmed when it
 /// cannot be changed.
-fn switch<'a>(on: bool, set: Option<impl Fn(bool) -> Message + 'a>) -> Element<'a, Message> {
+pub(crate) fn switch<'a>(on: bool, set: Option<impl Fn(bool) -> Message + 'a>) -> Element<'a, Message> {
     container(crate::settings_ui::switch_styled(on, P.warning, 16.0, set))
         .width(SWITCH_SLOT)
         .into()
 }
 
 /// `content` with its explanation in a tooltip: the panel shows names and states only.
-fn tip<'a>(content: impl Into<Element<'a, Message>>, said: String) -> Element<'a, Message> {
+pub(crate) fn tip<'a>(content: impl Into<Element<'a, Message>>, said: String) -> Element<'a, Message> {
     tooltip(
         content,
         container(text(said).size(style::SMALL))
@@ -564,7 +564,7 @@ fn tip<'a>(content: impl Into<Element<'a, Message>>, said: String) -> Element<'a
 }
 
 /// A row's name, explained on hover.
-fn name<'a>(name: &'a str, said: String) -> Element<'a, Message> {
+pub(crate) fn name<'a>(name: &'a str, said: String) -> Element<'a, Message> {
     tip(text(name).size(style::SMALL).width(140), said)
 }
 
@@ -776,17 +776,20 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>) -> Element
                     content = content.push(hosts(id, views, perms, can_change));
                 }
             }
-            folded.push("Host control");
-            why.push("Host control, for the real desktop and host processes outside the jail: needs an explicit activation, not implemented yet. A policy or a choice never turns it on.".into());
-            content = content.push(tip(
-                text(format!("{}: not available yet", folded.join(", ")))
-                    .size(style::TINY)
-                    .color(P.fg_dim)
-                    .wrapping(text::Wrapping::None),
-                why.join("\n"),
-            ));
+            if !folded.is_empty() {
+                content = content.push(tip(
+                    text(format!("{}: not available yet", folded.join(", ")))
+                        .size(style::TINY)
+                        .color(P.fg_dim)
+                        .wrapping(text::Wrapping::None),
+                    why.join("\n"),
+                ));
+            }
         }
     }
+    // Host actions: the separately labelled group of docs/permission-modes.md, independent of
+    // the policy read
+    content = content.push(crate::host_control::group(view, session, can_change));
     let restorable = perms.views.as_ref().is_some_and(|views| {
         views.preview.permissions.iter().any(|p| p.requested.is_some())
             || !views.preview.session_hosts.is_empty()
@@ -999,7 +1002,7 @@ mod tests {
         ui.find("Applies after a restart").unwrap();
         ui.find("blocked.example · blocked").unwrap();
         ui.find("Requested · unavailable").is_err().then_some(()).unwrap();
-        ui.find("Test desktop, Private D-Bus, GPU rendering, Host control: not available yet").unwrap();
+        ui.find("Test desktop, Private D-Bus, GPU rendering: not available yet").unwrap();
         assert!(ui.find("TOOL APPROVALS").is_err(), "no group headings");
     }
 
@@ -1183,7 +1186,7 @@ mod tests {
         perms.views = Some(Views { launch: Some(preview.clone()), preview, agent_name: None });
         let mut ui = simulator(&app, (720.0, 860.0));
         ui.find("Desktop development").unwrap();
-        ui.find("Private D-Bus, GPU rendering, Host control: not available yet").unwrap();
+        ui.find("Private D-Bus, GPU rendering: not available yet").unwrap();
         ui.find("Jailed · expanded access · Test desktop").unwrap();
     }
 

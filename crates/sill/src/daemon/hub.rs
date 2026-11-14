@@ -215,6 +215,11 @@ impl Hub {
         self.store.lock().unwrap().sessions().ok().and_then(|v| v.into_iter().find(|s| s.id == id)).is_some_and(|s| s.auto_allow)
     }
 
+    /// Every open frontend connection.
+    pub(super) fn connections(&self) -> Vec<Arc<Conn>> {
+        self.conns.lock().unwrap().iter().filter_map(|w| w.upgrade()).collect()
+    }
+
     pub fn connected(&self, conn: &Arc<Conn>) {
         let mut c = self.conns.lock().unwrap();
         c.retain(|w| w.strong_count() > 0);
@@ -241,6 +246,8 @@ impl Hub {
         for id in public_ids {
             self.presence(&id);
         }
+        // a Host control activation nobody displays any more ends (docs/permission-modes.md)
+        super::host_control::displaying_changed(self);
     }
 
     /// Tell the session's shim how many frontends are attached (docs/daemon.md §3.6): the agent
@@ -271,6 +278,7 @@ impl Hub {
         self.sfp.lock().unwrap().expire();
         super::streams::reap();
         super::terminals::reap();
+        super::host_control::sweep(self);
         self.reap_strays();
         let now = sill_core::store::now();
         let mut ids: Vec<String> = self.children.lock().unwrap().keys().cloned().collect();
@@ -352,6 +360,13 @@ impl Hub {
     pub fn dispatch(self: &Arc<Self>, conn: &Arc<Conn>, m: &str, params: Value) -> Result<Value, Error> {
         if let Some(result) = self.changes_public(m, params.clone()) { return result.map_err(super::sfp::failure); }
         if let Some(result) = super::agent_admin::handle(self, m, params.clone()) { return result.map_err(super::sfp::failure); }
+        if let Some(result) = super::host_control::handle(self, conn, m, params.clone()) {
+            return result.map_err(|e| {
+                if let Some(e) = e.downcast_ref::<Error>() { return e.clone(); }
+                if e.downcast_ref::<sill_core::sfp::DomainError>().is_some() { return super::sfp::failure(e); }
+                Error::domain("operation_failed", format!("{e:#}"))
+            });
+        }
         if let Some(result) = super::admin::handle(self, conn.id, m, params.clone()) {
             return result.map_err(|e| {
                 if let Some(e) = e.downcast_ref::<Error>() { return e.clone(); }
@@ -567,6 +582,7 @@ impl Hub {
             bail!("not a session id");
         }
         super::terminals::forget_session(id);
+        super::host_control::session_ended(self, id, "the session was deleted");
         let ghost = self.is_ghost(id);
         let had_runner = self.runners.lock().unwrap().contains_key(id);
         let relay_dir = sill_proto::runtime_dir()?.join(id);

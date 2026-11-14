@@ -21,11 +21,12 @@ pub const CAPABILITIES: &[Capability] = &[
     Capability { name: "sill.send_now", version: 1, doc: "_sill/submissions.send_now: a queued submission goes next, the active turn stopped." },
     Capability { name: "sill.permission_modes", version: 1, doc: "The frontend shows session permission state: it may change session capability choices (_sill/permissions.set, apply_development, restore_defaults) and operate sessions using Desktop development or Host control capabilities." },
     Capability { name: "sill.desktop_view", version: 1, doc: "_sill/desktop.capture and _sill/desktop.read: pictures of a session's test desktop, for a live view." },
+    Capability { name: "sill.host_control", version: 1, doc: "The frontend displays Host control: the permanent session caption and the window-level line naming every session with active control. It may activate and revoke (_sill/host_control.activate, revoke); attached to a session, it counts as displaying that session's control, which ends when the last such connection goes." },
 ];
 
 /// Capabilities that state a frontend's own user-facing contract. The shared client offers
 /// them only when the program declares it implements them, never for every program linking it.
-pub const FRONTEND_DECLARED: &[&str] = &["sill.permission_modes"];
+pub const FRONTEND_DECLARED: &[&str] = &["sill.permission_modes", "sill.host_control"];
 
 /// Whether `name` is a well-formed capability name.
 pub fn valid_capability_name(name: &str) -> bool {

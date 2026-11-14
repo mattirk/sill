@@ -323,7 +323,7 @@ fn write_session_hosts(session_id: &str, hosts: &std::collections::BTreeSet<Stri
     let _ = fs::remove_file(temporary);
     result
 }
-fn session_with_pins(hub: &Hub, id: &str) -> Result<(sill_core::store::Session, Vec<PathBuf>)> {
+pub(super) fn session_with_pins(hub: &Hub, id: &str) -> Result<(sill_core::store::Session, Vec<PathBuf>)> {
     hub.with_store(|store| {
         let row = store.session_exact(id)?.ok_or_else(|| domain("not_found", "session not found"))?;
         let pins = store.jail_pins(id)?;
@@ -369,7 +369,8 @@ pub(super) fn frontend_gate(hub: &Hub, conn: &super::Conn, method: &str, params:
         error
     };
     match method {
-        "_sill/permissions.set" | "_sill/permissions.apply_development" | "_sill/permissions.restore_defaults" | "_sill/policy.save_host" =>
+        "_sill/permissions.set" | "_sill/permissions.apply_development" | "_sill/permissions.restore_defaults" | "_sill/policy.save_host"
+        | "_sill/host_control.activate" | "_sill/host_control.revoke" =>
             return Err(missing("permission changes need a frontend that shows permission state".into())),
         "_sill/sessions.submit" | "_sill/sessions.start" | "_sill/sessions.control" | "_sill/submissions.resume"
         | "_sill/submissions.send_now" | "_sill/questions.answer" | "_sill/policy.start" | "_sill/policy.allow_host"

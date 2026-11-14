@@ -189,6 +189,27 @@ enum Cmd {
         #[command(subcommand)]
         cmd: PermissionsCmd,
     },
+    /// Host control: named host operations outside the jail for one running session, for as long
+    /// as this command (or another frontend showing it) stays connected (docs/permission-modes.md)
+    HostControl {
+        #[command(subcommand)]
+        cmd: HostControlCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum HostControlCmd {
+    /// Activate with these operations (view, input, inspect, launch, stop, stop_existing,
+    /// commands), or change an active control's scope; stays connected until Ctrl-C, which revokes
+    Activate {
+        session: String,
+        #[arg(required = true, value_delimiter = ',')]
+        operations: Vec<String>,
+    },
+    /// End the session's activation
+    Revoke { session: String },
+    /// The session's Host control state
+    State { session: String },
 }
 
 #[derive(Subcommand)]
@@ -710,6 +731,57 @@ fn policy_cmd(name: Option<String>, cmd: Option<PolicyCmd>) -> Result<()> {
     }
     Ok(())
 }
+fn host_control_cmd(cmd: HostControlCmd) -> Result<()> {
+    use sill_proto::{host_control as api, sessions::SessionKey};
+    if std::env::var_os("SILL_SESSION").is_some() {
+        bail!("Host control is a host administrative action");
+    }
+    let print = |s: &api::State| {
+        if s.active {
+            println!("Host control active (generation {}): {}", s.generation, s.operations.join(", "));
+            println!("displaying frontends: {}", s.displaying);
+        } else {
+            println!("Host control inactive (last generation {})", s.generation);
+        }
+        if let Some(ended) = &s.ended {
+            println!("ended: {}", ended.reason);
+        }
+    };
+    match cmd {
+        HostControlCmd::State { session } => {
+            let c = sill_proto::Client::connect_or_start()?;
+            let key = policy_session_key(&c, &session)?;
+            print(&c.call("_sill/host_control.state", SessionKey { session_id: key })?);
+        }
+        HostControlCmd::Revoke { session } => {
+            sill_proto::client::declare_capability(api::CAPABILITY);
+            let c = sill_proto::Client::connect_or_start()?;
+            let key = policy_session_key(&c, &session)?;
+            print(&c.call("_sill/host_control.revoke", SessionKey { session_id: key })?);
+        }
+        HostControlCmd::Activate { session, operations } => {
+            // this command is the displaying frontend: it shows the state and keeps the connection,
+            // and the activation, for as long as it runs
+            sill_proto::client::declare_capability(api::CAPABILITY);
+            let c = sill_proto::Client::connect_or_start()?;
+            let key = policy_session_key(&c, &session)?;
+            let state: api::State = c.call("_sill/host_control.activate", api::Activate { session_id: key.clone(), operations })?;
+            print(&state);
+            println!("HOST CONTROL · actions can run outside the jail · session {key}");
+            println!("This command keeps it active; Ctrl-C or closing it revokes.");
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+                let state: api::State = c.call("_sill/host_control.state", SessionKey { session_id: key.clone() })?;
+                if !state.active {
+                    print(&state);
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn permissions_cmd(cmd: PermissionsCmd) -> Result<()> {
     use sill_proto::{admin as api, sessions::SessionKey};
     if std::env::var_os("SILL_SESSION").is_some() && !matches!(cmd, PermissionsCmd::Show { .. }) {
@@ -805,6 +877,7 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Policy { name, cmd } => policy_cmd(name, cmd),
         Cmd::Permissions { cmd } => permissions_cmd(cmd),
+        Cmd::HostControl { cmd } => host_control_cmd(cmd),
         Cmd::Memory { cmd } => memory_cmd(cmd),
         Cmd::Session { cmd } => session_cmd(cmd),
         Cmd::Pin { cmd } => pin_cmd(cmd.unwrap_or(PinCmd::List)),

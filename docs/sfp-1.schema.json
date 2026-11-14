@@ -1,5 +1,25 @@
 {
   "$defs": {
+    "Activate": {
+      "additionalProperties": false,
+      "description": "Activate Host control for a session with exactly these operations, or change an active\none's scope to them. Each call that takes effect is a new generation.",
+      "properties": {
+        "operations": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "operations"
+      ],
+      "type": "object"
+    },
     "AddNote": {
       "additionalProperties": false,
       "properties": {
@@ -432,6 +452,27 @@
           ]
         }
       },
+      "type": "object"
+    },
+    "Brief": {
+      "description": "Active Host control on a session record, for a window-level indication of every such session.",
+      "properties": {
+        "generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operations": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "generation",
+        "operations"
+      ],
       "type": "object"
     },
     "CancelTurn": {
@@ -1409,6 +1450,21 @@
       "required": [
         "session_id",
         "reason"
+      ],
+      "type": "object"
+    },
+    "Ended": {
+      "properties": {
+        "at": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason",
+        "at"
       ],
       "type": "object"
     },
@@ -4558,6 +4614,17 @@
         "ghost": {
           "type": "boolean"
         },
+        "host_control": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Brief"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Active Host control (docs/permission-modes.md): its generation and operations; absent\notherwise. For the window-level indication naming every such session."
+        },
         "last_used": {
           "type": "string"
         },
@@ -5540,6 +5607,61 @@
       ],
       "type": "object"
     },
+    "State": {
+      "description": "A session's Host control state.",
+      "properties": {
+        "active": {
+          "type": "boolean"
+        },
+        "displaying": {
+          "description": "Connections displaying this session's control; the activation ends when the last goes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ended": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Ended"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Why and when the last activation ended, until the next one."
+        },
+        "generation": {
+          "description": "Counts every activation and scope change of this session since the daemon started; 0\nbefore the first. Actions carry the generation they were made under; a stale one is refused.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operations": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "since": {
+          "description": "Unix seconds, decimal, of the current activation.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "session_id",
+        "active",
+        "generation",
+        "operations",
+        "displaying"
+      ],
+      "type": "object"
+    },
     "Status": {
       "additionalProperties": false,
       "properties": {
@@ -6268,6 +6390,11 @@
         "doc": "_sill/desktop.capture and _sill/desktop.read: pictures of a session's test desktop, for a live view.",
         "name": "sill.desktop_view",
         "version": 1
+      },
+      {
+        "doc": "The frontend displays Host control: the permanent session caption and the window-level line naming every session with active control. It may activate and revoke (_sill/host_control.activate, revoke); attached to a session, it counts as displaying that session's control, which ends when the last such connection goes.",
+        "name": "sill.host_control",
+        "version": 1
       }
     ],
     "rules": "Names are namespace.feature (lowercase ASCII, digits, '_'); versions are cumulative from 1; the daemon answers min(offered, supported) and omits unknown ones. A missing capability disables that feature only; it is never a protocol mismatch."
@@ -6598,6 +6725,48 @@
       },
       "result": {
         "$ref": "#/$defs/PermissionsChanged"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.host_control": 1
+      },
+      "doc": "Activate Host control for a running session with exactly these operations, or change an active one's scope: a new generation each time. Refused for ghosts, a forbidding policy, a stopped session; never a saved choice.",
+      "kind": "request",
+      "name": "_sill/host_control.activate",
+      "params": {
+        "$ref": "#/$defs/Activate"
+      },
+      "result": {
+        "$ref": "#/$defs/State"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.host_control": 1
+      },
+      "doc": "End the session's Host control activation; a no-op without one.",
+      "kind": "request",
+      "name": "_sill/host_control.revoke",
+      "params": {
+        "$ref": "#/$defs/SessionKey"
+      },
+      "result": {
+        "$ref": "#/$defs/State"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.permission_modes": 1
+      },
+      "doc": "A session's Host control state: active, generation, operations, displaying frontends, the last end. Session records carry the active brief for every client.",
+      "kind": "request",
+      "name": "_sill/host_control.state",
+      "params": {
+        "$ref": "#/$defs/SessionKey"
+      },
+      "result": {
+        "$ref": "#/$defs/State"
       }
     },
     {

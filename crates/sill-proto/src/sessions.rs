@@ -66,6 +66,10 @@ pub struct Session {
     /// session to apply it. False when the session is not running.
     #[serde(default)]
     pub policy_changed: bool,
+    /// Active Host control (docs/permission-modes.md): its generation and operations; absent
+    /// otherwise. For the window-level indication naming every such session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_control: Option<crate::host_control::Brief>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SessionKey {

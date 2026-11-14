@@ -1151,6 +1151,59 @@ fn travelling_policy_suggestions_are_session_grants_and_offline_is_not_overridde
 }
 
 #[test]
+fn host_control_is_an_activation_a_displaying_frontend_holds() {
+    let d = Daemon::start();
+    let mut plain = d.connect().unwrap();
+    let mut modes = d.connect_caps(json!({"sill.permission_modes":1})).unwrap();
+    let mut host = d.connect_caps(json!({"sill.permission_modes":1,"sill.host_control":1})).unwrap();
+    let policies = d.dir.join("home/host-control-policies");
+    std::fs::create_dir_all(&policies).unwrap();
+    let mut create = |name: &str, text: &str, ghost: bool| {
+        let path = policies.join(format!("{name}.toml"));
+        std::fs::write(&path, format!("name='{name}'\n{text}")).unwrap();
+        let created = modes.call("_sill/sessions.create", json!({"create_id":name,"agent":"claude","policy":path.to_str().unwrap(),"ghost":ghost})).unwrap();
+        created["result"]["session_id"].as_str().unwrap().to_string()
+    };
+    let stopped = create("stopped", "[network]\nmode='allow'", false);
+    let forbidden = create("forbidden", "[permissions]\nhost_control='forbidden'", false);
+    let ghost = create("ghost", "", true);
+    let activate = |c: &mut Conn, session: &str, operations: Value|
+        c.call("_sill/host_control.activate", json!({"session_id":session,"operations":operations})).unwrap();
+
+    // only a frontend that shows Host control may activate: the permission-modes gate first, then
+    // the host-control capability itself
+    let refused = activate(&mut plain, &stopped, json!(["launch"]));
+    assert_eq!(refused["error"]["data"]["details"]["capability"], "sill.permission_modes", "{refused}");
+    let refused = activate(&mut modes, &stopped, json!(["launch"]));
+    assert_eq!((refused["error"]["data"]["code"].clone(), refused["error"]["data"]["details"]["capability"].clone()),
+        (json!("unsupported"), json!("sill.host_control")), "{refused}");
+    // never for a ghost, never against a forbidding policy, never without a jail
+    assert_eq!(activate(&mut host, &ghost, json!(["launch"]))["error"]["data"]["code"], "permission_denied");
+    let refused = activate(&mut host, &forbidden, json!(["launch"]));
+    assert_eq!(refused["error"]["data"]["code"], "permission_denied", "{refused}");
+    assert!(refused["error"]["message"].as_str().unwrap().contains("forbidden"), "{refused}");
+    let refused = activate(&mut host, &stopped, json!(["launch", "stop"]));
+    assert_eq!(refused["error"]["data"]["code"], "invalid_state", "{refused}");
+    assert!(refused["error"]["message"].as_str().unwrap().contains("not running"), "{refused}");
+    // the scope is named operations, at least one
+    assert_eq!(activate(&mut host, &stopped, json!(["launch", "teleport"]))["error"]["code"], -32602);
+    assert_eq!(activate(&mut host, &stopped, json!([]))["error"]["code"], -32602);
+    // the state shows to frontends that show permission state (records carry the brief to all);
+    // nothing above left an activation behind
+    assert_eq!(plain.call("_sill/host_control.state", json!({"session_id":stopped})).unwrap()["error"]["data"]["code"], "unsupported");
+    let state = modes.call("_sill/host_control.state", json!({"session_id":stopped})).unwrap();
+    assert_eq!((state["result"]["active"].clone(), state["result"]["generation"].clone(), state["result"]["displaying"].clone()),
+        (json!(false), json!(0), json!(0)), "{state}");
+    let record = plain.call("_sill/sessions.get", json!({"session_id":stopped})).unwrap();
+    assert!(record["result"].get("host_control").is_none(), "{record}");
+    // revoking needs the capability too; revoking nothing is nothing
+    assert_eq!(plain.call("_sill/host_control.revoke", json!({"session_id":stopped})).unwrap()["error"]["data"]["code"], "unsupported");
+    let revoked = host.call("_sill/host_control.revoke", json!({"session_id":stopped})).unwrap();
+    assert_eq!(revoked["result"]["active"], false, "{revoked}");
+    assert_eq!(host.call("_sill/host_control.state", json!({"session_id":"nope"})).unwrap()["error"]["data"]["code"], "not_found");
+}
+
+#[test]
 fn development_permissions_apply_together_or_not_at_all() {
     let d = Daemon::start();
     let mut gtk = d.connect().unwrap();

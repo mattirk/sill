@@ -67,6 +67,7 @@ fn args<T: serde::de::DeserializeOwned>(v: Value) -> Result<T, Error> { serde_js
 
 impl Hub {
     pub(super) fn sfp_lifecycle(&self, session_id:&str, ended:Option<(bool,&str)>, note:Option<String>) -> Result<()> {
+        if ended.is_some() { super::host_control::session_ended(self, session_id, "the session ended"); }
         self.with_store(|store| {
             let journal=Journal::new(store)?;
             let row=store.sessions()?.into_iter().find(|s|s.id==session_id).ok_or_else(||domain("not_found","session not found"))?;
@@ -200,6 +201,7 @@ impl Hub {
                 let mut all = self.sfp.lock().unwrap();
                 if all.active.get(&(conn.id,a.session_id.clone())).is_some_and(|s|s.id==a.subscription_id) { all.remove(conn.id,&a.session_id); }
                 drop(all);self.presence(&a.session_id);
+                super::host_control::displaying_changed(self);
                 Ok(json!({}))
             })(),
             "_sill/uploads.create" => (|| {

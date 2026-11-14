@@ -128,7 +128,12 @@ impl App {
                 iced::mouse::Interaction::ResizingHorizontally
             })
         };
-        let window = column![bar, content];
+        // the window-level Host control line: every session with active control, whichever shows
+        let mut window = column![bar];
+        if let Some(band) = crate::host_control::band(self) {
+            window = window.push(band);
+        }
+        let window = window.push(content);
         // Keep the conversation at the same tree position when the menu opens/closes.
         // Wrapping it in a stack only while open discards its scroll and selection state.
         let mut layers = stack![window];
@@ -1211,6 +1216,9 @@ impl App {
     fn composer<'a>(&'a self, view: &'a SessionView) -> Element<'a, Message> {
         let session = self.all_sessions.iter().find(|s| s.session_id == view.id);
         let mut composer = Column::new();
+        if let Some(caption) = session.and_then(crate::host_control::caption) {
+            composer = composer.push(caption);
+        }
         if let Some(caption) = crate::permissions::caption(view, session) {
             composer = composer.push(caption);
         }

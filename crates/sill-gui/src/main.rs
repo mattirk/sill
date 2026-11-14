@@ -5,6 +5,7 @@ mod daemon_ui;
 mod demo;
 mod desktop;
 mod desktop_view;
+mod host_control;
 mod details;
 mod editor;
 mod fonts;
@@ -108,6 +109,7 @@ fn main() -> iced::Result {
     // this window shows session permission state (its Permissions panel), so it may change
     // choices and operate sessions using Desktop development capabilities (docs/protocol.md)
     sill_proto::client::declare_capability(permissions::CAPABILITY);
+    sill_proto::client::declare_capability(host_control::CAPABILITY);
     fonts::install();
     let above = !options.demo && settings::load().always_on_top();
     iced::application(
@@ -250,6 +252,7 @@ pub enum Message {
     Procs(processes::Event),
     /// The session's Permissions panel (`permissions.rs`).
     Perms(permissions::Event),
+    HostControl(host_control::Event),
     /// The live view of a session's test desktop (`desktop_view.rs`).
     Desktop(desktop_view::Event),
     NetworkRead(String, Result<sill_proto::admin::NetworkDenied, String>),
@@ -427,6 +430,7 @@ pub struct SessionView {
     pub permissions: permissions::Perms,
     /// Its test desktop's live view (`desktop_view.rs`).
     pub desktop: desktop_view::View,
+    pub host_control: host_control::View,
 }
 
 impl SessionView {
@@ -481,6 +485,7 @@ impl SessionView {
             processes: processes::Procs::default(),
             permissions: permissions::Perms::default(),
             desktop: desktop_view::View::default(),
+            host_control: host_control::View::default(),
         }
     }
 
@@ -1442,6 +1447,7 @@ impl App {
             }
             Message::Procs(event) => return self.processes_event(event),
             Message::Perms(event) => return self.permissions_event(event),
+            Message::HostControl(event) => return self.host_control_event(event),
             Message::Desktop(event) => return self.desktop_event(event),
             Message::NetworkRead(id, result) => self.network.read(id, result),
             Message::NetworkAnswer(id, host, allow) => return self.answer_network(id, host, allow),

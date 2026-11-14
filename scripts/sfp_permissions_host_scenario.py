@@ -823,6 +823,67 @@ PY
               f"{refusal} {json.dumps(st['test_desktop'])}")
         check("a ghost refuses development permissions",
               code(c.call, "_sill/permissions.apply_development", {"session_id": ghost_bus}) == "permission_denied")
+
+        # -- 17. Host control: an activation a displaying frontend holds --------------------------
+        HOST = {"sill.permission_modes": 1, "sill.host_control": 1}
+        hc = Client(env.socket, capabilities=HOST, name="host-control")
+        ctl = create("host-control", env.policy("host-control"))
+        activate = lambda client, sid, ops: client.call("_sill/host_control.activate", {"session_id": sid, "operations": ops})
+        hc_state = lambda sid: c.call("_sill/host_control.state", {"session_id": sid})
+        check("a GTK-like client cannot activate Host control",
+              code(gtk.call, "_sill/host_control.activate", {"session_id": ctl, "operations": ["launch"]}) == "unsupported")
+        check("a permission-modes client without the host-control capability cannot either",
+              code(c.call, "_sill/host_control.activate", {"session_id": ctl, "operations": ["launch"]}) == "unsupported")
+        check("a stopped session cannot be activated",
+              code(hc.call, "_sill/host_control.activate", {"session_id": ctl, "operations": ["launch"]}) == "invalid_state")
+        start(ctl)
+        st = activate(hc, ctl, ["launch", "stop"])
+        check("activation: generation 1 with the named operations, one displaying frontend",
+              st["active"] and st["generation"] == 1 and st["operations"] == ["launch", "stop"] and st["displaying"] == 1, json.dumps(st))
+        rec = c.call("_sill/sessions.get", {"session_id": ctl})
+        check("the session record carries the active brief for every client",
+              rec.get("host_control") == {"generation": 1, "operations": ["launch", "stop"]}, json.dumps(rec.get("host_control")))
+        st = activate(hc, ctl, ["launch", "stop", "commands"])
+        check("a scope change is a new generation", st["active"] and st["generation"] == 2 and "commands" in st["operations"], json.dumps(st))
+        sub_id, view = c.attach(ctl)
+        texts = " | ".join((item["content"][0].get("text") or "") for item in view.items("notice"))
+        check("activation and scope change are notices in the conversation",
+              "Host control activated (generation 1)" in texts and "scope changed (generation 2)" in texts, texts[:300])
+        c.call("_sill/sessions.detach", {"session_id": ctl, "subscription_id": sub_id})
+        st = hc.call("_sill/host_control.revoke", {"session_id": ctl})
+        check("revoked by the person: inactive, with the reason", not st["active"] and st["ended"]["reason"].startswith("revoked"), json.dumps(st))
+        check("…and the record no longer carries it", c.call("_sill/sessions.get", {"session_id": ctl}).get("host_control") is None)
+        activate(hc, ctl, ["inspect"])
+        hc.close()
+        time.sleep(1)
+        st = hc_state(ctl)
+        check("the activating frontend leaving ends the activation", not st["active"] and "displaying" in st["ended"]["reason"], json.dumps(st))
+        hc = Client(env.socket, capabilities=HOST, name="host-control")
+        hc2 = Client(env.socket, capabilities=HOST, name="host-control-2")
+        activate(hc, ctl, ["inspect"])
+        hc2.attach(ctl)
+        st = hc_state(ctl)
+        check("an attached host-control frontend displays it too", st["active"] and st["displaying"] == 2, json.dumps(st))
+        hc.close()
+        time.sleep(1)
+        st = hc_state(ctl)
+        check("the activation survives while another displaying frontend stays attached", st["active"] and st["displaying"] == 1, json.dumps(st))
+        hc2.close()
+        time.sleep(1)
+        st = hc_state(ctl)
+        check("…and ends when that one goes too", not st["active"], json.dumps(st))
+        hc = Client(env.socket, capabilities=HOST, name="host-control")
+        activate(hc, ctl, ["launch"])
+        c.call("_sill/sessions.stop", {"session_id": ctl})
+        st = hc_state(ctl)
+        check("stopping the session ends its Host control", not st["active"] and "stopped" in st["ended"]["reason"], json.dumps(st))
+        no_host = create("no-host-control", env.policy("no-host-control", permissions='host_control = "forbidden"'))
+        start(no_host)
+        check("a forbidding policy refuses activation",
+              code(hc.call, "_sill/host_control.activate", {"session_id": no_host, "operations": ["launch"]}) == "permission_denied")
+        check("a ghost refuses activation",
+              code(hc.call, "_sill/host_control.activate", {"session_id": ghost_bus, "operations": ["launch"]}) == "permission_denied")
+        hc.close()
     finally:
         for sid in created:
             for method in ("_sill/sessions.stop", "_sill/sessions.delete"):

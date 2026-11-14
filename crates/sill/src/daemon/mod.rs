@@ -25,6 +25,7 @@ mod runner;
 mod streams;
 mod terminals;
 mod host;
+mod host_control;
 mod context;
 mod frontend;
 mod admin;

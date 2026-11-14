@@ -734,6 +734,33 @@ characters. A name change does not alter `title`; it updates a known summary-sig
 Older sessions without a preserved name return null. The exported schema includes this additive
 extension; clients default absent name fields to null.
 
+### Host control activation (2026-11-07)
+
+Capability `sill.host_control` (frontend-declared: a program that shows the permanent "HOST
+CONTROL · actions can run outside the jail" caption on the session and a window-level line naming
+every session with active control). Host control is an activation held in the daemon's memory,
+never a saved choice (docs/permission-modes.md, Host control):
+
+| Method | Request | Result | Needs |
+|---|---|---|---|
+| `_sill/host_control.activate` | `{session_id, operations}` | state | `sill.host_control` |
+| `_sill/host_control.revoke` | `{session_id}` | state | `sill.host_control` |
+| `_sill/host_control.state` | `{session_id}` | state | `sill.permission_modes` |
+
+Operations: `view`, `input`, `inspect`, `launch`, `stop`, `stop_existing`, `commands`. `activate`
+sets the scope exactly and is a new `generation` every time it takes effect, on a running session
+only; it is refused with `permission_denied` for a ghost or a policy (or repository fragment)
+forbidding Host control, `invalid_state` for a stopped or ended session, `unsupported` (with the
+missing capability in `details`) from a connection without `sill.host_control` or without
+`sill.permission_modes`. The state says `active`, `generation`, `operations`, `displaying` (the
+connections showing this session's control: the activator while it lives, and every
+`sill.host_control` connection attached to the session), `since`, and `ended` (why and when the
+last activation ended). The activation ends with `revoke`, when the last displaying connection
+closes or detaches, when the session stops, ends or is deleted, or when its jail is found gone;
+a daemon restart never restores one. Each activation, scope change and revocation is a `notice`
+item in the session's conversation. Session records carry `host_control: {generation, operations}`
+while active, for the window-level line.
+
 ### Test desktop pictures (2026-11-06)
 
 Capability `sill.desktop_view` (daemon-offered; every client offers it). A session whose launch has
