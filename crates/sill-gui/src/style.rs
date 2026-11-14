@@ -235,7 +235,7 @@ pub fn prompt(_: &Theme, _: text_editor::Status) -> text_editor::Style {
     }
 }
 
-/// A read-only text view (the transcript for selecting across messages).
+/// A read-only text view (a file's source).
 pub fn reader(_: &Theme, _: text_editor::Status) -> text_editor::Style {
     text_editor::Style {
         background: Background::Color(P.code_bg),

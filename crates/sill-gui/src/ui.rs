@@ -3,7 +3,7 @@
 //! conversation; the composer with the agent's controls and send / stop.
 //!
 //! Supervision (docs/sill-gui.md, direction 4): every tab carries its session's mark — working,
-//! a question waiting, a problem — and while a file or the transcript covers the conversation a
+//! a question waiting, a problem — and while a file or the drawer covers the conversation a
 //! status strip keeps the selected session's state, its question and Stop in reach.
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
@@ -46,15 +46,9 @@ impl App {
             let covered = !view.conversation_shown();
             let body = match self.file_view(view) {
                 Some(reader) => reader,
-                None => {
-                    let conversation = match &view.text_view {
-                        Some(content) => self.transcript_view(content),
-                        None => self.feed(view),
-                    };
-                    column![conversation, self.composer(view)]
-                        .height(Fill)
-                        .into()
-                }
+                None => column![self.feed(view), self.composer(view)]
+                    .height(Fill)
+                    .into(),
             };
             // a file open takes the chips' row too, as in the shelf
             let chips: Element<'_, Message> = if view.files.reader.is_some() {
@@ -851,42 +845,6 @@ impl App {
                 .width(Fill)
                 .style(style::fill(alpha(P.warning, 0.10))),
         )
-    }
-
-    fn transcript_view<'a>(&'a self, content: &'a text_editor::Content) -> Element<'a, Message> {
-        column![
-            row![
-                text("The conversation as text, captured when opened")
-                    .size(style::SMALL)
-                    .color(P.fg_dim),
-                space().width(Fill),
-                keys::press(
-                    button(text("Refresh").size(style::SMALL)).style(style::quiet),
-                    Message::RefreshText
-                ),
-                keys::press(
-                    button(text("Copy all").size(style::SMALL)).style(style::quiet),
-                    Message::CopyTranscript
-                ),
-                keys::press(
-                    button(text("Close").size(style::SMALL)).style(style::quiet),
-                    Message::ToggleText
-                ),
-            ]
-            .spacing(4)
-            .align_y(Alignment::Center),
-            text_editor(content)
-                .on_action(Message::TextAction)
-                .key_binding(reading_keys)
-                .height(Fill)
-                .font(MONO_FONT)
-                .size(style::MONO)
-                .style(style::reader),
-        ]
-        .spacing(8)
-        .padding(12)
-        .height(Fill)
-        .into()
     }
 
     // --- the composer ---------------------------------------------------------------------------

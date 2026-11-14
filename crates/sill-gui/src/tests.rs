@@ -405,22 +405,6 @@ fn updates_from_a_replaced_lane_are_ignored() {
     assert_eq!(app.views["other"].status, sill_client::lane::Status::Live);
 }
 
-#[test]
-fn transcript_selection_is_read_only_and_stable_during_streaming() {
-    let (mut app, _) = App::new(true, None);
-    let _ = app.update(Message::ToggleText);
-    let original = demo_view(&app).text_view.as_ref().unwrap().text();
-    let _ = app.update(Message::TextAction(
-        iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Insert('X')),
-    ));
-    let _ = app.update(Message::DemoTick);
-    assert_eq!(demo_view(&app).text_view.as_ref().unwrap().text(), original);
-    let _ = app.update(Message::RefreshText);
-    let text = demo_view(&app).text_view.as_ref().unwrap().text();
-    assert!(text.contains("A streamed paragraph"));
-    assert!(!text.starts_with('X'));
-}
-
 // --- the person's requests ----------------------------------------------------------------------
 
 /// Each action is one public SFP request of the exact shape the daemon accepts (its request
@@ -678,11 +662,9 @@ fn the_status_strip_keeps_the_question_and_stop_in_reach_while_a_file_is_open() 
         matches!(&messages[..], [Message::Answer { option_id, .. }, Message::Stop] if option_id == "allow"),
         "{messages:?}"
     );
-    // the transcript covers it too; from there the strip has the way back
-    let _ = app.update(Message::Workspace(Action::CloseViewer));
-    let _ = app.update(Message::ToggleText);
+    // the file's own close is the way back
     let mut ui = simulator(&app, (1000.0, 860.0));
-    ui.click("‹ Conversation").unwrap();
+    ui.click(iced::widget::Id::new("close-file")).unwrap();
     for message in ui.into_messages().collect::<Vec<_>>() {
         let _ = app.update(message);
     }
@@ -2005,7 +1987,7 @@ fn stepping_tabs_wraps_round() {
     assert_eq!(app.selected.as_deref(), Some("other"));
 }
 
-/// Escape steps back as in the shelf: the open file, then the transcript, then the drawer.
+/// Escape steps back as in the shelf: the open file, then the drawer's quick look.
 #[test]
 fn escape_steps_back() {
     use crate::workspace::Action;
@@ -2017,13 +1999,9 @@ fn escape_steps_back() {
         )),
         repo: None,
     }));
-    let _ = app.update(Message::ToggleText);
-    assert!(demo_view(&app).files.reader.is_some() && demo_view(&app).text_view.is_some());
+    assert!(demo_view(&app).files.reader.is_some());
     let _ = app.update(Message::Escape);
     assert!(demo_view(&app).files.reader.is_none(), "the file first");
-    assert!(demo_view(&app).text_view.is_some());
-    let _ = app.update(Message::Escape);
-    assert!(demo_view(&app).text_view.is_none(), "then the transcript");
     assert!(app.workspace.shown);
     let _ = app.update(Message::Escape);
     assert!(!app.workspace.shown, "then the drawer");

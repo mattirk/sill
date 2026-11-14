@@ -35,11 +35,6 @@ const LINES: &[(&str, &str)] = &[
         "M9 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z",
     ),
     ("maximize", "M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"),
-    // the conversation as one text, to select across messages (lucide text-cursor; sill-gui's own)
-    (
-        "text-cursor",
-        "M17 22h-1a4 4 0 0 1-4-4V6a4 4 0 0 1 4-4h1M7 22h1a4 4 0 0 0 4-4v-1M7 2h1a4 4 0 0 1 4 4v1",
-    ),
     (
         "sessions",
         "M3 5h.01M3 12h.01M3 19h.01M8 5h13M8 12h13M8 19h13",

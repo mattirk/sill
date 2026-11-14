@@ -144,15 +144,11 @@ pub enum Message {
     Choose(String),
     Refresh,
     Copy(String),
-    /// Copy the whole conversation as text, or the open file (read when pressed, not per frame).
-    CopyTranscript,
+    /// Copy the open file (read when pressed, not per frame).
     CopyFile,
     Link(String),
     /// A selection drag in the conversation started (`true`) or ended (`false`).
     Selecting(bool),
-    ToggleText,
-    RefreshText,
-    TextAction(text_editor::Action),
     DemoTick,
     Tick,
     Scrolled(bool, f32),
@@ -174,7 +170,7 @@ pub enum Message {
     RetrySend(String),
     CheckSend(String),
     DiscardSend(String),
-    /// From the status strip: back to the conversation, from files or the transcript.
+    /// From the status strip: back to the conversation, from the drawer over it.
     ShowConversation,
     /// A press on the top bar's empty space: the window manager moves the window.
     DragWindow,
@@ -202,7 +198,7 @@ pub enum Message {
     Focus(bool),
     /// Ctrl+Shift+Right (1) or Left (-1): the next or previous session.
     StepTab(i32),
-    /// Escape: the file or transcript closes, else the drawer, else the prompt takes the keys.
+    /// Escape: the file closes, else the drawer's quick look, else the prompt takes the keys.
     Escape,
     /// PageDown (true) or PageUp in the conversation or the open file.
     Page(bool),
@@ -251,7 +247,6 @@ pub struct SessionView {
     pub answering: BTreeSet<String>,
     pub follow_tail: bool,
     pub scroll_offset: f32,
-    pub text_view: Option<text_editor::Content>,
     pub terminal: Option<terminal::Pane>,
     pub terminal_shown: bool,
     terminal_generation: u64,
@@ -281,7 +276,6 @@ impl SessionView {
             answering: BTreeSet::new(),
             follow_tail: true,
             scroll_offset: 0.0,
-            text_view: None,
             terminal: None,
             terminal_shown: false,
             terminal_generation: 0,
@@ -292,9 +286,9 @@ impl SessionView {
         }
     }
 
-    /// The conversation is on screen (not a file, not the transcript).
+    /// The conversation is on screen (no file over it).
     pub fn conversation_shown(&self) -> bool {
-        self.text_view.is_none() && self.files.reader.is_none()
+        self.files.reader.is_none()
     }
 
     pub fn attention(&self) -> Attention {
@@ -781,11 +775,6 @@ impl App {
                 return operation::snap_to_end("conversation");
             }
             Message::Copy(value) => return iced::clipboard::write(value),
-            Message::CopyTranscript => {
-                if let Some(view) = self.current() {
-                    return iced::clipboard::write(view.conversation.transcript());
-                }
-            }
             Message::CopyFile => {
                 if let Some(file) = self.current().and_then(|v| v.files.reader.as_ref()) {
                     return iced::clipboard::write(file.text.clone());
@@ -793,33 +782,6 @@ impl App {
             }
             Message::Link(url) => return iced::clipboard::write(url),
             Message::Selecting(held) => self.selecting = held,
-            Message::ToggleText => {
-                if let Some(view) = self.current_mut() {
-                    view.text_view = match view.text_view {
-                        Some(_) => None,
-                        None => Some(text_editor::Content::with_text(
-                            &view.conversation.transcript(),
-                        )),
-                    };
-                    if view.text_view.is_none() {
-                        return self.restore_scroll();
-                    }
-                }
-            }
-            Message::RefreshText => {
-                if let Some(view) = self.current_mut() {
-                    view.text_view = Some(text_editor::Content::with_text(
-                        &view.conversation.transcript(),
-                    ));
-                }
-            }
-            Message::TextAction(action) => {
-                if !matches!(action, text_editor::Action::Edit(_))
-                    && let Some(content) = self.current_mut().and_then(|v| v.text_view.as_mut())
-                {
-                    content.perform(action);
-                }
-            }
             Message::DemoTick => return self.demo_tick(),
             Message::Tick => self.now = Instant::now(),
             Message::Prompt(action) => {
@@ -920,7 +882,6 @@ impl App {
             }
             Message::ShowConversation => {
                 if let Some(view) = self.current_mut() {
-                    view.text_view = None;
                     view.files.close_reader();
                     view.reader = None;
                 }
@@ -1432,7 +1393,7 @@ impl App {
         Task::none()
     }
 
-    /// Escape steps back, as in the shelf: the open file closes, then the transcript, then the
+    /// Escape steps back, as in the shelf: the open file closes, then the
     /// drawer; with nothing left to close, the prompt takes the keyboard.
     fn escape(&mut self) -> Task<Message> {
         if self.menu.take().is_some() {
@@ -1454,10 +1415,6 @@ impl App {
         if view.files.reader.is_some() {
             view.files.close_reader();
             view.reader = None;
-            return self.restore_scroll();
-        }
-        if view.text_view.is_some() {
-            view.text_view = None;
             return self.restore_scroll();
         }
         let terminal = view.terminal_shown;
