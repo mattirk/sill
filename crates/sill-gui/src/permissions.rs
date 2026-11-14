@@ -893,7 +893,12 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>, narrow: bo
                 match fs {
                     None => rows = rows.push(text("Filesystem plan not recorded; rebuild this session.").size(style::TINY).color(P.warning)),
                     Some(fs) => {
-                        for rule in &fs.rules {
+                        for rule in fs.rules.iter().filter(|rule| {
+                            rule.behavior != "agent_mask"
+                                || !fs.rules.iter().any(|agent| {
+                                    agent.behavior == "agent" && agent.target == rule.target
+                                })
+                        }) {
                             let backing = rule.backing.as_ref().map(|p| format!(" → {}", p.display)).unwrap_or_default();
                             rows = rows.push(tip(text(format!("{}: {}{}", rule.behavior, rule.target.display, backing)).size(style::TINY), format!("{} — {}", rule.source, rule.reason)));
                         }
@@ -1040,6 +1045,37 @@ mod tests {
         assert!(!perms.restart_pending(false));
         perms.views.as_mut().unwrap().launch.as_mut().unwrap().filesystem = None;
         assert!(perms.restart_pending(true));
+    }
+
+    #[test]
+    fn filesystem_folds_only_agent_masks_that_duplicate_agent_paths() {
+        let (mut app, _) = App::new(true, None);
+        app.all_sessions = vec![session_record("demo", "demo", false, false)];
+        let mut preview: PolicyView = serde_json::from_value(view("preview", false, json!([]))).unwrap();
+        let rule = |behavior: &str, target: &str| sill_proto::admin::PathRule {
+            target: sill_proto::sessions::HostPath::from_path(std::path::Path::new(target)),
+            backing: None,
+            behavior: behavior.into(),
+            source: "test".into(),
+            reason: "test rule".into(),
+        };
+        preview.filesystem.as_mut().unwrap().rules = vec![
+            rule("agent", "/home/me/.claude"),
+            rule("agent_mask", "/home/me/.claude"),
+            rule("agent_mask", "/home/me/.codex"),
+            rule("mask", "/home/me/.claude"),
+        ];
+        app.views.get_mut("demo").unwrap().permissions = Perms {
+            open: true,
+            filesystem_open: true,
+            views: Some(Views { preview, launch: None, agent_name: None }),
+            ..Default::default()
+        };
+        let mut ui = simulator(&app, (720.0, 860.0));
+        ui.find("agent: /home/me/.claude").unwrap();
+        assert!(ui.find("agent_mask: /home/me/.claude").is_err());
+        ui.find("agent_mask: /home/me/.codex").unwrap();
+        ui.find("mask: /home/me/.claude").unwrap();
     }
 
     /// A client whose daemon granted the permission-modes capability, and that daemon's end.
