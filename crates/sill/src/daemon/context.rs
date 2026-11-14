@@ -15,6 +15,9 @@ pub(super) struct Context {
     /// Changing model rebuilds its available options. Restore the other choices only after the
     /// agent confirms the model, using the newly offered values.
     reconcile_model: Option<String>,
+    /// The option `reconcile_model` was requested through, so its refusal can be told apart.
+    #[serde(default)]
+    reconcile_option: Option<String>,
     #[serde(default)]
     pending_controls: Option<AgentSettings>,
     #[serde(default)]
@@ -84,12 +87,9 @@ impl Context {
         if !resumed {
             self.sent_standing = None;
         }
-        self.reconcile_model = None;
-        self.pending_controls = None;
+        self.settle();
         self.issued_controls.clear();
-        self.controls_deadline = None;
         self.controls_error = None;
-        self.user_controls = false;
     }
 
     pub fn restoring(&self) -> bool {
@@ -122,18 +122,32 @@ impl Context {
         let mut names: Vec<_> = pending.config.keys().cloned().collect();
         if pending.mode.is_some() { names.push("mode".into()); }
         self.controls_error = Some(format!("Agent did not confirm settings: {}. Showing reported values.", names.join(", ")));
-        self.reconcile_model = None;
-        self.controls_deadline = None;
-        self.user_controls = false;
+        self.settle();
         true
     }
 
-    pub fn fail_controls(&mut self, reason: &str) {
+    /// The agent refused one setting (`mode` or `config:<option id>`): only that one is let go.
+    /// The others stay pending; after a refused model the caller runs `restore` again, so the
+    /// settings that waited for it go out against the model the agent kept.
+    pub fn fail_control(&mut self, setting: &str, reason: &str) {
+        self.controls_error = Some(format!("{reason}. Showing reported values."));
+        let Some(pending) = self.pending_controls.as_mut() else { return };
+        match setting.strip_prefix("config:") {
+            Some(id) => {
+                pending.config.remove(id);
+                if self.reconcile_option.as_deref() == Some(id) { self.reconcile_model = None; self.reconcile_option = None; }
+            }
+            None => pending.mode = None,
+        }
+        if pending.mode.is_none() && pending.config.is_empty() { self.settle(); }
+    }
+
+    fn settle(&mut self) {
         self.pending_controls = None;
         self.reconcile_model = None;
+        self.reconcile_option = None;
         self.controls_deadline = None;
         self.user_controls = false;
-        self.controls_error = Some(format!("{reason}. Showing reported values."));
     }
 
     /// Keep user selections pending until the agent reports them. Model changes also reconcile
@@ -148,6 +162,7 @@ impl Context {
                 settings.config.insert(id.clone(), value.clone());
                 if controls.is_some_and(|c| c.options.iter().any(|o| o.id == *id && o.category == "model")) {
                     self.reconcile_model = Some(value);
+                    self.reconcile_option = Some(id.clone());
                 }
             }
             _ => return,
@@ -171,6 +186,7 @@ impl Context {
                 return Vec::new();
             }
             self.reconcile_model = None;
+            self.reconcile_option = None;
             self.issued_controls.clear();
             // The selected model is now confirmed. Restore dependent choices only now.
             self.pending_controls = Some(remembered.clone());
@@ -187,6 +203,7 @@ impl Context {
             if let Some(command) = wanted(option, pending) {
                 if self.issued_controls.insert(format!("config:{id}")) { commands.push(command); }
                 self.reconcile_model = Some(want);
+                self.reconcile_option = Some(id.clone());
                 return commands;
             }
             unsupported.push(id.clone()); pending.config.remove(id);
@@ -210,9 +227,7 @@ impl Context {
         if !unsupported.is_empty() {
             self.controls_error = Some(format!("Saved settings unavailable: {}. Showing reported values.", unsupported.join(", ")));
         }
-        if pending.mode.is_none() && pending.config.is_empty() {
-            self.pending_controls = None; self.controls_deadline = None;
-        }
+        if pending.mode.is_none() && pending.config.is_empty() { self.settle(); }
         commands
     }
 
@@ -402,8 +417,38 @@ mod tests {
         assert!(!context.restoring() && context.optimistic().is_none());
         // a rejection lets go of the pick
         context.chosen(Some(&offered), &acp::Command::SetMode("auto".into()));
-        context.fail_controls("set mode failed");
+        context.fail_control("mode", "set mode failed");
         assert!(context.optimistic().is_none() && !context.restoring());
+    }
+
+    #[test]
+    fn a_refusal_lets_go_of_its_own_setting_only() {
+        // a refused model: mode and effort still go out, against the model the agent kept
+        let settings = AgentSettings { mode: Some("auto".into()), config: [("model".into(), "large".into()), ("effort".into(), "high".into())].into() };
+        let mut context = Context::default();
+        assert_eq!(context.restore(&controls("small", "low"), &settings, true).len(), 1);
+        context.fail_control("config:model", "set option failed");
+        assert!(context.restoring());
+        let after = context.restore(&controls("small", "low"), &settings, false);
+        assert!(matches!(&after[..], [acp::Command::SetMode(mode), acp::Command::SetConfig(id, _)] if mode == "auto" && id == "effort"));
+        let mut confirmed = controls("small", "high"); confirmed.modes.as_mut().unwrap().0 = "auto".into();
+        context.restore(&confirmed, &settings, false);
+        assert!(!context.restoring());
+        assert!(context.controls_error.as_ref().unwrap().contains("set option failed"), "the refusal stays reported");
+        // one of two picks refused: the other is still shown and awaited
+        let offered = controls("large", "low");
+        context.chosen(Some(&offered), &acp::Command::SetConfig("effort".into(), ConfigValue::Id("high".into())));
+        context.chosen(Some(&offered), &acp::Command::SetMode("auto".into()));
+        context.fail_control("mode", "set mode failed");
+        let picked = context.optimistic().unwrap();
+        assert!(picked.mode.is_none() && picked.config.contains_key("effort"));
+        // a refused effort during a model change does not end the wait for the model
+        let mut context = Context::default();
+        context.chosen(Some(&offered), &acp::Command::SetConfig("model".into(), ConfigValue::Id("small".into())));
+        context.chosen(Some(&offered), &acp::Command::SetConfig("effort".into(), ConfigValue::Id("high".into())));
+        context.fail_control("config:effort", "set option failed");
+        assert!(context.restore(&offered, &settings, false).is_empty(), "the model is not confirmed yet");
+        assert!(context.restoring());
     }
 
     #[test]

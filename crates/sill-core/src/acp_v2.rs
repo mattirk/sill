@@ -555,6 +555,7 @@ async fn drive(
                 let mut request = value;
                 request["sessionId"] = json!(id);
                 request["configId"] = json!(config_id);
+                let setting = format!("config:{config_id}");
                 let request: v2::SetSessionConfigOptionRequest = protocol(request)?;
                 match cx.send_request(request).block_task().await {
                     Ok(response) => {
@@ -564,7 +565,7 @@ async fn drive(
                     }
                     Err(e) => {
                         let _ = events
-                            .send(Event::ControlFailed(format!("set option failed: {e}")))
+                            .send(Event::ControlFailed { setting, reason: format!("set option failed: {e}") })
                             .await;
                     }
                 }

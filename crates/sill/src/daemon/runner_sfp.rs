@@ -17,6 +17,16 @@ fn overlay(controls: &mut p::SessionControls, picked: &sill_core::store::AgentSe
     }
 }
 
+/// The one place the controls' published state is decided: a person's unconfirmed picks over the
+/// agent's values, then the status — restoring saved settings, agent not ready, a setting that
+/// failed, or ready.
+fn stamp(controls: &mut p::SessionControls, st: &State, ready: bool) {
+    if let Some(picked) = st.context.optimistic() { overlay(controls, picked); }
+    controls.status = if st.context.locking() { "restoring" } else if !ready { "loading" }
+        else if st.context.controls_error.is_some() { "failed" } else { "ready" }.into();
+    controls.error = st.context.controls_error.clone();
+}
+
 impl Runner {
     /// Publish pending state without changing the last confirmed controls. On timeout show the
     /// latest reported values, even if restoration never succeeded.
@@ -27,11 +37,7 @@ impl Runner {
         if !st.context.restoring() && st.context.controls_error.is_some() {
             session.controls = st.controls.as_ref().map(super::super::sfp_adapter::session_controls);
         }
-        if let Some(controls) = &mut session.controls {
-            if let Some(picked) = st.context.optimistic() { overlay(controls, picked); }
-            controls.status = if st.context.locking() { "restoring" } else if st.context.controls_error.is_some() { "failed" } else if st.ready.is_none() { "loading" } else { "ready" }.into();
-            controls.error = st.context.controls_error.clone();
-        }
+        if let Some(controls) = &mut session.controls { stamp(controls, st, st.ready.is_some()); }
         if before == session { return Ok(vec![]); }
         journal.append(&self.id, None, &[p::Event::SessionUpdated { session }])
     }
@@ -120,10 +126,7 @@ impl Runner {
         let mut seeded=session.clone();
         if seeded.controls.is_none() && let Some(c)=&st.controls { seeded.controls=Some(super::super::sfp_adapter::session_controls(c)); }
         if !seeded.capabilities.contains_key("images") && let Some(images)=st.images { seeded.capabilities.insert("images".into(),images); }
-        if let Some(controls) = &mut seeded.controls {
-            controls.status = if st.context.locking() { "restoring" } else if st.ready.is_none() { "loading" } else if st.context.controls_error.is_some() { "failed" } else { "ready" }.into();
-            controls.error = st.context.controls_error.clone();
-        }
+        if let Some(controls) = &mut seeded.controls { stamp(controls, st, st.ready.is_some()); }
         // the runner's summary turn is the truth: a daemon that stopped mid-change says it right
         seeded.summarizing=Self::summarizing_wire(st);
         if seeded!=session { events.extend(journal.append(&self.id,None,&[p::Event::SessionUpdated{session:seeded}])?); }
@@ -178,7 +181,11 @@ impl Runner {
                 self.restore(store, st, controls, true)?;
             }
             relay::Event::Controls(controls) => { self.restore(store, st, controls, false)?; }
-            relay::Event::ControlFailed(reason) => { st.context.fail_controls(reason); }
+            relay::Event::ControlFailed { setting, reason } => {
+                st.context.fail_control(setting, reason);
+                // what waited for a refused model goes out against the model the agent kept
+                if let Some(reported) = st.controls.clone() { self.restore(store, st, &reported, false)?; }
+            }
             _ => {}
         }
         let question=match event { relay::Event::Resolved{request}=>st.adapter.question_id(*request).map(|id|journal.question(&self.id,id)).transpose()?, _=>None };
@@ -189,7 +196,7 @@ impl Runner {
             if next.question_ids.is_empty() && next.turn_id.is_none() {next.activity="idle".into();}
             vec![p::Event::SessionUpdated{session:next}]
         } else {st.adapter.project(&session,event,question.as_ref())};
-        if matches!(event, relay::Event::ControlFailed(_)) {
+        if matches!(event, relay::Event::ControlFailed { .. }) {
             let mut next = session.clone();
             next.controls = st.controls.as_ref().map(super::super::sfp_adapter::session_controls);
             events.push(p::Event::SessionUpdated { session: next });
@@ -202,12 +209,9 @@ impl Runner {
                 if st.context.locking() {
                     next.controls = session.controls.clone().or_else(|| Some(super::super::sfp_adapter::session_controls(&Controls::default())));
                 }
-                if let Some(controls) = &mut next.controls {
-                    // a person's unconfirmed picks stay on screen over what the agent reports
-                    if let Some(picked) = st.context.optimistic() { overlay(controls, picked); }
-                    controls.status = if st.context.locking() { "restoring" } else if st.context.controls_error.is_some() { "failed" } else if st.ready.is_none() && !matches!(event, relay::Event::Ready {..} | relay::Event::V2Ready {..}) { "loading" } else { "ready" }.into();
-                    controls.error = st.context.controls_error.clone();
-                }
+                // this event is projected before the runner records it: a Ready makes the agent ready
+                let ready = st.ready.is_some() || matches!(event, relay::Event::Ready {..} | relay::Event::V2Ready {..});
+                if let Some(controls) = &mut next.controls { stamp(controls, st, ready); }
             }
         }
         // Agent image bytes commit with the events that reference them, in this transaction.
@@ -488,6 +492,7 @@ mod tests {
         assert_eq!(c.current_mode.as_deref(), Some("auto"));
         assert_eq!(c.status, "ready");
         assert!(!st.context.restoring());
+        st.ready = Some(("agent".into(), true));
         st.controls = Some(defaults.clone());
         st.context.chosen(Some(&defaults), &acp::Command::SetMode("auto".into()));
         assert!(st.context.expire_controls(u64::MAX));
@@ -497,7 +502,7 @@ mod tests {
         assert_eq!(c.current_mode.as_deref(), Some("ask"), "failure shows the agent's actual values");
         assert!(c.error.unwrap().contains("mode"));
         st.context.chosen(Some(&defaults), &acp::Command::SetMode("auto".into()));
-        f.runner.sfp_project(&f.store, &mut st, &relay::Event::ControlFailed("mode rejected".into()), 3).unwrap();
+        f.runner.sfp_project(&f.store, &mut st, &relay::Event::ControlFailed { setting: "mode".into(), reason: "mode rejected".into() }, 3).unwrap();
         let c = j.session(&f.runner.id).unwrap().controls.unwrap();
         assert_eq!(c.status, "failed");
         assert!(c.error.unwrap().contains("mode rejected"));
@@ -522,7 +527,7 @@ mod tests {
         let c = j.session(&f.runner.id).unwrap().controls.unwrap();
         assert_eq!((c.current_mode.as_deref(), c.status.as_str()), (Some("auto"), "ready"));
         assert!(st.context.restoring());
-        f.runner.sfp_project(&f.store, &mut st, &relay::Event::ControlFailed("set mode failed".into()), 3).unwrap();
+        f.runner.sfp_project(&f.store, &mut st, &relay::Event::ControlFailed { setting: "mode".into(), reason: "set mode failed".into() }, 3).unwrap();
         let c = j.session(&f.runner.id).unwrap().controls.unwrap();
         assert_eq!((c.current_mode.as_deref(), c.status.as_str()), (Some("ask"), "failed"), "a refused pick shows the agent's value again");
     }

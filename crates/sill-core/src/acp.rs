@@ -237,8 +237,8 @@ pub enum Event {
     Capabilities { images: bool },
     /// Modes / config options changed (by us or by the agent).
     Controls(Controls),
-    /// A settings request was rejected by the agent.
-    ControlFailed(String),
+    /// A settings request was rejected by the agent. `setting` is `mode` or `config:<option id>`.
+    ControlFailed { setting: String, reason: String },
     /// A prompt turn started.
     TurnStarted,
     /// Replayed user message (only after a `session/load`).
@@ -817,7 +817,7 @@ async fn drive(
                         let _ = events_loop.send(Event::Controls(controls_from(last_modes.as_ref(), Some(&last_options)))).await;
                     }
                     Err(e) => {
-                        let _ = events_loop.send(Event::ControlFailed(format!("set mode failed: {e}"))).await;
+                        let _ = events_loop.send(Event::ControlFailed { setting: "mode".into(), reason: format!("set mode failed: {e}") }).await;
                     }
                 }
             }
@@ -827,13 +827,14 @@ async fn drive(
                     ConfigValue::Id(id) => SessionConfigOptionValue::value_id(id),
                     ConfigValue::Bool(b) => SessionConfigOptionValue::Boolean { value: b },
                 };
+                let setting = format!("config:{config_id}");
                 match session.connection().send_request(SetSessionConfigOptionRequest::new(sid, config_id, v)).block_task().await {
                     Ok(resp) => {
                         last_options = resp.config_options.clone();
                         let _ = events_loop.send(Event::Controls(controls_from(last_modes.as_ref(), Some(&last_options)))).await;
                     }
                     Err(e) => {
-                        let _ = events_loop.send(Event::ControlFailed(format!("set option failed: {e}"))).await;
+                        let _ = events_loop.send(Event::ControlFailed { setting, reason: format!("set option failed: {e}") }).await;
                     }
                 }
             }

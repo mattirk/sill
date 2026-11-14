@@ -326,7 +326,7 @@ impl AdapterState {
                     api_key: method.api_key.clone(),
                 }).collect() });
             }
-            relay::Event::ControlFailed(_) => {}
+            relay::Event::ControlFailed { .. } => {}
             relay::Event::Controls(controls) => { next.controls = Some(session_controls(controls)); }
             relay::Event::Usage { used, size } => { next.usage = Some(sfp::Usage { used: used.to_string(), size: size.to_string() }); }
         }
