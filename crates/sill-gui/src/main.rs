@@ -152,6 +152,7 @@ fn main() -> iced::Result {
         icon: tray::rgba(tray::APP_ICON, 128)
             .and_then(|rgba| iced::window::icon::from_rgba(rgba, 128, 128).ok()),
         // the window's class, `sill` as `sill.desktop`: the panel and menu match the window to it
+        #[cfg(target_os = "linux")]
         platform_specific: iced::window::settings::PlatformSpecific {
             application_id: "sill".into(),
             ..Default::default()

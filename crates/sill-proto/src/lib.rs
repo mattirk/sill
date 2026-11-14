@@ -39,8 +39,31 @@ pub fn socket_path() -> Result<PathBuf> {
 }
 
 pub fn runtime_dir() -> Result<PathBuf> {
-    let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).context("XDG_RUNTIME_DIR not set: no place for the daemon socket")?;
+    let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    #[cfg(target_os = "macos")]
+    let base = match base { Some(base) => Some(base), None => Some(macos_runtime_base()?) };
+    let base = base.context("XDG_RUNTIME_DIR not set: no place for the daemon socket")?;
     Ok(base.join("sill"))
+}
+
+/// macOS has no XDG_RUNTIME_DIR, and its TMPDIR is too long for SSH's control sockets (ssh adds a
+/// random suffix while making one; a socket path has 104 bytes): a private `/tmp/sill-UID`,
+/// refused when someone else owns it or can enter it.
+#[cfg(target_os = "macos")]
+fn macos_runtime_base() -> Result<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    let uid = rustix::process::getuid().as_raw();
+    let dir = PathBuf::from(format!("/tmp/sill-{uid}"));
+    match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e).with_context(|| format!("creating {}", dir.display())),
+    }
+    let meta = std::fs::symlink_metadata(&dir).with_context(|| format!("checking {}", dir.display()))?;
+    if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o077 != 0 {
+        anyhow::bail!("{} is not a private directory of this user", dir.display());
+    }
+    Ok(dir)
 }
 
 /// `_sill/daemon.status`.
