@@ -120,8 +120,9 @@ pub struct FolderTree {
     scope: RefCell<Option<PathBuf>>,
     store: Rc<Store>,
     badges: Rc<RefCell<BTreeMap<PathBuf, String>>>,
-    /// Paths whose badge is a session's unkept overlay change (pending in Changes), not git's.
-    pending: Rc<RefCell<std::collections::BTreeSet<PathBuf>>>,
+    /// Paths whose badge is a session's unkept overlay change (pending in Changes), not git's: the
+    /// session's title, for the tooltip.
+    pending: Rc<RefCell<BTreeMap<PathBuf, String>>>,
     /// Every session's pending changes: the badges here, and the viewer shows a pending path's diff.
     pub changes: Rc<RefCell<Vec<Change>>>,
     pinned: Rc<RefCell<Vec<PathBuf>>>,
@@ -167,7 +168,7 @@ impl FolderTree {
         root.append(&bar);
 
         let badges: Rc<RefCell<BTreeMap<PathBuf, String>>> = Rc::new(RefCell::new(BTreeMap::new()));
-        let pending: Rc<RefCell<std::collections::BTreeSet<PathBuf>>> = Rc::new(RefCell::new(Default::default()));
+        let pending: Rc<RefCell<BTreeMap<PathBuf, String>>> = Rc::new(RefCell::new(BTreeMap::new()));
         let pinned: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
         let elsewhere: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
         let roots = gio::ListStore::new::<gtk::StringObject>();
@@ -257,9 +258,9 @@ impl FolderTree {
                 let badge_text = badges.borrow().get(&path).cloned().unwrap_or_default();
                 // a session's unkept overlay change is not on the host: accent (as in Changes), said
                 // in the tooltip — git's own changes are the warning colour
-                let from_session = pending.borrow().contains(&path);
-                name.set_tooltip_text(from_session.then_some("changed in a session's overlay, not on the host yet — keep or revert it in Changes"));
-                if from_session {
+                let owner = pending.borrow().get(&path).cloned();
+                name.set_tooltip_text(owner.as_ref().map(|s| format!("changed by session “{s}” in its overlay — not on the host until kept there (Changes)")).as_deref());
+                if owner.is_some() {
                     name.add_css_class("sill-pending");
                 } else if badge_text.starts_with('?') {
                     name.add_css_class("sill-new");
@@ -472,9 +473,10 @@ impl FolderTree {
         }
         *self.elsewhere.borrow_mut() = elsewhere;
         *self.pinned.borrow_mut() = target_pins;
-        let (tx, rx) = async_channel::bounded::<Vec<Change>>(1);
+        let (tx, rx) = async_channel::bounded::<(Vec<Change>, BTreeMap<PathBuf, String>)>(1);
         std::thread::spawn(move || {
             let mut all = Vec::new();
+            let mut owners: BTreeMap<PathBuf, String> = BTreeMap::new(); // path → the session that changed it
             for s in sessions {
                 let Ok(policy) = sill_core::policy::Policy::load(&s.policy, &home) else { continue };
                 let Ok(state_dir) = sill_core::session::state_dir(uid, &s.id) else { continue };
@@ -486,19 +488,23 @@ impl FolderTree {
                     Err(_) => vec![],
                 };
                 let Ok(plan) = changes::session_plan(policy.clone(), state_dir, &home, uid, &user, binds) else { continue };
-                all.extend(changes::scan(&policy, &plan, None).unwrap_or_default());
+                let found = changes::scan(&policy, &plan, None).unwrap_or_default();
+                for c in &found {
+                    owners.entry(c.path.clone()).or_insert_with(|| s.title.clone());
+                }
+                all.extend(found);
             }
-            let _ = tx.send_blocking(all);
+            let _ = tx.send_blocking((all, owners));
         });
         let t = self.clone();
         glib::spawn_future_local(async move {
-            if let Ok(all) = rx.recv().await {
-                t.apply(all, pins);
+            if let Ok((all, owners)) = rx.recv().await {
+                t.apply(all, owners, pins);
             }
         });
     }
 
-    fn apply(self: &Rc<Self>, all: Vec<Change>, pins: Vec<PathBuf>) {
+    fn apply(self: &Rc<Self>, all: Vec<Change>, owners: BTreeMap<PathBuf, String>, pins: Vec<PathBuf>) {
         let home = session::home().unwrap_or_default();
         let mut badges: BTreeMap<PathBuf, String> = BTreeMap::new();
         // git working-tree status of every repo in view (pins, repos with session changes, the scope's
@@ -537,10 +543,8 @@ impl FolderTree {
             Some(s) => vec![s.clone()],
             None => pins.into_iter().filter(|p| p.is_dir()).collect(),
         };
-        let mut pending = std::collections::BTreeSet::new();
         for c in all.iter().filter(|c| !c.ignored) {
             badges.insert(c.path.clone(), format!("{}{}", c.kind.letter(), if c.conflict { "!" } else { "" }));
-            pending.insert(c.path.clone());
             let mut p = c.path.parent();
             while let Some(d) = p {
                 badges.entry(d.to_path_buf()).or_insert_with(|| "•".into());
@@ -558,7 +562,7 @@ impl FolderTree {
             roots.push(home);
         }
         *self.badges.borrow_mut() = badges;
-        *self.pending.borrow_mut() = pending;
+        *self.pending.borrow_mut() = owners;
         *self.changes.borrow_mut() = all;
         // directories already listed: files that appeared or went since, in place
         self.listed.borrow_mut().retain(|_, w| w.upgrade().is_some());
