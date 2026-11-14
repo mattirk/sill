@@ -93,13 +93,26 @@ pub fn prepare(client: &Client, session_id: &str) -> Result<(Definition, bool)> 
     Ok((agent, restart_first))
 }
 
-/// Run `method` of `agent_id` on the daemon's host, telling `progress` each line it reports;
-/// `Ok` once the login completed. A lost stream leaves the outcome unknown: an error that says so.
+/// What a host login tells its frontend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostEvent {
+    /// The daemon runs it: the operation [`cancel`] stops.
+    Started { operation_id: String },
+    Line(String),
+    /// A page to open in the person's browser on this machine. When the daemon is on another
+    /// machine, the page's loopback callback here is already relayed to it.
+    OpenUrl { url: String },
+}
+
+/// Run `method` of `agent_id` on the daemon's host, telling `progress` what it reports; `Ok`
+/// once the login completed. A lost stream leaves the outcome unknown: an error that says so.
+/// With the daemon on another machine (a box), a page's loopback callback port is relayed from
+/// this machine's loopback for as long as the login runs.
 pub fn host_login(
     client: &Client,
     agent_id: &str,
     method_id: &str,
-    mut progress: impl FnMut(String),
+    mut progress: impl FnMut(HostEvent),
 ) -> Result<()> {
     use std::io::BufRead;
     let job: JobStream = client.call(
@@ -119,6 +132,8 @@ pub fn host_login(
             }
         };
     };
+    let operation_id = job.operation.operation_id.clone();
+    progress(HostEvent::Started { operation_id: operation_id.clone() });
     let stream = sill_proto::transport::open_stream(&token)?;
     struct Close(std::sync::Arc<dyn Fn() + Send + Sync>);
     impl Drop for Close {
@@ -127,18 +142,80 @@ pub fn host_login(
         }
     }
     let _close = Close(stream.interrupt.clone());
+    // the relays live as long as the login
+    let mut relays: Vec<crate::processes::Bridge> = Vec::new();
     for line in std::io::BufReader::new(stream.reader).lines() {
         match serde_json::from_str::<Progress>(&line?)? {
             Progress::Completed { .. } => return Ok(()),
             Progress::Failed { message, .. } => bail!("{message}"),
             Progress::Status { text } | Progress::Stderr { text } | Progress::Output { text } => {
-                progress(text)
+                progress(HostEvent::Line(text))
+            }
+            Progress::OpenUrl { url, callback_port } => {
+                relay_callback(client, &mut relays, callback_port, &operation_id)?;
+                progress(HostEvent::OpenUrl { url })
             }
         }
     }
     bail!(
         "the login's connection closed before it finished; check whether it worked before trying again"
     )
+}
+
+/// With the daemon on another machine, relay a login page's loopback `port` here to the daemon
+/// host's, once per port, for as long as `relays` lives. A port in use here cancels the login: its
+/// page could never call back.
+pub(crate) fn relay_callback(
+    client: &Client,
+    relays: &mut Vec<crate::processes::Bridge>,
+    port: Option<u16>,
+    operation_id: &str,
+) -> Result<()> {
+    let Some(port) = port else { return Ok(()) };
+    let remote = sill_proto::transport::selected().ok().flatten().is_some();
+    if !remote || relays.iter().any(|r| r.url().ends_with(&format!(":{port}"))) {
+        return Ok(());
+    }
+    match crate::processes::expose_exact(port, callback_opener(operation_id.to_owned())) {
+        Ok(relay) => {
+            relays.push(relay);
+            Ok(())
+        }
+        Err(e) => {
+            let _ = cancel(client, operation_id);
+            bail!("{e:#}: the login page could not call back here; close what uses it and try again")
+        }
+    }
+}
+
+/// The daemon's stream to the running login's callback port, asked once per browser connection
+/// on a connection of its own.
+fn callback_opener(operation_id: String) -> crate::processes::Opener {
+    std::sync::Arc::new(move || {
+        let client = Client::connect()?;
+        let opened: sill_proto::host::HostStream = client.call(
+            "_sill/streams.login_callback",
+            sill_proto::host::OperationKey { operation_id: operation_id.clone() },
+        )?;
+        sill_proto::transport::open_stream(&opened.token)
+    })
+}
+
+/// Stop a running host login (`_sill/operations.cancel`); it fails with code `cancelled`.
+pub fn cancel(client: &Client, operation_id: &str) -> Result<()> {
+    let _: sill_proto::Empty = client.call(
+        "_sill/operations.cancel",
+        sill_proto::host::OperationKey { operation_id: operation_id.into() },
+    )?;
+    Ok(())
+}
+
+/// The running login a `busy` refusal of `_sill/agents.login` names, to cancel it by.
+pub fn busy_login(error: &anyhow::Error) -> Option<String> {
+    let data = error.downcast_ref::<sill_proto::rpc::Error>()?.data.as_ref()?;
+    (data.get("code")?.as_str()? == "busy")
+        .then(|| data.pointer("/details/operation_id")?.as_str().map(str::to_owned))
+        .flatten()
 }
 
 /// Start the session's jail again, with the login the host wrote bound in.

@@ -656,12 +656,16 @@ impl App {
                 };
                 p.busy.insert(id.clone());
                 p.unticked.remove(&id);
-                p.logs.insert(id.clone(), if method.is_some() { "Logging in on this machine…".into() } else { "Starting it once in a throwaway jail…".into() });
+                p.logs.insert(id.clone(), if method.is_some() { "Logging in on the daemon's machine…".into() } else { "Starting it once in a throwaway jail…".into() });
                 let (tx, rx) = async_channel::bounded(64);
                 std::thread::spawn(move || {
                     let result = connect()
                         .and_then(|client| {
                             agents::discover(&client, &id, method.as_deref(), |line| {
+                                // a login page: opened in the person's browser here
+                                if let Some(url) = line.strip_prefix(agents::OPEN_PREFIX) {
+                                    crate::terminal::open_link(url.to_string());
+                                }
                                 let _ = tx.send_blocking(Event::Log(id.clone(), line));
                             })
                         })

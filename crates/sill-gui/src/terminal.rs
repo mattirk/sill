@@ -412,9 +412,10 @@ impl canvas::Program<Action> for Pane {
                 state.modifiers = *modifiers;
                 None
             }
-            // Ctrl+click on a link opens it (a login's link, longer than the pane is wide)
+            // Ctrl+click (Cmd+click on macOS) on a link opens it (a login's link, longer than
+            // the pane is wide)
             E::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
-                if state.modifiers.control()
+                if state.modifiers.command()
                     && let Some(at) = cursor.position_in(bounds)
                     && let Some(url) = self.link_at(self.cell_at(at).0) =>
             {
@@ -477,20 +478,10 @@ impl canvas::Program<Action> for Pane {
                 text,
                 ..
             }) if self.focused && self.status == Status::Running => {
-                let shortcut = modifiers.control() && modifiers.shift();
                 match key.as_ref() {
-                    Key::Character(c) if shortcut && c.eq_ignore_ascii_case("c") => {
-                        publish(Action::Copy)
-                    }
-                    // Ctrl+Shift+V as terminals have it; Ctrl+V and Shift+Insert too, as the
-                    // rest of the window pastes (a login's code)
-                    Key::Character(c)
-                        if modifiers.control()
-                            && !modifiers.alt()
-                            && c.eq_ignore_ascii_case("v") =>
-                    {
-                        publish(Action::Paste)
-                    }
+                    _ if let Some(action) = clipboard_key(key, *modifiers) => publish(action),
+                    // other Cmd chords are the window's shortcuts, never the shell's input
+                    _ if cfg!(target_os = "macos") && modifiers.logo() => None,
                     Key::Named(Named::Insert) if modifiers.shift() && !modifiers.control() => {
                         publish(Action::Paste)
                     }
@@ -537,7 +528,7 @@ impl canvas::Program<Action> for Pane {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
-        if state.modifiers.control()
+        if state.modifiers.command()
             && let Some(at) = cursor.position_in(bounds)
             && self.link_at(self.cell_at(at).0).is_some()
         {
@@ -640,6 +631,49 @@ fn link_in(chars: &[char], at: usize) -> Option<String> {
 fn web(url: &str) -> Option<String> {
     let lower = url.to_ascii_lowercase();
     (lower.starts_with("https://") || lower.starts_with("http://")).then(|| url.to_string())
+}
+
+/// The terminal's copy and paste keys, in the platform's way. Linux and Windows: Ctrl+Shift+C/V
+/// as terminals have them, and Ctrl+V too, as the rest of the window pastes (a login's code).
+/// macOS: Cmd+C/V as Terminal has them; every Ctrl key goes to the shell there.
+fn clipboard_key(key: &Key, modifiers: Modifiers) -> Option<Action> {
+    let Key::Character(c) = key.as_ref() else { return None };
+    let (copy, paste) = if cfg!(target_os = "macos") {
+        let cmd = modifiers.logo() && !modifiers.alt() && !modifiers.control();
+        (cmd, cmd)
+    } else {
+        (modifiers.control() && modifiers.shift(), modifiers.control() && !modifiers.alt())
+    };
+    if copy && c.eq_ignore_ascii_case("c") {
+        Some(Action::Copy)
+    } else if paste && c.eq_ignore_ascii_case("v") {
+        Some(Action::Paste)
+    } else {
+        None
+    }
+}
+
+/// Cmd+C/V on macOS and Ctrl(+Shift)+C/V elsewhere; on macOS Ctrl+C and Ctrl+V stay the
+/// shell's (an interrupt, a literal next character).
+#[test]
+fn copy_and_paste_keys_follow_the_platform() {
+    let ch = |c: &str| Key::Character(c.into());
+    let is = |key: &str, modifiers: Modifiers| clipboard_key(&ch(key), modifiers);
+    let paste = |a: Option<Action>| matches!(a, Some(Action::Paste));
+    let copy = |a: Option<Action>| matches!(a, Some(Action::Copy));
+    if cfg!(target_os = "macos") {
+        assert!(paste(is("v", Modifiers::LOGO)));
+        assert!(copy(is("c", Modifiers::LOGO)));
+        assert!(is("v", Modifiers::CTRL).is_none());
+        assert!(is("c", Modifiers::CTRL).is_none());
+    } else {
+        assert!(paste(is("v", Modifiers::CTRL)));
+        assert!(paste(is("v", Modifiers::CTRL | Modifiers::SHIFT)));
+        assert!(copy(is("c", Modifiers::CTRL | Modifiers::SHIFT)));
+        assert!(is("c", Modifiers::CTRL).is_none(), "Ctrl+C is the shell's interrupt");
+        assert!(is("v", Modifiers::LOGO).is_none());
+    }
+    assert!(is("x", Modifiers::COMMAND).is_none());
 }
 
 /// Open `url` in the person's browser, off the GUI thread; a failure is said on stderr.

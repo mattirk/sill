@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail};
 const TOKEN_SECONDS: u64 = 60;
 const MAX_PENDING: usize = 64;
 
-enum Endpoint { Socket(UnixStream), Terminal(String) }
+enum Endpoint { Socket(UnixStream), Tcp(std::net::TcpStream), Terminal(String) }
 struct Pending { endpoint: Endpoint, expires: Instant }
 fn state() -> &'static Mutex<HashMap<String, Pending>> { static S: OnceLock<Mutex<HashMap<String, Pending>>> = OnceLock::new(); S.get_or_init(Default::default) }
 
@@ -41,22 +41,34 @@ pub fn port(session: &str, port: u16) -> Result<String> {
 }
 
 pub fn socket(socket: UnixStream) -> Result<String> { add(Endpoint::Socket(socket)) }
+/// A TCP connection on the daemon host (a login's loopback callback).
+pub fn tcp(stream: std::net::TcpStream) -> Result<String> { add(Endpoint::Tcp(stream)) }
 pub fn discard(token: &str) { state().lock().unwrap().remove(token); }
 
-pub fn claim(token: &str, mut reader: BufReader<UnixStream>) -> Result<()> {
+pub fn claim(token: &str, reader: BufReader<UnixStream>) -> Result<()> {
     let pending = state().lock().unwrap().remove(token).context("unknown or already used stream token")?;
     if pending.expires < Instant::now() { bail!("stream token expired"); }
     match pending.endpoint {
         Endpoint::Terminal(id) => super::terminals::serve(&id, reader),
-        Endpoint::Socket(mut endpoint) => {
-            let mut writer = reader.get_ref().try_clone()?;
-            let socket = reader.get_ref().try_clone()?;
-            let mut input = endpoint.try_clone()?;
-            let copy = std::thread::spawn(move || { let _ = std::io::copy(&mut reader, &mut input); let _ = input.shutdown(std::net::Shutdown::Write); });
-            let _ = std::io::copy(&mut endpoint, &mut writer);
-            let _ = socket.shutdown(std::net::Shutdown::Both);
-            let _ = copy.join();
-            Ok(())
-        },
+        Endpoint::Socket(endpoint) => {
+            let input = endpoint.try_clone()?;
+            relay(reader, endpoint, input, |s| s.shutdown(std::net::Shutdown::Write))
+        }
+        Endpoint::Tcp(endpoint) => {
+            let input = endpoint.try_clone()?;
+            relay(reader, endpoint, input, |s| s.shutdown(std::net::Shutdown::Write))
+        }
     }
+}
+
+/// Bytes both ways between the claiming client and `endpoint` (`input` its write half), until
+/// both sides finish; the client's EOF half-closes the endpoint.
+fn relay<E: Read + Send + 'static, I: std::io::Write + Send + 'static>(mut reader: BufReader<UnixStream>, mut endpoint: E, mut input: I, half_close: fn(&I) -> std::io::Result<()>) -> Result<()> {
+    let mut writer = reader.get_ref().try_clone()?;
+    let socket = reader.get_ref().try_clone()?;
+    let copy = std::thread::spawn(move || { let _ = std::io::copy(&mut reader, &mut input); let _ = half_close(&input); });
+    let _ = std::io::copy(&mut endpoint, &mut writer);
+    let _ = socket.shutdown(std::net::Shutdown::Both);
+    let _ = copy.join();
+    Ok(())
 }

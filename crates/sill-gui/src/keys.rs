@@ -121,6 +121,15 @@ fn annotation_key(key: &Key, modifiers: Modifiers) -> Option<Message> {
     }
 }
 
+/// The platform's own modifier for commands: Cmd on macOS, Ctrl elsewhere (iced's `command()`).
+/// Shortcuts written `Ctrl+…` mean it, and on macOS say `Cmd+…`.
+pub const PRIMARY: &str = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+
+/// A text naming shortcuts as `Ctrl+…`, in the platform's words.
+pub fn label(text: &str) -> String {
+    if cfg!(target_os = "macos") { text.replace("Ctrl+", "Cmd+") } else { text.to_string() }
+}
+
 /// A button the keyboard reaches too: Tab focuses it, Enter or Space presses it.
 pub fn press<'a>(button: Button<'a, Message>, message: Message) -> Element<'a, Message> {
     focus(button.on_press(message.clone()))
@@ -581,7 +590,7 @@ mod annotation_tests {
             for character in ["s", "z"] {
                 let key = Key::Character(character.into());
                 let _ = ui.simulate(vec![
-                    Event::Keyboard(keyboard::Event::ModifiersChanged(Modifiers::CTRL)),
+                    Event::Keyboard(keyboard::Event::ModifiersChanged(Modifiers::COMMAND)),
                     Event::Keyboard(keyboard::Event::KeyPressed {
                         key: key.clone(),
                         modified_key: key,
@@ -589,7 +598,7 @@ mod annotation_tests {
                             keyboard::key::NativeCode::Unidentified,
                         ),
                         location: keyboard::Location::Standard,
-                        modifiers: Modifiers::CTRL,
+                        modifiers: Modifiers::COMMAND,
                         text: None,
                         repeat: false,
                     }),

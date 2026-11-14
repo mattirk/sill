@@ -925,6 +925,13 @@ fn main() -> Result<()> {
             sill_core::login::run_into(a, &home, &ghosts, &method, |line| match line {
                 sill_core::login::Line::Status(t) => eprintln!("{t}"),
                 sill_core::login::Line::Stderr(t) => eprintln!("\x1b[2m{t}\x1b[0m"),
+                // this command runs where the person is: open it here, and say it for another browser
+                sill_core::login::Line::OpenUrl { url, .. } => {
+                    eprintln!("open: {url}");
+                    let _ = std::process::Command::new("xdg-open").arg(&url)
+                        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+                        .spawn().map(|mut child| std::thread::spawn(move || child.wait()));
+                }
             })?;
             eprintln!("logged in; running {agent} sessions pick it up when they start again");
             Ok(())

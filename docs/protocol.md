@@ -389,6 +389,8 @@ Public host streams are implemented (2026-11-03):
 | `_sill/registry.install` | `{entry_id, version, source, allow_unreviewed?, operation_id?}` | `{token, operation}` |
 | `_sill/registry.list` | `{after?, limit?}` | `{entries, next}` |
 | `_sill/agents.discover` | `{agent_id, method_id?, operation_id?}` | `{token, operation}` — needs `sill.agent_setup: 1` |
+| `_sill/streams.login_callback` | `{operation_id}` | `{token}` — needs `sill.login_browser: 1` |
+| `_sill/operations.cancel` | `{operation_id}` | `{}` — needs `sill.login_browser: 1` |
 
 These baseline methods need no optional capability (except `_sill/agents.discover`, 2026-11-08, below). Login selects a configured agent on the daemon box, never a frontend
 command. The agent validates the method during login; an unsupported method is a streamed failure.
@@ -438,9 +440,19 @@ Login/install streams carry UTF-8 newline-delimited tagged JSON, described by
 `streams.host_progress.event` in the exported schema:
 
 - `{type: "status", text}` or `{type: "stderr", text}` for login progress.
+- `{type: "open_url", url, callback_port?}` (2026-11-11, `sill.login_browser: 1`): a login page
+  for the frontend to open in the person's browser; the daemon opens none. `callback_port` is the
+  daemon host's loopback port the page's `redirect_uri` names. A frontend on another machine
+  listens on exactly that port of its own loopback and relays each connection with
+  `_sill/streams.login_callback {operation_id}`, raw TCP bytes to that port on the daemon host,
+  served only for the port the running login reported (`not_found` when no such login runs,
+  `invalid_state` without a port or when nothing listens). `_sill/operations.cancel
+  {operation_id}` stops a running login, including one run by directory setup; it fails with
+  code `cancelled` (`not_found` when no such login runs). A `busy` refusal of a job with an
+  operation names it in `details.operation_id`. [Design](login.md#the-browser-belongs-to-the-frontend-2026-11-11).
 - `{type: "output", text}` for installer output.
 - `{type: "completed", agent_id}` establishes success. Read current agent configuration separately.
-- `{type: "failed", code: "operation_failed", message}` establishes failure; filesystem changes
+- `{type: "failed", code: "operation_failed" | "cancelled", message}` establishes failure; filesystem changes
   or login side effects may already have occurred. Unknown failure codes never authorize retry.
 
 Each text/message is truncated at a UTF-8 boundary to 16 KiB. At most four login/install jobs
@@ -449,7 +461,8 @@ an exhausted job budget returns `limit_exceeded`. Progress writes have a one-sec
 a stalled reader loses its stream while the job continues. A job reserves its slot until it
 finishes, including after disconnect. Login retains its existing agent-response deadlines
 (30 seconds for initialization, ten minutes for authentication); installers have no new overall
-deadline. Cancellation and reconnect/replay are unsupported for these two job streams.
+deadline. Logins can be cancelled (`sill.login_browser`, above); installs cannot, and
+reconnect/replay is unsupported for both job streams.
 Closing or never claiming their stream **does not cancel the job**. EOF without a terminal event,
 a lost token/reply, or daemon death does not establish the outcome. Login/install callers that
 retained an `operation_id` recover it through `_sill/operations.get` or an identical opening

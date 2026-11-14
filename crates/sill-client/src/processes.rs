@@ -213,10 +213,22 @@ pub fn expose(port: u16, open: Opener) -> Result<Bridge> {
     expose_on(port, port, open)
 }
 
+/// Listen on exactly `port` of this machine's loopback, each connection relayed through a
+/// stream from `open`: for a port that cannot move, such as a login's registered callback.
+pub fn expose_exact(port: u16, open: Opener) -> Result<Bridge> {
+    let listener = TcpListener::bind(("127.0.0.1", port))
+        .with_context(|| format!("port {port} on this machine is in use"))?;
+    serve(listener, port, open)
+}
+
 fn expose_on(port: u16, preferred: u16, open: Opener) -> Result<Bridge> {
     let listener = TcpListener::bind(("127.0.0.1", preferred))
         .or_else(|_| TcpListener::bind(("127.0.0.1", 0)))
         .context("listen on this machine's loopback")?;
+    serve(listener, port, open)
+}
+
+fn serve(listener: TcpListener, port: u16, open: Opener) -> Result<Bridge> {
     let host_port = listener.local_addr()?.port();
     listener.set_nonblocking(true)?;
     let stop = Arc::new(AtomicBool::new(false));

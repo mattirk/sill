@@ -4,7 +4,9 @@ use anyhow::Result;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use sill_proto::{host as api, rpc::Error};
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -22,16 +24,52 @@ fn valid_id(id: &str) -> Result<()> {
     }
     Ok(())
 }
-fn jobs() -> &'static Mutex<HashSet<String>> { static JOBS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new(); JOBS.get_or_init(Default::default) }
+/// Running jobs by key, each with its operation when it has one.
+fn jobs() -> &'static Mutex<HashMap<String, Option<String>>> { static JOBS: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new(); JOBS.get_or_init(Default::default) }
 pub(super) struct Job(String);
 impl Job {
-    pub(super) fn reserve(key: String) -> Result<Self> {
+    pub(super) fn reserve(key: String) -> Result<Self> { Self::reserve_for(key, None) }
+    /// `busy` names the running job's operation, so another frontend can cancel a login it did not start.
+    fn reserve_for(key: String, operation_id: Option<&str>) -> Result<Self> {
         let mut jobs = jobs().lock().unwrap();
-        if jobs.contains(&key) { return Err(domain("busy", "this host operation is already running")); }
+        if let Some(running) = jobs.get(&key) {
+            let details = running.as_ref().map(|id| json!({ "operation_id": id }));
+            return Err(sill_core::sfp::DomainError { code: "busy", message: "this host operation is already running".into(), details }.into());
+        }
         if jobs.len() >= api::MAX_JOBS { return Err(sill_core::sfp::DomainError::limit(sill_proto::rpc::LimitScope::Capacity, None, "too many host jobs")); }
-        jobs.insert(key.clone());
+        jobs.insert(key.clone(), operation_id.map(str::to_owned));
         Ok(Self(key))
     }
+}
+
+/// A running login: whether it is cancelled, and the callback port its page reported.
+#[derive(Default)]
+struct LoginCtl { cancelled: AtomicBool, callback_port: Mutex<Option<u16>> }
+fn logins() -> &'static Mutex<HashMap<String, Arc<LoginCtl>>> { static L: OnceLock<Mutex<HashMap<String, Arc<LoginCtl>>>> = OnceLock::new(); L.get_or_init(Default::default) }
+/// Registered while its job runs, by operation.
+struct LoginEntry(String, Arc<LoginCtl>);
+impl LoginEntry {
+    fn new(operation_id: &str) -> Self {
+        let ctl = Arc::new(LoginCtl::default());
+        logins().lock().unwrap().insert(operation_id.to_owned(), ctl.clone());
+        Self(operation_id.to_owned(), ctl)
+    }
+    fn cancelled(&self) -> bool { self.1.cancelled.load(Ordering::Acquire) }
+    /// A login line as progress; an `open_url`'s port is the one the callback relay may reach.
+    fn progress(&self, line: sill_core::login::Line) -> api::Progress {
+        match line {
+            sill_core::login::Line::Status(s) => api::Progress::Status { text: text(s) },
+            sill_core::login::Line::Stderr(s) => api::Progress::Stderr { text: text(s) },
+            sill_core::login::Line::OpenUrl { url, callback_port } => {
+                if callback_port.is_some() { *self.1.callback_port.lock().unwrap() = callback_port; }
+                api::Progress::OpenUrl { url, callback_port }
+            }
+        }
+    }
+}
+impl Drop for LoginEntry { fn drop(&mut self) { logins().lock().unwrap().remove(&self.0); } }
+fn running_login(operation_id: &str) -> Result<Arc<LoginCtl>> {
+    logins().lock().unwrap().get(operation_id).cloned().ok_or_else(|| domain("not_found", "no such login is running"))
 }
 impl Drop for Job { fn drop(&mut self) { jobs().lock().unwrap().remove(&self.0); } }
 
@@ -87,7 +125,7 @@ fn existing(hub: &Hub, id: &str, method: &str, input: &Value) -> Result<Option<a
     hub.with_store(|s| Ok(sill_core::operations::Journal::new(s.conn())?.existing(id, method, input)?.map(|operation| api::JobStream { token: None, operation })))
 }
 fn start(hub: &Hub, id: String, method: &str, input: Value, key: String, run: impl FnOnce(&mut ProgressWriter) -> Result<String> + Send + 'static) -> Result<api::JobStream> {
-    let job = Job::reserve(key)?;
+    let job = Job::reserve_for(key, Some(&id))?;
     let (reader, writer) = UnixStream::pair()?;
     writer.set_write_timeout(Some(std::time::Duration::from_secs(1)))?;
     let token = super::streams::socket(reader)?;
@@ -108,7 +146,10 @@ fn start(hub: &Hub, id: String, method: &str, input: Value, key: String, run: im
         let mut progress = ProgressWriter(Some(writer));
         let (agent_id, code, event) = match run(&mut progress) {
             Ok(agent_id) => (Some(agent_id.clone()), None, api::Progress::Completed { agent_id }),
-            Err(e) => (None, Some("operation_failed"), api::Progress::Failed { code: "operation_failed".into(), message: text(format!("{e:#}")) }),
+            Err(e) => {
+                let code = if e.downcast_ref::<sill_core::login::Cancelled>().is_some() { api::CANCELLED } else { "operation_failed" };
+                (None, Some(code), api::Progress::Failed { code: code.into(), message: text(format!("{e:#}")) })
+            }
         };
         let saved = sill_core::operations::Journal::new(store.conn()).and_then(|j| j.finish(&operation_id, agent_id.as_deref(), code));
         if let Err(error) = saved {
@@ -127,7 +168,7 @@ fn start(hub: &Hub, id: String, method: &str, input: Value, key: String, run: im
 }
 
 pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
-    if !matches!(method, "_sill/streams.port" | "_sill/agents.login" | "_sill/agents.discover" | "_sill/agents.reset" | "_sill/registry.install" | "_sill/registry.list" | "_sill/operations.get") { return None; }
+    if !matches!(method, "_sill/streams.port" | "_sill/streams.login_callback" | "_sill/operations.cancel" | "_sill/agents.login" | "_sill/agents.discover" | "_sill/agents.reset" | "_sill/registry.install" | "_sill/registry.list" | "_sill/operations.get") { return None; }
     Some((|| {
         match method {
             "_sill/operations.get" => {
@@ -145,6 +186,20 @@ pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
                 if !socket.exists() { return Err(domain("invalid_state", "session jail is not running")); }
                 Ok(json!(api::HostStream { token: super::streams::port(&a.session_id, a.port)? }))
             }
+            "_sill/streams.login_callback" => {
+                let a: api::OperationKey = args(params)?;
+                let login = running_login(&a.operation_id)?;
+                let Some(port) = *login.callback_port.lock().unwrap() else { return Err(domain("invalid_state", "this login reported no callback port")) };
+                let tcp = std::net::TcpStream::connect(("127.0.0.1", port))
+                    .or_else(|_| std::net::TcpStream::connect(("::1", port)))
+                    .map_err(|e| domain("invalid_state", &format!("nothing answers the login's callback port {port}: {e}")))?;
+                Ok(json!(api::HostStream { token: super::streams::tcp(tcp)? }))
+            }
+            "_sill/operations.cancel" => {
+                let a: api::OperationKey = args(params)?;
+                running_login(&a.operation_id)?.cancelled.store(true, Ordering::Release);
+                Ok(json!(sill_proto::Empty {}))
+            }
             "_sill/agents.login" => {
                 let a: api::AgentLogin = args(params)?;
                 let (id, input) = identity(&a.operation_id, &a)?;
@@ -155,13 +210,9 @@ pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
                 let agent = sill_core::agents::load(&home)?.remove(&a.agent_id).ok_or_else(|| domain("not_found", "agent not found"))?;
                 agent.ready(&home)?;
                 let ghosts = hub.with_store(|s| Ok(sill_core::session::ghost_credential_homes(&s.sessions()?, &agent.id)))?;
+                let login = LoginEntry::new(&id);
                 Ok(json!(start(hub, id, method, input, format!("login:{}", agent.id), move |progress| {
-                    sill_core::login::run_into(&agent, &home, &ghosts, &a.method_id, |line| {
-                        progress.send(match line {
-                            sill_core::login::Line::Status(s) => api::Progress::Status { text: text(s) },
-                            sill_core::login::Line::Stderr(s) => api::Progress::Stderr { text: text(s) },
-                        });
-                    })?;
+                    sill_core::login::run_cancellable(&agent, &home, &ghosts, &a.method_id, &|| login.cancelled(), |line| progress.send(login.progress(line)))?;
                     Ok(agent.id)
                 })?))
             }
@@ -175,16 +226,13 @@ pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
                 if sill_core::registry::installed(&home, &agent.id).is_none() { return Err(domain("invalid_state", "the agent is not installed by sill; discovery runs the installed command")); }
                 if let Some(m) = &a.method_id && (m.is_empty() || m.len() > 256 || m.chars().any(char::is_control)) { return Err(invalid("invalid method_id")); }
                 // the same key as its install: never two first starts, or one during an install
+                let login = a.method_id.is_some().then(|| LoginEntry::new(&id));
                 Ok(json!(start(hub, id, method, input, format!("install:{}", agent.id), move |progress| {
                     match &a.method_id {
                         None => { sill_core::registry::discover(&home, &agent, &mut |s| progress.send(api::Progress::Output { text: text(s) }))?; }
                         Some(m) => {
-                            sill_core::login::setup(&agent, &home, m, |line| {
-                                progress.send(match line {
-                                    sill_core::login::Line::Status(s) => api::Progress::Status { text: text(s) },
-                                    sill_core::login::Line::Stderr(s) => api::Progress::Stderr { text: text(s) },
-                                });
-                            })?;
+                            let login = login.as_ref().expect("registered for a login");
+                            sill_core::login::setup_cancellable(&agent, &home, m, &|| login.cancelled(), |line| progress.send(login.progress(line)))?;
                         }
                     }
                     Ok(agent.id)
@@ -296,6 +344,9 @@ mod tests {
         let replacement = Job::reserve("test:extra".into()).unwrap();
         drop((replacement, held));
         assert!(jobs().lock().unwrap().is_empty());
+        let _running = Job::reserve_for("test:login".into(), Some("op-1")).unwrap();
+        let busy = Job::reserve("test:login".into()).err().unwrap();
+        assert_eq!(busy.downcast_ref::<sill_core::sfp::DomainError>().unwrap().details, Some(json!({"operation_id": "op-1"})));
         let clipped = text("€".repeat(api::MAX_PROGRESS_TEXT));
         assert!(clipped.len() <= api::MAX_PROGRESS_TEXT);
         assert!(clipped.ends_with('€'));

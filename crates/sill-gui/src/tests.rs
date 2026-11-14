@@ -930,7 +930,7 @@ fn ctrl_q_quits() {
         repeat: false,
     };
     assert!(matches!(
-        crate::keys::shortcut(press(Modifiers::CTRL)),
+        crate::keys::shortcut(press(Modifiers::COMMAND)),
         Some(Message::Quit)
     ));
     assert!(crate::keys::shortcut(press(Modifiers::empty())).is_none());
@@ -1275,7 +1275,7 @@ fn the_keys_go_between_shelf_drawer_and_full() {
                 iced::keyboard::key::NativeCode::Unidentified,
             ),
             location: iced::keyboard::Location::Standard,
-            modifiers: iced::keyboard::Modifiers::CTRL | iced::keyboard::Modifiers::SHIFT,
+            modifiers: iced::keyboard::Modifiers::COMMAND | iced::keyboard::Modifiers::SHIFT,
             text: None,
             repeat: false,
         })
@@ -1747,13 +1747,13 @@ fn drag(ui: &mut impl Drive, from: iced::Point, to: iced::Point) {
 fn ctrl_c() -> Vec<iced::Event> {
     use iced::keyboard::{Event, Key, Location, Modifiers, key};
     vec![
-        iced::Event::Keyboard(Event::ModifiersChanged(Modifiers::CTRL)),
+        iced::Event::Keyboard(Event::ModifiersChanged(Modifiers::COMMAND)),
         iced::Event::Keyboard(Event::KeyPressed {
             key: Key::Character("c".into()),
             modified_key: Key::Character("c".into()),
             physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
             location: Location::Standard,
-            modifiers: Modifiers::CTRL,
+            modifiers: Modifiers::COMMAND,
             text: None,
             repeat: false,
         }),
@@ -2173,7 +2173,7 @@ fn session_shortcuts_work_from_the_prompt() {
     };
     let named = |n| Key::Named(n);
     let ch = |c: &str| Key::Character(c.into());
-    let both = Modifiers::CTRL | Modifiers::SHIFT;
+    let both = Modifiers::COMMAND | Modifiers::SHIFT;
     assert!(matches!(
         shortcut(press(named(Named::Tab), Modifiers::empty())),
         Some(Message::Focus(true))
@@ -2183,11 +2183,11 @@ fn session_shortcuts_work_from_the_prompt() {
         Some(Message::Focus(false))
     ));
     assert!(matches!(
-        shortcut(press(ch("."), Modifiers::CTRL)),
+        shortcut(press(ch("."), Modifiers::COMMAND)),
         Some(Message::StepTab(1))
     ));
     assert!(matches!(
-        shortcut(press(ch(","), Modifiers::CTRL)),
+        shortcut(press(ch(","), Modifiers::COMMAND)),
         Some(Message::StepTab(-1))
     ));
     assert!(matches!(
@@ -2195,7 +2195,7 @@ fn session_shortcuts_work_from_the_prompt() {
         Some(Message::Layout(crate::layout::Action::ToggleFull))
     ));
     assert!(matches!(
-        shortcut(press(ch("t"), Modifiers::CTRL)),
+        shortcut(press(ch("t"), Modifiers::COMMAND)),
         Some(Message::NewSession)
     ));
     assert!(matches!(
@@ -2207,29 +2207,29 @@ fn session_shortcuts_work_from_the_prompt() {
         Some(Message::Page(true))
     ));
     assert!(matches!(
-        shortcut(press(named(Named::End), Modifiers::CTRL)),
+        shortcut(press(named(Named::End), Modifiers::COMMAND)),
         Some(Message::Latest)
     ));
     assert!(matches!(
-        shortcut(press(ch("q"), Modifiers::CTRL)),
+        shortcut(press(ch("q"), Modifiers::COMMAND)),
         Some(Message::Quit)
     ));
     assert!(shortcut(press(ch("a"), Modifiers::empty())).is_none());
 
     assert!(matches!(
-        shortcut(press(ch("w"), Modifiers::CTRL)),
+        shortcut(press(ch("w"), Modifiers::COMMAND)),
         Some(Message::CloseCurrent)
     ));
     for digit in 1..=9 {
         assert!(
-            matches!(shortcut(press(ch(&digit.to_string()), Modifiers::CTRL)),
+            matches!(shortcut(press(ch(&digit.to_string()), Modifiers::COMMAND)),
             Some(Message::SelectTab(at)) if at == digit - 1)
         );
     }
     // Ctrl+0 is no tab: it puts Interface scale back to 100 %, as + and - step it
     for (key, step) in [("0", 0), ("+", 1), ("=", 1), ("-", -1)] {
         assert!(
-            matches!(shortcut(press(ch(key), Modifiers::CTRL)), Some(Message::ScaleStep(s)) if s == step),
+            matches!(shortcut(press(ch(key), Modifiers::COMMAND)), Some(Message::ScaleStep(s)) if s == step),
             "Ctrl+{key}"
         );
     }
@@ -2241,7 +2241,7 @@ fn session_shortcuts_work_from_the_prompt() {
         shortcut(press(ch("T"), both)),
         Some(Message::ToggleTerminal)
     ));
-    assert!(shortcut(press(ch("t"), Modifiers::CTRL | Modifiers::ALT)).is_none());
+    assert!(shortcut(press(ch("t"), Modifiers::COMMAND | Modifiers::ALT)).is_none());
     assert!(shortcut(press(named(Named::ArrowLeft), both)).is_none());
     assert!(shortcut(press(named(Named::ArrowRight), both)).is_none());
 
@@ -2256,7 +2256,7 @@ fn session_shortcuts_work_from_the_prompt() {
         status: Status::Focused { is_hovered: false },
     };
     assert!(matches!(
-        crate::ui::enter_sends(typed(named(Named::ArrowLeft), both)),
+        crate::ui::enter_sends(typed(named(Named::ArrowLeft), JUMP | Modifiers::SHIFT)),
         Some(Binding::Select(iced::widget::text_editor::Motion::WordLeft))
     ));
     assert!(matches!(
@@ -3073,19 +3073,19 @@ fn session_shortcuts_precede_text_inputs_and_do_not_insert_characters() {
     let mut ui =
         iced_test::Simulator::with_size(crate::snapshots::settings(), (600.0, 100.0), view);
     ui.click(iced::widget::Id::new("edit")).unwrap();
-    let mut events = hotkey(Key::Character("2".into()), Modifiers::CTRL);
+    let mut events = hotkey(Key::Character("2".into()), Modifiers::COMMAND);
     if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { text, .. }) = &mut events[1] {
         *text = Some("2".into()); // even backends supplying printable Ctrl text cannot insert it
     }
     ui.send(events);
-    ui.send(hotkey(Key::Character("t".into()), Modifiers::CTRL));
+    ui.send(hotkey(Key::Character("t".into()), Modifiers::COMMAND));
     ui.send(hotkey(
         Key::Character("T".into()),
-        Modifiers::CTRL | Modifiers::SHIFT,
+        Modifiers::COMMAND | Modifiers::SHIFT,
     ));
-    ui.send(hotkey(Key::Character("w".into()), Modifiers::CTRL));
-    ui.send(hotkey(Key::Character(",".into()), Modifiers::CTRL));
-    ui.send(hotkey(Key::Character(".".into()), Modifiers::CTRL));
+    ui.send(hotkey(Key::Character("w".into()), Modifiers::COMMAND));
+    ui.send(hotkey(Key::Character(",".into()), Modifiers::COMMAND));
+    ui.send(hotkey(Key::Character(".".into()), Modifiers::COMMAND));
     let messages: Vec<_> = ui.into_messages().collect();
     assert!(
         matches!(
@@ -3129,10 +3129,10 @@ fn word_selection_works_in_prompt_and_source_bindings() {
                 status: Status::Focused { is_hovered: false },
             };
             assert!(
-                matches!(binding(event(Modifiers::CTRL | Modifiers::SHIFT)), Some(Binding::Select(m)) if m == motion)
+                matches!(binding(event(JUMP | Modifiers::SHIFT)), Some(Binding::Select(m)) if m == motion)
             );
             assert!(
-                matches!(binding(event(Modifiers::CTRL)), Some(Binding::Move(m)) if m == motion)
+                matches!(binding(event(JUMP)), Some(Binding::Move(m)) if m == motion)
             );
         }
     }
@@ -3146,7 +3146,7 @@ fn word_selection_works_in_prompt_and_source_bindings() {
         ui.send(hotkey(Key::Named(Named::Home), Modifiers::empty()));
         ui.send(hotkey(
             Key::Named(Named::ArrowRight),
-            Modifiers::CTRL | Modifiers::SHIFT,
+            JUMP | Modifiers::SHIFT,
         ));
     });
     for message in messages {
@@ -3161,7 +3161,7 @@ fn word_selection_works_in_prompt_and_source_bindings() {
         let messages = live.frame(&app, |ui| {
             ui.send(hotkey(
                 Key::Named(direction),
-                Modifiers::CTRL | Modifiers::SHIFT,
+                JUMP | Modifiers::SHIFT,
             ));
         });
         for message in messages {
@@ -3187,7 +3187,7 @@ fn word_selection_works_in_single_line_inputs() {
     ui.send(hotkey(Key::Named(Named::Home), Modifiers::empty()));
     ui.send(hotkey(
         Key::Named(Named::ArrowRight),
-        Modifiers::CTRL | Modifiers::SHIFT,
+        JUMP | Modifiers::SHIFT,
     ));
     let mut insert = hotkey(Key::Character("X".into()), Modifiers::empty());
     if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { text, .. }) = &mut insert[1] {
@@ -3300,8 +3300,8 @@ fn configured_shortcuts_intercept_inputs_and_release_old_bindings() {
         iced_test::Simulator::with_size(crate::snapshots::settings(), (600.0, 100.0), view);
     ui.click(iced::widget::Id::new("custom-edit")).unwrap();
     ui.send(hotkey(Key::Character("n".into()), Modifiers::ALT));
-    ui.send(hotkey(Key::Character("t".into()), Modifiers::CTRL));
-    ui.send(hotkey(Key::Character("w".into()), Modifiers::CTRL));
+    ui.send(hotkey(Key::Character("t".into()), Modifiers::COMMAND));
+    ui.send(hotkey(Key::Character("w".into()), Modifiers::COMMAND));
     let messages: Vec<_> = ui.into_messages().collect();
     assert_eq!(
         messages
@@ -3311,7 +3311,7 @@ fn configured_shortcuts_intercept_inputs_and_release_old_bindings() {
         1
     );
     assert!(!messages.iter().any(|m| matches!(m, Message::CloseCurrent)));
-    assert!(crate::keys::from_text(&Key::Character("t".into()), Modifiers::CTRL, true).is_none());
+    assert!(crate::keys::from_text(&Key::Character("t".into()), Modifiers::COMMAND, true).is_none());
 }
 
 #[test]
@@ -3381,7 +3381,7 @@ fn host_and_jail_shells_keep_separate_panes_and_route_hidden_events() {
 fn host_shell_shortcut_is_configurable() {
     use iced::keyboard::{Key, Modifiers};
     let mut bindings = crate::shortcuts::Bindings::new();
-    let modifiers = Modifiers::CTRL | Modifiers::SHIFT;
+    let modifiers = Modifiers::COMMAND | Modifiers::SHIFT;
     assert!(matches!(
         crate::shortcuts::message(&bindings, &Key::Character("h".into()), modifiers),
         Some(Message::ToggleHostTerminal)
@@ -3815,9 +3815,9 @@ fn prompt_undo_and_redo_shortcuts() {
     use iced::keyboard::{Key, Modifiers, key};
     use iced::widget::text_editor::{Binding, KeyPress, Status};
     for (character, modifiers, redo) in [
-        ("z", Modifiers::CTRL, false),
-        ("z", Modifiers::CTRL | Modifiers::SHIFT, true),
-        ("y", Modifiers::CTRL, true),
+        ("z", Modifiers::COMMAND, false),
+        ("z", Modifiers::COMMAND | Modifiers::SHIFT, true),
+        ("y", Modifiers::COMMAND, true),
     ] {
         let press = KeyPress {
             key: Key::Character(character.into()),
@@ -4181,3 +4181,11 @@ fn acp_controls_distinguish_loading_restoring_empty_and_failed() {
     controls.status = "failed".into(); controls.error = Some("Agent did not confirm effort".into());
     assert!(simulator(&app, (1200.0, 860.0)).find("Settings warning").is_err());
 }
+
+/// The modifier that moves by words, as iced's editors take it (`Modifiers::jump`): Alt (Option)
+/// on macOS, Ctrl elsewhere.
+const JUMP: iced::keyboard::Modifiers = if cfg!(target_os = "macos") {
+    iced::keyboard::Modifiers::ALT
+} else {
+    iced::keyboard::Modifiers::CTRL
+};

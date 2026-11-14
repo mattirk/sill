@@ -109,7 +109,21 @@ pub enum Progress {
     Output { text: String },
     Completed { agent_id: String },
     Failed { code: String, message: String },
+    /// A login page for the frontend to open in the person's browser (capability
+    /// `sill.login_browser`); the daemon opens none. `callback_port`: the daemon host's loopback
+    /// port the page redirects to, which a frontend on another machine relays with
+    /// `_sill/streams.login_callback`.
+    OpenUrl {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        callback_port: Option<u16>,
+    },
 }
+
+/// The capability of browser-login handling: `open_url` progress, the callback relay and cancel.
+pub const LOGIN_BROWSER: &str = "sill.login_browser";
+/// Failure code of a cancelled login.
+pub const CANCELLED: &str = "cancelled";
 
 /// A durable receipt survives stream loss and daemon restart. Unknown never authorizes replay.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

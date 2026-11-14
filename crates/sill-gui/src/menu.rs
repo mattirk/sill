@@ -281,7 +281,7 @@ impl App {
                     View::Drawer => "view-drawer",
                     View::Full => "view-full",
                 }),
-                tip(format!("{label}: {what}")),
+                tip(keys::label(&format!("{label}: {what}"))),
                 tooltip::Position::Bottom,
             )
         };
@@ -324,7 +324,7 @@ impl App {
                         Message::Quit,
                     ))
                     .id("close-window"),
-                    tip("Close: the window goes; the daemon and the sessions go on. The tray icon or the hotkey will bring it back (Ctrl+Q)".into()),
+                    tip(keys::label("Close: the window goes; the daemon and the sessions go on. The tray icon or the hotkey will bring it back (Ctrl+Q)")),
                     tooltip::Position::Bottom,
                 ),
             ]

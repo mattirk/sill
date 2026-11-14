@@ -4629,6 +4629,32 @@
             "message"
           ],
           "type": "object"
+        },
+        {
+          "description": "A login page for the frontend to open in the person's browser (capability\n`sill.login_browser`); the daemon opens none. `callback_port`: the daemon host's loopback\nport the page redirects to, which a frontend on another machine relays with\n`_sill/streams.login_callback`.",
+          "properties": {
+            "callback_port": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "open_url",
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "url"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -7331,6 +7357,11 @@
         "version": 1
       },
       {
+        "doc": "Host logins hand their pages to the frontend (`open_url` login progress) instead of opening a browser on the daemon host; _sill/streams.login_callback relays the page's loopback callback from a frontend on another machine; _sill/operations.cancel stops a running login.",
+        "name": "sill.login_browser",
+        "version": 1
+      },
+      {
         "doc": "The frontend displays Host control: the permanent session caption and the window-level line naming every session with active control. It may activate and revoke (_sill/host_control.activate, revoke); attached to a session, it counts as displaying that session's control, which ends when the last such connection goes.",
         "name": "sill.host_control",
         "version": 1
@@ -8642,6 +8673,34 @@
       },
       "result": {
         "$ref": "#/$defs/HostStream"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.login_browser": 1
+      },
+      "doc": "Connect to the loopback callback port a running login reported in `open_url`, on the daemon host; raw TCP bytes. `not_found` when no such login runs, `invalid_state` when it reported no port or nothing listens. Do not blindly retry.",
+      "kind": "request",
+      "name": "_sill/streams.login_callback",
+      "params": {
+        "$ref": "#/$defs/OperationKey"
+      },
+      "result": {
+        "$ref": "#/$defs/HostStream"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.login_browser": 1
+      },
+      "doc": "Stop a running login (also one run by directory setup): its agent and helpers end and the operation fails with code `cancelled`. `not_found` when no such login runs.",
+      "kind": "request",
+      "name": "_sill/operations.cancel",
+      "params": {
+        "$ref": "#/$defs/OperationKey"
+      },
+      "result": {
+        "$ref": "#/$defs/Empty"
       }
     },
     {

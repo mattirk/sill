@@ -28,6 +28,11 @@ pub struct Login {
     notes: Vec<(String, bool)>,
     /// The terminal pane (by its generation) that runs the login command.
     pub terminal: Option<u64>,
+    /// The host login running for this card, or a `busy` one another frontend started: what
+    /// Cancel stops.
+    operation: Option<String>,
+    /// The page the host login asked a browser to open: opened once, and offered again.
+    url: Option<String>,
 }
 
 #[derive(Clone)]
@@ -40,6 +45,15 @@ pub enum Event {
     Routed(String, Result<(String, Route, bool), String>),
     /// A line of the host login's progress.
     Line(String),
+    /// The host login's operation, to cancel it by: one this card started, or (`busy`) one
+    /// already running.
+    Operation(String),
+    /// A page for the person's browser, opened here.
+    OpenUrl(String),
+    /// Open the page again.
+    Open,
+    Cancel,
+    Cancelled(Result<(), String>),
     HostDone(Result<(), String>),
 }
 
@@ -52,6 +66,11 @@ impl std::fmt::Debug for Event {
             Event::SubmitKey => write!(f, "SubmitKey"),
             Event::Routed(m, r) => write!(f, "Routed({m:?}, {r:?})"),
             Event::Line(l) => write!(f, "Line({l:?})"),
+            Event::Operation(o) => write!(f, "Operation({o:?})"),
+            Event::OpenUrl(u) => write!(f, "OpenUrl({u:?})"),
+            Event::Open => write!(f, "Open"),
+            Event::Cancel => write!(f, "Cancel"),
+            Event::Cancelled(r) => write!(f, "Cancelled({r:?})"),
             Event::HostDone(r) => write!(f, "HostDone({r:?})"),
         }
     }
@@ -159,7 +178,41 @@ impl App {
                 };
             }
             Event::Line(line) => login.notes.push((line, false)),
+            Event::Operation(operation) => login.operation = Some(operation),
+            Event::OpenUrl(url) => {
+                login.url = Some(url.clone());
+                if !demo {
+                    crate::terminal::open_link(url);
+                }
+            }
+            Event::Open => {
+                if let Some(url) = login.url.clone() {
+                    crate::terminal::open_link(url);
+                }
+            }
+            Event::Cancel => {
+                let (Some(operation), Some(actions)) = (login.operation.clone(), actions) else {
+                    return Task::none();
+                };
+                return crate::blocking(
+                    move || {
+                        actions
+                            .once(|client| login::cancel(client, &operation))
+                            .map_err(|e| format!("{e:#}"))
+                    },
+                    move |done| Message::Login(session, Event::Cancelled(done)),
+                );
+            }
+            Event::Cancelled(Ok(())) => {
+                login.operation = None;
+                login.notes.push(("Cancelled.".into(), false));
+            }
+            Event::Cancelled(Err(why)) => {
+                login.notes.push((format!("Could not cancel: {why}"), true));
+            }
             Event::HostDone(Ok(())) => {
+                login.operation = None;
+                login.url = None;
                 login.notes.push((
                     "Logged in; the session starts again with the new login.".into(),
                     false,
@@ -168,6 +221,8 @@ impl App {
             }
             Event::HostDone(Err(why)) => {
                 login.chosen = None;
+                login.url = None;
+                login.operation = None;
                 login.notes.push((format!("Login failed: {why}"), true));
                 // the agent asks again, and the card offers its methods again
                 return self.login_control(&session, Control::RetrySession);
@@ -255,7 +310,7 @@ impl App {
         view.terminal_shown = true;
         view.login.terminal = Some(generation);
         view.login.notes.push((
-            "Finish the login in the terminal below: Ctrl+click its link to open it, and paste the code back with Ctrl+V. The session goes on when it closes.".into(),
+            crate::keys::label("Finish the login in the terminal below: Ctrl+click its link to open it, and paste the code back with Ctrl+V. The session goes on when it closes."),
             false,
         ));
         let session = session.to_string();
@@ -275,7 +330,7 @@ impl App {
         };
         if let Some(view) = self.views.get_mut(session) {
             view.login.notes.push((
-                "The login runs on the daemon's host; follow the link it reports.".into(),
+                "The login runs on the daemon's host; its page opens in your browser here.".into(),
                 false,
             ));
         }
@@ -286,12 +341,21 @@ impl App {
             .spawn(move || {
                 let done = (|| -> anyhow::Result<()> {
                     let client = connect()?;
-                    login::host_login(&client, &agent_id, &method_id, |line| {
-                        let _ = tx.send_blocking(Event::Line(line));
+                    login::host_login(&client, &agent_id, &method_id, |event| {
+                        let _ = tx.send_blocking(match event {
+                            login::HostEvent::Started { operation_id } => Event::Operation(operation_id),
+                            login::HostEvent::Line(line) => Event::Line(line),
+                            login::HostEvent::OpenUrl { url } => Event::OpenUrl(url),
+                        });
                     })?;
                     login::restart(&client, &id)
                 })();
+                // a login already running (`busy`): after the failure, so Cancel stops that one
+                let running = done.as_ref().err().and_then(login::busy_login);
                 let _ = tx.send_blocking(Event::HostDone(done.map_err(|e| format!("{e:#}"))));
+                if let Some(running) = running {
+                    let _ = tx.send_blocking(Event::Operation(running));
+                }
             });
         if spawned.is_err() {
             return Task::none();
@@ -410,6 +474,33 @@ impl App {
             } else {
                 alpha(P.fg, 0.7)
             }));
+        }
+        let mut actions = row![].spacing(8).align_y(Alignment::Center);
+        if let Some(url) = &login.url {
+            actions = actions.push(
+                tooltip(
+                    keys::press(
+                        button(text("Open login page").size(style::SMALL))
+                            .padding([4, 10])
+                            .style(style::solid(P.accent)),
+                        event(Event::Open),
+                    ),
+                    container(text(url).size(style::TINY))
+                        .padding([3, 8])
+                        .max_width(520)
+                        .style(style::fill(P.surface)),
+                    tooltip::Position::Top,
+                ),
+            );
+        }
+        if login.operation.is_some() {
+            actions = actions.push(keys::press(
+                button(text("Cancel login").size(style::SMALL)).padding([4, 10]),
+                event(Event::Cancel),
+            ));
+        }
+        if login.url.is_some() || login.operation.is_some() {
+            card = card.push(actions);
         }
         Some(crate::ui::ruled(
             2.0,

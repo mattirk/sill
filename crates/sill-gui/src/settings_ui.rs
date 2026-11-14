@@ -458,7 +458,7 @@ impl App {
             rows.push(setting(
                 label,
                 None,
-                text_input("Disabled", crate::shortcuts::value(bindings, i))
+                text_input("Disabled", &crate::keys::label(crate::shortcuts::value(bindings, i)))
                     .width(180)
                     .padding(7)
                     .size(style::SMALL)
@@ -466,7 +466,7 @@ impl App {
             ));
         }
         let error = crate::shortcuts::validate(bindings).err();
-        let mut controls = column![text("Use Ctrl or Alt with a key, optionally Shift. Blank disables a shortcut. Use Plus for +.").size(style::SMALL)];
+        let mut controls = column![text(format!("Use {} or Alt with a key, optionally Shift. Blank disables a shortcut. Use Plus for +.", crate::keys::PRIMARY)).size(style::SMALL)];
         if let Some(why) = &error {
             controls = controls.push(text(why.clone()).size(style::SMALL).color(P.error));
         }
@@ -884,7 +884,7 @@ fn where_things_are() -> Vec<(&'static str, String)> {
         ),
         (
             "Keys",
-            "Ctrl+Shift+D shelf ⇄ drawer · Ctrl+Shift+F full · Escape session ⇄ backend · Enter send · Shift+Enter newline · Ctrl+T new session · Ctrl+Shift+T shell · Ctrl+W close session · Ctrl+1–9 select tab · Ctrl+,/. previous/next · Ctrl+Q close".into(),
+            crate::keys::label("Ctrl+Shift+D shelf ⇄ drawer · Ctrl+Shift+F full · Escape session ⇄ backend · Enter send · Shift+Enter newline · Ctrl+T new session · Ctrl+Shift+T shell · Ctrl+W close session · Ctrl+1–9 select tab · Ctrl+,/. previous/next · Ctrl+Q close"),
         ),
     ]
 }

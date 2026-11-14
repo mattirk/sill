@@ -585,6 +585,29 @@ sleep 1
 printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
 "#).unwrap();
     std::fs::write(agents.join("fixture.toml"), format!("id = 'fixture'\nname = 'Fixture'\ncommand = ['/bin/sh', '{}']\nhome_paths = []\nhost_login = ['browser']\n", script.display())).unwrap();
+    // A browser login as Codex's: the page goes to `BROWSER`, the agent waits on a loopback port
+    // for the page's callback. `hang` never finishes.
+    let page = dir.join("page_login.py");
+    std::fs::write(&page, r#"import json, os, socket, subprocess, sys
+sys.stdin.readline()
+print(json.dumps({'jsonrpc':'2.0','id':1,'result':{'authMethods':[{'id':'browser'},{'id':'hang'}]}}), flush=True)
+auth = json.loads(sys.stdin.readline())
+if auth['params']['methodId'] == 'hang':
+    sys.stdin.readline()
+    sys.exit(0)
+server = socket.socket()
+server.bind(('127.0.0.1', 0))
+server.listen(1)
+port = server.getsockname()[1]
+subprocess.run([os.environ['BROWSER'], f'https://auth.example/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A{port}%2Fcb'], check=True)
+connection, _ = server.accept()
+request = connection.makefile('rb').readline()
+assert request == b'GET /cb?code=x\n', request
+connection.sendall(b'ok\n')
+connection.close()
+print(json.dumps({'jsonrpc':'2.0','id':auth['id'],'result':{}}), flush=True)
+"#).unwrap();
+    std::fs::write(agents.join("page-fixture.toml"), format!("id = 'page-fixture'\nname = 'Page fixture'\ncommand = ['/usr/bin/python3', '{}']\nhome_paths = []\nhost_login = ['browser', 'hang']\n", page.display())).unwrap();
     // Fake local installer: one package fails, the other creates only fixture files.
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -719,6 +742,55 @@ fn public_port_stream_preserves_bytes_and_half_close() {
     stream.read_to_end(&mut bytes).unwrap();
     assert_eq!(bytes, b"\xffreply\0");
     shim.join().unwrap();
+}
+
+/// docs/login.md "The browser belongs to the frontend": the daemon hands the page over instead of
+/// opening it, relays its loopback callback only for that running login, and cancels on request.
+#[test]
+fn a_login_hands_over_its_page_relays_its_callback_and_can_be_cancelled() {
+    use std::io::BufRead;
+    let d = host_fixture();
+    let mut c = d.connect_caps(json!({"sill.login_browser": 1})).unwrap();
+    let opened = c.call("_sill/agents.login", json!({"operation_id":"page-login","agent_id":"page-fixture","method_id":"browser"})).unwrap();
+    let mut events = claim_host(&d, &opened);
+    let next = |events: &mut BufReader<UnixStream>| -> Value {
+        let mut line = String::new();
+        events.read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line:?}; {}", d.log()))
+    };
+    let page = loop {
+        let event = next(&mut events);
+        if event["type"] == "open_url" { break event; }
+        assert!(matches!(event["type"].as_str(), Some("status" | "stderr")), "{event}");
+    };
+    assert!(page["url"].as_str().unwrap().starts_with("https://auth.example/authorize?"), "{page}");
+    let port = page["callback_port"].as_u64().unwrap();
+    assert!(port > 0);
+    assert_eq!(c.call("_sill/streams.login_callback", json!({"operation_id":"other-login"})).unwrap()["error"]["data"]["code"], "not_found");
+    let relay = c.call("_sill/streams.login_callback", json!({"operation_id":"page-login"})).unwrap();
+    let mut callback = claim_host(&d, &relay);
+    callback.get_mut().write_all(b"GET /cb?code=x\n").unwrap();
+    let mut answer = String::new();
+    callback.read_line(&mut answer).unwrap();
+    assert_eq!(answer, "ok\n");
+    let rest: Vec<Value> = events.lines().map(|l| serde_json::from_str(&l.unwrap()).unwrap()).collect();
+    assert_eq!(rest.last().unwrap(), &json!({"type":"completed","agent_id":"page-fixture"}), "{rest:?}");
+    // the relay ends with its login
+    assert_eq!(c.call("_sill/streams.login_callback", json!({"operation_id":"page-login"})).unwrap()["error"]["data"]["code"], "not_found");
+
+    let hang = json!({"operation_id":"hanging-login","agent_id":"page-fixture","method_id":"hang"});
+    let opened = c.call("_sill/agents.login", hang).unwrap();
+    let busy = c.call("_sill/agents.login", json!({"agent_id":"page-fixture","method_id":"hang"})).unwrap();
+    assert_eq!(busy["error"]["data"]["code"], "busy");
+    assert_eq!(busy["error"]["data"]["details"]["operation_id"], "hanging-login", "{busy}");
+    assert_eq!(c.call("_sill/streams.login_callback", json!({"operation_id":"hanging-login"})).unwrap()["error"]["data"]["code"], "invalid_state");
+    let events = claim_host(&d, &opened);
+    assert_eq!(c.call("_sill/operations.cancel", json!({"operation_id":"hanging-login"})).unwrap()["result"], json!({}));
+    let events: Vec<Value> = events.lines().map(|l| serde_json::from_str(&l.unwrap()).unwrap()).collect();
+    assert_eq!(events.last().unwrap()["code"], "cancelled", "{events:?}");
+    let receipt = c.call("_sill/operations.get", json!({"operation_id":"hanging-login"})).unwrap();
+    assert_eq!((receipt["result"]["state"].as_str(), receipt["result"]["code"].as_str()), (Some("failed"), Some("cancelled")));
+    assert_eq!(c.call("_sill/operations.cancel", json!({"operation_id":"hanging-login"})).unwrap()["error"]["data"]["code"], "not_found");
 }
 
 #[test]

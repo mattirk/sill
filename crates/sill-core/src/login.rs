@@ -1,6 +1,8 @@
 //! Host-side login uses a fresh private HOME and XDG tree. Only declared credential files
 //! return to the profile; settings, history, hooks and incidental tool output never do.
-//! The browser helper alone restores the person's environment. Host methods must be declared.
+//! The daemon never opens a browser: the browser helper hands each URL to the login's report
+//! ([`Line::OpenUrl`]) and the frontend opens it where the person is (docs/login.md, "The browser
+//! belongs to the frontend"). Host methods must be declared.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -22,7 +24,21 @@ pub enum Line {
     Status(String),
     /// The agent's stderr: noise unless the login fails.
     Stderr(String),
+    /// A page the login asked a browser to open: http(s), each once. `callback_port` is the
+    /// daemon host's loopback port its `redirect_uri` names, which the browser must reach.
+    OpenUrl { url: String, callback_port: Option<u16> },
 }
+
+/// The login was cancelled (`_sill/operations.cancel`); the agent and its helpers were stopped.
+#[derive(Debug)]
+pub struct Cancelled;
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("the login was cancelled") }
+}
+impl std::error::Error for Cancelled {}
+
+/// Never cancelled: for callers with no way to cancel.
+pub fn never() -> bool { false }
 
 /// Run `method` of `agent` on the host; `report` gets progress lines. Blocking.
 pub fn run(agent: &Agent, home: &Path, method: &str, report: impl FnMut(Line)) -> Result<()> {
@@ -31,11 +47,16 @@ pub fn run(agent: &Agent, home: &Path, method: &str, report: impl FnMut(Line)) -
 
 /// Run `method` of `agent` on the host, copying login files into its sill-owned home and each
 /// existing directory in `extra_homes` (such as ghost sessions' copies of the agent home).
-pub fn run_into(agent: &Agent, home: &Path, extra_homes: &[(PathBuf, crate::credentials::Rules)], method: &str, mut report: impl FnMut(Line)) -> Result<()> {
+pub fn run_into(agent: &Agent, home: &Path, extra_homes: &[(PathBuf, crate::credentials::Rules)], method: &str, report: impl FnMut(Line)) -> Result<()> {
+    run_cancellable(agent, home, extra_homes, method, &never, report)
+}
+
+/// [`run_into`], ended with [`Cancelled`] once `cancelled` says so.
+pub fn run_cancellable(agent: &Agent, home: &Path, extra_homes: &[(PathBuf, crate::credentials::Rules)], method: &str, cancelled: &dyn Fn() -> bool, mut report: impl FnMut(Line)) -> Result<()> {
     let paths = agent.ready(home)?;
     anyhow::ensure!(agent.host_login.iter().any(|m| m == method), "host login method is not explicitly declared");
     let scratch = scratch_dir(home, &agent.id)?;
-    let result = login_in(agent, home, &scratch, paths, method, &mut report);
+    let result = login_in(agent, home, &scratch, paths, method, cancelled, &mut report);
     let copied = match &result {
         Ok(()) => (|| -> Result<usize> {
             let dst = crate::session::agent_home(home, &agent.id);
@@ -66,10 +87,15 @@ pub fn run_into(agent: &Agent, home: &Path, extra_homes: &[(PathBuf, crate::cred
 /// agent's directories and credential files (docs/agent-directories.md, "Directory setup by
 /// probe"). The proposed directories are copied whole into the agent's sill-owned home, so the
 /// login holds once the person applies the proposal; nothing is declared here.
-pub fn setup(agent: &Agent, home: &Path, method: &str, mut report: impl FnMut(Line)) -> Result<crate::registry::Discovery> {
+pub fn setup(agent: &Agent, home: &Path, method: &str, report: impl FnMut(Line)) -> Result<crate::registry::Discovery> {
+    setup_cancellable(agent, home, method, &never, report)
+}
+
+/// [`setup`], ended with [`Cancelled`] once `cancelled` says so.
+pub fn setup_cancellable(agent: &Agent, home: &Path, method: &str, cancelled: &dyn Fn() -> bool, mut report: impl FnMut(Line)) -> Result<crate::registry::Discovery> {
     anyhow::ensure!(agent.home_paths.is_none(), "agent {} is set up already", agent.id);
     let scratch = scratch_dir(home, &agent.id)?;
-    let result = login_in(agent, home, &scratch, &[], method, &mut report).and_then(|()| {
+    let result = login_in(agent, home, &scratch, &[], method, cancelled, &mut report).and_then(|()| {
         let proposals = crate::registry::proposals_from(&scratch, home);
         anyhow::ensure!(!proposals.is_empty(), "the login succeeded but wrote nothing under the home; there is nothing to keep");
         let login_files = crate::registry::credential_candidates(&scratch, &proposals);
@@ -148,7 +174,16 @@ fn copy_private(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// Start the agent on the host with `scratch` as its home and run `method`'s `authenticate`.
-fn login_in(agent: &Agent, home: &Path, scratch: &Path, paths: &[crate::agents::HomePath], method: &str, report: &mut impl FnMut(Line)) -> Result<()> {
+fn login_in(agent: &Agent, home: &Path, scratch: &Path, paths: &[crate::agents::HomePath], method: &str, cancelled: &dyn Fn() -> bool, report: &mut impl FnMut(Line)) -> Result<()> {
+    let urls = scratch.with_extension("urls");
+    let _ = std::fs::remove_file(&urls);
+    let mut watch = Watch { urls: urls.clone(), read: 0, seen: Default::default(), cancelled };
+    let result = login_watched(agent, home, scratch, paths, method, &mut watch, report);
+    let _ = std::fs::remove_file(&urls);
+    result
+}
+
+fn login_watched(agent: &Agent, home: &Path, scratch: &Path, paths: &[crate::agents::HomePath], method: &str, watch: &mut Watch, report: &mut impl FnMut(Line)) -> Result<()> {
     let Some(prog) = agent.command.first() else { bail!("agent {} has no command", agent.id) };
     let mut env = agent.env.clone();
     let mut unset: Vec<&str> = Vec::new();
@@ -156,6 +191,7 @@ fn login_in(agent: &Agent, home: &Path, scratch: &Path, paths: &[crate::agents::
     let path = std::env::var("PATH").unwrap_or_default();
     env.insert("PATH".into(), format!("{}:{path}", shim_dir.display()));
     env.insert("BROWSER".into(), shim_dir.join("xdg-open").display().to_string());
+    env.insert(URLS_ENV.into(), watch.urls.display().to_string());
     env.insert("HOME".into(), scratch.display().to_string());
     for (name, rel) in [("XDG_CONFIG_HOME", ".config"), ("XDG_DATA_HOME", ".local/share"), ("XDG_STATE_HOME", ".local/state"), ("XDG_CACHE_HOME", ".cache")] {
         let dir = scratch.join(rel);
@@ -214,7 +250,7 @@ fn login_in(agent: &Agent, home: &Path, scratch: &Path, paths: &[crate::agents::
             else { json!({"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false},"clientInfo":{"name":"sill","version":env!("CARGO_PKG_VERSION")}}) };
         let init = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":params});
         writeln!(stdin, "{init}")?;
-        let resp = wait_response(&rx, &erx, 1, Duration::from_secs(30), report)?;
+        let resp = wait_response(&rx, &erx, 1, Duration::from_secs(30), watch, report)?;
         if v2 && resp.get("protocolVersion").and_then(Value::as_u64)!=Some(2) {
             bail!("the opted-in ACP v2 agent did not select protocolVersion 2");
         }
@@ -229,16 +265,16 @@ fn login_in(agent: &Agent, home: &Path, scratch: &Path, paths: &[crate::agents::
         }
         if !v2 && let Some(offered) = offered.into_iter().flatten().find(|m| m.get("id").and_then(Value::as_str) == Some(method)) {
             if offered.get("type").and_then(Value::as_str) == Some("terminal") {
-                return terminal_login(agent, home, &env, &unset, offered, false, report);
+                return terminal_login(agent, home, &env, &unset, offered, false, watch, report);
             }
             if let Some(terminal) = offered.pointer("/_meta/terminal-auth") {
-                return terminal_login(agent, home, &env, &unset, terminal, true, report);
+                return terminal_login(agent, home, &env, &unset, terminal, true, watch, report);
             }
         }
         report(Line::Status(format!("logging in with {method}…")));
         let auth = json!({ "jsonrpc": "2.0", "id": 2, "method": if v2 {"auth/login"} else {"authenticate"}, "params": { "methodId": method } });
         writeln!(stdin, "{auth}")?;
-        wait_response(&rx, &erx, 2, TIMEOUT, report)?;
+        wait_response(&rx, &erx, 2, TIMEOUT, watch, report)?;
         Ok(())
     })();
     stop_agent(&mut child, &crate::registry::tools_dir(home));
@@ -254,6 +290,7 @@ fn terminal_login(
     unset: &[&str],
     method: &Value,
     legacy: bool,
+    watch: &mut Watch,
     report: &mut impl FnMut(Line),
 ) -> Result<()> {
     let args: Vec<String> =
@@ -314,6 +351,7 @@ fn terminal_login(
             for line in rx.try_iter() {
                 report(Line::Status(line));
             }
+            watch.poll(report)?;
             if let Some(status) = child.try_wait()? {
                 // Drain final output, bounded even if a descendant inherited a pipe.
                 let drain_until = std::time::Instant::now() + Duration::from_secs(1);
@@ -357,6 +395,72 @@ fn stop_agent(child: &mut std::process::Child, tools: &Path) {
     signal(rustix::process::Signal::KILL);
 }
 
+/// The URLs a login's browser helper handed over, reported each once; and its cancellation.
+struct Watch<'a> {
+    urls: PathBuf,
+    read: usize,
+    seen: std::collections::HashSet<String>,
+    cancelled: &'a dyn Fn() -> bool,
+}
+
+impl Watch<'_> {
+    /// Report URLs that arrived since the last poll; [`Cancelled`] once the login is cancelled.
+    fn poll(&mut self, report: &mut impl FnMut(Line)) -> Result<()> {
+        if (self.cancelled)() {
+            return Err(Cancelled.into());
+        }
+        let Ok(bytes) = std::fs::read(&self.urls) else { return Ok(()) };
+        let bytes = &bytes[..bytes.len().min(MAX_URLS_BYTES)];
+        // whole lines only: the helper may be writing the rest
+        let Some(end) = bytes.iter().rposition(|b| *b == b'\n').map(|i| i + 1) else { return Ok(()) };
+        if end <= self.read {
+            return Ok(());
+        }
+        let fresh = String::from_utf8_lossy(&bytes[self.read..end]).into_owned();
+        self.read = end;
+        for url in fresh.lines().map(str::trim) {
+            let lower = url.to_ascii_lowercase();
+            let web = lower.starts_with("https://") || lower.starts_with("http://");
+            if web && url.len() <= 16 * 1024 && !url.chars().any(char::is_control) && self.seen.insert(url.to_string()) {
+                report(Line::OpenUrl { url: url.to_string(), callback_port: callback_port(url) });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The daemon host's loopback port an OAuth page sends the browser back to: its `redirect_uri`
+/// when that is `http://localhost:PORT` or `http://127.0.0.1:PORT`.
+pub fn callback_port(url: &str) -> Option<u16> {
+    let query = url.split_once('?')?.1.split('#').next()?;
+    let value = query.split('&').find_map(|pair| pair.strip_prefix("redirect_uri="))?;
+    let redirect = percent_decode(value)?;
+    let authority = redirect.strip_prefix("http://")?.split(['/', '?', '#']).next()?;
+    let (host, port) = authority.rsplit_once(':')?;
+    if !matches!(host.to_ascii_lowercase().as_str(), "localhost" | "127.0.0.1") {
+        return None;
+    }
+    port.parse().ok().filter(|port| *port != 0)
+}
+
+fn percent_decode(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' => {
+                let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+                out.push(u8::from_str_radix(hex, 16).ok()?);
+                i += 3;
+            }
+            b'+' => { out.push(b' '); i += 1; }
+            b => { out.push(b); i += 1; }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 /// Every process below `root`, by parent links in `/proc`.
 fn descendants(root: i32) -> Vec<i32> {
     let parents: Vec<(i32, i32)> = std::fs::read_dir("/proc").into_iter().flatten().flatten().filter_map(|e| {
@@ -384,6 +488,7 @@ fn wait_response(
     erx: &std::sync::mpsc::Receiver<String>,
     id: u64,
     timeout: Duration,
+    watch: &mut Watch,
     report: &mut impl FnMut(Line),
 ) -> Result<Value> {
     let deadline = std::time::Instant::now() + timeout;
@@ -391,11 +496,12 @@ fn wait_response(
         for line in erx.try_iter() {
             report(Line::Stderr(line));
         }
+        watch.poll(report)?;
         let now = std::time::Instant::now();
         if now >= deadline {
             bail!("no answer within {} s", timeout.as_secs());
         }
-        match rx.recv_timeout((deadline - now).min(Duration::from_millis(500))) {
+        match rx.recv_timeout((deadline - now).min(Duration::from_millis(200))) {
             Ok(v) => {
                 if v.get("id").and_then(|i| i.as_u64()) == Some(id) {
                     if let Some(err) = v.get("error") {
@@ -420,20 +526,18 @@ fn wait_response(
     }
 }
 
-/// A directory with an `xdg-open` that runs the real one in the person's own environment, for
-/// logins whose process runs with a relocated home.
+/// The variable naming the file the browser helper appends URLs to, one per line.
+const URLS_ENV: &str = "SILL_LOGIN_URLS";
+/// At most this much of the URL file is read: a login opens a page or two.
+const MAX_URLS_BYTES: usize = 1024 * 1024;
+
+/// A directory with an `xdg-open`, also the login's `BROWSER`, that only hands its URL to the
+/// login ([`Watch`]): the frontend opens it in the person's browser, wherever that is.
 fn browser_shim(home: &Path) -> Result<PathBuf> {
     let dir = crate::registry::tools_dir(home).join(".browser-shim");
     std::fs::create_dir_all(&dir)?;
-    let real = |var: &str, fallback: &str| std::env::var(var).unwrap_or_else(|_| home.join(fallback).display().to_string());
     let script = format!(
-        "#!/bin/sh\n# sill: open in the person's browser, not the agent's relocated home\nexport HOME='{home}'\nexport XDG_CONFIG_HOME='{cfg}'\nexport XDG_DATA_HOME='{data}'\nexport XDG_STATE_HOME='{state}'\nexport XDG_CACHE_HOME='{cache}'\n{dbus}unset BROWSER\nexec /usr/bin/xdg-open \"$@\"\n",
-        home = home.display(),
-        dbus = std::env::var("DBUS_SESSION_BUS_ADDRESS").map(|d| format!("export DBUS_SESSION_BUS_ADDRESS='{d}'\n")).unwrap_or_default(),
-        cfg = real("XDG_CONFIG_HOME", ".config"),
-        data = real("XDG_DATA_HOME", ".local/share"),
-        state = real("XDG_STATE_HOME", ".local/state"),
-        cache = real("XDG_CACHE_HOME", ".cache"),
+        "#!/bin/sh\n# sill: the frontend opens login pages in the person's browser (docs/login.md); this hands the URL over\n[ -n \"${URLS_ENV}\" ] || {{ echo \"sill: no login to hand $1 to\" >&2; exit 1; }}\nfor url in \"$@\"; do printf '%s\\n' \"$url\" >> \"${URLS_ENV}\"; done\n"
     );
     let p = dir.join("xdg-open");
     if std::fs::read_to_string(&p).ok().as_deref() != Some(script.as_str()) {
@@ -453,6 +557,52 @@ mod login_copy_tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn the_callback_port_comes_only_from_a_loopback_redirect() {
+        let codex = "https://auth.openai.com/oauth/authorize?response_type=code&client_id=x&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid";
+        assert_eq!(callback_port(codex), Some(1455));
+        assert_eq!(callback_port("https://a.example/?redirect_uri=http://127.0.0.1:54321/cb"), Some(54321));
+        assert_eq!(callback_port("https://a.example/?redirect_uri=https%3A%2F%2Fexample.com%3A1455%2Fcb"), None);
+        assert_eq!(callback_port("https://a.example/?redirect_uri=http%3A%2F%2Fevil.example%3A1455%2F"), None);
+        assert_eq!(callback_port("https://a.example/?redirect_uri=http%3A%2F%2Flocalhost%2Fcb"), None);
+        assert_eq!(callback_port("https://a.example/?redirect_uri=http%3A%2F%2Flocalhost%3A0%2F"), None);
+        assert_eq!(callback_port("https://a.example/device"), None);
+    }
+
+    /// The agent "opens a browser" through `BROWSER` and then waits for a callback that never
+    /// comes: the URL is reported once, with its port, and a cancel ends the wait.
+    #[test]
+    fn a_login_reports_the_browser_url_and_can_be_cancelled() {
+        let home = dir("open-url");
+        let script = home.join("agent.py");
+        std::fs::write(&script, r#"import json,os,subprocess,sys
+request=json.loads(sys.stdin.readline())
+print(json.dumps({'jsonrpc':'2.0','id':1,'result':{'protocolVersion':1,'authMethods':[{'id':'browser','name':'Browser'}]}}),flush=True)
+request=json.loads(sys.stdin.readline())
+url='https://auth.example/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fcb'
+for _ in range(2):
+    subprocess.run([os.environ['BROWSER'],url],check=True)
+subprocess.run(['xdg-open','https://auth.example/second'],check=True)
+sys.stdin.readline()
+"#).unwrap();
+        let mut agent = crate::agents::builtin().into_iter().find(|a| a.id == "codex").unwrap();
+        agent.host_login = vec!["browser".into()];
+        agent.command = vec!["/usr/bin/python3".into(), script.to_string_lossy().into_owned()];
+        let opened = std::cell::RefCell::new(Vec::new());
+        let cancelled = || opened.borrow().len() >= 2;
+        let started = std::time::Instant::now();
+        let error = run_cancellable(&agent, &home, &[], "browser", &cancelled, |line| {
+            if let Line::OpenUrl { url, callback_port } = line { opened.borrow_mut().push((url, callback_port)); }
+        }).unwrap_err();
+        assert!(error.downcast_ref::<Cancelled>().is_some(), "{error:#}");
+        assert!(started.elapsed() < Duration::from_secs(20));
+        assert_eq!(*opened.borrow(), [
+            ("https://auth.example/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fcb".to_string(), Some(1455)),
+            ("https://auth.example/second".to_string(), None),
+        ]);
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]

@@ -215,6 +215,9 @@ pub fn set_up(definition: &api::Definition, discovery: &api::Discovery, unticked
     d
 }
 
+/// How a job's progress line names a login page for the person's browser.
+pub const OPEN_PREFIX: &str = "Open in your browser: ";
+
 /// A host job with tagged progress: start it, follow its stream, and on stream loss read the
 /// durable receipt instead of retrying.
 fn run_job(
@@ -239,12 +242,18 @@ fn run_job(
             }
         }
         let _stop = Stop(stream.interrupt);
+        // a login run by directory setup: its callback relays live as long as the job
+        let mut relays = Vec::new();
         for line in std::io::BufReader::new(stream.reader).lines() {
             let Ok(line) = line else { break };
             match serde_json::from_str::<host::Progress>(&line)? {
                 host::Progress::Status { text }
                 | host::Progress::Output { text }
                 | host::Progress::Stderr { text } => progress(text),
+                host::Progress::OpenUrl { url, callback_port } => {
+                    crate::login::relay_callback(client, &mut relays, callback_port, &job.operation.operation_id)?;
+                    progress(format!("{OPEN_PREFIX}{url}"))
+                }
                 host::Progress::Completed { .. } => return Ok(()),
                 host::Progress::Failed { message, .. } => bail!("{message}"),
             }

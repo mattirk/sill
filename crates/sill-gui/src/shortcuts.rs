@@ -1,4 +1,6 @@
-//! Editable window shortcuts. Editing/navigation keys remain owned by widgets.
+//! Editable window shortcuts. Editing/navigation keys remain owned by widgets. `Ctrl` in a
+//! shortcut is the platform's command modifier ([`crate::keys::PRIMARY`]): Cmd on macOS, where
+//! `Cmd` may be written too.
 use crate::{Message, layout};
 use iced::keyboard::{Key, Modifiers};
 
@@ -52,9 +54,10 @@ fn parse(value: &str) -> Result<Option<Chord>, String> {
     for modifier in &parts[..parts.len() - 1] {
         match modifier.trim().to_lowercase().as_str() {
             "ctrl" => chord.ctrl = true,
+            "cmd" | "command" if cfg!(target_os = "macos") => chord.ctrl = true,
             "alt" => chord.alt = true,
             "shift" => chord.shift = true,
-            _ => return Err("Use Ctrl, Alt or Shift modifiers.".into()),
+            _ => return Err(format!("Use {}, Alt or Shift modifiers.", crate::keys::PRIMARY)),
         }
     }
     if chord.key == "plus" || chord.key == "=" {
@@ -62,9 +65,10 @@ fn parse(value: &str) -> Result<Option<Chord>, String> {
         chord.shift = false;
     }
     if chord.key.chars().count() != 1 || (!chord.ctrl && !chord.alt) {
-        return Err(
-            "Use Ctrl or Alt with a letter, number or punctuation; write Plus for +.".into(),
-        );
+        return Err(format!(
+            "Use {} or Alt with a letter, number or punctuation; write Plus for +.",
+            crate::keys::PRIMARY
+        ));
     }
     // These belong to text editing, terminal copy/paste, or existing navigation.
     if chord.ctrl
@@ -88,7 +92,9 @@ pub fn validate(bindings: &Bindings) -> Result<(), String> {
     Ok(())
 }
 pub fn message(bindings: &Bindings, key: &Key, modifiers: Modifiers) -> Option<Message> {
-    if modifiers.logo() {
+    // the other platform modifier is not part of any shortcut: Super elsewhere, Ctrl on macOS
+    let other = if cfg!(target_os = "macos") { modifiers.control() } else { modifiers.logo() };
+    if other {
         return None;
     }
     let Key::Character(key) = key else {
@@ -102,7 +108,7 @@ pub fn message(bindings: &Bindings, key: &Key, modifiers: Modifiers) -> Option<M
     let pressed = Chord {
         shift: modifiers.shift() && key != "+",
         key,
-        ctrl: modifiers.control(),
+        ctrl: modifiers.command(),
         alt: modifiers.alt(),
     };
     let index = (0..ACTIONS.len())
@@ -142,10 +148,10 @@ mod tests {
             message(&back.shortcuts, &key("n"), Modifiers::ALT),
             Some(Message::NewSession)
         ));
-        assert!(message(&back.shortcuts, &key("t"), Modifiers::CTRL).is_none());
-        assert!(message(&back.shortcuts, &key("w"), Modifiers::CTRL).is_none());
+        assert!(message(&back.shortcuts, &key("t"), Modifiers::COMMAND).is_none());
+        assert!(message(&back.shortcuts, &key("w"), Modifiers::COMMAND).is_none());
         assert!(matches!(
-            message(&Bindings::new(), &key("t"), Modifiers::CTRL),
+            message(&Bindings::new(), &key("t"), Modifiers::COMMAND),
             Some(Message::NewSession)
         ));
     }
