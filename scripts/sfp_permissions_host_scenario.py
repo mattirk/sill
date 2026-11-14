@@ -490,18 +490,19 @@ PY
               json.dumps(ghost_view)[:400])
 
         # -- 10. Desktop development requests and the frontend gate ------------------------------
-        # (the GPU has no backend yet: the request without one; the test desktop is 14, the bus 15.)
+        # GPU availability depends on host devices; test desktop is 14, bus 15.
         d = create("desktop", env.policy("desktop", permissions='gpu = "on"\nprivate_bus = "forbidden"'))
         shown = env.cli("permissions", "show", d).stdout
         info("sill permissions show (GPU request):\n       " + "\n       ".join(shown.splitlines()))
         line = next((l for l in shown.splitlines() if l.startswith("gpu")), "")
-        check("the CLI shows a requested GPU as unavailable, policy default on",
-              "unavailable" in line and "policy default: on" in line, shown)
+        gpu_available = states(c.call("_sill/policy.preview", {"session_id": d}))["gpu"]["available"]
+        check("the CLI shows the GPU policy default on", "policy default: on" in line, shown)
         check("the CLI shows a forbidden capability",
               any(l.startswith("private_bus") and "policy default: forbidden" in l for l in shown.splitlines()), shown)
-        check("a GPU request refuses launch (no backend)", code(c.call, "_sill/sessions.start", {"session_id": d}) is not None)
-        time.sleep(0.5)
-        check("…and no jail or scope was created (no fallback)", not scope_active(d) and not get(d)["running"])
+        if not gpu_available:
+            check("an unavailable GPU request refuses launch", code(c.call, "_sill/sessions.start", {"session_id": d}) is not None)
+            time.sleep(0.5)
+            check("…and no jail or scope was created", not scope_active(d) and not get(d)["running"])
         check("a plain client cannot start it", code(plain.call, "_sill/sessions.start", {"session_id": d}) == "unsupported")
         check("a plain client cannot approve hosts for it",
               code(plain.call, "_sill/policy.allow_host", {"session_id": d, "host": OTHER}) == "unsupported")

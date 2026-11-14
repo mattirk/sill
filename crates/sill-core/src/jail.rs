@@ -387,6 +387,11 @@ impl JailSpec {
             push(&mut a, &[&"--symlink", target, &Path::new("/").join(name)]);
         }
         push(&mut a, &[&"--proc", &"/proc", &"--dev", &"/dev", &"--tmpfs", &"/tmp", &"--tmpfs", &"/run"]);
+        if p.permissions.gpu == crate::permissions::Rule::On {
+            let gpu = crate::gpu::probe();
+            let node = gpu.node.ok_or_else(|| anyhow::anyhow!("{}", gpu.missing))?;
+            push(&mut a, &[&"--dev-bind", &node, &node]);
+        }
         // expanded directories (contain a mount point): tmpfs, then their children below
         expanded.sort();
         for d in &expanded {
@@ -953,6 +958,22 @@ mod tests {
         assert!(r.contains("--setenv DBUS_SYSTEM_BUS_ADDRESS disabled:"), "{r}");
         assert!(!r.contains("unix:path="), "{r}");
         assert!(!r.contains(".X11-unix") && !r.contains("XAUTHORITY"), "{r}");
+    }
+
+    #[test]
+    fn gpu_access_is_explicit_and_render_only() {
+        let mut s = spec();
+        assert!(!render(&s.plan().unwrap().argv).contains("/dev/dri"));
+        s.policy.permissions.gpu = crate::permissions::Rule::On;
+        if let Some(node) = crate::gpu::probe().node {
+            let r = render(&s.plan().unwrap().argv);
+            assert!(r.contains(&format!("--dev-bind {0} {0}", node.display())));
+            assert!(!r.contains("/dev/dri/card"));
+        } else {
+            assert!(s.plan().unwrap_err().to_string().contains("render node"));
+        }
+        s.policy.permissions.gpu = crate::permissions::Rule::Forbidden;
+        assert!(!render(&s.plan().unwrap().argv).contains("/dev/dri"));
     }
 
     /// With the private bus the session address is the jail's own socket; the system bus stays

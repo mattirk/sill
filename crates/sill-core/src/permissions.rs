@@ -32,10 +32,11 @@ pub const DEVELOPMENT_CAPABILITIES: [&str; 2] = ["test_desktop", "private_bus"];
 
 /// Whether this machine can enforce `capability`: the public web proxy always; the test desktop
 /// when a usable Weston with Xwayland is installed (`desktop::probe`); the private bus when
-/// `dbus-daemon` is (`bus::probe`); nothing else yet.
+/// `dbus-daemon` is (`bus::probe`); GPU when a supported render node is accessible.
 pub fn available(capability: &str) -> bool {
     match capability {
         "public_web" => true,
+        "gpu" => crate::gpu::probe().available(),
         "test_desktop" => crate::desktop::probe().available(),
         "private_bus" => crate::bus::probe().available(),
         _ => false,
@@ -45,6 +46,7 @@ pub fn available(capability: &str) -> bool {
 /// Why `capability` has no enforcement backend here.
 fn unavailable_reason(capability: &str) -> String {
     match capability {
+        "gpu" => crate::gpu::probe().missing,
         "test_desktop" => crate::desktop::probe().missing.clone(),
         "private_bus" => crate::bus::probe().missing.clone(),
         _ => "enforcement backend not implemented".into(),
@@ -149,6 +151,7 @@ impl Permissions {
         }
         if !available(capability) {
             return Some(match capability {
+                "gpu" => "no accessible Intel/AMD GPU render node",
                 "test_desktop" => "no test desktop on this machine (Weston and Xwayland)",
                 "private_bus" => "no dbus-daemon on this machine (the dbus package)",
                 _ => "enforcement backend not implemented",
@@ -224,6 +227,8 @@ impl Permissions {
                     "an isolated Weston desktop with Xwayland; the real display stays out of reach".into()
                 } else if effective && capability == "private_bus" {
                     "a D-Bus session bus of the jail's own; the person's buses stay out of reach".into()
+                } else if effective && capability == "gpu" {
+                    "GPU render node enabled; exposes GPU driver ioctls and shared GPU resources".into()
                 } else if effective {
                     "public web proxy enabled; local destinations remain separately restricted".into()
                 } else if let Some(refusal) = refusal {
@@ -286,8 +291,10 @@ mod tests {
     fn unsupported_defaults_never_claim_enforcement() {
         let p = Policy::parse("name='future'\n[permissions]\ngpu='on'").unwrap();
         let state = &p.permissions.states(&p.network, &[])[2];
-        assert!(state.default_enabled && !state.effective && !state.available);
-        assert!(p.permissions.validate_launch(&p.network).is_err());
+        assert!(state.default_enabled);
+        assert_eq!(state.effective, available("gpu"));
+        assert_eq!(state.available, available("gpu"));
+        assert_eq!(p.permissions.validate_launch(&p.network).is_ok(), available("gpu"));
         assert!(p.permissions.uses_modes());
     }
 
@@ -338,13 +345,13 @@ mod tests {
         assert_eq!(p.network.mode, NetMode::All);
         assert!(applied.iter().find(|c| c.capability == "public_web").unwrap().blocked.is_none());
         let gpu = applied.iter().find(|c| c.capability == "gpu").unwrap();
-        assert_eq!(gpu.blocked.as_deref(), Some("enforcement backend not implemented"));
+        assert_eq!(gpu.blocked.is_none(), available("gpu"));
         // A blocked desktop choice is reported, never forced into a launch it would refuse.
         assert!(p.permissions.validate_launch(&p.network).is_ok());
-        assert!(!p.permissions.uses_modes());
+        assert_eq!(p.permissions.uses_modes(), available("gpu"));
         let states = p.permissions.states(&p.network, &applied);
         assert!(states[3].effective && states[3].source == "session" && states[3].requested == Some(true) && !states[3].default_enabled);
-        assert!(states[2].blocked && states[2].source == "policy" && states[2].reason.contains("backend"));
+        assert_eq!(states[2].blocked, !available("gpu"));
 
         let mut p = Policy::parse("name='test'\n[permissions]\npublic_web='on'\ngpu='on'").unwrap();
         let applied = p.permissions.apply_session(&mut p.network, &choices(&[("public_web", false), ("gpu", false)]));

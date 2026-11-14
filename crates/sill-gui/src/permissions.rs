@@ -44,7 +44,7 @@ const ROWS: &[(&str, &str, &str)] = &[
         "Private D-Bus",
         "A D-Bus session bus of the jail's own, for test applications and the services they activate, which run in the jail too. Your session and system buses stay out of reach.",
     ),
-    ("gpu", "GPU rendering", "A selected render device for the jail."),
+    ("gpu", "GPU rendering", "Intel/AMD render device access, including GPU driver ioctls and shared GPU resources. Requires restart."),
 ];
 
 #[derive(Debug, Clone)]

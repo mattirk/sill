@@ -107,16 +107,17 @@ try:
         desktop = session("desktop", "mode='allow'\n[permissions]\ngpu='on'\nhost_control='forbidden'")
         view = client.call("_sill/policy.preview", {"session_id": desktop})
         states = {item["capability"]: item for item in view["permissions"]}
-        # the GPU has no backend yet (the test desktop's and the private bus's depend on what is installed)
+        # GPU availability depends on accessible supported host devices.
         assert states["gpu"]["allowed"] and states["gpu"]["default_enabled"]
-        assert not states["gpu"]["effective"] and not states["gpu"]["available"]
+        assert states["gpu"]["effective"] == states["gpu"]["available"]
         assert not states["host_control"]["allowed"] and not states["host_control"]["effective"]
-        try:
-            modes.call("_sill/sessions.start", {"session_id": desktop})
-        except RpcError as error:
-            assert "enforcement backend" in str(error), error
-        else:
-            raise AssertionError("unsupported desktop request started a jail")
+        if not states["gpu"]["available"]:
+            try:
+                modes.call("_sill/sessions.start", {"session_id": desktop})
+            except RpcError as error:
+                assert "render node" in str(error), error
+            else:
+                raise AssertionError("unavailable GPU request started a jail")
         assert not client.call("_sill/policy.check", {"text": "name='bad'\n[permissions]\nhost_control='on'"})["valid"]
         web = session("web", "mode='allow'\n[permissions]\npublic_web='on'")
         states = {item["capability"]: item for item in client.call("_sill/policy.preview", {"session_id": web})["permissions"]}

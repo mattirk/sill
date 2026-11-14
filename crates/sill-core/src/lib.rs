@@ -22,6 +22,7 @@ pub mod ledger;
 pub mod login;
 pub mod credentials;
 pub mod bus;
+pub mod gpu;
 pub mod desktop;
 pub mod desktop_capture;
 pub mod memory;
