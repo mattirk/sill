@@ -374,6 +374,13 @@ impl App {
         let requests = self
             .views
             .get_mut(session)
+            .filter(|v| {
+                // Do not supersede slow replies or pile up work on a remote daemon.
+                v.files.directories.values().all(|d| d.pending.is_none())
+                    && v.files.repos.values().all(|r| {
+                        r.pending.is_none() && r.counts_pending.is_none()
+                    })
+            })
             .map(|v| v.files.refresh())
             .unwrap_or_default();
         self.files_send(session, requests);

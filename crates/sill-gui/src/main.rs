@@ -232,6 +232,8 @@ pub enum Message {
     DemoTick,
     Tick,
     NetworkPoll,
+    /// Refresh the visible session's file tree and Git counts.
+    FilesPoll,
     /// Managed processes and exposed ports (`processes.rs`).
     Procs(processes::Event),
     NetworkRead(String, Result<sill_proto::admin::NetworkDenied, String>),
@@ -1109,6 +1111,13 @@ impl App {
                     .map(|_| Message::Procs(processes::Event::Poll)),
             );
         }
+        if !self.demo && !self.backend_shown() && self.current().is_some() {
+            subscriptions.push(
+                iced::time::every(Duration::from_secs(2))
+                    .with("session-files")
+                    .map(|_| Message::FilesPoll),
+            );
+        }
         // sessions started or ended elsewhere appear and go
         if !self.demo {
             subscriptions
@@ -1265,10 +1274,6 @@ impl App {
                 {
                     tasks.push(self.changes_event(changes_ui::Event::Refresh));
                 }
-                // the pins' chips show their changed lines with the drawer closed too
-                if let Some(id) = self.selected.clone() {
-                    tasks.push(self.files_refresh(&id));
-                }
                 return Task::batch(tasks);
             }
             Message::Scrolled(at_bottom, offset, viewport) => {
@@ -1295,6 +1300,13 @@ impl App {
             Message::DemoTick => return self.demo_tick(),
             Message::Tick => self.now = Instant::now(),
             Message::NetworkPoll => return self.poll_network(),
+            Message::FilesPoll => {
+                if !self.backend_shown() {
+                    if let Some(id) = self.selected.clone() {
+                        return self.files_refresh(&id);
+                    }
+                }
+            }
             Message::Procs(event) => return self.processes_event(event),
             Message::NetworkRead(id, result) => self.network.read(id, result),
             Message::NetworkAnswer(id, host, allow) => return self.answer_network(id, host, allow),
@@ -2386,6 +2398,7 @@ impl App {
                 other => format!("{session} lane {epoch}: {other:?}"),
             });
         }
+        let was_busy = view.conversation.busy();
         view.status.follow(&update);
         let mut grew = false;
         let mut relist = false;
@@ -2424,6 +2437,7 @@ impl App {
             }
             lane::Update::Connecting { .. } => {}
         }
+        let finished = was_busy && !view.conversation.busy();
         let snap = grew && selected && view.follow_tail && view.conversation_shown() && !selecting;
         let mut tasks: Vec<Task<Message>> = checks
             .into_iter()
@@ -2436,6 +2450,9 @@ impl App {
                 )
             })
             .collect();
+        if finished {
+            tasks.push(self.files_refresh(&session));
+        }
         tasks.push(self.load_media(&session));
         if relist {
             tasks.push(self.list());

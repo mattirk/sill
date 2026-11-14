@@ -244,25 +244,16 @@ impl App {
                     // not move away as the pointer approaches it from the indicator.
                     mouse_area(
                         row![
-                            tooltip(
-                                keys::press(
-                                    button(
-                                        svg(icons::plus())
-                                            .width(15)
-                                            .height(15)
-                                            .style(style::icon(alpha(P.fg, 0.75))),
-                                    )
-                                    .padding(4)
-                                    .style(style::quiet),
-                                    Message::Menu(crate::menu::Event::Toggle),
-                                ),
-                                container(
-                                    text("New session, reopen one, or change the view")
-                                        .size(style::TINY)
+                            keys::press(
+                                button(
+                                    svg(icons::plus())
+                                        .width(15)
+                                        .height(15)
+                                        .style(style::icon(alpha(P.fg, 0.75))),
                                 )
-                                .padding([3, 8])
-                                .style(style::fill(P.surface)),
-                                tooltip::Position::Bottom,
+                                .padding(4)
+                                .style(style::quiet),
+                                Message::Menu(crate::menu::Event::Toggle),
                             ),
                             // the activity over the drawer when it is beside the conversation, so the +
                             // ends the conversation's side, as in the shelf
