@@ -147,13 +147,28 @@ impl std::fmt::Debug for Bridge {
 
 struct Connection {
     socket: std::net::TcpStream,
-    interrupt: Arc<dyn Fn() + Send + Sync>,
+    closed: AtomicBool,
+    interrupt: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl Connection {
     fn close(&self) {
+        self.closed.store(true, Ordering::Release);
         let _ = self.socket.shutdown(std::net::Shutdown::Both);
-        (self.interrupt)();
+        if let Some(interrupt) = self.interrupt.lock().unwrap().take() {
+            interrupt();
+        }
+    }
+
+    /// A bridge may be dropped while the daemon is still opening its stream.
+    fn arm(&self, interrupt: Arc<dyn Fn() + Send + Sync>) -> bool {
+        let mut slot = self.interrupt.lock().unwrap();
+        if self.closed.load(Ordering::Acquire) {
+            interrupt();
+            return false;
+        }
+        *slot = Some(interrupt);
+        true
     }
 }
 
@@ -243,14 +258,11 @@ fn relay(
     stopped: &AtomicBool,
     active: &Mutex<Vec<Weak<Connection>>>,
 ) {
-    let Ok(stream) = open() else { return };
-    let (Ok(mut host_r), Ok(socket)) = (host.try_clone(), host.try_clone()) else {
-        (stream.interrupt)();
-        return;
-    };
+    let Ok(socket) = host.try_clone() else { return };
     let connection = Arc::new(Connection {
         socket,
-        interrupt: stream.interrupt.clone(),
+        closed: AtomicBool::new(false),
+        interrupt: Mutex::new(None),
     });
     {
         let mut all = active.lock().unwrap();
@@ -261,6 +273,14 @@ fn relay(
         connection.close();
         return;
     }
+    let Ok(stream) = open() else { return };
+    if !connection.arm(stream.interrupt.clone()) {
+        return;
+    }
+    let Ok(mut host_r) = host.try_clone() else {
+        connection.close();
+        return;
+    };
     let mut host_w = host;
     let mut remote_r = stream.reader;
     let mut remote_w = stream.writer;
@@ -278,6 +298,48 @@ fn relay(
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+
+    #[test]
+    fn dropping_a_bridge_closes_a_browser_while_its_stream_is_still_opening() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let (entered, opening) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let wait = Mutex::new(wait);
+        let (interrupted, closed) = mpsc::channel();
+        let open: Opener = Arc::new(move || {
+            entered.send(()).unwrap();
+            wait.lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+            let interrupted = interrupted.clone();
+            Ok(sill_proto::transport::RawStream {
+                reader: Box::new(std::io::empty()),
+                writer: Box::new(std::io::sink()),
+                shutdown_write: Arc::new(|| {}),
+                interrupt: Arc::new(move || {
+                    let _ = interrupted.send(());
+                }),
+            })
+        });
+        let bridge = expose(0, open).unwrap();
+        let mut browser = std::net::TcpStream::connect(("127.0.0.1", bridge.host_port)).unwrap();
+        browser
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        opening.recv_timeout(Duration::from_secs(5)).unwrap();
+        drop(bridge);
+        assert_eq!(
+            browser.read(&mut [0u8; 1]).unwrap(),
+            0,
+            "browser closes before the daemon answers"
+        );
+        release.send(()).unwrap();
+        closed
+            .recv_timeout(Duration::from_secs(5))
+            .expect("late stream is interrupted too");
+    }
 
     #[test]
     fn uptime_reads_naturally() {
