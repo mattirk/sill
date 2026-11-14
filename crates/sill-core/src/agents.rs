@@ -26,6 +26,22 @@ pub struct Agent {
     /// Environment that switches the agent's own sandbox off inside the jail (SPEC §4.2).
     #[serde(default)]
     pub sandbox_off_env: BTreeMap<String, String>,
+    /// Where the agent keeps its own files (`~/.claude`); changes there are "agent state" in the UI.
+    #[serde(default)]
+    pub state_dirs: Vec<String>,
+    /// Paths replaced inside the jail by a sill-owned copy (`~/.local/state/sill/agents/<id>/…`), so
+    /// the agent runs completely inside: its credentials, transcripts, settings and caches never touch
+    /// the host's own installation of the agent (SPEC §4.10 #4).
+    #[serde(default)]
+    pub home_paths: Vec<String>,
+    /// Files copied from the host into the sill-owned home when it is first created (login only).
+    #[serde(default)]
+    pub seed_files: Vec<String>,
+    /// Files bound from the host *over* the sill-owned home: the login itself. OAuth refresh tokens
+    /// rotate, so two copies of the credentials revoke each other; one shared file is the only
+    /// workable option (and the only thing the agent writes to the host).
+    #[serde(default)]
+    pub shared_files: Vec<String>,
 }
 
 pub fn builtin() -> Vec<Agent> {
@@ -38,6 +54,10 @@ pub fn builtin() -> Vec<Agent> {
             supports_load: true,
             domains: vec!["api.anthropic.com".into(), "*.anthropic.com".into(), "claude.ai".into(), "*.claude.ai".into()],
             sandbox_off_env: Default::default(),
+            state_dirs: vec!["~/.claude".into(), "~/.claude.json".into()],
+            home_paths: vec!["~/.claude".into(), "~/.claude.json".into()],
+            seed_files: vec!["~/.claude.json".into()],
+            shared_files: vec!["~/.claude/.credentials.json".into()],
         },
         Agent {
             id: "codex".into(),
@@ -47,6 +67,10 @@ pub fn builtin() -> Vec<Agent> {
             supports_load: false,
             domains: vec!["api.openai.com".into(), "*.openai.com".into(), "chatgpt.com".into(), "*.chatgpt.com".into()],
             sandbox_off_env: Default::default(),
+            state_dirs: vec!["~/.codex".into()],
+            home_paths: vec!["~/.codex".into()],
+            seed_files: vec![],
+            shared_files: vec!["~/.codex/auth.json".into()],
         },
         Agent {
             id: "gemini".into(),
@@ -56,6 +80,10 @@ pub fn builtin() -> Vec<Agent> {
             supports_load: false,
             domains: vec!["*.googleapis.com".into(), "*.google.com".into()],
             sandbox_off_env: Default::default(),
+            state_dirs: vec!["~/.gemini".into()],
+            home_paths: vec!["~/.gemini".into()],
+            seed_files: vec![],
+            shared_files: vec!["~/.gemini/oauth_creds.json".into()],
         },
     ]
 }

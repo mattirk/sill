@@ -23,6 +23,10 @@ pub struct Conversation {
     status: gtk::Label,
     /// Follow new content unless the person scrolled up.
     stick_to_bottom: std::cell::Cell<bool>,
+    /// Set while we move the adjustment ourselves, so it doesn't count as the person scrolling.
+    following: std::cell::Cell<bool>,
+    /// Previous adjustment value, to tell a scroll-up from everything else that moves it.
+    last_value: std::cell::Cell<f64>,
 }
 
 impl Conversation {
@@ -46,32 +50,53 @@ impl Conversation {
             tool_rows: RefCell::new(HashMap::new()),
             status,
             stick_to_bottom: std::cell::Cell::new(true),
+            following: std::cell::Cell::new(false),
+            last_value: std::cell::Cell::new(0.0),
         });
-        // The content height is only known after layout: follow the adjustment's upper bound instead of
-        // guessing when to scroll. Scrolling up by hand releases it; reaching the bottom re-engages it.
+        // The content height is only known after layout: follow the adjustment's geometry (`changed` covers
+        // both the content growing and the viewport shrinking, e.g. the prompt box getting taller) instead
+        // of guessing when to scroll. Any scroll up that isn't ours releases it — by direction, not by
+        // distance, so a touchpad's first few pixels aren't yanked back — and reaching the bottom
+        // re-engages it.
         let adj = conv.root.vadjustment();
         {
             let c = conv.clone();
-            adj.connect_upper_notify(move |adj| {
+            adj.connect_changed(move |adj| {
                 if c.stick_to_bottom.get() {
-                    adj.set_value(adj.upper() - adj.page_size());
+                    c.follow(adj);
                 }
             });
         }
         {
             let c = conv.clone();
             adj.connect_value_changed(move |adj| {
-                let at_bottom = adj.value() >= adj.upper() - adj.page_size() - 24.0;
-                c.stick_to_bottom.set(at_bottom);
+                let v = adj.value();
+                if !c.following.get() {
+                    if v >= adj.upper() - adj.page_size() - 1.0 {
+                        c.stick_to_bottom.set(true);
+                    } else if v < c.last_value.get() {
+                        c.stick_to_bottom.set(false);
+                    }
+                }
+                c.last_value.set(v);
             });
         }
         conv
     }
 
+    /// Move to the bottom without it counting as the person scrolling.
+    fn follow(&self, adj: &gtk::Adjustment) {
+        let bottom = (adj.upper() - adj.page_size()).max(adj.lower());
+        if adj.value() != bottom {
+            self.following.set(true);
+            adj.set_value(bottom);
+            self.following.set(false);
+        }
+    }
+
     fn scroll_to_end(&self) {
         self.stick_to_bottom.set(true);
-        let adj = self.root.vadjustment();
-        adj.set_value(adj.upper() - adj.page_size());
+        self.follow(&self.root.vadjustment());
     }
 
     fn text_view(css: &str) -> gtk::TextView {
@@ -219,7 +244,8 @@ impl Conversation {
     /// Apply one session event.
     pub fn handle(&self, ev: Event) {
         match ev {
-            Event::Ready { session_id, resumed } => {
+            Event::Controls(_) => {}
+            Event::Ready { session_id, resumed, .. } => {
                 self.status.set_text(&format!("{} · {}", if resumed { "resumed" } else { "ready" }, &session_id[..session_id.len().min(8)]))
             }
             Event::TurnStarted => self.status.set_text("working…"),
@@ -291,6 +317,21 @@ entry { border-radius: 0; }
 .sill-pin { padding: 0 2px; min-height: 0; min-width: 0; opacity: 0.4; -gtk-icon-size: 11px; }
 .sill-pin:hover { opacity: 1; }
 .sill-badge { font-size: 80%; color: alpha(@accent_color, 0.9); font-family: monospace; }
+.sill-controls { font-size: 85%; }
+.sill-controls .dim-label { opacity: 0.7; }
+.sill-control { min-height: 0; padding: 0; color: alpha(@view_fg_color, 0.6); }
+.sill-control > button { min-height: 0; padding: 1px 6px; background: transparent; border: none; box-shadow: none; color: inherit; }
+.sill-control > button:hover { background: alpha(@view_fg_color, 0.07); color: @view_fg_color; }
+.sill-control > button arrow { -gtk-icon-size: 10px; opacity: 0.6; }
+switch.sill-control { min-width: 30px; min-height: 14px; opacity: 0.7; }
+switch.sill-control:hover, switch.sill-control:checked { opacity: 1; }
+switch.sill-control > slider { min-width: 12px; min-height: 12px; }
+button.sill-send { min-height: 22px; min-width: 22px; padding: 0 5px; font-size: 170%; line-height: 1;
+                   background: alpha(@accent_bg_color, 0.25); }
+button.sill-send > label { padding: 0; margin: 0; }
+button.sill-send:hover { background: alpha(@accent_bg_color, 0.45); }
+button.sill-send.sill-stop { font-size: 140%; color: @error_color; background: alpha(@error_bg_color, 0.25); }
+button.sill-send.sill-stop:hover { background: alpha(@error_bg_color, 0.45); }
 .sill-prompt-box { border-radius: 0; border: none; border-top: 1px solid alpha(@view_fg_color, 0.15);
                    background: alpha(@view_fg_color, 0.035); }
 "#;

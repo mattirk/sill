@@ -60,6 +60,10 @@ pub struct Paths {
     /// Visible, never writable.
     #[serde(default)]
     pub ro: Vec<String>,
+    /// Session-private scratch (caches): a directory on the state filesystem bound at this path,
+    /// persistent across turns, deleted with the session, never written to the host.
+    #[serde(default)]
+    pub private: Vec<String>,
     /// Host mount points left out of the jail entirely (they appear as empty directories).
     #[serde(default)]
     pub hidden_mounts: Vec<String>,
@@ -111,6 +115,14 @@ pub struct JailOptions {
     /// nested namespaces + overlayfs is the largest kernel attack surface here (SPEC §4.10 #10).
     #[serde(default)]
     pub allow_userns: bool,
+    /// Give the jail the X11 display (socket + Xauthority). Off by default: X11 lets any client read
+    /// every keystroke and drive every window (SPEC §4.10 #3). On = the agent can run and see GUI apps.
+    #[serde(default)]
+    pub x11: bool,
+    /// Give the jail the D-Bus session bus. Off by default: the session bus is a full escape (systemd
+    /// user units, keyring secrets). Prefer an `xdg-dbus-proxy` allow-list when that exists.
+    #[serde(default)]
+    pub dbus: bool,
     /// Extra environment for every process in the jail.
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,

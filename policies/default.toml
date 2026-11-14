@@ -19,17 +19,14 @@ allow = [
 allow_local = []          # host-local addresses are refused in every mode unless listed here
 
 [paths]
-# Unrecorded host writes — one reason each (SPEC §4.2 "direct"):
+# Unrecorded host writes — one reason each (SPEC §4.2 "direct"). Agent state is NOT here: each agent gets
+# a sill-owned home bound over its real one (registry `home_paths`), so nothing it writes reaches the host's
+# own copy of the agent (shell snapshots, plugin caches: SPEC §4.10 #4).
 direct = [
-  "~/.cache",                      # package/tool caches: throwing them away per session costs time, records nothing useful
-  "~/.npm",                        # npm cache (npx adapters)
-  # Claude Code state that carries no executable config. settings.json, hooks, plugins and ~/.claude.json
-  # (MCP server commands live there) stay overlaid: kept only on review (SPEC §4.10 #4).
-  "~/.claude/.credentials.json",   # login must persist
-  "~/.claude/projects",            # transcripts: needed for resume
-  "~/.claude/sessions", "~/.claude/backups", "~/.claude/statsig", "~/.claude/todos",
-  "~/.claude/shell-snapshots", "~/.claude/debug", "~/.claude/file-history", "~/.claude/cache",
 ]
+# Session-private scratch: bound from the state filesystem, kept across turns, gone with the session.
+# Caches hold code the host would later run (uv/pip/pre-commit), so they never touch the host.
+private = ["~/.cache", "~/.npm"]
 # Hidden in the jail and in the host view:
 mask = [
   "~/.ssh", "~/.gnupg", "~/secrets",
@@ -49,7 +46,9 @@ hidden_mounts = ["/boot", "/boot/efi"]
 # Repo roots kept automatically at quiescent moments:
 auto_keep = ["~/GIT/*"]
 # Recorded, but neither hashed per turn nor auto-kept:
-ledger_ignore = ["target/", "node_modules/", "__pycache__/", ".venv/", "build/", ".cargo/registry/"]
+# Inside git repositories the repo's own .gitignore decides what is build output; these patterns cover
+# the rest (home-level tool caches and the like).
+ledger_ignore = ["target/", "node_modules/", "__pycache__/", ".venv/", "build/", ".cargo/registry/", ".cargo/.global-cache", ".cargo/.package-cache", ".rustup/"]
 
 [limits]
 cpu_weight = 20
@@ -62,5 +61,10 @@ agent_idle_minutes = 10       # stop just the agent process (≈1.6 % CPU parked
 
 [jail]
 allow_userns = false
+# Desktop access. x11 = true lets the agent run and see GUI programs (and, as any X11 client, read keys and
+# drive windows of the whole desktop); dbus = true hands it the session bus (systemd user units, keyring).
+# Both are off in the shipped default; this box's copy opts in to x11 (SPEC §4.10 #3).
+x11 = false
+dbus = false
 [jail.env]
 # extra environment for every process in the jail, e.g. TZ = "Europe/Helsinki"

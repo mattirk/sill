@@ -482,7 +482,8 @@ impl FilesPage {
                 if !state_dir.is_dir() {
                     continue;
                 }
-                let Ok(plan) = changes::session_plan(policy.clone(), state_dir, &home, uid, &user) else { continue };
+                let binds = session::binds_of(&s, &policy, &home);
+                let Ok(plan) = changes::session_plan(policy.clone(), state_dir, &home, uid, &user, binds) else { continue };
                 all.extend(changes::scan(&policy, &plan, None).unwrap_or_default());
             }
             let _ = tx.send_blocking(all);
@@ -503,7 +504,7 @@ impl FilesPage {
             Some(s) => vec![s.clone()],
             None => pins,
         };
-        for c in &all {
+        for c in all.iter().filter(|c| !c.ignored) {
             badges.insert(c.path.clone(), format!("{}{}", c.kind.letter(), if c.conflict { "!" } else { "" }));
             let mut p = c.path.parent();
             while let Some(d) = p {

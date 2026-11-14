@@ -72,6 +72,12 @@ enum Cmd {
     },
     /// Show/hide the running shelf (bind this to a hotkey)
     Toggle,
+    /// Quit the running shelf and start this binary's shelf in its place (sessions keep running)
+    Restart {
+        /// start hidden
+        #[arg(long)]
+        hidden: bool,
+    },
     /// Switch the shelf's colour theme: adwaita | dracula | solarized-dark | solarized-light | nord
     Theme { name: String },
     /// Show a policy as sill reads it
@@ -174,6 +180,9 @@ struct JailArgs {
     /// bind this sill-shim binary at /.sill/shim (testing)
     #[arg(long)]
     shim_bin: Option<PathBuf>,
+    /// extra read-write bind HOST=JAIL (agent home, private scratch); repeatable
+    #[arg(long = "bind")]
+    binds: Vec<String>,
     /// dev start: detach with setsid instead of a systemd user unit
     #[arg(long)]
     no_unit: bool,
@@ -201,6 +210,7 @@ fn main() -> Result<()> {
         Cmd::Launch { session, jail, shim } => launch(&session, jail, shim),
         Cmd::Shelf { cwd, hidden } => shelf::run(cwd, hidden),
         Cmd::Toggle => shelf::toggle(),
+        Cmd::Restart { hidden } => shelf::restart(hidden),
         Cmd::Theme { name } => shelf::set_theme(&name),
         Cmd::Proxy { fd, socket, policy } => {
             let policy = Policy::load(&policy, &home()?)?;
@@ -431,7 +441,7 @@ fn dev_cmd(cmd: DevCmd) -> Result<()> {
                     Event::Other(s) if verbose => {
                         let _ = writeln!(out, "\x1b[2m· {s}\x1b[0m");
                     }
-                    Event::UserText(_) | Event::Ready { .. } | Event::TurnStarted => {}
+                    Event::UserText(_) | Event::Ready { .. } | Event::TurnStarted | Event::Controls(_) => {}
                     Event::Stopped(r) => {
                         let _ = writeln!(out, "\n\x1b[2m[stop: {r:?}]\x1b[0m");
                     }
@@ -562,6 +572,7 @@ fn start_unit(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>) -> Resul
         share_net: jail.net,
         env: jail.env.clone(),
         shim_bin,
+        binds: vec![],
     };
     let sock = sill_core::session::ensure_started(&opts, &home()?, &std::env::current_exe()?)?;
     println!("session {session} started as unit {}.service; socket {}", sill_core::session::unit_name(session), sock.display());
@@ -629,6 +640,11 @@ fn build_spec(a: JailArgs, command: Vec<OsString>) -> Result<JailSpec> {
     if let Some(shim) = &a.shim_bin {
         extra_args.extend(["--ro-bind".into(), shim.clone().into(), "/.sill/shim".into()]);
     }
+    let mut binds = Vec::new();
+    for b in &a.binds {
+        let Some((h, j)) = b.split_once('=') else { bail!("--bind expects HOST=JAIL, got {b}") };
+        binds.push((PathBuf::from(h), PathBuf::from(j)));
+    }
     Ok(JailSpec {
         policy,
         home,
@@ -643,6 +659,7 @@ fn build_spec(a: JailArgs, command: Vec<OsString>) -> Result<JailSpec> {
         root_entries: jail::read_root_entries()?,
         proxy_socket: a.proxy.map(std::path::absolute).transpose()?,
         proxy_port: jail::PROXY_PORT,
+        binds,
         extra_args,
         command,
     })

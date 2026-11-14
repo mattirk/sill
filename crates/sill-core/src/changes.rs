@@ -20,7 +20,14 @@ pub fn never_auto_keep(path: &Path) -> bool {
 }
 
 /// The jail plan of a session as the launcher built it (same inputs: policy, state dir, host mounts).
-pub fn session_plan(policy: Policy, state_dir: PathBuf, home: &Path, uid: u32, user: &str) -> Result<jail::JailPlan> {
+pub fn session_plan(
+    policy: Policy,
+    state_dir: PathBuf,
+    home: &Path,
+    uid: u32,
+    user: &str,
+    binds: Vec<(PathBuf, PathBuf)>,
+) -> Result<jail::JailPlan> {
     let spec = JailSpec {
         policy,
         home: home.to_path_buf(),
@@ -35,18 +42,76 @@ pub fn session_plan(policy: Policy, state_dir: PathBuf, home: &Path, uid: u32, u
         root_entries: jail::read_root_entries()?,
         proxy_socket: None,
         proxy_port: jail::PROXY_PORT,
+        binds,
         extra_args: vec![],
         command: vec!["true".into()],
     };
     spec.plan()
 }
 
-/// Scan a session's upper trees.
+/// Scan a session's upper trees. Inside git repositories, git-ignored paths count as ignored (build
+/// output) exactly as the repository defines them; the policy's `ledger_ignore` patterns apply
+/// everywhere else.
 pub fn scan(policy: &Policy, plan: &jail::JailPlan, session_start: Option<std::time::SystemTime>) -> Result<Vec<Change>> {
     let mut skip = plan.masked.clone();
     skip.extend(plan.direct.iter().cloned());
     let opts = ScanOptions { session_start, ignore: policy.paths.ledger_ignore.clone(), skip };
-    ledger::scan(&plan.layers, &opts)
+    let mut changes = ledger::scan(&plan.layers, &opts)?;
+    apply_gitignore(&mut changes);
+    Ok(changes)
+}
+
+/// Mark changes that their repository's `.gitignore` rules ignore (`git check-ignore`, one call per
+/// repo). Paths already ignored by pattern stay ignored.
+pub fn apply_gitignore(changes: &mut [Change]) {
+    use std::io::Write;
+    let mut by_repo: BTreeMap<PathBuf, Vec<usize>> = BTreeMap::new();
+    for (i, c) in changes.iter().enumerate() {
+        if let Some(r) = repo_root(&c.path) {
+            by_repo.entry(r).or_default().push(i);
+        }
+    }
+    for (repo, idxs) in by_repo {
+        let mut child = match std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["check-ignore", "--stdin", "-z", "--no-index"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        {
+            let mut stdin = child.stdin.take().unwrap();
+            for &i in &idxs {
+                if let Ok(rel) = changes[i].path.strip_prefix(&repo) {
+                    let _ = stdin.write_all(rel.as_os_str().as_encoded_bytes());
+                    let _ = stdin.write_all(b"\0");
+                }
+            }
+        }
+        let Ok(out) = child.wait_with_output() else { continue };
+        let ignored: std::collections::HashSet<Vec<u8>> =
+            out.stdout.split(|b| *b == 0).filter(|s| !s.is_empty()).map(|s| s.to_vec()).collect();
+        for &i in &idxs {
+            if let Ok(rel) = changes[i].path.strip_prefix(&repo)
+                && ignored.contains(rel.as_os_str().as_encoded_bytes())
+            {
+                changes[i].ignored = true;
+            }
+        }
+    }
+}
+
+/// Is this path inside one of the agent's own state locations (`~/.claude`, `~/.claude.json`, …)?
+pub fn is_agent_state(path: &Path, state_dirs: &[String], home: &Path) -> bool {
+    state_dirs.iter().any(|d| {
+        let p = crate::paths::expand_home(d, home);
+        path == p || path.starts_with(&p)
+    })
 }
 
 /// Group changes by the nearest enclosing git repository ("" = outside any repo).

@@ -91,9 +91,18 @@ fn walk(upper_root: &Path, host_root: &Path, dir: &Path, opts: &ScanOptions, out
         let md = upper.symlink_metadata()?;
         let ft = md.file_type();
         let host_md = host.symlink_metadata().ok();
-        let conflict = match (&host_md, opts.session_start) {
-            (Some(h), Some(start)) => h.modified().map(|m| m > start).unwrap_or(false),
-            _ => false,
+        // Conflict: the host changed after the agent's copy was written (host mtime newer than the
+        // upper entry's), or after the session started when a start time is known. Copy-up preserves
+        // the host's mtime, the agent's write then sets the upper mtime, so a later host edit is newer.
+        let conflict = match &host_md {
+            Some(h) => {
+                let host_m = h.modified().ok();
+                let upper_m = md.modified().ok();
+                let newer_than_upper = matches!((host_m, upper_m), (Some(hm), Some(um)) if hm > um);
+                let newer_than_start = matches!((host_m, opts.session_start), (Some(hm), Some(start)) if hm > start);
+                newer_than_upper || newer_than_start
+            }
+            None => false,
         };
         let ignored = is_ignored(rel, &opts.ignore);
 

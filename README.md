@@ -92,6 +92,15 @@ sudo systemctl enable --now var-lib-sill.mount sill-state-perms.service
 With that mounted, `sill` uses `/var/lib/sill/<uid>/sessions/<id>` by default and `--unsafe-state` is
 no longer needed.
 
+## Agent home and private scratch
+
+Each agent runs completely inside sill: its own paths (`~/.claude` and `~/.claude.json` for Claude Code,
+`~/.codex`, `~/.gemini`) are replaced in every jail by a sill-owned copy under
+`~/.local/state/sill/agents/<id>/`, seeded once with the login files from the host. The host's own
+`~/.claude` is never seen or written by an agent. Caches (`~/.cache`, `~/.npm`: policy `private`) are
+per-session directories on the state filesystem, never on the host. Delete
+`~/.local/state/sill/agents/<id>` to make the agent log in again.
+
 ## Known limits (M0)
 
 - Files not owned by your uid:gid can't be modified in the jail (overlayfs copy-up can't chown to an

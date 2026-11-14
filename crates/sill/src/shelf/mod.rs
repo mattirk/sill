@@ -65,6 +65,12 @@ pub fn run(cwd: Option<PathBuf>, hidden: bool) -> Result<()> {
         }
     });
     app.add_action(&set_theme);
+    let quit = gio::SimpleAction::new("quit", None);
+    {
+        let app = app.clone();
+        quit.connect_activate(move |_, _| app.quit());
+    }
+    app.add_action(&quit);
     // no command-line parsing by GTK: we were started by clap
     let code = app.run_with_args::<&str>(&[]);
     if code != glib_exit_ok() {
@@ -89,6 +95,69 @@ pub fn set_theme(name: &str) -> Result<()> {
         return sill_core::config::save(&c);
     }
     app.activate_action("set-theme", Some(&name.to_variant()));
+    Ok(())
+}
+
+/// SIGTERM every other `sill shelf` process of this user (fallback for `restart`).
+fn kill_old_shelves() {
+    let me = std::process::id();
+    let Ok(rd) = std::fs::read_dir("/proc") else { return };
+    for e in rd.filter_map(Result::ok) {
+        let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else { continue };
+        if pid == me {
+            continue;
+        }
+        let Ok(cmd) = std::fs::read(e.path().join("cmdline")) else { continue };
+        let args: Vec<&[u8]> = cmd.split(|b| *b == 0).collect();
+        let is_shelf = args.first().map(|a| a.ends_with(b"/sill") || *a == b"sill").unwrap_or(false)
+            && args.get(1).map(|a| *a == b"shelf").unwrap_or(false);
+        if is_shelf && let Some(p) = rustix::process::Pid::from_raw(pid as i32) {
+            let _ = rustix::process::kill_process(p, rustix::process::Signal::TERM);
+        }
+    }
+}
+
+/// `sill restart`: stop the running shelf (if any) and launch this executable's shelf detached.
+pub fn restart(hidden: bool) -> Result<()> {
+    let app = gio::Application::new(Some(APP_ID), gio::ApplicationFlags::empty());
+    app.register(None::<&gio::Cancellable>)?;
+    if app.is_remote() {
+        app.activate_action("quit", None);
+        // wait for the old instance to release the application id; if it doesn't, terminate it
+        let mut freed = false;
+        for i in 0..60 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let probe = gio::Application::new(Some(APP_ID), gio::ApplicationFlags::empty());
+            if probe.register(None::<&gio::Cancellable>).is_ok() && !probe.is_remote() {
+                freed = true;
+                break;
+            }
+            if i == 30 {
+                kill_old_shelves();
+            }
+        }
+        if !freed {
+            bail!("the running shelf did not quit");
+        }
+    }
+    drop(app);
+    let exe = std::env::current_exe()?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("shelf");
+    if hidden {
+        cmd.arg("--hidden");
+    }
+    cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    // SAFETY: setsid between fork and exec only.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            rustix::process::setsid()?;
+            Ok(())
+        });
+    }
+    cmd.spawn()?;
+    println!("shelf restarted");
     Ok(())
 }
 

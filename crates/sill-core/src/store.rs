@@ -17,6 +17,8 @@ pub struct Session {
     /// The agent's own session id (ACP), once known; used for `session/load`.
     pub acp_session_id: Option<String>,
     pub policy: String,
+    /// Answer the agent's permission requests with "allow once" automatically.
+    pub auto_allow: bool,
 }
 
 /// One stored transcript entry.
@@ -71,7 +73,14 @@ impl Store {
                  kind TEXT NOT NULL, text TEXT NOT NULL, extra TEXT NOT NULL DEFAULT '',
                  PRIMARY KEY (session_id, seq));",
         )?;
+        // additive migrations
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN auto_allow INTEGER NOT NULL DEFAULT 0", []);
         Ok(Self { conn })
+    }
+
+    pub fn set_auto_allow(&self, id: &str, on: bool) -> Result<()> {
+        self.conn.execute("UPDATE sessions SET auto_allow = ?2 WHERE id = ?1", params![id, on as i32])?;
+        Ok(())
     }
 
     pub fn open_default() -> Result<Self> {
@@ -80,7 +89,7 @@ impl Store {
 
     pub fn sessions(&self) -> Result<Vec<Session>> {
         let mut st = self.conn.prepare(
-            "SELECT id, agent, title, created_at, last_used, acp_session_id, policy FROM sessions ORDER BY last_used DESC",
+            "SELECT id, agent, title, created_at, last_used, acp_session_id, policy, auto_allow FROM sessions ORDER BY last_used DESC",
         )?;
         let rows = st.query_map([], |r| {
             Ok(Session {
@@ -91,6 +100,7 @@ impl Store {
                 last_used: r.get(4)?,
                 acp_session_id: r.get(5)?,
                 policy: r.get(6)?,
+                auto_allow: r.get::<_, i32>(7)? != 0,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -105,6 +115,7 @@ impl Store {
             last_used: now(),
             acp_session_id: None,
             policy: policy.to_string(),
+            auto_allow: false,
         };
         self.conn.execute(
             "INSERT INTO sessions (id, agent, title, created_at, last_used, acp_session_id, policy) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6)",

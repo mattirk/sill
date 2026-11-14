@@ -18,6 +18,74 @@ pub struct StartOptions {
     pub share_net: bool,
     pub env: Vec<String>,
     pub shim_bin: Option<PathBuf>,
+    /// Extra read-write binds (host, jail), see [`binds_for`].
+    pub binds: Vec<(PathBuf, PathBuf)>,
+}
+
+/// The binds a session needs beyond the policy's mounts: the agent's sill-owned home paths and the
+/// session-private scratch directories. Creates what is missing (seeding the agent home from the host
+/// on first use, login files only).
+pub fn binds_for(agent: &crate::agents::Agent, policy: &Policy, state_dir: &Path, home: &Path) -> Result<Vec<(PathBuf, PathBuf)>> {
+    use crate::paths::{expand_home, expand_pattern, layer_name};
+    let mut out = Vec::new();
+    // agent home: ~/.local/state/sill/agents/<id>/<basename of the path>
+    let agents_base = std::env::var("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join(".local/state"))
+        .join("sill")
+        .join("agents")
+        .join(&agent.id);
+    for p in &agent.home_paths {
+        let inside = expand_home(p, home);
+        let name = inside.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let owned = agents_base.join(&name);
+        let host_is_dir = inside.is_dir();
+        if !owned.exists() {
+            std::fs::create_dir_all(&agents_base)?;
+            if host_is_dir || !inside.exists() {
+                std::fs::create_dir_all(&owned)?;
+            } else {
+                // a file path (~/.claude.json): seed from the host or start empty
+                let content = std::fs::read(&inside).unwrap_or_else(|_| b"{}".to_vec());
+                std::fs::write(&owned, content)?;
+            }
+            for seed in &agent.seed_files {
+                let src = expand_home(seed, home);
+                if let Ok(rel) = src.strip_prefix(&inside)
+                    && owned.is_dir()
+                    && src.is_file()
+                {
+                    let dst = owned.join(rel);
+                    if let Some(parent) = dst.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    let _ = std::fs::copy(&src, &dst);
+                }
+            }
+        }
+        // bwrap needs the mount point to exist inside: a missing ~/.claude.json would be created as
+        // a copy-up in the overlay, which is harmless (it is skipped by the ledger as a bind)
+        out.push((owned, inside));
+    }
+    // the login file shared with the host (bound after the home so it wins)
+    for p in &agent.shared_files {
+        let inside = expand_home(p, home);
+        if inside.is_file() {
+            out.push((inside.clone(), inside));
+        }
+    }
+    // session-private scratch
+    for pat in &policy.paths.private {
+        for inside in expand_pattern(pat, home).into_iter().chain(std::iter::once(expand_home(pat, home))) {
+            if out.iter().any(|(_, i)| *i == inside) {
+                continue;
+            }
+            let scratch = state_dir.join("private").join(layer_name(&inside));
+            std::fs::create_dir_all(&scratch)?;
+            out.push((scratch, inside));
+        }
+    }
+    Ok(out)
 }
 
 /// Where a session's upper trees live on the state filesystem (SPEC §4.9); created 0700 for the user.
@@ -95,6 +163,9 @@ pub fn ensure_started(opts: &StartOptions, home: &Path, exe: &Path) -> Result<Pa
     }
     if let Some(s) = &opts.shim_bin {
         cmd.arg("--shim").arg(s);
+    }
+    for (host, inside) in &opts.binds {
+        cmd.arg("--bind").arg(format!("{}={}", host.display(), inside.display()));
     }
     let st = cmd.status().context("run systemd-run (is the systemd user instance running?)")?;
     if !st.success() {

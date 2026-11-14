@@ -105,7 +105,8 @@ impl ChangesPage {
                 if !state_dir.is_dir() {
                     continue;
                 }
-                let Ok(plan) = changes::session_plan(policy.clone(), state_dir, &home, uid, &user) else { continue };
+                let binds = session::binds_of(&s, &policy, &home);
+                let Ok(plan) = changes::session_plan(policy.clone(), state_dir, &home, uid, &user, binds) else { continue };
                 let list = changes::scan(&policy, &plan, None).unwrap_or_default();
                 if !list.is_empty() {
                     out.push((s, list));
@@ -130,11 +131,27 @@ impl ChangesPage {
         let mut total = 0;
         let mut conflicts = 0;
         for (s, list) in groups {
-            for (repo, changes_in_repo) in changes::group_by_repo(&list) {
+            // build output (git-ignored / ledger_ignore) is the overlay's business, not the person's
+            let list: Vec<Change> = list.into_iter().filter(|c| !c.ignored).collect();
+            if list.is_empty() {
+                continue;
+            }
+            // the agent's own files go last, collapsed: reviewable, but not in the way
+            let home = session::home().unwrap_or_default();
+            let state_dirs = sill_core::agents::load(&home).get(&s.agent).map(|a| a.state_dirs.clone()).unwrap_or_default();
+            let (agent_state, list): (Vec<Change>, Vec<Change>) =
+                list.into_iter().partition(|c| changes::is_agent_state(&c.path, &state_dirs, &home));
+            let mut groups: Vec<(PathBuf, Vec<Change>, bool)> =
+                changes::group_by_repo(&list).into_iter().map(|(r, v)| (r, v, false)).collect();
+            if !agent_state.is_empty() {
+                groups.push((PathBuf::from("agent state"), agent_state, true));
+            }
+            for (repo, changes_in_repo, collapsed) in groups {
                 let header = gtk::Label::new(Some(&format!(
-                    "{} · {}",
+                    "{} · {}{}",
                     s.title,
-                    if repo.as_os_str().is_empty() { "outside any repo".to_string() } else { repo.display().to_string() }
+                    if repo.as_os_str().is_empty() { "outside any repo".to_string() } else { repo.display().to_string() },
+                    if collapsed { format!(" ({})", changes_in_repo.len()) } else { String::new() }
                 )));
                 header.set_xalign(0.0);
                 header.add_css_class("heading");
@@ -164,10 +181,20 @@ impl ChangesPage {
                         p.refresh();
                     });
                 }
+                let mut toggle: Option<gtk::ToggleButton> = None;
+                if collapsed {
+                    let t = gtk::ToggleButton::new();
+                    t.set_icon_name("pan-end-symbolic");
+                    t.add_css_class("flat");
+                    t.set_tooltip_text(Some("Show the agent's own files"));
+                    hbox.prepend(&t);
+                    toggle = Some(t);
+                }
                 hbox.append(&keep_all);
                 hrow.set_child(Some(&hbox));
                 self.list.append(&hrow);
                 self.rows.borrow_mut().push((s.id.clone(), changes_in_repo[0].clone())); // placeholder for the header index
+                let mut group_rows: Vec<gtk::ListBoxRow> = Vec::new();
 
                 for c in changes_in_repo {
                     total += 1;
@@ -235,8 +262,20 @@ impl ChangesPage {
                     b.append(&keep_b);
                     b.append(&revert_b);
                     row.set_child(Some(&b));
+                    if collapsed {
+                        row.set_visible(false);
+                    }
                     self.list.append(&row);
                     self.rows.borrow_mut().push((s.id.clone(), c.clone()));
+                    group_rows.push(row);
+                }
+                if let Some(t) = toggle {
+                    t.connect_toggled(move |t| {
+                        t.set_icon_name(if t.is_active() { "pan-down-symbolic" } else { "pan-end-symbolic" });
+                        for r in &group_rows {
+                            r.set_visible(t.is_active());
+                        }
+                    });
                 }
             }
         }

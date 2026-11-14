@@ -8,7 +8,7 @@ use gtk4 as gtk;
 use gtk::gdk;
 use gtk::glib;
 use gtk::prelude::*;
-use sill_core::acp::{Command, Event};
+use sill_core::acp::{Command, ConfigKind, ConfigValue, Controls, Event};
 use sill_core::store::{Session, Store};
 
 use super::conversation::Conversation;
@@ -18,6 +18,15 @@ pub struct SessionView {
     pub root: gtk::Box,
     prompt: gtk::TextView,
     pins_row: gtk::Box,
+    /// Agent controls (mode, model, effort, toggles) + send button, under the prompt.
+    controls_row: gtk::Box,
+    /// Set while the controls are being rebuilt so their change signals don't echo back.
+    rebuilding: std::cell::Cell<bool>,
+    /// sill's own switch: answer permission requests with "allow once" without asking.
+    auto_allow: std::cell::Cell<bool>,
+    /// Send button; becomes a stop button while a turn is running.
+    send_btn: RefCell<Option<gtk::Button>>,
+    busy: std::cell::Cell<bool>,
     pub session: RefCell<Session>,
     pub conv: Rc<Conversation>,
     pub status: gtk::Label,
@@ -28,6 +37,7 @@ pub struct SessionView {
     /// After a resume with replay: ignore replayed events until the first turn starts.
     replaying: RefCell<bool>,
     /// Called when a turn ends (the window refreshes the ledger pages).
+    pub on_busy: RefCell<Option<Box<dyn Fn(&str, bool)>>>,
     pub on_turn_end: RefCell<Option<Box<dyn Fn(&str)>>>,
     pub on_title: RefCell<Option<Box<dyn Fn(&str, &str)>>>,
     /// Click on a pin chip: open the Files page scoped to that folder.
@@ -61,6 +71,18 @@ impl SessionView {
             .build();
         prompt_scroll.add_css_class("sill-prompt-box");
 
+        let controls_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        controls_row.add_css_class("sill-controls");
+        controls_row.set_margin_start(8);
+        controls_row.set_margin_end(8);
+        controls_row.set_margin_top(2);
+        controls_row.set_margin_bottom(6);
+        let prompt_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        prompt_box.add_css_class("sill-prompt-box");
+        prompt_scroll.remove_css_class("sill-prompt-box");
+        prompt_box.append(&prompt_scroll);
+        prompt_box.append(&controls_row);
+
         let pins_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         pins_row.add_css_class("sill-pins");
         pins_row.set_margin_start(12);
@@ -71,12 +93,18 @@ impl SessionView {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.append(&pins_row);
         root.append(&conv.root);
-        root.append(&prompt_scroll);
+        root.append(&prompt_box);
 
+        let auto_allow_initial = session.auto_allow;
         let view = Rc::new(Self {
             root,
             prompt: prompt.clone(),
             pins_row,
+            controls_row,
+            rebuilding: std::cell::Cell::new(false),
+            auto_allow: std::cell::Cell::new(auto_allow_initial),
+            send_btn: RefCell::new(None),
+            busy: std::cell::Cell::new(false),
             session: RefCell::new(session),
             conv,
             status,
@@ -84,6 +112,7 @@ impl SessionView {
             store,
             agent_md: RefCell::new(String::new()),
             replaying: RefCell::new(false),
+            on_busy: RefCell::new(None),
             on_turn_end: RefCell::new(None),
             on_title: RefCell::new(None),
             on_open_folder: RefCell::new(None),
@@ -122,8 +151,161 @@ impl SessionView {
         prompt.add_controller(keys);
 
         view.refresh_pins();
+        view.build_controls(&Controls::default());
         view.connect();
         view
+    }
+
+    fn command(&self, c: Command) {
+        if let Some(d) = self.driver.borrow().as_ref() {
+            let _ = d.commands.try_send(c);
+        }
+    }
+
+    /// Rebuild the controls row from what the agent advertises: a dropdown per mode set / select
+    /// option, a switch per boolean, and the send button on the right.
+    fn build_controls(self: &Rc<Self>, c: &Controls) {
+        self.rebuilding.set(true);
+        while let Some(w) = self.controls_row.first_child() {
+            self.controls_row.remove(&w);
+        }
+        let dropdown = |names: &[String], current: usize| {
+            let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+            let d = gtk::DropDown::from_strings(&refs);
+            d.add_css_class("sill-control");
+            d.set_selected(current as u32);
+            d
+        };
+        if let Some((current, modes)) = &c.modes {
+            let names: Vec<String> = modes.iter().map(|(_, n)| n.clone()).collect();
+            let cur = modes.iter().position(|(id, _)| id == current).unwrap_or(0);
+            let d = dropdown(&names, cur);
+            d.set_tooltip_text(Some("Mode"));
+            let v = self.clone();
+            let ids: Vec<String> = modes.iter().map(|(id, _)| id.clone()).collect();
+            d.connect_selected_notify(move |d| {
+                if v.rebuilding.get() {
+                    return;
+                }
+                if let Some(id) = ids.get(d.selected() as usize) {
+                    v.command(Command::SetMode(id.clone()));
+                }
+            });
+            self.controls_row.append(&d);
+        }
+        for opt in &c.options {
+            // the mode set already covers a "mode"-category option (Claude Code sends both)
+            if opt.category == "mode" && c.modes.is_some() {
+                continue;
+            }
+            match &opt.kind {
+                ConfigKind::Select(current, values) => {
+                    let names: Vec<String> = values.iter().map(|(_, n)| n.clone()).collect();
+                    let cur = values.iter().position(|(id, _)| id == current).unwrap_or(0);
+                    let d = dropdown(&names, cur);
+                    d.set_tooltip_text(Some(&opt.name));
+                    let v = self.clone();
+                    let ids: Vec<String> = values.iter().map(|(id, _)| id.clone()).collect();
+                    let oid = opt.id.clone();
+                    d.connect_selected_notify(move |d| {
+                        if v.rebuilding.get() {
+                            return;
+                        }
+                        if let Some(id) = ids.get(d.selected() as usize) {
+                            v.command(Command::SetConfig(oid.clone(), ConfigValue::Id(id.clone())));
+                        }
+                    });
+                    self.controls_row.append(&d);
+                }
+                ConfigKind::Boolean(on) => {
+                    let b = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+                    let l = gtk::Label::new(Some(&opt.name));
+                    l.add_css_class("dim-label");
+                    let sw = gtk::Switch::new();
+                    sw.set_active(*on);
+                    sw.add_css_class("sill-control");
+                    sw.set_valign(gtk::Align::Center);
+                    let v = self.clone();
+                    let oid = opt.id.clone();
+                    sw.connect_state_set(move |_, state| {
+                        if !v.rebuilding.get() {
+                            v.command(Command::SetConfig(oid.clone(), ConfigValue::Bool(state)));
+                        }
+                        glib::Propagation::Proceed
+                    });
+                    b.append(&l);
+                    b.append(&sw);
+                    self.controls_row.append(&b);
+                }
+            }
+        }
+        // sill's own: auto-allow permission requests (the agent's "auto" modes still ask over ACP)
+        {
+            let b = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+            let l = gtk::Label::new(Some("auto-allow"));
+            l.add_css_class("dim-label");
+            let sw = gtk::Switch::new();
+            sw.set_active(self.auto_allow.get());
+            sw.add_css_class("sill-control");
+            sw.set_valign(gtk::Align::Center);
+            sw.set_tooltip_text(Some("Answer the agent's permission requests with \"allow once\" automatically; each one is still listed in the conversation"));
+            let v = self.clone();
+            sw.connect_state_set(move |_, state| {
+                v.auto_allow.set(state);
+                let _ = v.store.set_auto_allow(&v.id(), state);
+                v.session.borrow_mut().auto_allow = state;
+                glib::Propagation::Proceed
+            });
+            b.append(&l);
+            b.append(&sw);
+            self.controls_row.append(&b);
+        }
+        let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        spacer.set_hexpand(true);
+        self.controls_row.append(&spacer);
+        let send = gtk::Button::new();
+        send.add_css_class("sill-send");
+        {
+            let v = self.clone();
+            send.connect_clicked(move |_| {
+                if v.busy.get() {
+                    v.cancel();
+                    return;
+                }
+                let buf = v.prompt.buffer();
+                let text = buf.text(&buf.start_iter(), &buf.end_iter(), false).trim().to_string();
+                if !text.is_empty() && v.send(&text) {
+                    buf.set_text("");
+                }
+            });
+        }
+        self.controls_row.append(&send);
+        *self.send_btn.borrow_mut() = Some(send);
+        self.set_busy(self.busy.get());
+        self.rebuilding.set(false);
+    }
+
+    /// Flip the send button between "send" and "stop" (SPEC: one button, red while running).
+    fn set_busy(&self, busy: bool) {
+        self.busy.set(busy);
+        if let Some(b) = self.send_btn.borrow().as_ref() {
+            if busy {
+                b.set_label("■");
+                b.set_tooltip_text(Some("Stop the agent"));
+                b.add_css_class("sill-stop");
+            } else {
+                b.set_label("➤");
+                b.set_tooltip_text(Some("Send (Enter)"));
+                b.remove_css_class("sill-stop");
+            }
+        }
+    }
+
+    /// Ask the agent to stop the running turn.
+    pub fn cancel(&self) {
+        if let Some(d) = self.driver.borrow().as_ref() {
+            let _ = d.commands.try_send(Command::Cancel);
+        }
     }
 
     /// Chips under the session bar, one per pinned folder, with an unpin ×.
@@ -249,15 +431,36 @@ impl SessionView {
     fn handle(self: &Rc<Self>, ev: Event) {
         let replaying = *self.replaying.borrow();
         match &ev {
-            Event::Ready { session_id, resumed } => {
+            Event::Ready { session_id, resumed, controls } => {
                 let _ = self.store.set_acp_session_id(&self.id(), session_id);
                 self.session.borrow_mut().acp_session_id = Some(session_id.clone());
                 *self.replaying.borrow_mut() = *resumed;
                 self.status.set_text(if *resumed { "resumed" } else { "ready" });
+                self.build_controls(controls);
+                return;
+            }
+            Event::Controls(c) => {
+                self.build_controls(c);
+                return;
+            }
+            Event::PermissionRequest { .. } if self.auto_allow.get() => {
+                let Event::PermissionRequest { title, options, reply } = ev else { unreachable!() };
+                use sill_core::acp::PermissionOptionKind as K;
+                let pick = options
+                    .iter()
+                    .find(|o| o.kind == K::AllowOnce)
+                    .or_else(|| options.iter().find(|o| o.kind == K::AllowAlways))
+                    .map(|o| o.id.clone());
+                let _ = reply.send(pick.clone());
+                self.conv.add_note(&format!("auto-allowed: {title}{}", if pick.is_none() { " (no allow option; cancelled)" } else { "" }));
                 return;
             }
             Event::TurnStarted => {
                 *self.replaying.borrow_mut() = false;
+                self.set_busy(true);
+                if let Some(cb) = self.on_busy.borrow().as_ref() {
+                    cb(&self.id(), true);
+                }
             }
             Event::UserText(_) | Event::Text(_) | Event::Thought(_) | Event::ToolCall { .. } | Event::ToolCallUpdate { .. }
                 if replaying =>
@@ -270,6 +473,10 @@ impl SessionView {
                 let _ = self.store.append(&self.id(), "tool", title, status);
             }
             Event::Stopped(_) => {
+                self.set_busy(false);
+                if let Some(cb) = self.on_busy.borrow().as_ref() {
+                    cb(&self.id(), false);
+                }
                 self.flush_agent();
                 let id = self.id();
                 let v = self.clone();
@@ -291,10 +498,11 @@ impl SessionView {
             let msg = (|| -> anyhow::Result<String> {
                 let policy = sill_core::policy::Policy::load(&s.policy, &home)?;
                 let state_dir = sill_core::session::state_dir(uid, &s.id)?;
-                let plan = sill_core::changes::session_plan(policy.clone(), state_dir, &home, uid, &user)?;
+                let binds = session::binds_of(&s, &policy, &home);
+                let plan = sill_core::changes::session_plan(policy.clone(), state_dir, &home, uid, &user, binds)?;
                 let changes = sill_core::changes::scan(&policy, &plan, None)?;
                 let (kept, skipped) = sill_core::changes::auto_keep(&policy, &home, &changes);
-                let pending = changes.len() - kept.len();
+                let pending = changes.iter().filter(|c| !c.ignored).count().saturating_sub(kept.len());
                 let mut msg = String::new();
                 if !kept.is_empty() {
                     msg.push_str(&format!("kept {} file(s) in repo roots", kept.len()));

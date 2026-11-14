@@ -28,6 +28,8 @@ pub struct Shelf {
     tabs: Rc<TabStrip>,
     pages: gtk::Stack,
     status: gtk::Label,
+    spinner: gtk::Spinner,
+    busy: RefCell<std::collections::HashSet<String>>,
     views: RefCell<HashMap<String, Rc<SessionView>>>,
     changes: Rc<ChangesPage>,
     files: Rc<FilesPage>,
@@ -86,6 +88,10 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
     files_btn.set_tooltip_text(Some("Files"));
     bar.append(&files_btn);
 
+    let spinner = gtk::Spinner::new();
+    spinner.set_visible(false);
+    spinner.add_css_class("sill-spinner");
+    bar.append(&spinner);
     let status = gtk::Label::new(Some(""));
     status.add_css_class("dim-label");
     bar.append(&status);
@@ -143,6 +149,8 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         tabs: tabs.clone(),
         pages: pages.clone(),
         status: status.clone(),
+        spinner: spinner.clone(),
+        busy: RefCell::new(std::collections::HashSet::new()),
         views: RefCell::new(HashMap::new()),
         changes: changes.clone(),
         files: files.clone(),
@@ -304,7 +312,15 @@ impl Shelf {
         }
     }
 
+    /// Spinner in the bar while the selected session's agent is working.
+    fn sync_spinner(&self) {
+        let selected_busy = self.tabs.selected().map(|id| self.busy.borrow().contains(&id)).unwrap_or(false);
+        self.spinner.set_visible(selected_busy);
+        self.spinner.set_spinning(selected_busy);
+    }
+
     fn sync_status(&self) {
+        self.sync_spinner();
         if let Some(id) = self.tabs.selected()
             && let Some(v) = self.views.borrow().get(&id)
         {
@@ -332,6 +348,18 @@ impl Shelf {
         {
             let shelf = self.clone();
             *view.on_title.borrow_mut() = Some(Box::new(move |id, title| shelf.tabs.set_title(id, title)));
+        }
+        {
+            let shelf = self.clone();
+            *view.on_busy.borrow_mut() = Some(Box::new(move |id, busy| {
+                shelf.tabs.set_busy(id, busy);
+                if busy {
+                    shelf.busy.borrow_mut().insert(id.to_string());
+                } else {
+                    shelf.busy.borrow_mut().remove(id);
+                }
+                shelf.sync_spinner();
+            }));
         }
         {
             let shelf = self.clone();

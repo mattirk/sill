@@ -61,6 +61,9 @@ pub struct JailSpec {
     /// environment points HTTP(S)_PROXY at `127.0.0.1:<proxy_port>`, which the shim forwards.
     pub proxy_socket: Option<PathBuf>,
     pub proxy_port: u16,
+    /// Extra read-write binds (host path, jail path): agent home, session-private scratch. Applied
+    /// after the overlays and masks; nothing below them is recorded.
+    pub binds: Vec<(PathBuf, PathBuf)>,
     /// Extra arguments inserted before `--`.
     pub extra_args: Vec<OsString>,
     pub command: Vec<OsString>,
@@ -287,6 +290,28 @@ impl JailSpec {
             push(&mut a, &[&"--symlink", target, &format!("/{name}")]);
         }
         push(&mut a, &[&"--dir", &format!("/run/user/{}", self.uid)]);
+        // optional desktop access (policy [jail] x11 / dbus): the sockets and the variables that point at them
+        if p.jail.x11 {
+            if let Ok(display) = std::env::var("DISPLAY") {
+                let num = display.trim_start_matches(':').split('.').next().unwrap_or("0").to_string();
+                let sock = format!("/tmp/.X11-unix/X{num}");
+                if Path::new(&sock).exists() {
+                    push(&mut a, &[&"--ro-bind", &sock, &sock, &"--setenv", &"DISPLAY", &display]);
+                }
+                let xauth = std::env::var("XAUTHORITY").unwrap_or_else(|_| format!("{}/.Xauthority", self.home.display()));
+                if Path::new(&xauth).is_file() {
+                    push(&mut a, &[&"--ro-bind", &xauth, &xauth, &"--setenv", &"XAUTHORITY", &xauth]);
+                }
+            } else {
+                warnings.push("policy asks for x11 but DISPLAY is not set".into());
+            }
+        }
+        if p.jail.dbus {
+            let bus = format!("/run/user/{}/bus", self.uid);
+            if Path::new(&bus).exists() {
+                push(&mut a, &[&"--bind", &bus, &bus, &"--setenv", &"DBUS_SESSION_BUS_ADDRESS", &format!("unix:path={bus}")]);
+            }
+        }
         for r in &ro_binds {
             push(&mut a, &[&"--ro-bind", r, r]);
         }
@@ -358,6 +383,10 @@ impl JailSpec {
             for path in expand_pattern(pat, &self.home) {
                 push(&mut a, &[&"--ro-bind", &path, &path]);
             }
+        }
+        for (host, inside) in &self.binds {
+            push(&mut a, &[&"--bind", host, inside]);
+            direct.push(inside.clone());
         }
 
         if let Some(sock) = &self.proxy_socket {
@@ -453,6 +482,7 @@ mod tests {
             root_entries,
             proxy_socket: None,
             proxy_port: PROXY_PORT,
+            binds: vec![],
             extra_args: vec![],
             command: vec!["true".into()],
         }
