@@ -1250,6 +1250,10 @@ button.sill-install:hover { background: alpha(@accent_bg_color, 0.45); }
 .sill-diff { font-size: 90%; }
 .sill-files > row { padding: 0 4px 0 8px; min-height: 0; }
 .sill-files > row:selected { background: alpha(@accent_bg_color, 0.25); }
+/* a dropdown's list: the open one's row and the hovered row marked — the theme's transparent
+   rows (theme.rs) take GTK's own marking away */
+dropdown > popover listview > row:hover { background: alpha(@view_fg_color, 0.07); }
+dropdown > popover listview > row:selected { background: alpha(@accent_bg_color, 0.25); }
 .sill-files treeexpander { padding: 0; border-spacing: 0; }
 /* the row's own height comes from its content, so the indents (and their lines) run edge to edge */
 .sill-tree-row { padding: 2px 0; }
@@ -1301,7 +1305,7 @@ button.sill-action:checked { background: alpha(@view_fg_color, 0.09); border-bot
 /* the lock keeps the row's colour when on: the state is the glyph, not a highlight */
 button.sill-lock:checked { background: transparent; opacity: 0.9; }
 /* context used, of the model's window; warning colour from 80 % */
-.sill-usage { font-size: 80%; font-family: monospace; color: alpha(@view_fg_color, 0.45); padding: 0 0.4em; }
+.sill-usage { font-size: 95%; font-family: monospace; color: alpha(@view_fg_color, 0.45); padding: 0 0.4em; }
 .sill-usage.sill-usage-high { color: @warning_color; }
 /* a form from the agent (elicitation): fields under the question, answers by check or radio */
 .sill-form-field { margin-top: 2px; }
