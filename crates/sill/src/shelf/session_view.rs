@@ -193,25 +193,30 @@ impl SessionView {
         // the text view lays its lines out lazily, after the scrolled window has already measured
         // it, so a wrap that adds a line left the box a line short until the next relayout and
         // the new line clipped; worse, the view had scrolled to the cursor meanwhile and the
-        // leftover scroll ate the top margin, the first line flush against the top edge. The
-        // validated height (margins included) is the vadjustment's upper, so the box's minimum
-        // content height follows it, up to the cap, and while the content fits the scroll is held
-        // at the top — checked on every signal the mismatch can show up on (upper: lines came in;
-        // page-size: the box was allocated; value: the view scrolled), since on 4.24 no single one
-        // of them is last (2026-11-02). The low-priority idle (markdown::settle_height) still
+        // leftover scroll ate the top margin, the first line flush against the top edge. So the
+        // box's minimum content height follows the content's own height — the last line's y-range
+        // plus the margins, not the vadjustment's upper, which is max(content, allocation) and
+        // so never shrinks once the box has grown (the box stayed tall after a send, 2026-11-02) —
+        // up to the cap, and while the content fits the scroll is held at the top. Checked on
+        // every signal the mismatch can show up on: the buffer changed (text in or out), upper
+        // (lines validated), page-size (the box was allocated), value (the view scrolled); on 4.24
+        // no single one is reliably last. The low-priority idle (markdown::settle_height) still
         // lands after GTK's validation for the final measure. SILL_PROMPT_DEBUG=1 traces it.
         {
             let sw = prompt_scroll.downgrade();
+            let tv = prompt.downgrade();
             let debug = std::env::var_os("SILL_PROMPT_DEBUG").is_some();
-            let fit = Rc::new(move |adj: &gtk::Adjustment, why: &str| {
-                let Some(sw) = sw.upgrade() else { return };
+            let fit = Rc::new(move |why: &str| {
+                let (Some(sw), Some(tv)) = (sw.upgrade(), tv.upgrade()) else { return };
+                let adj = tv.vadjustment().unwrap();
                 let cap = sw.max_content_height();
-                let upper = adj.upper().ceil() as i32;
-                let want = upper.min(cap).max(0);
+                let (y, h) = tv.line_yrange(&tv.buffer().end_iter());
+                let content = y + h + tv.top_margin() + tv.bottom_margin();
+                let want = content.min(cap).max(0);
                 if debug {
                     eprintln!(
-                        "{} prompt {why}: upper={upper} page={} value={} min={} box={}",
-                        super::trace_ts(), adj.page_size(), adj.value(), sw.min_content_height(), sw.height()
+                        "{} prompt {why}: content={content} upper={} page={} value={} min={} box={}",
+                        super::trace_ts(), adj.upper(), adj.page_size(), adj.value(), sw.min_content_height(), sw.height()
                     );
                 }
                 if sw.min_content_height() != want {
@@ -219,16 +224,18 @@ impl SessionView {
                     sw.queue_resize();
                     super::markdown::settle_height(&sw);
                 }
-                if upper <= cap && adj.value() != 0.0 {
+                if content <= cap && adj.value() != 0.0 {
                     adj.set_value(0.0);
                 }
             });
             let adj = prompt.vadjustment().unwrap();
             let f = fit.clone();
-            adj.connect_upper_notify(move |a| f(a, "upper"));
+            prompt.buffer().connect_changed(move |_| f("changed"));
             let f = fit.clone();
-            adj.connect_page_size_notify(move |a| f(a, "page"));
-            adj.connect_value_changed(move |a| fit(a, "value"));
+            adj.connect_upper_notify(move |_| f("upper"));
+            let f = fit.clone();
+            adj.connect_page_size_notify(move |_| f("page"));
+            adj.connect_value_changed(move |_| fit("value"));
         }
 
         // no Box spacing: gaps are CSS margins in em, like every size in the row
