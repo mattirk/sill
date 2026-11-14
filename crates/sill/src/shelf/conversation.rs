@@ -1300,10 +1300,13 @@ button.sill-lock:checked { background: transparent; opacity: 0.9; }
 .sill-earlier { font-size: 85%; opacity: 0.6; padding: 2px 12px; min-height: 0; }
 .sill-earlier:hover { opacity: 1; }
 .sill-controls .dim-label { opacity: 0.7; }
-.sill-control { min-height: 0; padding: 0; color: alpha(@view_fg_color, 0.5); }
-.sill-control:hover { color: alpha(@view_fg_color, 0.85); }
+/* the dropdowns' text as dim as the row's glyphs and the usage figure; set on the button's label
+   itself, not inherited — GTK's own theme gives button text a colour of its own */
+.sill-control { min-height: 0; padding: 0; color: alpha(@view_fg_color, 0.55); }
 .sill-control > button { min-height: 2em; padding: 0 0.3em; background: transparent; border: none; box-shadow: none; color: inherit; }
-.sill-control > button:hover { background: alpha(@view_fg_color, 0.07); color: @view_fg_color; }
+.sill-control > button label { color: alpha(@view_fg_color, 0.55); }
+.sill-control > button:hover { background: alpha(@view_fg_color, 0.07); }
+.sill-control > button:hover label { color: @view_fg_color; }
 .sill-control > button arrow { -gtk-icon-size: 0.6em; opacity: 0.45; }
 switch.sill-control { min-width: 2.2em; min-height: 1.1em; opacity: 0.7; }
 switch.sill-control:hover, switch.sill-control:checked { opacity: 1; }
