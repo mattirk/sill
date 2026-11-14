@@ -6,6 +6,7 @@ mod changes;
 mod clamp;
 pub mod client;
 mod conversation;
+mod diffstat;
 mod fonts;
 mod herring;
 mod hotkey;

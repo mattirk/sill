@@ -413,6 +413,12 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
         let s = shelf.clone();
         *tree.on_open.borrow_mut() = Some(Box::new(move |p| s.open_file(p)));
         let s = shelf.clone();
+        tree.on_open_diff(move |repo, rel| {
+            s.viewer.open_git_diff(repo, rel);
+            s.viewer.root.set_visible(true);
+            s.viewer.focus();
+        });
+        let s = shelf.clone();
         *tree.on_close.borrow_mut() = Some(Box::new(move || s.close_tree()));
         let s = shelf.clone();
         *viewer.on_close.borrow_mut() = Some(Box::new(move || {

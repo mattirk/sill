@@ -70,6 +70,9 @@ pub struct Viewer {
     /// history key (`page: <title>`), and the slot it is shown in.
     page: RefCell<Option<(PathBuf, gtk::Widget)>>,
     page_slot: gtk::Box,
+    /// A repository file's git diff being shown (from the drawer's diff view): its history key
+    /// (`git diff: <path>`), the repository and the path below it.
+    git_diff: RefCell<Option<(PathBuf, PathBuf, PathBuf)>>,
 }
 
 impl Viewer {
@@ -179,6 +182,7 @@ impl Viewer {
             log_tick: RefCell::new(None),
             page: RefCell::new(None),
             page_slot,
+            git_diff: RefCell::new(None),
         });
         *v.weak.borrow_mut() = Rc::downgrade(&v);
         {
@@ -332,6 +336,41 @@ impl Viewer {
         self.show(&key);
     }
 
+    /// A repository file's diff against HEAD on top of what is shown (Escape comes back).
+    pub fn open_git_diff(&self, repo: &Path, rel: &Path) {
+        self.drop_edits();
+        let key = PathBuf::from(format!("git diff: {}", repo.join(rel).display()));
+        *self.git_diff.borrow_mut() = Some((key.clone(), repo.to_path_buf(), rel.to_path_buf()));
+        // one diff at a time (its repository and path are kept for the last one only)
+        let mut h = self.history.borrow_mut();
+        h.retain(|k| !k.to_string_lossy().starts_with("git diff: "));
+        h.push(key.clone());
+        drop(h);
+        self.show(&key);
+    }
+
+    /// A diff in the text view, read off the GTK thread.
+    fn show_diff(&self, of: sill_core::wire::DiffOf) {
+        self.text.set_language(sourceview5::LanguageManager::default().language("diff").as_ref());
+        self.text.set_highlight_syntax(true);
+        self.text.set_text("");
+        self.stack.set_visible_child_name("text");
+        let (tx, rx) = async_channel::bounded::<String>(1);
+        std::thread::spawn(move || {
+            let text = match crate::changes_client::diff(&|m, p| super::client::call(m, p), of) {
+                Ok(t) => t.text,
+                Err(e) => format!("diff: {e:#}"),
+            };
+            let _ = tx.send_blocking(text);
+        });
+        let buf = self.text.clone();
+        glib::spawn_future_local(async move {
+            if let Ok(text) = rx.recv().await {
+                buf.set_text(&text);
+            }
+        });
+    }
+
     fn show_log(&self, src: LogReader) {
         self.text.set_language(None);
         self.text.set_highlight_syntax(false);
@@ -397,6 +436,7 @@ impl Viewer {
         self.stop_follow();
         *self.log.borrow_mut() = None;
         *self.page.borrow_mut() = None;
+        *self.git_diff.borrow_mut() = None;
         while let Some(c) = self.page_slot.first_child() {
             self.page_slot.remove(&c);
         }
@@ -500,6 +540,11 @@ impl Viewer {
             self.stack.set_visible_child_name("page");
             return;
         }
+        let git = self.git_diff.borrow().as_ref().filter(|(k, _, _)| k == path).map(|(_, r, p)| (r.clone(), p.clone()));
+        if let Some((repo, rel)) = git {
+            self.say("git's view: the working tree against HEAD (open the file from the tree to edit it)");
+            return self.show_diff(sill_core::wire::DiffOf::Live { repo, rel });
+        }
         // a link under a pin's name is the agent's pointer anywhere on the host: not shown as the
         // pin's file (security.md S9); the target itself can be opened by its own name
         if super::remote::metadata(path).is_ok_and(|m| m.symlink) {
@@ -513,27 +558,8 @@ impl Viewer {
         let pending = self.changes.borrow().iter().find(|(_, c)| c.path == path).cloned();
         if let Some((session, c)) = pending {
             // the daemon reads the session's copy (docs/daemon.md §7 M2): asked off the GTK thread
-            self.text.set_language(sourceview5::LanguageManager::default().language("diff").as_ref());
-            self.text.set_highlight_syntax(true);
-            self.text.set_text("");
-            self.stack.set_visible_child_name("text");
             self.say(&format!("pending change ({}) of a session: keep or revert it in Changes before editing", c.kind.letter()));
-            let (tx, rx) = async_channel::bounded::<String>(1);
-            let of = sill_core::wire::DiffOf::Change { session, path: c.path.clone() };
-            std::thread::spawn(move || {
-                let text = match crate::changes_client::diff(&|m, p| super::client::call(m, p), of) {
-                    Ok(t) => t.text,
-                    Err(e) => format!("diff: {e:#}"),
-                };
-                let _ = tx.send_blocking(text);
-            });
-            let buf = self.text.clone();
-            glib::spawn_future_local(async move {
-                if let Ok(text) = rx.recv().await {
-                    buf.set_text(&text);
-                }
-            });
-            return;
+            return self.show_diff(sill_core::wire::DiffOf::Change { session, path: c.path.clone() });
         }
         let meta = super::remote::metadata(path);
         let size = meta.as_ref().map(|m| m.length).unwrap_or(0);

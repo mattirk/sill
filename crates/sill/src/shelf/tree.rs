@@ -234,6 +234,10 @@ pub struct FolderTree {
     search_seq: std::cell::Cell<u32>,
     /// Back to the global tree while scoped to one folder.
     all: gtk::Button,
+    /// Shows `git diff --stat` of the repositories in view instead of the tree.
+    diff: gtk::ToggleButton,
+    panes: gtk::Stack,
+    stat: Rc<super::diffstat::DiffStat>,
     view: gtk::ListView,
     roots: gio::ListStore,
     tree: gtk::TreeListModel,
@@ -294,12 +298,17 @@ impl FolderTree {
         all.add_css_class("sill-viewer-btn");
         all.set_tooltip_text(Some("Show everything: home, pinned folders, touched repositories"));
         all.set_visible(false);
+        let diff = gtk::ToggleButton::with_label("diff");
+        diff.add_css_class("flat");
+        diff.add_css_class("sill-viewer-btn");
+        diff.set_tooltip_text(Some("git diff --stat of the pinned repository (the shown folder's, else this session's pinned ones)"));
         let close = super::icons::glyph_button("sill-x");
         close.add_css_class("flat");
         close.add_css_class("sill-viewer-btn");
         close.set_tooltip_text(Some("Close the tree (Ctrl+Shift+F)"));
         bar.append(&search);
         bar.append(&all);
+        bar.append(&diff);
         bar.append(&close);
         root.append(&bar);
 
@@ -582,7 +591,12 @@ impl FolderTree {
         // window but never the drawer (2026-11-01). External keeps the natural width at the minimum,
         // so the drawer is exactly the size request the window gives it.
         let scroll = gtk::ScrolledWindow::builder().child(&view).vexpand(true).hscrollbar_policy(gtk::PolicyType::External).build();
-        root.append(&scroll);
+        let stat = super::diffstat::DiffStat::new();
+        let panes = gtk::Stack::new();
+        panes.set_vexpand(true);
+        panes.add_named(&scroll, Some("tree"));
+        panes.add_named(&stat.root, Some("diff"));
+        root.append(&panes);
         let hint = gtk::Label::new(Some("Nothing pinned to this session — pin a folder with + on its row, or open one from Home."));
         hint.set_xalign(0.0);
         hint.set_wrap(true);
@@ -604,6 +618,9 @@ impl FolderTree {
             query: RefCell::new(String::new()),
             search_seq: std::cell::Cell::new(0),
             all: all.clone(),
+            diff: diff.clone(),
+            panes,
+            stat,
             view,
             roots,
             tree,
@@ -668,6 +685,14 @@ impl FolderTree {
         }
         {
             let weak = Rc::downgrade(&t);
+            diff.connect_toggled(move |b| {
+                if let Some(t) = weak.upgrade() {
+                    t.set_diff_mode(b.is_active());
+                }
+            });
+        }
+        {
+            let weak = Rc::downgrade(&t);
             all.connect_clicked(move |_| {
                 if let Some(t) = weak.upgrade() {
                     t.set_scope(None);
@@ -686,6 +711,51 @@ impl FolderTree {
 
     pub fn scope(&self) -> Option<PathBuf> {
         self.scope.borrow().clone()
+    }
+
+    /// A diff row clicked: the viewer shows that file's git diff.
+    pub fn on_open_diff(&self, f: impl Fn(&Path, &Path) + 'static) {
+        *self.stat.on_open.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// Tree or `git diff --stat`: the search box filters whichever is shown.
+    fn set_diff_mode(self: &Rc<Self>, on: bool) {
+        self.search.set_text("");
+        self.query.borrow_mut().clear();
+        self.stat.set_filter("");
+        self.say("");
+        self.panes.set_visible_child_name(if on { "diff" } else { "tree" });
+        if on {
+            self.hint.set_visible(false);
+            self.refresh_stat(true);
+        } else {
+            self.refresh();
+        }
+    }
+
+    /// The repositories the diff view shows: the scoped folder's, else the current session's pinned
+    /// folders that are (in) repositories — a repository must be pinned to be shown.
+    fn stat_repos(&self) -> Vec<PathBuf> {
+        let dirs: Vec<PathBuf> = match self.scope.borrow().clone() {
+            Some(s) => vec![s],
+            None => self.pinned.borrow().clone(),
+        };
+        let mut repos: Vec<PathBuf> = Vec::new();
+        for d in dirs {
+            if let Some(r) = super::remote::repo_root(&d.join("x"))
+                && !repos.contains(&r)
+            {
+                repos.push(r);
+            }
+        }
+        repos
+    }
+
+    fn refresh_stat(self: &Rc<Self>, force: bool) {
+        if self.diff.is_active() {
+            let repos = self.stat_repos();
+            self.stat.refresh(repos, force);
+        }
     }
 
     /// A session just opened in a tab (new, or resumed): the tree shows its first pinned folder,
@@ -717,6 +787,10 @@ impl FolderTree {
     /// text puts the tree back.
     fn search(self: &Rc<Self>, text: &str) {
         let q = text.trim().to_lowercase();
+        if self.diff.is_active() {
+            self.stat.set_filter(&q);
+            return;
+        }
         let seq = self.search_seq.get().wrapping_add(1);
         self.search_seq.set(seq);
         let was = std::mem::replace(&mut *self.query.borrow_mut(), q.clone());
@@ -936,7 +1010,7 @@ impl FolderTree {
         }
         roots.dedup();
         // the global view with nothing but home: say how to get a folder into it
-        self.hint.set_visible(scope.is_none() && roots.is_empty() && global.is_empty() && touched.is_empty());
+        self.hint.set_visible(!self.diff.is_active() && scope.is_none() && roots.is_empty() && global.is_empty() && touched.is_empty());
         // the rows to show: the scoped folder alone, or the global view's groups under their
         // captions (a group that is empty has no caption)
         let text = |p: &PathBuf| p.to_string_lossy().into_owned();
@@ -996,6 +1070,7 @@ impl FolderTree {
         for item in self.bound.borrow().clone() {
             (self.decorate)(&item);
         }
+        self.refresh_stat(false);
         self.view.queue_draw();
         // follow the disk: the listed directories, and each repository's .git (commits, checkouts)
         let mut watch: Vec<PathBuf> = self.listed.borrow().keys().cloned().collect();

@@ -1752,6 +1752,11 @@ dropdown > popover listview > row:selected { background: alpha(@accent_bg_color,
 .sill-changed { color: @warning_color; }
 .sill-below { color: @warning_color; }
 .sill-new { color: @success_color; }
+/* the drawer's diff view: +added −removed in git's colours */
+.sill-stat-add { color: @success_color; }
+.sill-stat-del { color: @error_color; }
+.sill-stat-n { font-size: 90%; }
+.sill-stat > row { padding-top: 1px; padding-bottom: 1px; }
 .sill-pending { color: @accent_color; }
 .sill-dim { opacity: 0.45; }
 .sill-file-icon.sill-pinned { opacity: 1; }
