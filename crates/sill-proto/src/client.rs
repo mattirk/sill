@@ -45,6 +45,11 @@ impl Client {
                 if std::env::var_os("SILL_NO_DAEMON_START").is_some() {
                     return Err(e);
                 }
+                // a jail has its own tmpfs /run and no host socket: a daemon started here would
+                // die at once on the hidden sill.db and leave a dead socket behind
+                if std::env::var_os("SILL_SESSION").is_some() {
+                    bail!("no sill daemon is reachable from inside a session");
+                }
             }
         }
         let dir = crate::runtime_dir()?;
