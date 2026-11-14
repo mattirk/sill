@@ -177,6 +177,33 @@ pub fn builtin() -> Vec<Agent> {
             memory_paths: vec![],
         },
         Agent {
+            // Kimi Code 2.5.2: directories and login files from the tested registry setup.
+            id: "kimi-code".into(),
+            name: "Kimi Code".into(),
+            enabled: true,
+            command: vec!["kimi".into(), "acp".into()],
+            env: Default::default(),
+            supports_load: true,
+            experimental_acp_v2: false,
+            domains: vec!["*.kimi.ai".into(), "*.kimi.com".into()],
+            sandbox_off_env: Default::default(),
+            home_paths: Some(vec![HomePath::directory("~/.kimi-code")]),
+            login_files: vec![
+                ".kimi-code/config.toml".into(),
+                ".kimi-code/credentials/kimi-code.json".into(),
+                // Global endpoint slot: SHA-256 of the public OAuth/API endpoint pair,
+                // truncated by Kimi to 16 hex digits; independent of account/device.
+                ".kimi-code/credentials/kimi-code-env-0e4f99c69cc27850.json".into(),
+                ".kimi-code/device_id".into(),
+                ".kimi-code/region.json".into(),
+            ],
+            host_login: vec!["login".into()],
+            home_env: Some("KIMI_CODE_HOME".into()),
+            home_env_parent: false,
+            icon: None,
+            memory_paths: vec![],
+        },
+        Agent {
             id: "gemini".into(),
             name: "Gemini CLI".into(),
             enabled: true,

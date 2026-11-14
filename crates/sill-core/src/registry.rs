@@ -212,7 +212,7 @@ fn platform_key() -> &'static str {
 
 /// Registry ids known to work inside sill's jail end to end (install, login, a prompt). Everything
 /// else is still installable but hidden by default on the Agents page until someone tests it.
-pub const TESTED: &[&str] = &["claude-acp", "codex-acp", "antigravity-acp"];
+pub const TESTED: &[&str] = &["claude-acp", "codex-acp", "antigravity-acp", "kimi-code"];
 
 pub fn is_tested(id: &str) -> bool {
     TESTED.contains(&id)
@@ -229,6 +229,7 @@ pub fn builtin_for(entry: &Entry) -> Option<&'static str> {
         "@agentclientprotocol/claude-agent-acp" | "@zed-industries/claude-code-acp" => Some("claude"),
         "@agentclientprotocol/codex-acp" | "@zed-industries/codex-acp" => Some("codex"),
         "@google/gemini-cli" => Some("gemini"),
+        "@moonshot-ai/kimi-code" => Some("kimi-code"),
         _ => None,
     }
 }
@@ -1244,6 +1245,21 @@ fn npm_lockfile(spec: &str) -> Result<(serde_json::Value, serde_json::Value)> {
 #[cfg(test)]
 mod snapshot_tests {
     use super::*;
+
+    #[test]
+    fn kimi_code_registry_uses_the_tested_builtin_defaults() {
+        let entry: Entry = serde_json::from_value(serde_json::json!({
+            "id": "kimi-code", "name": "Kimi Code", "version": "2.5.2",
+            "distribution": {"npx": {"package": "@moonshot-ai/kimi-code@2.5.2"}}
+        })).unwrap();
+        assert!(is_tested(&entry.id));
+        assert_eq!(builtin_for(&entry), Some("kimi-code"));
+        let agent = agents::builtin().into_iter().find(|a| a.id == "kimi-code").unwrap();
+        agent.validate().unwrap();
+        assert_eq!(agent.home_paths.unwrap()[0].path, "~/.kimi-code");
+        assert_eq!(agent.host_login, ["login"]);
+        assert_eq!(agent.home_env.as_deref(), Some("KIMI_CODE_HOME"));
+    }
 
     #[test]
     fn exact_versions() {
