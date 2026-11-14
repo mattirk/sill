@@ -197,6 +197,9 @@ impl Runner {
                 st.ready = Some((session_id.clone(), *resumed));
                 st.controls = Some(controls.clone());
                 st.replaying = *resumed;
+                // the session opened: a login asked for before is done (an agent that wants one
+                // per prompt asks again there). Kept, it held every prompt in the queue.
+                st.auth = None;
             }
             relay::Event::Capabilities { images } => st.images = Some(*images),
             relay::Event::Controls(c) => { self.restore(store, st, c, false)?; st.controls = Some(c.clone()); },
