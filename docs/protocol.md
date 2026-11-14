@@ -761,3 +761,9 @@ These are design work, not reasons to reopen §6's product decisions:
   `frontend.request` helpers and schema tooling for the independent Python client.
 - Migration of existing stored transcripts to stable IDs, including limits on continuity claims
   when an old transcript lacks source identities. Do not deduplicate by text to fill those gaps.
+
+Session state includes `active_ms` (completed working intervals in milliseconds) and
+`active_since_ms` (Unix milliseconds when the current interval began, or null).
+The journal accumulates only `working` activity in an open session; waiting for input,
+idle, unknown, and ended states stop the clock. Snapshots preserve the total across
+frontend reconnects. Older state defaults to zero; past work is not reconstructed.

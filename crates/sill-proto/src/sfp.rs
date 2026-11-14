@@ -17,6 +17,12 @@ pub struct SessionState {
     pub deleted: bool,
     /// idle, working, waiting, unknown. Unknown must never be interpreted as idle.
     pub activity: String,
+    /// Completed working intervals, in milliseconds. Waiting and idle time are excluded.
+    #[serde(default)]
+    pub active_ms: u64,
+    /// Unix milliseconds at the start of the current working interval.
+    #[serde(default)]
+    pub active_since_ms: Option<u64>,
     pub turn_id: Option<String>,
     pub question_ids: Vec<String>,
     /// None means background activity is unknown, not empty.

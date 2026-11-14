@@ -235,9 +235,15 @@ curl -sSf https://sh.rustup.rs | sh
 sudo apt install bubblewrap libgtk-4-dev libvte-2.91-gtk4-dev libgtksourceview-5-dev
 cargo build --release
 cargo test --workspace
+packaging/deploy.sh --fast     # quicker local builds; incremental cache in target/local
 packaging/deploy.sh            # from source, in a host terminal (Ctrl+Shift+H): build, sudo sill init, restart, verify
 packaging/check.sh             # deploy.sh runs it last: daemon, units, a jail's view, keep/undo, a ghost session → target/host-check/report.txt
 ```
+
+For frequent local changes, `--fast` uses modest optimization, 16 code-generation units,
+no LTO, and incremental compilation. The first build fills a separate cache; later builds
+reuse it. Use `cargo build --profile local` to build without installing. Ordinary release
+builds retain their full optimization settings.
 
 Release channels: the tarball (`sill-<ver>-<arch>.tar.gz` + `SHA256SUMS`, `packaging/release.sh`)
 with `sudo ./sill init` inside; the `.deb` (`packaging/deb.sh`, `postinst` runs `sill init`); from

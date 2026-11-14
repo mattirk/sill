@@ -314,7 +314,7 @@ pub(crate) fn session_controls(controls: &acp::Controls) -> sfp::SessionControls
 mod tests {
     use super::*;
     fn session() -> sfp::SessionState {
-        sfp::SessionState { session_id: "s".into(), agent_generation_id: "generation-one".into(), lifecycle: "open".into(), title:None, summary:None, end_reason:None, deleted:false, activity: "idle".into(), turn_id: None, question_ids: vec![], background: None, capabilities: BTreeMap::new(), controls: None, authentication: None, usage: None, agent_title: None, commands: vec![] }
+        sfp::SessionState { session_id: "s".into(), agent_generation_id: "generation-one".into(), lifecycle: "open".into(), title:None, summary:None, end_reason:None, deleted:false, activity: "idle".into(), turn_id: None, question_ids: vec![], background: None, capabilities: BTreeMap::new(), controls: None, authentication: None, usage: None, agent_title: None, commands: vec![], active_ms:0, active_since_ms:None }
     }
     #[test]
     fn restart_retains_item_and_question_identity_but_replacement_does_not() {

@@ -103,6 +103,7 @@ pub struct SessionView {
     /// Send button; becomes a stop button while a turn is running.
     send_btn: RefCell<Option<gtk::Button>>,
     busy: std::cell::Cell<bool>,
+    active_time: std::cell::Cell<(u64, Option<u64>)>,
     pub session: RefCell<Session>,
     pub conv: Rc<Conversation>,
     pub status: gtk::Label,
@@ -487,6 +488,7 @@ impl SessionView {
             auto_allow: std::cell::Cell::new(auto_allow_initial),
             send_btn: RefCell::new(None),
             busy: std::cell::Cell::new(false),
+            active_time: std::cell::Cell::new((0, None)),
             session: RefCell::new(session),
             conv,
             status,
@@ -2180,6 +2182,13 @@ impl SessionView {
         self.agent_md.borrow_mut().clear();
     }
 
+    pub fn active_seconds(&self) -> u64 {
+        let (total, since) = self.active_time.get();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default().as_millis() as u64;
+        total.saturating_add(since.map_or(0, |start| now.saturating_sub(start))) / 1000
+    }
+
     fn handle(self: &Rc<Self>, ev: Event) {
         match &ev {
             Event::Ready { resumed, controls, .. } => {
@@ -2197,6 +2206,12 @@ impl SessionView {
             // the daemon answered it (the session auto-allows): a quiet mark on the call's own line
             Event::AutoAnswered { tool_call_id, title, allowed } => {
                 self.conv.mark_auto_allowed(tool_call_id, title, !*allowed);
+                return;
+            }
+            Event::Other(t) if t.starts_with("sill:active-time:") => {
+                if let Ok(time) = serde_json::from_str(&t["sill:active-time:".len()..]) {
+                    self.active_time.set(time);
+                }
                 return;
             }
             Event::Other(t) if t.starts_with("sill:replay:") => {

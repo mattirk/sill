@@ -214,6 +214,7 @@ fn render_item(item: &Item, attachments: &[wire::UserAttachment]) -> Vec<wire::E
 }
 fn render_session(session: &SessionState, previous: Option<&SessionState>) -> Vec<wire::Event> {
     let mut out = Vec::new();
+    out.push(wire::Event::Other(format!("sill:active-time:{}", serde_json::json!([session.active_ms, session.active_since_ms]))));
     if session.lifecycle == "ended" && !previous.is_some_and(|old| old.lifecycle == "ended") {
         out.push(wire::Event::SessionEnded { deleted:session.deleted, reason:session.end_reason.clone().unwrap_or_else(||"ended".into()) });
     }
@@ -378,7 +379,7 @@ mod tests {
     #[test]
     fn offered_commands_reach_the_view_when_they_change() {
         let mut view=View {session_id:"s".into(),subscription_id:"sub".into(),..Default::default()};
-        let mut session=SessionState { session_id:"s".into(),agent_generation_id:"g".into(),lifecycle:"open".into(),title:None,summary:None,end_reason:None,deleted:false,activity:"idle".into(),turn_id:None,question_ids:vec![],background:None,capabilities:BTreeMap::new(),controls:None,authentication:None,usage:None,agent_title:None,commands:vec![] };
+        let mut session=SessionState { session_id:"s".into(),agent_generation_id:"g".into(),lifecycle:"open".into(),title:None,summary:None,end_reason:None,deleted:false,activity:"idle".into(),turn_id:None,question_ids:vec![],background:None,capabilities:BTreeMap::new(),controls:None,authentication:None,usage:None,agent_title:None,commands:vec![], active_ms:0, active_since_ms:None };
         let quiet=view.accept(notification("1",Event::SessionUpdated {session:session.clone()})).unwrap();
         assert!(!quiet.iter().any(|e|matches!(e,wire::Event::Commands(_))));
         session.commands=vec![AgentCommand {name:"review".into(),description:"Review".into(),hint:Some("what".into())}];

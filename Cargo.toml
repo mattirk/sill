@@ -28,3 +28,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Optimized local builds with a reusable incremental cache.
+[profile.local]
+inherits = "release"
+opt-level = 1
+lto = "off"
+codegen-units = 16
+incremental = true

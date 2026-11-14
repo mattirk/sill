@@ -44,6 +44,7 @@ pub struct Shelf {
     /// Top-bar indicator: a quiet square while idle, a spinner while the selected agent works; the
     /// status text is its tooltip.
     status: gtk::Stack,
+    session_timer: gtk::Label,
     status_text: RefCell<String>,
     spinner: Rc<super::spinner::Spinner>,
     herring: Rc<super::herring::Herring>,
@@ -200,6 +201,27 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     status.add_named(&spinner.area, Some("busy"));
     status.set_valign(gtk::Align::Center);
     status.add_css_class("sill-status-slot");
+    let session_timer = gtk::Label::new(None);
+    session_timer.add_css_class("dim-label");
+    session_timer.add_css_class("monospace");
+    session_timer.set_tooltip_text(Some("Time the agent has worked (excludes idle time and waiting for input)"));
+    session_timer.set_visible(false);
+    // The right edge stays anchored at the indicator while the timer slides out to its left.
+    let timer_reveal = gtk::Revealer::new();
+    timer_reveal.set_transition_type(gtk::RevealerTransitionType::SlideLeft);
+    timer_reveal.set_transition_duration(180);
+    timer_reveal.set_child(Some(&session_timer));
+    let hover = gtk::EventControllerMotion::new();
+    let reveal = timer_reveal.downgrade();
+    hover.connect_enter(move |_, _, _| {
+        if let Some(reveal) = reveal.upgrade() { reveal.set_reveal_child(true); }
+    });
+    let reveal = timer_reveal.downgrade();
+    hover.connect_leave(move |_| {
+        if let Some(reveal) = reveal.upgrade() { reveal.set_reveal_child(false); }
+    });
+    status.add_controller(hover);
+    bar.append(&timer_reveal);
     bar.append(&status);
 
     // --- pages
@@ -272,6 +294,7 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
         tabs: tabs.clone(),
         pages: pages.clone(),
         status: status.clone(),
+        session_timer,
         status_text: RefCell::new(String::new()),
         spinner: spinner.clone(),
         herring: herring.clone(),
@@ -303,6 +326,14 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
                 let Some(s) = weak.upgrade() else { break };
                 s.lifecycle(&id, ev);
             }
+        });
+    }
+    {
+        let weak = Rc::downgrade(&shelf);
+        glib::timeout_add_seconds_local(1, move || {
+            let Some(s) = weak.upgrade() else { return glib::ControlFlow::Break };
+            s.sync_session_timer();
+            glib::ControlFlow::Continue
         });
     }
     {
@@ -864,6 +895,7 @@ impl Shelf {
 
     fn show_page(&self, name: &str) {
         self.stack.set_visible_child_name(name);
+        self.sync_session_timer();
         let backend = name != "sessions";
         self.tab_area.set_visible_child_name(if backend { "backend" } else { "sessions" });
         for (id, tab, _) in self.page_tabs.borrow().iter() {
@@ -1223,7 +1255,25 @@ impl Shelf {
         }
     }
 
+    fn sync_session_timer(&self) {
+        let views = self.views.borrow();
+        let selected = self.tabs.selected();
+        let view = selected.as_ref().filter(|_| self.stack.visible_child_name().as_deref() == Some("sessions"))
+            .and_then(|id| views.get(id));
+        self.session_timer.set_visible(view.is_some());
+        if let Some(view) = view {
+            let elapsed = view.active_seconds();
+            let text = if elapsed < 3600 {
+                format!("{}:{:02}", elapsed / 60, elapsed % 60)
+            } else {
+                format!("{}:{:02}:{:02}", elapsed / 3600, elapsed / 60 % 60, elapsed % 60)
+            };
+            self.session_timer.set_text(&text);
+        }
+    }
+
     fn sync_status(&self) {
+        self.sync_session_timer();
         self.sync_spinner();
         if let Some(id) = self.tabs.selected()
             && let Some(v) = self.views.borrow().get(&id)

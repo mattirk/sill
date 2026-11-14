@@ -86,7 +86,7 @@ impl<'a> Journal<'a> {
                 title:Some(row.title), summary:(!row.summary.is_empty()).then_some(row.summary), end_reason:None, deleted:false,
                 activity: "unknown".into(), turn_id: None, question_ids: vec![], background: None,
                 capabilities: BTreeMap::from([("steering".into(), false)]),
-                controls:None, authentication:None, usage:None, agent_title:None, commands:vec![],
+                controls:None, authentication:None, usage:None, agent_title:None, commands:vec![], active_ms:0, active_since_ms:None,
             };
             let inserted = self.store.conn().execute("INSERT OR IGNORE INTO sfp_sessions(session_id,state) VALUES (?1,?2)", params![session_id, serde_json::to_string(&state)?])?;
             if inserted == 1 {
@@ -202,6 +202,12 @@ impl<'a> Journal<'a> {
                 seq = seq.checked_add(1).ok_or_else(|| error("limit_exceeded", "session event sequence exhausted"))?;
                 let mut event = original.clone();
                 match &mut event {
+                    Event::SessionUpdated { session } => {
+                        let previous = self.session(session_id)?;
+                        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default().as_millis() as u64;
+                        update_active_time(&previous, session, now);
+                    }
                     Event::ItemCreated { item } if item.created_seq.is_empty() => item.created_seq = seq.to_string(),
                     Event::SubmissionUpdated { submission } if submission.accepted_seq.is_empty() => submission.accepted_seq = seq.to_string(),
                     _ => {}
@@ -475,6 +481,34 @@ pub fn timestamp(seconds:i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn active_time_excludes_waits_and_survives_storage() {
+        let f = Fixture::new();
+        let j = f.journal();
+        let mut previous = j.session(&f.id).unwrap();
+        for (activity, now, total, since) in [
+            ("working", 1000, 0, Some(1000)),
+            ("working", 2000, 0, Some(1000)),
+            ("waiting", 3500, 2500, None),
+            ("idle", 9000, 2500, None),
+            ("working", 12000, 2500, Some(12000)),
+            ("idle", 14000, 4500, None),
+        ] {
+            let mut next = previous.clone();
+            next.activity = activity.into();
+            update_active_time(&previous, &mut next, now);
+            assert_eq!((next.active_ms, next.active_since_ms), (total, since));
+            previous = next;
+        }
+        // Store a known completed total, then pass a stale producer state through append.
+        j.apply(&f.id, 0, &Event::SessionUpdated { session: previous }).unwrap();
+        let mut stale = j.session(&f.id).unwrap();
+        stale.active_ms = 0;
+        j.append(&f.id, None, &[Event::SessionUpdated { session: stale }]).unwrap();
+        let reopened = Store::open(&f.dir.join("s.db")).unwrap();
+        assert_eq!(Journal::new(&reopened).unwrap().session(&f.id).unwrap().active_ms, 4500);
+    }
+
     struct Fixture { dir:std::path::PathBuf, store:Store, id:String }
     impl Fixture {
         fn new() -> Self {
@@ -614,4 +648,17 @@ mod tests {
         assert_eq!(timestamp(951827696),"2000-02-29T12:34:56Z");
         assert_eq!(timestamp(-1),"1969-12-31T23:59:59Z");
     }
+}
+
+/// Carry the durable total forward even when a producer holds an older state copy.
+fn update_active_time(previous: &SessionState, next: &mut SessionState, now: u64) {
+    next.active_ms = previous.active_ms;
+    next.active_since_ms = previous.active_since_ms;
+    let working = next.activity == "working" && next.lifecycle == "open";
+    if !working || previous.agent_generation_id != next.agent_generation_id {
+        if let Some(start) = next.active_since_ms.take() {
+            next.active_ms = next.active_ms.saturating_add(now.saturating_sub(start));
+        }
+    }
+    if working && next.active_since_ms.is_none() { next.active_since_ms = Some(now); }
 }

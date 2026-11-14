@@ -101,6 +101,7 @@ pub fn line_mode(key: &str, fresh: bool, verbose: bool) -> Result<()> {
 }
 fn render_public(event: Event, verbose: bool, pending: &Mutex<Option<Pending>>) {
     if let Event::Other(text)=&event {
+        if text.starts_with("sill:active-time:") { return; }
         if let Some(json)=text.strip_prefix("sill:replay:") {
             if let Ok(value)=serde_json::from_str(json) {render_replay(&value);}
             return;

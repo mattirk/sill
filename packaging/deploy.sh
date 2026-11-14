@@ -5,6 +5,7 @@
 #
 #   packaging/deploy.sh             # cargo build --release, sudo sill init, sill restart, verify,
 #                                   # then packaging/check.sh (report in target/host-check/)
+#   packaging/deploy.sh --fast      # faster incremental build in target/local, then deploy
 #   packaging/deploy.sh --no-build  # install and restart what target/release already has
 set -eu
 cd "$(dirname "$0")/.."
@@ -15,19 +16,29 @@ fi
 # Deployment and host checks always address this machine, even from a shell with SILL_BOX set.
 SILL_BOX=local; export SILL_BOX
 PREFIX=${PREFIX:-/usr/local}
+sill_profile=release
+sill_build=yes
+for arg in "$@"; do
+    case "$arg" in
+        --fast) sill_profile=local ;;
+        --no-build) sill_build=no ;;
+        *) echo "usage: packaging/deploy.sh [--fast] [--no-build]" >&2; exit 1 ;;
+    esac
+done
+sill_build_dir="target/$sill_profile"
 sudo -v # the password now, not after the build
-if [ "${1:-}" != "--no-build" ]; then
-    cargo build --release
+if [ "$sill_build" = yes ]; then
+    cargo build --profile "$sill_profile"
 fi
 for b in sill sill-shim; do
-    [ -x "target/release/$b" ] || { echo "deploy.sh: target/release/$b missing" >&2; exit 1; }
+    [ -x "$sill_build_dir/$b" ] || { echo "deploy.sh: $sill_build_dir/$b missing" >&2; exit 1; }
 done
 
-sudo target/release/sill init --prefix "$PREFIX"
+sudo "$sill_build_dir/sill" init --prefix "$PREFIX"
 # what init installed must be what was built
 for b in sill sill-shim; do
-    cmp -s "target/release/$b" "$PREFIX/bin/$b" || {
-        echo "deploy.sh: $PREFIX/bin/$b differs from target/release/$b after init" >&2
+    cmp -s "$sill_build_dir/$b" "$PREFIX/bin/$b" || {
+        echo "deploy.sh: $PREFIX/bin/$b differs from $sill_build_dir/$b after init" >&2
         exit 1
     }
 done
