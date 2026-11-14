@@ -19,8 +19,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
-/// The oldest Weston with `--no-config` and `--xwayland` (10.0, 2022). Tested: 15.0.1.
-const MIN_MAJOR: u32 = 10;
+/// The oldest Weston with `--debug-scopes` (15.0, 2025): older ones abort on it, and without it
+/// the debug extension would offer every scope (2026-11-12, Debian 13's Weston 14). Tested: 15.0.1
+/// (the person's desktop) and 16.0.2 (the Mac app's VM, built from source).
+const MIN_MAJOR: u32 = 15;
 /// The desktop's size in pixels (an output of this size; a window this large when shown).
 pub const WIDTH: u32 = 1280;
 pub const HEIGHT: u32 = 800;

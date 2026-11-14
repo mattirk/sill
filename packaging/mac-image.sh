@@ -20,7 +20,8 @@ DEBIAN_IMAGE=debian-13-generic-arm64.tar.xz
 SYSTEM_SIZE=16g
 # the build's own data disks, thrown away after it
 DATA_SIZE=32g
-cache="$HOME/Library/Caches/sill/image"
+# downloads and built pieces kept between builds; CI points this at its own cache
+cache="${SILL_IMAGE_CACHE:-$HOME/Library/Caches/sill/image}"
 work="target/mac-image"
 out="dist/mac-image"
 mkdir -p "$cache" "$work" "$out"
@@ -68,12 +69,12 @@ write_files:
     content: $(base64 < packaging/mac/guest/dpkg-lean.cfg | tr -d '\n')
 package_update: true
 # the box (docs/server.md, plus Node for registry installs), then Desktop development's test
-# desktop (docs/permission-modes.md): Weston with its own Xwayland, the agent's input, software
-# OpenGL and Vulkan for the programs under test (the VM has no GPU of its own), the jail's
-# private D-Bus, a font
+# desktop (docs/permission-modes.md): Xwayland, the agent's input, software OpenGL and Vulkan
+# for the programs under test (the VM has no GPU of its own), the jail's private D-Bus, a font;
+# Weston itself is built from source below
 packages: [git, ca-certificates, build-essential, pkg-config, bubblewrap, e2fsprogs, util-linux,
            libpam-systemd, dbus-user-session, openssh-server, sudo, curl, nodejs, npm,
-           weston, xwayland, xdotool, libgl1-mesa-dri, libegl1, mesa-vulkan-drivers, dbus,
+           xwayland, xdotool, libgl1-mesa-dri, libegl1, mesa-vulkan-drivers, dbus,
            fonts-dejavu-core]
 # what cloud-init does shows on the virtio console (console.log), and the build learns there
 # when the account is ready, so it never tries a login too early
@@ -158,6 +159,27 @@ guest 'sudo install -D -m755 guest/packaging/mac/guest/sill-disks /usr/local/lib
     sudo mkdir -p /mnt/sill-state && rm -rf guest &&
     sudo systemctl daemon-reload && sudo systemctl enable sill-disks.service &&
     sudo /usr/local/lib/sill/sill-disks && sudo mount -a && findmnt -n -o SOURCE,TARGET /home && findmnt -n -o SOURCE,TARGET /mnt/sill-state'
+# Weston 16, built once per recipe (packaging/mac/guest/weston-build.sh) and kept in the cache
+# under its hash: CI caches the same file by the same key
+weston_key=$(shasum -a 256 packaging/mac/guest/weston-build.sh | cut -c1-16)
+weston_cache="$cache/weston-$weston_key"
+if [ -f "$weston_cache/weston.tar.gz" ] && [ -f "$weston_cache/runtime-packages" ]; then
+    echo "Weston from the cache ($weston_key)"
+else
+    echo "Building Weston ($weston_key; cached for later builds)"
+    git archive --format=tar HEAD packaging/mac/guest/weston-build.sh | guest 'rm -rf wb && mkdir wb && tar -x -C wb'
+    guest 'sudo sh wb/packaging/mac/guest/weston-build.sh /tmp/weston-out && rm -rf wb'
+    mkdir -p "$weston_cache.new"
+    guest 'cat /tmp/weston-out/weston.tar.gz' > "$weston_cache.new/weston.tar.gz"
+    guest 'cat /tmp/weston-out/runtime-packages' > "$weston_cache.new/runtime-packages"
+    rm -rf "$weston_cache" && mv "$weston_cache.new" "$weston_cache"
+fi
+guest 'sudo rm -rf /tmp/weston-out && mkdir -p /tmp/weston-in'
+guest 'cat > /tmp/weston-in/weston.tar.gz' < "$weston_cache/weston.tar.gz"
+guest 'cat > /tmp/weston-in/runtime-packages' < "$weston_cache/runtime-packages"
+guest 'sudo apt-get install -y -qq $(cat /tmp/weston-in/runtime-packages) >/dev/null &&
+    sudo tar -xzf /tmp/weston-in/weston.tar.gz -C / && sudo ldconfig && rm -rf /tmp/weston-in &&
+    weston --version'
 echo 'Building and installing sill in the guest'
 git archive --format=tar HEAD | guest 'rm -rf src && mkdir src && tar -x -C src'
 guest 'curl -fsSL https://sh.rustup.rs | sh -s -- -y -q --profile minimal >/dev/null'

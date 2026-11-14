@@ -103,7 +103,7 @@ false`); they stay remembered and apply again when the limit goes (2026-11-06, a
 launch snapshot lists those its build consulted; hosts approved later reach the running proxy live.
 Preview is prospective; snapshot effective state describes the recorded launch policy, not a
 live Host control activation. Availability describes the current daemon's backend support:
-`public_web` always, `test_desktop` where the daemon's machine has Weston (at least 10) and
+`public_web` always, `test_desktop` where the daemon's machine has Weston (at least 15) and
 Xwayland (2026-11-06, no schema change), the others not yet.
 Unavailable capabilities cannot be activated by selecting a policy. Host control never gains
 authority from policy inspection or import.
