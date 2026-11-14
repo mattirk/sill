@@ -212,3 +212,48 @@ fn a_commit_turn_that_changed_the_work_applies_nothing() {
     settle_task(&mut app, task);
     assert_eq!(app.views["idle"].workspaces.notices.len(), 1);
 }
+
+#[test]
+fn apply_onto_another_branch_asks_once_for_that_branch() {
+    let (client, mut daemon) = daemon();
+    let mut app = live_app(vec![client]);
+    let on = |branch: &str| {
+        let mut l = loaded(3);
+        l.details[0].revision.destination_branch = branch.into();
+        l
+    };
+    app.views.get_mut("demo").unwrap().workspaces.loaded = Some(on("feature"));
+    // the first click asks and sends nothing
+    let task = app.update(Message::Workspaces(Event::Apply("demo".into(), "ws-1".into())));
+    settle_task(&mut app, task);
+    let state = &app.views["demo"].workspaces;
+    assert_eq!(state.apply_armed, Some(("ws-1".into(), "feature".into())));
+    assert!(state.notices["ws-1"].0.contains("started from main, but your checkout is on feature"));
+    assert!(state.running.is_none());
+    // the checkout switched again before the second click: asked again, for the new branch
+    app.views.get_mut("demo").unwrap().workspaces.loaded = Some(on("other"));
+    let task = app.update(Message::Workspaces(Event::Apply("demo".into(), "ws-1".into())));
+    settle_task(&mut app, task);
+    assert_eq!(app.views["demo"].workspaces.apply_armed, Some(("ws-1".into(), "other".into())));
+    // clicking elsewhere drops the question
+    let _ = app.update(Message::Workspaces(Event::Disarm("demo".into())));
+    assert_eq!(app.views["demo"].workspaces.apply_armed, None);
+    let task = app.update(Message::Workspaces(Event::Apply("demo".into(), "ws-1".into())));
+    settle_task(&mut app, task);
+    // the second click for the same branch applies onto it
+    let server = std::thread::spawn(move || {
+        let get = daemon.expect("_sill/workspaces.get");
+        let mut d = detail(3);
+        d["revision"]["destination_branch"] = json!("other");
+        daemon.reply(&get, d);
+        let apply = daemon.expect("_sill/workspaces.apply");
+        assert_eq!(apply["params"]["revision"]["destination_branch"], "other");
+        daemon.reply(&apply, json!({"workspace": workspace(), "operation": null, "discarded": null}));
+    });
+    let task = app.update(Message::Workspaces(Event::Apply("demo".into(), "ws-1".into())));
+    settle_task(&mut app, task);
+    server.join().unwrap();
+    let state = &app.views["demo"].workspaces;
+    assert_eq!(state.notices.get("ws-1"), Some(&("Applied to your checkout.".to_string(), false)));
+    assert_eq!(state.apply_armed, None);
+}

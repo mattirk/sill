@@ -83,6 +83,8 @@ pub struct ChangesPage {
     pub said: Option<String>,
     /// A workspace's Discard pressed once.
     pub workspace_armed: Option<String>,
+    /// A workspace's Apply onto another branch pressed once, and that branch.
+    pub workspace_apply_armed: Option<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -484,8 +486,12 @@ impl App {
         }
         // a stopped or interrupted operation is seen to first; a carry's line leaves Apply offered
         if !d.workspace.operation.as_ref().is_some_and(|o| o.state == "conflict" || o.state == "interrupted") {
+            let onto = sill_client::workspaces::other_branch(d)
+                .map(|(_, now)| now)
+                .filter(|now| page.workspace_apply_armed.as_ref().is_some_and(|(w, b)| *w == id && b == now));
+            let label = onto.map_or("Apply".to_string(), |now| format!("Apply onto {now}?"));
             header = header.push(keys::press_maybe(
-                button(text("Apply").size(style::SMALL)).padding([2, 10]).style(style::solid(P.accent)),
+                button(text(label).size(style::SMALL)).padding([2, 10]).style(style::solid(P.accent)),
                 fresh.then(|| Message::Workspaces(W::PageApply(id.clone()))),
             ));
         }

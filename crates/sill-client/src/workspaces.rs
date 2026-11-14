@@ -35,6 +35,19 @@ pub fn pending(d: &api::Detail) -> bool {
     d.summary.commits > 0 || d.summary.files > 0 || d.workspace.operation.is_some()
 }
 
+/// The branch the workspace started from and the one the person's checkout is on now, when they
+/// differ: Apply would land on the other branch, so the frontend asks first (the person,
+/// 2026-11-10: confirm rather than refuse).
+pub fn other_branch(d: &api::Detail) -> Option<(&str, &str)> {
+    let (from, now) = (d.workspace.source_branch.as_str(), d.revision.destination_branch.as_str());
+    (!from.is_empty() && !now.is_empty() && from != now).then_some((from, now))
+}
+
+/// What the frontend says before the second click of an Apply onto another branch.
+pub fn other_branch_question(from: &str, now: &str) -> String {
+    format!("This workspace started from {from}, but your checkout is on {now} now. Apply again to apply onto {now}, or switch your checkout back to {from}.")
+}
+
 /// A short line for what an Apply would bring: `3 files +40 −12 · 2 commits`.
 pub fn describe(s: &api::Summary) -> String {
     let mut parts = Vec::new();
@@ -139,6 +152,11 @@ fn apply_steps(
     seen: &api::Revision,
 ) -> anyhow::Result<ApplyOutcome> {
     let d: api::Detail = serde_json::from_value(call("_sill/workspaces.get", serde_json::json!(api::Key { workspace_id: workspace_id.into() }))?)?;
+    // the person agreed to land on the branch they saw: a checkout switched since is looked at again
+    let switched = || anyhow::anyhow!("Your checkout switched branch since you looked: look again, then apply.");
+    if d.revision.destination_branch != seen.destination_branch {
+        return Err(switched());
+    }
     let mut revision = seen.clone();
     if d.needs_rebase {
         let p: api::Prepared = serde_json::from_value(call(
@@ -147,6 +165,9 @@ fn apply_steps(
         )?)?;
         if p.needs_rebase || !p.conflicts.is_empty() {
             return Ok(ApplyOutcome::Conflicts(p.conflicts));
+        }
+        if p.revision.destination_branch != seen.destination_branch {
+            return Err(switched());
         }
         revision = p.revision;
     }
@@ -261,5 +282,48 @@ mod tests {
         assert_eq!(out.unwrap(), ApplyOutcome::Applied);
         assert_eq!(calls.iter().map(|(m, _)| m.as_str()).collect::<Vec<_>>(), ["_sill/workspaces.get", "_sill/workspaces.apply"]);
         assert_eq!(calls[1].1["revision"]["tip"], "t1");
+    }
+
+    #[test]
+    fn a_checkout_on_another_branch_is_named_and_a_switch_since_is_refused() {
+        let (out, calls) = run_apply_switched();
+        let said = out.unwrap_err().to_string();
+        assert!(said.starts_with("Your checkout switched branch"), "{said}");
+        assert!(calls.iter().all(|(m, _)| m != "_sill/workspaces.apply" && m != "_sill/workspaces.prepare"));
+        let path = |p: &str| serde_json::json!(sill_proto::sessions::HostPath::from_path(std::path::Path::new(p)));
+        let detail = |now: &str| -> api::Detail {
+            serde_json::from_value(serde_json::json!({
+                "workspace": {"workspace_id": "ws-1", "name": "repo", "session_id": "s", "source": path("/home/me/repo"),
+                    "source_branch": "main", "base": "b0", "branch": "sill/repo-ws-1", "path": path("/ws/repo-ws-1"),
+                    "state": "open", "operation": null, "limitations": [], "created_at": "t", "updated_at": "t"},
+                "revision": {"tip": "t1", "worktree": "", "destination_branch": now, "destination_tip": "b1"},
+                "summary": {"commits": 1, "files": 1, "added": "0", "removed": "0", "uncommitted": []},
+                "needs_rebase": false}))
+            .unwrap()
+        };
+        assert_eq!(other_branch(&detail("main")), None);
+        assert_eq!(other_branch(&detail("")), None, "no branch to compare: the daemon refuses on its own");
+        assert_eq!(other_branch(&detail("feature")), Some(("main", "feature")));
+    }
+
+    /// The person saw `main`; the checkout is on `feature` by the time Apply reads it.
+    fn run_apply_switched() -> (anyhow::Result<ApplyOutcome>, Vec<(String, serde_json::Value)>) {
+        let mut calls = Vec::new();
+        let seen: api::Revision = serde_json::from_value(revision("t1", "b0")).unwrap();
+        let path = |p: &str| serde_json::json!(sill_proto::sessions::HostPath::from_path(std::path::Path::new(p)));
+        let workspace = serde_json::json!({"workspace_id": "ws-1", "name": "repo", "session_id": "s", "source": path("/home/me/repo"),
+            "source_branch": "main", "base": "b0", "branch": "sill/repo-ws-1", "path": path("/ws/repo-ws-1"),
+            "state": "open", "operation": null, "limitations": [], "created_at": "t", "updated_at": "t"});
+        let out = apply_steps(
+            |method, params| {
+                calls.push((method.to_string(), params));
+                Ok(serde_json::json!({"workspace": workspace,
+                    "revision": {"tip": "t1", "worktree": "", "destination_branch": "feature", "destination_tip": "b9"},
+                    "summary": {"commits": 1, "files": 1, "added": "1", "removed": "1", "uncommitted": []}, "needs_rebase": true}))
+            },
+            "ws-1",
+            &seen,
+        );
+        (out, calls)
     }
 }

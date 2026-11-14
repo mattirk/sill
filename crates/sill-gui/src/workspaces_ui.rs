@@ -56,8 +56,12 @@ impl App {
                 ));
                 line = line.push(quiet_button("Abort rebase", ev(Event::Abort(session.clone(), id.clone()))));
             } else {
+                let onto = ws::other_branch(d)
+                    .map(|(_, now)| now)
+                    .filter(|now| state.apply_armed.as_ref().is_some_and(|(w, b)| *w == id && b == now));
+                let label = onto.map_or("Apply".to_string(), |now| format!("Apply onto {now}?"));
                 let apply = keys::press_maybe(
-                    button(text("Apply").size(style::SMALL)).padding([3, 10]).style(style::solid(P.accent)),
+                    button(text(label).size(style::SMALL)).padding([3, 10]).style(style::solid(P.accent)),
                     ev(Event::Apply(session.clone(), id.clone())),
                 );
                 // Apply brings commits only: said before the click when it will ask for one first

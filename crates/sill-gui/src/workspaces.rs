@@ -16,6 +16,9 @@ pub struct State {
     pub loaded: Option<Loaded>,
     /// The workspace whose Discard was clicked once: the next click discards.
     pub armed: Option<String>,
+    /// An Apply onto another branch than the workspace started from, clicked once: the workspace
+    /// and the checkout's branch then. The next click applies when the branch is still that one.
+    pub apply_armed: Option<(String, String)>,
     /// The workspace an action is running for.
     pub running: Option<String>,
     /// What the last action on a workspace said: done, or why not.
@@ -182,6 +185,16 @@ impl App {
                 if !self.changes.as_ref().is_some_and(|p| p.fresh_workspaces) {
                     return Task::none();
                 }
+                let Some(detail) = self.changes_listing.details().iter().find(|d| d.workspace.workspace_id == workspace) else { return Task::none() };
+                if let Some((from, now)) = ws::other_branch(detail) {
+                    let asked = (workspace.clone(), now.to_string());
+                    let Some(page) = &mut self.changes else { return Task::none() };
+                    if page.workspace_apply_armed.as_ref() != Some(&asked) {
+                        page.said = Some(ws::other_branch_question(from, now));
+                        page.workspace_apply_armed = Some(asked);
+                        return Task::none();
+                    }
+                }
                 let (Some(actions), Some(seen)) = (self.actions.clone(), self.page_seen(&workspace)) else { return Task::none() };
                 blocking(
                     move || match ws::apply(&actions, &workspace, &seen) {
@@ -203,6 +216,13 @@ impl App {
                 };
                 if let Some(page) = &mut self.changes {
                     page.said = Some(said.to_string());
+                }
+                // the person confirmed another branch here: the session's Apply after the commit needs no second ask
+                let confirmed = self.changes.as_mut().and_then(|p| p.workspace_apply_armed.take()).filter(|(w, _)| *w == workspace);
+                if let (Some(session), Some(confirmed)) = (&open, confirmed)
+                    && let Some(view) = self.views.get_mut(session)
+                {
+                    view.workspaces.apply_armed = Some(confirmed);
                 }
                 match open {
                     Some(session) => Task::done(Message::Workspaces(Event::Commit(session, workspace))),
@@ -246,6 +266,7 @@ impl App {
             Event::PageDone(said, _bad) => {
                 if let Some(page) = &mut self.changes {
                     page.said = Some(said);
+                    page.workspace_apply_armed = None;
                 }
                 let mut tasks = vec![self.changes_refresh_if_shown()];
                 if let Some(id) = self.selected.clone() {
@@ -277,10 +298,14 @@ impl App {
             Event::Disarm(session) => {
                 if let Some(view) = self.views.get_mut(&session) {
                     view.workspaces.armed = None;
+                    view.workspaces.apply_armed = None;
                 }
                 Task::none()
             }
             Event::Apply(session, workspace) => {
+                if self.ask_other_branch(&session, &workspace) {
+                    return Task::none();
+                }
                 let Some((actions, seen)) = self.workspace_action(&session, &workspace) else { return Task::none() };
                 blocking(
                     move || match ws::apply(&actions, &workspace, &seen) {
@@ -362,6 +387,9 @@ impl App {
             Event::Done(session, workspace, said, bad) => {
                 if let Some(view) = self.views.get_mut(&session) {
                     view.workspaces.running = None;
+                    if view.workspaces.apply_armed.as_ref().is_some_and(|(w, _)| *w == workspace) {
+                        view.workspaces.apply_armed = None;
+                    }
                     view.workspaces.notices.insert(workspace, (said, bad));
                     view.workspaces.diff = None;
                 }
@@ -392,6 +420,26 @@ impl App {
                 Task::none()
             }
         }
+    }
+
+    /// Whether an Apply of `workspace` must first ask: the checkout is on another branch than the
+    /// workspace started from and the person has not clicked again for that branch. Asking arms
+    /// the second click and says why.
+    fn ask_other_branch(&mut self, session: &str, workspace: &str) -> bool {
+        let Some(view) = self.views.get_mut(session) else { return false };
+        let state = &mut view.workspaces;
+        if state.running.is_some() {
+            return false;
+        }
+        let Some((from, now)) = state.loaded.as_ref().and_then(|l| l.detail(workspace)).and_then(ws::other_branch) else { return false };
+        let asked = (workspace.to_string(), now.to_string());
+        if state.apply_armed.as_ref() == Some(&asked) {
+            return false;
+        }
+        let question = ws::other_branch_question(from, now);
+        state.apply_armed = Some(asked);
+        state.notices.insert(workspace.to_string(), (question, true));
+        true
     }
 
     /// The client and the revision the person saw, marking the action as running; None when one
