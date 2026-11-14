@@ -224,6 +224,7 @@ impl AdapterState {
                 next.authentication = Some(sfp::Authentication { message: message.clone(), methods: methods.iter().map(|method| sfp::AuthMethod {
                     method_id: method.id.clone(), title: method.name.clone(), description: method.description.clone(),
                     terminal: method.terminal.as_ref().map(|(args, env)| sfp::AuthTerminal { args: args.clone(), env: env.clone() }),
+                    api_key: method.api_key.clone(),
                 }).collect() });
             }
             relay::Event::Controls(controls) => { next.controls = Some(session_controls(controls)); }

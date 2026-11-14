@@ -103,8 +103,8 @@ pub struct Conversation {
     plan: RefCell<Option<gtk::Label>>,
     /// Forms still unanswered (each tells whether its reply is still pending).
     open_forms: RefCell<Vec<Rc<dyn Fn() -> bool>>>,
-    /// Login cards still asking (their label and buttons), closed when the login is done.
-    auth_cards: RefCell<Vec<(gtk::Label, gtk::FlowBox)>>,
+    /// Login cards still asking (their label, buttons and API key row), closed when the login is done.
+    auth_cards: RefCell<Vec<(gtk::Label, gtk::FlowBox, gtk::Box)>>,
     /// A prompt's attachment → a local file to draw (runs off the main thread: it may ask the daemon).
     image_loader: RefCell<Option<ImageLoader>>,
 }
@@ -1202,7 +1202,9 @@ impl Conversation {
     }
 
     /// The agent wants a login first: one button per method it offers.
-    pub fn add_auth(&self, message: &str, methods: Vec<sill_core::acp::AuthMethodInfo>, pick: Rc<dyn Fn(sill_core::acp::AuthMethodInfo)>) {
+    /// A login card: one button per method. A method that takes an API key opens a field for it
+    /// first; `pick` gets the method and, for such a method, the key typed.
+    pub fn add_auth(&self, message: &str, methods: Vec<sill_core::acp::AuthMethodInfo>, pick: Rc<dyn Fn(sill_core::acp::AuthMethodInfo, Option<String>)>) {
         self.finish_current();
         let frame = gtk::Box::new(gtk::Orientation::Vertical, 6);
         frame.add_css_class("sill-permission");
@@ -1213,6 +1215,24 @@ impl Conversation {
         label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         frame.append(&label);
         let buttons = answer_row();
+        // the API key field, under the buttons once a method that takes a key is chosen
+        let key_row = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        key_row.set_visible(false);
+        let key_line = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let key = gtk::PasswordEntry::new();
+        key.set_show_peek_icon(true);
+        key.set_hexpand(true);
+        let use_key = answer_button("Use key");
+        use_key.add_css_class("suggested-action");
+        key_line.append(&key);
+        key_line.append(&use_key);
+        let key_note = gtk::Label::new(Some("sill keeps the key outside the agent's jail and gives it to the agent only to log in"));
+        key_note.add_css_class("dim-label");
+        key_note.set_xalign(0.0);
+        key_note.set_wrap(true);
+        key_row.append(&key_line);
+        key_row.append(&key_note);
+        let keyed: Rc<RefCell<Option<sill_core::acp::AuthMethodInfo>>> = Rc::new(RefCell::new(None));
         for m in methods {
             let b = answer_button(&m.name);
             b.set_tooltip_text(m.description.as_deref());
@@ -1220,15 +1240,52 @@ impl Conversation {
             let pick = pick.clone();
             let buttons2 = buttons.clone();
             let label2 = label.clone();
+            let (key_row2, key2, keyed2) = (key_row.clone(), key.clone(), keyed.clone());
             b.connect_clicked(move |_| {
+                if let Some(provider) = &m.api_key {
+                    let who = match provider.as_str() {
+                        "google" => "Google",
+                        "openai" => "OpenAI",
+                        "anthropic" => "Anthropic",
+                        other => other,
+                    };
+                    key2.set_placeholder_text(Some(&if who.is_empty() { "Paste your API key".to_string() } else { format!("Paste your {who} API key") }));
+                    *keyed2.borrow_mut() = Some(m.clone());
+                    key_row2.set_visible(true);
+                    key2.grab_focus();
+                    return;
+                }
                 buttons2.set_sensitive(false);
+                key_row2.set_visible(false);
                 label2.set_text(&format!("{} → {}", label2.text(), m.name));
-                pick(m.clone());
+                pick(m.clone(), None);
             });
             buttons.append(&b);
         }
+        let submit = {
+            let (pick, buttons, label, key_row, key, keyed) = (pick.clone(), buttons.clone(), label.clone(), key_row.clone(), key.clone(), keyed.clone());
+            Rc::new(move || {
+                let text = key.text().trim().to_string();
+                let Some(m) = keyed.borrow().clone() else { return };
+                if text.is_empty() {
+                    key.grab_focus();
+                    return;
+                }
+                key.set_text("");
+                buttons.set_sensitive(false);
+                key_row.set_visible(false);
+                label.set_text(&format!("{} → {}", label.text(), m.name));
+                pick(m, Some(text));
+            })
+        };
+        {
+            let submit = submit.clone();
+            use_key.connect_clicked(move |_| submit());
+        }
+        key.connect_activate(move |_| submit());
         frame.append(&buttons);
-        self.auth_cards.borrow_mut().push((label, buttons.clone()));
+        frame.append(&key_row);
+        self.auth_cards.borrow_mut().push((label, buttons.clone(), key_row));
         self.place(&frame);
         self.request_follow();
     }
@@ -1243,8 +1300,9 @@ impl Conversation {
     pub fn auth_done(&self) {
         let cards: Vec<_> = self.auth_cards.borrow_mut().drain(..).collect();
         if cards.is_empty() { return; }
-        for (label, buttons) in cards {
+        for (label, buttons, key_row) in cards {
             buttons.set_visible(false);
+            key_row.set_visible(false);
             label.set_text("Logged in");
         }
         self.add_note("logged in; the agent is ready");
@@ -1549,8 +1607,13 @@ popover.sill-session-menu > contents { padding: 10px 12px; min-width: 260px; }
 .sill-agent-name { font-weight: 600; }
 .sill-agent-version { font-size: 85%; }
 .sill-agent-id { font-family: monospace; font-size: 80%; opacity: 0.5; }
-.sill-agent-link { padding: 0 4px; min-height: 0; min-width: 0; opacity: 0.55; }
-.sill-agent-link:hover { opacity: 1; }
+.sill-agent-badge { font-size: 75%; padding: 0 6px; border-radius: 8px; border: 1px solid alpha(@view_fg_color, 0.2); opacity: 0.75; }
+.sill-agent-note { font-size: 85%; opacity: 0.7; }
+/* the second line's tools stay faint until the row is pointed at */
+.sill-agent-link { padding: 0 4px; min-height: 0; min-width: 0; opacity: 0.3; }
+.sill-agent-link label { font-size: 85%; }
+.sill-agents > row:hover .sill-agent-link { opacity: 0.7; }
+.sill-agents > row .sill-agent-link:hover { opacity: 1; }
 .sill-agent-log { font-family: monospace; font-size: 80%; opacity: 0.7; }
 button.sill-install { padding: 1px 10px; min-height: 22px; font-weight: normal; background: alpha(@accent_bg_color, 0.25); border: none; box-shadow: none; }
 button.sill-install:hover { background: alpha(@accent_bg_color, 0.45); }

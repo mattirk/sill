@@ -235,7 +235,7 @@ fn render_session(session: &SessionState, previous: Option<&SessionState>) -> Ve
         out.push(wire::Event::Other("sill:authenticated".into()));
     }
     if (previous.is_none() || previous.is_some_and(|old| old.authentication != session.authentication)) && let Some(a)=&session.authentication {
-        out.push(wire::Event::AuthRequired { message:a.message.clone(),methods:a.methods.iter().map(|m|wire::AuthMethodInfo { id:m.method_id.clone(),name:m.title.clone(),description:m.description.clone(),terminal:m.terminal.as_ref().map(|t|(t.args.clone(),t.env.clone())) }).collect() });
+        out.push(wire::Event::AuthRequired { message:a.message.clone(),methods:a.methods.iter().map(|m|wire::AuthMethodInfo { id:m.method_id.clone(),name:m.title.clone(),description:m.description.clone(),terminal:m.terminal.as_ref().map(|t|(t.args.clone(),t.env.clone())),api_key:m.api_key.clone() }).collect() });
     }
     if previous.map_or(!session.commands.is_empty(), |old| old.commands != session.commands) {
         out.push(wire::Event::Commands(session.commands.iter().map(|c| wire::AgentCommand { name: c.name.clone(), description: c.description.clone(), hint: c.hint.clone() }).collect()));
@@ -266,6 +266,7 @@ pub fn command_request(session_id: &str, command: &wire::Command, view: Option<&
             return Ok(("_sill/sessions.cancel",json!({"session_id":session_id,"turn_id":turn_id})));
         }
         wire::Command::Authenticate(method_id) => json!({"type":"authenticate","method_id":method_id}),
+        wire::Command::AuthenticateWithKey { method_id, key } => json!({"type":"authenticate","method_id":method_id,"api_key":key.0}),
         wire::Command::RetrySession => json!({"type":"retry_session"}),
         wire::Command::SetMode(mode_id) => json!({"type":"set_mode","mode_id":mode_id}),
         wire::Command::SetConfig(option_id,value) => json!({"type":"set_config","option_id":option_id,"value":match value { wire::ConfigValue::Id(value)=>json!({"type":"id","value":value}),wire::ConfigValue::Bool(value)=>json!({"type":"bool","value":value}) }}),

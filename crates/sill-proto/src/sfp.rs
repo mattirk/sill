@@ -66,6 +66,10 @@ pub struct Authentication { pub message: String, pub methods: Vec<AuthMethod> }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct AuthMethod {
     pub method_id: String, pub title: String, pub description: Option<String>, pub terminal: Option<AuthTerminal>,
+    /// The method takes an API key the person types: the provider the agent names (`google`,
+    /// `openai`), empty when it names none. Send it with `authenticate`'s `api_key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct AuthTerminal { pub args: Vec<String>, pub env: BTreeMap<String, String> }
@@ -272,7 +276,9 @@ pub enum ConfigValue { Id { value:String }, Bool { value:bool } }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag="type", rename_all="snake_case")]
 pub enum Control {
-    Authenticate { method_id:String }, RetrySession,
+    /// `api_key`: for a method marked `api_key`. The daemon keeps it where the agent's jail cannot
+    /// read it and answers the agent's next login request with it; it is never journaled.
+    Authenticate { method_id:String, #[serde(default, skip_serializing_if = "Option::is_none")] api_key:Option<crate::wire::Secret> }, RetrySession,
     SetMode { mode_id:String }, SetConfig { option_id:String, value:ConfigValue },
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

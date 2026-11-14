@@ -65,17 +65,11 @@ pub struct Agent {
     /// or missing: a neutral placeholder.
     #[serde(default)]
     pub icon: Option<String>,
-    /// Where the agent keeps its own memory (what it learned about the person and their projects),
-    /// as patterns under `~` that may glob (`~/.claude/projects/*/memory`), directories or files;
-    /// resolved inside the sill-owned home. The agents page offers to forget them in one click (sill's own memory,
-    /// docs/memory.md, remembers the sessions).
+    /// Where the agent keeps its own memory, as patterns under `~` (`~/.claude/projects/*/memory`).
+    /// Unused since the Agents page's Reset replaced "forget memory" (2026-11-03); kept so
+    /// definitions that name it still load (unknown fields are refused).
     #[serde(default)]
     pub memory_paths: Vec<String>,
-    /// The files that hold the agent's login, as paths under `~` resolved inside its sill-owned
-    /// home (`~/.claude/.credentials.json`). "Log out" removes them; empty: sill does not know
-    /// where the agent keeps its login and offers no log out.
-    #[serde(default)]
-    pub login_files: Vec<String>,
 }
 
 fn yes() -> bool {
@@ -131,7 +125,6 @@ pub fn builtin() -> Vec<Agent> {
             home_env_parent: false,
             icon: Some("sill-claude-symbolic".into()),
             memory_paths: vec!["~/.claude/projects/*/memory".into()],
-            login_files: vec!["~/.claude/.credentials.json".into()],
         },
         Agent {
             id: "codex".into(),
@@ -153,7 +146,6 @@ pub fn builtin() -> Vec<Agent> {
             home_env_parent: false,
             icon: Some("sill-openai-symbolic".into()),
             memory_paths: vec!["~/.codex/memories".into()],
-            login_files: vec!["~/.codex/auth.json".into()],
         },
         Agent {
             id: "gemini".into(),
@@ -176,7 +168,6 @@ pub fn builtin() -> Vec<Agent> {
             icon: Some("sill-gemini-symbolic".into()),
             // the `save_memory` tool appends to this one file
             memory_paths: vec!["~/.gemini/GEMINI.md".into()],
-            login_files: vec!["~/.gemini/oauth_creds.json".into()],
         },
     ]
 }
@@ -209,9 +200,6 @@ pub fn load(home: &Path) -> BTreeMap<String, Agent> {
                     if a.memory_paths.is_empty() {
                         a.memory_paths = b.memory_paths.clone();
                     }
-                    if a.login_files.is_empty() {
-                        a.login_files = b.login_files.clone();
-                    }
                 }
                 out.insert(a.id.clone(), a);
             }
@@ -220,63 +208,82 @@ pub fn load(home: &Path) -> BTreeMap<String, Agent> {
     out
 }
 
-/// The agent's memory paths (directories or files) that exist in its sill-owned home (`memory_paths`,
-/// each `~/<dir>/…` mapped to `<agents_base>/<dir>/…` the way [`crate::session::binds_for`] lays the
-/// home out).
-pub fn memory_dirs_in(agent: &Agent, agents_base: &Path) -> Vec<std::path::PathBuf> {
-    let mut out = Vec::new();
-    for p in &agent.memory_paths {
-        let Some(rel) = p.strip_prefix("~/") else { continue };
-        let pattern = agents_base.join(rel);
-        let s = pattern.to_string_lossy();
-        if s.contains(['*', '?', '[']) {
-            if let Ok(paths) = glob::glob(&s) {
-                out.extend(paths.filter_map(Result::ok));
-            }
-        } else if pattern.exists() {
-            out.push(pattern);
-        }
-    }
-    out.sort();
-    out
-}
-
-/// Same, for the agent's home under `~`.
-pub fn memory_dirs(agent: &Agent, home: &Path) -> Vec<std::path::PathBuf> {
-    memory_dirs_in(agent, &crate::session::agent_home(home, &agent.id))
-}
-
-/// Delete the agent's memory paths; how many files went.
-pub fn forget_memory(agent: &Agent, home: &Path) -> anyhow::Result<usize> {
+/// Reset an agent to how a fresh install starts: each of `homes` (its sill-owned home, the copies
+/// in ghost sessions) removed whole — login, settings, history, its memory. A link inside is
+/// removed, never what it points to. Stop the agent's running sessions first: a running agent
+/// holds its login and writes to its home. How many files went.
+pub fn reset_homes(homes: &[std::path::PathBuf]) -> anyhow::Result<usize> {
     let mut n = 0;
-    for p in memory_dirs(agent, home) {
-        n += count_files(&p);
-        if p.is_dir() { std::fs::remove_dir_all(&p)? } else { std::fs::remove_file(&p)? }
+    for home in homes {
+        if std::fs::symlink_metadata(home).is_err() {
+            continue;
+        }
+        n += count_files(home);
+        std::fs::remove_dir_all(home).map_err(|e| anyhow::anyhow!("removing {}: {e}", home.display()))?;
     }
     Ok(n)
 }
 
-/// The agent's login files that exist in `base`, a home laid out as its sill-owned one (that, or
-/// a ghost's copy). A link counts as the file, so removing it never touches what it points to.
-pub fn login_files_in(agent: &Agent, base: &Path) -> Vec<std::path::PathBuf> {
-    agent.login_files.iter()
-        .filter_map(|p| p.strip_prefix("~/"))
-        .map(|rel| base.join(rel))
-        .filter(|p| std::fs::symlink_metadata(p).is_ok_and(|m| !m.is_dir()))
+/// Where sill keeps the API keys the person typed for an agent's login methods: in sill's state,
+/// not in any folder bound into a jail (`~/.local/state/sill` shows only `tools/` there), so the
+/// agent's commands cannot read them; the agent gets a key only in its login request.
+pub fn api_key_dir(home: &Path, agent_id: &str) -> std::path::PathBuf {
+    std::env::var("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| home.join(".local/state"))
+        .join("sill")
+        .join("keys")
+        .join(agent_id)
+}
+
+fn plain_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 128 && id != "." && id != ".." && id.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
+}
+
+/// The file of the key for `method_id`; refused for an id that is not a plain file name.
+pub fn api_key_file(home: &Path, agent_id: &str, method_id: &str) -> anyhow::Result<std::path::PathBuf> {
+    anyhow::ensure!(plain_id(agent_id) && plain_id(method_id), "the agent or its login method has an id sill cannot keep a key under");
+    Ok(api_key_dir(home, agent_id).join(method_id))
+}
+
+/// Keep `key` for the method, readable by the person only; the file it is in.
+pub fn save_api_key(home: &Path, agent_id: &str, method_id: &str, key: &str) -> anyhow::Result<std::path::PathBuf> {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+    let file = api_key_file(home, agent_id, method_id)?;
+    let dir = file.parent().expect("a key file has a folder");
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    for d in [dir, dir.parent().expect("keys/")] {
+        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let tmp = dir.join(format!(".{method_id}.tmp"));
+    let _ = std::fs::remove_file(&tmp);
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+    f.write_all(key.as_bytes())?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, &file)?;
+    Ok(file)
+}
+
+/// The agent's saved API keys, if any.
+pub fn api_key_files(home: &Path, agent_id: &str) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(api_key_dir(home, agent_id))
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
         .collect()
 }
 
-/// Remove the agent's login from each home in `homes`; the files removed. Stop the agent's running
-/// sessions first: a running agent holds its login and may write a refreshed one back.
-pub fn remove_login(agent: &Agent, homes: &[std::path::PathBuf]) -> anyhow::Result<Vec<std::path::PathBuf>> {
-    let mut removed = Vec::new();
-    for base in homes {
-        for f in login_files_in(agent, base) {
-            std::fs::remove_file(&f).map_err(|e| anyhow::anyhow!("removing {}: {e}", f.display()))?;
-            removed.push(f);
-        }
+/// Forget the agent's saved API keys; how many went.
+pub fn remove_api_keys(home: &Path, agent_id: &str) -> anyhow::Result<usize> {
+    let files = api_key_files(home, agent_id);
+    for f in &files {
+        std::fs::remove_file(f)?;
     }
-    Ok(removed)
+    let _ = std::fs::remove_dir(api_key_dir(home, agent_id));
+    Ok(files.len())
 }
 
 /// Files at a path: the file itself, or those below a directory, recursively.
@@ -295,72 +302,33 @@ pub fn count_files(dir: &Path) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Claude's memory lives per project; the glob finds each, a plain path itself, nothing absent.
-    #[test]
-    fn memory_dirs_follow_the_patterns() {
-        let base = std::env::temp_dir().join(format!("sill-agents-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let claude = builtin().into_iter().find(|a| a.id == "claude").unwrap();
-        assert!(memory_dirs_in(&claude, &base).is_empty());
-        for proj in ["-home-x", "-home-y"] {
-            let m = base.join(".claude/projects").join(proj).join("memory");
-            std::fs::create_dir_all(&m).unwrap();
-            std::fs::write(m.join("MEMORY.md"), "").unwrap();
-        }
-        std::fs::create_dir_all(base.join(".claude/projects/-home-z")).unwrap(); // no memory yet
-        let dirs = memory_dirs_in(&claude, &base);
-        assert_eq!(dirs, vec![base.join(".claude/projects/-home-x/memory"), base.join(".claude/projects/-home-y/memory")]);
-        assert_eq!(dirs.iter().map(|d| count_files(d)).sum::<usize>(), 2);
-        let codex = builtin().into_iter().find(|a| a.id == "codex").unwrap();
-        std::fs::create_dir_all(base.join(".codex/memories/a")).unwrap();
-        assert_eq!(memory_dirs_in(&codex, &base), vec![base.join(".codex/memories")]);
-        let gemini = builtin().into_iter().find(|a| a.id == "gemini").unwrap();
-        assert!(memory_dirs_in(&gemini, &base).is_empty());
-        std::fs::create_dir_all(base.join(".gemini")).unwrap();
-        std::fs::write(base.join(".gemini/GEMINI.md"), "- likes tea\n").unwrap();
-        let g = memory_dirs_in(&gemini, &base);
-        assert_eq!(g, vec![base.join(".gemini/GEMINI.md")]);
-        assert_eq!(count_files(&g[0]), 1);
-        std::fs::remove_dir_all(&base).unwrap();
-    }
-}
-
-#[cfg(test)]
 mod login_tests {
     use super::*;
 
     #[test]
-    fn the_curated_agents_name_their_login_and_share_none_with_the_host() {
+    fn the_curated_agents_share_no_login_with_the_host() {
         for a in builtin() {
             assert!(a.shared_files.is_empty(), "{} shares a host file", a.id);
-            assert!(!a.login_files.is_empty(), "{} names no login file", a.id);
-            assert!(a.login_files.iter().all(|f| a.home_paths.iter().any(|h| f.starts_with(&format!("{h}/")))), "{}: a login file outside its home", a.id);
         }
     }
 
     #[test]
-    fn removing_a_login_takes_the_files_and_links_never_what_they_point_to() {
-        let dir = std::env::temp_dir().join(format!("sill-logout-{}", std::process::id()));
+    fn a_reset_removes_the_whole_home_and_links_never_what_they_point_to() {
+        let dir = std::env::temp_dir().join(format!("sill-reset-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let (own, ghost, host) = (dir.join("own"), dir.join("ghost"), dir.join("host"));
-        for d in [own.join(".claude"), ghost.join(".claude"), host.clone()] {
+        for d in [own.join(".claude/projects"), ghost.join(".claude"), host.clone()] {
             std::fs::create_dir_all(d).unwrap();
         }
-        let claude = builtin().into_iter().find(|a| a.id == "claude").unwrap();
         std::fs::write(own.join(".claude/.credentials.json"), "sill's login").unwrap();
-        std::fs::write(own.join(".claude/settings.json"), "{}").unwrap();
+        std::fs::write(own.join(".claude/projects/history.jsonl"), "history").unwrap();
         // a ghost's copy that is a link to the person's own login on the host
         std::fs::write(host.join(".credentials.json"), "the host's login").unwrap();
         std::os::unix::fs::symlink(host.join(".credentials.json"), ghost.join(".claude/.credentials.json")).unwrap();
-        assert_eq!(login_files_in(&claude, &own).len(), 1);
-        let removed = remove_login(&claude, &[own.clone(), ghost.clone(), dir.join("missing")]).unwrap();
-        assert_eq!(removed, [own.join(".claude/.credentials.json"), ghost.join(".claude/.credentials.json")]);
-        assert!(own.join(".claude/settings.json").exists(), "only the login goes");
+        assert!(reset_homes(&[own.clone(), ghost.clone(), dir.join("missing")]).unwrap() >= 2);
+        assert!(!own.exists() && !ghost.exists());
         assert_eq!(std::fs::read_to_string(host.join(".credentials.json")).unwrap(), "the host's login");
-        assert!(remove_login(&claude, &[own, ghost]).unwrap().is_empty());
+        assert_eq!(reset_homes(&[own, ghost]).unwrap(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

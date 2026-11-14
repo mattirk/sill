@@ -12,7 +12,7 @@ static RESPONSES: OnceLock<Responses> = OnceLock::new();
 fn cacheable(r: &Request) -> bool {
     matches!(r, Request::Home |
         Request::Memories { .. } | Request::AgentSettings { .. } | Request::Config | Request::Instructions |
-        Request::Agents | Request::AgentMemory { .. } | Request::Registry | Request::Installed { .. } |
+        Request::Agents | Request::Registry | Request::Installed { .. } |
         Request::Available(_) | Request::Metadata { .. } | Request::List { .. } | Request::Head { .. } |
         Request::RepoRoot { .. } | Request::PolicyDesktop { .. } | Request::Policies | Request::Kept { .. } |
         Request::ProcessPolicy { .. } | Request::JailOutdated { .. })
@@ -156,9 +156,6 @@ pub mod agents {
     pub fn load(_home: &std::path::Path) -> std::collections::BTreeMap<String, Agent> { super::request(super::Request::Agents).unwrap_or_default() }
     pub fn save_override(_home: &std::path::Path, agent: &Agent) -> anyhow::Result<std::path::PathBuf> { super::request(super::Request::SaveAgent(agent.clone())) }
     pub fn remove_override(_home: &std::path::Path, id: &str) -> anyhow::Result<bool> { super::request(super::Request::RemoveAgent { id: id.into() }) }
-    pub fn memory_dirs(agent: &Agent, _home: &std::path::Path) -> Vec<std::path::PathBuf> { super::request::<sill_core::frontend::AgentMemory>(super::Request::AgentMemory { id: agent.id.clone() }).map(|m| m.dirs).unwrap_or_default() }
-    pub fn memory_files(agent: &Agent) -> usize { super::request::<sill_core::frontend::AgentMemory>(super::Request::AgentMemory { id: agent.id.clone() }).map(|m| m.files).unwrap_or_default() }
-    pub fn forget_memory(agent: &Agent, _home: &std::path::Path) -> anyhow::Result<usize> { super::request(super::Request::ForgetAgentMemory { id: agent.id.clone() }) }
 }
 pub mod registry {
     use anyhow::Context;

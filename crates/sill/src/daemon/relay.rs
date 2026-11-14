@@ -85,6 +85,10 @@ pub(crate) enum Event {
 pub(crate) enum Command {
     Prompt { text: String, attachments: Vec<acp::Attachment> },
     Authenticate(String),
+    /// A login with an API key the daemon saved: the relay reads `key_file` right before sending,
+    /// so neither this command nor the daemon's saved outbox holds the key. Only for a relay whose
+    /// Hello says `api_keys` (an older one cannot parse it).
+    AuthenticateKey { method: String, key_file: std::path::PathBuf },
     RetrySession,
     SetMode(String),
     SetConfig(String, acp::ConfigValue),
@@ -104,6 +108,7 @@ impl Command {
         match self {
             Command::Prompt { text, attachments } => acp::Command::Prompt(text, attachments),
             Command::Authenticate(m) => acp::Command::Authenticate(m),
+            Command::AuthenticateKey { method, key_file } => acp::Command::AuthenticateKey { method, key_file },
             Command::RetrySession => acp::Command::RetrySession,
             Command::SetMode(m) => acp::Command::SetMode(m),
             Command::SetConfig(o, v) => acp::Command::SetConfig(o, v),
@@ -197,6 +202,8 @@ enum Output {
         /// Older protocol-1 workers synthesized Cancelled on RPC error and did not check
         /// question reply receiver liveness. Absence preserves continuity without false proof.
         #[serde(default)] outcome_evidence: bool,
+        /// Accepts `Command::AuthenticateKey` (relays from 2026-11-03 on).
+        #[serde(default)] api_keys: bool,
     },
     Event(Delivered),
     Accepted { id: u64, error: Option<String> },
@@ -422,7 +429,7 @@ fn serve(mut stream: UnixStream, shared: Arc<Shared>) -> Result<()> {
         let mut state = shared.state.lock().unwrap();
         if version != RELAY_PROTOCOL {
             // say which version this is, so the daemon knows it is looking at another build's relay
-            write_line(&mut stream, &Output::Hello { acknowledged: state.acknowledged, last: state.next_seq, version: RELAY_PROTOCOL, outcome_evidence: true })?;
+            write_line(&mut stream, &Output::Hello { acknowledged: state.acknowledged, last: state.next_seq, version: RELAY_PROTOCOL, outcome_evidence: true, api_keys: true })?;
             bail!("a daemon of relay protocol {version} connected; this relay speaks {RELAY_PROTOCOL}");
         }
         if since < state.acknowledged || since > state.next_seq {
@@ -433,7 +440,7 @@ fn serve(mut stream: UnixStream, shared: Arc<Shared>) -> Result<()> {
         }
         state.generation += 1;
         state.subscriber = Some(stream.try_clone()?);
-        write_line(&mut stream, &Output::Hello { acknowledged: state.acknowledged, last: state.next_seq, version: RELAY_PROTOCOL, outcome_evidence: true })?;
+        write_line(&mut stream, &Output::Hello { acknowledged: state.acknowledged, last: state.next_seq, version: RELAY_PROTOCOL, outcome_evidence: true, api_keys: true })?;
         let pending: Vec<_> = state.pending.values().filter(|p| p.seq <= since).map(|p| Delivered { seq: 0, event: p.event.clone() }).collect();
         shared.changed.notify_all();
         (state.generation, pending)
@@ -524,10 +531,12 @@ pub(crate) struct Client {
     waiters: Waiters,
     closed: AtomicBool,
     outcome_evidence: bool,
+    api_keys: bool,
 }
 
 impl Client {
     pub fn outcome_evidence(&self) -> bool { self.outcome_evidence }
+    pub fn api_keys(&self) -> bool { self.api_keys }
 
     fn write(&self, value: &Input) -> Result<()> {
         if self.closed.load(Ordering::Acquire) {
@@ -586,7 +595,7 @@ pub(super) fn connect(socket: &Path, since: u64) -> Result<(Arc<Client>, mpsc::R
     if first.is_empty() {
         return Err(Refused("the ACP relay closed the connection at Hello (its cursor range, or an older relay)".into()).into());
     }
-    let Ok(Output::Hello { acknowledged, last, version, outcome_evidence }) = serde_json::from_str::<Output>(&first) else {
+    let Ok(Output::Hello { acknowledged, last, version, outcome_evidence, api_keys }) = serde_json::from_str::<Output>(&first) else {
         return Err(Refused("the ACP relay did not answer Hello with a Hello".into()).into());
     };
     if version != RELAY_PROTOCOL {
@@ -596,7 +605,7 @@ pub(super) fn connect(socket: &Path, since: u64) -> Result<(Arc<Client>, mpsc::R
         return Err(Refused(format!("the ACP relay no longer retains cursor {since} ({acknowledged}..{last})")).into());
     }
     stream.set_read_timeout(None)?;
-    let client = Arc::new(Client { writer: Mutex::new(stream), waiters: Mutex::new(BTreeMap::new()), closed: AtomicBool::new(false), outcome_evidence });
+    let client = Arc::new(Client { writer: Mutex::new(stream), waiters: Mutex::new(BTreeMap::new()), closed: AtomicBool::new(false), outcome_evidence, api_keys });
     let receive = Arc::downgrade(&client);
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new().name("sill-relay-reader".into()).spawn(move || {

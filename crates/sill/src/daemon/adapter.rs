@@ -12,6 +12,8 @@ impl From<wire::Command> for Command {
         match command {
             wire::Command::Prompt { text, attachments, entry: _ } => Command::Prompt { text, attachments: attachments.into_iter().map(Into::into).collect() },
             wire::Command::Authenticate(m) => Command::Authenticate(m),
+            // the internal path keeps no keys: the agent refuses the login and asks again
+            wire::Command::AuthenticateWithKey { method_id, .. } => Command::Authenticate(method_id),
             wire::Command::RetrySession => Command::RetrySession,
             wire::Command::SetMode(m) => Command::SetMode(m),
             wire::Command::SetConfig(o, v) => Command::SetConfig(o, v.into()),

@@ -10,12 +10,35 @@ impl Runner {
             return self.sfp_login_done(hub);
         }
         let command=match control {
-            p::Control::Authenticate{method_id}=>wire::Command::Authenticate(method_id),
+            p::Control::Authenticate{method_id,api_key:Some(key)}=>return self.sfp_authenticate_key(hub,method_id,key),
+            p::Control::Authenticate{method_id,api_key:None}=>wire::Command::Authenticate(method_id),
             p::Control::RetrySession=>wire::Command::RetrySession,
             p::Control::SetMode{mode_id}=>wire::Command::SetMode(mode_id),
             p::Control::SetConfig{option_id,value}=>wire::Command::SetConfig(option_id,match value{p::ConfigValue::Id{value}=>wire::ConfigValue::Id(value),p::ConfigValue::Bool{value}=>wire::ConfigValue::Bool(value)}),
         };
         self.command(hub,0,command)
+    }
+    /// A login with an API key the person typed: kept where the agent's jail cannot read it
+    /// (`agents::api_key_dir`), then the relay is told to send it from there — the command and
+    /// the runner's saved outbox carry the file, never the key. The agent's next login requests
+    /// are answered with it too, without the card (`Runner::saved_key_for`).
+    fn sfp_authenticate_key(&self,hub:&Hub,method_id:String,key:wire::Secret)->Result<()> {
+        if !self.relay.api_keys() {
+            return Err(Error::domain("unsupported","this session's agent connection predates API key logins; start the session again").into());
+        }
+        let key=key.0.trim().to_string();
+        if key.is_empty() || key.len()>4096 || key.chars().any(char::is_control) {
+            return Err(Error::invalid_params("an API key is 1 to 4096 characters on one line").into());
+        }
+        hub.with_store(|store| {
+            let agent=store.sessions()?.into_iter().find(|s|s.id==self.id).map(|s|s.agent).ok_or_else(||Error::domain("not_found","session not found"))?;
+            let key_file=sill_core::agents::save_api_key(&hub.home,&agent,&method_id,&key)?;
+            let mut st=self.st.lock().unwrap();
+            if st.ended || st.retired { return Err(Error::domain("invalid_state","the session is not running").into()); }
+            Self::queue(&mut st,relay::Command::AuthenticateKey{method:method_id,key_file});
+            self.save(store,&st)?;
+            self.drain(store,&mut st)
+        })
     }
     /// A login ran outside the protocol (the agent's own terminal command) while its session was
     /// open: the session asked for it at a prompt, not at its start, so there is nothing to open
@@ -104,6 +127,7 @@ impl Runner {
         let authenticated=matches!(event,relay::Event::Other(text) if text=="_sill_authenticated" || text=="logged in; send the message again");
         let mut events=if authenticated {
             st.auth=None;
+            st.key_tried=false;
             let mut next=session.clone();next.authentication=None;
             if next.question_ids.is_empty() && next.turn_id.is_none() {next.activity="idle".into();}
             vec![p::Event::SessionUpdated{session:next}]

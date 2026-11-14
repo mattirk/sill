@@ -56,6 +56,9 @@ struct State {
     generation_id: String,
     adapter: super::sfp_adapter::AdapterState,
     active_submission: Option<String>,
+    /// A login request was answered with a saved API key: if the agent asks again, the card shows
+    /// (with its reason) instead of the same key going again. Cleared when the agent is logged in.
+    key_tried: bool,
     /// This daemon sent a cancel during the turn in flight: the evidence an older relay's
     /// `Cancelled` stop lacks (it uses the same reason for a prompt error).
     cancel_sent: bool,
@@ -152,7 +155,17 @@ impl Runner {
                     tx.commit()?;
                     return Ok(None);
                 }
-                let public_events = self.sfp_project(store, &mut st, &delivery.event, seq)?;
+                // a login the person already gave an API key for is answered with it, no card;
+                // once per request — refused, the card shows with the agent's reason
+                let saved_key = if st.key_tried { None } else { self.saved_key_for(store, &hub, &delivery.event) };
+                let public_events = match saved_key {
+                    Some((method, key_file)) => {
+                        st.key_tried = true;
+                        Self::queue(&mut st, relay::Command::AuthenticateKey { method, key_file });
+                        Vec::new()
+                    }
+                    None => self.sfp_project(store, &mut st, &delivery.event, seq)?,
+                };
                 let done = self.handle_locked(store, &mut st, delivery.event.clone(), false)?;
                 if seq > 0 { st.cursor = seq; }
                 if let Some(done) = &done { st.completed = Some(done.clone()); }
@@ -200,6 +213,7 @@ impl Runner {
                 // the session opened: a login asked for before is done (an agent that wants one
                 // per prompt asks again there). Kept, it held every prompt in the queue.
                 st.auth = None;
+                st.key_tried = false;
             }
             relay::Event::Capabilities { images } => st.images = Some(*images),
             relay::Event::Controls(c) => { self.restore(store, st, c, false)?; st.controls = Some(c.clone()); },
@@ -305,6 +319,20 @@ impl Runner {
             if !st.retired { self.save(store, &st)?; self.sfp_dispatch(store,hub,&mut st)?; }
             Ok(())
         }).ok();
+    }
+
+    /// A login request one of whose methods takes an API key the person already gave: that
+    /// method and the key's file (`agents::api_key_file`).
+    fn saved_key_for(&self, store: &Store, hub: &Hub, event: &relay::Event) -> Option<(String, std::path::PathBuf)> {
+        let relay::Event::AuthRequired { methods, .. } = event else { return None };
+        if !self.relay.api_keys() {
+            return None;
+        }
+        let agent = store.sessions().ok()?.into_iter().find(|s| s.id == self.id)?.agent;
+        methods.iter().filter(|m| m.api_key.is_some()).find_map(|m| {
+            let file = sill_core::agents::api_key_file(&hub.home, &agent, &m.id).ok()?;
+            file.is_file().then(|| (m.id.clone(), file))
+        })
     }
 
     fn queue(st: &mut State, command: relay::Command) {

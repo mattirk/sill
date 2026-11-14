@@ -93,7 +93,7 @@ fn start(key: String, run: impl FnOnce(&mut ProgressWriter) -> Result<String> + 
 }
 
 pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
-    if !matches!(method, "_sill/streams.port" | "_sill/agents.login" | "_sill/agents.logout" | "_sill/registry.install" | "_sill/registry.list") { return None; }
+    if !matches!(method, "_sill/streams.port" | "_sill/agents.login" | "_sill/agents.reset" | "_sill/registry.install" | "_sill/registry.list") { return None; }
     Some((|| {
         match method {
             "_sill/streams.port" => {
@@ -123,20 +123,17 @@ pub fn handle(hub: &Hub, method: &str, params: Value) -> Option<Result<Value>> {
                     Ok(agent.id)
                 })?))
             }
-            "_sill/agents.logout" => {
-                let a: api::AgentLogout = args(params)?;
+            "_sill/agents.reset" => {
+                let a: api::AgentReset = args(params)?;
                 valid_id(&a.agent_id)?;
                 let home = sill_core::changes::home()?;
                 let agent = sill_core::agents::load(&home).remove(&a.agent_id).ok_or_else(|| domain("not_found", "agent not found"))?;
-                if agent.login_files.is_empty() {
-                    return Err(domain("unsupported", "sill does not know where this agent keeps its login"));
-                }
-                // first the running sessions: a running agent holds its login and may write it back
+                // first the running sessions: a running agent holds its login and writes to its home
                 let stopped = hub.stop_sessions_of(&agent.id);
                 let mut homes = vec![sill_core::session::agent_home(&home, &agent.id)];
                 homes.extend(hub.ghost_homes_of(&agent.id));
-                let removed = sill_core::agents::remove_login(&agent, &homes)?;
-                Ok(json!(api::LoggedOut { removed: removed.len() as u32, stopped }))
+                let removed = sill_core::agents::reset_homes(&homes)? + sill_core::agents::remove_api_keys(&home, &agent.id)?;
+                Ok(json!(api::AgentResetDone { removed: removed as u32, stopped }))
             }
             "_sill/registry.install" => {
                 let a: api::RegistryInstall = args(params)?;

@@ -312,6 +312,10 @@ pub struct AuthMethodInfo {
     /// Terminal method: run the agent's own command with these extra args and env in a terminal the
     /// person can see; the agent never gets `authenticate` for it. None: the `authenticate` RPC.
     pub terminal: Option<(Vec<String>, std::collections::BTreeMap<String, String>)>,
+    /// The method takes an API key the person types (`_meta["api-key"]`, Gemini CLI and codex-acp):
+    /// the provider it names, empty when none. The key goes along with [`Command::AuthenticateKey`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
 }
 
 /// The agent's login method as sill keeps it.
@@ -320,7 +324,30 @@ fn auth_method_info(m: &AuthMethod) -> AuthMethodInfo {
         AuthMethod::Terminal(t) => Some((t.args.clone(), t.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect())),
         _ => None,
     };
-    AuthMethodInfo { id: m.id().to_string(), name: m.name().to_string(), description: m.description().map(str::to_string), terminal }
+    let api_key = m.meta().and_then(|meta| meta.get("api-key")).map(|mark| mark.get("provider").and_then(|p| p.as_str()).unwrap_or_default().to_string());
+    AuthMethodInfo { id: m.id().to_string(), name: m.name().to_string(), description: m.description().map(str::to_string), terminal, api_key }
+}
+
+/// `authenticate` with an API key the daemon saved in `key_file` (read here, at the last moment:
+/// commands carry the file, never the key). Adapters read the key from `_meta` in different
+/// shapes: Gemini CLI `{"api-key": "<key>"}`, codex-acp `{"api-key": {"apiKey": "<key>"}}`. The
+/// order matters (both checked against the real adapters, 2026-11-03): codex-acp refuses Gemini's
+/// shape ("CODEX_API_KEY or OPENAI_API_KEY is not set") so its own goes next, but Gemini CLI
+/// accepts codex's shape without reading a key and only fails when the session opens. Neither
+/// checks the key itself at login: a wrong one shows at the first prompt. The last refusal is the
+/// reason given.
+async fn authenticate_with_key(cx: &agent_client_protocol::ConnectionTo<Agent>, method: &str, key_file: &Path) -> Result<(), String> {
+    let key = std::fs::read_to_string(key_file).map_err(|e| format!("the saved API key could not be read: {e}"))?;
+    let key = key.trim();
+    let mut refused = String::from("the agent refused the API key");
+    for shape in [serde_json::json!({"api-key": key}), serde_json::json!({"api-key": {"apiKey": key}})] {
+        let Ok(meta) = serde_json::from_value::<Meta>(shape) else { continue };
+        match cx.send_request(AuthenticateRequest::new(method.to_string()).meta(meta)).block_task().await {
+            Ok(_) => return Ok(()),
+            Err(e) => refused = e.message,
+        }
+    }
+    Err(refused)
 }
 
 /// Something sent along with a prompt (SPEC §3.2 attachments): a pasted screenshot, a chosen file.
@@ -358,6 +385,9 @@ pub enum Command {
     Prompt(String, Vec<Attachment>),
     /// Run an agent-side auth method (`authenticate`), then open the session again.
     Authenticate(String),
+    /// `authenticate` a method marked `api_key` with the key saved in `key_file` (see
+    /// [`AuthMethodInfo::api_key`]); the file is read when the request goes, never carried.
+    AuthenticateKey { method: String, key_file: std::path::PathBuf },
     /// Open the session again (after a terminal login ran outside the protocol).
     RetrySession,
     SetMode(String),
@@ -536,6 +566,14 @@ pub fn run_session(
                                             }
                                         }
                                     }
+                                    Ok(Command::AuthenticateKey { method, key_file }) => match authenticate_with_key(&cx, &method, &key_file).await {
+                                        Ok(()) => break,
+                                        Err(reason) => {
+                                            let _ = events_loop
+                                                .send(Event::AuthRequired { message: format!("login failed: {reason}"), methods: auth_methods.clone() })
+                                                .await;
+                                        }
+                                    },
                                     Ok(Command::RetrySession) => break,
                                     Ok(Command::Quit) | Err(_) => return Ok(()),
                                     Ok(_) => {}
@@ -686,6 +724,20 @@ async fn drive(
                     Err(e) => {
                         let _ = events_loop
                             .send(Event::AuthRequired { message: format!("login failed: {}", e.message), methods: auth_methods.to_vec() })
+                            .await;
+                    }
+                }
+            }
+            Next::Cmd(Some(Command::AuthenticateKey { method, key_file })) => {
+                let conn = session.connection().clone();
+                match authenticate_with_key(&conn, &method, &key_file).await {
+                    Ok(()) => {
+                        let _ = events_loop.send(Event::Other("_sill_authenticated".into())).await;
+                        let _ = events_loop.send(Event::Other("logged in; send the message again".into())).await;
+                    }
+                    Err(reason) => {
+                        let _ = events_loop
+                            .send(Event::AuthRequired { message: format!("login failed: {reason}"), methods: auth_methods.to_vec() })
                             .await;
                     }
                 }

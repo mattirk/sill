@@ -1120,7 +1120,13 @@ impl SessionView {
     /// The person picked a login method. Agent-side methods go through the protocol; terminal
     /// methods run the agent's own command in the pane (Claude: `--cli auth login …`), and the
     /// session is opened again when that exits.
-    fn authenticate(self: &Rc<Self>, m: AuthMethodInfo) {
+    /// `key`: the API key typed for a method that takes one (`AuthMethodInfo::api_key`).
+    fn authenticate(self: &Rc<Self>, m: AuthMethodInfo, key: Option<String>) {
+        if let Some(key) = key {
+            self.status.set_text("logging in");
+            self.command(Command::AuthenticateWithKey { method_id: m.id, key: wire::Secret(key) });
+            return;
+        }
         let home = session::home().unwrap_or_default();
         let agent_id = self.session.borrow().agent.clone();
         let Some(agent) = agents::load(&home).remove(&agent_id) else {
@@ -2403,9 +2409,9 @@ impl SessionView {
                 self.conv.add_auth(
                     message,
                     methods.clone(),
-                    Rc::new(move |m| {
+                    Rc::new(move |m, key| {
                         if let Some(v) = weak.upgrade() {
-                            v.authenticate(m);
+                            v.authenticate(m, key);
                         }
                     }),
                 );

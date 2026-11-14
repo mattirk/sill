@@ -41,18 +41,33 @@ enum Ask {
     HangsAtOpen,
 }
 
-/// An agent's login behavior. It is logged in exactly while `credential` exists: `authenticate`
-/// creates it, and a terminal login is the test creating it before the frontend retries.
+/// Where an agent reads an API key in `authenticate`'s `_meta`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Shape {
+    /// `{"api-key": "<key>"}` (Gemini CLI)
+    Text,
+    /// `{"api-key": {"apiKey": "<key>"}}` (codex-acp)
+    Object,
+}
+
+/// An agent's login behavior. It is logged in while `credential` exists — `authenticate` creates
+/// it, a terminal login is the test creating it before the frontend retries — or, with `key`,
+/// once its `api-key` method got the right key: then in memory only, as Gemini CLI holds it.
 #[derive(Clone)]
 struct Script {
     asks: Ask,
     methods: Value,
     /// `authenticate` calls that fail before one succeeds.
     failing: Arc<Mutex<usize>>,
+    key: Option<(Shape, &'static str)>,
+    /// A key in the other shape is accepted without being read, as Gemini CLI does: the login
+    /// "succeeds" and the session still cannot open. Sending that shape first would end there.
+    lenient: bool,
 }
 
 fn agent_method() -> Value { json!({"id": "browser", "name": "Browser"}) }
 fn terminal_method() -> Value { json!({"type": "terminal", "id": "cli-login", "name": "Terminal login", "args": ["--login"]}) }
+fn key_method() -> Value { json!({"id": "api-key", "name": "API key", "_meta": {"api-key": {"provider": "google"}}}) }
 
 fn read(reader: &mut BufReader<UnixStream>) -> Option<Value> {
     let mut line = String::new();
@@ -79,9 +94,10 @@ fn serve(stream: UnixStream, script: Script, credential: PathBuf, observed: mpsc
         return;
     }
     let auth_required = json!({"code": -32000, "message": "Authentication required"});
+    let mut key_accepted = false;
     while let Some(message) = read(&mut reader) {
         let (Some(id), Some(method)) = (message.get("id").cloned(), message["method"].as_str()) else { continue };
-        let logged_in = credential.exists();
+        let logged_in = credential.exists() || key_accepted;
         if method == "session/new" && script.asks == Ask::HangsAtOpen && !logged_in {
             let _ = observed.send("session/new unanswered".into());
             continue;
@@ -90,6 +106,21 @@ fn serve(stream: UnixStream, script: Script, credential: PathBuf, observed: mpsc
             "initialize" => Ok(json!({"protocolVersion": 1, "agentCapabilities": {"loadSession": false, "promptCapabilities": {"image": false}}, "authMethods": script.methods})),
             "session/new" if script.asks == Ask::AtOpen && !logged_in => Err(auth_required.clone()),
             "session/new" => Ok(json!({"sessionId": "login-session"})),
+            "authenticate" if message["params"]["methodId"] == "api-key" && script.key.is_some() => {
+                let (shape, expected) = script.key.unwrap();
+                let meta = &message["params"]["_meta"]["api-key"];
+                let given = match shape { Shape::Text => meta.as_str(), Shape::Object => meta["apiKey"].as_str() };
+                let other_shape = match shape { Shape::Text => meta.is_object(), Shape::Object => meta.is_string() };
+                let _ = observed.send(format!("key {}", given.unwrap_or("-")));
+                if given == Some(expected) {
+                    key_accepted = true;
+                    Ok(json!({}))
+                } else if script.lenient && other_shape {
+                    Ok(json!({}))
+                } else {
+                    Err(json!({"code": -32000, "message": "API key missing or not valid"}))
+                }
+            }
             "authenticate" => {
                 let mut failing = script.failing.lock().unwrap();
                 if *failing > 0 {
@@ -150,10 +181,15 @@ impl Fixture {
         command
     }
 
-    fn new(script: Script) -> Self { Self::with_relay_env(script, &[]) }
+    fn new(script: Script) -> Self { Self::start(script, &[], None) }
 
     /// `env`: for the relay, where the agent loop runs (`SILL_SESSION_OPEN_TIMEOUT_MS`).
-    fn with_relay_env(script: Script, env: &[(&str, &str)]) -> Self {
+    fn with_relay_env(script: Script, env: &[(&str, &str)]) -> Self { Self::start(script, env, None) }
+
+    /// The person typed `key` for `method` in an earlier session: sill kept it.
+    fn with_saved_key(script: Script, method: &str, key: &str) -> Self { Self::start(script, &[], Some((method, key))) }
+
+    fn start(script: Script, env: &[(&str, &str)], saved_key: Option<(&str, &str)>) -> Self {
         let dir = scratch("login");
         for sub in ["run/sill", "state/sill", "config/sill", "home"] {
             std::fs::create_dir_all(dir.join(sub)).unwrap();
@@ -193,6 +229,11 @@ impl Fixture {
         while !runtime.join("relay.sock").exists() {
             assert!(waited.elapsed() < WAIT, "the relay did not come up");
             std::thread::sleep(Duration::from_millis(10));
+        }
+        if let Some((method, key)) = saved_key {
+            let keys = dir.join("state/sill/keys/claude");
+            std::fs::create_dir_all(&keys).unwrap();
+            std::fs::write(keys.join(method), key).unwrap();
         }
         let daemon = Self::environment(&dir).arg("daemon").stderr(std::fs::File::create(dir.join("daemon.log")).unwrap()).spawn().unwrap();
         let fixture = Self { dir, session, credential, daemon, relay, launcher, shutdown, shim: Some(shim), observed };
@@ -237,6 +278,24 @@ impl Fixture {
 
     /// What the person did in the agent's login terminal: its login file is there now.
     fn terminal_login(&self) { std::fs::write(&self.credential, "token").unwrap(); }
+
+    fn saved_key(&self, method: &str) -> PathBuf { self.dir.join("state/sill/keys/claude").join(method) }
+
+    /// Files under sill's state, the logs included, that contain `secret` — not counting the saved
+    /// key itself or the daemon's staged copy of its own binary.
+    fn holding(&self, secret: &str) -> Vec<PathBuf> {
+        fn walk(dir: &Path, skip: &[PathBuf], secret: &[u8], out: &mut Vec<PathBuf>) {
+            for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let p = e.path();
+                if skip.iter().any(|s| p.starts_with(s)) { continue; }
+                if p.is_dir() && !p.is_symlink() { walk(&p, skip, secret, out); }
+                else if std::fs::read(&p).is_ok_and(|b| b.windows(secret.len()).any(|w| w == secret)) { out.push(p); }
+            }
+        }
+        let mut out = vec![];
+        walk(&self.dir, &[self.dir.join("state/sill/keys"), self.dir.join("state/sill/bin")], secret.as_bytes(), &mut out);
+        out
+    }
 }
 
 impl Drop for Fixture {
@@ -295,6 +354,9 @@ impl Frontend {
         }
     }
 
+    /// The frontend showed an event like that at any point.
+    fn showed(&self, matches: impl Fn(&Event) -> bool) -> bool { self.shown.iter().any(matches) }
+
     fn login_card(&mut self, fixture: &Fixture) -> (String, Vec<String>) {
         match self.wait_for(fixture, "the login card", |e| matches!(e, Event::AuthRequired { .. })) {
             Event::AuthRequired { message, methods } => (message, methods.into_iter().map(|m| m.id).collect()),
@@ -324,7 +386,13 @@ impl Frontend {
     }
 }
 
-fn script(asks: Ask, methods: Value) -> Script { Script { asks, methods, failing: Arc::new(Mutex::new(0)) } }
+fn script(asks: Ask, methods: Value) -> Script { Script { asks, methods, failing: Arc::new(Mutex::new(0)), key: None, lenient: false } }
+
+/// An agent whose `api-key` method takes `key` in `shape`; a Gemini-like one (`Text`) accepts the
+/// other shape without reading it, as Gemini CLI does.
+fn key_script(shape: Shape, key: &'static str) -> Script {
+    Script { key: Some((shape, key)), lenient: shape == Shape::Text, ..script(Ask::AtOpen, json!([key_method()])) }
+}
 
 // --- scenarios: when the agent asks × how the person logs in -----------------------------------
 
@@ -437,29 +505,88 @@ fn an_agent_that_hangs_at_open_gets_the_login_card_after_the_timeout() {
     frontend.answer(&fixture, "PROMPT-ONE");
 }
 
-// --- log out ---------------------------------------------------------------------------------------
+// --- API keys ------------------------------------------------------------------------------------
 
-/// Log out: the agent's running sessions stop first (a running agent holds its login and may write
-/// it back), then its login leaves its sill home. Again: nothing left; an unknown agent is refused.
+/// Gemini CLI and codex-acp mark their API key method (`_meta["api-key"]`) and read the key from
+/// `authenticate`'s `_meta`, each in its own shape. The card asks for the key; sill keeps it out of
+/// the agent's jail, out of its journal and logs, and sends it in both shapes.
 #[test]
-fn logging_an_agent_out_stops_its_sessions_then_removes_its_login() {
+fn an_api_key_typed_into_the_card_reaches_the_agent_in_its_shape() {
+    for shape in [Shape::Text, Shape::Object] {
+        let fixture = Fixture::new(key_script(shape, "sk-typed-1234"));
+        let mut frontend = Frontend::attach(&fixture);
+        let card = frontend.wait_for(&fixture, "the login card", |e| matches!(e, Event::AuthRequired { .. }));
+        let Event::AuthRequired { methods, .. } = card else { unreachable!() };
+        assert_eq!(methods[0].api_key.as_deref(), Some("google"), "the card knows to ask for a key");
+        frontend.control(json!({"type": "authenticate", "method_id": "api-key", "api_key": "sk-typed-1234"}));
+        if shape == Shape::Object { fixture.expect("key -"); }
+        fixture.expect("key sk-typed-1234");
+        frontend.login_card_closes(&fixture);
+        frontend.submit("PROMPT-ONE");
+        frontend.answer(&fixture, "PROMPT-ONE");
+        let saved = fixture.saved_key("api-key");
+        assert_eq!(std::fs::read_to_string(&saved).unwrap(), "sk-typed-1234");
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&saved).unwrap().permissions().mode() & 0o777, 0o600, "{shape:?}");
+        assert!(fixture.holding("sk-typed-1234").is_empty(), "the key leaked into {:?}", fixture.holding("sk-typed-1234"));
+    }
+}
+
+/// Gemini CLI holds a key in memory only: every new agent asks again at session open. A key the
+/// person gave before answers it, and the card never shows.
+#[test]
+fn a_saved_api_key_answers_a_new_agent_without_the_card() {
+    let fixture = Fixture::with_saved_key(key_script(Shape::Text, "sk-saved-5678"), "api-key", "sk-saved-5678");
+    let mut frontend = Frontend::attach(&fixture);
+    fixture.expect("key sk-saved-5678");
+    frontend.wait_for(&fixture, "the session opening", |e| matches!(e, Event::Ready { .. }));
+    frontend.submit("PROMPT-ONE");
+    frontend.answer(&fixture, "PROMPT-ONE");
+    assert!(!frontend.showed(|e| matches!(e, Event::AuthRequired { .. })), "the card showed though a key was saved");
+}
+
+/// A saved key the agent refuses (revoked, replaced) is tried once; the card shows with the agent's
+/// reason, and the key typed there replaces it.
+#[test]
+fn a_refused_saved_api_key_shows_the_card_with_the_reason() {
+    // an agent that checks the key at login (Gemini CLI and codex-acp do not: theirs fails at the
+    // first prompt, and Log out clears it)
+    let fixture = Fixture::with_saved_key(Script { lenient: false, ..key_script(Shape::Text, "sk-new-9999") }, "api-key", "sk-old-0000");
+    let mut frontend = Frontend::attach(&fixture);
+    let (reason, _) = frontend.login_card(&fixture);
+    assert!(reason.contains("API key missing or not valid"), "{reason}");
+    frontend.control(json!({"type": "authenticate", "method_id": "api-key", "api_key": "sk-new-9999"}));
+    frontend.login_card_closes(&fixture);
+    frontend.submit("PROMPT-ONE");
+    frontend.answer(&fixture, "PROMPT-ONE");
+    assert_eq!(std::fs::read_to_string(fixture.saved_key("api-key")).unwrap(), "sk-new-9999");
+}
+
+// --- reset ----------------------------------------------------------------------------------------
+
+/// Reset: the agent's running sessions stop first (a running agent holds its login and writes to its
+/// home), then its sill-owned home and saved API keys go — it starts as a fresh install. Again:
+/// nothing left; an unknown agent is refused.
+#[test]
+fn resetting_an_agent_stops_its_sessions_then_removes_its_home_and_keys() {
     let fixture = Fixture::new(script(Ask::AtPrompt, json!([terminal_method()])));
     let mut frontend = Frontend::attach(&fixture);
     frontend.wait_for(&fixture, "the session opening", |e| matches!(e, Event::Ready { .. }));
-    let login = fixture.dir.join("state/sill/agents/claude/.claude/.credentials.json");
-    std::fs::create_dir_all(login.parent().unwrap()).unwrap();
-    std::fs::write(&login, "sill's login").unwrap();
-    let settings = login.with_file_name("settings.json");
-    std::fs::write(&settings, "{}").unwrap();
-    let out: Value = frontend.client.call("_sill/agents.logout", json!({"agent_id": "claude"})).unwrap();
+    let own = fixture.dir.join("state/sill/agents/claude");
+    std::fs::create_dir_all(own.join(".claude")).unwrap();
+    std::fs::write(own.join(".claude/.credentials.json"), "sill's login").unwrap();
+    std::fs::write(own.join(".claude/settings.json"), "{}").unwrap();
+    std::fs::create_dir_all(fixture.saved_key("api-key").parent().unwrap()).unwrap();
+    std::fs::write(fixture.saved_key("api-key"), "sk-saved").unwrap();
+    let out: Value = frontend.client.call("_sill/agents.reset", json!({"agent_id": "claude"})).unwrap();
     assert_eq!(out["stopped"], json!([fixture.session]), "{out}");
-    assert_eq!(out["removed"], 1, "{out}");
-    assert!(!login.exists(), "the login is gone");
-    assert!(settings.exists(), "only the login goes");
+    assert_eq!(out["removed"], 3, "{out}");
+    assert!(!own.exists(), "the agent's home is gone");
+    assert!(!fixture.saved_key("api-key").exists(), "the saved key is gone");
     fixture.expect("closed");
-    let again: Value = frontend.client.call("_sill/agents.logout", json!({"agent_id": "claude"})).unwrap();
+    let again: Value = frontend.client.call("_sill/agents.reset", json!({"agent_id": "claude"})).unwrap();
     assert_eq!((again["removed"].clone(), again["stopped"].clone()), (json!(0), json!([])), "{again}");
-    let unknown = frontend.client.call::<Value>("_sill/agents.logout", json!({"agent_id": "nobody"}));
+    let unknown = frontend.client.call::<Value>("_sill/agents.reset", json!({"agent_id": "nobody"}));
     assert!(unknown.is_err_and(|e| format!("{e:#}").contains("agent not found")));
 }
 

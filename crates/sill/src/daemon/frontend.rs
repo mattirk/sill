@@ -2,7 +2,7 @@
 use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
-use sill_core::frontend::{AgentMemory, DirEntry, ExportFile, Metadata, Request};
+use sill_core::frontend::{DirEntry, ExportFile, Metadata, Request};
 use super::Hub;
 
 pub fn dispatch(hub: &Hub, params: Value) -> Result<Value> {
@@ -56,16 +56,6 @@ pub fn dispatch(hub: &Hub, params: Value) -> Result<Value> {
         Request::Agents => json!(sill_core::agents::load(&home)),
         Request::SaveAgent(agent) => { valid_agent(&agent.id)?; json!(sill_core::agents::save_override(&home, &agent)?) },
         Request::RemoveAgent { id } => { valid_agent(&id)?; json!(sill_core::agents::remove_override(&home, &id)?) },
-        Request::AgentMemory { id } => {
-            let agent = sill_core::agents::load(&home).remove(&id).context("unknown agent")?;
-            let dirs = sill_core::agents::memory_dirs(&agent, &home);
-            let files = dirs.iter().map(|p| sill_core::agents::count_files(p)).sum();
-            json!(AgentMemory { dirs, files })
-        },
-        Request::ForgetAgentMemory { id } => {
-            let agent = sill_core::agents::load(&home).remove(&id).context("unknown agent")?;
-            json!(sill_core::agents::forget_memory(&agent, &home)?)
-        },
         Request::Registry => {
             let (entries, when) = sill_core::registry::merged(&home);
             json!((entries.into_iter().map(sill_core::frontend::RegistryEntry::from).collect::<Vec<_>>(), when))

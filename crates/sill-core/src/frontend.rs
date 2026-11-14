@@ -26,8 +26,6 @@ pub enum Request {
     Agents,
     SaveAgent(crate::agents::Agent),
     RemoveAgent { id: String },
-    AgentMemory { id: String },
-    ForgetAgentMemory { id: String },
     Registry,
     FetchRegistry,
     Installed { id: String },
@@ -76,12 +74,6 @@ pub struct Metadata {
 pub struct DirEntry {
     pub path: PathBuf,
     pub metadata: Metadata,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentMemory {
-    pub dirs: Vec<PathBuf>,
-    pub files: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

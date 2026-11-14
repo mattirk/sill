@@ -95,6 +95,19 @@ pub struct AuthMethodInfo {
     /// Terminal method: run the agent's own command with these extra args and env in a terminal the
     /// person can see; the agent never gets `authenticate` for it. None: the `authenticate` RPC.
     pub terminal: Option<(Vec<String>, BTreeMap<String, String>)>,
+    /// The method takes an API key the person types (ACP `_meta["api-key"]`): the provider it
+    /// names (`google`, `openai`), empty when it names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+}
+
+/// A secret the person typed (an API key): serialized as its string, never shown by `Debug`.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub struct Secret(pub String);
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("Secret(…)") }
 }
 
 /// Something sent along with a prompt (SPEC §3.2 attachments): a pasted screenshot, a chosen file.
@@ -223,6 +236,8 @@ pub enum Command {
     /// `text` is what the agent gets (standing block and pin prefix included).
     Prompt { text: String, attachments: Vec<Attachment>, entry: Option<Entry> },
     Authenticate(String),
+    /// A method that takes an API key (`AuthMethodInfo::api_key`), with the key the person typed.
+    AuthenticateWithKey { method_id: String, key: Secret },
     RetrySession,
     SetMode(String),
     SetConfig(String, ConfigValue),

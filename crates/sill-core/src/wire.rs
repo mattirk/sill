@@ -81,7 +81,7 @@ impl From<acp::FormField> for FormField {
 }
 
 impl From<acp::AuthMethodInfo> for AuthMethodInfo {
-    fn from(m: acp::AuthMethodInfo) -> Self { Self { id: m.id, name: m.name, description: m.description, terminal: m.terminal } }
+    fn from(m: acp::AuthMethodInfo) -> Self { Self { id: m.id, name: m.name, description: m.description, terminal: m.terminal, api_key: m.api_key } }
 }
 
 // --- the frontends' side back to the agent's -----------------------------------------------------
@@ -161,7 +161,7 @@ impl From<FormField> for acp::FormField {
 }
 
 impl From<AuthMethodInfo> for acp::AuthMethodInfo {
-    fn from(m: AuthMethodInfo) -> Self { Self { id: m.id, name: m.name, description: m.description, terminal: m.terminal } }
+    fn from(m: AuthMethodInfo) -> Self { Self { id: m.id, name: m.name, description: m.description, terminal: m.terminal, api_key: m.api_key } }
 }
 
 impl From<AttachmentKind> for acp::AttachmentKind {

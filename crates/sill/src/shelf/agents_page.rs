@@ -33,6 +33,10 @@ enum State {
 
 struct Row {
     state_box: gtk::Box,
+    /// The second line's quiet tools: settings, reset.
+    tools_box: gtk::Box,
+    /// A passing word at the end of the second line (a reset asking to confirm, its result).
+    note: gtk::Label,
     log: gtk::Label,
     icon_box: gtk::Box,
     /// Inline settings (gear), built on first open.
@@ -117,7 +121,8 @@ impl AgentsPage {
         let list = gtk::ListBox::new();
         list.add_css_class("sill-agents");
         list.set_selection_mode(gtk::SelectionMode::None);
-        let scroll = gtk::ScrolledWindow::builder().vexpand(true).child(&list).build();
+        // rows fit the width (long names and badges shorten): never a sideways scroll
+        let scroll = gtk::ScrolledWindow::builder().vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).child(&list).build();
         root.append(&scroll);
 
         let (tx, rx) = async_channel::unbounded::<Progress>();
@@ -289,6 +294,7 @@ impl AgentsPage {
         let name = gtk::Label::new(Some(&e.name));
         name.add_css_class("sill-agent-name");
         name.set_xalign(0.0);
+        name.set_ellipsize(gtk::pango::EllipsizeMode::End);
         top.append(&name);
         let ver = gtk::Label::new(Some(&format!("v{}", e.version)));
         ver.add_css_class("dim-label");
@@ -297,23 +303,23 @@ impl AgentsPage {
         if !registry::is_tested(&e.id) {
             let u = gtk::Label::new(Some("untested"));
             u.add_css_class("dim-label");
-            u.add_css_class("sill-agent-version");
+            u.add_css_class("sill-agent-badge");
             u.set_tooltip_text(Some("Not yet tried inside sill's jail: install, login and a prompt may need work"));
             top.append(&u);
         }
         if e.trust == Trust::Live {
             let u = gtk::Label::new(Some("unverified"));
             u.add_css_class("dim-label");
-            u.add_css_class("sill-agent-version");
+            u.add_css_class("sill-agent-badge");
             u.set_tooltip_text(Some(&format!(
                 "From the live index only, not in sill's reviewed snapshot: an install takes {} as the index names it (exact version, no lockfile) and asks you to confirm",
                 e.install_spec()
             )));
             top.append(&u);
         } else if let Some(n) = &e.newer {
-            let u = gtk::Label::new(Some(&format!("v{} in the live index", n.version)));
+            let u = gtk::Label::new(Some("newer"));
             u.add_css_class("dim-label");
-            u.add_css_class("sill-agent-version");
+            u.add_css_class("sill-agent-badge");
             u.set_tooltip_text(Some(&format!("Newer than sill's snapshot (v{}), unverified: installing it takes {} as the index names it and asks you to confirm", e.version, n.install_spec())));
             top.append(&u);
         }
@@ -323,12 +329,15 @@ impl AgentsPage {
         let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         spacer.set_hexpand(true);
         top.append(&spacer);
-        // id and links sit before the action, quiet
+        // line 2, under the name: id, links and the quiet tools — on line 1 they pushed the row
+        // wider than the page (with an update, the action went out of sight)
+        let bottom = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        bottom.set_margin_start(24);
         let id = gtk::Label::new(Some(&e.id));
         id.add_css_class("sill-agent-id");
         id.set_valign(gtk::Align::Center);
-        top.append(&id);
-        let bottom = top.clone();
+        id.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        bottom.append(&id);
         for (url, tip) in [(e.repository.as_deref(), "Source"), (e.website.as_deref(), "Website")] {
             let Some(url) = url else { continue };
             let b = gtk::Button::new();
@@ -344,11 +353,22 @@ impl AgentsPage {
             });
             bottom.append(&b);
         }
+        let tools_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        tools_box.set_valign(gtk::Align::Center);
+        bottom.append(&tools_box);
+        let note = gtk::Label::new(None);
+        note.add_css_class("sill-agent-note");
+        note.set_hexpand(true);
+        note.set_xalign(1.0);
+        note.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        note.set_visible(false);
+        bottom.append(&note);
         let state_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         state_box.set_valign(gtk::Align::Center);
         state_box.set_margin_start(6);
         top.append(&state_box);
         col.append(&top);
+        col.append(&bottom);
 
         // installer output (hidden until there is some)
         let log = gtk::Label::new(None);
@@ -363,8 +383,8 @@ impl AgentsPage {
         editor.set_visible(false);
         col.append(&editor);
 
-        self.rows.borrow_mut().insert(e.id.clone(), Row { state_box: state_box.clone(), log: log.clone(), icon_box, editor });
-        self.fill_state(e, state, &state_box);
+        self.rows.borrow_mut().insert(e.id.clone(), Row { state_box: state_box.clone(), tools_box: tools_box.clone(), note, log: log.clone(), icon_box, editor });
+        self.fill_state(e, state, &state_box, &tools_box);
         if let Some(lines) = self.logs.borrow().get(&e.id)
             && let Some(last) = lines.last()
         {
@@ -375,9 +395,11 @@ impl AgentsPage {
     }
 
     /// The right-hand side of a row: one clear action, the rest quiet.
-    fn fill_state(self: &Rc<Self>, e: &Entry, state: State, state_box: &gtk::Box) {
-        while let Some(c) = state_box.first_child() {
-            state_box.remove(&c);
+    fn fill_state(self: &Rc<Self>, e: &Entry, state: State, state_box: &gtk::Box, tools_box: &gtk::Box) {
+        for b in [state_box, tools_box] {
+            while let Some(c) = b.first_child() {
+                b.remove(&c);
+            }
         }
         if self.installing.borrow().contains(&e.id) {
             let sp = super::spinner::Spinner::new(); // not GtkSpinner: see spinner.rs
@@ -389,12 +411,9 @@ impl AgentsPage {
             return;
         }
         if !matches!(state, State::Absent) {
-            state_box.append(&self.gear(e));
-            if let Some(b) = self.forget_button(e) {
-                state_box.append(&b);
-            }
-            if let Some(b) = self.logout_button(e) {
-                state_box.append(&b);
+            tools_box.append(&self.gear(e));
+            if let Some(b) = self.reset_button(e) {
+                tools_box.append(&b);
             }
         }
         match state {
@@ -472,109 +491,95 @@ impl AgentsPage {
         b
     }
 
-    /// One click forgets the agent's own memory (what it noted about the person and their projects
-    /// in its sill-owned home); only when there is some. Sill's memory of the sessions stays.
-    fn forget_button(self: &Rc<Self>, e: &Entry) -> Option<gtk::Button> {
-        let home = session::home().ok()?;
-        let id = registry::builtin_for(e).map(str::to_string).unwrap_or_else(|| e.id.clone());
-        let agent = super::remote::agents::load(&home).remove(&id)?;
-        let dirs = super::remote::agents::memory_dirs(&agent, &home);
-        if dirs.is_empty() {
-            return None;
-        }
-        let files: usize = super::remote::agents::memory_files(&agent);
-        let fg = icons::fg_for(&self.list, &theme::current());
-        let b = gtk::Button::new();
-        b.set_child(Some(&icons::named("sill-brain", fg, 13)));
-        b.add_css_class("flat");
-        b.add_css_class("sill-agent-link");
-        b.set_tooltip_text(Some(&format!(
-            "Forget {}'s own memory: {files} file{} under {} ({}). Sill's memory of the sessions stays.",
-            agent.name,
-            if files == 1 { "" } else { "s" },
-            sill_core::session::agent_home(&home, &agent.id).display(),
-            dirs.iter().filter_map(|d| d.strip_prefix(sill_core::session::agent_home(&home, &agent.id)).ok()).map(|d| d.display().to_string()).collect::<Vec<_>>().join(", ")
-        )));
-        let p = self.clone();
-        let e2 = e.clone();
-        b.connect_clicked(move |_| {
-            let msg = match super::remote::agents::forget_memory(&agent, &home) {
-                Ok(n) => format!("forgot {n} memory file{}", if n == 1 { "" } else { "s" }),
-                Err(err) => format!("forget failed: {err:#}"),
-            };
-            p.logs.borrow_mut().insert(e2.id.clone(), vec![msg]);
-            p.refresh_row(&e2, &home);
-        });
-        Some(b)
-    }
-
-    /// "Log out": sill's login for the agent removed, its running sessions stopped first (a
-    /// running agent holds its login and may write it back). Only when sill knows where the agent
-    /// keeps its login and there is one; the person's own login on this computer is never touched.
-    fn logout_button(self: &Rc<Self>, e: &Entry) -> Option<gtk::Button> {
+    /// "Reset": the agent as a fresh install starts. Its running sessions stop first (a running
+    /// agent holds its login and writes to its home), then its sill-owned home — login, settings,
+    /// history, its own memory — and its saved API keys go. The install, its settings in sill and
+    /// sill's transcripts stay; the person's own files on this computer are never touched. Only
+    /// when there is something to reset.
+    fn reset_button(self: &Rc<Self>, e: &Entry) -> Option<gtk::Button> {
         let home = session::home().ok()?;
         let id = registry::builtin_for(e).map(str::to_string).unwrap_or_else(|| e.id.clone());
         let agent = super::remote::agents::load(&home).remove(&id)?;
         let own = sill_core::session::agent_home(&home, &agent.id);
-        let files: Vec<PathBuf> = agent.login_files.iter().filter_map(|p| p.strip_prefix("~/")).map(|rel| own.join(rel)).filter(|p| super::remote::exists(p)).collect();
-        if files.is_empty() {
+        let keys = sill_core::agents::api_key_dir(&home, &agent.id);
+        let has = |p: &std::path::Path| super::remote::list(p).is_ok_and(|l| !l.is_empty());
+        if !has(&own) && !has(&keys) {
             return None;
         }
-        let b = gtk::Button::with_label("Log out");
+        let b = gtk::Button::with_label("Reset");
         b.add_css_class("flat");
         b.add_css_class("sill-agent-link");
+        b.set_valign(gtk::Align::Center);
         b.set_tooltip_text(Some(&format!(
-            "Log {} out of sill: its running sessions stop (their conversations stay), then its login ({}) goes. Your own login on this computer is untouched.",
+            "Reset {} as if newly installed: its running sessions stop, then its login, settings, history and memory in {} go. Sill's transcripts and your own login on this computer stay.",
             agent.name,
-            files.iter().map(|f| f.display().to_string()).collect::<Vec<_>>().join(", ")
+            own.display()
         )));
         let p = self.clone();
         let e2 = e.clone();
         let (agent_id, name) = (agent.id.clone(), agent.name.clone());
         b.connect_clicked(move |b| {
             // the first click says what happens, the second does it
-            let key = format!("logout:{agent_id}");
+            let key = format!("reset:{agent_id}");
             if p.confirm.borrow().as_deref() != Some(key.as_str()) {
-                *p.confirm.borrow_mut() = Some(key);
-                b.set_label("Confirm log out");
-                let msg = format!("Log {name} out of sill? Its running sessions stop first; their conversations stay. Click again to confirm.");
-                p.logs.borrow_mut().insert(e2.id.clone(), vec![msg.clone()]);
-                if let Some(r) = p.rows.borrow().get(&e2.id) {
-                    r.log.set_text(&msg);
-                    r.log.set_visible(true);
-                }
+                *p.confirm.borrow_mut() = Some(key.clone());
+                b.set_label("Confirm reset");
+                p.flash(&e2.id, &format!("{name} forgets its login, settings and history"));
+                // unanswered, the question goes away again
+                let (p2, b2) = (p.clone(), b.clone());
+                glib::timeout_add_seconds_local_once(8, move || {
+                    if p2.confirm.borrow().as_deref() == Some(key.as_str()) {
+                        p2.confirm.borrow_mut().take();
+                        b2.set_label("Reset");
+                    }
+                });
                 return;
             }
             p.confirm.borrow_mut().take();
             b.set_sensitive(false);
-            let (p, e2, agent_id, name, home) = (p.clone(), e2.clone(), agent_id.clone(), name.clone(), home.clone());
+            let (p, e2, agent_id, home) = (p.clone(), e2.clone(), agent_id.clone(), home.clone());
             glib::spawn_future_local(async move {
                 let done = gtk::gio::spawn_blocking(move || {
-                    super::client::call::<sill_proto::host::LoggedOut>("_sill/agents.logout", sill_proto::host::AgentLogout { agent_id }).map_err(|e| format!("{e:#}"))
+                    super::client::call::<sill_proto::host::AgentResetDone>("_sill/agents.reset", sill_proto::host::AgentReset { agent_id }).map_err(|e| format!("{e:#}"))
                 })
                 .await;
                 let msg = match done {
-                    Ok(Ok(out)) => {
-                        let stopped = match out.stopped.len() {
-                            0 => String::new(),
-                            1 => ", 1 running session stopped".into(),
-                            n => format!(", {n} running sessions stopped"),
-                        };
-                        format!("logged {name} out of sill: {} login file{} removed{stopped}", out.removed, if out.removed == 1 { "" } else { "s" })
-                    }
-                    Ok(Err(err)) => format!("log out failed: {err}"),
-                    Err(_) => "log out failed".into(),
+                    Ok(Ok(out)) => match out.stopped.len() {
+                        0 => "reset".to_string(),
+                        1 => "reset · 1 session stopped".into(),
+                        n => format!("reset · {n} sessions stopped"),
+                    },
+                    Ok(Err(err)) => format!("reset failed: {err}"),
+                    Err(_) => "reset failed".into(),
                 };
-                p.logs.borrow_mut().insert(e2.id.clone(), vec![msg]);
                 super::remote::invalidate();
                 p.refresh_row(&e2, &home);
+                p.flash(&e2.id, &msg);
             });
         });
         Some(b)
     }
 
+    /// A passing word on a row's second line, gone after a few seconds.
+    fn flash(&self, id: &str, text: &str) {
+        let Some(note) = self.rows.borrow().get(id).map(|r| r.note.clone()) else { return };
+        note.set_text(text);
+        note.set_tooltip_text(Some(text));
+        note.set_visible(true);
+        let shown = text.to_string();
+        glib::timeout_add_seconds_local_once(8, move || {
+            if note.text() == shown {
+                note.set_text("");
+                note.set_visible(false);
+            }
+        });
+    }
+
     fn action_button(self: &Rc<Self>, e: &Entry, label: &str, class: &str) -> gtk::Button {
         let b = gtk::Button::with_label(label);
+        if let Some(l) = b.child().and_downcast::<gtk::Label>() {
+            l.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        }
         b.add_css_class(class);
         b.set_tooltip_text(Some(&match e.how() {
             Some("npx") => format!("npm package {} into ~/.local/state/sill/tools (no install scripts run)", e.package_name().unwrap_or_default()),
@@ -647,7 +652,7 @@ impl AgentsPage {
         let state = self.state_of(e, home);
         let rows = self.rows.borrow();
         if let Some(r) = rows.get(&e.id) {
-            self.fill_state(e, state, &r.state_box);
+            self.fill_state(e, state, &r.state_box, &r.tools_box);
             if let Some(lines) = self.logs.borrow().get(&e.id)
                 && let Some(last) = lines.last()
             {
