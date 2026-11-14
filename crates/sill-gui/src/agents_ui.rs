@@ -9,6 +9,7 @@ use iced::widget::{
 use iced::{Alignment, Element, Fill, Task};
 use sill_client::agents::{self, Entry};
 use sill_proto::agent_admin::Definition;
+use sill_proto::host::RegistryEntry;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Default)]
@@ -61,7 +62,10 @@ pub enum Event {
     Search(String),
     Filter(Filter),
     Untested(bool),
-    Install(String, bool),
+    /// Install or update to the entry's target version (see [`target`]).
+    Install(String),
+    /// The per-agent version choice: on = Latest, off = Supported.
+    Latest(String, bool),
     Remove(String),
     Reset(String),
     Edit(String),
@@ -79,6 +83,16 @@ pub enum Event {
 }
 fn msg(e: Event) -> Message {
     Message::Agents(e)
+}
+/// The version Install and Update act on: with **Latest** chosen, the live index's newer version
+/// when there is one; otherwise, and with **Supported**, the snapshot's (or the live entry itself
+/// when the snapshot does not know it).
+fn target<'a>(settings: &crate::settings::Settings, e: &'a Entry) -> &'a RegistryEntry {
+    let r = &e.registry;
+    match &r.newer {
+        Some(newer) if settings.prefers_latest(&r.entry_id) => newer,
+        _ => r,
+    }
 }
 fn control(label: &str, event: Event) -> Element<'_, Message> {
     keys::press(
@@ -376,19 +390,22 @@ impl App {
                     serde_json::to_value(definition).unwrap(),
                 );
             }
-            Event::Install(id, newer) => {
+            Event::Latest(id, latest) => {
+                if latest {
+                    self.settings.supported_agents.remove(&id);
+                } else {
+                    self.settings.supported_agents.insert(id);
+                }
+                self.save_settings();
+            }
+            Event::Install(id) => {
                 if p.busy.contains(&id) {
                     return Task::none();
                 }
                 let Some(entry) = p.entries.iter().find(|e| e.registry.entry_id == id) else {
                     return Task::none();
                 };
-                let entry = if newer {
-                    entry.registry.newer.as_deref().unwrap_or(&entry.registry)
-                } else {
-                    &entry.registry
-                }
-                .clone();
+                let entry = target(&self.settings, entry).clone();
                 let key = format!("install:{id}:{}:{}", entry.version, entry.source);
                 if entry.source == "live" && p.armed.as_deref() != Some(&key) {
                     p.armed = Some(key);
@@ -530,6 +547,8 @@ impl App {
             }
             count += 1;
             let id = &r.entry_id;
+            let latest = self.settings.prefers_latest(id);
+            let wanted = target(&self.settings, e);
             let mut top = row![
                 match p.icons.get(id) {
                     Some(handle) => iced::widget::svg(handle.clone())
@@ -550,15 +569,15 @@ impl App {
             if p.busy.contains(id) {
                 top = top.push(text("Working…").size(style::SMALL).color(P.accent));
             } else if let Some(installed) = &e.installed {
-                if installed.version != r.version {
-                    top = top.push(control("Update", Event::Install(id.clone(), false)));
+                if installed.version != wanted.version {
+                    top = top.push(control("Update", Event::Install(id.clone())));
                 } else {
                     top = top.push(text("Installed").size(style::SMALL).color(P.fg_dim));
                 }
             } else if e.available {
                 top = top.push(text("On this machine").size(style::SMALL).color(P.fg_dim));
-            } else if r.installable {
-                top = top.push(control("Install", Event::Install(id.clone(), false)));
+            } else if wanted.installable {
+                top = top.push(control("Install", Event::Install(id.clone())));
             }
             let expanded = p.details.as_deref() == Some(id);
             top = top.push(control(
@@ -571,11 +590,11 @@ impl App {
             ));
             let mut card = column![top].spacing(6);
             if expanded {
-                card = card.push(
-                    text(format!("{} · v{} · {}", id, r.version, r.source))
-                        .size(style::SMALL)
-                        .color(P.fg_dim),
-                );
+                let mut versions = format!("{} · supported v{} ({})", id, r.version, r.source);
+                if let Some(newer) = &r.newer {
+                    versions.push_str(&format!(" · latest v{} (live, unreviewed)", newer.version));
+                }
+                card = card.push(text(versions).size(style::SMALL).color(P.fg_dim));
                 card = card.push(text(&r.description).size(style::SMALL).color(P.fg_dim));
                 if !r.installable && !e.present() {
                     card = card.push(
@@ -607,18 +626,25 @@ impl App {
                     }
                 }
                 if e.installed.is_some() {
-                    if r.newer.is_some() {
-                        links = links.push(control(
-                            "Newer (unreviewed)",
-                            Event::Install(id.clone(), true),
-                        ));
-                    }
                     links = links.push(control("Remove", Event::Remove(id.clone())));
                 }
                 if e.definition.is_some() {
                     links = links.push(control("Reset", Event::Reset(id.clone())));
                 }
                 card = card.push(links.wrap());
+                card = card.push(
+                    toggler(latest)
+                        .label(if latest {
+                            "Version: Latest — the live index's newest, unreviewed"
+                        } else {
+                            "Version: Supported — sill's reviewed snapshot"
+                        })
+                        .text_size(style::SMALL)
+                        .on_toggle({
+                            let id = id.clone();
+                            move |v| msg(Event::Latest(id.clone(), v))
+                        }),
+                );
             }
             if let Some(log) = p
                 .logs
@@ -792,7 +818,7 @@ mod tests {
             definition: None,
             available: false,
         });
-        let _ = app.update(msg(Event::Install("live-agent".into(), false)));
+        let _ = app.update(msg(Event::Install("live-agent".into())));
         assert!(app.agents_page.busy.is_empty());
         assert_eq!(
             app.agents_page.armed.as_deref(),
@@ -815,6 +841,48 @@ mod tests {
         let _ = app.update(msg(Event::Edit("live-agent".into())));
         assert!(app.agents_page.editor.is_none());
         assert!(app.agents_page.details.is_none());
+    }
+    #[test]
+    fn install_follows_the_per_agent_version_choice() {
+        let (mut app, _) = App::new(true, None);
+        let registry: RegistryEntry = serde_json::from_value(serde_json::json!({
+            "entry_id":"codex-acp", "name":"Codex", "version":"1", "source":"snapshot",
+            "installable":true, "description":"", "repository":null, "website":null,
+            "install_kind":"npx", "install_spec":"codex@1", "package_name":"codex",
+            "has_icon":false, "builtin_agent_id":null, "newer":{
+                "entry_id":"codex-acp", "name":"Codex", "version":"2", "source":"live",
+                "installable":true, "description":"", "repository":null, "website":null,
+                "install_kind":"npx", "install_spec":"codex@2", "package_name":"codex",
+                "has_icon":false, "builtin_agent_id":null, "newer":null
+            }
+        }))
+        .unwrap();
+        app.agents_page.entries.push(Entry {
+            registry,
+            installed: None,
+            definition: None,
+            available: false,
+        });
+        // Latest by default: the newer live version, which asks for confirmation first
+        assert!(app.settings.prefers_latest("codex-acp"));
+        assert_eq!(target(&app.settings, &app.agents_page.entries[0]).version, "2");
+        let _ = app.update(msg(Event::Install("codex-acp".into())));
+        assert_eq!(
+            app.agents_page.armed.as_deref(),
+            Some("install:codex-acp:2:live")
+        );
+        assert!(app.agents_page.logs["codex-acp"].contains("codex@2"));
+        // Supported: the snapshot's version, no confirmation needed
+        let _ = app.update(msg(Event::Latest("codex-acp".into(), false)));
+        assert!(!app.settings.prefers_latest("codex-acp"));
+        assert_eq!(target(&app.settings, &app.agents_page.entries[0]).version, "1");
+        app.agents_page.armed = None;
+        app.agents_page.logs.clear();
+        let _ = app.update(msg(Event::Install("codex-acp".into())));
+        assert!(app.agents_page.armed.is_none());
+        assert!(!app.agents_page.logs.contains_key("codex-acp"));
+        let _ = app.update(msg(Event::Latest("codex-acp".into(), true)));
+        assert!(app.settings.supported_agents.is_empty());
     }
     #[test]
     #[ignore = "writes Agents page PNGs for visual review"]
