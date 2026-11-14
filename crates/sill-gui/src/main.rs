@@ -92,6 +92,7 @@ static HIDDEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::ne
 
 fn main() -> iced::Result {
     prefer_low_power_gpu();
+    prefer_vulkan();
     let options = Options::parse();
     // one sill-gui per account: a second start shows the running one and leaves
     if !options.demo {
@@ -165,6 +166,19 @@ fn prefer_low_power_gpu() {
         // SAFETY: the first thing main does, before any thread exists that could read the
         // environment.
         unsafe { std::env::set_var("WGPU_POWER_PREF", "low") };
+    }
+}
+
+/// Draw through Vulkan, unless the person names backends (`WGPU_BACKEND`). Where no GPU can be
+/// used — no `/dev/dri`, as in a jail or a VM without one — wgpu still offers its GL adapter
+/// through Mesa's EGL. iced accepts it, since a surface made only to check compatibility passes,
+/// and the window's own surface then fails to configure: wgpu panics, and iced's fallback to the
+/// software renderer never runs. With Vulkan only, the missing adapter is an error iced catches,
+/// and the window opens on the software renderer. A GPU without Vulkan draws in software too.
+fn prefer_vulkan() {
+    if cfg!(target_os = "linux") && std::env::var_os("WGPU_BACKEND").is_none() {
+        // SAFETY: as in prefer_low_power_gpu, before any thread exists.
+        unsafe { std::env::set_var("WGPU_BACKEND", "vulkan") };
     }
 }
 
