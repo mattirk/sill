@@ -66,6 +66,21 @@ fn main() {
             }
             Event::Controls(c) => show(&format!("{ms:>5} CONTROLS"), c),
             Event::Usage { used, size } => println!("{ms:>5} usage {used} / {size}"),
+            Event::Elicitation { message, fields, .. } => {
+                println!("{ms:>5} form: {message} — {} field(s): {:?}", fields.len(), fields.iter().map(|f| f.key.as_str()).collect::<Vec<_>>());
+                // answered with the first choice, like a person clicking the first option
+                let Event::Elicitation { fields, reply, .. } = ev else { unreachable!() };
+                let mut values = std::collections::BTreeMap::new();
+                for f in fields {
+                    if let sill_core::acp::FieldKind::Choice(o) = f.kind
+                        && let Some((v, _, _)) = o.first()
+                    {
+                        values.insert(f.key, serde_json::Value::String(v.clone()));
+                    }
+                }
+                let _ = reply.send(Some(values));
+                continue;
+            }
             Event::Other(s) => println!("{ms:>5} other: {s}"),
             Event::Ended(e) => {
                 println!("{ms:>5} ended: {e:?}");

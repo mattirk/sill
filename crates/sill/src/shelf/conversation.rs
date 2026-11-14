@@ -865,6 +865,138 @@ impl Conversation {
         self.request_follow();
     }
 
+    /// A form from the agent (ACP elicitation: a multiple-choice question, a free text, a yes/no):
+    /// one block per field — radio or check buttons for choices, an entry for text and numbers, a
+    /// check for a boolean — then Submit and Cancel. The answer goes back by field key.
+    pub fn add_form(
+        &self,
+        message: &str,
+        fields: Vec<sill_core::acp::FormField>,
+        reply: oneshot::Sender<Option<std::collections::BTreeMap<String, serde_json::Value>>>,
+    ) {
+        use sill_core::acp::FieldKind;
+        self.finish_current();
+        let frame = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        frame.add_css_class("sill-permission");
+        frame.add_css_class("sill-form");
+        let label = gtk::Label::new(Some(message));
+        label.set_xalign(0.0);
+        label.set_wrap(true);
+        label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        label.set_selectable(true);
+        frame.append(&label);
+        // what each field's widgets answer with, read at Submit
+        type Reader = Box<dyn Fn() -> Option<serde_json::Value>>;
+        let mut readers: Vec<(String, Reader)> = Vec::new();
+        for f in fields {
+            let block = gtk::Box::new(gtk::Orientation::Vertical, 3);
+            block.add_css_class("sill-form-field");
+            if !f.title.is_empty() {
+                let t = gtk::Label::new(Some(&f.title));
+                t.add_css_class("sill-form-title");
+                t.set_xalign(0.0);
+                t.set_wrap(true);
+                block.append(&t);
+            }
+            if !f.description.is_empty() {
+                let d = gtk::Label::new(Some(&f.description));
+                d.add_css_class("sill-form-desc");
+                d.set_xalign(0.0);
+                d.set_wrap(true);
+                d.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+                block.append(&d);
+            }
+            let reader: Reader = match &f.kind {
+                FieldKind::Choice(opts) | FieldKind::Choices(opts) => {
+                    let single = matches!(f.kind, FieldKind::Choice(_));
+                    let mut buttons: Vec<(String, gtk::CheckButton)> = Vec::new();
+                    let mut first: Option<gtk::CheckButton> = None;
+                    for (value, title, desc) in opts {
+                        let b = gtk::CheckButton::with_label(if title.is_empty() { value } else { title });
+                        if !desc.is_empty() {
+                            b.set_tooltip_text(Some(desc));
+                        }
+                        if single {
+                            match &first {
+                                Some(group) => b.set_group(Some(group)),
+                                None => first = Some(b.clone()),
+                            }
+                        }
+                        block.append(&b);
+                        buttons.push((value.clone(), b));
+                    }
+                    Box::new(move || {
+                        let picked: Vec<serde_json::Value> =
+                            buttons.iter().filter(|(_, b)| b.is_active()).map(|(v, _)| serde_json::Value::String(v.clone())).collect();
+                        if single { picked.into_iter().next() } else { Some(serde_json::Value::Array(picked)) }
+                    })
+                }
+                FieldKind::Bool => {
+                    let b = gtk::CheckButton::with_label(if f.title.is_empty() { "yes" } else { &f.title });
+                    block.append(&b);
+                    Box::new(move || Some(serde_json::Value::Bool(b.is_active())))
+                }
+                FieldKind::Text | FieldKind::Number => {
+                    let e = gtk::Entry::new();
+                    e.set_placeholder_text(Some(if matches!(f.kind, FieldKind::Number) { "a number" } else { "optional" }));
+                    block.append(&e);
+                    let number = matches!(f.kind, FieldKind::Number);
+                    Box::new(move || {
+                        let text = e.text().trim().to_string();
+                        if text.is_empty() {
+                            return None;
+                        }
+                        if number {
+                            text.parse::<f64>().ok().and_then(serde_json::Number::from_f64).map(serde_json::Value::Number)
+                        } else {
+                            Some(serde_json::Value::String(text))
+                        }
+                    })
+                }
+            };
+            readers.push((f.key.clone(), reader));
+            frame.append(&block);
+        }
+        let buttons = answer_row();
+        let reply = Rc::new(RefCell::new(Some(reply)));
+        let readers = Rc::new(readers);
+        let submit = answer_button("Submit");
+        submit.add_css_class("suggested-action");
+        {
+            let reply = reply.clone();
+            let readers = readers.clone();
+            let buttons2 = buttons.clone();
+            let label2 = label.clone();
+            submit.connect_clicked(move |_| {
+                if let Some(tx) = reply.borrow_mut().take() {
+                    let values: std::collections::BTreeMap<String, serde_json::Value> =
+                        readers.iter().filter_map(|(k, r)| r().map(|v| (k.clone(), v))).collect();
+                    let _ = tx.send(Some(values));
+                    buttons2.set_sensitive(false);
+                    label2.set_text(&format!("{} → answered", label2.text()));
+                }
+            });
+        }
+        let cancel = answer_button("Cancel");
+        cancel.add_css_class("destructive-action");
+        {
+            let buttons2 = buttons.clone();
+            let label2 = label.clone();
+            cancel.connect_clicked(move |_| {
+                if let Some(tx) = reply.borrow_mut().take() {
+                    let _ = tx.send(None);
+                    buttons2.set_sensitive(false);
+                    label2.set_text(&format!("{} → cancelled", label2.text()));
+                }
+            });
+        }
+        buttons.append(&submit);
+        buttons.append(&cancel);
+        frame.append(&buttons);
+        self.place(&frame);
+        self.request_follow();
+    }
+
     /// The agent wants a login first: one button per method it offers.
     pub fn add_auth(&self, message: &str, methods: Vec<sill_core::acp::AuthMethodInfo>, pick: Rc<dyn Fn(sill_core::acp::AuthMethodInfo)>) {
         self.finish_current();
@@ -929,6 +1061,10 @@ impl Conversation {
             Event::PermissionRequest { title, options, reply, .. } => {
                 self.status.set_text("waiting for your answer");
                 self.add_permission(&title, options, reply)
+            }
+            Event::Elicitation { message, fields, reply } => {
+                self.status.set_text("waiting for your answer");
+                self.add_form(&message, fields, reply)
             }
             Event::Other(_) | Event::Capabilities { .. } => {}
             Event::Stopped(reason) => {
@@ -1152,6 +1288,12 @@ button.sill-lock:checked { background: transparent; opacity: 0.9; }
 /* context used, of the model's window; warning colour from 80 % */
 .sill-usage { font-size: 80%; font-family: monospace; color: alpha(@view_fg_color, 0.45); padding: 0 0.4em; }
 .sill-usage.sill-usage-high { color: @warning_color; }
+/* a form from the agent (elicitation): fields under the question, answers by check or radio */
+.sill-form-field { margin-top: 2px; }
+.sill-form-title { font-weight: bold; }
+.sill-form-desc { opacity: 0.7; font-size: 90%; }
+.sill-form checkbutton { padding: 1px 0; }
+.sill-form entry { min-height: 0; padding: 3px 8px; }
 /* managed processes: the indicator and its list */
 .sill-procs { font-size: 80%; color: alpha(@view_fg_color, 0.6); padding: 0 0.3em; }
 .sill-procs.sill-procs-fail { color: @warning_color; }

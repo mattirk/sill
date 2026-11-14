@@ -10,7 +10,9 @@ use std::path::Path;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ClientCapabilities, ContentBlock, InitializeRequest, PromptRequest, PromptResponse, RequestPermissionOutcome,
+    CancelNotification, ClientCapabilities, ContentBlock, CreateElicitationRequest, CreateElicitationResponse, ElicitationAcceptAction,
+    ElicitationAction, ElicitationCapabilities, ElicitationContentValue, ElicitationFormCapabilities, ElicitationMode,
+    ElicitationPropertySchema, ElicitationSchema, InitializeRequest, MultiSelectItems, PromptRequest, PromptResponse, RequestPermissionOutcome,
     RequestPermissionRequest,
     RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigOptionValue, SessionConfigSelectOptions, SessionModeState,
@@ -103,6 +105,66 @@ fn controls_from(modes: Option<&SessionModeState>, options: Option<&[SessionConf
     Controls { modes, options }
 }
 
+/// One field of a form the agent asks the person to fill (ACP `elicitation/create`, form mode —
+/// Claude's AskUserQuestion arrives this way: one choice field per question plus an "Other" text).
+#[derive(Debug, Clone)]
+pub struct FormField {
+    pub key: String,
+    pub title: String,
+    pub description: String,
+    pub kind: FieldKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum FieldKind {
+    /// One of these: (value, title, description).
+    Choice(Vec<(String, String, String)>),
+    /// Any number of these.
+    Choices(Vec<(String, String, String)>),
+    Text,
+    Bool,
+    Number,
+}
+
+/// The form's fields from its JSON schema: what sill can show, in the schema's order.
+pub fn form_fields(schema: &ElicitationSchema) -> Vec<FormField> {
+    let opts = |o: &[agent_client_protocol::schema::v1::EnumOption]| -> Vec<(String, String, String)> {
+        o.iter().map(|e| (e.value.clone(), e.title.clone(), e.description.clone().unwrap_or_default())).collect()
+    };
+    let plain = |v: &[String]| -> Vec<(String, String, String)> { v.iter().map(|s| (s.clone(), s.clone(), String::new())).collect() };
+    schema
+        .properties
+        .iter()
+        .map(|(key, p)| {
+            let (title, description, kind) = match p {
+                ElicitationPropertySchema::String(s) => (
+                    s.title.clone(),
+                    s.description.clone(),
+                    match (&s.one_of, &s.enum_values) {
+                        (Some(o), _) if !o.is_empty() => FieldKind::Choice(opts(o)),
+                        (_, Some(v)) if !v.is_empty() => FieldKind::Choice(plain(v)),
+                        _ => FieldKind::Text,
+                    },
+                ),
+                ElicitationPropertySchema::Array(m) => (
+                    m.title.clone(),
+                    m.description.clone(),
+                    match &m.items {
+                        MultiSelectItems::Titled(t) => FieldKind::Choices(opts(&t.options)),
+                        MultiSelectItems::String(s) => FieldKind::Choices(plain(&s.values)),
+                        _ => FieldKind::Text,
+                    },
+                ),
+                ElicitationPropertySchema::Boolean(b) => (b.title.clone(), b.description.clone(), FieldKind::Bool),
+                ElicitationPropertySchema::Number(n) => (n.title.clone(), n.description.clone(), FieldKind::Number),
+                ElicitationPropertySchema::Integer(n) => (n.title.clone(), n.description.clone(), FieldKind::Number),
+                _ => (None, None, FieldKind::Text),
+            };
+            FormField { key: key.clone(), title: title.unwrap_or_default(), description: description.unwrap_or_default(), kind }
+        })
+        .collect()
+}
+
 /// What the caller sees while a session runs.
 #[derive(Debug)]
 pub enum Event {
@@ -127,6 +189,9 @@ pub enum Event {
     SubagentText { parent: String, text: String },
     /// The agent asks for permission; answer with the chosen option id (None = cancel).
     PermissionRequest { tool_call_id: String, title: String, options: Vec<PermissionOption>, reply: oneshot::Sender<Option<String>> },
+    /// The agent asks the person to fill a form (a multiple-choice question, say); answer with the
+    /// values by field key — strings, arrays of strings, booleans, numbers — or None to cancel.
+    Elicitation { message: String, fields: Vec<FormField>, reply: oneshot::Sender<Option<std::collections::BTreeMap<String, serde_json::Value>>> },
     Other(String),
     /// Context used so far, of the model's window, in tokens (`usage_update`, after each turn
     /// from agents that report it: Claude, Codex, Antigravity…).
@@ -241,6 +306,7 @@ pub fn run_session(
     let (reader, writer) = stream.split();
     let transport = ByteStreams::new(writer, reader);
     let events_perm = events.clone();
+    let events_form = events.clone();
     let events_loop = events.clone();
     let auto = opts.auto;
 
@@ -283,14 +349,50 @@ pub fn run_session(
                 },
                 agent_client_protocol::on_receive_request!(),
             )
+            .on_receive_request(
+                async move |req: CreateElicitationRequest, responder, _cx| {
+                    // a form: shown as a card, answered with the values; anything else (a URL flow)
+                    // is declined — nothing in the jail could open it anyway
+                    let ElicitationMode::Form(form) = req.mode else {
+                        return responder.respond(CreateElicitationResponse::new(ElicitationAction::Decline));
+                    };
+                    if auto != AutoPermission::Ask {
+                        return responder.respond(CreateElicitationResponse::new(ElicitationAction::Cancel));
+                    }
+                    let fields = form_fields(&form.requested_schema);
+                    let (tx, rx) = oneshot::channel();
+                    let _ = events_form.send(Event::Elicitation { message: req.message.clone(), fields, reply: tx }).await;
+                    let action = match rx.await.unwrap_or(None) {
+                        Some(values) => {
+                            let content: std::collections::BTreeMap<String, ElicitationContentValue> = values
+                                .into_iter()
+                                .filter_map(|(k, v)| {
+                                    let v = match v {
+                                        serde_json::Value::String(s) => ElicitationContentValue::String(s),
+                                        serde_json::Value::Bool(b) => ElicitationContentValue::Boolean(b),
+                                        serde_json::Value::Number(n) => ElicitationContentValue::Number(n.as_f64()?),
+                                        serde_json::Value::Array(a) => ElicitationContentValue::StringArray(a.into_iter().filter_map(|x| x.as_str().map(str::to_string)).collect()),
+                                        _ => return None,
+                                    };
+                                    Some((k, v))
+                                })
+                                .collect();
+                            ElicitationAction::Accept(ElicitationAcceptAction::new().content(content))
+                        }
+                        None => ElicitationAction::Cancel,
+                    };
+                    responder.respond(CreateElicitationResponse::new(action))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
             .connect_with(transport, async move |cx| {
                 // the agent may hand us a login to run in a terminal (its own CLI's login flow)
                 let mut auth_caps = AuthCapabilities::new();
                 auth_caps.terminal = true;
+                // forms: the agent's multiple-choice questions come as elicitations (SPEC §3.3)
+                let caps = ClientCapabilities::new().auth(auth_caps).elicitation(ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()));
                 let init = cx
-                    .send_request(
-                        InitializeRequest::new(ProtocolVersion::V1).client_capabilities(ClientCapabilities::new().auth(auth_caps)),
-                    )
+                    .send_request(InitializeRequest::new(ProtocolVersion::V1).client_capabilities(caps))
                     .block_task()
                     .await?;
                 let can_load = init.agent_capabilities.load_session;
@@ -791,5 +893,45 @@ fn kind_name(block: &ContentBlock) -> &'static str {
         ContentBlock::Audio(_) => "audio",
         ContentBlock::ResourceLink(_) => "resource link",
         _ => "content",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Claude's AskUserQuestion as the adapter sends it: a titled choice per question, an "Other"
+    /// text each, a multi-select as an array of titled items.
+    #[test]
+    fn form_fields_from_the_adapters_schema() {
+        let schema: ElicitationSchema = serde_json::from_value(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "q1": { "type": "string", "title": "Database", "description": "Which one?", "oneOf": [
+                    { "const": "Postgres", "title": "Postgres", "description": "the default" },
+                    { "const": "SQLite", "title": "SQLite" }
+                ]},
+                "q1_custom": { "type": "string", "title": "Other", "description": "Type your own answer" },
+                "q2": { "type": "array", "title": "Features", "items": { "anyOf": [
+                    { "const": "auth", "title": "Auth" }, { "const": "search", "title": "Search" }
+                ]}},
+                "ok": { "type": "boolean", "title": "Proceed" },
+                "n": { "type": "integer", "title": "Workers" }
+            }
+        }))
+        .unwrap();
+        let f = form_fields(&schema);
+        let keys: Vec<&str> = f.iter().map(|x| x.key.as_str()).collect();
+        assert_eq!(keys, ["n", "ok", "q1", "q1_custom", "q2"]); // the schema map is ordered by key
+        let q1 = f.iter().find(|x| x.key == "q1").unwrap();
+        assert_eq!((q1.title.as_str(), q1.description.as_str()), ("Database", "Which one?"));
+        match &q1.kind {
+            FieldKind::Choice(o) => assert_eq!(o[0], ("Postgres".into(), "Postgres".into(), "the default".into())),
+            k => panic!("{k:?}"),
+        }
+        assert!(matches!(f.iter().find(|x| x.key == "q1_custom").unwrap().kind, FieldKind::Text));
+        assert!(matches!(&f.iter().find(|x| x.key == "q2").unwrap().kind, FieldKind::Choices(o) if o.len() == 2));
+        assert!(matches!(f.iter().find(|x| x.key == "ok").unwrap().kind, FieldKind::Bool));
+        assert!(matches!(f.iter().find(|x| x.key == "n").unwrap().kind, FieldKind::Number));
     }
 }

@@ -208,6 +208,12 @@ Dismiss. A process that declares a port is offered for exposing on this machine'
 once per session, or silently for ports in the policy's `[processes] expose` list — and the list
 shows the URL. Loopback only; nothing on the LAN.
 
+## Questions from the agent
+
+When an agent asks you something with choices (Claude's "ask user question", an MCP server's
+elicitation), it appears as a form in the conversation: pick an option — or several, or type your
+own in "Other" — and Submit; Cancel tells the agent there is no answer. The agent waits meanwhile.
+
 ## Instructions
 
 Standing instructions reach every agent, whatever its type: Settings → Instructions (Markdown,

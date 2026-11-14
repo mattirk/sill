@@ -12,6 +12,15 @@ for line in sys.stdin:
         send({"jsonrpc":"2.0","id":mid,"result":{"sessionId":"fake-1","modes":{"currentModeId":"default","availableModes":[{"id":"default","name":"Default"}]},"configOptions":[]}})
     elif meth == "session/prompt":
         sid = p["sessionId"]
+        # a multiple-choice question (what Claude's AskUserQuestion becomes), answered before the turn goes on
+        send({"jsonrpc":"2.0","id":100,"method":"elicitation/create","params":{"sessionId":sid,"mode":"form","message":"Which database?","requestedSchema":{"type":"object","properties":{
+            "q1":{"type":"string","title":"Database","oneOf":[{"const":"Postgres","title":"Postgres"},{"const":"SQLite","title":"SQLite"}]},
+            "q1_custom":{"type":"string","title":"Other"}}}}})
+        for ans in sys.stdin:
+            a = json.loads(ans)
+            if a.get("id") == 100:
+                notify(sid, {"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"you chose " + json.dumps(a.get("result",{}).get("action")) + " "}})
+                break
         notify(sid, {"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello "}})
         notify(sid, {"sessionUpdate":"usage_update","used":12345,"size":200000})
         # as claude-agent-acp sends it: a cost, and a cost missing its amount (total_cost_usd unset)
