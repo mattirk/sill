@@ -120,6 +120,8 @@ pub struct FolderTree {
     scope: RefCell<Option<PathBuf>>,
     store: Rc<Store>,
     badges: Rc<RefCell<BTreeMap<PathBuf, String>>>,
+    /// Paths whose badge is a session's unkept overlay change (pending in Changes), not git's.
+    pending: Rc<RefCell<std::collections::BTreeSet<PathBuf>>>,
     /// Every session's pending changes: the badges here, and the viewer shows a pending path's diff.
     pub changes: Rc<RefCell<Vec<Change>>>,
     pinned: Rc<RefCell<Vec<PathBuf>>>,
@@ -165,6 +167,7 @@ impl FolderTree {
         root.append(&bar);
 
         let badges: Rc<RefCell<BTreeMap<PathBuf, String>>> = Rc::new(RefCell::new(BTreeMap::new()));
+        let pending: Rc<RefCell<std::collections::BTreeSet<PathBuf>>> = Rc::new(RefCell::new(Default::default()));
         let pinned: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
         let elsewhere: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
         let roots = gio::ListStore::new::<gtk::StringObject>();
@@ -216,6 +219,7 @@ impl FolderTree {
         });
         {
             let badges = badges.clone();
+            let pending = pending.clone();
             let pinned = pinned.clone();
             let elsewhere = elsewhere.clone();
             let tree_rc = tree_rc.clone();
@@ -237,7 +241,7 @@ impl FolderTree {
                 let is_dir = path.is_dir();
                 icon.set_from_gicon(&file_icon(&path, is_dir, row.is_expanded()));
                 let fname = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                for c in ["sill-changed", "sill-below", "sill-dim", "sill-pinned", "sill-new"] {
+                for c in ["sill-changed", "sill-pending", "sill-below", "sill-dim", "sill-pinned", "sill-new"] {
                     name.remove_css_class(c);
                 }
                 if is_noise(&fname) {
@@ -251,7 +255,13 @@ impl FolderTree {
                 };
                 name.set_text(&label);
                 let badge_text = badges.borrow().get(&path).cloned().unwrap_or_default();
-                if badge_text.starts_with('?') {
+                // a session's unkept overlay change is not on the host: accent (as in Changes), said
+                // in the tooltip — git's own changes are the warning colour
+                let from_session = pending.borrow().contains(&path);
+                name.set_tooltip_text(from_session.then_some("changed in a session's overlay, not on the host yet — keep or revert it in Changes"));
+                if from_session {
+                    name.add_css_class("sill-pending");
+                } else if badge_text.starts_with('?') {
                     name.add_css_class("sill-new");
                 } else if badge_text == "•" {
                     name.add_css_class("sill-below"); // a folder with changes somewhere below
@@ -336,6 +346,7 @@ impl FolderTree {
             scope: RefCell::new(None),
             store,
             badges,
+            pending,
             changes: Rc::new(RefCell::new(Vec::new())),
             pinned,
             elsewhere,
@@ -526,8 +537,10 @@ impl FolderTree {
             Some(s) => vec![s.clone()],
             None => pins.into_iter().filter(|p| p.is_dir()).collect(),
         };
+        let mut pending = std::collections::BTreeSet::new();
         for c in all.iter().filter(|c| !c.ignored) {
             badges.insert(c.path.clone(), format!("{}{}", c.kind.letter(), if c.conflict { "!" } else { "" }));
+            pending.insert(c.path.clone());
             let mut p = c.path.parent();
             while let Some(d) = p {
                 badges.entry(d.to_path_buf()).or_insert_with(|| "•".into());
@@ -545,6 +558,7 @@ impl FolderTree {
             roots.push(home);
         }
         *self.badges.borrow_mut() = badges;
+        *self.pending.borrow_mut() = pending;
         *self.changes.borrow_mut() = all;
         // directories already listed: files that appeared or went since, in place
         self.listed.borrow_mut().retain(|_, w| w.upgrade().is_some());

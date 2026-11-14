@@ -1028,6 +1028,7 @@ button.sill-install:hover { background: alpha(@accent_bg_color, 0.45); }
 .sill-changed { color: @warning_color; }
 .sill-below { color: @warning_color; }
 .sill-new { color: @success_color; }
+.sill-pending { color: @accent_color; }
 .sill-dim { opacity: 0.45; }
 .sill-pinned { color: @accent_color; }
 .sill-editor gutter { border: none; }
