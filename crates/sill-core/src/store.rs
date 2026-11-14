@@ -285,19 +285,38 @@ impl Store {
 
     pub fn entries(&self, session_id: &str) -> Result<Vec<Entry>> {
         let mut st = self.conn.prepare("SELECT seq, ts, kind, text, extra, tool_kind, detail, diff FROM entries WHERE session_id = ?1 ORDER BY seq")?;
-        let rows = st.query_map(params![session_id], |r| {
-            Ok(Entry {
-                seq: r.get(0)?,
-                ts: r.get(1)?,
-                kind: r.get(2)?,
-                text: r.get(3)?,
-                extra: r.get(4)?,
-                tool_kind: r.get(5)?,
-                detail: r.get(6)?,
-                diff: r.get(7)?,
-            })
-        })?;
+        let rows = st.query_map(params![session_id], Self::entry_row)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// The last `limit` entries before `before` (all of them when `None`), oldest first: the
+    /// conversation is rendered from the end and earlier chunks on demand (SPEC §3.1 history).
+    pub fn entries_before(&self, session_id: &str, before: Option<i64>, limit: usize) -> Result<Vec<Entry>> {
+        let mut st = self.conn.prepare(
+            "SELECT seq, ts, kind, text, extra, tool_kind, detail, diff FROM entries WHERE session_id = ?1 AND seq < ?2 ORDER BY seq DESC LIMIT ?3",
+        )?;
+        let rows = st.query_map(params![session_id, before.unwrap_or(i64::MAX), limit as i64], Self::entry_row)?;
+        let mut v = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        v.reverse();
+        Ok(v)
+    }
+
+    pub fn entry_count(&self, session_id: &str) -> Result<usize> {
+        let n: i64 = self.conn.query_row("SELECT count(*) FROM entries WHERE session_id = ?1", params![session_id], |r| r.get(0))?;
+        Ok(n as usize)
+    }
+
+    fn entry_row(r: &rusqlite::Row) -> rusqlite::Result<Entry> {
+        Ok(Entry {
+            seq: r.get(0)?,
+            ts: r.get(1)?,
+            kind: r.get(2)?,
+            text: r.get(3)?,
+            extra: r.get(4)?,
+            tool_kind: r.get(5)?,
+            detail: r.get(6)?,
+            diff: r.get(7)?,
+        })
     }
 }
 
@@ -322,6 +341,16 @@ mod tests {
         // an unknown seq is a harmless no-op
         store.update_tool("s1", 99, Some("x"), None, None, None).unwrap();
         assert_eq!(store.entries("s1").unwrap()[0].text, "Read src/main.rs");
+        // the tail and the chunks before it, oldest first
+        for i in 0..5 {
+            store.append("s1", "user", &format!("m{i}"), "").unwrap();
+        }
+        assert_eq!(store.entry_count("s1").unwrap(), 6);
+        let tail = store.entries_before("s1", None, 2).unwrap();
+        assert_eq!(tail.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(), ["m3", "m4"]);
+        let earlier = store.entries_before("s1", Some(tail[0].seq), 2).unwrap();
+        assert_eq!(earlier.iter().map(|e| e.text.as_str()).collect::<Vec<_>>(), ["m1", "m2"]);
+        assert_eq!(store.entries_before("s1", Some(earlier[0].seq), 10).unwrap().len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

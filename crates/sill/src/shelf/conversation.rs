@@ -93,6 +93,11 @@ pub struct Conversation {
     last_value: std::cell::Cell<f64>,
     last_upper: std::cell::Cell<f64>,
     last_page: std::cell::Cell<f64>,
+    /// While earlier history is rendered: each new widget goes right after this one (and becomes
+    /// it), so a chunk lands in order above everything already shown.
+    insert_after: RefCell<Option<gtk::Widget>>,
+    /// (upper, value) before a chunk was put above the view: the view stays where it was.
+    keep_view: std::cell::Cell<Option<(f64, f64)>>,
 }
 
 impl Conversation {
@@ -139,6 +144,8 @@ impl Conversation {
             last_value: std::cell::Cell::new(0.0),
             last_upper: std::cell::Cell::new(0.0),
             last_page: std::cell::Cell::new(0.0),
+            insert_after: RefCell::new(None),
+            keep_view: std::cell::Cell::new(None),
         });
         // The content height is only known after layout: follow the adjustment's geometry (`changed` covers
         // both the content growing and the viewport shrinking, e.g. the prompt box getting taller) instead
@@ -175,9 +182,23 @@ impl Conversation {
         }
         {
             let c = conv.clone();
-            adj.connect_changed(move |_| {
+            adj.connect_changed(move |adj| {
                 // `changed` arrives inside the viewport's allocation; a set_value there is clamped
                 // away when the allocation finishes. Follow from the next frames instead.
+                if let Some((upper, value)) = c.keep_view.take() {
+                    // content was put above the view: move down by as much as was added
+                    let target = value + (adj.upper() - upper);
+                    let adj = adj.clone();
+                    let weak = Rc::downgrade(&c);
+                    gtk::glib::idle_add_local_once(move || {
+                        if let Some(c) = weak.upgrade() {
+                            c.following.set(true);
+                            adj.set_value(target);
+                            c.following.set(false);
+                        }
+                    });
+                    return;
+                }
                 if c.stick_to_bottom.get() {
                     c.request_follow();
                 }
@@ -322,8 +343,45 @@ impl Conversation {
             a.set_wrap_mode(gtk::pango::WrapMode::WordChar);
             block.append(&a);
         }
-        self.column.append(&block);
+        self.place(&block);
         self.scroll_to_end();
+    }
+
+    /// Put a widget at the top of the conversation (the "show earlier" row), and take it away.
+    pub fn prepend_top(&self, w: &impl IsA<gtk::Widget>) {
+        self.column.prepend(w);
+    }
+
+    pub fn remove_top(&self, w: &impl IsA<gtk::Widget>) {
+        self.column.remove(w);
+    }
+
+    /// From here until [`Self::end_insert`], everything added goes in order right after `anchor`
+    /// instead of at the end: earlier history, rendered on demand above what is shown. The view
+    /// keeps its place; streamed blocks and tool groups are closed on both sides.
+    pub fn begin_insert_after(&self, anchor: &impl IsA<gtk::Widget>) {
+        self.finish_current();
+        let adj = self.root.vadjustment();
+        self.stick_to_bottom.set(false);
+        self.keep_view.set(Some((adj.upper(), adj.value())));
+        *self.insert_after.borrow_mut() = Some(anchor.clone().upcast());
+    }
+
+    pub fn end_insert(&self) {
+        self.finish_current();
+        self.insert_after.borrow_mut().take();
+    }
+
+    /// Where a new message widget goes: the end, or after the insertion point while one is set.
+    fn place(&self, w: &impl IsA<gtk::Widget>) {
+        let mut anchor = self.insert_after.borrow_mut();
+        match anchor.as_ref() {
+            Some(a) => {
+                self.column.insert_child_after(w, Some(a));
+                *anchor = Some(w.clone().upcast());
+            }
+            None => self.column.append(w),
+        }
     }
 
     fn finish_current(&self) {
@@ -357,7 +415,7 @@ impl Conversation {
         let fresh = cur.is_none();
         if fresh {
             let msg = self.message_box();
-            self.column.append(&msg);
+            self.place(&msg);
             *cur = Some((msg, String::new()));
         }
         cur.as_mut().unwrap().1.push_str(chunk);
@@ -389,7 +447,7 @@ impl Conversation {
     fn add_message_block(&self, class: &str, md: &str) {
         self.finish_current();
         let msg = self.message_box();
-        self.column.append(&msg);
+        self.place(&msg);
         markdown::render(&msg, class, md);
         msg.queue_resize();
         self.request_follow();
@@ -555,17 +613,29 @@ impl Conversation {
         let body = gtk::Label::new(detail);
         body.add_css_class("sill-tool-body");
         body.set_xalign(0.0);
-        body.set_wrap(true);
-        body.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        body.set_wrap(false); // command lines and output keep their lines; the box scrolls sideways
         body.set_selectable(true);
         body.set_visible(detail.is_some_and(|d| !d.is_empty()));
+        let body_scroll = gtk::ScrolledWindow::builder()
+            .child(&body)
+            .hscrollbar_policy(gtk::PolicyType::Automatic)
+            .vscrollbar_policy(gtk::PolicyType::Never)
+            .propagate_natural_height(true)
+            .visible(body.is_visible())
+            .build();
         // a file edit's diff under the text: the code segments' view with the diff language
         let diff_view = markdown::code_view();
         diff_view.add_css_class("sill-tool-diff");
         diff_view.set_visible(false);
+        let diff_scroll = markdown::code_scroller(&diff_view);
+        diff_scroll.set_visible(false);
+        // the scrollers follow what they hold
+        for (inner, outer) in [(body.clone().upcast::<gtk::Widget>(), body_scroll.clone()), (diff_view.clone().upcast::<gtk::Widget>(), diff_scroll.clone())] {
+            inner.connect_visible_notify(move |w| outer.set_visible(w.is_visible()));
+        }
         let body_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        body_box.append(&body);
-        body_box.append(&diff_view);
+        body_box.append(&body_scroll);
+        body_box.append(&diff_scroll);
         let body_rev = gtk::Revealer::builder().child(&body_box).reveal_child(false).transition_type(gtk::RevealerTransitionType::SlideDown).build();
         card.append(&body_rev);
         {
@@ -624,7 +694,7 @@ impl Conversation {
                 *tr.group.borrow_mut() = Some(group.clone());
                 self.refresh_group(&group);
             }
-            None => self.column.append(&tr.row),
+            None => self.place(&tr.row),
         }
         *self.last_tool.borrow_mut() = if delegation { None } else { Some(id) };
         self.request_follow();
@@ -665,6 +735,10 @@ impl Conversation {
         // the card takes the first row's place
         self.column.insert_child_after(&card, Some(&first.row));
         self.column.remove(&first.row);
+        let mut anchor = self.insert_after.borrow_mut();
+        if anchor.as_ref() == Some(first.row.upcast_ref()) {
+            *anchor = Some(card.clone().upcast());
+        }
         rows.append(&first.row);
         let first_id = self.tool_rows.borrow().iter().find(|(_, r)| Rc::ptr_eq(r, first)).map(|(id, _)| id.clone());
         let g = Rc::new(ToolGroup { header_title, header_mark, rows, ids: RefCell::new(first_id.into_iter().collect()), edit: first.edit });
@@ -758,7 +832,7 @@ impl Conversation {
             buttons.append(&b);
         }
         frame.append(&buttons);
-        self.column.append(&frame);
+        self.place(&frame);
         self.request_follow();
     }
 
@@ -787,7 +861,7 @@ impl Conversation {
             buttons.append(&b);
         }
         frame.append(&buttons);
-        self.column.append(&frame);
+        self.place(&frame);
         self.request_follow();
     }
 
@@ -818,7 +892,7 @@ impl Conversation {
             buttons.append(&b);
         }
         frame.append(&buttons);
-        self.column.append(&frame);
+        self.place(&frame);
         self.request_follow();
     }
 
@@ -829,13 +903,14 @@ impl Conversation {
         l.set_xalign(0.0);
         l.set_wrap(true);
         l.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-        self.column.append(&l);
+        self.place(&l);
         self.request_follow();
     }
 
     /// Apply one session event.
     pub fn handle(&self, ev: Event) {
         match ev {
+            Event::Usage { .. } => {} // the view shows it in the controls row
             Event::Controls(_) | Event::AuthRequired { .. } => {}
             Event::Ready { session_id, resumed, .. } => {
                 self.status.set_text(&format!("{} · {}", if resumed { "resumed" } else { "ready" }, &session_id[..session_id.len().min(8)]))
@@ -1074,6 +1149,12 @@ button.sill-action:checked { background: alpha(@view_fg_color, 0.09); border-bot
 .sill-ctl-icon:hover, .sill-ctl-icon:checked { opacity: 1; }
 /* the lock keeps the row's colour when on: the state is the glyph, not a highlight */
 button.sill-lock:checked { background: transparent; opacity: 0.9; }
+/* context used, of the model's window; warning colour from 80 % */
+.sill-usage { font-size: 80%; font-family: monospace; color: alpha(@view_fg_color, 0.45); padding: 0 0.4em; }
+.sill-usage.sill-usage-high { color: @warning_color; }
+/* the "show earlier" row above a long session's history */
+.sill-earlier { font-size: 85%; opacity: 0.6; padding: 2px 12px; min-height: 0; }
+.sill-earlier:hover { opacity: 1; }
 .sill-controls .dim-label { opacity: 0.7; }
 .sill-control { min-height: 0; padding: 0; color: alpha(@view_fg_color, 0.5); }
 .sill-control:hover { color: alpha(@view_fg_color, 0.85); }

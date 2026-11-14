@@ -99,11 +99,11 @@ impl Viewer {
         text_view.set_monospace(true);
         text_view.set_show_line_numbers(true);
         text_view.set_tab_width(4);
-        text_view.set_wrap_mode(gtk::WrapMode::WordChar);
+        text_view.set_wrap_mode(gtk::WrapMode::None); // code never wraps: it scrolls sideways
         text_view.set_left_margin(6);
         text_view.set_top_margin(6);
         text_view.add_css_class("sill-editor");
-        let text_scroll = gtk::ScrolledWindow::builder().child(&text_view).vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build();
+        let text_scroll = gtk::ScrolledWindow::builder().child(&text_view).vexpand(true).hscrollbar_policy(gtk::PolicyType::Automatic).build();
 
         // markdown: the conversation's renderer, in a column of its own
         let md = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -454,7 +454,7 @@ impl Viewer {
         self.stop_follow();
         self.editable.set(false);
         self.edit.set_visible(false);
-        self.text_view.set_wrap_mode(gtk::WrapMode::WordChar);
+        self.text_view.set_wrap_mode(gtk::WrapMode::None);
         self.update_title();
         // a session's log under its history key, not a file
         let log = self.log.borrow().as_ref().filter(|(k, _)| k == path).map(|(_, s)| s.clone());

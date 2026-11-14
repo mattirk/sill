@@ -128,6 +128,9 @@ pub enum Event {
     /// The agent asks for permission; answer with the chosen option id (None = cancel).
     PermissionRequest { tool_call_id: String, title: String, options: Vec<PermissionOption>, reply: oneshot::Sender<Option<String>> },
     Other(String),
+    /// Context used so far, of the model's window, in tokens (`usage_update`, after each turn
+    /// from agents that report it: Claude, Codex, Antigravity…).
+    Usage { used: u64, size: u64 },
     /// The agent wants a login before it opens a session; answer with [`Command::Authenticate`]
     /// (agent-side method) or run the terminal method and send [`Command::RetrySession`].
     AuthRequired { message: String, methods: Vec<AuthMethodInfo> },
@@ -422,6 +425,8 @@ async fn drive(
     type PromptFut = std::pin::Pin<Box<dyn std::future::Future<Output = Result<PromptResponse, agent_client_protocol::Error>>>>;
     let mut pending: Option<PromptFut> = None;
     let mut in_turn = false;
+    // update kinds this build can't parse, each noted once
+    let mut unknown_kinds: std::collections::HashSet<String> = std::collections::HashSet::new();
     loop {
         // wait for a command, an update or the prompt's answer, whichever comes first; the
         // borrowing futures are dropped before `session` is used again
@@ -563,7 +568,7 @@ async fn drive(
                     let events = events_loop.clone();
                     let modes_cell = std::cell::RefCell::new(&mut last_modes);
                     let options_cell = std::cell::RefCell::new(&mut last_options);
-                    MatchDispatch::new(dispatch)
+                    let dispatched = MatchDispatch::new(dispatch)
                         .if_notification(async |n: SessionNotification| {
                             match n.update {
                                 SessionUpdate::CurrentModeUpdate(u) => {
@@ -585,7 +590,22 @@ async fn drive(
                             Ok(())
                         })
                         .await
-                        .otherwise_ignore()?;
+                        .otherwise_ignore();
+                    match dispatched {
+                        Ok(()) => {}
+                        // an update of a kind this build does not know (the protocol grows; the
+                        // typed handler can't parse it): skipped, not a dead session — the agent
+                        // goes on, and so does the turn (`fake-agent.py` sends one to prove it)
+                        Err(e) if e.code == ErrorCode::InvalidParams => {
+                            // the kind's name is in the error's data (`unknown variant `x`, expected…`)
+                            let detail = e.data.as_ref().and_then(|d| d.get("error")).and_then(|v| v.as_str()).unwrap_or(&e.message);
+                            let kind = detail.split('`').nth(1).unwrap_or("?").to_string();
+                            if unknown_kinds.insert(kind.clone()) {
+                                let _ = events_loop.send(Event::Other(format!("skipped `{kind}` updates: this sill doesn't know them yet"))).await;
+                            }
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
                 _ => {}
             },
@@ -630,6 +650,7 @@ fn to_event(update: SessionUpdate) -> Event {
             None => Event::Text(text(&c.content)),
         },
         SessionUpdate::AgentThoughtChunk(c) => Event::Thought(text(&c.content)),
+        SessionUpdate::UsageUpdate(u) => Event::Usage { used: u.used, size: u.size },
         SessionUpdate::ToolCall(t) => {
             let delegation = is_delegation(t.name.as_deref(), &t.title, t.raw_input.as_ref(), t.meta.as_ref());
             Event::ToolCall {

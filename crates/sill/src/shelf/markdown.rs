@@ -236,6 +236,8 @@ fn settle_heights(msg: &gtk::Box) {
     while let Some(w) = c {
         if let Some(tv) = w.downcast_ref::<gtk::TextView>() {
             settle_height(tv);
+        } else if let Some(tv) = w.downcast_ref::<gtk::ScrolledWindow>().and_then(|s| s.child()).and_downcast::<gtk::TextView>() {
+            settle_height(&tv);
         }
         c = w.next_sibling();
     }
@@ -259,7 +261,19 @@ fn prose_view(class: &str) -> gtk::TextView {
     tv
 }
 
-/// A code segment: read-only, wrapped at the column, highlighted. (Also a tool call's diff.)
+/// The scroller a code view sits in: code never wraps, it scrolls sideways (2026-11-01); the
+/// height is the content's.
+pub fn code_scroller(view: &sourceview5::View) -> gtk::ScrolledWindow {
+    gtk::ScrolledWindow::builder()
+        .child(view)
+        .hscrollbar_policy(gtk::PolicyType::Automatic)
+        .vscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_height(true)
+        .build()
+}
+
+/// A code segment: read-only, never wrapped (see [`code_scroller`]), highlighted. (Also a tool
+/// call's diff.)
 pub fn code_view() -> sourceview5::View {
     let buffer = sourceview5::Buffer::new(None);
     buffer.set_highlight_syntax(true);
@@ -268,7 +282,7 @@ pub fn code_view() -> sourceview5::View {
     view.set_editable(false);
     view.set_cursor_visible(false);
     view.set_monospace(true);
-    view.set_wrap_mode(gtk::WrapMode::WordChar);
+    view.set_wrap_mode(gtk::WrapMode::None);
     view.set_left_margin(scale(10.0));
     view.set_right_margin(scale(10.0));
     view.set_top_margin(scale(6.0));
@@ -377,11 +391,16 @@ impl<'a> Out<'a> {
 
     fn code(&mut self, lang: &str, code: &str) -> sourceview5::View {
         self.close_text();
-        let view = match self.reuse(sourceview5::View::static_type()).and_then(|w| w.downcast::<sourceview5::View>().ok()) {
+        // a code segment is its scroller with the view inside
+        let view = match self
+            .reuse(gtk::ScrolledWindow::static_type())
+            .and_then(|w| w.downcast::<gtk::ScrolledWindow>().ok())
+            .and_then(|s| s.child().and_downcast::<sourceview5::View>())
+        {
             Some(v) => v,
             None => {
                 let v = code_view();
-                self.msg.append(&v);
+                self.msg.append(&code_scroller(&v));
                 v
             }
         };

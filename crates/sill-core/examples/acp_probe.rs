@@ -1,6 +1,9 @@
 //! Headless probe of `acp::run_session` against a real agent: `cargo run -p sill-core --example
 //! acp_probe -- claude-agent-acp`. On Ready it sends what the shelf's `apply_remembered` would
 //! (model, mode, effort) and prints every Controls event, so the drive loop can be watched without GTK.
+//! With `ACP_PROBE_PROMPT=hi` it sends one prompt instead — against `fake-agent.py` next to this
+//! file, which answers with a usage update and an update kind sill doesn't know, both of which the
+//! loop must survive.
 use std::os::unix::net::UnixStream;
 use std::process::{Command as Proc, Stdio};
 
@@ -41,11 +44,17 @@ fn main() {
         match &ev {
             Event::Ready { controls, resumed, .. } => {
                 show(&format!("{ms:>5} READY(resumed={resumed})"), controls);
-                for c in [
-                    Command::SetConfig("model".into(), ConfigValue::Id("sonnet".into())),
-                    Command::SetMode("auto".into()),
-                    Command::SetConfig("effort".into(), ConfigValue::Id("high".into())),
-                ] {
+                // ACP_PROBE_PROMPT=text: one prompt turn instead of the settings (for a fake agent that
+                // emits updates the shelf must survive)
+                let cmds = match std::env::var("ACP_PROBE_PROMPT") {
+                    Ok(text) => vec![Command::Prompt(text, vec![])],
+                    Err(_) => vec![
+                        Command::SetConfig("model".into(), ConfigValue::Id("sonnet".into())),
+                        Command::SetMode("auto".into()),
+                        Command::SetConfig("effort".into(), ConfigValue::Id("high".into())),
+                    ],
+                };
+                for c in cmds {
                     println!("{ms:>5} send {c:?}");
                     cmd_tx.try_send(c).unwrap();
                 }
@@ -56,6 +65,7 @@ fn main() {
                 });
             }
             Event::Controls(c) => show(&format!("{ms:>5} CONTROLS"), c),
+            Event::Usage { used, size } => println!("{ms:>5} usage {used} / {size}"),
             Event::Other(s) => println!("{ms:>5} other: {s}"),
             Event::Ended(e) => {
                 println!("{ms:>5} ended: {e:?}");

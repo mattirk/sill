@@ -10,7 +10,12 @@ use gtk::gdk;
 use gtk::glib;
 use sill_core::acp::{Attachment, AttachmentKind, AuthMethodInfo, Command, ConfigKind, ConfigValue, Controls, Event};
 use sill_core::agents;
-use sill_core::store::{Session, Store};
+use sill_core::store::{Entry, Session, Store};
+
+/// Entries rendered when a session opens; the rest come in chunks of [`HISTORY_CHUNK`] from the
+/// "show earlier" row (SPEC §3.1 history: opening a long session costs the same as a short one).
+const HISTORY_TAIL: usize = 60;
+const HISTORY_CHUNK: usize = 120;
 
 use super::conversation::Conversation;
 use super::viewer;
@@ -55,6 +60,12 @@ pub struct SessionView {
     /// Attach button and auto-allow lock: drawn glyphs, repainted on a theme change like the shell toggle.
     attach_btn: RefCell<Option<gtk::Button>>,
     lock_btn: RefCell<Option<gtk::ToggleButton>>,
+    /// Context used of the model's window (tokens), from the agent's last usage update; shown in
+    /// the controls row, hidden until the first one.
+    usage: std::cell::Cell<Option<(u64, u64)>>,
+    usage_lbl: RefCell<Option<gtk::Label>>,
+    /// History not shown yet: the first shown entry's seq, and the "show earlier" row at the top.
+    earlier: RefCell<Option<(i64, gtk::Box, gtk::Button)>>,
     pins_row: gtk::Box,
     /// Agent controls (mode, model, effort, toggles) + send button, under the prompt.
     controls_row: gtk::Box,
@@ -365,6 +376,9 @@ impl SessionView {
             shell_btn: RefCell::new(None),
             attach_btn: RefCell::new(None),
             lock_btn: RefCell::new(None),
+            usage: std::cell::Cell::new(None),
+            usage_lbl: RefCell::new(None),
+            earlier: RefCell::new(None),
             pins_row,
             controls_row,
             rebuilding: std::cell::Cell::new(false),
@@ -411,24 +425,27 @@ impl SessionView {
             }));
         }
 
-        // stored transcript
-        if let Ok(entries) = view.store.entries(&view.session.borrow().id) {
-            for e in entries {
-                match e.kind.as_str() {
-                    "user" => view.conv.add_user_with(&e.text, &e.extra.lines().filter(|l| !l.is_empty()).map(str::to_string).collect::<Vec<_>>()),
-                    "agent" => view.conv.add_agent_block(&e.text),
-                    "thought" => view.conv.add_thought_block(&e.text),
-                    "tool" => view.conv.add_tool_call_full(
-                        format!("stored-{}", e.seq),
-                        &e.text,
-                        &e.extra,
-                        (!e.tool_kind.is_empty()).then_some(e.tool_kind.as_str()),
-                        (!e.detail.is_empty()).then_some(e.detail.as_str()),
-                        None,
-                        (!e.diff.is_empty()).then_some(e.diff.as_str()),
-                    ),
-                    _ => view.conv.add_note(&e.text),
-                }
+        // stored transcript: the tail now, earlier chunks when asked for
+        {
+            let id = view.session.borrow().id.clone();
+            let total = view.store.entry_count(&id).unwrap_or(0);
+            let tail = view.store.entries_before(&id, None, HISTORY_TAIL).unwrap_or_default();
+            let first_seq = tail.first().map(|e| e.seq);
+            view.render_entries(&tail);
+            if let Some(first) = first_seq
+                && total > tail.len()
+            {
+                let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                row.set_halign(gtk::Align::Center);
+                let b = gtk::Button::with_label("");
+                b.add_css_class("flat");
+                b.add_css_class("sill-earlier");
+                row.append(&b);
+                view.conv.prepend_top(&row);
+                *view.earlier.borrow_mut() = Some((first, row, b.clone()));
+                view.update_earlier(total - tail.len());
+                let v = view.clone();
+                b.connect_clicked(move |_| v.show_earlier());
             }
         }
 
@@ -1172,6 +1189,15 @@ impl SessionView {
                 }
             }
         }
+        // context used, when the agent reports it
+        {
+            let l = gtk::Label::new(None);
+            l.add_css_class("sill-usage");
+            l.set_visible(false);
+            right.append(&l);
+            *self.usage_lbl.borrow_mut() = Some(l);
+            self.show_usage();
+        }
         // sill's own: auto-allow permission requests (the agent's "auto" modes still ask over ACP).
         // An open lock = requests are answered "allow once" by sill; closed = they wait for you.
         {
@@ -1223,6 +1249,74 @@ impl SessionView {
         *self.send_btn.borrow_mut() = Some(send);
         self.set_busy(self.busy.get());
         self.rebuilding.set(false);
+    }
+
+    /// Stored entries onto the conversation, in order.
+    fn render_entries(&self, entries: &[Entry]) {
+        for e in entries {
+            match e.kind.as_str() {
+                "user" => self.conv.add_user_with(&e.text, &e.extra.lines().filter(|l| !l.is_empty()).map(str::to_string).collect::<Vec<_>>()),
+                "agent" => self.conv.add_agent_block(&e.text),
+                "thought" => self.conv.add_thought_block(&e.text),
+                "tool" => self.conv.add_tool_call_full(
+                    format!("stored-{}", e.seq),
+                    &e.text,
+                    &e.extra,
+                    (!e.tool_kind.is_empty()).then_some(e.tool_kind.as_str()),
+                    (!e.detail.is_empty()).then_some(e.detail.as_str()),
+                    None,
+                    (!e.diff.is_empty()).then_some(e.diff.as_str()),
+                ),
+                _ => self.conv.add_note(&e.text),
+            }
+        }
+    }
+
+    fn update_earlier(&self, left: usize) {
+        if let Some((_, _, b)) = self.earlier.borrow().as_ref() {
+            b.set_label(&format!("show earlier ({left} more)"));
+        }
+    }
+
+    /// The chunk of history before what is shown, rendered above it; the row goes when none is left.
+    fn show_earlier(self: &Rc<Self>) {
+        let Some((first, row, _)) = self.earlier.borrow().clone() else { return };
+        let id = self.id();
+        let chunk = self.store.entries_before(&id, Some(first), HISTORY_CHUNK).unwrap_or_default();
+        let Some(new_first) = chunk.first().map(|e| e.seq) else { return };
+        self.conv.begin_insert_after(&row);
+        self.render_entries(&chunk);
+        self.conv.end_insert();
+        let left = self.store.entries_before(&id, Some(new_first), usize::MAX).map(|v| v.len()).unwrap_or(0);
+        if left > 0 {
+            if let Some(e) = self.earlier.borrow_mut().as_mut() {
+                e.0 = new_first;
+            }
+            self.update_earlier(left);
+        } else {
+            self.conv.remove_top(&row);
+            self.earlier.borrow_mut().take();
+        }
+    }
+
+    /// The usage label from the last usage update: percent on the row, tokens in the tooltip.
+    fn show_usage(&self) {
+        let Some(l) = self.usage_lbl.borrow().clone() else { return };
+        match self.usage.get() {
+            Some((used, size)) if size > 0 => {
+                let pct = (used * 100 / size).min(999);
+                l.set_text(&format!("{pct}%"));
+                let k = |n: u64| if n >= 1000 { format!("{}k", n / 1000) } else { n.to_string() };
+                l.set_tooltip_text(Some(&format!("context: {} of {} tokens used", k(used), k(size))));
+                if pct >= 80 {
+                    l.add_css_class("sill-usage-high");
+                } else {
+                    l.remove_css_class("sill-usage-high");
+                }
+                l.set_visible(true);
+            }
+            _ => l.set_visible(false),
+        }
     }
 
     /// Flip the send button between "send" and "stop" (SPEC: one button, red while running).
@@ -1883,6 +1977,11 @@ impl SessionView {
                 return;
             }
             Event::Capabilities { images } => self.images_ok.set(*images),
+            Event::Usage { used, size } => {
+                self.usage.set(Some((*used, *size)));
+                self.show_usage();
+                return;
+            }
             Event::TurnStarted => {
                 *self.replaying.borrow_mut() = false;
                 self.set_busy(true);
