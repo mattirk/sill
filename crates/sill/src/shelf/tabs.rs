@@ -282,6 +282,8 @@ pub const CSS: &str = r#"
 @keyframes sill-pulse { from { opacity: 1; } 50% { opacity: 0.45; } to { opacity: 1; } }
 .sill-tab.busy label { color: @accent_color; animation: sill-pulse 1.6s ease-in-out infinite; }
 .sill-tab label { padding: 0; }
+/* the agent of this tab is working: its name in the accent colour, selected or not */
+.sill-tab.busy label { color: @accent_color; }
 .sill-tab-entry, .sill-tab-entry:focus { border: none; box-shadow: none; outline: none; background: transparent;
                                          padding: 0; margin: 0; min-height: 0; border-radius: 0; }
 .sill-tab-entry text { background: transparent; }

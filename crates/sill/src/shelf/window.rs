@@ -43,7 +43,7 @@ pub struct Shelf {
     /// status text is its tooltip.
     status: gtk::Stack,
     status_text: RefCell<String>,
-    spinner: gtk::Spinner,
+    spinner: Rc<super::spinner::Spinner>,
     busy: RefCell<std::collections::HashSet<String>>,
     pending_restart: RefCell<std::collections::HashSet<String>>,
     views: RefCell<HashMap<String, Rc<SessionView>>>,
@@ -144,9 +144,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
     files_btn.set_tooltip_text(Some("Files"));
     bar.append(&files_btn);
 
-    let spinner = gtk::Spinner::new();
-    spinner.add_css_class("sill-spinner");
-    spinner.set_valign(gtk::Align::Center);
+    let spinner = super::spinner::Spinner::new(); // not GtkSpinner: see spinner.rs
     let idle = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     idle.add_css_class("sill-status");
     idle.set_valign(gtk::Align::Center);
@@ -155,7 +153,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
     status.set_hhomogeneous(true);
     status.set_vhomogeneous(true);
     status.add_named(&idle, Some("idle"));
-    status.add_named(&spinner, Some("busy"));
+    status.add_named(&spinner.area, Some("busy"));
     status.set_valign(gtk::Align::Center);
     status.add_css_class("sill-status-slot");
     bar.append(&status);

@@ -10,6 +10,7 @@ mod markdown;
 mod session;
 mod session_view;
 mod settings;
+mod spinner;
 mod tabs;
 mod theme;
 mod tree;

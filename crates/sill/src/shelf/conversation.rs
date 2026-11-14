@@ -985,7 +985,7 @@ popover.sill-session-menu > contents { padding: 10px 12px; min-width: 260px; }
 .sill-status-slot { padding: 6px 8px; }
 .sill-status { min-width: 8px; min-height: 8px; border-radius: 4px; background: alpha(@view_fg_color, 0.3); }
 .sill-status.sill-attention { background: @warning_color; }
-.sill-spinner { min-width: 15px; min-height: 15px; opacity: 0.8; }
+.sill-spinner { min-width: 15px; min-height: 15px; color: @accent_color; }
 /* Agents page: one quiet row per registry entry */
 .sill-agents { background: transparent; }
 .sill-agents > row { padding: 0; }
