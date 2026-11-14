@@ -78,6 +78,12 @@ on new connections. Grants persist with the session, enter policy previews and s
 launch snapshots, and are deleted with it. Wildcards are refused. Offline policies and
 `network.allow_additional_hosts = false` reject approval; repository restrictions are resolved
 again before a new launch. Agent-wide endpoint defaults are never changed by Allow.
+Policy previews and retained launch snapshots include a `permissions` array. Each record
+identifies `capability`, `allowed`, `default_enabled`, `effective`, `available` and `reason`.
+Preview is prospective; snapshot effective state describes the recorded launch policy, not a
+live Host control activation. Availability describes the current daemon's backend support.
+Unavailable capabilities cannot be activated by selecting a policy. Host control never gains
+authority from policy inspection or import.
 The schema command exports the concrete records and method shapes. Counters are decimal strings;
 records/events use named objects and `type` tags. `scripts/sfp_client.py` is an independent Python
 consumer and schema validator (install `scripts/requirements-sfp.txt`).

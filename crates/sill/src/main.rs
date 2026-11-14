@@ -702,6 +702,11 @@ fn policy_session_key(c: &sill_proto::Client, key: &str) -> Result<String> {
 fn print_policy_view(view: &sill_proto::admin::PolicyView) {
     println!("# {} policy for {} ({})", view.view, view.session_id, view.name);
     if let Some(text) = &view.text { print!("{text}"); }
+    for permission in &view.permissions {
+        println!("# permission {}: allowed={}, default={}, effective={}, available={} ({})",
+            permission.capability, permission.allowed, permission.default_enabled,
+            permission.effective, permission.available, permission.reason);
+    }
     for source in &view.sources {
         println!("# fragment {}{}", source.path.display, if source.ignored { " (ignored for this build)" } else { "" });
     }

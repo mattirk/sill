@@ -80,9 +80,21 @@ pub struct PolicyStart {
     pub session_id: String,
     pub ignore_roots: Vec<HostPath>,
 }
+/// Capability defaults and ceilings, evaluated against this view's resolved policy.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PermissionState {
+    pub capability: String,
+    pub allowed: bool,
+    pub default_enabled: bool,
+    pub effective: bool,
+    pub available: bool,
+    pub reason: String,
+}
 /// Policy inspection always identifies its view; previews are never evidence of enforcement.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PolicyView {
+    #[serde(default)]
+    pub permissions: Vec<PermissionState>,
     pub view: String,
     pub session_id: String,
     pub name: String,

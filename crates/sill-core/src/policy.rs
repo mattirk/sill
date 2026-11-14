@@ -29,6 +29,8 @@ pub struct Policy {
     pub jail: JailOptions,
     #[serde(default)]
     pub processes: Processes,
+    #[serde(default)]
+    pub permissions: crate::permissions::Permissions,
 }
 
 /// Managed processes (docs/tasks.md §2.4, §2.5).
@@ -201,10 +203,12 @@ impl Default for JailOptions {
 
 impl Policy {
     pub fn parse(text: &str) -> Result<Self> {
-        let p: Policy = toml::from_str(text).context("parse policy")?;
+        let mut p: Policy = toml::from_str(text).context("parse policy")?;
         if p.name.is_empty() {
             bail!("policy has no name");
         }
+        p.permissions.validate(&p.network)?;
+        p.permissions.apply_defaults(&mut p.network);
         Ok(p)
     }
 
@@ -217,6 +221,8 @@ impl Policy {
     /// `all` becomes the allow-list of the `default` policy (a ghost does not get a wider world than
     /// a normal session), and the idle timeout is at most an hour (0 = never becomes an hour).
     pub fn ghostly(&mut self, home: &Path) {
+        use crate::permissions::{Permissions, Rule};
+        self.permissions = Permissions { test_desktop: Rule::Forbidden, private_bus: Rule::Forbidden, gpu: Rule::Forbidden, public_web: Rule::Forbidden, host_control: Rule::Forbidden };
         let direct = std::mem::take(&mut self.paths.direct);
         for d in direct {
             if !self.paths.ro.contains(&d) {

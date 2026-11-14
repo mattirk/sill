@@ -729,6 +729,7 @@ pub fn ensure_started(opts: &StartOptions, home: &Path, exe: &Path) -> Result<St
     let base = session_base_policy(&opts.policy, home, opts.x11, opts.dbus, opts.ghost, opts.agent.as_deref())?;
     let resolution = crate::policy_fragments::resolve(&base, &opts.pins, &opts.ignore_fragments)?;
     let resolution = resolved_policy_with_grants(resolution, &opts.session)?;
+    resolution.policy.permissions.validate_launch(&resolution.policy.network)?;
     let serialized_resolution = serde_json::to_vec_pretty(&resolution)?;
     if serialized_resolution.len() > MAX_POLICY_SNAPSHOT_BYTES { bail!("launch policy snapshot exceeds 4 MiB"); }
     let policy = &resolution.policy;

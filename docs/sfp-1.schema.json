@@ -3289,6 +3289,38 @@
       ],
       "type": "object"
     },
+    "PermissionState": {
+      "description": "Capability defaults and ceilings, evaluated against this view's resolved policy.",
+      "properties": {
+        "allowed": {
+          "type": "boolean"
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "capability": {
+          "type": "string"
+        },
+        "default_enabled": {
+          "type": "boolean"
+        },
+        "effective": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "capability",
+        "allowed",
+        "default_enabled",
+        "effective",
+        "available",
+        "reason"
+      ],
+      "type": "object"
+    },
     "Pinned": {
       "description": "`pins.add`'s result: the canonical path pinned (open, unlike the request).",
       "properties": {
@@ -3513,6 +3545,13 @@
         },
         "name": {
           "type": "string"
+        },
+        "permissions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PermissionState"
+          },
+          "type": "array"
         },
         "session_id": {
           "type": "string"

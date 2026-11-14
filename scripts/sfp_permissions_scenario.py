@@ -100,10 +100,27 @@ try:
         denied(session("offline", "mode='none'"), "example.com")
         denied(session("ceiling", "allow_additional_hosts=false"), "example.com")
         denied(first, "*.example.com")
+        # Permission inspection must distinguish an eligible capability from an implemented backend.
+        desktop = session("desktop", "mode='allow'\n[permissions]\ntest_desktop='on'\nhost_control='forbidden'")
+        view = client.call("_sill/policy.preview", {"session_id": desktop})
+        states = {item["capability"]: item for item in view["permissions"]}
+        assert states["test_desktop"]["allowed"] and states["test_desktop"]["default_enabled"]
+        assert not states["test_desktop"]["effective"] and not states["test_desktop"]["available"]
+        assert not states["host_control"]["allowed"] and not states["host_control"]["effective"]
+        try:
+            client.call("_sill/sessions.start", {"session_id": desktop})
+        except RpcError as error:
+            assert "enforcement backend" in str(error), error
+        else:
+            raise AssertionError("unsupported desktop request started a jail")
+        assert not client.call("_sill/policy.check", {"text": "name='bad'\n[permissions]\nhost_control='on'"})["valid"]
+        web = session("web", "mode='allow'\n[permissions]\npublic_web='on'")
+        states = {item["capability"]: item for item in client.call("_sill/policy.preview", {"session_id": web})["permissions"]}
+        assert states["public_web"]["available"] and states["public_web"]["effective"]
         # Previously remembered grants do not survive a newly imposed hard ceiling in previews.
         (root / "first.toml").write_text("name='first'\n[network]\nallow_additional_hosts=false")
         assert "permission-fixture.example.com" not in client.call("_sill/policy.preview", {"session_id": first})["text"]
         denied(first, "another.example.com")
-        print("Session network approval isolation, persistence preview, limits and default preservation passed")
+        print("Session network approvals, capability inspection, limits and unsupported-backend refusal passed")
 finally:
     client.close()

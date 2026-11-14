@@ -110,6 +110,8 @@ pub struct Resolution {
 #[serde(deny_unknown_fields)]
 struct Fragment {
     #[serde(default)]
+    permissions: std::collections::BTreeMap<String, crate::permissions::Rule>,
+    #[serde(default)]
     paths: FragmentPaths,
     #[serde(default)]
     network: FragmentNetwork,
@@ -373,6 +375,13 @@ fn plain_path(root: &Path, value: &str) -> Result<PathBuf> {
 }
 
 fn validate(f: &Fragment, root: &Path) -> Result<()> {
+    let known = crate::permissions::Permissions::default();
+    for (capability, rule) in &f.permissions {
+        if !known.rules().iter().any(|(name, _)| *name == capability)
+            || *rule != crate::permissions::Rule::Forbidden {
+            bail!("repository permission {capability:?} must name a known capability and be forbidden");
+        }
+    }
     if f.paths.ro.len() + f.paths.mask.len() > 256 {
         bail!("at most 256 path rules per fragment");
     }
@@ -528,6 +537,20 @@ fn ranges(ports: BTreeSet<u16>) -> Vec<String> {
 }
 
 fn apply(f: &Fragment, root: &Path, source: &Path, out: &mut Resolution) -> Result<()> {
+    use crate::permissions::Rule;
+    for capability in f.permissions.keys() {
+        match capability.as_str() {
+            "test_desktop" => out.policy.permissions.test_desktop = Rule::Forbidden,
+            "private_bus" => out.policy.permissions.private_bus = Rule::Forbidden,
+            "gpu" => out.policy.permissions.gpu = Rule::Forbidden,
+            "host_control" => out.policy.permissions.host_control = Rule::Forbidden,
+            "public_web" => {
+                out.policy.permissions.public_web = Rule::Forbidden;
+                if out.policy.network.mode == NetMode::All { out.policy.network.mode = NetMode::Allow; }
+            }
+            _ => unreachable!("validated permission name"),
+        }
+    }
     for path in &f.paths.ro {
         out.fragment_ro.push(plain_path(root, path)?);
     }
@@ -972,4 +995,20 @@ mod tests {
         assert_eq!(decoded.fragment_ro, vec![root.join("src")]);
         assert_eq!(decoded.fingerprint, resolved.fingerprint);
     }
+    #[test]
+    fn repository_permissions_only_tighten_and_never_enable_backends() {
+        let repo = Repo::new();
+        let base = Policy::parse("name='development'\n[permissions]\npublic_web='on'").unwrap();
+        repo.write("[permissions]\npublic_web='forbidden'\nhost_control='forbidden'");
+        let resolved = repo.resolve(&base).unwrap();
+        assert_eq!(resolved.policy.network.mode, NetMode::Allow);
+        assert!(!resolved.policy.permissions.states(&resolved.policy.network)[3].effective);
+        assert_eq!(resolved.policy.permissions.host_control, crate::permissions::Rule::Forbidden);
+        assert!(resolved.policy.permissions.validate_launch(&resolved.policy.network).is_ok());
+        for text in ["[permissions]\ngpu='on'", "[permissions]\ngpu='off'", "[permissions]\nunknown='forbidden'"] {
+            repo.write(text);
+            assert!(repo.resolve(&base).is_err());
+        }
+    }
+
 }

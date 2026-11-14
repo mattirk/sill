@@ -22,6 +22,7 @@ pub mod credentials;
 pub mod memory;
 pub mod mounts;
 pub mod paths;
+pub mod permissions;
 pub mod policy;
 pub mod policy_fragments;
 pub mod proxy;

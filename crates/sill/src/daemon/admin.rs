@@ -214,7 +214,12 @@ fn valid_policy_name(name: &str) -> Result<()> {
     Ok(())
 }
 fn policy_view(view: &str, session_id: &str, name: &str, r: sill_core::policy_fragments::Resolution) -> Result<api::PolicyView> {
+    let permissions = r.policy.permissions.states(&r.policy.network).into_iter().map(|state| api::PermissionState {
+        capability: state.capability.into(), allowed: state.allowed, default_enabled: state.default_enabled,
+        effective: state.effective, available: state.available, reason: state.reason.into(),
+    }).collect();
     Ok(api::PolicyView {
+        permissions,
         view: view.into(), session_id: session_id.into(), name: name.into(),
         text: Some(toml::to_string_pretty(&r.policy)?),
         fragment_ro: r.fragment_ro.iter().map(|p| HostPath::from_path(p)).collect(),
@@ -512,7 +517,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 Ok(resolved) => policy_view("preview", &a.session_id, &row.policy, resolved)?,
                 Err(e) => api::PolicyView {
                     view: "preview".into(), session_id: a.session_id, name: row.policy,
-                    text: None, fragment_ro: vec![], fragment_masks: vec![], sources: vec![],
+                    permissions: vec![], text: None, fragment_ro: vec![], fragment_masks: vec![], sources: vec![],
                     suggestions: vec![], fingerprint: None, diagnostics: vec![format!("{e:#}")],
                 },
             };

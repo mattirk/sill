@@ -145,6 +145,7 @@ fn no_bind_across_mask(inside: &Path, masked: &[PathBuf]) -> Result<()> {
 
 impl JailSpec {
     pub fn plan(&self) -> Result<JailPlan> {
+        self.policy.permissions.validate_launch(&self.policy.network)?;
         let p = &self.policy;
         let mut warnings = Vec::new();
         let hidden: Vec<PathBuf> =

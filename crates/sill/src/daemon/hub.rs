@@ -1088,12 +1088,18 @@ impl Hub {
         }
         let registry = sill_core::agents::load(&self.home);
         let Some(agent) = registry.get(&s.agent) else { bail!("unknown agent {}", s.agent) };
+        // Diagnose unavailable capabilities before preparing host state or launch bindings.
+        // ensure_started resolves and validates again at the actual enforcement boundary.
+        let cfg = sill_core::config::load();
+        let (x11, dbus) = sill_core::config::desktop_grants(&s.desktop, &cfg);
+        let base = sill_core::session::session_base_policy(&s.policy, &self.home, x11, dbus, s.ghost, Some(&s.agent))?;
+        let policy_pins = if s.ghost { vec![] } else { pins.clone() };
+        let resolved = sill_core::policy_fragments::resolve(&base, &policy_pins, ignore_roots)?;
+        resolved.policy.permissions.validate_launch(&resolved.policy.network)?;
         let uid = rustix::process::getuid().as_raw();
         let sdir = sill_core::session::state_dir(uid, id)?;
         let policy = Policy::load(&s.policy, &self.home)?;
         let binds = sill_core::session::binds_for(agent, &policy, &sdir, &self.home, &pins, s.ghost)?;
-        let cfg = sill_core::config::load();
-        let (x11, dbus) = sill_core::config::desktop_grants(&s.desktop, &cfg);
         let opts = StartOptions {
             session: id.to_string(),
             policy: s.policy.clone(),
