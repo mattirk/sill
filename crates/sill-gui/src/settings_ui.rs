@@ -742,7 +742,7 @@ fn where_things_are() -> Vec<(&'static str, String)> {
         ),
         (
             "Keys",
-            "Ctrl+Shift+D shelf ⇄ drawer · Ctrl+Shift+F full · Escape session ⇄ backend · Enter send · Shift+Enter newline · Ctrl+T shell · Ctrl+Shift+Left/Right tabs · Ctrl+Q close".into(),
+            "Ctrl+Shift+D shelf ⇄ drawer · Ctrl+Shift+F full · Escape session ⇄ backend · Enter send · Shift+Enter newline · Ctrl+T new session · Ctrl+Shift+T shell · Ctrl+W close session · Ctrl+1–9 select tab · Ctrl+,/. previous/next · Ctrl+Q close".into(),
         ),
     ]
 }

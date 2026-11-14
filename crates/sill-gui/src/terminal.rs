@@ -478,7 +478,7 @@ impl canvas::Program<Action> for Pane {
                 ..
             }) if self.focused
                 && self.status == Status::Running
-                // the window's shortcuts (Ctrl+T hides the shell again) pass the shell by
+                // Reserved window shortcuts pass the shell by.
                 && !crate::keys::window_shortcut(key, *modifiers) =>
             {
                 let shortcut = modifiers.control() && modifiers.shift();

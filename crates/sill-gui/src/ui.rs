@@ -125,7 +125,7 @@ impl App {
         if let Some(menu) = &self.menu {
             layers = layers.push(self.session_menu(menu));
         }
-        layers.into()
+        keys::intercept_shortcuts(layers)
     }
 
     /// The drawer's edge: a line to drag, wider than it looks.

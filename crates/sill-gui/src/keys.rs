@@ -1,5 +1,5 @@
 //! Keyboard operation (docs/sill-gui.md, implementation direction 6): every control takes the
-//! keyboard and shows that it has it, and the window answers the shelf's shortcuts.
+//! keyboard and shows that it has it, and the window handles session and layout shortcuts.
 //!
 //! iced 0.14 lets only text inputs and editors take focus. [`focus`] puts any control into
 //! iced's own focus traversal, so Tab and Shift+Tab move through the window in reading order —
@@ -31,6 +31,7 @@ pub struct Focus<'a, M> {
     content: Element<'a, M>,
     on_activate: Option<M>,
     on_key: Option<OnKey<'a, M>>,
+    before_children: Option<OnKey<'a, M>>,
 }
 
 #[derive(Default)]
@@ -55,6 +56,7 @@ pub fn focus<'a, M>(content: impl Into<Element<'a, M>>) -> Focus<'a, M> {
         content: content.into(),
         on_activate: None,
         on_key: None,
+        before_children: None,
     }
 }
 
@@ -68,6 +70,14 @@ impl<'a, M> Focus<'a, M> {
         self.on_key = Some(Rc::new(keys));
         self
     }
+}
+
+/// Reserved window shortcuts run before focused text fields and the shell. This wrapper
+/// does not join focus traversal; ordinary editing keys go straight to the child.
+pub fn intercept_shortcuts<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    let mut wrapper = focus(content);
+    wrapper.before_children = Some(Rc::new(window_message));
+    wrapper.into()
 }
 
 /// A button the keyboard reaches too: Tab focuses it, Enter or Space presses it.
@@ -131,7 +141,9 @@ impl<M: Clone> Widget<M, Theme, Renderer> for Focus<'_, M> {
         renderer: &Renderer,
         operation: &mut dyn Operation,
     ) {
-        operation.focusable(None, layout.bounds(), tree.state.downcast_mut::<State>());
+        if self.before_children.is_none() {
+            operation.focusable(None, layout.bounds(), tree.state.downcast_mut::<State>());
+        }
         self.content
             .as_widget_mut()
             .operate(&mut tree.children[0], layout, renderer, operation);
@@ -148,6 +160,16 @@ impl<M: Clone> Widget<M, Theme, Renderer> for Focus<'_, M> {
         shell: &mut Shell<'_, M>,
         viewport: &Rectangle,
     ) {
+        if let Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) = event
+            && let Some(message) = self
+                .before_children
+                .as_ref()
+                .and_then(|on| on(key, *modifiers))
+        {
+            shell.publish(message);
+            shell.capture_event();
+            return;
+        }
         let state = tree.state.downcast_mut::<State>();
         match event {
             Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
@@ -440,16 +462,37 @@ pub fn page(ids: &[&'static str], down: bool) -> Task<Message> {
     })
 }
 
-/// A window shortcut, as the shelf has it where it has one (`shelf/window.rs`): these work from
-/// the prompt and the jail shell too, which pass them on.
-pub fn window_shortcut(key: &Key, modifiers: Modifiers) -> bool {
-    let (ctrl, shift) = (modifiers.command(), modifiers.shift());
-    match key.as_ref() {
-        Key::Named(Named::ArrowLeft | Named::ArrowRight) => ctrl && shift,
-        Key::Character(c) if ["f", "d"].iter().any(|k| c.eq_ignore_ascii_case(k)) => ctrl && shift,
-        Key::Character(c) if c.eq_ignore_ascii_case("t") => ctrl && !shift,
-        _ => false,
+/// Window shortcuts shared by the root, editors and shell; word-selection keys stay local.
+fn window_message(key: &Key, modifiers: Modifiers) -> Option<Message> {
+    if !modifiers.command() || modifiers.alt() {
+        return None;
     }
+    Some(match key.as_ref() {
+        Key::Character(c) if modifiers.shift() && c.eq_ignore_ascii_case("f") => {
+            Message::Layout(crate::layout::Action::ToggleFull)
+        }
+        Key::Character(c) if modifiers.shift() && c.eq_ignore_ascii_case("t") => {
+            Message::ToggleTerminal
+        }
+        Key::Character(c) if modifiers.shift() && c.eq_ignore_ascii_case("d") => {
+            Message::Layout(crate::layout::Action::ToggleShelf)
+        }
+        Key::Character(c) if !modifiers.shift() => match c {
+            "t" | "T" => Message::NewSession,
+            "w" | "W" => Message::CloseCurrent,
+            "," => Message::StepTab(-1),
+            "." => Message::StepTab(1),
+            "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" => {
+                Message::SelectTab(c.as_bytes()[0] as usize - b'1' as usize)
+            }
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
+pub fn window_shortcut(key: &Key, modifiers: Modifiers) -> bool {
+    window_message(key, modifiers).is_some()
 }
 
 /// What a key no control took means to the window.
@@ -457,20 +500,12 @@ pub fn shortcut(event: keyboard::Event) -> Option<Message> {
     let keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
         return None;
     };
+    if let Some(message) = window_message(&key, modifiers) {
+        return Some(message);
+    }
     let (ctrl, shift) = (modifiers.command(), modifiers.shift());
     Some(match key.as_ref() {
         Key::Named(Named::Tab) if !ctrl && !modifiers.alt() => Message::Focus(!shift),
-        Key::Named(Named::ArrowLeft) if ctrl && shift => Message::StepTab(-1),
-        Key::Named(Named::ArrowRight) if ctrl && shift => Message::StepTab(1),
-        Key::Character(c) if ctrl && shift && c.eq_ignore_ascii_case("f") => {
-            Message::Layout(crate::layout::Action::ToggleFull)
-        }
-        Key::Character(c) if ctrl && shift && c.eq_ignore_ascii_case("d") => {
-            Message::Layout(crate::layout::Action::ToggleShelf)
-        }
-        Key::Character(c) if ctrl && !shift && c.eq_ignore_ascii_case("t") => {
-            Message::ToggleTerminal
-        }
         Key::Character("s") if ctrl => Message::Workspace(crate::workspace::Action::SaveFile),
         Key::Character("q") if ctrl => Message::Quit,
         Key::Named(Named::Escape) => Message::Escape,
@@ -481,8 +516,8 @@ pub fn shortcut(event: keyboard::Event) -> Option<Message> {
     })
 }
 
-/// Keys a text editor would use itself that the window needs too: its shortcuts (the shelf takes
-/// Ctrl+Shift+Left/Right for tabs even in its prompt) and, in the prompt, paging the conversation.
+/// Window shortcuts and, in the prompt, paging the conversation. Ctrl+Shift+Left/Right
+/// stays with the editor for selecting by words.
 /// Tab, Shift+Tab and Escape need nothing: an editor lets them through.
 pub fn from_text(key: &Key, modifiers: Modifiers, paging: bool) -> Option<Message> {
     if window_shortcut(key, modifiers) {

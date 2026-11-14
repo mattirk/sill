@@ -294,7 +294,12 @@ pub enum Message {
     Layout(layout::Action),
     /// Tab (true) or Shift+Tab: the keyboard moves to the next or previous control.
     Focus(bool),
-    /// Ctrl+Shift+Right (1) or Left (-1): the next or previous session.
+    /// Start a session with the current agent, or open the chooser with no selected tab.
+    NewSession,
+    CloseCurrent,
+    /// Zero-based position among the visible session tabs.
+    SelectTab(usize),
+    /// Ctrl+period (1) or comma (-1): the next or previous session.
     StepTab(i32),
     /// Escape: between the session and the backend.
     Escape,
@@ -1434,6 +1439,33 @@ impl App {
                 }
             },
             Message::Focus(forward) => return keys::step(forward),
+            Message::NewSession => {
+                let agent = self
+                    .tabs
+                    .iter()
+                    .find(|tab| Some(&tab.id) == self.selected.as_ref())
+                    .map(|tab| tab.agent.clone());
+                return match agent {
+                    Some(agent) => self.menu_event(menu::Event::New {
+                        agent,
+                        ghost: false,
+                    }),
+                    None if self.menu.is_some() => Task::none(),
+                    None => self.menu_event(menu::Event::Toggle),
+                };
+            }
+            Message::CloseCurrent => {
+                return match self.selected.clone() {
+                    Some(id) => self.update(Message::CloseTab(id)),
+                    None => Task::none(),
+                };
+            }
+            Message::SelectTab(at) => {
+                return match self.tabs.get(at) {
+                    Some(tab) => self.choose(tab.id.clone()),
+                    None => Task::none(),
+                };
+            }
             Message::StepTab(delta) => {
                 let Some(at) = self
                     .selected
@@ -2057,7 +2089,16 @@ impl App {
                 }
             }
             Event::New { agent, ghost } => {
-                let remember = self.menu.take().is_some_and(|m| m.remember_pins);
+                let remember = self
+                    .menu
+                    .take()
+                    .map(|m| m.remember_pins)
+                    .unwrap_or_else(|| {
+                        self.daemon_settings
+                            .as_ref()
+                            .and_then(|s| s.remember_pins)
+                            .unwrap_or(false)
+                    });
                 if self.demo {
                     return Task::none();
                 }

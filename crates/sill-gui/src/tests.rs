@@ -2044,9 +2044,9 @@ fn focus_scrolls_the_control_into_sight() {
     );
 }
 
-/// The shelf's shortcuts (`shelf/window.rs`), and how the prompt passes them on.
+/// Session shortcuts replace the old bindings without taking word selection from editors.
 #[test]
-fn shortcuts_match_the_shelf_and_work_from_the_prompt() {
+fn session_shortcuts_work_from_the_prompt() {
     use crate::keys::shortcut;
     use iced::keyboard::{Event, Key, Location, Modifiers, key, key::Named};
     let press = |key: Key, modifiers| Event::KeyPressed {
@@ -2070,11 +2070,11 @@ fn shortcuts_match_the_shelf_and_work_from_the_prompt() {
         Some(Message::Focus(false))
     ));
     assert!(matches!(
-        shortcut(press(named(Named::ArrowRight), both)),
+        shortcut(press(ch("."), Modifiers::CTRL)),
         Some(Message::StepTab(1))
     ));
     assert!(matches!(
-        shortcut(press(named(Named::ArrowLeft), both)),
+        shortcut(press(ch(","), Modifiers::CTRL)),
         Some(Message::StepTab(-1))
     ));
     assert!(matches!(
@@ -2083,7 +2083,7 @@ fn shortcuts_match_the_shelf_and_work_from_the_prompt() {
     ));
     assert!(matches!(
         shortcut(press(ch("t"), Modifiers::CTRL)),
-        Some(Message::ToggleTerminal)
+        Some(Message::NewSession)
     ));
     assert!(matches!(
         shortcut(press(named(Named::Escape), Modifiers::empty())),
@@ -2103,8 +2103,30 @@ fn shortcuts_match_the_shelf_and_work_from_the_prompt() {
     ));
     assert!(shortcut(press(ch("a"), Modifiers::empty())).is_none());
 
-    // in the prompt: tab switching beats word selection, PageUp pages the conversation, and
-    // Tab is left to the window
+    assert!(matches!(
+        shortcut(press(ch("w"), Modifiers::CTRL)),
+        Some(Message::CloseCurrent)
+    ));
+    for digit in 1..=9 {
+        assert!(
+            matches!(shortcut(press(ch(&digit.to_string()), Modifiers::CTRL)),
+            Some(Message::SelectTab(at)) if at == digit - 1)
+        );
+    }
+    assert!(shortcut(press(ch("0"), Modifiers::CTRL)).is_none());
+    assert!(matches!(
+        shortcut(press(ch("t"), both)),
+        Some(Message::ToggleTerminal)
+    ));
+    assert!(matches!(
+        shortcut(press(ch("T"), both)),
+        Some(Message::ToggleTerminal)
+    ));
+    assert!(shortcut(press(ch("t"), Modifiers::CTRL | Modifiers::ALT)).is_none());
+    assert!(shortcut(press(named(Named::ArrowLeft), both)).is_none());
+    assert!(shortcut(press(named(Named::ArrowRight), both)).is_none());
+
+    // Editors retain word selection; paging and Tab keep their existing behavior.
     use iced::widget::text_editor::{Binding, KeyPress, Status};
     let typed = |key: Key, modifiers| KeyPress {
         key: key.clone(),
@@ -2116,7 +2138,7 @@ fn shortcuts_match_the_shelf_and_work_from_the_prompt() {
     };
     assert!(matches!(
         crate::ui::enter_sends(typed(named(Named::ArrowLeft), both)),
-        Some(Binding::Custom(Message::StepTab(-1)))
+        Some(Binding::Select(iced::widget::text_editor::Motion::WordLeft))
     ));
     assert!(matches!(
         crate::ui::enter_sends(typed(named(Named::PageUp), Modifiers::empty())),
@@ -2125,7 +2147,7 @@ fn shortcuts_match_the_shelf_and_work_from_the_prompt() {
     assert!(crate::ui::enter_sends(typed(named(Named::Tab), Modifiers::empty())).is_none());
 }
 
-/// Ctrl+Shift+Left/Right walk the tabs, round the ends.
+/// Ctrl+comma/period walk the tabs, round the ends.
 #[test]
 fn stepping_tabs_wraps_round() {
     let (mut app, _) = App::new(true, None);
@@ -2739,4 +2761,207 @@ fn folder_chips_show_tracked_lines_and_untracked_files_independently() {
     ui.find("+12").unwrap();
     ui.find("−7").unwrap();
     assert!(ui.find("?0").is_err());
+}
+
+fn hotkey(key: iced::keyboard::Key, modifiers: iced::keyboard::Modifiers) -> Vec<iced::Event> {
+    use iced::keyboard::{Event, Location, key::NativeCode, key::Physical};
+    vec![
+        iced::Event::Keyboard(Event::ModifiersChanged(modifiers)),
+        iced::Event::Keyboard(Event::KeyPressed {
+            key: key.clone(),
+            modified_key: key,
+            physical_key: Physical::Unidentified(NativeCode::Unidentified),
+            location: Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        }),
+    ]
+}
+
+#[test]
+fn session_shortcuts_precede_text_inputs_and_do_not_insert_characters() {
+    use iced::keyboard::{Key, Modifiers};
+    let input = iced::widget::text_input("", "alpha beta gamma")
+        .id("edit")
+        .on_input(Message::Copy);
+    let view = crate::keys::intercept_shortcuts(input);
+    let mut ui =
+        iced_test::Simulator::with_size(crate::snapshots::settings(), (600.0, 100.0), view);
+    ui.click(iced::widget::Id::new("edit")).unwrap();
+    let mut events = hotkey(Key::Character("2".into()), Modifiers::CTRL);
+    if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { text, .. }) = &mut events[1] {
+        *text = Some("2".into()); // even backends supplying printable Ctrl text cannot insert it
+    }
+    ui.send(events);
+    ui.send(hotkey(Key::Character("t".into()), Modifiers::CTRL));
+    ui.send(hotkey(
+        Key::Character("T".into()),
+        Modifiers::CTRL | Modifiers::SHIFT,
+    ));
+    ui.send(hotkey(Key::Character("w".into()), Modifiers::CTRL));
+    ui.send(hotkey(Key::Character(",".into()), Modifiers::CTRL));
+    ui.send(hotkey(Key::Character(".".into()), Modifiers::CTRL));
+    let messages: Vec<_> = ui.into_messages().collect();
+    assert!(
+        matches!(
+            messages.as_slice(),
+            [
+                Message::SelectTab(1),
+                Message::NewSession,
+                Message::ToggleTerminal,
+                Message::CloseCurrent,
+                Message::StepTab(-1),
+                Message::StepTab(1)
+            ]
+        ),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn word_selection_works_in_prompt_and_source_bindings() {
+    use iced::{
+        keyboard::{Key, Modifiers, key::Named},
+        widget::text_editor::{Binding, KeyPress, Motion, Status},
+    };
+    for binding in [
+        crate::ui::enter_sends,
+        crate::ui::reading_keys,
+        Binding::<Message>::from_key_press,
+    ] {
+        for (key, motion) in [
+            (Named::ArrowLeft, Motion::WordLeft),
+            (Named::ArrowRight, Motion::WordRight),
+        ] {
+            let event = |modifiers| KeyPress {
+                key: Key::Named(key),
+                modified_key: Key::Named(key),
+                physical_key: iced::keyboard::key::Physical::Unidentified(
+                    iced::keyboard::key::NativeCode::Unidentified,
+                ),
+                modifiers,
+                text: None,
+                status: Status::Focused { is_hovered: false },
+            };
+            assert!(
+                matches!(binding(event(Modifiers::CTRL | Modifiers::SHIFT)), Some(Binding::Select(m)) if m == motion)
+            );
+            assert!(
+                matches!(binding(event(Modifiers::CTRL)), Some(Binding::Move(m)) if m == motion)
+            );
+        }
+    }
+    let (mut app, _) = App::new(true, None);
+    type_text(&mut app, "alpha beta gamma");
+    let mut live = Live::new((720.0, 860.0));
+    live.operations.push(Box::new(
+        iced::advanced::widget::operation::focusable::focus(iced::widget::Id::new("prompt")),
+    ));
+    let messages = live.frame(&app, |ui| {
+        ui.send(hotkey(Key::Named(Named::Home), Modifiers::empty()));
+        ui.send(hotkey(
+            Key::Named(Named::ArrowRight),
+            Modifiers::CTRL | Modifiers::SHIFT,
+        ));
+    });
+    for message in messages {
+        let _ = app.update(message);
+    }
+    assert_eq!(demo_view(&app).draft.selection().as_deref(), Some("alpha"));
+    assert_eq!(app.selected.as_deref(), Some("demo"));
+    for (direction, expected) in [
+        (Named::ArrowRight, "alpha beta"),
+        (Named::ArrowLeft, "alpha "),
+    ] {
+        let messages = live.frame(&app, |ui| {
+            ui.send(hotkey(
+                Key::Named(direction),
+                Modifiers::CTRL | Modifiers::SHIFT,
+            ));
+        });
+        for message in messages {
+            let _ = app.update(message);
+        }
+        assert_eq!(demo_view(&app).draft.selection().as_deref(), Some(expected));
+        assert_eq!(app.selected.as_deref(), Some("demo"));
+    }
+}
+
+#[test]
+fn word_selection_works_in_single_line_inputs() {
+    use iced::keyboard::{Key, Modifiers, key::Named};
+    let input = iced::widget::text_input("", "alpha beta gamma")
+        .id("edit")
+        .on_input(Message::Copy);
+    let mut ui = iced_test::Simulator::with_size(
+        crate::snapshots::settings(),
+        (600.0, 100.0),
+        crate::keys::intercept_shortcuts(input),
+    );
+    ui.click(iced::widget::Id::new("edit")).unwrap();
+    ui.send(hotkey(Key::Named(Named::Home), Modifiers::empty()));
+    ui.send(hotkey(
+        Key::Named(Named::ArrowRight),
+        Modifiers::CTRL | Modifiers::SHIFT,
+    ));
+    let mut insert = hotkey(Key::Character("X".into()), Modifiers::empty());
+    if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { text, .. }) = &mut insert[1] {
+        *text = Some("X".into());
+    }
+    ui.send(insert);
+    let messages: Vec<_> = ui.into_messages().collect();
+    assert!(
+        matches!(messages.as_slice(), [Message::Copy(text)] if text == "X beta gamma"),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn numbered_tabs_ignore_missing_positions_and_new_session_opens_chooser_when_empty() {
+    let (mut app, _) = App::new(true, None);
+    add_session(&mut app, "other");
+    let _ = app.update(Message::SelectTab(1));
+    assert_eq!(app.selected.as_deref(), Some("other"));
+    let _ = app.update(Message::SelectTab(8));
+    assert_eq!(app.selected.as_deref(), Some("other"));
+    let _ = app.update(Message::SelectTab(0));
+    assert_eq!(app.selected.as_deref(), Some("demo"));
+    app.tabs.clear();
+    app.selected = None;
+    let _ = app.update(Message::CloseCurrent);
+    let _ = app.update(Message::StepTab(1));
+    let _ = app.update(Message::NewSession);
+    assert!(app.menu.is_some());
+}
+
+#[test]
+fn session_hotkeys_create_with_current_agent_and_close_current_session() {
+    let (client, mut daemon) = daemon();
+    let mut app = live_app(vec![client]);
+    app.tabs[0].agent = "codex".into();
+    app.daemon_settings = Some(serde_json::from_value(json!({"remember_pins":true})).unwrap());
+    let server = std::thread::spawn(move || {
+        let req = daemon.expect("_sill/sessions.create");
+        assert_eq!(req["params"]["agent"], "codex");
+        assert_eq!(req["params"]["remember_pins"], true);
+        daemon.reply(&req, json!({"session_id":"fresh"}));
+        let req = daemon.expect("_sill/sessions.list");
+        daemon.reply(
+            &req,
+            json!({"sessions":[session_record("fresh", "Fresh", false, false)], "next":null}),
+        );
+        let req = daemon.expect("_sill/sessions.end");
+        assert_eq!(req["params"]["session_id"], "fresh");
+        daemon.reply(&req, json!({}));
+        let req = daemon.expect("_sill/sessions.list");
+        daemon.reply(&req, json!({"sessions":[], "next":null}));
+    });
+    let task = app.update(Message::NewSession);
+    settle_task(&mut app, task);
+    assert_eq!(app.selected.as_deref(), Some("fresh"));
+    let task = app.update(Message::CloseCurrent);
+    settle_task(&mut app, task);
+    assert!(app.tabs.is_empty());
+    server.join().unwrap();
 }
