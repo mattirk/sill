@@ -29,6 +29,9 @@ const RO_BIND: &[&str] = &["sys"];
 const SKIP: &[&str] = &["lost+found"];
 /// Where the host tree is visible read-only inside the jail.
 pub const HOST_VIEW: &str = "/.sill/host";
+/// The sill state filesystem (SPEC §4.9): never a layer, never visible — it holds every session's
+/// upper trees.
+pub const STATE_FS: &str = "/var/lib/sill";
 /// Where the session proxy's socket is bound inside the jail.
 pub const PROXY_SOCKET: &str = "/.sill/proxy.sock";
 /// Loopback port the shim forwards to the proxy socket.
@@ -84,6 +87,8 @@ pub struct Layer {
 pub struct JailPlan {
     pub argv: Vec<OsString>,
     pub layers: Vec<Layer>,
+    /// Directories that contain a mount point and were split into per-child mounts.
+    pub expanded: Vec<PathBuf>,
     pub masked: Vec<PathBuf>,
     pub direct: Vec<PathBuf>,
     pub warnings: Vec<String>,
@@ -111,11 +116,70 @@ impl JailSpec {
             p.paths.hidden_mounts.iter().map(|h| crate::paths::expand_home(h, &self.home)).collect();
         let is_hidden = |path: &Path| hidden.iter().any(|h| is_under(path, h));
 
-        // --- layers: top-level directories, then persistent mounts below them
+        // --- layers: top-level directories, then persistent mounts below them. A directory that has a
+        // mount point somewhere inside it can't be an overlay lower (the kernel refuses it), so it is
+        // expanded: it becomes a tmpfs in the jail and each child is handled on its own (dirs → overlay
+        // or expand again, symlinks → symlink, files → read-only bind).
         let real = mounts::real_mounts(&self.mounts);
         let mut layers: Vec<Layer> = Vec::new();
         let mut ro_binds: Vec<PathBuf> = Vec::new();
         let mut symlinks: Vec<(PathBuf, String)> = Vec::new();
+        let mut expanded: Vec<PathBuf> = Vec::new();
+        let has_submount = |path: &Path| {
+            self.mounts.iter().any(|m| m.mount_point != path && is_under(&m.mount_point, path))
+        };
+        // the state fs and anything inside the session's own state dir: never overlaid, never visible
+        let is_state_fs = |path: &Path| is_under(path, Path::new(STATE_FS)) || is_under(path, &self.state_dir);
+        // returns true when the dir was handled (overlay, expansion or ro-bind)
+        fn handle_dir(
+            path: &Path,
+            spec: &JailSpec,
+            real: &[Mount],
+            is_hidden: &dyn Fn(&Path) -> bool,
+            has_submount: &dyn Fn(&Path) -> bool,
+            is_state_fs: &dyn Fn(&Path) -> bool,
+            layers: &mut Vec<Layer>,
+            ro_binds: &mut Vec<PathBuf>,
+            symlinks: &mut Vec<(PathBuf, String)>,
+            expanded: &mut Vec<PathBuf>,
+            warnings: &mut Vec<String>,
+        ) {
+            if is_hidden(path) || is_state_fs(path) {
+                return;
+            }
+            let is_mount = spec.mounts.iter().any(|m| m.mount_point == path);
+            if is_mount && !real.iter().any(|r| r.mount_point == path) {
+                ro_binds.push(path.to_path_buf()); // non-persistent fs (squashfs, fuse): read-only
+                return;
+            }
+            if !has_submount(path) {
+                layers.push(spec.layer_for(path));
+                return;
+            }
+            let Ok(rd) = std::fs::read_dir(path) else {
+                warnings.push(format!("{} not readable, left out of the jail", path.display()));
+                return;
+            };
+            expanded.push(path.to_path_buf());
+            let mut entries: Vec<_> = rd.filter_map(Result::ok).collect();
+            entries.sort_by_key(|e| e.file_name());
+            for e in entries {
+                let child = e.path();
+                let Ok(md) = child.symlink_metadata() else { continue };
+                if md.file_type().is_symlink() {
+                    if let Ok(t) = std::fs::read_link(&child) {
+                        symlinks.push((t, child.to_string_lossy().trim_start_matches('/').to_string()));
+                    }
+                } else if md.is_dir() {
+                    if std::fs::read_dir(&child).is_err() {
+                        continue; // unreadable (e.g. root-only): absent in the jail
+                    }
+                    handle_dir(&child, spec, real, is_hidden, has_submount, is_state_fs, layers, ro_binds, symlinks, expanded, warnings);
+                } else {
+                    ro_binds.push(child);
+                }
+            }
+        }
         for e in &self.root_entries {
             let path = PathBuf::from("/").join(&e.name);
             if let Some(target) = &e.symlink {
@@ -129,49 +193,33 @@ impl JailSpec {
                 ro_binds.push(path);
                 continue;
             }
-            if is_hidden(&path) {
-                continue;
-            }
             if !e.readable {
                 warnings.push(format!("{} not readable, left out of the jail", path.display()));
                 continue;
             }
-            // a top-level dir that is a mount of a non-persistent fs (squashfs, fuse, …): read-only
-            if self.mounts.iter().any(|m| m.mount_point == path) && !real.iter().any(|r| r.mount_point == path) {
-                ro_binds.push(path);
-                continue;
-            }
-            layers.push(self.layer_for(&path));
-        }
-        for m in &real {
-            let top = m.mount_point.components().nth(1).map(|c| PathBuf::from("/").join(c.as_os_str()));
-            let Some(top) = top else { continue };
-            if m.mount_point == top {
-                continue; // handled as a top-level entry above
-            }
-            if !layers.iter().any(|l| l.host == top) || is_hidden(&m.mount_point) {
-                continue;
-            }
-            if is_under(&self.state_dir, &m.mount_point) {
-                continue; // the sill state filesystem: never a layer, invisible to its parent overlay
-            }
-            layers.push(self.layer_for(&m.mount_point));
+            handle_dir(&path, self, &real, &is_hidden, &has_submount, &is_state_fs, &mut layers, &mut ro_binds, &mut symlinks, &mut expanded, &mut warnings);
         }
         // parents before children (mount order)
         layers.sort_by(|a, b| a.host.cmp(&b.host));
 
         // --- state dir safety
-        let state_layer = layers.iter().find(|l| is_under(&self.state_dir, &l.host));
+        let state_in_tree = layers
+            .iter()
+            .map(|l| l.host.clone())
+            .chain(expanded.iter().cloned())
+            .find(|h| is_under(&self.state_dir, h));
         let state_on_submount = self.mounts.iter().any(|m| {
             m.mount_point != Path::new("/")
                 && is_under(&self.state_dir, &m.mount_point)
                 && !layers.iter().any(|l| l.host == m.mount_point)
         });
-        if state_layer.is_some() && !state_on_submount {
+        if let Some(tree) = state_in_tree
+            && !state_on_submount
+        {
             let msg = format!(
                 "state dir {} lies inside overlaid tree {} on the same filesystem (SPEC §4.9: use the sill state filesystem)",
                 self.state_dir.display(),
-                state_layer.unwrap().host.display()
+                tree.display()
             );
             if self.unsafe_state { warnings.push(msg) } else { bail!(msg) }
         }
@@ -226,10 +274,18 @@ impl JailSpec {
         }
 
         // root symlinks, fresh dirs, /sys
-        for (target, name) in &symlinks {
+        for (target, name) in symlinks.iter().filter(|(_, n)| !n.contains('/')) {
             push(&mut a, &[&"--symlink", target, &format!("/{name}")]);
         }
         push(&mut a, &[&"--proc", &"/proc", &"--dev", &"/dev", &"--tmpfs", &"/tmp", &"--tmpfs", &"/run"]);
+        // expanded directories (contain a mount point): tmpfs, then their children below
+        expanded.sort();
+        for d in &expanded {
+            push(&mut a, &[&"--tmpfs", d]);
+        }
+        for (target, name) in symlinks.iter().filter(|(_, n)| n.contains('/')) {
+            push(&mut a, &[&"--symlink", target, &format!("/{name}")]);
+        }
         push(&mut a, &[&"--dir", &format!("/run/user/{}", self.uid)]);
         for r in &ro_binds {
             push(&mut a, &[&"--ro-bind", r, r]);
@@ -242,15 +298,27 @@ impl JailSpec {
 
         // host view: same layers read-only, every other mount below them masked
         push(&mut a, &[&"--dir", &HOST_VIEW]);
-        for l in &layers {
-            push(&mut a, &[&"--ro-bind", &l.host, &host_view(&l.host)]);
+        let host_binds: Vec<PathBuf> = {
+            // top-most of: expanded dirs and layers (an expanded dir's bind already covers its children)
+            let mut v: Vec<PathBuf> = expanded.iter().cloned().chain(layers.iter().map(|l| l.host.clone())).collect();
+            v.sort();
+            let mut out: Vec<PathBuf> = Vec::new();
+            for p in v {
+                if !out.iter().any(|o| is_under(&p, o)) {
+                    out.push(p);
+                }
+            }
+            out
+        };
+        for h in &host_binds {
+            push(&mut a, &[&"--ro-bind", h, &host_view(h)]);
         }
         let mut host_masks: Vec<PathBuf> = Vec::new();
         for m in &self.mounts {
             if m.mount_point == Path::new("/") || layers.iter().any(|l| l.host == m.mount_point) {
                 continue;
             }
-            if layers.iter().any(|l| is_under(&m.mount_point, &l.host)) {
+            if host_binds.iter().any(|h| is_under(&m.mount_point, h)) {
                 host_masks.push(m.mount_point.clone());
             }
         }
@@ -305,7 +373,7 @@ impl JailSpec {
         }
         a.extend(self.command.iter().cloned());
 
-        Ok(JailPlan { argv: a, layers, masked, direct, warnings })
+        Ok(JailPlan { argv: a, layers, expanded, masked, direct, warnings })
     }
 
     fn layer_for(&self, host: &Path) -> Layer {
@@ -360,7 +428,7 @@ mod tests {
              50 25 0:30 / /tmp rw - tmpfs tmpfs rw\n\
              60 25 8:16 / /mnt/data rw - ext4 /dev/sdb1 rw\n\
              70 25 7:0 / /var/lib/sill rw - ext4 /dev/loop0 rw\n\
-             80 25 0:40 / /home/me/.cache/doc rw - fuse.portal portal rw\n",
+             80 25 0:40 / /mnt/portal rw - fuse.portal portal rw\n",
         );
         let root_entries = ["bin", "boot", "dev", "etc", "home", "lib", "mnt", "proc", "run", "sys", "tmp", "usr", "var"]
             .iter()
@@ -396,11 +464,19 @@ mod tests {
         let hosts: Vec<_> = plan.layers.iter().map(|l| l.host.to_string_lossy().into_owned()).collect();
         // /boot hidden by the default policy; /mnt/data is a nested persistent mount; /var/lib/sill is a
         // sub-mount of /var and therefore not a layer (invisible to the overlay, masked in the host view)
-        assert_eq!(hosts, vec!["/etc", "/home", "/mnt", "/mnt/data", "/usr", "/var"]);
-        assert_eq!(plan.layers[3].upper, PathBuf::from("/var/lib/sill/1000/sessions/x/upper/mnt%data"));
+        // /mnt and /var contain mount points → expanded (tmpfs + children); their real sub-mounts are
+        // their own layers; the state fs never is. The fake root_entries have no real /mnt or /var
+        // children on this machine's filesystem, so only the mounts themselves show up as layers.
+        assert!(hosts.contains(&"/etc".to_string()) && hosts.contains(&"/home".to_string()) && hosts.contains(&"/usr".to_string()));
+        assert!(!hosts.contains(&"/mnt".to_string()), "/mnt holds mounts, must be expanded");
+        // (/mnt/data would be a layer on a machine where that directory exists; the test host has none)
+        assert!(!hosts.contains(&"/var".to_string()) && !hosts.contains(&"/mnt".to_string()));
+        assert!(!hosts.iter().any(|h| h.contains("sill")));
+        assert!(plan.expanded.contains(&PathBuf::from("/var")) && plan.expanded.contains(&PathBuf::from("/mnt")));
         let s = render(&plan.argv);
+        assert!(s.contains("--tmpfs /var "));
         assert!(s.contains("--tmpfs /.sill/host/var/lib/sill"));
-        assert!(s.contains("--tmpfs /.sill/host/home/me/.cache/doc"));
+        assert!(s.contains("--tmpfs /.sill/host/mnt/portal"));
         assert!(s.contains("--symlink usr/bin /bin"));
         assert!(s.contains("--disable-userns"));
         assert!(!s.contains("--share-net"));

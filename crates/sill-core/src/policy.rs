@@ -80,6 +80,14 @@ pub struct Limits {
     pub memory_max: String,
     pub tasks_max: u32,
     pub idle_timeout_minutes: u32,
+    /// Stop the agent process (not the jail) after this long without traffic and without a connected
+    /// shelf; 0 = never.
+    #[serde(default = "default_agent_idle")]
+    pub agent_idle_minutes: u32,
+}
+
+fn default_agent_idle() -> u32 {
+    10
 }
 
 impl Default for Limits {
@@ -91,6 +99,7 @@ impl Default for Limits {
             memory_max: "12G".into(),
             tasks_max: 512,
             idle_timeout_minutes: 120,
+            agent_idle_minutes: 10,
         }
     }
 }

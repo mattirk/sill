@@ -3,7 +3,8 @@
 A shelf for AI agents on your own Linux machine: an ACP client, a jail the host controls, and a ledger
 of every change the agent makes. See [SPEC.md](SPEC.md) for the design; this file is the practical side.
 
-Status: **M0** (2026-10-28). The risky parts work end to end from the command line; no GTK shelf yet.
+Status: **M1** (2026-10-28). The shelf window works on top of the M0 pieces: hotkey toggle, left-edge
+placement, streamed Markdown conversation, tool-call rows, permission buttons, prompt box.
 
 ## Layout
 
@@ -53,6 +54,21 @@ $S dev stop
 Logs: `$XDG_RUNTIME_DIR/sill/dev/{jail,proxy}.log` (the proxy log lists every allow/deny).
 `--net` shares the host network instead of using the proxy (testing only).
 
+## The shelf (M1)
+
+```bash
+sill shelf --cwd ~/GIT/workdir-1 --hidden   # start (autostart entry does this); session unit "main"
+sill toggle                                 # show/hide — bind to Alt+Space (Cinnamon custom shortcut)
+```
+
+Enter sends the prompt, Shift+Enter inserts a newline, Escape hides the shelf. The window sits on the
+left edge, 38 % of the work area wide, above other windows, out of the taskbar. The agent session runs
+in `sill-main.service` and survives the shelf; permissions are answered with the buttons in the
+conversation. Per-user setup (done): `~/.config/autostart/sill.desktop`, Cinnamon shortcut
+`custom0` = `/usr/local/bin/sill toggle`. Binaries are installed system-wide by
+`studio-debian-system/sound/config/install.sh` from `target/release/` (build with `cargo build --release`
+first).
+
 ## State filesystem
 
 Session upper trees must not live inside an overlaid tree (SPEC §4.9). The units in
@@ -75,4 +91,4 @@ no longer needed.
   unmapped id; SPEC §4.10 #16). Group-shared trees: `direct` or `ro` in the policy for now.
 - The parked agent process costs ~1.6 % of a core; stop it when idle (`dev stop`) until idle-stop exists.
 - HTTP CONNECT proxy only (no SOCKS5); programs that ignore `HTTPS_PROXY` have no network, by design.
-- The jail is detached with `setsid`, not yet a systemd user unit.
+- No sessions list/resume, files pane or changes view in the shelf yet (M2); no focus keeper (M3).

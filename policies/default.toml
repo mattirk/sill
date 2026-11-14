@@ -39,6 +39,9 @@ mask = [
   "~/.config/Nextcloud",           # sync account tokens
   "~/.mozilla", "~/.config/chromium", "~/.config/google-chrome",
 ]
+# Group-shared trees (setgid dirs, group-writable files) must be direct or ro: overlayfs can't copy up
+# files owned by another uid/gid inside the user namespace (SPEC §4.10 #16). Add yours here, e.g.
+#   direct = [..., "/srv/shared-project"]
 # Visible, never writable:
 ro = []
 # Host mount points left out of the jail (shown as empty directories):
@@ -54,7 +57,8 @@ io_weight = 20
 memory_high = "8G"
 memory_max = "12G"
 tasks_max = 512
-idle_timeout_minutes = 120
+idle_timeout_minutes = 120    # stop the whole jail after this long without a turn
+agent_idle_minutes = 10       # stop just the agent process (≈1.6 % CPU parked, SPEC §4.10 #17); resume via session/load
 
 [jail]
 allow_userns = false

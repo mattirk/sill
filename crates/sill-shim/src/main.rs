@@ -88,6 +88,16 @@ struct State {
     outbox_bytes: usize,
     /// Bumped for every new agent connection so an old relay thread knows it was replaced.
     relay_generation: u64,
+    /// A shelf is attached to the agent stream.
+    relay_connected: bool,
+    /// Last agent stdio traffic or shelf (dis)connect.
+    last_activity: Option<std::time::Instant>,
+}
+
+impl State {
+    fn touch(&mut self) {
+        self.last_activity = Some(std::time::Instant::now());
+    }
 }
 
 type Shared = Arc<(Mutex<State>, Condvar)>;
@@ -109,6 +119,15 @@ fn main() -> Result<()> {
             }
         });
     }
+    // --agent-idle SECS : stop the agent process after SECS without traffic and without a shelf attached
+    let mut agent_idle: Option<u64> = None;
+    while let Some(i) = args.iter().position(|a| a == "--agent-idle") {
+        if i + 1 >= args.len() {
+            bail!("--agent-idle expects seconds");
+        }
+        agent_idle = Some(args.remove(i + 1).parse().context("--agent-idle expects seconds")?);
+        args.remove(i);
+    }
     let listener = match args.as_slice() {
         [flag, fd] if flag == "--control-fd" => {
             let fd: i32 = fd.parse().context("--control-fd expects a number")?;
@@ -124,6 +143,10 @@ fn main() -> Result<()> {
     eprintln!("sill-shim: ready (pid {})", std::process::id());
 
     let shared: Shared = Arc::new((Mutex::new(State::default()), Condvar::new()));
+    if let Some(secs) = agent_idle.filter(|s| *s > 0) {
+        let shared = shared.clone();
+        std::thread::spawn(move || idle_monitor(shared, std::time::Duration::from_secs(secs)));
+    }
     let mut accept_errors = 0;
     for conn in listener.incoming() {
         let conn = match conn {
@@ -245,6 +268,7 @@ fn spawn_agent(argv: Vec<String>, env: BTreeMap<String, String>, cwd: Option<Pat
     st.outbox.clear();
     st.outbox_bytes = 0;
     st.child = Some(child);
+    st.touch();
     drop(st);
     eprintln!("sill-shim: agent {prog} started, pid {pid}");
 
@@ -266,6 +290,7 @@ fn spawn_agent(argv: Vec<String>, env: BTreeMap<String, String>, cwd: Option<Pat
             }
             st.outbox_bytes += line.len() + 1;
             st.outbox.push_back(line);
+            st.touch();
             cvar.notify_all();
         }
         let mut st = lock.lock().unwrap();
@@ -324,12 +349,35 @@ fn kill_agent(shared: &Shared, grace_ms: u64) -> Result<Option<i32>> {
     }
 }
 
+/// Kill the agent after `timeout` of silence with no shelf attached. The jail stays; the shelf resumes
+/// the ACP session with session/load when it comes back (SPEC §4.10 #17).
+fn idle_monitor(shared: Shared, timeout: std::time::Duration) {
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(15));
+        let idle = {
+            let mut st = shared.0.lock().unwrap();
+            reap(&mut st);
+            st.child.is_some()
+                && !st.relay_connected
+                && st.last_activity.map(|t| t.elapsed() >= timeout).unwrap_or(false)
+        };
+        if idle {
+            eprintln!("sill-shim: agent idle for {}s with no shelf attached, stopping it", timeout.as_secs());
+            if let Err(e) = kill_agent(&shared, 5000) {
+                eprintln!("sill-shim: idle stop: {e:#}");
+            }
+        }
+    }
+}
+
 // --- agent relay ---------------------------------------------------------------------------------
 
 fn agent_relay(reader: BufReader<UnixStream>, writer: UnixStream, shared: Shared) -> Result<()> {
     let generation = {
         let mut st = shared.0.lock().unwrap();
         st.relay_generation += 1;
+        st.relay_connected = true;
+        st.touch();
         shared.1.notify_all();
         st.relay_generation
     };
@@ -371,6 +419,7 @@ fn agent_relay(reader: BufReader<UnixStream>, writer: UnixStream, shared: Shared
         if st.relay_generation != generation {
             break;
         }
+        st.touch();
         let Some(stdin) = st.stdin.as_mut() else { break };
         if stdin.write_all(line.as_bytes()).is_err() || stdin.write_all(b"\n").is_err() || stdin.flush().is_err() {
             break;
@@ -382,6 +431,8 @@ fn agent_relay(reader: BufReader<UnixStream>, writer: UnixStream, shared: Shared
         let mut st = shared.0.lock().unwrap();
         if st.relay_generation == generation {
             st.relay_generation += 1;
+            st.relay_connected = false;
+            st.touch();
         }
         shared.1.notify_all();
     }
