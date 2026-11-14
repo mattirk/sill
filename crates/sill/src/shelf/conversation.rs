@@ -1232,16 +1232,18 @@ button.sill-install:hover { background: alpha(@accent_bg_color, 0.45); }
 .sill-badge.sill-badge-kept { color: alpha(@success_color, 0.75); }
 .sill-diff-frame { border-top: 1px solid alpha(@view_fg_color, 0.12); }
 .sill-diff { font-size: 90%; }
-.sill-files > row { padding: 0 4px; min-height: 0; }
+.sill-files > row { padding: 0 4px 0 8px; min-height: 0; }
 .sill-files > row:selected { background: alpha(@accent_bg_color, 0.25); }
-.sill-files treeexpander { padding: 0; }
+.sill-files treeexpander { padding: 0; border-spacing: 0; }
 /* the row's own height comes from its content, so the indents (and their lines) run edge to edge */
 .sill-tree-row { padding: 2px 0; }
 /* the global view's group captions (Pinned here · Repositories with changes · Home) */
 .sill-tree-section { font-size: 80%; opacity: 0.5; padding-top: 6px; }
-/* one faint guide line per level: 12 px per level with the line 4 px in, so the gaps panel edge →
-   first line → … → last line → icon come out about the same (8 / 12 / 8 px) */
-.sill-files treeexpander > indent { -gtk-icon-size: 8px; min-width: 8px; min-height: 0; margin-left: 4px; border-left: 1px solid alpha(@view_fg_color, 0.14); }
+/* one faint guide line per level on a 16 px grid: a level is margin 8 + line 1 + 7 (the theme's
+   `border-spacing: 4px` between an expander's children is zeroed above, or it widens every level), the
+   row's 8 px left padding puts the first line at 16 like the rest — edge → line → line → … all 16 px
+   apart — and each line runs through the centre of its parent's icon (icons start at 8 + 16·depth) */
+.sill-files treeexpander > indent { -gtk-icon-size: 7px; min-width: 7px; min-height: 0; margin-left: 8px; border-left: 1px solid alpha(@view_fg_color, 0.14); }
 .sill-file-icon { opacity: 0.7; -gtk-icon-size: 0.95em; }
 .sill-badge-logo { -gtk-icon-size: 0.85em; margin-left: 2px; }
 .sill-changed { color: @warning_color; }

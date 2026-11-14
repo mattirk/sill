@@ -62,6 +62,18 @@ pub fn build() -> gtk::Box {
     ar_dd.set_tooltip_text(Some("What the agent changed outside git and outside pinned folders is reverted this long after its last write, once the session is idle. Keep in Changes stops the clock."));
     root.append(&row("Auto-revert", &ar_dd));
 
+    // tray icon: a StatusNotifierItem on the panel (SPEC §4.6); registered at shelf start
+    let tray = gtk::Switch::new();
+    tray.set_active(sill_core::config::load().tray());
+    tray.set_halign(gtk::Align::Start);
+    tray.set_valign(gtk::Align::Center);
+    tray.set_tooltip_text(Some("A sill icon on the panel's tray: a click shows or hides the shelf, its menu quits. Needs a panel that takes StatusNotifier items (Cinnamon, KDE, XFCE, MATE, LXQt; GNOME with the AppIndicator extension). Takes effect at the next shelf start."));
+    tray.connect_state_set(|_, on| {
+        let _ = sill_core::config::update(|c| c.tray = Some(on));
+        glib::Propagation::Proceed
+    });
+    root.append(&row("Tray icon", &tray));
+
     // host terminal (Ctrl+Shift+H): a command line; empty = the first installed known terminal
     let term = gtk::Entry::new();
     term.set_hexpand(true);

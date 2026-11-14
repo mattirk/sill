@@ -1525,7 +1525,7 @@ impl SessionView {
             l.set_tooltip_text(Some(&if is_dir {
                 format!("{shown} · show the folder's tree · +lines −lines vs HEAD, ?untracked files")
             } else {
-                format!("{shown} · open the file (Escape returns)")
+                format!("{shown} · open the file (Escape returns) · +lines −lines vs HEAD, ? = untracked")
             }));
             {
                 let weak = Rc::downgrade(self);
@@ -2629,20 +2629,37 @@ impl SessionView {
     }
 }
 
-/// (+insertions, −deletions, untracked files) of a git working tree vs HEAD; None if not a repo.
-fn git_summary(dir: &std::path::Path) -> Option<(u64, u64, u64)> {
-    if !dir.join(".git").exists() {
+/// (+insertions, −deletions, untracked files) vs HEAD: of a pinned folder's working tree, or of a
+/// pinned file alone (in the repository that holds it, found by walking up); None outside a repo.
+fn git_summary(path: &std::path::Path) -> Option<(u64, u64, u64)> {
+    let (repo, spec): (std::path::PathBuf, Option<std::path::PathBuf>) = if path.is_dir() {
+        (path.to_path_buf(), None)
+    } else {
+        let root = path.ancestors().skip(1).find(|a| a.join(".git").exists())?;
+        (root.to_path_buf(), Some(path.strip_prefix(root).ok()?.to_path_buf()))
+    };
+    if !repo.join(".git").exists() {
         return None;
     }
-    let git = sill_core::changes::Git::open(dir).ok()?;
-    let out = git.cmd().args(["diff", "--numstat"]).args(sill_core::changes::Git::DIFF_SAFE).arg("HEAD").output().ok()?;
+    let git = sill_core::changes::Git::open(&repo).ok()?;
+    let mut cmd = git.cmd();
+    cmd.args(["diff", "--numstat"]).args(sill_core::changes::Git::DIFF_SAFE).args(["HEAD", "--"]);
+    if let Some(s) = &spec {
+        cmd.arg(s);
+    }
+    let out = cmd.output().ok()?;
     let (mut add, mut del) = (0u64, 0u64);
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         let mut it = line.split('\t');
         add += it.next().and_then(|x| x.parse::<u64>().ok()).unwrap_or(0);
         del += it.next().and_then(|x| x.parse::<u64>().ok()).unwrap_or(0);
     }
-    let out = git.cmd().args(["ls-files", "--others", "--exclude-standard"]).output().ok()?;
+    let mut cmd = git.cmd();
+    cmd.args(["ls-files", "--others", "--exclude-standard", "--"]);
+    if let Some(s) = &spec {
+        cmd.arg(s);
+    }
+    let out = cmd.output().ok()?;
     let untracked = String::from_utf8_lossy(&out.stdout).lines().count() as u64;
     Some((add, del, untracked))
 }

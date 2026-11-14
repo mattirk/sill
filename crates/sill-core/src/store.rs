@@ -76,10 +76,20 @@ pub fn new_id() -> String {
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
+        // the person's state is 0700/0600 whatever the umask says (security.md S21): the dir here,
+        // the database after SQLite made it — the -wal/-shm files copy the main file's mode
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
+            std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
         }
         let conn = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
+        for suffix in ["", "-wal", "-shm"] {
+            let f = path.with_file_name(format!("{}{suffix}", path.file_name().unwrap_or_default().to_string_lossy()));
+            if f.exists() {
+                let _ = std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600));
+            }
+        }
         // another shelf or a CLI holding a write: wait a little instead of failing at once (a
         // failure here is the service's crash loop, SPEC §4.11 #17)
         conn.busy_timeout(std::time::Duration::from_secs(5))?;

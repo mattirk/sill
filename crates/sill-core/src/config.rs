@@ -37,6 +37,9 @@ pub struct Config {
     /// command line, `{cwd}` replaced by the directory (it is also the process's working directory).
     /// Unset = the first of [`HOST_TERMINALS`] found in `PATH`.
     pub host_terminal: Option<String>,
+    /// A tray icon (StatusNotifierItem) while the shelf runs: click shows or hides it, the menu
+    /// quits. Unset = on; the panel must speak the protocol (SPEC §4.6).
+    pub tray: Option<bool>,
 }
 
 /// Terminals the shelf knows, in preference order: (program, command line). Programs that start
@@ -118,6 +121,10 @@ impl Config {
     }
 
     /// Minutes before an unkept change outside git is reverted; 0 = never.
+    pub fn tray(&self) -> bool {
+        self.tray.unwrap_or(true)
+    }
+
     pub fn auto_revert_minutes(&self) -> u32 {
         self.auto_revert_minutes.unwrap_or(AUTO_REVERT_DEFAULT)
     }

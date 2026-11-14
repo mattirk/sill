@@ -22,7 +22,7 @@ use sill_core::store::Store;
 use super::{session, theme};
 
 /// Folders below this depth are opened when a scoped tree is shown (0 = the pinned folder itself).
-const OPEN_DEPTH: u32 = 2;
+const OPEN_DEPTH: u32 = 1;
 /// Opening stops once this many rows are shown (a huge folder must not stall the shelf).
 const OPEN_LIMIT: u32 = 600;
 
@@ -967,7 +967,7 @@ impl FolderTree {
         });
     }
 
-    /// A scoped tree starts two levels open (build output and dot folders stay closed).
+    /// A scoped tree starts one level open: the pinned folder itself (its children stay closed).
     fn open_levels(&self) {
         let mut i = 0;
         while i < self.tree.n_items() && self.tree.n_items() < OPEN_LIMIT {

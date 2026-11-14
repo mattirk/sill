@@ -18,11 +18,13 @@ mod settings;
 mod spinner;
 mod tabs;
 mod theme;
+mod tray;
 mod tree;
 mod viewer;
 mod window;
 mod x11;
 
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
@@ -73,6 +75,9 @@ pub fn run(cwd: Option<PathBuf>, hidden: bool) -> Result<()> {
             w.set_visible(false);
         } else {
             w.present();
+        }
+        if sill_core::config::load().tray() {
+            tray::start(app);
         }
     });
     let toggle = gio::SimpleAction::new("toggle", None);
@@ -267,7 +272,7 @@ pub fn restart(hidden: bool, dev: bool, detached: bool) -> Result<()> {
     }
     // a dev shelf has no journal: its output goes to the state dir
     let log = sill_core::store::default_path().ok().and_then(|p| {
-        std::fs::OpenOptions::new().create(true).append(true).open(p.with_file_name("shelf.log")).ok()
+        std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(p.with_file_name("shelf.log")).ok()
     });
     cmd.stdin(std::process::Stdio::null());
     match log {
@@ -306,7 +311,7 @@ fn inside_shelf() -> bool {
 fn restart_detached(hidden: bool, dev: bool) -> Result<()> {
     let exe = std::env::current_exe()?;
     let log_path = sill_core::store::default_path()?.with_file_name("shelf.log");
-    let log = std::fs::OpenOptions::new().create(true).append(true).open(&log_path)?;
+    let log = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(&log_path)?;
     let mut args: Vec<std::ffi::OsString> = vec!["--user".into(), "--scope".into(), "--quiet".into(), "--".into()];
     args.extend(["setsid".into(), "-f".into(), exe.into_os_string(), "restart".into(), "--detached".into()]);
     if hidden {
