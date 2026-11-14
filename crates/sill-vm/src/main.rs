@@ -1,5 +1,10 @@
 //! SPIKE (2026-11-12): boot a Debian cloud image with Apple's Virtualization framework from Rust
-//! and reach its SSH. `sill-vm DIR`: DIR holds `disk.raw` and `seed.iso` (cloud-init, NoCloud).
+//! and reach its SSH. `sill-vm DIR`: DIR holds `disk.raw` and `seed.iso` (cloud-init, NoCloud);
+//! the VM's EFI variables and machine identity are kept there too, so the guest keeps its DHCP
+//! lease between boots. Prints the guest's address once its SSH answers; with `SILL_VM_HOLD`
+//! set to a path, keeps the VM until that file exists, then asks the guest to stop. CPUs and
+//! memory: `SILL_VM_CPUS` (4), `SILL_VM_MEMORY_GB` (4). The binary needs the
+//! `com.apple.security.virtualization` entitlement (`packaging/mac/sill-vm.entitlements`).
 #[cfg(not(target_os = "macos"))]
 fn main() {
     eprintln!("sill-vm: macOS only");
@@ -49,6 +54,22 @@ mod spike {
                 bail!("this Mac cannot run virtual machines");
             }
             let platform = VZGenericPlatformConfiguration::new();
+            let id_path = dir.join("machine-id");
+            let id = std::fs::read(&id_path).ok().and_then(|bytes| {
+                VZGenericMachineIdentifier::initWithDataRepresentation(
+                    VZGenericMachineIdentifier::alloc(),
+                    &objc2_foundation::NSData::with_bytes(&bytes),
+                )
+            });
+            let id = match id {
+                Some(id) => id,
+                None => {
+                    let id = VZGenericMachineIdentifier::new();
+                    std::fs::write(&id_path, id.dataRepresentation().to_vec())?;
+                    id
+                }
+            };
+            platform.setMachineIdentifier(&id);
             let boot = VZEFIBootLoader::new();
             let vars_path = dir.join("efivars");
             let vars = if vars_path.exists() {
@@ -97,8 +118,11 @@ mod spike {
             let config = VZVirtualMachineConfiguration::new();
             config.setPlatform(&platform);
             config.setBootLoader(Some(&boot));
-            config.setCPUCount(4);
-            config.setMemorySize(4 * 1024 * 1024 * 1024);
+            let number = |name: &str, default: u64| {
+                std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+            };
+            config.setCPUCount(number("SILL_VM_CPUS", 4) as usize);
+            config.setMemorySize(number("SILL_VM_MEMORY_GB", 4) * 1024 * 1024 * 1024);
             config.setStorageDevices(&NSArray::from_retained_slice(&disks));
             config.setNetworkDevices(&NSArray::from_retained_slice(&[Retained::into_super(net)]));
             config.setSerialPorts(&NSArray::from_retained_slice(&[Retained::into_super(serial)]));
@@ -181,17 +205,20 @@ mod spike {
     }
 
     /// The address macOS's DHCP server leased to the guest, found by its host name (the guest
-    /// identifies itself by a DHCP client id, not its MAC).
+    /// identifies itself by a DHCP client id, not its MAC); of several, the latest lease.
     fn leased() -> Option<String> {
         let leases = std::fs::read_to_string("/var/db/dhcpd_leases").ok()?;
-        let mut found = None;
-        for entry in leases.split('}') {
-            if entry.lines().any(|line| line.trim() == "name=sill-box") {
-                found = entry
-                    .lines()
-                    .find_map(|line| line.trim().strip_prefix("ip_address=").map(str::to_string));
-            }
-        }
-        found
+        leases
+            .split('}')
+            .filter(|entry| entry.lines().any(|line| line.trim() == "name=sill-box"))
+            .filter_map(|entry| {
+                let field = |key: &str| {
+                    entry.lines().find_map(|line| line.trim().strip_prefix(key).map(str::to_string))
+                };
+                let until = u64::from_str_radix(field("lease=0x")?.as_str(), 16).ok()?;
+                Some((until, field("ip_address=")?))
+            })
+            .max()
+            .map(|(_, ip)| ip)
     }
 }
