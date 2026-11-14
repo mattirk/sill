@@ -19,7 +19,7 @@ use super::changes::ChangesPage;
 use super::files::FilesPage;
 use super::session_view::SessionView;
 use super::tabs::TabStrip;
-use super::{session, settings, x11};
+use super::{session, settings, theme, x11};
 
 thread_local! {
     pub static HOTKEY: RefCell<Option<Rc<super::hotkey::Hotkey>>> = const { RefCell::new(None) };
@@ -31,7 +31,10 @@ pub struct Shelf {
     stack: gtk::Stack,
     tabs: Rc<TabStrip>,
     pages: gtk::Stack,
-    status: gtk::Label,
+    /// Top-bar indicator: a quiet square while idle, a spinner while the selected agent works; the
+    /// status text is its tooltip.
+    status: gtk::Stack,
+    status_text: RefCell<String>,
     spinner: gtk::Spinner,
     busy: RefCell<std::collections::HashSet<String>>,
     pending_restart: RefCell<std::collections::HashSet<String>>,
@@ -98,11 +101,19 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
     bar.append(&files_btn);
 
     let spinner = gtk::Spinner::new();
-    spinner.set_visible(false);
     spinner.add_css_class("sill-spinner");
-    bar.append(&spinner);
-    let status = gtk::Label::new(Some(""));
-    status.add_css_class("dim-label");
+    spinner.set_valign(gtk::Align::Center);
+    let idle = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    idle.add_css_class("sill-status");
+    idle.set_valign(gtk::Align::Center);
+    idle.set_halign(gtk::Align::Center);
+    let status = gtk::Stack::new();
+    status.set_hhomogeneous(true);
+    status.set_vhomogeneous(true);
+    status.add_named(&idle, Some("idle"));
+    status.add_named(&spinner, Some("busy"));
+    status.set_valign(gtk::Align::Center);
+    status.add_css_class("sill-status-slot");
     bar.append(&status);
 
     // --- pages
@@ -158,6 +169,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         tabs: tabs.clone(),
         pages: pages.clone(),
         status: status.clone(),
+        status_text: RefCell::new(String::new()),
         spinner: spinner.clone(),
         busy: RefCell::new(std::collections::HashSet::new()),
         pending_restart: RefCell::new(std::collections::HashSet::new()),
@@ -165,6 +177,20 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         changes: changes.clone(),
         files: files.clone(),
     });
+    {
+        // drawn glyphs don't follow CSS: redraw the tab icons in the new theme's foreground
+        let weak = Rc::downgrade(&shelf);
+        theme::on_change(move |_| {
+            if let Some(s) = weak.upgrade() {
+                let sessions = s.store.sessions().unwrap_or_default();
+                for id in s.tabs.ids() {
+                    if let Some(sess) = sessions.iter().find(|x| x.id == id) {
+                        s.tabs.set_icon(&id, &s.tab_icon(&sess.agent));
+                    }
+                }
+            }
+        });
+    }
 
     {
         let s = shelf.clone();
@@ -389,11 +415,34 @@ impl Shelf {
         }
     }
 
-    /// Spinner in the bar while the selected session's agent is working.
+    /// The small agent glyph for a tab, in the strip's current text colour.
+    fn tab_icon(&self, agent: &str) -> gtk::Image {
+        let home = session::home().unwrap_or_default();
+        let registry = agents::load(&home);
+        let color = super::icons::fg_for(&self.tabs.root, &theme::current());
+        super::icons::image(registry.get(agent), color, 12)
+    }
+
+    /// Spinner in the bar while the selected session's agent is working, a square otherwise.
     fn sync_spinner(&self) {
         let selected_busy = self.tabs.selected().map(|id| self.busy.borrow().contains(&id)).unwrap_or(false);
-        self.spinner.set_visible(selected_busy);
+        self.status.set_visible_child_name(if selected_busy { "busy" } else { "idle" });
         self.spinner.set_spinning(selected_busy);
+    }
+
+    /// The selected session's status: shown on hover; states that need the person (login, a dead
+    /// session, a failed start) tint the square.
+    fn set_status(&self, text: &str) {
+        *self.status_text.borrow_mut() = text.to_string();
+        self.status.set_tooltip_text(if text.is_empty() { None } else { Some(text) });
+        let attention = ["needed", "failed", "ended", "not running", "closed"].iter().any(|w| text.contains(w));
+        if let Some(idle) = self.status.child_by_name("idle") {
+            if attention {
+                idle.add_css_class("sill-attention");
+            } else {
+                idle.remove_css_class("sill-attention");
+            }
+        }
     }
 
     fn sync_status(&self) {
@@ -401,7 +450,7 @@ impl Shelf {
         if let Some(id) = self.tabs.selected()
             && let Some(v) = self.views.borrow().get(&id)
         {
-            self.status.set_text(&v.status.text());
+            self.set_status(&v.status.text());
         }
     }
 
@@ -414,6 +463,7 @@ impl Shelf {
         let view = SessionView::new(s.clone(), self.store.clone());
         self.pages.add_named(&view.root, Some(&id));
         self.tabs.add(&id, &s.title);
+        self.tabs.set_icon(&id, &self.tab_icon(&s.agent));
         {
             let shelf = self.clone();
             *view.on_turn_end.borrow_mut() = Some(Box::new(move |_id| {
@@ -460,7 +510,7 @@ impl Shelf {
             let vid = id.clone();
             view.status.connect_notify_local(Some("label"), move |l, _| {
                 if shelf.tabs.selected().as_deref() == Some(vid.as_str()) {
-                    shelf.status.set_text(&l.text());
+                    shelf.set_status(&l.text());
                 }
             });
         }
@@ -506,7 +556,7 @@ impl Shelf {
         }
         self.tabs.remove(id);
         if self.tabs.selected().is_none() {
-            self.status.set_text("");
+            self.set_status("");
         }
     }
 

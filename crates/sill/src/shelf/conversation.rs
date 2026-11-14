@@ -397,6 +397,11 @@ popover.sill-menu > contents { padding: 4px; min-width: 180px; }
 .sill-menu-caption { font-size: 80%; opacity: 0.5; padding: 2px 10px; }
 .sill-menu-trash { padding: 0 6px; min-height: 0; opacity: 0.35; background: transparent; border: none; box-shadow: none; }
 .sill-menu-trash:hover { opacity: 1; color: @error_color; }
+/* top-bar status: a small dot at rest, a spinner while working; the text lives in the tooltip */
+.sill-status-slot { padding: 6px 8px; }
+.sill-status { min-width: 8px; min-height: 8px; border-radius: 4px; background: alpha(@view_fg_color, 0.3); }
+.sill-status.sill-attention { background: @warning_color; }
+.sill-spinner { min-width: 15px; min-height: 15px; opacity: 0.8; }
 .sill-files > row { padding: 1px 4px; min-height: 0; }
 .sill-files > row:selected { background: alpha(@accent_bg_color, 0.25); }
 .sill-files treeexpander { padding: 1px 0; }

@@ -13,6 +13,8 @@ use gtk::prelude::*;
 pub struct Tab {
     pub id: String,
     root: gtk::Box,
+    /// Holds the agent glyph (set by the window, redrawn on theme change).
+    icon_slot: gtk::Box,
     stack: gtk::Stack,
     label: gtk::Label,
     entry: gtk::Entry,
@@ -53,6 +55,10 @@ impl TabStrip {
     pub fn add(self: &Rc<Self>, id: &str, title: &str) {
         let root = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         root.add_css_class("sill-tab");
+        let icon_slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        icon_slot.add_css_class("sill-tab-icon");
+        icon_slot.set_valign(gtk::Align::Center);
+        root.append(&icon_slot);
         let stack = gtk::Stack::new();
         stack.set_hhomogeneous(false);
         stack.set_vhomogeneous(true);
@@ -71,7 +77,7 @@ impl TabStrip {
         close.add_css_class("sill-tab-close");
         root.append(&stack);
         root.append(&close);
-        let tab = Rc::new(Tab { id: id.to_string(), root: root.clone(), stack, label, entry });
+        let tab = Rc::new(Tab { id: id.to_string(), root: root.clone(), icon_slot, stack, label, entry });
 
         // click selects, double-click edits
         let click = gtk::GestureClick::new();
@@ -162,6 +168,21 @@ impl TabStrip {
         }
     }
 
+    /// Put (or replace) the small agent glyph in front of a tab's title.
+    pub fn set_icon(&self, id: &str, icon: &impl IsA<gtk::Widget>) {
+        if let Some(t) = self.tabs.borrow().iter().find(|t| t.id == id) {
+            while let Some(c) = t.icon_slot.first_child() {
+                t.icon_slot.remove(&c);
+            }
+            t.icon_slot.append(icon);
+        }
+    }
+
+    /// Ids of all tabs, in order.
+    pub fn ids(&self) -> Vec<String> {
+        self.tabs.borrow().iter().map(|t| t.id.clone()).collect()
+    }
+
     pub fn set_title(&self, id: &str, title: &str) {
         if let Some(t) = self.tabs.borrow().iter().find(|t| t.id == id) {
             t.label.set_text(title);
@@ -218,7 +239,9 @@ impl TabStrip {
 
 pub const CSS: &str = r#"
 .sill-tabs { padding: 0; }
-.sill-tab { padding: 4px 6px 4px 12px; margin-right: 1px; background: alpha(@view_fg_color, 0.04);
+.sill-tab-icon { opacity: 0.55; margin-right: 3px; }
+.sill-tab.selected .sill-tab-icon { opacity: 0.85; }
+.sill-tab { padding: 4px 6px 4px 10px; margin-right: 1px; background: alpha(@view_fg_color, 0.04);
             border-bottom: 2px solid transparent; }
 .sill-tab.selected { background: alpha(@view_fg_color, 0.09); border-bottom: 2px solid alpha(@accent_bg_color, 0.9); }
 @keyframes sill-pulse { from { opacity: 1; } 50% { opacity: 0.45; } to { opacity: 1; } }
