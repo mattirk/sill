@@ -127,6 +127,7 @@ pub fn run(a: InitArgs) -> Result<()> {
         return summary(&i);
     }
 
+    check_prefix(&a.prefix)?;
     // 1. checks: reported, not fixed
     checks(&mut i);
     // 2. files
@@ -225,6 +226,36 @@ fn kernel_version() -> Option<(u32, u32)> {
 
 fn read_num(path: &str) -> Option<u64> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// `<prefix>/bin/sill` is what the boot hook runs as root and the shelf unit per user, so the
+/// prefix must be absolute and every directory above it root-owned and writable by root only
+/// (security.md S12): a prefix under a home or a group-writable `/usr/local` would let whoever
+/// writes there put code into every boot.
+fn check_prefix(prefix: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    if !prefix.is_absolute() {
+        bail!("--prefix {} must be absolute: it is written into units that run at boot", prefix.display());
+    }
+    let mut p = prefix.to_path_buf();
+    loop {
+        if let Ok(m) = std::fs::metadata(&p) {
+            if m.uid() != 0 || m.mode() & 0o022 != 0 {
+                bail!(
+                    "--prefix {}: {} is {} (uid {}, mode {:o}); the boot hook runs {}/bin/sill as root, so every directory above it must belong to root and be writable by root only",
+                    prefix.display(),
+                    p.display(),
+                    if m.uid() != 0 { "not owned by root" } else { "writable by group or others" },
+                    m.uid(),
+                    m.mode() & 0o7777,
+                    prefix.display()
+                );
+            }
+        }
+        if !p.pop() {
+            return Ok(());
+        }
+    }
 }
 
 // --- 2. files -----------------------------------------------------------------------------------
@@ -520,6 +551,33 @@ fn boot_hook(i: &mut Init, prefix: &Path, has_systemd: bool) -> Result<()> {
 
 // --- 5. per user --------------------------------------------------------------------------------
 
+/// The binary the autostart runs: a sill-owned copy of this one (and its `sill-shim`) under
+/// `~/.local/state/sill/bin/autostart/`, which every jail masks — never `current_exe()` itself,
+/// which may be a checkout's `target/debug/sill` in a pinned folder, where an agent could rewrite
+/// what every login runs (security.md S12). `sill init --user` again refreshes the copy; the
+/// system-wide unit (`sill init` as root) runs `<prefix>/bin/sill` and needs none. Replaced by
+/// rename, so a shelf running the old copy keeps it.
+fn stage_autostart(i: &mut Init, home: &Path, exe: &Path) -> Result<PathBuf> {
+    let dir = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".local/state")).join("sill/bin/autostart");
+    let dst = dir.join("sill");
+    i.done(format!("copy {} to {} (the autostart runs the copy; `sill init --user` again refreshes it)", exe.display(), dst.display()));
+    if i.dry {
+        return Ok(dst);
+    }
+    std::fs::create_dir_all(&dir)?;
+    for name in ["sill", "sill-shim"] {
+        let src = exe.with_file_name(name);
+        if !src.is_file() {
+            i.problem(format!("{} not found next to {}: sessions need it", name, exe.display()));
+            continue;
+        }
+        let tmp = dir.join(format!(".{name}.part"));
+        std::fs::copy(&src, &tmp).with_context(|| format!("copy {}", src.display()))?;
+        std::fs::rename(&tmp, dir.join(name))?;
+    }
+    Ok(dst)
+}
+
 /// `sill init --user`: the shelf's autostart for this account, nothing else. The hotkey is the
 /// desktop's business: sill never edits anyone's shortcuts.
 fn user_setup(a: &InitArgs) -> Result<()> {
@@ -538,7 +596,8 @@ fn user_setup(a: &InitArgs) -> Result<()> {
             .unwrap_or(false);
         if !known {
             // no system-wide unit (cargo install, tarball without root): a private copy
-            let unit = UNIT_SHELF.replace("/usr/local/bin/sill", &exe.display().to_string());
+            let run = stage_autostart(&mut i, &home, &exe)?;
+            let unit = UNIT_SHELF.replace("/usr/local/bin/sill", &run.display().to_string());
             i.put_file(&home.join(".config/systemd/user/sill-shelf.service"), unit.as_bytes(), 0o644)?;
             i.run("reload user units", "systemctl", &["--user", "daemon-reload"])?;
         }
@@ -560,10 +619,11 @@ fn user_setup(a: &InitArgs) -> Result<()> {
             }
         }
     } else {
+        let run = stage_autostart(&mut i, &home, &exe)?;
         let entry = format!(
             "[Desktop Entry]\nType=Application\nName=sill\nComment=agent shelf (hidden; `sill toggle` shows it)\n\
              Exec={} shelf --hidden\nIcon=sill\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
-            exe.display()
+            run.display()
         );
         i.put_file(&home.join(".config/autostart/sill.desktop"), entry.as_bytes(), 0o644)?;
     }
