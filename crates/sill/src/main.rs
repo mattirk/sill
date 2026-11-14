@@ -184,6 +184,29 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<PolicyCmd>,
     },
+    /// A session's capability choices, within its policy limits (docs/permission-modes.md)
+    Permissions {
+        #[command(subcommand)]
+        cmd: PermissionsCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum PermissionsCmd {
+    /// Next-build permission state, and the running jail's launch state when it differs
+    Show { session: String },
+    /// Remember a choice for this session: on, off, or default (follow the policy)
+    Set {
+        session: String,
+        /// test_desktop, private_bus, gpu or public_web; Host control is never a saved choice
+        capability: String,
+        #[arg(value_parser = ["on", "off", "default"])]
+        value: String,
+    },
+    /// Restore defaults: remove the session's added capability and host grants; policy and pins stay
+    Restore { session: String },
+    /// Save for future sessions: add a host pattern to the session agent's network defaults
+    SaveHost { session: String, host: String },
 }
 
 #[derive(Subcommand)]
@@ -643,6 +666,7 @@ fn policy_cmd(name: Option<String>, cmd: Option<PolicyCmd>) -> Result<()> {
         && matches!(&cmd, PolicyCmd::Import { .. } | PolicyCmd::Start { .. }) {
         bail!("policy import and fragment exceptions are host administrative actions");
     }
+    sill_proto::client::declare_capability("sill.permission_modes");
     let c = sill_proto::Client::connect_or_start()?;
     match cmd {
         PolicyCmd::Show { name } => {
@@ -689,6 +713,60 @@ fn policy_cmd(name: Option<String>, cmd: Option<PolicyCmd>) -> Result<()> {
     }
     Ok(())
 }
+fn permissions_cmd(cmd: PermissionsCmd) -> Result<()> {
+    use sill_proto::{admin as api, sessions::SessionKey};
+    if std::env::var_os("SILL_SESSION").is_some() && !matches!(cmd, PermissionsCmd::Show { .. }) {
+        bail!("permission changes are host administrative actions");
+    }
+    // This command shows permission state, which is the contract the capability states.
+    sill_proto::client::declare_capability("sill.permission_modes");
+    let c = sill_proto::Client::connect_or_start()?;
+    let print_changed = |changed: api::PermissionsChanged| {
+        print_permissions(&changed.preview);
+        if changed.restart_required { println!("The running jail keeps its launch state until the session is restarted."); }
+    };
+    match cmd {
+        PermissionsCmd::Show { session } => {
+            let row = c.resolve_session(&session)?;
+            let preview: api::PolicyView = c.call("_sill/policy.preview", SessionKey { session_id: row.session_id.clone() })?;
+            print_permissions(&preview);
+            for diagnostic in &preview.diagnostics { eprintln!("{diagnostic}"); }
+            let launch: api::PolicySnapshot = c.call("_sill/policy.snapshot", SessionKey { session_id: row.session_id })?;
+            if let Some(launch) = launch.snapshot.filter(|_| row.running) {
+                let effective = |view: &api::PolicyView| view.permissions.iter().map(|p| (p.capability.clone(), p.effective)).collect::<Vec<_>>();
+                if effective(&launch) != effective(&preview) {
+                    println!("Running jail (launch state):");
+                    print_permissions(&launch);
+                }
+            }
+            if !preview.diagnostics.is_empty() { bail!("policy preview has errors"); }
+        }
+        PermissionsCmd::Set { session, capability, value } => {
+            let key = policy_session_key(&c, &session)?;
+            let enabled = match value.as_str() { "on" => Some(true), "off" => Some(false), _ => None };
+            print_changed(c.call("_sill/permissions.set", api::PermissionChoice { session_id: key, capability, enabled })?);
+        }
+        PermissionsCmd::Restore { session } => {
+            let key = policy_session_key(&c, &session)?;
+            print_changed(c.call("_sill/permissions.restore_defaults", SessionKey { session_id: key })?);
+        }
+        PermissionsCmd::SaveHost { session, host } => {
+            let key = policy_session_key(&c, &session)?;
+            let saved: api::SavedHost = c.call("_sill/policy.save_host", api::NetworkHost { session_id: key, host: host.clone() })?;
+            println!("Saved {host} for future {} sessions; existing sessions are unchanged.", saved.agent_name);
+        }
+    }
+    Ok(())
+}
+fn print_permissions(view: &sill_proto::admin::PolicyView) {
+    for p in &view.permissions {
+        let state = if p.effective { "on" } else if p.available { "off" } else { "unavailable" };
+        let choice = match p.requested { Some(true) => ", session: on", Some(false) => ", session: off", None => "" };
+        println!("{:<13} {state:<11} policy default: {}{choice}{} ({})", p.capability,
+            if !p.allowed { "forbidden" } else if p.default_enabled { "on" } else { "off" },
+            if p.blocked { ", blocked" } else { "" }, p.reason);
+    }
+}
 fn read_policy_input(path: &Path) -> Result<String> {
     use std::io::Read;
     let mut text = String::new();
@@ -703,9 +781,10 @@ fn print_policy_view(view: &sill_proto::admin::PolicyView) {
     println!("# {} policy for {} ({})", view.view, view.session_id, view.name);
     if let Some(text) = &view.text { print!("{text}"); }
     for permission in &view.permissions {
-        println!("# permission {}: allowed={}, default={}, effective={}, available={} ({})",
+        println!("# permission {}: allowed={}, default={}, requested={}, effective={}, available={}, source={} ({})",
             permission.capability, permission.allowed, permission.default_enabled,
-            permission.effective, permission.available, permission.reason);
+            permission.requested.map_or("policy".into(), |enabled| enabled.to_string()),
+            permission.effective, permission.available, permission.source, permission.reason);
     }
     for source in &view.sources {
         println!("# fragment {}{}", source.path.display, if source.ignored { " (ignored for this build)" } else { "" });
@@ -724,6 +803,7 @@ fn main() -> Result<()> {
     }
     match cli.cmd {
         Cmd::Policy { name, cmd } => policy_cmd(name, cmd),
+        Cmd::Permissions { cmd } => permissions_cmd(cmd),
         Cmd::Memory { cmd } => memory_cmd(cmd),
         Cmd::Session { cmd } => session_cmd(cmd),
         Cmd::Pin { cmd } => pin_cmd(cmd.unwrap_or(PinCmd::List)),

@@ -26,6 +26,16 @@ pub const QUICK_TIMEOUT: Duration = Duration::from_secs(5);
 /// A bare daemon's `daemon.log` is rotated to `.1` past this when the next one starts.
 const LOG_KEEP: u64 = 8 * 1024 * 1024;
 
+/// Frontend-declared capabilities this program offers on connections it makes from now on.
+static DECLARED: Mutex<std::collections::BTreeSet<&'static str>> = Mutex::new(std::collections::BTreeSet::new());
+
+/// Declare that this program implements a frontend-declared capability's user-facing contract
+/// (`initialize::FRONTEND_DECLARED`). Connections made later offer it; existing ones do not.
+pub fn declare_capability(name: &'static str) {
+    debug_assert!(crate::initialize::FRONTEND_DECLARED.contains(&name), "{name} is not frontend-declared");
+    DECLARED.lock().unwrap().insert(name);
+}
+
 struct Outbound {
     line: Vec<u8>,
     deadline: Instant,
@@ -171,8 +181,11 @@ impl Client {
             crate::initialize::Initialize {
                 protocols: vec![crate::initialize::PROTOCOL_ID.into()],
                 client: crate::initialize::Peer { name: "sill".into(), version: env!("CARGO_PKG_VERSION").into() },
-                // this build implements every capability it knows of
-                capabilities: crate::initialize::CAPABILITIES.iter().map(|c| (c.name.to_string(), c.version)).collect(),
+                // this build implements every capability it knows of, except the ones that
+                // describe a frontend's own contract and were not declared by this program
+                capabilities: crate::initialize::CAPABILITIES.iter()
+                    .filter(|c| !crate::initialize::FRONTEND_DECLARED.contains(&c.name) || DECLARED.lock().unwrap().contains(c.name))
+                    .map(|c| (c.name.to_string(), c.version)).collect(),
             }, QUICK_TIMEOUT,
         ).context("SFP initialization failed; explicitly update/restart an incompatible daemon")?;
         if result.protocol != crate::initialize::PROTOCOL_ID {

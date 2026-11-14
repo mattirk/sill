@@ -214,9 +214,10 @@ fn valid_policy_name(name: &str) -> Result<()> {
     Ok(())
 }
 fn policy_view(view: &str, session_id: &str, name: &str, r: sill_core::policy_fragments::Resolution) -> Result<api::PolicyView> {
-    let permissions = r.policy.permissions.states(&r.policy.network).into_iter().map(|state| api::PermissionState {
+    let permissions = r.policy.permissions.states(&r.policy.network, &r.session_permissions).into_iter().map(|state| api::PermissionState {
         capability: state.capability.into(), allowed: state.allowed, default_enabled: state.default_enabled,
-        effective: state.effective, available: state.available, reason: state.reason.into(),
+        requested: state.requested, blocked: state.blocked, source: state.source.into(),
+        effective: state.effective, available: state.available, reason: state.reason,
     }).collect();
     Ok(api::PolicyView {
         permissions,
@@ -276,15 +277,26 @@ fn session_hosts(session_id: &str) -> Result<std::collections::BTreeSet<String>>
     if hosts.len() > 128 { return Err(domain("limit_exceeded", "at most 128 session host grants")); }
     Ok(hosts)
 }
+static SESSION_HOSTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn remember_session_host(session_id: &str, host: &str) -> Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = LOCK.lock().unwrap();
+    let _guard = SESSION_HOSTS.lock().unwrap();
     let mut hosts = session_hosts(session_id)?;
     hosts.insert(host.into());
     if hosts.len() > 128 { return Err(domain("limit_exceeded", "at most 128 session host grants")); }
-    let text = hosts.into_iter().collect::<Vec<_>>().join("\n") + "\n";
+    write_session_hosts(session_id, &hosts)
+}
+/// Revoke hosts approved during this run for new proxy connections. True when there were any:
+/// tunnels already open keep going until the jail is rebuilt.
+fn clear_session_hosts(session_id: &str) -> Result<bool> {
+    let _guard = SESSION_HOSTS.lock().unwrap();
+    if session_hosts(session_id)?.is_empty() { return Ok(false); }
+    write_session_hosts(session_id, &Default::default())?;
+    Ok(true)
+}
+fn write_session_hosts(session_id: &str, hosts: &std::collections::BTreeSet<String>) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let text: String = hosts.iter().map(|host| format!("{host}\n")).collect();
     let runtime = sill_core::shim::runtime_dir(session_id)?;
     let temporary = runtime.join("session-allowed-hosts.new");
     let result = (|| {
@@ -297,6 +309,76 @@ fn remember_session_host(session_id: &str, host: &str) -> Result<()> {
     let _ = fs::remove_file(temporary);
     result
 }
+fn session_with_pins(hub: &Hub, id: &str) -> Result<(sill_core::store::Session, Vec<PathBuf>)> {
+    hub.with_store(|store| {
+        let row = store.session_exact(id)?.ok_or_else(|| domain("not_found", "session not found"))?;
+        let pins = store.jail_pins(id)?;
+        Ok((row, pins))
+    })
+}
+fn preview(hub: &Hub, session_id: &str) -> Result<api::PolicyView> {
+    let (row, pins) = session_with_pins(hub, session_id)?;
+    Ok(match sill_core::session::next_build(&row, &sill_core::changes::home()?, &pins, &[]) {
+        Ok(resolved) => policy_view("preview", session_id, &row.policy, resolved)?,
+        Err(e) => api::PolicyView {
+            view: "preview".into(), session_id: session_id.into(), name: row.policy,
+            permissions: vec![], text: None, fragment_ro: vec![], fragment_masks: vec![], sources: vec![],
+            suggestions: vec![], fingerprint: None, diagnostics: vec![format!("{e:#}")],
+        },
+    })
+}
+/// The next build after a grant change, and whether the running jail still has another state.
+/// Without launch evidence a running jail is never reported as current.
+fn permissions_changed(hub: &Hub, session_id: &str, live_revoked: bool) -> Result<api::PermissionsChanged> {
+    let preview = preview(hub, session_id)?;
+    let restart_required = sill_core::session::is_running(session_id) && (live_revoked
+        || match sill_core::session::policy_snapshot(session_id)? {
+            Some(launch) => {
+                let (choices, hosts) = hub.with_store(|store| Ok((store.permission_choices(session_id)?, store.network_hosts(session_id)?)))?;
+                sill_core::session::grants_outdated(&launch, &choices, &hosts)
+            }
+            None => true,
+        });
+    Ok(api::PermissionsChanged { preview, restart_required })
+}
+
+const PERMISSION_MODES: &str = "sill.permission_modes";
+/// The daemon side of "GTK supports Default only" (docs/permission-modes.md, Frontends): a
+/// connection without the permission-modes capability cannot change session capability choices,
+/// nor operate or widen a session whose launch or next build uses Desktop development or Host
+/// control capabilities. Actual capabilities decide, not a mode label; stopping stays available.
+pub(super) fn frontend_gate(hub: &Hub, conn: &super::Conn, method: &str, params: &Value) -> Result<(), Error> {
+    if conn.has_capability(PERMISSION_MODES) { return Ok(()); }
+    let missing = |message: String| {
+        let mut error = Error::domain("unsupported", message);
+        error.data.as_mut().unwrap()["details"] = json!({"capability": PERMISSION_MODES});
+        error
+    };
+    match method {
+        "_sill/permissions.set" | "_sill/permissions.restore_defaults" | "_sill/policy.save_host" =>
+            return Err(missing("permission changes need a frontend that shows permission state".into())),
+        "_sill/sessions.submit" | "_sill/sessions.start" | "_sill/sessions.control" | "_sill/submissions.resume"
+        | "_sill/submissions.send_now" | "_sill/questions.answer" | "_sill/policy.start" | "_sill/policy.allow_host"
+        | "_sill/sessions.pin" | "_sill/sessions.unpin" => {}
+        _ => return Ok(()),
+    }
+    // Malformed parameters are the method's own error.
+    let Some(id) = params.get("session_id").and_then(Value::as_str) else { return Ok(()) };
+    match session_uses_modes(hub, id) {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(missing("this session uses Desktop development or Host control capabilities; operate it from sill-gui or the CLI".into())),
+        Err(e) => Err(missing(format!("the session's permission state could not be determined ({e:#}); operate it from sill-gui or the CLI"))),
+    }
+}
+fn session_uses_modes(hub: &Hub, id: &str) -> Result<bool> {
+    let Some(row) = hub.with_store(|store| store.session_exact(id))? else { return Ok(false) };
+    if sill_core::session::is_running(id) {
+        if let Some(launch) = sill_core::session::policy_snapshot(id)? { return Ok(launch.policy.permissions.uses_modes()); }
+    }
+    let pins = hub.with_store(|store| store.jail_pins(id))?;
+    Ok(sill_core::session::next_build(&row, &sill_core::changes::home()?, &pins, &[])?.policy.permissions.uses_modes())
+}
+
 pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> {
     if let Some(r) = super::discovery::handle(m, p.clone()) {
         return Some(r);
@@ -310,6 +392,9 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             | "_sill/policy.denied"
             | "_sill/policy.remember_denied"
             | "_sill/policy.allow_host"
+            | "_sill/policy.save_host"
+            | "_sill/permissions.set"
+            | "_sill/permissions.restore_defaults"
             | "_sill/files.home"
             | "_sill/files.metadata"
             | "_sill/files.list"
@@ -373,11 +458,8 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 let policy = match snapshot {
                     Some(snapshot) => snapshot.policy,
                     None => {
-                        let cfg = sill_core::config::load();
-                        let (x11, dbus) = sill_core::config::desktop_grants(&row.desktop, &cfg);
-                        let base = sill_core::session::session_base_policy(&row.policy, &home, x11, dbus, row.ghost, Some(&row.agent))?;
-                        let pins = if row.ghost { vec![] } else { hub.with_store(|store| store.jail_pins(&a.session_id))? };
-                        sill_core::policy_fragments::resolve(&base, &pins, &[])?.policy
+                        let pins = hub.with_store(|store| store.jail_pins(&a.session_id))?;
+                        sill_core::session::next_build_restrictions(&row, &home, &pins, &[])?.policy
                     }
                 };
                 if policy.network.mode == sill_core::policy::NetMode::None {
@@ -390,6 +472,54 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
                 if running { remember_session_host(&a.session_id, &a.host)?; }
                 bounded(api::AllowedHost { agent_name: "this session".into(), live: running })
             }
+        }
+        "_sill/policy.save_host" => {
+            let a: api::NetworkHost = args(p)?;
+            if a.host.is_empty() || a.host.len() > 1024 || a.host.chars().any(char::is_control) {
+                return Err(invalid("invalid host"));
+            }
+            let row = hub.with_store(|s| s.session_exact(&a.session_id))?.ok_or_else(|| domain("not_found", "session not found"))?;
+            if row.ghost { return Err(domain("permission_denied", "ghost sessions do not change future-session defaults")); }
+            let name = a.host.rsplit_once(':').filter(|(_, port)| port.parse::<u16>().is_ok()).map(|(name, _)| name).unwrap_or(&a.host);
+            if !sill_core::proxy::valid_hostname(name.strip_prefix("*.").unwrap_or(name)) { return Err(invalid("invalid host pattern")); }
+            let home = sill_core::changes::home()?;
+            let mut agent = sill_core::agents::load(&home).remove(&row.agent).ok_or_else(|| domain("not_found", "unknown agent"))?;
+            if !agent.domains.contains(&a.host) {
+                if agent.domains.len() >= 256 { return Err(domain("limit_exceeded", "at most 256 agent network defaults")); }
+                agent.domains.push(a.host.clone());
+                sill_core::agents::save_override(&home, &agent)?;
+            }
+            bounded(api::SavedHost { agent_id: agent.id, agent_name: agent.name })
+        }
+        "_sill/permissions.set" => {
+            let a: api::PermissionChoice = args(p)?;
+            let (row, pins) = session_with_pins(hub, &a.session_id)?;
+            if row.ghost { return Err(domain("permission_denied", "ghost sessions support Default only")); }
+            if sill_core::permissions::Permissions::default().rule(&a.capability).is_none() {
+                return Err(invalid("unknown capability"));
+            }
+            if a.capability == "host_control" {
+                return Err(domain("permission_denied", "Host control needs explicit activation; it is not a session choice"));
+            }
+            if a.enabled == Some(true) {
+                // Refuse widening the current limits would block, rather than remembering it.
+                let restrictions = sill_core::session::next_build_restrictions(&row, &sill_core::changes::home()?, &pins, &[])?;
+                let mut choices = hub.with_store(|store| store.permission_choices(&a.session_id))?;
+                choices.insert(a.capability.clone(), true);
+                let candidate = sill_core::session::apply_grants(restrictions, &choices, vec![]);
+                if let Some(reason) = candidate.session_permissions.iter().find(|c| c.capability == a.capability).and_then(|c| c.blocked.as_ref()) {
+                    return Err(domain("permission_denied", format!("{}: {reason}", a.capability)));
+                }
+            }
+            hub.with_store(|store| store.set_permission_choice(&a.session_id, &a.capability, a.enabled))?;
+            bounded(permissions_changed(hub, &a.session_id, false)?)
+        }
+        "_sill/permissions.restore_defaults" => {
+            let a: sill_proto::sessions::SessionKey = args(p)?;
+            session(hub, &a.session_id)?;
+            hub.with_store(|store| store.restore_default_permissions(&a.session_id))?;
+            let live_revoked = sill_core::session::is_running(&a.session_id) && clear_session_hosts(&a.session_id)?;
+            bounded(permissions_changed(hub, &a.session_id, live_revoked)?)
         }
 
         "_sill/files.home" => {
@@ -502,26 +632,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
         "_sill/policy.preview" => {
             let a: sill_proto::sessions::SessionKey = args(p)?;
             session(hub, &a.session_id)?;
-            let (row, pins) = hub.with_store(|store| {
-                let row = store.session_exact(&a.session_id)?.ok_or_else(|| domain("not_found", "session not found"))?;
-                Ok((row, store.jail_pins(&a.session_id)?))
-            })?;
-            let home = sill_core::changes::home()?;
-            let cfg = sill_core::config::load();
-            let (x11, dbus) = sill_core::config::desktop_grants(&row.desktop, &cfg);
-            let pins = if row.ghost { vec![] } else { pins };
-            let result = sill_core::session::session_base_policy(&row.policy, &home, x11, dbus, row.ghost, Some(&row.agent))
-                .and_then(|base| sill_core::policy_fragments::resolve(&base, &pins, &[]))
-                .and_then(|resolved| sill_core::session::resolved_policy_with_grants(resolved, &a.session_id));
-            let view = match result {
-                Ok(resolved) => policy_view("preview", &a.session_id, &row.policy, resolved)?,
-                Err(e) => api::PolicyView {
-                    view: "preview".into(), session_id: a.session_id, name: row.policy,
-                    permissions: vec![], text: None, fragment_ro: vec![], fragment_masks: vec![], sources: vec![],
-                    suggestions: vec![], fingerprint: None, diagnostics: vec![format!("{e:#}")],
-                },
-            };
-            bounded(view)
+            bounded(preview(hub, &a.session_id)?)
         }
         "_sill/policy.snapshot" => {
             let a: sill_proto::sessions::SessionKey = args(p)?;

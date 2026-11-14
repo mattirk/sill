@@ -167,6 +167,9 @@ impl Store {
                  session_id TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (session_id, path));
              CREATE TABLE IF NOT EXISTS session_network_hosts (
                  session_id TEXT NOT NULL, host TEXT NOT NULL, PRIMARY KEY (session_id, host));
+             CREATE TABLE IF NOT EXISTS session_permissions (
+                 session_id TEXT NOT NULL, capability TEXT NOT NULL, enabled INTEGER NOT NULL,
+                 PRIMARY KEY (session_id, capability));
              CREATE TABLE IF NOT EXISTS global_pins (path TEXT PRIMARY KEY, added_at INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS entries (
                  session_id TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL,
@@ -482,6 +485,7 @@ impl Store {
         self.conn.execute("DELETE FROM entries WHERE session_id = ?1", params![id])?;
         self.conn.execute("DELETE FROM session_pins WHERE session_id = ?1", params![id])?;
         self.conn.execute("DELETE FROM session_network_hosts WHERE session_id = ?1", params![id])?;
+        self.conn.execute("DELETE FROM session_permissions WHERE session_id = ?1", params![id])?;
         self.conn.execute("DELETE FROM pin_heads WHERE session_id = ?1", params![id])?;
         // its history rows stay (SPEC §3.6): what it did to the host outlives it
         self.conn.execute("DELETE FROM session_names WHERE session_id = ?1", params![id])?;
@@ -503,6 +507,40 @@ impl Store {
         self.conn.execute("INSERT OR IGNORE INTO session_network_hosts (session_id, host) VALUES (?1, ?2)", params![session_id, host])?;
         let count: i64 = self.conn.query_row("SELECT count(*) FROM session_network_hosts WHERE session_id = ?1", params![session_id], |row| row.get(0))?;
         anyhow::ensure!(count <= 128, "at most 128 session host grants");
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Remembered capability choices: a preference for this session's next builds, never authority.
+    pub fn permission_choices(&self, session_id: &str) -> Result<std::collections::BTreeMap<String, bool>> {
+        let mut statement = self.conn.prepare("SELECT capability, enabled FROM session_permissions WHERE session_id = ?1")?;
+        let rows = statement.query_map(params![session_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// `None` returns the capability to its policy default. Host control is an activation, not a choice.
+    pub fn set_permission_choice(&self, session_id: &str, capability: &str, enabled: Option<bool>) -> Result<()> {
+        anyhow::ensure!(crate::permissions::Permissions::default().rule(capability).is_some(), "unknown capability {capability:?}");
+        anyhow::ensure!(capability != "host_control", "Host control is never a saved session choice");
+        let transaction = self.conn.unchecked_transaction()?;
+        anyhow::ensure!(self.session_exact(session_id)?.is_some(), "session not found");
+        match enabled {
+            Some(enabled) => self.conn.execute(
+                "INSERT INTO session_permissions (session_id, capability, enabled) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (session_id, capability) DO UPDATE SET enabled = excluded.enabled",
+                params![session_id, capability, enabled])?,
+            None => self.conn.execute("DELETE FROM session_permissions WHERE session_id = ?1 AND capability = ?2", params![session_id, capability])?,
+        };
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Restore defaults: remove added capability and host grants; policy and pins stay selected.
+    pub fn restore_default_permissions(&self, session_id: &str) -> Result<()> {
+        let transaction = self.conn.unchecked_transaction()?;
+        anyhow::ensure!(self.session_exact(session_id)?.is_some(), "session not found");
+        self.conn.execute("DELETE FROM session_permissions WHERE session_id = ?1", params![session_id])?;
+        self.conn.execute("DELETE FROM session_network_hosts WHERE session_id = ?1", params![session_id])?;
         transaction.commit()?;
         Ok(())
     }
@@ -973,6 +1011,41 @@ mod tests {
         assert!(!store.network_hosts(&first.id).unwrap().contains(&"overflow.example.com".into()));
         store.delete(&first.id).unwrap();
         assert!(store.network_hosts(&first.id).unwrap().is_empty());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn permission_choices_persist_per_session_and_restore_defaults_keeps_pins() {
+        let dir = std::env::temp_dir().join(format!("sill-permission-choices-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("store.db");
+        let store = Store::open(&path).unwrap();
+        let first = store.create("codex", "custom").unwrap();
+        let second = store.create("codex", "custom").unwrap();
+        store.set_permission_choice(&first.id, "public_web", Some(true)).unwrap();
+        store.set_permission_choice(&first.id, "test_desktop", Some(false)).unwrap();
+        store.set_permission_choice(&first.id, "public_web", Some(false)).unwrap();
+        assert!(store.set_permission_choice(&first.id, "host_control", Some(true)).is_err());
+        assert!(store.set_permission_choice(&first.id, "unknown", Some(true)).is_err());
+        assert!(store.set_permission_choice("missing", "gpu", Some(true)).is_err());
+        assert!(store.permission_choices(&second.id).unwrap().is_empty());
+        store.allow_network_host(&first.id, "example.com").unwrap();
+        store.pin(&first.id, Path::new("/tmp/project")).unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        let remembered = store.permission_choices(&first.id).unwrap();
+        assert_eq!(remembered.get("public_web"), Some(&false));
+        assert_eq!(remembered.get("test_desktop"), Some(&false));
+        store.set_permission_choice(&first.id, "test_desktop", None).unwrap();
+        assert_eq!(store.permission_choices(&first.id).unwrap().len(), 1);
+        store.restore_default_permissions(&first.id).unwrap();
+        assert!(store.permission_choices(&first.id).unwrap().is_empty());
+        assert!(store.network_hosts(&first.id).unwrap().is_empty());
+        assert_eq!(store.pins(&first.id).unwrap(), [PathBuf::from("/tmp/project")]);
+        assert_eq!(store.session_exact(&first.id).unwrap().unwrap().policy, "custom");
+        store.set_permission_choice(&first.id, "gpu", Some(false)).unwrap();
+        store.delete(&first.id).unwrap();
+        assert!(store.permission_choices(&first.id).unwrap().is_empty());
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

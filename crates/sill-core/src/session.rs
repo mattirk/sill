@@ -499,15 +499,43 @@ pub fn session_base_policy(name: &str, home: &Path, x11: Option<bool>, dbus: Opt
     Ok(policy)
 }
 
-/// Apply remembered human grants within resolved restrictions. Live approvals are not policy
-/// source edits, so retain the source fingerprint while recording grants in the launch rules.
-pub fn resolved_policy_with_grants(mut resolution: crate::policy_fragments::Resolution, session: &str) -> Result<crate::policy_fragments::Resolution> {
-    let base = &mut resolution.policy;
-    if base.network.mode != crate::policy::NetMode::None && base.network.allow_additional_hosts {
-        let store = crate::store::Store::open(&crate::store::default_path()?)?;
-        base.network.allow.extend(store.network_hosts(session)?);
+/// Apply remembered human grants after repository and ghost restrictions, within the resolved
+/// limits. Grants are not policy source edits: the source fingerprint stays, and the resolution
+/// records the choices and hosts this build consulted.
+pub fn apply_grants(mut resolution: crate::policy_fragments::Resolution, choices: &std::collections::BTreeMap<String, bool>, hosts: Vec<String>) -> crate::policy_fragments::Resolution {
+    let policy = &mut resolution.policy;
+    resolution.session_permissions = policy.permissions.apply_session(&mut policy.network, choices);
+    if policy.network.mode != crate::policy::NetMode::None && policy.network.allow_additional_hosts {
+        policy.network.allow.extend(hosts.iter().cloned());
+        resolution.session_hosts = hosts;
     }
-    Ok(resolution)
+    resolution
+}
+
+pub fn resolved_policy_with_grants(resolution: crate::policy_fragments::Resolution, session: &str) -> Result<crate::policy_fragments::Resolution> {
+    let store = crate::store::Store::open(&crate::store::default_path()?)?;
+    Ok(apply_grants(resolution, &store.permission_choices(session)?, store.network_hosts(session)?))
+}
+
+/// A stored session's next build before its session grants: base policy with desktop overrides,
+/// then repository fragments of its jail pins (none for a ghost).
+pub fn next_build_restrictions(row: &crate::store::Session, home: &Path, pins: &[PathBuf], ignore_roots: &[PathBuf]) -> Result<crate::policy_fragments::Resolution> {
+    let cfg = crate::config::load();
+    let (x11, dbus) = crate::config::desktop_grants(&row.desktop, &cfg);
+    let base = session_base_policy(&row.policy, home, x11, dbus, row.ghost, Some(&row.agent))?;
+    crate::policy_fragments::resolve(&base, if row.ghost { &[] } else { pins }, ignore_roots)
+}
+
+/// A stored session's next build, as the launcher resolves it.
+pub fn next_build(row: &crate::store::Session, home: &Path, pins: &[PathBuf], ignore_roots: &[PathBuf]) -> Result<crate::policy_fragments::Resolution> {
+    resolved_policy_with_grants(next_build_restrictions(row, home, pins, ignore_roots)?, &row.id)
+}
+
+/// The launch no longer matches the remembered grants: a capability choice changed, or a host
+/// grant it included was removed. Hosts approved since launch reach the running proxy live.
+pub fn grants_outdated(launch: &crate::policy_fragments::Resolution, choices: &std::collections::BTreeMap<String, bool>, hosts: &[String]) -> bool {
+    let launched: std::collections::BTreeMap<_, _> = launch.session_permissions.iter().map(|c| (c.capability.clone(), c.enabled)).collect();
+    launched != *choices || launch.session_hosts.iter().any(|host| !hosts.contains(host))
 }
 
 fn snapshot_dir(session: &str) -> Result<PathBuf> {
@@ -584,9 +612,15 @@ fn write_policy_snapshot(dir: &Path, resolution: &crate::policy_fragments::Resol
     result
 }
 
-/// Compare source content, including absent fragments and pins, rather than modification times.
-pub fn jail_outdated_with_pins(session: &str, base: &Policy, pins: &[PathBuf]) -> bool {
-    snapshot_outdated(policy_snapshot(session), base, pins)
+/// Policy sources, pins or remembered session grants changed since the recorded launch. Compare
+/// source content, including absent fragments and pins, rather than modification times.
+pub fn jail_outdated_with_grants(session: &str, base: &Policy, pins: &[PathBuf], store: &crate::store::Store) -> bool {
+    let snapshot = policy_snapshot(session);
+    if let Ok(Some(launch)) = &snapshot {
+        let (Ok(choices), Ok(hosts)) = (store.permission_choices(session), store.network_hosts(session)) else { return true };
+        if grants_outdated(launch, &choices, &hosts) { return true; }
+    }
+    snapshot_outdated(snapshot, base, pins)
 }
 
 fn snapshot_outdated(snapshot: Result<Option<crate::policy_fragments::Resolution>>, base: &Policy, pins: &[PathBuf]) -> bool {
@@ -920,6 +954,32 @@ mod tests {
         }));
         std::fs::remove_file(tree.repo().join(".sill/policy.toml")).unwrap();
         assert!(snapshot_outdated(Ok(Some(latest)), &base, &[tree.repo()]));
+    }
+
+    #[test]
+    fn session_grants_apply_after_repository_restrictions_and_are_recorded_for_the_launch() {
+        let tree = PolicyTestTree::new();
+        let base = Policy::parse("name='custom'\n[network]\nmode='allow'").unwrap();
+        let choices: std::collections::BTreeMap<String, bool> = [("public_web".to_string(), true)].into();
+        let hosts = vec!["example.com".to_string()];
+        let launch = apply_grants(tree.resolve(&base), &choices, hosts.clone());
+        assert_eq!(launch.policy.network.mode, crate::policy::NetMode::All);
+        assert_eq!(launch.session_hosts, hosts);
+        assert!(!grants_outdated(&launch, &choices, &hosts));
+        // Hosts approved while running are live; removed hosts or changed choices need a rebuild.
+        assert!(!grants_outdated(&launch, &choices, &["example.com".into(), "later.example.com".into()]));
+        assert!(grants_outdated(&launch, &choices, &[]));
+        assert!(grants_outdated(&launch, &Default::default(), &hosts));
+        // A repository prohibition blocks the remembered choice instead of being bypassed.
+        tree.fragment("[permissions]\npublic_web='forbidden'");
+        let blocked = apply_grants(tree.resolve(&base), &choices, hosts.clone());
+        assert_eq!(blocked.policy.network.mode, crate::policy::NetMode::Allow);
+        assert!(blocked.session_permissions[0].blocked.is_some());
+        tree.fragment("[network]\nmode='none'");
+        let offline = apply_grants(tree.resolve(&base), &choices, hosts);
+        assert!(offline.session_hosts.is_empty() && !offline.policy.network.allow.contains(&"example.com".to_string()));
+        let decoded: crate::policy_fragments::Resolution = serde_json::from_slice(&serde_json::to_vec(&blocked).unwrap()).unwrap();
+        assert_eq!(decoded.session_permissions, blocked.session_permissions);
     }
 
     #[test]

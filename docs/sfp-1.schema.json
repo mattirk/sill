@@ -3270,6 +3270,29 @@
       ],
       "type": "object"
     },
+    "PermissionChoice": {
+      "additionalProperties": false,
+      "description": "Remember a capability choice for one session; `enabled: null` returns to the policy default.",
+      "properties": {
+        "capability": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "capability"
+      ],
+      "type": "object"
+    },
     "PermissionOption": {
       "properties": {
         "kind": {
@@ -3298,6 +3321,11 @@
         "available": {
           "type": "boolean"
         },
+        "blocked": {
+          "default": false,
+          "description": "The remembered choice could not take effect within this view's limits (see `reason`).",
+          "type": "boolean"
+        },
         "capability": {
           "type": "string"
         },
@@ -3309,6 +3337,18 @@
         },
         "reason": {
           "type": "string"
+        },
+        "requested": {
+          "description": "The session's remembered choice; null follows the policy default.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "source": {
+          "default": "",
+          "description": "`session` when an applied session choice decides the state, otherwise `policy`.",
+          "type": "string"
         }
       },
       "required": [
@@ -3318,6 +3358,23 @@
         "effective",
         "available",
         "reason"
+      ],
+      "type": "object"
+    },
+    "PermissionsChanged": {
+      "description": "The next build after a permission change. Preview is prospective, never enforcement evidence.",
+      "properties": {
+        "preview": {
+          "$ref": "#/$defs/PolicyView"
+        },
+        "restart_required": {
+          "description": "The running jail does not have the new state; a restart builds it.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "preview",
+        "restart_required"
       ],
       "type": "object"
     },
@@ -4322,6 +4379,22 @@
       },
       "required": [
         "path"
+      ],
+      "type": "object"
+    },
+    "SavedHost": {
+      "description": "An agent-wide network default saved deliberately; it changes no existing session.",
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "agent_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent_id",
+        "agent_name"
       ],
       "type": "object"
     },
@@ -6150,6 +6223,11 @@
         "doc": "_sill/submissions.send_now: a queued submission goes next, the active turn stopped.",
         "name": "sill.send_now",
         "version": 1
+      },
+      {
+        "doc": "The frontend shows session permission state: it may change session capability choices and operate sessions using Desktop development or Host control capabilities.",
+        "name": "sill.permission_modes",
+        "version": 1
       }
     ],
     "rules": "Names are namespace.feature (lowercase ASCII, digits, '_'); versions are cumulative from 1; the daemon answers min(offered, supported) and omits unknown ones. A missing capability disables that feature only; it is never a protocol mismatch."
@@ -6410,6 +6488,48 @@
       },
       "result": {
         "$ref": "#/$defs/AllowedHost"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.permission_modes": 1
+      },
+      "doc": "Save for future sessions: add a host pattern to the session agent's network defaults. Existing sessions and their grants are unchanged.",
+      "kind": "request",
+      "name": "_sill/policy.save_host",
+      "params": {
+        "$ref": "#/$defs/NetworkHost"
+      },
+      "result": {
+        "$ref": "#/$defs/SavedHost"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.permission_modes": 1
+      },
+      "doc": "Remember a contained capability choice for this session within policy limits; blocked widening is refused. Inspect the preview after uncertainty.",
+      "kind": "request",
+      "name": "_sill/permissions.set",
+      "params": {
+        "$ref": "#/$defs/PermissionChoice"
+      },
+      "result": {
+        "$ref": "#/$defs/PermissionsChanged"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.permission_modes": 1
+      },
+      "doc": "Restore defaults: remove this session's added capability and host grants, keeping its policy and pins. A running jail keeps its launch state until restarted.",
+      "kind": "request",
+      "name": "_sill/permissions.restore_defaults",
+      "params": {
+        "$ref": "#/$defs/SessionKey"
+      },
+      "result": {
+        "$ref": "#/$defs/PermissionsChanged"
       }
     },
     {

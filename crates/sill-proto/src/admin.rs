@@ -86,9 +86,32 @@ pub struct PermissionState {
     pub capability: String,
     pub allowed: bool,
     pub default_enabled: bool,
+    /// The session's remembered choice; null follows the policy default.
+    pub requested: Option<bool>,
+    /// The remembered choice could not take effect within this view's limits (see `reason`).
+    #[serde(default)]
+    pub blocked: bool,
+    /// `session` when an applied session choice decides the state, otherwise `policy`.
+    #[serde(default)]
+    pub source: String,
     pub effective: bool,
     pub available: bool,
     pub reason: String,
+}
+/// Remember a capability choice for one session; `enabled: null` returns to the policy default.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PermissionChoice {
+    pub session_id: String,
+    pub capability: String,
+    pub enabled: Option<bool>,
+}
+/// The next build after a permission change. Preview is prospective, never enforcement evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PermissionsChanged {
+    pub preview: PolicyView,
+    /// The running jail does not have the new state; a restart builds it.
+    pub restart_required: bool,
 }
 /// Policy inspection always identifies its view; previews are never evidence of enforcement.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -268,6 +291,12 @@ pub struct NetworkDenied {
 pub struct NetworkHost {
     pub session_id: String,
     pub host: String,
+}
+/// An agent-wide network default saved deliberately; it changes no existing session.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SavedHost {
+    pub agent_id: String,
+    pub agent_name: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AllowedHost {

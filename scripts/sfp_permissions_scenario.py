@@ -11,13 +11,13 @@ class RpcError(Exception):
 
 class Client:
     """Small independent wire client; no optional Python dependencies required."""
-    def __init__(self, path):
+    def __init__(self, path, capabilities=None):
         self.socket = socket.socket(socket.AF_UNIX)
         self.socket.settimeout(10)
         self.socket.connect(path)
         self.input = self.socket.makefile("rb")
         self.sequence = 0
-        self.call("_sill/initialize", {"protocols": ["sfp/1-dev.3"], "client": {"name": "permission-test", "version": "1"}, "capabilities": {}})
+        self.capabilities = self.call("_sill/initialize", {"protocols": ["sfp/1-dev.3"], "client": {"name": "permission-test", "version": "1"}, "capabilities": capabilities or {}})["capabilities"]
 
     def call(self, method, params):
         self.sequence += 1
@@ -74,6 +74,7 @@ if sys.argv[1] == "--binary":
     sys.exit(0)
 
 client = Client(sys.argv[1])
+modes = Client(sys.argv[1], {"sill.permission_modes": 1})
 try:
     with tempfile.TemporaryDirectory(prefix="sill-network-policies-") as temporary:
         root = pathlib.Path(temporary)
@@ -108,7 +109,7 @@ try:
         assert not states["test_desktop"]["effective"] and not states["test_desktop"]["available"]
         assert not states["host_control"]["allowed"] and not states["host_control"]["effective"]
         try:
-            client.call("_sill/sessions.start", {"session_id": desktop})
+            modes.call("_sill/sessions.start", {"session_id": desktop})
         except RpcError as error:
             assert "enforcement backend" in str(error), error
         else:
@@ -121,6 +122,34 @@ try:
         (root / "first.toml").write_text("name='first'\n[network]\nallow_additional_hosts=false")
         assert "permission-fixture.example.com" not in client.call("_sill/policy.preview", {"session_id": first})["text"]
         denied(first, "another.example.com")
-        print("Session network approvals, capability inspection, limits and unsupported-backend refusal passed")
+        # Session capability choices need the frontend-declared capability; GTK-like clients lack it.
+        assert "sill.permission_modes" not in client.capabilities and modes.capabilities["sill.permission_modes"] == 1
+        def code(call, *args):
+            try:
+                call(*args)
+            except RpcError as error:
+                return error.args[0].get("data", {}).get("code") or error.args[0]["code"]
+            raise AssertionError("refusal expected")
+        choice = lambda session_id, capability, enabled: {"session_id": session_id, "capability": capability, "enabled": enabled}
+        assert code(client.call, "_sill/permissions.set", choice(second, "public_web", True)) == "unsupported"
+        changed = modes.call("_sill/permissions.set", choice(second, "public_web", True))
+        states = {item["capability"]: item for item in changed["preview"]["permissions"]}
+        assert states["public_web"]["effective"] and states["public_web"]["source"] == "session", states
+        assert not changed["restart_required"]
+        assert code(modes.call, "_sill/permissions.set", choice(second, "private_bus", True)) == "permission_denied"
+        assert code(modes.call, "_sill/permissions.set", choice(second, "host_control", True)) == "permission_denied"
+        assert code(modes.call, "_sill/permissions.set", choice(session("restricted", "mode='allow'\nallow_additional_hosts=false"), "public_web", True)) == "permission_denied"
+        restored = modes.call("_sill/permissions.restore_defaults", {"session_id": second})
+        states = {item["capability"]: item for item in restored["preview"]["permissions"]}
+        assert not states["public_web"]["effective"] and states["public_web"]["requested"] is None, states
+        # A session requesting Desktop development capabilities refuses operation without them.
+        assert code(client.call, "_sill/policy.allow_host", {"session_id": desktop, "host": "example.com"}) == "unsupported"
+        assert code(client.call, "_sill/sessions.start", {"session_id": desktop}) == "unsupported"
+        modes.call("_sill/policy.allow_host", {"session_id": desktop, "host": "example.com"})
+        saved = modes.call("_sill/policy.save_host", {"session_id": second, "host": "*.saved-fixture.example"})
+        assert saved["agent_id"] == "claude"
+        assert "*.saved-fixture.example" in client.call("_sill/agents.get", {"agent_id": "claude"})["domains"]
+        print("Session network approvals, capability inspection, limits, unsupported-backend refusal, session choices, Restore defaults and the frontend gate passed")
 finally:
     client.close()
+    modes.close()

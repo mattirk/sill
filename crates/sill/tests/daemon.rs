@@ -1013,9 +1013,17 @@ fn public_network_denials_are_live_bounded_pages() {
     let answer=c.call("_sill/policy.remember_denied",json!({"session_id":session,"host":"host-000.example"})).unwrap();
     assert!(answer.get("error").is_none(),"{answer}");
     assert_eq!(std::fs::read_to_string(runtime.join("denied.answered")).unwrap(),"host-000.example\n");
-    // Allow is session-only and concrete (2026-11-06): wildcards are refused
+    // Allow is session-only and concrete (2026-11-06); a wildcard is only an agent-wide default,
+    // saved deliberately by a frontend that shows permission state
     let allowed=c.call("_sill/policy.allow_host",json!({"session_id":session,"host":"*.example.test"})).unwrap();
     assert_eq!(allowed["error"]["code"],-32602,"{allowed}");
+    let saved=c.call("_sill/policy.save_host",json!({"session_id":session,"host":"*.example.test"})).unwrap();
+    assert_eq!(saved["error"]["data"]["details"]["capability"],"sill.permission_modes","{saved}");
+    let mut modes=d.connect_caps(json!({"sill.permission_modes":1})).unwrap();
+    let saved=modes.call("_sill/policy.save_host",json!({"session_id":session,"host":"*.example.test"})).unwrap();
+    assert_eq!(saved["result"]["agent_id"],"claude","{saved}");
+    let agent=c.call("_sill/agents.get",json!({"agent_id":"claude"})).unwrap();
+    assert!(agent["result"]["domains"].as_array().unwrap().contains(&json!("*.example.test")),"{agent}");
     // a running session gets an exact host at once, as a live grant its proxy reads per
     // connection: the agent goes on without a restart (2026-11-05)
     let _shim=std::os::unix::net::UnixListener::bind(runtime.join("shim.sock")).unwrap();
@@ -1024,6 +1032,11 @@ fn public_network_denials_are_live_bounded_pages() {
     assert_eq!(std::fs::read_to_string(runtime.join("session-allowed-hosts")).unwrap(),"api.example.test\n");
     let agent=c.call("_sill/agents.get",json!({"agent_id":"claude"})).unwrap();
     assert!(!agent["result"]["domains"].as_array().unwrap().contains(&json!("api.example.test")),"agent defaults unchanged: {agent}");
+    // Restore defaults also stops hosts approved during this run from matching new connections
+    let restored=modes.call("_sill/permissions.restore_defaults",json!({"session_id":session})).unwrap();
+    assert_eq!(restored["result"]["restart_required"],true,"{restored}");
+    assert_eq!(std::fs::read_to_string(runtime.join("session-allowed-hosts")).unwrap(),"");
+    assert!(!restored["result"]["preview"]["text"].as_str().unwrap().contains("api.example.test"),"{restored}");
     for host in ["bad\nname", "../invalid"] {
         assert!(c.call("_sill/policy.allow_host",json!({"session_id":session,"host":host})).unwrap().get("error").is_some());
     }
@@ -1130,6 +1143,82 @@ fn travelling_policy_suggestions_are_session_grants_and_offline_is_not_overridde
     std::fs::write(snapshot.join("latest.json"), serde_json::to_vec(&resolution).unwrap()).unwrap();
     let offline = c.call("_sill/policy.allow_host", json!({"session_id":id,"host":"packages.example"})).unwrap();
     assert_eq!(offline["error"]["data"]["code"], "permission_denied", "{offline}");
+}
+
+#[test]
+fn session_permission_choices_restore_defaults_and_frontend_gate() {
+    let d = Daemon::start();
+    let mut gtk = d.connect().unwrap();
+    let mut modes = d.connect_caps(json!({"sill.permission_modes":1})).unwrap();
+    let policies = d.dir.join("home/permission-policies");
+    std::fs::create_dir_all(&policies).unwrap();
+    let mut create = |name: &str, text: &str, ghost: bool| {
+        let path = policies.join(format!("{name}.toml"));
+        std::fs::write(&path, format!("name='{name}'\n{text}")).unwrap();
+        let created = modes.call("_sill/sessions.create", json!({"create_id":name,"agent":"claude","policy":path.to_str().unwrap(),"ghost":ghost})).unwrap();
+        created["result"]["session_id"].as_str().unwrap().to_string()
+    };
+    let web = create("web", "[network]\nmode='allow'", false);
+    let other = create("other", "[network]\nmode='allow'", false);
+    let desktop = create("desktop", "[permissions]\ntest_desktop='on'", false);
+    let ghost = create("ghost", "[network]\nmode='allow'", true);
+    let state = |view: &Value, capability: &str| view["permissions"].as_array().unwrap().iter()
+        .find(|p| p["capability"] == capability).cloned().unwrap();
+    let set = |c: &mut Conn, session: &str, capability: &str, enabled: Value|
+        c.call("_sill/permissions.set", json!({"session_id":session,"capability":capability,"enabled":enabled})).unwrap();
+
+    // Only a frontend that shows permission state may change choices.
+    let refused = set(&mut gtk, &web, "public_web", json!(true));
+    assert_eq!(refused["error"]["data"]["code"], "unsupported", "{refused}");
+    assert_eq!(refused["error"]["data"]["details"]["capability"], "sill.permission_modes");
+    let changed = set(&mut modes, &web, "public_web", json!(true));
+    assert_eq!(changed["result"]["restart_required"], false, "{changed}");
+    let web_state = state(&changed["result"]["preview"], "public_web");
+    assert_eq!((web_state["effective"].clone(), web_state["requested"].clone(), web_state["source"].clone()), (json!(true), json!(true), json!("session")), "{web_state}");
+    let unchanged = modes.call("_sill/policy.preview", json!({"session_id":other})).unwrap();
+    assert_eq!(state(&unchanged["result"], "public_web")["effective"], false, "grants belong to one session");
+
+    // Widening is refused where no backend or a limit blocks it; declining always applies.
+    let blocked = set(&mut modes, &web, "test_desktop", json!(true));
+    assert_eq!(blocked["error"]["data"]["code"], "permission_denied", "{blocked}");
+    assert!(blocked["error"]["message"].as_str().unwrap().contains("backend"), "{blocked}");
+    assert_eq!(set(&mut modes, &web, "host_control", json!(true))["error"]["data"]["code"], "permission_denied");
+    assert_eq!(set(&mut modes, &web, "unknown", json!(true))["error"]["code"], -32602);
+    assert!(set(&mut modes, &web, "gpu", json!(false)).get("error").is_none());
+    assert_eq!(set(&mut modes, &ghost, "public_web", json!(true))["error"]["data"]["code"], "permission_denied");
+
+    // A newly imposed ceiling blocks the remembered choice instead of being bypassed.
+    std::fs::write(policies.join("web.toml"), "name='web'\n[network]\nmode='allow'\nallow_additional_hosts=false").unwrap();
+    let preview = modes.call("_sill/policy.preview", json!({"session_id":web})).unwrap();
+    let web_state = state(&preview["result"], "public_web");
+    assert_eq!((web_state["effective"].clone(), web_state["blocked"].clone()), (json!(false), json!(true)), "{web_state}");
+    std::fs::write(policies.join("web.toml"), "name='web'\n[network]\nmode='allow'").unwrap();
+
+    // Restore defaults removes added grants and keeps the selected policy.
+    assert!(gtk.call("_sill/policy.allow_host", json!({"session_id":web,"host":"api.example.test"})).unwrap().get("error").is_none());
+    let restored = modes.call("_sill/permissions.restore_defaults", json!({"session_id":web})).unwrap();
+    let web_state = state(&restored["result"]["preview"], "public_web");
+    assert_eq!((web_state["effective"].clone(), web_state["requested"].clone()), (json!(false), Value::Null), "{web_state}");
+    assert!(!restored["result"]["preview"]["text"].as_str().unwrap().contains("api.example.test"));
+    let row = modes.call("_sill/sessions.get", json!({"session_id":web})).unwrap();
+    assert!(row["result"]["policy"].as_str().unwrap().ends_with("web.toml"), "{row}");
+
+    // GTK operates Default sessions, never ones requesting Desktop development capabilities.
+    for (method, params) in [
+        ("_sill/sessions.submit", json!({"session_id":desktop,"submission_id":"s1","content":[]})),
+        ("_sill/questions.answer", json!({"session_id":desktop,"question_id":"q"})),
+        ("_sill/policy.allow_host", json!({"session_id":desktop,"host":"example.com"})),
+        ("_sill/sessions.start", json!({"session_id":desktop})),
+    ] {
+        let refused = gtk.call(method, params).unwrap();
+        assert_eq!(refused["error"]["data"]["details"]["capability"], "sill.permission_modes", "{method}: {refused}");
+    }
+    let permitted = modes.call("_sill/policy.allow_host", json!({"session_id":desktop,"host":"example.com"})).unwrap();
+    assert!(permitted.get("error").is_none(), "{permitted}");
+    assert!(gtk.call("_sill/policy.preview", json!({"session_id":desktop})).unwrap().get("error").is_none(), "inspection stays available");
+    // Declining the default makes it a Default session again, operable by GTK.
+    assert!(set(&mut modes, &desktop, "test_desktop", json!(false)).get("error").is_none());
+    assert!(gtk.call("_sill/policy.allow_host", json!({"session_id":desktop,"host":"example.org"})).unwrap().get("error").is_none());
 }
 
 #[test]

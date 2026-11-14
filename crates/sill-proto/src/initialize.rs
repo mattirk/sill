@@ -19,7 +19,12 @@ pub struct Capability { pub name: &'static str, pub version: u32, pub doc: &'sta
 /// compatible additions arrive here (docs/protocol.md, Compatibility and errors).
 pub const CAPABILITIES: &[Capability] = &[
     Capability { name: "sill.send_now", version: 1, doc: "_sill/submissions.send_now: a queued submission goes next, the active turn stopped." },
+    Capability { name: "sill.permission_modes", version: 1, doc: "The frontend shows session permission state: it may change session capability choices and operate sessions using Desktop development or Host control capabilities." },
 ];
+
+/// Capabilities that state a frontend's own user-facing contract. The shared client offers
+/// them only when the program declares it implements them, never for every program linking it.
+pub const FRONTEND_DECLARED: &[&str] = &["sill.permission_modes"];
 
 /// Whether `name` is a well-formed capability name.
 pub fn valid_capability_name(name: &str) -> bool {

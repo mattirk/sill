@@ -79,11 +79,38 @@ launch snapshots, and are deleted with it. Wildcards are refused. Offline polici
 `network.allow_additional_hosts = false` reject approval; repository restrictions are resolved
 again before a new launch. Agent-wide endpoint defaults are never changed by Allow.
 Policy previews and retained launch snapshots include a `permissions` array. Each record
-identifies `capability`, `allowed`, `default_enabled`, `effective`, `available` and `reason`.
+identifies `capability`, `allowed`, `default_enabled`, `requested`, `blocked`, `source`,
+`effective`, `available` and `reason`. `requested` is the session's remembered choice (null
+follows the policy default); `blocked` means that choice could not take effect within the view's
+limits, explained by `reason`; `source` is `session` when an applied choice decides the state.
 Preview is prospective; snapshot effective state describes the recorded launch policy, not a
 live Host control activation. Availability describes the current daemon's backend support.
 Unavailable capabilities cannot be activated by selecting a policy. Host control never gains
 authority from policy inspection or import.
+
+Session permission changes need `sill.permission_modes: 1` (2026-11-06). The shared client
+offers it only from programs that display permission state (currently the CLI), never on behalf
+of every frontend. `_sill/permissions.set` remembers a contained capability choice for one
+session: `enabled: true` is refused with `permission_denied` when the resolved policy, a
+repository fragment, an offline rule, `network.allow_additional_hosts = false` or a missing
+backend would block it; `false` always applies; `null` returns to the policy default. Ghost
+sessions and `host_control` refuse every choice. `_sill/permissions.restore_defaults` (Restore
+defaults) removes the session's added capability choices and host grants and keeps its policy
+and pins; on a running jail it also stops hosts approved during this run from matching new
+proxy connections. Both return the next-build `preview` and `restart_required`: true when a
+running jail still has another state, including tunnels that remain open. Choices are applied
+after repository and ghost restrictions at every new build and recorded in the launch snapshot;
+a changed choice or a removed launch host marks the running jail `policy_changed`.
+`_sill/policy.save_host` (Save for future sessions) adds a host pattern, wildcards allowed, to
+the session agent's network defaults and changes no existing session; ghosts refuse it.
+
+Without `sill.permission_modes` a connection also cannot submit, resume, send now, answer,
+change controls, start, approve hosts or change pins for a session whose launch (when running)
+or next build requests Desktop development or Host control capabilities (`test_desktop`,
+`private_bus`, `gpu`, `host_control`). Those requests return `unsupported` with
+`details.capability`; an undeterminable permission state is refused the same way. Attaching,
+reading, cancelling and stopping remain available. This keeps GTK and the line-mode attach
+Default-only; it is not a defense against impersonation by host code.
 The schema command exports the concrete records and method shapes. Counters are decimal strings;
 records/events use named objects and `type` tags. `scripts/sfp_client.py` is an independent Python
 consumer and schema validator (install `scripts/requirements-sfp.txt`).
@@ -497,8 +524,10 @@ be used on that connection. A method that needs a missing capability returns `un
 `details.capability`. The exported schema lists the daemon's capabilities under
 `capabilities.offered` and each method's requirement under `methods[].capabilities`.
 
-The sfp/1 baseline needs no optional capability. The current capability registry is empty;
-`sill.internal` and the `_sill/internal/*` methods have been removed.
+The sfp/1 baseline needs no optional capability. The current registry is `sill.send_now`
+and `sill.permission_modes`; `sill.internal` and the `_sill/internal/*` methods have been
+removed. A frontend-declared capability (`initialize::FRONTEND_DECLARED`) states the client's
+own user-facing contract, so the shared client offers it only after the program declares it.
 
 Agent abilities (`steering`, `images`) are not handshake capabilities: they are reported in
 session state, may change with the agent, and use the same open-map rule (unknown keys ignored).
@@ -675,7 +704,8 @@ preview does not imply enforcement. No mutation is blindly retried after an unce
 Suggested concrete hosts appear through the existing denied-host controls. Approving an
 exact suggested host records a session grant, without modifying agent-wide domains; the
 proxy reloads those grants for new connections. Offline launch policies reject grants.
-Other existing denied-host approvals retain their agent-wide behavior. Import conflicts
+Every other denied-host approval is session-only as well; only `_sill/policy.save_host`
+changes agent-wide defaults. Import conflicts
 return `conflict`; invalid fragment/build errors retain their source diagnostics.
 
 The recorded development schema is refreshed for these additive methods. Identity remains

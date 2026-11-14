@@ -12,7 +12,7 @@ fn record(store: &Store, s: sill_core::store::Session) -> Result<api::Session> {
             let (x11, dbus) = sill_core::config::desktop_grants(&s.desktop, &cfg);
             let pins = if s.ghost { vec![] } else { store.jail_pins(&s.id).unwrap_or_default() };
             match sill_core::session::session_base_policy(&s.policy, &home, x11, dbus, s.ghost, Some(&s.agent)) {
-                Ok(base) => sill_core::session::jail_outdated_with_pins(&s.id, &base, &pins)
+                Ok(base) => sill_core::session::jail_outdated_with_grants(&s.id, &base, &pins, store)
                     || sill_core::session::jail_outdated(&s.id, &s.policy, &home),
                 Err(_) => true,
             }

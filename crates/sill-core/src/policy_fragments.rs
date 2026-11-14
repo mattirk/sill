@@ -104,6 +104,12 @@ pub struct Resolution {
     pub suggestions: Vec<Suggestion>,
     /// Hash of base policy, canonical roots and raw source inputs, including missing sources.
     pub fingerprint: String,
+    /// Remembered session capability choices this build consulted, with their outcome.
+    #[serde(default)]
+    pub session_permissions: Vec<crate::permissions::SessionChoice>,
+    /// Session-only host approvals included in this build's allow-list.
+    #[serde(default)]
+    pub session_hosts: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -312,6 +318,8 @@ pub fn resolve(base: &Policy, pins: &[PathBuf], ignore_roots: &[PathBuf]) -> Res
         sources: vec![],
         suggestions: vec![],
         fingerprint: input.fingerprint,
+        session_permissions: vec![],
+        session_hosts: vec![],
     };
     for (root, value) in input.roots.into_iter().zip(input.values) {
         let path = root.join(FRAGMENT);
@@ -1002,7 +1010,7 @@ mod tests {
         repo.write("[permissions]\npublic_web='forbidden'\nhost_control='forbidden'");
         let resolved = repo.resolve(&base).unwrap();
         assert_eq!(resolved.policy.network.mode, NetMode::Allow);
-        assert!(!resolved.policy.permissions.states(&resolved.policy.network)[3].effective);
+        assert!(!resolved.policy.permissions.states(&resolved.policy.network, &[])[3].effective);
         assert_eq!(resolved.policy.permissions.host_control, crate::permissions::Rule::Forbidden);
         assert!(resolved.policy.permissions.validate_launch(&resolved.policy.network).is_ok());
         for text in ["[permissions]\ngpu='on'", "[permissions]\ngpu='off'", "[permissions]\nunknown='forbidden'"] {

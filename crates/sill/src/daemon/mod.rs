@@ -70,9 +70,15 @@ pub struct Conn {
     queued_bytes: Arc<AtomicUsize>,
     /// To cut a stuck connection off.
     sock: UnixStream,
+    /// What the daemon answered at initialization: the optional features this connection may use.
+    capabilities: std::sync::OnceLock<std::collections::BTreeMap<String, u32>>,
 }
 
 impl Conn {
+    pub fn has_capability(&self, name: &str) -> bool {
+        self.capabilities.get().is_some_and(|answered| answered.get(name).is_some_and(|v| *v > 0))
+    }
+
     /// Queue one line; false when the connection is gone or stuck (it is cut off then).
     pub fn send(&self, line: String) -> bool {
         if line.len().saturating_add(1) > sill_proto::initialize::MAX_MESSAGE_BYTES {
@@ -364,7 +370,7 @@ fn serve(stream: UnixStream, hub: Arc<Hub>) -> Result<()> {
     { reader.get_ref().set_read_timeout(None)?; return streams::claim(token, reader); }
     let stream = reader.get_ref();
     let (tx, rx) = sync_channel::<WriteItem>(QUEUE);
-    let conn = Arc::new(Conn { id: NEXT_CONN.fetch_add(1, Ordering::Relaxed), tx, queued_bytes: Arc::new(AtomicUsize::new(0)), sock: stream.try_clone()? });
+    let conn = Arc::new(Conn { id: NEXT_CONN.fetch_add(1, Ordering::Relaxed), tx, queued_bytes: Arc::new(AtomicUsize::new(0)), sock: stream.try_clone()?, capabilities: Default::default() });
     let mut writer = stream.try_clone()?;
     std::thread::Builder::new().name(format!("sill-daemon-write-{}", conn.id)).spawn(move || {
         for item in rx {
@@ -417,6 +423,7 @@ fn read_loop(mut reader: BufReader<UnixStream>, first: String, hub: &Arc<Hub>, c
                 .and_then(|params| state.initialize(params, env!("CARGO_PKG_VERSION")));
             match result {
                 Ok(initialized) => {
+                    let _ = conn.capabilities.set(initialized.capabilities.clone());
                     reader.get_ref().set_read_timeout(None)?;
                     conn.reply(&Response::ok(id, serde_json::to_value(initialized)?));
                     hub.connected(conn);
@@ -483,7 +490,7 @@ mod queue_budget_tests {
     fn failed_sends_and_abandoned_queues_release_their_byte_reservations() {
         let (sock,_peer)=UnixStream::pair().unwrap();
         let (tx,rx)=sync_channel(1);
-        let conn=Conn{id:0,tx,queued_bytes:Arc::new(AtomicUsize::new(0)),sock};
+        let conn=Conn{id:0,tx,queued_bytes:Arc::new(AtomicUsize::new(0)),sock,capabilities:Default::default()};
         assert!(conn.send("queued".into()));
         assert_eq!(conn.queued_bytes.load(Ordering::Relaxed),7);
         assert!(!conn.send("cannot fit".into()),"full channel refuses and releases the new reservation");
