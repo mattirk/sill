@@ -297,3 +297,23 @@ fn a_call_nobody_answers_times_out_with_advice() {
     let msg = format!("{e:#}");
     assert!(msg.contains("did not answer _sill/daemon.status in 0 s") && msg.contains("sill restart"), "{msg}");
 }
+
+#[test]
+fn the_schema_is_printed_without_a_daemon() {
+    let out = Command::new(env!("CARGO_BIN_EXE_sill")).args(["daemon", "schema"]).env("SILL_NO_DAEMON_START", "1").output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["protocol"], json!(sill_proto::PROTOCOL));
+    assert!(doc["$defs"]["Event"].is_object() && doc["$defs"]["Command"].is_object());
+}
+
+#[test]
+fn attach_to_an_unknown_session_is_refused_cleanly() {
+    let d = Daemon::start();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_sill"));
+    cmd.args(["attach", "no-such-session"]).env("XDG_RUNTIME_DIR", d.dir.join("run")).env("XDG_STATE_HOME", d.dir.join("state")).env("HOME", d.dir.join("home")).env_remove("SILL_SESSION");
+    let out = cmd.stdin(Stdio::null()).output().unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no session no-such-session"), "{err}");
+}

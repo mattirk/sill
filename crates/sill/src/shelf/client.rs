@@ -131,7 +131,7 @@ pub fn quick<T: DeserializeOwned>(method: &str, params: impl Serialize + Clone) 
 /// An error is logged, not raised: the view has already changed what it shows.
 pub fn set(id: &str, set: sill_core::wire::SessionSet) {
     let what = format!("{set:?}");
-    match serde_json::to_value(&set).map_err(anyhow::Error::from).and_then(|set| write::<serde_json::Value>(sill_proto::method::SESSIONS_SET, sill_proto::SessionSet { key: id.to_string(), set })) {
+    match write::<serde_json::Value>(sill_proto::method::SESSIONS_SET, sill_proto::SessionSet { key: id.to_string(), set }) {
         Ok(_) => {}
         Err(e) => eprintln!("sill: session {id} {what}: {e:#}"),
     }
@@ -172,7 +172,7 @@ pub fn note_remove(id: &str, ts: i64, text: &str) -> Result<()> {
 }
 
 pub fn set_agent_settings(agent: &str, settings: &sill_core::store::AgentSettings) -> Result<()> {
-    write::<serde_json::Value>(sill_proto::method::AGENTS_SET_SETTINGS, sill_proto::AgentSettingsSet { agent: agent.to_string(), settings: serde_json::to_value(settings)? })?;
+    write::<serde_json::Value>(sill_proto::method::AGENTS_SET_SETTINGS, sill_proto::AgentSettingsSet { agent: agent.to_string(), settings: settings.clone() })?;
     Ok(())
 }
 
@@ -247,8 +247,7 @@ pub fn detach(id: &str) {
 
 /// A command to the session: a refusal (a turn running, the session gone) comes back as the error.
 pub fn command(id: &str, cmd: &sill_core::wire::Command) -> Result<()> {
-    let command = serde_json::to_value(cmd)?;
-    call::<serde_json::Value>(sill_proto::method::SESSIONS_COMMAND, sill_proto::SessionCommand { key: id.to_string(), command })?;
+    call::<serde_json::Value>(sill_proto::method::SESSIONS_COMMAND, sill_proto::SessionCommand { key: id.to_string(), command: cmd.clone() })?;
     Ok(())
 }
 
@@ -279,7 +278,7 @@ fn dispatch(c: Arc<Client>) {
             continue;
         }
         let Ok(n) = serde_json::from_value::<sill_proto::SessionEvent>(params) else { continue };
-        let Ok(wire) = serde_json::from_value::<sill_core::wire::Event>(n.event) else { continue };
+        let wire = n.event;
         if matches!(wire, sill_core::wire::Event::SessionEnded { .. } | sill_core::wire::Event::Summarized { .. } | sill_core::wire::Event::Note(_)) {
             lifecycle(n.key, Lifecycle::Event(wire));
             continue;
@@ -299,10 +298,9 @@ fn dispatch(c: Arc<Client>) {
         let Some(tx) = subs().lock().unwrap().get(&n.key).filter(|(_, t)| *t == me).map(|(tx, _)| tx.clone()) else { continue };
         let key = n.key.clone();
         // a question: the view answers through a reply channel, the answer goes to the daemon
-        let ev = wire.into_acp(move |request, answer| {
+        let ev = sill_core::wire::event_into_acp(wire, move |request, answer| {
             std::thread::spawn(move || {
                 let Ok(answer) = futures::executor::block_on(answer) else { return };
-                let Ok(answer) = serde_json::to_value(answer) else { return };
                 if let Err(e) = quick::<serde_json::Value>(sill_proto::method::SESSIONS_ANSWER, sill_proto::SessionAnswer { key, request, answer }) {
                     eprintln!("sill: answering the agent: {e:#}");
                 }

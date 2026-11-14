@@ -20,49 +20,38 @@ use agent_client_protocol::schema::v1::{
     ToolCallContent,
 };
 use agent_client_protocol::util::MatchDispatch;
-pub use agent_client_protocol::schema::v1::{PermissionOptionKind, StopReason};
+pub use sill_proto::wire::{PermissionOptionKind, StopReason};
+use agent_client_protocol::schema::v1 as acp_v1;
+
+/// ACP's kind as the protocol crate's (the same names on the wire).
+fn option_kind(k: acp_v1::PermissionOptionKind) -> PermissionOptionKind {
+    match k {
+        acp_v1::PermissionOptionKind::AllowOnce => PermissionOptionKind::AllowOnce,
+        acp_v1::PermissionOptionKind::AllowAlways => PermissionOptionKind::AllowAlways,
+        acp_v1::PermissionOptionKind::RejectOnce => PermissionOptionKind::RejectOnce,
+        acp_v1::PermissionOptionKind::RejectAlways => PermissionOptionKind::RejectAlways,
+        other => PermissionOptionKind::Other(serde_json::to_value(other).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_else(|| format!("{other:?}"))),
+    }
+}
+
+/// ACP's stop reason as the protocol crate's.
+fn stop_reason(r: acp_v1::StopReason) -> StopReason {
+    match r {
+        acp_v1::StopReason::EndTurn => StopReason::EndTurn,
+        acp_v1::StopReason::MaxTokens => StopReason::MaxTokens,
+        acp_v1::StopReason::MaxTurnRequests => StopReason::MaxTurnRequests,
+        acp_v1::StopReason::Refusal => StopReason::Refusal,
+        acp_v1::StopReason::Cancelled => StopReason::Cancelled,
+        other => StopReason::Other(serde_json::to_value(other).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_else(|| format!("{other:?}"))),
+    }
+}
 use agent_client_protocol::schema::v1::{AuthCapabilities, AuthMethod, AuthenticateRequest, Meta};
 use agent_client_protocol::{ActiveSession, Agent, ByteStreams, Client, ErrorCode, SessionMessage};
 use anyhow::{Context, Result, anyhow};
 use futures::AsyncReadExt;
 use futures::channel::oneshot;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct PermissionOption {
-    pub id: String,
-    pub name: String,
-    pub kind: PermissionOptionKind,
-}
-
-/// The agent's adjustable session settings (SPEC: modes + config options), as the UI shows them.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct Controls {
-    /// (current mode id, [(id, name)])
-    pub modes: Option<(String, Vec<(String, String)>)>,
-    pub options: Vec<ConfigOption>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ConfigOption {
-    pub id: String,
-    pub name: String,
-    /// `mode` | `model` | `model_config` | `thought_level` | other
-    pub category: String,
-    pub kind: ConfigKind,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum ConfigKind {
-    /// (current value id, [(value id, name)])
-    Select(String, Vec<(String, String)>),
-    Boolean(bool),
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum ConfigValue {
-    Id(String),
-    Bool(bool),
-}
+pub use sill_proto::wire::{ConfigKind, ConfigOption, ConfigValue, Controls, PermissionOption};
 
 fn controls_from(modes: Option<&SessionModeState>, options: Option<&[SessionConfigOption]>) -> Controls {
     let modes = modes.map(|m| {
@@ -105,26 +94,7 @@ fn controls_from(modes: Option<&SessionModeState>, options: Option<&[SessionConf
     Controls { modes, options }
 }
 
-/// One field of a form the agent asks the person to fill (ACP `elicitation/create`, form mode —
-/// Claude's AskUserQuestion arrives this way: one choice field per question plus an "Other" text).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct FormField {
-    pub key: String,
-    pub title: String,
-    pub description: String,
-    pub kind: FieldKind,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum FieldKind {
-    /// One of these: (value, title, description).
-    Choice(Vec<(String, String, String)>),
-    /// Any number of these.
-    Choices(Vec<(String, String, String)>),
-    Text,
-    Bool,
-    Number,
-}
+pub use sill_proto::wire::{FieldKind, FormField};
 
 /// The form's fields from its JSON schema: what sill can show, in the schema's order.
 pub fn form_fields(schema: &ElicitationSchema) -> Vec<FormField> {
@@ -209,47 +179,18 @@ pub enum Event {
     Ended(Option<String>),
 }
 
+pub use sill_proto::wire::AuthMethodInfo;
+
 /// One way to log in, as the agent advertises it in `initialize`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct AuthMethodInfo {
-    pub id: String,
-    pub name: String,
-    pub description: Option<String>,
-    /// Terminal method: run the agent's own command with these extra args and env in a terminal the
-    /// person can see; the agent never gets `authenticate` for it. None: the `authenticate` RPC.
-    pub terminal: Option<(Vec<String>, std::collections::BTreeMap<String, String>)>,
+fn auth_method_info(m: &AuthMethod) -> AuthMethodInfo {
+    let terminal = match m {
+        AuthMethod::Terminal(t) => Some((t.args.clone(), t.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect())),
+        _ => None,
+    };
+    AuthMethodInfo { id: m.id().to_string(), name: m.name().to_string(), description: m.description().map(str::to_string), terminal }
 }
 
-impl From<&AuthMethod> for AuthMethodInfo {
-    fn from(m: &AuthMethod) -> Self {
-        let terminal = match m {
-            AuthMethod::Terminal(t) => Some((t.args.clone(), t.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect())),
-            _ => None,
-        };
-        AuthMethodInfo {
-            id: m.id().to_string(),
-            name: m.name().to_string(),
-            description: m.description().map(str::to_string),
-            terminal,
-        }
-    }
-}
-
-/// Something sent along with a prompt (SPEC §3.2 attachments): a pasted screenshot, a chosen file.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Attachment {
-    pub name: String,
-    pub mime: String,
-    pub kind: AttachmentKind,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum AttachmentKind {
-    /// Sent inline as an ACP image block (base64).
-    Image { data_base64: String },
-    /// Copied where the jail can read it; sent as a resource link plus a line of text naming the path.
-    File { jail_path: std::path::PathBuf },
-}
+pub use sill_proto::wire::{Attachment, AttachmentKind};
 
 /// Standard base64 (no external crate for 20 lines).
 pub fn base64(bytes: &[u8]) -> String {
@@ -323,7 +264,7 @@ pub fn run_session(
                     let options: Vec<PermissionOption> = req
                         .options
                         .iter()
-                        .map(|o| PermissionOption { id: o.option_id.to_string(), name: o.name.clone(), kind: o.kind })
+                        .map(|o| PermissionOption { id: o.option_id.to_string(), name: o.name.clone(), kind: option_kind(o.kind) })
                         .collect();
                     let title = req
                         .tool_call
@@ -401,7 +342,7 @@ pub fn run_session(
                     .await?;
                 let can_load = init.agent_capabilities.load_session;
                 let _ = events_loop.send(Event::Capabilities { images: init.agent_capabilities.prompt_capabilities.image }).await;
-                let auth_methods: Vec<AuthMethodInfo> = init.auth_methods.iter().map(AuthMethodInfo::from).collect();
+                let auth_methods: Vec<AuthMethodInfo> = init.auth_methods.iter().map(auth_method_info).collect();
 
                 // Open the session and drive it until Quit. A session refused for want of a login is
                 // tried again after the person logged in. `session/new` goes through `run_until`:
@@ -567,7 +508,7 @@ async fn drive(
                 in_turn = false;
                 match result {
                     Ok(resp) => {
-                        let _ = events_loop.send(Event::Stopped(resp.stop_reason)).await;
+                        let _ = events_loop.send(Event::Stopped(stop_reason(resp.stop_reason))).await;
                     }
                     Err(e) if e.code == ErrorCode::AuthRequired => {
                         let _ = events_loop.send(Event::Stopped(StopReason::Cancelled)).await;
@@ -668,7 +609,7 @@ async fn drive(
             Next::Update(update) => match update? {
                 SessionMessage::StopReason(reason) => {
                     in_turn = false;
-                    let _ = events_loop.send(Event::Stopped(reason)).await;
+                    let _ = events_loop.send(Event::Stopped(stop_reason(reason))).await;
                 }
                 SessionMessage::SessionMessage(dispatch) => {
                     let events = events_loop.clone();

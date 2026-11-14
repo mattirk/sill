@@ -1,47 +1,20 @@
-//! A session's conversation as it crosses the daemon socket (docs/daemon.md §3.3): what the daemon,
-//! the ACP client of every running session, tells the frontends attached to it, and what they ask
-//! it to do. [`acp::Event`] without its reply channels — a permission request or a form carries a
-//! request number instead, and the answer comes back as `_sill/sessions.answer` — and a command that
-//! says what the transcript gets for a prompt, since the daemon is the one that writes it.
-//!
-//! Serialized as JSON inside the `_sill/session.event` notification and the `_sill/sessions.command`
-//! request (`sill-proto` carries them as plain values). The types live here, next to `acp`, until
-//! the protocol is frozen (M3) and they move to the protocol crate.
+//! A session's conversation as it crosses the daemon socket (docs/daemon.md §3.3): the wire types
+//! are `sill_proto::wire` (re-exported here, so `sill_core::wire::Event` is the same type), and
+//! this module is the bridge to [`acp::Event`] — a permission request or a form carries a reply
+//! channel there and a request number here, so the conversions each way live where the ACP
+//! client does, and a frontend linking only `sill-proto` never sees them.
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
 
-use crate::acp::{self, Attachment, AuthMethodInfo, ConfigValue, Controls, FormField, PermissionOption, StopReason};
+pub use sill_proto::wire::*;
 
-/// What the transcript gets when a prompt is accepted.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Entry {
-    /// The person's prompt as they typed it (without sill's prefix) and the attachments' names.
-    User { text: String, names: Vec<String> },
-    /// A turn sill asks for itself (the summary): a note says what it was.
-    Note(String),
-}
+use crate::acp;
 
-/// What a frontend asks of a running session (`acp::Command`, plus the transcript entry).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Command {
-    /// `text` is what the agent gets (standing block and pin prefix included).
-    Prompt { text: String, attachments: Vec<Attachment>, entry: Option<Entry> },
-    Authenticate(String),
-    RetrySession,
-    SetMode(String),
-    SetConfig(String, ConfigValue),
-    Cancel,
-    /// The frontend is done with the session (its tab closed): it detaches; the agent stays the
-    /// daemon's until the session is stopped.
-    Quit,
-}
-
-impl Command {
-    /// The `acp::Command` the session loop takes, and the entry for the transcript.
-    pub fn into_acp(self) -> (acp::Command, Option<Entry>) {
-        match self {
+/// The `acp::Command` the session loop takes, and the entry for the transcript.
+pub fn command_into_acp(cmd: Command) -> (acp::Command, Option<Entry>) {
+    {
+        match cmd {
             Command::Prompt { text, attachments, entry } => (acp::Command::Prompt(text, attachments), entry),
             Command::Authenticate(m) => (acp::Command::Authenticate(m), None),
             Command::RetrySession => (acp::Command::RetrySession, None),
@@ -51,126 +24,6 @@ impl Command {
             Command::Quit => (acp::Command::Quit, None),
         }
     }
-}
-
-/// `acp::Event` on the wire. `request` numbers a question the agent asked; it is answered with
-/// [`Answer`] and, once any frontend answered, every attached one gets [`Event::Resolved`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Event {
-    Ready { session_id: String, resumed: bool, controls: Controls },
-    Capabilities { images: bool },
-    Controls(Controls),
-    TurnStarted,
-    UserText(String),
-    Text(String),
-    Thought(String),
-    ToolCall { id: String, title: String, kind: String, status: String, detail: Option<String>, diff: Option<String>, parent: Option<String> },
-    ToolCallUpdate { id: String, status: Option<String>, title: Option<String>, detail: Option<String>, diff: Option<String> },
-    SubagentText { parent: String, text: String },
-    PermissionRequest { request: u64, tool_call_id: String, title: String, options: Vec<PermissionOption> },
-    AutoAnswered { tool_call_id: String, title: String, allowed: bool },
-    Elicitation { request: u64, message: String, fields: Vec<FormField> },
-    /// A question was answered (by this frontend or another): drop its dialog.
-    Resolved { request: u64 },
-    Other(String),
-    Usage { used: u64, size: u64 },
-    AuthRequired { message: String, methods: Vec<AuthMethodInfo> },
-    Stopped(StopReason),
-    Ended(Option<String>),
-    /// The daemon ended the session (`sessions.end`): its row is written — or deleted, when
-    /// nothing was asked in it — and its jail is stopping. Frontends drop the session.
-    SessionEnded { deleted: bool, reason: String },
-    /// A line for the transcript's reader that sill wrote itself (the summary turn's mark).
-    Note(String),
-    /// A checkpoint summary (`sessions.checkpoint`) is in: the text as stored (None when the agent
-    /// wrote nothing), and the name it gave the session if the first line was one.
-    Summarized { text: Option<String>, title: Option<String> },
-}
-
-/// One change to a session's row (`_sill/sessions.set`): what the shelf wrote to the store itself
-/// before the daemon was its only writer. `kind` as in `Session::title_kind` / `summary_kind`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SessionSet {
-    Title { title: String, kind: String },
-    AutoAllow(bool),
-    Desktop(String),
-    MemoryScope(String),
-    Policy(String),
-    Summary { text: String, kind: String },
-    /// The session's own agent settings (mode, model, options — SPEC §3.2).
-    Settings(crate::store::AgentSettings),
-    /// An ended session comes back: `ended_at` cleared.
-    Reopen,
-}
-
-/// The Changes page over the wire (docs/daemon.md §7 M2): what `_sill/changes.list` answers.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ChangesList {
-    /// Pinned folders that are git repositories, with git's view of their working tree (live:
-    /// host = jail); only those with something to show.
-    pub live: Vec<LiveRepo>,
-    /// Every session with overlay changes or undoable keeps, newest first.
-    pub sessions: Vec<SessionChanges>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LiveRepo {
-    pub repo: std::path::PathBuf,
-    /// `git status` rows: (path relative to the repository, status letter).
-    pub status: Vec<(std::path::PathBuf, String)>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionChanges {
-    pub id: String,
-    pub title: String,
-    pub ghost: bool,
-    /// Its overlay changes outside the agent's own state (build output left out).
-    pub changes: Vec<ChangeRow>,
-    /// The agent's own files that landed in the overlay (shown folded).
-    pub agent_state: Vec<ChangeRow>,
-    /// Keeps that can still be undone, newest first.
-    pub kept: Vec<crate::keep::Kept>,
-}
-
-/// One overlay change as listed, with what a frontend needs without reading the session's files.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChangeRow {
-    pub change: crate::ledger::Change,
-    /// The upper entry's last write (unix seconds): the auto-revert countdown counts from it.
-    pub written: Option<i64>,
-    /// The enclosing git repository on the host; empty outside any.
-    pub repo: std::path::PathBuf,
-    /// SHA-256 of a regular file's content as listed: keep copies only that (a swap is refused).
-    pub hash: Option<String>,
-    /// Why sill never keeps this path itself (its own files, a repository's executable config).
-    pub protected: Option<String>,
-}
-
-/// What `_sill/changes.diff` shows.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum DiffOf {
-    /// A session's overlay change: the upper content against the host's.
-    Change { session: String, path: std::path::PathBuf },
-    /// A pinned repository's own change: git's diff.
-    Live { repo: std::path::PathBuf, rel: std::path::PathBuf },
-    /// A keep: the host as it is against the version it replaced.
-    Kept { session: String, id: String },
-}
-
-/// What a keep, a revert or an undo did, path by path.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Done {
-    pub done: Vec<(std::path::PathBuf, String)>,
-    pub failed: Vec<(std::path::PathBuf, String)>,
-}
-
-/// The answer to a question: the chosen permission option (None = cancel), or the form's values
-/// (None = cancel).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Answer {
-    Permission(Option<String>),
-    Form(Option<BTreeMap<String, serde_json::Value>>),
 }
 
 /// Where an agent's question waits for its answer.
@@ -197,10 +50,10 @@ impl Reply {
     }
 }
 
-impl Event {
-    /// The daemon side: an event of the session loop as it goes out; a question gets `request`
-    /// and its reply channel comes back to be kept until it is answered.
-    pub fn from_acp(ev: acp::Event, request: u64) -> (Event, Option<Reply>) {
+/// The daemon side: an event of the session loop as it goes out; a question gets `request` and
+/// its reply channel comes back to be kept until it is answered.
+pub fn event_from_acp(ev: acp::Event, request: u64) -> (Event, Option<Reply>) {
+    {
         use acp::Event as A;
         let e = match ev {
             A::Ready { session_id, resumed, controls } => Event::Ready { session_id, resumed, controls },
@@ -227,11 +80,14 @@ impl Event {
         (e, None)
     }
 
-    /// The frontend side: back into the `acp::Event` a view renders. A question gets a fresh reply
-    /// channel whose answer `answer` sends to the daemon; `Resolved` has no `acp` form (None).
-    pub fn into_acp(self, answer: impl FnOnce(u64, futures::channel::oneshot::Receiver<Answer>) + Send + 'static) -> Option<acp::Event> {
+}
+
+/// The frontend side: back into the `acp::Event` a view renders. A question gets a fresh reply
+/// channel whose answer `answer` sends to the daemon; `Resolved` has no `acp` form (None).
+pub fn event_into_acp(ev: Event, answer: impl FnOnce(u64, futures::channel::oneshot::Receiver<Answer>) + Send + 'static) -> Option<acp::Event> {
+    {
         use acp::Event as A;
-        Some(match self {
+        Some(match ev {
             Event::Ready { session_id, resumed, controls } => A::Ready { session_id, resumed, controls },
             Event::Capabilities { images } => A::Capabilities { images },
             Event::Controls(c) => A::Controls(c),
@@ -301,12 +157,11 @@ mod tests {
     fn a_question_round_trips_with_its_answer() {
         let (tx, rx) = futures::channel::oneshot::channel::<Option<String>>();
         let ev = acp::Event::PermissionRequest { tool_call_id: "t1".into(), title: "rm".into(), options: vec![], reply: tx };
-        let (wire, reply) = Event::from_acp(ev, 7);
+        let (wire, reply) = event_from_acp(ev, 7);
         let wire: Event = serde_json::from_str(&serde_json::to_string(&wire).unwrap()).unwrap();
         // the frontend's side: its view answers through the reply channel it got
         let (got_tx, got_rx) = std::sync::mpsc::channel();
-        let ev = wire
-            .into_acp(move |request, answer| {
+        let ev = event_into_acp(wire, move |request, answer| {
                 std::thread::spawn(move || {
                     let a = futures::executor::block_on(answer).unwrap();
                     let _ = got_tx.send((request, a));

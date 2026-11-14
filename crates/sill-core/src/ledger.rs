@@ -20,39 +20,7 @@ use anyhow::Result;
 
 use crate::jail::Layer;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum Kind {
-    Added,
-    Modified,
-    Deleted,
-    /// File type differs between host and upper (file ↔ symlink ↔ dir).
-    TypeChanged,
-    /// Directory replaced wholesale (opaque); its new contents are listed as Added.
-    Replaced,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum FileType {
-    File,
-    Dir,
-    Symlink,
-    Other,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Change {
-    /// Host path.
-    pub path: PathBuf,
-    /// Path inside the upper tree (absent for deletions it is the whiteout node).
-    pub upper: PathBuf,
-    pub kind: Kind,
-    pub file_type: FileType,
-    pub size: u64,
-    /// The host changed this path after the session started (SPEC §4.4 conflicts).
-    pub conflict: bool,
-    /// Matches a `ledger_ignore` pattern: recorded, not hashed per turn, never auto-kept.
-    pub ignored: bool,
-}
+pub use sill_proto::wire::{Change, FileType, Kind};
 
 #[derive(Debug, Clone, Default)]
 pub struct ScanOptions {
@@ -277,17 +245,6 @@ fn same_content(a: &Path, am: &std::fs::Metadata, b: &Path, bm: &std::fs::Metada
     }
 }
 
-impl Kind {
-    pub fn letter(self) -> char {
-        match self {
-            Kind::Added => 'A',
-            Kind::Modified => 'M',
-            Kind::Deleted => 'D',
-            Kind::TypeChanged => 'T',
-            Kind::Replaced => 'R',
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

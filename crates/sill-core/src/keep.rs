@@ -40,24 +40,7 @@ pub struct KeepOptions {
     pub undo: Option<PathBuf>,
 }
 
-/// One line of `kept/log.jsonl`: a keep and what it replaced.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Kept {
-    /// Name of the payload directory below `kept/`; `prior` inside it is the host's previous version.
-    pub id: String,
-    pub ts: i64,
-    /// Host path.
-    pub path: PathBuf,
-    /// What keep did: `added` `updated` `removed` `symlink` `directory`.
-    pub what: String,
-    /// What the host had before: `absent` `file` `symlink` `dir` `other` (no payload for `absent` and
-    /// `other`; for `dir` the payload is the whole tree when keep removed it, else just its mode).
-    pub before: String,
-    /// SHA-256 of the file keep wrote (files only): a later edit on the host is told apart on undo.
-    pub hash: Option<String>,
-    #[serde(default)]
-    pub undone_at: Option<i64>,
-}
+pub use sill_proto::wire::Kept;
 
 const LOG: &str = "log.jsonl";
 const PRIOR: &str = "prior";

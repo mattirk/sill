@@ -22,5 +22,6 @@ async-io = "2"
 sha2 = "0.11.1"
 rusqlite.workspace = true
 sill-memory.workspace = true
+sill-proto.workspace = true
 rand = "0.10.3"
 similar = "3.2.1"

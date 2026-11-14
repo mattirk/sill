@@ -20,6 +20,7 @@ use sill_core::shim;
 mod daemon;
 mod init;
 mod shelf;
+mod tui;
 
 #[derive(Parser)]
 #[command(name = "sill", version, about = "agent shelf")]
@@ -62,6 +63,18 @@ enum Cmd {
         /// delegated cgroup subtree to create the session cgroup in
         #[arg(long)]
         cgroup_root: Option<PathBuf>,
+    },
+    /// Talk to a session from this terminal (docs/daemon.md decision 11): a line is a prompt, the
+    /// agent's text and tool calls come back, a permission request is answered on the next line
+    Attach {
+        /// session id, its first characters, or the exact title
+        key: String,
+        /// start the agent again instead of reattaching to one running in the jail
+        #[arg(long)]
+        fresh: bool,
+        /// thoughts, tool call updates and usage too
+        #[arg(short, long)]
+        verbose: bool,
     },
     /// The daemon (docs/daemon.md): run it (what sill.service does), or ask the running one
     Daemon {
@@ -169,6 +182,9 @@ enum DaemonCmd {
     Status,
     /// Ask the running daemon to leave; sessions are not touched
     Stop,
+    /// The protocol as one JSON document: every method with its params and result, every type's
+    /// JSON Schema (docs/protocol.md) — for a frontend in another language
+    Schema,
 }
 
 #[derive(Subcommand)]
@@ -512,6 +528,7 @@ fn main() -> Result<()> {
         Cmd::Session { cmd } => session_cmd(cmd),
         Cmd::Pin { cmd } => pin_cmd(cmd.unwrap_or(PinCmd::List)),
         Cmd::Changes { cmd } => changes_cmd(cmd.unwrap_or(ChangesCmd::List)),
+        Cmd::Attach { key, fresh, verbose } => tui::line_mode(&key, fresh, verbose),
         Cmd::Daemon { cmd } => daemon_cmd(cmd),
         Cmd::Registry { cmd: RegistryCmd::Snapshot { out } } => {
             let out = out.unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sill-core/registry/snapshot.json"));
@@ -1191,6 +1208,10 @@ fn daemon_cmd(cmd: Option<DaemonCmd>) -> Result<()> {
             println!("jails:    {}", s.launcher);
             println!("socket:   {}", s.socket);
             println!("sessions: {} in the store, {} running", s.sessions, s.running);
+            Ok(())
+        }
+        Some(DaemonCmd::Schema) => {
+            println!("{}", serde_json::to_string_pretty(&sill_proto::schema::document())?);
             Ok(())
         }
         Some(DaemonCmd::Stop) => match sill_proto::Client::connect() {

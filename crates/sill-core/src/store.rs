@@ -46,16 +46,7 @@ pub struct Session {
     pub ghost: bool,
 }
 
-/// The agent controls as set by the person (SPEC §3.2): mode id and config option values. Kept twice:
-/// per session (`sessions.agent_settings`, what that session runs with) and per agent type
-/// (`agent_settings`, the default a new session starts from — every change in any session updates it).
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct AgentSettings {
-    pub mode: Option<String>,
-    /// option id → value id (selects) or "true"/"false" (booleans)
-    #[serde(default)]
-    pub config: std::collections::BTreeMap<String, String>,
-}
+pub use sill_proto::wire::AgentSettings;
 
 /// One stored transcript entry.
 #[derive(Debug, Clone)]

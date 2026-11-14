@@ -203,7 +203,7 @@ impl Runner {
             other => other,
         };
         let request = st.next_request;
-        let (wire, reply) = wire::Event::from_acp(ev, request);
+        let (wire, reply) = wire::event_from_acp(ev, request);
         if let Some(r) = reply {
             st.next_request += 1;
             st.pending.insert(request, (wire.clone(), r));
@@ -374,7 +374,7 @@ impl Runner {
     /// A frontend's command. A prompt is refused while a turn runs; when it is taken, its entry is
     /// written — the person's text, or the note for a turn sill asked for.
     pub fn command(&self, hub: &Hub, cmd: wire::Command) -> Result<()> {
-        let (cmd, entry) = cmd.into_acp();
+        let (cmd, entry) = wire::command_into_acp(cmd);
         let prompt = matches!(cmd, acp::Command::Prompt(..));
         {
             let mut st = self.st.lock().unwrap();
@@ -449,7 +449,7 @@ fn broadcast(id: &str, subs: &mut Vec<Arc<Conn>>, event: &wire::Event) {
     if subs.is_empty() {
         return;
     }
-    let params = sill_proto::SessionEvent { key: id.to_string(), event: serde_json::to_value(event).unwrap_or_default() };
+    let params = sill_proto::SessionEvent { key: id.to_string(), event: event.clone() };
     let req = sill_proto::rpc::Request::new(None, sill_proto::method::SESSION_EVENT, serde_json::to_value(params).unwrap_or_default());
     let Ok(line) = serde_json::to_string(&req) else { return };
     subs.retain(|c| c.send(line.clone()));

@@ -291,7 +291,7 @@ impl Hub {
             }
             method::SESSIONS_SET => {
                 let r: SessionSet = args(params)?;
-                let set: sill_core::wire::SessionSet = serde_json::from_value(r.set).map_err(Error::invalid_params)?;
+                let set = r.set;
                 self.set_session(&r.key, set).map_err(|e| Error::failed(format!("{e:#}")))?;
                 Ok(json!({}))
             }
@@ -359,7 +359,7 @@ impl Hub {
             }
             method::AGENTS_SET_SETTINGS => {
                 let a: AgentSettingsSet = args(params)?;
-                let settings: sill_core::store::AgentSettings = serde_json::from_value(a.settings).map_err(Error::invalid_params)?;
+                let settings = a.settings;
                 self.with_store(|s| s.set_agent_settings(&a.agent, &settings)).map_err(|e| Error::failed(format!("{e:#}")))?;
                 Ok(json!({}))
             }
@@ -434,7 +434,7 @@ impl Hub {
             }
             method::SESSIONS_COMMAND => {
                 let c: SessionCommand = args(params)?;
-                let cmd: sill_core::wire::Command = serde_json::from_value(c.command).map_err(Error::invalid_params)?;
+                let cmd = c.command;
                 let r = self.runner(&c.key)?;
                 if matches!(cmd, sill_core::wire::Command::Quit) {
                     r.detach(conn.id);
@@ -446,7 +446,7 @@ impl Hub {
             }
             method::SESSIONS_ANSWER => {
                 let a: SessionAnswer = args(params)?;
-                let answer: sill_core::wire::Answer = serde_json::from_value(a.answer).map_err(Error::invalid_params)?;
+                let answer = a.answer;
                 self.runner(&a.key)?.answer(a.request, answer).map_err(|e| Error::failed(format!("{e:#}")))?;
                 Ok(json!({}))
             }

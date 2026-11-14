@@ -11,11 +11,14 @@ use serde::{Deserialize, Serialize};
 
 pub mod client;
 pub mod rpc;
+pub mod schema;
+pub mod wire;
 
 pub use client::Client;
 
-/// Bumped when a method or a type changes shape; the daemon reports its own in [`DaemonStatus`].
-pub const PROTOCOL: u32 = 4;
+/// Bumped when a method or a type changes shape (docs/protocol.md has the changelog); the daemon
+/// reports its own in [`DaemonStatus`], and a client of another number restarts it.
+pub const PROTOCOL: u32 = 5;
 
 /// Method names. Groups follow the table in docs/daemon.md §3.3.
 pub mod method {
@@ -51,7 +54,7 @@ pub mod method {
     pub const SESSIONS_CHECKPOINT: &str = "_sill/sessions.checkpoint";
     /// The writes that were the shelf's (M1c): `sill.db` has one writer, the daemon.
     pub const SESSIONS_NEW: &str = "_sill/sessions.new";
-    /// One field of a session's row; params [`SessionSet`] with a `sill_core::wire::SessionSet`.
+    /// One field of a session's row; params [`SessionSet`].
     pub const SESSIONS_SET: &str = "_sill/sessions.set";
     /// Stop the jail, remove the session's state and its row.
     pub const SESSIONS_DELETE: &str = "_sill/sessions.delete";
@@ -69,13 +72,13 @@ pub mod method {
     pub const MEMORY_COMPACT: &str = "_sill/memory.compact";
     /// Delete every ended session; answers [`Count`].
     pub const MEMORY_FORGET: &str = "_sill/memory.forget";
-    /// An agent type's default settings (`sill_core::store::AgentSettings` as JSON).
+    /// An agent type's default settings; params [`AgentSettingsSet`].
     pub const AGENTS_SET_SETTINGS: &str = "_sill/agents.set_settings";
-    /// The Changes page (docs/daemon.md §7 M2): answers a `sill_core::wire::ChangesList`.
+    /// The Changes page (docs/daemon.md §7 M2): answers a [`wire::ChangesList`].
     pub const CHANGES_LIST: &str = "_sill/changes.list";
-    /// Params a `sill_core::wire::DiffOf`; answers [`Text`].
+    /// Params a [`wire::DiffOf`]; answers [`Text`].
     pub const CHANGES_DIFF: &str = "_sill/changes.diff";
-    /// Params [`ChangesKeep`]; the next four answer a `sill_core::wire::Done`.
+    /// Params [`ChangesKeep`]; this and the next two answer a [`wire::Done`].
     pub const CHANGES_KEEP: &str = "_sill/changes.keep";
     /// Params [`ChangesPaths`].
     pub const CHANGES_REVERT: &str = "_sill/changes.revert";
@@ -109,7 +112,7 @@ pub fn runtime_dir() -> Result<PathBuf> {
 }
 
 /// `_sill/daemon.status`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DaemonStatus {
     pub version: String,
     pub protocol: u32,
@@ -131,7 +134,7 @@ pub struct DaemonStatus {
 }
 
 /// A session as the store holds it (`store::Session`), plus what the daemon knows about its jail.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Session {
     pub id: String,
     pub agent: String,
@@ -155,13 +158,13 @@ pub struct Session {
 }
 
 /// `_sill/sessions.get`, `_sill/memory.show`: an id, its first characters, or the exact title.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Key {
     pub key: String,
 }
 
 /// `_sill/memory.list`: an ended session, newest first.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MemorySession {
     pub id: String,
     pub agent: String,
@@ -172,7 +175,7 @@ pub struct MemorySession {
 }
 
 /// `_sill/memory.search`: the words, plus the filters the CLI takes as flags.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MemorySearch {
     pub words: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -184,7 +187,7 @@ pub struct MemorySearch {
 }
 
 /// `_sill/memory.transcript`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Transcript {
     pub key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -192,7 +195,7 @@ pub struct Transcript {
 }
 
 /// `_sill/sessions.start`: the shim socket of the running jail.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Started {
     pub socket: PathBuf,
     /// This call started the jail (false: it was already running).
@@ -200,7 +203,7 @@ pub struct Started {
 }
 
 /// `_sill/sessions.log`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LogRequest {
     pub key: String,
     pub lines: usize,
@@ -208,30 +211,30 @@ pub struct LogRequest {
 
 /// `_sill/sessions.attach`. `fresh`: an agent still running in the jail is started again instead
 /// of being reattached (adapters that refuse a second `initialize`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Attach {
     pub key: String,
     #[serde(default)]
     pub fresh: bool,
 }
 
-/// `_sill/sessions.command`: `command` is a `sill_core::wire::Command` as JSON.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `_sill/sessions.command`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionCommand {
     pub key: String,
-    pub command: serde_json::Value,
+    pub command: wire::Command,
 }
 
-/// `_sill/sessions.answer`: `answer` is a `sill_core::wire::Answer` as JSON.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `_sill/sessions.answer`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionAnswer {
     pub key: String,
     pub request: u64,
-    pub answer: serde_json::Value,
+    pub answer: wire::Answer,
 }
 
 /// `_sill/sessions.end`. `reason`: `close` (the tab), `idle` (the policy's idle timeout), `quit`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct End {
     pub key: String,
     #[serde(default)]
@@ -240,7 +243,7 @@ pub struct End {
 
 /// `_sill/sessions.end`'s answer. `pending`: the agent writes its summary first; the session's
 /// `SessionEnded` event says when it is done. Otherwise the end is complete when this arrives.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Ending {
     pub pending: bool,
     /// The session was deleted (nothing was asked in it) instead of remembered.
@@ -250,7 +253,7 @@ pub struct Ending {
 /// `_sill/sessions.new`: a session row. `pins` are copied as given; with `remember_pins` and none
 /// given, the pins of the latest session that had any (Settings → Remember pins). Answers [`Key`]
 /// with the new id.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NewSession {
     pub agent: String,
     pub policy: String,
@@ -271,28 +274,28 @@ pub struct NewSession {
     pub ghost: bool,
 }
 
-/// `_sill/sessions.set`: `set` is a `sill_core::wire::SessionSet` as JSON.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `_sill/sessions.set`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionSet {
     pub key: String,
-    pub set: serde_json::Value,
+    pub set: wire::SessionSet,
 }
 
 /// `_sill/sessions.pin|unpin`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Pin {
     pub key: String,
     pub path: PathBuf,
 }
 
 /// `_sill/pins.add`, `_sill/pins.remove`: a global pin.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GlobalPin {
     pub path: PathBuf,
 }
 
 /// `_sill/memory.note_add`; `_sill/memory.note_remove` with `ts` (a note is its time and text).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Note {
     pub key: String,
     pub text: String,
@@ -301,35 +304,35 @@ pub struct Note {
 }
 
 /// `_sill/agents.set_settings`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentSettingsSet {
     pub agent: String,
-    pub settings: serde_json::Value,
+    pub settings: wire::AgentSettings,
 }
 
 /// `_sill/sessions.jail_view`: each overlay layer (host path, its upper tree) and the masked paths.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct JailView {
     pub layers: Vec<(PathBuf, PathBuf)>,
     pub masked: Vec<PathBuf>,
 }
 
 /// `_sill/changes.keep`: each host path with the hash it was listed with (None: no check).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ChangesKeep {
     pub session: String,
     pub items: Vec<(PathBuf, Option<String>)>,
 }
 
 /// `_sill/changes.revert`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ChangesPaths {
     pub session: String,
     pub paths: Vec<PathBuf>,
 }
 
 /// `_sill/changes.undo`: keep ids; none = every undoable keep of the session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ChangesUndo {
     pub session: String,
     #[serde(default)]
@@ -339,14 +342,14 @@ pub struct ChangesUndo {
 }
 
 /// `_sill/changes.git_revert`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GitRevert {
     pub repo: PathBuf,
     pub rel: PathBuf,
 }
 
 /// `_sill/memory.compact`'s answer.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Compacted {
     pub compacted: usize,
     pub trimmed: usize,
@@ -354,24 +357,24 @@ pub struct Compacted {
 }
 
 /// A count (`_sill/memory.forget`).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Count {
     pub n: usize,
 }
 
-/// `_sill/session.event`: `event` is a `sill_core::wire::Event` as JSON.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `_sill/session.event`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionEvent {
     pub key: String,
-    pub event: serde_json::Value,
+    pub event: wire::Event,
 }
 
 /// A result that is text the way the CLI prints it (`memory.show`, `memory.search`, `memory.transcript`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Text {
     pub text: String,
 }
 
 /// No parameters.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Empty {}
