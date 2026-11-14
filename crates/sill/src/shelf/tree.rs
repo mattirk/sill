@@ -554,8 +554,10 @@ impl FolderTree {
         {
             repos.push(r);
         }
+        let mut from_git = 0usize;
         for repo in &repos {
             for (rel, st) in changes::git_status(repo) {
+                from_git += 1;
                 let path = repo.join(rel);
                 badges.insert(path.clone(), st);
                 let mut d = path.parent();
@@ -591,6 +593,14 @@ impl FolderTree {
         if scope.is_none() && !roots.contains(&home) {
             roots.push(home);
         }
+        // the title says, on hover, when the badges were last read and where they come from
+        let when = glib::DateTime::now_local().ok().and_then(|d| d.format("%H:%M:%S").ok()).map(|s| s.to_string()).unwrap_or_default();
+        let from_sessions = all.iter().filter(|c| !c.ignored).count();
+        self.title.set_tooltip_text(Some(&format!(
+            "badges read {when}: {from_git} from git status in {} repositor{}, {from_sessions} from sessions' overlays",
+            repos.len(),
+            if repos.len() == 1 { "y" } else { "ies" }
+        )));
         *self.badges.borrow_mut() = badges;
         *self.pending.borrow_mut() = owners;
         *self.changes.borrow_mut() = all;
