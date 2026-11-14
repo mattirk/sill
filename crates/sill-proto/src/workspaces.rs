@@ -183,7 +183,11 @@ pub struct Prepared {
     pub revision: Revision,
     /// Different from the revision prepared before: the person must look again.
     pub changed: bool,
+    /// The result still does not descend from the destination (the rebase stopped or could not run).
     pub needs_rebase: bool,
+    /// The rebase stopped on these files: resolve them in the workspace (Reopen) or abort.
+    #[serde(default)]
+    pub conflicts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

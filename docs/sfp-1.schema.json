@@ -4414,7 +4414,16 @@
           "description": "Different from the revision prepared before: the person must look again.",
           "type": "boolean"
         },
+        "conflicts": {
+          "default": [],
+          "description": "The rebase stopped on these files: resolve them in the workspace (Reopen) or abort.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "needs_rebase": {
+          "description": "The result still does not descend from the destination (the rebase stopped or could not run).",
           "type": "boolean"
         },
         "revision": {
@@ -7808,7 +7817,7 @@
       "capabilities": {
         "sill.workspaces": 1
       },
-      "doc": "Record the source's current branch and tip as the destination and return the revision a Merge would apply. needs_rebase when the result does not descend from the destination (rebase in the workspace).",
+      "doc": "Record the source's current branch and tip as the destination and, when the source moved, rebase the result onto it in a helper jail with the workspace session's restrictions; return the revision a Merge would apply. A rebase that stops leaves conflicts (resolve in the workspace, or abort); changed means the person must look again.",
       "kind": "request",
       "name": "_sill/workspaces.prepare",
       "params": {
@@ -7816,6 +7825,20 @@
       },
       "result": {
         "$ref": "#/$defs/Prepared"
+      }
+    },
+    {
+      "capabilities": {
+        "sill.workspaces": 1
+      },
+      "doc": "Abort a rebase that prepare left stopped, in the same helper jail: the result is as it was before.",
+      "kind": "request",
+      "name": "_sill/workspaces.abort",
+      "params": {
+        "$ref": "#/$defs/Operate"
+      },
+      "result": {
+        "$ref": "#/$defs/Changed"
       }
     },
     {

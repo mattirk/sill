@@ -1506,6 +1506,7 @@ fn start_session(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>) -> Re
         shim_bin,
         agent: None,
         ghost: jail.ghost,
+        workspace: None,
         binds: jail
             .binds
             .iter()
@@ -1807,6 +1808,7 @@ fn build_spec(a: JailArgs, command: Vec<OsString>) -> Result<JailSpec> {
         masks: vec![],
         memory_dir: None,
         bridge_dir: None,
+        workspace_mask: None,
         seccomp_fd: None,
         extra_args,
         command,

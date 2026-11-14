@@ -793,8 +793,11 @@ never repeats the work, and `_sill/operations.get` reports the receipt. Refusals
 (`submodules`, `linked_worktree`, `partial_clone`, `lfs`, `filter_drivers`, `borrowed_objects`,
 `detached_head`, `ref_format`, `no_commits`, `not_a_repository`); otherwise `stale_revision`,
 `source_moved`, `source_overlap`, `untracked_collision`, `uncommitted`, `writer_active`,
-`path_taken`, `retention_expired` or `state`. A rebase in a helper jail and its abort are not part of
-this version: `needs_rebase` asks for it to be done in the workspace.
+`path_taken`, `retention_expired`, `rebase_in_progress`, `rebase_failed`, `no_session` or `state`.
+When the source moved, `prepare` rebases the result in a helper jail built from the workspace
+session's next build (no network, the source hidden); a rebase that stops is left for the
+workspace (`conflicts`, and the workspace's `operation` reads `rebase`/`conflict`) and
+`_sill/workspaces.abort` undoes it in the same helper.
 
 ### `_sill/repos.root` answers for a repository folder (2026-11-08)
 

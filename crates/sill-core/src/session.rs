@@ -30,6 +30,8 @@ pub struct StartOptions {
     /// A ghost session (docs/memory.md §3): `sill launch --ghost` tightens the policy
     /// (`Policy::ghostly`) and leaves the memory snapshot out unless Settings say otherwise.
     pub ghost: bool,
+    /// A workspace session's source to hide (`Store::workspace_mask`).
+    pub workspace: Option<crate::agent_storage::WorkspaceMask>,
 }
 
 /// The sill-owned home of an agent: `~/.local/state/sill/agents/<id>/`, holding the jail's copy of
@@ -90,10 +92,11 @@ pub fn state_dir_path(uid: u32, session: &str) -> Result<PathBuf> {
     Ok(Path::new(crate::jail::STATE_FS).join(uid.to_string()).join("sessions").join(session))
 }
 
-pub fn freeze_filesystem(mut resolution: crate::policy_fragments::Resolution, agent_id: &str, home: &Path, state_dir: &Path, pins: &[PathBuf], ghost: bool) -> Result<crate::policy_fragments::Resolution> {
+pub fn freeze_filesystem(mut resolution: crate::policy_fragments::Resolution, agent_id: &str, home: &Path, state_dir: &Path, pins: &[PathBuf], ghost: bool, workspace: Option<&crate::agent_storage::WorkspaceMask>) -> Result<crate::policy_fragments::Resolution> {
     let registry = crate::agents::load(home)?;
     let agent = registry.get(agent_id).context("unknown agent")?;
     let mut plan = crate::agent_storage::resolve(agent, &registry, &resolution.policy, state_dir, home, pins, ghost)?;
+    plan.workspace = workspace.cloned();
     plan.add_fragments(&resolution.fragment_ro, &resolution.fragment_masks);
     resolution.filesystem = Some(plan);
     Ok(resolution)
@@ -284,9 +287,9 @@ pub fn next_build_restrictions(row: &crate::store::Session, home: &Path, pins: &
 }
 
 /// A stored session's next build, as the launcher resolves it.
-pub fn next_build(row: &crate::store::Session, home: &Path, pins: &[PathBuf], ignore_roots: &[PathBuf]) -> Result<crate::policy_fragments::Resolution> {
+pub fn next_build(row: &crate::store::Session, home: &Path, pins: &[PathBuf], ignore_roots: &[PathBuf], workspace: Option<&crate::agent_storage::WorkspaceMask>) -> Result<crate::policy_fragments::Resolution> {
     let resolution = resolved_policy_with_grants(next_build_restrictions(row, home, pins, ignore_roots)?, &row.id)?;
-    freeze_filesystem(resolution, &row.agent, home, &state_dir_path(rustix::process::getuid().as_raw(), &row.id)?, pins, row.ghost)
+    freeze_filesystem(resolution, &row.agent, home, &state_dir_path(rustix::process::getuid().as_raw(), &row.id)?, pins, row.ghost, workspace)
 }
 
 /// The launch no longer matches the remembered grants: a capability choice changed, or a host
@@ -533,7 +536,7 @@ pub fn ensure_started(opts: &StartOptions, home: &Path, exe: &Path) -> Result<St
     let resolution = resolved_policy_with_grants(resolution, &opts.session)?;
     let resolution = if let Some(id) = &opts.agent {
         let state = opts.state_dir.clone().unwrap_or(state_dir_path(rustix::process::getuid().as_raw(), &opts.session)?);
-        freeze_filesystem(resolution, id, home, &state, &opts.pins, opts.ghost)?
+        freeze_filesystem(resolution, id, home, &state, &opts.pins, opts.ghost, opts.workspace.as_ref())?
     } else {
         let registry = crate::agents::load(home)?;
         let state = opts.state_dir.clone().unwrap_or(state_dir_path(rustix::process::getuid().as_raw(), &opts.session)?);

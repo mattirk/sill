@@ -39,6 +39,10 @@ impl Context {
                 facts
             })
             .unwrap_or_default();
+        let facts = match sill_core::workspace::records::session_notice(store.conn(), id) {
+            Ok(Some(notice)) => facts + &notice,
+            _ => facts,
+        };
         // Global pins are mounts, not the session's focus or recall scope (docs/pins.md).
         let pins = store.pins(id)?;
         let memory = if session.ghost && !cfg.ghost_memory() {

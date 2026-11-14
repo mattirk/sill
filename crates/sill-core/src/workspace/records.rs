@@ -44,6 +44,10 @@ pub trait Host {
     /// A session pinned to `pin`, not started; `create_id` makes a retry return the same one.
     fn new_session(&self, create_id: &str, agent: &str, policy: &str, pin: &Path) -> Result<String>;
     fn life(&self, session: &str) -> Life;
+    /// Run `argv` in a jail with `session`'s restrictions (its next build: masks, pins, the
+    /// workspace's source hidden), no network, working directory `cwd`: the workspace's own Git
+    /// runs there, never on the host.
+    fn run_jailed(&self, session: &str, cwd: &Path, argv: &[&str]) -> Result<std::process::Output>;
     /// Where workspaces are made; retained ones go to `<root>/.retained`.
     fn root(&self) -> PathBuf;
     fn now(&self) -> i64 {
@@ -195,11 +199,34 @@ fn settle(conn: &Connection, op: &str, state: &str, detail: &str) -> Result<()> 
 fn interrupted(conn: &Connection, workspace: &str) -> Result<Option<api::WorkspaceOperation>> {
     Ok(conn
         .query_row(
-            "SELECT kind,detail FROM workspace_journal WHERE workspace_id=?1 AND state='interrupted' ORDER BY started_at DESC LIMIT 1",
+            "SELECT kind,state,detail FROM workspace_journal WHERE workspace_id=?1 AND state IN ('interrupted','conflict') ORDER BY started_at DESC LIMIT 1",
             [workspace],
-            |r| Ok(api::WorkspaceOperation { kind: r.get(0)?, state: "interrupted".into(), detail: r.get(1)? }),
+            |r| Ok(api::WorkspaceOperation { kind: r.get(0)?, state: r.get(1)?, detail: r.get(2)? }),
         )
         .optional()?)
+}
+
+/// A rebase stopped part way in the clone (the person, the agent or the helper left it so).
+fn rebasing(clone: &Path) -> bool {
+    clone.join(".git/rebase-merge").exists() || clone.join(".git/rebase-apply").exists()
+}
+
+/// Files the clone's index holds in conflict, read through the hardened view.
+fn conflicted(clone: &Path) -> Vec<String> {
+    let Ok(git) = crate::changes::Git::open(clone) else { return vec![] };
+    let Ok(out) = git.cmd().args(["diff", "--name-only", "--diff-filter=U", "-z"]).output() else { return vec![] };
+    String::from_utf8_lossy(&out.stdout).split('\0').filter(|p| !p.is_empty()).map(str::to_string).collect()
+}
+
+/// A conflict entry whose rebase has since finished or been aborted in the workspace is settled.
+fn clear_conflict<H: Host>(h: &H, r: &Row) -> Result<()> {
+    if !rebasing(&r.path) {
+        h.db(|c| {
+            c.execute("UPDATE workspace_journal SET state='done' WHERE workspace_id=?1 AND state='conflict'", [&r.id])?;
+            Ok(())
+        })?;
+    }
+    Ok(())
 }
 
 fn state(s: &str) -> api::WorkspaceState {
@@ -500,12 +527,50 @@ pub fn prepare<H: Host>(h: &H, a: &api::Operate) -> Result<api::Prepared> {
     if r.state != "result" {
         return Err(refuse("state", "only a result can be merged", vec![]));
     }
-    let fresh = h.db(|c| receipts(c)?.begin(&a.operation_id, METHOD, &fingerprint))?.1;
+    clear_conflict(h, &r)?;
+    if rebasing(&r.path) {
+        return Err(refuse("rebase_in_progress", "A rebase is stopped in the workspace: finish it there (Reopen) or abort it.", conflicted(&r.path)));
+    }
     let (branch, _) = super::source_head(&r.source)?;
     if branch.is_empty() {
         return Err(refuse("detached_head", "check out a branch in the source first", vec![]));
     }
-    super::set_destination(&r.source, &r.path, &r.id, &branch, &r.branch)?;
+    // what a rebase would need, checked before anything is recorded or moved
+    let (current, needs_rebase) = revision_now(&r)?;
+    let mut helper = None;
+    if needs_rebase {
+        if !current.worktree.is_empty() {
+            return Err(refuse("uncommitted", "The workspace has uncommitted changes; a rebase needs them committed or removed.", super::summary(&r.path, &r.branch, &r.base)?.uncommitted));
+        }
+        let Some(session) = r.session_id.clone().filter(|s| h.life(s) != Life::Missing) else {
+            return Err(refuse("no_session", "The workspace's session is gone; reopen it to rebase.", vec![]));
+        };
+        helper = Some(session);
+    }
+    let fresh = h.db(|c| receipts(c)?.begin(&a.operation_id, METHOD, &fingerprint))?.1;
+    let dest = super::set_destination(&r.source, &r.path, &r.id, &branch, &r.branch)?;
+    let mut conflicts = Vec::new();
+    if let Some(session) = helper {
+        let out = h.run_jailed(&session, &r.path, &["git", "rebase", "--no-autostash", "refs/sill/dest"])?;
+        if !out.status.success() {
+            if rebasing(&r.path) {
+                conflicts = conflicted(&r.path);
+                let detail = format!("The rebase onto {branch} ({}) stopped: {}", &dest[..dest.len().min(12)], if conflicts.is_empty() { "see the workspace".into() } else { conflicts.join(", ") });
+                let k = key(&a.operation_id);
+                h.db(|c| {
+                    intent(c, &k, &r.id, "rebase", &json!({"dest": dest}), h.now())?;
+                    settle(c, &k, "conflict", &detail)
+                })?;
+            } else {
+                let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                let hint = if r.shallow { " The source is shallow: fetch more history in it, then prepare again." } else { "" };
+                if fresh {
+                    h.db(|c| receipts(c)?.finish(&a.operation_id, None, Some("invalid_state")))?;
+                }
+                return Err(refuse("rebase_failed", format!("The rebase could not run: {why}.{hint}"), vec![]));
+            }
+        }
+    }
     let (revision, needs_rebase) = revision_now(&r)?;
     let changed = r.reviewed.as_ref() != Some(&revision);
     r.reviewed = Some(revision.clone());
@@ -517,7 +582,29 @@ pub fn prepare<H: Host>(h: &H, a: &api::Operate) -> Result<api::Prepared> {
         }
         Ok(())
     })?;
-    Ok(api::Prepared { workspace: h.db(|c| record(c, &r))?, revision, changed, needs_rebase })
+    Ok(api::Prepared { workspace: h.db(|c| record(c, &r))?, revision, changed, needs_rebase, conflicts })
+}
+
+/// Abort a rebase that stopped in the workspace, in the same helper jail.
+pub fn abort<H: Host>(h: &H, a: &api::Operate) -> Result<api::Changed> {
+    let _g = lock();
+    let r = get_row(h, &a.workspace_id)?;
+    if !rebasing(&r.path) {
+        clear_conflict(h, &r)?;
+        return changed(h, &r, None, None);
+    }
+    if writing(h, &r) {
+        return Err(refuse("writer_active", "a session is working in it; abort the rebase there", vec![]));
+    }
+    let Some(session) = r.session_id.clone().filter(|s| h.life(s) != Life::Missing) else {
+        return Err(refuse("no_session", "The workspace's session is gone; reopen it to abort the rebase there.", vec![]));
+    };
+    let out = h.run_jailed(&session, &r.path, &["git", "rebase", "--abort"])?;
+    if !out.status.success() {
+        return Err(refuse("rebase_failed", format!("The rebase could not be aborted: {}", String::from_utf8_lossy(&out.stderr).trim()), vec![]));
+    }
+    clear_conflict(h, &r)?;
+    changed(h, &r, None, None)
 }
 
 fn stop_message(stop: &super::Stop) -> String {
@@ -545,6 +632,9 @@ pub fn merge<H: Host>(h: &H, a: &api::Apply) -> Result<api::Changed> {
     }
     if r.state != "result" {
         return Err(refuse("state", "only a result can be merged", vec![]));
+    }
+    if rebasing(&r.path) {
+        return Err(refuse("rebase_in_progress", "A rebase is stopped in the workspace: finish it there (Reopen) or abort it.", conflicted(&r.path)));
     }
     let (now_rev, _) = revision_now(&r)?;
     if now_rev != a.revision {
@@ -727,6 +817,44 @@ fn restored(r: &mut Row, now: i64) {
     r.retained = None;
     r.retained_until = None;
     r.updated_at = now;
+}
+
+/// The source repository `session` works on as a workspace, when it is one: the latest row naming
+/// it as owner or session. None in a store without workspaces.
+pub fn session_source(conn: &Connection, session: &str) -> Result<Option<PathBuf>> {
+    let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspaces')", [], |r| r.get(0))?;
+    if !exists {
+        return Ok(None);
+    }
+    Ok(conn
+        .query_row(
+            "SELECT source FROM workspaces WHERE owner=?1 OR session_id=?1 ORDER BY updated_at DESC LIMIT 1",
+            [session],
+            |r| r.get::<_, Vec<u8>>(0),
+        )
+        .optional()?
+        .map(path))
+}
+
+/// What the agent of a workspace session is told (§5): where it works, on which branch from which
+/// base, that the source checkout is hidden, and that the person merges. None for other sessions.
+pub fn session_notice(conn: &Connection, session: &str) -> Result<Option<String>> {
+    let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspaces')", [], |r| r.get(0))?;
+    if !exists {
+        return Ok(None);
+    }
+    let r = conn
+        .query_row(&format!("SELECT {COLUMNS} FROM workspaces WHERE owner=?1 OR session_id=?1 ORDER BY updated_at DESC LIMIT 1"), [session], row)
+        .optional()?;
+    Ok(r.filter(|r| r.state != "discarded").map(|r| {
+        format!(
+            "\n[This session works in a workspace: {path}, its own clone of {source} on branch {branch}, started from {base}. The source checkout is hidden from this jail — work and commit here; uncommitted work is not merged. The person reviews the result and merges it into the source, or discards it.]",
+            path = r.path.display(),
+            source = r.source.display(),
+            branch = r.branch,
+            base = &r.base[..r.base.len().min(12)],
+        )
+    }))
 }
 
 /// The end of retention: retained clones past their time go, with their anchors and rows.

@@ -606,7 +606,20 @@ impl Store {
                 out.push(g);
             }
         }
+        // a workspace session never gets its source, nor a pin inside it (docs/parallel-coding.md §5);
+        // an ancestor pin stays, the jail masks the source within it
+        if let Some(source) = crate::workspace::records::session_source(&self.conn, session_id)? {
+            out.retain(|p| !p.starts_with(&source));
+        }
         Ok(out)
+    }
+
+    /// A workspace session's source checkout and object store, for its jail (§4–5).
+    pub fn workspace_mask(&self, session_id: &str) -> Result<Option<crate::agent_storage::WorkspaceMask>> {
+        Ok(crate::workspace::records::session_source(&self.conn, session_id)?.map(|source| crate::agent_storage::WorkspaceMask {
+            objects: sill_proto::sessions::HostPath::from_path(&source.join(".git/objects")),
+            source: sill_proto::sessions::HostPath::from_path(&source),
+        }))
     }
 
     pub fn unpin(&self, session_id: &str, path: &Path) -> Result<()> {

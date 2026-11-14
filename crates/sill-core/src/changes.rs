@@ -54,6 +54,7 @@ pub fn session_plan(
         masks: vec![], // the other agents' paths are tmpfs in the jail: nothing of theirs is in an upper tree
         memory_dir: None,
         bridge_dir: None,
+        workspace_mask: None,
         seccomp_fd: None,
         extra_args: vec![],
         command: vec!["true".into()],

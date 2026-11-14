@@ -15,7 +15,8 @@ fn record(store: &Store, s: sill_core::store::Session) -> Result<api::Session> {
             let next = (|| -> Result<sill_core::policy_fragments::Resolution> {
                 let resolution = sill_core::session::next_build_restrictions(&s, &home, &pins, &[])?;
                 let resolution = sill_core::session::apply_grants(resolution, &store.permission_choices(&s.id)?, store.network_hosts(&s.id)?);
-                sill_core::session::freeze_filesystem(resolution, &s.agent, &home, &sill_core::session::state_dir_path(rustix::process::getuid().as_raw(), &s.id)?, &pins, s.ghost)
+                let workspace = store.workspace_mask(&s.id)?;
+                sill_core::session::freeze_filesystem(resolution, &s.agent, &home, &sill_core::session::state_dir_path(rustix::process::getuid().as_raw(), &s.id)?, &pins, s.ghost, workspace.as_ref())
             })();
             match (current, next) {
                 (Ok(current), Ok(next)) if next.filesystem.as_ref().is_some_and(|next| current.same_mounts(next)) => {},

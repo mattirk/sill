@@ -34,6 +34,14 @@ impl Host for TestHost {
     fn life(&self, session: &str) -> Life {
         *self.lives.lock().unwrap().get(session).unwrap_or(&Life::Missing)
     }
+    /// No jail in a unit test: the command runs as the helper jail would run it.
+    fn run_jailed(&self, session: &str, cwd: &Path, argv: &[&str]) -> Result<std::process::Output> {
+        assert_ne!(self.life(session), Life::Missing);
+        Ok(Command::new(argv[0]).args(&argv[1..]).current_dir(cwd)
+            .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_EDITOR", "true").env("GIT_SEQUENCE_EDITOR", "true")
+            .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t").env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()?)
+    }
     fn root(&self) -> PathBuf {
         self.root.clone()
     }
@@ -234,13 +242,59 @@ fn merge_refuses_what_the_person_did_not_see() {
     assert_eq!(std::fs::read_to_string(f.source.join("f2.txt")).unwrap(), "the person's f2\n");
     assert_eq!(get(&f.host, &ws.workspace_id).unwrap().workspace.state, api::WorkspaceState::Result);
     git(&f.source, &["checkout", "-q", "--", "f2.txt"]);
-    // the source moved: the revision names the old tip, and a rebase is needed
+    // the source moved: the revision names the old tip
     write(&f.source.join("f1.txt"), "host\n");
     git(&f.source, &["commit", "-qam", "host"]);
     assert_eq!(reason(&merge(&f.host, &apply("op-m4", &ws, &prepared.revision)).unwrap_err()), "stale_revision");
+    // and both changed f1: the rebase stops on it, shown, and nothing merges until it is settled
     let again = prepare(&f.host, &op("op-p3", &ws)).unwrap();
     assert!(again.needs_rebase && again.changed);
-    assert_eq!(reason(&merge(&f.host, &apply("op-m5", &ws, &again.revision)).unwrap_err()), "stale_revision");
+    assert_eq!(again.conflicts, vec!["f1.txt".to_string()]);
+    let shown = again.workspace.operation.clone().unwrap();
+    assert_eq!((shown.kind.as_str(), shown.state.as_str()), ("rebase", "conflict"));
+    assert_eq!(reason(&merge(&f.host, &apply("op-m5", &ws, &again.revision)).unwrap_err()), "rebase_in_progress");
+    let e = prepare(&f.host, &op("op-p4", &ws)).unwrap_err();
+    assert_eq!((reason(&e), paths(&e)), ("rebase_in_progress".to_string(), vec!["f1.txt".to_string()]));
+    let aborted = abort(&f.host, &op("op-a", &ws)).unwrap();
+    assert!(aborted.workspace.operation.is_none());
+    assert_eq!(git(&path, &["rev-parse", "HEAD"]), again.revision.tip, "back to the result as it was");
+}
+
+#[test]
+fn prepare_rebases_onto_a_moved_source_and_the_merge_follows() {
+    let f = fixture("rebase");
+    let ws = worked(&f);
+    write(&f.source.join("f1.txt"), "host work\n");
+    git(&f.source, &["commit", "-qam", "host"]);
+    let host_tip = git(&f.source, &["rev-parse", "main"]);
+    assert!(get(&f.host, &ws.workspace_id).unwrap().needs_rebase);
+    let prepared = prepare(&f.host, &op("op-p", &ws)).unwrap();
+    assert!(!prepared.needs_rebase && prepared.changed && prepared.conflicts.is_empty());
+    assert_eq!(prepared.revision.destination_tip, host_tip);
+    let path = ws.path.to_path().unwrap();
+    assert_eq!(git(&path, &["rev-parse", "HEAD~1"]), host_tip, "the result sits on the source's tip");
+    assert!(!git(&path, &["rev-parse", "refs/sill/pre-rebase"]).is_empty(), "the old tip is kept");
+    merge(&f.host, &apply("op-m", &ws, &prepared.revision)).unwrap();
+    assert_eq!(std::fs::read_to_string(f.source.join("f1.txt")).unwrap(), "host work\n");
+    assert_eq!(std::fs::read_to_string(f.source.join("f2.txt")).unwrap(), "agent work\n");
+}
+
+#[test]
+fn a_rebase_finished_in_the_workspace_clears_the_conflict() {
+    let f = fixture("resolve");
+    let ws = worked(&f);
+    let path = ws.path.to_path().unwrap();
+    write(&f.source.join("f2.txt"), "host f2\n");
+    git(&f.source, &["commit", "-qam", "host"]);
+    assert_eq!(prepare(&f.host, &op("op-p", &ws)).unwrap().conflicts, vec!["f2.txt".to_string()]);
+    // the agent, reopened, resolves it
+    write(&path.join("f2.txt"), "both\n");
+    git(&path, &["add", "f2.txt"]);
+    Command::new("git").arg("-C").arg(&path).args(["-c", "user.name=t", "-c", "user.email=t@t", "rebase", "--continue"]).env("GIT_EDITOR", "true").output().unwrap();
+    let prepared = prepare(&f.host, &op("op-p2", &ws)).unwrap();
+    assert!(!prepared.needs_rebase && prepared.workspace.operation.is_none());
+    merge(&f.host, &apply("op-m", &ws, &prepared.revision)).unwrap();
+    assert_eq!(std::fs::read_to_string(f.source.join("f2.txt")).unwrap(), "both\n");
 }
 
 #[test]
@@ -347,4 +401,39 @@ fn reconcile_finishes_a_discard_whose_clone_had_moved() {
     let w = get(&f.host, &ws.workspace_id).unwrap().workspace;
     assert_eq!(w.state, api::WorkspaceState::Discarded);
     assert_eq!(undo(&f.host, &op("op-u", &ws)).unwrap().workspace.state, api::WorkspaceState::Result);
+}
+
+/// A workspace session's jail pins leave out its source and anything inside it; an ancestor pin
+/// stays (the jail masks the source within it), and its mask names the source's object store.
+#[test]
+fn a_workspace_sessions_pins_leave_out_its_source() {
+    let f = fixture("pins");
+    let made = create(&f.host, &create_req(&f, "op-1")).unwrap();
+    let db = f.dir.join("store.db");
+    let store = crate::store::Store::open(&db).unwrap();
+    init(store.conn()).unwrap();
+    // the row as the daemon's store would hold it
+    let row = f.host.db(|c| load(c, &made.workspace.workspace_id)).unwrap().unwrap();
+    save(store.conn(), &row).unwrap();
+    let session = made.session_id.as_str();
+    let inside = f.source.join("sub");
+    std::fs::create_dir_all(&inside).unwrap();
+    store.pin(session, &made.workspace.path.to_path().unwrap()).unwrap();
+    store.global_pin(&f.source).unwrap();
+    store.global_pin(&inside).unwrap();
+    store.global_pin(&f.dir).unwrap();
+    let pins = store.jail_pins(session).unwrap();
+    assert!(pins.contains(&made.workspace.path.to_path().unwrap()));
+    assert!(pins.contains(&f.dir), "an ancestor pin stays");
+    assert!(!pins.contains(&f.source) && !pins.contains(&inside), "{pins:?}");
+    let mask = store.workspace_mask(session).unwrap().unwrap();
+    assert_eq!(mask.source.to_path().unwrap(), f.source);
+    assert_eq!(mask.objects.to_path().unwrap(), f.source.join(".git/objects"));
+    // another session is untouched
+    assert!(store.jail_pins("other").unwrap().contains(&f.source));
+    assert!(store.workspace_mask("other").unwrap().is_none());
+    // the agent is told where it works
+    let notice = session_notice(store.conn(), session).unwrap().unwrap();
+    assert!(notice.contains(&made.workspace.branch) && notice.contains("hidden"), "{notice}");
+    assert!(session_notice(store.conn(), "other").unwrap().is_none());
 }

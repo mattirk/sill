@@ -47,6 +47,50 @@ impl Host for Daemon<'_> {
     fn root(&self) -> PathBuf {
         root()
     }
+
+    /// The rebase helper (§7 step 3): `sill jail run` with the session's next build — its masks,
+    /// pins, agent home and the workspace's hidden source — no network, a throwaway state
+    /// directory on the state filesystem, the resolution in a private file. Never while the
+    /// session's own jail runs: the helper must be the only writer.
+    fn run_jailed(&self, session: &str, cwd: &Path, argv: &[&str]) -> Result<std::process::Output> {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        let hub = self.0;
+        anyhow::ensure!(!sill_core::session::is_running(session), "the session's jail is running");
+        let (row, pins, mask) = hub.with_store(|s| {
+            let row = s.session_exact(session)?.ok_or_else(|| anyhow::anyhow!("no session {session}"))?;
+            Ok((row, s.jail_pins(session)?, s.workspace_mask(session)?))
+        })?;
+        let resolved = sill_core::session::next_build(&row, &hub.home, &pins, &[], mask.as_ref())?;
+        if let Some(plan) = &resolved.filesystem {
+            plan.prepare()?;
+        }
+        let tag = format!("{session}-{}", sill_core::store::new_id());
+        let uid = rustix::process::getuid().as_raw();
+        let state = Path::new(sill_core::jail::STATE_FS).join(uid.to_string()).join("helpers").join(&tag);
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&state)?;
+        let dir = sill_proto::runtime_dir()?.join("helpers");
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
+        let file = dir.join(format!("{tag}.json"));
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&file)?;
+            f.write_all(&serde_json::to_vec(&resolved)?)?;
+        }
+        let out = std::process::Command::new(&hub.exe)
+            .args(["jail", "run", "--resolved-policy"])
+            .arg(&file)
+            .arg("--state-dir")
+            .arg(&state)
+            .arg("--cwd")
+            .arg(cwd)
+            .args(["--env", "GIT_EDITOR=true", "--env", "GIT_SEQUENCE_EDITOR=true", "--env", "GIT_TERMINAL_PROMPT=0", "--"])
+            .args(argv)
+            .stdin(std::process::Stdio::null())
+            .output();
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir_all(&state);
+        Ok(out?)
+    }
 }
 
 /// `$XDG_DATA_HOME/sill/workspaces`, usually `~/.local/share/sill/workspaces` (§3).
@@ -118,6 +162,10 @@ impl Hub {
                 "_sill/workspaces.discard" => {
                     let a: api::Apply = args(params)?;
                     (json!(records::discard(&h, &a)?), Some(a.workspace_id))
+                }
+                "_sill/workspaces.abort" => {
+                    let a: api::Operate = args(params)?;
+                    (json!(records::abort(&h, &a)?), Some(a.workspace_id))
                 }
                 "_sill/workspaces.undo" => {
                     let a: api::Operate = args(params)?;

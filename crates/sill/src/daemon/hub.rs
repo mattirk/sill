@@ -1127,11 +1127,12 @@ impl Hub {
         if !sill_core::session::valid_id(id) {
             bail!("not a session id");
         }
-        let (s, pins) = {
+        let (s, pins, workspace) = {
             let store = self.store.lock().unwrap();
             let Some(s) = store.sessions()?.into_iter().find(|x| x.id == id) else { bail!("no session {id}") };
             let pins = store.jail_pins(id)?; // the global pins too (docs/pins.md)
-            (s, pins)
+            let workspace = store.workspace_mask(id)?;
+            (s, pins, workspace)
         };
         // Reuse a live jail before computing a new launch plan. Recovery must not
         // require the state mount or installed policy just to reconnect its shim.
@@ -1143,7 +1144,7 @@ impl Hub {
         let Some(agent) = registry.get(&s.agent) else { bail!("unknown agent {}", s.agent) };
         // Diagnose unavailable capabilities before preparing host state or launch bindings.
         // ensure_started resolves and validates again at the actual enforcement boundary.
-        let resolved = sill_core::session::next_build(&s, &self.home, &pins, ignore_roots)?;
+        let resolved = sill_core::session::next_build(&s, &self.home, &pins, ignore_roots, workspace.as_ref())?;
         resolved.policy.permissions.validate_launch(&resolved.policy.network)?;
         let uid = rustix::process::getuid().as_raw();
         let sdir = sill_core::session::state_dir(uid, id)?;
@@ -1163,6 +1164,7 @@ impl Hub {
             agent: Some(s.agent.clone()),
             binds,
             ghost: s.ghost,
+            workspace: if s.ghost { None } else { workspace },
         };
         let started = sill_core::session::ensure_started(&opts, &self.home, &self.exe).context("starting the jail")?;
         // the pinned repositories' HEAD when this open period began (kept across restarts)

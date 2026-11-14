@@ -29,6 +29,15 @@ pub struct PolicyPaths {
     pub read_only: Vec<HostPath>,
 }
 
+/// A workspace session's view of its source repository (docs/parallel-coding.md §4–5): the
+/// checkout is hidden in both views, only its object store comes back read-only at its own path,
+/// so the clone's alternates work alike on the host and in the jail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceMask {
+    pub source: HostPath,
+    pub objects: HostPath,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Plan {
     pub profile: HostPath,
@@ -39,6 +48,8 @@ pub struct Plan {
     pub agent_masks: Vec<AgentMask>,
     pub policy_paths: PolicyPaths,
     pub view: FilesystemView,
+    #[serde(default)]
+    pub workspace: Option<WorkspaceMask>,
 }
 
 /// No storage preparation, credential import or filesystem writes occur during resolution.
@@ -69,6 +80,7 @@ pub fn resolve(
             rules: vec![],
             unused: vec![],
         },
+        workspace: None,
     };
     plan.rule(
         home,
@@ -419,6 +431,7 @@ impl Plan {
             && self.bindings == other.bindings
             && self.agent_masks == other.agent_masks
             && self.view.rules == other.view.rules
+            && self.workspace == other.workspace
     }
     pub fn prepare(&self) -> Result<()> {
         use std::os::unix::fs::DirBuilderExt;
@@ -470,6 +483,7 @@ impl Plan {
     }
     pub fn apply(&self, spec: &mut crate::jail::JailSpec) -> Result<()> {
         spec.binds = self.binds()?;
+        spec.workspace_mask = self.workspace.as_ref().map(|w| Ok::<_, anyhow::Error>((w.source.to_path()?, w.objects.to_path()?))).transpose()?;
         spec.policy_paths = Some(self.policy_paths.clone());
         spec.agent_masks = self
             .agent_masks
