@@ -29,7 +29,8 @@ use vte4::prelude::*;
 
 /// The session's overlay as the shelf sees it: (layers, masked paths), for resolving a path the
 /// agent names to the file it sees.
-type JailView = (Vec<sill_core::jail::Layer>, Vec<std::path::PathBuf>);
+/// A jail's overlay layers (host path, upper tree) and its masked paths, as the daemon plans them.
+type JailView = (Vec<(std::path::PathBuf, std::path::PathBuf)>, Vec<std::path::PathBuf>);
 
 pub struct SessionView {
     pub root: gtk::Box,
@@ -1906,14 +1907,10 @@ impl SessionView {
         if let Some(j) = self.jail.borrow().as_ref() {
             return Some(j.clone());
         }
-        let s = self.session.borrow().clone();
-        let home = session::home().ok()?;
-        let policy = sill_core::session::policy_of(&s, &home).ok()?;
-        let sdir = sill_core::session::state_dir(session::uid(), &s.id).ok()?;
-        let binds = session::binds_of(&s, &policy, &home, &self.store);
-        let user = std::env::var("USER").unwrap_or_default();
-        let plan = sill_core::changes::session_plan(policy, sdir, &home, session::uid(), &user, binds).ok()?;
-        let j = (plan.layers, plan.masked);
+        // the daemon plans it (docs/daemon.md §7 M2); once per jail, so a blocking call here is one
+        // short round trip, not one per image
+        let v: sill_proto::JailView = super::client::call(sill_proto::method::SESSIONS_JAIL_VIEW, sill_proto::Key { key: self.id() }).ok()?;
+        let j = (v.layers, v.masked);
         *self.jail.borrow_mut() = Some(j.clone());
         Some(j)
     }
@@ -1952,9 +1949,9 @@ impl SessionView {
         if masked.iter().any(|m| p.starts_with(m)) {
             return None;
         }
-        for l in &layers {
-            if let Ok(rel) = p.strip_prefix(&l.host) {
-                let upper = l.upper.join(rel);
+        for (host, upper_root) in &layers {
+            if let Ok(rel) = p.strip_prefix(host) {
+                let upper = upper_root.join(rel);
                 if let Ok(md) = upper.symlink_metadata() {
                     if md.file_type().is_char_device() {
                         return None; // deleted in the jail

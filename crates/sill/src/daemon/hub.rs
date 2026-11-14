@@ -55,6 +55,8 @@ pub struct Hub {
     starting: Mutex<()>,
     /// Sessions whose end waits for the agent's summary turn (`sessions.end`).
     ending: Mutex<HashMap<String, EndCtx>>,
+    /// Every open frontend connection, for what is everyone's news (`changes.changed`).
+    conns: Mutex<Vec<std::sync::Weak<Conn>>>,
     /// When each running jail was started or adopted by this daemon: the idle timer counts from
     /// the latest of this, the last prompt and the last turn's end, so a session just resumed is
     /// not ended a minute in.
@@ -78,6 +80,7 @@ impl Hub {
             starting: Mutex::new(()),
             ending: Mutex::new(HashMap::new()),
             started_at: Mutex::new(HashMap::new()),
+            conns: Mutex::new(Vec::new()),
         };
         hub.adopt_running();
         hub.sweep_dead_ghosts();
@@ -99,8 +102,26 @@ impl Hub {
         self.store.lock().unwrap().sessions().ok().and_then(|v| v.into_iter().find(|s| s.id == id)).is_some_and(|s| s.auto_allow)
     }
 
+    pub fn connected(&self, conn: &Arc<Conn>) {
+        let mut c = self.conns.lock().unwrap();
+        c.retain(|w| w.strong_count() > 0);
+        c.push(Arc::downgrade(conn));
+    }
+
+    /// `changes.changed` to every frontend: a sweep reverted, a keep was made (by any client), a
+    /// session went or a turn ended — whatever shows the overlays rescans.
+    pub fn changes_changed(&self) {
+        let req = sill_proto::rpc::Request::new(None, method::CHANGES_CHANGED, json!({}));
+        let Ok(line) = serde_json::to_string(&req) else { return };
+        let conns: Vec<Arc<Conn>> = self.conns.lock().unwrap().iter().filter_map(|w| w.upgrade()).collect();
+        for c in conns {
+            c.send(line.clone());
+        }
+    }
+
     /// A connection closed: it is subscribed nowhere any more.
     pub fn disconnect(&self, conn: u64) {
+        self.conns.lock().unwrap().retain(|w| w.upgrade().is_some_and(|c| c.id != conn));
         let ids: Vec<String> = {
             let runners = self.runners.lock().unwrap();
             runners
@@ -299,6 +320,10 @@ impl Hub {
                 // what the person would want to look at: build output is not asked about
                 to_value(Count { n: changes.iter().filter(|c| !c.ignored).count() })
             }
+            method::SESSIONS_JAIL_VIEW => {
+                let k: Key = args(params)?;
+                to_value(self.jail_view(&k.key).map_err(|e| Error::failed(format!("{e:#}")))?)
+            }
             method::CHANGES_HISTORY => {
                 let f: sill_core::history::Filter = args(params)?;
                 to_value(self.changes_history(f).map_err(|e| Error::failed(format!("{e:#}")))?)
@@ -310,19 +335,27 @@ impl Hub {
             }
             method::CHANGES_KEEP => {
                 let k: sill_proto::ChangesKeep = args(params)?;
-                to_value(self.changes_keep(&k.session, k.items).map_err(|e| Error::failed(format!("{e:#}")))?)
+                let r = self.changes_keep(&k.session, k.items).map_err(|e| Error::failed(format!("{e:#}")));
+                self.changes_changed();
+                to_value(r?)
             }
             method::CHANGES_REVERT => {
                 let r: sill_proto::ChangesPaths = args(params)?;
-                to_value(self.changes_revert(&r.session, r.paths).map_err(|e| Error::failed(format!("{e:#}")))?)
+                let r = self.changes_revert(&r.session, r.paths).map_err(|e| Error::failed(format!("{e:#}")));
+                self.changes_changed();
+                to_value(r?)
             }
             method::CHANGES_UNDO => {
                 let u: sill_proto::ChangesUndo = args(params)?;
-                to_value(self.changes_undo(&u.session, u.ids, u.force).map_err(|e| Error::failed(format!("{e:#}")))?)
+                let r = self.changes_undo(&u.session, u.ids, u.force).map_err(|e| Error::failed(format!("{e:#}")));
+                self.changes_changed();
+                to_value(r?)
             }
             method::CHANGES_GIT_REVERT => {
                 let g: sill_proto::GitRevert = args(params)?;
-                to_value(Text { text: self.changes_git_revert(&g.repo, &g.rel).map_err(|e| Error::failed(format!("{e:#}")))? })
+                let r = self.changes_git_revert(&g.repo, &g.rel).map_err(|e| Error::failed(format!("{e:#}")));
+                self.changes_changed();
+                to_value(Text { text: r? })
             }
             method::SESSIONS_END => {
                 let e: End = args(params)?;
@@ -643,6 +676,7 @@ impl Hub {
             let _ = std::fs::remove_dir_all(rt);
         }
         refresh_memory();
+        self.changes_changed();
         eprintln!("sill daemon: session {id} deleted");
         Ok(())
     }
@@ -688,6 +722,7 @@ impl Hub {
                 }
             }
             eprintln!("sill daemon: ghost {}: reverted {n} of {} path(s) an hour after their last write", s.id, due.len());
+            self.changes_changed();
             if n > 0 && let Some(r) = runner {
                 r.notify(&sill_core::wire::Event::Note(format!("ghost: {n} path(s) reverted, an hour after their last write")));
             }

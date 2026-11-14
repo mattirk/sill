@@ -50,7 +50,7 @@ pub struct Viewer {
     info: gtk::Label,
     message: gtk::Label,
     /// Every session's pending changes (shared with the tree): a pending path shows its diff.
-    changes: Rc<RefCell<Vec<Change>>>,
+    changes: Rc<RefCell<Vec<(String, Change)>>>,
     /// The shown file can be edited (a writable text file, not a diff or a preview).
     editable: Cell<bool>,
     dirty: Cell<bool>,
@@ -74,7 +74,7 @@ pub struct Viewer {
 }
 
 impl Viewer {
-    pub fn new(changes: Rc<RefCell<Vec<Change>>>) -> Rc<Self> {
+    pub fn new(changes: Rc<RefCell<Vec<(String, Change)>>>) -> Rc<Self> {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.add_css_class("sill-viewer");
         let bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -512,14 +512,29 @@ impl Viewer {
             return self.say_only(&format!("{} is not a file (or is gone)", path.display()));
         }
         // pending session change: the diff, not the host file (keep or revert it in Changes first)
-        let pending = self.changes.borrow().iter().find(|c| c.path == path).cloned();
-        if let Some(c) = pending {
-            let text = changes::unified_diff(&c).unwrap_or_else(|e| format!("diff: {e:#}"));
+        let pending = self.changes.borrow().iter().find(|(_, c)| c.path == path).cloned();
+        if let Some((session, c)) = pending {
+            // the daemon reads the session's copy (docs/daemon.md §7 M2): asked off the GTK thread
             self.text.set_language(sourceview5::LanguageManager::default().language("diff").as_ref());
             self.text.set_highlight_syntax(true);
-            self.text.set_text(&text);
+            self.text.set_text("");
             self.stack.set_visible_child_name("text");
             self.say(&format!("pending change ({}) of a session: keep or revert it in Changes before editing", c.kind.letter()));
+            let (tx, rx) = async_channel::bounded::<String>(1);
+            let of = sill_core::wire::DiffOf::Change { session, path: c.path.clone() };
+            std::thread::spawn(move || {
+                let text = match super::client::call::<sill_proto::Text>(sill_proto::method::CHANGES_DIFF, of) {
+                    Ok(t) => t.text,
+                    Err(e) => format!("diff: {e:#}"),
+                };
+                let _ = tx.send_blocking(text);
+            });
+            let buf = self.text.clone();
+            glib::spawn_future_local(async move {
+                if let Ok(text) = rx.recv().await {
+                    buf.set_text(&text);
+                }
+            });
             return;
         }
         let meta = std::fs::metadata(path);

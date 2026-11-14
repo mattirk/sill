@@ -36,6 +36,8 @@ fn subs() -> &'static Subs {
 pub enum Lifecycle {
     Event(sill_core::wire::Event),
     Resolved { tool_call_id: String },
+    /// `changes.changed`: the overlays changed; whatever shows them rescans.
+    ChangesChanged,
 }
 
 type LifecycleTx = Mutex<Option<async_channel::Sender<(String, Lifecycle)>>>;
@@ -247,6 +249,10 @@ fn dispatch(c: Arc<Client>) {
     loop {
         let next = c.notifications.lock().unwrap().recv();
         let Ok((method, params)) = next else { break };
+        if method == sill_proto::method::CHANGES_CHANGED {
+            lifecycle(String::new(), Lifecycle::ChangesChanged);
+            continue;
+        }
         if method != sill_proto::method::SESSION_EVENT {
             continue;
         }

@@ -31,6 +31,10 @@ pub struct ChangesPage {
     summary: gtk::Label,
     message: gtk::Label,
     rows: RefCell<Vec<Row>>, // what each list row index shows
+    /// A refresh is out (the daemon answers it), and whether another was asked for meanwhile:
+    /// `changes.changed` and the page's own actions arrive together, one rescan follows.
+    loading: Cell<bool>,
+    again: Cell<bool>,
     /// History (SPEC §3.6): what sessions did to the host over time, shown instead of the list.
     history: gtk::ListBox,
     hrows: RefCell<Vec<Option<Event>>>,
@@ -146,7 +150,7 @@ impl ChangesPage {
         paned.set_vexpand(true);
         root.append(&paned);
 
-        let page = Rc::new(Self { root, list, diff, summary, message, rows: RefCell::new(Vec::new()), history, hrows: RefCell::new(Vec::new()), filter, lists });
+        let page = Rc::new(Self { root, list, diff, summary, message, rows: RefCell::new(Vec::new()), loading: Cell::new(false), again: Cell::new(false), history, hrows: RefCell::new(Vec::new()), filter, lists });
         {
             let p = page.clone();
             history_b.connect_toggled(move |b| {
@@ -222,10 +226,20 @@ impl ChangesPage {
         if self.lists.visible_child_name().as_deref() == Some("history") {
             return self.refresh_history();
         }
+        if self.loading.replace(true) {
+            self.again.set(true);
+            return;
+        }
         let p = self.clone();
-        ask::<ChangesList>(sill_proto::method::CHANGES_LIST, sill_proto::Empty::default(), move |r| match r {
-            Ok(list) => p.populate(list.live, list.sessions),
-            Err(e) => p.message.set_text(&format!("changes: {e:#}")),
+        ask::<ChangesList>(sill_proto::method::CHANGES_LIST, sill_proto::Empty::default(), move |r| {
+            match r {
+                Ok(list) => p.populate(list.live, list.sessions),
+                Err(e) => p.message.set_text(&format!("changes: {e:#}")),
+            }
+            p.loading.set(false);
+            if p.again.replace(false) {
+                p.refresh();
+            }
         });
     }
 

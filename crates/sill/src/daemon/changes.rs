@@ -187,6 +187,7 @@ impl Hub {
                     eprintln!("sill daemon: history: {err:#}");
                 }
             }
+            self.changes_changed();
             eprintln!("sill daemon: session {}: auto-reverted {} path(s) outside git{}", s.id, d.done.len(), if d.failed.is_empty() { String::new() } else { format!(", {} failed", d.failed.len()) });
         }
     }
@@ -235,6 +236,8 @@ impl Hub {
                 }
                 msg.push_str(&adopted_note);
             }
+            // the turn may have written anything: whatever shows the overlays rescans
+            hub.changes_changed();
             if !msg.is_empty()
                 && let Some(r) = hub.runners.lock().unwrap().get(&id)
             {
@@ -260,6 +263,21 @@ impl Hub {
 
     pub(super) fn changes_history(&self, f: sill_core::history::Filter) -> Result<Vec<sill_core::history::Event>> {
         self.with_store(|st| sill_memory::history::query(st.conn(), &f))
+    }
+
+    /// How the session's jail lays the host out (its overlay layers and the masked paths): what a
+    /// frontend needs to show a file as the agent sees it — an image the agent names, say.
+    pub(super) fn jail_view(&self, id: &str) -> Result<sill_proto::JailView> {
+        let Some(s) = self.with_store(|st| st.sessions())?.into_iter().find(|s| s.id == id) else { bail!("no session {id}") };
+        let (uid, user) = who();
+        let policy = sill_core::session::policy_of(&s, &self.home)?;
+        let registry = sill_core::agents::load(&self.home);
+        let Some(agent) = registry.get(&s.agent) else { bail!("unknown agent {}", s.agent) };
+        let sdir = sill_core::session::state_dir(uid, &s.id)?;
+        let pins = self.with_store(|st| st.pins(&s.id)).unwrap_or_default();
+        let binds = sill_core::session::binds_for(agent, &policy, &sdir, &self.home, &pins, s.ghost)?;
+        let plan = sill_core::changes::session_plan(policy, sdir, &self.home, uid, &user, binds)?;
+        Ok(sill_proto::JailView { layers: plan.layers.into_iter().map(|l| (l.host, l.upper)).collect(), masked: plan.masked })
     }
 
     fn scan_one(&self, session: &str) -> Result<Vec<Change>> {

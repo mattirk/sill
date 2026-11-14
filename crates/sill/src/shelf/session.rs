@@ -7,8 +7,6 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use sill_core::acp::Event;
-use sill_core::agents;
-use sill_core::session::state_dir;
 use sill_core::store;
 use sill_core::wire::Command;
 
@@ -61,13 +59,4 @@ pub fn mode_note() -> Option<String> {
         Ok(s) if !s.limits => Some(format!("no resource limits for this jail — a busy agent can starve the host ({})", s.launcher)),
         _ => None,
     }
-}
-
-/// The binds a stored session runs with (for ledger scans on the host side).
-pub fn binds_of(s: &store::Session, policy: &sill_core::policy::Policy, home: &std::path::Path, store: &store::Store) -> Vec<(PathBuf, PathBuf)> {
-    let registry = agents::load(home);
-    let Some(agent) = registry.get(&s.agent) else { return vec![] };
-    let Ok(sdir) = state_dir(uid(), &s.id) else { return vec![] };
-    let pins = store.pins(&s.id).unwrap_or_default();
-    sill_core::session::binds_for(agent, policy, &sdir, home, &pins, s.ghost).unwrap_or_default()
 }

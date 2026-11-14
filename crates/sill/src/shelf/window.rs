@@ -1435,6 +1435,13 @@ impl Shelf {
         use sill_core::wire::Event as W;
         let ev = match ev {
             super::client::Lifecycle::Event(e) => e,
+            super::client::Lifecycle::ChangesChanged => {
+                self.changes.refresh_if_shown();
+                if self.tree.root.is_visible() {
+                    self.tree.refresh();
+                }
+                return;
+            }
             super::client::Lifecycle::Resolved { tool_call_id } => {
                 if let Some(v) = self.views.borrow().get(id).cloned() {
                     v.conv.resolve_permission(&tool_call_id);

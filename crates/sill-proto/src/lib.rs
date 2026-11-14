@@ -77,6 +77,11 @@ pub mod method {
     pub const CHANGES_UNDO: &str = "_sill/changes.undo";
     /// A pinned repository's path back to HEAD; params [`GitRevert`], answers [`Text`].
     pub const CHANGES_GIT_REVERT: &str = "_sill/changes.git_revert";
+    /// Notification, no params: the overlays changed (a sweep, a keep, a turn, a deletion) —
+    /// whatever shows them rescans.
+    pub const CHANGES_CHANGED: &str = "_sill/changes.changed";
+    /// A session's jail layout for showing files as the agent sees them; answers [`JailView`].
+    pub const SESSIONS_JAIL_VIEW: &str = "_sill/sessions.jail_view";
     /// The ledger across time (SPEC §3.6): params a `sill_core::history::Filter`, answers its events.
     pub const CHANGES_HISTORY: &str = "_sill/changes.history";
     pub const MEMORY_LIST: &str = "_sill/memory.list";
@@ -288,6 +293,13 @@ pub struct Note {
 pub struct AgentSettingsSet {
     pub agent: String,
     pub settings: serde_json::Value,
+}
+
+/// `_sill/sessions.jail_view`: each overlay layer (host path, its upper tree) and the masked paths.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct JailView {
+    pub layers: Vec<(PathBuf, PathBuf)>,
+    pub masked: Vec<PathBuf>,
 }
 
 /// `_sill/changes.keep`: each host path with the hash it was listed with (None: no check).

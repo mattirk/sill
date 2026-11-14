@@ -173,6 +173,7 @@ fn bind_direct() -> Result<UnixListener> {
 fn serve(stream: UnixStream, hub: Arc<Hub>) -> Result<()> {
     let (tx, rx) = sync_channel::<String>(QUEUE);
     let conn = Arc::new(Conn { id: NEXT_CONN.fetch_add(1, Ordering::Relaxed), tx, sock: stream.try_clone()? });
+    hub.connected(&conn);
     let mut writer = stream.try_clone()?;
     std::thread::Builder::new().name(format!("sill-daemon-write-{}", conn.id)).spawn(move || {
         for mut line in rx {

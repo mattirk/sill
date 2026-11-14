@@ -272,8 +272,9 @@ pub struct FolderTree {
     /// Each repository's main language (badge mark, tooltip), read with the badges when older than
     /// a minute.
     langs: Rc<RefCell<BTreeMap<PathBuf, (String, String, std::time::Instant)>>>,
-    /// Every session's pending changes: the badges here, and the viewer shows a pending path's diff.
-    pub changes: Rc<RefCell<Vec<Change>>>,
+    /// Every session's pending changes, with the session's id: the badges here, and the viewer asks
+    /// the daemon for a pending path's diff.
+    pub changes: Rc<RefCell<Vec<(String, Change)>>>,
     pinned: Rc<RefCell<Vec<PathBuf>>>,
     /// Pinned by some other session than the current one: shown, but the button pins here.
     elsewhere: Rc<RefCell<Vec<PathBuf>>>,
@@ -848,9 +849,6 @@ impl FolderTree {
             return;
         }
         let sessions = self.store.sessions().unwrap_or_default();
-        let home = session::home().unwrap_or_default();
-        let uid = session::uid();
-        let user = std::env::var("USER").unwrap_or_default();
         let target = self.pin_target.borrow().clone();
         let target_pins: Vec<PathBuf> = target.as_ref().and_then(|t| self.store.pins(t).ok()).unwrap_or_default();
         // the selected session's pins first, then everyone else's
@@ -871,27 +869,24 @@ impl FolderTree {
         let scope = self.scope.borrow().clone();
         let pins_for_git = pins.clone();
         type Statuses = Vec<(PathBuf, Vec<(PathBuf, String)>)>;
-        let (tx, rx) = async_channel::bounded::<(Vec<Change>, BTreeMap<PathBuf, String>, Statuses)>(1);
+        let (tx, rx) = async_channel::bounded::<(Vec<(String, Change)>, BTreeMap<PathBuf, String>, Statuses)>(1);
+        drop(sessions);
         std::thread::spawn(move || {
-            let mut all = Vec::new();
+            // every session's overlay changes, as the daemon scans them (docs/daemon.md §7 M2)
+            let mut pairs: Vec<(String, Change)> = Vec::new();
             let mut owners: BTreeMap<PathBuf, String> = BTreeMap::new(); // path → the session that changed it
-            for s in sessions {
-                let Ok(policy) = sill_core::session::policy_of(&s, &home) else { continue };
-                let Ok(state_dir) = sill_core::session::state_dir(uid, &s.id) else { continue };
-                if !state_dir.is_dir() {
-                    continue;
+            match super::client::call::<sill_core::wire::ChangesList>(sill_proto::method::CHANGES_LIST, sill_proto::Empty::default()) {
+                Ok(list) => {
+                    for s in list.sessions {
+                        for r in s.changes.into_iter().chain(s.agent_state) {
+                            owners.entry(r.change.path.clone()).or_insert_with(|| s.title.clone());
+                            pairs.push((s.id.clone(), r.change));
+                        }
+                    }
                 }
-                let binds = match Store::open_default() {
-                    Ok(st) => session::binds_of(&s, &policy, &home, &st),
-                    Err(_) => vec![],
-                };
-                let Ok(plan) = changes::session_plan(policy.clone(), state_dir, &home, uid, &user, binds) else { continue };
-                let found = changes::scan(&policy, &plan, None).unwrap_or_default();
-                for c in &found {
-                    owners.entry(c.path.clone()).or_insert_with(|| s.title.clone());
-                }
-                all.extend(found);
+                Err(e) => eprintln!("sill: the tree's badges: {e:#}"),
             }
+            let all: Vec<&Change> = pairs.iter().map(|(_, c)| c).collect();
             // git working-tree status of every repo in view (pins, repos with session changes, the
             // scope's repo) — here, not on the GTK thread: `git status` on a big tree takes a while
             // (SPEC §4.11 #13)
@@ -910,7 +905,7 @@ impl FolderTree {
                 repos.push(r);
             }
             let statuses: Statuses = repos.into_iter().map(|r| (changes::git_status(&r), r)).map(|(st, r)| (r, st)).collect();
-            let _ = tx.send_blocking((all, owners, statuses));
+            let _ = tx.send_blocking((pairs, owners, statuses));
         });
         let t = self.clone();
         glib::spawn_future_local(async move {
@@ -924,7 +919,8 @@ impl FolderTree {
         });
     }
 
-    fn apply(self: &Rc<Self>, all: Vec<Change>, owners: BTreeMap<PathBuf, String>, statuses: Vec<(PathBuf, Vec<(PathBuf, String)>)>) {
+    fn apply(self: &Rc<Self>, pairs: Vec<(String, Change)>, owners: BTreeMap<PathBuf, String>, statuses: Vec<(PathBuf, Vec<(PathBuf, String)>)>) {
+        let all: Vec<Change> = pairs.iter().map(|(_, c)| c.clone()).collect();
         let home = session::home().unwrap_or_default();
         let mut badges: BTreeMap<PathBuf, Badge> = BTreeMap::new();
         // git working-tree status of every repo in view, as the scan thread read it: M/A/D/R from
@@ -1007,7 +1003,7 @@ impl FolderTree {
             if repos.len() == 1 { "y" } else { "ies" }
         )));
         *self.badges.borrow_mut() = badges;
-        *self.changes.borrow_mut() = all;
+        *self.changes.borrow_mut() = pairs;
         // directories already listed: files that appeared or went since, in place
         self.listed.borrow_mut().retain(|_, w| w.upgrade().is_some());
         let listed: Vec<(PathBuf, gio::ListStore)> = self.listed.borrow().iter().filter_map(|(d, w)| w.upgrade().map(|s| (d.clone(), s))).collect();
