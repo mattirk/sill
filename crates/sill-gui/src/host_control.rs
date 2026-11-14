@@ -25,8 +25,8 @@ pub enum Event {
     /// An operation ticked or unticked for the activation.
     Select(String, String, bool),
     Activate(String),
-    /// Tick every operation and activate: the shield's Ctrl+Shift+click.
-    ActivateAll(String),
+    /// A Basic switch: a whole group of operations on or off, at once.
+    SetGroup(String, Group, bool),
     Revoke(String),
     Done(String, u64, Result<State, String>),
     /// The state read with the Permissions panel: the activation and the policy's ban.
@@ -86,6 +86,36 @@ pub fn offered() -> Vec<&'static str> {
         .collect()
 }
 
+/// The Basic switches' groups of operations (the person, 2026-11-13). In Sill.app with its own
+/// VM: VM (what acts in the VM, outside the jail) and Host (the Mac). Elsewhere the daemon's
+/// host is the machine itself: Host alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Group {
+    Vm,
+    Host,
+}
+
+/// The groups this window offers, with their names and operations.
+pub fn groups() -> Vec<(Group, &'static str, Vec<&'static str>)> {
+    let (mac, rest): (Vec<_>, Vec<_>) =
+        offered().into_iter().partition(|op| sill_proto::host_control::MAC_OPERATIONS.contains(op));
+    if mac.is_empty() {
+        vec![(Group::Host, "Host", rest)]
+    } else {
+        vec![(Group::Vm, "VM", rest), (Group::Host, "Host", mac)]
+    }
+}
+
+/// The groups with an operation in the session's active control.
+pub fn groups_on(session: &Session) -> Vec<Group> {
+    let Some(brief) = &session.host_control else { return vec![] };
+    groups()
+        .into_iter()
+        .filter(|(_, _, operations)| brief.operations.iter().any(|op| operations.contains(&op.as_str())))
+        .map(|(group, _, _)| group)
+        .collect()
+}
+
 fn mac_attached() -> bool {
     #[cfg(target_os = "macos")]
     return crate::local_vm::phase().is_some();
@@ -115,12 +145,34 @@ impl App {
                 }
                 Task::none()
             }
-            Event::ActivateAll(id) => {
+            Event::SetGroup(id, group, on) => {
+                let Some((_, _, operations)) = groups().into_iter().find(|(g, _, _)| *g == group) else {
+                    return Task::none();
+                };
+                // from what is active now: the other group stays as it is
+                let mut next: BTreeSet<String> = self
+                    .all_sessions
+                    .iter()
+                    .find(|s| s.session_id == id)
+                    .and_then(|s| s.host_control.as_ref())
+                    .map(|brief| brief.operations.iter().cloned().collect())
+                    .unwrap_or_default();
+                for operation in operations {
+                    if on {
+                        next.insert(operation.to_string());
+                    } else {
+                        next.remove(operation);
+                    }
+                }
                 let Some(view) = self.views.get_mut(&id) else {
                     return Task::none();
                 };
-                view.host_control.selected = offered().iter().map(|op| op.to_string()).collect();
-                self.host_control_event(Event::Activate(id))
+                if view.host_control.busy {
+                    return Task::none();
+                }
+                let revoke = next.is_empty();
+                view.host_control.selected = next;
+                self.host_control_event(if revoke { Event::Revoke(id) } else { Event::Activate(id) })
             }
             Event::Activate(id) => {
                 let Some(view) = self.views.get_mut(&id) else {
@@ -522,6 +574,7 @@ mod tests {
         let mut app = live_app(vec![client]);
         app.all_sessions = vec![session_record("demo", "demo", false, false)];
         app.views.get_mut("demo").unwrap().permissions.open = true;
+        app.views.get_mut("demo").unwrap().permissions.advanced = true;
         let task = app.update(Message::HostControl(Event::Select("demo".into(), "launch".into(), true)));
         settle_task(&mut app, task);
         let activates = |app: &App| {
@@ -547,6 +600,7 @@ mod tests {
         let mut app = live_app(vec![client]);
         app.all_sessions = vec![session_record("demo", "demo", false, false)];
         app.views.get_mut("demo").unwrap().permissions.open = true;
+        app.views.get_mut("demo").unwrap().permissions.advanced = true;
         {
             let mut ui = simulator(&app, (720.0, 900.0));
             ui.find("Activate host control").unwrap();
@@ -589,9 +643,10 @@ mod tests {
         ui.find("Revoke").unwrap();
     }
 
-    /// The shield menu's Host control choice activates every operation without opening the panel.
+    /// The Host switch (here, without a Mac's VM, the only group) activates every operation the
+    /// window offers at once, from the shield menu without opening the panel.
     #[test]
-    fn the_shield_menu_activates_every_operation() {
+    fn the_host_switch_activates_its_group_at_once() {
         let (client, mut daemon) = hosting_client();
         let mut app = live_app(vec![client]);
         app.all_sessions = vec![session_record("demo", "demo", false, false)];
@@ -631,7 +686,7 @@ mod tests {
                 }
             }
         });
-        let task = app.update(Message::Perms(crate::permissions::Event::HostControlAll("demo".into())));
+        let task = app.update(Message::Perms(crate::permissions::Event::HostGroup("demo".into(), super::Group::Host, true)));
         settle_task(&mut app, task);
         fake.join().unwrap();
         let perms = &app.views["demo"].permissions;

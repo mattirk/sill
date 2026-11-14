@@ -68,8 +68,13 @@ pub enum Event {
     /// running jail needs one. The panel is left as it is; the shield's tooltip and caption
     /// carry the outcome.
     DevelopmentRestarting(String),
-    /// The shield menu's second choice: Host control with every operation.
-    HostControlAll(String),
+    /// The Basic Development switch: on as `DevelopmentRestarting`; off returns the test desktop
+    /// and private D-Bus to the policy, then restarts where the running jail needs it.
+    SetDevelopment(String, bool),
+    /// A Basic Host control switch (the panel's or the shield menu's): a group on or off.
+    HostGroup(String, crate::host_control::Group, bool),
+    /// Show or hide the granular toggles.
+    Advanced(String),
     /// Stop and start the jail: for new permissions, or for changed pins (binds are made at
     /// launch, so a pin added to a running session reaches it only this way).
     Restart(String, Change),
@@ -91,6 +96,8 @@ pub enum Change {
     Development,
     /// Development, followed by a restart where the running jail needs one (the shield menu).
     DevelopmentRestarting,
+    /// The Basic switch's off, followed by a restart where the running jail needs one.
+    DevelopmentOff,
     Restore,
     SaveHost(String),
     AutoAllow(bool),
@@ -104,6 +111,8 @@ pub struct Perms {
     /// The shield's right-click menu is open.
     pub menu: bool,
     pub filesystem_open: bool,
+    /// The granular toggles are shown under the Basic switches.
+    pub advanced: bool,
     pub views: Option<Views>,
     pub error: Option<String>,
     reading: Option<u64>,
@@ -189,6 +198,14 @@ impl Perms {
         differs || applied_hosts(launch).any(|h| !now.contains(&h))
     }
 
+    /// The Basic Development switch is on: the test desktop and private D-Bus are both on for
+    /// the next build.
+    pub fn development_on(&self) -> bool {
+        self.views.as_ref().is_some_and(|views| {
+            DEVELOPMENT.iter().all(|c| state(&views.preview, c).is_some_and(|s| s.effective))
+        })
+    }
+
     fn note(&mut self, serial: u64, text: String, failed: bool) {
         self.notice = Some((serial, text, failed));
     }
@@ -235,11 +252,44 @@ impl App {
                     params,
                 );
             }
-            Event::HostControlAll(id) => {
+            Event::SetDevelopment(id, true) => return self.permissions_event(Event::DevelopmentRestarting(id)),
+            Event::SetDevelopment(id, false) => {
+                let (Some(actions), Some(view)) = (self.actions.clone(), self.views.get_mut(&id)) else {
+                    return Task::none();
+                };
+                view.permissions.menu = false;
+                if view.permissions.busy {
+                    return Task::none();
+                }
+                view.permissions.busy = true;
+                let session = id.clone();
+                return blocking(
+                    move || {
+                        let mut last = None;
+                        for capability in DEVELOPMENT {
+                            let params = json!({"session_id": session, "capability": capability, "enabled": null});
+                            let outcome = actions.call_needing(CAPABILITY, "_sill/permissions.set", params);
+                            let done = outcome.is_done();
+                            last = Some(outcome);
+                            if !done {
+                                break;
+                            }
+                        }
+                        last.expect("DEVELOPMENT is not empty")
+                    },
+                    move |outcome| Message::Perms(Event::Done(id, Change::DevelopmentOff, outcome)),
+                );
+            }
+            Event::HostGroup(id, group, on) => {
                 if let Some(view) = self.views.get_mut(&id) {
                     view.permissions.menu = false;
                 }
-                return self.host_control_event(crate::host_control::Event::ActivateAll(id));
+                return self.host_control_event(crate::host_control::Event::SetGroup(id, group, on));
+            }
+            Event::Advanced(id) => {
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.permissions.advanced = !view.permissions.advanced;
+                }
             }
             Event::Read(id, serial, result) => {
                 let Some(view) = self.views.get_mut(&id) else {
@@ -475,6 +525,8 @@ impl App {
                     Change::Development => format!("Development permissions on{later}."),
                     Change::DevelopmentRestarting if restart_required => "Development permissions on; restarting…".into(),
                     Change::DevelopmentRestarting => "Development permissions on.".into(),
+                    Change::DevelopmentOff if restart_required => "Development permissions off; restarting…".into(),
+                    Change::DevelopmentOff => "Development permissions off.".into(),
                     Change::Restore => format!("Defaults restored{later}."),
                     Change::SaveHost(host) => format!("{host} saved for new {agent} sessions."),
                     Change::AutoAllow(true) => "Auto-allow on.".into(),
@@ -492,8 +544,8 @@ impl App {
         if matches!(change, Change::Restart) && outcome.is_done() {
             self.reattach(&id);
         }
-        // the shield menu's development choice goes straight on to the restart it needs
-        if matches!(change, Change::DevelopmentRestarting) && outcome.is_done() && restart_required {
+        // the Development switch and the shield menu's choice go straight on to the restart it needs
+        if matches!(change, Change::DevelopmentRestarting | Change::DevelopmentOff) && outcome.is_done() && restart_required {
             return self.permissions_event(Event::Restart(id, Change::Restart));
         }
         let session = id.clone();
@@ -520,8 +572,14 @@ impl App {
 pub fn indicator<'a>(view: &'a SessionView, session: Option<&Session>) -> Element<'a, Message> {
     let running = session.is_some_and(|s| s.running);
     let expanded = view.permissions.expanded(running);
-    let color = if !expanded.is_empty() {
+    // orange while the agent may act on the host; yellow, the lesser caution, for expanded
+    // access in the jail and for control of the VM (the person, 2026-11-13)
+    let groups = crate::host_control::groups();
+    let on = session.map(crate::host_control::groups_on).unwrap_or_default();
+    let color = if on.contains(&crate::host_control::Group::Host) {
         P.warning
+    } else if !expanded.is_empty() || !on.is_empty() {
+        alpha(style::yellow(), 0.85)
     } else if view.permissions.open {
         P.accent
     } else {
@@ -533,10 +591,15 @@ pub fn indicator<'a>(view: &'a SessionView, session: Option<&Session>) -> Elemen
     } else {
         format!("Permissions · expanded access: {}", expanded.join(" · "))
     };
+    for (group, label, _) in &groups {
+        if on.contains(group) {
+            tip.push_str(&format!(" · {label} control active"));
+        }
+    }
     if pending {
         tip.push_str(" · changes apply after a restart");
     }
-    tip.push_str(" · right click: shortcuts");
+    tip.push_str(" · right click: switches");
     let shield = keys::press_maybe(
         crate::ui::bar_button(icons::glyph("shield", crate::ui::BAR_ICON, color)).style(style::quiet),
         session.map(|_| Message::Perms(Event::Toggle(view.id.clone()))),
@@ -546,13 +609,18 @@ pub fn indicator<'a>(view: &'a SessionView, session: Option<&Session>) -> Elemen
     let id = view.id.clone();
     let shield: Element<'a, Message> = if session.is_some() {
         let choose = id.clone();
+        // the Basic switches, ticked while on: a choice flips its switch
+        let development = view.permissions.development_on();
+        let mark = |on: bool, label: &str| if on { format!("✓ {label}") } else { label.to_string() };
+        let mut choices = vec![mark(development, DEVELOPMENT_SWITCH)];
+        choices.extend(groups.iter().map(|(group, label, _)| mark(on.contains(group), label)));
         crate::popup::popup(
             shield,
             view.permissions.menu,
-            SHIELD_CHOICES.iter().map(|c| c.to_string()).collect(),
-            move |index| match index {
-                0 => Message::Perms(Event::DevelopmentRestarting(choose.clone())),
-                _ => Message::Perms(Event::HostControlAll(choose.clone())),
+            choices,
+            move |index| match index.checked_sub(1).and_then(|i| groups.get(i)) {
+                None => Message::Perms(Event::SetDevelopment(choose.clone(), !development)),
+                Some((group, _, _)) => Message::Perms(Event::HostGroup(choose.clone(), *group, !on.contains(group))),
             },
             Message::Perms(Event::ShieldMenu(id)),
         )
@@ -569,11 +637,8 @@ pub fn indicator<'a>(view: &'a SessionView, session: Option<&Session>) -> Elemen
     crate::ui::bar_tip(shield, tip)
 }
 
-/// The shield menu's rows, in order: `DevelopmentRestarting`, then `HostControlAll`.
-pub const SHIELD_CHOICES: [&str; 2] = [
-    "Development mode",
-    "Host control mode",
-];
+/// The Basic switch for the development permissions, in the panel and the shield menu.
+pub const DEVELOPMENT_SWITCH: &str = "Development";
 
 /// "Jailed · expanded access" over the composer, in the host terminal's warning treatment but
 /// naming the jail: the agent is still inside it. Pending changes without expanded access
@@ -654,6 +719,26 @@ pub(crate) fn switch<'a>(on: bool, set: Option<impl Fn(bool) -> Message + 'a>) -
     container(crate::settings_ui::switch_styled(on, P.warning, 16.0, set))
         .width(SWITCH_SLOT)
         .into()
+}
+
+/// A Basic switch: yellow for development and the VM, the warning colour for the host.
+fn basic_switch<'a>(
+    label: &'a str,
+    said: String,
+    on: bool,
+    color: iced::Color,
+    status: &'a str,
+    set: Option<impl Fn(bool) -> Message + 'a>,
+) -> Element<'a, Message> {
+    slot(
+        row![
+            name(label, said),
+            container(crate::settings_ui::switch_styled(on, color, 16.0, set)).width(SWITCH_SLOT),
+            text(status).size(style::SMALL).color(color).wrapping(text::Wrapping::None).width(Fill),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    )
 }
 
 /// `content` with its explanation in a tooltip: the panel shows names and states only.
@@ -828,6 +913,69 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>, narrow: bo
         .align_y(Alignment::Center),
     );
 
+    // Basic: three switches that act at once (the person, 2026-11-13). Development is the test
+    // desktop and private D-Bus; VM and Host are Host control's operations in two groups (Host
+    // alone where the daemon's host is this machine). Advanced holds the granular toggles.
+    let development_on = perms.development_on();
+    let development_usable = perms.views.as_ref().is_some_and(|views| {
+        DEVELOPMENT.iter().all(|c| state(&views.preview, c).is_some_and(|s| s.available && s.allowed))
+    });
+    let mut basic = Column::new();
+    basic = basic.push(basic_switch(
+        DEVELOPMENT_SWITCH,
+        "A test desktop and a private D-Bus in the jail, for building and trying desktop apps. Switching restarts the jail when it needs it, which stops the agent's current turn.".into(),
+        development_on,
+        style::yellow(),
+        if development_on && perms.restart_pending(running) { "after restart" } else { "" },
+        (can_change && (development_on || development_usable)).then(|| {
+            let id = id.to_string();
+            move |on: bool| Message::Perms(Event::SetDevelopment(id.clone(), on))
+        }),
+    ));
+    let groups_on = crate::host_control::groups_on(session);
+    let host_free = can_change && !view.host_control.busy && crate::host_control::ban(view).is_none();
+    for (group, label, operations) in crate::host_control::groups() {
+        let names: Vec<String> = operations.iter().map(|op| crate::host_control::operation_label(op)).collect();
+        let (said, color) = match (group, cfg!(target_os = "macos")) {
+            (crate::host_control::Group::Vm, _) => (
+                format!("The agent may act in Sill's virtual machine, outside its jail: {}. Until you switch it off, the window stops showing the session, or the session stops.", names.join(", ")),
+                style::yellow(),
+            ),
+            (crate::host_control::Group::Host, true) => (
+                format!("The agent may act on your Mac, as you: {}. Programs run unrestricted from shared folders. Until you switch it off or Sill quits.", names.join(", ")),
+                P.warning,
+            ),
+            (crate::host_control::Group::Host, false) => (
+                format!("The agent may act on this machine outside its jail, as you: {}. Until you switch it off, the window stops showing the session, or the session stops.", names.join(", ")),
+                P.warning,
+            ),
+        };
+        let on = groups_on.contains(&group);
+        basic = basic.push(basic_switch(
+            label,
+            said,
+            on,
+            color,
+            if on { "active" } else { "" },
+            host_free.then(|| {
+                let id = id.to_string();
+                move |on: bool| Message::Perms(Event::HostGroup(id.clone(), group, on))
+            }),
+        ));
+    }
+    if let Some(error) = &view.host_control.error {
+        basic = basic.push(text(error).size(style::TINY).color(P.error));
+    } else if let Some(ban) = crate::host_control::ban(view) {
+        basic = basic.push(ban);
+    }
+    content = content.push(basic);
+    content = content.push(keys::press(
+        button(text(if perms.advanced { "▾ Advanced" } else { "▸ Advanced" }).size(style::TINY))
+            .padding([2, 0])
+            .style(style::quiet),
+        Message::Perms(Event::Advanced(id.into())),
+    ));
+
     // IN THE JAIL: tool approvals, then jail access; ON THE HOST: Host control. Two columns of
     // fixed width (the second under the first in a narrow window); nothing moves between states.
     let mut jail = Column::new().width(JAIL_COLUMN);
@@ -953,6 +1101,7 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>, narrow: bo
         ]
         .into()
     };
+    if perms.advanced {
     content = content.push(columns);
     content = content.push(keys::press(button(text(if perms.filesystem_open { "▾ Filesystem" } else { "▸ Filesystem" }).size(style::TINY)).style(style::quiet), Message::Perms(Event::Filesystem(id.into()))));
     if perms.filesystem_open {
@@ -986,7 +1135,7 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>, narrow: bo
         }
         content = content.push(iced::widget::scrollable(files).height(iced::Length::Fixed(200.0)));
     }
-
+    }
 
     let pending = perms.restart_pending(running) || session.policy_changed;
     // one line for the last change's note, else the restart that is waiting
@@ -1100,6 +1249,28 @@ mod tests {
                "session_hosts": hosts})
     }
 
+    /// The panel opens on the Basic switches (Development and, without a Mac's VM, Host); the
+    /// granular toggles are under Advanced.
+    #[test]
+    fn the_panel_opens_on_the_basic_switches() {
+        let (mut app, _) = App::new(true, None);
+        app.all_sessions = vec![session_record("demo", "demo", false, false)];
+        app.views.get_mut("demo").unwrap().permissions.open = true;
+        let mut ui = simulator(&app, (720.0, 860.0));
+        ui.find(DEVELOPMENT_SWITCH).unwrap();
+        ui.find("Host").unwrap();
+        assert!(ui.find("VM").is_err() && ui.find("IN THE JAIL").is_err());
+        ui.click("▸ Advanced").unwrap();
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert!(messages.iter().any(|m| matches!(m, Message::Perms(Event::Advanced(_)))));
+        for message in messages {
+            let _ = app.update(message);
+        }
+        let mut ui = simulator(&app, (720.0, 860.0));
+        ui.find("IN THE JAIL").unwrap();
+        ui.find("ON THE HOST").unwrap();
+    }
+
     #[test]
     fn filesystem_changes_require_restart_but_unused_inventory_does_not() {
         let launch: PolicyView = serde_json::from_value(view("launch", false, json!([]))).unwrap();
@@ -1138,6 +1309,7 @@ mod tests {
         ];
         app.views.get_mut("demo").unwrap().permissions = Perms {
             open: true,
+            advanced: true,
             filesystem_open: true,
             views: Some(Views { preview, launch: None, agent_name: None }),
             ..Default::default()
@@ -1186,6 +1358,7 @@ mod tests {
             assert_eq!(agent["params"]["agent_id"], "claude");
             daemon.reply(&agent, json!({"id": "claude", "name": "Claude Code"}));
         });
+        let _ = app.update(Message::Perms(Event::Advanced("demo".into())));
         let task = app.update(Message::Perms(Event::Toggle("demo".into())));
         settle_task(&mut app, task);
         fake.join().unwrap();
@@ -1320,6 +1493,7 @@ mod tests {
         {
             let perms = &mut app.views.get_mut("demo").unwrap().permissions;
             perms.open = true;
+        perms.advanced = true;
             perms.views = Some(Views { launch: None, preview: preview.clone(), agent_name: None });
         }
         {
@@ -1436,6 +1610,7 @@ mod tests {
         let preview: PolicyView = serde_json::from_value(preview).unwrap();
         let perms = &mut app.views.get_mut("demo").unwrap().permissions;
         perms.open = true;
+        perms.advanced = true;
         perms.views = Some(Views { launch: Some(preview.clone()), preview, agent_name: None });
         let mut ui = simulator(&app, (720.0, 860.0));
         ui.find("Desktop development").unwrap();
@@ -1453,6 +1628,7 @@ mod tests {
         app.all_sessions = vec![ghost];
         let perms = &mut app.views.get_mut("demo").unwrap().permissions;
         perms.open = true;
+        perms.advanced = true;
         perms.views = Some(serde_json::from_value::<PolicyView>(view("preview", false, json!([]))).map(|preview| Views {
             preview,
             launch: None,

@@ -923,3 +923,17 @@ fn render_settings_tabs() {
         }
     }
 }
+
+#[test]
+#[ignore = "writes PNGs for review; run explicitly"]
+fn render_permissions_basic() {
+    let (mut app, _) = App::new(true, None);
+    for _ in 0..=demo::CHUNKS.len() {
+        let _ = app.update(crate::Message::DemoTick);
+    }
+    app.all_sessions = vec![crate::tests::session_record("demo", "demo", false, false)];
+    app.views.get_mut("demo").unwrap().permissions.open = true;
+    render(&app, "13-permissions-basic");
+    app.views.get_mut("demo").unwrap().permissions.advanced = true;
+    render(&app, "13-permissions-advanced");
+}

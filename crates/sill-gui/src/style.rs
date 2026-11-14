@@ -497,6 +497,12 @@ pub fn solid(color: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
     }
 }
 
+/// The theme's warning turned yellow: the lesser caution, beside the warning itself (development
+/// and VM access against Host control; the person, 2026-11-13).
+pub fn yellow() -> Color {
+    with_hue(P.warning, 46.0)
+}
+
 /// `color` turned to the hue at `degrees`, keeping its own saturation and lightness: a red, a
 /// yellow in a theme's own tone, whatever hues the theme happens to have (Miasma's error and
 /// warning are both orange).
