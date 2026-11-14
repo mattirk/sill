@@ -45,35 +45,10 @@ for b in sill sill-shim sill-gui; do
     }
 done
 
-# restart: stops the unit, ends any other sill-gui, restarts the daemon, starts the unit
-"$PREFIX/bin/sill" restart
-
-# exactly one local sill-gui, the installed one, under the unit
-sleep 2
-windows=$(packaging/local-gui.sh)
-n=$(printf '%s\n' "$windows" | grep -c . || true)
-if [ "$n" -ne 1 ]; then
-    echo "deploy.sh: expected one local sill-gui process, found $n:" >&2
-    printf '%s\n' "$windows" >&2
-    exit 1
-fi
-sill_gui_pid=${windows%% *}
-sill_gui_exe=$(readlink "/proc/$sill_gui_pid/exe" 2>/dev/null || true)
-sill_expected_exe=$(readlink -f "$PREFIX/bin/sill-gui")
-case "$sill_gui_exe" in
-    "$sill_expected_exe") ;;
-    *) echo "deploy.sh: the running sill-gui is not $sill_expected_exe: $windows" >&2; exit 1 ;;
-esac
-if command -v systemctl >/dev/null 2>&1 && systemctl --user cat sill-gui.service >/dev/null 2>&1; then
-    systemctl --user is-active --quiet sill-gui.service || {
-        echo "deploy.sh: sill-gui.service is not active (journalctl --user -u sill-gui)" >&2
-        exit 1
-    }
-fi
-echo "deployed: $PREFIX/bin/sill $(sha256sum "$PREFIX/bin/sill" | cut -c1-12); sill-gui $sill_expected_exe running as pid $sill_gui_pid"
-
-# what a session cannot see from its jail, into target/host-check/report.txt for the agent to read
-PREFIX="$PREFIX" SILL_BUILD_DIR="$sill_build_dir" packaging/check.sh || {
-    echo "deploy.sh: deployed, but check.sh found $? failure(s): target/host-check/report.txt" >&2
-    exit 1
-}
+# Keep restart AND verification outside the daemon/GUI/host-shell process groups.
+# The service continues even if restarting sill closes the terminal that launched deployment.
+sill_deploy_unit="sill-deploy-$(date +%s)-$$"
+echo "Restarting daemon, GUI and running jails; log: journalctl --user -u $sill_deploy_unit"
+exec systemd-run --user --wait --collect --unit="$sill_deploy_unit" \
+    --working-directory="$PWD" -- /bin/sh "$PWD/packaging/deploy-restart.sh" \
+    "$PREFIX" "$sill_build_dir"

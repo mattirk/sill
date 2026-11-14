@@ -731,6 +731,13 @@ async fn drive(
                             .send(Event::AuthRequired { message: e.message.clone(), methods: auth_methods.to_vec() })
                             .await;
                     }
+                    Err(e) if agent_client_protocol::is_incoming_transport_closed(&e)
+                        || agent_client_protocol::is_connection_terminated(&e) => {
+                        // A dead connection cannot accept another prompt. End this
+                        // worker so the daemon can create a new connection on retry.
+                        // Do not replay a request whose execution is uncertain.
+                        return Err(e);
+                    }
                     Err(e) => {
                         let _ = events_loop.send(Event::Other(format!("prompt failed: {e}"))).await;
                         // A failed RPC does not establish cancellation or successful insertion.

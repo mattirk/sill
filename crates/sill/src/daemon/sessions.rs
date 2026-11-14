@@ -266,6 +266,7 @@ impl Hub {
                     match method {
                         "_sill/sessions.start" => {
                             let s = self.start_session(&a.session_id)?;
+                            self.ensure_runner(&a.session_id, false)?;
                             Ok(json!(api::Started {
                                 session_id: a.session_id,
                                 fresh: s.fresh
@@ -273,8 +274,7 @@ impl Hub {
                         }
                         "_sill/sessions.stop" => {
                             crate::daemon::host_control::session_ended(self, &a.session_id, "the session stopped");
-                            self.retire_runner(&a.session_id);
-                            sill_core::session::stop(&a.session_id)?;
+                            self.stop_session(&a.session_id)?;
                             Ok(json!({}))
                         }
                         _ => {

@@ -483,7 +483,6 @@ impl Hub {
                 std::thread::sleep(std::time::Duration::from_millis(25));
             }
         }
-        let mut evicted = false;
         let existing = if fresh { None } else {
             match super::relay::connect(&socket, Runner::cursor(&snapshot)) {
                 Ok(connection) => Some(connection),
@@ -492,7 +491,6 @@ impl Hub {
                 Err(e) if e.downcast_ref::<super::relay::Refused>().is_some() => {
                     eprintln!("sill daemon: session {id}: the ACP relay refused recovery ({e:#}); replacing it");
                     super::relay::evict(&dir, id)?;
-                    evicted = true;
                     None
                 }
                 Err(e) if std::os::unix::net::UnixStream::connect(&socket).is_ok() => return Err(e.context("existing ACP relay did not accept recovery; refusing to replace it")),
@@ -521,8 +519,9 @@ impl Hub {
                     Ok((s, agent))
                 })?;
                 let mut control = sill_core::shim::Control::connect(&started.socket)?;
-                // an evicted relay's agent held the old SDK connection: it starts again too
-                if (fresh || evicted) && control.status()?.running { control.kill(3000)?; }
+                // Without a usable relay, a surviving agent may still hold the
+                // failed SDK connection. Restart it before opening a new stream.
+                if control.status()?.running { control.kill(3000)?; }
                 if !control.status()?.running {
                     let mut env = agent.env.clone(); env.extend(agent.sandbox_off_env.clone());
                     control.spawn(&agent.command, &env, Some(&self.home))?;
@@ -868,7 +867,14 @@ impl Hub {
     /// The session's conversation is over as far as the daemon is concerned: no more events out.
     /// Stop a session's jail and its agent; the conversation stays and starts again when used.
     pub(super) fn stop_session(&self, id: &str) -> Result<()> {
+        // Recovery/attachment must not adopt the old relay during teardown.
+        let _one_at_a_time = self.starting.lock().unwrap();
         self.retire_runner(id);
+        let dir = sill_proto::runtime_dir()?.join(id);
+        // Quit is asynchronous. A successful jail stop must also make the old
+        // agent connection unavailable before a subsequent start can reuse it.
+        super::relay::wait_stopped(&dir.join("relay.sock"))
+            .or_else(|_| super::relay::evict(&dir, id))?;
         sill_core::session::stop(id)
     }
 

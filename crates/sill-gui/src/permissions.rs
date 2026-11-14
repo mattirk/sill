@@ -61,7 +61,9 @@ pub enum Event {
     AutoAllow(String, bool),
     /// Apply development permissions: the test desktop and private D-Bus together.
     ApplyDevelopment(String),
-    Restart(String),
+    /// Stop and start the jail: for new permissions, or for changed pins (binds are made at
+    /// launch, so a pin added to a running session reaches it only this way).
+    Restart(String, Change),
     Done(String, Change, Outcome),
     NoticeExpired(String, u64),
 }
@@ -82,6 +84,7 @@ pub enum Change {
     SaveHost(String),
     AutoAllow(bool),
     Restart,
+    RestartPins,
 }
 
 /// A session's permission state in this window.
@@ -274,7 +277,7 @@ impl App {
                     params,
                 );
             }
-            Event::Restart(id) => {
+            Event::Restart(id, change) => {
                 let (Some(actions), Some(view)) = (self.actions.clone(), self.views.get_mut(&id))
                 else {
                     return Task::none();
@@ -293,7 +296,7 @@ impl App {
                         }
                         actions.call("_sill/sessions.start", key)
                     },
-                    move |outcome| Message::Perms(Event::Done(id, Change::Restart, outcome)),
+                    move |outcome| Message::Perms(Event::Done(id, change, outcome)),
                 );
             }
             Event::Done(id, change, outcome) => return self.permission_done(id, change, outcome),
@@ -440,6 +443,7 @@ impl App {
                     Change::AutoAllow(true) => "Auto-allow on.".into(),
                     Change::AutoAllow(false) => "Auto-allow off.".into(),
                     Change::Restart => "Restarted with the new permissions.".into(),
+                    Change::RestartPins => "Restarted with the new pins.".into(),
                 },
                 false,
             ),
@@ -449,7 +453,7 @@ impl App {
         if let Some(view) = self.views.get_mut(&id) {
             view.permissions.note(serial, said, failed);
         }
-        if matches!(change, Change::Restart) && outcome.is_done() {
+        if matches!(change, Change::Restart | Change::RestartPins) && outcome.is_done() {
             self.reattach(&id);
         }
         let session = id.clone();
@@ -926,7 +930,7 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>, narrow: bo
                     .width(RESTART_SLOT)
                     .padding([2, 8])
                     .style(style::quiet),
-                (!perms.busy).then(|| Message::Perms(Event::Restart(id.into()))),
+                (!perms.busy).then(|| Message::Perms(Event::Restart(id.into(), Change::Restart))),
             ),
             why,
         )

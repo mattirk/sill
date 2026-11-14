@@ -105,19 +105,34 @@ fn systemctl(args: &[&str]) -> bool {
 /// installed binaries); `--dev` instead stops the service and runs the checkout's debug build of
 /// sill-gui on its own, for trying a build without installing it. The next daemon is started by
 /// its first client, so a `--dev` window brings up the daemon of its own build (docs/daemon.md §3.6).
-pub fn restart(hidden: bool, dev: bool, detached: bool) -> Result<()> {
+/// With `--jails`, the replacement daemon adopts running jails before rebuilding each one.
+pub fn restart(hidden: bool, dev: bool, detached: bool, jails: bool) -> Result<()> {
     // run from a host shell of the window (the daemon's pty) or anywhere in the units' cgroups,
     // the stops below would take this command down before it starts anything — so the work is
     // handed to a copy outside: its own scope, its own session, its output in gui.log
     if !detached && inside_sill() {
-        return restart_detached(hidden, dev);
+        return restart_detached(hidden, dev, jails);
     }
     let unit_known = systemctl(&["cat", "sill-gui.service"]);
     if unit_known {
         systemctl(&["stop", "sill-gui.service"]);
     }
     stop_running_gui();
-    restart_daemon(dev);
+    let running = if jails {
+        let client = sill_proto::Client::connect_or_start()?;
+        let running: Vec<_> = client.list_sessions()?.into_iter()
+            .filter(|s| s.running && s.ended_at.is_none()).collect();
+        running
+    } else { Vec::new() };
+    restart_daemon(dev)?;
+    if !running.is_empty() {
+        let client = sill_proto::Client::connect_or_start()?;
+        for session in running {
+            client.call::<serde_json::Value>("_sill/sessions.stop", sill_proto::sessions::SessionKey { session_id: session.session_id.clone() })?;
+            client.call::<sill_proto::sessions::Started>("_sill/sessions.start", sill_proto::sessions::SessionKey { session_id: session.session_id.clone() })?;
+            println!("jail {} restarted", session.session_id);
+        }
+    }
     if unit_known && !dev {
         if !systemctl(&["start", "sill-gui.service"]) {
             bail!("systemctl --user start sill-gui failed");
@@ -188,7 +203,7 @@ fn inside_sill() -> bool {
 /// Run `sill restart` again outside: in a transient scope of its own (not a unit's cgroup, so the
 /// stops don't reach it), in a new session (no controlling pty to hang up when the shell goes),
 /// logging to gui.log.
-fn restart_detached(hidden: bool, dev: bool) -> Result<()> {
+fn restart_detached(hidden: bool, dev: bool, jails: bool) -> Result<()> {
     let exe = std::env::current_exe()?;
     let log_path = sill_core::store::default_path()?.with_file_name("gui.log");
     let log = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(&log_path)?;
@@ -200,6 +215,7 @@ fn restart_detached(hidden: bool, dev: bool) -> Result<()> {
     if dev {
         args.push("--dev".into());
     }
+    if jails { args.push("--jails".into()); }
     let st = std::process::Command::new("systemd-run")
         .args(&args)
         .stdin(std::process::Stdio::null())
@@ -249,38 +265,26 @@ fn stop_running_gui() {
 /// does, from the window's own build (the dev build for `--dev`, the installed one otherwise), so a
 /// window never talks to a daemon of another build. With the installed units, `--dev` also stops
 /// `sill.socket` (a dev daemon binds the same path itself) and a plain restart starts it again.
-fn restart_daemon(dev: bool) {
+fn restart_daemon(dev: bool) -> Result<()> {
     let socket_unit = systemctl(&["cat", "sill.socket"]);
     if socket_unit {
-        // a deploy rewrote the units (`sudo sill init`): the user manager must read them again
-        // before the restart, or the new daemon runs under the old text (docs/daemon.md §3.7)
         if ["sill.service", "sill.socket", "sill-gui.service"].iter().any(|u| crate::init::unit_stale(u)) {
-            systemctl(&["daemon-reload"]);
+            anyhow::ensure!(systemctl(&["daemon-reload"]), "could not reload user units");
         }
-        systemctl(&["stop", "sill.service"]);
-        if dev {
-            systemctl(&["stop", "sill.socket"]);
-        }
+        anyhow::ensure!(systemctl(&["stop", "sill.socket", "sill.service"]), "could not stop daemon units");
     }
-    if socket_unit && !dev {
-        // the socket unit still listens: a connect from here would only activate a fresh daemon
-        // to ask it to leave, and a second one after it (docs/daemon.md §3.9 item 8). The stop was
-        // synchronous; the next client's connection starts the daemon that stays.
-        systemctl(&["stop", "sill-daemon.service"]);
-        return;
-    }
-    // a daemon a client started (transient unit sill-daemon, or bare): ask it to leave
-    if let Ok(c) = sill_proto::Client::connect() {
-        let _ = c.call::<serde_json::Value>(sill_proto::method::DAEMON_SHUTDOWN, sill_proto::Empty::default());
+    // Unit files may exist while a bare daemon owns the socket. Stop that daemon too.
+    if let Ok(client) = sill_proto::Client::connect() {
+        client.call_within::<serde_json::Value>(sill_proto::method::DAEMON_SHUTDOWN, sill_proto::Empty::default(), sill_proto::client::QUICK_TIMEOUT)?;
     }
     systemctl(&["stop", "sill-daemon.service"]);
-    for _ in 0..40 {
-        if sill_proto::Client::connect().is_err() {
-            break;
-        }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while sill_proto::Client::connect().is_ok() {
+        anyhow::ensure!(std::time::Instant::now() < deadline, "old daemon did not stop within 10 seconds");
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     if socket_unit && !dev {
-        systemctl(&["start", "sill.socket"]);
+        anyhow::ensure!(systemctl(&["start", "sill.socket"]), "could not start sill.socket");
     }
+    Ok(())
 }

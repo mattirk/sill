@@ -118,6 +118,9 @@ enum Cmd {
     Toggle,
     /// Restart the daemon and sill-gui, under the `sill-gui` user service when it is installed
     Restart {
+        /// Rebuild running jails too, preserving their sessions
+        #[arg(long)]
+        jails: bool,
         /// start sill-gui hidden
         #[arg(long)]
         hidden: bool,
@@ -960,9 +963,12 @@ fn main() -> Result<()> {
         Cmd::Init(a) => init::run(a),
         Cmd::Gui { hidden } => frontend::gui(hidden),
         Cmd::Toggle => frontend::toggle(),
-        Cmd::Restart { hidden, dev, detached } => {
-            if sill_proto::transport::selected()?.is_some() { restart_daemon_only() }
-            else { frontend::restart(hidden, dev, detached) }
+        Cmd::Restart { hidden, dev, detached, jails } => {
+            if sill_proto::transport::selected()?.is_some() {
+                anyhow::ensure!(!jails, "restart --jails must run on the local host");
+                restart_daemon_only()
+            }
+            else { frontend::restart(hidden, dev, detached, jails) }
         },
         Cmd::Login { agent, method } => {
             let home = home()?;

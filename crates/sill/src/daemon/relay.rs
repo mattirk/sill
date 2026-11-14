@@ -870,6 +870,44 @@ mod tests {
     }
 
     #[test]
+    fn closed_transport_prompt_error_ends_worker_without_replay() {
+        let dir = scratch("prompt-transport-closed");
+        let socket = dir.join("relay.sock");
+        let (agent, worker_stream) = UnixStream::pair().unwrap();
+        let fake = std::thread::spawn(move || {
+            agent.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut reader = BufReader::new(agent.try_clone().unwrap());
+            let mut writer = agent;
+            let init = read(&mut reader);
+            message(&mut writer, json!({"jsonrpc":"2.0","id":init["id"],"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}}));
+            let new = read(&mut reader);
+            message(&mut writer, json!({"jsonrpc":"2.0","id":new["id"],"result":{"sessionId":"fake"}}));
+            let prompt = read(&mut reader);
+            assert_eq!(prompt["method"], "session/prompt");
+            message(&mut writer, json!({"jsonrpc":"2.0","id":prompt["id"],"error":{"code":-32603,"message":"Incoming transport closed","data":{"reason":"incoming_transport_closed","method":"session/prompt"}}}));
+            let mut extra = String::new();
+            assert_eq!(reader.read_line(&mut extra).unwrap(), 0, "failed prompt was replayed");
+        });
+        let path = socket.clone();
+        let worker = std::thread::spawn(move || run_with("test", &path, Path::new("/tmp"), None, false, ORPHAN_GRACE, || Ok(worker_stream)));
+        let (client, events) = loop {
+            match connect(&socket, 0) {
+                Ok(c) => break c,
+                Err(_) => std::thread::sleep(Duration::from_millis(5)),
+            }
+        };
+        let mut cursor = 0;
+        until(&events, &client, &mut cursor, |e| matches!(e, Event::Ready { .. }));
+        client.command(1, Command::Prompt { text: "hello".into(), attachments: vec![] }).unwrap();
+        until(&events, &client, &mut cursor, |e| matches!(e, Event::Ended(Some(_))));
+        assert!(finishes(&worker, Duration::from_secs(5)));
+        worker.join().unwrap().unwrap();
+        fake.join().unwrap();
+        wait_stopped(&socket).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn reconnect_preserves_live_turn_question_and_command_identity() {
         let dir = std::env::temp_dir().join(format!("sill-relay-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

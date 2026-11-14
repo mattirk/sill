@@ -228,6 +228,9 @@ pub struct Effects {
     /// The person asked to browse a folder and it is there: show the drawer — if this session is
     /// still the one they are looking at.
     pub reveal: bool,
+    /// A pin was added or removed. Pins are binds made at launch (docs/pins.md), so a running
+    /// jail must be restarted for the change to reach it; the frontend decides when.
+    pub pins_changed: bool,
 }
 
 #[derive(Debug, Default)]
@@ -736,6 +739,7 @@ impl FilesState {
                             self.expanded.remove(key(&path));
                         }
                         effects.follow.push(Request::Roots);
+                        effects.pins_changed = true;
                     }
                     Err(error) => {
                         self.error = Some(format!(

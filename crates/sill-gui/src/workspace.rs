@@ -549,6 +549,14 @@ impl App {
                     self.workspace.shown = true;
                 }
                 self.files_send(&session, effects.follow);
+                // pins are binds made at launch: a running jail is restarted to get the change
+                // (the agent resumes with its history, as after a permission change)
+                if effects.pins_changed && self.tabs.iter().any(|t| t.id == session && t.running) {
+                    return self.update(Message::Perms(crate::permissions::Event::Restart(
+                        session,
+                        crate::permissions::Change::RestartPins,
+                    )));
+                }
                 Task::none()
             }
             Action::Hover(key) => {

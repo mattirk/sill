@@ -269,11 +269,11 @@ impl Hub {
         }
     }
 
-    /// Every session's pinned folders, and the global ones, that are git repositories.
+    /// Active (not ended) sessions' pinned folders, and the global ones, that are git repositories.
     fn pinned_repos(&self) -> Result<Vec<PathBuf>> {
         self.with_store(|st| {
             let mut out = Vec::new();
-            for s in st.sessions()? {
+            for s in st.sessions()?.into_iter().filter(|s| s.ended_at.is_none()) {
                 out.extend(st.pins(&s.id)?.into_iter().filter(|p| p.join(".git").exists()));
             }
             out.extend(st.global_pins()?.into_iter().filter(|p| p.join(".git").exists()));
