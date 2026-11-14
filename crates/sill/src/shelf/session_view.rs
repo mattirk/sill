@@ -17,6 +17,7 @@ use super::session;
 pub struct SessionView {
     pub root: gtk::Box,
     prompt: gtk::TextView,
+    pins_row: gtk::Box,
     pub session: RefCell<Session>,
     pub conv: Rc<Conversation>,
     pub status: gtk::Label,
@@ -58,13 +59,22 @@ impl SessionView {
             .build();
         prompt_scroll.add_css_class("sill-prompt-box");
 
+        let pins_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        pins_row.add_css_class("sill-pins");
+        pins_row.set_margin_start(12);
+        pins_row.set_margin_end(12);
+        pins_row.set_margin_bottom(4);
+        pins_row.set_visible(false);
+
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        root.append(&pins_row);
         root.append(&conv.root);
         root.append(&prompt_scroll);
 
         let view = Rc::new(Self {
             root,
             prompt: prompt.clone(),
+            pins_row,
             session: RefCell::new(session),
             conv,
             status,
@@ -108,8 +118,53 @@ impl SessionView {
         }
         prompt.add_controller(keys);
 
+        view.refresh_pins();
         view.connect();
         view
+    }
+
+    /// Chips under the session bar, one per pinned folder, with an unpin ×.
+    pub fn refresh_pins(self: &Rc<Self>) {
+        while let Some(c) = self.pins_row.first_child() {
+            self.pins_row.remove(&c);
+        }
+        let pins = self.store.pins(&self.id()).unwrap_or_default();
+        self.pins_row.set_visible(!pins.is_empty());
+        if pins.is_empty() {
+            return;
+        }
+        let head = gtk::Label::new(Some("pinned"));
+        head.add_css_class("dim-label");
+        self.pins_row.append(&head);
+        let home = std::env::var("HOME").unwrap_or_default();
+        for p in pins {
+            let chip = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+            chip.add_css_class("sill-chip");
+            let l = gtk::Label::new(Some(&p.to_string_lossy().replace(&home, "~")));
+            l.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+            l.set_max_width_chars(32);
+            let x = gtk::Button::from_icon_name("window-close-symbolic");
+            x.add_css_class("flat");
+            x.add_css_class("sill-tab-close");
+            let v = self.clone();
+            x.connect_clicked(move |_| {
+                let _ = v.store.unpin(&v.id(), &p);
+                v.refresh_pins();
+            });
+            chip.append(&l);
+            chip.append(&x);
+            self.pins_row.append(&chip);
+        }
+    }
+
+    /// Context block prepended to prompts while pins exist (SPEC §3.1 pins).
+    fn pin_prefix(&self) -> String {
+        let pins = self.store.pins(&self.id()).unwrap_or_default();
+        if pins.is_empty() {
+            return String::new();
+        }
+        let list: Vec<String> = pins.iter().map(|p| p.display().to_string()).collect();
+        format!("[Pinned folders — focus your work there unless told otherwise: {}]\n\n", list.join(", "))
     }
 
     pub fn focus_prompt(&self) {
@@ -146,7 +201,8 @@ impl SessionView {
             self.conv.add_note("session is not running");
             return false;
         };
-        match d.try_send(Command::Prompt(text.to_string())) {
+        let outgoing = format!("{}{}", self.pin_prefix(), text);
+        match d.try_send(Command::Prompt(outgoing)) {
             Ok(()) => {
                 self.conv.add_user(text);
                 let id = self.id();

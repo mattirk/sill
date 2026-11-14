@@ -69,8 +69,84 @@ pub fn by_id(id: &str) -> Theme {
 }
 
 thread_local! {
+    static LISTENERS: RefCell<Vec<Box<dyn Fn(&Theme)>>> = const { RefCell::new(Vec::new()) };
     static CURRENT: RefCell<Theme> = RefCell::new(by_id("adwaita"));
     static PROVIDER: RefCell<Option<gtk::CssProvider>> = const { RefCell::new(None) };
+}
+
+/// Called after every theme change (for widgets that can't be styled by CSS, e.g. GtkSourceView).
+pub fn on_change(f: impl Fn(&Theme) + 'static) {
+    LISTENERS.with(|l| l.borrow_mut().push(Box::new(f)));
+}
+
+/// GtkSourceView style scheme id for the theme: a generated `sill-<id>` scheme built from the palette
+/// (see [`write_source_schemes`]); Adwaita keeps the stock schemes.
+pub fn source_scheme(t: &Theme) -> String {
+    if t.bg.is_empty() {
+        if adw::StyleManager::default().is_dark() { "Adwaita-dark".into() } else { "Adwaita".into() }
+    } else {
+        format!("sill-{}", t.id)
+    }
+}
+
+/// Write one GtkSourceView style scheme per palette theme into the user's state dir and return the
+/// directory (added to the scheme manager's search path by the editor).
+pub fn write_source_schemes() -> Option<std::path::PathBuf> {
+    let base = std::env::var("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/state"));
+    let dir = base.join("sill").join("styles");
+    std::fs::create_dir_all(&dir).ok()?;
+    for t in builtin().into_iter().filter(|t| !t.bg.is_empty()) {
+        let xml = format!(
+            r##"<?xml version="1.0" encoding="UTF-8"?>
+<style-scheme id="sill-{id}" name="sill {name}" version="1.0">
+  <style name="text"                  foreground="{fg}" background="{bg}"/>
+  <style name="selection"             background="{accent}" foreground="{bg}"/>
+  <style name="cursor"                foreground="{fg}"/>
+  <style name="current-line"          background="{surface}"/>
+  <style name="line-numbers"          foreground="{dim}" background="{bg}"/>
+  <style name="current-line-number"   foreground="{accent}" background="{bg}" bold="true"/>
+  <style name="bracket-match"         foreground="{accent}" bold="true"/>
+  <style name="search-match"          background="{warning}" foreground="{bg}"/>
+  <style name="def:comment"           foreground="{dim}" italic="true"/>
+  <style name="def:shebang"           foreground="{dim}"/>
+  <style name="def:doc-comment"       foreground="{dim}" italic="true"/>
+  <style name="def:string"            foreground="{success}"/>
+  <style name="def:special-char"      foreground="{warning}"/>
+  <style name="def:number"            foreground="{warning}"/>
+  <style name="def:boolean"           foreground="{warning}"/>
+  <style name="def:constant"          foreground="{warning}"/>
+  <style name="def:keyword"           foreground="{accent}" bold="true"/>
+  <style name="def:statement"         foreground="{accent}"/>
+  <style name="def:type"              foreground="{link}"/>
+  <style name="def:builtin"           foreground="{link}"/>
+  <style name="def:function"          foreground="{fg}"/>
+  <style name="def:identifier"        foreground="{fg}"/>
+  <style name="def:preprocessor"      foreground="{warning}"/>
+  <style name="def:error"             foreground="{error}" underline="error"/>
+  <style name="def:warning"           foreground="{warning}"/>
+  <style name="def:note"              foreground="{accent}" bold="true"/>
+  <style name="def:heading"           foreground="{accent}" bold="true"/>
+  <style name="def:emphasis"          italic="true"/>
+  <style name="def:strong-emphasis"   bold="true"/>
+  <style name="def:link-text"         foreground="{link}" underline="single"/>
+  <style name="def:link-destination"  foreground="{link}"/>
+  <style name="def:inline-code"       foreground="{success}"/>
+  <style name="def:list-marker"       foreground="{accent}"/>
+  <style name="diff:added-line"       foreground="{success}"/>
+  <style name="diff:removed-line"     foreground="{error}"/>
+  <style name="diff:changed-line"     foreground="{warning}"/>
+  <style name="diff:location"         foreground="{accent}"/>
+  <style name="diff:diff-file"        foreground="{fg}" bold="true"/>
+</style-scheme>
+"##,
+            id = t.id, name = t.name, fg = t.fg, bg = t.bg, accent = t.accent, surface = t.surface,
+            dim = t.fg_dim, warning = t.warning, success = t.success, link = t.link, error = t.error,
+        );
+        let _ = std::fs::write(dir.join(format!("sill-{}.xml", t.id)), xml);
+    }
+    Some(dir)
 }
 
 pub fn current() -> Theme {
@@ -168,6 +244,11 @@ pub fn apply(t: &Theme) {
     });
     CURRENT.with(|c| *c.borrow_mut() = t.clone());
     super::markdown::retheme();
+    LISTENERS.with(|l| {
+        for f in l.borrow().iter() {
+            f(t);
+        }
+    });
 }
 
 /// Colours the Markdown text tags need (they can't use CSS variables).

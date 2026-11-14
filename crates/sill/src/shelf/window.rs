@@ -81,6 +81,11 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
     plus.set_popover(Some(&plus_pop));
     bar.append(&plus);
 
+    let files_btn = gtk::Button::from_icon_name("folder-symbolic");
+    files_btn.add_css_class("flat");
+    files_btn.set_tooltip_text(Some("Files"));
+    bar.append(&files_btn);
+
     let status = gtk::Label::new(Some(""));
     status.add_css_class("dim-label");
     bar.append(&status);
@@ -91,10 +96,40 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
     stack.set_vexpand(true);
     stack.add_named(&pages, Some("sessions"));
     let changes = ChangesPage::new(store.clone());
-    stack.add_named(&changes.root, Some("changes"));
     let files = FilesPage::new(store.clone());
-    stack.add_named(&files.root, Some("files"));
-    stack.add_named(&settings::build(), Some("settings"));
+    let settings_page = settings::build();
+    // backend pages get a header with an obvious way back to the session
+    let back_buttons: Rc<RefCell<Vec<gtk::Button>>> = Rc::new(RefCell::new(Vec::new()));
+    for (name, title, body) in [
+        ("changes", "Changes", changes.root.clone().upcast::<gtk::Widget>()),
+        ("files", "Files", files.root.clone().upcast::<gtk::Widget>()),
+        ("settings", "Settings", settings_page.clone().upcast::<gtk::Widget>()),
+    ] {
+        let wrap = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        head.add_css_class("sill-page-head");
+        head.set_margin_start(8);
+        head.set_margin_end(12);
+        head.set_margin_top(2);
+        head.set_margin_bottom(4);
+        let back = gtk::Button::new();
+        let back_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        back_box.append(&gtk::Image::from_icon_name("go-previous-symbolic"));
+        back_box.append(&gtk::Label::new(Some("Back to session")));
+        back.set_child(Some(&back_box));
+        back.add_css_class("sill-back");
+        back.set_tooltip_text(Some("Escape"));
+        let t = gtk::Label::new(Some(title));
+        t.add_css_class("heading");
+        t.set_xalign(0.0);
+        t.set_hexpand(true);
+        head.append(&back);
+        head.append(&t);
+        wrap.append(&head);
+        wrap.append(&body);
+        stack.add_named(&wrap, Some(name));
+        back_buttons.borrow_mut().push(back);
+    }
 
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
     column.append(&bar);
@@ -113,6 +148,22 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         files: files.clone(),
     });
 
+    {
+        let s = shelf.clone();
+        files_btn.connect_clicked(move |_| s.show_page("files"));
+    }
+    for b in back_buttons.borrow().iter() {
+        let s = shelf.clone();
+        b.connect_clicked(move |_| s.show_page("sessions"));
+    }
+    {
+        let s = shelf.clone();
+        *files.on_pin.borrow_mut() = Some(Box::new(move |sid| {
+            if let Some(v) = s.views.borrow().get(sid) {
+                v.refresh_pins();
+            }
+        }));
+    }
     // dropdown entries
     for (label, page) in [("Sessions", "sessions"), ("Changes", "changes"), ("Files", "files"), ("Settings", "settings")] {
         let b = gtk::Button::with_label(label);
@@ -138,6 +189,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         let s = shelf.clone();
         *tabs.on_select.borrow_mut() = Some(Box::new(move |id| {
             s.pages.set_visible_child_name(id);
+            *s.files.pin_target.borrow_mut() = Some(id.to_string());
             s.sync_status();
             s.focus_prompt();
         }));
@@ -207,7 +259,12 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
             let w: gtk::Window = w.clone().upcast();
             let s = s.clone();
             glib::idle_add_local_once(move || {
-                if let Some(area) = x11::work_area(&w) {
+                let fraction = if s.stack.visible_child_name().as_deref() == Some("files") {
+                    x11::width_fraction().max(0.5)
+                } else {
+                    x11::width_fraction()
+                };
+                if let Some(area) = x11::work_area_with(&w, fraction) {
                     x11::place(&w, &area);
                 }
                 x11::activate(&w);
@@ -225,6 +282,12 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
 impl Shelf {
     fn show_page(&self, name: &str) {
         self.stack.set_visible_child_name(name);
+        // the Files page (tree + editor) needs room: half the work area while it is open
+        let w: gtk::Window = self.window.clone().upcast();
+        let fraction = if name == "files" { x11::width_fraction().max(0.5) } else { x11::width_fraction() };
+        if let Some(area) = x11::work_area_with(&w, fraction) {
+            x11::place(&w, &area);
+        }
         match name {
             "changes" => self.changes.refresh(),
             "files" => self.files.refresh(),

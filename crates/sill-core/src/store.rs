@@ -64,6 +64,8 @@ impl Store {
                  id TEXT PRIMARY KEY, agent TEXT NOT NULL, title TEXT NOT NULL,
                  created_at INTEGER NOT NULL, last_used INTEGER NOT NULL,
                  acp_session_id TEXT, policy TEXT NOT NULL DEFAULT 'default');
+             CREATE TABLE IF NOT EXISTS session_pins (
+                 session_id TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (session_id, path));
              CREATE TABLE IF NOT EXISTS entries (
                  session_id TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL,
                  kind TEXT NOT NULL, text TEXT NOT NULL, extra TEXT NOT NULL DEFAULT '',
@@ -128,7 +130,27 @@ impl Store {
 
     pub fn delete(&self, id: &str) -> Result<()> {
         self.conn.execute("DELETE FROM entries WHERE session_id = ?1", params![id])?;
+        self.conn.execute("DELETE FROM session_pins WHERE session_id = ?1", params![id])?;
         self.conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn pins(&self, session_id: &str) -> Result<Vec<PathBuf>> {
+        let mut st = self.conn.prepare("SELECT path FROM session_pins WHERE session_id = ?1 ORDER BY path")?;
+        let rows = st.query_map(params![session_id], |r| r.get::<_, String>(0))?;
+        Ok(rows.filter_map(Result::ok).map(PathBuf::from).collect())
+    }
+
+    pub fn pin(&self, session_id: &str, path: &Path) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO session_pins (session_id, path) VALUES (?1, ?2)",
+            params![session_id, path.to_string_lossy()],
+        )?;
+        Ok(())
+    }
+
+    pub fn unpin(&self, session_id: &str, path: &Path) -> Result<()> {
+        self.conn.execute("DELETE FROM session_pins WHERE session_id = ?1 AND path = ?2", params![session_id, path.to_string_lossy()])?;
         Ok(())
     }
 

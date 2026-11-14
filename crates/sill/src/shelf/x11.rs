@@ -35,15 +35,15 @@ fn xid(window: &gtk::Window) -> Option<u32> {
 }
 
 /// Work area of the current desktop (`_NET_WORKAREA`, panels excluded), falling back to the first
-/// monitor's geometry.
-pub fn work_area(window: &gtk::Window) -> Option<Placement> {
+/// monitor's geometry. With an explicit width fraction (the Files page widens the shelf to at least half).
+pub fn work_area_with(window: &gtk::Window, fraction: f64) -> Option<Placement> {
     let (x, y, w, h) = net_workarea().or_else(|| {
         let display = WidgetExt::display(window);
         let m = display.monitors().item(0)?.downcast::<gtk::gdk::Monitor>().ok()?;
         let g = m.geometry();
         Some((g.x(), g.y(), g.width() as u32, g.height() as u32))
     })?;
-    let width = (w as f64 * width_fraction()).round() as u32;
+    let width = (w as f64 * fraction).round() as u32;
     Some(Placement { x, y, width, height: h })
 }
 

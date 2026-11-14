@@ -273,6 +273,22 @@ entry { border-radius: 0; }
 .sill-permission button { border-radius: 0; }
 .sill-prompt { border-radius: 0; }
 .sill-prompt text { background: transparent; }
+.sill-files > row { padding: 1px 4px; min-height: 0; }
+.sill-files > row:selected { background: alpha(@accent_bg_color, 0.25); }
+.sill-files treeexpander { padding: 1px 0; }
+.sill-file-icon { opacity: 0.7; -gtk-icon-size: 14px; }
+.sill-changed { color: @warning_color; }
+.sill-dim { opacity: 0.45; }
+.sill-pinned { color: @accent_color; }
+.sill-editor gutter { border: none; }
+.sill-page-head { border-bottom: 1px solid alpha(@view_fg_color, 0.12); padding-bottom: 4px; }
+.sill-back { padding: 2px 10px 2px 6px; background: alpha(@accent_bg_color, 0.18); color: @view_fg_color; }
+.sill-back:hover { background: alpha(@accent_bg_color, 0.32); }
+.sill-pins { padding: 2px 0; }
+.sill-chip { background: alpha(@view_fg_color, 0.07); padding: 1px 2px 1px 8px; }
+.sill-pin { padding: 0 2px; min-height: 0; min-width: 0; opacity: 0.4; -gtk-icon-size: 11px; }
+.sill-pin:hover { opacity: 1; }
+.sill-badge { font-size: 80%; color: alpha(@accent_color, 0.9); font-family: monospace; }
 .sill-prompt-box { border-radius: 0; border: none; border-top: 1px solid alpha(@view_fg_color, 0.15);
                    background: alpha(@view_fg_color, 0.035); }
 "#;

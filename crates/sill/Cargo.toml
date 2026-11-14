@@ -21,3 +21,4 @@ x11rb = "0.14"
 pulldown-cmark = { version = "0.13", default-features = false }
 async-channel = "2"
 futures = "0.3"
+sourceview5 = "0.11"
