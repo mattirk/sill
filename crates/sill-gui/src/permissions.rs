@@ -254,9 +254,6 @@ impl App {
                 }
             }
             Event::DevelopmentRestarting(id) => {
-                if let Some(view) = self.views.get_mut(&id) {
-                    view.permissions.menu = false;
-                }
                 let params = json!({"session_id": id});
                 return self.permission_change(
                     id,
@@ -649,7 +646,6 @@ pub fn indicator<'a>(view: &'a SessionView, session: Option<&Session>) -> Elemen
 pub fn dropdown<'a>(view: &'a SessionView, session: &'a Session) -> Element<'a, Message> {
     let perms = &view.permissions;
     let id = view.id.as_str();
-    let running = session.running;
     let can_change = !session.ghost && !perms.busy;
     // Basic: three switches that act at once (the person, 2026-11-13). Development is the test
     // desktop and private D-Bus; VM and Host are Host control's operations in two groups (Host
@@ -664,7 +660,6 @@ pub fn dropdown<'a>(view: &'a SessionView, session: &'a Session) -> Element<'a, 
         "A test desktop and a private D-Bus in the jail, for building and trying desktop apps. Switching restarts the jail when it needs it, which stops the agent's current turn.".into(),
         development_on,
         style::yellow(),
-        if development_on && perms.restart_pending(running) { "after restart" } else { "" },
         (can_change && (development_on || development_usable)).then(|| {
             let id = id.to_string();
             move |on: bool| Message::Perms(Event::SetDevelopment(id.clone(), on))
@@ -694,7 +689,6 @@ pub fn dropdown<'a>(view: &'a SessionView, session: &'a Session) -> Element<'a, 
             said,
             on,
             color,
-            if on { "active" } else { "" },
             host_free.then(|| {
                 let id = id.to_string();
                 move |on: bool| Message::Perms(Event::HostGroup(id.clone(), group, on))
@@ -723,8 +717,8 @@ pub fn dropdown<'a>(view: &'a SessionView, session: &'a Session) -> Element<'a, 
         .into()
 }
 
-/// The dropdown's width: a name, its switch and a word of state.
-const DROPDOWN: f32 = 210.0;
+/// The dropdown's width: a name and its switch.
+const DROPDOWN: f32 = 170.0;
 
 /// The Basic switch for the development permissions, in the shield's dropdown.
 pub const DEVELOPMENT_SWITCH: &str = "Development";
@@ -778,23 +772,25 @@ pub(crate) fn switch<'a>(on: bool, set: Option<impl Fn(bool) -> Message + 'a>) -
         .into()
 }
 
-/// A Basic switch: yellow for development and the VM, the warning colour for the host.
+/// A Basic switch: its name with the switch at the row's right, yellow for development and
+/// the VM, the warning colour for the host. The whole row flips it (the person, 2026-11-13).
 fn basic_switch<'a>(
     label: &'a str,
     said: String,
     on: bool,
     color: iced::Color,
-    status: &'a str,
-    set: Option<impl Fn(bool) -> Message + 'a>,
+    set: Option<impl Fn(bool) -> Message + Clone + 'a>,
 ) -> Element<'a, Message> {
-    slot(
-        row![
-            name(label, said),
-            container(crate::settings_ui::switch_styled(on, color, 16.0, set)).width(SWITCH_SLOT),
-            text(status).size(style::SMALL).color(color).wrapping(text::Wrapping::None).width(Fill),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center),
+    let flip = set.clone().map(|set| set(!on));
+    let line = row![
+        text(label).size(style::SMALL).width(Fill),
+        crate::settings_ui::switch_styled(on, color, 16.0, set),
+    ]
+    .spacing(12)
+    .align_y(Alignment::Center);
+    tip(
+        keys::press_maybe(button(line).width(Fill).height(ROW).padding([0, 0]).style(style::quiet), flip),
+        said,
     )
 }
 
@@ -1253,7 +1249,11 @@ mod tests {
         ui.find(DEVELOPMENT_SWITCH).unwrap();
         ui.find("Host").unwrap();
         assert!(ui.find("VM").is_err() && ui.find("IN THE JAIL").is_err());
-        drop(ui);
+        // the whole row flips its switch, and the press does not close the dropdown
+        ui.click("Host").unwrap();
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert!(messages.iter().any(|m| matches!(m, Message::Perms(Event::HostGroup(_, _, true)))));
+        assert!(!messages.iter().any(|m| matches!(m, Message::Perms(Event::ShieldMenu(_)))));
         let _ = app.update(Message::Perms(Event::ShieldMenu("demo".into())));
         app.views.get_mut("demo").unwrap().permissions.open = true;
         let mut ui = simulator(&app, (720.0, 860.0));
@@ -1563,7 +1563,7 @@ mod tests {
         let order: Vec<&str> = seen.iter().map(String::as_str).filter(|m| m.starts_with("_sill/permissions") || m.starts_with("_sill/sessions.st")).collect();
         assert_eq!(order, ["_sill/permissions.apply_development", "_sill/sessions.stop", "_sill/sessions.start"]);
         let perms = &app.views["demo"].permissions;
-        assert!(!perms.open && !perms.menu, "the menu closes; the panel stays as it was");
+        assert!(!perms.open && perms.menu, "the dropdown stays; the panel stays closed");
         let (_, said, failed) = perms.notice.clone().unwrap();
         assert!(!failed && said == "Restarted with the new permissions.", "{said}");
     }
