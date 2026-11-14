@@ -64,10 +64,12 @@ pub fn check(dir: &Path) -> Vec<Problem> {
     problems
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) fn memory_bytes() -> Option<u64> {
     sysctl_u64(c"hw.memsize")
 }
 
+#[cfg(target_os = "macos")]
 fn macos_major() -> Option<u32> {
     let mut buf = [0u8; 32];
     let mut len = buf.len();
@@ -84,10 +86,13 @@ fn macos_major() -> Option<u32> {
     if !ok {
         return None;
     }
-    let text = std::str::from_utf8(&buf[..len]).ok()?.trim_end_matches('\0');
+    let text = std::str::from_utf8(&buf[..len])
+        .ok()?
+        .trim_end_matches('\0');
     text.split('.').next()?.parse().ok()
 }
 
+#[cfg(target_os = "macos")]
 fn sysctl_u64(name: &std::ffi::CStr) -> Option<u64> {
     let mut value = 0u64;
     let mut len = std::mem::size_of::<u64>();
@@ -102,6 +107,17 @@ fn sysctl_u64(name: &std::ffi::CStr) -> Option<u64> {
         )
     } == 0;
     ok.then_some(value)
+}
+
+// These queries describe the Mac hosting the VM; other platforms have no value.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn memory_bytes() -> Option<u64> {
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_major() -> Option<u32> {
+    None
 }
 
 /// Free space where `dir` is, or where it will be made (its nearest existing ancestor).
