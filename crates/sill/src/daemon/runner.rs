@@ -104,10 +104,14 @@ impl Runner {
     }
 
     fn handle(&self, hub: &Arc<Hub>, ev: acp::Event) {
+        let stopped = matches!(ev, acp::Event::Stopped(_));
         let done = self.handle_locked(hub, ev);
         // the lock is released: the hub may lock this runner again (retire it, broadcast to it)
         if let Some(d) = done {
             hub.summary_done(&self.id, d);
+        }
+        if stopped {
+            hub.turn_ended(&self.id);
         }
     }
 

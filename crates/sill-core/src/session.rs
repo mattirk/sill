@@ -252,6 +252,15 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The policy a session's jail runs with: its own, tightened for a ghost (`Policy::ghostly`).
+pub fn policy_of(s: &crate::store::Session, home: &Path) -> Result<Policy> {
+    let mut p = Policy::load(&s.policy, home)?;
+    if s.ghost {
+        p.ghostly(home);
+    }
+    Ok(p)
+}
+
 /// `ghost` (docs/memory.md §3.2): the agent home is a copy in the session's state dir
 /// ([`ghost_agent_home`], seeded once by [`seed_ghost_home`]), adopted state is not bound (writes
 /// there go to the overlay like any other) and pins are ignored — a ghost has none.

@@ -9,7 +9,6 @@ use anyhow::{Context, Result};
 use sill_core::acp::Event;
 use sill_core::agents;
 use sill_core::session::state_dir;
-use sill_core::shim;
 use sill_core::store;
 use sill_core::wire::Command;
 
@@ -71,11 +70,4 @@ pub fn binds_of(s: &store::Session, policy: &sill_core::policy::Policy, home: &s
     let Ok(sdir) = state_dir(uid(), &s.id) else { return vec![] };
     let pins = store.pins(&s.id).unwrap_or_default();
     sill_core::session::binds_for(agent, policy, &sdir, home, &pins, s.ghost).unwrap_or_default()
-}
-
-/// Revert a path inside a running session's jail.
-pub fn revert(session: &str, path: &std::path::Path) -> Result<String> {
-    let sock = sill_core::session::socket_path(session)?;
-    let mut c = shim::Control::connect(&sock).context("session is not running")?;
-    c.revert(path)
 }

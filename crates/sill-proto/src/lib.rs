@@ -65,6 +65,18 @@ pub mod method {
     pub const MEMORY_FORGET: &str = "_sill/memory.forget";
     /// An agent type's default settings (`sill_core::store::AgentSettings` as JSON).
     pub const AGENTS_SET_SETTINGS: &str = "_sill/agents.set_settings";
+    /// The Changes page (docs/daemon.md §7 M2): answers a `sill_core::wire::ChangesList`.
+    pub const CHANGES_LIST: &str = "_sill/changes.list";
+    /// Params a `sill_core::wire::DiffOf`; answers [`Text`].
+    pub const CHANGES_DIFF: &str = "_sill/changes.diff";
+    /// Params [`ChangesKeep`]; the next four answer a `sill_core::wire::Done`.
+    pub const CHANGES_KEEP: &str = "_sill/changes.keep";
+    /// Params [`ChangesPaths`].
+    pub const CHANGES_REVERT: &str = "_sill/changes.revert";
+    /// Params [`ChangesUndo`].
+    pub const CHANGES_UNDO: &str = "_sill/changes.undo";
+    /// A pinned repository's path back to HEAD; params [`GitRevert`], answers [`Text`].
+    pub const CHANGES_GIT_REVERT: &str = "_sill/changes.git_revert";
     pub const MEMORY_LIST: &str = "_sill/memory.list";
     pub const MEMORY_SHOW: &str = "_sill/memory.show";
     pub const MEMORY_SEARCH: &str = "_sill/memory.search";
@@ -274,6 +286,37 @@ pub struct Note {
 pub struct AgentSettingsSet {
     pub agent: String,
     pub settings: serde_json::Value,
+}
+
+/// `_sill/changes.keep`: each host path with the hash it was listed with (None: no check).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangesKeep {
+    pub session: String,
+    pub items: Vec<(PathBuf, Option<String>)>,
+}
+
+/// `_sill/changes.revert`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangesPaths {
+    pub session: String,
+    pub paths: Vec<PathBuf>,
+}
+
+/// `_sill/changes.undo`: keep ids; none = every undoable keep of the session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangesUndo {
+    pub session: String,
+    #[serde(default)]
+    pub ids: Vec<String>,
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// `_sill/changes.git_revert`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitRevert {
+    pub repo: PathBuf,
+    pub rel: PathBuf,
 }
 
 /// `_sill/memory.compact`'s answer.

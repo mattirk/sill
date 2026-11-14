@@ -876,7 +876,7 @@ impl FolderTree {
             let mut all = Vec::new();
             let mut owners: BTreeMap<PathBuf, String> = BTreeMap::new(); // path → the session that changed it
             for s in sessions {
-                let Ok(policy) = sill_core::policy::Policy::load(&s.policy, &home) else { continue };
+                let Ok(policy) = sill_core::session::policy_of(&s, &home) else { continue };
                 let Ok(state_dir) = sill_core::session::state_dir(uid, &s.id) else { continue };
                 if !state_dir.is_dir() {
                     continue;

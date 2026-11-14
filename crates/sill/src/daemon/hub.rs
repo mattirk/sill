@@ -22,6 +22,10 @@ use sill_proto::{
 use super::Conn;
 use super::runner::{Runner, SummaryDone, SummaryKind};
 
+// the Changes page's methods: a child module, so it reaches the hub's own fields
+#[path = "changes.rs"]
+mod changes;
+
 /// What an end that waits for the agent's summary needs once the answer is in (the facts as they
 /// were when the end was asked for; the row's summary is replaced only when memory is on).
 struct EndCtx {
@@ -167,6 +171,7 @@ impl Hub {
             }
         }
         self.revert_ghosts();
+        self.auto_revert();
         let uid = rustix::process::getuid().as_raw();
         match sill_core::memory::nightly_if_due(&|id| {
             let _ = sill_core::session::remove_state(uid, id);
@@ -293,6 +298,27 @@ impl Hub {
                 let changes = self.session_changes(&s, uid, &user).map_err(|e| Error::failed(format!("{e:#}")))?;
                 // what the person would want to look at: build output is not asked about
                 to_value(Count { n: changes.iter().filter(|c| !c.ignored).count() })
+            }
+            method::CHANGES_LIST => to_value(self.changes_list().map_err(|e| Error::failed(format!("{e:#}")))?),
+            method::CHANGES_DIFF => {
+                let of: sill_core::wire::DiffOf = args(params)?;
+                to_value(Text { text: self.changes_diff(of).map_err(|e| Error::failed(format!("{e:#}")))? })
+            }
+            method::CHANGES_KEEP => {
+                let k: sill_proto::ChangesKeep = args(params)?;
+                to_value(self.changes_keep(&k.session, k.items).map_err(|e| Error::failed(format!("{e:#}")))?)
+            }
+            method::CHANGES_REVERT => {
+                let r: sill_proto::ChangesPaths = args(params)?;
+                to_value(self.changes_revert(&r.session, r.paths).map_err(|e| Error::failed(format!("{e:#}")))?)
+            }
+            method::CHANGES_UNDO => {
+                let u: sill_proto::ChangesUndo = args(params)?;
+                to_value(self.changes_undo(&u.session, u.ids, u.force).map_err(|e| Error::failed(format!("{e:#}")))?)
+            }
+            method::CHANGES_GIT_REVERT => {
+                let g: sill_proto::GitRevert = args(params)?;
+                to_value(Text { text: self.changes_git_revert(&g.repo, &g.rel).map_err(|e| Error::failed(format!("{e:#}")))? })
             }
             method::SESSIONS_END => {
                 let e: End = args(params)?;
@@ -656,10 +682,7 @@ impl Hub {
     /// A session's writes as the Changes page lists them: its upper trees against its policy (a
     /// ghost's tightened).
     fn session_changes(&self, s: &sill_core::store::Session, uid: u32, user: &str) -> Result<Vec<sill_core::ledger::Change>> {
-        let mut policy = Policy::load(&s.policy, &self.home)?;
-        if s.ghost {
-            policy.ghostly(&self.home);
-        }
+        let policy = sill_core::session::policy_of(s, &self.home)?;
         let registry = sill_core::agents::load(&self.home);
         let Some(agent) = registry.get(&s.agent) else { bail!("unknown agent {}", s.agent) };
         let sdir = sill_core::session::state_dir(uid, &s.id)?;

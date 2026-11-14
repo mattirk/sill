@@ -1908,7 +1908,7 @@ impl SessionView {
         }
         let s = self.session.borrow().clone();
         let home = session::home().ok()?;
-        let policy = sill_core::policy::Policy::load(&s.policy, &home).ok()?;
+        let policy = sill_core::session::policy_of(&s, &home).ok()?;
         let sdir = sill_core::session::state_dir(session::uid(), &s.id).ok()?;
         let binds = session::binds_of(&s, &policy, &home, &self.store);
         let user = std::env::var("USER").unwrap_or_default();
@@ -2432,67 +2432,14 @@ impl SessionView {
         self.conv.handle(ev);
     }
 
-    /// Count the session's pending changes (SPEC §4.4) and tell the window to refresh the ledger pages.
+    /// A turn ended: the chips and the ledger pages refresh (the daemon scans and notes the count).
     fn after_turn(self: &Rc<Self>, id: &str) {
-        let s = self.session.borrow().clone();
-        let store2 = Store::open_default().ok();
-        let (tx, rx) = async_channel::bounded::<String>(1);
-        let home = session::home().unwrap_or_default();
-        let uid = session::uid();
-        let user = std::env::var("USER").unwrap_or_default();
-        std::thread::spawn(move || {
-            let msg = (|| -> anyhow::Result<String> {
-                let policy = sill_core::policy::Policy::load(&s.policy, &home)?;
-                let state_dir = sill_core::session::state_dir(uid, &s.id)?;
-                let binds = match store2.as_ref() {
-                    Some(st) => session::binds_of(&s, &policy, &home, st),
-                    None => vec![],
-                };
-                let plan = sill_core::changes::session_plan(policy.clone(), state_dir, &home, uid, &user, binds)?;
-                let changes = sill_core::changes::scan(&policy, &plan, None)?;
-                // the agent's own new dot-paths move into its sill-owned home (SPEC §4.2)
-                let mut note = String::new();
-                if let Some(agent) = sill_core::agents::load(&home).get(&s.agent) {
-                    let pins = store2.as_ref().and_then(|st| st.pins(&s.id).ok()).unwrap_or_default();
-                    let adopted = sill_core::session::adopt_agent_state(agent, &home, &changes, &pins)?;
-                    if !adopted.is_empty() {
-                        let names: Vec<String> = adopted
-                            .iter()
-                            .map(|p| format!("~/{}", p.strip_prefix(&home).unwrap_or(p).display()))
-                            .collect();
-                        note = format!("{} kept as {}'s own state (in its jail home from the next start)", names.join(", "), agent.name);
-                    }
-                }
-                let state = sill_core::agents::load(&home).get(&s.agent).map(|a| sill_core::session::state_paths(a, &home)).unwrap_or_default();
-                let pending = changes
-                    .iter()
-                    .filter(|c| !c.ignored && !sill_core::changes::is_agent_state(&c.path, &state, &home))
-                    .count();
-                let mut msg = if pending > 0 { format!("{pending} change(s) pending in Changes") } else { String::new() };
-                if !note.is_empty() {
-                    if !msg.is_empty() {
-                        msg.push_str(" · ");
-                    }
-                    msg.push_str(&note);
-                }
-                Ok(msg)
-            })();
-            let _ = tx.send_blocking(msg.unwrap_or_else(|e| format!("ledger: {e:#}")));
-        });
-        let weak = Rc::downgrade(self);
-        let id = id.to_string();
-        glib::spawn_future_local(async move {
-            if let Ok(msg) = rx.recv().await {
-                let Some(v) = weak.upgrade() else { return };
-                if !msg.is_empty() {
-                    v.conv.add_note(&msg);
-                }
-                v.refresh_pins(); // git numbers on the chips
-                if let Some(cb) = v.on_turn_end.borrow().as_ref() {
-                    cb(&id);
-                }
-            }
-        });
+        // the scan, the adoption of the agent's own state and the note with the count are the
+        // daemon's after every turn (docs/daemon.md §7 M2); the view refreshes what it shows
+        self.refresh_pins(); // git numbers on the chips
+        if let Some(cb) = self.on_turn_end.borrow().as_ref() {
+            cb(id);
+        }
     }
 
     /// The tab is closing: tell the agent, stop the timers, cancel the monitors and drop the

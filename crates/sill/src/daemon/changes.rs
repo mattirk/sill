@@ -1,0 +1,303 @@
+//! The Changes page's work in the daemon (docs/daemon.md §7 M2): every session's overlay scanned
+//! against its policy, the pinned repositories' git status, keep with its hash check, revert (in
+//! the jail through the shim while it runs, the upper entry dropped when it does not), undo, the
+//! diffs — and the auto-revert sweep, which the shelf ran before. Frontends name a change by
+//! session and host path; the daemon finds it again in a fresh scan, so nothing a frontend sends
+//! points at a file of its choosing.
+
+use std::path::{Path, PathBuf};
+
+use anyhow::{Result, bail};
+use sill_core::keep::{self, KeepOptions};
+use sill_core::ledger::{Change, FileType, Kind};
+use sill_core::store::Session;
+use sill_core::wire::{ChangeRow, ChangesList, DiffOf, Done, LiveRepo, SessionChanges};
+
+use super::Hub;
+
+impl Hub {
+    pub(super) fn changes_list(&self) -> Result<ChangesList> {
+        let sessions = self.with_store(|s| s.sessions())?;
+        let (uid, user) = who();
+        let registry = sill_core::agents::load(&self.home);
+        let mut pinned: Vec<PathBuf> = self.pinned_repos()?;
+        pinned.sort();
+        pinned.dedup();
+        let live = pinned
+            .into_iter()
+            .map(|repo| LiveRepo { status: sill_core::changes::git_status(&repo), repo })
+            .filter(|l| !l.status.is_empty())
+            .collect();
+        let mut out = Vec::new();
+        for s in sessions {
+            let list: Vec<Change> = self.session_changes(&s, uid, &user).unwrap_or_default().into_iter().filter(|c| !c.ignored).collect();
+            let kept = kept_dir(uid, &s.id).map(|d| keep::undoable(&d)).unwrap_or_default();
+            if list.is_empty() && kept.is_empty() {
+                continue;
+            }
+            let state_dirs = registry.get(&s.agent).map(|a| sill_core::session::state_paths(a, &self.home)).unwrap_or_default();
+            let (agent_state, changes): (Vec<Change>, Vec<Change>) =
+                list.into_iter().partition(|c| sill_core::changes::is_agent_state(&c.path, &state_dirs, &self.home));
+            out.push(SessionChanges {
+                id: s.id.clone(),
+                title: s.title.clone(),
+                ghost: s.ghost,
+                changes: changes.into_iter().map(row).collect(),
+                agent_state: agent_state.into_iter().map(row).collect(),
+                kept,
+            });
+        }
+        Ok(ChangesList { live, sessions: out })
+    }
+
+    pub(super) fn changes_diff(&self, of: DiffOf) -> Result<String> {
+        match of {
+            DiffOf::Change { session, path } => {
+                let (_, c) = self.find_change(&session, &path)?;
+                sill_core::changes::unified_diff(&c)
+            }
+            DiffOf::Live { repo, rel } => {
+                self.check_live(&repo, &rel)?;
+                Ok(sill_core::changes::git_diff(&repo, &rel))
+            }
+            DiffOf::Kept { session, id } => {
+                let dir = kept_dir(who().0, &session)?;
+                let Some(k) = keep::list(&dir).into_iter().find(|k| k.id == id) else { bail!("no keep {id} in session {session}") };
+                Ok(sill_core::changes::undo_diff(&k.path, &keep::prior_path(&dir, &k)))
+            }
+        }
+    }
+
+    /// Keep each (path, hash as listed): copied to the host with the previous version saved for undo.
+    pub(super) fn changes_keep(&self, session: &str, items: Vec<(PathBuf, Option<String>)>) -> Result<Done> {
+        let changes = self.scan_one(session)?;
+        let dir = kept_dir(who().0, session)?;
+        let mut d = Done::default();
+        for (path, hash) in items {
+            let Some(c) = changes.iter().find(|c| c.path == path) else {
+                d.failed.push((path, "no longer a change of this session".into()));
+                continue;
+            };
+            let opts = KeepOptions { undo: Some(dir.clone()), expected_hash: hash, ..Default::default() };
+            match keep::keep(c, &opts) {
+                Ok(what) => d.done.push((path, what.to_string())),
+                Err(e) => d.failed.push((path, format!("{e:#}"))),
+            }
+        }
+        Ok(d)
+    }
+
+    /// Revert paths of a session, deepest first: in the jail while it runs, else by dropping the
+    /// upper entry (the overlay is not mounted then, and that is the revert).
+    pub(super) fn changes_revert(&self, session: &str, mut paths: Vec<PathBuf>) -> Result<Done> {
+        let changes = self.scan_one(session)?;
+        paths.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+        let found: Vec<Change> = paths.iter().filter_map(|p| changes.iter().find(|c| &c.path == p).cloned()).collect();
+        let mut d = revert(session, &found);
+        for p in paths.into_iter().filter(|p| !found.iter().any(|c| &c.path == p)) {
+            d.failed.push((p, "no longer a change of this session".into()));
+        }
+        Ok(d)
+    }
+
+    /// Undo keeps by id (all of the session's undoable ones when `ids` is empty), newest first;
+    /// `force` puts the previous version back even when the host was edited since.
+    pub(super) fn changes_undo(&self, session: &str, ids: Vec<String>, force: bool) -> Result<Done> {
+        let dir = kept_dir(who().0, session)?;
+        let all = keep::undoable(&dir);
+        let pick: Vec<_> = if ids.is_empty() { all } else { all.into_iter().filter(|k| ids.contains(&k.id)).collect() };
+        let mut d = Done::default();
+        for k in pick {
+            match keep::undo(&dir, &k, force) {
+                Ok(what) => d.done.push((k.path.clone(), what.to_string())),
+                Err(e) => d.failed.push((k.path.clone(), format!("{e:#}"))),
+            }
+        }
+        Ok(d)
+    }
+
+    /// `git checkout HEAD` of one path of a pinned repository (an untracked file is removed).
+    pub(super) fn changes_git_revert(&self, repo: &Path, rel: &Path) -> Result<String> {
+        self.check_live(repo, rel)?;
+        Ok(sill_core::changes::git_revert(repo, rel)?.to_string())
+    }
+
+    /// Auto-revert (SPEC §4.4), from the minute sweep: in every session but a ghost (its hour is
+    /// `revert_ghosts`) that is not mid-turn, each overlay change outside any git repository whose
+    /// last write is older than Settings' delay is reverted; a conflict is left for the person, the
+    /// agent's own state alone.
+    pub(super) fn auto_revert(&self) {
+        let minutes = sill_core::config::load().auto_revert_minutes();
+        if minutes == 0 {
+            return;
+        }
+        let after = std::time::Duration::from_secs(minutes as u64 * 60);
+        let (uid, user) = who();
+        let registry = sill_core::agents::load(&self.home);
+        let sessions: Vec<Session> = self.with_store(|s| s.sessions()).unwrap_or_default().into_iter().filter(|s| !s.ghost).collect();
+        for s in sessions {
+            if self.runners.lock().unwrap().get(&s.id).is_some_and(|r| r.alive() && r.busy()) {
+                continue;
+            }
+            let state_dirs = registry.get(&s.agent).map(|a| sill_core::session::state_paths(a, &self.home)).unwrap_or_default();
+            let now = std::time::SystemTime::now();
+            let mut due: Vec<Change> = self
+                .session_changes(&s, uid, &user)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|c| !c.conflict && !c.ignored && sill_core::changes::repo_root(&c.path).is_none())
+                .filter(|c| !sill_core::changes::is_agent_state(&c.path, &state_dirs, &self.home))
+                .filter(|c| written(c).is_some_and(|t| now.duration_since(t).unwrap_or_default() >= after))
+                .collect();
+            if due.is_empty() {
+                continue;
+            }
+            due.sort_by_key(|c| std::cmp::Reverse(c.path.components().count()));
+            let d = revert(&s.id, &due);
+            eprintln!("sill daemon: session {}: auto-reverted {} path(s) outside git{}", s.id, d.done.len(), if d.failed.is_empty() { String::new() } else { format!(", {} failed", d.failed.len()) });
+        }
+    }
+
+    /// After each turn, on a thread (it scans): the agent's own new dot-paths move into its
+    /// sill-owned home (SPEC §4.2, what the shelf's `after_turn` did) — never for a ghost, whose
+    /// state must not reach the home every later session shares — and the attached frontends get
+    /// a note: how many changes wait in Changes, what was adopted.
+    pub fn turn_ended(self: &std::sync::Arc<Self>, id: &str) {
+        let hub = self.clone();
+        let id = id.to_string();
+        let _ = std::thread::Builder::new().name(format!("sill-turn-{id}")).spawn(move || {
+            let Some(s) = hub.with_store(|st| st.sessions()).ok().and_then(|v| v.into_iter().find(|s| s.id == id)) else { return };
+            let (uid, user) = who();
+            let changes = match hub.session_changes(&s, uid, &user) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("sill daemon: session {id}: scanning after the turn: {e:#}");
+                    return;
+                }
+            };
+            let registry = sill_core::agents::load(&hub.home);
+            let agent = registry.get(&s.agent);
+            let mut adopted_note = String::new();
+            if let Some(agent) = agent.filter(|_| !s.ghost) {
+                let pins = hub.with_store(|st| st.pins(&s.id)).unwrap_or_default();
+                match sill_core::session::adopt_agent_state(agent, &hub.home, &changes, &pins) {
+                    Ok(adopted) if !adopted.is_empty() => {
+                        let names: Vec<String> = adopted.iter().map(|p| format!("~/{}", p.strip_prefix(&hub.home).unwrap_or(p).display())).collect();
+                        adopted_note = format!("{} kept as {}'s own state (in its jail home from the next start)", names.join(", "), agent.name);
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("sill daemon: session {id}: adopting the agent's state: {e:#}"),
+                }
+            }
+            let state = agent.map(|a| sill_core::session::state_paths(a, &hub.home)).unwrap_or_default();
+            let pending = changes.iter().filter(|c| !c.ignored && !sill_core::changes::is_agent_state(&c.path, &state, &hub.home)).count();
+            let mut msg = match pending {
+                0 => String::new(),
+                n if s.ghost => format!("{n} change(s) in Changes — they revert an hour after their last write unless kept"),
+                n => format!("{n} change(s) pending in Changes"),
+            };
+            if !adopted_note.is_empty() {
+                if !msg.is_empty() {
+                    msg.push_str(" · ");
+                }
+                msg.push_str(&adopted_note);
+            }
+            if !msg.is_empty()
+                && let Some(r) = hub.runners.lock().unwrap().get(&id)
+            {
+                r.notify(&sill_core::wire::Event::Note(msg));
+            }
+        });
+    }
+
+    fn scan_one(&self, session: &str) -> Result<Vec<Change>> {
+        let Some(s) = self.with_store(|st| st.sessions())?.into_iter().find(|s| s.id == session) else { bail!("no session {session}") };
+        let (uid, user) = who();
+        self.session_changes(&s, uid, &user)
+    }
+
+    fn find_change(&self, session: &str, path: &Path) -> Result<(String, Change)> {
+        match self.scan_one(session)?.into_iter().find(|c| c.path == path) {
+            Some(c) => Ok((session.to_string(), c)),
+            None => bail!("{} is no longer a change of session {session}", path.display()),
+        }
+    }
+
+    /// Every session's pinned folders that are git repositories.
+    fn pinned_repos(&self) -> Result<Vec<PathBuf>> {
+        self.with_store(|st| {
+            let mut out = Vec::new();
+            for s in st.sessions()? {
+                out.extend(st.pins(&s.id)?.into_iter().filter(|p| p.join(".git").exists()));
+            }
+            Ok(out)
+        })
+    }
+
+    /// A live diff or revert is only for a pinned repository, and only below it.
+    fn check_live(&self, repo: &Path, rel: &Path) -> Result<()> {
+        if !self.pinned_repos()?.iter().any(|p| p == repo) {
+            bail!("{} is not a pinned repository", repo.display());
+        }
+        if rel.is_absolute() || rel.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+            bail!("{}: not a path inside the repository", rel.display());
+        }
+        Ok(())
+    }
+}
+
+fn who() -> (u32, String) {
+    let uid = rustix::process::getuid().as_raw();
+    (uid, std::env::var("USER").unwrap_or_else(|_| uid.to_string()))
+}
+
+fn kept_dir(uid: u32, session: &str) -> Result<PathBuf> {
+    Ok(sill_core::session::state_dir(uid, session)?.join("kept"))
+}
+
+fn written(c: &Change) -> Option<std::time::SystemTime> {
+    std::fs::symlink_metadata(&c.upper).ok()?.modified().ok()
+}
+
+fn row(c: Change) -> ChangeRow {
+    let written = written(&c).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64);
+    let hash = (c.file_type == FileType::File && matches!(c.kind, Kind::Added | Kind::Modified)).then(|| keep::sha256_file(&c.upper).ok()).flatten();
+    ChangeRow {
+        repo: sill_core::changes::repo_root(&c.path).unwrap_or_default(),
+        protected: keep::protected(&c.path).map(str::to_string),
+        written,
+        hash,
+        change: c,
+    }
+}
+
+/// Revert `changes` of a session in the given order.
+fn revert(session: &str, changes: &[Change]) -> Done {
+    let mut d = Done::default();
+    let mut control = if sill_core::session::is_running(session) {
+        sill_core::session::socket_path(session).ok().and_then(|s| sill_core::shim::Control::connect(&s).ok())
+    } else {
+        None
+    };
+    for c in changes {
+        let r = match control.as_mut() {
+            Some(ctl) => ctl.revert(&c.path),
+            None => remove_upper_entry(&c.upper).map(|_| "dropped from the session's record".to_string()),
+        };
+        match r {
+            Ok(what) => d.done.push((c.path.clone(), what)),
+            Err(e) => d.failed.push((c.path.clone(), format!("{e:#}"))),
+        }
+    }
+    d
+}
+
+/// Remove an entry from an unmounted upper tree (whiteout, file, symlink or directory).
+fn remove_upper_entry(upper: &Path) -> Result<()> {
+    match upper.symlink_metadata() {
+        Ok(md) if md.is_dir() => std::fs::remove_dir_all(upper)?,
+        Ok(_) => std::fs::remove_file(upper)?,
+        Err(_) => {}
+    }
+    Ok(())
+}

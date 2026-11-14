@@ -103,6 +103,68 @@ pub enum SessionSet {
     Reopen,
 }
 
+/// The Changes page over the wire (docs/daemon.md §7 M2): what `_sill/changes.list` answers.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChangesList {
+    /// Pinned folders that are git repositories, with git's view of their working tree (live:
+    /// host = jail); only those with something to show.
+    pub live: Vec<LiveRepo>,
+    /// Every session with overlay changes or undoable keeps, newest first.
+    pub sessions: Vec<SessionChanges>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiveRepo {
+    pub repo: std::path::PathBuf,
+    /// `git status` rows: (path relative to the repository, status letter).
+    pub status: Vec<(std::path::PathBuf, String)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionChanges {
+    pub id: String,
+    pub title: String,
+    pub ghost: bool,
+    /// Its overlay changes outside the agent's own state (build output left out).
+    pub changes: Vec<ChangeRow>,
+    /// The agent's own files that landed in the overlay (shown folded).
+    pub agent_state: Vec<ChangeRow>,
+    /// Keeps that can still be undone, newest first.
+    pub kept: Vec<crate::keep::Kept>,
+}
+
+/// One overlay change as listed, with what a frontend needs without reading the session's files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangeRow {
+    pub change: crate::ledger::Change,
+    /// The upper entry's last write (unix seconds): the auto-revert countdown counts from it.
+    pub written: Option<i64>,
+    /// The enclosing git repository on the host; empty outside any.
+    pub repo: std::path::PathBuf,
+    /// SHA-256 of a regular file's content as listed: keep copies only that (a swap is refused).
+    pub hash: Option<String>,
+    /// Why sill never keeps this path itself (its own files, a repository's executable config).
+    pub protected: Option<String>,
+}
+
+/// What `_sill/changes.diff` shows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DiffOf {
+    /// A session's overlay change: the upper content against the host's.
+    Change { session: String, path: std::path::PathBuf },
+    /// A pinned repository's own change: git's diff.
+    Live { repo: std::path::PathBuf, rel: std::path::PathBuf },
+    /// A keep: the host as it is against the version it replaced.
+    Kept { session: String, id: String },
+}
+
+/// What a keep, a revert or an undo did, path by path.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Done {
+    pub done: Vec<(std::path::PathBuf, String)>,
+    pub failed: Vec<(std::path::PathBuf, String)>,
+}
+
 /// The answer to a question: the chosen permission option (None = cancel), or the form's values
 /// (None = cancel).
 #[derive(Debug, Clone, Serialize, Deserialize)]

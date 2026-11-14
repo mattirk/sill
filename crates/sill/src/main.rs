@@ -123,6 +123,12 @@ enum Cmd {
         #[command(subcommand)]
         cmd: MemoryCmd,
     },
+    /// What sessions changed against the host, through the daemon: list, diff, keep, revert, undo
+    /// (SPEC §4.4; `sill jail keep|kept|unkeep|changes` work on a state dir by hand)
+    Changes {
+        #[command(subcommand)]
+        cmd: Option<ChangesCmd>,
+    },
     /// Sessions, through the daemon: start one, list them, end one (docs/daemon.md §3.4)
     Session {
         #[command(subcommand)]
@@ -147,6 +153,26 @@ enum DaemonCmd {
     Status,
     /// Ask the running daemon to leave; sessions are not touched
     Stop,
+}
+
+#[derive(Subcommand)]
+enum ChangesCmd {
+    /// Every session's pending changes and undoable keeps, and the pinned repositories' git status
+    List,
+    /// One change's diff: the session's version against the host's
+    Diff { session: String, path: PathBuf },
+    /// Copy changed paths to the host, the previous versions saved for undo
+    Keep { session: String, paths: Vec<PathBuf> },
+    /// Put the host's version back in the session
+    Revert { session: String, paths: Vec<PathBuf> },
+    /// Undo keeps: the given keep ids, or every undoable keep of the session
+    Undo {
+        session: String,
+        ids: Vec<String>,
+        /// even when the host was edited after the keep
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -450,6 +476,7 @@ fn main() -> Result<()> {
         }
         Cmd::Memory { cmd } => memory_cmd(cmd),
         Cmd::Session { cmd } => session_cmd(cmd),
+        Cmd::Changes { cmd } => changes_cmd(cmd.unwrap_or(ChangesCmd::List)),
         Cmd::Daemon { cmd } => daemon_cmd(cmd),
         Cmd::Registry { cmd: RegistryCmd::Snapshot { out } } => {
             let out = out.unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sill-core/registry/snapshot.json"));
@@ -982,6 +1009,60 @@ fn shell_words(s: &str) -> Vec<String> {
 }
 
 // --- shared --------------------------------------------------------------------------------------
+
+fn changes_cmd(cmd: ChangesCmd) -> Result<()> {
+    use sill_proto::method as m;
+    let c = sill_proto::Client::connect_or_start()?;
+    let session = |key: &str| -> Result<String> { Ok(c.call::<sill_proto::Session>(m::SESSIONS_GET, sill_proto::Key { key: key.to_string() })?.id) };
+    let abs = |paths: Vec<PathBuf>| -> Result<Vec<PathBuf>> {
+        let cwd = std::env::current_dir()?;
+        Ok(paths.into_iter().map(|p| if p.is_absolute() { p } else { cwd.join(p) }).collect())
+    };
+    let report = |d: sill_core::wire::Done| {
+        for (p, what) in &d.done {
+            println!("{}: {what}", p.display());
+        }
+        for (p, e) in &d.failed {
+            eprintln!("{}: {e}", p.display());
+        }
+        if d.failed.is_empty() { Ok(()) } else { Err(anyhow::anyhow!("{} failed", d.failed.len())) }
+    };
+    match cmd {
+        ChangesCmd::List => {
+            let l: sill_core::wire::ChangesList = c.call(m::CHANGES_LIST, sill_proto::Empty::default())?;
+            for r in &l.live {
+                println!("{} (pinned, git)", r.repo.display());
+                for (rel, st) in &r.status {
+                    println!("  {st:<2} {}", rel.display());
+                }
+            }
+            for s in &l.sessions {
+                println!("{}  {}{}", s.id, if s.ghost { "ghost " } else { "" }, s.title);
+                for r in s.changes.iter().chain(&s.agent_state) {
+                    let ch = &r.change;
+                    println!("  {}{} {}", ch.kind.letter(), if ch.conflict { "!" } else { " " }, ch.path.display());
+                }
+                for k in &s.kept {
+                    println!("  kept {} {} ({})", k.id, k.path.display(), k.what);
+                }
+            }
+            Ok(())
+        }
+        ChangesCmd::Diff { session: key, path } => {
+            let path = abs(vec![path])?.remove(0);
+            let t: sill_proto::Text = c.call(m::CHANGES_DIFF, sill_core::wire::DiffOf::Change { session: session(&key)?, path })?;
+            print!("{}", t.text);
+            Ok(())
+        }
+        ChangesCmd::Keep { session: key, paths } => {
+            // what the person names is what is kept: no listed hash to hold it to
+            let items = abs(paths)?.into_iter().map(|p| (p, None)).collect();
+            report(c.call(m::CHANGES_KEEP, sill_proto::ChangesKeep { session: session(&key)?, items })?)
+        }
+        ChangesCmd::Revert { session: key, paths } => report(c.call(m::CHANGES_REVERT, sill_proto::ChangesPaths { session: session(&key)?, paths: abs(paths)? })?),
+        ChangesCmd::Undo { session: key, ids, force } => report(c.call(m::CHANGES_UNDO, sill_proto::ChangesUndo { session: session(&key)?, ids, force })?),
+    }
+}
 
 fn session_cmd(cmd: SessionCmd) -> Result<()> {
     let c = sill_proto::Client::connect_or_start()?;

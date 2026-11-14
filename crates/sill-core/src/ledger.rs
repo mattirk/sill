@@ -20,7 +20,7 @@ use anyhow::Result;
 
 use crate::jail::Layer;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     Added,
     Modified,
@@ -31,7 +31,7 @@ pub enum Kind {
     Replaced,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FileType {
     File,
     Dir,
@@ -39,7 +39,7 @@ pub enum FileType {
     Other,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Change {
     /// Host path.
     pub path: PathBuf,

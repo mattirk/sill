@@ -292,13 +292,11 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
         });
     }
     {
-        // auto-revert (SPEC §4.4): the Changes page sweeps once a minute; a session that is mid-turn
-        // is left alone. The idle-timeout end and memory's nightly run are the daemon's (docs/daemon.md §3.6)
-        let weak = Rc::downgrade(&shelf);
-        changes.set_busy_probe(move |id| weak.upgrade().map(|s| s.busy.borrow().contains(id)).unwrap_or(true));
+        // auto-revert (SPEC §4.4), the idle-timeout end and memory's nightly run are the daemon's
+        // minute sweep (docs/daemon.md §3.6, §7 M2); the Changes page follows it while shown
         let c = changes.clone();
         gtk::glib::timeout_add_seconds_local(60, move || {
-            c.sweep();
+            c.refresh_if_shown();
             gtk::glib::ControlFlow::Continue
         });
     }
