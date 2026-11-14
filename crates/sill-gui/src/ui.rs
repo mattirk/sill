@@ -1698,12 +1698,10 @@ impl App {
 
     // --- the composer ---------------------------------------------------------------------------
 
-    /// The composer's bar, `width` wide: the shell's button, the agent's controls (scrolling
-    /// sideways when they do not fit: Interface scale 150 % in Shelf mode) and send or stop,
-    /// which stay in reach.
-    fn composer_bar<'a>(&'a self, view: &'a SessionView, width: f32) -> Element<'a, Message> {
-        /// What the +, shell, shield and send/stop buttons take with their spacing, and a margin.
-        const BUTTONS_ROOM: f32 = 168.0;
+    /// The composer's bar: the shell's button, the agent's controls (scrolling sideways when
+    /// they do not fit: Interface scale 150 % in Shelf mode) and send or stop, which stay in
+    /// reach.
+    fn composer_bar<'a>(&'a self, view: &'a SessionView) -> Element<'a, Message> {
         let has_session = !view.conversation.session_id.is_empty() || self.demo;
         let sendable = view.annotation.is_none()
             && !view.attachments_busy
@@ -1767,12 +1765,16 @@ impl App {
             agent_controls = agent_controls.push(processes);
         }
         let agent_controls = scrollable(agent_controls)
+            .id("agent-controls")
             .direction(scrollable::Direction::Horizontal(style::bar()))
             .anchor_right()
             .style(style::feed_scroll)
             .width(Shrink);
-        // as wide as its controls, up to the room the buttons leave: past that it scrolls
-        let agent_controls = container(agent_controls).max_width((width - BUTTONS_ROOM).max(0.0));
+        // as wide as its controls, up to all the room the buttons leave, whatever they are: the
+        // row measures its buttons first and this, its one filling child, gets the rest; past
+        // that the controls scroll (a fixed allowance for the buttons cut the controls short
+        // with room to spare: the person, 2026-11-14)
+        let agent_controls = container(agent_controls).width(Fill).align_right(Fill);
         let can_attach = has_session && !view.attachments_busy && view.annotation.is_none();
         let attach = bar_tip(
             keys::press_maybe(
@@ -1800,7 +1802,7 @@ impl App {
         if let Some(desktop) = crate::desktop_view::indicator(view, session) {
             left = left.push(desktop);
         }
-        row![left, space().width(Fill), agent_controls, permissions, action]
+        row![left, agent_controls, permissions, action]
             .spacing(4)
             .align_y(Alignment::Center)
             .into()
@@ -1985,8 +1987,7 @@ impl App {
         } else {
             editor
         };
-        // the bar knows its width, so the agent's controls can give way to the buttons
-        let bar = responsive(move |size| self.composer_bar(view, size.width)).height(Shrink);
+        let bar = self.composer_bar(view);
         // the prompt folds away while the terminal is up in its place
         let terminal = view.terminal.as_ref()
             .filter(|_| view.terminal_shown && view.annotation.is_none());

@@ -1230,7 +1230,52 @@ fn narrow_drawer_opens_files_in_the_full_content_area() {
     assert!(demo_view(&app).files.reader.is_some());
 }
 
-/// In a window too narrow for both, the drawer opens over the conversation, which keeps its place
+/// The agent's controls take all the room the composer bar's buttons leave: whole when they fit,
+/// and scrolling only once the bar is full up to the buttons at its left (a fixed allowance for
+/// the buttons cut them short with room to spare).
+#[test]
+fn the_agents_controls_use_the_whole_composer_bar() {
+    use iced_test::selector::Candidate;
+    let (app, _) = App::new(true, None);
+    let measure = |width: f32| {
+        let mut ui = simulator(&app, (width, 700.0));
+        let controls = ui
+            .select(|candidate| match candidate {
+                Candidate::Scrollable { id: Some(id), bounds, content_bounds, .. }
+                    if id == &iced::widget::Id::new("agent-controls") =>
+                {
+                    Some((bounds, content_bounds))
+                }
+                _ => None,
+            })
+            .expect("the agent's controls");
+        let shell = ui
+            .select(|candidate| match candidate {
+                Candidate::Container { id: Some(id), bounds, .. }
+                    if id == &iced::widget::Id::new("terminal-button") =>
+                {
+                    Some(bounds)
+                }
+                _ => None,
+            })
+            .expect("the shell's button");
+        (controls.0, controls.1, shell)
+    };
+    let (shown, content, _) = measure(720.0);
+    assert!(shown.width >= content.width - 0.5, "all in view with room: {shown:?} of {content:?}");
+    // narrower and narrower: whenever they are cut, no room is left between them and the buttons
+    let mut cut = false;
+    for width in (200..=720).rev().step_by(20) {
+        let (shown, content, shell) = measure(width as f32);
+        if shown.width < content.width - 0.5 {
+            cut = true;
+            let gap = shown.x - (shell.x + shell.width);
+            assert!(gap < 40.0, "at {width} px the controls are cut with {gap} px unused");
+        }
+    }
+    assert!(cut, "no width cut the controls: the test measures nothing");
+}
+
 /// underneath.
 #[test]
 fn a_drawer_over_the_conversation_keeps_its_place() {
