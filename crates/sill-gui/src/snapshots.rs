@@ -938,3 +938,15 @@ fn render_permissions_basic() {
     app.views.get_mut("demo").unwrap().permissions.open = true;
     render(&app, "13-permissions-advanced");
 }
+
+#[test]
+#[ignore = "writes a PNG of the herring hovered, for review"]
+fn render_herring_hovered() {
+    let (app, _) = App::new(true, None);
+    let mut ui = iced_test::Simulator::with_size(settings(), (720.0, 120.0), app.view());
+    ui.point_at((19.0, 18.0));
+    let snapshot = ui.snapshot(&crate::style::theme()).unwrap();
+    std::fs::create_dir_all(dir()).unwrap();
+    let _ = std::fs::remove_file(dir().join("herring-hovered-wgpu.png"));
+    assert!(snapshot.matches_image(dir().join("herring-hovered")).unwrap());
+}

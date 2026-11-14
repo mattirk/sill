@@ -322,28 +322,29 @@ impl App {
             right: 8.0,
             ..Padding::ZERO
         });
+        // the hover's box just round the mark, as a tab's round its label, with rounder corners
+        // beside the window's; the underline under it, as wide as the tab's place
+        // (the person, 2026-11-13)
+        let mark_button = keys::press(
+            button(crate::herring::herring(18.0, P.fg, self.herring_flick))
+                .padding([5, 6])
+                .style(|theme, status| button::Style {
+                    border: iced::Border { radius: 8.0.into(), ..iced::Border::default() },
+                    ..style::quiet(theme, status)
+                }),
+            Message::ToggleChanges,
+        );
         let mark = tooltip(
-            keys::press(
-                // a box just round the mark, its underline as wide as the box (as a tab's)
-                button(
-                    column![
-                        container(crate::herring::herring(18.0, P.fg, self.herring_flick))
-                            .center(Fill),
-                        rule::horizontal(2).style(style::rule_style(if shown {
-                            P.accent
-                        } else {
-                            Color::TRANSPARENT
-                        })),
-                    ]
-                    .width(Fill)
-                    .height(Fill),
-                )
-                .padding(0)
-                .width(34)
-                .height(Fill)
-                .style(style::quiet),
-                Message::ToggleChanges,
-            ),
+            column![
+                container(mark_button).center(Fill),
+                rule::horizontal(2).style(style::rule_style(if shown {
+                    P.accent
+                } else {
+                    Color::TRANSPARENT
+                })),
+            ]
+            .width(38)
+            .height(Fill),
             container(
                 text(if shown {
                     "Back to the conversation"
