@@ -278,10 +278,19 @@ impl Store {
 
     /// A new session; `ghost` is fixed from here on (docs/memory.md §3.1).
     pub fn create_with(&self, agent: &str, policy: &str, ghost: bool) -> Result<Session> {
+        // Serialize allocation with inserts, including other connections to this store.
+        let tx = if self.conn.is_autocommit() {
+            Some(rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate)?)
+        } else {
+            None // The caller's transaction already covers allocation and both inserts.
+        };
+        let used = self.conn.prepare("SELECT name FROM session_names")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
         let s = Session {
             id: new_id(),
             agent: agent.to_string(),
-            title: crate::title::random_name(),
+            title: crate::title::unused_name(&used),
             title_kind: String::new(),
             created_at: now(),
             last_used: now(),
@@ -303,6 +312,7 @@ impl Store {
             params![s.id, s.agent, s.title, s.created_at, s.last_used, s.policy, serde_json::to_string(&s.agent_settings)?, ghost as i32],
         )?;
         self.conn.execute("INSERT INTO session_names (session_id, name) VALUES (?1, ?2)", params![s.id, s.title])?;
+        if let Some(tx) = tx { tx.commit()?; }
         Ok(s)
     }
 
@@ -838,6 +848,27 @@ mod tests {
         assert_eq!(back.agent_settings.config.get("effort").map(String::as_str), Some("high"));
         assert!(store.create("gemini", "default").unwrap().agent_settings.config.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn generated_names_avoid_stored_names_inside_and_outside_transactions() {
+        let dir = std::env::temp_dir().join(format!("sill-name-allocation-{}", new_id()));
+        let store = Store::open(&dir.join("store.db")).unwrap();
+        let tx = store.conn().unchecked_transaction().unwrap();
+        {
+            let mut insert = store.conn().prepare("INSERT INTO session_names VALUES (?1, ?2)").unwrap();
+            for index in 0..60_000 {
+                insert.execute(params![format!("reserved-{index}"), crate::title::base_name(index)]).unwrap();
+            }
+        }
+        let first = store.create("test", "default").unwrap();
+        assert!(first.title.ends_with("-2"));
+        assert_eq!(store.session_name(&first.id).as_deref(), Some(first.title.as_str()));
+        tx.commit().unwrap();
+        let second = store.create("test", "default").unwrap();
+        assert_ne!(first.title, second.title);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
