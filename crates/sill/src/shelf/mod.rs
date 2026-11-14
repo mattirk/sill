@@ -5,6 +5,7 @@ mod agents_page;
 mod changes;
 mod conversation;
 mod fonts;
+mod herring;
 mod hotkey;
 mod icons;
 mod lang_icons;

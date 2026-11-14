@@ -44,6 +44,7 @@ pub struct Shelf {
     status: gtk::Stack,
     status_text: RefCell<String>,
     spinner: Rc<super::spinner::Spinner>,
+    herring: Rc<super::herring::Herring>,
     busy: RefCell<std::collections::HashSet<String>>,
     pending_restart: RefCell<std::collections::HashSet<String>>,
     views: RefCell<HashMap<String, Rc<SessionView>>>,
@@ -119,8 +120,9 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
 
     // "sill" flips between the sessions and the backend: pressed = backend, with the page tabs in
     // place of the session tabs
-    let action = gtk::ToggleButton::with_label("sill");
-    action.add_css_class("heading");
+    let herring = super::herring::Herring::new(); // the mark, flicks its tail on a press
+    let action = gtk::ToggleButton::new();
+    action.set_child(Some(&herring.area));
     action.add_css_class("flat");
     action.add_css_class("sill-action");
     action.set_tooltip_text(Some("Sessions ⇄ backend (Escape)"));
@@ -233,6 +235,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         status: status.clone(),
         status_text: RefCell::new(String::new()),
         spinner: spinner.clone(),
+        herring: herring.clone(),
         busy: RefCell::new(std::collections::HashSet::new()),
         pending_restart: RefCell::new(std::collections::HashSet::new()),
         views: RefCell::new(HashMap::new()),
@@ -329,6 +332,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
             if s.syncing.get() {
                 return;
             }
+            s.herring.flick();
             if b.is_active() {
                 let page = sill_core::config::load().default_page().to_string();
                 s.show_page(&page);
@@ -478,6 +482,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         let s = shelf.clone();
         esc.connect_key_pressed(move |_, key, _, _| {
             if key == gdk::Key::Escape {
+                s.herring.flick();
                 // the viewer steps back (then closes), then the pages; the tree is Ctrl+Shift+F's
                 if s.viewer.root.is_visible() {
                     s.viewer.escape();
