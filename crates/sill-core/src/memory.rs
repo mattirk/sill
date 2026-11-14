@@ -65,21 +65,45 @@ fn fact_lines(f: &Facts, home: &Path) -> Vec<String> {
     lines
 }
 
+/// The ask shared by the end and a checkpoint: the summary, with the session's name on its first
+/// line (title.rs: the summary names the session; [`split_title`] takes it off again).
+const ASK: &str = "Write 5–15 lines for a future agent that opens these folders: what was asked, what was done and where (paths), decisions and why, what is unfinished, what not to try again. Plain text, no greeting, no questions — only that agent reads it. First line: `Title: ` and 2–5 words naming this session for a list of sessions (what it was about, not the folder).";
+
 /// What the agent is asked as the session's last turn (docs/memory.md §2.2). The facts go with it
 /// so the summary names real places, not "the file I edited".
 pub fn summary_prompt(f: &Facts, home: &Path) -> String {
-    format!(
-        "[sill: this session is ending. Write 5–15 lines for a future agent that opens these folders: what was asked, what was done and where (paths), decisions and why, what is unfinished, what not to try again. Plain text, no greeting, no questions — only that agent reads it. Facts sill has: {}.]",
-        fact_lines(f, home).join("; ")
-    )
+    format!("[sill: this session is ending. {ASK} Facts sill has: {}.]", fact_lines(f, home).join("; "))
 }
 
 /// *Summarize now* (docs/memory.md §2.5): the same ask as a checkpoint, the session going on.
 pub fn checkpoint_prompt(f: &Facts, home: &Path) -> String {
-    format!(
-        "[sill: a checkpoint, the session goes on afterwards. Write 5–15 lines for a future agent that opens these folders: what was asked, what was done and where (paths), decisions and why, what is unfinished, what not to try again. Plain text, no greeting, no questions — only that agent reads it. Facts sill has: {}.]",
-        fact_lines(f, home).join("; ")
-    )
+    format!("[sill: a checkpoint, the session goes on afterwards. {ASK} Facts sill has: {}.]", fact_lines(f, home).join("; "))
+}
+
+/// The name the agent put on the summary's first line, and the summary without it: `Title: …`
+/// (any case, with or without quotes or a trailing stop), capped at 40 characters. No such line,
+/// or an empty one: no name, the text as it came.
+pub fn split_title(answer: &str) -> (Option<String>, String) {
+    let text = answer.trim();
+    let Some((first, rest)) = text.split_once('\n').or(Some((text, ""))) else { unreachable!() };
+    let first = first.trim().trim_start_matches(['*', '#', ' ']).trim_end_matches('*');
+    let Some(rest_of_line) = first.get(..6).filter(|h| h.eq_ignore_ascii_case("title:")).map(|_| &first[6..]) else {
+        return (None, text.to_string());
+    };
+    // markdown emphasis, quotes and a trailing stop go, in whatever order they were nested
+    let mut title = rest_of_line;
+    loop {
+        let t = title.trim().trim_matches(|c: char| matches!(c, '"' | '“' | '”' | '\'' | '`' | '*')).trim_end_matches(['.', '!']);
+        if t == title {
+            break;
+        }
+        title = t;
+    }
+    if title.is_empty() {
+        return (None, rest.trim().to_string());
+    }
+    let title = if title.chars().count() > 40 { title.chars().take(39).collect::<String>().trim_end().to_string() + "…" } else { title.to_string() };
+    (Some(title), rest.trim().to_string())
 }
 
 /// The summary sill writes when the agent cannot be asked: the facts, marked as such. It leads with
@@ -302,6 +326,8 @@ mod tests {
         };
         let p = summary_prompt(&f, home);
         assert!(p.starts_with("[sill: this session is ending."), "{p}");
+        assert!(p.contains("First line: `Title: `"), "{p}");
+        assert!(checkpoint_prompt(&f, home).starts_with("[sill: a checkpoint"));
         assert!(p.contains("pinned folders: ~/GIT/sill; kept to the host (2): updated ~/GIT/sill/src/a.rs, added /etc/x; 1 prompt, 12 tool calls.]"), "{p}");
         let a = auto_summary(&f, 1_793_491_200 + 3600, home);
         assert_eq!(first_line(&a), "Asked: “make the allow button safer”");
@@ -309,5 +335,18 @@ mod tests {
         let silent = auto_summary(&Facts { first_prompt: None, ..f.clone() }, 0, home);
         assert_eq!(first_line(&silent), "Session “proxy allow button” with claude, 2026-11-01.");
         assert_eq!(first_line("\n\n  hello \nworld"), "hello");
+    }
+
+    #[test]
+    fn the_summary_names_the_session() {
+        assert_eq!(split_title("Title: proxy allow button\nAsked: make it safer.\nDone."), (Some("proxy allow button".into()), "Asked: make it safer.\nDone.".into()));
+        assert_eq!(split_title("**Title:** “Settings page sections.”\n\nbody"), (Some("Settings page sections".into()), "body".into()));
+        assert_eq!(split_title("TITLE: x"), (Some("x".into()), "".into()));
+        assert_eq!(split_title("Title:\nbody"), (None, "body".into()));
+        assert_eq!(split_title("Asked: things\nTitle: late"), (None, "Asked: things\nTitle: late".into()));
+        let long = format!("Title: {}\nb", "word ".repeat(12));
+        let (t, _) = split_title(&long);
+        assert_eq!(t.as_deref().map(|t| t.chars().count()), Some(40));
+        assert!(t.unwrap().ends_with('…'));
     }
 }

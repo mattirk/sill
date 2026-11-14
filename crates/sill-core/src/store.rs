@@ -12,6 +12,9 @@ pub struct Session {
     pub id: String,
     pub agent: String,
     pub title: String,
+    /// Who named it last (title.rs): "" for the two-word name, "agent" when its summary named it
+    /// (at a checkpoint or the end), "person" when renamed by hand.
+    pub title_kind: String,
     pub created_at: i64,
     pub last_used: i64,
     /// The agent's own session id (ACP), once known; used for `session/load`.
@@ -141,6 +144,8 @@ impl Store {
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN follows TEXT NOT NULL DEFAULT ''", []);
         // memory M2: compaction level per session, and when the nightly run last went
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN compacted INTEGER NOT NULL DEFAULT 0", []);
+        // the summary names the session (title.rs): who named it last
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN title_kind TEXT NOT NULL DEFAULT ''", []);
         conn.execute_batch("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")?;
         sill_memory::install(&conn).context("memory index")?;
         Ok(Self { conn })
@@ -189,7 +194,7 @@ impl Store {
 
     pub fn sessions(&self) -> Result<Vec<Session>> {
         let mut st = self.conn.prepare(
-            "SELECT id, agent, title, created_at, last_used, acp_session_id, policy, auto_allow, agent_settings, desktop, ended_at, summary, summary_kind, memory_scope, follows, compacted FROM sessions ORDER BY last_used DESC",
+            "SELECT id, agent, title, created_at, last_used, acp_session_id, policy, auto_allow, agent_settings, desktop, ended_at, summary, summary_kind, memory_scope, follows, compacted, title_kind FROM sessions ORDER BY last_used DESC",
         )?;
         let rows = st.query_map([], |r| {
             Ok(Session {
@@ -209,6 +214,7 @@ impl Store {
                 memory_scope: r.get(13)?,
                 follows: r.get(14)?,
                 compacted: r.get(15)?,
+                title_kind: r.get(16)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -219,6 +225,7 @@ impl Store {
             id: new_id(),
             agent: agent.to_string(),
             title: crate::title::random_name(),
+            title_kind: String::new(),
             created_at: now(),
             last_used: now(),
             acp_session_id: None,
@@ -245,8 +252,10 @@ impl Store {
         Ok(())
     }
 
-    pub fn set_title(&self, id: &str, title: &str) -> Result<()> {
-        self.conn.execute("UPDATE sessions SET title = ?2 WHERE id = ?1", params![id, title])?;
+    /// Name the session; `kind` says who did (`Session::title_kind`). The last name wins, whoever
+    /// gave it: a summary renames a session the person named.
+    pub fn set_title(&self, id: &str, title: &str, kind: &str) -> Result<()> {
+        self.conn.execute("UPDATE sessions SET title = ?2, title_kind = ?3 WHERE id = ?1", params![id, title, kind])?;
         Ok(())
     }
 
@@ -567,6 +576,11 @@ mod tests {
         let r = get(&s.id);
         assert!(r.ended_at.is_none());
         assert_eq!(r.summary, "fixed the proxy\nin proxy.rs");
+        // named by the person, then by the agent's summary: the last name wins
+        store.set_title(&s.id, "my name", "person").unwrap();
+        assert_eq!((get(&s.id).title.as_str(), get(&s.id).title_kind.as_str()), ("my name", "person"));
+        store.set_title(&s.id, "proxy fix", "agent").unwrap();
+        assert_eq!((get(&s.id).title.as_str(), get(&s.id).title_kind.as_str()), ("proxy fix", "agent"));
         store.add_memory(&s.id, "note", "the person's note").unwrap();
         assert_eq!(store.memories(&s.id).unwrap().iter().map(|m| m.2.as_str()).collect::<Vec<_>>(), ["the person's note"]);
         store.delete(&s.id).unwrap();

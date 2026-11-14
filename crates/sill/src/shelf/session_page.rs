@@ -179,11 +179,18 @@ pub fn build(store: Rc<Store>, s: &Session, view: Option<Rc<SessionView>>, chang
             let prompt = sill_core::memory::checkpoint_prompt(&facts, &home);
             b.set_sensitive(false);
             b.set_label("writing…");
-            let (store, id, stored, from_agent, buf, changed, set_by, b2, refresh_state) = (store.clone(), id.clone(), stored.clone(), from_agent.clone(), buf.clone(), changed.clone(), set_by.clone(), b.clone(), refresh_state.clone());
+            let (store, id, stored, from_agent, buf, changed, set_by, b2, refresh_state, v2, title) = (store.clone(), id.clone(), stored.clone(), from_agent.clone(), buf.clone(), changed.clone(), set_by.clone(), b.clone(), refresh_state.clone(), v.clone(), title.clone());
             v.ask_checkpoint(&prompt, Box::new(move |answer| {
                 b2.set_label("Summarize now");
                 refresh_state();
                 let Some(a) = answer.map(|a| a.trim().to_string()).filter(|a| !a.is_empty()) else { return };
+                // the first line names the session (title.rs), unless the person named it
+                let (name, body) = sill_core::memory::split_title(&a);
+                if let Some(n) = name {
+                    v2.rename(&n, "agent");
+                    title.set_text(&v2.session.borrow().title);
+                }
+                let a = if body.is_empty() { a } else { body };
                 if store.set_summary(&id, &a, "agent").is_ok() {
                     *stored.borrow_mut() = a.clone();
                     from_agent.set(true);

@@ -2137,6 +2137,20 @@ impl SessionView {
         self.ask_summary_turn(prompt, "summarize now: the agent writes a checkpoint summary for memory", true, then);
     }
 
+    /// Name the session (store, the view's copy, the tab); `kind` as in `Session::title_kind`.
+    pub fn rename(&self, title: &str, kind: &str) {
+        let id = self.id();
+        let _ = self.store.set_title(&id, title, kind);
+        {
+            let mut s = self.session.borrow_mut();
+            s.title = title.to_string();
+            s.title_kind = kind.to_string();
+        }
+        if let Some(cb) = self.on_title.borrow().as_ref() {
+            cb(&id, title);
+        }
+    }
+
     /// A checkpoint is being written.
     pub fn checkpoint_pending(&self) -> bool {
         self.summarizing.borrow().is_some() && self.checkpoint.get()
@@ -2258,16 +2272,6 @@ impl SessionView {
                 let _ = self.store.touch(&id);
                 self.turns_this_run.set(self.turns_this_run.get() + 1);
                 lap("store append+touch");
-                // first prompt names the session (keywords), unless it has nothing to say
-                let first = self.store.count_kind(&id, "user").map(|n| n <= 1).unwrap_or(false);
-                lap("store entries");
-                if first && let Some(title) = sill_core::title::from_prompt(text) {
-                    let _ = self.store.set_title(&id, &title);
-                    self.session.borrow_mut().title = title.clone();
-                    if let Some(cb) = self.on_title.borrow().as_ref() {
-                        cb(&id, &title);
-                    }
-                }
                 lap("done");
                 true
             }

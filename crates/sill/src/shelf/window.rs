@@ -404,9 +404,11 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     {
         let s = shelf.clone();
         *tabs.on_rename.borrow_mut() = Some(Box::new(move |id, title| {
-            let _ = s.store.set_title(id, title);
+            let _ = s.store.set_title(id, title, "person");
             if let Some(v) = s.views.borrow().get(id) {
-                v.session.borrow_mut().title = title.to_string();
+                let mut sess = v.session.borrow_mut();
+                sess.title = title.to_string();
+                sess.title_kind = "person".into();
             }
         }));
     }
@@ -958,10 +960,12 @@ impl Shelf {
             name.connect_activate(move |e| {
                 let title = e.text().trim().to_string();
                 if !title.is_empty() {
-                    let _ = shelf.store.set_title(&sid, &title);
+                    let _ = shelf.store.set_title(&sid, &title, "person");
                     shelf.tabs.set_title(&sid, &title);
                     if let Some(v) = shelf.views.borrow().get(&sid) {
-                        v.session.borrow_mut().title = title;
+                        let mut sess = v.session.borrow_mut();
+                        sess.title = title;
+                        sess.title_kind = "person".into();
                     }
                 }
                 p.popdown();
@@ -1307,7 +1311,8 @@ impl Shelf {
     /// turn keeps the summary it had (decision 13: no cold agent dressed as a continuation). With
     /// memory off only `ended_at` is set, the summary stays empty. Closed again while the agent
     /// writes, the tab goes and the summary finishes out of sight (`background_view`); closed
-    /// during *Summarize now*, that checkpoint becomes the end's summary the same way.
+    /// during *Summarize now*, that checkpoint becomes the end's summary the same way. The
+    /// summary's first line names the session (title.rs) unless the person named it.
     fn close_session(self: &Rc<Self>, id: &str) {
         let view = self.views.borrow().get(id).cloned();
         if view.as_ref().is_some_and(|v| v.summary_pending() && !v.checkpoint_pending()) {
@@ -1332,7 +1337,13 @@ impl Shelf {
             let agent = answer.map(|a| a.trim().to_string()).filter(|a| !a.is_empty());
             let _ = match agent {
                 _ if !memory || keep_old => shelf.store.end_only(&sid),
-                Some(a) => shelf.store.end(&sid, &a, "agent"),
+                Some(a) => {
+                    let (title, body) = sill_core::memory::split_title(&a);
+                    if let Some(t) = title {
+                        let _ = shelf.store.set_title(&sid, &t, "agent");
+                    }
+                    shelf.store.end(&sid, if body.is_empty() { &a } else { &body }, "agent")
+                }
                 None => shelf.store.end(&sid, &sill_core::memory::auto_summary(&facts, sill_core::store::now(), &home), "auto"),
             };
             refresh_memory();
