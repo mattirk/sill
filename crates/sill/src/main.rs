@@ -428,6 +428,7 @@ fn dev_cmd(cmd: DevCmd) -> Result<()> {
                     Event::Other(s) if verbose => {
                         let _ = writeln!(out, "\x1b[2m· {s}\x1b[0m");
                     }
+                    Event::UserText(_) | Event::Ready { .. } | Event::TurnStarted => {}
                     Event::Stopped(r) => {
                         let _ = writeln!(out, "\n\x1b[2m[stop: {r:?}]\x1b[0m");
                     }

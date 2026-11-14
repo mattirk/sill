@@ -1,16 +1,17 @@
 //! ACP client over the shim's agent stream (SPEC §4.1). Runtime-neutral: the SDK is driven with
 //! `futures::executor::block_on` on a plain thread; the socket is wrapped by `async-io`. The caller
-//! talks to the running session through channels: [`Command`]s in, [`Event`]s out. Permission
-//! requests carry a one-shot reply channel; the dispatch loop waits for the answer, as the agent does.
+//! talks to the running session through channels: [`Command`]s in, [`Event`]s out. Updates are read
+//! continuously (not only during a turn), so agent-initiated updates and `session/load` replays reach
+//! the caller too. Permission requests carry a one-shot reply channel; the dispatch loop waits for the
+//! answer, as the agent does.
 
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    ClientCapabilities, ContentBlock, InitializeRequest, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome, SessionNotification,
-    SessionUpdate, StopReason,
+    ClientCapabilities, ContentBlock, InitializeRequest, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, SelectedPermissionOutcome, SessionNotification, SessionUpdate, StopReason,
 };
 use agent_client_protocol::util::MatchDispatch;
 pub use agent_client_protocol::schema::v1::PermissionOptionKind;
@@ -29,10 +30,12 @@ pub struct PermissionOption {
 /// What the caller sees while a session runs.
 #[derive(Debug)]
 pub enum Event {
-    /// The ACP session is up (session id).
-    Ready(String),
+    /// The ACP session is up: (agent session id, resumed with history replay?).
+    Ready { session_id: String, resumed: bool },
     /// A prompt turn started.
     TurnStarted,
+    /// Replayed user message (only after a `session/load`).
+    UserText(String),
     Text(String),
     Thought(String),
     ToolCall { id: String, title: String, kind: String, status: String },
@@ -56,20 +59,25 @@ pub enum Command {
 /// (the M0 CLI). The shelf answers them itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutoPermission {
-    /// Pick the first `AllowOnce` option, else `AllowAlways`, else cancel.
     AllowOnce,
-    /// Pick a reject option, else cancel.
     Reject,
     /// Ask through the event channel.
     Ask,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionOptions {
+    pub cwd: std::path::PathBuf,
+    pub auto: AutoPermission,
+    /// Resume this agent session with `session/load` if the agent supports it.
+    pub resume: Option<String>,
 }
 
 /// Run an ACP session over `stream` until `Command::Quit` or the connection ends. Blocking; run it
 /// on its own thread.
 pub fn run_session(
     stream: UnixStream,
-    cwd: &Path,
-    auto: AutoPermission,
+    opts: SessionOptions,
     commands: async_channel::Receiver<Command>,
     events: async_channel::Sender<Event>,
 ) -> Result<()> {
@@ -77,9 +85,9 @@ pub fn run_session(
     let stream = async_io::Async::new(stream).context("async socket")?;
     let (reader, writer) = stream.split();
     let transport = ByteStreams::new(writer, reader);
-    let cwd = cwd.to_path_buf();
     let events_perm = events.clone();
     let events_loop = events.clone();
+    let auto = opts.auto;
 
     let result: Result<(), agent_client_protocol::Error> = futures::executor::block_on(async move {
         Client
@@ -121,49 +129,72 @@ pub fn run_session(
                 agent_client_protocol::on_receive_request!(),
             )
             .connect_with(transport, async move |cx| {
-                cx.send_request(
-                    InitializeRequest::new(ProtocolVersion::V1).client_capabilities(ClientCapabilities::new()),
-                )
-                .block_task()
-                .await?;
-                cx.build_session(&cwd)
+                let init = cx
+                    .send_request(InitializeRequest::new(ProtocolVersion::V1).client_capabilities(ClientCapabilities::new()))
                     .block_task()
-                    .run_until(async |mut session| {
-                        let _ = events_loop.send(Event::Ready(session.session_id().to_string())).await;
-                        loop {
-                            let cmd = match commands.recv().await {
-                                Ok(c) => c,
-                                Err(_) => break,
-                            };
-                            let text = match cmd {
-                                Command::Quit => break,
-                                Command::Prompt(t) => t,
-                            };
-                            session.send_prompt(text.as_str())?;
-                            let _ = events_loop.send(Event::TurnStarted).await;
-                            loop {
-                                match session.read_update().await? {
-                                    SessionMessage::StopReason(reason) => {
-                                        let _ = events_loop.send(Event::Stopped(reason)).await;
-                                        break;
-                                    }
-                                    SessionMessage::SessionMessage(dispatch) => {
-                                        let events = events_loop.clone();
-                                        MatchDispatch::new(dispatch)
-                                            .if_notification(async |n: SessionNotification| {
-                                                let _ = events.send(to_event(n.update)).await;
-                                                Ok(())
-                                            })
-                                            .await
-                                            .otherwise_ignore()?;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        Ok(())
-                    })
                     .await?;
+                let can_load = init.agent_capabilities.load_session;
+
+                // either resume (history replayed as updates) or start fresh
+                let resume = opts.resume.clone().filter(|_| can_load);
+                let (mut session, resumed) = match resume {
+                    Some(id) => match cx.load_session(id, &opts.cwd).block_task().start_session().await {
+                        Ok(restored) => (restored.into_session(), true),
+                        Err(e) => {
+                            tracing::warn!("session/load failed, starting fresh: {e}");
+                            (cx.build_session(&opts.cwd).block_task().start_session().await?, false)
+                        }
+                    },
+                    None => (cx.build_session(&opts.cwd).block_task().start_session().await?, false),
+                };
+                let _ = events_loop.send(Event::Ready { session_id: session.session_id().to_string(), resumed }).await;
+
+                let mut in_turn = false;
+                loop {
+                    // wait for either a command or an update, whichever comes first; both futures are
+                    // dropped before `session` is used again
+                    enum Next {
+                        Cmd(Option<Command>),
+                        Update(Result<SessionMessage, agent_client_protocol::Error>),
+                    }
+                    let next = {
+                        let cmd_fut = Box::pin(commands.recv());
+                        let upd_fut = Box::pin(session.read_update());
+                        match futures::future::select(cmd_fut, upd_fut).await {
+                            futures::future::Either::Left((cmd, _)) => Next::Cmd(cmd.ok()),
+                            futures::future::Either::Right((upd, _)) => Next::Update(upd),
+                        }
+                    };
+                    match next {
+                        Next::Cmd(Some(Command::Prompt(text))) => {
+                            if in_turn {
+                                let _ = events_loop.send(Event::Other("busy: prompt dropped".into())).await;
+                                continue;
+                            }
+                            session.send_prompt(text.as_str())?;
+                            in_turn = true;
+                            let _ = events_loop.send(Event::TurnStarted).await;
+                        }
+                        Next::Cmd(Some(Command::Quit)) | Next::Cmd(None) => break,
+                        Next::Update(update) => match update? {
+                            SessionMessage::StopReason(reason) => {
+                                in_turn = false;
+                                let _ = events_loop.send(Event::Stopped(reason)).await;
+                            }
+                            SessionMessage::SessionMessage(dispatch) => {
+                                let events = events_loop.clone();
+                                MatchDispatch::new(dispatch)
+                                    .if_notification(async |n: SessionNotification| {
+                                        let _ = events.send(to_event(n.update)).await;
+                                        Ok(())
+                                    })
+                                    .await
+                                    .otherwise_ignore()?;
+                            }
+                            _ => {}
+                        },
+                    }
+                }
                 Ok(())
             })
             .await
@@ -184,8 +215,8 @@ pub fn run_prompt(
     let (cmd_tx, cmd_rx) = async_channel::bounded(2);
     let (ev_tx, ev_rx) = async_channel::unbounded();
     cmd_tx.send_blocking(Command::Prompt(prompt.to_string()))?;
-    let cwd = cwd.to_path_buf();
-    let worker = std::thread::spawn(move || run_session(stream, &cwd, auto, cmd_rx, ev_tx));
+    let opts = SessionOptions { cwd: cwd.to_path_buf(), auto, resume: None };
+    let worker = std::thread::spawn(move || run_session(stream, opts, cmd_rx, ev_tx));
     while let Ok(ev) = ev_rx.recv_blocking() {
         let stop = matches!(ev, Event::Stopped(_));
         let ended = matches!(ev, Event::Ended(_));
@@ -208,6 +239,7 @@ fn to_event(update: SessionUpdate) -> Event {
         }
     }
     match update {
+        SessionUpdate::UserMessageChunk(c) => Event::UserText(text(&c.content)),
         SessionUpdate::AgentMessageChunk(c) => Event::Text(text(&c.content)),
         SessionUpdate::AgentThoughtChunk(c) => Event::Thought(text(&c.content)),
         SessionUpdate::ToolCall(t) => Event::ToolCall {

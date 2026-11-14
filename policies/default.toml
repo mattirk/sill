@@ -28,7 +28,7 @@ direct = [
   "~/.claude/.credentials.json",   # login must persist
   "~/.claude/projects",            # transcripts: needed for resume
   "~/.claude/sessions", "~/.claude/backups", "~/.claude/statsig", "~/.claude/todos",
-  "~/.claude/shell-snapshots", "~/.claude/debug", "~/.claude/file-history",
+  "~/.claude/shell-snapshots", "~/.claude/debug", "~/.claude/file-history", "~/.claude/cache",
 ]
 # Hidden in the jail and in the host view:
 mask = [

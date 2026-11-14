@@ -64,6 +64,9 @@ pub fn render(buffer: &gtk::TextBuffer, markdown: &str) {
     let mut list_stack: Vec<Option<u64>> = Vec::new(); // None = bullet, Some(n) = next number
     let mut in_code_block = false;
     let mut need_newline = false; // a block ended; separate the next block with a blank line
+    // tables: collected as rows of cells, rendered aligned in monospace at the end tag
+    let mut table: Option<Vec<Vec<String>>> = None;
+    let mut in_table_cell = false;
 
     let insert = |buffer: &gtk::TextBuffer, text: &str, tags: &[&str]| {
         let mut end = buffer.end_iter();
@@ -135,10 +138,23 @@ pub fn render(buffer: &gtk::TextBuffer, markdown: &str) {
                 Tag::Strikethrough => tags.push("strike"),
                 Tag::Link { .. } => tags.push("link"),
                 Tag::Image { .. } => insert(buffer, "[image: ", &[]),
-                Tag::Table(_) => block_start(buffer, &mut need_newline),
-                Tag::TableRow => {}
-                Tag::TableCell => {}
-                Tag::TableHead => tags.push("bold"),
+                Tag::Table(_) => {
+                    block_start(buffer, &mut need_newline);
+                    table = Some(Vec::new());
+                }
+                Tag::TableHead | Tag::TableRow => {
+                    if let Some(t) = table.as_mut() {
+                        t.push(Vec::new());
+                    }
+                }
+                Tag::TableCell => {
+                    if let Some(t) = table.as_mut()
+                        && let Some(row) = t.last_mut()
+                    {
+                        row.push(String::new());
+                    }
+                    in_table_cell = true;
+                }
                 _ => {}
             },
             Event::End(tag) => match tag {
@@ -177,26 +193,57 @@ pub fn render(buffer: &gtk::TextBuffer, markdown: &str) {
                         insert(buffer, "\n", &[]);
                     }
                 }
-                TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link | TagEnd::TableHead => {
+                TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link => {
                     tags.pop();
                 }
                 TagEnd::Image => insert(buffer, "]", &[]),
-                TagEnd::TableRow => insert(buffer, "\n", &[]),
-                TagEnd::TableCell => insert(buffer, "  ", &[]),
-                TagEnd::Table => need_newline = true,
+                TagEnd::TableHead | TagEnd::TableRow => {}
+                TagEnd::TableCell => in_table_cell = false,
+                TagEnd::Table => {
+                    if let Some(rows) = table.take() {
+                        let ncols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+                        let widths: Vec<usize> = (0..ncols)
+                            .map(|i| rows.iter().map(|r| r.get(i).map(|c| c.chars().count()).unwrap_or(0)).max().unwrap_or(0))
+                            .collect();
+                        for (ri, r) in rows.iter().enumerate() {
+                            let line: Vec<String> = (0..ncols)
+                                .map(|i| {
+                                    let c = r.get(i).map(String::as_str).unwrap_or("");
+                                    format!("{c:<w$}", w = widths[i])
+                                })
+                                .collect();
+                            let t: &[&str] = if ri == 0 { &["codeblock", "bold"] } else { &["codeblock"] };
+                            insert(buffer, &format!("{}\n", line.join("  ").trim_end()), t);
+                            if ri == 0 {
+                                let sep: Vec<String> = widths.iter().map(|w| "─".repeat(*w)).collect();
+                                insert(buffer, &format!("{}\n", sep.join("  ")), &["codeblock"]);
+                            }
+                        }
+                    }
+                    need_newline = true;
+                }
                 _ => {}
             },
             Event::Text(t) => {
-                if in_code_block {
-                    insert(buffer, &t, &tags);
+                if in_table_cell {
+                    if let Some(row) = table.as_mut().and_then(|t| t.last_mut()).and_then(|r| r.last_mut()) {
+                        row.push_str(&t);
+                    }
                 } else {
+                    let _ = in_code_block;
                     insert(buffer, &t, &tags);
                 }
             }
             Event::Code(c) => {
-                let mut t = tags.clone();
-                t.push("code");
-                insert(buffer, &c, &t);
+                if in_table_cell {
+                    if let Some(row) = table.as_mut().and_then(|t| t.last_mut()).and_then(|r| r.last_mut()) {
+                        row.push_str(&c);
+                    }
+                } else {
+                    let mut t = tags.clone();
+                    t.push("code");
+                    insert(buffer, &c, &t);
+                }
             }
             Event::SoftBreak => insert(buffer, " ", &tags),
             Event::HardBreak => insert(buffer, "\n", &tags),

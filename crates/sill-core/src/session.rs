@@ -20,6 +20,33 @@ pub struct StartOptions {
     pub shim_bin: Option<PathBuf>,
 }
 
+/// Where a session's upper trees live on the state filesystem (SPEC §4.9); created 0700 for the user.
+pub fn state_dir(uid: u32, session: &str) -> Result<PathBuf> {
+    let state_fs = Path::new(crate::jail::STATE_FS);
+    let all = crate::mounts::host_mounts()?;
+    if !crate::mounts::is_mount_point(&all, state_fs) {
+        bail!("{} is not mounted (install the sill state units, SPEC §4.9)", state_fs.display());
+    }
+    let mine = state_fs.join(uid.to_string());
+    if !mine.is_dir() {
+        std::fs::create_dir(&mine).with_context(|| format!("create {}", mine.display()))?;
+    }
+    std::fs::set_permissions(&mine, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+    Ok(mine.join("sessions").join(session))
+}
+
+/// Remove a session's upper trees (needs a user namespace: overlayfs creates root-owned work dirs).
+pub fn remove_state(uid: u32, session: &str) -> Result<()> {
+    let dir = state_dir(uid, session)?;
+    if dir.is_dir() {
+        let st = std::process::Command::new("unshare").args(["-Ur", "rm", "-rf"]).arg(&dir).status()?;
+        if !st.success() {
+            bail!("rm -rf {} failed", dir.display());
+        }
+    }
+    Ok(())
+}
+
 pub fn unit_name(session: &str) -> String {
     format!("sill-{session}")
 }

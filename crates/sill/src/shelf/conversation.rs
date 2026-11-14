@@ -21,6 +21,8 @@ pub struct Conversation {
     current_thought: RefCell<Option<(gtk::TextView, String)>>,
     tool_rows: RefCell<HashMap<String, (gtk::Label, gtk::Label)>>,
     status: gtk::Label,
+    /// Follow new content unless the person scrolled up.
+    stick_to_bottom: std::cell::Cell<bool>,
 }
 
 impl Conversation {
@@ -36,21 +38,40 @@ impl Conversation {
             .vexpand(true)
             .child(&column)
             .build();
-        Rc::new(Self {
+        let conv = Rc::new(Self {
             root,
             column,
             current: RefCell::new(None),
             current_thought: RefCell::new(None),
             tool_rows: RefCell::new(HashMap::new()),
             status,
-        })
+            stick_to_bottom: std::cell::Cell::new(true),
+        });
+        // The content height is only known after layout: follow the adjustment's upper bound instead of
+        // guessing when to scroll. Scrolling up by hand releases it; reaching the bottom re-engages it.
+        let adj = conv.root.vadjustment();
+        {
+            let c = conv.clone();
+            adj.connect_upper_notify(move |adj| {
+                if c.stick_to_bottom.get() {
+                    adj.set_value(adj.upper() - adj.page_size());
+                }
+            });
+        }
+        {
+            let c = conv.clone();
+            adj.connect_value_changed(move |adj| {
+                let at_bottom = adj.value() >= adj.upper() - adj.page_size() - 24.0;
+                c.stick_to_bottom.set(at_bottom);
+            });
+        }
+        conv
     }
 
     fn scroll_to_end(&self) {
+        self.stick_to_bottom.set(true);
         let adj = self.root.vadjustment();
-        // after layout: defer one idle so the new height is known
-        let adj2 = adj.clone();
-        gtk::glib::idle_add_local_once(move || adj2.set_value(adj2.upper() - adj2.page_size()));
+        adj.set_value(adj.upper() - adj.page_size());
     }
 
     fn text_view(css: &str) -> gtk::TextView {
@@ -98,6 +119,23 @@ impl Conversation {
         md.push_str(chunk);
         markdown::render(&tv.buffer(), md);
         drop(cur);
+        self.scroll_to_end();
+    }
+
+    /// A complete agent message (stored transcript).
+    pub fn add_agent_block(&self, md: &str) {
+        self.finish_current();
+        let tv = Self::text_view("sill-agent");
+        markdown::render(&tv.buffer(), md);
+        self.column.append(&tv);
+        self.scroll_to_end();
+    }
+
+    pub fn add_thought_block(&self, md: &str) {
+        self.finish_current();
+        let tv = Self::text_view("sill-thought");
+        markdown::render(&tv.buffer(), md);
+        self.column.append(&tv);
         self.scroll_to_end();
     }
 
@@ -181,8 +219,11 @@ impl Conversation {
     /// Apply one session event.
     pub fn handle(&self, ev: Event) {
         match ev {
-            Event::Ready(id) => self.status.set_text(&format!("ready · session {}", &id[..id.len().min(8)])),
+            Event::Ready { session_id, resumed } => {
+                self.status.set_text(&format!("{} · {}", if resumed { "resumed" } else { "ready" }, &session_id[..session_id.len().min(8)]))
+            }
             Event::TurnStarted => self.status.set_text("working…"),
+            Event::UserText(t) => self.add_user(&t),
             Event::Text(t) => self.append_markdown(&self.current, "sill-agent", &t),
             Event::Thought(t) => self.append_markdown(&self.current_thought, "sill-thought", &t),
             Event::ToolCall { id, title, status, .. } => self.add_tool_call(id, &title, &status),

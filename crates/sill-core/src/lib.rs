@@ -6,6 +6,8 @@
 //! - [`paths`]   — `~` expansion, globs, the escaped names used for upper trees
 
 pub mod acp;
+pub mod agents;
+pub mod changes;
 pub mod jail;
 pub mod keep;
 pub mod ledger;
@@ -15,3 +17,5 @@ pub mod policy;
 pub mod proxy;
 pub mod session;
 pub mod shim;
+pub mod store;
+pub mod title;

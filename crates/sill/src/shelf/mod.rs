@@ -1,9 +1,13 @@
 //! The shelf: a GTK4 window on the left edge, toggled by `sill toggle` (SPEC §3.1, §4.6).
 //! One instance per desktop session (GApplication); `toggle` reaches it over D-Bus activation.
 
+mod changes;
 mod conversation;
+mod files;
 mod markdown;
 mod session;
+mod session_view;
+mod settings;
 mod window;
 mod x11;
 

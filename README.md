@@ -3,8 +3,9 @@
 A shelf for AI agents on your own Linux machine: an ACP client, a jail the host controls, and a ledger
 of every change the agent makes. See [SPEC.md](SPEC.md) for the design; this file is the practical side.
 
-Status: **M1** (2026-10-28). The shelf window works on top of the M0 pieces: hotkey toggle, left-edge
-placement, streamed Markdown conversation, tool-call rows, permission buttons, prompt box.
+Status: **M2** (2026-10-28). Sessions with tabs, persistence and resume; the action-button dropdown with
+the global Changes page (keep / revert / conflicts), the Files page, Settings; auto-keep of repo changes at
+turn end.
 
 ## Layout
 
@@ -54,17 +55,23 @@ $S dev stop
 Logs: `$XDG_RUNTIME_DIR/sill/dev/{jail,proxy}.log` (the proxy log lists every allow/deny).
 `--net` shares the host network instead of using the proxy (testing only).
 
-## The shelf (M1)
+## The shelf (M1–M2)
 
 ```bash
-sill shelf --cwd ~/GIT/workdir-1 --hidden   # start (autostart entry does this); session unit "main"
-sill toggle                                 # show/hide — bind to Alt+Space (Cinnamon custom shortcut)
+sill shelf --hidden    # start (autostart entry does this); reopens the most recent session
+sill toggle            # show/hide — bind to Alt+Space (Cinnamon custom shortcut)
 ```
 
-Enter sends the prompt, Shift+Enter inserts a newline, Escape hides the shelf. The window sits on the
-left edge, 38 % of the work area wide, above other windows, out of the taskbar. The agent session runs
-in `sill-main.service` and survives the shelf; permissions are answered with the buttons in the
-conversation. Per-user setup (done): `~/.config/autostart/sill.desktop`, Cinnamon shortcut
+- **Sessions** are tabs: `+` picks the agent (Claude Code, Codex, Gemini; `~/.config/sill/agents/*.toml`
+  adds more) or reopens a stored one. Each session has its own jail (`sill-<id>.service`, upper trees under
+  `/var/lib/sill/<uid>/sessions/<id>`), its own conversation stored in `~/.local/state/sill/sill.db`, and
+  resumes with history (`session/load`) when reopened. Closing a tab stops its jail; the session stays.
+- The **`sill ▾`** button switches pages: *Sessions*, *Changes* (every session's pending changes, grouped
+  by session and repo: diff, Keep, Revert, Keep all; conflicts marked `!`), *Files* (tree of touched repos
+  with badges), *Settings*. Escape goes back, then hides.
+- After each turn, changes under the policy's `auto_keep` roots are kept automatically (never
+  `.git/config`, `.git/hooks`, conflicts or ignored build output); the rest waits in Changes.
+- Enter sends, Shift+Enter newline. Permissions are answered with the buttons in the conversation. Per-user setup (done): `~/.config/autostart/sill.desktop`, Cinnamon shortcut
 `custom0` = `/usr/local/bin/sill toggle`. Binaries are installed system-wide by
 `studio-debian-system/sound/config/install.sh` from `target/release/` (build with `cargo build --release`
 first).
