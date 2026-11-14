@@ -24,7 +24,7 @@ cache="$HOME/Library/Caches/sill/image"
 work="target/mac-image"
 out="dist/mac-image"
 mkdir -p "$cache" "$work" "$out"
-rm -f "$work"/*.raw "$work"/seed.iso "$work"/address "$work"/go "$work"/console.log
+rm -f "$work"/*.raw "$work"/seed.iso "$work"/ready "$work"/go "$work"/console.log
 rm -rf "$work"/seed
 
 # Debian's image, verified against its published checksums
@@ -75,15 +75,14 @@ codesign --force --sign - --entitlements packaging/mac/sill-vm.entitlements targ
 # off and boots it again from here, as the app does
 vm=
 boot() {
-    rm -f "$work/go" "$work/address"
-    SILL_VM_HOLD="$PWD/$work/go" target/debug/sill-vm "$work" > "$work/address" 2>> "$work/vm.log" &
+    rm -f "$work/go" "$work/ready"
+    SILL_VM_HOLD="$PWD/$work/go" target/debug/sill-vm "$work" > "$work/ready" 2>> "$work/vm.log" &
     vm=$!
-    while [ ! -s "$work/address" ]; do
+    while [ ! -s "$work/ready" ]; do
         kill -0 $vm 2>/dev/null || { cat "$work/vm.log" >&2; exit 1; }
         sleep 1
     done
-    address=$(cat "$work/address")
-    echo "Guest at $address"
+    echo 'Guest is up'
 }
 # a clean power-off, then the VM process ends by itself
 power_off() {
@@ -97,8 +96,10 @@ trap 'touch "$work/go"; [ -z "$vm" ] || wait $vm 2>/dev/null || true' EXIT
 boot
 guest() {
     # never a password prompt: until cloud-init has put the key in place, a login just fails
+    # over the VM's host–guest socket (sill-vm's ssh.sock), never the guest's network
     ssh -q -i "$work/key" -o BatchMode=yes -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 "sill@$address" "$@"
+        -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
+        -o ProxyCommand="nc -U $PWD/$work/ssh.sock" sill@sill-box "$@"
 }
 
 # SSH answers before cloud-init has made the account; OpenSSH holds failed logins against
