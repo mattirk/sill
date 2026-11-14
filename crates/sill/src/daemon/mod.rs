@@ -40,6 +40,11 @@ pub use hub::Hub;
 const LOCK_PATIENCE_SECS: u64 = 30;
 /// The exit status of a daemon that found itself stuck (a panic is 101).
 const EXIT_STUCK: i32 = 102;
+/// The sweep's interval; `SILL_SWEEP_SECS` overrides it (the tests use 1).
+const SWEEP_SECS: u64 = 60;
+/// How many intervals a sweep may take before the watchdog calls it stuck: five minutes at the
+/// default, far above a sweep that stops strays or runs the nightly compaction.
+const SWEEP_PATIENCE_INTERVALS: u32 = 5;
 
 /// Lines a connection may have waiting before it counts as stuck (decision 15): a streaming turn
 /// is a few hundred events a second at most.
@@ -152,20 +157,24 @@ pub fn run() -> Result<()> {
             }
         })?;
     }
+    let sweep_every = std::time::Duration::from_secs(std::env::var("SILL_SWEEP_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(SWEEP_SECS).max(1));
     {
-        // the minute sweep: idle sessions end, memory's nightly run (docs/daemon.md §3.6)
+        // the minute sweep: idle sessions end, memory's nightly run (docs/daemon.md §3.6); its
+        // heartbeat is the watchdog's
         let hub = hub.clone();
         std::thread::Builder::new().name("sill-daemon-sweep".into()).spawn(move || {
             loop {
-                std::thread::sleep(std::time::Duration::from_secs(60));
+                std::thread::sleep(sweep_every);
                 hub.sweep();
+                hub.swept();
             }
         })?;
     }
     {
         // the watchdog (docs/daemon.md §3.7): a lock nobody can take within the patience is a
         // deadlock, and a deadlocked daemon is worse than a dead one — it leaves, the unit or the
-        // next client starts a fresh one and the sessions are adopted. While every lock answers,
+        // next client starts a fresh one and the sessions are adopted. A sweep that has not
+        // finished in five intervals is stuck the same way. While every lock answers,
         // systemd hears `WATCHDOG=1`; a daemon too wedged to run even this thread is killed by
         // `WatchdogSec=` in the unit.
         let hub = hub.clone();
@@ -174,10 +183,10 @@ pub fn run() -> Result<()> {
         std::thread::Builder::new().name("sill-daemon-watchdog".into()).spawn(move || {
             loop {
                 std::thread::sleep(patience / 2);
-                match hub.health(patience) {
+                match hub.health(patience, sweep_every * SWEEP_PATIENCE_INTERVALS) {
                     Ok(()) => notify("WATCHDOG=1"),
-                    Err(lock) => {
-                        eprintln!("sill daemon: the {lock} lock has been held for {} s: stuck; leaving so the next daemon starts clean (sessions keep running)", patience.as_secs());
+                    Err(why) => {
+                        eprintln!("sill daemon: {why}: stuck; leaving so the next daemon starts clean (sessions keep running)");
                         std::process::exit(EXIT_STUCK);
                     }
                 }
@@ -430,6 +439,12 @@ fn read_loop(mut reader: BufReader<UnixStream>, first: String, hub: &Arc<Hub>, c
         #[cfg(debug_assertions)]
         if method == "_sill/daemon.deadlock" {
             hub.hold_runners_forever();
+        }
+        #[cfg(debug_assertions)]
+        if method == "_sill/daemon.stall_sweep" {
+            hub.stall_sweep();
+            conn.reply(&Response::ok(id, serde_json::json!({})));
+            continue;
         }
         let reply = match hub.dispatch(conn, method, msg.params.unwrap_or(serde_json::Value::Null)) {
             Ok(v) => Response::ok(id, v),

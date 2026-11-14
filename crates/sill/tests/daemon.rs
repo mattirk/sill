@@ -396,6 +396,20 @@ fn the_watchdog_ends_a_daemon_with_a_stuck_lock() {
     d.connect().unwrap().call(sill_proto::method::DAEMON_STATUS, json!({})).unwrap();
 }
 
+/// The sweep (idle ends, ghost reverts, the stray reaper, the nightly run) is one thread that holds
+/// no lock while it works: stuck in one step, the lock probe never saw it, and everything after
+/// that step stopped quietly. Its heartbeat is now the watchdog's (docs/daemon.md §3.7).
+#[cfg(debug_assertions)]
+#[test]
+fn the_watchdog_ends_a_daemon_whose_sweep_is_stuck() {
+    let mut d = Daemon::start_env(Daemon::dir(), &[("SILL_WATCHDOG_SECS", "2"), ("SILL_SWEEP_SECS", "1")]);
+    d.connect().unwrap().call("_sill/daemon.stall_sweep", json!({})).unwrap();
+    let st = d.wait_exit();
+    assert_eq!(st.code(), Some(102), "{st}");
+    let log = d.log();
+    assert!(log.contains("the minute sweep has not finished for") && log.contains(": stuck;"), "{log}");
+}
+
 #[test]
 fn the_unit_hears_ready_watchdog_and_stopping() {
     let dir = Daemon::dir();

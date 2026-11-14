@@ -67,7 +67,15 @@ pub struct Hub {
     /// the latest of this, the last prompt and the last turn's end, so a session just resumed is
     /// not ended a minute in.
     started_at: Mutex<HashMap<String, i64>>,
+    /// When the minute sweep last finished, or the daemon started: the watchdog's proof that the
+    /// sweep — idle ends, ghost reverts, the stray reaper, the nightly run — still runs. It holds
+    /// no lock while it works, so a step that hangs was invisible to the lock probe.
+    swept: Mutex<std::time::Instant>,
 }
+
+/// Debug builds only: the next sweep hangs (tests/daemon.rs, the watchdog's sweep check).
+#[cfg(debug_assertions)]
+static STALL_SWEEP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Taken and released before `deadline`, polling: `std::sync::Mutex` has no timed lock.
 pub(super) fn probe<T>(m: &Mutex<T>, deadline: std::time::Instant) -> bool {
@@ -114,6 +122,7 @@ impl Hub {
             ending: Mutex::new(ending),
             started_at: Mutex::new(HashMap::new()),
             conns: Mutex::new(Vec::new()),
+            swept: Mutex::new(std::time::Instant::now()),
         };
         hub.adopt_running();
         hub.sweep_dead_ghosts();
@@ -151,21 +160,40 @@ impl Hub {
     /// taken and released within `patience`, or the one that was not is named — a deadlock, or
     /// a request that has held a lock for far longer than any legitimate work. The order is the
     /// one the requests use (hub locks before a runner's), so the probe itself cannot deadlock.
-    pub fn health(&self, patience: std::time::Duration) -> std::result::Result<(), &'static str> {
+    /// Then the minute sweep has finished within `sweep_patience`: a sweep stuck in one step (a
+    /// `systemctl` that never returns, a shim that does not answer) stops every later step and
+    /// holds no lock, so only its heartbeat shows it. What is wrong, as one line.
+    pub fn health(&self, patience: std::time::Duration, sweep_patience: std::time::Duration) -> std::result::Result<(), String> {
         let deadline = std::time::Instant::now() + patience;
-        probe(&self.conns, deadline).then_some(()).ok_or("conns")?;
-        probe(&self.children, deadline).then_some(()).ok_or("children")?;
-        probe(&self.ending, deadline).then_some(()).ok_or("ending")?;
-        probe(&self.started_at, deadline).then_some(()).ok_or("started_at")?;
-        probe(&self.runners, deadline).then_some(()).ok_or("runners")?;
+        let held = |lock: &str| format!("the {lock} lock has been held for {} s", patience.as_secs());
+        probe(&self.conns, deadline).then_some(()).ok_or_else(|| held("conns"))?;
+        probe(&self.children, deadline).then_some(()).ok_or_else(|| held("children"))?;
+        probe(&self.ending, deadline).then_some(()).ok_or_else(|| held("ending"))?;
+        probe(&self.started_at, deadline).then_some(()).ok_or_else(|| held("started_at"))?;
+        probe(&self.runners, deadline).then_some(()).ok_or_else(|| held("runners"))?;
         let runners: Vec<Arc<Runner>> = self.runners.lock().unwrap().values().cloned().collect();
         for r in runners {
-            r.probe(deadline).then_some(()).ok_or("a runner's state")?;
+            r.probe(deadline).then_some(()).ok_or_else(|| held("a runner's state"))?;
         }
-        probe(&self.store, deadline).then_some(()).ok_or("store")?;
+        probe(&self.store, deadline).then_some(()).ok_or_else(|| held("store"))?;
         // held for a whole jail start: last, with what patience is left
-        probe(&self.starting, deadline).then_some(()).ok_or("starting")?;
+        probe(&self.starting, deadline).then_some(()).ok_or_else(|| held("starting"))?;
+        let since = self.swept.lock().unwrap().elapsed();
+        if since > sweep_patience {
+            return Err(format!("the minute sweep has not finished for {} s", since.as_secs()));
+        }
         Ok(())
+    }
+
+    /// The minute sweep finished (its heartbeat, read by `health`).
+    pub fn swept(&self) {
+        *self.swept.lock().unwrap() = std::time::Instant::now();
+    }
+
+    /// Debug builds only: how tests/daemon.rs makes the watchdog find a stuck sweep.
+    #[cfg(debug_assertions)]
+    pub fn stall_sweep(&self) {
+        STALL_SWEEP.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Debug builds only: how tests/daemon.rs makes the watchdog find a stuck lock.
@@ -235,6 +263,10 @@ impl Hub {
     /// closing its tab would (`sessions.end`, reason `idle`; 0 = never) — attached or not, the
     /// daemon's sessions are its own. Then memory's nightly run when it is due.
     pub fn sweep(self: &Arc<Self>) {
+        #[cfg(debug_assertions)]
+        while STALL_SWEEP.load(std::sync::atomic::Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
         super::memory_api::sweep();
         self.sfp.lock().unwrap().expire();
         super::streams::reap();
