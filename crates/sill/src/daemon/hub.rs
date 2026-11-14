@@ -330,8 +330,8 @@ impl Hub {
 
     /// Once a minute (docs/daemon.md §3.6): the policy's idle timeout ends a running session whose
     /// person has sent nothing for `idle_timeout_minutes` and whose agent is between turns, as
-    /// closing its tab would (`sessions.end`, reason `idle`; 0 = never) — attached or not, the
-    /// daemon's sessions are its own. Then memory's nightly run when it is due.
+    /// closing its tab would (`sessions.end`, reason `idle`; 0 = never). Sessions with an
+    /// attached frontend are exempt, including open background tabs. Then memory's nightly run.
     pub fn sweep(self: &Arc<Self>) {
         #[cfg(debug_assertions)]
         while STALL_SWEEP.load(std::sync::atomic::Ordering::Relaxed) {
@@ -350,6 +350,10 @@ impl Hub {
         ids.dedup();
         let sessions = self.with_store(|s| s.sessions()).unwrap_or_default();
         for id in ids {
+            // An open tab is still in use even when the person is only reading it.
+            if self.sfp.lock().unwrap().count(&id) > 0 {
+                continue;
+            }
             let Some(s) = sessions.iter().find(|x| x.id == id) else { continue };
             if s.ended_at.is_some() || self.ending.lock().unwrap().contains_key(&id) || self.persisted_end(&id).ok().flatten().is_some() {
                 continue;
