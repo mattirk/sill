@@ -310,6 +310,9 @@ pub fn create(source: &Source, id: &str, name: &str, path: &Path, operation: &st
     let mut c = git.cmd();
     c.arg("rev-parse").arg("--verify").arg(format!("{branch}^{{tree}}"));
     ok(c, "verify the clone")?;
+    drop(git);
+    // what the person has from it so far: the base (§12 applied snapshot)
+    flow::set_applied(path, &flow::snapshot(path, "sill: base")?)?;
     Ok(Created { path: path.to_path_buf(), branch, base: source.head.clone() })
 }
 
@@ -664,6 +667,7 @@ pub fn expire(retained: &Path, source: &Path, id: &str) -> Result<()> {
     Ok(())
 }
 
+pub mod flow;
 pub mod records;
 
 #[cfg(test)]
