@@ -4174,6 +4174,7 @@ dependencies = [
  "image",
  "ksni",
  "libc",
+ "objc2 0.6.5",
  "percent-encoding",
  "resvg",
  "rfd",

@@ -1,5 +1,6 @@
-//! Sill's look in iced: the theme palette and the conversation's rules — flat and square, no
-//! bubbles or rounded corners, hierarchy by tone and a thin left rule. Every theme is here, the
+//! Sill's look in iced: the theme palette and the conversation's rules — flat, no bubbles,
+//! hierarchy by tone and a thin left rule. Corners are square on Linux and slightly round on the
+//! Mac (`CONTROL`, `CARD`). Every theme is here, the
 //! same struct with other values.
 use iced::widget::{
     button, container, overlay::menu, pick_list, rule, scrollable, svg, text_editor,
@@ -312,6 +313,46 @@ pub fn theme() -> Theme {
     )
 }
 
+/// A control's corners (buttons, hover and selection backgrounds, dropdowns): square on Linux,
+/// slightly round on the Mac, where the window's own corners are round (the person, 2026-11-12).
+pub const CONTROL: f32 = if cfg!(target_os = "macos") { 5.0 } else { 0.0 };
+/// A card's corners (code blocks, chips, menus, the person's message), as `CONTROL`.
+pub const CARD: f32 = if cfg!(target_os = "macos") { 6.0 } else { 0.0 };
+
+/// A control's border: `CONTROL`'s corners.
+fn control_border() -> Border {
+    Border {
+        color: Color::TRANSPARENT,
+        width: 0.0,
+        radius: CONTROL.into(),
+    }
+}
+
+/// A surface in `color` with a card's corners.
+pub fn card(color: Color) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        background: Some(color.into()),
+        border: Border {
+            radius: CARD.into(),
+            ..Border::default()
+        },
+        ..container::Style::default()
+    }
+}
+
+/// A card behind a left rule (`ui::ruled`): only its right corners are a card's, so the rule
+/// stays a straight line.
+pub fn card_right(color: Color) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        background: Some(color.into()),
+        border: Border {
+            radius: iced::border::Radius::default().top_right(CARD).bottom_right(CARD),
+            ..Border::default()
+        },
+        ..container::Style::default()
+    }
+}
+
 fn square(color: Color, width: f32) -> Border {
     Border {
         color,
@@ -354,7 +395,7 @@ pub fn quiet(_: &Theme, status: button::Status) -> button::Style {
             button::Status::Disabled => alpha(P.fg, 0.3),
             _ => alpha(P.fg, 0.75),
         },
-        border: square(Color::TRANSPARENT, 0.0),
+        border: control_border(),
         shadow: Shadow::default(),
         snap: true,
     }
@@ -366,7 +407,7 @@ pub fn row_button(_: &Theme, status: button::Status) -> button::Style {
     button::Style {
         background: hovered.then(|| alpha(P.fg, 0.04).into()),
         text_color: if hovered { P.fg } else { alpha(P.fg, 0.75) },
-        border: square(Color::TRANSPARENT, 0.0),
+        border: control_border(),
         shadow: Shadow::default(),
         snap: true,
     }
@@ -378,7 +419,7 @@ pub fn row_selected(_: &Theme, status: button::Status) -> button::Style {
     button::Style {
         background: Some(alpha(P.accent, if hovered { 0.3 } else { 0.25 }).into()),
         text_color: P.fg,
-        border: square(Color::TRANSPARENT, 0.0),
+        border: control_border(),
         shadow: Shadow::default(),
         snap: true,
     }
@@ -399,7 +440,7 @@ pub fn tinted(color: Color) -> impl Fn(&Theme, button::Status) -> button::Style 
             .into(),
         ),
         text_color: P.fg,
-        border: square(Color::TRANSPARENT, 0.0),
+        border: control_border(),
         shadow: Shadow::default(),
         snap: true,
     }
@@ -428,7 +469,7 @@ pub fn send(_: &Theme, status: button::Status) -> button::Style {
             .into(),
         ),
         text_color: P.fg,
-        border: square(Color::TRANSPARENT, 0.0),
+        border: control_border(),
         shadow: Shadow::default(),
         snap: true,
     }
@@ -449,7 +490,7 @@ pub fn solid(color: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
         button::Style {
             background: Some(background.into()),
             text_color: P.bg,
-            border: square(Color::TRANSPARENT, 0.0),
+            border: control_border(),
             shadow: Shadow::default(),
             snap: true,
         }
@@ -502,7 +543,7 @@ pub fn control(_: &Theme, status: pick_list::Status) -> pick_list::Style {
         } else {
             Color::TRANSPARENT
         }),
-        border: square(Color::TRANSPARENT, 0.0),
+        border: control_border(),
     }
 }
 
@@ -511,7 +552,7 @@ pub fn control(_: &Theme, status: pick_list::Status) -> pick_list::Style {
 pub fn control_menu(_: &Theme) -> menu::Style {
     menu::Style {
         background: P.surface.into(),
-        border: square(P.border, 1.0),
+        border: Border { radius: CARD.into(), ..square(P.border, 1.0) },
         text_color: alpha(P.fg, 0.85),
         selected_text_color: P.fg,
         selected_background: alpha(P.accent, 0.22).into(),

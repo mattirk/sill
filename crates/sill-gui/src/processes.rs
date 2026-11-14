@@ -572,7 +572,7 @@ pub fn panel(view: &SessionView) -> Element<'_, Message> {
             container(card)
                 .padding([6, 10])
                 .width(Fill)
-                .style(style::fill(alpha(P.accent, 0.08))),
+                .style(style::card_right(alpha(P.accent, 0.08))),
         ));
     }
     if state.open && !state.list.is_empty() {
@@ -716,7 +716,7 @@ fn list(view: &SessionView) -> Element<'_, Message> {
             .padding([6, 10])
             .max_height(420)
             .width(Fill)
-            .style(style::fill(P.surface)),
+            .style(style::card_right(P.surface)),
     )
 }
 

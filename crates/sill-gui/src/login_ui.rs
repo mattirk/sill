@@ -508,7 +508,7 @@ impl App {
             container(card)
                 .padding([8, 10])
                 .width(Fill)
-                .style(style::fill(alpha(P.warning, 0.10))),
+                .style(style::card_right(alpha(P.warning, 0.10))),
         ))
     }
 }

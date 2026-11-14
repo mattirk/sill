@@ -23,6 +23,8 @@ mod icons;
 mod keys;
 mod layout;
 mod login_ui;
+#[cfg(target_os = "macos")]
+mod macos;
 mod media;
 mod menu;
 mod names;
@@ -144,7 +146,9 @@ fn main() -> iced::Result {
     .window(iced::window::Settings {
         size: START_SIZE,
         // no title bar: the top bar's empty space moves the window
-        decorations: false,
+        // the Mac keeps the system's frame for its rounded corners, rim and shadow, the title
+        // bar transparent and its buttons hidden (`macos.rs`)
+        decorations: cfg!(target_os = "macos"),
         visible: !options.hidden,
         // closing hides: the window stays, and with it the hotkey and `sill toggle`
         exit_on_close_request: options.demo,
@@ -162,6 +166,8 @@ fn main() -> iced::Result {
             application_id: "sill".into(),
             ..Default::default()
         },
+        #[cfg(target_os = "macos")]
+        platform_specific: macos::platform_specific(),
         ..iced::window::Settings::default()
     })
     .run()
@@ -1862,7 +1868,12 @@ impl App {
             Message::ActivityHover(on) => self.activity_hovered = on,
             Message::Opened(id) => {
                 self.window_id = Some(id);
+                #[cfg(target_os = "macos")]
+                let dress = iced::window::run(id, macos::hide_buttons).discard();
+                #[cfg(not(target_os = "macos"))]
+                let dress = Task::none();
                 return Task::batch([
+                    dress,
                     iced::window::monitor_size(id).map(Message::Monitor),
                     iced::window::run(id, x11_window).map(Message::XId),
                 ]);

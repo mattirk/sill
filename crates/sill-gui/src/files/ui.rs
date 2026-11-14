@@ -132,7 +132,7 @@ impl App {
                 }),
             ));
             chips = chips.push(tip(
-                container(chip).style(style::fill(style::alpha(P.fg, 0.07))),
+                container(chip).style(style::card(style::alpha(P.fg, 0.07))),
                 match said {
                     Some(said) => format!("{}\n{said}", root.path.display),
                     None => root.path.display.clone(),

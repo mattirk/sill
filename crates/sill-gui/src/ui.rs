@@ -285,7 +285,7 @@ impl App {
                 .size(style::TINY),
             )
             .padding([3, 8])
-            .style(style::fill(P.surface)),
+            .style(style::card(P.surface)),
             tooltip::Position::Bottom,
         );
         let tabs = responsive(move |size| {
@@ -1118,7 +1118,7 @@ impl App {
                 )
                 .padding([10, 14])
                 .width(Fill)
-                .style(style::fill(P.code_bg)),
+                .style(style::card_right(P.code_bg)),
             ),
             // the agent's reasoning: Markdown (Codex's summaries are bold
             // titles after blank lines), smaller, dimmed and in italics
@@ -1466,7 +1466,7 @@ impl App {
             container(card)
                 .padding([8, 10])
                 .width(Fill)
-                .style(style::fill(alpha(P.warning, 0.10))),
+                .style(style::card_right(alpha(P.warning, 0.10))),
         )
     }
 
@@ -1921,7 +1921,7 @@ pub(crate) fn bar_tip<'a>(
         content,
         container(text(tip).size(style::SMALL))
             .padding([4, 8])
-            .style(style::fill(P.code_bg)),
+            .style(style::card(P.code_bg)),
         tooltip::Position::Top,
     )
     .into()
@@ -2731,7 +2731,7 @@ fn folded_note<'a>(item_id: &str, message: &'a str, color: Color, open: bool) ->
     if open {
         body = body.push(note(message, color));
     }
-    ruled(3.0, color, container(body).width(Fill).style(style::fill(alpha(color, 0.08))))
+    ruled(3.0, color, container(body).width(Fill).style(style::card_right(alpha(color, 0.08))))
 }
 
 fn note<'a>(message: &'a str, color: Color) -> Element<'a, Message> {
@@ -2745,7 +2745,7 @@ fn note<'a>(message: &'a str, color: Color) -> Element<'a, Message> {
         )
         .padding([6, 12])
         .width(Fill)
-        .style(style::fill(alpha(color, 0.08))),
+        .style(style::card_right(alpha(color, 0.08))),
     )
 }
 
@@ -2783,7 +2783,7 @@ fn diff(diff: &str) -> Element<'_, Message> {
     container(
         container(column)
             .padding([6, 10])
-            .style(style::fill(P.code_bg)),
+            .style(style::card(P.code_bg)),
     )
     .padding(Padding {
         top: 2.0,

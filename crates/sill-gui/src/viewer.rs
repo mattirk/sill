@@ -175,7 +175,7 @@ impl<'a> Viewer<'a, Message> for SillViewer<'a> {
             .style(style::feed_scroll),
         )
         .width(Fill)
-        .style(style::fill(P.code_bg));
+        .style(style::card(P.code_bg));
         let copy = right(
             button(text("Copy").size(style::TINY))
                 .padding([2, 8])

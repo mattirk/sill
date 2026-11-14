@@ -43,6 +43,10 @@ libc = "0.2"
 ksni = { version = "0.3.7", default-features = false, features = ["tokio", "blocking"] }
 resvg = { version = "0.45", default-features = false }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# the Mac's window edge (`macos.rs`)
+objc2 = "0.6"
+
 [dev-dependencies]
 iced_test = "=0.14.0"
 

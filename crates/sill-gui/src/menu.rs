@@ -225,7 +225,7 @@ impl App {
             border: iced::Border {
                 color: P.border,
                 width: 1.0,
-                radius: 0.0.into(),
+                radius: style::CARD.into(),
             },
             ..iced::widget::container::Style::default()
         });

@@ -283,7 +283,7 @@ impl<M: Clone> Widget<M, Theme, Renderer> for Focus<'_, M> {
                     border: Border {
                         color: P.accent,
                         width: 2.0,
-                        radius: 0.0.into(),
+                        radius: crate::style::CONTROL.into(),
                     },
                     ..Quad::default()
                 },
