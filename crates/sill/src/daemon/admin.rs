@@ -418,6 +418,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             | "_sill/files.read"
             | "_sill/files.write"
             | "_sill/settings.get"
+            | "_sill/usage.active_time"
             | "_sill/settings.patch"
             | "_sill/settings.instructions.get"
             | "_sill/settings.instructions.set"
@@ -668,6 +669,15 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             let _: sill_proto::Empty = args(p)?;
             let c: api::Settings = serde_json::from_value(json!(sill_core::config::load()))?;
             bounded(c)
+        }
+        "_sill/usage.active_time" => {
+            let a: api::ActiveTimeQuery = args(p)?;
+            if !(1..=366).contains(&a.days) {
+                return Err(invalid("days must be 1 to 366"));
+            }
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+            let hours = hub.with_store(|store| sill_core::sfp::Journal::new(store)?.active_hours(now.saturating_sub(u64::from(a.days) * 86_400_000), now))?;
+            Ok(json!(api::ActiveTime { hours: hours.into_iter().map(|(hour, ms)| api::ActiveHour { hour, ms }).collect() }))
         }
         "_sill/settings.patch" => {
             if serde_json::to_vec(&p)?.len() > api::TEXT_BYTES {

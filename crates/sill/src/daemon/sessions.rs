@@ -5,7 +5,14 @@ use rusqlite::OptionalExtension;
 use sill_proto::sessions as api;
 
 fn record(store: &Store, s: sill_core::store::Session) -> Result<api::Session> {
+    // a session never attached has no journal state yet: no time worked
+    let (active_ms, active_since_ms) = store.conn()
+        .query_row("SELECT json_extract(state,'$.active_ms'),json_extract(state,'$.active_since_ms') FROM sfp_sessions WHERE session_id=?1", [&s.id],
+            |r| Ok((r.get::<_, Option<i64>>(0)?.unwrap_or(0) as u64, r.get::<_, Option<i64>>(1)?.map(|v| v as u64))))
+        .unwrap_or((0, None));
     Ok(api::Session {
+        active_ms,
+        active_since_ms,
         running: s.ended_at.is_none() && sill_core::session::is_running(&s.id),
         policy_changed: s.ended_at.is_none() && sill_core::changes::home().is_ok_and(|home| {
             let pins = if s.ghost { vec![] } else { store.jail_pins(&s.id).unwrap_or_default() };

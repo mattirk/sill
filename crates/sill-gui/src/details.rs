@@ -66,6 +66,14 @@ impl App {
         }
     }
 
+    /// The worked time of a session this window follows, as its timer shows it.
+    fn worked_ms(&self, id: &str) -> Option<u64> {
+        self.views
+            .get(id)
+            .filter(|view| view.conversation.session.is_some())
+            .and_then(|view| view.attention().worked_ms)
+    }
+
     pub(crate) fn details_load(&mut self, id: String) -> Task<Message> {
         let Some(actions) = self.actions.clone() else {
             return Task::none();
@@ -385,20 +393,14 @@ impl App {
                 s.policy,
                 s.compacted
             )));
-            let start = s.created_at.parse::<u64>().unwrap_or(0);
-            let end = s
-                .ended_at
-                .as_deref()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or_else(|| {
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs()
-                });
+            // the time the agent worked, as the top bar's timer shows it
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
             body = body.push(text(format!(
-                "Duration: {} min",
-                end.saturating_sub(start) / 60
+                "Worked: {}",
+                sill_client::supervision::clock(worked_ms(s, self.worked_ms(&s.session_id), now))
             )));
             if let Some(kept) = page.kept {
                 body = body.push(text(format!("Kept changes: {kept}")));
@@ -419,6 +421,17 @@ impl App {
             .height(Fill)
             .into()
     }
+}
+
+/// The time the agent worked in a session: the live conversation's when this window follows
+/// it (what the timer shows), else the session record's, counted on while it works.
+fn worked_ms(session: &Session, live: Option<u64>, now_ms: u64) -> u64 {
+    live.unwrap_or_else(|| {
+        session.active_ms
+            + session
+                .active_since_ms
+                .map_or(0, |since| now_ms.saturating_sub(since))
+    })
 }
 
 fn timestamp(value: &str) -> String {

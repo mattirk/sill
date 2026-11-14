@@ -18,6 +18,8 @@ use crate::{App, Message, keys};
 
 /// The page's reading width.
 const MEASURE: f32 = 680.0;
+/// The last section: the running-time chart, folded until asked for.
+const RUNNING_TIME: &str = "Agent running time";
 
 /// Shelf mode's width, a share of the main display (sill-gui's own setting).
 const SHELF_SHARES: &[(f32, &str)] = &[
@@ -60,7 +62,7 @@ impl Default for SettingsPage {
             token: sill_client::request_id("settings-page"),
             load_token: String::new(),
             policies: crate::policies::State::default(),
-            collapsed: std::collections::BTreeSet::from(["Keyboard shortcuts", "Policies", "Daemon technical details"]),
+            collapsed: std::collections::BTreeSet::from(["Keyboard shortcuts", "Policies", "Daemon technical details", RUNNING_TIME]),
             shortcuts: None,
             snapshot: None,
             instructions: text_editor::Content::new(),
@@ -843,6 +845,11 @@ impl App {
             }
             page_column = page_column.push(container(card).style(style::fill(P.surface)));
         }
+        let page_column = page_column.push(section(
+            page,
+            RUNNING_TIME,
+            vec![crate::usage::view(snapshot.active_hours.as_deref())],
+        ));
         crate::selection::area(page_column)
             .on_copy(Message::Copy)
             .into()

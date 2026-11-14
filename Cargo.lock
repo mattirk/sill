@@ -4173,6 +4173,7 @@ dependencies = [
  "iced_test",
  "image",
  "ksni",
+ "libc",
  "percent-encoding",
  "resvg",
  "rfd",

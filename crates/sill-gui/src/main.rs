@@ -48,6 +48,7 @@ mod tests;
 mod tool_runs;
 mod tray;
 mod ui;
+mod usage;
 mod viewer;
 mod workspaces;
 mod workspaces_ui;
@@ -2225,6 +2226,7 @@ impl App {
                 },
                 instructions: "Commit after the person has tested a feature.".into(),
                 global_pins: vec![],
+                active_hours: Some(crate::usage::demo()),
             };
             return Task::done(Message::SettingsReply(
                 token,

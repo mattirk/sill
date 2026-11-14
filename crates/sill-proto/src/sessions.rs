@@ -70,6 +70,12 @@ pub struct Session {
     /// otherwise. For the window-level indication naming every such session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_control: Option<crate::host_control::Brief>,
+    /// The session state's `active_ms` and `active_since_ms` (the time the agent worked), so a
+    /// frontend that has not attached shows the same time as one that has.
+    #[serde(default)]
+    pub active_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_since_ms: Option<u64>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SessionKey {

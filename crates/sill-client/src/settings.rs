@@ -70,7 +70,13 @@ pub struct Snapshot {
     pub settings: Settings,
     pub instructions: String,
     pub global_pins: Vec<HostPath>,
+    /// The time agents worked per UTC hour over the last `ACTIVE_DAYS` days; `None` when the
+    /// daemon does not report it.
+    pub active_hours: Option<Vec<sill_proto::admin::ActiveHour>>,
 }
+
+/// How far back the running time is read: a day more than a month of local days needs.
+pub const ACTIVE_DAYS: u16 = 32;
 
 /// Read the settings, the global instructions and the global pins.
 pub fn read(client: &Client) -> anyhow::Result<Snapshot> {
@@ -99,10 +105,21 @@ pub fn read(client: &Client) -> anyhow::Result<Snapshot> {
             break;
         }
     }
+    let active_hours = client
+        .has_capability("sill.usage")
+        .then(|| {
+            client.call::<sill_proto::admin::ActiveTime>(
+                "_sill/usage.active_time",
+                sill_proto::admin::ActiveTimeQuery { days: ACTIVE_DAYS },
+            )
+        })
+        .and_then(Result::ok)
+        .map(|time| time.hours);
     Ok(Snapshot {
         settings,
         instructions: instructions.text,
         global_pins,
+        active_hours,
     })
 }
 

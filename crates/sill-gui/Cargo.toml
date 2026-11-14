@@ -38,6 +38,8 @@ unicode-width = "0.2"
 # manager to activate it (the daemon's x11rb, same version)
 x11rb = { version = "0.14", features = ["randr"] }
 rustix.workspace = true
+# the local day of a time (localtime_r), for the running-time chart
+libc = "0.2"
 ksni = { version = "0.3.7", default-features = false, features = ["tokio", "blocking"] }
 resvg = { version = "0.45", default-features = false }
 

@@ -41,6 +41,7 @@ impl<'a> Journal<'a> {
           CREATE TABLE IF NOT EXISTS sfp_blocks (
             session_id TEXT NOT NULL, item_id TEXT NOT NULL, block_id TEXT NOT NULL,
             retired INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(session_id,item_id,block_id));
+          CREATE TABLE IF NOT EXISTS active_hours (hour INTEGER PRIMARY KEY, ms INTEGER NOT NULL);
           CREATE TABLE IF NOT EXISTS sfp_events (
             session_id TEXT NOT NULL, seq INTEGER NOT NULL, json TEXT NOT NULL, bytes INTEGER NOT NULL,
             PRIMARY KEY(session_id,seq));
@@ -177,6 +178,38 @@ impl<'a> Journal<'a> {
         serde_json::from_str(&json.ok_or_else(|| error("not_found", "session has no SFP state"))?).map_err(Into::into)
     }
 
+    /// Add a completed working interval to the hours it covers. The hours outlive the session:
+    /// they are what the agents worked, not what is still stored of it.
+    fn record_active(&self, start: u64, end: u64) -> Result<()> {
+        for (hour, ms) in hour_shares(start, end) {
+            self.store.conn().execute(
+                "INSERT INTO active_hours(hour,ms) VALUES(?1,?2) ON CONFLICT(hour) DO UPDATE SET ms=ms+excluded.ms",
+                params![hour as i64, ms as i64],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The time agents worked in each UTC hour from `since_ms` to `now_ms`, over all sessions and
+    /// summed where several worked at once: (Unix hour, milliseconds), ascending, hours without
+    /// work left out. Intervals still running count up to `now_ms`.
+    pub fn active_hours(&self, since_ms: u64, now_ms: u64) -> Result<Vec<(u64, u64)>> {
+        let mut hours = std::collections::BTreeMap::new();
+        let conn = self.store.conn();
+        let mut stored = conn.prepare("SELECT hour,ms FROM active_hours WHERE hour>=?1")?;
+        for row in stored.query_map([(since_ms / HOUR_MS) as i64], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))? {
+            let (hour, ms) = row?;
+            *hours.entry(hour as u64).or_insert(0u64) += ms as u64;
+        }
+        let mut running = conn.prepare("SELECT json_extract(state,'$.active_since_ms') FROM sfp_sessions WHERE json_extract(state,'$.active_since_ms') IS NOT NULL")?;
+        for start in running.query_map([], |r| r.get::<_, i64>(0))? {
+            for (hour, ms) in hour_shares((start? as u64).max(since_ms / HOUR_MS * HOUR_MS), now_ms) {
+                *hours.entry(hour).or_insert(0) += ms;
+            }
+        }
+        Ok(hours.into_iter().collect())
+    }
+
     pub fn cursor(&self, session_id: &str) -> Result<Cursor> {
         self.exists(session_id)?;
         let seq: Option<i64> = self.store.conn().query_row("SELECT seq FROM sfp_sessions WHERE session_id=?1", [session_id], |r| r.get(0)).optional()?;
@@ -225,7 +258,9 @@ impl<'a> Journal<'a> {
                         let previous = self.session(session_id)?;
                         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default().as_millis() as u64;
-                        update_active_time(&previous, session, now);
+                        if let Some((start, end)) = update_active_time(&previous, session, now) {
+                            self.record_active(start, end)?;
+                        }
                     }
                     Event::ItemCreated { item } if item.created_seq.is_empty() => item.created_seq = seq.to_string(),
                     Event::SubmissionUpdated { submission } if submission.accepted_seq.is_empty() => submission.accepted_seq = seq.to_string(),
@@ -599,6 +634,26 @@ mod tests {
     }
 
     #[test]
+    fn working_intervals_are_kept_by_hour_and_outlive_their_session() {
+        const H: u64 = 3_600_000;
+        assert_eq!(hour_shares(H - 1000, 2 * H + 500), [(0, 1000), (1, H), (2, 500)]);
+        assert!(hour_shares(5, 5).is_empty());
+        let f = Fixture::new();
+        let j = f.journal();
+        j.record_active(10 * H + 1000, 11 * H + 2000).unwrap();
+        j.record_active(10 * H + 5000, 10 * H + 6000).unwrap();
+        // a session working now counts up to the moment asked about
+        let mut working = j.session(&f.id).unwrap();
+        working.activity = "working".into();
+        working.active_since_ms = Some(12 * H + 100);
+        j.apply(&f.id, 0, &Event::SessionUpdated { session: working }).unwrap();
+        assert_eq!(j.active_hours(0, 12 * H + 700).unwrap(), [(10, H), (11, 2000), (12, 600)]);
+        assert_eq!(j.active_hours(11 * H + 10, 12 * H + 700).unwrap(), [(11, 2000), (12, 600)]);
+        f.store.delete(&f.id).unwrap();
+        assert_eq!(j.active_hours(0, 13 * H).unwrap(), [(10, H), (11, 2000)]);
+    }
+
+    #[test]
     fn active_time_survives_a_generation_change_with_stale_producer_totals() {
         let f = Fixture::new();
         let mut previous = f.journal().session(&f.id).unwrap();
@@ -832,16 +887,34 @@ mod tests {
 }
 
 /// Carry the durable total forward even when a producer holds an older state copy.
-fn update_active_time(previous: &SessionState, next: &mut SessionState, now: u64) {
+/// Returns the working interval this update completed, in Unix milliseconds.
+fn update_active_time(previous: &SessionState, next: &mut SessionState, now: u64) -> Option<(u64, u64)> {
     next.active_ms = previous.active_ms;
     next.active_since_ms = previous.active_since_ms;
     let working = next.activity == "working" && next.lifecycle == "open";
+    let mut completed = None;
     if !working || previous.agent_generation_id != next.agent_generation_id {
         if let Some(start) = next.active_since_ms.take() {
             next.active_ms = next.active_ms.saturating_add(now.saturating_sub(start));
+            completed = Some((start, now));
         }
     }
     if working && next.active_since_ms.is_none() { next.active_since_ms = Some(now); }
+    completed
+}
+
+const HOUR_MS: u64 = 3_600_000;
+
+/// A working interval as its share of each UTC hour it covers: (Unix hour, milliseconds).
+fn hour_shares(start: u64, end: u64) -> Vec<(u64, u64)> {
+    let mut shares = Vec::new();
+    let mut at = start;
+    while at < end {
+        let next = ((at / HOUR_MS + 1) * HOUR_MS).min(end);
+        shares.push((at / HOUR_MS, next - at));
+        at = next;
+    }
+    shares
 }
 
 /// The retry identity of a request record that may gain optional fields within sfp/1.

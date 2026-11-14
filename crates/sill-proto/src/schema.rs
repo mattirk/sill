@@ -135,6 +135,7 @@ pub const METHODS: &[Method] = &[
     req::<crate::admin::FileRead, crate::admin::FileBytes>("_sill/files.read", "Read at most 1 MiB from a regular daemon-host file; chunks are not an immutable snapshot."),
     req::<crate::admin::FileWrite, crate::Empty>("_sill/files.write", "Atomically replace a daemon-host file with at most 1 MiB. Do not blindly retry; read the file after uncertainty."),
     req::<crate::Empty, crate::admin::Settings>("_sill/settings.get", "Read daemon settings."),
+    req_needing::<crate::admin::ActiveTimeQuery, crate::admin::ActiveTime>("_sill/usage.active_time", "sill.usage", 1, "Read the time agents worked per UTC hour over the last days, summed over all sessions including deleted ones."),
     req::<crate::admin::SettingsPatch, crate::Empty>("_sill/settings.patch", "Apply named settings changes. Read settings after an uncertain outcome before retrying."),
     req::<crate::Empty, crate::Text>("_sill/settings.instructions.get", "Read global instructions."),
     req::<crate::admin::Text, crate::Empty>("_sill/settings.instructions.set", "Replace global instructions (at most 1 MiB). Read back after uncertainty before retrying."),

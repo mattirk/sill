@@ -580,6 +580,7 @@ named request/result records. They do not make the development identity a stable
 | `_sill/files.home`, `_sill/files.metadata`, `_sill/files.list` | Exact daemon-host paths; live directory keyset pages (1–128); byte identities, display text ignored. |
 | `_sill/files.read`, `_sill/files.write` | Base64 regular-file data; reads use decimal byte offsets and chunks up to 1 MiB; writes atomically replace up to 1 MiB. Reads refuse symlinks. |
 | `_sill/settings.get`, `_sill/settings.patch` | Explicit settings record and tagged changes; unknown change kinds rejected; at most 64 changes and 1 MiB input. |
+| `_sill/usage.active_time` | `sill.usage: 1` (2026-11-10). `{days}` (1–366) → `{hours: [{hour, ms}]}`: milliseconds agents worked in each Unix hour, ascending, empty hours left out, summed over sessions (deleted ones included; working at once adds up) and counting intervals still running. The journal adds each completed working interval to the hours it covers; work from before 2026-11-10 is not reconstructed. |
 | `_sill/settings.instructions.get`, `_sill/settings.instructions.set` | Global instruction text, at most 1 MiB input. |
 | `_sill/policy.list`, `_sill/policy.get` | Policy names and the TOML policy document. |
 | `_sill/procs.list`, `_sill/procs.tail`, `_sill/procs.stop`, `_sill/procs.dismiss` | Session managed processes; bounded live pages, tail up to 10,000 lines; stop requests termination, not proof of exit. |
@@ -681,7 +682,9 @@ Session state includes `active_ms` (completed working intervals in milliseconds)
 `active_since_ms` (Unix milliseconds when the current interval began, or null).
 The journal accumulates only `working` activity in an open session; waiting for input,
 idle, unknown, and ended states stop the clock. Snapshots preserve the total across
-frontend reconnects. Older state defaults to zero; past work is not reconstructed.
+frontend reconnects. Older state defaults to zero; past work is not reconstructed. Session records
+(`_sill/sessions.get`, `.list`) carry the same two fields, so a frontend that has not attached
+shows the same worked time.
 
 Session state's `summarizing` (2026-11-10) is `checkpoint` while the turn running is sill's
 *Summarize now* turn, `end` while it is the session's closing summary (a checkpoint becomes `end`

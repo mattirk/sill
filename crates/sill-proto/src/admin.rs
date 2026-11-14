@@ -62,6 +62,27 @@ pub struct FileWrite {
 pub struct Text {
     pub text: String,
 }
+/// `_sill/usage.active_time`: how far back to look.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ActiveTimeQuery {
+    /// Whole days before now, 1 to 366.
+    pub days: u16,
+}
+/// The time agents worked, by UTC hour, so a frontend can group it into its own local days.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct ActiveTime {
+    /// Ascending; hours without work are left out.
+    pub hours: Vec<ActiveHour>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ActiveHour {
+    /// Unix time in whole hours.
+    pub hour: u64,
+    /// Milliseconds worked in that hour, summed over sessions (more than an hour when several
+    /// agents worked at once).
+    pub ms: u64,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyKey {
