@@ -2446,6 +2446,12 @@ impl App {
             Event::RemovePin(path) => {
                 return self.settings_call(settings::remove_global_pin(path), |_| String::new());
             }
+            Event::RestoreNetworkPrompts => {
+                return self.settings_call(
+                    settings::patch(sill_proto::admin::SettingChange::NetworkQuietHosts { value: vec![] }),
+                    |_| "Network prompts restored. Network access is unchanged.".into(),
+                );
+            }
             Event::Compact => {
                 page.said = Some("Compacting…".into());
                 return self.settings_call(settings::compact(), |v| {

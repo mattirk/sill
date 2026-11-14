@@ -97,6 +97,7 @@ pub enum Event {
     PinPath(String),
     AddPin,
     RemovePin(HostPath),
+    RestoreNetworkPrompts,
     Compact,
     DeleteAll,
     ToggleWhere,
@@ -578,6 +579,19 @@ impl App {
             .spacing(8)
             .align_y(Alignment::Center),
         );
+        page_column = page_column.push(section(
+            page,
+            "Network",
+            vec![setting(
+                "Dismissed network prompts",
+                Some("Restore prompts hidden with Don’t ask again across all sessions. Network access stays unchanged."),
+                quiet_button(
+                    "Restore all",
+                    (!s.network_quiet_hosts.is_empty())
+                        .then(|| event(Event::RestoreNetworkPrompts)),
+                ),
+            )],
+        ));
         page_column = page_column.push(section(
             page,
             "Sessions",

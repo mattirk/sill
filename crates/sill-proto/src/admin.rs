@@ -257,6 +257,7 @@ pub struct ProcessesPage {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Settings {
+    pub network_quiet_hosts: Vec<String>,
     pub theme: String,
     pub drawer_follow_changes: Option<bool>,
     pub hotkey: Option<String>,
@@ -277,6 +278,7 @@ pub struct Settings {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SettingChange {
+    NetworkQuietHosts { value: Vec<String> },
     Theme { value: String },
     DrawerFollowChanges { value: Option<bool> },
     Hotkey { value: Option<String> },

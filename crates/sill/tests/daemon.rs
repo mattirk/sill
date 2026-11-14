@@ -1043,6 +1043,17 @@ fn public_network_denials_are_live_bounded_pages() {
     let page=c.call("_sill/policy.denied",json!({"session_id":other_id,"limit":128})).unwrap();
     assert!(page["result"]["quiet"].as_array().unwrap().contains(&json!("sdmntprcentralus.oaiusercontent.com")),"{page}");
     assert!(!runtime.join("session-allowed-hosts").exists());
+    let settings=c.call("_sill/settings.get",json!({})).unwrap();
+    assert_eq!(settings["result"]["network_quiet_hosts"],json!(["sdmntprcentralus.oaiusercontent.com"]));
+    let restored=c.call("_sill/settings.patch",json!({"changes":[{"type":"network_quiet_hosts","value":[]}]})).unwrap();
+    assert!(restored.get("error").is_none(),"{restored}");
+    for id in [session, other_id] {
+        let page=c.call("_sill/policy.denied",json!({"session_id":id,"limit":128})).unwrap();
+        assert!(!page["result"]["quiet"].as_array().unwrap().contains(&json!("sdmntprcentralus.oaiusercontent.com")),"{page}");
+    }
+    let config=std::fs::read_to_string(d.dir.join("config/sill/sill.toml")).unwrap();
+    assert!(!config.contains("sdmntprcentralus.oaiusercontent.com"));
+    assert!(!runtime.join("session-allowed-hosts").exists());
     // Allow is session-only and concrete (2026-11-06); a wildcard is only an agent-wide default,
     // saved deliberately by a frontend that shows permission state
     let allowed=c.call("_sill/policy.allow_host",json!({"session_id":session,"host":"*.example.test"})).unwrap();
