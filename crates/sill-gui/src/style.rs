@@ -401,6 +401,23 @@ pub fn quiet(_: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// A quiet button with a thin border: an action offered beside the accent one, not competing
+/// with it (the shelf's Crosscheck).
+pub fn outlined(theme: &Theme, status: button::Status) -> button::Style {
+    let mut style = quiet(theme, status);
+    style.border = Border { color: alpha(P.fg, if matches!(status, button::Status::Disabled) { 0.12 } else { 0.25 }), width: 1.0, radius: CONTROL.into() };
+    style
+}
+
+/// [`outlined`] in the accent: the one action of an opened Crosscheck result.
+pub fn outlined_accent(theme: &Theme, status: button::Status) -> button::Style {
+    let mut style = quiet(theme, status);
+    let dim = if matches!(status, button::Status::Disabled) { 0.4 } else { 1.0 };
+    style.text_color = alpha(P.accent, dim);
+    style.border = Border { color: alpha(P.accent, 0.8 * dim), width: 1.0, radius: CONTROL.into() };
+    style
+}
+
 /// A row that is the button (a tool line): no chrome until hovered (`.sill-tool-line`).
 pub fn row_button(_: &Theme, status: button::Status) -> button::Style {
     let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);

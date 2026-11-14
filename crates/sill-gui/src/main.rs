@@ -6,6 +6,7 @@ mod annotation_tests;
 mod box_ui;
 mod changes_ui;
 mod control;
+mod crosscheck;
 mod daemon_ui;
 mod demo;
 mod desktop;
@@ -139,6 +140,8 @@ fn main() -> iced::Result {
     // choices and operate sessions using Desktop development capabilities (docs/protocol.md)
     sill_proto::client::declare_capability(permissions::CAPABILITY);
     sill_proto::client::declare_capability(host_control::CAPABILITY);
+    // a second opinion on a workspace's work, on the shelf above the prompt (docs/crosscheck.md)
+    sill_proto::client::declare_capability(sill_proto::crosscheck::CAPABILITY);
     fonts::install();
     // the Mac's daemon runs in a VM of the window's own
     #[cfg(target_os = "macos")]
@@ -427,6 +430,7 @@ pub enum Message {
     Changes(changes_ui::Event),
     /// A session's workspaces (docs/parallel-coding.md §12).
     Workspaces(workspaces::Event),
+    Crosscheck(crosscheck::Event),
     /// The herring's pages: one shown in the conversation's place.
     ShowPage(Page),
     Settings(settings_ui::Event),
@@ -724,6 +728,8 @@ pub struct App {
     /// What the Changes page lists, as last read: kept while the page is closed, so opening it
     /// shows that at once while the new listing is read.
     pub changes_listing: changes_ui::Listing,
+    /// Every workspace's Crosscheck review, and the Reviewer setting (`crosscheck`).
+    pub crosscheck: crosscheck::State,
     name_editor: Option<names::Editor>,
     details: Option<details::Page>,
     details_drafts: BTreeMap<String, details::Draft>,
@@ -886,6 +892,7 @@ impl App {
             agent_icons_queued: BTreeSet::new(),
             last_page: Page::Changes,
             changes_listing: changes_ui::Listing::default(),
+            crosscheck: crosscheck::State::default(),
             daemon_settings: None,
             pending_choose: None,
             armed_close: None,
@@ -1377,6 +1384,10 @@ impl App {
         // The spinner and timer reveal animate between these samples.
         if self.current().is_some_and(|v| v.conversation.busy()) {
             subscriptions.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick));
+        }
+        // a Reviewer at work: its line's latest step and time
+        if self.crosscheck.ticking() && !self.demo {
+            subscriptions.push(iced::time::every(Duration::from_secs(2)).map(|_| Message::Crosscheck(crosscheck::Event::Poll)));
         }
         // the VM on its way somewhere while Settings shows it
         if self.vm_ticking() {
@@ -2150,6 +2161,7 @@ impl App {
             Message::DaemonSettings(_, Err(_)) => self.settings_pending = false,
             Message::Changes(event) => return self.changes_event(event),
             Message::Workspaces(event) => return self.workspaces_event(event),
+            Message::Crosscheck(event) => return self.crosscheck_event(event),
             Message::CloseTab(id) => {
                 let ghost = self
                     .all_sessions
@@ -2311,7 +2323,7 @@ impl App {
                     category: self.settings.settings_category,
                     ..settings_ui::SettingsPage::default()
                 });
-                Task::batch([self.settings_load(), self.vm_event(vm_ui::Event::Read)])
+                Task::batch([self.settings_load(), self.vm_event(vm_ui::Event::Read), self.crosscheck_reviewers_load()])
             }
         }
     }

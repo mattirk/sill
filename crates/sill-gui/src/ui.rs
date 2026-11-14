@@ -26,7 +26,7 @@ use crate::layout::{self, Drawer};
 use crate::style::{self, P, alpha};
 use crate::{App, Message, Pick, SessionView, Tab, icons, keys, rows, selection, viewer};
 
-const MONO_FONT: Font = Font::with_name(crate::fonts::MONO_FAMILY);
+pub(crate) const MONO_FONT: Font = Font::with_name(crate::fonts::MONO_FAMILY);
 /// The window's resize edges, over its outer pixels: wide enough (the person, 2026-11-07).
 const EDGE: f32 = 5.0;
 /// A pasted image's thumbnail in the conversation: this share of the conversation's width.
@@ -1336,13 +1336,14 @@ impl App {
         let line = button(
             row![
                 text(if open { "▾" } else { "▸" }).size(style::SMALL).color(quiet).width(14),
-                text(crate::folds::label(purpose, running))
+                text(crate::folds::said(purpose, inside[0]).unwrap_or_else(|| crate::folds::label(purpose, running).to_string()))
                     .size(style::SMALL)
-                    .color(quiet)
+                    .color(if purpose == sill_proto::crosscheck::FIX_PURPOSE { P.fg } else { quiet })
                     .width(Fill),
-                text(match inside.len() {
-                    1 => "1 item".to_string(),
-                    n => format!("{n} items"),
+                text(match (purpose, inside.len()) {
+                    (sill_proto::crosscheck::FIX_PURPOSE, _) => if open { "hide" } else { "show" }.to_string(),
+                    (_, 1) => "1 item".to_string(),
+                    (_, n) => format!("{n} items"),
                 })
                 .size(style::TINY)
                 .color(alpha(P.fg, 0.4)),
@@ -3221,6 +3222,16 @@ enum Indicator {
     Spinner(Color),
     Dot(Color),
     Pulse(Color),
+}
+
+/// The busy spinner by itself, as the activity shows it.
+pub(crate) fn spinner<'a>(color: Color) -> Element<'a, Message> {
+    activity_canvas(Indicator::Spinner(color), None)
+}
+
+/// A status dot the size of the spinner.
+pub(crate) fn dot<'a>(color: Color) -> Element<'a, Message> {
+    activity_canvas(Indicator::Dot(color), None)
 }
 
 /// The activity: its indicator, with the timer beside it when shown.

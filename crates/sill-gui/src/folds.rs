@@ -7,6 +7,8 @@ use std::ops::Range;
 
 use sill_proto::sfp::Item;
 
+const FIX: &str = sill_proto::crosscheck::FIX_PURPOSE;
+
 /// One row of the feed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Row {
@@ -31,7 +33,10 @@ pub fn rows<'a>(
     purpose: impl Fn(&'a Item) -> Option<&'a str>,
     stands_alone: impl Fn(&Item) -> bool,
 ) -> Vec<Row> {
-    let folded = |item: &'a Item| purpose(item).filter(|why| !stands_alone(item) && !(*why == "commit" && item.kind == "agent"));
+    // of a Crosscheck fix request only the prompt folds: the turn it starts is the agent's work
+    let folded = |item: &'a Item| {
+        purpose(item).filter(|why| !stands_alone(item) && !(*why == "commit" && item.kind == "agent") && !(*why == FIX && item.kind != "user"))
+    };
     let mut rows = Vec::new();
     let mut plain = 0;
     let mut index = 0;
@@ -72,6 +77,17 @@ fn push_plain(rows: &mut Vec<Row>, items: &[&Item], range: Range<usize>, stands_
     );
 }
 
+/// What a fold's line says when it is the folded prompt's own first line: a Crosscheck fix
+/// request, which sill wrote and begins with what the person pressed for ("Fix the 2 problems
+/// codex found"). Other folds say [`label`].
+pub fn said(purpose: &str, first: &Item) -> Option<String> {
+    if purpose != FIX || first.kind != "user" {
+        return None;
+    }
+    let text = first.content.iter().find_map(|c| c.text.as_deref())?;
+    text.lines().map(str::trim).find(|l| !l.is_empty()).map(str::to_string)
+}
+
 /// The fold's line: what sill asked for, and whether the agent is still at it.
 pub fn label(purpose: &str, running: bool) -> &'static str {
     match (purpose, running) {
@@ -79,6 +95,7 @@ pub fn label(purpose: &str, running: bool) -> &'static str {
         ("summary", false) => "Session summary",
         ("commit", true) => "Committing for Apply…",
         ("commit", false) => "Committed for Apply",
+        (FIX, _) => "Asked to fix what Crosscheck found",
         (_, true) => "Working for sill…",
         (_, false) => "Done for sill",
     }
@@ -163,5 +180,22 @@ mod tests {
                 Row::Items(2..3),
             ]
         );
+    }
+
+    #[test]
+    fn of_a_crosscheck_fix_request_only_the_prompt_folds() {
+        let mut prompt = item("p", "user", None, false);
+        prompt.content = vec![serde_json::from_value(serde_json::json!({"block_id": "b", "type": "text", "text": "\nFix the 2 problems codex found\n\nA second opinion…"})).unwrap()];
+        let items = [item("before", "agent", Some("t0"), false), prompt, item("work", "tool", Some("t1"), true), item("answer", "agent", Some("t1"), false)];
+        let refs: Vec<&Item> = items.iter().collect();
+        let purpose = |i: &Item| match i.item_id.as_str() {
+            "p" | "work" | "answer" => Some(FIX),
+            _ => None,
+        };
+        let rows = rows(&refs, purpose, |_| false);
+        assert_eq!(rows, [Row::Items(0..1), Row::Fold(1..2, FIX.to_string()), Row::Items(2..3), Row::Items(3..4)]);
+        assert_eq!(said(FIX, refs[1]).as_deref(), Some("Fix the 2 problems codex found"));
+        assert_eq!(said("commit", refs[1]), None);
+        assert_eq!(said(FIX, refs[2]), None);
     }
 }

@@ -593,6 +593,74 @@ fn render_workspaces() {
     render_size(&app, "workspaces-3-checkout-only", (1000.0, 500.0));
 }
 
+/// Crosscheck (docs/crosscheck.md): the line under a workspace's line on the shelf in each of
+/// its states — the button, a Reviewer at work (closed and with its steps), no problems,
+/// problems (closed and open), the work changed since, could not finish — and the Reviewer in
+/// Settings. Compared by eye with the drawings the design was agreed from.
+#[test]
+#[ignore = "writes the Crosscheck PNGs for review"]
+fn render_crosscheck() {
+    use crate::Message;
+    use crate::crosscheck::{Event, tests::run};
+    let (mut app, _) = App::new(true, None);
+    for _ in 0..=demo::CHUNKS.len() {
+        let _ = app.update(Message::DemoTick);
+    }
+    let _ = app.update(Message::Answer { question_id: "demo-question".into(), option_id: "allow".into() });
+    let host = |p: &str| sill_proto::sessions::HostPath::from_path(std::path::Path::new(p));
+    let ws = serde_json::json!({"workspace_id": "ws-1", "name": "sill", "session_id": "demo", "source": host("/home/demo/sill"),
+        "source_branch": "main", "base": "b0", "branch": "sill/sill-ws-1", "path": host("/ws/sill-ws-1"),
+        "state": "open", "operation": null, "limitations": [], "created_at": "t", "updated_at": "t"});
+    let detail = serde_json::json!({"workspace": ws, "revision": {"tip": "t1", "worktree": "", "destination_branch": "main", "destination_tip": "b0"},
+        "summary": {"commits": 1, "files": 1, "added": "4", "removed": "2", "uncommitted": []}, "needs_rebase": false});
+    app.views.get_mut("demo").unwrap().workspaces.loaded = Some(sill_client::workspaces::Loaded {
+        view: serde_json::from_value(serde_json::json!({"workspaces_mode": true, "workspaces": [ws], "live": []})).unwrap(),
+        details: vec![serde_json::from_value(detail).unwrap()],
+    });
+    let size = (720.0, 420.0);
+    app.crosscheck.offered = true;
+    render_size(&app, "crosscheck-1-before", size);
+    let steps = ["Read AGENTS.md", "Compared the work with where it leaves the checkout: 1 file", "Read crates/sill-core/src/jail.rs around the changed test", "Read the VM mount configuration", "Running the jail tests"];
+    app.crosscheck.runs.insert("ws-1".into(), run("reviewing", false, &[], &steps));
+    render_size(&app, "crosscheck-2-reviewing", size);
+    let _ = app.update(Message::Crosscheck(Event::Toggle("ws-1".into())));
+    render_size(&app, "crosscheck-2b-reviewing-steps", size);
+    let _ = app.update(Message::Crosscheck(Event::Toggle("ws-1".into())));
+    app.crosscheck.runs.insert("ws-1".into(), run("complete", false, &[], &[]));
+    render_size(&app, "crosscheck-3-no-problems", size);
+    let problems = [
+        ("The test now accepts any path under /var/lib/sill, so a layer inside the state directory would pass.", Some(("crates/sill-core/src/jail.rs", 1412))),
+        ("The comment above the assertion still describes the old, broader check.", Some(("crates/sill-core/src/jail.rs", 1405))),
+    ];
+    app.crosscheck.runs.insert("ws-1".into(), run("complete", false, &problems, &[]));
+    render_size(&app, "crosscheck-4-problems", size);
+    let _ = app.update(Message::Crosscheck(Event::Toggle("ws-1".into())));
+    render_size(&app, "crosscheck-5-problems-open", size);
+    let _ = app.update(Message::Crosscheck(Event::Toggle("ws-1".into())));
+    app.crosscheck.runs.insert("ws-1".into(), run("complete", true, &problems, &[]));
+    render_size(&app, "crosscheck-7-changed-since", size);
+    app.crosscheck.runs.insert("ws-1".into(), run("failed", false, &[], &[]));
+    render_size(&app, "crosscheck-8-could-not-finish", size);
+
+    // Settings → Agent behaviour → Crosscheck
+    let task = app.update(Message::ShowPage(crate::Page::Settings));
+    crate::tests::settle_task(&mut app, task);
+    app.settings_page.as_mut().unwrap().category = crate::settings_ui::Category::AgentBehaviour;
+    for section in ["Instructions", "Policies", "Network"] {
+        app.settings_page.as_mut().unwrap().collapsed.insert(section);
+    }
+    let mut setup = crate::crosscheck::tests::setup();
+    setup.reviewers = vec![sill_proto::crosscheck::Reviewer { name: String::new(), agent: "codex".into(), options: [("effort".to_string(), "high".to_string())].into() }];
+    let _ = app.update(Message::Crosscheck(Event::Reviewers(Ok(setup.clone()))));
+    render_size(&app, "crosscheck-9-settings-reviewer", size);
+    setup.reviewers[0].agent = "claude".into();
+    let _ = app.update(Message::Crosscheck(Event::Reviewers(Ok(setup.clone()))));
+    render_size(&app, "crosscheck-9b-settings-reviewer-unknown", size);
+    setup.reviewers.clear();
+    let _ = app.update(Message::Crosscheck(Event::Reviewers(Ok(setup))));
+    render_size(&app, "crosscheck-9c-settings-automatic", size);
+}
+
 /// A run of shell calls between the demo's first call and its answer, as Claude makes them:
 /// several commands to a call, joined by `;` and `&&`. Grouped by program (`tool_runs`), a call
 /// that ran several commands shown as a line for each: folded, with one group opened, and with

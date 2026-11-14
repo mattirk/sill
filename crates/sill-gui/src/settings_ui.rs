@@ -772,6 +772,8 @@ impl App {
             )],
         ));
 
+            page_column = page_column.push(section(page, "Crosscheck", self.crosscheck_settings()));
+
             page_column = page_column.push(section(
                 page,
                 "Policies",

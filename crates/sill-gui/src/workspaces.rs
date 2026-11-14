@@ -297,12 +297,15 @@ impl App {
                 if view.workspaces.diff.as_ref().is_some_and(|(id, _)| loaded.detail(id).is_none_or(|d| !ws::pending(d))) {
                     view.workspaces.diff = None;
                 }
+                // each workspace's review, read with it
+                let reviews: Vec<String> = loaded.details.iter().map(|d| d.workspace.workspace_id.clone()).collect();
                 view.workspaces.loaded = Some(loaded);
+                let mut tasks: Vec<Task<Message>> = reviews.into_iter().map(|id| self.crosscheck_load(id)).collect();
                 // the drawer reads the agent's copies: what it showed was the person's checkout
                 if self.drawer.set_aliases(&session, aliases) {
-                    return self.files_refresh(&session);
+                    tasks.push(self.files_refresh(&session));
                 }
-                Task::none()
+                Task::batch(tasks)
             }
             Event::Disarm(session) => {
                 if let Some(view) = self.views.get_mut(&session) {

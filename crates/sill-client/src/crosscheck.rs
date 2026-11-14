@@ -11,8 +11,22 @@ pub fn set_reviewers(actions: &Actions, reviewers: &[api::Reviewer]) -> anyhow::
     actions.once(|c| c.call("_sill/crosscheck.set_reviewers", api::SetReviewers { reviewers: reviewers.into() }))
 }
 
-pub fn get(actions: &Actions, workspace_id: &str) -> anyhow::Result<api::Current> {
-    actions.reading(|c| c.call("_sill/crosscheck.get", api::WorkspaceKey { workspace_id: workspace_id.into() }))
+/// A workspace's review as a frontend asks for it: whether this daemon does Crosscheck at all,
+/// and the review when there is one.
+#[derive(Debug, Clone)]
+pub struct Seen {
+    pub offered: bool,
+    pub run: Option<api::Run>,
+}
+
+pub fn get(actions: &Actions, workspace_id: &str) -> anyhow::Result<Seen> {
+    actions.reading(|c| {
+        if !c.has_capability(api::CAPABILITY) {
+            return Ok(Seen { offered: false, run: None });
+        }
+        let current: api::Current = c.call("_sill/crosscheck.get", api::WorkspaceKey { workspace_id: workspace_id.into() })?;
+        Ok(Seen { offered: true, run: current.run })
+    })
 }
 
 pub fn start(actions: &Actions, request: &api::Start) -> anyhow::Result<api::Run> {

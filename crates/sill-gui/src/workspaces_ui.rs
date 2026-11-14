@@ -57,6 +57,10 @@ impl App {
                 ));
                 line = line.push(quiet_button("Abort rebase", ev(Event::Abort(session.clone(), id.clone()))));
             } else {
+                // a second opinion before applying (docs/crosscheck.md)
+                if let Some(crosscheck) = self.crosscheck_button(d) {
+                    line = line.push(crosscheck);
+                }
                 let onto = ws::other_branch(d)
                     .map(|(_, now)| now)
                     .filter(|now| state.apply_armed.as_ref().is_some_and(|(w, b)| *w == id && b == now));
@@ -100,6 +104,9 @@ impl App {
             };
             line = line.push(quiet_button(discard, ev(Event::Discard(session.clone(), id.clone()))));
             shelf = shelf.push(line);
+            for row in self.crosscheck_rows(view, d) {
+                shelf = shelf.push(row);
+            }
             if state.menu.as_deref() == Some(id.as_str()) && !rebase_stopped {
                 shelf = shelf.push(
                     row![
