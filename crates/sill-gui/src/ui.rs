@@ -1102,28 +1102,27 @@ impl App {
             stop_button()
         } else {
             keys::press_maybe(
-                button(
-                    svg(icons::send())
-                        .width(12)
-                        .height(12)
-                        .style(move |theme, status| {
-                            // dark on the accent only when the button lights up: there is a prompt
-                            if sendable {
-                                style::send_arrow(theme, status)
-                            } else {
-                                style::send_arrow(theme, svg::Status::Idle)
-                            }
-                        }),
-                )
+                button(svg(icons::send()).width(12).height(12).style(
+                    move |theme, status| {
+                        // dark on the accent only when the button lights up: there is a prompt
+                        if sendable {
+                            style::send_arrow(theme, status)
+                        } else {
+                            style::send_arrow(theme, svg::Status::Idle)
+                        }
+                    },
+                ))
                 .padding(3)
                 .style(style::send),
                 sendable.then_some(Message::Send),
             )
         };
-        let shell = button(icons::glyph(
+        let shell = bar_button(icons::glyph(
             "terminal",
-            12.0,
-            if view.terminal_shown && view.terminal_host {
+            BAR_ICON,
+            if !has_session {
+                alpha(P.fg_dim, 0.4)
+            } else if view.terminal_shown && view.terminal_host {
                 P.warning
             } else if view.terminal_shown {
                 P.accent
@@ -1131,7 +1130,6 @@ impl App {
                 P.fg_dim
             },
         ))
-        .padding([4, 6])
         .style(style::quiet);
         let shell = container(keys::press_maybe(
             shell,
@@ -1144,15 +1142,7 @@ impl App {
         } else {
             shell
         };
-        let shell = tooltip(
-            shell,
-            container(
-                text("Left-click: jail terminal · Right-click: host terminal").size(style::SMALL),
-            )
-            .padding([4, 8])
-            .style(style::fill(P.code_bg)),
-            tooltip::Position::Top,
-        );
+        let shell = bar_tip(shell, "Left-click: jail terminal · Right-click: host terminal");
         // the agent's controls sideways-scrolling between the shell's button and send/stop, which
         // stay in reach however narrow the window (Interface scale 150 % in Shelf mode)
         let mut agent_controls = row![].spacing(4).align_y(Alignment::Center);
@@ -1164,7 +1154,7 @@ impl App {
         }
         if let Some(usage) = usage(view) {
             agent_controls = agent_controls
-                .push(container(text(usage).size(style::TINY).color(P.fg_dim)).padding([0, 6]));
+                .push(container(text(usage).size(CONTROL_TEXT).color(P.fg_dim)).padding([0, 6]));
         }
         let agent_controls = scrollable(agent_controls)
             .direction(scrollable::Direction::Horizontal(style::bar()))
@@ -1173,12 +1163,22 @@ impl App {
             .width(Shrink);
         // as wide as its controls, up to the room the two buttons leave: past that it scrolls
         let agent_controls = container(agent_controls).max_width((width - BUTTONS_ROOM).max(0.0));
-        let attach = keys::press_maybe(
-            button(text("+").size(style::TEXT))
-                .padding([4, 6])
+        let can_attach = has_session && !view.attachments_busy;
+        let attach = bar_tip(
+            keys::press_maybe(
+                bar_button(icons::glyph(
+                    "plus",
+                    BAR_ICON,
+                    if can_attach {
+                        P.fg_dim
+                    } else {
+                        alpha(P.fg_dim, 0.4)
+                    },
+                ))
                 .style(style::quiet),
-            (has_session && !view.attachments_busy)
-                .then_some(Message::Media(crate::media::Event::Choose)),
+                can_attach.then_some(Message::Media(crate::media::Event::Choose)),
+            ),
+            "Attach files or images",
         );
         row![attach, shell, space().width(Fill), agent_controls, action]
             .spacing(4)
@@ -1440,6 +1440,37 @@ fn mark<'a>(attention: &Attention) -> Option<Element<'a, Message>> {
 }
 
 /// Stop the selected session's turn (found by its id in tests: it has no text).
+/// The composer bar's quiet buttons are this square, as tall as the agent's controls beside them,
+/// so their boxes line up when hovered (send and stop keep their smaller filled square).
+pub(crate) const BAR_BUTTON: f32 = 22.0;
+/// The line glyphs in the composer bar's quiet buttons.
+pub(crate) const BAR_ICON: f32 = 14.0;
+
+/// A composer bar button: `content` centred in a [`BAR_BUTTON`] square.
+pub(crate) fn bar_button<'a>(
+    content: impl Into<Element<'a, Message>>,
+) -> iced::widget::Button<'a, Message> {
+    button(center(content))
+        .width(BAR_BUTTON)
+        .height(BAR_BUTTON)
+        .padding(0)
+}
+
+/// A composer bar button's tooltip, above it.
+pub(crate) fn bar_tip<'a>(
+    content: impl Into<Element<'a, Message>>,
+    tip: impl text::IntoFragment<'a>,
+) -> Element<'a, Message> {
+    tooltip(
+        content,
+        container(text(tip).size(style::SMALL))
+            .padding([4, 8])
+            .style(style::fill(P.code_bg)),
+        tooltip::Position::Top,
+    )
+    .into()
+}
+
 fn stop_button<'a>() -> Element<'a, Message> {
     container(keys::press(
         button(
@@ -1816,6 +1847,12 @@ fn plan(item: &Item) -> Element<'_, Message> {
     )
 }
 
+/// An agent control's label: a little smaller than captions, so mode, model and effort stay quiet.
+const CONTROL_TEXT: f32 = style::TINY * 0.9;
+/// The control's padding above and below its label, keeping it [`BAR_BUTTON`] tall (iced's
+/// line height is 1.3 × the text size).
+const CONTROL_PAD_Y: f32 = (BAR_BUTTON - CONTROL_TEXT * 1.3) / 2.0;
+
 /// The room a control keeps at its right for its caret.
 const CARET_ROOM: f32 = 19.0;
 
@@ -1831,9 +1868,9 @@ fn control<'a>(
     on_select: impl Fn(Pick) -> Message + 'a,
 ) -> Element<'a, Message> {
     let label = selected.as_ref().map_or("", |p| p.title.as_str());
-    // the shelf's controls are 80 % of the body text (`.sill-controls`); room at the right for
+    // a little smaller than the shelf's 80 % of the body text (`.sill-controls`); room at the right for
     // the caret
-    let width = text_width(label, style::TINY) + 6.0 + CARET_ROOM;
+    let width = text_width(label, CONTROL_TEXT) + 6.0 + CARET_ROOM;
     let on_select = std::rc::Rc::new(on_select);
     let select = on_select.clone();
     let choices = picks.clone();
@@ -1851,10 +1888,10 @@ fn control<'a>(
         .menu_padding([6.0, MENU_SIDE])
         .menu_text_size(style::SMALL)
         .menu_gap(6.0)
-        .text_size(style::TINY)
+        .text_size(CONTROL_TEXT)
         .padding(Padding {
-            top: 3.0,
-            bottom: 3.0,
+            top: CONTROL_PAD_Y,
+            bottom: CONTROL_PAD_Y,
             left: 6.0,
             right: CARET_ROOM,
         })

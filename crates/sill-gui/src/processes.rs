@@ -495,7 +495,7 @@ pub fn indicator(view: &SessionView) -> Option<Element<'_, Message>> {
         P.fg_dim
     };
     let content = row![
-        icons::glyph("processes", 12.0, color),
+        icons::glyph("processes", crate::ui::BAR_ICON, color),
         text(running.to_string()).size(style::TINY).color(color),
     ]
     .spacing(3)
@@ -508,7 +508,10 @@ pub fn indicator(view: &SessionView) -> Option<Element<'_, Message>> {
     Some(
         iced::widget::tooltip(
             keys::press(
-                button(content).padding([4, 6]).style(style::quiet),
+                button(container(content).center_y(Fill))
+                    .height(crate::ui::BAR_BUTTON)
+                    .padding([0, 6])
+                    .style(style::quiet),
                 Message::Procs(Event::Toggle(view.id.clone())),
             ),
             container(text(tip).size(style::SMALL))
