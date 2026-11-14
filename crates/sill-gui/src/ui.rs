@@ -949,7 +949,11 @@ impl App {
                     "warning" => P.warning,
                     _ => P.fg_dim,
                 };
-                note(source, color)
+                if is_long_notice(source) {
+                    folded_note(&item.item_id, source, color, view.open_tools.contains(&item.item_id))
+                } else {
+                    note(source, color)
+                }
             }
             "plan" => plan(item),
             // agent text and anything newer: Markdown as the agent wrote it
@@ -2155,6 +2159,45 @@ fn asked<'a>(mut card: Column<'a, Message>, question: &'a Question) -> Column<'a
 }
 
 /// An error or a notice: its colour as text, tint and rule (`.sill-error-note`).
+/// A notice long enough to bury the conversation (a Host control inspection's process list):
+/// folded to its first line until clicked.
+pub(crate) fn is_long_notice(message: &str) -> bool {
+    message.len() > LONG_NOTICE || message.lines().count() > 3
+}
+const LONG_NOTICE: usize = 240;
+
+/// A long notice: one pressable line with a chevron, the whole text under it when open (the
+/// same open set as tool calls, `Message::ToggleTool`).
+fn folded_note<'a>(item_id: &str, message: &'a str, color: Color, open: bool) -> Element<'a, Message> {
+    let line = button(
+        row![
+            text(if open { "▾" } else { "▸" }).size(style::SMALL).color(color).width(14),
+            container(
+                text(one_line(message, 160))
+                    .size(style::SMALL)
+                    .color(color)
+                    .wrapping(text::Wrapping::None),
+            )
+            .width(Fill)
+            .clip(true),
+            text(format!("{} chars", message.len()))
+                .size(style::TINY)
+                .color(alpha(color, 0.7)),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+    )
+    .padding([3, 6])
+    .width(Fill)
+    .style(style::row_button);
+    let line = keys::press(line, Message::ToggleTool(item_id.to_owned()));
+    let mut body = Column::new().push(line);
+    if open {
+        body = body.push(note(message, color));
+    }
+    ruled(3.0, color, container(body).width(Fill).style(style::fill(alpha(color, 0.08))))
+}
+
 fn note<'a>(message: &'a str, color: Color) -> Element<'a, Message> {
     ruled(
         3.0,

@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 
 pub fn run(args: &[String]) -> Result<()> {
-    let operation = args.first().context("usage: sill-host state | OP GENERATION JSON_ARGS; launch/commands: {\"argv\":[...],\"cwd\":\"/absolute/host/path\",\"env\":{...}}; stop: {\"name\":\"host:ID\"}; stop_existing: {\"pid\":PID,\"start_ticks\":TICKS}")?;
+    let operation = args.first().context("usage: sill-host state | OP GENERATION JSON_ARGS; launch/commands: {\"argv\":[...],\"cwd\":\"/absolute/host/path\",\"env\":{...}}; stop: {\"name\":\"host:ID\"}; stop_existing: {\"pid\":PID,\"start_ticks\":TICKS}; view: {} (the desktop, a PNG under /.sill/bridge/view/), {\"list\":true} (its windows) or {\"window\":ID}; input: {\"actions\":[{\"move\":[x,y]},{\"click\":1},{\"key\":\"ctrl+l\"},{\"type\":\"text\"},{\"wait\":ms}]}")?;
     let (generation, parameters) = if operation == "state" {
         anyhow::ensure!(args.len() == 1, "state takes no arguments");
         (None, Value::Null)

@@ -16,7 +16,7 @@ pub const OPERATIONS: [&str; 7] = ["view", "input", "inspect", "launch", "stop",
 /// What an operation name means, for frontends and the CLI.
 pub fn describe(operation: &str) -> &'static str {
     match operation {
-        "view" => "Display viewing: screenshots of the real desktop",
+        "view" => "Display viewing: pictures of the real desktop or one of its windows",
         "input" => "Display input: mouse and keyboard on the real desktop",
         "inspect" => "Process inspection: list host processes and their status",
         "launch" => "Process launch: start a program on the host with explicit arguments",

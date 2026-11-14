@@ -735,6 +735,8 @@ mod tests {
             state: state.into(),
             exit_code: None,
             last_line: String::new(),
+            kept: false,
+            location: "jail".into(),
         }
     }
 

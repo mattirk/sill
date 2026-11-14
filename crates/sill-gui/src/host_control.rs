@@ -1,7 +1,7 @@
 //! Host control in sill-gui (docs/permission-modes.md, Host control): the Host actions group of
 //! the Permissions panel, where the person ticks the operations and activates or revokes; the
 //! permanent "HOST CONTROL · actions can run outside the jail" caption over a session's
-//! composer; and a window-level band naming every session with active control, so switching to
+//! composer; and a window-level band naming every other session with active control, so switching to
 //! a Default session cannot hide it. sill-gui declares `sill.host_control`: while a tab is
 //! attached to a session, this window displays that session's control and keeps it alive.
 use std::collections::BTreeSet;
@@ -251,12 +251,15 @@ pub fn caption<'a>(session: &Session) -> Option<Element<'a, Message>> {
     )
 }
 
-/// The window-level band naming every session with active Host control, whichever tab shows.
+/// The window-level band naming every *other* session with active Host control, so switching
+/// to a session without it cannot hide elevated activity. The shown session's own control is the
+/// caption over the composer; the band does not repeat it (the person asked, 2026-11-07).
 pub fn band(app: &App) -> Option<Element<'_, Message>> {
+    let shown = app.current().map(|v| v.id.as_str());
     let names: Vec<String> = app
         .all_sessions
         .iter()
-        .filter(|s| s.host_control.is_some())
+        .filter(|s| s.host_control.is_some() && Some(s.session_id.as_str()) != shown)
         .map(|s| s.name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| s.title.clone()))
         .collect();
     if names.is_empty() {
@@ -314,7 +317,7 @@ mod tests {
     }
 
     /// The group activates with exactly the ticked operations; the answer and the refreshed
-    /// session record then show the caption and the band.
+    /// session record then show the caption; the band is for other sessions.
     #[test]
     fn activating_sends_the_ticked_operations_and_shows_the_caption_and_band() {
         let (client, mut daemon) = hosting_client();
@@ -358,9 +361,43 @@ mod tests {
         assert!(app.all_sessions[0].host_control.is_some(), "the record was refreshed");
         let mut ui = simulator(&app, (720.0, 900.0));
         ui.find(format!("{CAPTION} · launch, stop")).unwrap();
-        ui.find("HOST CONTROL active:").unwrap();
+        assert!(ui.find("HOST CONTROL active:").is_err(), "the shown session's caption is enough");
         ui.find("ON THE HOST · ACTIVE").unwrap();
         ui.find("Revoke").unwrap();
+    }
+
+    /// A long Host control notice (an inspection's process list) is one line until clicked.
+    #[test]
+    fn long_notices_fold_to_a_line_until_opened() {
+        let (mut app, _) = App::new(true, None);
+        let _ = app.update(Message::DemoTick);
+        let long = format!("HOST action inspect completed: {}", "{\"pid\":1,\"name\":\"systemd\"},".repeat(40));
+        let short = "HOST action on host · generation 1: inspect {}";
+        for (id, text) in [("long", long.as_str()), ("short", short)] {
+            let view = app.current_mut().unwrap();
+            let mut item = view.conversation.item("user").unwrap().clone();
+            item.item_id = id.into();
+            item.created_seq = format!("9{}", id.len());
+            item.kind = "notice".into();
+            item.content = vec![sill_proto::sfp::Content::text(text)];
+            let event = crate::tests::event(&view.conversation, sill_proto::sfp::Event::ItemCreated { item });
+            assert!(view.accept(event));
+        }
+        assert!(crate::ui::is_long_notice(&long) && !crate::ui::is_long_notice(short));
+        // selectable text is not a plain text widget: the fold line and its chevron are
+        let mut ui = simulator(&app, (720.0, 860.0));
+        ui.find(format!("{} chars", long.len())).unwrap();
+        ui.find("▸").unwrap();
+        assert!(ui.find("▾").is_err(), "folded until clicked");
+        ui.click(format!("{} chars", long.len())).unwrap();
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert!(messages.iter().any(|m| matches!(m, Message::ToggleTool(id) if id == "long")), "{messages:?}");
+        for m in messages {
+            let _ = app.update(m);
+        }
+        assert!(app.current().unwrap().open_tools.contains("long"));
+        let mut ui = simulator(&app, (720.0, 860.0));
+        ui.find("▾").unwrap();
     }
 
     /// The band names every session with active control, whichever one shows.

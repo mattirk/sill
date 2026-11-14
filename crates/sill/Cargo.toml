@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [features]
 default = ["shelf"]
-shelf = ["dep:gtk4", "dep:gdk4-x11", "dep:x11rb", "dep:pulldown-cmark", "dep:sourceview5", "dep:vte4", "dep:shell-words", "dep:yeslogic-fontconfig-sys"]
+shelf = ["dep:gtk4", "dep:gdk4-x11", "dep:pulldown-cmark", "dep:sourceview5", "dep:vte4", "dep:shell-words", "dep:yeslogic-fontconfig-sys"]
 
 [dependencies]
 sill-core.workspace = true
@@ -28,7 +28,8 @@ serde_json.workspace = true
 rusqlite.workspace = true
 gtk4 = { version = "0.11", features = ["v4_18"], optional = true }
 gdk4-x11 = { version = "0.11", features = ["v4_18"], optional = true }
-x11rb = { version = "0.14", features = ["randr"], optional = true }
+# the GTK shelf (randr) and the daemon's Host control display viewing (pure Rust, headless too)
+x11rb = { version = "0.14", features = ["randr"] }
 pulldown-cmark = { version = "0.13", default-features = false, optional = true }
 async-channel = "2"
 futures = "0.3"

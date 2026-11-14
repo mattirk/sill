@@ -27,6 +27,7 @@ mod terminals;
 mod host;
 mod host_control;
 mod host_bridge;
+mod host_display;
 mod context;
 mod frontend;
 mod admin;

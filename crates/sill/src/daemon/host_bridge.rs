@@ -322,12 +322,54 @@ fn action(hub: &Arc<Hub>, session: &str, generation: u64, r: &Request) -> Result
             signal(pid, ticks)?;
             Ok(json!({"stopped":pid}))
         }
+        "view" => {
+            super::host_display::availability()?;
+            match super::host_display::view(&r.args)? {
+                super::host_display::View::Windows(windows) => {
+                    Ok(json!({"windows":windows,"location":"host"}))
+                }
+                super::host_display::View::Picture { raw, window, x, y } => {
+                    let revision = sill_core::desktop_capture::revision(&raw);
+                    let png = sill_core::desktop_capture::png(&raw)?;
+                    // readable in the jail through the bridge directory; only the newest few stay
+                    let dir = views(session)?;
+                    std::fs::create_dir_all(&dir)?;
+                    let id = super::sfp::id();
+                    std::fs::write(dir.join(format!("{id}.png")), &png)?;
+                    let mut old: Vec<_> = std::fs::read_dir(&dir)?
+                        .flatten()
+                        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+                        .collect();
+                    old.sort();
+                    for (_, path) in old.iter().rev().skip(KEPT_VIEWS) {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    Ok(json!({
+                        "path": format!("{}/view/{id}.png", sill_core::jail::BRIDGE_DIR),
+                        "width": raw.width, "height": raw.height, "x": x, "y": y,
+                        "window": window, "revision": revision, "location": "host",
+                    }))
+                }
+            }
+        }
+        "input" => {
+            super::host_display::availability()?;
+            super::host_display::input(&r.args)
+        }
         _ => bail!("operation backend unavailable"),
     }
+}
+/// How many of a session's pictures stay readable in the jail.
+const KEPT_VIEWS: usize = 8;
+fn views(session: &str) -> Result<PathBuf> {
+    Ok(sill_core::shim::runtime_dir(session)?.join("bridge/view"))
 }
 pub fn cleanup(hub: &Hub, session: &str) {
     if let Ok(path) = socket(session) {
         let _ = std::fs::remove_file(path);
+    }
+    if let Ok(dir) = views(session) {
+        let _ = std::fs::remove_dir_all(dir);
     }
     if let Ok(processes) = hub.with_store(|s| s.host_processes(session)) {
         for p in processes

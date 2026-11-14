@@ -183,6 +183,12 @@ pub fn capture(socket: &Path) -> Result<Raw> {
     result
 }
 
+/// The SHA-256 of the pixels, hex: an unchanged picture has the same revision.
+pub fn revision(raw: &Raw) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(&raw.bgrx).iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// `raw` as an RGB PNG, quickly (fdeflate): a few tens of milliseconds for a HiDPI desktop.
 pub fn png(raw: &Raw) -> Result<Vec<u8>> {
     let mut rgb = Vec::with_capacity(raw.width as usize * raw.height as usize * 3);

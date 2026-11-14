@@ -6,8 +6,9 @@ real bubblewrap jails (systemd scopes when the user manager answers). Every chec
 jail runs a shell inside it through a session terminal. Needs internet access for the public-web
 checks (example.com/.org/.net, www.iana.org), Python jsonschema (scripts/requirements-sfp.txt),
 and for the test desktop Weston, Xwayland, xdotool and ImageMagick (`magick`), for the private bus
-dbus-daemon and dbus-send; it runs headless,
-since the throwaway daemon gets no display:
+dbus-daemon and dbus-send, and for Host control's display operations the system Python's
+python-xlib (the witness window); it runs headless, since the throwaway daemon gets no display
+until section 19 gives it a headless one of its own:
 
     python scripts/sfp_permissions_host_scenario.py --binary target/local/sill [--keep]
 
@@ -36,6 +37,7 @@ from sfp_client import Client, RpcError  # noqa: E402
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 STUB = REPO / "scripts/fixtures/stub_acp_agent.py"
+WITNESS = REPO / "scripts/fixtures/x11_input_witness.py"
 ALLOWED, OTHER, THIRD, FOURTH = "example.com", "example.org", "example.net", "www.iana.org"
 MODES = {"sill.permission_modes": 1}
 
@@ -260,6 +262,7 @@ def scenario(env, port, lan):
     c = env.client()
     gtk = env.client(modes=False, name="gtk-like")
     created = []
+    background = []
 
     def create(name, policy, pins=(), ghost=False):
         sid = c.call("_sill/sessions.create", {"create_id": f"host-{name}", "agent": "stub", "policy": str(policy),
@@ -922,6 +925,106 @@ PY
         hc.call("_sill/host_control.revoke", {"session_id": ctl})
         time.sleep(.3)
         check("unkept host process is stopped on revocation", not pathlib.Path(f"/proc/{second['pid']}").exists())
+
+        # -- 19. display operations: no display, then a headless Weston/Xwayland as the host display
+        generation = activate(hc, ctl, ["view", "input"])["generation"]
+        rc, text = bridge(ctl, "view", generation, {})
+        check("view without a host display is refused, saying why", rc != 0 and "DISPLAY" in text, text)
+        rc, text = bridge(ctl, "input", generation, {"actions": [{"key": "a"}]})
+        check("input likewise, and nothing is typed", rc != 0 and "DISPLAY" in text, text)
+        hc.close()
+        c.close()
+        env.stop_daemon()
+        hd = env.run / "hostdisplay"
+        hd.mkdir(mode=0o700)
+        # a headless Weston, and on it a full-screen (not rootless) Xwayland: an X server with a
+        # readable root window and XTEST input, like the person's Xorg, and no window manager
+        weston = subprocess.Popen(
+            [shutil.which("weston"), "--backend=headless", "--renderer=pixman", "--width=1280", "--height=800",
+             "--socket=wayland-hd", "--idle-time=0", "--no-config", f"--log={hd}/weston.log"],
+            env={"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(hd), "XDG_RUNTIME_DIR": str(hd)},
+            cwd=hd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True)
+        background.append(weston)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not (hd / "wayland-hd").exists():
+            time.sleep(0.1)
+        display_number = next(n for n in range(50, 100) if not pathlib.Path(f"/tmp/.X11-unix/X{n}").exists())
+        xwayland = subprocess.Popen(
+            [shutil.which("Xwayland"), f":{display_number}", "-noreset", "-fullscreen", "-geometry", "1280x800"],
+            env={"PATH": "/usr/bin:/bin", "HOME": str(hd), "XDG_RUNTIME_DIR": str(hd), "WAYLAND_DISPLAY": "wayland-hd"},
+            cwd=hd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=(hd / "xwayland.log").open("w"),
+            start_new_session=True)
+        background.append(xwayland)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not pathlib.Path(f"/tmp/.X11-unix/X{display_number}").exists():
+            time.sleep(0.1)
+        time.sleep(0.5)
+        check("a headless host display for the throwaway daemon (Weston + a full Xwayland)",
+              xwayland.poll() is None and pathlib.Path(f"/tmp/.X11-unix/X{display_number}").exists(),
+              read(hd / "xwayland.log")[-500:])
+        env.environment["DISPLAY"] = f":{display_number}"
+        env.start_daemon()
+        c = env.client()
+        hc = Client(env.socket, capabilities=HOST, name="host-control")
+        witness_log = env.root / "witness.log"
+        witness = subprocess.Popen(["/usr/bin/python3", "-I", str(WITNESS), str(witness_log)],
+                                   env={"DISPLAY": env.environment["DISPLAY"], "PATH": "/usr/bin:/bin"},
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        background.append(witness)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not (witness_log.exists() and "mapped" in read(witness_log)):
+            time.sleep(0.1)
+        time.sleep(0.5)
+        check("the witness window is up on it", "mapped" in read(witness_log), read(witness_log))
+        check("the jail outlived the daemon restart", sh(c, ctl, "echo up")[1] == "up")
+        generation = activate(hc, ctl, ["view", "input"])["generation"]
+        rc, text = bridge(ctl, "view", generation, {})
+        check("agent takes a picture of the host desktop", rc == 0, text)
+        shot = json.loads(text) if rc == 0 else {}
+        check("…1280×800, a PNG under the bridge directory",
+              shot.get("width") == 1280 and shot.get("height") == 800 and shot.get("path", "").startswith("/.sill/bridge/view/")
+              and shot.get("location") == "host", json.dumps(shot))
+        rc, sig = sh(c, ctl, f"head -c 8 {shot.get('path', '/nonexistent')} | od -An -tx1 | tr -d ' \\n'")
+        check("…readable inside the jail", sig == "89504e470d0a1a0a", sig)
+        host_png = env.run / "sill" / ctl / "bridge/view" / pathlib.PurePath(shot.get("path", "x")).name
+        ihdr = host_png.read_bytes()[16:24] if host_png.exists() else b""
+        check("…the host file carries the desktop's size", ihdr == (1280).to_bytes(4, "big") + (800).to_bytes(4, "big"))
+        rc, text = bridge(ctl, "view", generation, {"list": True})
+        rows = json.loads(text).get("windows", []) if rc == 0 else []
+        witness_window = next((w for w in rows if w["name"] == "sill-witness"), None)
+        check("view lists the desktop's windows with the witness", witness_window is not None, text[:300])
+        witness_window = witness_window or {"window": 0, "x": 0, "y": 0, "width": 0, "height": 0}
+        rc, text = bridge(ctl, "view", generation, {"window": witness_window["window"]})
+        part = json.loads(text) if rc == 0 else {}
+        check("a selected window's area of the desktop", rc == 0 and (part.get("width"), part.get("height")) == (300, 200)
+              and part.get("window") == witness_window["window"], text)
+        target = (witness_window["x"] + 50, witness_window["y"] + 50)
+        rc, text = bridge(ctl, "input", generation, {"actions": [
+            {"move": list(target)}, {"click": 1}, {"wait": 100}, {"key": "a"}, {"type": "hi"}]})
+        done = json.loads(text) if rc == 0 else {}
+        check("agent gives the host desktop input", rc == 0 and done.get("performed") == 5, text)
+        check("…the pointer went where it was sent", (done.get("pointer") or {}).get("x") == target[0]
+              and (done.get("pointer") or {}).get("y") == target[1], json.dumps(done))
+        time.sleep(0.5)
+        seen = read(witness_log)
+        check("…the window received the click and the keys", "button 1" in seen and "key a" in seen
+              and "key h" in seen and "key i" in seen, seen)
+        check("an action the daemon does not know is refused whole",
+              bridge(ctl, "input", generation, {"actions": [{"key": "a"}, {"run": "xterm"}]})[0] != 0)
+        check("a key with shell characters is refused",
+              bridge(ctl, "input", generation, {"actions": [{"key": "a; rm -rf /"}]})[0] != 0)
+        check("too many actions are refused",
+              bridge(ctl, "input", generation, {"actions": [{"wait": 1}] * 33})[0] != 0)
+        before = len(read(witness_log))
+        generation = activate(hc, ctl, ["input"])["generation"]
+        check("viewing needs its own grant", bridge(ctl, "view", generation, {})[0] != 0)
+        generation = activate(hc, ctl, ["view"])["generation"]
+        rc, text = bridge(ctl, "input", generation, {"actions": [{"key": "z"}]})
+        check("input needs its own grant", rc != 0 and len(read(witness_log)) == before, text)
+        check("pictures stay while control is active", host_png.exists())
+        hc.call("_sill/host_control.revoke", {"session_id": ctl})
+        check("revocation removes the pictures", not host_png.parent.exists())
         hc.close()
     finally:
         for sid in created:
@@ -937,6 +1040,9 @@ PY
             gtk.close()
         except Exception:
             pass
+        for process in background:
+            process.kill()
+            process.wait()
     return created
 
 

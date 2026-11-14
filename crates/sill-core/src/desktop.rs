@@ -304,14 +304,13 @@ impl Shot {
 /// Take a picture of the test desktop whose runtime directory is `dir`, as a client of its own
 /// socket, outside the jail: its programs reach the compositor, never this process.
 pub fn capture(dir: &Path) -> Result<Shot> {
-    use sha2::Digest;
     let socket = dir.join(WAYLAND_SOCKET);
     if !socket.exists() {
         bail!("no test desktop is running");
     }
     let raw = crate::desktop_capture::capture(&socket)?;
     // of the pixels as they came: an unchanged desktop costs a copy and this hash, no conversion
-    let revision = sha2::Sha256::digest(&raw.bgrx).iter().map(|b| format!("{b:02x}")).collect();
+    let revision = crate::desktop_capture::revision(&raw);
     Ok(Shot { raw, revision })
 }
 

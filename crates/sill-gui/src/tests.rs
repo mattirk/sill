@@ -158,7 +158,7 @@ fn demo_view(app: &App) -> &SessionView {
     &app.views["demo"]
 }
 
-fn event(view: &sill_client::Conversation, payload: Event) -> SessionEvent {
+pub(crate) fn event(view: &sill_client::Conversation, payload: Event) -> SessionEvent {
     SessionEvent {
         session_id: view.session_id.clone(),
         subscription_id: view.subscription_id.clone(),
