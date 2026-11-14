@@ -414,7 +414,11 @@ pub(super) fn copy_overlay(child: &impl IsA<gtk::Widget>, text: impl Fn() -> Str
     let o = gtk::Overlay::new();
     o.set_child(Some(child));
     o.add_css_class("sill-copyable");
-    o.add_overlay(&copy_button(Rc::new(text)));
+    o.set_hexpand(true);
+    let button = copy_button(Rc::new(text));
+    o.add_overlay(&button);
+    // Even a one-line box must accommodate the button and its inset.
+    o.set_measure_overlay(&button, true);
     o
 }
 

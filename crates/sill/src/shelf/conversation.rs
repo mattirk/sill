@@ -472,7 +472,6 @@ impl Conversation {
         self.plan.borrow_mut().take();
         let block = gtk::Box::new(gtk::Orientation::Vertical, 2);
         block.add_css_class("sill-user");
-        block.set_margin_top(6);
         let l = gtk::Label::new(Some(text));
         l.set_wrap(true);
         l.set_wrap_mode(gtk::pango::WrapMode::WordChar);
@@ -481,7 +480,7 @@ impl Conversation {
         l.set_halign(gtk::Align::Fill);
         l.set_margin_end(26); // the first line stays clear of the copy button
         let said = text.to_string();
-        block.append(&markdown::copy_overlay(&l, move || said.clone()));
+        block.append(&l);
         if !attachments.is_empty() {
             let a = gtk::Label::new(Some(&format!("⌁ {}", attachments.join(" · "))));
             a.add_css_class("dim-label");
@@ -491,7 +490,9 @@ impl Conversation {
             a.set_wrap_mode(gtk::pango::WrapMode::WordChar);
             block.append(&a);
         }
-        self.place(&block);
+        let wrapped = markdown::copy_overlay(&block, move || said.clone());
+        wrapped.set_margin_top(6);
+        self.place(&wrapped);
         self.scroll_to_end();
     }
 
@@ -1431,10 +1432,10 @@ impl Conversation {
         l.set_wrap(true);
         l.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         l.set_selectable(true);
+        l.set_margin_end(32);
         row.append(&l);
         let t = text.to_string();
-        row.append(&markdown::copy_button(Rc::new(move || t.clone())));
-        self.place(&row);
+        self.place(&markdown::copy_overlay(&row, move || t.clone()));
         self.request_follow();
     }
 

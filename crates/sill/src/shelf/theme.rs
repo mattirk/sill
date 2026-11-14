@@ -285,6 +285,14 @@ pub fn stylesheet(t: &Theme) -> String {
     s.push('\n');
     s.push_str(super::tabs::CSS);
     s.push_str(super::settings::CSS);
+    // GTK paints the tooltip node itself, not a popover-style `contents` child.
+    // Delay its reveal in CSS: GTK4 has no configurable tooltip timeout. Keep
+    // only the background translucent so small tooltip text stays readable.
+    s.push_str(
+        "\n@keyframes sill-tooltip-reveal { from { opacity: 0; } to { opacity: 1; } }\n\
+         tooltip, tooltip.background { background: alpha(@popover_bg_color, 0.94); color: @popover_fg_color; border: 1px solid alpha(@borders, 0.7); box-shadow: none; text-shadow: none; border-radius: 6px; animation: sill-tooltip-reveal 150ms ease-out 350ms both; }\n\
+         tooltip label { color: @popover_fg_color; }\n",
+    );
     {
         s.push_str(&format!(
             "\n.sill-tab {{ background: {surface}; }}\n\
@@ -297,7 +305,7 @@ pub fn stylesheet(t: &Theme) -> String {
              textview text {{ background: transparent; color: {fg}; }}\n\
              window, window.background {{ background: {bg}; color: {fg}; }}\n\
              popover, popover.background {{ background: transparent; color: {fg}; }}\n\
-             popover > contents, popover > arrow, tooltip > contents {{ background: {surface}; color: {fg}; border: 1px solid {border}; }}\n\
+             popover > contents, popover > arrow {{ background: {surface}; color: {fg}; border: 1px solid {border}; }}\n\
              entry {{ background: {surface}; color: {fg}; border-color: {border}; }}\n\
              list, listview, row, scrolledwindow, viewport {{ background: transparent; color: {fg}; }}\n\
              button {{ border: none; box-shadow: none; text-shadow: none; -gtk-icon-shadow: none; background-image: none; background-color: alpha({fg}, 0.08); color: {fg}; }}\n\
