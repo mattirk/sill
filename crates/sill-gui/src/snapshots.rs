@@ -932,8 +932,9 @@ fn render_permissions_basic() {
         let _ = app.update(crate::Message::DemoTick);
     }
     app.all_sessions = vec![crate::tests::session_record("demo", "demo", false, false)];
-    app.views.get_mut("demo").unwrap().permissions.open = true;
+    app.views.get_mut("demo").unwrap().permissions.menu = true;
     render(&app, "13-permissions-basic");
-    app.views.get_mut("demo").unwrap().permissions.advanced = true;
+    app.views.get_mut("demo").unwrap().permissions.menu = false;
+    app.views.get_mut("demo").unwrap().permissions.open = true;
     render(&app, "13-permissions-advanced");
 }

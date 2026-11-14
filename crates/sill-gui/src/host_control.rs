@@ -596,7 +596,6 @@ mod tests {
         let mut app = live_app(vec![client]);
         app.all_sessions = vec![session_record("demo", "demo", false, false)];
         app.views.get_mut("demo").unwrap().permissions.open = true;
-        app.views.get_mut("demo").unwrap().permissions.advanced = true;
         let task = app.update(Message::HostControl(Event::Select("demo".into(), "launch".into(), true)));
         settle_task(&mut app, task);
         let activates = |app: &App| {
@@ -622,7 +621,6 @@ mod tests {
         let mut app = live_app(vec![client]);
         app.all_sessions = vec![session_record("demo", "demo", false, false)];
         app.views.get_mut("demo").unwrap().permissions.open = true;
-        app.views.get_mut("demo").unwrap().permissions.advanced = true;
         {
             let mut ui = simulator(&app, (720.0, 900.0));
             ui.find("Activate host control").unwrap();
@@ -712,7 +710,7 @@ mod tests {
         settle_task(&mut app, task);
         fake.join().unwrap();
         let perms = &app.views["demo"].permissions;
-        assert!(!perms.open && !perms.menu, "the menu closes; the panel stays as it was");
+        assert!(!perms.open && perms.menu, "the dropdown stays for the next switch; the panel stays closed");
         let state = app.views["demo"].host_control.state.as_ref().unwrap();
         assert!(state.active && state.operations.len() == OPERATIONS.len() - mac);
         assert_eq!(app.views["demo"].host_control.selected.len(), OPERATIONS.len() - mac);

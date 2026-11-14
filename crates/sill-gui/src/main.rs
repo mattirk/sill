@@ -42,7 +42,6 @@ mod network;
 mod perf;
 mod permissions;
 mod policies;
-mod popup;
 mod processes;
 mod rows;
 mod selection;

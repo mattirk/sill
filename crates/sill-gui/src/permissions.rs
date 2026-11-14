@@ -11,7 +11,7 @@
 //! between them is marked as applying after a restart, with a Restart now. Choices need the
 //! frontend-declared `sill.permission_modes` capability, which this window offers because it
 //! shows this state. Host control is `host_control.rs`; the shield's right-click menu
-//! (`popup.rs`) shortcuts development permissions and Host control.
+//! opens the dropdown of Basic switches on a left click and this panel on a right click.
 use iced::widget::{Column, button, column, container, row, rule, space, text, tooltip};
 use iced::{Alignment, Element, Fill, Task};
 use sill_client::actions::Outcome;
@@ -74,8 +74,6 @@ pub enum Event {
     SetDevelopment(String, bool),
     /// A Basic Host control switch (the panel's or the shield menu's): a group on or off.
     HostGroup(String, crate::host_control::Group, bool),
-    /// Show or hide the granular toggles.
-    Advanced(String),
     /// Stop and start the jail: for new permissions, or for changed pins (binds are made at
     /// launch, so a pin added to a running session reaches it only this way).
     Restart(String, Change),
@@ -112,8 +110,6 @@ pub struct Perms {
     /// The shield's right-click menu is open.
     pub menu: bool,
     pub filesystem_open: bool,
-    /// The granular toggles are shown under the Basic switches.
-    pub advanced: bool,
     /// Host control's operations to activate again after the Development switch's restart.
     reactivate: Vec<String>,
     pub views: Option<Views>,
@@ -231,7 +227,6 @@ impl App {
             && let Some(view) = self.views.get_mut(id)
             && matches!(view.status, crate::Status::Connecting | crate::Status::Reconnecting(_) | crate::Status::Loading)
         {
-            view.permissions.menu = false;
             self.permission_serial += 1;
             view.permissions.note(self.permission_serial, "The session is still starting; try again in a moment.".into(), true);
             return Task::none();
@@ -252,6 +247,10 @@ impl App {
             Event::ShieldMenu(id) => {
                 if let Some(view) = self.views.get_mut(&id) {
                     view.permissions.menu = !view.permissions.menu;
+                    if view.permissions.menu {
+                        // its switches show the daemon's state: read as the panel does
+                        return Task::batch([self.read_permissions(&id), self.read_host_control(&id)]);
+                    }
                 }
             }
             Event::DevelopmentRestarting(id) => {
@@ -271,7 +270,6 @@ impl App {
                 let (Some(actions), Some(view)) = (self.actions.clone(), self.views.get_mut(&id)) else {
                     return Task::none();
                 };
-                view.permissions.menu = false;
                 if view.permissions.busy {
                     return Task::none();
                 }
@@ -295,15 +293,7 @@ impl App {
                 );
             }
             Event::HostGroup(id, group, on) => {
-                if let Some(view) = self.views.get_mut(&id) {
-                    view.permissions.menu = false;
-                }
                 return self.host_control_event(crate::host_control::Event::SetGroup(id, group, on));
-            }
-            Event::Advanced(id) => {
-                if let Some(view) = self.views.get_mut(&id) {
-                    view.permissions.advanced = !view.permissions.advanced;
-                }
             }
             Event::Read(id, serial, result) => {
                 let Some(view) = self.views.get_mut(&id) else {
@@ -609,7 +599,6 @@ pub fn indicator<'a>(view: &'a SessionView, session: Option<&Session>) -> Elemen
     let expanded = view.permissions.expanded(running);
     // orange while the agent may act on the host; yellow, the lesser caution, for expanded
     // access in the jail and for control of the VM (the person, 2026-11-13)
-    let groups = crate::host_control::groups();
     let on = session.map(crate::host_control::groups_on).unwrap_or_default();
     let color = if on.contains(&crate::host_control::Group::Host) {
         P.warning
@@ -626,7 +615,7 @@ pub fn indicator<'a>(view: &'a SessionView, session: Option<&Session>) -> Elemen
     } else {
         format!("Permissions · expanded access: {}", expanded.join(" · "))
     };
-    for (group, label, _) in &groups {
+    for (group, label, _) in &crate::host_control::groups() {
         if on.contains(group) {
             tip.push_str(&format!(" · {label} control active"));
         }
@@ -634,32 +623,14 @@ pub fn indicator<'a>(view: &'a SessionView, session: Option<&Session>) -> Elemen
     if pending {
         tip.push_str(" · changes apply after a restart");
     }
-    tip.push_str(" · right click: switches");
+    tip.push_str(" · right click: all permissions");
     let shield = keys::press_maybe(
         crate::ui::bar_button(icons::glyph("shield", crate::ui::BAR_ICON, color)).style(style::quiet),
-        session.map(|_| Message::Perms(Event::Toggle(view.id.clone()))),
+        session.map(|_| Message::Perms(Event::ShieldMenu(view.id.clone()))),
     );
-    // a right press opens the menu of shortcuts, floating over the window as the agent
-    // controls' menus do (`popup.rs`); whether it is open is this view's state
-    let id = view.id.clone();
+    // a right press opens the panel of granular toggles
     let shield: Element<'a, Message> = if session.is_some() {
-        let choose = id.clone();
-        // the Basic switches, ticked while on: a choice flips its switch
-        let development = view.permissions.development_on();
-        let mark = |on: bool, label: &str| if on { format!("✓ {label}") } else { label.to_string() };
-        let mut choices = vec![mark(development, DEVELOPMENT_SWITCH)];
-        choices.extend(groups.iter().map(|(group, label, _)| mark(on.contains(group), label)));
-        crate::popup::popup(
-            shield,
-            view.permissions.menu,
-            choices,
-            move |index| match index.checked_sub(1).and_then(|i| groups.get(i)) {
-                None => Message::Perms(Event::SetDevelopment(choose.clone(), !development)),
-                Some((group, _, _)) => Message::Perms(Event::HostGroup(choose.clone(), *group, !on.contains(group))),
-            },
-            Message::Perms(Event::ShieldMenu(id)),
-        )
-        .into()
+        iced::widget::mouse_area(shield).on_right_press(Message::Perms(Event::Toggle(view.id.clone()))).into()
     } else {
         shield
     };
@@ -672,7 +643,90 @@ pub fn indicator<'a>(view: &'a SessionView, session: Option<&Session>) -> Elemen
     crate::ui::bar_tip(shield, tip)
 }
 
-/// The Basic switch for the development permissions, in the panel and the shield menu.
+/// The shield's dropdown (a left click; the person, 2026-11-13): the Basic switches alone, small,
+/// floating over the window's corner above the shield. The panel (a right click) has the
+/// granular toggles and never these.
+pub fn dropdown<'a>(view: &'a SessionView, session: &'a Session) -> Element<'a, Message> {
+    let perms = &view.permissions;
+    let id = view.id.as_str();
+    let running = session.running;
+    let can_change = !session.ghost && !perms.busy;
+    // Basic: three switches that act at once (the person, 2026-11-13). Development is the test
+    // desktop and private D-Bus; VM and Host are Host control's operations in two groups (Host
+    // alone where the daemon's host is this machine). Advanced holds the granular toggles.
+    let development_on = perms.development_on();
+    let development_usable = perms.views.as_ref().is_some_and(|views| {
+        DEVELOPMENT.iter().all(|c| state(&views.preview, c).is_some_and(|s| s.available && s.allowed))
+    });
+    let mut basic = Column::new();
+    basic = basic.push(basic_switch(
+        DEVELOPMENT_SWITCH,
+        "A test desktop and a private D-Bus in the jail, for building and trying desktop apps. Switching restarts the jail when it needs it, which stops the agent's current turn.".into(),
+        development_on,
+        style::yellow(),
+        if development_on && perms.restart_pending(running) { "after restart" } else { "" },
+        (can_change && (development_on || development_usable)).then(|| {
+            let id = id.to_string();
+            move |on: bool| Message::Perms(Event::SetDevelopment(id.clone(), on))
+        }),
+    ));
+    let groups_on = crate::host_control::groups_on(session);
+    let host_free = can_change && !view.host_control.busy && crate::host_control::ban(view).is_none();
+    for (group, label, operations) in crate::host_control::groups() {
+        let names: Vec<String> = operations.iter().map(|op| crate::host_control::operation_label(op)).collect();
+        let (said, color) = match (group, cfg!(target_os = "macos")) {
+            (crate::host_control::Group::Vm, _) => (
+                format!("The agent may act in Sill's virtual machine, outside its jail: {}. Until you switch it off, the window stops showing the session, or the session stops.", names.join(", ")),
+                style::yellow(),
+            ),
+            (crate::host_control::Group::Host, true) => (
+                format!("The agent may act on your Mac, as you: {}. Programs run unrestricted from shared folders. Until you switch it off or Sill quits.", names.join(", ")),
+                P.warning,
+            ),
+            (crate::host_control::Group::Host, false) => (
+                format!("The agent may act on this machine outside its jail, as you: {}. Until you switch it off, the window stops showing the session, or the session stops.", names.join(", ")),
+                P.warning,
+            ),
+        };
+        let on = groups_on.contains(&group);
+        basic = basic.push(basic_switch(
+            label,
+            said,
+            on,
+            color,
+            if on { "active" } else { "" },
+            host_free.then(|| {
+                let id = id.to_string();
+                move |on: bool| Message::Perms(Event::HostGroup(id.clone(), group, on))
+            }),
+        ));
+    }
+    if let Some(error) = &view.host_control.error {
+        basic = basic.push(text(error).size(style::TINY).color(P.error));
+    } else if let Some(ban) = crate::host_control::ban(view) {
+        basic = basic.push(ban);
+    }
+    if let Some((_, note, true)) = &perms.notice {
+        basic = basic.push(text(note).size(style::TINY).color(P.error));
+    }
+    container(basic.width(DROPDOWN))
+        .padding([6, 12])
+        .style(|theme| {
+            let menu = style::control_menu(theme);
+            container::Style {
+                background: Some(menu.background),
+                border: menu.border,
+                shadow: menu.shadow,
+                ..container::Style::default()
+            }
+        })
+        .into()
+}
+
+/// The dropdown's width: a name, its switch and a word of state.
+const DROPDOWN: f32 = 210.0;
+
+/// The Basic switch for the development permissions, in the shield's dropdown.
 pub const DEVELOPMENT_SWITCH: &str = "Development";
 
 pub(crate) fn small<'a>(label: &'a str, message: Option<Message>) -> Element<'a, Message> {
@@ -916,69 +970,6 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>, narrow: bo
         .align_y(Alignment::Center),
     );
 
-    // Basic: three switches that act at once (the person, 2026-11-13). Development is the test
-    // desktop and private D-Bus; VM and Host are Host control's operations in two groups (Host
-    // alone where the daemon's host is this machine). Advanced holds the granular toggles.
-    let development_on = perms.development_on();
-    let development_usable = perms.views.as_ref().is_some_and(|views| {
-        DEVELOPMENT.iter().all(|c| state(&views.preview, c).is_some_and(|s| s.available && s.allowed))
-    });
-    let mut basic = Column::new();
-    basic = basic.push(basic_switch(
-        DEVELOPMENT_SWITCH,
-        "A test desktop and a private D-Bus in the jail, for building and trying desktop apps. Switching restarts the jail when it needs it, which stops the agent's current turn.".into(),
-        development_on,
-        style::yellow(),
-        if development_on && perms.restart_pending(running) { "after restart" } else { "" },
-        (can_change && (development_on || development_usable)).then(|| {
-            let id = id.to_string();
-            move |on: bool| Message::Perms(Event::SetDevelopment(id.clone(), on))
-        }),
-    ));
-    let groups_on = crate::host_control::groups_on(session);
-    let host_free = can_change && !view.host_control.busy && crate::host_control::ban(view).is_none();
-    for (group, label, operations) in crate::host_control::groups() {
-        let names: Vec<String> = operations.iter().map(|op| crate::host_control::operation_label(op)).collect();
-        let (said, color) = match (group, cfg!(target_os = "macos")) {
-            (crate::host_control::Group::Vm, _) => (
-                format!("The agent may act in Sill's virtual machine, outside its jail: {}. Until you switch it off, the window stops showing the session, or the session stops.", names.join(", ")),
-                style::yellow(),
-            ),
-            (crate::host_control::Group::Host, true) => (
-                format!("The agent may act on your Mac, as you: {}. Programs run unrestricted from shared folders. Until you switch it off or Sill quits.", names.join(", ")),
-                P.warning,
-            ),
-            (crate::host_control::Group::Host, false) => (
-                format!("The agent may act on this machine outside its jail, as you: {}. Until you switch it off, the window stops showing the session, or the session stops.", names.join(", ")),
-                P.warning,
-            ),
-        };
-        let on = groups_on.contains(&group);
-        basic = basic.push(basic_switch(
-            label,
-            said,
-            on,
-            color,
-            if on { "active" } else { "" },
-            host_free.then(|| {
-                let id = id.to_string();
-                move |on: bool| Message::Perms(Event::HostGroup(id.clone(), group, on))
-            }),
-        ));
-    }
-    if let Some(error) = &view.host_control.error {
-        basic = basic.push(text(error).size(style::TINY).color(P.error));
-    } else if let Some(ban) = crate::host_control::ban(view) {
-        basic = basic.push(ban);
-    }
-    content = content.push(basic);
-    content = content.push(keys::press(
-        button(text(if perms.advanced { "▾ Advanced" } else { "▸ Advanced" }).size(style::TINY))
-            .padding([2, 0])
-            .style(style::quiet),
-        Message::Perms(Event::Advanced(id.into())),
-    ));
-
     // IN THE JAIL: tool approvals, then jail access; ON THE HOST: Host control. Two columns of
     // fixed width (the second under the first in a narrow window); nothing moves between states.
     let mut jail = Column::new().width(JAIL_COLUMN);
@@ -1104,7 +1095,6 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>, narrow: bo
         ]
         .into()
     };
-    if perms.advanced {
     content = content.push(columns);
     content = content.push(keys::press(button(text(if perms.filesystem_open { "▾ Filesystem" } else { "▸ Filesystem" }).size(style::TINY)).style(style::quiet), Message::Perms(Event::Filesystem(id.into()))));
     if perms.filesystem_open {
@@ -1137,7 +1127,6 @@ pub fn panel<'a>(view: &'a SessionView, session: Option<&'a Session>, narrow: bo
             }
         }
         content = content.push(iced::widget::scrollable(files).height(iced::Length::Fixed(200.0)));
-    }
     }
 
     let pending = perms.restart_pending(running) || session.policy_changed;
@@ -1252,26 +1241,25 @@ mod tests {
                "session_hosts": hosts})
     }
 
-    /// The panel opens on the Basic switches (Development and, without a Mac's VM, Host); the
-    /// granular toggles are under Advanced.
+    /// The shield's left click opens the dropdown of Basic switches (Development and, without a
+    /// Mac's VM, Host); the panel has the granular toggles and never the switches.
     #[test]
-    fn the_panel_opens_on_the_basic_switches() {
+    fn the_dropdown_has_the_basic_switches_and_the_panel_the_granular_ones() {
         let (mut app, _) = App::new(true, None);
         app.all_sessions = vec![session_record("demo", "demo", false, false)];
-        app.views.get_mut("demo").unwrap().permissions.open = true;
+        let _ = app.update(Message::Perms(Event::ShieldMenu("demo".into())));
+        assert!(app.views["demo"].permissions.menu && !app.views["demo"].permissions.open);
         let mut ui = simulator(&app, (720.0, 860.0));
         ui.find(DEVELOPMENT_SWITCH).unwrap();
         ui.find("Host").unwrap();
         assert!(ui.find("VM").is_err() && ui.find("IN THE JAIL").is_err());
-        ui.click("▸ Advanced").unwrap();
-        let messages: Vec<Message> = ui.into_messages().collect();
-        assert!(messages.iter().any(|m| matches!(m, Message::Perms(Event::Advanced(_)))));
-        for message in messages {
-            let _ = app.update(message);
-        }
+        drop(ui);
+        let _ = app.update(Message::Perms(Event::ShieldMenu("demo".into())));
+        app.views.get_mut("demo").unwrap().permissions.open = true;
         let mut ui = simulator(&app, (720.0, 860.0));
         ui.find("IN THE JAIL").unwrap();
         ui.find("ON THE HOST").unwrap();
+        assert!(ui.find(DEVELOPMENT_SWITCH).is_err());
     }
 
     #[test]
@@ -1312,7 +1300,6 @@ mod tests {
         ];
         app.views.get_mut("demo").unwrap().permissions = Perms {
             open: true,
-            advanced: true,
             filesystem_open: true,
             views: Some(Views { preview, launch: None, agent_name: None }),
             ..Default::default()
@@ -1361,7 +1348,6 @@ mod tests {
             assert_eq!(agent["params"]["agent_id"], "claude");
             daemon.reply(&agent, json!({"id": "claude", "name": "Claude Code"}));
         });
-        let _ = app.update(Message::Perms(Event::Advanced("demo".into())));
         let task = app.update(Message::Perms(Event::Toggle("demo".into())));
         settle_task(&mut app, task);
         fake.join().unwrap();
@@ -1495,7 +1481,6 @@ mod tests {
         {
             let perms = &mut app.views.get_mut("demo").unwrap().permissions;
             perms.open = true;
-        perms.advanced = true;
             perms.views = Some(Views { launch: None, preview: preview.clone(), agent_name: None });
         }
         {
@@ -1611,7 +1596,6 @@ mod tests {
         let preview: PolicyView = serde_json::from_value(preview).unwrap();
         let perms = &mut app.views.get_mut("demo").unwrap().permissions;
         perms.open = true;
-        perms.advanced = true;
         perms.views = Some(Views { launch: Some(preview.clone()), preview, agent_name: None });
         let mut ui = simulator(&app, (720.0, 860.0));
         ui.find("Desktop development").unwrap();
@@ -1629,7 +1613,6 @@ mod tests {
         app.all_sessions = vec![ghost];
         let perms = &mut app.views.get_mut("demo").unwrap().permissions;
         perms.open = true;
-        perms.advanced = true;
         perms.views = Some(serde_json::from_value::<PolicyView>(view("preview", false, json!([]))).map(|preview| Views {
             preview,
             launch: None,

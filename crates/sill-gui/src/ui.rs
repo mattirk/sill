@@ -32,6 +32,9 @@ const EDGE: f32 = 5.0;
 /// A pasted image's thumbnail in the conversation: this share of the conversation's width.
 const THUMBNAIL_SHARE: f32 = 0.3;
 
+/// How far above the window's bottom the shield's dropdown sits: over the composer's bar.
+const SHIELD_DROPDOWN_LIFT: f32 = 58.0;
+
 impl App {
     pub(crate) fn view(&self) -> Element<'_, Message> {
         let content = responsive(move |size| {
@@ -161,6 +164,21 @@ impl App {
         let mut layers = stack![window];
         if let Some(menu) = &self.menu {
             layers = layers.push(self.session_menu(menu));
+        }
+        // the shield's dropdown: over the window's corner above the composer's bar; a press
+        // anywhere else closes it
+        if !self.backend_shown()
+            && let Some(view) = self.current().filter(|v| v.permissions.menu)
+            && let Some(session) = self.all_sessions.iter().find(|s| s.session_id == view.id)
+        {
+            let close = Message::Perms(crate::permissions::Event::ShieldMenu(view.id.clone()));
+            layers = layers.push(iced::widget::mouse_area(container(space()).width(Fill).height(Fill)).on_press(close));
+            layers = layers.push(
+                container(iced::widget::opaque(crate::permissions::dropdown(view, session)))
+                    .padding(Padding { top: 0.0, right: 12.0, bottom: SHIELD_DROPDOWN_LIFT, left: 0.0 })
+                    .align_right(Fill)
+                    .align_bottom(Fill),
+            );
         }
         // Resize targets overlay the outer pixels; they must not inset the content. Shelf mode is
         // locked to its edge at the full height: only its right edge, corners included, changes
