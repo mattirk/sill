@@ -453,9 +453,10 @@ button.sill-install:hover { background: alpha(@accent_bg_color, 0.45); }
 .sill-dim { opacity: 0.45; }
 .sill-pinned { color: @accent_color; }
 .sill-editor gutter { border: none; }
-.sill-page-head { border-bottom: 1px solid alpha(@view_fg_color, 0.12); padding-bottom: 4px; }
-.sill-back { padding: 2px 10px 2px 6px; background: alpha(@accent_bg_color, 0.18); color: @view_fg_color; }
-.sill-back:hover { background: alpha(@accent_bg_color, 0.32); }
+/* the "sill" toggle: quiet, underlined like a selected tab while the backend is open */
+button.sill-action { padding: 2px 8px; min-height: 0; background: transparent; box-shadow: none; border-bottom: 2px solid transparent; }
+button.sill-action:hover { background: alpha(@view_fg_color, 0.07); }
+button.sill-action:checked { background: alpha(@view_fg_color, 0.09); border-bottom: 2px solid alpha(@accent_bg_color, 0.9); }
 .sill-pins { padding: 2px 0; }
 .sill-chip { background: alpha(@view_fg_color, 0.07); padding: 0 2px 0 0; }
 .sill-chip-open { padding: 1px 8px; min-height: 0; }

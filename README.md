@@ -65,6 +65,10 @@ sill toggle                                # show/hide — bind to Alt+Space (Ci
 sill restart --dev                         # run the build in target/ instead of the installed one
 ```
 
+- **`sill`** (top left) flips between the sessions and the backend: the session tabs give way to page tabs
+  (Changes · Files · Agents · Settings), opening on the default page (Changes; Settings → Default page).
+  `sill` again returns to the session; Escape does the same flip either way. The folder button opens Files
+  and, pressed again, returns to the session.
 - **Sessions** are tabs: `+` picks the agent (Claude Code, Codex, Gemini; `~/.config/sill/agents/*.toml`
   adds more, with an `icon` name; sill ships provider glyphs `sill-claude-symbolic`, `sill-openai-symbolic`,
   `sill-gemini-symbolic` and a neutral placeholder for anything else) or reopens a stored one. Each session has its own jail (`sill-<id>.service`, upper trees under

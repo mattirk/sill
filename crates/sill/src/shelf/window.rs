@@ -30,6 +30,12 @@ pub struct Shelf {
     pub window: adw::ApplicationWindow,
     store: Rc<Store>,
     stack: gtk::Stack,
+    action: gtk::ToggleButton,
+    tab_area: gtk::Stack,
+    /// Backend page tabs: (page id, tab box, icon slot).
+    page_tabs: RefCell<Vec<(String, gtk::Box, gtk::Box)>>,
+    /// Set while show_page syncs the action button, so its toggled signal doesn't loop back.
+    syncing: std::cell::Cell<bool>,
     tabs: Rc<TabStrip>,
     pages: gtk::Stack,
     /// Top-bar indicator: a quiet square while idle, a spinner while the selected agent works; the
@@ -68,20 +74,24 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
     bar.set_margin_top(6);
     bar.set_margin_bottom(2);
 
-    let action = gtk::MenuButton::new();
-    action.set_label("sill");
+    // "sill" flips between the sessions and the backend: pressed = backend, with the page tabs in
+    // place of the session tabs
+    let action = gtk::ToggleButton::with_label("sill");
     action.add_css_class("heading");
     action.add_css_class("flat");
-    let popover = gtk::Popover::new();
-    popover.add_css_class("sill-menu");
-    popover.set_has_arrow(false);
-    let menu = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    popover.set_child(Some(&menu));
-    action.set_popover(Some(&popover));
+    action.add_css_class("sill-action");
+    action.set_tooltip_text(Some("Sessions ⇄ backend (Escape)"));
     bar.append(&action);
 
     let tabs = TabStrip::new();
-    bar.append(&tabs.root);
+    let page_tabs_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    page_tabs_box.add_css_class("sill-tabs");
+    let tab_area = gtk::Stack::new();
+    tab_area.set_hhomogeneous(false);
+    tab_area.set_hexpand(true);
+    tab_area.add_named(&tabs.root, Some("sessions"));
+    tab_area.add_named(&page_tabs_box, Some("backend"));
+    bar.append(&tab_area);
     let pages = gtk::Stack::new();
     pages.set_vexpand(true);
 
@@ -127,38 +137,15 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
     let files = FilesPage::new(store.clone());
     let agents_page = AgentsPage::new();
     let settings_page = settings::build();
-    // backend pages get a header with an obvious way back to the session
-    let back_buttons: Rc<RefCell<Vec<gtk::Button>>> = Rc::new(RefCell::new(Vec::new()));
-    for (name, title, body) in [
-        ("changes", "Changes", changes.root.clone().upcast::<gtk::Widget>()),
-        ("files", "Files", files.root.clone().upcast::<gtk::Widget>()),
-        ("agents", "Agents", agents_page.root.clone().upcast::<gtk::Widget>()),
-        ("settings", "Settings", settings_page.clone().upcast::<gtk::Widget>()),
+    // backend pages: the page tabs in the bar say where you are, "sill" or Escape goes back
+    for (name, body) in [
+        ("changes", changes.root.clone().upcast::<gtk::Widget>()),
+        ("files", files.root.clone().upcast::<gtk::Widget>()),
+        ("agents", agents_page.root.clone().upcast::<gtk::Widget>()),
+        ("settings", settings_page.clone().upcast::<gtk::Widget>()),
     ] {
-        let wrap = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        head.add_css_class("sill-page-head");
-        head.set_margin_start(8);
-        head.set_margin_end(12);
-        head.set_margin_top(2);
-        head.set_margin_bottom(4);
-        let back = gtk::Button::new();
-        let back_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-        back_box.append(&gtk::Image::from_icon_name("go-previous-symbolic"));
-        back_box.append(&gtk::Label::new(Some("Back to session")));
-        back.set_child(Some(&back_box));
-        back.add_css_class("sill-back");
-        back.set_tooltip_text(Some("Escape"));
-        let t = gtk::Label::new(Some(title));
-        t.add_css_class("heading");
-        t.set_xalign(0.0);
-        t.set_hexpand(true);
-        head.append(&back);
-        head.append(&t);
-        wrap.append(&head);
-        wrap.append(&body);
-        stack.add_named(&wrap, Some(name));
-        back_buttons.borrow_mut().push(back);
+        body.set_margin_top(6);
+        stack.add_named(&body, Some(name));
     }
 
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -170,6 +157,10 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         window: window.clone(),
         store: store.clone(),
         stack: stack.clone(),
+        action: action.clone(),
+        tab_area: tab_area.clone(),
+        page_tabs: RefCell::new(Vec::new()),
+        syncing: std::cell::Cell::new(false),
         tabs: tabs.clone(),
         pages: pages.clone(),
         status: status.clone(),
@@ -187,6 +178,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         let weak = Rc::downgrade(&shelf);
         theme::on_change(move |_| {
             if let Some(s) = weak.upgrade() {
+                s.page_tab_icons();
                 let sessions = s.store.sessions().unwrap_or_default();
                 for id in s.tabs.ids() {
                     if let Some(sess) = sessions.iter().find(|x| x.id == id) {
@@ -198,12 +190,15 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
     }
 
     {
+        // Files: open it, or step back to the session when it is already open
         let s = shelf.clone();
-        files_btn.connect_clicked(move |_| s.show_page("files"));
-    }
-    for b in back_buttons.borrow().iter() {
-        let s = shelf.clone();
-        b.connect_clicked(move |_| s.show_page("sessions"));
+        files_btn.connect_clicked(move |_| {
+            if s.stack.visible_child_name().as_deref() == Some("files") {
+                s.show_page("sessions");
+            } else {
+                s.show_page("files");
+            }
+        });
     }
     {
         let s = shelf.clone();
@@ -214,42 +209,19 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
             s.restart_session(sid);
         }));
     }
-    // dropdown entries: the same quiet rows as the "+" menu, rebuilt on every show so the glyphs
-    // take the current theme's colour
+    // the page tabs (built once, glyphs redrawn with the theme) and the "sill" toggle
+    shelf.build_page_tabs(&page_tabs_box);
     {
         let s = shelf.clone();
-        let menu = menu.clone();
-        popover.connect_show(move |pop| {
-            while let Some(c) = menu.first_child() {
-                menu.remove(&c);
+        action.connect_toggled(move |b| {
+            if s.syncing.get() {
+                return;
             }
-            let menu_color = menu.color();
-            for (label, icon, page) in [
-                ("Sessions", "sill-sessions", "sessions"),
-                ("Changes", "sill-changes", "changes"),
-                ("Files", "sill-files", "files"),
-                ("Agents", "sill-agents", "agents"),
-                ("Settings", "sill-settings", "settings"),
-            ] {
-                let b = gtk::Button::new();
-                b.add_css_class("flat");
-                b.add_css_class("sill-menu-item");
-                let h = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-                let i = super::icons::named(icon, menu_color, 15);
-                i.add_css_class("sill-menu-icon");
-                let l = gtk::Label::new(Some(label));
-                l.set_xalign(0.0);
-                l.set_hexpand(true);
-                h.append(&i);
-                h.append(&l);
-                b.set_child(Some(&h));
-                let s = s.clone();
-                let pop = pop.clone();
-                b.connect_clicked(move |_| {
-                    pop.popdown();
-                    s.show_page(page);
-                });
-                menu.append(&b);
+            if b.is_active() {
+                let page = sill_core::config::load().default_page().to_string();
+                s.show_page(&page);
+            } else {
+                s.show_page("sessions");
             }
         });
     }
@@ -333,7 +305,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
         });
     }
 
-    // Escape: back to sessions, or hide
+    // Escape does what the "sill" button does: sessions ⇄ backend (hiding is the hotkey's job)
     let esc = gtk::EventControllerKey::new();
     {
         let s = shelf.clone();
@@ -342,7 +314,8 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
                 if s.stack.visible_child_name().as_deref() != Some("sessions") {
                     s.show_page("sessions");
                 } else {
-                    s.window.set_visible(false);
+                    let page = sill_core::config::load().default_page().to_string();
+                    s.show_page(&page);
                 }
                 return glib::Propagation::Stop;
             }
@@ -399,6 +372,18 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
 impl Shelf {
     fn show_page(&self, name: &str) {
         self.stack.set_visible_child_name(name);
+        let backend = name != "sessions";
+        self.tab_area.set_visible_child_name(if backend { "backend" } else { "sessions" });
+        for (id, tab, _) in self.page_tabs.borrow().iter() {
+            if id == name {
+                tab.add_css_class("selected");
+            } else {
+                tab.remove_css_class("selected");
+            }
+        }
+        self.syncing.set(true);
+        self.action.set_active(backend);
+        self.syncing.set(false);
         // the Files page (tree + editor) needs room: half the work area while it is open
         let w: gtk::Window = self.window.clone().upcast();
         let fraction = if name == "files" { x11::width_fraction().max(0.5) } else { x11::width_fraction() };
@@ -419,6 +404,38 @@ impl Shelf {
             && let Some(v) = self.views.borrow().get(&id)
         {
             v.focus_prompt();
+        }
+    }
+
+    /// One tab per backend page in the bar: glyph + title, styled like the session tabs.
+    fn build_page_tabs(self: &Rc<Self>, strip: &gtk::Box) {
+        for (id, title) in sill_core::config::PAGES {
+            let tab = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+            tab.add_css_class("sill-tab");
+            let slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            slot.add_css_class("sill-tab-icon");
+            slot.set_valign(gtk::Align::Center);
+            tab.append(&slot);
+            let l = gtk::Label::new(Some(title));
+            tab.append(&l);
+            let click = gtk::GestureClick::new();
+            let s = self.clone();
+            click.connect_released(move |_, _, _, _| s.show_page(id));
+            tab.add_controller(click);
+            strip.append(&tab);
+            self.page_tabs.borrow_mut().push((id.to_string(), tab, slot));
+        }
+        self.page_tab_icons();
+    }
+
+    /// (Re)draw the page tabs' glyphs in the strip's current foreground.
+    fn page_tab_icons(&self) {
+        let color = super::icons::fg_for(&self.tabs.root, &theme::current());
+        for (id, _, slot) in self.page_tabs.borrow().iter() {
+            while let Some(c) = slot.first_child() {
+                slot.remove(&c);
+            }
+            slot.append(&super::icons::named(&format!("sill-{id}"), color, 12));
         }
     }
 

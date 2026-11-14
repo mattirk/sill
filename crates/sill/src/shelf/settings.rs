@@ -68,6 +68,26 @@ pub fn build() -> gtk::Box {
     wbox.append(&hint);
     root.append(&row("Width", &wbox));
 
+    // the page the "sill" button opens
+    let page_ids: Vec<&str> = sill_core::config::PAGES.iter().map(|(id, _)| *id).collect();
+    let page_titles: Vec<&str> = sill_core::config::PAGES.iter().map(|(_, t)| *t).collect();
+    let page_dd = gtk::DropDown::from_strings(&page_titles);
+    let current_page = sill_core::config::load().default_page().to_string();
+    if let Some(i) = page_ids.iter().position(|id| *id == current_page) {
+        page_dd.set_selected(i as u32);
+    }
+    {
+        let ids: Vec<String> = page_ids.iter().map(|s| s.to_string()).collect();
+        page_dd.connect_selected_notify(move |d| {
+            if let Some(id) = ids.get(d.selected() as usize) {
+                let mut c = sill_core::config::load();
+                c.default_page = Some(id.clone());
+                let _ = sill_core::config::save(&c);
+            }
+        });
+    }
+    root.append(&row("Default page", &page_dd));
+
     // show/hide key: click the button, press the combination you want
     let current = sill_core::config::load().hotkey.unwrap_or_else(|| super::hotkey::DEFAULT.to_string());
     let hk = gtk::Button::with_label(&pretty(&current));
@@ -144,7 +164,7 @@ pub fn build() -> gtk::Box {
         ("Agents".into(), "the Agents page: install from the ACP registry, the gear edits command, environment, domains (~/.config/sill/agents/*.toml)".into()),
         ("Sessions".into(), format!("{home}/.local/state/sill/sill.db; jails under /var/lib/sill/<uid>/sessions/")),
         ("Units".into(), "systemctl --user list-units 'sill-*'; logs: journalctl --user -u sill-<id>".into()),
-        ("Keys".into(), "hotkey show/hide · Escape back/hide · Enter send · Shift+Enter newline · Ctrl+T shell · F2 or double-click rename".into()),
+        ("Keys".into(), "hotkey show/hide · Escape sessions ⇄ backend · Enter send · Shift+Enter newline · Ctrl+T shell · F2 or double-click rename".into()),
     ];
     for (k, v) in info {
         let vl = gtk::Label::new(Some(&v));

@@ -556,10 +556,23 @@ impl SessionView {
             .name("sill-login".into())
             .spawn(move || {
                 let progress = tx.clone();
-                let r = sill_core::login::run(&agent, &home, &method, |line| {
-                    let _ = progress.send_blocking(Ok(line));
+                // the agent's stderr is noise (browser chatter) unless the login fails
+                let mut stderr: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+                let r = sill_core::login::run(&agent, &home, &method, |line| match line {
+                    sill_core::login::Line::Status(t) => {
+                        let _ = progress.send_blocking(Ok(t));
+                    }
+                    sill_core::login::Line::Stderr(t) => {
+                        if stderr.len() >= 12 {
+                            stderr.pop_front();
+                        }
+                        stderr.push_back(t);
+                    }
                 });
-                let _ = tx.send_blocking(r.map(|()| String::new()).map_err(|e| format!("{e:#}")));
+                let _ = tx.send_blocking(r.map(|()| String::new()).map_err(|e| {
+                    let tail: Vec<String> = stderr.into_iter().collect();
+                    if tail.is_empty() { format!("{e:#}") } else { format!("{e:#}\n{}", tail.join("\n")) }
+                }));
             })
             .ok();
         let v = self.clone();
@@ -1144,6 +1157,9 @@ impl SessionView {
             {
                 return; // the stored transcript is already on screen
             }
+            // some agents (Mistral Vibe) echo the prompt back as a user message chunk during the
+            // turn; the shelf already shows what it sent, so outside a replay it is dropped
+            Event::UserText(_) => return,
             Event::Text(t) => self.agent_md.borrow_mut().push_str(t),
             Event::ToolCall { id, title, status, .. } => {
                 self.flush_agent();

@@ -7,7 +7,7 @@
 //! the host file named in `shared_files`, which is bound in. Either way the session starts again.
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -19,11 +19,20 @@ use crate::agents::Agent;
 /// How long the person gets to finish the browser flow.
 const TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
-/// Run `method` of `agent` on the host; `report` gets progress lines (auth status notifications,
-/// the agent's own stderr). Blocking.
-pub fn run(agent: &Agent, home: &Path, method: &str, mut report: impl FnMut(String)) -> Result<()> {
+/// What a login reports while it runs.
+#[derive(Debug, Clone)]
+pub enum Line {
+    /// Worth showing: sill's own steps and the agent's auth status notifications.
+    Status(String),
+    /// The agent's stderr: noise unless the login fails.
+    Stderr(String),
+}
+
+/// Run `method` of `agent` on the host; `report` gets progress lines. Blocking.
+pub fn run(agent: &Agent, home: &Path, method: &str, mut report: impl FnMut(Line)) -> Result<()> {
     let Some(prog) = agent.command.first() else { bail!("agent {} has no command", agent.id) };
     let mut env = agent.env.clone();
+    let mut unset: Vec<&str> = Vec::new();
     match (&agent.home_env, agent.home_paths.first()) {
         (Some(var), Some(first)) => {
             // the agent's home for this run is the jail's copy: nothing of it lands on the host
@@ -47,34 +56,31 @@ pub fn run(agent: &Agent, home: &Path, method: &str, mut report: impl FnMut(Stri
             // an agent sill knows nothing about: run its login with `$HOME` (and the XDG dirs) at
             // the sill-owned agent home, so whatever it writes — `~/.foo`, `~/.config/foo` — lands
             // there and is bound into its jails from then on (`session::adopted_binds`). The
-            // desktop's file-association files are linked in so the browser it opens is yours.
+            // browser it opens must NOT inherit that: an `xdg-open` shim first on PATH (and
+            // `$BROWSER`) restores the real home and XDG dirs, so it is your browser, your profile.
+            // Only `$HOME` moves; the XDG dirs stay real, so a browser the agent launches by any
+            // route (xdg-open, a bundled opener, Python's webbrowser) finds its own profile. The
+            // price: an agent keeping its login under `$XDG_CONFIG_HOME` writes it to the host.
             let base = crate::session::agent_home(home, &agent.id);
-            for sub in [".config", ".local/share", ".local/state", ".cache"] {
-                std::fs::create_dir_all(base.join(sub))?;
-            }
-            for rel in ["mimeapps.list"] {
-                let src = home.join(".config").join(rel);
-                let dst = base.join(".config").join(rel);
-                if src.exists() && !dst.exists() {
-                    let _ = std::os::unix::fs::symlink(&src, &dst);
-                }
-            }
-            let apps_src = home.join(".local/share/applications");
-            let apps_dst = base.join(".local/share/applications");
-            if apps_src.is_dir() && !apps_dst.exists() {
-                let _ = std::os::unix::fs::symlink(&apps_src, &apps_dst);
-            }
+            std::fs::create_dir_all(&base)?;
+            let shim_dir = browser_shim(home)?;
+            let path = std::env::var("PATH").unwrap_or_default();
+            env.insert("PATH".into(), format!("{}:{path}", shim_dir.display()));
+            env.insert("BROWSER".into(), shim_dir.join("xdg-open").display().to_string());
             env.insert("HOME".into(), base.display().to_string());
-            env.insert("XDG_CONFIG_HOME".into(), base.join(".config").display().to_string());
-            env.insert("XDG_DATA_HOME".into(), base.join(".local/share").display().to_string());
-            env.insert("XDG_STATE_HOME".into(), base.join(".local/state").display().to_string());
-            env.insert("XDG_CACHE_HOME".into(), base.join(".cache").display().to_string());
+            // no keyring for the login (the "fail" backend: every call raises, the "null" one silently
+            // swallows writes): a token kept in the desktop's secret service would be
+            // invisible inside the jail, so the agent must fall back to its file (Vibe: ~/.vibe/.env)
+            unset.push("DBUS_SESSION_BUS_ADDRESS");
+            env.insert("PYTHON_KEYRING_BACKEND".into(), "keyring.backends.fail.Keyring".into());
         }
     }
-    let mut child = Command::new(prog)
-        .args(&agent.command[1..])
-        .envs(&env)
-        .current_dir(home)
+    let mut cmd = Command::new(prog);
+    cmd.args(&agent.command[1..]).envs(&env).current_dir(home);
+    for v in &unset {
+        cmd.env_remove(v);
+    }
+    let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -120,7 +126,7 @@ pub fn run(agent: &Agent, home: &Path, method: &str, mut report: impl FnMut(Stri
         if !methods.is_empty() && !methods.iter().any(|m| m == method) {
             bail!("{prog} offers no login method {method:?} (it has: {})", methods.join(", "));
         }
-        report(format!("logging in with {method}…"));
+        report(Line::Status(format!("logging in with {method}…")));
         let auth = json!({ "jsonrpc": "2.0", "id": 2, "method": "authenticate", "params": { "methodId": method } });
         writeln!(stdin, "{auth}")?;
         wait_response(&rx, &erx, 2, TIMEOUT, &mut report)?;
@@ -137,12 +143,12 @@ fn wait_response(
     erx: &std::sync::mpsc::Receiver<String>,
     id: u64,
     timeout: Duration,
-    report: &mut impl FnMut(String),
+    report: &mut impl FnMut(Line),
 ) -> Result<Value> {
     let deadline = std::time::Instant::now() + timeout;
     loop {
         for line in erx.try_iter() {
-            report(line);
+            report(Line::Stderr(line));
         }
         let now = std::time::Instant::now();
         if now >= deadline {
@@ -164,11 +170,35 @@ fn wait_response(
                         .and_then(|l| l.as_str())
                         .map(str::to_string)
                         .unwrap_or_else(|| m.to_string());
-                    report(label);
+                    report(Line::Status(label));
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => bail!("the agent exited during login"),
         }
     }
+}
+
+/// A directory with an `xdg-open` that runs the real one in the person's own environment, for
+/// logins whose process runs with a relocated home.
+fn browser_shim(home: &Path) -> Result<PathBuf> {
+    let dir = crate::registry::tools_dir(home).join(".browser-shim");
+    std::fs::create_dir_all(&dir)?;
+    let real = |var: &str, fallback: &str| std::env::var(var).unwrap_or_else(|_| home.join(fallback).display().to_string());
+    let script = format!(
+        "#!/bin/sh\n# sill: open in the person's browser, not the agent's relocated home\nexport HOME='{home}'\nexport XDG_CONFIG_HOME='{cfg}'\nexport XDG_DATA_HOME='{data}'\nexport XDG_STATE_HOME='{state}'\nexport XDG_CACHE_HOME='{cache}'\n{dbus}unset BROWSER\nexec /usr/bin/xdg-open \"$@\"\n",
+        home = home.display(),
+        dbus = std::env::var("DBUS_SESSION_BUS_ADDRESS").map(|d| format!("export DBUS_SESSION_BUS_ADDRESS='{d}'\n")).unwrap_or_default(),
+        cfg = real("XDG_CONFIG_HOME", ".config"),
+        data = real("XDG_DATA_HOME", ".local/share"),
+        state = real("XDG_STATE_HOME", ".local/state"),
+        cache = real("XDG_CACHE_HOME", ".cache"),
+    );
+    let p = dir.join("xdg-open");
+    if std::fs::read_to_string(&p).ok().as_deref() != Some(script.as_str()) {
+        std::fs::write(&p, script)?;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755))?;
+    Ok(dir)
 }

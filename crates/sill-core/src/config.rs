@@ -14,6 +14,21 @@ pub struct Config {
     pub width: Option<f64>,
     /// Global show/hide key, GTK accelerator syntax (`<Alt>space`, `<Super>grave`, `F12`).
     pub hotkey: Option<String>,
+    /// Backend page the "sill" button opens: `changes` (default), `files`, `agents`, `settings`.
+    pub default_page: Option<String>,
+}
+
+/// The backend pages, in tab order: (id, title).
+pub const PAGES: &[(&str, &str)] = &[("changes", "Changes"), ("files", "Files"), ("agents", "Agents"), ("settings", "Settings")];
+
+impl Config {
+    /// A valid default page id.
+    pub fn default_page(&self) -> &str {
+        match self.default_page.as_deref() {
+            Some(p) if PAGES.iter().any(|(id, _)| *id == p) => p,
+            _ => "changes",
+        }
+    }
 }
 
 pub fn path() -> Result<PathBuf> {
