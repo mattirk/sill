@@ -206,6 +206,14 @@ impl Store {
         Ok(())
     }
 
+    pub fn count_kind(&self, session_id: &str, kind: &str) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM entries WHERE session_id = ?1 AND kind = ?2",
+            params![session_id, kind],
+            |r| r.get(0),
+        )?)
+    }
+
     pub fn entries(&self, session_id: &str) -> Result<Vec<Entry>> {
         let mut st = self.conn.prepare("SELECT seq, ts, kind, text, extra FROM entries WHERE session_id = ?1 ORDER BY seq")?;
         let rows = st.query_map(params![session_id], |r| {

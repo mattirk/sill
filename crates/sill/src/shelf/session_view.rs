@@ -384,30 +384,14 @@ impl SessionView {
         head.set_tooltip_text(Some("pinned folders"));
         self.pins_row.append(&head);
         let home = std::env::var("HOME").unwrap_or_default();
+        let mut summaries: Vec<(std::path::PathBuf, gtk::Box)> = Vec::new();
         for p in pins {
             let chip = gtk::Box::new(gtk::Orientation::Horizontal, 2);
             chip.add_css_class("sill-chip");
             let l = gtk::Button::new();
             let lbox = gtk::Box::new(gtk::Orientation::Horizontal, 6);
             lbox.append(&gtk::Label::new(Some(&p.to_string_lossy().replace(&home, "~"))));
-            // git working-tree summary next to the name: +added −deleted (vs HEAD), untracked count
-            if let Some((add, del, untracked)) = git_summary(&p) {
-                if add > 0 {
-                    let a = gtk::Label::new(Some(&format!("+{add}")));
-                    a.add_css_class("sill-git-add");
-                    lbox.append(&a);
-                }
-                if del > 0 {
-                    let d = gtk::Label::new(Some(&format!("−{del}")));
-                    d.add_css_class("sill-git-del");
-                    lbox.append(&d);
-                }
-                if untracked > 0 {
-                    let u = gtk::Label::new(Some(&format!("?{untracked}")));
-                    u.add_css_class("dim-label");
-                    lbox.append(&u);
-                }
-            }
+            summaries.push((p.clone(), lbox.clone()));
             l.set_child(Some(&lbox));
             l.add_css_class("flat");
             l.add_css_class("sill-chip-open");
@@ -436,6 +420,41 @@ impl SessionView {
             chip.append(&x);
             self.pins_row.append(&chip);
         }
+        // git working-tree summary next to each name: +added −deleted (vs HEAD), untracked count.
+        // git runs off the main thread (it walks the repo; on the main thread it stalled painting and
+        // scrolling for seconds); the chips' boxes are the handle, so a refresh in between — which
+        // removes them from the row — makes a late result harmless.
+        let (tx, rx) = async_channel::bounded::<Vec<Option<(u64, u64, u64)>>>(1);
+        let paths: Vec<std::path::PathBuf> = summaries.iter().map(|(p, _)| p.clone()).collect();
+        let boxes: Vec<gtk::Box> = summaries.into_iter().map(|(_, b)| b).collect();
+        std::thread::spawn(move || {
+            let found: Vec<Option<(u64, u64, u64)>> = paths.iter().map(|p| git_summary(p)).collect();
+            let _ = tx.send_blocking(found);
+        });
+        glib::spawn_future_local(async move {
+            let Ok(found) = rx.recv().await else { return };
+            for (lbox, s) in boxes.iter().zip(found) {
+                let Some((add, del, untracked)) = s else { continue };
+                if lbox.parent().is_none() {
+                    continue; // replaced by a newer refresh
+                }
+                if add > 0 {
+                    let a = gtk::Label::new(Some(&format!("+{add}")));
+                    a.add_css_class("sill-git-add");
+                    lbox.append(&a);
+                }
+                if del > 0 {
+                    let d = gtk::Label::new(Some(&format!("−{del}")));
+                    d.add_css_class("sill-git-del");
+                    lbox.append(&d);
+                }
+                if untracked > 0 {
+                    let u = gtk::Label::new(Some(&format!("?{untracked}")));
+                    u.add_css_class("dim-label");
+                    lbox.append(&u);
+                }
+            }
+        });
     }
 
     /// Pins the jail was started with, for deciding whether a rebuild is needed.
@@ -484,19 +503,30 @@ impl SessionView {
 
     /// Send a prompt; false if the agent is busy or the session is down.
     pub fn send(&self, text: &str) -> bool {
+        let trace = std::env::var_os("SILL_TRACE").is_some();
+        let t0 = std::time::Instant::now();
+        let lap = |what: &str| {
+            if trace {
+                eprintln!("{} send: {what} at {} ms", super::trace_ts(), t0.elapsed().as_millis());
+            }
+        };
         let Some(d) = self.driver.borrow().as_ref().map(|d| d.commands.clone()) else {
             self.conv.add_note("session is not running");
             return false;
         };
         let outgoing = format!("{}{}", self.pin_prefix(), text);
+        lap("prefix");
         match d.try_send(Command::Prompt(outgoing)) {
             Ok(()) => {
                 self.conv.add_user(text);
+                lap("add_user");
                 let id = self.id();
                 let _ = self.store.append(&id, "user", text, "");
                 let _ = self.store.touch(&id);
+                lap("store append+touch");
                 // first prompt names the session (keywords), unless it has nothing to say
-                let first = self.store.entries(&id).map(|e| e.iter().filter(|e| e.kind == "user").count() <= 1).unwrap_or(false);
+                let first = self.store.count_kind(&id, "user").map(|n| n <= 1).unwrap_or(false);
+                lap("store entries");
                 if first && let Some(title) = sill_core::title::from_prompt(text) {
                     let _ = self.store.set_title(&id, &title);
                     self.session.borrow_mut().title = title.clone();
@@ -504,6 +534,7 @@ impl SessionView {
                         cb(&id, &title);
                     }
                 }
+                lap("done");
                 true
             }
             Err(_) => {

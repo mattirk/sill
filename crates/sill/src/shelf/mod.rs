@@ -18,9 +18,17 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use gtk4 as gtk;
 use gtk::gio;
+use gtk::glib;
 use gtk::prelude::*;
 
 pub const APP_ID: &str = "io.github.mattirk.sill";
+
+/// Wall-clock stamp for `SILL_TRACE` lines (shelf.log has no journal prefix).
+pub fn trace_ts() -> String {
+    let d = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let s = d.as_secs() % 86400;
+    format!("{:02}:{:02}:{:02}.{:03}", s / 3600, s / 60 % 60, s % 60, d.subsec_millis())
+}
 
 pub fn run(cwd: Option<PathBuf>, hidden: bool) -> Result<()> {
     let cwd = match cwd {
@@ -36,6 +44,18 @@ pub fn run(cwd: Option<PathBuf>, hidden: bool) -> Result<()> {
             return;
         }
         let w = window::build(app, cwd_for_activate.clone());
+        if std::env::var_os("SILL_TRACE").is_some() {
+            // main-loop stall detector: anything that holds the GTK thread shows up here with its length
+            let mut last = std::time::Instant::now();
+            glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+                let gap = last.elapsed();
+                if gap > std::time::Duration::from_millis(150) {
+                    eprintln!("{} main loop stalled {} ms", trace_ts(), gap.as_millis());
+                }
+                last = std::time::Instant::now();
+                glib::ControlFlow::Continue
+            });
+        }
         if hidden {
             // keep the session warm, show on the first toggle
             w.set_visible(false);
@@ -167,7 +187,21 @@ pub fn restart(hidden: bool, dev: bool) -> Result<()> {
     if hidden {
         cmd.arg("--hidden");
     }
-    cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    // a dev shelf has no journal: its output goes to the state dir
+    let log = sill_core::store::default_path().ok().and_then(|p| {
+        std::fs::OpenOptions::new().create(true).append(true).open(p.with_file_name("shelf.log")).ok()
+    });
+    cmd.stdin(std::process::Stdio::null());
+    match log {
+        Some(f) => {
+            cmd.stdout(f.try_clone()?);
+            cmd.stderr(f);
+        }
+        None => {
+            cmd.stdout(std::process::Stdio::null());
+            cmd.stderr(std::process::Stdio::null());
+        }
+    }
     // SAFETY: setsid between fork and exec only.
     unsafe {
         use std::os::unix::process::CommandExt;

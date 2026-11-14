@@ -31,6 +31,7 @@ pub struct Conversation {
     /// Previous adjustment value, to tell a scroll-up from everything else that moves it.
     last_value: std::cell::Cell<f64>,
     last_upper: std::cell::Cell<f64>,
+    last_page: std::cell::Cell<f64>,
 }
 
 impl Conversation {
@@ -60,6 +61,7 @@ impl Conversation {
             following: std::cell::Cell::new(false),
             last_value: std::cell::Cell::new(0.0),
             last_upper: std::cell::Cell::new(0.0),
+            last_page: std::cell::Cell::new(0.0),
         });
         // The content height is only known after layout: follow the adjustment's geometry (`changed` covers
         // both the content growing and the viewport shrinking, e.g. the prompt box getting taller) instead
@@ -81,11 +83,13 @@ impl Conversation {
             adj.connect_value_changed(move |adj| {
                 let v = adj.value();
                 let upper = adj.upper();
-                // a drop in value while the content height is changing is GTK clamping/relayout
-                // (text views validate lines lazily), not the person scrolling up
-                let relayout = upper != c.last_upper.get();
+                let page = adj.page_size();
+                // a drop in value while the geometry is changing is GTK clamping/relayout (text views
+                // validate lines lazily; the viewport shrinks when the prompt box grows), not the
+                // person scrolling up
+                let relayout = upper != c.last_upper.get() || page != c.last_page.get();
                 if !c.following.get() && !relayout {
-                    if v >= upper - adj.page_size() - 1.0 {
+                    if v >= upper - page - 1.0 {
                         c.stick_to_bottom.set(true);
                     } else if v < c.last_value.get() {
                         c.stick_to_bottom.set(false);
@@ -93,6 +97,7 @@ impl Conversation {
                 }
                 c.last_value.set(v);
                 c.last_upper.set(upper);
+                c.last_page.set(page);
             });
         }
         conv
@@ -186,6 +191,7 @@ impl Conversation {
         let (tv, md) = cur.as_mut().unwrap();
         md.push_str(chunk);
         markdown::render(&tv.buffer(), md);
+        tv.queue_resize(); // the view must re-measure: lazy line validation leaves stale heights behind
         drop(cur);
         self.request_follow();
     }
@@ -195,6 +201,7 @@ impl Conversation {
         self.finish_current();
         let tv = Self::text_view("sill-agent");
         markdown::render(&tv.buffer(), md);
+        tv.queue_resize(); // the view must re-measure: lazy line validation leaves stale heights behind
         self.column.append(&tv);
         self.request_follow();
     }
@@ -203,6 +210,7 @@ impl Conversation {
         self.finish_current();
         let tv = Self::text_view("sill-thought");
         markdown::render(&tv.buffer(), md);
+        tv.queue_resize(); // the view must re-measure: lazy line validation leaves stale heights behind
         self.column.append(&tv);
         self.request_follow();
     }

@@ -70,6 +70,9 @@ pub struct Paths {
     /// Relative patterns the ledger records but doesn't hash per turn.
     #[serde(default)]
     pub ledger_ignore: Vec<String>,
+    /// Accepted and ignored: policies written before pinned folders became live (2026-10-28) have it.
+    #[serde(default, skip_serializing)]
+    pub auto_keep: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
