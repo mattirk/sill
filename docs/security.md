@@ -59,6 +59,7 @@ Verified in code and, where marked ⊙, confirmed from inside a running jail:
 | S18 | Low | **Transient `sill-<id>` units and `sill-shelf.service` have no systemd hardening** (no `NoNewPrivileges`, `ProtectSystem`, seccomp). bwrap is the boundary; a bwrap bypass has no second fence. | by design, noted |
 | S19 | Low | Minor: `--state-dir` fstab line lacks `nosuid,nodev` (`init.rs:310`); image briefly 0644 before chmod; proxy `serve` ends on the first `accept` error and `addrs[0]` panics the handler on an empty resolve (`proxy.rs:105,171`); `Proxy-Authorization` forwarded upstream (`:182`); any port on allowed hosts (§4.11 #9). | proxy items **fixed 2026-11-01** (§4.11 #9); fstab/image mode open |
 | S20 | Info | **SPEC §4.11 claims "Host-mismatched absolute-form refused" — the code forwards `Host:` verbatim** (`proxy.rs:177-188`); the decision uses the request-line authority only. Not a bypass (the TCP target is the checked one); the SPEC should say "ignored". D-Bus actions (`quit`, `toggle`, `set-theme`, `set-hotkey`) are reachable from an `x11+dbus` jail — the #4 umbrella. Default allow-list permits exfiltration via GitHub/npm by design. | doc / known |
+| S21 | Low | **State files take their mode from the umask, not from sill.** `store::open` lets SQLite create `sill.db` (SQLite's default 0644 & ~umask), `create_dir_all` makes `~/.local/state/sill` and `sessions/` with 0777 & ~umask, `shelf.log` likewise; on this box (umask 002, user-private group) they are 0775/0664, on a machine with a shared `users` group or umask 022 they are group- or world-readable. The agent homes and the `kept/` journal are already explicit 0700/0600 (`session.rs:220-231`, `keep.rs:253`). Same-uid readers are unaffected either way (see Data at rest). | open — `DirBuilder.mode(0o700)` for the state dir, `fchmod 0600` on the db after open (and `-wal`/`-shm`: SQLite copies the main file's mode), the log 0600 |
 
 ## Status
 
@@ -68,7 +69,7 @@ is the only way the shelf runs git. Later the same day S8 (host shells with git'
 and S10 (`expected_hash` wired, Keep all limited to plain file writes) followed, then S7 (the
 Allow-host prompt from a validated name, no public-suffix wildcards, capped), S9 (tree and viewer
 stop at links) and S16 (session ids checked at the sinks). Still open from this pass: S12, S13,
-S15, S17–S20.
+S15, S17–S21.
 
 2026-11-01, later: the §4.11 leftovers closed in seven commits — #8 (other agents' credentials
 masked, homes 0700), #7/#9 (proxy decides on the name before DNS, one port per pattern, connection
@@ -78,6 +79,35 @@ host), #13 (session start, git status, keep/revert off the GTK thread), #15 (wea
 session view), #17 (store busy timeout and atomic seq, ledger EACCES, hotkey HUP, store-open error
 window). Open from this file: S12, S13, S15, S17, S18, S19's
 fstab/image items.
+
+## Data at rest
+
+The question came up (2026-11-01): nothing sill stores is encrypted — transcripts, summaries, the
+upper trees, the kept journal, the agents' own homes with their credentials — all plain files owned
+by the user. That is the stance, and the reasoning is by reader:
+
+| Reader | What protects the data | Would a sill cipher add anything |
+|---|---|---|
+| Another local user | 0700 per-uid dirs (S21 makes it explicit) | no |
+| Someone with the disk (theft, a discarded drive) | **full-disk encryption**, the OS's | no: a key sill can read at shelf start sits under the same uid as the data; the thief has both. Only a passphrase typed at every start would differ, and the agents' homes (`~/.claude.json` credentials, their own transcripts, plaintext as the vendors ship them) would stay in the clear anyway |
+| Another process running as the user on the host | nothing — it reads a key the way sill would | no; this is the jail's threat in the other direction |
+| **The agent in the jail** | masking: `sill.db*`, `~/.config/sill`, `~/.local/state/sill/bin`, the other agents' homes are tmpfs or `/dev/null` in every jail (S2, S16, §4.11 #8) | no — and this is the reader that matters |
+
+So an application-level layer would protect against none of the four and suggest protection against
+the second. What does help, and what sill does or should do:
+
+- **Recommend FDE as the baseline**, in the install docs: sill's data at rest is as safe as the disk.
+- **fscrypt on the state image** for whoever wants a per-user key: `/var/lib/sill.img` is ext4, which
+  supports fscrypt natively, and `pam_fscrypt` unlocks a directory with the login passphrase. The
+  upper trees are the richest target — copy-up puts a copy of *every* file the agent touched there,
+  `~/Documents` or a `.env` included — and this covers them with no sill code: a documented
+  `fscrypt encrypt /var/lib/sill/<uid>` step, maybe a `sill init --fscrypt` later.
+- **Hygiene over secrecy**: auto-revert, deleting the upper tree at close, ghost sessions'
+  `secure_delete` + `VACUUM` (docs/memory.md §3.4). Transcripts hold whatever the agent `cat`ed; a
+  redaction regex on store would miss most of it and promise more than it does — not planned.
+- **Explicit modes** (S21): 0700 on the state dir, 0600 on the database and log, independent of the
+  umask. The `kept/<id>/prior` payloads keep the host file's own mode, under a 0700 parent, which is
+  right: undo must put the mode back.
 
 ## Proposed top three (as written before the fixes)
 
