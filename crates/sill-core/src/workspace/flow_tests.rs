@@ -1,11 +1,11 @@
 //! The §12 flow against real repositories: snapshots, repeated Apply with uncommitted work, the
-//! person's own edits stopping it, Discard and Undo, and a spare folder reused clean of Git
-//! settings but warm with ignored build output.
+//! person's own edits stopping it, Discard and Undo, and a workspace made warm from the checkout's
+//! files.
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::*;
-use crate::workspace::{create, inspect, path_for};
+use crate::workspace::{Source, create, inspect, path_for};
 
 struct Dir(PathBuf);
 impl Drop for Dir {
@@ -323,39 +323,99 @@ fn discard_after_a_rebase_stays_on_the_persons_commit() {
     assert!(!unapplied(&s, &c.path, &c.branch).unwrap());
 }
 
+/// The checkout as the person may have it when a session starts: build output, an edit, a
+/// deletion, files of their own, links, a repository nested in it, Git settings.
+fn lived_in(s: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    write(&s.join("target/debug/app"), "warm build\n");
+    std::fs::set_permissions(s.join("target/debug/app"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink("app", s.join("target/debug/link")).unwrap();
+    std::os::unix::fs::symlink("/nonexistent/elsewhere", s.join("target/dangling")).unwrap();
+    write(&s.join("leftover.txt"), "the person's untracked file\n");
+    write(&s.join("nested/n.txt"), "another repository\n");
+    git(&s.join("nested"), &["init", "-q"]);
+    write(&s.join("f1.txt"), "the person's edit\n");
+    std::fs::remove_file(s.join("f2.txt")).unwrap();
+    git(s, &["config", "core.fsmonitor", "/bin/false"]);
+    write(&s.join(".git/hooks/post-checkout"), "#!/bin/sh\ntouch /tmp/sill-planted\n");
+    let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_500_000_000);
+    for f in ["f3.txt", "target/debug/app"] {
+        std::fs::File::options().write(true).open(s.join(f)).unwrap().set_modified(old).unwrap();
+    }
+}
+
+fn modified(p: &Path) -> std::time::SystemTime {
+    std::fs::metadata(p).unwrap().modified().unwrap()
+}
+
 #[test]
-fn a_reused_folder_keeps_build_output_but_nothing_a_session_planted() {
-    let d = tmp("reuse");
-    let (s, src, c) = setup(&d);
-    write(&c.path.join("target/debug/app"), "warm build\n");
-    write(&c.path.join("leftover.txt"), "untracked\n");
-    write(&c.path.join("f1.txt"), "unfinished\n");
-    git(&c.path, &["checkout", "-qb", "agent-branch"]);
-    git(&c.path, &["config", "core.fsmonitor", "/bin/false"]);
-    git(&c.path, &["config", "alias.x", "!touch /tmp/sill-planted"]);
-    write(&c.path.join(".git/hooks/post-checkout"), "#!/bin/sh\ntouch /tmp/sill-planted\n");
-    write(&c.path.join(".git/info/exclude"), "f2.txt\n");
-    // the source moved on meanwhile
-    write(&s.join("f3.txt"), "host\n");
-    git(&s, &["commit", "-qam", "host"]);
-    let src = Source { head: head(&s), ..src };
-    let spare = spare_path(&d.0.join("ws"), &s);
-    std::fs::create_dir_all(spare.parent().unwrap()).unwrap();
-    std::fs::rename(&c.path, &spare).unwrap();
-    let to = path_for(&d.0.join("ws"), &src, "w2", "again");
-    let made = reuse(&spare, &src, "w2", "again", &to, "op2").unwrap();
-    assert!(!spare.exists() && to.exists());
-    assert_eq!(read(&to.join("target/debug/app")), "warm build\n", "ignored build output kept");
-    assert!(!to.join("leftover.txt").exists());
+fn a_workspace_made_from_the_checkout_is_warm_and_at_the_base() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = tmp("warm");
+    let (s, src, _) = setup(&d);
+    lived_in(&s);
+    let to = path_for(&d.0.join("ws"), &src, "w2", "warm");
+    let made = crate::workspace::create_as(&src, "w2", "warm", &to, "op2", crate::workspace::seed::How::Bytes).unwrap();
+    // the build output, as it was
+    assert_eq!(read(&to.join("target/debug/app")), "warm build\n");
+    assert_eq!(std::fs::metadata(to.join("target/debug/app")).unwrap().permissions().mode() & 0o777, 0o755);
+    assert_eq!(modified(&to.join("target/debug/app")), modified(&s.join("target/debug/app")));
+    assert_eq!(std::fs::read_link(to.join("target/debug/link")).unwrap(), Path::new("app"));
+    assert_eq!(std::fs::read_link(to.join("target/dangling")).unwrap(), Path::new("/nonexistent/elsewhere"));
+    // the base, not the person's uncommitted state
     assert_eq!(read(&to.join("f1.txt")), "line 1\n");
-    assert_eq!(read(&to.join("f3.txt")), "host\n", "at the source's HEAD");
+    assert_eq!(read(&to.join("f2.txt")), "line 2\n");
+    assert!(!to.join("leftover.txt").exists() && !to.join("nested").exists());
     assert_eq!(git(&to, &["rev-parse", "HEAD"]), src.head);
     assert_eq!(git(&to, &["branch", "--format=%(refname:short)"]), made.branch, "only the new branch");
-    let config = read(&to.join(".git/config"));
-    assert!(!config.contains("fsmonitor") && !config.contains("alias"), "{config}");
-    assert!(!to.join(".git/hooks/post-checkout").exists());
-    assert!(!std::fs::read_to_string(to.join(".git/info/exclude")).unwrap_or_default().contains("f2.txt"));
     assert_eq!(git(&to, &["status", "--porcelain"]), "");
+    // an unchanged source keeps its time: a build sees nothing to do
+    assert_eq!(modified(&to.join("f3.txt")), modified(&s.join("f3.txt")));
+    // nothing of the checkout's Git settings
+    assert!(!read(&to.join(".git/config")).contains("fsmonitor"));
+    assert!(!to.join(".git/hooks").exists());
+    assert_eq!(crate::workspace::marker(&to).as_deref(), Some("op2"));
+    assert!(!unapplied(&s, &to, &made.branch).unwrap(), "nothing to bring: the person's edits are theirs");
+    git(&to, &["fsck"]);
+    // the checkout is as it was
+    assert_eq!(read(&s.join("f1.txt")), "the person's edit\n");
+    assert!(!s.join("f2.txt").exists() && s.join("leftover.txt").exists() && s.join("nested/.git").exists());
+    // and the two are apart: a build in the workspace is not one in the checkout
+    write(&to.join("target/debug/app"), "rebuilt\n");
+    assert_eq!(read(&s.join("target/debug/app")), "warm build\n");
+}
+
+/// A checkout that holds sill's workspaces (a home folder kept in Git): the copy leaves itself out.
+#[test]
+fn a_workspace_inside_the_checkout_does_not_copy_itself() {
+    let d = tmp("inside");
+    let (s, src, _) = setup(&d);
+    write(&s.join("target/debug/app"), "warm build\n");
+    let to = s.join("target/workspaces/w2");
+    crate::workspace::create_as(&src, "w2", "in", &to, "op2", crate::workspace::seed::How::Bytes).unwrap();
+    assert_eq!(read(&to.join("target/debug/app")), "warm build\n");
+    assert!(to.join("target/workspaces").exists() && !to.join("target/workspaces/w2").exists());
+    assert_eq!(git(&to, &["status", "--porcelain"]), "");
+}
+
+/// As the daemon makes one: warm where this filesystem shares file data, cold where it does
+/// not, a whole workspace either way.
+#[test]
+fn a_workspace_is_whole_whether_or_not_the_filesystem_shares() {
+    let d = tmp("share");
+    let (s, src, _) = setup(&d);
+    lived_in(&s);
+    let probe = d.0.join("probe");
+    std::fs::create_dir_all(&probe).unwrap();
+    let shares = crate::workspace::seed::copy(&s, &probe, crate::workspace::seed::How::Share).is_ok();
+    let to = path_for(&d.0.join("ws"), &src, "w2", "any");
+    let made = create(&src, "w2", "any", &to, "op2").unwrap();
+    assert_eq!(to.join("target/debug/app").exists(), shares);
+    assert_eq!(read(&to.join("f1.txt")), "line 1\n");
+    assert_eq!(read(&to.join("f2.txt")), "line 2\n");
+    assert!(!to.join("leftover.txt").exists());
+    assert_eq!(git(&to, &["status", "--porcelain"]), "");
+    assert_eq!(crate::workspace::marker(&to).as_deref(), Some("op2"));
     assert!(!unapplied(&s, &to, &made.branch).unwrap());
     git(&to, &["fsck"]);
 }

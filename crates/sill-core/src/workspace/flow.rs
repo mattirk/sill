@@ -1,6 +1,6 @@
 //! The session flow of §12 (docs/parallel-coding.md): Apply as a repeatable checkpoint that brings
 //! a workspace's commits and uncommitted changes into the person's checkout, Discard back to what
-//! was last applied (kept as a snapshot for Undo), and a finished folder reused as a warm spare.
+//! was last applied (kept as a snapshot for Undo).
 //!
 //! A **snapshot** is a commit of a clone's whole state — its HEAD plus every tracked change and
 //! every untracked file that is not ignored — made with a private index, so the clone's own index
@@ -13,11 +13,11 @@
 //! edit of a dirty file. All Git here runs through the hardened view ([`Git`]); nothing in
 //! either repository's config runs.
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-use super::{Created, MARKER, Source, Stop, anchor, ok, ok_raw, read_tree_stop, run, slug};
+use super::{Stop, ok, ok_raw, read_tree_stop, run};
 use crate::changes::Git;
 
 /// The snapshot of what the person already has from this workspace.
@@ -611,75 +611,6 @@ pub fn undo(source: &Path, clone: &Path, workspace_branch: &str, discarded: &str
     }
     reset_to_snapshot(clone, workspace_branch, discarded)?;
     Ok(true)
-}
-
-/// A fresh repository's config as `git init` writes it for this object format.
-fn fresh_config(object_format: &str) -> Result<String> {
-    let dir = std::env::temp_dir().join(format!("sill-fresh-{}-{}", std::process::id(), crate::store::new_id()));
-    let mut c = std::process::Command::new("git");
-    c.args(["init", "-q", "--template="]).arg(format!("--object-format={object_format}")).arg(&dir).env("GIT_CONFIG_NOSYSTEM", "1");
-    let made = ok(c, "init").and_then(|_| Ok(std::fs::read_to_string(dir.join(".git/config"))?));
-    let _ = std::fs::remove_dir_all(&dir);
-    made
-}
-
-/// Make a finished folder `spare` the new workspace `id` at `path` (§12 spare): renamed, its Git
-/// settings reset to a fresh repository's — config, hooks, `info/`, refs, reflogs and any
-/// stopped operation go — so nothing one session planted runs in the next; its objects stay and
-/// it borrows the source's store; tracked files reset to the source's HEAD on a new branch,
-/// untracked files removed, **ignored files kept** (the warm build output).
-pub fn reuse(spare: &Path, source: &Source, id: &str, name: &str, path: &Path, operation: &str) -> Result<Created> {
-    if path.exists() && path != spare {
-        bail!("{} already exists", path.display());
-    }
-    anchor(&source.root, id, "base", &source.head)?;
-    if path != spare {
-        std::fs::create_dir_all(path.parent().context("no parent")?)?;
-        std::fs::rename(spare, path).with_context(|| format!("move {}", spare.display()))?;
-    }
-    let gitdir = path.join(".git");
-    let config = fresh_config(&source.object_format)?;
-    for gone in ["hooks", "info", "logs", "refs", "rebase-merge", "rebase-apply", "sequencer"] {
-        let p = gitdir.join(gone);
-        if p.exists() {
-            std::fs::remove_dir_all(&p)?;
-        }
-    }
-    for gone in ["packed-refs", "MERGE_HEAD", "MERGE_MSG", "CHERRY_PICK_HEAD", "REVERT_HEAD", "ORIG_HEAD", "FETCH_HEAD", "index.lock", "shallow"] {
-        let _ = std::fs::remove_file(gitdir.join(gone));
-    }
-    std::fs::write(gitdir.join("config"), config)?;
-    for dir in ["refs/heads", "refs/tags", "info"] {
-        std::fs::create_dir_all(gitdir.join(dir))?;
-    }
-    std::fs::write(gitdir.join(MARKER), operation)?;
-    let objects = Git::open(&source.root)?.objects().canonicalize()?;
-    std::fs::create_dir_all(gitdir.join("objects/info"))?;
-    std::fs::write(gitdir.join("objects/info/alternates"), format!("{}\n", objects.display()))?;
-    let branch = format!("sill/{}-{id}", slug(name));
-    std::fs::write(gitdir.join("HEAD"), format!("ref: refs/heads/{branch}\n"))?;
-    let git = Git::open(path)?;
-    for (r, v) in [(format!("refs/heads/{branch}"), &source.head), ("refs/sill/base".to_string(), &source.head)] {
-        let mut c = git.cmd_write();
-        c.args(["update-ref", &r, v]);
-        ok(c, "set refs")?;
-    }
-    let mut c = git.cmd_write();
-    c.args(["read-tree", "--reset", "-u", &source.head]);
-    ok(c, "reset the files")?;
-    let mut c = git.cmd_write();
-    c.args(["clean", "-fdq"]);
-    ok(c, "remove untracked files")?;
-    drop(git);
-    set_applied(path, &snapshot(path, "sill: base")?)?;
-    Ok(Created { path: path.to_path_buf(), branch, base: source.head.clone() })
-}
-
-/// The folder kept as a repository's spare, if any: `<root>/.spare/<repository key>`.
-pub fn spare_path(root: &Path, source: &Path) -> PathBuf {
-    use sha2::Digest;
-    let key: String = sha2::Sha256::digest(source.as_os_str().as_encoded_bytes()).iter().take(8).map(|b| format!("{b:02x}")).collect();
-    root.join(".spare").join(key)
 }
 
 #[cfg(test)]

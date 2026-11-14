@@ -321,7 +321,7 @@ fn no_program_from_either_config_runs_on_the_host() {
     let _ = summary(&c.path, &c.branch, &c.base).unwrap();
     let _ = revision(&c.path, &c.branch).unwrap();
     set_destination(&s, &c.path, "ab12", "main", &c.branch).unwrap();
-    // the §12 flow too: an Apply of uncommitted work, a Discard, an Undo, a spare reused
+    // the §12 flow too: an Apply of uncommitted work, a Discard, an Undo, a workspace made warm
     write(&c.path.join("f3.txt"), "agent uncommitted\n");
     write(&c.path.join("extra.txt"), "agent new\n");
     let tip = git(&s, &["rev-parse", "main"]);
@@ -331,13 +331,10 @@ fn no_program_from_either_config_runs_on_the_host() {
     write(&c.path.join("f3.txt"), "more\n");
     let kept = super::flow::discard(&s, &c.path, "ab12", "1", &c.branch).unwrap();
     assert!(super::flow::undo(&s, &c.path, &c.branch, &kept).unwrap());
-    let spare = super::flow::spare_path(&d.0.join("ws"), &s);
-    std::fs::create_dir_all(spare.parent().unwrap()).unwrap();
-    std::fs::rename(&c.path, &spare).unwrap();
     // (inspect would now refuse it: the applied .gitattributes names a filter its config defines)
     let again = Source { root: s.clone(), branch: "main".into(), head: git(&s, &["rev-parse", "main"]), object_format: "sha1".into(), shallow: false, dirty: true };
     let to = path_for(&d.0.join("ws"), &again, "cd34", "again");
-    super::flow::reuse(&spare, &again, "cd34", "again", &to, "op-2").unwrap();
+    create_as(&again, "cd34", "again", &to, "op-2", seed::How::Bytes).unwrap();
     drop_anchors(&s, "ab12").unwrap();
     let ran = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(ran.is_empty(), "programs ran on the host: {ran}");

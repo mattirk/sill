@@ -1,6 +1,6 @@
 //! §12 records against real repositories, with a test host whose sessions' lives, turns and pins
-//! the test sets: workspaces made at a session's start, Apply and Discard during it, Undo, the
-//! spare folder, rebase, and what a restart finds.
+//! the test sets: workspaces made at a session's start, Apply and Discard during it, Undo, a
+//! finished folder removed, rebase, and what a restart finds.
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -273,23 +273,23 @@ fn discard_and_undo_during_the_session() {
 }
 
 #[test]
-fn an_ended_session_frees_its_folder_as_the_warm_spare() {
-    let f = fixture("spare");
+fn an_ended_session_with_nothing_left_frees_its_folder() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fixture("free");
     let w = session(&f, "s1");
     let clone = clone_of(&w);
-    write(&clone.join("target/debug/app"), "warm\n");
-    // the session read only, then ended: its folder becomes the spare, nothing is shown
+    write(&clone.join("target/debug/app"), "built\n");
+    // a tool's folder it may not write itself (a module cache)
+    write(&clone.join("target/cache/m.txt"), "kept read-only\n");
+    std::fs::set_permissions(clone.join("target/cache"), std::fs::Permissions::from_mode(0o555)).unwrap();
+    // the session read only, then ended: its folder goes, nothing is shown
     f.host.lives.lock().unwrap().insert("s1".into(), Life::Ended);
     let listed = list(&f.host, &api::List { session_id: None, after: None, limit: None }).unwrap();
     assert!(listed.workspaces.is_empty());
     assert!(!clone.exists());
-    assert!(flow::spare_path(&f.host.root, &f.source).join("target/debug/app").exists());
-    // the next session gets it, warm
+    // a session that ends with work left: a result, shown; applied, then freed
     let w2 = session(&f, "s2");
     let clone2 = clone_of(&w2);
-    assert_eq!(read(&clone2.join("target/debug/app")), "warm\n");
-    assert!(!flow::spare_path(&f.host.root, &f.source).exists());
-    // a session that ends with work left: a result, shown; applied, then freed
     write(&clone2.join("f1.txt"), "work\n");
     f.host.lives.lock().unwrap().insert("s2".into(), Life::Ended);
     let listed = list(&f.host, &api::List { session_id: None, after: None, limit: None }).unwrap();
@@ -297,7 +297,17 @@ fn an_ended_session_frees_its_folder_as_the_warm_spare() {
     let done = apply(&f.host, &apply_req("a1", &w2, &rev(&f, &w2))).unwrap();
     assert!(done.workspace.is_none(), "nothing left: freed");
     assert_eq!(read(&f.source.join("f1.txt")), "work\n");
-    assert!(flow::spare_path(&f.host.root, &f.source).exists());
+    assert!(!clone2.exists());
+}
+
+/// Spare folders an earlier version kept (one finished folder per repository) go at the
+/// daemon's start: a new workspace takes its build output from the checkout.
+#[test]
+fn a_start_removes_the_spare_folders_of_before() {
+    let f = fixture("old-spare");
+    write(&f.host.root.join(".spare/7fda970fa7eda2a1/target/debug/app"), "old\n");
+    reconcile(&f.host).unwrap();
+    assert!(!f.host.root.join(".spare").exists());
 }
 
 #[test]
@@ -382,7 +392,7 @@ fn a_store_gives_the_jail_its_workspaces_and_keeps_policy_pins() {
 }
 
 /// The person changes a running workspace session's pins: the next start matches them. A new
-/// pin gets its workspace; a removed one leaves the jail — freed to the spare with nothing left,
+/// pin gets its workspace; a removed one leaves the jail — freed with nothing left,
 /// a result on Changes with work waiting — and opens again when pinned again.
 #[test]
 fn a_start_after_a_pin_change_matches_the_workspaces_to_the_pins() {
@@ -400,13 +410,13 @@ fn a_start_after_a_pin_change_matches_the_workspaces_to_the_pins() {
     let w = session(&f, "s1");
     assert_eq!(mounted(), [f.source.clone()]);
 
-    // nothing done in it: unpinned, it becomes the spare and the new pin gets its own
+    // nothing done in it: unpinned, it goes and the new pin gets its own
     set_pins(vec![other.clone()]);
     let layout = ensure_for_session(&f.host, "s1").unwrap();
     assert_eq!(layout.iter().map(|l| l.source.clone()).collect::<Vec<_>>(), [other.clone()]);
     assert_eq!(mounted(), [other.clone()]);
     assert!(f.host.db(|c| load(c, &w.workspace_id)).unwrap().is_none(), "freed");
-    assert!(spare(&f.host, &f.source).exists(), "kept warm as the spare");
+    assert!(!clone_of(&w).exists(), "its folder with it");
 
     // pinned again with work left in it, then unpinned: a result, not mounted, still offered
     set_pins(vec![f.source.clone(), other.clone()]);
@@ -444,7 +454,7 @@ fn every_clone_there_is_known_and_a_freed_one_is_not() {
     assert_eq!(f.host.db(|c| all_clones(c)).unwrap(), [clone_of(&w)]);
     f.host.pins.lock().unwrap().insert("s1".into(), vec![]);
     ensure_for_session(&f.host, "s1").unwrap();
-    assert!(f.host.db(|c| all_clones(c)).unwrap().is_empty(), "freed to the spare: no longer a clone of anyone's");
+    assert!(f.host.db(|c| all_clones(c)).unwrap().is_empty(), "freed: no longer a clone of anyone's");
 }
 
 /// One request tells the window everything about a session's workspaces: the view carries each

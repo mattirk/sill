@@ -277,20 +277,37 @@ pub struct Created {
 /// empty repository borrowing the source's real object store, check out a new branch at the base.
 /// The source is read only through the hardened view and gets nothing but the anchor. `path` must
 /// not exist. Nothing of a failed attempt is left but what [`remove_partial`] removes.
+///
+/// The folder starts **warm** where the filesystem can share file data (§12): the checkout's
+/// working tree — its ignored build output with it — is taken as it is, then brought to the base.
+/// Where it cannot, or the checkout cannot be read, the folder starts cold: tracked files only.
 pub fn create(source: &Source, id: &str, name: &str, path: &Path, operation: &str) -> Result<Created> {
+    create_as(source, id, name, path, operation, seed::How::Share)
+}
+
+fn create_as(source: &Source, id: &str, name: &str, path: &Path, operation: &str, how: seed::How) -> Result<Created> {
     if path.exists() {
         bail!("{} already exists", path.display());
     }
     anchor(&source.root, id, "base", &source.head)?;
     let objects = Git::open(&source.root)?.objects().canonicalize()?;
     std::fs::create_dir_all(path.parent().context("workspace path has no parent")?)?;
+    // the marker first: whatever is left of an interrupted attempt is known to be this one's
+    std::fs::create_dir_all(path.join(".git"))?;
+    std::fs::write(path.join(".git").join(MARKER), operation)?;
+    let warm = seed::copy(&source.root, path, how).is_ok();
+    if !warm {
+        // nothing of a copy that stopped half way stays
+        remove_folder(path)?;
+        std::fs::create_dir_all(path.join(".git"))?;
+        std::fs::write(path.join(".git").join(MARKER), operation)?;
+    }
     let mut c = std::process::Command::new("git");
     c.args(["init", "-q", "--template="])
         .arg(format!("--object-format={}", source.object_format))
         .arg(path)
         .env("GIT_CONFIG_NOSYSTEM", "1");
     ok(c, "init")?;
-    std::fs::write(path.join(".git").join(MARKER), operation)?;
     std::fs::create_dir_all(path.join(".git/objects/info"))?;
     std::fs::write(path.join(".git/objects/info/alternates"), format!("{}\n", objects.display()))?;
     let branch = format!("sill/{}-{id}", slug(name));
@@ -298,14 +315,19 @@ pub fn create(source: &Source, id: &str, name: &str, path: &Path, operation: &st
     let mut c = git.cmd_write();
     c.args(["update-ref", "-m", "sill workspace base"]).arg("refs/sill/base").arg(&source.head);
     ok(c, "base ref")?;
+    if warm {
+        to_base(&git, path, &branch, &source.head)?;
+    }
     drop(git);
-    // a fresh repository with sill's own config: check out on it directly, hooks and fsmonitor off
-    let mut c = std::process::Command::new("git");
-    c.arg("-C").arg(path)
-        .args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "advice.detachedHead=false"])
-        .args(["checkout", "-q", "-b", &branch, &source.head])
-        .env("GIT_CONFIG_NOSYSTEM", "1");
-    ok(c, "checkout")?;
+    if !warm {
+        // a fresh repository with sill's own config: check out on it directly, hooks and fsmonitor off
+        let mut c = std::process::Command::new("git");
+        c.arg("-C").arg(path)
+            .args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "advice.detachedHead=false"])
+            .args(["checkout", "-q", "-b", &branch, &source.head])
+            .env("GIT_CONFIG_NOSYSTEM", "1");
+        ok(c, "checkout")?;
+    }
     let git = Git::open(path)?;
     let mut c = git.cmd();
     c.arg("rev-parse").arg("--verify").arg(format!("{branch}^{{tree}}"));
@@ -314,6 +336,50 @@ pub fn create(source: &Source, id: &str, name: &str, path: &Path, operation: &st
     // what the person has from it so far: the base (§12 applied snapshot)
     flow::set_applied(path, &flow::snapshot(path, "sill: base")?)?;
     Ok(Created { path: path.to_path_buf(), branch, base: source.head.clone() })
+}
+
+/// Bring a folder holding the checkout's files to `head` on the new `branch`: the person's
+/// uncommitted edits and deletions go back to the base, their untracked files go, **ignored
+/// files stay** (the warm build output). A file that already is as the base has it is not
+/// written, so it keeps the checkout's time and build tools see it as unchanged.
+fn to_base(git: &Git, path: &Path, branch: &str, head: &str) -> Result<()> {
+    std::fs::write(path.join(".git/HEAD"), format!("ref: refs/heads/{branch}\n"))?;
+    let mut c = git.cmd_write();
+    c.args(["update-ref", &format!("refs/heads/{branch}"), head]);
+    ok(c, "set the branch")?;
+    let mut c = git.cmd_write();
+    c.args(["read-tree", head]);
+    ok(c, "read the base")?;
+    // which files are the base's already: fails where one is not, and that is the answer
+    let mut c = git.cmd_write();
+    c.args(["update-index", "-q", "--refresh"]);
+    let _ = run(c);
+    let mut c = git.cmd_write();
+    c.args(["read-tree", "--reset", "-u", head]);
+    ok(c, "reset the files")?;
+    // twice forced: a repository nested in the checkout, not ignored, goes with the rest
+    let mut c = git.cmd_write();
+    c.args(["clean", "-ffdq"]);
+    ok(c, "remove untracked files")?;
+    Ok(())
+}
+
+/// Remove a folder sill made, also where a tool left folders it may not write (a module cache).
+pub(crate) fn remove_folder(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    if std::fs::remove_dir_all(path).is_ok() {
+        return Ok(());
+    }
+    let mut dirs = vec![path.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        for entry in std::fs::read_dir(&dir)?.flatten() {
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                dirs.push(entry.path());
+            }
+        }
+    }
+    Ok(std::fs::remove_dir_all(path)?)
 }
 
 /// Remove what an unfinished [`create`] by `operation` left at `path`. Refuses a directory whose
@@ -325,7 +391,7 @@ pub fn remove_partial(path: &Path, operation: &str) -> Result<bool> {
     if marker(path).as_deref() != Some(operation) {
         bail!("{} was not made by this operation; left in place", path.display());
     }
-    std::fs::remove_dir_all(path)?;
+    remove_folder(path)?;
     Ok(true)
 }
 
@@ -557,6 +623,7 @@ fn read_tree_stop(stderr: &str) -> Stop {
 
 pub mod flow;
 pub mod records;
+mod seed;
 
 #[cfg(test)]
 mod git_tests;

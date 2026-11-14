@@ -1,7 +1,7 @@
 //! Workspace records, the operation journal and what the person does (docs/parallel-coding.md
 //! §12): a workspace per session and pinned repository, made when the session's jail starts;
 //! Apply and Discard as often as the person likes; Undo of discarded work for 7 days; a finished
-//! folder kept as the repository's warm spare.
+//! folder removed.
 //!
 //! The daemon store keeps a row per workspace, a row per discarded piece of work, the session's
 //! mode and the repositories it keeps live, and a journal entry per mutation written before any
@@ -52,7 +52,7 @@ pub trait Host {
     /// repository's path), no network, working directory `cwd`: the workspace's own Git runs
     /// there, never on the host.
     fn run_jailed(&self, session: &str, cwd: &Path, argv: &[&str]) -> Result<std::process::Output>;
-    /// Where workspaces are made; spares go to `<root>/.spare`.
+    /// Where workspaces are made.
     fn root(&self) -> PathBuf;
     fn now(&self) -> i64 {
         crate::store::now()
@@ -331,23 +331,12 @@ fn clear_conflict<H: Host>(h: &H, r: &Row) -> Result<()> {
     Ok(())
 }
 
-/// The repository's spare folder: the most recently finished one (§12).
-fn spare<H: Host>(h: &H, source: &Path) -> PathBuf {
-    flow::spare_path(&h.root(), source)
-}
-
-/// The workspace is done with: its folder becomes the repository's spare (the previous spare
-/// goes), its anchors go except those of discarded work, its row goes.
+/// The workspace is done with: its folder goes (nothing in it is left to apply, and the next
+/// workspace takes its build output from the checkout, §12), its anchors go except those of
+/// discarded work, its row goes.
 fn free<H: Host>(h: &H, r: &Row) -> Result<()> {
     if r.path.exists() {
-        // nothing runs in it any more: what its looks left goes
-        let _ = flow::prune(&r.path);
-        let to = spare(h, &r.source);
-        if to.exists() {
-            std::fs::remove_dir_all(&to).with_context(|| format!("remove the old spare {}", to.display()))?;
-        }
-        std::fs::create_dir_all(to.parent().context("no parent")?)?;
-        std::fs::rename(&r.path, &to).with_context(|| format!("keep {} as the spare", r.path.display()))?;
+        super::remove_folder(&r.path).with_context(|| format!("remove {}", r.path.display()))?;
     }
     if r.source.exists() {
         for name in ["base", "dest", "incoming"] {
@@ -479,10 +468,10 @@ fn layout_where(conn: &Connection, session: &str, keep: impl Fn(&Row) -> bool) -
 }
 
 /// At the start of `session`'s jail (§12), the workspaces made to match its pins: one for each
-/// session-pinned repository, made fresh or from the repository's spare, or kept from the
+/// session-pinned repository, made from the checkout (warm where it can be), or kept from the
 /// session's last start. A repository that cannot have one stays live, its reason recorded. A
 /// workspace whose repository is no longer pinned leaves the jail and settles as at the session's
-/// end: with nothing left to apply it becomes the spare, with work waiting a result on Changes
+/// end: with nothing left to apply its folder goes, with work waiting a result on Changes
 /// (pinned again, it opens again). Nothing for a live session.
 pub fn ensure_for_session<H: Host>(h: &H, session: &str) -> Result<Vec<Layout>> {
     if !h.db(|c| mode(c, session))? {
@@ -540,13 +529,7 @@ pub fn ensure_for_session<H: Host>(h: &H, session: &str) -> Result<Vec<Layout>> 
         let op = key(&format!("ensure:{session}:{id}"));
         let now = h.now();
         h.db(|c| intent(c, &op, &id, "create", &json!({"path": bytes(&at), "source": bytes(&src.root)}), now))?;
-        let spare = spare(h, &src.root);
-        let made = if spare.exists() {
-            flow::reuse(&spare, &src, &id, &name, &at, &op)
-        } else {
-            super::create(&src, &id, &name, &at, &op)
-        };
-        let made = match made {
+        let made = match super::create(&src, &id, &name, &at, &op) {
             Ok(m) => m,
             Err(e) => {
                 let _ = super::remove_partial(&at, &op);
@@ -644,7 +627,7 @@ fn summary(r: &Row, m: &flow::Mirror) -> Result<api::Summary> {
 
 /// A workspace after one look (`detail`).
 enum Settled {
-    /// Its session had ended with nothing left: the folder is the spare now.
+    /// Its session had ended with nothing left: the folder is gone.
     Freed,
     /// Its folder or checkout is gone: the record alone.
     Record(api::Workspace),
@@ -998,8 +981,7 @@ pub fn undo<H: Host>(h: &H, a: &api::Undo) -> Result<api::Changed> {
             let id = format!("ws-{}", crate::store::new_id());
             let at = super::path_for(&h.root(), &src, &id, &d.name);
             let op = key(&a.operation_id);
-            let spare = spare(h, &src.root);
-            let made = if spare.exists() { flow::reuse(&spare, &src, &id, &d.name, &at, &op)? } else { super::create(&src, &id, &d.name, &at, &op)? };
+            let made = super::create(&src, &id, &d.name, &at, &op)?;
             flow::reset_to_snapshot(&made.path, &made.branch, &d.snapshot)?;
             let now = h.now();
             let r = Row {
@@ -1129,6 +1111,11 @@ pub fn reconcile<H: Host>(h: &H) -> Result<()> {
     })?;
     for r in rows {
         settle_session(h, r)?;
+    }
+    // spare folders of before 2026-11-09, when a finished folder was kept for the next session
+    let spares = h.root().join(".spare");
+    if spares.exists() {
+        let _ = super::remove_folder(&spares);
     }
     sweep(h)?;
     Ok(())
