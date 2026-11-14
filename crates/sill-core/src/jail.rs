@@ -388,15 +388,18 @@ impl JailSpec {
 
         // masks (both views), direct, ro. Sill's own files are masked whatever the policy says: its
         // configuration (policies, agent overrides — a session's mounts and allowed domains are made
-        // of them), the session store and the staged binaries (security.md S2), and every agent's
-        // sill-owned home (`agents/`, the login scratch): the current agent gets its own bound at
-        // `~/.claude` etc. from the host side, the others' stay out of sight (SPEC §4.11 #8).
+        // of them) and its whole state directory — the session store, the staged binaries
+        // (security.md S2), every agent's sill-owned home (`agents/`, the login scratch), the
+        // daemon's lock, the shelf's log, and whatever is put there next: an allow-list, so a new
+        // file is hidden until someone decides otherwise. The current agent gets its own home bound
+        // at `~/.claude` etc. from the host side, the others' stay out of sight (SPEC §4.11 #8); the
+        // installed adapters (`tools/`) are bound back read-only below, the agent runs from there.
         let mut masked = Vec::new();
         let config_dir = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| self.home.join(".config"));
         let state_base = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| self.home.join(".local/state"));
-        let own: Vec<PathBuf> = [config_dir.join("sill"), state_base.join("sill/bin"), state_base.join("sill/agents"), state_base.join("sill/login"), state_base.join("sill/memory"), state_base.join("sill/registry")]
+        let state_dir = state_base.join("sill");
+        let own: Vec<PathBuf> = [config_dir.join("sill"), state_dir.clone()]
             .into_iter()
-            .chain(["sill.db", "sill.db-wal", "sill.db-shm"].iter().map(|f| state_base.join("sill").join(f)))
             // the user's journal is readable by ACL: every session's proxy lines and agent stderr (S15)
             .chain([PathBuf::from("/var/log/journal")])
             .chain(self.masks.iter().cloned())
@@ -416,6 +419,13 @@ impl JailSpec {
                     }
                 }
                 masked.push(path);
+            }
+        }
+        // what the jail needs from sill's state, back over the mask: the adapters it runs
+        let tools = state_dir.join("tools");
+        if tools.is_dir() {
+            for target in [tools.clone(), host_view(&tools)] {
+                push(&mut a, &[&"--ro-bind", &tools, &target]);
             }
         }
         // a bind inside a mask puts the masked thing back, a bind over a mask buries it: neither

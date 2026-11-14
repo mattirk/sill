@@ -58,6 +58,11 @@ static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
 /// Run until `_sill/daemon.shutdown` or a fatal socket error. The listener is systemd's when the
 /// unit passed one (`LISTEN_FDS`), ours otherwise (direct mode: spawned by the first client).
 pub fn run() -> Result<()> {
+    // a jail has no store and no host socket: nothing to run here, and `lock_store` would leave a
+    // daemon.lock in the session's overlay (one more thing in Changes)
+    if std::env::var_os("SILL_SESSION").is_some() {
+        bail!("sill daemon does not run inside a session");
+    }
     // one daemon per store, whatever socket it listens on: two would be two writers of sill.db
     let _store_lock = lock_store()?;
     let (listener, mode) = match activated_listener()? {

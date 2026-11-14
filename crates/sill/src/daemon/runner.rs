@@ -384,6 +384,9 @@ impl Runner {
             }
         }
         if self.commands.try_send(cmd).is_err() {
+            if prompt {
+                self.st.lock().unwrap().busy = false; // or every later prompt is refused as busy
+            }
             bail!("the session loop is gone");
         }
         match entry {

@@ -40,7 +40,26 @@ impl Client {
     /// spawned detached — and the socket waited for (direct mode, docs/daemon.md §3.1).
     pub fn connect_or_start() -> Result<Client> {
         match Self::connect() {
-            Ok(c) => return Ok(c),
+            Ok(c) => match c.protocol()? {
+                p if p == crate::PROTOCOL => return Ok(c),
+                p => {
+                    // an older (or newer) binary's daemon, left running across an upgrade: it is
+                    // asked to leave and comes back as this binary — the socket unit starts the
+                    // installed one on the next connection, else it is started below
+                    eprintln!("sill: the daemon speaks protocol {p}, this binary {}: restarting it", crate::PROTOCOL);
+                    let _ = c.call::<Value>(crate::method::DAEMON_SHUTDOWN, crate::Empty::default());
+                    drop(c);
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    while Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(100));
+                        match Self::connect() {
+                            Ok(c) if c.protocol().ok() == Some(crate::PROTOCOL) => return Ok(c),
+                            Ok(_) => continue, // the old one is still leaving
+                            Err(_) => break,   // gone: start one
+                        }
+                    }
+                }
+            },
             Err(e) => {
                 if std::env::var_os("SILL_NO_DAEMON_START").is_some() {
                     return Err(e);
@@ -112,6 +131,12 @@ impl Client {
                 Err(_) => std::thread::sleep(Duration::from_millis(50)),
             }
         }
+    }
+
+    /// The protocol the daemon on this connection speaks (`daemon.status`).
+    fn protocol(&self) -> Result<u32> {
+        let s: crate::DaemonStatus = self.call(crate::method::DAEMON_STATUS, crate::Empty::default())?;
+        Ok(s.protocol)
     }
 
     /// The connection is gone (the daemon left or restarted): the caller connects again.

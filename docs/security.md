@@ -95,7 +95,7 @@ by the user. That is the stance, and the reasoning is by reader:
 | Another local user | 0700 per-uid dirs (S21 makes it explicit) | no |
 | Someone with the disk (theft, a discarded drive) | **full-disk encryption**, the OS's | no: a key sill can read at shelf start sits under the same uid as the data; the thief has both. Only a passphrase typed at every start would differ, and the agents' homes (`~/.claude.json` credentials, their own transcripts, plaintext as the vendors ship them) would stay in the clear anyway |
 | Another process running as the user on the host | nothing — it reads a key the way sill would | no; this is the jail's threat in the other direction |
-| **The agent in the jail** | masking: `sill.db*`, `~/.config/sill`, `~/.local/state/sill/bin`, the other agents' homes are tmpfs or `/dev/null` in every jail (S2, S16, §4.11 #8) | no — and this is the reader that matters |
+| **The agent in the jail** | masking: `~/.config/sill` and the whole of `~/.local/state/sill` (`sill.db*`, `bin`, the agents' homes, the daemon's lock, the shelf's log) are tmpfs in every jail, only `tools/` bound back read-only (S2, S16, §4.11 #8; whole-directory since 2026-11-02) | no — and this is the reader that matters |
 
 So an application-level layer would protect against none of the four and suggest protection against
 the second. What does help, and what sill does or should do:
