@@ -29,6 +29,20 @@ const STROKES: &[(&str, &str)] = &[
     ("sill-agents", "M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2M14 2h6a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z"),
     ("sill-code", "m16 18 6-6-6-6M8 6l-6 6 6 6"),
     ("sill-link", "M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"),
+    // controls drawn by sill rather than taken from the icon theme: themes differ in how much of
+    // the canvas a glyph fills (Papirus's 22/24 px symbolic set is a 16 px glyph with margins, its
+    // plus even sits in a corner), so a theme icon changes size with the lookup size the display
+    // scale lands on
+    ("sill-plus", "M5 12h14M12 5v14"),
+    ("sill-minus", "M5 12h14"),
+    ("sill-lock", "M7 11V7a5 5 0 0 1 10 0v4M5 11h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2z"),
+    ("sill-lock-open", "M7 11V7a5 5 0 0 1 9.9-1M5 11h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2z"),
+];
+
+/// Filled glyphs for the send button (lucide send-horizontal, a plain square for stop).
+const FILLED: &[(&str, &str)] = &[
+    ("sill-send", "M3.714 3.048a.498.498 0 0 0-.683.627l2.843 7.627a2 2 0 0 1 0 1.396l-2.842 7.627a.498.498 0 0 0 .682.627l18-8.5a.5.5 0 0 0 0-.904z"),
+    ("sill-stop", "M6 6h12v12H6z"),
 ];
 
 pub const PLACEHOLDER: &str = "sill-agent-symbolic";
@@ -42,13 +56,53 @@ fn hex(color: gdk::RGBA) -> String {
     )
 }
 
-fn texture_image(svg: String, px: i32) -> gtk::Image {
-    let i = match gdk::Texture::from_bytes(&glib::Bytes::from_owned(svg.into_bytes())) {
+/// `px` as callers give it is for the normal text size; textures don't follow CSS font sizes, so the
+/// text scale is applied here (CSS-sized icons get it from their `em` units).
+fn scaled(px: i32) -> i32 {
+    (px as f64 * super::theme::text_scale()).round().max(1.0) as i32
+}
+
+fn texture(svg: String) -> gtk::Image {
+    match gdk::Texture::from_bytes(&glib::Bytes::from_owned(svg.into_bytes())) {
         Ok(t) => gtk::Image::from_paintable(Some(&t)),
         Err(_) => gtk::Image::from_icon_name("image-missing-symbolic"),
-    };
-    i.set_pixel_size(px);
+    }
+}
+
+fn texture_image(svg: String, px: i32) -> gtk::Image {
+    let i = texture(svg);
+    i.set_pixel_size(scaled(px));
     i
+}
+
+fn stroke_svg(d: &str, color: gdk::RGBA, size: i32) -> String {
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24"><path fill="none" stroke="{stroke}" stroke-opacity="{a}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" d="{d}"/></svg>"##,
+        stroke = hex(color),
+        a = color.alpha()
+    )
+}
+
+fn fill_svg(d: &str, color: gdk::RGBA, size: i32) -> String {
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24"><path fill="{fill}" fill-opacity="{a}" d="{d}"/></svg>"##,
+        fill = hex(color),
+        a = color.alpha()
+    )
+}
+
+/// A sill glyph (stroke or filled) with no size of its own: the widget's CSS `-gtk-icon-size` sizes
+/// it, so a control sized in `em` keeps its glyph in proportion on every display and text scale.
+/// Rendered large enough to stay crisp at 2× for any sensible em.
+pub fn scalable(name: &str, color: gdk::RGBA) -> gtk::Image {
+    const SIZE: i32 = 96;
+    if let Some((_, d)) = STROKES.iter().find(|(n, _)| *n == name) {
+        return texture(stroke_svg(d, color, SIZE));
+    }
+    if let Some((_, d)) = FILLED.iter().find(|(n, _)| *n == name) {
+        return texture(fill_svg(d, color, SIZE));
+    }
+    gtk::Image::from_icon_name(name)
 }
 
 /// A sill line glyph (`sill-sessions`, `sill-files`, …) in colour `color`.
@@ -56,13 +110,7 @@ pub fn named(name: &str, color: gdk::RGBA, px: i32) -> gtk::Image {
     let Some((_, d)) = STROKES.iter().find(|(n, _)| *n == name) else {
         return gtk::Image::from_icon_name(name);
     };
-    let size = px * 4;
-    let svg = format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24"><path fill="none" stroke="{stroke}" stroke-opacity="{a}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" d="{d}"/></svg>"##,
-        stroke = hex(color),
-        a = color.alpha()
-    );
-    texture_image(svg, px)
+    texture_image(stroke_svg(d, color, px * 4), px)
 }
 
 fn glyph(name: &str) -> Option<&'static str> {
@@ -81,7 +129,7 @@ pub fn image(agent: Option<&sill_core::agents::Agent>, color: gdk::RGBA, px: i32
         let known = gdk::Display::default().map(|d| gtk::IconTheme::for_display(&d).has_icon(&name)).unwrap_or(false);
         if known {
             let i = gtk::Image::from_icon_name(&name);
-            i.set_pixel_size(px);
+            i.set_pixel_size(scaled(px));
             return i;
         }
     }

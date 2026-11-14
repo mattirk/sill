@@ -943,7 +943,7 @@ button.sill-install:hover { background: alpha(@accent_bg_color, 0.45); }
 .sill-files > row { padding: 1px 4px; min-height: 0; }
 .sill-files > row:selected { background: alpha(@accent_bg_color, 0.25); }
 .sill-files treeexpander { padding: 1px 0; }
-.sill-file-icon { opacity: 0.7; -gtk-icon-size: 14px; }
+.sill-file-icon { opacity: 0.7; -gtk-icon-size: 0.95em; }
 .sill-changed { color: @warning_color; }
 .sill-new { color: @success_color; }
 .sill-dim { opacity: 0.45; }
@@ -960,33 +960,36 @@ button.sill-action:checked { background: alpha(@view_fg_color, 0.09); border-bot
 .sill-git-add { color: @success_color; font-size: 90%; }
 .sill-git-del { color: @error_color; font-size: 90%; }
 .sill-scope { padding: 2px 0; }
-.sill-pin { padding: 0 2px; min-height: 0; min-width: 0; opacity: 0.4; -gtk-icon-size: 11px; }
+.sill-pin { padding: 0 2px; min-height: 0; min-width: 0; opacity: 0.4; -gtk-icon-size: 0.75em; }
 .sill-pin:hover { opacity: 1; }
 .sill-badge { font-size: 80%; color: alpha(@accent_color, 0.9); font-family: monospace; }
 /* the ACP controls row (mode, model, reasoning, …): small, light and quiet until hovered */
 .sill-controls { font-size: 80%; }
 .sill-controls label { font-weight: normal; }
-.sill-ctl-icon { min-height: 0; min-width: 0; padding: 2px 6px; opacity: 0.6; -gtk-icon-size: 13px; }
+/* Everything in the row is sized in em — buttons, glyphs, gaps — and nothing in px: em follows the
+   text scale and the display's font DPI, px only the integer scale factor, so px rows come out
+   different on every machine. The glyphs are sill's own textures sized by -gtk-icon-size. */
+.sill-controls > *, .sill-controls > box > * { margin-left: 0.3em; }
+.sill-controls > *:first-child, .sill-controls > box > *:first-child { margin-left: 0; }
+.sill-ctl-icon { min-width: 2em; min-height: 2em; padding: 0; opacity: 0.6; }
+.sill-ctl-icon > image { -gtk-icon-size: 1.1em; }
 .sill-ctl-icon:hover, .sill-ctl-icon:checked { opacity: 1; }
-/* the lock: same colour in both states, fixed width so open/closed don't shift the row */
-button.sill-lock { min-width: 24px; padding: 2px 0; opacity: 0.6; }
+/* the lock keeps the row's colour when on: the state is the glyph, not a highlight */
 button.sill-lock:checked { background: transparent; opacity: 0.9; }
-button.sill-lock:hover { opacity: 1; }
 .sill-controls .dim-label { opacity: 0.7; }
 .sill-control { min-height: 0; padding: 0; color: alpha(@view_fg_color, 0.5); }
 .sill-control:hover { color: alpha(@view_fg_color, 0.85); }
-.sill-control > button { min-height: 0; padding: 1px 4px; background: transparent; border: none; box-shadow: none; color: inherit; }
+.sill-control > button { min-height: 2em; padding: 0 0.3em; background: transparent; border: none; box-shadow: none; color: inherit; }
 .sill-control > button:hover { background: alpha(@view_fg_color, 0.07); color: @view_fg_color; }
-.sill-control > button arrow { -gtk-icon-size: 9px; opacity: 0.45; }
-switch.sill-control { min-width: 30px; min-height: 14px; opacity: 0.7; }
+.sill-control > button arrow { -gtk-icon-size: 0.6em; opacity: 0.45; }
+switch.sill-control { min-width: 2.2em; min-height: 1.1em; opacity: 0.7; }
 switch.sill-control:hover, switch.sill-control:checked { opacity: 1; }
-switch.sill-control > slider { min-width: 12px; min-height: 12px; }
-button.sill-send { min-height: 22px; min-width: 22px; padding: 0; font-size: 170%; line-height: 1;
-                   background: alpha(@accent_bg_color, 0.25); }
-button.sill-send > label { padding: 0; margin: 0; }
+switch.sill-control > slider { min-width: 0.9em; min-height: 0.9em; }
+button.sill-send { min-width: 2em; min-height: 2em; padding: 0; background: alpha(@accent_bg_color, 0.25); }
+button.sill-send > image { -gtk-icon-size: 1.1em; margin: 0; padding: 0; }
 button.sill-send:hover { background: alpha(@accent_bg_color, 0.45); }
-button.sill-send.sill-stop { color: @error_color; background: alpha(@error_bg_color, 0.25); }
-button.sill-send.sill-stop > image { margin: 0; padding: 0; }
+button.sill-send.sill-stop { background: alpha(@error_bg_color, 0.25); }
+button.sill-send.sill-stop > image { -gtk-icon-size: 1em; }
 button.sill-send.sill-stop:hover { background: alpha(@error_bg_color, 0.45); }
 .sill-terminal { padding: 4px; }
 /* a notice over the terminal that fades away */

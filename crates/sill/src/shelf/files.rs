@@ -105,7 +105,7 @@ impl FilesPage {
             name.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
             let badge = gtk::Label::new(None);
             badge.add_css_class("sill-badge");
-            let pin = gtk::Button::from_icon_name("list-add-symbolic");
+            let pin = gtk::Button::new();
             pin.set_tooltip_text(Some("Pin to the current session"));
             pin.add_css_class("flat");
             pin.add_css_class("sill-pin");
@@ -186,7 +186,10 @@ impl FilesPage {
                     _ => None,
                 });
                 pin.set_visible(is_dir);
-                pin.set_icon_name(if pinned { "list-remove-symbolic" } else { "list-add-symbolic" });
+                pin.set_child(Some(&super::icons::scalable(
+                    if pinned { "sill-minus" } else { "sill-plus" },
+                    super::icons::fg_for(&pin, &theme::current()),
+                )));
                 pin.set_tooltip_text(Some(if pinned { "Unpin from the current session" } else { "Pin to the current session" }));
                 let p = path.clone();
                 let weak = page_for_bind.borrow().clone();

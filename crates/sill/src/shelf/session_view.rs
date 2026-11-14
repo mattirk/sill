@@ -41,6 +41,9 @@ pub struct SessionView {
     /// The jail must be rebuilt at the next restart even if the pins are unchanged (new login file).
     force_restart: std::cell::Cell<bool>,
     shell_btn: RefCell<Option<gtk::ToggleButton>>,
+    /// Attach button and auto-allow lock: drawn glyphs, repainted on a theme change like the shell toggle.
+    attach_btn: RefCell<Option<gtk::Button>>,
+    lock_btn: RefCell<Option<gtk::ToggleButton>>,
     pins_row: gtk::Box,
     /// Agent controls (mode, model, effort, toggles) + send button, under the prompt.
     controls_row: gtk::Box,
@@ -108,7 +111,8 @@ impl SessionView {
             .build();
         prompt_scroll.add_css_class("sill-prompt-box");
 
-        let controls_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        // no Box spacing: gaps are CSS margins in em, like every size in the row
+        let controls_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         controls_row.add_css_class("sill-controls");
         controls_row.set_margin_start(8);
         controls_row.set_margin_end(8);
@@ -332,6 +336,8 @@ impl SessionView {
             startup_retried: std::cell::Cell::new(false),
             force_restart: std::cell::Cell::new(false),
             shell_btn: RefCell::new(None),
+            attach_btn: RefCell::new(None),
+            lock_btn: RefCell::new(None),
             pins_row,
             controls_row,
             rebuilding: std::cell::Cell::new(false),
@@ -415,8 +421,15 @@ impl SessionView {
                     v.apply_terminal_theme(t);
                     // drawn glyphs don't follow CSS: redraw them in the new foreground
                     if let Some(b) = v.shell_btn.borrow().as_ref() {
-                        b.set_child(Some(&super::icons::named("sill-terminal", super::icons::fg_for(b, t), 15)));
+                        b.set_child(Some(&super::icons::scalable("sill-terminal", super::icons::fg_for(b, t))));
                     }
+                    if let Some(b) = v.attach_btn.borrow().as_ref() {
+                        b.set_child(Some(&super::icons::scalable("sill-plus", super::icons::fg_for(b, t))));
+                    }
+                    if let Some(b) = v.lock_btn.borrow().as_ref() {
+                        b.set_child(Some(&lock_glyph(b.is_active(), super::icons::fg_for(b, t))));
+                    }
+                    v.set_busy(v.busy.get());
                     v.refresh_pins();
                 }
             });
@@ -652,7 +665,9 @@ impl SessionView {
             self.controls_row.remove(&w);
         }
         // left: attach (later: file upload) and the shell toggle (M3); everything else sits right
-        let attach = gtk::Button::from_icon_name("list-add-symbolic");
+        let fg = super::icons::fg_for(&self.controls_row, &theme::current());
+        let attach = gtk::Button::new();
+        attach.set_child(Some(&super::icons::scalable("sill-plus", fg)));
         attach.add_css_class("flat");
         attach.add_css_class("sill-ctl-icon");
         attach.set_tooltip_text(Some("Attach a file or image to the next prompt (Ctrl+V pastes a screenshot)"));
@@ -672,8 +687,9 @@ impl SessionView {
             });
         }
         self.controls_row.append(&attach);
+        *self.attach_btn.borrow_mut() = Some(attach);
         let term = gtk::ToggleButton::new();
-        term.set_child(Some(&super::icons::named("sill-terminal", super::icons::fg_for(&self.controls_row, &theme::current()), 15)));
+        term.set_child(Some(&super::icons::scalable("sill-terminal", fg)));
         term.add_css_class("flat");
         term.add_css_class("sill-ctl-icon");
         term.set_tooltip_text(Some("Shell inside this session's jail (Ctrl+`)"));
@@ -693,7 +709,7 @@ impl SessionView {
         self.controls_row.append(&spacer);
         // the agent's and sill's controls: their dropdowns ellipsize (`compact_dropdown`), so on a
         // narrow shelf the row truncates long names instead of setting the window's minimum width
-        let right = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        let right = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         right.set_halign(gtk::Align::End);
         right.set_valign(gtk::Align::Center);
         let dropdown = |names: &[String], current: usize| {
@@ -816,16 +832,12 @@ impl SessionView {
             t.add_css_class("sill-ctl-icon");
             t.add_css_class("sill-lock");
             t.set_active(self.auto_allow.get());
-            // one fixed-size image for both states, so the glyph swap doesn't move anything
-            let lock = gtk::Image::new();
-            lock.set_pixel_size(13);
-            t.set_child(Some(&lock));
+            // the same glyph size in both states, so the swap doesn't move anything
             let set_look = move |t: &gtk::ToggleButton| {
+                t.set_child(Some(&lock_glyph(t.is_active(), fg)));
                 if t.is_active() {
-                    lock.set_icon_name(Some("changes-allow-symbolic"));
                     t.set_tooltip_text(Some("Auto-allow is on: permission requests are answered \"allow once\" (each is still listed)"));
                 } else {
-                    lock.set_icon_name(Some("changes-prevent-symbolic"));
                     t.set_tooltip_text(Some("Auto-allow is off: permission requests wait for your answer"));
                 }
             };
@@ -838,6 +850,7 @@ impl SessionView {
                 let _ = v.store.set_auto_allow(&v.id(), state);
                 v.session.borrow_mut().auto_allow = state;
             });
+            *self.lock_btn.borrow_mut() = Some(t.clone());
             right.append(&t);
         }
         self.controls_row.append(&right);
@@ -868,14 +881,14 @@ impl SessionView {
         self.busy.set(busy);
         if let Some(b) = self.send_btn.borrow().as_ref() {
             if busy {
-                // a drawn square (an image, not a glyph on a baseline) sits dead centre
-                let sq = gtk::Image::from_icon_name("media-playback-stop-symbolic");
-                sq.set_pixel_size(12);
-                b.set_child(Some(&sq));
+                // drawn glyphs (not text on a baseline) sit dead centre and size with the button
+                let t = theme::current();
+                let red = gtk::gdk::RGBA::parse(t.error).unwrap_or_else(|_| super::icons::fg_for(b, &t));
+                b.set_child(Some(&super::icons::scalable("sill-stop", red)));
                 b.set_tooltip_text(Some("Stop the agent"));
                 b.add_css_class("sill-stop");
             } else {
-                b.set_label("➤");
+                b.set_child(Some(&super::icons::scalable("sill-send", super::icons::fg_for(b, &theme::current()))));
                 b.set_tooltip_text(Some("Send (Enter)"));
                 b.remove_css_class("sill-stop");
             }
@@ -1516,8 +1529,15 @@ fn compact_dropdown(d: &gtk::DropDown) {
             l.set_text(&text_of(item));
         }
     });
+    // The check marks the dropdown's *chosen* item (`selected` on the DropDown). A list item's own
+    // `selected` is the popup's cursor, which follows the pointer, so a check bound to it wandered
+    // with the mouse.
+    fn mark(check: &gtk::Image, item: &gtk::ListItem, d: &gtk::DropDown) {
+        check.set_opacity(if item.position() == d.selected() { 1.0 } else { 0.0 });
+    }
     let list = gtk::SignalListItemFactory::new();
-    list.connect_setup(|_, obj| {
+    let dd = d.downgrade();
+    list.connect_setup(move |_, obj| {
         let Some(item) = obj.downcast_ref::<gtk::ListItem>() else { return };
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let l = gtk::Label::new(None);
@@ -1527,19 +1547,33 @@ fn compact_dropdown(d: &gtk::DropDown) {
         row.append(&l);
         row.append(&check);
         item.set_child(Some(&row));
-        let c = check.clone();
-        item.connect_selected_notify(move |item| c.set_opacity(if item.is_selected() { 1.0 } else { 0.0 }));
+        // rows stay bound while the popup is hidden: follow later choices too (one handler per
+        // row ever created; rows are recycled, so a handful per dropdown)
+        if let Some(d) = dd.upgrade() {
+            let (item, check) = (item.downgrade(), check.downgrade());
+            d.connect_selected_notify(move |d| {
+                if let (Some(item), Some(check)) = (item.upgrade(), check.upgrade()) {
+                    mark(&check, &item, d);
+                }
+            });
+        }
     });
-    list.connect_bind(|_, obj| {
+    let dd = d.downgrade();
+    list.connect_bind(move |_, obj| {
         let Some(item) = obj.downcast_ref::<gtk::ListItem>() else { return };
         let Some(row) = item.child().and_downcast::<gtk::Box>() else { return };
         if let Some(l) = row.first_child().and_downcast::<gtk::Label>() {
             l.set_text(&text_of(item));
         }
-        if let Some(c) = row.last_child() {
-            c.set_opacity(if item.is_selected() { 1.0 } else { 0.0 });
+        if let (Some(c), Some(d)) = (row.last_child().and_downcast::<gtk::Image>(), dd.upgrade()) {
+            mark(&c, item, &d);
         }
     });
     d.set_factory(Some(&button));
     d.set_list_factory(Some(&list));
+}
+
+/// The auto-allow lock: open when requests are answered by sill, closed when they wait.
+fn lock_glyph(open: bool, color: gtk::gdk::RGBA) -> gtk::Image {
+    super::icons::scalable(if open { "sill-lock-open" } else { "sill-lock" }, color)
 }
