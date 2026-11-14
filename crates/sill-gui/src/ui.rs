@@ -1077,6 +1077,9 @@ impl App {
         for control in controls(view) {
             agent_controls = agent_controls.push(control);
         }
+        if let Some(processes) = crate::processes::indicator(view) {
+            agent_controls = agent_controls.push(processes);
+        }
         if let Some(usage) = usage(view) {
             agent_controls = agent_controls
                 .push(container(text(usage).size(style::TINY).color(P.fg_dim)).padding([0, 6]));
@@ -1102,7 +1105,9 @@ impl App {
     }
 
     fn composer<'a>(&'a self, view: &'a SessionView) -> Element<'a, Message> {
-        let mut composer = Column::new().push(self.network_prompt(view));
+        let mut composer = Column::new()
+            .push(crate::processes::panel(view))
+            .push(self.network_prompt(view));
         if !view.attachments.is_empty() {
             let mut strip = row![].spacing(6).align_y(Alignment::Center);
             for (index, attachment) in view.attachments.iter().enumerate() {

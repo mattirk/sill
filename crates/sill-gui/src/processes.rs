@@ -1,0 +1,761 @@
+//! Managed processes and exposed ports (docs/tasks.md §2.4, §2.5), as the shelf's
+//! (`shelf/session_view.rs`): every open session's processes are read every few seconds; the
+//! composer's bar shows how many run (warning colour while an ended one failed), and pressing it
+//! shows the list above the composer — name, state and uptime, the command, the last output line,
+//! the address when its port is exposed — with Log, Stop / Dismiss per row and Stop all.
+//!
+//! A running process that declared a port is exposed on this machine's loopback without asking
+//! when the session's launch policy lists the port under `[processes] expose`; otherwise a card
+//! asks once per session. The bridges belong to the session's view: they close when the process
+//! ends, the session stops or its tab goes. sill-client's `processes` does the relaying.
+use std::collections::{BTreeMap, BTreeSet};
+
+use iced::widget::{
+    Column, button, column, container, row, rule, scrollable, space, text, text_editor,
+};
+use iced::{Alignment, Element, Fill, Font, Task};
+use sill_client::actions::Outcome;
+use sill_client::processes::{self as procs, Bridge, Process};
+
+use crate::style::{self, P, alpha};
+use crate::{App, Message, SessionView, blocking, icons, json, keys};
+
+/// How long a note on an exposed port or a refused action stays.
+const NOTICE: std::time::Duration = std::time::Duration::from_secs(if cfg!(test) { 0 } else { 8 });
+
+#[derive(Debug, Clone)]
+pub enum Event {
+    Poll,
+    /// A session's list (an error: no jail to ask, so no ports either) and, when a running port
+    /// waited for a decision, the expose specs of its launch policy.
+    Read(String, Result<Vec<Process>, String>, Option<Vec<String>>),
+    /// Show or hide the list.
+    Toggle(String),
+    /// Expose a port the person was asked about, or one shown as not exposed.
+    Expose(String, u16),
+    NotNow(String, u16),
+    /// Show or hide a process's output.
+    Log(String, String),
+    LogRead(String, String, Result<String, String>),
+    LogText(String, text_editor::Action),
+    /// Stop one (every running one, with an empty name) or dismiss an ended one.
+    Stop(String, String),
+    Dismiss(String, String),
+    Done(String, Outcome),
+    OpenUrl(String),
+    NoticeExpired(String, u64),
+}
+
+/// A session's managed processes in this window.
+#[derive(Default)]
+pub struct Procs {
+    pub list: Vec<Process>,
+    reading: bool,
+    pub bridges: BTreeMap<u16, Bridge>,
+    /// Ports asked about once, and those the person said yes to, this session.
+    asked: BTreeSet<u16>,
+    approved: BTreeSet<u16>,
+    /// The cards waiting for an answer: port and process name.
+    pub questions: Vec<(u16, String)>,
+    pub open: bool,
+    /// The output shown: its process, and the text read last.
+    pub log: Option<(String, text_editor::Content)>,
+    /// A note on the last exposure or action: its number, the text, whether it is a failure.
+    notice: Option<(u64, String, bool)>,
+}
+
+impl Procs {
+    fn running_ports(&self) -> Vec<(u16, String)> {
+        self.list
+            .iter()
+            .filter(|p| procs::running(p))
+            .filter_map(|p| p.port.map(|port| (port, p.name.clone())))
+            .collect()
+    }
+
+    /// Ports already bridged or asked about: the policy is read only for a port not among them.
+    fn known(&self) -> BTreeSet<u16> {
+        self.bridges
+            .keys()
+            .copied()
+            .chain(self.asked.iter().copied())
+            .collect()
+    }
+
+    /// The list came back: ports of ended processes close, new ones are exposed or asked about.
+    /// What to expose comes back, for the caller to bridge (it holds the connection).
+    fn read(&mut self, list: Vec<Process>, specs: Option<&[String]>) -> Vec<(u16, String)> {
+        self.reading = false;
+        self.list = list;
+        let running = self.running_ports();
+        self.bridges
+            .retain(|port, _| running.iter().any(|(p, _)| p == port));
+        self.questions
+            .retain(|(port, _)| running.iter().any(|(p, _)| p == port));
+        let mut expose = vec![];
+        for (port, name) in running {
+            if self.bridges.contains_key(&port) {
+                continue;
+            }
+            if self.approved.contains(&port) || specs.is_some_and(|s| procs::allows(s, port)) {
+                expose.push((port, name));
+            } else if specs.is_some() && self.asked.insert(port) {
+                self.questions.push((port, name));
+            }
+        }
+        if self
+            .log
+            .as_ref()
+            .is_some_and(|(name, _)| !self.list.iter().any(|p| &p.name == name))
+        {
+            self.log = None;
+        }
+        expose
+    }
+
+    fn note(&mut self, serial: u64, text: String, failed: bool) {
+        self.notice = Some((serial, text, failed));
+    }
+}
+
+/// A running port neither bridged nor asked about: reading the policy is needed for it.
+fn undecided(known: &BTreeSet<u16>, list: &[Process]) -> bool {
+    list.iter()
+        .filter(|p| procs::running(p))
+        .filter_map(|p| p.port)
+        .any(|port| !known.contains(&port))
+}
+
+impl App {
+    fn session_running(&self, id: &str) -> bool {
+        self.all_sessions
+            .iter()
+            .any(|s| s.session_id == id && s.running && s.ended_at.is_none())
+    }
+
+    pub(crate) fn processes_event(&mut self, event: Event) -> Task<Message> {
+        match event {
+            Event::Poll => return self.poll_processes(),
+            Event::Read(id, result, specs) => {
+                let Some(view) = self.views.get_mut(&id) else {
+                    return Task::none();
+                };
+                let expose = view
+                    .processes
+                    .read(result.unwrap_or_default(), specs.as_deref());
+                let mut tasks = vec![];
+                for (port, name) in expose {
+                    tasks.push(self.expose_port(&id, port, &name));
+                }
+                if let Some(view) = self.views.get(&id)
+                    && let Some((name, _)) = &view.processes.log
+                {
+                    tasks.push(self.read_log(&id, name.clone()));
+                }
+                return Task::batch(tasks);
+            }
+            Event::Toggle(id) => {
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.processes.open = !view.processes.open;
+                    if !view.processes.open {
+                        view.processes.log = None;
+                    }
+                }
+            }
+            Event::Expose(id, port) => {
+                let Some(view) = self.views.get_mut(&id) else {
+                    return Task::none();
+                };
+                view.processes.approved.insert(port);
+                view.processes.questions.retain(|(p, _)| *p != port);
+                let name = view
+                    .processes
+                    .list
+                    .iter()
+                    .find(|p| p.port == Some(port))
+                    .map_or_else(|| format!("port {port}"), |p| p.name.clone());
+                return self.expose_port(&id, port, &name);
+            }
+            Event::NotNow(id, port) => {
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.processes.questions.retain(|(p, _)| *p != port);
+                }
+            }
+            Event::Log(id, name) => {
+                let Some(view) = self.views.get_mut(&id) else {
+                    return Task::none();
+                };
+                if view.processes.log.as_ref().is_some_and(|(n, _)| *n == name) {
+                    view.processes.log = None;
+                    return Task::none();
+                }
+                view.processes.log =
+                    Some((name.clone(), text_editor::Content::with_text("Reading…")));
+                return self.read_log(&id, name);
+            }
+            Event::LogRead(id, name, result) => {
+                if let Some(view) = self.views.get_mut(&id)
+                    && let Some((shown, content)) = &mut view.processes.log
+                    && *shown == name
+                {
+                    let text =
+                        result.unwrap_or_else(|e| format!("The output could not be read: {e}"));
+                    let text = if text.trim().is_empty() {
+                        "No output yet.".to_string()
+                    } else {
+                        text
+                    };
+                    if content.text() != text {
+                        *content = text_editor::Content::with_text(text.trim_end());
+                        content
+                            .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
+                    }
+                }
+            }
+            Event::LogText(id, action) => {
+                // read-only: selecting, moving and scrolling, never editing
+                if !matches!(action, text_editor::Action::Edit(_))
+                    && let Some(view) = self.views.get_mut(&id)
+                    && let Some((_, content)) = &mut view.processes.log
+                {
+                    content.perform(action);
+                }
+            }
+            Event::Stop(id, name) => {
+                // Stop all: each running one by name (the daemon takes no empty name)
+                let names = if name.is_empty() {
+                    self.views.get(&id).map_or_else(Vec::new, |v| {
+                        v.processes
+                            .list
+                            .iter()
+                            .filter(|p| procs::running(p))
+                            .map(|p| p.name.clone())
+                            .collect()
+                    })
+                } else {
+                    vec![name]
+                };
+                return self.process_action(id, "_sill/procs.stop", names);
+            }
+            Event::Dismiss(id, name) => {
+                return self.process_action(id, "_sill/procs.dismiss", vec![name]);
+            }
+            Event::Done(id, outcome) => {
+                let mut tasks = vec![];
+                if let Some(problem) = outcome.problem() {
+                    tasks.push(self.process_note(&id, format!("process: {problem}"), true));
+                }
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.processes.reading = false;
+                }
+                tasks.push(self.poll_one(&id));
+                return Task::batch(tasks);
+            }
+            Event::OpenUrl(url) => crate::terminal::open_link(url),
+            Event::NoticeExpired(id, serial) => {
+                if let Some(view) = self.views.get_mut(&id)
+                    && view
+                        .processes
+                        .notice
+                        .as_ref()
+                        .is_some_and(|(n, _, _)| *n == serial)
+                {
+                    view.processes.notice = None;
+                }
+            }
+        }
+        Task::none()
+    }
+
+    /// Every open session's list; a session that is not running has none, nor ports.
+    fn poll_processes(&mut self) -> Task<Message> {
+        if self.demo || self.actions.is_none() {
+            return Task::none();
+        }
+        let ids: Vec<String> = self.views.keys().cloned().collect();
+        Task::batch(ids.iter().map(|id| self.poll_one(id)).collect::<Vec<_>>())
+    }
+
+    fn poll_one(&mut self, id: &str) -> Task<Message> {
+        let running = self.session_running(id);
+        let (Some(actions), Some(view)) = (self.actions.clone(), self.views.get_mut(id)) else {
+            return Task::none();
+        };
+        if !running {
+            if !view.processes.list.is_empty() || !view.processes.bridges.is_empty() {
+                view.processes.read(vec![], None);
+            }
+            return Task::none();
+        }
+        if std::mem::replace(&mut view.processes.reading, true) {
+            return Task::none();
+        }
+        let known = view.processes.known();
+        let policy = self
+            .all_sessions
+            .iter()
+            .find(|s| s.session_id == id)
+            .map(|s| s.policy.clone())
+            .unwrap_or_default();
+        let session = id.to_string();
+        let id = id.to_string();
+        blocking(
+            move || {
+                let list = actions
+                    .reading(|client| procs::list(client, &session))
+                    .map_err(|e| format!("{e:#}"));
+                let specs = match &list {
+                    Ok(list) if undecided(&known, list) => actions
+                        .reading(|client| procs::session_exposable(client, &session, &policy))
+                        .ok(),
+                    _ => None,
+                };
+                (list, specs)
+            },
+            move |(list, specs)| Message::Procs(Event::Read(id, list, specs)),
+        )
+    }
+
+    fn read_log(&self, id: &str, name: String) -> Task<Message> {
+        let Some(actions) = self.actions.clone() else {
+            return Task::none();
+        };
+        let (session, id) = (id.to_string(), id.to_string());
+        blocking(
+            {
+                let name = name.clone();
+                move || {
+                    actions
+                        .read::<sill_proto::Text>(
+                            "_sill/procs.tail",
+                            json!({"session_id": session, "name": name, "lines": procs::LOG_LINES}),
+                        )
+                        .map(|t| t.text)
+                        .map_err(|e| format!("{e:#}"))
+                }
+            },
+            move |result| Message::Procs(Event::LogRead(id, name, result)),
+        )
+    }
+
+    /// `method` for each of `names`, once each; the first that did not take effect is the outcome.
+    fn process_action(
+        &mut self,
+        id: String,
+        method: &'static str,
+        names: Vec<String>,
+    ) -> Task<Message> {
+        let Some(actions) = self.actions.clone() else {
+            return Task::none();
+        };
+        let session = id.clone();
+        blocking(
+            move || {
+                let mut outcome = Outcome::Done(json!({}));
+                for name in names {
+                    let done = actions.call(method, json!({"session_id": session, "name": name}));
+                    if outcome.is_done() && !done.is_done() {
+                        outcome = done;
+                    }
+                }
+                outcome
+            },
+            move |outcome| Message::Procs(Event::Done(id, outcome)),
+        )
+    }
+
+    fn expose_port(&mut self, id: &str, port: u16, name: &str) -> Task<Message> {
+        let Some(actions) = self.actions.clone() else {
+            return Task::none();
+        };
+        let opener = procs::opener(actions, id.to_string(), port);
+        let (said, failed) = match procs::expose(port, opener) {
+            Ok(bridge) => {
+                let said = if bridge.host_port == port {
+                    format!(
+                        "{name}: port {port} is open on this machine at {}",
+                        bridge.url()
+                    )
+                } else {
+                    format!(
+                        "{name}: port {port} is open on this machine at {} ({port} was taken)",
+                        bridge.url()
+                    )
+                };
+                if let Some(view) = self.views.get_mut(id) {
+                    view.processes.bridges.insert(port, bridge);
+                }
+                (said, false)
+            }
+            Err(e) => (
+                format!("{name}: port {port} could not be exposed: {e:#}"),
+                true,
+            ),
+        };
+        self.process_note(id, said, failed)
+    }
+
+    fn process_note(&mut self, id: &str, said: String, failed: bool) -> Task<Message> {
+        self.process_serial += 1;
+        let serial = self.process_serial;
+        let Some(view) = self.views.get_mut(id) else {
+            return Task::none();
+        };
+        view.processes.note(serial, said, failed);
+        let id = id.to_string();
+        blocking(
+            move || std::thread::sleep(NOTICE),
+            move |()| Message::Procs(Event::NoticeExpired(id, serial)),
+        )
+    }
+}
+
+/// The composer bar's indicator: the count of running processes, in the warning colour while an
+/// ended one failed; nothing while the session has none.
+pub fn indicator(view: &SessionView) -> Option<Element<'_, Message>> {
+    let list = &view.processes.list;
+    if list.is_empty() {
+        return None;
+    }
+    let running = list.iter().filter(|p| procs::running(p)).count();
+    let failed = list.iter().any(procs::failed);
+    let color = if failed {
+        P.warning
+    } else if view.processes.open {
+        P.accent
+    } else {
+        P.fg_dim
+    };
+    let content = row![
+        icons::glyph("processes", 12.0, color),
+        text(running.to_string()).size(style::TINY).color(color),
+    ]
+    .spacing(3)
+    .align_y(Alignment::Center);
+    let tip = format!(
+        "{running} managed process{} running{}",
+        if running == 1 { "" } else { "es" },
+        if failed { " · one has failed" } else { "" }
+    );
+    Some(
+        iced::widget::tooltip(
+            keys::press(
+                button(content).padding([4, 6]).style(style::quiet),
+                Message::Procs(Event::Toggle(view.id.clone())),
+            ),
+            container(text(tip).size(style::SMALL))
+                .padding([4, 8])
+                .style(style::fill(P.code_bg)),
+            iced::widget::tooltip::Position::Top,
+        )
+        .into(),
+    )
+}
+
+fn small_button(label: &str, message: Message) -> Element<'_, Message> {
+    keys::press(
+        button(text(label).size(style::TINY))
+            .padding([2, 8])
+            .style(style::quiet),
+        message,
+    )
+}
+
+/// The cards asking about ports, the note on the last exposure or action, and the list when shown.
+pub fn panel(view: &SessionView) -> Element<'_, Message> {
+    let state = &view.processes;
+    if state.questions.is_empty()
+        && state.notice.is_none()
+        && !(state.open && !state.list.is_empty())
+    {
+        return space().height(0).into();
+    }
+    let id = &view.id;
+    let mut content = Column::new().spacing(6);
+    for (port, name) in &state.questions {
+        let card = column![
+            text(format!(
+                "{name} listens on port {port} inside the jail. Expose it on this machine, loopback only (http://127.0.0.1:{port})?"
+            ))
+            .size(style::SMALL),
+            row![
+                keys::press(
+                    button(text("Expose").size(style::SMALL))
+                        .padding([4, 10])
+                        .style(style::solid(P.accent)),
+                    Message::Procs(Event::Expose(id.clone(), *port)),
+                ),
+                keys::press(
+                    button(text("Not now").size(style::SMALL))
+                        .padding([4, 10])
+                        .style(style::quiet),
+                    Message::Procs(Event::NotNow(id.clone(), *port)),
+                ),
+            ]
+            .spacing(8),
+        ]
+        .spacing(8);
+        content = content.push(crate::ui::ruled(
+            2.0,
+            P.accent,
+            container(card)
+                .padding([6, 10])
+                .width(Fill)
+                .style(style::fill(alpha(P.accent, 0.08))),
+        ));
+    }
+    if state.open && !state.list.is_empty() {
+        content = content.push(list(view));
+    }
+    if let Some((_, note, failed)) = &state.notice {
+        content = content.push(text(note).size(style::TINY).color(if *failed {
+            P.error
+        } else {
+            alpha(P.fg, 0.7)
+        }));
+    }
+    // set off from the prompt as the queued prompts are: a faint band, a rule, a gap
+    column![
+        container(content)
+            .padding([6, 12])
+            .width(Fill)
+            .style(style::fill(alpha(P.accent, 0.05))),
+        rule::horizontal(1).style(style::rule_style(P.border)),
+        space().height(4),
+    ]
+    .into()
+}
+
+fn list(view: &SessionView) -> Element<'_, Message> {
+    let state = &view.processes;
+    let id = &view.id;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let mono = Font::with_name(crate::fonts::MONO_FAMILY);
+    let mut rows = Column::new().spacing(8);
+    for p in &state.list {
+        let running = procs::running(p);
+        let shown = state.log.as_ref().is_some_and(|(n, _)| *n == p.name);
+        let head = row![
+            text(&p.name).size(style::SMALL).font(Font {
+                weight: iced::font::Weight::Bold,
+                ..Font::with_name(crate::fonts::SANS_FAMILY)
+            }),
+            text(procs::state(p, now))
+                .size(style::TINY)
+                .color(if procs::failed(p) {
+                    P.warning
+                } else {
+                    P.fg_dim
+                }),
+            space().width(Fill),
+            small_button(
+                if shown { "Hide log" } else { "Log" },
+                Message::Procs(Event::Log(id.clone(), p.name.clone())),
+            ),
+            if running {
+                small_button(
+                    "Stop",
+                    Message::Procs(Event::Stop(id.clone(), p.name.clone())),
+                )
+            } else {
+                small_button(
+                    "Dismiss",
+                    Message::Procs(Event::Dismiss(id.clone(), p.name.clone())),
+                )
+            },
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        let mut entry = Column::new().spacing(2).push(head).push(
+            text(crate::ui::one_line(&p.argv.join(" "), 100))
+                .size(style::TINY)
+                .font(mono)
+                .color(P.fg_dim)
+                .wrapping(text::Wrapping::None),
+        );
+        if !p.last_line.is_empty() {
+            entry = entry.push(
+                text(crate::ui::one_line(&p.last_line, 100))
+                    .size(style::TINY)
+                    .font(mono)
+                    .color(alpha(P.fg, 0.7))
+                    .wrapping(text::Wrapping::None),
+            );
+        }
+        if let Some(port) = p.port {
+            match state.bridges.get(&port) {
+                Some(bridge) => {
+                    let url = bridge.url();
+                    entry = entry.push(
+                        row![
+                            keys::press(
+                                button(text(url.clone()).size(style::TINY).color(P.link))
+                                    .padding(0)
+                                    .style(style::quiet),
+                                Message::Procs(Event::OpenUrl(url.clone())),
+                            ),
+                            small_button("Copy", Message::Link(url)),
+                        ]
+                        .spacing(6)
+                        .align_y(Alignment::Center),
+                    );
+                }
+                None if running => {
+                    entry = entry.push(
+                        row![
+                            text(format!("port {port} inside the jail, not exposed"))
+                                .size(style::TINY)
+                                .color(P.fg_dim),
+                            small_button("Expose", Message::Procs(Event::Expose(id.clone(), port))),
+                        ]
+                        .spacing(6)
+                        .align_y(Alignment::Center),
+                    );
+                }
+                None => {}
+            }
+        }
+        if let Some((_, content)) = state.log.as_ref().filter(|_| shown) {
+            let session = id.clone();
+            entry = entry.push(
+                text_editor(content)
+                    .height(220)
+                    .padding(8)
+                    .size(style::TINY)
+                    .font(mono)
+                    .style(style::reader)
+                    .on_action(move |a| Message::Procs(Event::LogText(session.clone(), a)))
+                    .key_binding(crate::ui::reading_keys),
+            );
+        }
+        rows = rows.push(entry);
+    }
+    if state.list.iter().filter(|p| procs::running(p)).count() > 1 {
+        rows = rows.push(small_button(
+            "Stop all",
+            Message::Procs(Event::Stop(id.clone(), String::new())),
+        ));
+    }
+    crate::ui::ruled(
+        2.0,
+        P.fg_dim,
+        container(scrollable(rows).style(style::feed_scroll))
+            .padding([6, 10])
+            .max_height(420)
+            .width(Fill)
+            .style(style::fill(P.surface)),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn process(name: &str, state: &str, port: Option<u16>) -> Process {
+        Process {
+            name: name.into(),
+            argv: vec!["serve".into()],
+            cwd: sill_proto::sessions::HostPath::from_path(std::path::Path::new("/tmp")),
+            port,
+            pid: 1,
+            started: "0".into(),
+            state: state.into(),
+            exit_code: None,
+            last_line: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_new_port_is_exposed_by_policy_or_asked_about_once() {
+        let mut state = Procs::default();
+        let list = vec![
+            process("web", "running", Some(3000)),
+            process("api", "running", Some(9000)),
+        ];
+        assert!(undecided(&state.known(), &list));
+        let specs = vec!["3000-3999".to_string()];
+        let expose = state.read(list.clone(), Some(&specs));
+        assert_eq!(expose, vec![(3000, "web".to_string())]);
+        assert_eq!(state.questions, vec![(9000, "api".to_string())]);
+        // asked once: a later read neither asks again nor needs the policy for it
+        state.questions.clear();
+        assert!(
+            undecided(&state.known(), &list),
+            "3000 is not bridged in this test"
+        );
+        let expose = state.read(list.clone(), Some(&specs));
+        assert_eq!(expose, vec![(3000, "web".to_string())]);
+        assert!(state.questions.is_empty());
+        // the person said yes later: exposed from then on
+        state.approved.insert(9000);
+        assert_eq!(state.read(list.clone(), Some(&specs)).len(), 2);
+        // without the policy only what the person approved goes
+        assert_eq!(state.read(list, None), vec![(9000, "api".to_string())]);
+    }
+
+    #[test]
+    fn without_the_policy_nothing_is_exposed_or_asked() {
+        let mut state = Procs::default();
+        let list = vec![process("web", "running", Some(3000))];
+        assert!(state.read(list.clone(), None).is_empty());
+        assert!(state.questions.is_empty());
+        assert!(
+            undecided(&state.known(), &list),
+            "asked when the policy can be read"
+        );
+    }
+
+    #[test]
+    fn an_ended_process_takes_its_question_and_log_with_it() {
+        let mut state = Procs::default();
+        state.read(vec![process("api", "running", Some(9000))], Some(&[]));
+        assert_eq!(state.questions.len(), 1);
+        state.log = Some(("api".into(), text_editor::Content::new()));
+        state.read(vec![process("api", "stopped", Some(9000))], Some(&[]));
+        assert!(state.questions.is_empty());
+        assert!(state.log.is_some(), "an ended process keeps its log");
+        state.read(vec![], None);
+        assert!(state.log.is_none());
+    }
+
+    /// Stop all asks for each running process by name: the daemon refuses an empty name.
+    #[test]
+    fn stop_all_stops_each_running_process_by_name() {
+        use crate::tests::{connector, daemon, settle_task};
+        let (client, mut daemon) = daemon();
+        let (mut app, _) = App::new(true, None);
+        app.demo = false;
+        app.actions = Some(sill_client::actions::Actions::new(connector(vec![client])));
+        app.views.get_mut("demo").unwrap().processes.list = vec![
+            process("api", "running", None),
+            process("old", "exited", None),
+            process("web", "running", Some(3000)),
+        ];
+        let fake = std::thread::spawn(move || {
+            let mut stopped = vec![];
+            for _ in 0..2 {
+                let stop = daemon.expect("_sill/procs.stop");
+                stopped.push(stop["params"]["name"].as_str().unwrap().to_string());
+                daemon.reply(&stop, json!({}));
+            }
+            stopped
+        });
+        let task = app.update(Message::Procs(Event::Stop("demo".into(), String::new())));
+        settle_task(&mut app, task);
+        assert_eq!(fake.join().unwrap(), vec!["api", "web"]);
+    }
+
+    /// A port bridged for a running process closes when the process ends.
+    #[test]
+    fn a_bridge_goes_when_its_process_ends() {
+        let mut state = Procs::default();
+        let open: procs::Opener = std::sync::Arc::new(|| anyhow::bail!("not in this test"));
+        state.bridges.insert(3000, procs::expose(0, open).unwrap());
+        state.read(vec![process("web", "running", Some(3000))], None);
+        assert_eq!(state.bridges.len(), 1);
+        state.read(vec![process("web", "exited", Some(3000))], None);
+        assert!(state.bridges.is_empty());
+    }
+}

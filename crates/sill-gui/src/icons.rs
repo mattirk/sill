@@ -34,6 +34,11 @@ const LINES: &[(&str, &str)] = &[
         "M9 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z",
     ),
     ("maximize", "M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"),
+    // managed processes (lucide server): the composer bar's indicator
+    (
+        "processes",
+        "M2 2h20v8h-20zM2 14h20v8h-20zM6 6L6.01 6M6 18L6.01 18",
+    ),
     (
         "sessions",
         "M3 5h.01M3 12h.01M3 19h.01M8 5h13M8 12h13M8 19h13",

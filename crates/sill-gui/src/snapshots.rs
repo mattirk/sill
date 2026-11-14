@@ -403,3 +403,53 @@ fn render_network() {
     ));
     render(&app, "15-network");
 }
+
+#[test]
+#[ignore = "writes managed-process PNGs for review"]
+fn render_processes() {
+    use crate::processes::Event;
+    let (mut app, _) = App::new(true, None);
+    for _ in 0..=demo::CHUNKS.len() {
+        let _ = app.update(crate::Message::DemoTick);
+    }
+    app.views
+        .get_mut("demo")
+        .unwrap()
+        .conversation
+        .questions
+        .clear();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let list = serde_json::from_value(serde_json::json!([
+        {"name": "web", "argv": ["npm", "run", "dev", "--", "--port", "5173"],
+         "cwd": {"display": "/home/demo/project", "bytes_base64": "L2hvbWUvZGVtby9wcm9qZWN0"},
+         "port": 5173, "pid": 41, "started": (now - 192).to_string(), "state": "running",
+         "exit_code": null, "last_line": "  ➜  Local:   http://localhost:5173/"},
+        {"name": "build", "argv": ["cargo", "build", "--release"],
+         "cwd": {"display": "/home/demo/project", "bytes_base64": "L2hvbWUvZGVtby9wcm9qZWN0"},
+         "port": null, "pid": 42, "started": "0", "state": "exited",
+         "exit_code": 101, "last_line": "error: could not compile `demo` (bin \"demo\")"}
+    ]))
+    .unwrap();
+    let _ = app.update(crate::Message::Procs(Event::Read(
+        "demo".into(),
+        Ok(list),
+        Some(vec![]),
+    )));
+    render(&app, "16-process-question");
+    let _ = app.update(crate::Message::Procs(Event::NotNow("demo".into(), 5173)));
+    let _ = app.update(crate::Message::Procs(Event::Toggle("demo".into())));
+    render(&app, "17-processes");
+    let _ = app.update(crate::Message::Procs(Event::Log(
+        "demo".into(),
+        "build".into(),
+    )));
+    let _ = app.update(crate::Message::Procs(Event::LogRead(
+        "demo".into(),
+        "build".into(),
+        Ok("   Compiling demo v0.1.0\nerror[E0308]: mismatched types\n --> src/main.rs:3:5\nerror: could not compile `demo` (bin \"demo\")\n".into()),
+    )));
+    render(&app, "18-process-log");
+}

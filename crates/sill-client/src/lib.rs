@@ -15,6 +15,7 @@
 //! - [`files`]: session pins, directories, repositories and file reading, and the per-session state
 //!   of a file drawer, with late replies kept to their own session.
 //! - [`terminal`]: a session's jail shell over the daemon's byte stream, detached when dropped.
+//! - [`processes`]: managed processes and their ports exposed on this machine's loopback.
 //!
 //! Everything blocks on threads of its own and reports through callbacks; the frontend decides how
 //! its main loop is woken. Nothing here is Linux-only: the client core is meant to build for macOS
@@ -28,6 +29,7 @@ pub mod files;
 pub mod lane;
 pub mod login;
 pub mod outbox;
+pub mod processes;
 pub mod sessions;
 pub mod settings;
 pub mod supervision;

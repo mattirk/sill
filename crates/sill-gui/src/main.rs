@@ -17,6 +17,7 @@ mod network;
 #[cfg(test)]
 mod perf;
 mod policies;
+mod processes;
 mod rows;
 mod selection;
 mod settings;
@@ -231,6 +232,8 @@ pub enum Message {
     DemoTick,
     Tick,
     NetworkPoll,
+    /// Managed processes and exposed ports (`processes.rs`).
+    Procs(processes::Event),
     NetworkRead(String, Result<sill_proto::admin::NetworkDenied, String>),
     NetworkAnswer(String, String, bool),
     NetworkDone(String, network::Choice, Outcome),
@@ -393,6 +396,8 @@ pub struct SessionView {
     seen_failure: Option<String>,
     /// What the person has entered in open form questions.
     pub forms: BTreeMap<String, forms::Form>,
+    /// Its managed processes and the ports exposed from them (`processes.rs`).
+    pub processes: processes::Procs,
 }
 
 impl SessionView {
@@ -443,6 +448,7 @@ impl SessionView {
             reader: None,
             seen_failure: None,
             forms: BTreeMap::new(),
+            processes: processes::Procs::default(),
         }
     }
 
@@ -559,6 +565,8 @@ impl SessionView {
 
 pub struct App {
     network: network::State,
+    /// Numbers the notes on exposed ports, so a later one outlives an earlier one's expiry.
+    process_serial: u64,
     pub demo: bool,
     connect: Option<Connector>,
     actions: Option<Arc<Actions>>,
@@ -662,6 +670,7 @@ impl App {
         let (workspace, file_task) = workspace::Workspace::new(connect.clone());
         let mut app = Self {
             network: network::State::default(),
+            process_serial: 0,
             demo,
             actions: connect.clone().map(Actions::new),
             connect,
@@ -1094,6 +1103,11 @@ impl App {
         if !self.demo {
             subscriptions
                 .push(iced::time::every(Duration::from_secs(2)).map(|_| Message::NetworkPoll));
+            // managed processes: every open session's, so its ports close when they end
+            subscriptions.push(
+                iced::time::every(Duration::from_secs(3))
+                    .map(|_| Message::Procs(processes::Event::Poll)),
+            );
         }
         // sessions started or ended elsewhere appear and go
         if !self.demo {
@@ -1281,6 +1295,7 @@ impl App {
             Message::DemoTick => return self.demo_tick(),
             Message::Tick => self.now = Instant::now(),
             Message::NetworkPoll => return self.poll_network(),
+            Message::Procs(event) => return self.processes_event(event),
             Message::NetworkRead(id, result) => self.network.read(id, result),
             Message::NetworkAnswer(id, host, allow) => return self.answer_network(id, host, allow),
             Message::NetworkDone(id, choice, outcome) => {
