@@ -21,6 +21,17 @@ const REAL_FS: &[&str] = &[
     "bcachefs", "nfs", "nfs4", "cifs", "iso9660", "udf",
 ];
 
+/// Persistent filesystems overlayfs refuses as a lower layer: their names compare
+/// case-insensitively (dentry hash/compare operations), and the overlay mount fails with EINVAL —
+/// every jail would fail to start (2026-11-06: a policy without `hidden_mounts` and a vfat `/boot`).
+/// They are bound read-only instead: visible, never writable, never recorded.
+const NO_OVERLAY_FS: &[&str] = &["vfat", "msdos", "exfat", "ntfs3", "iso9660"];
+
+/// Can this mount be an overlay lower layer?
+pub fn overlayable(m: &Mount) -> bool {
+    !NO_OVERLAY_FS.contains(&m.fstype.as_str())
+}
+
 pub fn parse_mountinfo(text: &str) -> Vec<Mount> {
     parse_mountinfo_bytes(text.as_bytes())
 }

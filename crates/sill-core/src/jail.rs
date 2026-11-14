@@ -184,8 +184,10 @@ impl JailSpec {
                 return;
             }
             let is_mount = spec.mounts.iter().any(|m| m.mount_point == path);
-            if is_mount && !real.iter().any(|r| r.mount_point == path) {
-                ro_binds.push(path.to_path_buf()); // non-persistent fs (squashfs, fuse): read-only
+            // non-persistent fs (squashfs, fuse), or one overlayfs refuses as a lower (vfat):
+            // read-only
+            if is_mount && real.iter().find(|r| r.mount_point == path).is_none_or(|r| !mounts::overlayable(r)) {
+                ro_binds.push(path.to_path_buf());
                 return;
             }
             if !has_submount(path) {
@@ -1000,6 +1002,23 @@ mod tests {
         assert!(!s.contains("--share-net"));
         assert!(s.contains("--ro-bind /sys /sys"));
         assert!(s.ends_with("--chdir /home/me -- true"));
+    }
+
+    #[test]
+    fn a_filesystem_overlayfs_refuses_is_bound_read_only() {
+        // a policy that does not hide /boot, on a machine whose /boot is vfat
+        let mut s = spec();
+        s.mounts = mounts::parse_mountinfo(
+            "25 1 8:2 / / rw - ext4 /dev/sda2 rw\n\
+             40 25 8:1 / /boot rw - vfat /dev/sda1 rw\n\
+             70 25 7:0 / /var/lib/sill rw - ext4 /dev/loop0 rw\n",
+        );
+        s.policy.paths.hidden_mounts.clear();
+        let plan = s.plan().unwrap();
+        assert!(!plan.layers.iter().any(|l| l.host == Path::new("/boot")), "vfat cannot be an overlay lower");
+        let r = render(&plan.argv);
+        assert!(r.contains("--ro-bind /boot /boot"), "{r}");
+        assert!(!r.contains("--overlay-src /boot"));
     }
 
     #[test]
