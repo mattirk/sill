@@ -339,7 +339,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
                 if let Some(area) = x11::work_area_with(&w, fraction) {
                     x11::place(&w, &area);
                 }
-                x11::activate(&w);
+                x11::activate(&w, 0);
                 s.focus_prompt();
             });
         });
@@ -352,7 +352,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
             spec = super::hotkey::DEFAULT.to_string();
         }
         let w = window.clone().upcast::<gtk::Window>();
-        match super::hotkey::Hotkey::start(&spec, move || toggle(&w)) {
+        match super::hotkey::Hotkey::start(&spec, move |time| toggle(&w, time)) {
             Ok((hk, err)) => {
                 if let Some(e) = err {
                     eprintln!("sill: hotkey {spec}: {e}");
@@ -696,15 +696,16 @@ fn stop_then(id: &str, then: impl FnOnce() + 'static) {
     });
 }
 
-pub fn show(w: &gtk::Window) {
+/// Show and focus; `time` is the X time of the triggering key press (0 when unknown).
+pub fn show(w: &gtk::Window, time: u32) {
     w.present();
-    x11::activate(w);
+    x11::activate(w, time);
 }
 
-pub fn toggle(w: &gtk::Window) {
+pub fn toggle(w: &gtk::Window, time: u32) {
     if w.is_visible() && (w.is_active() || x11::is_active(w)) {
         w.set_visible(false);
     } else {
-        show(w);
+        show(w, time);
     }
 }

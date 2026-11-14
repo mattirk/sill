@@ -43,7 +43,7 @@ pub fn run(cwd: Option<PathBuf>, hidden: bool) -> Result<()> {
     app.connect_activate(move |app| {
         if let Some(w) = app.windows().first() {
             // a second `sill shelf`: just show the existing one
-            window::show(&w);
+            window::show(&w, 0);
             return;
         }
         let w = window::build(app, cwd_for_activate.clone());
@@ -71,7 +71,7 @@ pub fn run(cwd: Option<PathBuf>, hidden: bool) -> Result<()> {
         let app = app.clone();
         move |_, _| {
             if let Some(w) = app.windows().first() {
-                window::toggle(w);
+                window::toggle(w, 0);
             }
         }
     });

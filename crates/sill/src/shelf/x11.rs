@@ -117,14 +117,17 @@ pub fn is_active(window: &gtk::Window) -> bool {
 }
 
 /// Ask the WM to activate (focus + raise) the window.
-pub fn activate(window: &gtk::Window) {
+/// Ask the window manager to focus the shelf. `time` is the X server time of the user action that
+/// asked for it (the hotkey press); with 0 (`CURRENT_TIME`) focus-stealing prevention may only mark
+/// the window as demanding attention instead of raising it.
+pub fn activate(window: &gtk::Window, time: u32) {
     let Some(xid) = xid(window) else { return };
     let Ok((conn, screen_num)) = x11rb::connect(None) else { return };
     let root = conn.setup().roots[screen_num].root;
     if let Ok(c) = conn.intern_atom(false, b"_NET_ACTIVE_WINDOW")
         && let Ok(r) = c.reply()
     {
-        let ev = ClientMessageEvent::new(32, xid, r.atom, [1u32, x11rb::CURRENT_TIME, 0, 0, 0]);
+        let ev = ClientMessageEvent::new(32, xid, r.atom, [1u32, time, 0, 0, 0]);
         let _ = conn.send_event(false, root, EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY, ev);
         let _ = conn.flush();
     }

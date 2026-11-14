@@ -119,8 +119,9 @@ pub struct Hotkey {
 }
 
 impl Hotkey {
-    /// Start the grab thread; `on_press` runs on the GTK main loop for every press.
-    pub fn start(spec: &str, on_press: impl Fn() + 'static) -> Result<(Self, Option<String>)> {
+    /// Start the grab thread; `on_press` runs on the GTK main loop for every real press (X
+    /// autorepeat is filtered out) with the X server time of the press, for focus requests.
+    pub fn start(spec: &str, on_press: impl Fn(u32) + 'static) -> Result<(Self, Option<String>)> {
         let (conn, screen_num) = x11rb::connect(None).context("X11 connection for the hotkey")?;
         let root = conn.setup().roots[screen_num].root;
         let mut current: Option<Binding> = None;
@@ -132,24 +133,37 @@ impl Hotkey {
             },
             Err(e) => error = Some(format!("{e:#}")),
         }
-        let (press_tx, press_rx) = async_channel::unbounded::<()>();
+        let (press_tx, press_rx) = async_channel::unbounded::<u32>();
         let (req_tx, req_rx) = std::sync::mpsc::channel::<(String, std::sync::mpsc::Sender<Result<()>>)>();
         let (wake_rd, wake_wr) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC | rustix::pipe::PipeFlags::NONBLOCK)?;
         std::thread::Builder::new().name("sill-hotkey".into()).spawn(move || {
             use rustix::event::{PollFd, PollFlags, poll};
             let xsock = conn.stream();
+            // X autorepeat shows up as a KeyRelease immediately followed by a KeyPress with the
+            // same keycode and timestamp; a chord held a moment too long would otherwise toggle
+            // twice (show, then hide) and look like a press that did nothing
+            let mut last_release: Option<(u8, u32)> = None;
             loop {
                 // drain what the server already delivered, then wait for the socket or a request
                 while let Ok(Some(ev)) = conn.poll_for_event() {
-                    if let Event::KeyPress(k) = ev
-                        && let Some(b) = &current
-                    {
-                        let state = ModMask::from(
-                            k.state.bits() & (KeyButMask::CONTROL | KeyButMask::SHIFT | KeyButMask::MOD1 | KeyButMask::MOD4).bits(),
-                        );
-                        if k.detail == b.keycode && state == b.mods {
-                            let _ = press_tx.send_blocking(());
+                    match ev {
+                        Event::KeyRelease(k) => last_release = Some((k.detail, k.time)),
+                        Event::KeyPress(k) => {
+                            let repeat = last_release == Some((k.detail, k.time));
+                            last_release = None;
+                            if repeat {
+                                continue;
+                            }
+                            if let Some(b) = &current {
+                                let state = ModMask::from(
+                                    k.state.bits() & (KeyButMask::CONTROL | KeyButMask::SHIFT | KeyButMask::MOD1 | KeyButMask::MOD4).bits(),
+                                );
+                                if k.detail == b.keycode && state == b.mods {
+                                    let _ = press_tx.send_blocking(k.time);
+                                }
+                            }
                         }
+                        _ => {}
                     }
                 }
                 let mut fds = [PollFd::new(&xsock, PollFlags::IN), PollFd::new(&wake_rd, PollFlags::IN)];
@@ -182,8 +196,8 @@ impl Hotkey {
             }
         })?;
         gtk4::glib::spawn_future_local(async move {
-            while press_rx.recv().await.is_ok() {
-                on_press();
+            while let Ok(time) = press_rx.recv().await {
+                on_press(time);
             }
         });
         Ok((Self { requests: Mutex::new(req_tx), wake: wake_wr }, error))
