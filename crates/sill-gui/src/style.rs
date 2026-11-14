@@ -114,12 +114,17 @@ pub fn icon(color: Color) -> impl Fn(&Theme, svg::Status) -> svg::Style {
     move |_, _| svg::Style { color: Some(color) }
 }
 
-/// Text-only button: dim, brighter on hover, a faint hover background (`.sill-menu-item`).
+/// Text-only button: dim, brighter on hover, a faint hover background (`.sill-menu-item`);
+/// dimmer still when it cannot be pressed.
 pub fn quiet(_: &Theme, status: button::Status) -> button::Style {
     let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
     button::Style {
         background: hovered.then(|| alpha(P.fg, 0.07).into()),
-        text_color: if hovered { P.fg } else { alpha(P.fg, 0.75) },
+        text_color: match status {
+            _ if hovered => P.fg,
+            button::Status::Disabled => alpha(P.fg, 0.3),
+            _ => alpha(P.fg, 0.75),
+        },
         border: square(Color::TRANSPARENT, 0.0),
         shadow: Shadow::default(),
         snap: true,

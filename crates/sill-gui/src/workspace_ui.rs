@@ -581,7 +581,7 @@ pub(crate) fn numbered_diff(source: &str) -> Vec<(Option<usize>, Option<usize>, 
         .collect()
 }
 
-fn diff_rows(source: &str) -> Column<'_, Message> {
+pub(crate) fn diff_rows(source: &str) -> Column<'_, Message> {
     let mut rows = Column::new().spacing(1);
     for (old, new, line) in numbered_diff(source) {
         let color = if old.is_none() && new.is_some() {

@@ -21,6 +21,13 @@ pub struct Daemon {
 }
 
 impl Daemon {
+    /// The next request, whatever it is.
+    pub fn next(&mut self) -> Value {
+        let mut line = String::new();
+        self.reader.read_line(&mut line).unwrap();
+        serde_json::from_str(&line).expect("a request")
+    }
+
     pub fn expect(&mut self, method: &str) -> Value {
         let mut line = String::new();
         self.reader.read_line(&mut line).unwrap();
@@ -1742,10 +1749,11 @@ fn tab_reaches_every_control_in_reading_order_and_enter_presses_it() {
             .position(|n| n.starts_with(what))
             .unwrap_or_else(|| panic!("{what} not reached: {names:?}"))
     };
-    assert_eq!(names[0], "choose demo", "{names:?}");
-    assert_eq!(names[1], "Menu(Toggle)", "{names:?}");
-    assert_eq!(names[2], "ToggleText", "{names:?}");
-    assert!(names[3].starts_with("files ToggleDrawer"), "{names:?}");
+    assert_eq!(names[0], "ToggleChanges", "{names:?}");
+    assert_eq!(names[1], "choose demo", "{names:?}");
+    assert_eq!(names[2], "Menu(Toggle)", "{names:?}");
+    assert_eq!(names[3], "ToggleText", "{names:?}");
+    assert!(names[4].starts_with("files ToggleDrawer"), "{names:?}");
     let order = [
         at("files Toggle("),
         at("ToggleTool(\"tool\")"),
@@ -1766,9 +1774,9 @@ fn tab_reaches_every_control_in_reading_order_and_enter_presses_it() {
 fn space_presses_and_arrows_step_a_dropdown() {
     use iced::keyboard::key::Named;
     let mut app = streamed();
-    let spaced = at_each_stop(&mut app, (720.0, 860.0), 1, Named::Space);
+    let spaced = at_each_stop(&mut app, (720.0, 860.0), 2, Named::Space);
     assert!(
-        matches!(&spaced[0], Some(Message::Choose(id)) if id == "demo"),
+        matches!(&spaced[1], Some(Message::Choose(id)) if id == "demo"),
         "{spaced:?}"
     );
     let stepped = at_each_stop(&mut app, (720.0, 860.0), 40, Named::ArrowDown);
@@ -2148,4 +2156,152 @@ fn a_held_prompt_can_be_sent_or_discarded() {
     );
     daemon.reply(&resume, json!({}));
     settle_task(&mut app, task);
+}
+
+// --- changes ----------------------------------------------------------------------------------
+
+fn changes_key(app: &App, file: &str) -> String {
+    let page = app.changes.as_ref().unwrap();
+    let entries = page.entries.as_ref().unwrap().as_ref().unwrap();
+    entries
+        .iter()
+        .find(|e| sill_client::changes::path(e).display.ends_with(file))
+        .map(sill_client::changes::entry_key)
+        .unwrap()
+}
+
+/// The herring opens the Changes page: the pinned repository's live changes, the session's writes
+/// (one changed on the host, which cannot be kept) and an earlier keep to undo. A row opens its
+/// diff; reverting takes a second press; Escape goes back.
+#[test]
+fn the_changes_page_groups_what_sessions_wrote() {
+    use crate::changes_ui::Event;
+    let (mut app, _) = App::new(true, None);
+    let task = app.update(Message::ToggleChanges);
+    settle_task(&mut app, task);
+    let mut ui = simulator(&app, (720.0, 860.0));
+    for shown in [
+        "5 pending change(s)",
+        "/home/demo/project",
+        "live",
+        "witty-willow",
+        "no git",
+        "Keep all",
+        "/home/demo/.config/app/settings.toml",
+        "changed on the host too",
+        "Kept from witty-willow",
+        "Undo",
+    ] {
+        ui.find(shown)
+            .unwrap_or_else(|_| panic!("{shown} is not shown"));
+    }
+    ui.click("/home/demo/.config/app/settings.toml").unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    for message in messages {
+        let task = app.update(message);
+        settle_task(&mut app, task);
+    }
+    let mut ui = simulator(&app, (720.0, 860.0));
+    ui.find("+theme = \"dracula\"").unwrap();
+    drop(ui);
+    let key = changes_key(&app, "settings.toml");
+    let _ = app.update(Message::Changes(Event::Revert(key.clone())));
+    assert_eq!(
+        app.changes.as_ref().unwrap().armed.as_deref(),
+        Some(key.as_str())
+    );
+    let mut ui = simulator(&app, (720.0, 860.0));
+    ui.find("Revert?").unwrap();
+    drop(ui);
+    let _ = app.update(Message::Escape);
+    assert!(
+        app.changes.is_none(),
+        "Escape goes back to the conversation"
+    );
+}
+
+/// The page's actions are the daemon's requests: keep with the version shown, revert all on a
+/// second press, git's revert for a live file, undo for a keep; the page reads again after each.
+#[test]
+fn changes_actions_are_the_public_requests() {
+    use crate::changes_ui::{ChangesPage, Event};
+    let (client, mut daemon) = daemon();
+    let mut app = live_app(vec![client]);
+    app.changes = Some(ChangesPage {
+        entries: Some(Ok(demo::changes())),
+        ..ChangesPage::default()
+    });
+    let keep = changes_key(&app, "settings.toml");
+    let live = changes_key(&app, "README.md");
+    let kept = changes_key(&app, ".bashrc");
+    let server = std::thread::spawn(move || {
+        let reload = |daemon: &mut Daemon| {
+            for _ in 0..2 {
+                let request = daemon.next();
+                match request["method"].as_str() {
+                    Some("_sill/changes.list") => {
+                        daemon.reply(&request, json!({"entries": [], "next": null}))
+                    }
+                    Some("_sill/settings.get") => daemon.reply(
+                        &request,
+                        json!({"theme": "dracula", "auto_revert_minutes": 1440}),
+                    ),
+                    other => panic!("unexpected {other:?}"),
+                }
+            }
+        };
+        let request = daemon.expect("_sill/changes.keep");
+        assert_eq!(request["params"]["session_id"], "demo");
+        assert_eq!(request["params"]["items"][0]["expected_hash"], "demo-hash");
+        let path = request["params"]["items"][0]["path"].clone();
+        daemon.reply(
+            &request,
+            json!({"done": [{"path": path, "message": ""}], "failed": []}),
+        );
+        reload(&mut daemon);
+        let request = daemon.expect("_sill/changes.revert");
+        assert_eq!(request["params"]["paths"].as_array().unwrap().len(), 3);
+        daemon.reply(&request, json!({"done": [], "failed": []}));
+        reload(&mut daemon);
+        let request = daemon.expect("_sill/changes.git-revert");
+        assert!(
+            request["params"]["path"]["display"]
+                .as_str()
+                .unwrap()
+                .ends_with("README.md")
+        );
+        daemon.reply(&request, json!({"text": "reverted"}));
+        reload(&mut daemon);
+        let request = daemon.expect("_sill/changes.undo");
+        assert_eq!(
+            request["params"],
+            json!({"session_id":"demo", "keep_ids":["k1"], "force": false})
+        );
+        daemon.reply(&request, json!({"done": [], "failed": []}));
+        reload(&mut daemon);
+    });
+    let task = app.update(Message::Changes(Event::Keep(keep)));
+    settle_task(&mut app, task);
+    let page = app.changes.as_ref().unwrap();
+    assert_eq!(page.said.as_deref(), Some("kept: settings.toml"));
+    assert_eq!(page.auto_revert, 1440);
+    // the page read again (empty now); the rest act on the demo's entries
+    app.changes.as_mut().unwrap().entries = Some(Ok(demo::changes()));
+    let all: Vec<String> = ["settings.toml", "plan.md", ".profile"]
+        .iter()
+        .map(|f| changes_key(&app, f))
+        .collect();
+    for _ in 0..2 {
+        let task = app.update(Message::Changes(Event::RevertAll(all.clone())));
+        settle_task(&mut app, task);
+    }
+    app.changes.as_mut().unwrap().entries = Some(Ok(demo::changes()));
+    for _ in 0..2 {
+        let task = app.update(Message::Changes(Event::Revert(live.clone())));
+        settle_task(&mut app, task);
+    }
+    app.changes.as_mut().unwrap().entries = Some(Ok(demo::changes()));
+    let task = app.update(Message::Changes(Event::Undo(kept)));
+    settle_task(&mut app, task);
+    server.join().unwrap();
 }

@@ -193,3 +193,28 @@ fn render_lifecycle() {
     let _ = app.update(Message::Latest);
     render(&app, "13-form");
 }
+
+#[test]
+#[ignore = "writes the Changes page PNG for review"]
+fn render_changes() {
+    use crate::Message;
+    let (mut app, _) = App::new(true, None);
+    let _ = app.update(Message::ToggleChanges);
+    let _ = app.update(Message::Changes(crate::changes_ui::Event::Loaded(Ok((
+        demo::changes(),
+        0,
+    )))));
+    let key = {
+        let page = app.changes.as_ref().unwrap();
+        let entries = page.entries.as_ref().unwrap().as_ref().unwrap();
+        sill_client::changes::entry_key(&entries[2])
+    };
+    let _ = app.update(Message::Changes(crate::changes_ui::Event::Diff(
+        key.clone(),
+    )));
+    let _ = app.update(Message::Changes(crate::changes_ui::Event::DiffLoaded(
+        key,
+        Ok(demo::changes_diff()),
+    )));
+    render(&app, "14-changes");
+}

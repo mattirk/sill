@@ -319,3 +319,38 @@ pub fn files(request: &Request) -> Result<Data, String> {
         }
     })
 }
+
+/// The demo's Changes page: the pinned project's own changes, the session's writes outside it
+/// (one changed on the host meanwhile), and an earlier keep that can be undone.
+pub fn changes() -> Vec<sill_proto::changes::Entry> {
+    let written = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+        - 25 * 60)
+        .to_string();
+    let overlay = |file: &str, kind: &str, conflict: bool| {
+        serde_json::json!({"type":"overlay", "session_id":"demo", "title":"witty-willow",
+            "ghost": false, "agent_state": false, "path": path(file), "kind": kind,
+            "file_type":"file", "size":"120", "conflict": conflict, "written": written,
+            "repo": null, "hash":"demo-hash", "protected": null})
+    };
+    [
+        serde_json::json!({"type":"live", "repo": path("/home/demo/project"),
+            "path": path("/home/demo/project/README.md"), "status":"M"}),
+        serde_json::json!({"type":"live", "repo": path("/home/demo/project"),
+            "path": path("/home/demo/project/notes.txt"), "status":"?"}),
+        overlay("/home/demo/.config/app/settings.toml", "modified", false),
+        overlay("/home/demo/scratch/plan.md", "added", false),
+        overlay("/home/demo/.profile", "modified", true),
+        serde_json::json!({"type":"kept", "session_id":"demo", "title":"witty-willow",
+            "ghost": false, "keep_id":"k1", "timestamp":"1793806135",
+            "path": path("/home/demo/.bashrc"), "what":"wrote", "before":"a file", "hash": null}),
+    ]
+    .into_iter()
+    .map(|entry| serde_json::from_value(entry).expect("a demo change"))
+    .collect()
+}
+
+pub fn changes_diff() -> String {
+    "--- a/settings.toml\n+++ b/settings.toml\n@@ -1,3 +1,3 @@\n [ui]\n-theme = \"light\"\n+theme = \"dracula\"\n size = 13\n".into()
+}

@@ -33,6 +33,14 @@ pub const NARROW: f32 = 600.0;
 impl App {
     pub(crate) fn view(&self) -> Element<'_, Message> {
         let content = responsive(move |size| {
+            // the Changes page in the conversation's place; the strip keeps the session in reach
+            if let Some(page) = &self.changes {
+                let mut screen = column![self.changes_view(page)].height(Fill);
+                if let Some(view) = self.current() {
+                    screen = screen.push(self.strip(view));
+                }
+                return screen.into();
+            }
             let Some(view) = self.current() else {
                 return self.empty();
             };
@@ -115,10 +123,46 @@ impl App {
     // --- top bar --------------------------------------------------------------------------------
 
     fn top_bar(&self) -> Element<'_, Message> {
-        let mark = svg(icons::herring())
-            .width(18)
-            .height(18)
-            .style(style::icon(P.fg));
+        // the herring opens the sill pages (Changes so far), underlined while one shows
+        let shown = self.changes.is_some();
+        let mark = tooltip(
+            keys::press(
+                button(
+                    column![
+                        container(
+                            svg(icons::herring())
+                                .width(18)
+                                .height(18)
+                                .style(style::icon(P.fg)),
+                        )
+                        .height(Fill)
+                        .align_y(Alignment::Center),
+                        rule::horizontal(2).style(style::rule_style(if shown {
+                            P.accent
+                        } else {
+                            Color::TRANSPARENT
+                        })),
+                    ]
+                    .width(22)
+                    .height(Fill),
+                )
+                .padding([0, 12])
+                .height(Fill)
+                .style(style::quiet),
+                Message::ToggleChanges,
+            ),
+            container(
+                text(if shown {
+                    "Back to the conversation"
+                } else {
+                    "Changes: what the sessions wrote"
+                })
+                .size(style::TINY),
+            )
+            .padding([3, 8])
+            .style(style::fill(P.surface)),
+            tooltip::Position::Bottom,
+        );
         let mut tabs = row![].spacing(2).height(Fill);
         for tab in &self.tabs {
             tabs = tabs.push(self.tab(tab));
@@ -139,7 +183,7 @@ impl App {
         mouse_area(
             container(
                 row![
-                    container(mark).padding(Padding::from([0.0, 14.0])),
+                    container(mark).padding(Padding::from([0.0, 2.0])),
                     scrollable(tabs)
                         .width(Fill)
                         .height(Fill)

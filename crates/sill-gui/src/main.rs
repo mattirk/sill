@@ -1,3 +1,4 @@
+mod changes_ui;
 mod demo;
 mod fonts;
 mod forms;
@@ -116,6 +117,8 @@ impl std::fmt::Display for Pick {
 /// What a request the person made was, for its outcome.
 #[derive(Debug, Clone)]
 pub enum Act {
+    /// A keep, revert or undo on the Changes page, by what it does.
+    Changes(&'static str),
     Create,
     Reopen(String),
     End(String),
@@ -195,6 +198,9 @@ pub enum Message {
     Page(bool),
     /// The `+` menu: start, reopen, delete sessions.
     Menu(menu::Event),
+    /// The herring: the Changes page, or back to the conversation.
+    ToggleChanges,
+    Changes(changes_ui::Event),
     /// A tab's ×: end its session (a ghost's needs a second press).
     CloseTab(String),
     /// A form question: a field edited, the form sent, or declined.
@@ -392,6 +398,8 @@ pub struct App {
     pub views: BTreeMap<String, SessionView>,
     /// The `+` menu, while open.
     pub menu: Option<menu::Menu>,
+    /// The Changes page, while shown in place of the conversation.
+    pub changes: Option<changes_ui::ChangesPage>,
     /// A session just created or reopened: chosen once the list shows it.
     pending_choose: Option<String>,
     /// A ghost's tab whose × was pressed once.
@@ -455,6 +463,7 @@ impl App {
             all_sessions: Vec::new(),
             views: BTreeMap::new(),
             menu: None,
+            changes: None,
             pending_choose: None,
             armed_close: None,
             selected: None,
@@ -613,6 +622,13 @@ impl App {
             Message::Choose(id) => return self.choose(id),
             Message::Refresh => {
                 let mut tasks = vec![self.list()];
+                if self
+                    .changes
+                    .as_ref()
+                    .is_some_and(|c| !c.history && !c.loading)
+                {
+                    tasks.push(self.changes_event(changes_ui::Event::Refresh));
+                }
                 if self.workspace.shown
                     && let Some(id) = self.selected.clone()
                 {
@@ -840,6 +856,17 @@ impl App {
             }
             Message::Escape => return self.escape(),
             Message::Menu(event) => return self.menu_event(event),
+            Message::ToggleChanges => {
+                if self.changes.take().is_some() {
+                    return self.restore_scroll();
+                }
+                self.changes = Some(changes_ui::ChangesPage {
+                    loading: true,
+                    ..changes_ui::ChangesPage::default()
+                });
+                return self.changes_load();
+            }
+            Message::Changes(event) => return self.changes_event(event),
             Message::CloseTab(id) => {
                 let ghost = self
                     .all_sessions
@@ -929,6 +956,190 @@ impl App {
                 return keys::page(ids, down);
             }
             Message::Noop => {}
+        }
+        Task::none()
+    }
+
+    /// The pending changes and Settings → auto-revert, read off the GUI thread.
+    fn changes_load(&self) -> Task<Message> {
+        use changes_ui::Event;
+        let Some(actions) = self.actions.clone() else {
+            return Task::done(Message::Changes(Event::Loaded(Ok((demo::changes(), 0)))));
+        };
+        blocking(
+            move || {
+                let entries = actions
+                    .reading(sill_client::changes::list)
+                    .map_err(|e| format!("{e:#}"))?;
+                // unread settings: no countdown rather than a wrong one
+                let minutes = actions
+                    .read::<sill_proto::admin::Settings>("_sill/settings.get", json!({}))
+                    .map_or(0, |s| sill_client::changes::auto_revert(&s));
+                Ok((entries, minutes))
+            },
+            |loaded| Message::Changes(Event::Loaded(loaded)),
+        )
+    }
+
+    fn history_load(&self, before: Option<String>) -> Task<Message> {
+        use changes_ui::Event;
+        let Some(actions) = self.actions.clone() else {
+            return Task::none();
+        };
+        let append = before.is_some();
+        blocking(
+            move || {
+                actions
+                    .reading(|c| sill_client::changes::history(c, before.clone()))
+                    .map_err(|e| format!("{e:#}"))
+            },
+            move |page| Message::Changes(Event::HistoryLoaded(page, append)),
+        )
+    }
+
+    fn changes_event(&mut self, event: changes_ui::Event) -> Task<Message> {
+        use changes_ui::Event;
+        use sill_client::changes;
+        use sill_proto::changes::Entry;
+        let demo = self.demo;
+        let Some(page) = &mut self.changes else {
+            return Task::none();
+        };
+        match event {
+            Event::Loaded(loaded) => {
+                page.loading = false;
+                match loaded {
+                    Ok((entries, minutes)) => {
+                        let keys: Vec<String> = entries.iter().map(changes::entry_key).collect();
+                        page.open.retain(|k, _| keys.contains(k));
+                        if page
+                            .armed
+                            .as_ref()
+                            .is_some_and(|a| !keys.iter().any(|k| a.ends_with(k.as_str())))
+                        {
+                            page.armed = None;
+                        }
+                        page.auto_revert = minutes;
+                        page.entries = Some(Ok(entries));
+                    }
+                    Err(error) => page.entries = Some(Err(error)),
+                }
+            }
+            Event::Refresh => {
+                if page.history {
+                    page.history_loading = true;
+                    return self.history_load(None);
+                }
+                page.loading = true;
+                return self.changes_load();
+            }
+            Event::History(on) => {
+                page.history = on;
+                if on && page.events.is_empty() && !page.history_loading {
+                    page.history_loading = true;
+                    return self.history_load(None);
+                }
+            }
+            Event::HistoryLoaded(loaded, append) => {
+                page.history_loading = false;
+                match loaded {
+                    Ok(next) => {
+                        if !append {
+                            page.events.clear();
+                        }
+                        page.events.extend(next.events);
+                        page.next = next.next;
+                        page.history_error = None;
+                    }
+                    Err(error) => page.history_error = Some(error),
+                }
+            }
+            Event::MoreHistory => {
+                let before = page.next.clone();
+                page.history_loading = true;
+                return self.history_load(before);
+            }
+            Event::Diff(key) => {
+                if page.open.remove(&key).is_some() {
+                    return Task::none();
+                }
+                let Some(entry) = page.entry(&key) else {
+                    return Task::none();
+                };
+                let target = changes::target(entry);
+                page.open.insert(key.clone(), None);
+                let Some(actions) = self.actions.clone() else {
+                    return Task::done(Message::Changes(Event::DiffLoaded(
+                        key,
+                        Ok(demo::changes_diff()),
+                    )));
+                };
+                return blocking(
+                    move || {
+                        actions
+                            .reading(|c| changes::diff(c, target.clone()))
+                            .map_err(|e| format!("{e:#}"))
+                    },
+                    move |diff| Message::Changes(Event::DiffLoaded(key, diff)),
+                );
+            }
+            Event::DiffLoaded(key, diff) => {
+                if let Some(slot) = page.open.get_mut(&key) {
+                    *slot = Some(diff);
+                }
+            }
+            event @ (Event::Keep(_)
+            | Event::KeepAll(_)
+            | Event::Revert(_)
+            | Event::RevertAll(_)
+            | Event::Undo(_)) => {
+                let (keys, armed_as) = match &event {
+                    Event::Keep(key) | Event::Undo(key) => (vec![key.clone()], None),
+                    Event::KeepAll(keys) => (keys.clone(), None),
+                    Event::Revert(key) => (vec![key.clone()], Some(key.clone())),
+                    Event::RevertAll(keys) => {
+                        (keys.clone(), keys.first().map(|k| format!("all {k}")))
+                    }
+                    _ => unreachable!(),
+                };
+                // reverting takes a second press
+                if let Some(armed) = armed_as {
+                    if page.armed.as_ref() != Some(&armed) {
+                        page.armed = Some(armed);
+                        return Task::none();
+                    }
+                    page.armed = None;
+                }
+                if demo {
+                    page.said = Some("The demo keeps and reverts nothing.".into());
+                    return Task::none();
+                }
+                let entries: Vec<&Entry> = keys.iter().filter_map(|k| page.entry(k)).collect();
+                let Some(first) = entries.first() else {
+                    return Task::none();
+                };
+                let (verb, (method, params)) = match (&event, first) {
+                    (Event::Revert(_), Entry::Live { repo, path, .. }) => {
+                        ("reverted", changes::git_revert(repo, path))
+                    }
+                    (
+                        Event::Undo(_),
+                        Entry::Kept {
+                            session_id,
+                            keep_id,
+                            ..
+                        },
+                    ) => ("undone", changes::undo(session_id, keep_id)),
+                    (Event::Keep(_) | Event::KeepAll(_), Entry::Overlay { session_id, .. }) => {
+                        ("kept", changes::keep(session_id, &entries))
+                    }
+                    (Event::Revert(_) | Event::RevertAll(_), Entry::Overlay { session_id, .. }) => {
+                        ("reverted", changes::revert(session_id, &entries))
+                    }
+                    _ => return Task::none(),
+                };
+                return self.act("", Act::Changes(verb), method, params);
+            }
         }
         Task::none()
     }
@@ -1051,6 +1262,9 @@ impl App {
     fn escape(&mut self) -> Task<Message> {
         if self.menu.take().is_some() {
             return Task::none();
+        }
+        if self.changes.take().is_some() {
+            return self.restore_scroll();
         }
         self.armed_close = None;
         let drawer = self.workspace.shown;
@@ -1235,7 +1449,8 @@ impl App {
         if !self.tabs.iter().any(|t| t.id == id) {
             return Task::none();
         }
-        let again = self.selected.as_deref() == Some(id.as_str());
+        let again = self.selected.as_deref() == Some(id.as_str()) && self.changes.is_none();
+        self.changes = None;
         self.selected = Some(id.clone());
         let view = self
             .views
@@ -1263,6 +1478,16 @@ impl App {
 
     fn done(&mut self, session: String, act: Act, outcome: Outcome) -> Task<Message> {
         trace(|| format!("{session} {act:?} → {outcome:?}"));
+        if let Act::Changes(verb) = &act {
+            if let Some(page) = &mut self.changes {
+                page.said = Some(match &outcome {
+                    Outcome::Done(value) => sill_client::changes::said(verb, value),
+                    other => format!("{verb}: {}", other.problem().unwrap_or_default()),
+                });
+                page.loading = true;
+            }
+            return self.changes_load();
+        }
         let lifecycle = match &act {
             Act::Create => Some("Starting the session"),
             Act::Reopen(_) => Some("Reopening the session"),
@@ -1321,7 +1546,11 @@ impl App {
                 if let Some(problem) = outcome.problem() {
                     let what = match act {
                         Act::Resume => "Sending the held prompt",
-                        Act::Create | Act::Reopen(_) | Act::End(_) | Act::Delete => unreachable!(),
+                        Act::Create
+                        | Act::Reopen(_)
+                        | Act::End(_)
+                        | Act::Delete
+                        | Act::Changes(_) => unreachable!(),
                         Act::Stop => "Stopping the turn",
                         Act::Answer(_) => "Answering the question",
                         Act::Unqueue => "Removing the queued prompt",
