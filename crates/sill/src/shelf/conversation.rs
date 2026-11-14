@@ -327,7 +327,9 @@ impl Conversation {
         l.set_selectable(true);
         l.set_xalign(0.0);
         l.set_halign(gtk::Align::Fill);
-        block.append(&l);
+        l.set_margin_end(26); // the first line stays clear of the copy button
+        let said = text.to_string();
+        block.append(&markdown::copy_overlay(&l, move || said.clone()));
         if !attachments.is_empty() {
             let a = gtk::Label::new(Some(&format!("⌁ {}", attachments.join(" · "))));
             a.add_css_class("dim-label");
@@ -615,8 +617,13 @@ impl Conversation {
             .hscrollbar_policy(gtk::PolicyType::Automatic)
             .vscrollbar_policy(gtk::PolicyType::Never)
             .propagate_natural_height(true)
-            .visible(body.is_visible())
             .build();
+        // the command (or output) under a copy button
+        let body_wrap = markdown::copy_overlay(&body_scroll, {
+            let b = body.clone();
+            move || b.text().to_string()
+        });
+        body_wrap.set_visible(body.is_visible());
         // a file edit's diff under the text: the code segments' view with the diff language
         let diff_view = markdown::code_view();
         diff_view.add_css_class("sill-tool-diff");
@@ -624,11 +631,11 @@ impl Conversation {
         let diff_scroll = markdown::code_scroller(&diff_view);
         diff_scroll.set_visible(false);
         // the scrollers follow what they hold
-        for (inner, outer) in [(body.clone().upcast::<gtk::Widget>(), body_scroll.clone()), (diff_view.clone().upcast::<gtk::Widget>(), diff_scroll.clone())] {
+        for (inner, outer) in [(body.clone().upcast::<gtk::Widget>(), body_wrap.clone().upcast::<gtk::Widget>()), (diff_view.clone().upcast::<gtk::Widget>(), diff_scroll.clone().upcast::<gtk::Widget>())] {
             inner.connect_visible_notify(move |w| outer.set_visible(w.is_visible()));
         }
         let body_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        body_box.append(&body_scroll);
+        body_box.append(&body_wrap);
         body_box.append(&diff_scroll);
         let body_rev = gtk::Revealer::builder().child(&body_box).reveal_child(false).transition_type(gtk::RevealerTransitionType::SlideDown).build();
         card.append(&body_rev);
@@ -1162,6 +1169,14 @@ searchentry > image { -gtk-icon-size: 1.1em; }
 /* a fenced code block: the theme's source scheme, a quiet frame */
 .sill-code { font-size: 92%; margin: 2px 8px; }
 .sill-code, .sill-code text { background: @sill_code_bg; }
+/* the copy button over a code block, a prompt, a tool command: there while the pointer is over the block */
+button.sill-copy { padding: 3px; min-height: 0; min-width: 0; margin: 6px 12px; opacity: 0; transition: opacity 120ms;
+                   background: alpha(@view_bg_color, 0.9); border: 1px solid alpha(@view_fg_color, 0.18); }
+button.sill-copy > image { -gtk-icon-size: 0.9em; }
+.sill-copyable:hover button.sill-copy { opacity: 0.75; }
+.sill-copyable button.sill-copy:hover { opacity: 1; }
+/* what a click on a link offers */
+.sill-link-pop > contents { padding: 8px 10px; }
 /* a tool call: one quiet line; the body opens under it */
 .sill-tool { background: transparent; border-radius: 0; padding: 0; border-left: 2px solid alpha(@view_fg_color, 0.18); }
 .sill-tool-line { padding: 3px 6px; font-size: 90%; color: alpha(@view_fg_color, 0.75); }

@@ -1,8 +1,10 @@
 //! Markdown → a message of segments (SPEC §4.5): prose in text views with tags (headings, emphasis,
 //! inline code, lists with hanging indents, links, block quotes, hairline rules, task markers, tables
 //! as real columns on Pango tab stops measured with the view's own font), and each fenced code block
-//! as a GtkSourceView *between* the prose views, highlighted in the theme's scheme. No HTML, no
-//! images (shown as their alt text).
+//! as a GtkSourceView *between* the prose views, highlighted in the theme's scheme. No HTML. Links
+//! (`[text](url)`, `<url>` and bare `http(s)://…` in prose) carry their URL in a per-URL tag and open
+//! a small popover on click — Open for http(s) only (SPEC §4.5), Copy for any; code blocks get a
+//! copy button that appears on hover (`copy_overlay`, also used for prompts and tool commands).
 //!
 //! Code is a sibling, never a child anchored inside the text: an anchored child only ever gets a
 //! fixed size, and a fixed size outlives every resize — it held the column wider than the viewport
@@ -21,7 +23,7 @@ use gtk4 as gtk;
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use sourceview5::prelude::*;
 
-use super::{theme, viewer};
+use super::{icons, theme, viewer};
 
 /// Where a message's images come from and what a click on one does. A conversation resolves paths as
 /// the agent sees them inside its jail; the file viewer resolves them relative to the file.
@@ -236,7 +238,7 @@ fn settle_heights(msg: &gtk::Box) {
     while let Some(w) = c {
         if let Some(tv) = w.downcast_ref::<gtk::TextView>() {
             settle_height(tv);
-        } else if let Some(tv) = w.downcast_ref::<gtk::ScrolledWindow>().and_then(|s| s.child()).and_downcast::<gtk::TextView>() {
+        } else if let Some(tv) = code_in_segment(&w) {
             settle_height(&tv);
         }
         c = w.next_sibling();
@@ -258,7 +260,232 @@ fn prose_view(class: &str) -> gtk::TextView {
     tv.add_css_class(class);
     install_tags(&tv.buffer());
     tv.connect_map(settle_height);
+    install_link_handlers(&tv);
     tv
+}
+
+/// The tag that carries a link's URL: `link:<url>`, unstyled (the styling is the fixed `link`
+/// tag), made in the buffer on first use (`Out::insert`).
+const LINK_PREFIX: &str = "link:";
+
+fn link_tag_name(url: &str) -> String {
+    format!("{LINK_PREFIX}{url}")
+}
+
+/// The link under widget coordinates (x, y) in a prose view, with the rectangle of the character
+/// there (the popover points at it).
+fn link_at(tv: &gtk::TextView, x: f64, y: f64) -> Option<(String, gtk::gdk::Rectangle)> {
+    let (bx, by) = tv.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
+    let iter = tv.iter_at_location(bx, by)?;
+    let url = iter.tags().iter().find_map(|t| t.name().and_then(|n| n.strip_prefix(LINK_PREFIX).map(str::to_string)))?;
+    let r = tv.iter_location(&iter);
+    let (wx, wy) = tv.buffer_to_window_coords(gtk::TextWindowType::Widget, r.x(), r.y());
+    Some((url, gtk::gdk::Rectangle::new(wx, wy, r.width().max(1), r.height().max(1))))
+}
+
+/// Clicks on links open a popover (never the browser outright: SPEC §4.5's click-through), the
+/// pointer turns into a hand over them, and the URL is the tooltip.
+fn install_link_handlers(tv: &gtk::TextView) {
+    let click = gtk::GestureClick::new();
+    click.set_button(1);
+    click.connect_released(|g, n, x, y| {
+        let Some(tv) = g.widget().and_downcast::<gtk::TextView>() else { return };
+        // a drag that selected text through a link is a selection, not a click
+        if n != 1 || tv.buffer().has_selection() {
+            return;
+        }
+        if let Some((url, at)) = link_at(&tv, x, y) {
+            link_popover(&tv, &url, at);
+        }
+    });
+    tv.add_controller(click);
+    let motion = gtk::EventControllerMotion::new();
+    let over = std::cell::Cell::new(false);
+    motion.connect_motion(move |m, x, y| {
+        let Some(tv) = m.widget().and_downcast::<gtk::TextView>() else { return };
+        let on = link_at(&tv, x, y).is_some();
+        if on != over.replace(on) {
+            tv.set_cursor_from_name(Some(if on { "pointer" } else { "text" }));
+        }
+    });
+    motion.connect_leave(|m| {
+        if let Some(tv) = m.widget().and_downcast::<gtk::TextView>() {
+            tv.set_cursor_from_name(Some("text"));
+        }
+    });
+    tv.add_controller(motion);
+    tv.set_has_tooltip(true);
+    tv.connect_query_tooltip(|tv, x, y, keyboard, tip| {
+        if keyboard {
+            return false;
+        }
+        match link_at(tv, x as f64, y as f64) {
+            Some((url, _)) => {
+                tip.set_text(Some(&url));
+                true
+            }
+            None => false,
+        }
+    });
+}
+
+/// What a click on a link offers: the URL, Open (http and https only — the shelf registers no other
+/// handlers, and `file:`/custom schemes are the host's business), Copy.
+fn link_popover(tv: &gtk::TextView, url: &str, at: gtk::gdk::Rectangle) {
+    let pop = gtk::Popover::new();
+    pop.set_parent(tv);
+    pop.set_pointing_to(Some(&at));
+    pop.set_position(gtk::PositionType::Bottom);
+    pop.add_css_class("sill-link-pop");
+    let col = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let shown = gtk::Label::new(Some(url));
+    shown.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    shown.set_max_width_chars(64);
+    shown.set_xalign(0.0);
+    shown.add_css_class("dim-label");
+    col.append(&shown);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let web = url.starts_with("https://") || url.starts_with("http://");
+    if web {
+        let open = gtk::Button::with_label("Open in browser");
+        open.add_css_class("suggested-action");
+        let url = url.to_string();
+        let p = pop.clone();
+        open.connect_clicked(move |b| {
+            let win = b.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+            gtk::UriLauncher::new(&url).launch(win.as_ref(), None::<&gtk::gio::Cancellable>, |_| {});
+            p.popdown();
+        });
+        row.append(&open);
+    } else {
+        let note = gtk::Label::new(Some("only http(s) links open from the shelf"));
+        note.add_css_class("dim-label");
+        note.set_xalign(0.0);
+        row.append(&note);
+    }
+    let copy = gtk::Button::with_label("Copy link");
+    {
+        let url = url.to_string();
+        let p = pop.clone();
+        copy.connect_clicked(move |b| {
+            b.clipboard().set_text(&url);
+            p.popdown();
+        });
+    }
+    row.append(&copy);
+    col.append(&row);
+    pop.set_child(Some(&col));
+    // a popover is a child of the view: take it out once it has closed (not from inside the signal)
+    pop.connect_closed(|p| {
+        let p = p.clone();
+        gtk::glib::idle_add_local_once(move || p.unparent());
+    });
+    pop.popup();
+}
+
+/// A flat copy button: a glyph that turns into a tick for a moment after the click. `text` is read
+/// at the click, so a streamed block copies what it holds then.
+pub(super) fn copy_button(text: Rc<dyn Fn() -> String>) -> gtk::Button {
+    let b = icons::glyph_button("sill-copy");
+    b.add_css_class("flat");
+    b.add_css_class("sill-copy");
+    b.set_tooltip_text(Some("Copy"));
+    b.set_halign(gtk::Align::End);
+    b.set_valign(gtk::Align::Start);
+    b.set_can_focus(false);
+    b.connect_clicked(move |b| {
+        b.clipboard().set_text(&text());
+        if let Some(img) = b.child().and_downcast::<gtk::Image>() {
+            icons::set_glyph(&img, "sill-check");
+            let weak = img.downgrade();
+            gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(1200), move || {
+                if let Some(i) = weak.upgrade() {
+                    icons::set_glyph(&i, "sill-copy");
+                }
+            });
+        }
+    });
+    b
+}
+
+/// `child` with a copy button over its top-right corner, shown while the pointer is over it (CSS
+/// `.sill-copyable`). Code blocks, prompts, tool commands.
+pub(super) fn copy_overlay(child: &impl IsA<gtk::Widget>, text: impl Fn() -> String + 'static) -> gtk::Overlay {
+    let o = gtk::Overlay::new();
+    o.set_child(Some(child));
+    o.add_css_class("sill-copyable");
+    o.add_overlay(&copy_button(Rc::new(text)));
+    o
+}
+
+/// The code view inside a code segment (`copy_overlay` → scroller → view), if `w` is one.
+fn code_in_segment(w: &gtk::Widget) -> Option<sourceview5::View> {
+    w.downcast_ref::<gtk::Overlay>()?.child().and_downcast::<gtk::ScrolledWindow>()?.child().and_downcast::<sourceview5::View>()
+}
+
+/// Bare URLs in prose text: `(piece, is a URL)` in order. A URL starts at `http://` or `https://`
+/// after a non-word character and runs to whitespace or a quote/angle bracket; trailing sentence
+/// punctuation and a closing bracket without its opening one inside the URL stay out of it.
+fn split_urls(text: &str) -> Vec<(&str, bool)> {
+    let mut out = Vec::new();
+    let mut rest_start = 0;
+    let mut i = 0;
+    while i < text.len() {
+        let Some(off) = text[i..].find("http") else { break };
+        let at = i + off;
+        let scheme_len = if text[at..].starts_with("https://") {
+            8
+        } else if text[at..].starts_with("http://") {
+            7
+        } else {
+            i = at + 4;
+            continue;
+        };
+        let word_before = text[..at].chars().next_back().is_some_and(|c| c.is_alphanumeric());
+        let body_start = at + scheme_len;
+        let mut end = text[body_start..].find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\'' | '`')).map(|e| body_start + e).unwrap_or(text.len());
+        if word_before || end == body_start {
+            i = body_start;
+            continue;
+        }
+        loop {
+            let url = &text[at..end];
+            let Some(last) = url.chars().next_back() else { break };
+            let drop = match last {
+                '.' | ',' | ';' | ':' | '!' | '?' | '*' => true,
+                ')' => url.matches(')').count() > url.matches('(').count(),
+                ']' => url.matches(']').count() > url.matches('[').count(),
+                _ => false,
+            };
+            if drop { end -= last.len_utf8() } else { break }
+        }
+        if end > body_start {
+            if rest_start < at {
+                out.push((&text[rest_start..at], false));
+            }
+            out.push((&text[at..end], true));
+            rest_start = end;
+        }
+        i = end.max(body_start);
+    }
+    if rest_start < text.len() {
+        out.push((&text[rest_start..], false));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_urls;
+
+    #[test]
+    fn bare_urls() {
+        let v = split_urls("see https://github.com/iced-rs/iced. Also (http://a.b/c(d)) and x https://e.f/g, done");
+        let urls: Vec<&str> = v.iter().filter(|(_, u)| *u).map(|(s, _)| *s).collect();
+        assert_eq!(urls, ["https://github.com/iced-rs/iced", "http://a.b/c(d)", "https://e.f/g"]);
+        assert_eq!(v.iter().map(|(s, _)| *s).collect::<String>(), "see https://github.com/iced-rs/iced. Also (http://a.b/c(d)) and x https://e.f/g, done");
+        assert!(split_urls("nohttps://x and https:// alone").iter().all(|(_, u)| !u));
+    }
 }
 
 /// The scroller a code view sits in: code never wraps, it scrolls sideways (2026-11-01); the
@@ -392,15 +619,18 @@ impl<'a> Out<'a> {
     fn code(&mut self, lang: &str, code: &str) -> sourceview5::View {
         self.close_text();
         // a code segment is its scroller with the view inside
-        let view = match self
-            .reuse(gtk::ScrolledWindow::static_type())
-            .and_then(|w| w.downcast::<gtk::ScrolledWindow>().ok())
-            .and_then(|s| s.child().and_downcast::<sourceview5::View>())
-        {
+        // a code segment is its scroller with the view inside, under a copy button
+        let view = match self.reuse(gtk::Overlay::static_type()).as_ref().and_then(code_in_segment) {
             Some(v) => v,
             None => {
                 let v = code_view();
-                self.msg.append(&code_scroller(&v));
+                let weak = v.downgrade();
+                self.msg.append(&copy_overlay(&code_scroller(&v), move || {
+                    weak.upgrade().map(|v| {
+                        let b = v.buffer();
+                        b.text(&b.start_iter(), &b.end_iter(), true).to_string()
+                    }).unwrap_or_default()
+                }));
                 v
             }
         };
@@ -504,7 +734,29 @@ impl<'a> Out<'a> {
             let start = buffer.iter_at_offset(start_off);
             let end = buffer.end_iter();
             for t in tags {
+                if t.starts_with(LINK_PREFIX) && buffer.tag_table().lookup(t).is_none() {
+                    buffer.tag_table().add(&gtk::TextTag::new(Some(t)));
+                }
                 buffer.apply_tag_by_name(t, &start, &end);
+            }
+        }
+    }
+
+    /// `insert`, with bare URLs in `text` as links (not inside a link already: its text is the
+    /// link's, whatever it says).
+    fn insert_linked(&mut self, text: &str, tags: &[String]) {
+        if tags.iter().any(|t| t.starts_with(LINK_PREFIX)) || !text.contains("http") {
+            self.insert(text, tags);
+            return;
+        }
+        for (piece, is_url) in split_urls(text) {
+            if is_url {
+                let mut t = tags.to_vec();
+                t.push("link".into());
+                t.push(link_tag_name(piece));
+                self.insert(piece, &t);
+            } else {
+                self.insert(piece, tags);
             }
         }
     }
@@ -680,7 +932,10 @@ pub fn render_marked(msg: &gtk::Box, class: &str, markdown: &str, changed: &[(us
                 Tag::Emphasis => tags.push("italic".into()),
                 Tag::Strong => tags.push("bold".into()),
                 Tag::Strikethrough => tags.push("strike".into()),
-                Tag::Link { .. } => tags.push("link".into()),
+                Tag::Link { dest_url, .. } => {
+                    tags.push("link".into());
+                    tags.push(link_tag_name(&dest_url));
+                }
                 Tag::Image { dest_url, .. } => {
                     image = Some((dest_url.to_string(), String::new()));
                     image_changed = touched(&range);
@@ -743,7 +998,11 @@ pub fn render_marked(msg: &gtk::Box, class: &str, markdown: &str, changed: &[(us
                     }
                     mark_changed(block_marks.pop().flatten());
                 }
-                TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link => {
+                TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => {
+                    tags.pop();
+                }
+                TagEnd::Link => {
+                    tags.pop();
                     tags.pop();
                 }
                 TagEnd::Image => {
@@ -762,6 +1021,7 @@ pub fn render_marked(msg: &gtk::Box, class: &str, markdown: &str, changed: &[(us
                                 out.insert(&format!("{label} "), &tags);
                                 let mut t = tags.clone();
                                 t.push("link".into());
+                                t.push(link_tag_name(&src));
                                 out.insert(&src, &t);
                             }
                             _ => {
@@ -951,7 +1211,7 @@ pub fn render_marked(msg: &gtk::Box, class: &str, markdown: &str, changed: &[(us
                         cell.push_str(&t);
                     }
                 } else {
-                    out.insert(&t, &tags);
+                    out.insert_linked(&t, &tags);
                 }
             }
             Event::Code(c) => {
