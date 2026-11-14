@@ -594,6 +594,9 @@ its open choices do not reopen these decisions.
 | Interactive terminal disconnect | Keep the terminal alive within its session or explicit lifetime and allow reattachment to the same terminal. |
 | Terminal output recovery | Replay bounded recent output on reattachment and explicitly report gaps; do not retain an unlimited terminal byte log. |
 | Independent validation client | Build the first independent client in Python using exported schemas. |
+| Retry receipt lifetime (answered 2026-11-03) | Keep receipts without expiry under the hard cap (65,536); at capacity new work is refused with `limit_exceeded` and existing IDs stay recoverable. An ID never dispatches twice. No retry window. |
+| Compatibility after the freeze (answered 2026-11-03) | The identity stays `sfp/1`. Additions are optional and advertised as named, versioned capabilities in `_sill/initialize`; clients ignore what they do not know. No `sfp/1.x` minor versions. A breaking change is `sfp/2`. See §7.2. |
+| Freeze scope of §7.11 (answered 2026-11-03) | Capability names/versions and per-code error-detail schemas are settled before the freeze. Migration of stored transcripts to stable IDs and history/terminal retention limits are out of v1 and arrive later as capability-gated additions. |
 
 ## 7. sfp/1-draft.1 proposed contract
 
@@ -653,6 +656,20 @@ The example limits are illustrative, not chosen defaults. Limits apply to encode
 ceiling and the mandatory limit inventory remain freeze work. `_sill/daemon.schema` must describe
 the selected protocol's methods, notifications, errors, limits and capability requirements; it
 must not expose protocol 6 shapes under an SFP identity.
+
+**Extension rule after the freeze (decided 2026-11-03).** The identity remains `sfp/1` for the
+lifetime of v1; there are no `sfp/1.x` minor versions. A compatible addition is a new method,
+notification, optional request/result field, enum variant or error detail that an old peer can
+ignore or never sees. Each addition is advertised as a named capability (`name: version`) in
+`_sill/initialize`; a daemon uses it toward a client only when the client offered it, and a
+client calls it only when the daemon returned it. A missing capability disables that feature;
+it is not a protocol mismatch and never triggers the explicit-replacement flow, which is
+reserved for a protocol-identity mismatch (`sfp/1` vs `sfp/2`). Changing the meaning of an
+existing field, making an optional field required, or removing anything requires `sfp/2`.
+Experimental features (for example native ACP v2) and features a build or platform can disable
+are capabilities too. The daemon build version and protocol revision in `daemon.status` are
+diagnostics only; clients must not gate behaviour on them. Example: durable `operation_id`
+receipts for Changes mutations would be a capability such as `changes.operation_id: 1`.
 
 ### 7.3 Identities, state and event ordering
 
@@ -985,7 +1002,10 @@ Required conformance scenarios include:
 
 ### 7.11 Open choices for the next revision
 
-These are design work, not reasons to reopen §6's product decisions:
+These are design work, not reasons to reopen §6's product decisions. **Scope decided
+2026-11-03:** capability names/versions and required error-detail schemas must be settled before
+the freeze; migration of stored transcripts to stable IDs and history/terminal retention limits
+are out of v1 and may arrive later as capability-gated additions (§7.2).
 
 - Exact baseline item/content, session/activity, tool, form and attachment schemas; which related
   transitions require a single atomic event; explicit evidence rules for adapter confirmations.
