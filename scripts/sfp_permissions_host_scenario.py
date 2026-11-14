@@ -88,7 +88,7 @@ class Env:
         agent.chmod(0o755)
         (self.home / ".config/sill/agents/stub.toml").write_text(
             f'id = "stub"\nname = "Stub agent"\ncommand = ["{agent}"]\nsupports_load = true\n'
-            'domains = ["stub-agent.invalid"]\n')
+            'domains = ["stub-agent.invalid"]\nhome_paths = []\n')
         (self.home / ".ssh/id_planted").write_text("planted secret\n")
         (self.home / ".config/sill/sill.toml").write_text("theme = \"iceberg-dark\"\n")
         self.environment = {k: v for k, v in os.environ.items() if k not in (
@@ -795,14 +795,14 @@ PY
             time.sleep(0.2)
         check("stopping the session ends its dbus-daemon", not any(pathlib.Path(f"/proc/{p}").exists() for p in daemons))
         # a Default session has none; as a session choice it comes with the next build
-        plain = create("no-bus", env.policy("no-bus"))
-        start(plain)
+        no_bus = create("no-bus", env.policy("no-bus"))
+        start(no_bus)
         has_bus = lambda sid: sh(c, sid, f'echo "[$DBUS_SESSION_BUS_ADDRESS]"; {names} >/dev/null 2>&1 && echo BUS-REACHED')[1]
-        before = has_bus(plain)
+        before = has_bus(no_bus)
         check("a Default session has a dead bus address and no bus", before == "[disabled:]", before)
-        changed = c.call("_sill/permissions.set", {"session_id": plain, "capability": "private_bus", "enabled": True})
+        changed = c.call("_sill/permissions.set", {"session_id": no_bus, "capability": "private_bus", "enabled": True})
         check("turning the private bus on for a running session needs a restart", changed["restart_required"])
-        after = has_bus(plain) if restart(plain) else "no restart"
+        after = has_bus(no_bus) if restart(no_bus) else "no restart"
         check("after the restart the session has its bus", after.endswith("BUS-REACHED") and "unix:path=" in after, after)
         ghost_bus = create("ghost-bus", env.policy("ghost-bus", permissions='private_bus = "on"'), ghost=True)
         check("a ghost refuses a private bus",
@@ -1118,8 +1118,8 @@ PY
         (masked_repo / "secret").write_text("masked-secret-text\n")
         (masked_repo / ".sill/policy.toml").write_text("[paths]\nmask = ['secret']\n")
         combo = create("combo", env.policy("combo"), pins=[masked_repo])
-        plain = create("plain-default", env.policy("plain-default"))
-        check("a session for every grant at once and a Default session start", start(combo) and start(plain))
+        default = create("plain-default", env.policy("plain-default"))
+        check("a session for every grant at once and a Default session start", start(combo) and start(default))
         c.call("_sill/permissions.apply_development", {"session_id": combo})
         c.call("_sill/permissions.set", {"session_id": combo, "capability": "public_web", "enabled": True})
         check("…with the test desktop, the private bus and public web after a restart",
@@ -1231,7 +1231,7 @@ PY
         check("…while its public web works", reaches(c, combo, FOURTH))
 
         # the Default session next to it gains nothing from it
-        status, out = sh(c, plain, f"""
+        status, out = sh(c, default, f"""
             ls -A /tmp/.X11-unix 2>/dev/null | grep . && echo X-SOCKET
             [ -S /run/user/{uid}/bus ] && echo BUS-SOCKET
             ls -A /.sill/bridge 2>/dev/null | grep . && echo BRIDGE-ENTRIES
@@ -1243,9 +1243,9 @@ PY
               not any(m in out for m in ("X-SOCKET", "BUS-SOCKET", "BRIDGE-ENTRIES", "HOST-CONTROL", "HOST-PROCESSES"))
               and "env [] [disabled:]" in out, out)
         # (example.net is saved to the agent's defaults by section 12: every new session of it has it)
-        check("…nor its public web: a host the other reaches is refused to it by its proxy", refused(c, plain, FOURTH),
-              str(fetch(c, plain, f"https://{FOURTH}/")))
-        check("…nor its Host control: the Default session's state is inactive", not hc_state(plain)["active"])
+        check("…nor its public web: a host the other reaches is refused to it by its proxy", refused(c, default, FOURTH),
+              str(fetch(c, default, f"https://{FOURTH}/")))
+        check("…nor its Host control: the Default session's state is inactive", not hc_state(default)["active"])
 
         # a frontend without the capabilities changes nothing, through any entry point
         attempts = {
@@ -1254,8 +1254,8 @@ PY
             "_sill/host_control.keep": {"session_id": combo, "name": "host:x", "keep": True},
             "_sill/host_control.revoke": {"session_id": combo},
             "_sill/host_control.state": {"session_id": combo},
-            "_sill/permissions.set": {"session_id": plain, "capability": "public_web", "enabled": True},
-            "_sill/permissions.apply_development": {"session_id": plain},
+            "_sill/permissions.set": {"session_id": default, "capability": "public_web", "enabled": True},
+            "_sill/permissions.apply_development": {"session_id": default},
             "_sill/permissions.restore_defaults": {"session_id": combo},
             # (approving a host is a plain client's to do for a Default session; this one uses permission modes)
             "_sill/policy.allow_host": {"session_id": combo, "host": "allowed-by-plain.example"},
