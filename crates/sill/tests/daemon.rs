@@ -43,6 +43,15 @@ impl Daemon {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(std::fs::OpenOptions::new().create(true).append(true).open(dir.join("daemon.log")).unwrap());
+        // a session leader without a terminal, as systemd and a client's bare start make it: a
+        // terminal the daemon opens carelessly becomes its own, and its hangup kills the daemon
+        // (the host shell's SIGHUP, 2026-11-03)
+        unsafe {
+            std::os::unix::process::CommandExt::pre_exec(&mut c, || {
+                rustix::process::setsid().map_err(std::io::Error::from)?;
+                Ok(())
+            });
+        }
         c
     }
 
