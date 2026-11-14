@@ -172,7 +172,9 @@ fn login_in(agent: &Agent, home: &Path, scratch: &Path, paths: &[crate::agents::
     unset.push("DBUS_SESSION_BUS_ADDRESS");
     env.insert("PYTHON_KEYRING_BACKEND".into(), "keyring.backends.fail.Keyring".into());
     let mut cmd = Command::new(prog);
-    cmd.args(&agent.command[1..]).envs(&env).current_dir(home);
+    // Some agents refuse browser helpers beneath their working directory. The
+    // private login home is separate from tools/.browser-shim under the real home.
+    cmd.args(&agent.command[1..]).envs(&env).current_dir(scratch);
     for v in &unset {
         cmd.env_remove(v);
     }
@@ -225,11 +227,112 @@ fn login_in(agent: &Agent, home: &Path, scratch: &Path, paths: &[crate::agents::
         if v2 && !offered.into_iter().flatten().any(|m|m.get(id_field).and_then(Value::as_str)==Some(method) && m.get("type").and_then(Value::as_str)==Some("agent")) {
             bail!("login method {method:?} is not an agent-driven ACP v2 login");
         }
+        if !v2 && let Some(offered) = offered.into_iter().flatten().find(|m| m.get("id").and_then(Value::as_str) == Some(method)) {
+            if offered.get("type").and_then(Value::as_str) == Some("terminal") {
+                return terminal_login(agent, home, &env, &unset, offered, false, report);
+            }
+            if let Some(terminal) = offered.pointer("/_meta/terminal-auth") {
+                return terminal_login(agent, home, &env, &unset, terminal, true, report);
+            }
+        }
         report(Line::Status(format!("logging in with {method}…")));
         let auth = json!({ "jsonrpc": "2.0", "id": 2, "method": if v2 {"auth/login"} else {"authenticate"}, "params": { "methodId": method } });
         writeln!(stdin, "{auth}")?;
         wait_response(&rx, &erx, 2, TIMEOUT, report)?;
         Ok(())
+    })();
+    stop_agent(&mut child, &crate::registry::tools_dir(home));
+    result
+}
+
+/// Terminal auth runs the advertised login command rather than the ACP authenticate check.
+/// Device flows print their URL/code to the registry's progress pane; no stdin is forwarded.
+fn terminal_login(
+    agent: &Agent,
+    home: &Path,
+    env: &std::collections::BTreeMap<String, String>,
+    unset: &[&str],
+    method: &Value,
+    legacy: bool,
+    report: &mut impl FnMut(Line),
+) -> Result<()> {
+    let args: Vec<String> =
+        serde_json::from_value(method.get("args").cloned().unwrap_or(json!([])))
+            .context("terminal login arguments")?;
+    let extra_env: std::collections::BTreeMap<String, String> =
+        serde_json::from_value(method.get("env").cloned().unwrap_or(json!({})))
+            .context("terminal login environment")?;
+    let mut command = if legacy {
+        let program = method
+            .get("command")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .context("terminal login command is missing")?;
+        Command::new(program)
+    } else {
+        let mut command = Command::new(&agent.command[0]);
+        command.args(&agent.command[1..]);
+        command
+    };
+    command
+        .args(args)
+        .envs(extra_env)
+        .envs(env)
+        .current_dir(env.get("HOME").context("private login home")?);
+    for name in unset {
+        command.env_remove(name);
+    }
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("start terminal login")?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stdout = child.stdout.take().context("terminal login stdout")?;
+    let stderr = child.stderr.take().context("terminal login stderr")?;
+    for stream in [
+        Box::new(stdout) as Box<dyn std::io::Read + Send>,
+        Box::new(stderr),
+    ] {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stream).lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    drop(tx);
+    report(Line::Status(
+        "Complete the login in your browser; the login command's progress follows.".into(),
+    ));
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    let result = (|| -> Result<()> {
+        loop {
+            for line in rx.try_iter() {
+                report(Line::Status(line));
+            }
+            if let Some(status) = child.try_wait()? {
+                // Drain final output, bounded even if a descendant inherited a pipe.
+                let drain_until = std::time::Instant::now() + Duration::from_secs(1);
+                while std::time::Instant::now() < drain_until {
+                    match rx.recv_timeout(Duration::from_millis(50)) {
+                        Ok(line) => report(Line::Status(line)),
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    }
+                }
+                anyhow::ensure!(status.success(), "terminal login failed: {status}");
+                return Ok(());
+            }
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "terminal login timed out"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
     })();
     stop_agent(&mut child, &crate::registry::tools_dir(home));
     result
@@ -375,6 +478,99 @@ print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{}}),flush=True)
         agent.command[2]="2".into();agent.command[3]="future".into();
         assert!(run(&agent,&home,"browser",|_|{}).unwrap_err().to_string().contains("not an agent-driven"));
         let _=std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn terminal_setup_runs_advertised_login_and_keeps_its_files() {
+        for legacy in [false, true] {
+            let home = dir(if legacy {
+                "terminal-legacy"
+            } else {
+                "terminal"
+            });
+            let script = home.join("agent.py");
+            std::fs::write(&script, r#"import json,sys,os,pathlib
+legacy = sys.argv[1] == 'legacy'
+if '--login' in sys.argv or 'login' in sys.argv:
+    assert pathlib.Path.cwd() == pathlib.Path.home()
+    # Kimi rejects xdg-open helpers under cwd: the shim must remain outside it.
+    shim = pathlib.Path(os.environ['PATH'].split(os.pathsep)[0])/'xdg-open'
+    assert shim.is_file()
+    assert not shim.is_relative_to(pathlib.Path.cwd())
+    assert os.environ['LOGIN_FIXTURE'] == 'yes'
+    assert os.environ['XDG_CONFIG_HOME'].startswith(os.environ['HOME'])
+    assert 'DBUS_SESSION_BUS_ADDRESS' not in os.environ
+    target = pathlib.Path.home()/'.fixture'/'token.json'
+    target.parent.mkdir(parents=True)
+    target.write_text('{}')
+    print('Open https://example.invalid/device and enter CODE', flush=True)
+    print('Authorized', file=sys.stderr, flush=True)
+    sys.exit(0)
+assert pathlib.Path.cwd() == pathlib.Path.home()
+request=json.loads(sys.stdin.readline())
+assert request['method']=='initialize'
+method={'id':'login','name':'Account'}
+if legacy:
+    method['_meta']={'terminal-auth':{'command':sys.executable,'args':[__file__,'legacy','login'],'env':{'LOGIN_FIXTURE':'yes'}}}
+else:
+    method.update(type='terminal',args=['--login'],env={'LOGIN_FIXTURE':'yes'})
+print(json.dumps({'jsonrpc':'2.0','id':1,'result':{'authMethods':[method]}}),flush=True)
+request=sys.stdin.readline()
+assert not request, 'terminal methods must never receive authenticate'
+"#).unwrap();
+            let mut agent = crate::agents::builtin()
+                .into_iter()
+                .find(|a| a.id == "codex")
+                .unwrap();
+            agent.id = "terminal-fixture".into();
+            agent.home_paths = None;
+            agent.home_env = None;
+            agent.command = vec![
+                "/usr/bin/python3".into(),
+                script.to_string_lossy().into_owned(),
+                if legacy { "legacy" } else { "current" }.into(),
+                "acp".into(),
+            ];
+            let mut lines = Vec::new();
+            let discovery = setup(&agent, &home, "login", |line| {
+                if let Line::Status(line) = line {
+                    lines.push(line);
+                }
+            })
+            .unwrap();
+            assert_eq!(discovery.login_method.as_deref(), Some("login"));
+            assert!(
+                discovery
+                    .login_files
+                    .contains(&".fixture/token.json".into())
+            );
+            assert!(
+                crate::session::agent_home(&home, &agent.id)
+                    .join(".fixture/token.json")
+                    .is_file()
+            );
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.contains("https://example.invalid/device"))
+            );
+            assert!(lines.iter().any(|line| line == "Authorized"));
+            // A failed helper must not become a successful discovery.
+            std::fs::write(
+                &script,
+                std::fs::read_to_string(&script)
+                    .unwrap()
+                    .replace("sys.exit(0)", "sys.exit(7)"),
+            )
+            .unwrap();
+            assert!(
+                setup(&agent, &home, "login", |_| {})
+                    .unwrap_err()
+                    .to_string()
+                    .contains("terminal login failed")
+            );
+            let _ = std::fs::remove_dir_all(home);
+        }
     }
 
     #[test]

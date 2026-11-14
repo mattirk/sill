@@ -447,7 +447,19 @@ impl App {
                 }
             }
             Event::Log(id, line) => {
-                p.logs.insert(id, line.chars().take(16384).collect());
+                if !line.trim().is_empty() {
+                    // Keep device-login URLs/codes when a later line says "waiting".
+                    let log = p.logs.entry(id).or_default();
+                    if !log.is_empty() {
+                        log.push('\n');
+                    }
+                    log.extend(line.chars().take(16384));
+                    let excess = log.chars().count().saturating_sub(16384);
+                    if excess > 0 {
+                        let end = log.char_indices().nth(excess).unwrap().0;
+                        log.drain(..end);
+                    }
+                }
             }
             Event::Done(id, result) => {
                 p.busy.remove(&id);
@@ -1051,6 +1063,23 @@ mod tests {
             app.agents_page.editor.as_ref().unwrap().definition.domains,
             ["openai.com", "*.example.com:8443"]
         );
+    }
+
+    #[test]
+    fn login_progress_keeps_the_url_and_code_while_waiting() {
+        let (mut app, _) = App::new(true, None);
+        for line in ["Open https://example.invalid/device", "Enter CODE", "", "Waiting for authorization"] {
+            let _ = app.update(msg(Event::Log("kimi-code".into(), line.into())));
+        }
+        let log = &app.agents_page.logs["kimi-code"];
+        assert!(log.contains("https://example.invalid/device"));
+        assert!(log.contains("Enter CODE"));
+        assert!(log.ends_with("Waiting for authorization"));
+        let _ = app.update(msg(Event::Log("kimi-code".into(), "é".repeat(20000))));
+        assert_eq!(app.agents_page.logs["kimi-code"].chars().count(), 16384);
+        let _ = app.update(msg(Event::Log("kimi-code".into(), "Still waiting".into())));
+        assert_eq!(app.agents_page.logs["kimi-code"].chars().count(), 16384);
+        assert!(app.agents_page.logs["kimi-code"].ends_with("Still waiting"));
     }
 
     #[test]
