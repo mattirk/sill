@@ -920,7 +920,8 @@ impl Hub {
             return Ok(Ending { pending: false, deleted: true });
         }
         let saw = runner.as_ref().is_some_and(|r| r.agent_saw_session());
-        ctx.keep_old = ctx.keep_old && !saw;
+        ctx.keep_old = ctx.keep_old && !runner.as_ref().is_some_and(|r| r.had_turn());
+        let keep_old = ctx.keep_old;
         let said = self.with_store(|s| s.count_kind(id, "agent")).unwrap_or(0) > 0;
         if let Some(r) = runner
             && ctx.memory
@@ -941,7 +942,9 @@ impl Hub {
             }
         }
         eprintln!("sill daemon: session {id} ends ({reason})");
-        self.finish_end(id, Some((self.end_ctx(id)?, None)), false, reason);
+        let mut ctx = self.end_ctx(id)?;
+        ctx.keep_old = keep_old;
+        self.finish_end(id, Some((ctx, None)), false, reason);
         Ok(Ending { pending: false, deleted: false })
     }
 

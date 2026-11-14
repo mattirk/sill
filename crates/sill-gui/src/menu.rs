@@ -289,6 +289,10 @@ impl App {
         } else {
             "not running".into()
         };
+        let sub = match session.name.as_deref().filter(|name| !name.is_empty()) {
+            Some(name) => format!("{name} · {sub}"),
+            None => sub,
+        };
         let main = keys::press(
             button(
                 row![

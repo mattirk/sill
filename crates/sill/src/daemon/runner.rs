@@ -389,6 +389,11 @@ impl Runner {
         st.ready.as_ref().is_some_and(|(_, resumed)| *resumed) || st.turns > 0
     }
 
+    /// Restored context alone does not create work for another closing summary.
+    pub fn had_turn(&self) -> bool {
+        self.st.lock().unwrap().turns > 0
+    }
+
     /// The agent is up and between turns: it can be asked one more thing.
     pub fn agent_idle(&self) -> bool {
         let st = self.st.lock().unwrap();
@@ -627,6 +632,23 @@ mod tests {
         });
         let (client, _) = relay::connect(&socket, 0).unwrap();
         (client, server, dir)
+    }
+
+    #[test]
+    fn resumed_context_without_a_turn_does_not_need_another_summary() {
+        let (client, server, dir) = relay_client();
+        let store = Store::open(&dir.join("test.db")).unwrap();
+        let session = store.create("fake-agent", "default").unwrap();
+        let runner = Runner::new(&session.id, client.clone(), serde_json::Value::Null).unwrap();
+        runner.st.lock().unwrap().ready = Some(("restored-session".into(), true));
+        assert!(runner.agent_saw_session());
+        assert!(!runner.had_turn());
+        runner.handle_locked(&store, &mut runner.st.lock().unwrap(), relay::Event::TurnStarted, false).unwrap();
+        assert!(runner.had_turn());
+        drop(runner);
+        drop(client);
+        server.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
