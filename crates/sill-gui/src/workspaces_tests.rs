@@ -96,3 +96,33 @@ fn apply_and_discard_send_the_revision_the_person_saw() {
     assert!(bad && said.starts_with("The workspace changed since you looked"), "{said}");
     server.join().unwrap();
 }
+
+#[test]
+fn resolve_asks_the_agent_to_finish_a_stopped_rebase() {
+    let (client, mut daemon) = daemon();
+    let mut app = live_app(vec![client]);
+    let stopped = "The rebase onto main (3335b133341e) stopped: src/drawer.rs";
+    let mut conflict = loaded(3);
+    conflict.details[0].workspace.operation =
+        Some(serde_json::from_value(json!({"kind": "rebase", "state": "conflict", "detail": stopped})).unwrap());
+    // the demo's own session is in a turn: the agent is not asked then
+    app.views.get_mut("demo").unwrap().workspaces.loaded = Some(conflict.clone());
+    let task = app.update(Message::Workspaces(Event::Resolve("demo".into(), "ws-1".into())));
+    settle_task(&mut app, task);
+    let mut idle = crate::SessionView::new("idle");
+    idle.workspaces.loaded = Some(conflict);
+    idle.draft = crate::editor::Editor::with_text("half a thought");
+    app.views.insert("idle".into(), idle);
+    let _task = app.update(Message::Workspaces(Event::Resolve("idle".into(), "ws-1".into())));
+    let request = daemon.expect("_sill/sessions.submit");
+    assert_eq!(request["params"]["session_id"], "idle");
+    let text = request["params"]["text"].as_str().unwrap();
+    assert!(text.starts_with(stopped), "{text}");
+    assert!(text.contains("git rebase --continue") && text.contains("Do not abort"), "{text}");
+    daemon.reply(&request, json!({}));
+    assert_eq!(app.views["idle"].draft.text().trim_end(), "half a thought", "the composer keeps what the person was writing");
+    // a workspace without a stopped rebase has nothing to resolve
+    app.views.get_mut("idle").unwrap().workspaces.loaded = Some(loaded(3));
+    let task = app.update(Message::Workspaces(Event::Resolve("idle".into(), "ws-1".into())));
+    settle_task(&mut app, task);
+}

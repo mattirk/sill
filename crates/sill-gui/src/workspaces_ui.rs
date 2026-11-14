@@ -46,6 +46,14 @@ impl App {
                 line = line.push(text("Working…").size(style::TINY).color(P.fg_dim));
             }
             if d.workspace.operation.as_ref().is_some_and(|o| o.state == "conflict") {
+                line = line.push(tooltip(
+                    keys::press_maybe(
+                        button(text("Resolve").size(style::SMALL)).padding([3, 10]).style(style::solid(P.accent)),
+                        ev(Event::Resolve(session.clone(), id.clone())),
+                    ),
+                    container(text("Ask the agent to resolve the conflict and finish the rebase").size(style::TINY)).padding(6).style(style::fill(P.surface)),
+                    tooltip::Position::Top,
+                ));
                 line = line.push(quiet_button("Abort rebase", ev(Event::Abort(session.clone(), id.clone()))));
             } else {
                 line = line.push(keys::press_maybe(

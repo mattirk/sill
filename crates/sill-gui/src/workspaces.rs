@@ -64,12 +64,23 @@ pub enum Event {
     Apply(String, String),
     Discard(String, String),
     Abort(String, String),
+    /// A stopped rebase: ask the session's agent to resolve it and finish the rebase.
+    Resolve(String, String),
     /// Click elsewhere: a Discard waiting for its second click is not wanted.
     Disarm(String),
     /// An action ended: the session, the workspace, what to say and whether it went wrong.
     Done(String, String, String, bool),
     Diff(String, String),
     DiffLoaded(String, String, Result<String, String>),
+}
+
+/// What Resolve sends the agent: the rebase stopped in its own copy, where only it can finish it.
+/// `detail` is the daemon's line with the destination and the conflicted files.
+fn resolve_prompt(detail: &str) -> String {
+    format!(
+        "{detail}\n\nThe rebase is stopped in your workspace. Resolve the conflicts keeping what both sides intended, \
+         stage the files and run `git rebase --continue` until the rebase is finished. Do not abort it."
+    )
 }
 
 impl App {
@@ -185,7 +196,7 @@ impl App {
                 blocking(
                     move || match ws::apply(&actions, &workspace, &seen) {
                         Ok(ApplyOutcome::Applied) => (workspace, "Applied to your checkout.".to_string(), false),
-                        Ok(ApplyOutcome::Conflicts(paths)) => (workspace, format!("The rebase onto your checkout stopped on {}: resolve it in the session, or Abort.", paths.join(", ")), true),
+                        Ok(ApplyOutcome::Conflicts(paths)) => (workspace, format!("The rebase onto your checkout stopped on {}: Resolve asks the agent, or Abort.", paths.join(", ")), true),
                         Err(e) => (workspace, ws::message(&e), true),
                     },
                     move |(w, said, bad)| Message::Workspaces(Event::Done(session, w, said, bad)),
@@ -216,6 +227,16 @@ impl App {
                     },
                     move |(w, said, bad)| Message::Workspaces(Event::Done(session, w, said, bad)),
                 )
+            }
+            Event::Resolve(session, workspace) => {
+                let Some(view) = self.views.get(&session) else { return Task::none() };
+                if view.workspaces.running.is_some() || view.conversation.busy() {
+                    return Task::none();
+                }
+                let Some(stopped) = view.workspaces.offered().into_iter().find(|d| d.workspace.workspace_id == workspace).and_then(|d| d.workspace.operation.as_ref()).filter(|o| o.state == "conflict") else {
+                    return Task::none();
+                };
+                self.submit(&session, resolve_prompt(&stopped.detail), vec![])
             }
             Event::Done(session, workspace, said, bad) => {
                 if let Some(view) = self.views.get_mut(&session) {

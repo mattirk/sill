@@ -3225,20 +3225,31 @@ impl App {
         }
         let session = view.id.clone();
         let attachments = std::mem::take(&mut view.attachments);
+        self.submit(&session, text, attachments)
+    }
+
+    /// `text` goes to `session`'s agent as a prompt of the person's: the composer's, or one a
+    /// button writes for them (the shelf's Resolve). The draft is not touched.
+    pub(crate) fn submit(&mut self, session: &str, text: String, attachments: Vec<media::DraftAttachment>) -> Task<Message> {
+        let Some(view) = self.views.get_mut(session) else {
+            return Task::none();
+        };
+        view.follow_tail = true;
+        view.failed = None;
         let submit = view.outbox.send_with_attachments(
-            &session,
+            session,
             text,
             attachments.iter().map(|a| a.attachment.clone()).collect(),
         );
         view.pending_attachments.insert(submit.submission_id.clone(), attachments);
         let reopen = view.lane.is_none();
         if reopen {
-            self.open_lane(&session, lane::Mode::Open);
+            self.open_lane(session, lane::Mode::Open);
         }
         let id = submit.submission_id.clone();
         Task::batch([
             self.act(
-                &session,
+                session,
                 Act::Send(id),
                 "_sill/sessions.submit",
                 json!(submit),
