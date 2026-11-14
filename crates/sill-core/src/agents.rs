@@ -56,6 +56,10 @@ pub struct Agent {
     /// lands there directly and the host never gets a `~/.codex` of its own.
     #[serde(default)]
     pub home_env: Option<String>,
+    /// Symbolic icon name for the "+" menu and tabs (`sill-claude-symbolic`, any theme icon). Unknown
+    /// or missing: a neutral placeholder.
+    #[serde(default)]
+    pub icon: Option<String>,
 }
 
 fn yes() -> bool {
@@ -106,6 +110,7 @@ pub fn builtin() -> Vec<Agent> {
             shared_files: vec!["~/.claude/.credentials.json".into()],
             host_login: vec![],
             home_env: None,
+            icon: Some("sill-claude-symbolic".into()),
         },
         Agent {
             id: "codex".into(),
@@ -122,6 +127,7 @@ pub fn builtin() -> Vec<Agent> {
             shared_files: vec!["~/.codex/auth.json".into()],
             host_login: vec!["chat-gpt".into(), "chatgpt".into()],
             home_env: Some("CODEX_HOME".into()),
+            icon: Some("sill-openai-symbolic".into()),
         },
         Agent {
             id: "gemini".into(),
@@ -138,6 +144,7 @@ pub fn builtin() -> Vec<Agent> {
             shared_files: vec!["~/.gemini/oauth_creds.json".into()],
             host_login: vec![],
             home_env: None,
+            icon: Some("sill-gemini-symbolic".into()),
         },
     ]
 }

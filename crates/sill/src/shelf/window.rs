@@ -83,7 +83,9 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
     plus.add_css_class("flat");
     plus.set_tooltip_text(Some("New session"));
     let plus_pop = gtk::Popover::new();
-    let plus_menu = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    plus_pop.add_css_class("sill-menu");
+    plus_pop.set_has_arrow(false);
+    let plus_menu = gtk::Box::new(gtk::Orientation::Vertical, 0);
     plus_pop.set_child(Some(&plus_menu));
     plus.set_popover(Some(&plus_pop));
     bar.append(&plus);
@@ -478,15 +480,30 @@ impl Shelf {
             menu.remove(&c);
         }
         let home = session::home().unwrap_or_default();
-        let head = gtk::Label::new(Some("New session with"));
-        head.add_css_class("dim-label");
-        head.set_xalign(0.0);
-        menu.append(&head);
-        for (id, agent) in agents::load(&home).into_iter().filter(|(_, a)| a.enabled) {
-            let b = gtk::Button::with_label(&agent.name);
+        let registry = agents::load(&home);
+        // a quiet row: icon, name, nothing else; the glyph takes the menu's own text colour
+        let color = menu.color();
+        let row = |agent: Option<&agents::Agent>, text: &str| -> gtk::Button {
+            let b = gtk::Button::new();
             b.add_css_class("flat");
+            b.add_css_class("sill-menu-item");
+            let h = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+            let i = super::icons::image(agent, color, 15);
+            i.add_css_class("sill-menu-icon");
+            let l = gtk::Label::new(Some(text));
+            l.set_xalign(0.0);
+            l.set_hexpand(true);
+            l.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            h.append(&i);
+            h.append(&l);
+            b.set_child(Some(&h));
+            b
+        };
+        for (id, agent) in registry.iter().filter(|(_, a)| a.enabled) {
+            let b = row(Some(agent), &agent.name);
             let s = self.clone();
             let pop = pop.clone();
+            let id = id.clone();
             b.connect_clicked(move |_| {
                 pop.popdown();
                 if let Ok(sess) = s.store.create(&id, "default") {
@@ -503,18 +520,20 @@ impl Shelf {
             .filter(|s| !self.tabs.has(&s.id))
             .collect();
         if !stored.is_empty() {
+            let sep = gtk::Separator::new(gtk::Orientation::Horizontal);
+            sep.add_css_class("sill-menu-sep");
+            menu.append(&sep);
             let head = gtk::Label::new(Some("Reopen"));
-            head.add_css_class("dim-label");
+            head.add_css_class("sill-menu-caption");
             head.set_xalign(0.0);
-            head.set_margin_top(6);
             menu.append(&head);
             for sess in stored {
-                let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-                let b = gtk::Button::with_label(&format!("{} ({})", sess.title, sess.agent));
-                b.add_css_class("flat");
+                let line = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                let b = row(registry.get(&sess.agent), &sess.title);
                 b.set_hexpand(true);
                 let del = gtk::Button::from_icon_name("user-trash-symbolic");
                 del.add_css_class("flat");
+                del.add_css_class("sill-menu-trash");
                 del.set_tooltip_text(Some("Delete session and its recorded changes"));
                 {
                     let s = self.clone();
@@ -536,9 +555,9 @@ impl Shelf {
                         let _ = s.store.delete(&id);
                     });
                 }
-                row.append(&b);
-                row.append(&del);
-                menu.append(&row);
+                line.append(&b);
+                line.append(&del);
+                menu.append(&line);
             }
         }
     }

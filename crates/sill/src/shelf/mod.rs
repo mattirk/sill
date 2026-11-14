@@ -5,6 +5,7 @@ mod changes;
 mod conversation;
 mod files;
 mod hotkey;
+mod icons;
 mod markdown;
 mod session;
 mod session_view;

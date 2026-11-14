@@ -66,7 +66,8 @@ sill restart --dev                         # run the build in target/ instead of
 ```
 
 - **Sessions** are tabs: `+` picks the agent (Claude Code, Codex, Gemini; `~/.config/sill/agents/*.toml`
-  adds more) or reopens a stored one. Each session has its own jail (`sill-<id>.service`, upper trees under
+  adds more, with an `icon` name; sill ships provider glyphs `sill-claude-symbolic`, `sill-openai-symbolic`,
+  `sill-gemini-symbolic` and a neutral placeholder for anything else) or reopens a stored one. Each session has its own jail (`sill-<id>.service`, upper trees under
   `/var/lib/sill/<uid>/sessions/<id>`), its own conversation stored in `~/.local/state/sill/sill.db`, and
   resumes with history (`session/load`) when reopened. Closing a tab stops its jail; the session stays.
 - **Pins** are the session's workspace. A pinned folder is bound live into the jail: what the agent

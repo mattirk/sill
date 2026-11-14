@@ -386,6 +386,17 @@ entry { border-radius: 0; }
 .sill-permission button { border-radius: 0; }
 .sill-prompt { border-radius: 0; }
 .sill-prompt text { background: transparent; }
+/* "+" menu: a plain list, icon + name, left-aligned */
+popover.sill-menu > contents { padding: 4px; min-width: 180px; }
+.sill-menu-item { padding: 5px 10px; min-height: 0; background: transparent; border: none; box-shadow: none; }
+.sill-menu-item:hover { background: alpha(@view_fg_color, 0.07); }
+.sill-menu-item label { color: inherit; font-weight: normal; }
+.sill-menu-icon { opacity: 0.9; }
+.sill-menu-item:hover .sill-menu-icon { opacity: 1; }
+.sill-menu-sep { margin: 4px 6px; opacity: 0.5; }
+.sill-menu-caption { font-size: 80%; opacity: 0.5; padding: 2px 10px; }
+.sill-menu-trash { padding: 0 6px; min-height: 0; opacity: 0.35; background: transparent; border: none; box-shadow: none; }
+.sill-menu-trash:hover { opacity: 1; color: @error_color; }
 .sill-files > row { padding: 1px 4px; min-height: 0; }
 .sill-files > row:selected { background: alpha(@accent_bg_color, 0.25); }
 .sill-files treeexpander { padding: 1px 0; }
