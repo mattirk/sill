@@ -24,7 +24,6 @@ clap = { version = "4", features = ["derive"] }
 rustix = { version = "1", features = ["fs", "process", "mount", "net", "pipe", "pty", "termios", "stdio", "event", "system", "time", "param"] }
 glob = "0.3"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Debug builds keep file and line numbers for backtraces but not full variable info: most of
 # a debug artifact's size is debug info (target/ had grown to 159 GB, 2026-11-09).
