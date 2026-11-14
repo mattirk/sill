@@ -60,7 +60,7 @@ impl App {
             let mut global_heading = false;
             for root in &state.roots {
                 if root.global && !global_heading {
-                    body = body.push(caption("Shortcuts · use + to pin to this session"));
+                    body = body.push(caption("Shortcuts"));
                     global_heading = true;
                 }
                 let dir = root.metadata.as_ref().is_some_and(|m| m.directory);
@@ -259,7 +259,8 @@ fn node<'a>(
                 .height(Fill),
         );
     }
-    line = line.push(button);
+    // Keep the path tooltip off the pin button, which has its own tooltip.
+    line = line.push(tip(button, hover));
     // the pin keeps its place while hidden, so the names do not move when it shows
     line = line.push(if show_pin {
         glyph_action(
@@ -279,7 +280,7 @@ fn node<'a>(
     }))
     .on_enter(msg(Action::Hover(row_key.to_string())))
     .on_exit(msg(Action::Unhover(row_key.to_string())));
-    tip(line, hover)
+    line.into()
 }
 
 /// The Diff view: per pinned repository a dim header — its

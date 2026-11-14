@@ -485,31 +485,18 @@ impl App {
             let armed = self.armed_close.as_deref() == Some(tab.id.as_str());
             row![
                 label,
-                tooltip(
-                    container(keys::press(
-                        button(icons::glyph(
-                            "x",
-                            12.0,
-                            if armed { P.error } else { alpha(P.fg, 0.55) },
-                        ))
-                        .width(CLOSE_WIDTH)
-                        .padding([4, 6])
-                        .style(style::quiet),
-                        Message::CloseTab(tab.id.clone()),
+                container(keys::press(
+                    button(icons::glyph(
+                        "x",
+                        12.0,
+                        if armed { P.error } else { alpha(P.fg, 0.55) },
                     ))
-                    .id("close-tab"),
-                    container(
-                        text(if armed {
-                            "A ghost: closing deletes it and its unkept changes — press again"
-                        } else {
-                            "Close: ends the session (it can be reopened from +)"
-                        })
-                        .size(style::TINY),
-                    )
-                    .padding([3, 8])
-                    .style(style::fill(P.surface)),
-                    tooltip::Position::Bottom,
-                ),
+                    .width(CLOSE_WIDTH)
+                    .padding([4, 6])
+                    .style(style::quiet),
+                    Message::CloseTab(tab.id.clone()),
+                ))
+                .id("close-tab"),
             ]
             .align_y(Alignment::Center)
             .into()
