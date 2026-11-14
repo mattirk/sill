@@ -2235,7 +2235,7 @@ pub(crate) fn session_record(
 /// The menu shows the agents with their ghost buttons, then the sessions to reopen — the first
 /// five and "N more…" — and its rows ask for what they say.
 /// The + opens its menu as the pointer comes over it; hovering again keeps it; the pointer
-/// leaving the menu closes it; a click still toggles.
+/// leaving the menu closes it; outside presses can still dismiss it.
 #[test]
 fn the_menu_opens_on_hover_and_closes_when_the_pointer_leaves() {
     use crate::menu::Event;

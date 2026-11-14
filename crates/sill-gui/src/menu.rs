@@ -188,7 +188,13 @@ impl App {
         // a press anywhere else closes the menu, and so does the pointer leaving it (it opened as
         // the pointer came over the +, which the menu's top padding covers)
         iced::widget::stack![
-            mouse_area(container(space()).width(Fill).height(Fill)).on_press(event(Event::Toggle)),
+            // Leave the top bar uncovered so presses on + reach its open-only handler.
+            column![
+                space().height(37),
+                mouse_area(container(space()).width(Fill).height(Fill))
+                    .on_press(event(Event::Leave)),
+            ]
+            .height(Fill),
             mouse_area(placed).on_exit(event(Event::Leave)),
         ]
         .into()

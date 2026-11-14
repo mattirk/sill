@@ -288,7 +288,7 @@ impl App {
                     // not move away as the pointer approaches it from the indicator.
                     mouse_area(
                         row![
-                            // the menu opens as the pointer comes over the +; a click still toggles
+                            // Hover opens the menu; pressing + keeps it open, including by keyboard.
                             mouse_area(keys::press(
                                 button(
                                     svg(icons::plus())
@@ -298,7 +298,7 @@ impl App {
                                 )
                                 .padding(4)
                                 .style(style::quiet),
-                                Message::Menu(crate::menu::Event::Toggle),
+                                Message::Menu(crate::menu::Event::Hover),
                             ))
                             .on_enter(Message::Menu(crate::menu::Event::Hover)),
                             // the activity over the drawer when it is beside the conversation, so the +
@@ -312,7 +312,8 @@ impl App {
                                 _ => container(activity),
                             },
                         ]
-                        .spacing(6)
+                        // A little more room after + shifts it left without shrinking its hit area.
+                        .spacing(9)
                         .align_y(Alignment::Center),
                     )
                     .on_exit(Message::ActivityHover(false)),
@@ -445,11 +446,11 @@ impl App {
             )
         };
         let label: Element<'a, Message> = row![agent, label].align_y(Alignment::Center).into();
-        // Reserve the close slot on every tab so selecting one never shifts its neighbours.
+        // Show the close button on every tab, including inactive tabs.
         // Closing ends the session (a ghost asks once: it deletes it).
         // The 12px glyph plus its 6px padding on each side.
         const CLOSE_WIDTH: f32 = 24.0;
-        let label: Element<'a, Message> = if active && !self.demo {
+        let label: Element<'a, Message> = if !self.demo {
             let armed = self.armed_close.as_deref() == Some(tab.id.as_str());
             row![
                 label,
