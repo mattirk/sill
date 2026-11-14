@@ -14,9 +14,10 @@ pub fn platform_specific() -> iced::window::settings::PlatformSpecific {
     }
 }
 
-/// Hide the system's close, miniaturize and zoom buttons, once the window exists (on the main
-/// thread, where iced's window tasks run).
-pub fn hide_buttons(window: &dyn iced::window::Window) {
+/// Once the window exists (on the main thread, where iced's window tasks run): hide the system's
+/// close, miniaturize and zoom buttons, and have the system keep the window's size and place
+/// between runs.
+pub fn dress(window: &dyn iced::window::Window) {
     let Ok(handle) = window.window_handle() else { return };
     let RawWindowHandle::AppKit(handle) = handle.as_raw() else { return };
     let view: *mut AnyObject = handle.ns_view.as_ptr().cast();
@@ -32,6 +33,11 @@ pub fn hide_buttons(window: &dyn iced::window::Window) {
             if !button.is_null() {
                 let () = msg_send![button, setHidden: true];
             }
+        }
+        let name: *mut AnyObject =
+            msg_send![objc2::class!(NSString), stringWithUTF8String: c"sill".as_ptr()];
+        if !name.is_null() {
+            let _: bool = msg_send![ns_window, setFrameAutosaveName: name];
         }
     }
 }

@@ -166,8 +166,11 @@ impl App {
         // locked to its edge at the full height: only its right edge, corners included, changes
         // its width. A free window has every edge, and its corners resize both ways.
         use iced::window::Direction;
-        layers = layers.push(container(edge(Direction::East, false)).align_right(Fill));
-        if self.layout.mode != layout::Mode::Shelf {
+        // (the Mac's window is resized by the system at its own edges)
+        if !self.layout.plain {
+            layers = layers.push(container(edge(Direction::East, false)).align_right(Fill));
+        }
+        if !self.layout.plain && self.layout.mode != layout::Mode::Shelf {
             layers = layers
                 .push(container(edge(Direction::West, false)).align_left(Fill))
                 .push(container(edge(Direction::North, true)).align_top(Fill))
@@ -1772,10 +1775,11 @@ impl App {
         };
         // under the prompt the icons sit low (the prompt's own padding is above them); under the
         // terminal the bar is a strip of its own, the icons centred in it — the same height
+        // (4 px more under the icons than at first: the row sat too low, the person, 2026-11-12)
         let (top, bottom) = if terminal.is_some() {
-            (3.0, 3.0)
+            (5.0, 5.0)
         } else {
-            (4.0, 2.0)
+            (4.0, 6.0)
         };
         composer = composer.push(input).push(container(bar).padding(Padding {
             top,

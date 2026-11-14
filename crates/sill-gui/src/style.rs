@@ -497,6 +497,36 @@ pub fn solid(color: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
     }
 }
 
+/// `color` turned to the hue at `degrees`, keeping its own saturation and lightness: a red, a
+/// yellow in a theme's own tone, whatever hues the theme happens to have (Miasma's error and
+/// warning are both orange).
+pub fn with_hue(color: Color, degrees: f32) -> Color {
+    let (max, min) = (
+        color.r.max(color.g).max(color.b),
+        color.r.min(color.g).min(color.b),
+    );
+    let lightness = (max + min) / 2.0;
+    let chroma = max - min;
+    let saturation = if chroma == 0.0 {
+        0.0
+    } else {
+        chroma / (1.0 - (2.0 * lightness - 1.0).abs())
+    };
+    let c = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+    let h = degrees.rem_euclid(360.0) / 60.0;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let (r, g, b) = match h as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = lightness - c / 2.0;
+    Color::from_rgba(r + m, g + m, b + m, color.a)
+}
+
 pub fn mix(a: Color, b: Color, t: f32) -> Color {
     Color::from_rgba(
         a.r + (b.r - a.r) * t,

@@ -342,6 +342,10 @@ pub enum Message {
     /// The window manager moved the window.
     Moved,
     Quit,
+    /// The window's own buttons on the Mac (the `+` menu): into the Dock, and to the size the
+    /// system thinks best and back.
+    Minimize,
+    Zoom,
     Media(media::Event),
     Annotation(annotation::Event),
     AttachmentPaths(String, String, Option<Vec<std::path::PathBuf>>),
@@ -864,7 +868,11 @@ impl App {
             demo_step: 0,
             width: START_SIZE.width,
             height: START_SIZE.height,
-            layout: layout::Layout::default(),
+            layout: layout::Layout {
+                // the Mac's window is the system's: resized and placed by it, without modes
+                plain: cfg!(target_os = "macos") && !cfg!(test),
+                ..layout::Layout::default()
+            },
             settings: settings::Settings::default(),
             persist: false,
             monitor: None,
@@ -921,6 +929,11 @@ impl App {
             .unwrap_or_default();
         app.layout.drawer = app.settings.drawer_width;
         app.drawer.shown = app.layout.mode == layout::Mode::Drawer;
+        if app.layout.plain {
+            // one layout: the reading measure, the drawer when asked for
+            app.layout.mode = layout::Mode::Drawer;
+            app.drawer.shown = false;
+        }
         // the control socket's commands, and the hotkey (a real window only)
         let mut desktop_tasks = Vec::new();
         if let Some(control) = CONTROL.lock().unwrap().take() {
@@ -1245,6 +1258,9 @@ impl App {
     /// to its share of the monitor iced reports (a maximum the compositor may honour), and Drawer
     /// and Full get half its width when entered. Nothing is kept per display.
     fn fit_without_x11(&self, entering: bool) -> Task<Message> {
+        if self.layout.plain {
+            return Task::none();
+        }
         let (Some(id), Some(monitor), true) = (self.window_id, self.monitor, self.no_x11) else {
             return Task::none();
         };
@@ -1787,6 +1803,14 @@ impl App {
                 }
                 return self.hide();
             }
+            Message::Minimize => {
+                self.menu = None;
+                return iced::window::latest().and_then(|id| iced::window::minimize(id, true));
+            }
+            Message::Zoom => {
+                self.menu = None;
+                return iced::window::latest().and_then(iced::window::toggle_maximize);
+            }
             Message::ToggleTerminal | Message::ToggleHostTerminal => {
                 if self.current().is_some_and(|v| v.annotation.is_some()) { return Task::none(); }
                 return self.toggle_shell(matches!(message, Message::ToggleHostTerminal));
@@ -1869,7 +1893,7 @@ impl App {
             Message::Opened(id) => {
                 self.window_id = Some(id);
                 #[cfg(target_os = "macos")]
-                let dress = iced::window::run(id, macos::hide_buttons).discard();
+                let dress = iced::window::run(id, macos::dress).discard();
                 #[cfg(not(target_os = "macos"))]
                 let dress = Task::none();
                 return Task::batch([
@@ -1926,6 +1950,14 @@ impl App {
                 layout::Action::Mode(_)
                 | layout::Action::ToggleShelf
                 | layout::Action::ToggleFull => {
+                    // a plain window (the Mac) has no modes: their keys show and put away
+                    // the drawer
+                    if self.layout.plain {
+                        if matches!(action, layout::Action::Mode(_)) {
+                            return Task::none();
+                        }
+                        return self.update(Message::Files(files::Action::ToggleDrawer));
+                    }
                     let mode = self.layout.after(action);
                     return self.set_mode(mode);
                 }

@@ -66,6 +66,9 @@ impl Mode {
 #[derive(Debug)]
 pub struct Layout {
     pub mode: Mode,
+    /// The window is the system's own (the Mac): no modes and no placement of sill's; the drawer
+    /// is beside the conversation where both fit, whichever mode is named.
+    pub plain: bool,
     /// The mode Full was entered from, where Ctrl+Shift+F goes back to.
     pub before_full: Mode,
     /// The width the person dragged the drawer to; for this run of the window.
@@ -82,6 +85,7 @@ impl Default for Layout {
     fn default() -> Self {
         Self {
             mode: Mode::Shelf,
+            plain: false,
             before_full: Mode::Drawer,
             drawer: None,
             dragging: false,
@@ -128,7 +132,7 @@ impl Layout {
             return Drawer::Hidden;
         }
         let wanted = self.wanted();
-        if self.mode == Mode::Drawer && total - wanted - HANDLE >= MAIN_MIN {
+        if (self.plain || self.mode == Mode::Drawer) && total - wanted - HANDLE >= MAIN_MIN {
             Drawer::Beside(wanted)
         } else {
             Drawer::Over(wanted.min(total - UNCOVERED).max(DRAWER_MIN.min(total)))
@@ -203,6 +207,16 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plain_window_has_the_drawer_beside_when_it_fits_whatever_the_mode() {
+        let mut layout = Layout { plain: true, ..Layout::default() };
+        assert_eq!(layout.drawer(false, 1200.0), Drawer::Hidden);
+        assert_eq!(layout.drawer(true, 1200.0), Drawer::Beside(DRAWER_DEFAULT));
+        assert!(matches!(layout.drawer(true, 400.0), Drawer::Over(_)));
+        layout.plain = false;
+        assert!(matches!(layout.drawer(true, 1200.0), Drawer::Over(_)));
+    }
 
     #[test]
     fn the_rows_width_follows_the_drawer_only_where_it_narrows_them_and_not_while_dragged() {

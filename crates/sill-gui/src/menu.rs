@@ -255,6 +255,9 @@ impl App {
     /// The menu's foot: which view the window shows — the conversation with files, alone, or
     /// across the whole window. The view in use is marked.
     fn view_choice(&self) -> Element<'_, Message> {
+        if self.layout.plain {
+            return self.window_buttons();
+        }
         let current = self.layout.mode;
         let choice = |view: View, glyph: &'static str, label: &'static str, what: &'static str| {
             let on = view == current;
@@ -327,6 +330,53 @@ impl App {
                     tip(keys::label("Close: the window goes; the daemon and the sessions go on. The tray icon or the hotkey will bring it back (Ctrl+Q)")),
                     tooltip::Position::Bottom,
                 ),
+            ]
+            .spacing(2),
+        )
+        .padding(6)
+        .into()
+    }
+
+    /// The Mac's window has no modes: in their place the window's three buttons, sill's own, in
+    /// the theme's tones (the person, 2026-11-12). The first hides, as Close does elsewhere.
+    fn window_buttons(&self) -> Element<'_, Message> {
+        const DOT: f32 = 12.0;
+        // red and yellow as hues, in the tone of the theme's error and warning; the themes'
+        // success is green already
+        const RED: f32 = 4.0;
+        const YELLOW: f32 = 46.0;
+        let dot = |color: iced::Color, id: &'static str, message: Message, what: &'static str| {
+            tooltip(
+                container(keys::press(
+                    button(container(space().width(DOT).height(DOT)).style(move |_| {
+                        iced::widget::container::Style {
+                            background: Some(color.into()),
+                            border: iced::Border {
+                                radius: (DOT / 2.0).into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }
+                    }))
+                    .padding(6)
+                    .style(style::quiet),
+                    message,
+                ))
+                .id(id),
+                tip(keys::label(what)),
+                tooltip::Position::Bottom,
+            )
+        };
+        container(
+            row![
+                dot(
+                    style::with_hue(P.error, RED),
+                    "close-window",
+                    Message::Quit,
+                    "Hide: the window goes; the daemon and the sessions go on. `sill toggle` or starting sill again brings it back (Ctrl+Q)",
+                ),
+                dot(style::with_hue(P.warning, YELLOW), "minimize-window", Message::Minimize, "Minimize: into the Dock"),
+                dot(P.success, "zoom-window", Message::Zoom, "Zoom: fill the screen, and back"),
             ]
             .spacing(2),
         )

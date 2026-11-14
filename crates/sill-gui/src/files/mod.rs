@@ -351,7 +351,7 @@ impl App {
     fn toggle_drawer(&mut self) -> Task<Message> {
         // in Drawer mode, putting the drawer away is Full: the same window without it
         // (Ctrl+Shift+F brings it back); elsewhere a quick look over the conversation
-        if self.layout.mode == crate::layout::Mode::Drawer {
+        if self.layout.mode == crate::layout::Mode::Drawer && !self.layout.plain {
             return self.update(Message::Layout(crate::layout::Action::Mode(
                 crate::layout::Mode::Full,
             )));
