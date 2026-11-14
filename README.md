@@ -197,6 +197,17 @@ text is set in two faces embedded in the binary — **Source Sans 3** for everyt
 the licence texts ship with the fonts under `crates/sill/fonts/` and `~/.local/state/sill/fonts/`).
 Text size is 13 pt at Normal and scales with the Text size setting only.
 
+## Managed processes
+
+A command the agent needs to keep running after its turn — a dev server, a watcher — is started
+with `sill-proc start --name dev [--port 3000] -- npm run dev` inside the jail (`sill-proc
+list | tail dev | stop dev`). The shim keeps it alive across the agent's restarts and idle stops;
+it dies with the session. A background `&` does not survive the agent. The controls row shows how
+many run; its list has each one's state, last output line, log (followed in the viewer), Stop and
+Dismiss. A process that declares a port is offered for exposing on this machine's loopback — asked
+once per session, or silently for ports in the policy's `[processes] expose` list — and the list
+shows the URL. Loopback only; nothing on the LAN.
+
 ## Keys
 
 | Key | What |

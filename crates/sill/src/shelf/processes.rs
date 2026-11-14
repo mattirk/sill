@@ -51,7 +51,9 @@ pub fn expose(socket: PathBuf, jail_port: u16) -> Result<Bridge> {
                             relay(conn, &socket, jail_port);
                         });
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(std::time::Duration::from_millis(100)),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(100))
+                    }
                     Err(_) => break,
                 }
             }
@@ -61,8 +63,12 @@ pub fn expose(socket: PathBuf, jail_port: u16) -> Result<Bridge> {
 
 /// One browser connection ⇄ the shim ⇄ the process inside.
 fn relay(host: std::net::TcpStream, socket: &std::path::Path, port: u16) {
-    let Ok(jail) = sill_core::shim::port_stream(socket, port) else { return };
-    let (Ok(mut host_r), Ok(mut jail_r)) = (host.try_clone(), jail.try_clone()) else { return };
+    let Ok(jail) = sill_core::shim::port_stream(socket, port) else {
+        return;
+    };
+    let (Ok(mut host_r), Ok(mut jail_r)) = (host.try_clone(), jail.try_clone()) else {
+        return;
+    };
     let (mut host_w, mut jail_w) = (host, jail);
     let t = std::thread::spawn(move || {
         let _ = std::io::copy(&mut host_r, &mut jail_w);

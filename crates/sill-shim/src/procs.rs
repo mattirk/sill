@@ -23,7 +23,9 @@ use serde_json::{Value, json};
 /// Where the service lives inside the jail (`/run` is a fresh tmpfs there); `SILL_PROC_DIR`
 /// moves it for tests and for a shim run outside a jail.
 pub fn dir() -> PathBuf {
-    std::env::var_os("SILL_PROC_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/run/sill"))
+    std::env::var_os("SILL_PROC_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/run/sill"))
 }
 
 pub fn socket_path() -> PathBuf {
@@ -79,13 +81,26 @@ impl Default for Procs {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Op {
-    Start { name: String, argv: Vec<String>, cwd: Option<PathBuf>, port: Option<u16> },
+    Start {
+        name: String,
+        argv: Vec<String>,
+        cwd: Option<PathBuf>,
+        port: Option<u16>,
+    },
     List,
-    Tail { name: String, #[serde(default = "default_lines")] lines: usize },
-    Stop { name: String },
+    Tail {
+        name: String,
+        #[serde(default = "default_lines")]
+        lines: usize,
+    },
+    Stop {
+        name: String,
+    },
     StopAll,
     /// Forget an ended process (its log goes too).
-    Dismiss { name: String },
+    Dismiss {
+        name: String,
+    },
 }
 
 fn default_lines() -> usize {
@@ -93,11 +108,18 @@ fn default_lines() -> usize {
 }
 
 fn now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn valid_name(name: &str) -> bool {
-    !name.is_empty() && name.len() <= 40 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    !name.is_empty()
+        && name.len() <= 40
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
 impl Procs {
@@ -105,11 +127,19 @@ impl Procs {
         Procs(Arc::default(), dir)
     }
 
-    pub fn start(&self, name: &str, argv: Vec<String>, cwd: Option<PathBuf>, port: Option<u16>) -> Result<Info> {
+    pub fn start(
+        &self,
+        name: &str,
+        argv: Vec<String>,
+        cwd: Option<PathBuf>,
+        port: Option<u16>,
+    ) -> Result<Info> {
         if !valid_name(name) {
             bail!("a name is letters, digits, `-`, `_` or `.`, up to 40 of them");
         }
-        let Some((prog, rest)) = argv.split_first() else { bail!("no command") };
+        let Some((prog, rest)) = argv.split_first() else {
+            bail!("no command")
+        };
         if let Some(p) = port
             && p < 1024
         {
@@ -120,7 +150,8 @@ impl Procs {
             None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         };
         let log_dir = self.1.join("proc");
-        std::fs::create_dir_all(&log_dir).with_context(|| format!("create {}", log_dir.display()))?;
+        std::fs::create_dir_all(&log_dir)
+            .with_context(|| format!("create {}", log_dir.display()))?;
         let log = log_dir.join(format!("{name}.log"));
         {
             let mut t = self.0.lock().unwrap();
@@ -134,7 +165,8 @@ impl Procs {
         let _ = std::fs::remove_file(&log);
         // one pipe for stdout and stderr both, in order; the child in its own process group so a
         // stop reaches everything it started
-        let (read_end, write_end) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).context("pipe")?;
+        let (read_end, write_end) =
+            rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).context("pipe")?;
         let write_err = write_end.try_clone()?;
         let mut cmd = Command::new(prog);
         cmd.args(rest)
@@ -145,15 +177,32 @@ impl Procs {
             .process_group(0);
         let mut child = cmd.spawn().with_context(|| format!("start {prog}"))?;
         let pid = child.id();
-        let info = Info { name: name.to_string(), argv, cwd, port, pid, started: now(), state: ProcState::Running, last_line: String::new(), log: log.clone() };
+        let info = Info {
+            name: name.to_string(),
+            argv,
+            cwd,
+            port,
+            pid,
+            started: now(),
+            state: ProcState::Running,
+            last_line: String::new(),
+            log: log.clone(),
+        };
         self.0.lock().unwrap().procs.push(info.clone());
         // output → the capped log and the record's last line
         {
             let procs = self.clone();
             let name = name.to_string();
             std::thread::spawn(move || {
-                let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&log).ok();
-                for line in BufReader::new(std::fs::File::from(read_end)).lines().map_while(Result::ok) {
+                let mut file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log)
+                    .ok();
+                for line in BufReader::new(std::fs::File::from(read_end))
+                    .lines()
+                    .map_while(Result::ok)
+                {
                     if let Some(f) = file.as_mut() {
                         let _ = writeln!(f, "{line}");
                         if f.metadata().map(|m| m.len() > LOG_CAP).unwrap_or(false) {
@@ -191,7 +240,15 @@ impl Procs {
     }
 
     pub fn tail(&self, name: &str, lines: usize) -> Result<String> {
-        let log = self.0.lock().unwrap().procs.iter().find(|p| p.name == name).map(|p| p.log.clone()).with_context(|| format!("no process {name}"))?;
+        let log = self
+            .0
+            .lock()
+            .unwrap()
+            .procs
+            .iter()
+            .find(|p| p.name == name)
+            .map(|p| p.log.clone())
+            .with_context(|| format!("no process {name}"))?;
         let text = std::fs::read_to_string(&log).unwrap_or_default();
         let all: Vec<&str> = text.lines().collect();
         let from = all.len().saturating_sub(lines);
@@ -203,7 +260,11 @@ impl Procs {
         use rustix::process::{Pid, Signal, kill_process_group};
         let pid = {
             let t = self.0.lock().unwrap();
-            let p = t.procs.iter().find(|p| p.name == name).with_context(|| format!("no process {name}"))?;
+            let p = t
+                .procs
+                .iter()
+                .find(|p| p.name == name)
+                .with_context(|| format!("no process {name}"))?;
             if p.state != ProcState::Running {
                 return Ok(());
             }
@@ -213,7 +274,14 @@ impl Procs {
         let _ = kill_process_group(pgid, Signal::TERM);
         let deadline = std::time::Instant::now() + STOP_GRACE;
         loop {
-            if self.0.lock().unwrap().procs.iter().any(|p| p.name == name && p.state != ProcState::Running) {
+            if self
+                .0
+                .lock()
+                .unwrap()
+                .procs
+                .iter()
+                .any(|p| p.name == name && p.state != ProcState::Running)
+            {
                 break;
             }
             if std::time::Instant::now() >= deadline {
@@ -233,7 +301,15 @@ impl Procs {
     }
 
     pub fn stop_all(&self) -> usize {
-        let names: Vec<String> = self.0.lock().unwrap().procs.iter().filter(|p| p.state == ProcState::Running).map(|p| p.name.clone()).collect();
+        let names: Vec<String> = self
+            .0
+            .lock()
+            .unwrap()
+            .procs
+            .iter()
+            .filter(|p| p.state == ProcState::Running)
+            .map(|p| p.name.clone())
+            .collect();
         for n in &names {
             let _ = self.stop(n);
         }
@@ -242,7 +318,11 @@ impl Procs {
 
     pub fn dismiss(&self, name: &str) -> Result<()> {
         let mut t = self.0.lock().unwrap();
-        let i = t.procs.iter().position(|p| p.name == name).with_context(|| format!("no process {name}"))?;
+        let i = t
+            .procs
+            .iter()
+            .position(|p| p.name == name)
+            .with_context(|| format!("no process {name}"))?;
         if t.procs[i].state == ProcState::Running {
             bail!("{name} is running; stop it first");
         }
@@ -257,7 +337,12 @@ impl Procs {
             json!({ "ok": false, "error": e.to_string() })
         }
         match op {
-            Op::Start { name, argv, cwd, port } => match self.start(&name, argv, cwd, port) {
+            Op::Start {
+                name,
+                argv,
+                cwd,
+                port,
+            } => match self.start(&name, argv, cwd, port) {
                 Ok(info) => json!({ "ok": true, "proc": info }),
                 Err(e) => err(format!("{e:#}")),
             },
@@ -281,10 +366,12 @@ impl Procs {
     /// The in-jail door: one JSON request line per connection, one reply line.
     pub fn serve(&self, socket: &Path) -> Result<()> {
         if let Some(parent) = socket.parent() {
-            std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
         }
         let _ = std::fs::remove_file(socket);
-        let listener = UnixListener::bind(socket).with_context(|| format!("listen on {}", socket.display()))?;
+        let listener = UnixListener::bind(socket)
+            .with_context(|| format!("listen on {}", socket.display()))?;
         for conn in listener.incoming() {
             let Ok(mut conn) = conn else { continue };
             let procs = self.clone();
@@ -304,9 +391,15 @@ impl Procs {
 
 /// Keep the newer half of a log that grew past the cap, from a line start.
 fn trim_log(log: &Path) {
-    let Ok(bytes) = std::fs::read(log) else { return };
+    let Ok(bytes) = std::fs::read(log) else {
+        return;
+    };
     let keep_from = bytes.len().saturating_sub((LOG_CAP / 2) as usize);
-    let cut = bytes[keep_from..].iter().position(|b| *b == b'\n').map(|i| keep_from + i + 1).unwrap_or(keep_from);
+    let cut = bytes[keep_from..]
+        .iter()
+        .position(|b| *b == b'\n')
+        .map(|i| keep_from + i + 1)
+        .unwrap_or(keep_from);
     let _ = std::fs::write(log, &bytes[cut..]);
 }
 
@@ -327,7 +420,9 @@ pub fn cli(args: Vec<String>) -> i32 {
 const USAGE: &str = "usage: sill-proc start --name NAME [--port PORT] [--cwd DIR] -- COMMAND…\n       sill-proc list | tail NAME [-n LINES] | stop NAME | stop-all | dismiss NAME\n\nA command started here keeps running after your turn ends and after you restart; a background `&` does not.";
 
 fn cli_inner(mut args: Vec<String>) -> Result<()> {
-    let Some(sub) = args.first().cloned() else { bail!("{USAGE}") };
+    let Some(sub) = args.first().cloned() else {
+        bail!("{USAGE}")
+    };
     args.remove(0);
     let op = match sub.as_str() {
         "start" => {
@@ -337,7 +432,14 @@ fn cli_inner(mut args: Vec<String>) -> Result<()> {
             while let Some(a) = it.next() {
                 match a.as_str() {
                     "--name" => name = it.next(),
-                    "--port" => port = Some(it.next().context("--port expects a number")?.parse::<u16>().context("--port expects a number")?),
+                    "--port" => {
+                        port = Some(
+                            it.next()
+                                .context("--port expects a number")?
+                                .parse::<u16>()
+                                .context("--port expects a number")?,
+                        )
+                    }
                     "--cwd" => cwd = it.next().map(PathBuf::from),
                     "--" => {
                         rest.extend(it);
@@ -356,21 +458,35 @@ fn cli_inner(mut args: Vec<String>) -> Result<()> {
         "tail" => {
             let name = args.first().cloned().context("tail expects a name")?;
             let lines = match args.get(1).map(String::as_str) {
-                Some("-n") => args.get(2).context("-n expects a number")?.parse::<usize>().context("-n expects a number")?,
+                Some("-n") => args
+                    .get(2)
+                    .context("-n expects a number")?
+                    .parse::<usize>()
+                    .context("-n expects a number")?,
                 _ => 50,
             };
             json!({ "op": "tail", "name": name, "lines": lines })
         }
-        "stop" => json!({ "op": "stop", "name": args.first().cloned().context("stop expects a name")? }),
+        "stop" => {
+            json!({ "op": "stop", "name": args.first().cloned().context("stop expects a name")? })
+        }
         "stop-all" => json!({ "op": "stop_all" }),
-        "dismiss" => json!({ "op": "dismiss", "name": args.first().cloned().context("dismiss expects a name")? }),
+        "dismiss" => {
+            json!({ "op": "dismiss", "name": args.first().cloned().context("dismiss expects a name")? })
+        }
         _ => bail!("{USAGE}"),
     };
     let reply = call(&socket_path(), &op)?;
     match sub.as_str() {
         "start" => {
             let p = &reply["proc"];
-            println!("started {} (pid {}) — `sill-proc tail {}` shows its output, `sill-proc stop {}` ends it", p["name"].as_str().unwrap_or(""), p["pid"], p["name"].as_str().unwrap_or(""), p["name"].as_str().unwrap_or(""));
+            println!(
+                "started {} (pid {}) — `sill-proc tail {}` shows its output, `sill-proc stop {}` ends it",
+                p["name"].as_str().unwrap_or(""),
+                p["pid"],
+                p["name"].as_str().unwrap_or(""),
+                p["name"].as_str().unwrap_or("")
+            );
         }
         "list" => {
             let procs = reply["procs"].as_array().cloned().unwrap_or_default();
@@ -380,13 +496,35 @@ fn cli_inner(mut args: Vec<String>) -> Result<()> {
             for p in procs {
                 let state = match &p["state"] {
                     Value::String(s) => s.clone(),
-                    Value::Object(o) => o.iter().map(|(k, v)| format!("{k} {v}")).next().unwrap_or_default(),
+                    Value::Object(o) => o
+                        .iter()
+                        .map(|(k, v)| format!("{k} {v}"))
+                        .next()
+                        .unwrap_or_default(),
                     _ => "?".into(),
                 };
                 let up = now().saturating_sub(p["started"].as_u64().unwrap_or(0));
-                let port = p["port"].as_u64().map(|x| format!(" port {x}")).unwrap_or_default();
-                let argv: Vec<String> = p["argv"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
-                println!("{:<16} {:<10} pid {:<7} up {}s{}  {}", p["name"].as_str().unwrap_or(""), state, p["pid"], up, port, argv.join(" "));
+                let port = p["port"]
+                    .as_u64()
+                    .map(|x| format!(" port {x}"))
+                    .unwrap_or_default();
+                let argv: Vec<String> = p["argv"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                println!(
+                    "{:<16} {:<10} pid {:<7} up {}s{}  {}",
+                    p["name"].as_str().unwrap_or(""),
+                    state,
+                    p["pid"],
+                    up,
+                    port,
+                    argv.join(" ")
+                );
                 if let Some(l) = p["last_line"].as_str().filter(|l| !l.is_empty()) {
                     println!("{:<16} {l}", "");
                 }
@@ -402,7 +540,8 @@ fn cli_inner(mut args: Vec<String>) -> Result<()> {
 
 /// One request to the service, the reply's fields; an `ok: false` reply is the error.
 pub fn call(socket: &Path, op: &Value) -> Result<Value> {
-    let mut s = UnixStream::connect(socket).with_context(|| format!("the process service is not running ({})", socket.display()))?;
+    let mut s = UnixStream::connect(socket)
+        .with_context(|| format!("the process service is not running ({})", socket.display()))?;
     writeln!(s, "{op}")?;
     let mut text = String::new();
     s.read_to_string(&mut text)?;
@@ -439,19 +578,45 @@ mod tests {
         let d = fresh("kept");
         let procs = Procs::at(d.clone());
         let args = |s: &str| s.split(' ').map(str::to_string).collect::<Vec<_>>();
-        let info = procs.start("srv", args("sh -c echo_hi;sleep_30").iter().map(|a| a.replace('_', " ")).collect(), None, Some(3000)).unwrap();
+        let info = procs
+            .start(
+                "srv",
+                args("sh -c echo_hi;sleep_30")
+                    .iter()
+                    .map(|a| a.replace('_', " "))
+                    .collect(),
+                None,
+                Some(3000),
+            )
+            .unwrap();
         assert_eq!(info.state, ProcState::Running);
         assert!(wait_for(|| procs.tail("srv", 10).unwrap().contains("hi")));
         assert_eq!(procs.list()[0].last_line, "hi");
-        assert!(procs.start("srv", args("true"), None, None).is_err(), "a running name is taken");
+        assert!(
+            procs.start("srv", args("true"), None, None).is_err(),
+            "a running name is taken"
+        );
         procs.stop("srv").unwrap();
         assert_eq!(procs.list()[0].state, ProcState::Stopped);
         // an exit of its own is recorded with the code; the name is then free again
-        procs.start("job", vec!["sh".into(), "-c".into(), "exit 3".into()], None, None).unwrap();
-        assert!(wait_for(|| procs.list().iter().any(|p| p.name == "job" && p.state == ProcState::Exited(3))));
+        procs
+            .start(
+                "job",
+                vec!["sh".into(), "-c".into(), "exit 3".into()],
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(wait_for(|| procs
+            .list()
+            .iter()
+            .any(|p| p.name == "job" && p.state == ProcState::Exited(3))));
         procs.dismiss("job").unwrap();
         assert!(procs.list().iter().all(|p| p.name != "job"));
-        assert!(procs.start("x", args("true"), None, Some(80)).is_err(), "privileged port refused");
+        assert!(
+            procs.start("x", args("true"), None, Some(80)).is_err(),
+            "privileged port refused"
+        );
         assert!(procs.start("bad name", args("true"), None, None).is_err());
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -469,9 +634,17 @@ mod tests {
         assert!(wait_for(|| sock.exists()));
         let r = call(&sock, &json!({ "op": "start", "name": "w", "argv": ["sh", "-c", "echo out; echo err >&2; sleep 30"] })).unwrap();
         assert_eq!(r["proc"]["name"], "w");
-        assert!(wait_for(|| call(&sock, &json!({ "op": "tail", "name": "w", "lines": 5 })).map(|r| r["text"].as_str().unwrap_or("").contains("err")).unwrap_or(false)));
+        assert!(wait_for(|| call(
+            &sock,
+            &json!({ "op": "tail", "name": "w", "lines": 5 })
+        )
+        .map(|r| r["text"].as_str().unwrap_or("").contains("err"))
+        .unwrap_or(false)));
         assert!(call(&sock, &json!({ "op": "nope" })).is_err());
-        assert_eq!(call(&sock, &json!({ "op": "stop_all" })).unwrap()["stopped"], 1);
+        assert_eq!(
+            call(&sock, &json!({ "op": "stop_all" })).unwrap()["stopped"],
+            1
+        );
         assert_eq!(cli(vec!["bogus".into()]), 1); // the client itself is exercised by hand (see docs/tasks.md §2.4)
         let _ = std::fs::remove_dir_all(&d);
     }
