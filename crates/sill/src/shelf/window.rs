@@ -363,6 +363,10 @@ impl Shelf {
         }
         {
             let shelf = self.clone();
+            *view.on_restart.borrow_mut() = Some(Box::new(move |id| shelf.restart_session(id)));
+        }
+        {
+            let shelf = self.clone();
             *view.on_open_folder.borrow_mut() = Some(Box::new(move |p| {
                 shelf.files.set_scope(Some(p.to_path_buf()));
                 shelf.show_page("files");
@@ -381,6 +385,16 @@ impl Shelf {
         self.views.borrow_mut().insert(id.clone(), view);
         self.tabs.select(&id);
         self.sync_status();
+    }
+
+    /// Rebuild a session's jail (pins changed): close the tab, stop the unit, reopen → resume.
+    fn restart_session(self: &Rc<Self>, id: &str) {
+        let stored = self.store.sessions().unwrap_or_default().into_iter().find(|s| s.id == id);
+        self.close_session(id);
+        if let Some(s) = stored {
+            let shelf = self.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_millis(600), move || shelf.open_session(s));
+        }
     }
 
     fn close_session(self: &Rc<Self>, id: &str) {

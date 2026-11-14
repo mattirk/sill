@@ -81,8 +81,16 @@ impl ChangesPage {
             page.list.connect_row_selected(move |_, row| {
                 let Some(row) = row else { return };
                 let idx = row.index() as usize;
-                if let Some((_, c)) = p.rows.borrow().get(idx) {
-                    let text = changes::unified_diff(c).unwrap_or_else(|e| format!("diff: {e:#}"));
+                if let Some((sid, c)) = p.rows.borrow().get(idx) {
+                    let text = if sid.is_empty() {
+                        // live repo row: `upper` holds the repo root
+                        match c.path.strip_prefix(&c.upper) {
+                            Ok(rel) if !rel.as_os_str().is_empty() => changes::git_diff(&c.upper, rel),
+                            _ => String::new(),
+                        }
+                    } else {
+                        changes::unified_diff(c).unwrap_or_else(|e| format!("diff: {e:#}"))
+                    };
                     p.diff.buffer().set_text(&text);
                 }
             });
@@ -105,7 +113,10 @@ impl ChangesPage {
                 if !state_dir.is_dir() {
                     continue;
                 }
-                let binds = session::binds_of(&s, &policy, &home);
+                let binds = match Store::open_default() {
+                    Ok(st) => session::binds_of(&s, &policy, &home, &st),
+                    Err(_) => vec![],
+                };
                 let Ok(plan) = changes::session_plan(policy.clone(), state_dir, &home, uid, &user, binds) else { continue };
                 let list = changes::scan(&policy, &plan, None).unwrap_or_default();
                 if !list.is_empty() {
@@ -130,6 +141,73 @@ impl ChangesPage {
         self.diff.buffer().set_text("");
         let mut total = 0;
         let mut conflicts = 0;
+        // pinned folders first: live (host = jail); git repositories among them show git's view
+        let mut live: Vec<PathBuf> = self
+            .store
+            .sessions()
+            .unwrap_or_default()
+            .iter()
+            .flat_map(|s| self.store.pins(&s.id).unwrap_or_default())
+            .filter(|p| p.join(".git").exists())
+            .collect();
+        live.sort();
+        live.dedup();
+        for repo in live {
+            let status = changes::git_status(&repo);
+            if status.is_empty() {
+                continue;
+            }
+            let hrow = gtk::ListBoxRow::new();
+            hrow.set_selectable(false);
+            hrow.set_activatable(false);
+            let header = gtk::Label::new(Some(&format!("{} · pinned, live (host = jail) · git", repo.display())));
+            header.set_xalign(0.0);
+            header.add_css_class("heading");
+            header.set_margin_top(8);
+            hrow.set_child(Some(&header));
+            self.list.append(&hrow);
+            self.rows.borrow_mut().push((String::new(), placeholder_change(&repo)));
+            for (rel, st) in status {
+                total += 1;
+                let row = gtk::ListBoxRow::new();
+                let b = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                let letter = gtk::Label::new(Some(&format!("{st} ")));
+                letter.add_css_class("monospace");
+                match st.as_str() {
+                    "?" | "A" => letter.add_css_class("success"),
+                    "D" => letter.add_css_class("error"),
+                    _ => letter.add_css_class("accent"),
+                }
+                let path = gtk::Label::new(Some(&rel.display().to_string()));
+                path.set_xalign(0.0);
+                path.set_hexpand(true);
+                path.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+                let revert_b = gtk::Button::with_label("Revert");
+                revert_b.add_css_class("flat");
+                {
+                    let p = self.clone();
+                    let repo = repo.clone();
+                    let rel = rel.clone();
+                    revert_b.connect_clicked(move |_| {
+                        match changes::git_revert(&repo, &rel) {
+                            Ok(what) => {
+                                p.message.set_text(&format!("{}: {what}", rel.display()));
+                                p.refresh();
+                            }
+                            Err(e) => p.message.set_text(&format!("revert failed: {e:#}")),
+                        }
+                    });
+                }
+                b.append(&letter);
+                b.append(&path);
+                b.append(&revert_b);
+                row.set_child(Some(&b));
+                self.list.append(&row);
+                let mut c = placeholder_change(&repo.join(&rel));
+                c.upper = repo.clone(); // marker: diff via git
+                self.rows.borrow_mut().push((String::new(), c));
+            }
+        }
         for (s, list) in groups {
             // build output (git-ignored / ledger_ignore) is the overlay's business, not the person's
             let list: Vec<Change> = list.into_iter().filter(|c| !c.ignored).collect();
@@ -284,6 +362,18 @@ impl ChangesPage {
         } else {
             format!("{total} pending change(s){}", if conflicts > 0 { format!(", {conflicts} conflict(s)") } else { String::new() })
         });
+    }
+}
+
+fn placeholder_change(path: &std::path::Path) -> Change {
+    Change {
+        path: path.to_path_buf(),
+        upper: PathBuf::new(),
+        kind: Kind::Modified,
+        file_type: sill_core::ledger::FileType::File,
+        size: 0,
+        conflict: false,
+        ignored: false,
     }
 }
 

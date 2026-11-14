@@ -30,6 +30,7 @@ pub struct Conversation {
     following: std::cell::Cell<bool>,
     /// Previous adjustment value, to tell a scroll-up from everything else that moves it.
     last_value: std::cell::Cell<f64>,
+    last_upper: std::cell::Cell<f64>,
 }
 
 impl Conversation {
@@ -58,6 +59,7 @@ impl Conversation {
             weak: RefCell::new(std::rc::Weak::new()),
             following: std::cell::Cell::new(false),
             last_value: std::cell::Cell::new(0.0),
+            last_upper: std::cell::Cell::new(0.0),
         });
         // The content height is only known after layout: follow the adjustment's geometry (`changed` covers
         // both the content growing and the viewport shrinking, e.g. the prompt box getting taller) instead
@@ -78,14 +80,19 @@ impl Conversation {
             let c = conv.clone();
             adj.connect_value_changed(move |adj| {
                 let v = adj.value();
-                if !c.following.get() {
-                    if v >= adj.upper() - adj.page_size() - 1.0 {
+                let upper = adj.upper();
+                // a drop in value while the content height is changing is GTK clamping/relayout
+                // (text views validate lines lazily), not the person scrolling up
+                let relayout = upper != c.last_upper.get();
+                if !c.following.get() && !relayout {
+                    if v >= upper - adj.page_size() - 1.0 {
                         c.stick_to_bottom.set(true);
                     } else if v < c.last_value.get() {
                         c.stick_to_bottom.set(false);
                     }
                 }
                 c.last_value.set(v);
+                c.last_upper.set(upper);
             });
         }
         conv
@@ -127,7 +134,7 @@ impl Conversation {
             c.follow(&adj);
             let n = c.tick_frames.get() + 1;
             c.tick_frames.set(n);
-            if n > 12 {
+            if n > 40 {
                 c.ticking.set(false);
                 return gtk::glib::ControlFlow::Break;
             }
@@ -350,6 +357,7 @@ entry { border-radius: 0; }
 .sill-pins { padding: 2px 0; }
 .sill-chip { background: alpha(@view_fg_color, 0.07); padding: 0 2px 0 0; }
 .sill-chip-open { padding: 1px 8px; min-height: 0; }
+.sill-apply { color: @warning_color; padding: 0 8px; min-height: 0; }
 .sill-git-add { color: @success_color; font-size: 90%; }
 .sill-git-del { color: @error_color; font-size: 90%; }
 .sill-scope { padding: 2px 0; }

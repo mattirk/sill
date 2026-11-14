@@ -67,7 +67,8 @@ pub struct Paths {
     /// Host mount points left out of the jail entirely (they appear as empty directories).
     #[serde(default)]
     pub hidden_mounts: Vec<String>,
-    /// Repo roots whose changes are kept automatically at quiescent moments (SPEC §4.4).
+    /// Overlaid roots whose changes are kept automatically at quiescent moments (SPEC §4.4). Pinned
+    /// folders don't need this: they are bound live (host = jail), see `session::binds_for`.
     #[serde(default)]
     pub auto_keep: Vec<String>,
     /// Relative patterns the ledger records but neither hashes per turn nor auto-keeps.

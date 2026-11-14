@@ -45,6 +45,9 @@ pub struct SessionView {
     pub on_title: RefCell<Option<Box<dyn Fn(&str, &str)>>>,
     /// Click on a pin chip: open the Files page scoped to that folder.
     pub on_open_folder: RefCell<Option<Box<dyn Fn(&std::path::Path)>>>,
+    /// Pins that were live when the jail started; changed pins need a session restart.
+    live_pins: RefCell<Vec<std::path::PathBuf>>,
+    pub on_restart: RefCell<Option<Box<dyn Fn(&str)>>>,
 }
 
 impl SessionView {
@@ -120,6 +123,8 @@ impl SessionView {
             on_turn_end: RefCell::new(None),
             on_title: RefCell::new(None),
             on_open_folder: RefCell::new(None),
+            live_pins: RefCell::new(Vec::new()),
+            on_restart: RefCell::new(None),
         });
 
         // stored transcript
@@ -318,8 +323,10 @@ impl SessionView {
             self.pins_row.remove(&c);
         }
         let pins = self.store.pins(&self.id()).unwrap_or_default();
-        self.pins_row.set_visible(!pins.is_empty());
-        if pins.is_empty() {
+        let live = self.live_pins.borrow().clone();
+        let stale = pins != live;
+        self.pins_row.set_visible(!pins.is_empty() || stale);
+        if pins.is_empty() && !stale {
             return;
         }
         let head = if gtk::IconTheme::for_display(&gtk::gdk::Display::default().expect("display")).has_icon("view-pin-symbolic") {
@@ -380,6 +387,20 @@ impl SessionView {
             chip.append(&x);
             self.pins_row.append(&chip);
         }
+        if stale {
+            // pins are bound into the jail when it starts: offer the restart that makes them live
+            let b = gtk::Button::with_label("restart session to apply");
+            b.add_css_class("flat");
+            b.add_css_class("sill-apply");
+            b.set_tooltip_text(Some("Pinned folders become live (host = jail) when the session's jail is rebuilt; the conversation resumes"));
+            let v = self.clone();
+            b.connect_clicked(move |_| {
+                if let Some(cb) = v.on_restart.borrow().as_ref() {
+                    cb(&v.id());
+                }
+            });
+            self.pins_row.append(&b);
+        }
     }
 
     /// Context block prepended to prompts while pins exist (SPEC §3.1 pins).
@@ -402,7 +423,8 @@ impl SessionView {
 
     fn connect(self: &Rc<Self>) {
         let s = self.session.borrow().clone();
-        match session::start(&s) {
+        *self.live_pins.borrow_mut() = self.store.pins(&s.id).unwrap_or_default();
+        match session::start(&s, &self.store) {
             Ok(d) => {
                 let events = d.events.clone();
                 *self.driver.borrow_mut() = Some(d);
@@ -527,6 +549,7 @@ impl SessionView {
     /// Auto-keep repo changes (SPEC §4.4) and tell the window to refresh the ledger pages.
     fn after_turn(self: &Rc<Self>, id: &str) {
         let s = self.session.borrow().clone();
+        let store2 = Store::open_default().ok();
         let (tx, rx) = async_channel::bounded::<String>(1);
         let home = session::home().unwrap_or_default();
         let uid = session::uid();
@@ -535,7 +558,10 @@ impl SessionView {
             let msg = (|| -> anyhow::Result<String> {
                 let policy = sill_core::policy::Policy::load(&s.policy, &home)?;
                 let state_dir = sill_core::session::state_dir(uid, &s.id)?;
-                let binds = session::binds_of(&s, &policy, &home);
+                let binds = match store2.as_ref() {
+                    Some(st) => session::binds_of(&s, &policy, &home, st),
+                    None => vec![],
+                };
                 let plan = sill_core::changes::session_plan(policy.clone(), state_dir, &home, uid, &user, binds)?;
                 let changes = sill_core::changes::scan(&policy, &plan, None)?;
                 let (kept, skipped) = sill_core::changes::auto_keep(&policy, &home, &changes);

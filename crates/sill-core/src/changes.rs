@@ -163,6 +163,58 @@ pub fn auto_keep(policy: &Policy, home: &Path, changes: &[Change]) -> (Vec<PathB
     (kept, skipped)
 }
 
+/// `git status --porcelain` of a repo: (relative path, one-letter status `M`/`A`/`D`/`R`/`?`).
+pub fn git_status(repo: &Path) -> Vec<(PathBuf, String)> {
+    let Ok(out) = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["status", "--porcelain", "-z", "--untracked-files=all"])
+        .output()
+    else {
+        return vec![];
+    };
+    let mut v = Vec::new();
+    let mut it = out.stdout.split(|b| *b == 0).filter(|s| !s.is_empty());
+    while let Some(entry) = it.next() {
+        if entry.len() < 4 {
+            continue;
+        }
+        let (x, y) = (entry[0] as char, entry[1] as char);
+        let rel = String::from_utf8_lossy(&entry[3..]).into_owned();
+        if x == 'R' || x == 'C' {
+            let _ = it.next();
+        }
+        let st = if x == '?' { "?".to_string() } else if y != ' ' { y.to_string() } else { x.to_string() };
+        v.push((PathBuf::from(rel), st));
+    }
+    v
+}
+
+/// Unified diff of a file in a live repo (working tree vs HEAD; whole file for untracked).
+pub fn git_diff(repo: &Path, rel: &Path) -> String {
+    let out = std::process::Command::new("git").arg("-C").arg(repo).args(["diff", "HEAD", "--"]).arg(rel).output();
+    match out {
+        Ok(o) if !o.stdout.is_empty() => String::from_utf8_lossy(&o.stdout).into_owned(),
+        _ => std::fs::read_to_string(repo.join(rel)).map(|t| format!("(untracked)\n{t}")).unwrap_or_default(),
+    }
+}
+
+/// Revert a file in a live repo to HEAD (or delete it when untracked).
+pub fn git_revert(repo: &Path, rel: &Path) -> Result<&'static str> {
+    let tracked = std::process::Command::new("git").arg("-C").arg(repo).args(["ls-files", "--error-unmatch", "--"]).arg(rel)
+        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status()?.success();
+    if tracked {
+        let st = std::process::Command::new("git").arg("-C").arg(repo).args(["checkout", "HEAD", "--"]).arg(rel).status()?;
+        if !st.success() {
+            anyhow::bail!("git checkout failed");
+        }
+        Ok("restored from HEAD")
+    } else {
+        std::fs::remove_file(repo.join(rel))?;
+        Ok("untracked file removed")
+    }
+}
+
 /// Unified diff text for a change (host vs upper).
 pub fn unified_diff(c: &Change) -> Result<String> {
     use similar::TextDiff;

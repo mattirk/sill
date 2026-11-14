@@ -24,13 +24,14 @@ pub fn uid() -> u32 {
 }
 
 /// Start (or reconnect to) a stored session. The jail's cwd is the home directory (SPEC §3.1).
-pub fn start(s: &store::Session) -> Result<Driver> {
+pub fn start(s: &store::Session, store: &store::Store) -> Result<Driver> {
     let home = home()?;
     let registry = agents::load(&home);
     let Some(agent) = registry.get(&s.agent) else { bail!("unknown agent {}", s.agent) };
     let sdir = state_dir(uid(), &s.id)?;
     let policy = sill_core::policy::Policy::load(&s.policy, &home)?;
-    let binds = sill_core::session::binds_for(agent, &policy, &sdir, &home)?;
+    let pins = store.pins(&s.id).unwrap_or_default();
+    let binds = sill_core::session::binds_for(agent, &policy, &sdir, &home, &pins)?;
     let opts = StartOptions {
         session: s.id.clone(),
         policy: s.policy.clone(),
@@ -66,11 +67,12 @@ pub fn start(s: &store::Session) -> Result<Driver> {
 }
 
 /// The binds a stored session runs with (for ledger scans on the host side).
-pub fn binds_of(s: &store::Session, policy: &sill_core::policy::Policy, home: &std::path::Path) -> Vec<(PathBuf, PathBuf)> {
+pub fn binds_of(s: &store::Session, policy: &sill_core::policy::Policy, home: &std::path::Path, store: &store::Store) -> Vec<(PathBuf, PathBuf)> {
     let registry = agents::load(home);
     let Some(agent) = registry.get(&s.agent) else { return vec![] };
     let Ok(sdir) = state_dir(uid(), &s.id) else { return vec![] };
-    sill_core::session::binds_for(agent, policy, &sdir, home).unwrap_or_default()
+    let pins = store.pins(&s.id).unwrap_or_default();
+    sill_core::session::binds_for(agent, policy, &sdir, home, &pins).unwrap_or_default()
 }
 
 /// Revert a path inside a running session's jail.

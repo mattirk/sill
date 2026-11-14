@@ -43,8 +43,10 @@ mask = [
 ro = []
 # Host mount points left out of the jail (shown as empty directories):
 hidden_mounts = ["/boot", "/boot/efi"]
-# Repo roots kept automatically at quiescent moments:
-auto_keep = ["~/GIT/*"]
+# Folders pinned to a session are bound live (host = jail): edits and commits made in the jail are host
+# edits and commits at once; review = git for repositories. Everything else is overlaid and reviewed in
+# Changes. Overlaid roots to keep automatically at the end of each turn (none by default):
+auto_keep = []
 # Recorded, but neither hashed per turn nor auto-kept:
 # Inside git repositories the repo's own .gitignore decides what is build output; these patterns cover
 # the rest (home-level tool caches and the like).

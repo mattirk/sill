@@ -25,7 +25,13 @@ pub struct StartOptions {
 /// The binds a session needs beyond the policy's mounts: the agent's sill-owned home paths and the
 /// session-private scratch directories. Creates what is missing (seeding the agent home from the host
 /// on first use, login files only).
-pub fn binds_for(agent: &crate::agents::Agent, policy: &Policy, state_dir: &Path, home: &Path) -> Result<Vec<(PathBuf, PathBuf)>> {
+pub fn binds_for(
+    agent: &crate::agents::Agent,
+    policy: &Policy,
+    state_dir: &Path,
+    home: &Path,
+    pins: &[PathBuf],
+) -> Result<Vec<(PathBuf, PathBuf)>> {
     use crate::paths::{expand_home, expand_pattern, layer_name};
     let mut out = Vec::new();
     // agent home: ~/.local/state/sill/agents/<id>/<basename of the path>
@@ -72,6 +78,12 @@ pub fn binds_for(agent: &crate::agents::Agent, policy: &Policy, state_dir: &Path
         let inside = expand_home(p, home);
         if inside.is_file() {
             out.push((inside.clone(), inside));
+        }
+    }
+    // pinned folders: live, host = jail (git or not)
+    for p in pins {
+        if p.is_dir() && !out.iter().any(|(_, i)| i == p) {
+            out.push((p.clone(), p.clone()));
         }
     }
     // session-private scratch
