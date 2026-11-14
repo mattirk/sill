@@ -278,12 +278,16 @@ pub fn state_dir(uid: u32, session: &str) -> Result<PathBuf> {
     if !crate::mounts::is_mount_point(&all, state_fs) {
         bail!("{} is not mounted (install the sill state units, SPEC §4.9)", state_fs.display());
     }
+    // the state fs root is world-writable like /tmp: a `<uid>` directory someone else put there
+    // first is not ours and is not used (security.md S5)
     let mine = state_fs.join(uid.to_string());
-    if !mine.is_dir() {
-        std::fs::create_dir(&mine).with_context(|| format!("create {}", mine.display()))?;
+    let fd = crate::safe_fs::owned_dir(&mine, uid, true)?;
+    rustix::fs::fchmod(&fd, rustix::fs::Mode::from_raw_mode(0o700))?;
+    let sessions = mine.join("sessions");
+    if sessions.exists() {
+        crate::safe_fs::owned_dir(&sessions, uid, false)?;
     }
-    std::fs::set_permissions(&mine, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
-    Ok(mine.join("sessions").join(session))
+    Ok(sessions.join(session))
 }
 
 /// Remove a session's upper trees (needs a user namespace: overlayfs creates root-owned work dirs).

@@ -20,6 +20,7 @@ pub mod paths;
 pub mod policy;
 pub mod proxy;
 pub mod registry;
+pub mod safe_fs;
 pub mod session;
 pub mod shim;
 pub mod store;

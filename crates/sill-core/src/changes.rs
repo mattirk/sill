@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::jail::{self, JailSpec};
 use crate::ledger::{self, Change, ScanOptions};
@@ -53,6 +53,133 @@ pub fn scan(policy: &Policy, plan: &jail::JailPlan, session_start: Option<std::t
     Ok(changes)
 }
 
+static GIT_VIEWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Git on a repository the agent can write — a pin is live, and a kept overlay copy is the agent's
+/// too. Its `.git/config` (hooks path, fsmonitor, filters, diff drivers, promisor remotes…) can make
+/// git run anything, so git runs here with `--git-dir` at a private directory of sill's: links to
+/// the real objects, refs, HEAD, index and packed-refs, and a config that keeps only the
+/// repository's format (version, object format, ref storage) — nothing that names a program.
+/// Hooks and fsmonitor are switched off on the command line as well, diffs never call out
+/// ([`Git::DIFF_SAFE`]), and nothing is written back (`--no-optional-locks`). Every host-side git
+/// goes through here (security.md S1, SPEC §4.11 #3).
+pub struct Git {
+    work_tree: PathBuf,
+    dir: PathBuf,
+}
+
+impl Git {
+    pub fn open(repo: &Path) -> Result<Git> {
+        let dot = repo.join(".git");
+        // a linked worktree's `.git` is a file naming its directory
+        let gitdir = if dot.is_dir() {
+            dot
+        } else {
+            let text = std::fs::read_to_string(&dot).with_context(|| format!("{}: no .git", repo.display()))?;
+            let p = text.trim().strip_prefix("gitdir:").map(str::trim).with_context(|| format!("{}: malformed .git file", repo.display()))?;
+            let p = Path::new(p);
+            if p.is_absolute() { p.to_path_buf() } else { repo.join(p) }
+        };
+        // a linked worktree keeps objects and refs in the main repository
+        let common = match std::fs::read_to_string(gitdir.join("commondir")) {
+            Ok(c) => {
+                let p = PathBuf::from(c.trim());
+                if p.is_absolute() { p } else { gitdir.join(p) }
+            }
+            Err(_) => gitdir.clone(),
+        };
+        let n = GIT_VIEWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("sill-git-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
+        std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+        let view = Git { work_tree: repo.to_path_buf(), dir };
+        for (base, name) in [(&common, "objects"), (&common, "refs"), (&common, "packed-refs"), (&common, "info"), (&common, "shallow"), (&gitdir, "index")] {
+            let src = base.join(name);
+            if src.exists() {
+                std::os::unix::fs::symlink(&src, view.dir.join(name))?;
+            }
+        }
+        // HEAD is copied, not linked: git takes a symlinked HEAD for the ancient `HEAD -> refs/…`
+        // form and refuses any other target
+        std::fs::copy(gitdir.join("HEAD"), view.dir.join("HEAD")).with_context(|| format!("{}: no HEAD", repo.display()))?;
+        let original = std::fs::read_to_string(common.join("config")).unwrap_or_default();
+        std::fs::write(view.dir.join("config"), format_config(&original))?;
+        Ok(view)
+    }
+
+    /// A `git` on this view, the subcommand and its arguments still to add.
+    pub fn cmd(&self) -> std::process::Command {
+        let mut c = std::process::Command::new("git");
+        c.arg("--git-dir").arg(&self.dir).arg("--work-tree").arg(&self.work_tree).arg("--no-optional-locks");
+        for kv in ["core.fsmonitor=false", "core.hooksPath=/dev/null", "diff.external=", "submodule.recurse=false", "core.pager=cat", "protocol.allow=never"] {
+            c.arg("-c").arg(kv);
+        }
+        c.env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
+            .current_dir(&self.work_tree);
+        c
+    }
+
+    /// `diff` arguments that keep git from calling out: no external diff, no textconv, no submodules.
+    pub const DIFF_SAFE: &'static [&'static str] = &["--no-ext-diff", "--no-textconv", "--ignore-submodules=all"];
+}
+
+impl Drop for Git {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// The repository's format from its config, and nothing else: the keys below, with values that are
+/// one word (`1`, `true`, `sha256`, `reftable`). Everything that could name a program is left out.
+fn format_config(original: &str) -> String {
+    const KEEP: &[(&str, &str)] = &[
+        ("core", "repositoryformatversion"),
+        ("core", "filemode"),
+        ("core", "ignorecase"),
+        ("core", "symlinks"),
+        ("core", "precomposeunicode"),
+        ("core", "sparsecheckout"),
+        ("core", "sparsecheckoutcone"),
+        ("extensions", "objectformat"),
+        ("extensions", "compatobjectformat"),
+        ("extensions", "refstorage"),
+    ];
+    let mut section = String::new();
+    let mut kept: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for raw in original.lines() {
+        let line = raw.trim();
+        if let Some(rest) = line.strip_prefix('[') {
+            section = rest.split([']', ' ', '"']).next().unwrap_or("").to_ascii_lowercase();
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else { continue };
+        let (k, v) = (k.trim().to_ascii_lowercase(), v.trim());
+        if let Some((s, key)) = KEEP.iter().find(|(s, key)| *s == section && *key == k)
+            && !v.is_empty()
+            && v.chars().all(|c| c.is_ascii_alphanumeric())
+        {
+            kept.entry(s).or_default().push(format!("\t{key} = {v}\n"));
+        }
+    }
+    let mut out = String::from("[core]\n\tbare = false\n");
+    let core = kept.remove("core").unwrap_or_default();
+    if !core.iter().any(|l| l.contains("repositoryformatversion")) {
+        out.push_str("\trepositoryformatversion = 0\n");
+    }
+    out.extend(core);
+    if let Some(ext) = kept.remove("extensions") {
+        out.push_str("[extensions]\n");
+        out.extend(ext);
+    }
+    out
+}
+
 /// Mark changes that their repository's `.gitignore` rules ignore (`git check-ignore`, one call per
 /// repo). Paths already ignored by pattern stay ignored.
 pub fn apply_gitignore(changes: &mut [Change]) {
@@ -67,9 +194,9 @@ pub fn apply_gitignore(changes: &mut [Change]) {
         }
     }
     for (repo, idxs) in by_repo {
-        let mut child = match std::process::Command::new("git")
-            .arg("-C")
-            .arg(&repo)
+        let Ok(git) = Git::open(&repo) else { return };
+        let mut child = match git
+            .cmd()
             .args(["check-ignore", "--stdin", "-z", "--no-index"])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -136,12 +263,8 @@ pub fn repo_root(path: &Path) -> Option<PathBuf> {
 
 /// `git status --porcelain` of a repo: (relative path, one-letter status `M`/`A`/`D`/`R`/`?`).
 pub fn git_status(repo: &Path) -> Vec<(PathBuf, String)> {
-    let Ok(out) = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["status", "--porcelain", "-z", "--untracked-files=all"])
-        .output()
-    else {
+    let Ok(git) = Git::open(repo) else { return vec![] };
+    let Ok(out) = git.cmd().args(["status", "--porcelain", "-z", "--untracked-files=all", "--ignore-submodules=all"]).output() else {
         return vec![];
     };
     let mut v = Vec::new();
@@ -163,7 +286,7 @@ pub fn git_status(repo: &Path) -> Vec<(PathBuf, String)> {
 
 /// Unified diff of a file in a live repo (working tree vs HEAD; whole file for untracked).
 pub fn git_diff(repo: &Path, rel: &Path) -> String {
-    let out = std::process::Command::new("git").arg("-C").arg(repo).args(["diff", "HEAD", "--"]).arg(rel).output();
+    let out = Git::open(repo).and_then(|git| Ok(git.cmd().arg("diff").args(Git::DIFF_SAFE).args(["HEAD", "--"]).arg(rel).output()?));
     match out {
         Ok(o) if !o.stdout.is_empty() => String::from_utf8_lossy(&o.stdout).into_owned(),
         _ => std::fs::read_to_string(repo.join(rel)).map(|t| format!("(untracked)\n{t}")).unwrap_or_default(),
@@ -234,12 +357,7 @@ pub struct Language {
 /// (`git ls-files` with the index's object sizes: nothing is read, ignored and untracked files
 /// don't count). `None` without any code, or with a git too old for `--format`.
 pub fn repo_language(repo: &Path) -> Option<Language> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["ls-files", "-z", "--format=%(objectsize)%x09%(path)"])
-        .output()
-        .ok()?;
+    let out = Git::open(repo).ok()?.cmd().args(["ls-files", "-z", "--format=%(objectsize)%x09%(path)"]).output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -267,9 +385,9 @@ pub fn repo_language(repo: &Path) -> Option<Language> {
 /// working-tree file (`git diff -U0`; a pure deletion has no lines to mark and is left out).
 /// `None` for an untracked file (everything is new) or when git can't say.
 pub fn git_changed_lines(repo: &Path, rel: &Path) -> Option<Vec<(usize, usize)>> {
-    let tracked = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo)
+    let git = Git::open(repo).ok()?;
+    let tracked = git
+        .cmd()
         .args(["ls-files", "--error-unmatch", "--"])
         .arg(rel)
         .stdout(std::process::Stdio::null())
@@ -280,7 +398,7 @@ pub fn git_changed_lines(repo: &Path, rel: &Path) -> Option<Vec<(usize, usize)>>
     if !tracked {
         return None;
     }
-    let out = std::process::Command::new("git").arg("-C").arg(repo).args(["diff", "-U0", "HEAD", "--"]).arg(rel).output().ok()?;
+    let out = git.cmd().args(["diff", "-U0"]).args(Git::DIFF_SAFE).args(["HEAD", "--"]).arg(rel).output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -302,20 +420,30 @@ fn parse_hunk_ranges(diff: &str) -> Vec<(usize, usize)> {
     v
 }
 
-/// Revert a file in a live repo to HEAD (or delete it when untracked).
+/// Revert a file in a live repo to HEAD (or delete it when untracked). Git checks nothing out
+/// (a checkout runs smudge filters and hooks): the blob is read with `cat-file` and written below
+/// the repository without following links.
 pub fn git_revert(repo: &Path, rel: &Path) -> Result<&'static str> {
-    let tracked = std::process::Command::new("git").arg("-C").arg(repo).args(["ls-files", "--error-unmatch", "--"]).arg(rel)
-        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status()?.success();
-    if tracked {
-        let st = std::process::Command::new("git").arg("-C").arg(repo).args(["checkout", "HEAD", "--"]).arg(rel).status()?;
-        if !st.success() {
-            anyhow::bail!("git checkout failed");
-        }
-        Ok("restored from HEAD")
-    } else {
-        std::fs::remove_file(repo.join(rel))?;
-        Ok("untracked file removed")
+    let git = Git::open(repo)?;
+    let out = git.cmd().args(["ls-tree", "-z", "HEAD", "--"]).arg(rel).output()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let entry = text.trim_end_matches('\0');
+    if entry.is_empty() {
+        crate::safe_fs::remove_file_beneath(repo, rel)?;
+        return Ok("untracked file removed");
     }
+    // `<mode> blob <sha>\t<path>`
+    let mut fields = entry.split('\t').next().unwrap_or("").split_whitespace();
+    let (mode, kind, sha) = (fields.next().unwrap_or(""), fields.next().unwrap_or(""), fields.next().unwrap_or(""));
+    if kind != "blob" || mode == "120000" {
+        bail!("{}: not a regular file in HEAD", rel.display());
+    }
+    let blob = git.cmd().args(["cat-file", "blob", sha]).output()?;
+    if !blob.status.success() {
+        bail!("git cat-file {sha} failed");
+    }
+    crate::safe_fs::write_file_beneath(repo, rel, &blob.stdout, if mode == "100755" { 0o755 } else { 0o644 })?;
+    Ok("restored from HEAD")
 }
 
 /// Unified diff text for a change (host vs upper).
@@ -373,6 +501,50 @@ mod tests {
         assert!(git(&["add", "a.rs", "b.py", "README.md"]));
         let l = repo_language(&dir).expect("a language");
         assert_eq!((l.name, l.mark, l.percent), ("Rust", "Rs", 90));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A pin's `.git/config` is the agent's: fsmonitor, hooks and filters it names must not run.
+    #[test]
+    fn git_view_runs_nothing_from_the_repository_config() {
+        let dir = std::env::temp_dir().join(format!("sill-gitview-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().map(|o| o.status.success()).unwrap_or(false);
+        if !git(&["init", "-q"]) {
+            eprintln!("no git: skipped");
+            return;
+        }
+        let marker = dir.join("RAN");
+        let script = dir.join("evil.sh");
+        std::fs::write(&script, format!("#!/bin/sh\ntouch {}\ncat\n", marker.display())).unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        std::fs::write(dir.join(".gitattributes"), "*.txt filter=evil diff=evil\n").unwrap();
+        assert!(git(&["-c", "user.email=t@t", "-c", "user.name=t", "add", "."]));
+        assert!(git(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "one"]));
+        let s = script.display();
+        for kv in [format!("core.fsmonitor={s}"), format!("filter.evil.clean={s}"), format!("filter.evil.smudge={s}"), format!("diff.evil.command={s}"), format!("diff.evil.textconv={s}"), format!("core.hooksPath={}", dir.display())] {
+            let (k, v) = kv.split_once('=').unwrap();
+            assert!(git(&["config", k, v]));
+        }
+        std::fs::write(dir.join("a.txt"), "two\n").unwrap();
+        let st = git_status(&dir);
+        assert!(st.iter().any(|(p, s)| p == Path::new("a.txt") && s == "M"), "{st:?}");
+        assert!(git_diff(&dir, Path::new("a.txt")).contains("+two"));
+        assert!(git_changed_lines(&dir, Path::new("a.txt")).is_some());
+        let _ = repo_language(&dir); // through the view like the rest
+        assert_eq!(git_revert(&dir, Path::new("a.txt")).unwrap(), "restored from HEAD");
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "one\n");
+        assert!(!marker.exists(), "the repository's config ran a program");
+        // a tracked file turned into a link out of the repository is not followed on revert
+        let outside = std::env::temp_dir().join(format!("sill-gitview-out-{}", std::process::id()));
+        std::fs::write(&outside, "host").unwrap();
+        std::fs::remove_file(dir.join("a.txt")).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("a.txt")).unwrap();
+        assert!(git_revert(&dir, Path::new("a.txt")).is_err());
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "host");
+        let _ = std::fs::remove_file(&outside);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

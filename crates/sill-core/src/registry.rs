@@ -231,16 +231,7 @@ pub fn installed(home: &Path, id: &str) -> Option<Installed> {
 /// Whether an agent's command can run here: an absolute path that exists, or a name found on PATH
 /// (plus `~/.local/bin`, where npm's global installs land).
 pub fn available(agent: &Agent, home: &Path) -> Option<PathBuf> {
-    let first = agent.command.first()?;
-    let p = Path::new(first);
-    if p.is_absolute() {
-        return p.is_file().then(|| p.to_path_buf());
-    }
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|v| std::env::split_paths(&v).collect())
-        .unwrap_or_default();
-    dirs.push(home.join(".local/bin"));
-    dirs.into_iter().map(|d| d.join(first)).find(|c| c.is_file())
+    resolve_program(agent.command.first()?, home)
 }
 
 // --- install ---------------------------------------------------------------------------------------
@@ -256,8 +247,14 @@ pub fn install(home: &Path, entry: &Entry, log: &mut dyn FnMut(String)) -> Resul
         _ => install_binary(&dir, &entry.distribution.binary.as_ref().unwrap()[platform_key()], log)?,
     };
     let icon = fetch_icon(home, entry);
-    let supports_load = probe_load_session(&command, &env, home).unwrap_or(false);
-    log(format!("probe: {}", if supports_load { "resumes sessions" } else { "no session resume"}));
+    let supports_load = match probe_load_session(&command, &env, home) {
+        Ok(b) => b,
+        Err(e) => {
+            log(format!("probe (in a throwaway jail) failed: {e:#}"));
+            false
+        }
+    };
+    log(format!("probe: {}", if supports_load { "resumes sessions" } else { "no session resume" }));
 
     let installed = Installed { version: entry.version.clone(), kind: how.to_string(), command: command.clone(), env: env.clone() };
     std::fs::write(dir.join("installed.json"), serde_json::to_string_pretty(&installed)?)?;
@@ -468,7 +465,12 @@ fn install_binary(dir: &Path, d: &BinaryDist, log: &mut dyn FnMut(String)) -> Re
     let mut cmd = Command::new("curl");
     cmd.args(["-fSL", "--max-time", "600", "-o"]).arg(&archive).arg(url);
     run_logged(&mut cmd, log).context("download")?;
-    if let Some(want) = &d.sha256 {
+    // a download without a checksum is whatever the CDN served: not installed (security.md S3)
+    let Some(want) = &d.sha256 else {
+        let _ = std::fs::remove_file(&archive);
+        bail!("the registry gives no sha256 for {url}: refusing to install an unverifiable binary");
+    };
+    {
         use sha2::{Digest, Sha256};
         let got: String = Sha256::digest(std::fs::read(&archive)?).iter().map(|b| format!("{b:02x}")).collect();
         if !got.eq_ignore_ascii_case(want) {
@@ -507,18 +509,54 @@ fn install_binary(dir: &Path, d: &BinaryDist, log: &mut dyn FnMut(String)) -> Re
     Ok((command, d.env.clone()))
 }
 
+/// A program by name on the shelf's `PATH` (and `~/.local/bin`), or as given when absolute.
+fn resolve_program(name: &str, home: &Path) -> Option<PathBuf> {
+    let p = Path::new(name);
+    if p.is_absolute() {
+        return p.is_file().then(|| p.to_path_buf());
+    }
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|v| std::env::split_paths(&v).collect()).unwrap_or_default();
+    dirs.push(home.join(".local/bin"));
+    dirs.into_iter().map(|d| d.join(name)).find(|c| c.is_file())
+}
+
 /// Ask a freshly installed agent what it can do: `initialize` over its stdio with a short deadline.
-/// Returns whether it advertises `loadSession`.
+/// Returns whether it advertises `loadSession`. The package was just downloaded, so it runs in a
+/// throwaway jail, not on the host: no network, no capabilities, the system read-only, the home
+/// hidden but for the tools dir and the runtime the command needs (security.md S3).
 fn probe_load_session(command: &[String], env: &BTreeMap<String, String>, home: &Path) -> Result<bool> {
-    let Some(prog) = command.first() else { bail!("no command") };
-    let mut child = Command::new(prog)
-        .args(&command[1..])
-        .envs(env)
-        .current_dir(home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
+    let Some(first) = command.first() else { bail!("no command") };
+    let prog = resolve_program(first, home).with_context(|| format!("{first}: not found"))?;
+    let tools = tools_dir(home);
+    let mut b = Command::new("bwrap");
+    b.args(["--unshare-all", "--disable-userns", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--clearenv"]);
+    b.args(["--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/run"]);
+    b.arg("--tmpfs").arg(crate::jail::STATE_FS); // other sessions' upper trees
+    b.arg("--tmpfs").arg(home);
+    b.arg("--ro-bind").arg(&tools).arg(&tools);
+    // the runtime the command needs may live under the home (nvm's node, a venv): just those dirs
+    let mut path_dirs: Vec<PathBuf> = ["/usr/local/bin", "/usr/bin", "/bin"].iter().map(PathBuf::from).collect();
+    let mut needed: Vec<PathBuf> = prog.parent().map(Path::to_path_buf).into_iter().collect();
+    for runtime in ["node", "python3", "uv"] {
+        if let Some(p) = resolve_program(runtime, home).and_then(|p| p.parent().map(Path::to_path_buf)) {
+            needed.push(p);
+        }
+    }
+    for d in needed {
+        if d.starts_with(home) && !d.starts_with(&tools) {
+            b.arg("--ro-bind").arg(&d).arg(&d);
+        }
+        if !path_dirs.contains(&d) {
+            path_dirs.push(d);
+        }
+    }
+    let path = std::env::join_paths(path_dirs).context("PATH")?;
+    b.arg("--setenv").arg("HOME").arg(home).arg("--setenv").arg("PATH").arg(path).arg("--chdir").arg(home);
+    for (k, v) in env {
+        b.arg("--setenv").arg(k).arg(v);
+    }
+    b.arg("--").arg(&prog).args(&command[1..]);
+    let mut child = b.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().context("bwrap")?;
     let mut stdin = child.stdin.take().unwrap();
     let stdout = BufReader::new(child.stdout.take().unwrap());
     let init = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {

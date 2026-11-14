@@ -1551,8 +1551,12 @@ impl SessionView {
             self.conv.add_note("files can't be attached: this policy keeps no private ~/.cache for the session");
             return;
         };
-        if let Err(e) = std::fs::create_dir_all(&host_dir).and_then(|_| std::fs::write(host_dir.join(&name), &bytes)) {
-            self.conv.add_note(&format!("could not copy {name} into the session: {e}"));
+        // the uploads dir is inside the session's scratch, which the agent can reach: the copy
+        // never follows a link it may have planted there (security.md S6)
+        let rel = host_dir.join(&name);
+        let rel = rel.strip_prefix(&sdir).unwrap_or(&rel);
+        if let Err(e) = sill_core::safe_fs::write_file_beneath(&sdir, rel, &bytes, 0o644) {
+            self.conv.add_note(&format!("could not copy {name} into the session: {e:#}"));
             return;
         }
         self.add_attachment(Attachment { name: name.clone(), mime: "application/octet-stream".into(), kind: AttachmentKind::File { jail_path: jail_dir.join(&name) } });
@@ -2027,14 +2031,15 @@ fn git_summary(dir: &std::path::Path) -> Option<(u64, u64, u64)> {
     if !dir.join(".git").exists() {
         return None;
     }
-    let out = std::process::Command::new("git").arg("-C").arg(dir).args(["diff", "--numstat", "HEAD"]).output().ok()?;
+    let git = sill_core::changes::Git::open(dir).ok()?;
+    let out = git.cmd().args(["diff", "--numstat"]).args(sill_core::changes::Git::DIFF_SAFE).arg("HEAD").output().ok()?;
     let (mut add, mut del) = (0u64, 0u64);
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         let mut it = line.split('\t');
         add += it.next().and_then(|x| x.parse::<u64>().ok()).unwrap_or(0);
         del += it.next().and_then(|x| x.parse::<u64>().ok()).unwrap_or(0);
     }
-    let out = std::process::Command::new("git").arg("-C").arg(dir).args(["ls-files", "--others", "--exclude-standard"]).output().ok()?;
+    let out = git.cmd().args(["ls-files", "--others", "--exclude-standard"]).output().ok()?;
     let untracked = String::from_utf8_lossy(&out.stdout).lines().count() as u64;
     Some((add, del, untracked))
 }

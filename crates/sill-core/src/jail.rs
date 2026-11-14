@@ -111,6 +111,20 @@ pub fn read_root_entries() -> Result<Vec<RootEntry>> {
     Ok(out)
 }
 
+/// Refuse a mount at `inside` that lies under a masked path (it would expose what the mask hides)
+/// or above one (it would bury the mask under a real tree).
+fn no_bind_across_mask(inside: &Path, masked: &[PathBuf]) -> Result<()> {
+    if let Some(m) = masked.iter().find(|m| is_under(inside, m) || is_under(m, inside)) {
+        anyhow::bail!(
+            "{}: not mounted — it would {} the masked {} (a pin, a `direct`/`ro` path or an agent's files may not cross a `mask`)",
+            inside.display(),
+            if is_under(inside, m) { "sit inside" } else { "cover" },
+            m.display()
+        );
+    }
+    Ok(())
+}
+
 impl JailSpec {
     pub fn plan(&self) -> Result<JailPlan> {
         let p = &self.policy;
@@ -359,10 +373,19 @@ impl JailSpec {
             push(&mut a, &[&"--tmpfs", &self.state_dir, &"--tmpfs", &host_view(&self.state_dir)]);
         }
 
-        // masks (both views), direct, ro
+        // masks (both views), direct, ro. Sill's own files are masked whatever the policy says: its
+        // configuration (policies, agent overrides — a session's mounts and allowed domains are made
+        // of them), the session store and the staged binaries (security.md S2).
         let mut masked = Vec::new();
-        for pat in &p.paths.mask {
-            for path in expand_pattern(pat, &self.home) {
+        let config_dir = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| self.home.join(".config"));
+        let state_base = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| self.home.join(".local/state"));
+        let own: Vec<PathBuf> = [config_dir.join("sill"), state_base.join("sill/bin")]
+            .into_iter()
+            .chain(["sill.db", "sill.db-wal", "sill.db-shm"].iter().map(|f| state_base.join("sill").join(f)))
+            .filter(|p| p.exists())
+            .collect();
+        for path in p.paths.mask.iter().flat_map(|pat| expand_pattern(pat, &self.home)).chain(own) {
+            {
                 let is_dir = path.is_dir();
                 for target in [path.clone(), host_view(&path)] {
                     if is_dir {
@@ -374,19 +397,24 @@ impl JailSpec {
                 masked.push(path);
             }
         }
+        // a bind inside a mask puts the masked thing back, a bind over a mask buries it: neither
+        // is mounted, whatever a policy, a pin or an agent override asks for (security.md S2)
         let mut direct = Vec::new();
         for pat in &p.paths.direct {
             for path in expand_pattern(pat, &self.home) {
+                no_bind_across_mask(&path, &masked)?;
                 push(&mut a, &[&"--bind", &path, &path]);
                 direct.push(path);
             }
         }
         for pat in &p.paths.ro {
             for path in expand_pattern(pat, &self.home) {
+                no_bind_across_mask(&path, &masked)?;
                 push(&mut a, &[&"--ro-bind", &path, &path]);
             }
         }
         for (host, inside) in &self.binds {
+            no_bind_across_mask(inside, &masked)?;
             push(&mut a, &[&"--bind", host, inside]);
             direct.push(inside.clone());
         }
@@ -488,6 +516,17 @@ mod tests {
             extra_args: vec![],
             command: vec!["true".into()],
         }
+    }
+
+    #[test]
+    fn no_bind_may_cross_a_mask() {
+        let masked = vec![PathBuf::from("/home/me/.ssh"), PathBuf::from("/home/me/.config/x/credentials")];
+        assert!(no_bind_across_mask(Path::new("/home/me/.ssh/id_rsa"), &masked).is_err()); // inside: re-exposes
+        assert!(no_bind_across_mask(Path::new("/home/me"), &masked).is_err()); // over: buries
+        assert!(no_bind_across_mask(Path::new("/home/me/.ssh"), &masked).is_err());
+        assert!(no_bind_across_mask(Path::new("/home/me/.sshx"), &masked).is_ok());
+        assert!(no_bind_across_mask(Path::new("/home/me/proj"), &masked).is_ok());
+        assert!(no_bind_across_mask(Path::new("/home/me/.config/x"), &masked).is_err());
     }
 
     #[test]

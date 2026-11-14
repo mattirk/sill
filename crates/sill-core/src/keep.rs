@@ -55,6 +55,33 @@ pub struct Kept {
 const LOG: &str = "log.jsonl";
 const PRIOR: &str = "prior";
 
+/// Why keep refuses a path outright, or `None`. What the shelf itself runs or reads — its
+/// configuration (policies, agent overrides: a session's mounts and allowed domains are made of
+/// them) and its state (the session store, the staged binaries, the agents' homes) — and a
+/// repository's own executable configuration (`.git/config`, `.git/hooks`). A kept line there is
+/// the agent configuring the host; the person does it by hand if they mean it (security.md S2).
+pub fn protected(host: &Path) -> Option<&'static str> {
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let config = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".config"));
+    let state = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".local/state"));
+    if host.starts_with(config.join("sill")) {
+        return Some("sill's own configuration");
+    }
+    if host.starts_with(state.join("sill")) {
+        return Some("sill's own state");
+    }
+    let parts: Vec<&std::ffi::OsStr> = host.components().map(|c| c.as_os_str()).collect();
+    for (i, part) in parts.iter().enumerate() {
+        if *part == ".git"
+            && let Some(next) = parts.get(i + 1)
+            && (*next == "config" || *next == "hooks")
+        {
+            return Some("the repository's git configuration");
+        }
+    }
+    None
+}
+
 /// Open `path` with every component resolved without following symlinks and without leaving `/`.
 fn open_nofollow(path: &Path, flags: OFlags, mode: Mode) -> Result<std::fs::File> {
     let root = std::fs::File::open("/")?;
@@ -205,6 +232,9 @@ impl Prior {
 
 /// Apply one ledger entry to the host. Returns what was done.
 pub fn keep(change: &Change, opts: &KeepOptions) -> Result<&'static str> {
+    if let Some(why) = protected(&change.path) {
+        bail!("{}: not kept — {why}; do it by hand if you mean it", change.path.display());
+    }
     let host = &change.path;
     if !host.is_absolute() {
         bail!("{} is not absolute", host.display());

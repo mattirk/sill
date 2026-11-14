@@ -347,12 +347,27 @@ fn state_fs(i: &mut Init, a: &InitArgs, has_systemd: bool) -> Result<()> {
     if !i.dry {
         std::fs::set_permissions(state, std::os::unix::fs::PermissionsExt::from_mode(0o1777))?;
         for (uid, gid, _, _) in regular_users() {
+            // the parent is world-writable: a directory already there is taken over only when it
+            // is root's (an earlier init) or the user's own — never one someone else put there, and
+            // never through a symlink (security.md S5)
             let mine = state.join(uid.to_string());
-            if !mine.is_dir() {
-                std::fs::create_dir(&mine)?;
+            let created = match rustix::fs::mkdir(&mine, rustix::fs::Mode::from_raw_mode(0o700)) {
+                Ok(()) => true,
+                Err(rustix::io::Errno::EXIST) => false,
+                Err(e) => return Err(e).with_context(|| format!("create {}", mine.display())),
+            };
+            let fd = rustix::fs::open(&mine, rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC, rustix::fs::Mode::empty())
+                .with_context(|| format!("open {} (not through a symlink)", mine.display()))?;
+            let st = rustix::fs::fstat(&fd)?;
+            if !created && st.st_uid != uid && st.st_uid != 0 {
+                bail!(
+                    "{} belongs to uid {}, not uid {uid}: someone else put it there — remove it (or chown it) and run init again",
+                    mine.display(),
+                    st.st_uid
+                );
             }
-            std::fs::set_permissions(&mine, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
-            rustix::fs::chown(&mine, Some(rustix::fs::Uid::from_raw(uid)), Some(rustix::fs::Gid::from_raw(gid)))?;
+            rustix::fs::fchmod(&fd, rustix::fs::Mode::from_raw_mode(0o700))?;
+            rustix::fs::fchown(&fd, Some(rustix::fs::Uid::from_raw(uid)), Some(rustix::fs::Gid::from_raw(gid)))?;
         }
     }
     Ok(())

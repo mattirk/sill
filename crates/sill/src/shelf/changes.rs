@@ -393,7 +393,7 @@ impl ChangesPage {
                     keep_all.connect_clicked(move |_| {
                         let mut n = 0;
                         for c in &items {
-                            if c.conflict || c.ignored {
+                            if c.conflict || c.ignored || keep::protected(&c.path).is_some() {
                                 continue;
                             }
                             if keep::keep(c, &opts).is_ok() {
@@ -460,6 +460,11 @@ impl ChangesPage {
                     let keep_b = gtk::Button::with_label("Keep");
                     keep_b.set_sensitive(!c.conflict);
                     keep_b.set_tooltip_text(Some("copy to the host"));
+                    if let Some(why) = keep::protected(&c.path) {
+                        // sill's own files and a repository's executable config: never from here
+                        keep_b.set_sensitive(false);
+                        keep_b.set_tooltip_text(Some(&format!("not kept by sill: {why} — do it by hand if you mean it")));
+                    }
                     let revert_b = gtk::Button::with_label("Revert");
                     {
                         let p = self.clone();

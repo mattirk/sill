@@ -1,10 +1,13 @@
 //! Host-side agent login (SPEC §4.1 agents). Some logins open a browser and wait on a localhost
 //! callback (Codex's ChatGPT flow); inside the jail neither the browser nor the callback port is
 //! reachable, and the adapter does not hand out the URL. So the agent is started on the host for the
-//! login only: `initialize` → `authenticate` over its stdio, nothing else. Its home is relocated to
-//! the sill-owned copy (`home_env`, `CODEX_HOME`), so the login file and everything else it writes
-//! land in the jail's home and the host never gets a `~/.codex` or `~/.gemini`; an agent without `home_env` writes
-//! the host file named in `shared_files`, which is bound in. Either way the session starts again.
+//! login only: `initialize` → `authenticate` over its stdio, nothing else. Its home is relocated
+//! (`home_env`, `CODEX_HOME`) to a directory made fresh for the login — not the jail's copy: that
+//! one is the agent's to write, and a config planted there (an MCP server command, a hook) would run
+//! on the host through this very process (security.md S4). What the login writes is copied into
+//! the jail's copy afterwards, files only and never through a link, so the host never gets a
+//! `~/.codex` or `~/.gemini`; an agent without `home_env` writes the host file named in
+//! `shared_files`, which is bound in. Either way the session starts again.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -33,15 +36,22 @@ pub fn run(agent: &Agent, home: &Path, method: &str, mut report: impl FnMut(Line
     let Some(prog) = agent.command.first() else { bail!("agent {} has no command", agent.id) };
     let mut env = agent.env.clone();
     let mut unset: Vec<&str> = Vec::new();
+    // the login's own home: empty before, copied into the jail's copy after, removed then
+    let scratch = crate::session::agent_home(home, &agent.id)
+        .parent()
+        .and_then(Path::parent)
+        .map(|state| state.join("login").join(&agent.id))
+        .context("state dir")?;
+    let _ = std::fs::remove_dir_all(&scratch);
+    let mut copy_back: Option<PathBuf> = None;
     match (&agent.home_env, agent.home_paths.first()) {
         (Some(var), Some(first)) => {
-            // the agent's home for this run is the jail's copy: nothing of it lands on the host
             let name = Path::new(first).file_name().map(|n| n.to_os_string()).unwrap_or_default();
-            let parent = crate::session::agent_home(home, &agent.id);
-            let owned = parent.join(name);
+            let owned = scratch.join(name);
             std::fs::create_dir_all(&owned).with_context(|| format!("create {}", owned.display()))?;
-            let target = if agent.home_env_parent { &parent } else { &owned };
+            let target = if agent.home_env_parent { &scratch } else { &owned };
             env.insert(var.clone(), target.display().to_string());
+            copy_back = Some(crate::session::agent_home(home, &agent.id));
         }
         _ if !agent.shared_files.is_empty() => {
             // the login file's directory may not exist yet on a host that never ran the agent
@@ -61,13 +71,13 @@ pub fn run(agent: &Agent, home: &Path, method: &str, mut report: impl FnMut(Line
             // Only `$HOME` moves; the XDG dirs stay real, so a browser the agent launches by any
             // route (xdg-open, a bundled opener, Python's webbrowser) finds its own profile. The
             // price: an agent keeping its login under `$XDG_CONFIG_HOME` writes it to the host.
-            let base = crate::session::agent_home(home, &agent.id);
-            std::fs::create_dir_all(&base)?;
+            std::fs::create_dir_all(&scratch)?;
             let shim_dir = browser_shim(home)?;
             let path = std::env::var("PATH").unwrap_or_default();
             env.insert("PATH".into(), format!("{}:{path}", shim_dir.display()));
             env.insert("BROWSER".into(), shim_dir.join("xdg-open").display().to_string());
-            env.insert("HOME".into(), base.display().to_string());
+            env.insert("HOME".into(), scratch.display().to_string());
+            copy_back = Some(crate::session::agent_home(home, &agent.id));
             // no keyring for the login (the "fail" backend: every call raises, the "null" one silently
             // swallows writes): a token kept in the desktop's secret service would be
             // invisible inside the jail, so the agent must fall back to its file (Vibe: ~/.vibe/.env)
@@ -134,6 +144,12 @@ pub fn run(agent: &Agent, home: &Path, method: &str, mut report: impl FnMut(Line
     })();
     let _ = child.kill();
     let _ = child.wait();
+    if let (Ok(()), Some(dst)) = (&result, copy_back) {
+        std::fs::create_dir_all(&dst)?;
+        let n = crate::safe_fs::copy_files_beneath(&scratch, &dst)?;
+        report(Line::Status(format!("{n} login file(s) copied into the session's home")));
+    }
+    let _ = std::fs::remove_dir_all(&scratch);
     result
 }
 
