@@ -227,6 +227,8 @@ pub fn shut_down_on_signals() {
 
 /// Shut the VM down at Quit: the guest is asked first and given a little while, then stopped.
 pub fn shut_down() {
+    // the agents' Mac programs end with Sill (the person, 2026-11-13)
+    crate::mac_procs::stop_all();
     let Some(shared) = SHARED.get() else { return };
     let vm = shared.vm.lock().unwrap().take();
     if let Some(vm) = vm {
@@ -666,6 +668,7 @@ fn serve_mac(dir: &Path, vm: &sill_vm::Vm) -> Result<(), String> {
         ));
     }
     let secret = Arc::new(secret);
+    watch_mac_processes();
     vm.listen(
         MAC_PORT,
         Arc::new(move |stream| {
@@ -720,6 +723,12 @@ fn mac_request(line: &str, secret: &str) -> Result<(serde_json::Value, Option<Ve
         Some("input") => {
             granted(session, generation, "mac_input")?;
             return mac_input(session, generation, args).map(|result| (json!({"result": result}), None));
+        }
+        Some("commands") => {
+            granted(session, generation, "mac_commands")?;
+            // a working directory inside a folder shared with the VM (the person, 2026-11-13)
+            let shared: Vec<PathBuf> = DIR.get().map(|dir| load_folders(dir).into_iter().flatten().collect()).unwrap_or_default();
+            return crate::mac_procs::handle(session, args, &shared).map(|result| (json!({"result": result}), None));
         }
         _ => return Err("unknown Mac operation".into()),
     }
@@ -907,4 +916,25 @@ fn mac_input(session: &str, generation: u64, args: &serde_json::Value) -> Result
         std::thread::sleep(Duration::from_millis(30));
     }
     Ok(json!({"done": total, "of": total}))
+}
+
+/// Every few seconds: a session whose Mac processes still run but whose `mac_commands` grant has
+/// gone (revoked, the session ended, the daemon restarted) has them stopped. Started once.
+fn watch_mac_processes() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        let _ = std::thread::Builder::new().name("sill-gui-mac-procs".into()).spawn(|| loop {
+            std::thread::sleep(Duration::from_secs(3));
+            for session in crate::mac_procs::sessions_running() {
+                let state: Result<sill_proto::host_control::State, _> = sill_proto::Client::connect()
+                    .and_then(|client| client.call("_sill/host_control.state", serde_json::json!({"session_id": session})));
+                // the daemon unreachable is not a revocation: only a clear answer stops them
+                if let Ok(state) = state
+                    && (!state.active || !state.operations.iter().any(|op| op == "mac_commands"))
+                {
+                    crate::mac_procs::stop_session(&session);
+                }
+            }
+        });
+    });
 }

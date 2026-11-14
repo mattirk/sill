@@ -52,6 +52,7 @@ fn label(operation: &str) -> &'static str {
         "input" => "Display input",
         "mac_view" => "View Mac screen",
         "mac_input" => "Control Mac",
+        "mac_commands" => "Run Mac commands",
         "inspect" => "Process inspection",
         "launch" => "Process launch",
         "stop" => "Process stop",
@@ -69,7 +70,7 @@ pub fn offered() -> Vec<&'static str> {
         .iter()
         .copied()
         .filter(|op| match *op {
-            "mac_view" | "mac_input" => mac,
+            "mac_view" | "mac_input" | "mac_commands" => mac,
             "view" | "input" => !mac,
             _ => true,
         })
@@ -235,6 +236,9 @@ pub fn rows<'a>(view: &'a SessionView, session: &'a Session, can_change: bool) -
             }
             if *operation == "input" {
                 said.push_str(" Input can invoke anything on your desktop; a window scope is not a boundary.");
+            }
+            if *operation == "mac_commands" {
+                said.push_str(" Unrestricted: programs run as you on the Mac, from a shared folder; Sill records the command, not what it did. They stop when this is revoked and when Sill quits.");
             }
             if *operation == "mac_input" {
                 said.push_str(" The whole Mac desktop: clicks and keys reach whatever is in front, as yours would. Needs View Mac screen; your own mouse or keyboard pauses it.");

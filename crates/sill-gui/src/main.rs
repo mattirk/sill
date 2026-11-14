@@ -30,6 +30,8 @@ mod mac_screen;
 #[cfg(target_os = "macos")]
 mod mac_input;
 #[cfg(target_os = "macos")]
+mod mac_procs;
+#[cfg(target_os = "macos")]
 mod macos;
 mod media;
 mod menu;

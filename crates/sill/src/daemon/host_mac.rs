@@ -171,8 +171,68 @@ pub fn check_input(args: &Value) -> Result<()> {
     Ok(())
 }
 
+/// What `mac_commands` accepts: `{"run":{"argv":[…],"cwd":"/Users/…","env":{…}}}`, `{"list":true}`,
+/// `{"output":"mac:N"}` or `{"stop":"mac:N"}`. Checked again on the Mac (the working directory
+/// against the shared folders, there).
+pub fn check_commands(args: &Value) -> Result<()> {
+    let object = args.as_object().context("mac_commands takes a JSON object")?;
+    anyhow::ensure!(object.len() == 1, "one of run, list, output or stop");
+    let (kind, value) = object.iter().next().expect("one field");
+    let name = |v: &Value| -> Result<()> {
+        let n = v.as_str().context("a Mac process is named mac:N")?;
+        anyhow::ensure!(n.strip_prefix("mac:").is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit())), "a Mac process is named mac:N");
+        Ok(())
+    };
+    match kind.as_str() {
+        "list" => anyhow::ensure!(value == &Value::Bool(true), "list takes true"),
+        "output" | "stop" => name(value)?,
+        "run" => {
+            let run = value.as_object().context("run takes {\"argv\":[…],\"cwd\":\"/Users/…\"}")?;
+            for key in run.keys() {
+                anyhow::ensure!(matches!(key.as_str(), "argv" | "cwd" | "env"), "unknown field {key} in run");
+            }
+            let argv = run.get("argv").and_then(Value::as_array).context("run needs argv")?;
+            anyhow::ensure!(!argv.is_empty() && argv.len() <= 256, "argv has 1 to 256 parts");
+            anyhow::ensure!(argv.iter().all(|a| a.as_str().is_some_and(|a| !a.contains('\0'))), "argv is strings");
+            let cwd = run.get("cwd").and_then(Value::as_str).context("run needs cwd, an absolute Mac path")?;
+            anyhow::ensure!(cwd.starts_with('/'), "cwd is an absolute Mac path");
+            if let Some(env) = run.get("env") {
+                let env = env.as_object().context("env is an object of strings")?;
+                anyhow::ensure!(env.values().all(Value::is_string), "env is an object of strings");
+            }
+        }
+        other => anyhow::bail!("unknown mac_commands request {other}"),
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mac_commands_take_one_request_of_four() {
+        for ok in [
+            json!({"run":{"argv":["cargo","build"],"cwd":"/Users/me/sill"}}),
+            json!({"run":{"argv":["/bin/sh","-c","make"],"cwd":"/Users/me","env":{"X":"1"}}}),
+            json!({"list":true}),
+            json!({"output":"mac:3"}),
+            json!({"stop":"mac:12"}),
+        ] {
+            assert!(super::check_commands(&ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            json!({}),
+            json!({"run":{"argv":[],"cwd":"/Users/me"}}),
+            json!({"run":{"argv":["ls"],"cwd":"relative"}}),
+            json!({"run":{"argv":["ls"],"cwd":"/Users/me","user":"root"}}),
+            json!({"stop":"host:1"}),
+            json!({"stop":"mac:"}),
+            json!({"list":true,"stop":"mac:1"}),
+            json!({"shell":"ls"}),
+        ] {
+            assert!(super::check_commands(&bad).is_err(), "{bad}");
+        }
+    }
+
     use serde_json::json;
 
     #[test]

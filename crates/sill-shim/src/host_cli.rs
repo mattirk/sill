@@ -29,6 +29,7 @@ pub fn run(args: &[String]) -> Result<()> {
 const MAC_USAGE: &str = "usage: sill-mac state | displays G | windows G | screenshot G (--display ID | --window ID) [--output PATH]
        sill-mac click G --frame F X Y [--right] [--double] | move G --frame F X Y | drag G --frame F X1 Y1 X2 Y2
        sill-mac scroll G --frame F X Y DY [DX] | type G TEXT | key G COMBO | input G JSON
+       sill-mac run G --cwd DIR [--env K=V]… -- PROGRAM ARG… | ps G | output G mac:N | stop G mac:N
   state       Host control's generation and grants, and whether a Mac is attached
   displays    the Mac's displays: id, position and size in points, pixels, scale
   windows     the Mac's windows on screen: id, app, title, position and size in points
@@ -39,8 +40,15 @@ const MAC_USAGE: &str = "usage: sill-mac state | displays G | windows G | screen
   type        text where the Mac's focus is (not through the clipboard)
   key         a combination like cmd+shift+p, return, escape, left
   input       up to 32 actions in one request: {\"frame\":F,\"actions\":[{\"click\":[x,y]},{\"type\":\"text\"},…]}
+  run         start PROGRAM on the Mac as the person, in DIR (inside a shared Mac folder), with the
+              person's login environment; returns its name mac:N at once
+  ps          this session's Mac processes: name, argv, state, exit code
+  output      the last 64 KiB of a Mac process's output (stdout and stderr together)
+  stop        stop a Mac process and everything it started
 G is the generation (`sill-mac state`). Viewing needs the mac_view grant and macOS's Screen
-Recording consent for Sill; input needs mac_input and macOS's Accessibility consent. When the
+Recording consent for Sill; input needs mac_input and macOS's Accessibility consent; run, ps,
+output and stop need mac_commands (unrestricted: as the person; Mac processes stop on revocation
+and when Sill quits). When the
 person uses the mouse or keyboard, the agent's input stops and says how far it got: never repeat
 it blindly, take a new picture.";
 
@@ -80,6 +88,12 @@ pub fn run_mac(args: &[String]) -> Result<()> {
             }
             (target.context("screenshot needs --display ID or --window ID")?, output)
         }
+        "run" | "ps" | "output" | "stop" => {
+            let request = mac_commands(command, rest)?;
+            let result = call("mac_commands", Some(generation), request)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            return Ok(());
+        }
         "click" | "move" | "drag" | "scroll" | "type" | "key" | "input" => {
             let request = mac_input(command, rest)?;
             let result = call("mac_input", Some(generation), request)?;
@@ -95,6 +109,40 @@ pub fn run_mac(args: &[String]) -> Result<()> {
     }
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
+}
+
+/// A process request from `sill-mac run|ps|output|stop` and its arguments.
+fn mac_commands(command: &str, rest: &[String]) -> Result<Value> {
+    match command {
+        "ps" => {
+            anyhow::ensure!(rest.is_empty(), "ps takes only GENERATION");
+            Ok(json!({"list": true}))
+        }
+        "output" | "stop" => {
+            anyhow::ensure!(rest.len() == 1, "{command} takes a name, mac:N (`sill-mac ps`)");
+            Ok(json!({command: rest[0]}))
+        }
+        _ => {
+            let mut cwd = None;
+            let mut env = serde_json::Map::new();
+            let mut i = 0;
+            while i < rest.len() && rest[i] != "--" {
+                let value = rest.get(i + 1).with_context(|| format!("{} needs a value", rest[i]))?;
+                match rest[i].as_str() {
+                    "--cwd" => cwd = Some(value.clone()),
+                    "--env" => {
+                        let (k, v) = value.split_once('=').context("--env takes KEY=VALUE")?;
+                        env.insert(k.into(), json!(v));
+                    }
+                    other => anyhow::bail!("unknown option {other}\n{MAC_USAGE}"),
+                }
+                i += 2;
+            }
+            let argv = rest.get(i + 1..).filter(|a| !a.is_empty()).context("run needs -- PROGRAM ARG…")?;
+            let cwd = cwd.context("run needs --cwd DIR, inside a shared Mac folder")?;
+            Ok(json!({"run": {"argv": argv, "cwd": cwd, "env": env}}))
+        }
+    }
 }
 
 /// An input request from `sill-mac click|move|drag|scroll|type|key|input` and its arguments.
