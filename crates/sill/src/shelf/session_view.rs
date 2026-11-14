@@ -192,19 +192,43 @@ impl SessionView {
         prompt_scroll.add_css_class("sill-prompt-box");
         // the text view lays its lines out lazily, after the scrolled window has already measured
         // it, so a wrap that adds a line left the box a line short until the next relayout and
-        // the new line clipped; the validated height lands in the vadjustment's upper, so a change
-        // there asks for a fresh measure in the same frame — and once more from a low-priority
-        // idle, after GTK's own validation idles: a resize queued from inside layout is dropped
-        // on 4.24 (markdown::settle_height), which left the box a few pixels short, the first
-        // line scrolled up against its top edge
+        // the new line clipped; worse, the view had scrolled to the cursor meanwhile and the
+        // leftover scroll ate the top margin, the first line flush against the top edge. The
+        // validated height (margins included) is the vadjustment's upper, so the box's minimum
+        // content height follows it, up to the cap, and while the content fits the scroll is held
+        // at the top — checked on every signal the mismatch can show up on (upper: lines came in;
+        // page-size: the box was allocated; value: the view scrolled), since on 4.24 no single one
+        // of them is last (2026-11-02). The low-priority idle (markdown::settle_height) still
+        // lands after GTK's validation for the final measure. SILL_PROMPT_DEBUG=1 traces it.
         {
             let sw = prompt_scroll.downgrade();
-            prompt.vadjustment().unwrap().connect_upper_notify(move |_| {
-                if let Some(sw) = sw.upgrade() {
+            let debug = std::env::var_os("SILL_PROMPT_DEBUG").is_some();
+            let fit = Rc::new(move |adj: &gtk::Adjustment, why: &str| {
+                let Some(sw) = sw.upgrade() else { return };
+                let cap = sw.max_content_height();
+                let upper = adj.upper().ceil() as i32;
+                let want = upper.min(cap).max(0);
+                if debug {
+                    eprintln!(
+                        "{} prompt {why}: upper={upper} page={} value={} min={} box={}",
+                        super::trace_ts(), adj.page_size(), adj.value(), sw.min_content_height(), sw.height()
+                    );
+                }
+                if sw.min_content_height() != want {
+                    sw.set_min_content_height(want);
                     sw.queue_resize();
                     super::markdown::settle_height(&sw);
                 }
+                if upper <= cap && adj.value() != 0.0 {
+                    adj.set_value(0.0);
+                }
             });
+            let adj = prompt.vadjustment().unwrap();
+            let f = fit.clone();
+            adj.connect_upper_notify(move |a| f(a, "upper"));
+            let f = fit.clone();
+            adj.connect_page_size_notify(move |a| f(a, "page"));
+            adj.connect_value_changed(move |a| fit(a, "value"));
         }
 
         // no Box spacing: gaps are CSS margins in em, like every size in the row
