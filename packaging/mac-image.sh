@@ -72,7 +72,7 @@ package_update: true
 # desktop (docs/permission-modes.md): Xwayland, the agent's input, software OpenGL and Vulkan
 # for the programs under test (the VM has no GPU of its own), the jail's private D-Bus, a font;
 # Weston itself is built from source below
-packages: [git, ca-certificates, build-essential, pkg-config, bubblewrap, e2fsprogs, util-linux,
+packages: [git, ripgrep, ca-certificates, build-essential, pkg-config, bubblewrap, e2fsprogs, util-linux,
            libpam-systemd, dbus-user-session, openssh-server, sudo, curl, nodejs, npm,
            xwayland, xdotool, libgl1-mesa-dri, libegl1, mesa-vulkan-drivers, dbus,
            fonts-dejavu-core]
@@ -184,7 +184,9 @@ guest 'sudo apt-get install -y -qq $(cat /tmp/weston-in/runtime-packages) >/dev/
     weston --version'
 echo 'Building and installing sill in the guest'
 git archive --format=tar HEAD | guest 'rm -rf src && mkdir src && tar -x -C src'
-guest 'curl -fsSL https://sh.rustup.rs | sh -s -- -y -q --profile minimal >/dev/null'
+# Rust is only used for the image build and removed below. Leave shell profiles untouched;
+# deployment sources cargo/env explicitly, so fresh installs need no Rust initialization.
+guest 'curl -fsSL https://sh.rustup.rs | sh -s -- -y -q --profile minimal --no-modify-path >/dev/null'
 # a fresh SSH login gives the deployment its user manager (docs/server.md); the state
 # filesystem is the state disk's
 guest '. ~/.cargo/env && cd src && SILL_STATE_DIR=/mnt/sill-state ./packaging/deploy-server.sh'
