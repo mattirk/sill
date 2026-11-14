@@ -1422,7 +1422,7 @@ impl Shelf {
                 let del = super::icons::glyph_button("sill-trash");
                 del.add_css_class("flat");
                 del.add_css_class("sill-menu-trash");
-                del.set_tooltip_text(Some("Delete session and its recorded changes"));
+                del.set_tooltip_text(Some("Delete session and its recorded changes (click twice)"));
                 {
                     let s = self.clone();
                     let pop = pop.clone();
@@ -1436,7 +1436,13 @@ impl Shelf {
                     let s = self.clone();
                     let pop = pop.clone();
                     let id = sess.id.clone();
-                    del.connect_clicked(move |_| {
+                    // one click arms it, the next deletes: a slip on an ended row would lose its summary
+                    del.connect_clicked(move |b| {
+                        if !b.has_css_class("sill-armed") {
+                            b.add_css_class("sill-armed");
+                            b.set_tooltip_text(Some("Delete? Click again"));
+                            return;
+                        }
                         pop.popdown();
                         let s = s.clone();
                         let id2 = id.clone();

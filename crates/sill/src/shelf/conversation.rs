@@ -1197,7 +1197,7 @@ popover.sill-session-menu > contents { padding: 10px 12px; min-width: 260px; }
 .sill-session-menu dropdown > button, .sill-session-menu entry { min-height: 0; padding: 3px 8px; }
 .sill-menu-trash { padding: 0 6px; min-height: 0; opacity: 0.35; background: transparent; border: none; box-shadow: none; }
 .sill-menu-trash > image { -gtk-icon-size: 0.8em; }
-.sill-menu-trash:hover { opacity: 1; color: @error_color; }
+.sill-menu-trash:hover, .sill-menu-trash.sill-armed { opacity: 1; color: @error_color; }
 /* "delete all" beside the Reopen caption: caption-sized, armed in the error colour */
 .sill-menu-delete-all { font-size: 80%; padding: 0 8px; min-height: 0; opacity: 0.5; background: transparent; border: none; box-shadow: none; }
 .sill-menu-delete-all:hover, .sill-menu-delete-all.sill-armed { opacity: 1; color: @error_color; }
