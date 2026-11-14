@@ -2,10 +2,13 @@
 # Build the Mac app's Linux system image: Debian 13 arm64 with sill's daemon, shim and jail
 # runtime, booted with Apple's Virtualization framework (crates/sill-vm). Run on an Apple Silicon
 # Mac from a clone; it builds the committed HEAD, inside the VM itself, with the server deployment
-# (packaging/deploy-server.sh). Output: dist/mac-image/disk.raw, a sparse raw disk.
+# (packaging/deploy-server.sh). Output: dist/mac-image/system.raw, a sparse raw disk.
 #
-# The image leaves no key or identity behind: its first boot in the app runs cloud-init afresh
-# with the app's own seed (account key, host keys, machine id).
+# Only the system is in the image. The account's home and sill's state go on data disks of their
+# own (home.raw, state.raw), which the app makes and keeps across new images; the guest formats
+# them on first use (packaging/mac/guest). The image leaves no key or identity behind: its first
+# boot in the app runs cloud-init afresh with the app's own seed (account key, host keys,
+# machine id).
 set -eu
 cd "$(dirname "$0")/.."
 [ "$(uname -s)-$(uname -m)" = Darwin-arm64 ] || { echo 'Run on an Apple Silicon Mac.' >&2; exit 1; }
@@ -14,12 +17,14 @@ command -v cargo >/dev/null || { echo 'Missing cargo (rustup).' >&2; exit 1; }
 
 DEBIAN_URL=https://cloud.debian.org/images/cloud/trixie/latest
 DEBIAN_IMAGE=debian-13-generic-arm64.tar.xz
-DISK_SIZE=32g
+SYSTEM_SIZE=16g
+# the build's own data disks, thrown away after it
+DATA_SIZE=32g
 cache="$HOME/Library/Caches/sill/image"
 work="target/mac-image"
 out="dist/mac-image"
 mkdir -p "$cache" "$work" "$out"
-rm -f "$work"/disk.raw "$work"/seed.iso "$work"/go "$work"/console.log
+rm -f "$work"/*.raw "$work"/seed.iso "$work"/address "$work"/go "$work"/console.log
 rm -rf "$work"/seed
 
 # Debian's image, verified against its published checksums
@@ -33,8 +38,10 @@ rm -rf "$work"/seed
     fi
 )
 tar -xf "$cache/$DEBIAN_IMAGE" -C "$work" disk.raw
-# sparse: room for the build and sill's state image, using only what is written
-truncate -s "$DISK_SIZE" "$work/disk.raw"
+mv "$work/disk.raw" "$work/system.raw"
+# sparse: room for the build, using only what is written
+truncate -s "$SYSTEM_SIZE" "$work/system.raw"
+truncate -s "$DATA_SIZE" "$work/home.raw" "$work/state.raw"
 
 # a key for this build only, and the packages the box needs (docs/server.md, plus Node for
 # registry installs)
@@ -75,11 +82,20 @@ guest() {
 
 echo 'Waiting for the first boot (packages)'
 guest 'cloud-init status --wait >/dev/null; cloud-init status --long | grep -E "^(status|errors)"'
+echo 'Setting up the data disks'
+git archive --format=tar HEAD packaging/mac/guest | guest 'rm -rf guest && mkdir guest && tar -x -C guest'
+guest 'sudo install -D -m755 guest/packaging/mac/guest/sill-disks /usr/local/lib/sill/sill-disks &&
+    sudo install -m644 guest/packaging/mac/guest/sill-disks.service /etc/systemd/system/ &&
+    sudo sh -c "cat guest/packaging/mac/guest/fstab >> /etc/fstab" &&
+    sudo mkdir -p /mnt/sill-state && rm -rf guest &&
+    sudo systemctl daemon-reload && sudo systemctl enable sill-disks.service &&
+    sudo /usr/local/lib/sill/sill-disks && sudo mount -a && findmnt -n -o SOURCE,TARGET /home /mnt/sill-state'
 echo 'Building and installing sill in the guest'
 git archive --format=tar HEAD | guest 'rm -rf src && mkdir src && tar -x -C src'
 guest 'curl -fsSL https://sh.rustup.rs | sh -s -- -y -q --profile minimal >/dev/null'
-# a fresh SSH login gives the deployment its user manager (docs/server.md)
-guest '. ~/.cargo/env && cd src && ./packaging/deploy-server.sh'
+# a fresh SSH login gives the deployment its user manager (docs/server.md); the state
+# filesystem is the state disk's
+guest '. ~/.cargo/env && cd src && SILL_STATE_DIR=/mnt/sill-state ./packaging/deploy-server.sh'
 
 echo 'Cleaning up'
 guest 'rm -rf src .cargo .rustup .cache'
@@ -87,11 +103,17 @@ guest 'sudo apt-get -qq clean && sudo rm -rf /var/lib/apt/lists/*'
 # the next boot is a new instance: the app's seed gives the account its key, and the host keys
 # and machine id are made anew
 guest 'sudo cloud-init clean --logs --machine-id && rm -f ~/.ssh/authorized_keys ~/.bash_history'
+# the home the build left (the user units' links among it) becomes the image's own /home, which
+# a new home disk starts from
+guest 'sudo mkdir -p /mnt/root && sudo mount --bind / /mnt/root &&
+    sudo rm -rf /mnt/root/home/sill && sudo cp -a /home/sill /mnt/root/home/ &&
+    sudo umount /mnt/root && sudo rmdir /mnt/root'
 guest 'sudo fstrim -a >/dev/null 2>&1 || true; sudo poweroff' || true
 touch "$work/go"
 wait $vm || true
 trap - EXIT
 
-mv "$work/disk.raw" "$out/disk.raw"
+mv "$work/system.raw" "$out/system.raw"
+rm -f "$work/home.raw" "$work/state.raw"
 printf '%s\n' "$(git rev-parse HEAD)" > "$out/commit"
-echo "$out/disk.raw: $(du -h "$out/disk.raw" | cut -f1) used of $DISK_SIZE"
+echo "$out/system.raw: $(du -h "$out/system.raw" | cut -f1) used of $SYSTEM_SIZE"

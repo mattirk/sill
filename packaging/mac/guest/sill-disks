@@ -1,0 +1,20 @@
+#!/bin/sh
+# The Mac app's data disks (docs/sill-stick.md section 9): the account's home and sill's state
+# live on disks of their own, so a new system image leaves sessions and sign-ins alone. On first
+# use a blank disk is formatted; a new home disk gets the image's /home to start from.
+set -eu
+udevadm settle -t 10 || true
+for name in home state; do
+    disk=/dev/disk/by-id/virtio-sill-$name
+    [ -b "$disk" ] || continue
+    if [ -z "$(blkid -p -o value -s TYPE "$disk" 2>/dev/null || true)" ]; then
+        mkfs.ext4 -q -L "sill-$name" -m 0 "$disk"
+        if [ "$name" = home ]; then
+            fresh=$(mktemp -d)
+            mount "$disk" "$fresh"
+            cp -a /home/. "$fresh"/
+            umount "$fresh"
+            rmdir "$fresh"
+        fi
+    fi
+done

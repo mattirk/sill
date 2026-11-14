@@ -1,0 +1,15 @@
+# Formats the Mac app's blank data disks before the file systems mount (sill-disks).
+[Unit]
+Description=sill data disks
+DefaultDependencies=no
+After=systemd-remount-fs.service systemd-udevd.service
+Before=local-fs-pre.target
+Wants=local-fs-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/sill/sill-disks
+
+[Install]
+WantedBy=local-fs-pre.target

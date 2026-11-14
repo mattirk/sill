@@ -1,5 +1,7 @@
 //! SPIKE (2026-11-12): boot a Debian cloud image with Apple's Virtualization framework from Rust
-//! and reach its SSH. `sill-vm DIR`: DIR holds `disk.raw` and `seed.iso` (cloud-init, NoCloud);
+//! and reach its SSH. `sill-vm DIR`: DIR holds `system.raw` (the system disk), optionally
+//! `home.raw` and `state.raw` (the data disks, seen in the guest as `/dev/disk/by-id/virtio-sill-home`
+//! and `virtio-sill-state`, `packaging/mac/guest`) and `seed.iso` (cloud-init, NoCloud);
 //! the VM's EFI variables and machine identity are kept there too, so the guest keeps its DHCP
 //! lease between boots. Prints the guest's address once its SSH answers; with `SILL_VM_HOLD`
 //! set to a path, keeps the VM until that file exists, then asks the guest to stop. CPUs and
@@ -84,7 +86,10 @@ mod spike {
             };
             boot.setVariableStore(Some(&vars));
 
-            let disk = |name: &str, read_only: bool| -> Result<Retained<VZStorageDeviceConfiguration>> {
+            let disk = |name: &str,
+                        read_only: bool,
+                        id: Option<&str>|
+             -> Result<Retained<VZStorageDeviceConfiguration>> {
                 let attachment = VZDiskImageStorageDeviceAttachment::initWithURL_readOnly_error(
                     VZDiskImageStorageDeviceAttachment::alloc(),
                     &url(&dir.join(name)),
@@ -96,9 +101,20 @@ mod spike {
                     VZVirtioBlockDeviceConfiguration::alloc(),
                     &attachment,
                 );
+                if let Some(id) = id {
+                    device.setBlockDeviceIdentifier(&NSString::from_str(id));
+                }
                 Ok(Retained::into_super(device))
             };
-            let disks = [disk("disk.raw", false)?, disk("seed.iso", true)?];
+            let mut disks = vec![disk("system.raw", false, None)?];
+            for (file, id) in [("home.raw", "sill-home"), ("state.raw", "sill-state")] {
+                if dir.join(file).exists() {
+                    disks.push(disk(file, false, Some(id))?);
+                }
+            }
+            if dir.join("seed.iso").exists() {
+                disks.push(disk("seed.iso", true, None)?);
+            }
 
             let net = VZVirtioNetworkDeviceConfiguration::new();
             net.setAttachment(Some(&VZNATNetworkDeviceAttachment::new()));
@@ -150,8 +166,10 @@ mod spike {
             let mut seen = None;
             while Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(500));
-                if seen.is_none() {
-                    seen = leased();
+                // read afresh each round: an older lease of the same name may be there first
+                let now = leased();
+                if now.is_some() && now != seen {
+                    seen = now;
                     if let Some(ip) = &seen {
                         eprintln!("[{:>5.1}s] address {ip}", started.elapsed().as_secs_f32());
                     }

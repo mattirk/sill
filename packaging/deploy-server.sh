@@ -40,7 +40,8 @@ for sill_bin in sill sill-shim; do
     test -x "target/release/$sill_bin" || { echo "Missing target/release/$sill_bin" >&2; exit 1; }
 done
 sudo -v
-sudo target/release/sill init --headless
+# SILL_STATE_DIR: a mounted filesystem to bind as the state filesystem instead of an image
+sudo target/release/sill init --headless ${SILL_STATE_DIR:+--state-dir "$SILL_STATE_DIR"}
 for sill_bin in sill sill-shim; do
     cmp "target/release/$sill_bin" "/usr/local/bin/$sill_bin"
 done
