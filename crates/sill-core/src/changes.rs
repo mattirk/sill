@@ -462,21 +462,75 @@ pub fn git_revert(repo: &Path, rel: &Path) -> Result<&'static str> {
     Ok("restored from HEAD")
 }
 
+/// Larger files are not diffed: reading and diffing them would hold the GTK thread (SPEC §4.11 #13).
+pub const DIFF_MAX: u64 = 4 << 20;
+
+/// One side of a diff: the bytes of a regular file, or a line saying why there are none.
+enum Side {
+    Text(Vec<u8>),
+    Note(String),
+}
+
+/// Read `p` for a diff by what it is, never through a link: the upper tree is the agent's, and a
+/// symlink there planted at a changed path would otherwise read any host file into the diff pane
+/// (SPEC §4.11 #10). Absent = empty.
+fn diff_side(p: &Path) -> Side {
+    use std::os::unix::fs::OpenOptionsExt;
+    let md = match p.symlink_metadata() {
+        Ok(md) => md,
+        Err(_) => return Side::Text(Vec::new()),
+    };
+    let ft = md.file_type();
+    if ft.is_symlink() {
+        return Side::Note(format!("symlink → {}", std::fs::read_link(p).map(|t| t.display().to_string()).unwrap_or_default()));
+    }
+    if ft.is_dir() {
+        return Side::Note("directory".into());
+    }
+    if !ft.is_file() {
+        return Side::Note("special file".into());
+    }
+    if md.len() > DIFF_MAX {
+        return Side::Note(format!("{} MB: too large to diff", md.len() / 1_000_000));
+    }
+    let mut f = match std::fs::OpenOptions::new().read(true).custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32).open(p) {
+        Ok(f) => f,
+        Err(e) => return Side::Note(format!("unreadable: {e}")),
+    };
+    let mut bytes = Vec::with_capacity(md.len() as usize);
+    match std::io::Read::read_to_end(&mut f, &mut bytes) {
+        Ok(_) => Side::Text(bytes),
+        Err(e) => Side::Note(format!("unreadable: {e}")),
+    }
+}
+
+fn diff_sides(a: Side, b: Side, a_label: &str, b_label: &str) -> String {
+    match (a, b) {
+        (Side::Text(a), Side::Text(b)) => text_diff(&a, &b, a_label, b_label),
+        (a, b) => {
+            let say = |s: Side| match s {
+                Side::Text(t) if t.is_empty() => "absent".to_string(),
+                Side::Text(t) => format!("{} bytes", t.len()),
+                Side::Note(n) => n,
+            };
+            format!("{a_label}: {}\n{b_label}: {}\n", say(a), say(b))
+        }
+    }
+}
+
 /// Unified diff text for a change (host vs upper).
 pub fn unified_diff(c: &Change) -> Result<String> {
-    let host = if c.path.is_file() { std::fs::read(&c.path).unwrap_or_default() } else { Vec::new() };
-    let upper = if c.kind != ledger::Kind::Deleted && c.upper.is_file() { std::fs::read(&c.upper).unwrap_or_default() } else { Vec::new() };
+    let host = diff_side(&c.path);
+    let upper = if c.kind == ledger::Kind::Deleted { Side::Text(Vec::new()) } else { diff_side(&c.upper) };
     let name = c.path.display().to_string();
-    Ok(text_diff(&host, &upper, &format!("host:{name}"), &format!("jail:{name}")))
+    Ok(diff_sides(host, upper, &format!("host:{name}"), &format!("jail:{name}")))
 }
 
 /// What undoing a keep would change: the host's current content against the saved previous version
 /// (`keep::prior_path`).
 pub fn undo_diff(host: &Path, prior: &Path) -> String {
-    let now = if host.is_file() { std::fs::read(host).unwrap_or_default() } else { Vec::new() };
-    let before = if prior.is_file() { std::fs::read(prior).unwrap_or_default() } else { Vec::new() };
     let name = host.display().to_string();
-    text_diff(&now, &before, &format!("host:{name}"), &format!("undo:{name}"))
+    diff_sides(diff_side(host), diff_side(prior), &format!("host:{name}"), &format!("undo:{name}"))
 }
 
 /// A unified diff of two texts (3 lines of context), or a note for binary content.
@@ -498,6 +552,24 @@ pub fn home() -> Result<PathBuf> {
 mod tests {
     use super::*;
     use crate::ledger::{FileType, Kind};
+
+    #[test]
+    fn diff_never_reads_through_a_link() {
+        let dir = std::env::temp_dir().join(format!("sill-diff-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("secret"), "the key\n").unwrap();
+        std::fs::write(dir.join("host.txt"), "old\n").unwrap();
+        std::os::unix::fs::symlink(dir.join("secret"), dir.join("upper.txt")).unwrap();
+        let c = Change { path: dir.join("host.txt"), upper: dir.join("upper.txt"), kind: Kind::Modified, file_type: FileType::Symlink, size: 0, conflict: false, ignored: false };
+        let d = unified_diff(&c).unwrap();
+        assert!(d.contains("symlink →") && !d.contains("the key"), "{d}");
+        // plain files diff as before
+        std::fs::write(dir.join("new.txt"), "new\n").unwrap();
+        let c = Change { upper: dir.join("new.txt"), ..c };
+        assert!(unified_diff(&c).unwrap().contains("+new"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     /// The language is the one with most tracked bytes; docs and config don't count.
     #[test]

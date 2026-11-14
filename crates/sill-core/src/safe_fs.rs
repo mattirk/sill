@@ -79,6 +79,41 @@ pub fn remove_file_beneath(root: &Path, rel: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Replace the regular file `name` in `dir` with `bytes` in one step: written to a temporary next
+/// to it, synced, renamed over — a crash leaves the old or the new version whole, never an empty
+/// file. `dir` is opened without following a link at its end; a symlink at `name` is refused (its
+/// target may be anywhere on the host — edit that under its own path, security.md S9). The mode
+/// is the file's own, 0644 for a new one.
+pub fn replace_file(dir: &Path, name: &std::ffi::OsStr, bytes: &[u8]) -> Result<()> {
+    use rustix::fs::{renameat, statat};
+    let d = open_root(dir)?;
+    let mode = match statat(&d, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(st) if FileType::from_raw_mode(st.st_mode as RawMode) == FileType::Symlink => {
+            bail!("{} is a symlink: open its target to edit it", Path::new(name).display())
+        }
+        Ok(st) if FileType::from_raw_mode(st.st_mode as RawMode) != FileType::RegularFile => {
+            bail!("{} is not a regular file", Path::new(name).display())
+        }
+        Ok(st) => st.st_mode as RawMode & 0o7777,
+        Err(_) => 0o644,
+    };
+    let tmp = format!(".{}.sill-save.{}", name.to_string_lossy(), std::process::id());
+    let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let fd = openat2(&d, tmp.as_str(), flags, Mode::from_raw_mode(mode), RESOLVE)
+        .with_context(|| format!("create {} in {}", tmp, dir.display()))?;
+    let written = (|| -> Result<()> {
+        let mut f = std::fs::File::from(fd);
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        renameat(&d, tmp.as_str(), &d, name).with_context(|| format!("rename over {}", Path::new(name).display()))?;
+        Ok(())
+    })();
+    if written.is_err() {
+        let _ = unlinkat(&d, tmp.as_str(), AtFlags::empty());
+    }
+    written
+}
+
 /// Copy the regular files below `src` — a tree the shelf wrote itself — to the same paths below
 /// `dst`, a tree the agent can reach, through [`write_file_beneath`]. Symlinks and special files
 /// in `src` are skipped. Returns how many files were written.
@@ -126,6 +161,8 @@ pub fn owned_dir(dir: &Path, uid: u32, create: bool) -> Result<OwnedFd> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
 
     fn scratch(tag: &str) -> std::path::PathBuf {
@@ -157,6 +194,26 @@ mod tests {
         std::os::unix::fs::symlink(outside.join("keep"), root.join("l2")).unwrap();
         remove_file_beneath(&root, Path::new("l2")).unwrap();
         assert!(outside.join("keep").exists());
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn replace_file_is_whole_and_refuses_a_link() {
+        let root = scratch("replace");
+        std::fs::write(root.join("f.txt"), "old").unwrap();
+        std::fs::set_permissions(root.join("f.txt"), std::fs::Permissions::from_mode(0o640)).unwrap();
+        replace_file(&root, std::ffi::OsStr::new("f.txt"), b"new").unwrap();
+        assert_eq!(std::fs::read(root.join("f.txt")).unwrap(), b"new");
+        assert_eq!(std::fs::metadata(root.join("f.txt")).unwrap().permissions().mode() & 0o777, 0o640);
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1, "no temp file left");
+        replace_file(&root, std::ffi::OsStr::new("g.txt"), b"g").unwrap();
+        assert_eq!(std::fs::metadata(root.join("g.txt")).unwrap().permissions().mode() & 0o777, 0o644);
+        let outside = scratch("replace-out");
+        std::fs::write(outside.join("t"), "t").unwrap();
+        std::os::unix::fs::symlink(outside.join("t"), root.join("l")).unwrap();
+        assert!(replace_file(&root, std::ffi::OsStr::new("l"), b"x").is_err());
+        assert_eq!(std::fs::read(outside.join("t")).unwrap(), b"t");
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&outside);
     }

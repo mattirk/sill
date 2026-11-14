@@ -24,6 +24,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::os::fd::FromRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -635,6 +636,10 @@ fn port_relay(mut reader: BufReader<UnixStream>, mut writer: UnixStream, port: u
 }
 
 // --- files ---------------------------------------------------------------------------------------
+//
+// Revert and write work on the agent's tree: every path component is opened without following a
+// symlink and the final name is handled relative to its directory, so a link the agent planted
+// cannot steer the write into a pin or a `direct` tree (security.md S11, SPEC §4.11 #10).
 
 fn host_path(path: &Path) -> Result<PathBuf> {
     if !path.is_absolute() {
@@ -643,49 +648,113 @@ fn host_path(path: &Path) -> Result<PathBuf> {
     Ok(Path::new(HOST_VIEW).join(path.strip_prefix("/").unwrap()))
 }
 
-/// Make `path` identical to the host's version: copy it back, or remove it if the host doesn't have it.
-fn revert(path: &Path) -> Result<&'static str> {
-    let host = host_path(path)?;
-    match host.symlink_metadata() {
-        Err(_) => match path.symlink_metadata() {
-            Err(_) => Ok("absent"),
-            Ok(md) if md.is_dir() => {
-                std::fs::remove_dir_all(path)?;
-                Ok("removed")
+/// `path` as its parent directory (opened with no symlink on the way) and its final name.
+fn parent_and_name(path: &Path) -> Result<(std::os::fd::OwnedFd, std::ffi::OsString)> {
+    use rustix::fs::{Mode, OFlags, ResolveFlags, open, openat2};
+    if !path.is_absolute() {
+        bail!("{} is not absolute", path.display());
+    }
+    let name = match path.file_name() {
+        Some(n) if n != ".." && n != "." => n.to_os_string(),
+        _ => bail!("{}: no file name", path.display()),
+    };
+    let parent = path.parent().with_context(|| format!("{}: no parent", path.display()))?;
+    let flags = OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let root = open("/", flags, Mode::empty())?;
+    let rel = parent.strip_prefix("/").unwrap_or(parent);
+    if rel.as_os_str().is_empty() {
+        return Ok((root, name));
+    }
+    let dir = openat2(&root, rel, flags, Mode::empty(), ResolveFlags::NO_SYMLINKS | ResolveFlags::BENEATH)
+        .with_context(|| format!("{}: not reachable without following a symlink (use the real path)", parent.display()))?;
+    Ok((dir, name))
+}
+
+/// What sits at `name` in `dir`, not followed.
+fn type_at(dir: &impl std::os::fd::AsFd, name: &std::ffi::OsStr) -> Option<rustix::fs::FileType> {
+    use rustix::fs::{AtFlags, FileType, RawMode, statat};
+    statat(dir, name, AtFlags::SYMLINK_NOFOLLOW).ok().map(|st| FileType::from_raw_mode(st.st_mode as RawMode))
+}
+
+/// Remove `name` in `dir`, a tree or a single entry, never following a link.
+fn remove_at(dir: &impl std::os::fd::AsFd, name: &std::ffi::OsStr) -> Result<()> {
+    use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, openat, unlinkat};
+    match type_at(dir, name) {
+        None => Ok(()),
+        Some(FileType::Directory) => {
+            let sub = openat(dir, name, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())?;
+            let names: Vec<std::ffi::OsString> = Dir::read_from(&sub)?
+                .filter_map(Result::ok)
+                .map(|e| <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(e.file_name().to_bytes()).to_os_string())
+                .filter(|n| n != "." && n != "..")
+                .collect();
+            for n in names {
+                remove_at(&sub, &n)?;
             }
-            Ok(_) => {
-                std::fs::remove_file(path)?;
-                Ok("removed")
-            }
-        },
-        Ok(hmd) if hmd.file_type().is_symlink() => {
-            let target = std::fs::read_link(&host)?;
-            let _ = std::fs::remove_file(path);
-            std::os::unix::fs::symlink(target, path)?;
-            Ok("restored")
+            unlinkat(dir, name, AtFlags::REMOVEDIR)?;
+            Ok(())
         }
-        Ok(hmd) if hmd.is_dir() => {
-            if path.symlink_metadata().map(|m| !m.is_dir()).unwrap_or(false) {
-                std::fs::remove_file(path)?;
-            }
-            std::fs::create_dir_all(path)?;
-            std::fs::set_permissions(path, hmd.permissions())?;
-            Ok("restored")
-        }
-        Ok(hmd) => {
-            if path.symlink_metadata().map(|m| m.is_dir()).unwrap_or(false) {
-                std::fs::remove_dir_all(path)?;
-            }
-            std::fs::copy(&host, path).with_context(|| format!("copy {} back", path.display()))?;
-            std::fs::set_permissions(path, hmd.permissions())?;
-            Ok("restored")
-        }
+        Some(_) => Ok(unlinkat(dir, name, AtFlags::empty())?),
     }
 }
 
+/// Make `path` identical to the host's version: copy it back, or remove it if the host doesn't have it.
+fn revert(path: &Path) -> Result<&'static str> {
+    use rustix::fs::{FileType, Mode, OFlags, RawMode, ResolveFlags, fchmod, fstat, mkdirat, openat, openat2, symlinkat};
+    let host = host_path(path)?;
+    let (dir, name) = parent_and_name(path)?;
+    let cur = type_at(&dir, &name);
+    let Ok(hmd) = host.symlink_metadata() else {
+        if cur.is_none() {
+            return Ok("absent");
+        }
+        remove_at(&dir, &name)?;
+        return Ok("removed");
+    };
+    let mode = Mode::from_raw_mode((hmd.permissions().mode() & 0o7777) as RawMode);
+    if hmd.file_type().is_symlink() {
+        remove_at(&dir, &name)?;
+        symlinkat(std::fs::read_link(&host)?, &dir, &name)?;
+        return Ok("restored");
+    }
+    if hmd.is_dir() {
+        if cur != Some(FileType::Directory) {
+            remove_at(&dir, &name)?;
+            mkdirat(&dir, &name, mode)?;
+        }
+        let d = openat(&dir, &name, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty())?;
+        fchmod(&d, mode)?;
+        return Ok("restored");
+    }
+    if cur == Some(FileType::Directory) {
+        remove_at(&dir, &name)?;
+    }
+    let mut from = std::fs::File::open(&host).with_context(|| format!("open the host's {}", path.display()))?;
+    let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let fd = openat2(&dir, &name, flags, mode, ResolveFlags::NO_SYMLINKS | ResolveFlags::BENEATH)
+        .with_context(|| format!("open {} for writing (no symlinks)", path.display()))?;
+    if FileType::from_raw_mode(fstat(&fd)?.st_mode as RawMode) != FileType::RegularFile {
+        bail!("{}: not a regular file", path.display());
+    }
+    let mut to = std::fs::File::from(fd);
+    std::io::copy(&mut from, &mut to).with_context(|| format!("copy {} back", path.display()))?;
+    fchmod(&to, mode)?;
+    Ok("restored")
+}
+
+/// Write a regular file at `path` (parents created), never through a symlink.
 fn write_file(path: &Path, content: &str) -> Result<()> {
+    use rustix::fs::{FileType, Mode, OFlags, RawMode, ResolveFlags, fstat, openat2};
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, content).with_context(|| format!("write {}", path.display()))
+    let (dir, name) = parent_and_name(path)?;
+    let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let fd = openat2(&dir, &name, flags, Mode::from_raw_mode(0o644), ResolveFlags::NO_SYMLINKS | ResolveFlags::BENEATH)
+        .with_context(|| format!("write {} (no symlinks)", path.display()))?;
+    if FileType::from_raw_mode(fstat(&fd)?.st_mode as RawMode) != FileType::RegularFile {
+        bail!("{}: not a regular file", path.display());
+    }
+    let mut f = std::fs::File::from(fd);
+    f.write_all(content.as_bytes()).with_context(|| format!("write {}", path.display()))
 }

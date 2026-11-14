@@ -390,7 +390,9 @@ impl Viewer {
             return;
         }
         let text = self.text.text(&self.text.start_iter(), &self.text.end_iter(), true).to_string();
-        match std::fs::write(&path, text) {
+        // whole or not at all, and never through a link the agent may have put at the path
+        let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { return };
+        match sill_core::safe_fs::replace_file(dir, name, text.as_bytes()) {
             Ok(()) => {
                 self.dirty.set(false);
                 self.discard_armed.set(false);
