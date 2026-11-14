@@ -44,6 +44,7 @@ pub enum Action {
     CancelDiscard,
     Source,
     Text(text_editor::Action),
+    History(bool),
     Path(String),
     BrowsePath,
     PinPath,
@@ -63,7 +64,7 @@ pub enum Action {
 pub struct ReaderView {
     pub key: String,
     pub revision: u64,
-    pub content: text_editor::Content,
+    pub content: crate::editor::Editor,
     pub source_columns: usize,
     pub markdown: Option<markdown::Content>,
     pub saved: String,
@@ -195,7 +196,7 @@ impl SessionView {
             self.reader = Some(ReaderView {
                 key: key.into(),
                 revision: file.revision,
-                content: text_editor::Content::with_text(&file.text),
+                content: crate::editor::Editor::with_text(&file.text),
                 source_columns: source_columns(&file.text),
                 markdown: None,
                 saved: file.text.clone(),
@@ -334,6 +335,7 @@ impl App {
         {
             return Task::none();
         }
+        reader.content.break_group();
         let text = reader.content.text();
         if text.len() > sill_proto::admin::FILE_CHUNK_BYTES {
             reader.notice =
@@ -473,6 +475,7 @@ impl App {
                 };
                 reader.saving = None;
                 if outcome.is_done() {
+                    reader.content.break_group();
                     reader.saved = text.clone();
                     reader.dirty = reader.content.text() != text;
                     reader.markdown = None;
@@ -516,7 +519,7 @@ impl App {
                     if reader.saving.is_some() {
                         return Task::none();
                     }
-                    reader.content = text_editor::Content::with_text(&reader.saved);
+                    reader.content = crate::editor::Editor::with_text(&reader.saved);
                     reader.source_columns = source_columns(&reader.saved);
                     reader.dirty = false;
                     reader.notice = None;
@@ -636,13 +639,18 @@ impl App {
                         view.files.toggle_source();
                         vec![]
                     }
-                    Action::Text(action) => {
-                        let editing = matches!(action, text_editor::Action::Edit(_));
+                    action @ (Action::Text(_) | Action::History(_)) => {
+                        let editing = matches!(
+                            action,
+                            Action::Text(text_editor::Action::Edit(_)) | Action::History(_)
+                        );
                         let reveal = matches!(
                             action,
-                            text_editor::Action::Edit(_)
-                                | text_editor::Action::Move(_)
-                                | text_editor::Action::Select(_)
+                            Action::Text(
+                                text_editor::Action::Edit(_)
+                                    | text_editor::Action::Move(_)
+                                    | text_editor::Action::Select(_)
+                            ) | Action::History(_)
                         );
                         let editable = view.files.reader.as_ref().is_some_and(|f| {
                             f.source && f.repo.is_none() && f.pending.is_none() && f.error.is_none()
@@ -650,7 +658,11 @@ impl App {
                         if (!editing || editable)
                             && let Some(reader) = &mut view.reader
                         {
-                            reader.content.perform(action);
+                            match action {
+                                Action::Text(action) => reader.content.perform(action),
+                                Action::History(redo) => reader.content.history(redo),
+                                _ => unreachable!(),
+                            }
                             if editing {
                                 let text = reader.content.text();
                                 reader.source_columns = source_columns(&text);

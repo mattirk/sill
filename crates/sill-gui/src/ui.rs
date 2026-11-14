@@ -1898,10 +1898,24 @@ fn text_width_in_font(content: &str, size: f32, font: Font) -> f32 {
     paragraph.min_width().ceil()
 }
 
+fn history_shortcut(key_press: &text_editor::KeyPress) -> Option<bool> {
+    if key_press.modifiers.command()
+        && matches!(key_press.status, text_editor::Status::Focused { .. })
+        && let Key::Character(c) = key_press.key.as_ref()
+        && (c.eq_ignore_ascii_case("z") || c.eq_ignore_ascii_case("y"))
+    {
+        return Some(key_press.modifiers.shift() || c.eq_ignore_ascii_case("y"));
+    }
+    None
+}
+
 /// Enter sends; Shift+Enter is a new line; everything else is the editor's own.
 pub(crate) fn enter_sends(
     key_press: text_editor::KeyPress,
 ) -> Option<text_editor::Binding<Message>> {
+    if let Some(redo) = history_shortcut(&key_press) {
+        return Some(text_editor::Binding::Custom(Message::PromptHistory(redo)));
+    }
     if matches!(key_press.key.as_ref(), Key::Character(c) if c.eq_ignore_ascii_case("v"))
         && key_press.modifiers.command()
         && matches!(key_press.status, text_editor::Status::Focused { .. })
@@ -1927,6 +1941,11 @@ pub(crate) fn enter_sends(
 pub(crate) fn reading_keys(
     key_press: text_editor::KeyPress,
 ) -> Option<text_editor::Binding<Message>> {
+    if let Some(redo) = history_shortcut(&key_press) {
+        return Some(text_editor::Binding::Custom(Message::Workspace(
+            crate::workspace::Action::History(redo),
+        )));
+    }
     if key_press.modifiers.command()
         && matches!(&key_press.key, iced::keyboard::Key::Character(c) if c.eq_ignore_ascii_case("s"))
     {

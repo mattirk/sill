@@ -20,6 +20,7 @@ mod network;
 mod perf;
 mod policies;
 mod processes;
+mod editor;
 mod rows;
 mod selection;
 mod settings;
@@ -249,6 +250,7 @@ pub enum Message {
     Scrolled(bool, f32, f32),
     Latest,
     Prompt(text_editor::Action),
+    PromptHistory(bool),
     Send,
     Stop,
     Answer {
@@ -374,7 +376,7 @@ pub struct SessionView {
     pub status: Status,
     pub conversation: Conversation,
     pub rendered: BTreeMap<String, Rendered>,
-    pub draft: text_editor::Content,
+    pub draft: editor::Editor,
     pub attachments: Vec<sill_proto::sfp::Attachment>,
     pub attachments_busy: bool,
     pub media_token: String,
@@ -434,7 +436,7 @@ impl SessionView {
             status: Status::Closed,
             conversation: Conversation::default(),
             rendered: BTreeMap::new(),
-            draft: text_editor::Content::new(),
+            draft: editor::Editor::new(),
             attachments: vec![],
             attachments_busy: false,
             media_token: sill_client::request_id("media-view"),
@@ -1369,6 +1371,11 @@ impl App {
                     view.draft.perform(action);
                 }
             }
+            Message::PromptHistory(redo) => {
+                if let Some(view) = self.current_mut() {
+                    view.draft.history(redo);
+                }
+            }
             Message::Send => return self.send(),
             Message::Stop => return self.stop(),
             Message::Answer {
@@ -1439,7 +1446,7 @@ impl App {
                     }
                     text.push_str(pending.text());
                     view.attachments.extend(pending.submit.attachments);
-                    view.draft = text_editor::Content::with_text(&text);
+                    view.draft = editor::Editor::with_text(&text);
                     return operation::focus("prompt");
                 }
             }
@@ -2834,7 +2841,7 @@ impl App {
                         sill_client::outbox::State::Failed(reason) => reason.clone(),
                         _ => String::new(),
                     };
-                    view.draft = text_editor::Content::with_text(pending.text());
+                    view.draft = editor::Editor::with_text(pending.text());
                     view.attachments = pending.submit.attachments;
                     view.failed = Some(format!(
                         "Not sent: {reason}. The prompt is back in the composer."
@@ -2888,7 +2895,7 @@ impl App {
         if view.attachments_busy || (text.trim().is_empty() && view.attachments.is_empty()) {
             return Task::none();
         }
-        view.draft = text_editor::Content::new();
+        view.draft = editor::Editor::new();
         view.follow_tail = true;
         view.failed = None;
         let logged_in = view

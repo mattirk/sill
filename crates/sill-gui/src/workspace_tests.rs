@@ -472,7 +472,7 @@ fn save_writes_exact_source_and_failed_save_keeps_the_edits() {
         let view = app.views.get_mut("demo").unwrap();
         let r = view.reader.as_mut().unwrap();
         r.saved = "let café = 1;\r\n// end".into();
-        r.content = text_editor::Content::with_text(&r.saved);
+        r.content = crate::editor::Editor::with_text(&r.saved);
         view.files.reader.as_mut().unwrap().text = r.saved.clone();
     }
     insert(&mut app, 'X');
@@ -501,6 +501,18 @@ fn save_writes_exact_source_and_failed_save_keeps_the_edits() {
         app.views["demo"].files.reader.as_ref().unwrap().text,
         expected
     );
+    act(&mut app, Action::History(false));
+    assert_eq!(
+        app.views["demo"].reader.as_ref().unwrap().content.text(),
+        "let café = 1;\r\n// end"
+    );
+    assert!(app.views["demo"].reader.as_ref().unwrap().dirty);
+    act(&mut app, Action::History(true));
+    assert_eq!(
+        app.views["demo"].reader.as_ref().unwrap().content.text(),
+        expected
+    );
+    assert!(!app.views["demo"].reader.as_ref().unwrap().dirty);
     insert(&mut app, 'Y');
     let second = app.views["demo"].reader.as_ref().unwrap().content.text();
     let task = app.update(Message::Workspace(Action::SaveFile));
@@ -611,4 +623,45 @@ fn source_extent_accounts_for_tabs_wide_characters_and_edits() {
         ))),
     );
     assert_eq!(app.views["demo"].reader.as_ref().unwrap().source_columns, 5);
+}
+
+#[test]
+fn source_history_restores_selection_extent_and_respects_preview_and_reload() {
+    let mut app = app();
+    open_source(&mut app);
+    let original = app.views["demo"].reader.as_ref().unwrap().content.text();
+    act(&mut app, Action::Text(text_editor::Action::SelectAll));
+    let cursor = app.views["demo"].reader.as_ref().unwrap().content.cursor();
+    act(
+        &mut app,
+        Action::Text(text_editor::Action::Edit(text_editor::Edit::Paste(
+            std::sync::Arc::new("long".repeat(100)),
+        ))),
+    );
+    act(&mut app, Action::History(false));
+    let r = app.views["demo"].reader.as_ref().unwrap();
+    assert_eq!(r.content.text(), original);
+    assert_eq!(r.content.cursor(), cursor);
+    assert!(!r.dirty);
+    assert_eq!(r.source_columns, source_columns(&original));
+    act(&mut app, Action::History(true));
+    assert_eq!(
+        app.views["demo"].reader.as_ref().unwrap().source_columns,
+        400
+    );
+    act(&mut app, Action::Source);
+    act(&mut app, Action::History(false));
+    assert_eq!(
+        app.views["demo"].reader.as_ref().unwrap().content.text(),
+        "long".repeat(100)
+    );
+    act(&mut app, Action::Source);
+    act(&mut app, Action::History(false));
+    act(&mut app, Action::RefreshFile);
+    let refreshed = app.views["demo"].reader.as_ref().unwrap().content.text();
+    act(&mut app, Action::History(true));
+    assert_eq!(
+        app.views["demo"].reader.as_ref().unwrap().content.text(),
+        refreshed
+    );
 }

@@ -485,7 +485,7 @@ fn render_source_gutter() {
         .reader
         .as_mut()
         .unwrap()
-        .content = text_editor::Content::with_text(&content);
+        .content = crate::editor::Editor::with_text(&content);
     app.views
         .get_mut("demo")
         .unwrap()

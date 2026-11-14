@@ -3532,3 +3532,27 @@ fn background_settings_cannot_undo_a_newer_page_snapshot() {
     ));
     assert_eq!(app.daemon_settings.as_ref().unwrap().theme, before.theme);
 }
+
+#[test]
+fn prompt_undo_and_redo_shortcuts() {
+    use iced::keyboard::{Key, Modifiers, key};
+    use iced::widget::text_editor::{Binding, KeyPress, Status};
+    for (character, modifiers, redo) in [
+        ("z", Modifiers::CTRL, false),
+        ("z", Modifiers::CTRL | Modifiers::SHIFT, true),
+        ("y", Modifiers::CTRL, true),
+    ] {
+        let press = KeyPress {
+            key: Key::Character(character.into()),
+            modified_key: Key::Character(character.into()),
+            physical_key: key::Physical::Code(key::Code::KeyZ),
+            modifiers,
+            text: None,
+            status: Status::Focused { is_hovered: false },
+        };
+        assert!(matches!(crate::ui::enter_sends(press.clone()),
+            Some(Binding::Custom(Message::PromptHistory(value))) if value == redo));
+        assert!(matches!(crate::ui::reading_keys(press),
+            Some(Binding::Custom(Message::Workspace(crate::workspace::Action::History(value)))) if value == redo));
+    }
+}
