@@ -43,8 +43,6 @@ pub struct Session {
     /// The agent controls as last set in this session, re-applied whenever its ACP session is
     /// (re)started; a new session starts from its agent type's default (SPEC §3.2).
     pub agent_settings: AgentSettings,
-    /// Desktop access override: "" (the global default), "none", "x11", "x11+dbus" (SPEC §4.2).
-    pub desktop: String,
     /// When the session ended — its tab closed (docs/memory.md §2.1); None while it is open.
     pub ended_at: Option<i64>,
     /// What came of it, written at the end: by its agent (`summary_kind` "agent") or by sill from
@@ -146,7 +144,7 @@ impl Store {
         // another shelf or a CLI holding a write: wait a little instead of failing at once (a
         // failure here is the service's crash loop, SPEC §4.11 #17)
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        require_columns(&conn, "sessions", &["auto_allow", "agent_settings", "desktop", "ended_at", "summary", "summary_kind", "memory_scope", "follows", "compacted", "title_kind", "ghost"])
+        require_columns(&conn, "sessions", &["auto_allow", "agent_settings", "ended_at", "summary", "summary_kind", "memory_scope", "follows", "compacted", "title_kind", "ghost"])
             .with_context(|| format!("open {}", path.display()))?;
         require_columns(&conn, "entries", &["tool_kind", "detail", "diff", "call_id", "parent"])
             .with_context(|| format!("open {}", path.display()))?;
@@ -158,7 +156,7 @@ impl Store {
                  created_at INTEGER NOT NULL, last_used INTEGER NOT NULL,
                  acp_session_id TEXT, policy TEXT NOT NULL DEFAULT 'default',
                  auto_allow INTEGER NOT NULL DEFAULT 0, agent_settings TEXT NOT NULL DEFAULT '{}',
-                 desktop TEXT NOT NULL DEFAULT '', ended_at INTEGER, summary TEXT NOT NULL DEFAULT '',
+                 ended_at INTEGER, summary TEXT NOT NULL DEFAULT '',
                  summary_kind TEXT NOT NULL DEFAULT '', memory_scope TEXT NOT NULL DEFAULT '',
                  follows TEXT NOT NULL DEFAULT '', compacted INTEGER NOT NULL DEFAULT 0,
                  title_kind TEXT NOT NULL DEFAULT '', ghost INTEGER NOT NULL DEFAULT 0);
@@ -222,11 +220,6 @@ impl Store {
         Ok(())
     }
 
-    pub fn set_desktop(&self, id: &str, desktop: &str) -> Result<()> {
-        self.conn.execute("UPDATE sessions SET desktop = ?2 WHERE id = ?1", params![id, desktop])?;
-        Ok(())
-    }
-
     pub fn set_auto_allow(&self, id: &str, on: bool) -> Result<()> {
         self.conn.execute("UPDATE sessions SET auto_allow = ?2 WHERE id = ?1", params![id, on as i32])?;
         Ok(())
@@ -251,7 +244,7 @@ impl Store {
     }
     fn session_query(&self, suffix:&str, params: impl rusqlite::Params) -> Result<Vec<Session>> {
         let mut st = self.conn.prepare(&format!(
-            "SELECT id, agent, title, created_at, last_used, acp_session_id, policy, auto_allow, agent_settings, desktop, ended_at, summary, summary_kind, memory_scope, follows, compacted, title_kind, ghost FROM sessions {suffix}"
+            "SELECT id, agent, title, created_at, last_used, acp_session_id, policy, auto_allow, agent_settings, ended_at, summary, summary_kind, memory_scope, follows, compacted, title_kind, ghost FROM sessions {suffix}"
         ))?;
         let rows = st.query_map(params, |r| {
             Ok(Session {
@@ -264,15 +257,14 @@ impl Store {
                 policy: r.get(6)?,
                 auto_allow: r.get::<_, i32>(7)? != 0,
                 agent_settings: serde_json::from_str(&r.get::<_, String>(8)?).unwrap_or_default(),
-                desktop: r.get(9)?,
-                ended_at: r.get(10)?,
-                summary: r.get(11)?,
-                summary_kind: r.get(12)?,
-                memory_scope: r.get(13)?,
-                follows: r.get(14)?,
-                compacted: r.get(15)?,
-                title_kind: r.get(16)?,
-                ghost: r.get::<_, i32>(17)? != 0,
+                ended_at: r.get(9)?,
+                summary: r.get(10)?,
+                summary_kind: r.get(11)?,
+                memory_scope: r.get(12)?,
+                follows: r.get(13)?,
+                compacted: r.get(14)?,
+                title_kind: r.get(15)?,
+                ghost: r.get::<_, i32>(16)? != 0,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -304,7 +296,6 @@ impl Store {
             policy: policy.to_string(),
             auto_allow: false,
             agent_settings: self.agent_settings(agent), // the agent type's default
-            desktop: String::new(),
             ended_at: None,
             summary: String::new(),
             summary_kind: String::new(),

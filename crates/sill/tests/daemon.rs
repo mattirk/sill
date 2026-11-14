@@ -25,6 +25,10 @@ impl Daemon {
         for sub in ["run", "state", "home"] {
             std::fs::create_dir_all(dir.join(sub)).unwrap();
         }
+        // Keep fixtures independent of installed host policies (which may use retired fields).
+        let policies = dir.join("home/.config/sill/policies");
+        std::fs::create_dir_all(&policies).unwrap();
+        std::fs::write(policies.join("default.toml"), include_str!("../../../policies/default.toml")).unwrap();
         dir
     }
 
@@ -889,7 +893,8 @@ fn public_host_files_and_settings_need_no_internal_capability() {
     use sill_proto::{admin as a, sessions::HostPath};
     use std::os::unix::ffi::OsStringExt;
     let d=Daemon::start();let mut c=d.connect_caps(json!({})).unwrap();
-    let p=d.dir.join("home").join(std::ffi::OsString::from_vec(b"raw-\xff".to_vec()));
+    let files=d.dir.join("home/files");std::fs::create_dir_all(&files).unwrap();
+    let p=files.join(std::ffi::OsString::from_vec(b"raw-\xff".to_vec()));
     let path=HostPath::from_path(&p);
     let write=c.call("_sill/files.write",json!(a::FileWrite {path:path.clone(),bytes_base64:a::encode_bytes(b"abcdef")})).unwrap();
     assert!(write.get("error").is_none(),"{write}");
@@ -898,13 +903,13 @@ fn public_host_files_and_settings_need_no_internal_capability() {
     std::fs::write(&p,"changed file length").unwrap();
     let stale=c.call("_sill/files.read",json!({"path":path,"offset":"4","length":2,"revision":read["result"]["revision"]})).unwrap();
     assert_eq!(stale["error"]["data"]["code"],"invalid_cursor");
-    let root=HostPath::from_path(&d.dir.join("home"));
-    std::fs::write(d.dir.join("home/another"),"other").unwrap();
+    let root=HostPath::from_path(&files);
+    std::fs::write(files.join("another"),"other").unwrap();
     let first=c.call("_sill/files.list",json!(a::FilesList {path:root.clone(),after:None,limit:Some(1)})).unwrap();
     assert_eq!(first["result"]["entries"].as_array().unwrap().len(),1);assert!(!first["result"]["next"].is_null());
     let last=c.call("_sill/files.list",json!({"path":root,"after":first["result"]["next"],"limit":1})).unwrap();
     assert_eq!(last["result"]["entries"][0]["path"]["bytes_base64"],path.bytes_base64);
-    let link=d.dir.join("home/link");std::os::unix::fs::symlink(&p,&link).unwrap();
+    let link=files.join("link");std::os::unix::fs::symlink(&p,&link).unwrap();
     assert!(c.call("_sill/files.read",json!(a::FileRead {path:HostPath::from_path(&link),offset:"0".into(),length:None,revision:None})).unwrap().get("error").is_some());
     assert!(c.call("_sill/files.list",json!({"path":root,"limit":0})).unwrap().get("error").is_some());
     // a setting the protocol does not carry (the machine's frontend) survives a patch

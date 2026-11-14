@@ -203,33 +203,6 @@ pub fn build(timer_auto: Rc<std::cell::Cell<bool>>) -> gtk::Widget {
     pins_msg.set_visible(true);
     fill_global_pins(&pins_box, &pins_msg);
 
-    // desktop access for new sessions (SPEC §4.2): X11 / D-Bus — policy, on, off
-    let (pol_x11, pol_dbus) = super::remote::request(sill_core::frontend::Request::PolicyDesktop { policy: "default".into() }).unwrap_or((false, false));
-    let onoff = |b: bool| if b { "on" } else { "off" };
-    let dbox = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    type Get = fn(&super::remote::config::Config) -> Option<bool>;
-    type Set = fn(&mut super::remote::config::Config, Option<bool>);
-    let items: [(&str, bool, Get, Set, &str); 2] = [
-        ("X11", pol_x11, |c| c.desktop_x11, |c, v| c.desktop_x11 = v,
-         "Give new sessions the X11 display: the agent can run and see GUI programs — and, as any X11 client, read keys and drive every window. A session's own menu (its tab glyph) can override this."),
-        ("D-Bus", pol_dbus, |c| c.desktop_dbus, |c, v| c.desktop_dbus = v,
-         "Give new sessions the D-Bus session bus: a full escape (systemd user units, keyring). A session's own menu (its tab glyph) can override this."),
-    ];
-    for (name, pol, get, set, tip) in items {
-        let l = gtk::Label::new(Some(name));
-        l.add_css_class("dim-label");
-        let policy_label = format!("policy ({})", onoff(pol));
-        let labels: Vec<&str> = vec![&policy_label, "on", "off"];
-        let current = get(&super::remote::config::load());
-        let dd = choice(&labels, Some(match current { None => 0, Some(true) => 1, Some(false) => 2 }), move |i| {
-            let _ = super::remote::config::update(|c| set(c, match i { 1 => Some(true), 2 => Some(false), _ => None }));
-        });
-        dd.set_tooltip_text(Some(tip));
-        dbox.append(&l);
-        dbox.append(&dd);
-    }
-    row(&card, "Desktop", Some("For new sessions; a session's own menu can override"), &dbox);
-
     // auto-revert: unkept changes outside git and pins go away after this long
     let choices = super::remote::config::AUTO_REVERT_CHOICES;
     let labels: Vec<&str> = choices.iter().map(|(_, l)| *l).collect();

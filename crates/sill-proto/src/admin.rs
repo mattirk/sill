@@ -71,8 +71,6 @@ pub struct PolicyKey {
 pub struct PolicyEntry {
     pub name: String,
     pub text: String,
-    pub x11: bool,
-    pub dbus: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -226,8 +224,6 @@ pub struct Settings {
     pub timer_auto: Option<bool>,
     pub text_scale: Option<f64>,
     pub auto_revert_minutes: Option<u32>,
-    pub desktop_x11: Option<bool>,
-    pub desktop_dbus: Option<bool>,
     pub host_terminal: Option<String>,
     pub tray: Option<bool>,
     pub remember_pins: Option<bool>,
@@ -251,8 +247,6 @@ pub enum SettingChange {
     TimerAuto { value: Option<bool> },
     TextScale { value: Option<f64> },
     AutoRevertMinutes { value: Option<u32> },
-    DesktopX11 { value: Option<bool> },
-    DesktopDbus { value: Option<bool> },
     HostTerminal { value: Option<String> },
     Tray { value: Option<bool> },
     RememberPins { value: Option<bool> },

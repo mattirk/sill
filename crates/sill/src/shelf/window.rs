@@ -1121,17 +1121,14 @@ impl Shelf {
         }
     }
 
-    /// The small agent glyph for a tab, in the strip's current text colour — in the warning colour
-    /// while the session's jail has the desktop (X11 / D-Bus), in the accent colour while the
+    /// The small agent glyph for a tab, in the strip's current text colour — in the accent colour while the
     /// agent is in a turn (the glyph pulses then), SPEC §4.11 #4.
-    fn tab_icon(&self, agent: &str, desktop: bool, busy: bool) -> gtk::Image {
+    fn tab_icon(&self, agent: &str, busy: bool) -> gtk::Image {
         let home = session::home().unwrap_or_default();
         let registry = agents::load(&home);
         let t = theme::current();
         let fg = super::icons::fg_for(&self.tabs.root, &t);
-        let color = if desktop {
-            gtk::gdk::RGBA::parse(t.warning).unwrap_or(fg)
-        } else if busy {
+        let color = if busy {
             gtk::gdk::RGBA::parse(t.accent).unwrap_or(fg)
         } else {
             fg
@@ -1139,27 +1136,21 @@ impl Shelf {
         super::icons::image(registry.get(agent), color, 12)
     }
 
-    /// A tab's glyph colour and tooltip follow the session's effective desktop access.
+    /// Refresh a tab's activity glyph and session-menu tooltip.
     fn refresh_tab(&self, s: &Session) {
-        let (x11, dbus) = effective_desktop(s);
-        self.tabs.set_icon(&s.id, &self.tab_icon(&s.agent, x11 || dbus, self.busy.borrow().contains(&s.id)));
+        self.tabs.set_icon(&s.id, &self.tab_icon(&s.agent, self.busy.borrow().contains(&s.id)));
         self.tabs.set_class(&s.id, "sill-ghost", s.ghost);
         if s.ghost {
             self.tabs.set_tooltip(&s.id, Some(GHOST_TIP));
             return;
         }
-        let tip = match (x11, dbus) {
-            (true, true) => "X11 + D-Bus: the agent can see and drive the desktop and reach the session bus",
-            (true, false) => "X11: the agent can run GUI programs — and, as any X11 client, read keys and drive every window",
-            (false, true) => "D-Bus session bus: a way out of the jail",
-            (false, false) => "Session menu: click the glyph or right-click",
-        };
+        let tip = "Session menu: click the glyph or right-click";
         self.tabs.set_tooltip(&s.id, Some(tip));
     }
 
     /// The session menu (SPEC §3.1): what belongs to the session rather than to the next turn —
-    /// name, policy, desktop access — and where its jail runs. Built fresh on each open and dropped
-    /// when it closes; a policy or desktop change closes it first, since the restart replaces the tab
+    /// name, policy — and where its jail runs. Built fresh on each open and dropped
+    /// when it closes; a policy change closes it first, since the restart replaces the tab
     /// it is anchored to.
     fn show_policy_details(self: &Rc<Self>, id: &str) {
         let dialog = gtk::Window::builder().title("Session policy").transient_for(&self.window)
@@ -1317,42 +1308,6 @@ impl Shelf {
         }
         policy_row.append(&details);
         grid.attach(&policy_row, 1, 2, 1, 1);
-        // desktop access; "default" says what it resolves to for this session's policy
-        let choices = super::remote::config::DESKTOP_CHOICES;
-        let (dx, dd) = {
-            let mut d = s.clone();
-            d.desktop = String::new();
-            effective_desktop(&d)
-        };
-        let onoff = |b: bool| if b { "on" } else { "off" };
-        let default_label = format!("default (X11 {} · D-Bus {})", onoff(dx), onoff(dd));
-        let labels: Vec<&str> = choices.iter().map(|(id, l)| if id.is_empty() { default_label.as_str() } else { *l }).collect();
-        let desk = gtk::DropDown::from_strings(&labels);
-        desk.set_selected(choices.iter().position(|(cid, _)| *cid == s.desktop).unwrap_or(0) as u32);
-        desk.set_tooltip_text(Some("Desktop access of this session's jail. X11 lets the agent run and see GUI programs — and, as any X11 client, read keys and drive every window; D-Bus hands it the session bus. Changing it rebuilds the jail."));
-        {
-            let shelf = self.clone();
-            let sid = id.to_string();
-            let p = pop.clone();
-            desk.connect_selected_notify(move |d| {
-                let Some((cid, _)) = choices.get(d.selected() as usize) else { return };
-                let shelf = shelf.clone();
-                let sid = sid.clone();
-                p.popdown();
-                glib::idle_add_local_once(move || {
-                    let view = shelf.views.borrow().get(&sid).cloned();
-                    if let Some(v) = view {
-                        v.set_desktop(cid);
-                    }
-                });
-            });
-        }
-        if s.ghost {
-            desk.set_sensitive(false);
-            desk.set_tooltip_text(Some("A ghost session has no X11 and no D-Bus, whatever is chosen"));
-        }
-        grid.attach(&key("Desktop"), 0, 3, 1, 1);
-        grid.attach(&desk, 1, 3, 1, 1);
         // recall scope (docs/memory.md §2.3): which earlier sessions the agent is told about at
         // start. Three choices; the one the pins would pick is marked (default), and choosing it
         // stores "" so the session keeps following its pins
@@ -1492,7 +1447,7 @@ impl Shelf {
     }
 
     /// Open a session; `note` is shown first in its conversation. A jail built before the policy
-    /// file was last edited is stopped and rebuilt first, so policy edits (x11, dbus, masks…)
+    /// file was last edited is stopped and rebuilt first, so policy edits (permissions, masks…)
     /// take effect without closing anything by hand.
     fn open_session_with(self: &Rc<Self>, s: Session, note: Option<String>) {
         let id = s.id.clone();
@@ -2134,13 +2089,12 @@ impl Shelf {
     }
 
     /// *New here* on an ended session (docs/memory.md §2.5): a new session with its agent, policy,
-    /// desktop access, memory scope and pins, whose recall leads with that session's summary.
+    /// memory scope and pins, whose recall leads with that session's summary.
     fn new_here(self: &Rc<Self>, from: &Session) {
         let new = sill_proto::NewSession {
             agent: from.agent.clone(),
             policy: from.policy.clone(),
             pins: self.store.pins(&from.id).unwrap_or_default(),
-            desktop: from.desktop.clone(),
             memory_scope: from.memory_scope.clone(),
             follows: from.id.clone(),
             remember_pins: false,
@@ -2275,17 +2229,6 @@ pub fn toggle(w: &gtk::Window, time: u32) {
     } else {
         show(w, time);
     }
-}
-
-/// What a session's jail gets, (x11, dbus): the session's own choice, else `sill.toml`, else its
-/// policy's `[jail]` (SPEC §4.2).
-fn effective_desktop(s: &Session) -> (bool, bool) {
-    if s.ghost {
-        return (false, false); // docs/memory.md §3.2: off regardless
-    }
-    let (x11, dbus) = super::remote::config::desktop_grants(&s.desktop, &super::remote::config::load());
-    let (px, pd) = super::remote::request(sill_core::frontend::Request::PolicyDesktop { policy: s.policy.clone() }).unwrap_or((false, false));
-    (x11.unwrap_or(px), dbus.unwrap_or(pd))
 }
 
 #[cfg(test)]

@@ -38,11 +38,6 @@ pub struct Config {
     /// pinned folder is reverted this many minutes after its last write, once the session is idle.
     /// 0 = never; unset = [`AUTO_REVERT_DEFAULT`].
     pub auto_revert_minutes: Option<u32>,
-    /// Desktop access for new sessions (SPEC §4.2): give the jail the X11 display / the D-Bus session
-    /// bus. Unset = the policy decides (`[jail] x11` / `dbus`). A session can override both in its
-    /// session menu (stored per session).
-    pub desktop_x11: Option<bool>,
-    pub desktop_dbus: Option<bool>,
     /// The terminal the shelf opens on the host (Ctrl+Shift+T, the shell button's right-click): a
     /// command line, `{cwd}` replaced by the directory (it is also the process's working directory).
     /// Unset = the first of [`HOST_TERMINALS`] found in `PATH`.
@@ -103,20 +98,6 @@ pub fn in_path(program: &str) -> bool {
 /// The known terminals that are installed, in preference order.
 pub fn installed_terminals() -> Vec<(&'static str, &'static str)> {
     HOST_TERMINALS.iter().copied().filter(|(p, _)| in_path(p)).collect()
-}
-
-/// The per-session desktop choices (stored in `sessions.desktop`): (id, label).
-pub const DESKTOP_CHOICES: &[(&str, &str)] = &[("", "default"), ("none", "no desktop"), ("x11", "X11"), ("x11+dbus", "X11 + D-Bus")];
-
-/// What a session's jail gets: (x11, dbus); `None` = the policy decides. The session's own choice
-/// wins, then the global default from `sill.toml`.
-pub fn desktop_grants(session_desktop: &str, c: &Config) -> (Option<bool>, Option<bool>) {
-    match session_desktop {
-        "none" => (Some(false), Some(false)),
-        "x11" => (Some(true), Some(false)),
-        "x11+dbus" => (Some(true), Some(true)),
-        _ => (c.desktop_x11, c.desktop_dbus),
-    }
 }
 
 /// Auto-revert delays the Settings page offers: (minutes, label).

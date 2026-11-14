@@ -721,3 +721,11 @@ in its change field. The daemon trims names and accepts 1–80 characters withou
 characters. A name change does not alter `title`; it updates a known summary-signature footer.
 Older sessions without a preserved name return null. The exported schema includes this additive
 extension; clients default absent name fields to null.
+
+### Raw desktop controls retired (2026-11-06)
+
+The pre-freeze development schema was deliberately rebaselined to remove session/create
+`desktop`, the Desktop session-change variant, `desktop_x11`/`desktop_dbus` settings and
+setting-change variants, and `x11`/`dbus` policy-result fields. These controls and their host
+socket mounts are removed rather than preserved as aliases. Rebuild daemon and frontends
+together. The stable `sfp/1` cutover is still pending; identity remains `sfp/1-dev.3`.

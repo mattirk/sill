@@ -178,14 +178,6 @@ pub struct JailOptions {
     /// nested namespaces + overlayfs is the largest kernel attack surface here (SPEC §4.10 #10).
     #[serde(default)]
     pub allow_userns: bool,
-    /// Give the jail the X11 display (socket + Xauthority). Off by default: X11 lets any client read
-    /// every keystroke and drive every window (SPEC §4.10 #3). On = the agent can run and see GUI apps.
-    #[serde(default)]
-    pub x11: bool,
-    /// Give the jail the D-Bus session bus. Off by default: the session bus is a full escape (systemd
-    /// user units, keyring secrets). Prefer an `xdg-dbus-proxy` allow-list when that exists.
-    #[serde(default)]
-    pub dbus: bool,
     /// Extra environment for every process in the jail.
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,
@@ -197,7 +189,7 @@ pub struct JailOptions {
 
 impl Default for JailOptions {
     fn default() -> Self {
-        Self { allow_userns: false, x11: false, dbus: false, env: Default::default(), seccomp: true }
+        Self { allow_userns: false, env: Default::default(), seccomp: true }
     }
 }
 
@@ -229,8 +221,6 @@ impl Policy {
                 self.paths.ro.push(d);
             }
         }
-        self.jail.x11 = false;
-        self.jail.dbus = false;
         if self.network.mode == NetMode::All {
             let default = Self::load("default", home).unwrap_or_else(|_| Self::builtin_default());
             self.network.mode = NetMode::Allow;
@@ -307,6 +297,16 @@ pub fn available_page(home:&Path,after:Option<&str>,limit:usize)->(Vec<String>,b
 mod tests {
     use super::*;
 
+    #[test]
+    fn raw_host_desktop_grants_are_rejected() {
+        for field in ["x11", "dbus"] {
+            for value in ["true", "false"] {
+                let err = Policy::parse(&format!("name='retired'\n[jail]\n{field}={value}")).unwrap_err();
+                assert!(format!("{err:#}").contains("unknown field"), "{err:#}");
+            }
+        }
+    }
+
     /// A ghost only tightens (docs/memory.md §3.2): direct becomes ro, no desktop, `all` becomes the
     /// default allow-list, the idle timeout at most an hour.
     #[test]
@@ -314,15 +314,12 @@ mod tests {
         let home = Path::new("/nonexistent-home");
         let mut p = Policy::builtin_default();
         p.paths.direct = vec!["~/shared".into()];
-        p.jail.x11 = true;
-        p.jail.dbus = true;
         p.network.mode = NetMode::All;
         p.network.allow.clear();
         p.limits.idle_timeout_minutes = 0;
         p.ghostly(home);
         assert!(p.paths.direct.is_empty());
         assert!(p.paths.ro.contains(&"~/shared".to_string()));
-        assert!(!p.jail.x11 && !p.jail.dbus);
         assert_eq!(p.network.mode, NetMode::Allow);
         assert_eq!(p.network.allow, Policy::builtin_default().network.allow);
         assert_eq!(p.limits.idle_timeout_minutes, GHOST_IDLE_MINUTES);

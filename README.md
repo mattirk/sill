@@ -70,8 +70,7 @@ Escape does the same flip; the fish flicks its tail on both.
 page) or reopens a stored one. Each session has its own jail, its own conversation in
 `~/.local/state/sill/sill.db`, and resumes with history when reopened. Closing a tab stops its jail; the
 session stays. The tab's glyph (or a right-click) opens the **session menu**: name, policy, memory scope,
-desktop access (X11 / D-Bus — the glyph turns amber while granted) and where the jail runs; a policy or
-desktop change rebuilds the jail. The row under the prompt holds only what the next turn uses: mode,
+and where the jail runs; a policy change rebuilds the jail. The row under the prompt holds only what the next turn uses: mode,
 model, context usage, auto-allow (the lock: open = sill answers "allow once" for you), running processes.
 
 **Pins** show as chips above the prompt with their git +/−/untracked counts; a chip opens the file tree
@@ -128,7 +127,7 @@ design; this is what you see.
 - **The Reopen list** (`+`) shows date and the summary's first line under each ended session, the
   whole summary as a tooltip, and a search box over titles, summaries, notes and your prompts
   (`folder:` `agent:` `since:` filters). Clicking a row resumes the session with its history. *New here*
-  (`+` on the row) starts a fresh session with the same agent, policy, desktop access, scope and pins,
+  (`+` on the row) starts a fresh session with the same agent, policy, scope and pins,
   told the old one's summary first.
 - **The session page** (session menu → *Page*, or the page glyph on a Reopen row) shows the facts
   (agent, when, how long, kept paths, folders), the summary — editable in place, saved as you type
@@ -181,7 +180,7 @@ environment (the gear) and pick *API Key*; with ChatGPT pick *ChatGPT* (or `sill
 login runs on this machine because its browser callback can't reach the jail, but with `CODEX_HOME`
 pointing at the jail's copy, so nothing lands on the host. Gemini: see Known limits.
 
-**Policy changes.** A jail gets its mounts and desktop access when it is launched. After editing the
+**Policy changes.** A jail gets its mounts and permission state when it is launched. After editing the
 policy (`/etc/sill/policies/default.toml`, then `~/.config/sill/policies/`), reopen a session's tab: a
 jail older than the policy file is rebuilt. Restarting the shelf alone does not touch running sessions.
 

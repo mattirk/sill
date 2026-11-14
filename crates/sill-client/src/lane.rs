@@ -598,7 +598,7 @@ mod tests {
             &get,
             json!({"session_id":"s", "agent":"claude", "title":"t", "title_kind":"", "created_at":"1",
                    "last_used":"1", "ended_at":null, "policy":"default", "auto_allow":false,
-                   "desktop":"", "memory_scope":"", "summary":"", "summary_kind":"", "ghost":false,
+                   "memory_scope":"", "summary":"", "summary_kind":"", "ghost":false,
                    "running":false, "pins":[], "settings":{}, "follows":null, "compacted":"0"}),
         );
         assert!(matches!(settled(&updates), Update::NotRunning));

@@ -90,8 +90,6 @@ pub struct NewSession {
     #[serde(default)]
     pub pins: Vec<PathBuf>,
     #[serde(default)]
-    pub desktop: String,
-    #[serde(default)]
     pub memory_scope: String,
     /// The ended session this one follows (*New here*).
     #[serde(default)]

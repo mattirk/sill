@@ -8,10 +8,8 @@ fn record(store: &Store, s: sill_core::store::Session) -> Result<api::Session> {
     Ok(api::Session {
         running: s.ended_at.is_none() && sill_core::session::is_running(&s.id),
         policy_changed: s.ended_at.is_none() && sill_core::changes::home().is_ok_and(|home| {
-            let cfg = sill_core::config::load();
-            let (x11, dbus) = sill_core::config::desktop_grants(&s.desktop, &cfg);
             let pins = if s.ghost { vec![] } else { store.jail_pins(&s.id).unwrap_or_default() };
-            match sill_core::session::session_base_policy(&s.policy, &home, x11, dbus, s.ghost, Some(&s.agent)) {
+            match sill_core::session::session_base_policy(&s.policy, &home, s.ghost, Some(&s.agent)) {
                 Ok(base) => sill_core::session::jail_outdated_with_grants(&s.id, &base, &pins, store)
                     || sill_core::session::jail_outdated(&s.id, &s.policy, &home),
                 Err(_) => true,
@@ -28,7 +26,6 @@ fn record(store: &Store, s: sill_core::store::Session) -> Result<api::Session> {
         ended_at: s.ended_at.map(|t| t.to_string()),
         policy: s.policy,
         auto_allow: s.auto_allow,
-        desktop: s.desktop,
         memory_scope: s.memory_scope,
         summary: s.summary,
         summary_kind: s.summary_kind,
@@ -95,7 +92,6 @@ fn create(store: &Store, mut a: api::Create) -> Result<api::SessionKey> {
             agent: a.agent,
             policy: a.policy,
             pins,
-            desktop: a.desktop,
             memory_scope: a.memory_scope,
             follows: a.follows,
             remember_pins: a.remember_pins,
@@ -184,7 +180,6 @@ impl Hub {
                             api::Change::Title { text, kind } => store.set_title(&a.session_id, &text, &kind)?,
                             api::Change::Summary { text, kind } => store.set_summary(&a.session_id, &text, &kind)?,
                             api::Change::AutoAllow { enabled } => store.set_auto_allow(&a.session_id, enabled)?,
-                            api::Change::Desktop { value } => store.set_desktop(&a.session_id, &value)?,
                             api::Change::MemoryScope { value } => store.set_memory_scope(&a.session_id, &value)?,
                             api::Change::Policy { value } => store.set_policy(&a.session_id, &value)?,
                             api::Change::Settings { settings } => store.set_session_settings(&a.session_id, &settings.into())?,

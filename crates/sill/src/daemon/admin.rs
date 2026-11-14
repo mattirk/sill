@@ -612,8 +612,6 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             bounded(api::PolicyEntry {
                 name: a.name,
                 text: toml::to_string_pretty(&policy)?,
-                x11: policy.jail.x11,
-                dbus: policy.jail.dbus,
             })
         }
         "_sill/policy.start" => {
@@ -661,7 +659,7 @@ pub fn handle(hub: &Hub, conn: u64, m: &str, p: Value) -> Option<Result<Value>> 
             policy.name = a.name.clone();
             let text = toml::to_string_pretty(&policy)?;
             install_policy(&sill_core::changes::home()?, &a.name, &text, a.replace)?;
-            bounded(api::PolicyEntry { name: a.name, text, x11: policy.jail.x11, dbus: policy.jail.dbus })
+            bounded(api::PolicyEntry { name: a.name, text })
         }
         "_sill/procs.list" => {
             let a: api::ProcessesList = args(p)?;

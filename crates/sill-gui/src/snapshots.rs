@@ -156,7 +156,7 @@ fn render_lifecycle() {
                 "session_id": format!("s{i}"), "agent": if i == 1 { "codex" } else { "claude" },
                 "title": title,
                 "title_kind": "", "created_at": "1", "last_used": "1", "ended_at": "1793806135",
-                "policy": "default", "auto_allow": false, "desktop": "", "memory_scope": "",
+                "policy": "default", "auto_allow": false, "memory_scope": "",
                 "summary": "a summary", "summary_kind": "", "ghost": false, "running": false,
                 "pins": [], "settings": {}, "follows": null, "compacted": "0"
             }))

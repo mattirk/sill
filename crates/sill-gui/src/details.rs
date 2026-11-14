@@ -471,7 +471,7 @@ mod tests {
         let session = serde_json::from_value(json!({
             "session_id":"demo", "agent":"claude", "title":"Summary title", "title_kind":"",
             "created_at":"1", "last_used":"1", "ended_at":null, "policy":"default",
-            "auto_allow":false, "desktop":"", "memory_scope":"", "summary":"Saved summary",
+            "auto_allow":false, "memory_scope":"", "summary":"Saved summary",
             "summary_kind":"person", "ghost":false, "running":true, "pins":[],
             "settings":{}, "follows":null, "compacted":"0"
         }))

@@ -2215,7 +2215,7 @@ fn session_record(
     serde_json::from_value(json!({
         "session_id": id, "agent": "claude", "title": title, "title_kind": "",
         "created_at": "1", "last_used": "1", "ended_at": ended.then_some("1793806135"),
-        "policy": "default", "auto_allow": false, "desktop": "", "memory_scope": "",
+        "policy": "default", "auto_allow": false, "memory_scope": "",
         "summary": if ended { "made the arrow smaller" } else { "" }, "summary_kind": "",
         "ghost": ghost, "running": !ended, "pins": [], "settings": {}, "follows": null,
         "compacted": "0"

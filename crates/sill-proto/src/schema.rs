@@ -115,7 +115,7 @@ pub const METHODS: &[Method] = &[
     req::<crate::Empty, crate::Text>("_sill/settings.instructions.get", "Read global instructions."),
     req::<crate::admin::Text, crate::Empty>("_sill/settings.instructions.set", "Replace global instructions (at most 1 MiB). Read back after uncertainty before retrying."),
     req::<crate::admin::NamesList, crate::admin::Names>("_sill/policy.list", "List available daemon policy names (4 MiB result bound)."),
-    req::<crate::admin::PolicyKey, crate::admin::PolicyEntry>("_sill/policy.get", "Read a named daemon policy and desktop grants."),
+    req::<crate::admin::PolicyKey, crate::admin::PolicyEntry>("_sill/policy.get", "Read a named daemon policy."),
     req::<crate::admin::PolicyStart, crate::sessions::Started>("_sill/policy.start", "Start a session with explicit fragment-root exceptions for one jail build only; never blindly retry after uncertainty."),
     req::<crate::sessions::SessionKey, crate::admin::PolicyView>("_sill/policy.preview", "Preview next-build session rules and fragment diagnostics; this view is not enforced by a running jail."),
     req::<crate::sessions::SessionKey, crate::admin::PolicySnapshot>("_sill/policy.snapshot", "Inspect retained launch rules and fragment sources; null means no snapshot was recorded."),

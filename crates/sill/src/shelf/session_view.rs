@@ -2231,19 +2231,6 @@ impl SessionView {
         self.prompt.grab_focus();
     }
 
-    /// Desktop access of this session's jail (SPEC §4.2), from the session menu: stored, noted in
-    /// the conversation, and the jail rebuilt (after the turn when the agent is working).
-    pub fn set_desktop(self: &Rc<Self>, id: &str) {
-        if self.session.borrow().desktop == id {
-            return;
-        }
-        let label = sill_core::config::DESKTOP_CHOICES.iter().find(|(i, _)| *i == id).map(|(_, l)| *l).unwrap_or(id);
-        super::client::set(&self.id(), wire::SessionSet::Desktop(id.to_string()));
-        self.session.borrow_mut().desktop = id.to_string();
-        self.conv.add_note(&format!("desktop access: {label}; the session restarts"));
-        self.restart_for_jail();
-    }
-
     /// Which earlier sessions the agent is told about (docs/memory.md §2.3), from the session menu:
     /// stored; the changed standing block goes with the next prompt, no restart.
     pub fn set_memory_scope(&self, scope: &str) {

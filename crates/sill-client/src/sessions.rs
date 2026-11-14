@@ -23,7 +23,7 @@ pub fn create(agent: &str, ghost: bool, remember_pins: bool) -> Request {
     ("_sill/sessions.create", json!(create))
 }
 
-/// *New here*: a new session with an ended one's agent, policy, pins, desktop and memory scope,
+/// *New here*: a new session with an ended one's agent, policy, pins and memory scope,
 /// told that one's summary first.
 pub fn new_here(from: &Session) -> Request {
     let create = Create {
@@ -31,7 +31,6 @@ pub fn new_here(from: &Session) -> Request {
         agent: from.agent.clone(),
         policy: from.policy.clone(),
         pins: from.pins.clone(),
-        desktop: from.desktop.clone(),
         memory_scope: from.memory_scope.clone(),
         follows: from.session_id.clone(),
         remember_pins: false,
@@ -144,7 +143,7 @@ mod tests {
         serde_json::from_value(json!({
             "session_id": id, "agent": "claude", "title": format!("title {id}"), "title_kind": "",
             "created_at": "1", "last_used": "1", "ended_at": ended.then_some("2"),
-            "policy": "strict", "auto_allow": false, "desktop": "x11", "memory_scope": "here",
+            "policy": "strict", "auto_allow": false, "memory_scope": "here",
             "summary": "fixed the send arrow", "summary_kind": "agent", "ghost": ghost,
             "running": false, "pins": [{"bytes_base64": "L3A=", "display": "/p"}],
             "settings": {}, "follows": null, "compacted": "0"

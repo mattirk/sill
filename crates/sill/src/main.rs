@@ -521,11 +521,6 @@ struct JailArgs {
     /// SILL_LAUNCHER=direct
     #[arg(long)]
     direct: bool,
-    /// override the policy's desktop access: on | off (SPEC §4.2)
-    #[arg(long)]
-    x11: Option<String>,
-    #[arg(long)]
-    dbus: Option<String>,
     /// a ghost session (docs/memory.md §3): the policy tightened — `direct` as `ro`, no X11 or
     /// D-Bus, `all` network as the default allow-list — and no memory unless Settings allow it
     #[arg(long)]
@@ -1325,8 +1320,6 @@ fn start_session(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>) -> Re
         env: jail.env.clone(),
         shim_bin,
         agent: None,
-        x11: jail.x11.as_deref().map(|v| v == "on"),
-        dbus: jail.dbus.as_deref().map(|v| v == "on"),
         ghost: jail.ghost,
         binds: jail
             .binds
@@ -1573,7 +1566,7 @@ fn build_spec(a: JailArgs, command: Vec<OsString>) -> Result<JailSpec> {
     let policy = match &resolution {
         Some(resolved) => resolved.policy.clone(),
         None => sill_core::session::effective_base_policy(&a.policy, &home,
-            a.x11.as_deref().map(|v| v == "on"), a.dbus.as_deref().map(|v| v == "on"), a.ghost)?,
+            a.ghost)?,
     };
     let state_dir = match a.state_dir {
         Some(d) => d,

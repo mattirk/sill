@@ -53,7 +53,6 @@ pub struct Session {
     pub ended_at: Option<String>,
     pub policy: String,
     pub auto_allow: bool,
-    pub desktop: String,
     pub memory_scope: String,
     pub summary: String,
     pub summary_kind: String,
@@ -92,8 +91,6 @@ pub struct Create {
     #[serde(default)]
     pub pins: Vec<HostPath>,
     #[serde(default)]
-    pub desktop: String,
-    #[serde(default)]
     pub memory_scope: String,
     #[serde(default)]
     pub follows: String,
@@ -114,7 +111,6 @@ pub enum Change {
     Name { text: String },
     Title { text: String, kind: String },
     AutoAllow { enabled: bool },
-    Desktop { value: String },
     MemoryScope { value: String },
     Policy { value: String },
     Summary { text: String, kind: String },
@@ -162,7 +158,6 @@ impl From<crate::wire::SessionSet> for Change {
             S::Name(text) => Self::Name { text },
             S::Title { title, kind } => Self::Title { text: title, kind },
             S::AutoAllow(enabled) => Self::AutoAllow { enabled },
-            S::Desktop(value) => Self::Desktop { value },
             S::MemoryScope(value) => Self::MemoryScope { value },
             S::Policy(value) => Self::Policy { value },
             S::Summary { text, kind } => Self::Summary { text, kind },
@@ -177,7 +172,6 @@ impl From<Change> for crate::wire::SessionSet {
             Change::Name { text } => Self::Name(text),
             Change::Title { text, kind } => Self::Title { title: text, kind },
             Change::AutoAllow { enabled } => Self::AutoAllow(enabled),
-            Change::Desktop { value } => Self::Desktop(value),
             Change::MemoryScope { value } => Self::MemoryScope(value),
             Change::Policy { value } => Self::Policy(value),
             Change::Summary { text, kind } => Self::Summary { text, kind },
@@ -193,7 +187,6 @@ impl Create {
             agent: n.agent,
             policy: n.policy,
             pins: n.pins.iter().map(|p| HostPath::from_path(p)).collect(),
-            desktop: n.desktop,
             memory_scope: n.memory_scope,
             follows: n.follows,
             remember_pins: n.remember_pins,

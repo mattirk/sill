@@ -10,7 +10,7 @@ type Responses = Mutex<BTreeMap<String, (std::time::Instant, serde_json::Value)>
 static RESPONSES: OnceLock<Responses> = OnceLock::new();
 
 fn cacheable(r: &Request) -> bool {
-    matches!(r, Request::Config | Request::Instructions | Request::PolicyDesktop { .. } | Request::Policies)
+    matches!(r, Request::Config | Request::Instructions | Request::Policies)
 }
 
 pub fn invalidate() {
@@ -21,7 +21,7 @@ pub fn invalidate() {
 
 fn read_only(r:&Request)->bool {
     matches!(r, Request::Config | Request::Instructions | Request::PolicyText {..} | Request::Denied {..} |
-        Request::ProcTail {..} | Request::Policies | Request::PolicyDesktop {..})
+        Request::ProcTail {..} | Request::Policies)
 }
 
 fn public_request(r:&Request)->Result<(&'static str,serde_json::Value,bool)> {
@@ -31,7 +31,6 @@ fn public_request(r:&Request)->Result<(&'static str,serde_json::Value,bool)> {
         Request::RememberDenied {session,host}=>("_sill/policy.remember_denied",json!({"session_id":session,"host":host}),false),
         Request::AllowHost {session,host}=>("_sill/policy.allow_host",json!({"session_id":session,"host":host}),false),
         Request::Policies=>("_sill/policy.list",json!({}),false),
-        Request::PolicyDesktop {policy}=>("_sill/policy.get",json!({"name":policy}),false),
         Request::RefreshSnapshot=>("_sill/memory.refresh",json!({}),false),
         Request::Config=>("_sill/settings.get",json!({}),false),
         Request::PatchConfig {fields} => ("_sill/settings.patch",json!({"changes":fields.iter().map(|(k,v)|json!({"type":k,"value":v})).collect::<Vec<_>>()}),false),
@@ -96,7 +95,6 @@ pub fn request<T: DeserializeOwned>(r: Request) -> Result<T> {
     let value = if wrapped_text { value["text"].clone() } else { match &r {
         Request::AllowHost {..}=>value["agent_name"].clone(),
         Request::Policies=>value["names"].clone(),
-        Request::PolicyDesktop {..}=>serde_json::json!([value["x11"],value["dbus"]]),
         _=>value,
     } };
     if cached {

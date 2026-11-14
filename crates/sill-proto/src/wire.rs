@@ -348,7 +348,6 @@ pub enum SessionSet {
     Name(String),
     Title { title: String, kind: String },
     AutoAllow(bool),
-    Desktop(String),
     MemoryScope(String),
     Policy(String),
     Summary { text: String, kind: String },

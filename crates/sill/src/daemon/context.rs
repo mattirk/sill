@@ -27,13 +27,7 @@ impl Context {
         let Some(session) = store.sessions()?.into_iter().find(|s| s.id == id) else { bail!("no session {id}") };
         let cfg = sill_core::config::load();
         let facts = sill_core::session::policy_of(&session, home)
-            .map(|mut policy| {
-                let (x11, dbus) = sill_core::config::desktop_grants(&session.desktop, &cfg);
-                // Ghost grants are tightened by policy_of; an override must never restore them.
-                if !session.ghost {
-                    policy.jail.x11 = x11.unwrap_or(policy.jail.x11);
-                    policy.jail.dbus = dbus.unwrap_or(policy.jail.dbus);
-                }
+            .map(|policy| {
                 let mut facts = sill_core::instructions::facts_block(&policy, home);
                 if session.ghost {
                     facts.push_str(sill_core::instructions::GHOST_NOTICE);

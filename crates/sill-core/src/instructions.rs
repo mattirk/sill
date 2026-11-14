@@ -94,13 +94,7 @@ pub fn facts_block(policy: &Policy, home: &Path) -> String {
     if !p.ro.is_empty() {
         lines.push(format!("Read-only: {}.", some(&p.ro, 10)));
     }
-    let desktop = match (policy.jail.x11, policy.jail.dbus) {
-        (true, true) => "X11 and the D-Bus session bus are available.",
-        (true, false) => "X11 is available (GUI programs run and show); no D-Bus session bus.",
-        (false, true) => "The D-Bus session bus is available; no X11.",
-        (false, false) => "No X11, no D-Bus: nothing graphical, no desktop services (a program that asks for a bus is refused; none is started).",
-    };
-    lines.push(desktop.into());
+    lines.push("No X11, no D-Bus: nothing graphical, no desktop services (a program that asks for a bus is refused; none is started).".into());
     lines.push("The person reads your replies as rendered Markdown: to show an image file, write `![what it shows](/absolute/path.png)` with its path here; a bare path is only text.".into());
     let net = match policy.network.mode {
         NetMode::None => "No network.".to_string(),
@@ -207,7 +201,6 @@ private = ["~/.cache"]
 mask = ["~/.ssh", "~/.gnupg"]
 ro = ["/srv/music"]
 [jail]
-x11 = true
 "#,
         )
         .unwrap();
@@ -217,7 +210,7 @@ x11 = true
         assert!(f.contains("never on the host: ~/.cache."));
         assert!(f.contains("Hidden (empty here): ~/.ssh, ~/.gnupg."));
         assert!(f.contains("Read-only: /srv/music."));
-        assert!(f.contains("X11 is available"));
+        assert!(f.contains("No X11, no D-Bus"));
         assert!(f.contains("allow-list through sill's proxy (anthropic.com, github.com, crates.io)"), "{f}");
         assert!(f.contains("Not on PATH but present: ~/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin, ~/go/bin."), "{f}");
         // rustup's proxies on the PATH: the toolchain dir is not named

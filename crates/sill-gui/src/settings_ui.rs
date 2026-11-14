@@ -524,28 +524,6 @@ impl App {
         ));
 
         // ---- Sessions
-        let desktop = |value: Option<bool>| match value {
-            None => 0,
-            Some(true) => 1,
-            Some(false) => 2,
-        };
-        let from = |i: usize| match i {
-            1 => Some(true),
-            2 => Some(false),
-            _ => None,
-        };
-        let desktop_row = row![
-            text("X11").size(style::SMALL).color(P.fg_dim),
-            choice(["policy", "on", "off"], desktop(s.desktop_x11), move |i| {
-                change(SettingChange::DesktopX11 { value: from(i) })
-            }),
-            text("D-Bus").size(style::SMALL).color(P.fg_dim),
-            choice(["policy", "on", "off"], desktop(s.desktop_dbus), move |i| {
-                change(SettingChange::DesktopDbus { value: from(i) })
-            }),
-        ]
-        .spacing(10)
-        .align_y(Alignment::Center);
         let minutes = s
             .auto_revert_minutes
             .unwrap_or(settings::AUTO_REVERT_DEFAULT);
@@ -614,11 +592,6 @@ impl App {
                         "Folders and files every new session may work in; a chip and the agent's focus only when pinned in the session too",
                     ),
                     pins,
-                ),
-                setting(
-                    "Desktop",
-                    Some("For new sessions; a session's own menu can override"),
-                    desktop_row,
                 ),
                 setting(
                     "Auto-revert",

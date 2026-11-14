@@ -16,7 +16,6 @@ pub enum Request {
     ProcStop { session: String, name: String },
     ProcDismiss { session: String, name: String },
     Policies,
-    PolicyDesktop { policy: String },
     RefreshSnapshot,
 }
 

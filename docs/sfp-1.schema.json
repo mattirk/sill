@@ -522,23 +522,6 @@
           "additionalProperties": false,
           "properties": {
             "type": {
-              "const": "desktop",
-              "type": "string"
-            },
-            "value": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "type",
-            "value"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "type": {
               "const": "memory_scope",
               "type": "string"
             },
@@ -902,10 +885,6 @@
           "type": "string"
         },
         "create_id": {
-          "type": "string"
-        },
-        "desktop": {
-          "default": "",
           "type": "string"
         },
         "follows": {
@@ -3437,24 +3416,16 @@
     },
     "PolicyEntry": {
       "properties": {
-        "dbus": {
-          "type": "boolean"
-        },
         "name": {
           "type": "string"
         },
         "text": {
           "type": "string"
-        },
-        "x11": {
-          "type": "boolean"
         }
       },
       "required": [
         "name",
-        "text",
-        "x11",
-        "dbus"
+        "text"
       ],
       "type": "object"
     },
@@ -4474,9 +4445,6 @@
           "description": "Unix seconds, encoded as decimal strings.",
           "type": "string"
         },
-        "desktop": {
-          "type": "string"
-        },
         "ended_at": {
           "type": [
             "string",
@@ -4551,7 +4519,6 @@
         "last_used",
         "policy",
         "auto_allow",
-        "desktop",
         "memory_scope",
         "summary",
         "summary_kind",
@@ -5008,44 +4975,6 @@
           "additionalProperties": false,
           "properties": {
             "type": {
-              "const": "desktop_x11",
-              "type": "string"
-            },
-            "value": {
-              "type": [
-                "boolean",
-                "null"
-              ]
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "type": {
-              "const": "desktop_dbus",
-              "type": "string"
-            },
-            "value": {
-              "type": [
-                "boolean",
-                "null"
-              ]
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "type": {
               "const": "host_terminal",
               "type": "string"
             },
@@ -5247,20 +5176,6 @@
           "default": null,
           "type": [
             "string",
-            "null"
-          ]
-        },
-        "desktop_dbus": {
-          "default": null,
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "desktop_x11": {
-          "default": null,
-          "type": [
-            "boolean",
             "null"
           ]
         },
@@ -7038,7 +6953,7 @@
     },
     {
       "capabilities": {},
-      "doc": "Read a named daemon policy and desktop grants.",
+      "doc": "Read a named daemon policy.",
       "kind": "request",
       "name": "_sill/policy.get",
       "params": {

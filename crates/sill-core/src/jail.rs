@@ -343,35 +343,8 @@ impl JailSpec {
             push(&mut a, &[&"--symlink", target, &Path::new("/").join(name)]);
         }
         push(&mut a, &[&"--dir", &format!("/run/user/{}", self.uid)]);
-        // optional desktop access (policy [jail] x11 / dbus): the sockets and the variables that point at them
-        if p.jail.x11 {
-            if let Ok(display) = std::env::var("DISPLAY") {
-                let num = display.trim_start_matches(':').split('.').next().unwrap_or("0").to_string();
-                let sock = format!("/tmp/.X11-unix/X{num}");
-                if Path::new(&sock).exists() {
-                    push(&mut a, &[&"--ro-bind", &sock, &sock, &"--setenv", &"DISPLAY", &display]);
-                }
-                let xauth = std::env::var("XAUTHORITY").unwrap_or_else(|_| format!("{}/.Xauthority", self.home.display()));
-                if Path::new(&xauth).is_file() {
-                    push(&mut a, &[&"--ro-bind", &xauth, &xauth, &"--setenv", &"XAUTHORITY", &xauth]);
-                }
-            } else {
-                warnings.push("policy asks for x11 but DISPLAY is not set".into());
-            }
-        }
-        if p.jail.dbus {
-            let bus = format!("/run/user/{}/bus", self.uid);
-            if Path::new(&bus).exists() {
-                push(&mut a, &[&"--bind", &bus, &bus, &"--setenv", &"DBUS_SESSION_BUS_ADDRESS", &format!("unix:path={bus}")]);
-            }
-        } else {
-            // no bus means no bus: with the variable unset, the first program that wants one
-            // (libsecret, a GTK accessibility bridge) autolaunches a private dbus-daemon plus a
-            // keyring inside the jail — harmless, but a bus the facts say is not there, and two
-            // processes that live until the jail ends. `disabled:` is refused by libdbus and GDBus
-            // without spawning anything. The system bus is under the jail's own tmpfs /run anyway.
-            push(&mut a, &[&"--setenv", &"DBUS_SESSION_BUS_ADDRESS", &"disabled:", &"--setenv", &"DBUS_SYSTEM_BUS_ADDRESS", &"disabled:"]);
-        }
+        // Refuse bus autolaunch; no host display or bus sockets are shared.
+        push(&mut a, &[&"--setenv", &"DBUS_SESSION_BUS_ADDRESS", &"disabled:", &"--setenv", &"DBUS_SYSTEM_BUS_ADDRESS", &"disabled:"]);
         for r in &ro_binds {
             push(&mut a, &[&"--ro-bind", r, r]);
         }
@@ -922,12 +895,12 @@ mod tests {
     /// Without D-Bus the jail gets a dead address, not an unset one: nothing autolaunches a bus.
     #[test]
     fn no_dbus_is_a_dead_address_not_an_autolaunch() {
-        let mut s = spec();
-        s.policy.jail.dbus = false;
+        let s = spec();
         let r = render(&s.plan().unwrap().argv);
         assert!(r.contains("--setenv DBUS_SESSION_BUS_ADDRESS disabled:"), "{r}");
         assert!(r.contains("--setenv DBUS_SYSTEM_BUS_ADDRESS disabled:"), "{r}");
         assert!(!r.contains("unix:path="), "{r}");
+        assert!(!r.contains(".X11-unix") && !r.contains("XAUTHORITY"), "{r}");
     }
 
     #[test]

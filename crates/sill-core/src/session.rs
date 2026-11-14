@@ -27,9 +27,6 @@ pub struct StartOptions {
     pub agent: Option<String>,
     /// Extra read-write binds (host, jail), see [`binds_for`].
     pub binds: Vec<(PathBuf, PathBuf)>,
-    /// Desktop access overriding the policy's `[jail] x11` / `dbus` (`None` = policy), SPEC §4.2.
-    pub x11: Option<bool>,
-    pub dbus: Option<bool>,
     /// A ghost session (docs/memory.md §3): `sill launch --ghost` tightens the policy
     /// (`Policy::ghostly`) and leaves the memory snapshot out unless Settings say otherwise.
     pub ghost: bool,
@@ -477,20 +474,18 @@ pub fn socket_path(session: &str) -> Result<PathBuf> {
     Ok(shim::runtime_dir(session)?.join("shim.sock"))
 }
 
-/// A running jail was built before its policy file was last changed: mounts and the X11/D-Bus
+/// A running jail was built before its policy file was last changed: mounts and permission
 /// grants are fixed at launch, so the policy on disk no longer describes it.
 /// Resolve the base with the same overrides the launcher uses, before repository restrictions.
-pub fn effective_base_policy(name: &str, home: &Path, x11: Option<bool>, dbus: Option<bool>, ghost: bool) -> Result<Policy> {
+pub fn effective_base_policy(name: &str, home: &Path, ghost: bool) -> Result<Policy> {
     let mut p = Policy::load(name, home)?;
-    if let Some(value) = x11 { p.jail.x11 = value; }
-    if let Some(value) = dbus { p.jail.dbus = value; }
     if ghost { p.ghostly(home); }
     Ok(p)
 }
 
 /// Freeze registry endpoints too: proxy behavior and the recorded policy must agree.
-pub fn session_base_policy(name: &str, home: &Path, x11: Option<bool>, dbus: Option<bool>, ghost: bool, agent: Option<&str>) -> Result<Policy> {
-    let mut policy = effective_base_policy(name, home, x11, dbus, ghost)?;
+pub fn session_base_policy(name: &str, home: &Path, ghost: bool, agent: Option<&str>) -> Result<Policy> {
+    let mut policy = effective_base_policy(name, home, ghost)?;
     if policy.network.mode != crate::policy::NetMode::None {
         if let Some(agent) = agent.and_then(|id| crate::agents::load(home).remove(id)) {
             policy.network.allow.extend(agent.domains);
@@ -517,12 +512,10 @@ pub fn resolved_policy_with_grants(resolution: crate::policy_fragments::Resoluti
     Ok(apply_grants(resolution, &store.permission_choices(session)?, store.network_hosts(session)?))
 }
 
-/// A stored session's next build before its session grants: base policy with desktop overrides,
+/// A stored session's next build before its session grants: base policy,
 /// then repository fragments of its jail pins (none for a ghost).
 pub fn next_build_restrictions(row: &crate::store::Session, home: &Path, pins: &[PathBuf], ignore_roots: &[PathBuf]) -> Result<crate::policy_fragments::Resolution> {
-    let cfg = crate::config::load();
-    let (x11, dbus) = crate::config::desktop_grants(&row.desktop, &cfg);
-    let base = session_base_policy(&row.policy, home, x11, dbus, row.ghost, Some(&row.agent))?;
+    let base = session_base_policy(&row.policy, home, row.ghost, Some(&row.agent))?;
     crate::policy_fragments::resolve(&base, if row.ghost { &[] } else { pins }, ignore_roots)
 }
 
@@ -722,12 +715,6 @@ fn launch_args(opts: &StartOptions) -> Vec<std::ffi::OsString> {
         a.push("--shim".into());
         a.push(s.clone().into());
     }
-    for (flag, v) in [("--x11", opts.x11), ("--dbus", opts.dbus)] {
-        if let Some(on) = v {
-            a.push(flag.into());
-            a.push(if on { "on" } else { "off" }.into());
-        }
-    }
     if let Some(ag) = &opts.agent {
         a.push("--agent".into());
         a.push(ag.clone().into());
@@ -760,7 +747,7 @@ pub fn ensure_started(opts: &StartOptions, home: &Path, exe: &Path) -> Result<St
     if shim::Control::connect(&sock).is_ok() {
         return Ok(Started { socket: sock, child: None });
     }
-    let base = session_base_policy(&opts.policy, home, opts.x11, opts.dbus, opts.ghost, opts.agent.as_deref())?;
+    let base = session_base_policy(&opts.policy, home, opts.ghost, opts.agent.as_deref())?;
     let resolution = crate::policy_fragments::resolve(&base, &opts.pins, &opts.ignore_fragments)?;
     let resolution = resolved_policy_with_grants(resolution, &opts.session)?;
     resolution.policy.permissions.validate_launch(&resolution.policy.network)?;

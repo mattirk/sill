@@ -551,9 +551,6 @@ impl Hub {
         for p in &pins {
             store.pin(&s.id, p)?;
         }
-        if !n.desktop.is_empty() {
-            store.set_desktop(&s.id, &n.desktop)?;
-        }
         if !n.memory_scope.is_empty() {
             store.set_memory_scope(&s.id, &n.memory_scope)?;
         }
@@ -1063,7 +1060,7 @@ impl Hub {
         });
     }
 
-    /// Start a stored session's jail from its row — pins, policy, desktop grants, the agent's binds
+    /// Start a stored session's jail from its row — pins, policy, the agent's binds
     /// — or find it running (what `shelf/session.rs` built in-process before the daemon).
     fn start_session(&self, id: &str) -> Result<Started> {
         self.start_session_ignoring(id, &[])
@@ -1092,8 +1089,6 @@ impl Hub {
         // ensure_started resolves and validates again at the actual enforcement boundary.
         let resolved = sill_core::session::next_build(&s, &self.home, &pins, ignore_roots)?;
         resolved.policy.permissions.validate_launch(&resolved.policy.network)?;
-        let cfg = sill_core::config::load();
-        let (x11, dbus) = sill_core::config::desktop_grants(&s.desktop, &cfg);
         let uid = rustix::process::getuid().as_raw();
         let sdir = sill_core::session::state_dir(uid, id)?;
         let policy = Policy::load(&s.policy, &self.home)?;
@@ -1111,8 +1106,6 @@ impl Hub {
             shim_bin: None,
             agent: Some(s.agent.clone()),
             binds,
-            x11,
-            dbus,
             ghost: s.ghost,
         };
         let started = sill_core::session::ensure_started(&opts, &self.home, &self.exe).context("starting the jail")?;

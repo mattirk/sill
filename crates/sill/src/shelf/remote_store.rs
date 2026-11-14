@@ -16,7 +16,7 @@ impl Store {
             for s in page.sessions {
                 out.push(Session{id:s.session_id,agent:s.agent,title:s.title,title_kind:s.title_kind,
                     created_at:s.created_at.parse()?,last_used:s.last_used.parse()?,ended_at:s.ended_at.map(|v|v.parse()).transpose()?,
-                    acp_session_id:None,policy:s.policy,auto_allow:s.auto_allow,agent_settings:s.settings.into(),desktop:s.desktop,
+                    acp_session_id:None,policy:s.policy,auto_allow:s.auto_allow,agent_settings:s.settings.into(),
                     summary:s.summary,summary_kind:s.summary_kind,memory_scope:s.memory_scope,follows:s.follows.unwrap_or_default(),
                     compacted:s.compacted.parse()?,ghost:s.ghost});
             }
