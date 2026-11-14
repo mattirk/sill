@@ -454,3 +454,48 @@ fn render_processes() {
     ));
     render(&app, "18-process-log");
 }
+
+#[test]
+#[ignore = "writes source gutter PNGs for review"]
+fn render_source_gutter() {
+    use crate::{Message, workspace::Action};
+    use iced::widget::text_editor;
+    use sill_proto::sessions::HostPath;
+    let (mut app, _) = App::new(true, None);
+    let _ = app.update(Message::Workspace(Action::Open {
+        path: HostPath::from_path(std::path::Path::new("/home/demo/project/README.md")),
+        repo: None,
+    }));
+    let _ = app.update(Message::Workspace(Action::Source));
+    let content = (1..=130)
+        .map(|line| {
+            if line == 3 {
+                format!("// {}", "wrapped source text ".repeat(18))
+            } else if line == 4 {
+                String::new()
+            } else {
+                format!("let value_{line} = {line};")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    app.views
+        .get_mut("demo")
+        .unwrap()
+        .reader
+        .as_mut()
+        .unwrap()
+        .content = text_editor::Content::with_text(&content);
+    render_size(&app, "source-gutter-top", (720.0, 860.0));
+    let _ = app.update(Message::Workspace(Action::Text(
+        text_editor::Action::Scroll { lines: 95 },
+    )));
+    render_size(&app, "source-gutter-scrolled", (720.0, 860.0));
+    let _ = app.update(Message::Workspace(Action::Text(text_editor::Action::Move(
+        text_editor::Motion::DocumentEnd,
+    ))));
+    let _ = app.update(Message::Workspace(Action::Text(text_editor::Action::Edit(
+        text_editor::Edit::Enter,
+    ))));
+    render_size(&app, "source-gutter-edited", (720.0, 860.0));
+}

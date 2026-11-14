@@ -118,6 +118,8 @@ pub struct TextEditor<
     min_height: f32,
     max_height: f32,
     padding: Padding,
+    // sill patch: visible logical line numbers and their scrolled pixel positions.
+    line_numbers: Option<fn(&Renderer::Editor) -> Vec<(usize, f32)>>,
     wrapping: Wrapping,
     class: Theme::Class<'a>,
     key_binding: Option<Box<dyn Fn(KeyPress) -> Option<Binding<Message>> + 'a>>,
@@ -150,6 +152,7 @@ where
             min_height: 0.0,
             max_height: f32::INFINITY,
             padding: Padding::new(5.0),
+            line_numbers: None,
             wrapping: Wrapping::default(),
             class: <Theme as Catalog>::default(),
             key_binding: None,
@@ -297,6 +300,7 @@ where
             min_height: self.min_height,
             max_height: self.max_height,
             padding: self.padding,
+            line_numbers: self.line_numbers,
             wrapping: self.wrapping,
             class: self.class,
             key_binding: self.key_binding,
@@ -305,6 +309,25 @@ where
             highlighter_format: to_format,
             last_status: self.last_status,
         }
+    }
+
+    /// Enables a gutter using the renderer's visible logical lines (sill patch).
+    pub fn line_numbers(
+        mut self,
+        visible_lines: fn(&Renderer::Editor) -> Vec<(usize, f32)>,
+    ) -> Self {
+        self.line_numbers = Some(visible_lines);
+        self
+    }
+
+    fn text_padding(&self, renderer: &Renderer) -> Padding {
+        let mut padding = self.padding;
+        if self.line_numbers.is_some() {
+            let digits = self.content.line_count().max(1).ilog10() + 1;
+            let size = self.text_size.unwrap_or_else(|| renderer.default_size());
+            padding.left += (digits.max(2) as f32 + 2.0) * f32::from(size) * 0.6;
+        }
+        padding
     }
 
     /// Sets the closure to produce key bindings on key presses.
@@ -351,9 +374,10 @@ where
         };
 
         let bounds = layout.bounds();
+        let padding = self.text_padding(renderer);
         let internal = self.content.0.borrow_mut();
 
-        let text_bounds = bounds.shrink(self.padding);
+        let text_bounds = bounds.shrink(padding);
         let translation = text_bounds.position() - Point::ORIGIN;
 
         let cursor = match internal.editor.selection() {
@@ -624,6 +648,7 @@ where
         renderer: &Renderer,
         limits: &layout::Limits,
     ) -> iced_renderer::core::layout::Node {
+        let padding = self.text_padding(renderer);
         let mut internal = self.content.0.borrow_mut();
         let state = tree.state.downcast_mut::<State<Highlighter>>();
 
@@ -650,7 +675,7 @@ where
             .max_height(self.max_height);
 
         internal.editor.update(
-            limits.shrink(self.padding).max(),
+            limits.shrink(padding).max(),
             self.font.unwrap_or_else(|| renderer.default_font()),
             self.text_size.unwrap_or_else(|| renderer.default_size()),
             self.line_height,
@@ -669,7 +694,7 @@ where
                     limits
                         .height(min_bounds.height)
                         .max()
-                        .expand(Size::new(0.0, self.padding.y())),
+                        .expand(Size::new(0.0, padding.y())),
                 )
             }
         }
@@ -734,7 +759,7 @@ where
             event,
             state,
             layout.bounds(),
-            self.padding,
+            self.text_padding(renderer),
             cursor,
             self.key_binding.as_deref(),
         ) {
@@ -947,6 +972,7 @@ where
         _viewport: &Rectangle,
     ) {
         let bounds = layout.bounds();
+        let padding = self.text_padding(renderer);
 
         let mut internal = self.content.0.borrow_mut();
         let state = tree.state.downcast_ref::<State<Highlighter>>();
@@ -984,7 +1010,36 @@ where
             style.background,
         );
 
-        let text_bounds = bounds.shrink(self.padding);
+        let text_bounds = bounds.shrink(padding);
+
+        // sill patch: draw only visible line labels, outside the selectable source text.
+        if let Some(visible_lines) = self.line_numbers {
+            let size = self.text_size.unwrap_or_else(|| renderer.default_size());
+            let gutter = Rectangle {
+                x: bounds.x + self.padding.left,
+                y: text_bounds.y,
+                width: padding.left - self.padding.left - f32::from(size) * 0.6,
+                height: text_bounds.height,
+            };
+            for (number, top) in visible_lines(&internal.editor) {
+                renderer.fill_text(
+                    Text {
+                        content: number.to_string(),
+                        bounds: Size::new(gutter.width, f32::from(self.line_height.to_absolute(size))),
+                        size,
+                        line_height: self.line_height,
+                        font,
+                        align_x: text::Alignment::Right,
+                        align_y: alignment::Vertical::Top,
+                        shaping: text::Shaping::Basic,
+                        wrapping: Wrapping::None,
+                    },
+                    Point::new(gutter.x + gutter.width, gutter.y + top),
+                    style.placeholder,
+                    gutter,
+                );
+            }
+        }
 
         if internal.editor.is_empty() {
             if let Some(placeholder) = self.placeholder.clone() {

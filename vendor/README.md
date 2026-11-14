@@ -15,6 +15,9 @@ once upstream has an equivalent.
   list's menu can be wider, roomier and set apart from a compact list (upstream gives the menu the
   list's own width, padding and text size). sill-gui's agent controls are small labels whose menus
   read as menus (the person's request of 2026-11-05). Unset, upstream's behaviour.
+- `src/text_editor.rs`: optional `line_numbers` gutter, supplied with visible logical line
+  positions from the renderer. Gutter width tracks the number of digits; source layout, pointer
+  hit testing and IME positioning use the same inset. Default editors stay unchanged.
 - `src/lib.rs`: `#![allow(deprecated)]`, so upstream's own deprecation warnings do not show in
   sill's builds (a path dependency's warnings are not capped as a registry crate's are).
 

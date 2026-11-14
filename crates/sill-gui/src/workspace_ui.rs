@@ -380,7 +380,24 @@ impl App {
                 .padding(12)
                 .size(style::MONO)
                 .font(Font::with_name(crate::fonts::MONO_FAMILY))
-                .style(style::reader)
+                .style(|theme, status| {
+                    let mut style = style::reader(theme, status);
+                    style.border = iced::Border::default();
+                    style
+                })
+                .line_numbers(|editor| {
+                    let mut previous = None;
+                    editor
+                        .buffer()
+                        .layout_runs()
+                        .filter_map(|run| {
+                            let first = previous != Some(run.line_i);
+                            previous = Some(run.line_i);
+                            (first && run.glyphs.first().is_none_or(|glyph| glyph.start == 0))
+                                .then_some((run.line_i + 1, run.line_top))
+                        })
+                        .collect()
+                })
                 .on_action(|a| msg(Action::Text(a)))
                 .key_binding(crate::ui::reading_keys)
                 .highlight(
