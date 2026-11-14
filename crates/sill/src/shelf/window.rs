@@ -1142,6 +1142,10 @@ impl Shelf {
             v.quit();
             self.pages.remove(&v.root);
             self.pane_host.remove(&v.pane);
+            // this `v` should be the last reference: anything else is a leak (SPEC §4.11 #15)
+            if std::env::var_os("SILL_TRACE").is_some() {
+                eprintln!("{} view {id} closed, {} other reference(s) left", super::trace_ts(), Rc::strong_count(&v) - 1);
+            }
         }
         self.tabs.remove(id);
         self.sync_pane();

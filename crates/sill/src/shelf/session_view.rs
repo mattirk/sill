@@ -475,17 +475,22 @@ impl SessionView {
                 view.conv.prepend_top(&row);
                 *view.earlier.borrow_mut() = Some((first, row, b.clone()));
                 view.update_earlier(total - tail.len());
-                let v = view.clone();
-                b.connect_clicked(move |_| v.show_earlier());
+                let weak = Rc::downgrade(&view);
+                b.connect_clicked(move |_| {
+                    if let Some(v) = weak.upgrade() {
+                        v.show_earlier();
+                    }
+                });
             }
         }
 
         // Enter sends, Shift+Enter inserts a newline
         let keys = gtk::EventControllerKey::new();
         {
-            let v = view.clone();
+            let weak = Rc::downgrade(&view);
             let prompt = prompt.clone();
             keys.connect_key_pressed(move |_, key, _, state| {
+                let Some(v) = weak.upgrade() else { return glib::Propagation::Proceed };
                 // Ctrl+V with an image on the clipboard: attach it (text pastes as usual)
                 if (key == gdk::Key::v || key == gdk::Key::V) && state.contains(gdk::ModifierType::CONTROL_MASK) {
                     let cb = prompt.clipboard();
@@ -538,19 +543,31 @@ impl SessionView {
         }
         {
             // the shell toggle in the controls row drives the switcher
-            let v = view.clone();
-            *view.on_shell.borrow_mut() = Some(Box::new(move |on| v.show_shell(on)));
+            let weak = Rc::downgrade(&view);
+            *view.on_shell.borrow_mut() = Some(Box::new(move |on| {
+                if let Some(v) = weak.upgrade() {
+                    v.show_shell(on);
+                }
+            }));
         }
         {
             // the pty is foreign (the shell's pid is in the jail's namespace, VTE can't watch it), so
             // the shell going away shows up as EOF on the master, not as child-exited. Detach the dead
             // pty and drop back to the prompt; the next toggle opens a fresh shell.
-            let v = view.clone();
-            terminal.connect_eof(move |_| v.shell_closed());
+            let weak = Rc::downgrade(&view);
+            terminal.connect_eof(move |_| {
+                if let Some(v) = weak.upgrade() {
+                    v.shell_closed();
+                }
+            });
         }
         {
-            let v = view.clone();
-            host_term.connect_child_exited(move |_, _| v.host_shell_closed());
+            let weak = Rc::downgrade(&view);
+            host_term.connect_child_exited(move |_, _| {
+                if let Some(v) = weak.upgrade() {
+                    v.host_shell_closed();
+                }
+            });
         }
         view.connect(false);
         view
@@ -682,7 +699,7 @@ impl SessionView {
                 .or_else(|| self.store.pins(&self.id()).unwrap_or_default().into_iter().find(|p| p.is_dir()))
                 .or_else(|| session::home().ok())
                 .unwrap_or_else(|| std::path::PathBuf::from("/"));
-            let v = self.clone();
+            let weak = Rc::downgrade(self);
             self.host_term.spawn_async(
                 vte4::PtyFlags::DEFAULT,
                 Some(&dir.to_string_lossy()),
@@ -694,6 +711,7 @@ impl SessionView {
                 -1,
                 None::<&gtk::gio::Cancellable>,
                 move |res| {
+                    let Some(v) = weak.upgrade() else { return };
                     if let Err(e) = res {
                         v.conv.add_note(&format!("host shell: {e}"));
                         v.host_open.set(false);
@@ -779,10 +797,11 @@ impl SessionView {
         let open = item("Host shell here    Ctrl+Shift+H");
         open.set_tooltip_text(Some("The host's shell in this pane — a host process, outside the jail: nothing it does is recorded"));
         {
-            let v = self.clone();
+            let weak = Rc::downgrade(self);
             let p = pop.clone();
             open.connect_clicked(move |_| {
                 p.popdown();
+                let Some(v) = weak.upgrade() else { return };
                 if let Some(cb) = v.on_host_terminal.borrow().as_ref() {
                     cb(false);
                 }
@@ -798,10 +817,11 @@ impl SessionView {
             None => "No terminal found on the host; set one under Settings → Host terminal".to_string(),
         }));
         {
-            let v = self.clone();
+            let weak = Rc::downgrade(self);
             let p = pop.clone();
             window.connect_clicked(move |_| {
                 p.popdown();
+                let Some(v) = weak.upgrade() else { return };
                 if let Some(cb) = v.on_host_terminal.borrow().as_ref() {
                     cb(true);
                 }
@@ -949,9 +969,10 @@ impl SessionView {
                 }));
             })
             .ok();
-        let v = self.clone();
+        let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             while let Ok(msg) = rx.recv().await {
+                let Some(v) = weak.upgrade() else { break };
                 match msg {
                     Ok(line) if !line.is_empty() => v.conv.add_note(&line),
                     Ok(_) => {
@@ -1068,8 +1089,9 @@ impl SessionView {
         attach.add_css_class("sill-ctl-icon");
         attach.set_tooltip_text(Some("Attach a file or image to the next prompt (Ctrl+V pastes a screenshot)"));
         {
-            let v = self.clone();
+            let weak = Rc::downgrade(self);
             attach.connect_clicked(move |b| {
+                let Some(v) = weak.upgrade() else { return };
                 let dialog = gtk::FileDialog::builder().title("Attach to the prompt").modal(true).build();
                 let parent = b.root().and_then(|r| r.downcast::<gtk::Window>().ok());
                 let v = v.clone();
@@ -1092,8 +1114,9 @@ impl SessionView {
         term.set_active(self.bottom.visible_child_name().as_deref() == Some("shell"));
         *self.shell_btn.borrow_mut() = Some(term.clone());
         {
-            let v = self.clone();
+            let weak = Rc::downgrade(self);
             term.connect_toggled(move |t| {
+                let Some(v) = weak.upgrade() else { return };
                 if let Some(cb) = v.on_shell.borrow().as_ref() {
                     cb(t.is_active());
                 }
@@ -1105,8 +1128,12 @@ impl SessionView {
             menu.add_css_class("sill-menu");
             menu.set_has_arrow(false);
             menu.set_parent(&term);
-            let v = self.clone();
-            menu.connect_show(move |pop| v.fill_terminal_menu(pop));
+            let weak = Rc::downgrade(self);
+            menu.connect_show(move |pop| {
+                if let Some(v) = weak.upgrade() {
+                    v.fill_terminal_menu(pop);
+                }
+            });
             let right = gtk::GestureClick::new();
             right.set_button(3);
             let m = menu.clone();
@@ -1148,9 +1175,10 @@ impl SessionView {
             let cur = modes.iter().position(|(id, _)| id == current).unwrap_or(0);
             let d = dropdown(&names, cur);
             d.set_tooltip_text(Some("Mode"));
-            let v = self.clone();
+            let weak = Rc::downgrade(self);
             let ids: Vec<String> = modes.iter().map(|(id, _)| id.clone()).collect();
             d.connect_selected_notify(move |d| {
+                let Some(v) = weak.upgrade() else { return };
                 if v.rebuilding.get() {
                     return;
                 }
@@ -1173,11 +1201,12 @@ impl SessionView {
                     let cur = values.iter().position(|(id, _)| id == current).unwrap_or(0);
                     let d = dropdown(&names, cur);
                     d.set_tooltip_text(Some(&opt.name));
-                    let v = self.clone();
+                    let weak = Rc::downgrade(self);
                     let ids: Vec<String> = values.iter().map(|(id, _)| id.clone()).collect();
                     let oid = opt.id.clone();
                     let is_model = opt.category == "model";
                     d.connect_selected_notify(move |d| {
+                        let Some(v) = weak.upgrade() else { return };
                         if v.rebuilding.get() {
                             return;
                         }
@@ -1202,9 +1231,10 @@ impl SessionView {
                     sw.set_active(*on);
                     sw.add_css_class("sill-control");
                     sw.set_valign(gtk::Align::Center);
-                    let v = self.clone();
+                    let weak = Rc::downgrade(self);
                     let oid = opt.id.clone();
                     sw.connect_state_set(move |_, state| {
+                        let Some(v) = weak.upgrade() else { return glib::Propagation::Proceed };
                         if !v.rebuilding.get() {
                             v.command(Command::SetConfig(oid.clone(), ConfigValue::Bool(state)));
                             let o = oid.clone();
@@ -1231,8 +1261,12 @@ impl SessionView {
             menu.add_css_class("sill-menu");
             menu.set_has_arrow(false);
             menu.set_parent(&b);
-            let v = self.clone();
-            menu.connect_show(move |pop| v.fill_proc_menu(pop));
+            let weak = Rc::downgrade(self);
+            menu.connect_show(move |pop| {
+                if let Some(v) = weak.upgrade() {
+                    v.fill_proc_menu(pop);
+                }
+            });
             let m = menu.clone();
             b.connect_clicked(move |_| m.popup());
             right.append(&b);
@@ -1266,9 +1300,10 @@ impl SessionView {
                 }
             };
             set_look(&t);
-            let v = self.clone();
+            let weak = Rc::downgrade(self);
             t.connect_toggled(move |t| {
                 set_look(t);
+                let Some(v) = weak.upgrade() else { return };
                 let state = t.is_active();
                 v.auto_allow.set(state);
                 let _ = v.store.set_auto_allow(&v.id(), state);
@@ -1282,8 +1317,9 @@ impl SessionView {
         send.add_css_class("sill-send");
         send.set_valign(gtk::Align::Center); // its own square, not the row's height
         {
-            let v = self.clone();
+            let weak = Rc::downgrade(self);
             send.connect_clicked(move |_| {
+                let Some(v) = weak.upgrade() else { return };
                 if v.busy.get() {
                     v.cancel();
                     return;
@@ -1400,8 +1436,9 @@ impl SessionView {
         if self.refresh_pending.replace(true) {
             return;
         }
-        let v = self.clone();
+        let weak = Rc::downgrade(self);
         glib::timeout_add_local_once(std::time::Duration::from_millis(250), move || {
+            let Some(v) = weak.upgrade() else { return };
             v.refresh_pending.set(false);
             v.refresh_pins();
         });
@@ -1441,8 +1478,12 @@ impl SessionView {
             }
             for dir in [git.clone(), git.join("refs/heads")] {
                 if let Ok(m) = gtk::gio::File::for_path(&dir).monitor_directory(gtk::gio::FileMonitorFlags::NONE, None::<&gtk::gio::Cancellable>) {
-                    let v = self.clone();
-                    m.connect_changed(move |_, _, _, _| v.refresh_pins_soon());
+                    let weak = Rc::downgrade(self);
+                    m.connect_changed(move |_, _, _, _| {
+                        if let Some(v) = weak.upgrade() {
+                            v.refresh_pins_soon();
+                        }
+                    });
                     self.git_monitors.borrow_mut().push(m);
                 }
             }
@@ -1477,9 +1518,10 @@ impl SessionView {
                 format!("{shown} · open the file (Escape returns)")
             }));
             {
-                let v = self.clone();
+                let weak = Rc::downgrade(self);
                 let p = p.clone();
                 l.connect_clicked(move |_| {
+                    let Some(v) = weak.upgrade() else { return };
                     if p.is_dir() {
                         if let Some(cb) = v.on_open_folder.borrow().as_ref() {
                             cb(&p);
@@ -1492,8 +1534,9 @@ impl SessionView {
             let x = super::icons::glyph_button("sill-x");
             x.add_css_class("flat");
             x.add_css_class("sill-tab-close");
-            let v = self.clone();
+            let weak = Rc::downgrade(self);
             x.connect_clicked(move |_| {
+                let Some(v) = weak.upgrade() else { return };
                 let _ = v.store.unpin(&v.id(), &p);
                 v.refresh_pins();
                 // a folder pin is a mount: the jail is rebuilt (after the current turn if busy);
@@ -1578,9 +1621,11 @@ impl SessionView {
         let Ok(m) = gtk::gio::File::for_path(&rt).monitor_directory(gtk::gio::FileMonitorFlags::NONE, None::<&gtk::gio::Cancellable>) else {
             return;
         };
-        let v = self.clone();
+        let weak = Rc::downgrade(self);
         m.connect_changed(move |_, f, _, _| {
-            if f.basename().is_some_and(|b| b == std::path::Path::new("denied")) {
+            if f.basename().is_some_and(|b| b == std::path::Path::new("denied"))
+                && let Some(v) = weak.upgrade()
+            {
                 v.check_denied();
             }
         });
@@ -1610,14 +1655,28 @@ impl SessionView {
                 .unwrap_or_else(|| self.session.borrow().agent.clone());
             let mut actions: Vec<(String, Rc<dyn Fn()>)> = Vec::new();
             let exact = host.to_string();
-            let v = self.clone();
-            actions.push((format!("Allow {host}"), Rc::new(move || v.allow_domain(&exact))));
+            let weak = Rc::downgrade(self);
+            actions.push((
+                format!("Allow {host}"),
+                Rc::new(move || {
+                    if let Some(v) = weak.upgrade() {
+                        v.allow_domain(&exact);
+                    }
+                }),
+            ));
             let labels: Vec<&str> = name.split('.').collect();
             if labels.len() >= 3 {
                 let wild = format!("*.{}{}", labels[1..].join("."), host.strip_prefix(name).unwrap_or(""));
-                let v = self.clone();
+                let weak = Rc::downgrade(self);
                 let w = wild.clone();
-                actions.push((format!("Allow {wild}"), Rc::new(move || v.allow_domain(&w))));
+                actions.push((
+                    format!("Allow {wild}"),
+                    Rc::new(move || {
+                        if let Some(v) = weak.upgrade() {
+                            v.allow_domain(&w);
+                        }
+                    }),
+                ));
             }
             actions.push(("Keep blocked".into(), Rc::new(|| {})));
             self.conv.add_actions(
@@ -1736,8 +1795,9 @@ impl SessionView {
             let x = super::icons::glyph_button("sill-x");
             x.add_css_class("flat");
             x.set_tooltip_text(Some("Remove"));
-            let v = self.clone();
+            let weak = Rc::downgrade(self);
             x.connect_clicked(move |_| {
+                let Some(v) = weak.upgrade() else { return };
                 let mut l = v.attachments.borrow_mut();
                 if i < l.len() {
                     l.remove(i);
@@ -2146,14 +2206,26 @@ impl SessionView {
                 }
                 self.flush_agent();
                 let id = self.id();
-                let v = self.clone();
-                glib::idle_add_local_once(move || v.after_turn(&id));
+                let weak = Rc::downgrade(self);
+                glib::idle_add_local_once(move || {
+                    if let Some(v) = weak.upgrade() {
+                        v.after_turn(&id);
+                    }
+                });
                 self.poll_procs();
             }
             Event::AuthRequired { message, methods } => {
                 self.status.set_text("login needed");
-                let v = self.clone();
-                self.conv.add_auth(message, methods.clone(), Rc::new(move |m| v.authenticate(m)));
+                let weak = Rc::downgrade(self);
+                self.conv.add_auth(
+                    message,
+                    methods.clone(),
+                    Rc::new(move |m| {
+                        if let Some(v) = weak.upgrade() {
+                            v.authenticate(m);
+                        }
+                    }),
+                );
                 return;
             }
             Event::Ended(err) => {
@@ -2228,10 +2300,11 @@ impl SessionView {
             })();
             let _ = tx.send_blocking(msg.unwrap_or_else(|e| format!("ledger: {e:#}")));
         });
-        let v = self.clone();
+        let weak = Rc::downgrade(self);
         let id = id.to_string();
         glib::spawn_future_local(async move {
             if let Ok(msg) = rx.recv().await {
+                let Some(v) = weak.upgrade() else { return };
                 if !msg.is_empty() {
                     v.conv.add_note(&msg);
                 }
@@ -2243,14 +2316,33 @@ impl SessionView {
         });
     }
 
+    /// The tab is closing: tell the agent, stop the timers, cancel the monitors and drop the
+    /// window's callbacks — every closure the view hands out holds it weakly, so after this the
+    /// last `Rc` is the window's and the view goes with it (SPEC §4.11 #15).
     pub fn quit(&self) {
         if let Some(d) = self.driver.borrow().as_ref() {
             let _ = d.commands.try_send(Command::Quit);
         }
+        self.driver.borrow_mut().take();
         if let Some(id) = self.proc_tick.borrow_mut().take() {
             id.remove();
         }
         self.bridges.borrow_mut().clear();
+        for m in self.git_monitors.borrow_mut().drain(..) {
+            m.cancel();
+        }
+        if let Some(m) = self.denied_monitor.borrow_mut().take() {
+            m.cancel();
+        }
+        self.on_busy.borrow_mut().take();
+        self.on_turn_end.borrow_mut().take();
+        self.on_disk_change.borrow_mut().take();
+        self.on_title.borrow_mut().take();
+        self.on_open_folder.borrow_mut().take();
+        self.on_open_file.borrow_mut().take();
+        self.on_shell.borrow_mut().take();
+        self.on_host_terminal.borrow_mut().take();
+        self.on_restart.borrow_mut().take();
     }
 
     // --- managed processes (docs/tasks.md §2.4, §2.5) -------------------------------------------
@@ -2308,12 +2400,13 @@ impl SessionView {
             if allowed.allows(port) || self.port_approved.borrow().contains(&port) {
                 self.expose_port(port, &name);
             } else if self.port_asked.borrow_mut().insert(port) {
-                let v = self.clone();
+                let weak = Rc::downgrade(self);
                 let n = name.clone();
                 self.conv.add_actions(
                     &format!("{name} listens on port {port} inside the jail. Expose it on this machine, loopback only (http://127.0.0.1:{port})?"),
                     vec![
                         ("Expose".into(), Rc::new(move || {
+                            let Some(v) = weak.upgrade() else { return };
                             v.port_approved.borrow_mut().insert(port);
                             v.expose_port(port, &n);
                         })),
@@ -2395,11 +2488,12 @@ impl SessionView {
             log.add_css_class("flat");
             log.add_css_class("sill-change-btn");
             {
-                let v = self.clone();
+                let weak = Rc::downgrade(self);
                 let n = p.name.clone();
                 let pop = pop.clone();
                 log.connect_clicked(move |_| {
                     pop.popdown();
+                    let Some(v) = weak.upgrade() else { return };
                     if let Ok(socket) = sill_core::session::socket_path(&v.id())
                         && let Some(cb) = v.on_open_log.borrow().as_ref()
                     {
@@ -2412,13 +2506,15 @@ impl SessionView {
             act.add_css_class("flat");
             act.add_css_class("sill-change-btn");
             {
-                let v = self.clone();
+                let weak = Rc::downgrade(self);
                 let n = p.name.clone();
                 let running = p.running();
                 let pop = pop.clone();
                 act.connect_clicked(move |_| {
                     pop.popdown();
-                    v.proc_action(&n, running);
+                    if let Some(v) = weak.upgrade() {
+                        v.proc_action(&n, running);
+                    }
                 });
             }
             line.append(&act);
@@ -2460,11 +2556,13 @@ impl SessionView {
             let all = gtk::Button::with_label("Stop all");
             all.add_css_class("flat");
             all.add_css_class("sill-menu-item");
-            let v = self.clone();
+            let weak = Rc::downgrade(self);
             let pop = pop.clone();
             all.connect_clicked(move |_| {
                 pop.popdown();
-                v.proc_action("", true);
+                if let Some(v) = weak.upgrade() {
+                    v.proc_action("", true);
+                }
             });
             col.append(&all);
         }
@@ -2484,9 +2582,11 @@ impl SessionView {
             });
             let _ = tx.send_blocking(r.map_err(|e| format!("{e:#}")));
         });
-        let v = self.clone();
+        let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            if let Ok(Err(e)) = rx.recv().await {
+            let r = rx.recv().await;
+            let Some(v) = weak.upgrade() else { return };
+            if let Ok(Err(e)) = r {
                 v.conv.add_note(&format!("process: {e}"));
             }
             v.poll_procs();
