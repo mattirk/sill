@@ -903,6 +903,10 @@ popover.sill-menu > contents { padding: 4px; min-width: 180px; }
 .sill-menu-item:hover .sill-menu-icon { opacity: 1; }
 .sill-menu-sep { margin: 4px 6px; opacity: 0.5; }
 .sill-menu-caption { font-size: 80%; opacity: 0.5; padding: 2px 10px; }
+/* session menu (tab glyph / right-click): key–value rows, the jail's whereabouts as a caption */
+popover.sill-session-menu > contents { padding: 10px 12px; min-width: 260px; }
+.sill-session-key { opacity: 0.6; }
+.sill-session-menu dropdown > button, .sill-session-menu entry { min-height: 0; padding: 3px 8px; }
 .sill-menu-trash { padding: 0 6px; min-height: 0; opacity: 0.35; background: transparent; border: none; box-shadow: none; }
 .sill-menu-trash:hover { opacity: 1; color: @error_color; }
 /* top-bar status: a small dot at rest, a spinner while working; the text lives in the tooltip */

@@ -27,7 +27,7 @@ pub struct Config {
     pub auto_revert_minutes: Option<u32>,
     /// Desktop access for new sessions (SPEC §4.2): give the jail the X11 display / the D-Bus session
     /// bus. Unset = the policy decides (`[jail] x11` / `dbus`). A session can override both in its
-    /// controls row (stored per session).
+    /// session menu (stored per session).
     pub desktop_x11: Option<bool>,
     pub desktop_dbus: Option<bool>,
 }
@@ -49,7 +49,7 @@ pub fn desktop_grants(session_desktop: &str, c: &Config) -> (Option<bool>, Optio
 /// Auto-revert delays the Settings page offers: (minutes, label).
 pub const AUTO_REVERT_CHOICES: &[(u32, &str)] =
     &[(0, "Never"), (10, "10 minutes"), (30, "30 minutes"), (60, "1 hour"), (240, "4 hours"), (1440, "1 day")];
-pub const AUTO_REVERT_DEFAULT: u32 = 60;
+pub const AUTO_REVERT_DEFAULT: u32 = 1440;
 
 /// The backend pages, in tab order: (id, title).
 pub const PAGES: &[(&str, &str)] = &[("changes", "Changes"), ("files", "Files"), ("agents", "Agents"), ("settings", "Settings")];

@@ -27,6 +27,9 @@ pub struct TabStrip {
     pub on_select: RefCell<Option<Box<dyn Fn(&str)>>>,
     pub on_close: RefCell<Option<Box<dyn Fn(&str)>>>,
     pub on_rename: RefCell<Option<Box<dyn Fn(&str, &str)>>>,
+    /// The session menu (SPEC §3.1): opened from the tab's glyph or a right-click on the tab;
+    /// called with the tab id and the tab widget to anchor a popover to.
+    pub on_menu: RefCell<Option<Box<dyn Fn(&str, &gtk::Widget)>>>,
 }
 
 impl TabStrip {
@@ -41,6 +44,7 @@ impl TabStrip {
             on_select: RefCell::new(None),
             on_close: RefCell::new(None),
             on_rename: RefCell::new(None),
+            on_menu: RefCell::new(None),
         })
     }
 
@@ -58,6 +62,7 @@ impl TabStrip {
         let icon_slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         icon_slot.add_css_class("sill-tab-icon");
         icon_slot.set_valign(gtk::Align::Center);
+        icon_slot.set_cursor_from_name(Some("pointer"));
         root.append(&icon_slot);
         let stack = gtk::Stack::new();
         stack.set_hhomogeneous(false);
@@ -94,6 +99,23 @@ impl TabStrip {
             });
         }
         root.add_controller(click);
+        // the glyph opens the session menu; so does a right-click anywhere on the tab
+        {
+            let strip = self.clone();
+            let t = tab.clone();
+            let on_glyph = gtk::GestureClick::new();
+            on_glyph.set_button(1);
+            on_glyph.connect_released(move |_, _, _, _| strip.open_menu(&t));
+            tab.icon_slot.add_controller(on_glyph);
+        }
+        {
+            let strip = self.clone();
+            let t = tab.clone();
+            let right = gtk::GestureClick::new();
+            right.set_button(3);
+            right.connect_pressed(move |_, _, _, _| strip.open_menu(&t));
+            root.add_controller(right);
+        }
         {
             let strip = self.clone();
             let id = tab.id.clone();
@@ -186,6 +208,19 @@ impl TabStrip {
     pub fn set_title(&self, id: &str, title: &str) {
         if let Some(t) = self.tabs.borrow().iter().find(|t| t.id == id) {
             t.label.set_text(title);
+        }
+    }
+
+    pub fn set_tooltip(&self, id: &str, text: Option<&str>) {
+        if let Some(t) = self.tabs.borrow().iter().find(|t| t.id == id) {
+            t.root.set_tooltip_text(text);
+        }
+    }
+
+    fn open_menu(&self, tab: &Rc<Tab>) {
+        self.select(&tab.id);
+        if let Some(cb) = self.on_menu.borrow().as_ref() {
+            cb(&tab.id, tab.root.upcast_ref());
         }
     }
 

@@ -792,38 +792,6 @@ impl SessionView {
                 }
             }
         }
-        // sill's own: desktop access of the jail (SPEC §4.2) — default (Settings/policy), none, X11,
-        // X11 + D-Bus; a change rebuilds the jail (after the turn when the agent is working)
-        {
-            let choices = sill_core::config::DESKTOP_CHOICES;
-            let labels: Vec<&str> = choices.iter().map(|(_, l)| *l).collect();
-            let d = gtk::DropDown::from_strings(&labels);
-            compact_dropdown(&d);
-            d.add_css_class("sill-control");
-            d.set_tooltip_text(Some("Desktop access of this session's jail. X11 lets the agent run and see GUI programs — and, as any X11 client, read keys and drive every window; D-Bus hands it the session bus. Changing it restarts the session."));
-            let current = self.session.borrow().desktop.clone();
-            if let Some(i) = choices.iter().position(|(id, _)| *id == current) {
-                d.set_selected(i as u32);
-            }
-            let v = self.clone();
-            d.connect_selected_notify(move |d| {
-                if v.rebuilding.get() {
-                    return;
-                }
-                let Some((id, label)) = choices.get(d.selected() as usize) else { return };
-                if v.session.borrow().desktop == *id {
-                    return;
-                }
-                let _ = v.store.set_desktop(&v.id(), id);
-                v.session.borrow_mut().desktop = id.to_string();
-                v.conv.add_note(&format!("desktop access: {label}; the session restarts"));
-                v.force_restart.set(true);
-                if let Some(cb) = v.on_restart.borrow().as_ref() {
-                    cb(&v.id());
-                }
-            });
-            right.append(&d);
-        }
         // sill's own: auto-allow permission requests (the agent's "auto" modes still ask over ACP).
         // An open lock = requests are answered "allow once" by sill; closed = they wait for you.
         {
@@ -1207,6 +1175,38 @@ impl SessionView {
 
     pub fn focus_prompt(&self) {
         self.prompt.grab_focus();
+    }
+
+    /// Desktop access of this session's jail (SPEC §4.2), from the session menu: stored, noted in
+    /// the conversation, and the jail rebuilt (after the turn when the agent is working).
+    pub fn set_desktop(self: &Rc<Self>, id: &str) {
+        if self.session.borrow().desktop == id {
+            return;
+        }
+        let label = sill_core::config::DESKTOP_CHOICES.iter().find(|(i, _)| *i == id).map(|(_, l)| *l).unwrap_or(id);
+        let _ = self.store.set_desktop(&self.id(), id);
+        self.session.borrow_mut().desktop = id.to_string();
+        self.conv.add_note(&format!("desktop access: {label}; the session restarts"));
+        self.restart_for_jail();
+    }
+
+    /// The session's policy, from the session menu; the jail is rebuilt with it.
+    pub fn set_policy(self: &Rc<Self>, name: &str) {
+        if self.session.borrow().policy == name {
+            return;
+        }
+        let _ = self.store.set_policy(&self.id(), name);
+        self.session.borrow_mut().policy = name.to_string();
+        self.conv.add_note(&format!("policy: {name}; the session restarts"));
+        self.restart_for_jail();
+    }
+
+    /// A jail property changed: rebuild the jail (the window waits for the turn to end).
+    fn restart_for_jail(self: &Rc<Self>) {
+        self.force_restart.set(true);
+        if let Some(cb) = self.on_restart.borrow().as_ref() {
+            cb(&self.id());
+        }
     }
 
     pub fn id(&self) -> String {

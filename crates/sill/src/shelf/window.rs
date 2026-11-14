@@ -194,7 +194,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
                 let sessions = s.store.sessions().unwrap_or_default();
                 for id in s.tabs.ids() {
                     if let Some(sess) = sessions.iter().find(|x| x.id == id) {
-                        s.tabs.set_icon(&id, &s.tab_icon(&sess.agent));
+                        s.refresh_tab(sess);
                     }
                 }
             }
@@ -263,6 +263,10 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
                 v.session.borrow_mut().title = title.to_string();
             }
         }));
+    }
+    {
+        let s = shelf.clone();
+        *tabs.on_menu.borrow_mut() = Some(Box::new(move |id, anchor| s.session_menu(id, anchor)));
     }
     {
         // closing a tab: quit its driver and stop its unit; the stored session stays (reopen from "+")
@@ -478,12 +482,160 @@ impl Shelf {
         }
     }
 
-    /// The small agent glyph for a tab, in the strip's current text colour.
-    fn tab_icon(&self, agent: &str) -> gtk::Image {
+    /// The small agent glyph for a tab, in the strip's current text colour — in the warning colour
+    /// while the session's jail has the desktop (X11 / D-Bus), SPEC §4.11 #4.
+    fn tab_icon(&self, agent: &str, desktop: bool) -> gtk::Image {
         let home = session::home().unwrap_or_default();
         let registry = agents::load(&home);
-        let color = super::icons::fg_for(&self.tabs.root, &theme::current());
+        let t = theme::current();
+        let fg = super::icons::fg_for(&self.tabs.root, &t);
+        let color = if desktop { gtk::gdk::RGBA::parse(t.warning).unwrap_or(fg) } else { fg };
         super::icons::image(registry.get(agent), color, 12)
+    }
+
+    /// A tab's glyph colour and tooltip follow the session's effective desktop access.
+    fn refresh_tab(&self, s: &Session) {
+        let (x11, dbus) = effective_desktop(s);
+        self.tabs.set_icon(&s.id, &self.tab_icon(&s.agent, x11 || dbus));
+        let tip = match (x11, dbus) {
+            (true, true) => "X11 + D-Bus: the agent can see and drive the desktop and reach the session bus",
+            (true, false) => "X11: the agent can run GUI programs — and, as any X11 client, read keys and drive every window",
+            (false, true) => "D-Bus session bus: a way out of the jail",
+            (false, false) => "Session menu: click the glyph or right-click",
+        };
+        self.tabs.set_tooltip(&s.id, Some(tip));
+    }
+
+    /// The session menu (SPEC §3.1): what belongs to the session rather than to the next turn —
+    /// name, policy, desktop access — and where its jail runs. Built fresh on each open and dropped
+    /// when it closes; a policy or desktop change closes it first, since the restart replaces the tab
+    /// it is anchored to.
+    fn session_menu(self: &Rc<Self>, id: &str, anchor: &gtk::Widget) {
+        let Some(s) = self.store.sessions().unwrap_or_default().into_iter().find(|s| s.id == id) else { return };
+        let home = session::home().unwrap_or_default();
+        let pop = gtk::Popover::new();
+        pop.add_css_class("sill-menu");
+        pop.add_css_class("sill-session-menu");
+        pop.set_has_arrow(false);
+        pop.set_parent(anchor);
+        pop.connect_closed(|p| {
+            let p = p.clone();
+            glib::idle_add_local_once(move || p.unparent());
+        });
+        let grid = gtk::Grid::new();
+        grid.set_row_spacing(6);
+        grid.set_column_spacing(12);
+        let key = |text: &str| {
+            let l = gtk::Label::new(Some(text));
+            l.add_css_class("sill-session-key");
+            l.set_xalign(1.0);
+            l
+        };
+        // name
+        let name = gtk::Entry::new();
+        name.set_text(&s.title);
+        name.set_hexpand(true);
+        {
+            let shelf = self.clone();
+            let sid = id.to_string();
+            let p = pop.clone();
+            name.connect_activate(move |e| {
+                let title = e.text().trim().to_string();
+                if !title.is_empty() {
+                    let _ = shelf.store.set_title(&sid, &title);
+                    shelf.tabs.set_title(&sid, &title);
+                    if let Some(v) = shelf.views.borrow().get(&sid) {
+                        v.session.borrow_mut().title = title;
+                    }
+                }
+                p.popdown();
+            });
+        }
+        grid.attach(&key("Name"), 0, 0, 1, 1);
+        grid.attach(&name, 1, 0, 1, 1);
+        // agent
+        let agent_name = agents::load(&home).get(&s.agent).map(|a| a.name.clone()).unwrap_or_else(|| s.agent.clone());
+        let agent = gtk::Label::new(Some(&agent_name));
+        agent.set_xalign(0.0);
+        agent.add_css_class("dim-label");
+        grid.attach(&key("Agent"), 0, 1, 1, 1);
+        grid.attach(&agent, 1, 1, 1, 1);
+        // policy: the files there are to choose from (plus the session's own if it is none of them)
+        let mut policies = sill_core::policy::available(&home);
+        if !policies.contains(&s.policy) {
+            policies.push(s.policy.clone());
+        }
+        let refs: Vec<&str> = policies.iter().map(String::as_str).collect();
+        let pol = gtk::DropDown::from_strings(&refs);
+        pol.set_selected(policies.iter().position(|p| *p == s.policy).unwrap_or(0) as u32);
+        pol.set_tooltip_text(Some("The jail's policy: mounts, network allow-list, limits. Changing it rebuilds the jail."));
+        {
+            let shelf = self.clone();
+            let sid = id.to_string();
+            let p = pop.clone();
+            let policies = policies.clone();
+            pol.connect_selected_notify(move |d| {
+                let Some(name) = policies.get(d.selected() as usize).cloned() else { return };
+                let shelf = shelf.clone();
+                let sid = sid.clone();
+                p.popdown();
+                glib::idle_add_local_once(move || {
+                    // the restart this triggers takes `views` mutably: don't hold the borrow
+                    let view = shelf.views.borrow().get(&sid).cloned();
+                    if let Some(v) = view {
+                        v.set_policy(&name);
+                    }
+                });
+            });
+        }
+        grid.attach(&key("Policy"), 0, 2, 1, 1);
+        grid.attach(&pol, 1, 2, 1, 1);
+        // desktop access; "default" says what it resolves to for this session's policy
+        let choices = sill_core::config::DESKTOP_CHOICES;
+        let (dx, dd) = {
+            let mut d = s.clone();
+            d.desktop = String::new();
+            effective_desktop(&d)
+        };
+        let onoff = |b: bool| if b { "on" } else { "off" };
+        let default_label = format!("default (X11 {} · D-Bus {})", onoff(dx), onoff(dd));
+        let labels: Vec<&str> = choices.iter().map(|(id, l)| if id.is_empty() { default_label.as_str() } else { *l }).collect();
+        let desk = gtk::DropDown::from_strings(&labels);
+        desk.set_selected(choices.iter().position(|(cid, _)| *cid == s.desktop).unwrap_or(0) as u32);
+        desk.set_tooltip_text(Some("Desktop access of this session's jail. X11 lets the agent run and see GUI programs — and, as any X11 client, read keys and drive every window; D-Bus hands it the session bus. Changing it rebuilds the jail."));
+        {
+            let shelf = self.clone();
+            let sid = id.to_string();
+            let p = pop.clone();
+            desk.connect_selected_notify(move |d| {
+                let Some((cid, _)) = choices.get(d.selected() as usize) else { return };
+                let shelf = shelf.clone();
+                let sid = sid.clone();
+                p.popdown();
+                glib::idle_add_local_once(move || {
+                    let view = shelf.views.borrow().get(&sid).cloned();
+                    if let Some(v) = view {
+                        v.set_desktop(cid);
+                    }
+                });
+            });
+        }
+        grid.attach(&key("Desktop"), 0, 3, 1, 1);
+        grid.attach(&desk, 1, 3, 1, 1);
+        // where the jail runs (SPEC §4.7 launcher modes), copyable
+        let unit = sill_core::session::unit_name(id);
+        let whereabouts = match sill_core::launcher::current().mode {
+            sill_core::launcher::Mode::Unit => format!("unit {unit} · journalctl --user -u {unit}"),
+            sill_core::launcher::Mode::Direct => format!("detached · $XDG_RUNTIME_DIR/sill/{id}/"),
+        };
+        let foot = gtk::Label::new(Some(&whereabouts));
+        foot.add_css_class("sill-menu-caption");
+        foot.set_xalign(0.0);
+        foot.set_selectable(true);
+        foot.set_wrap(true);
+        grid.attach(&foot, 0, 4, 2, 1);
+        pop.set_child(Some(&grid));
+        pop.popup();
     }
 
     /// Spinner in the bar while the selected session's agent is working, a square otherwise.
@@ -548,7 +700,7 @@ impl Shelf {
         }
         self.pages.add_named(&view.root, Some(&id));
         self.tabs.add(&id, &s.title);
-        self.tabs.set_icon(&id, &self.tab_icon(&s.agent));
+        self.refresh_tab(&s);
         {
             let shelf = self.clone();
             *view.on_turn_end.borrow_mut() = Some(Box::new(move |_id| {
@@ -773,4 +925,13 @@ pub fn toggle(w: &gtk::Window, time: u32) {
     } else {
         show(w, time);
     }
+}
+
+/// What a session's jail gets, (x11, dbus): the session's own choice, else `sill.toml`, else its
+/// policy's `[jail]` (SPEC §4.2).
+fn effective_desktop(s: &Session) -> (bool, bool) {
+    let home = session::home().unwrap_or_default();
+    let (x11, dbus) = sill_core::config::desktop_grants(&s.desktop, &sill_core::config::load());
+    let (px, pd) = sill_core::policy::Policy::load(&s.policy, &home).map(|p| (p.jail.x11, p.jail.dbus)).unwrap_or((false, false));
+    (x11.unwrap_or(px), dbus.unwrap_or(pd))
 }

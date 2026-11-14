@@ -102,6 +102,9 @@ sill restart --dev                         # run the build in target/ instead of
   `sill-gemini-symbolic` and a neutral placeholder for anything else) or reopens a stored one. Each session has its own jail (`sill-<id>.service`, upper trees under
   `/var/lib/sill/<uid>/sessions/<id>`), its own conversation stored in `~/.local/state/sill/sill.db`, and
   resumes with history (`session/load`) when reopened. Closing a tab stops its jail; the session stays.
+  The tab's glyph (or a right-click on the tab) opens the **session menu**: name, policy, desktop access
+  (X11 / D-Bus — the glyph turns amber while granted) and where the jail runs; a policy or desktop change
+  rebuilds the jail. The row under the prompt holds only what the next turn uses.
 - **Pins** are the session's workspace. A pinned folder is bound live into the jail: what the agent
   writes there is on the host at once, commits included, and review is `git` as usual. The chips above the
   prompt show each pin with its +/−/untracked counts; the pins are also named in every prompt as the place

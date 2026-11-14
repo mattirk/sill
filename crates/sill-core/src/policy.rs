@@ -200,6 +200,25 @@ pub fn search_dirs(home: &Path) -> Vec<PathBuf> {
     vec![home.join(".config/sill/policies"), PathBuf::from("/etc/sill/policies")]
 }
 
+/// Policy names there are to choose from: the built-in `default` and every `*.toml` in the search
+/// directories (a user file shadows a system one of the same name, as in `load`).
+pub fn available(home: &Path) -> Vec<String> {
+    let mut names = vec!["default".to_string()];
+    for dir in search_dirs(home) {
+        let Ok(rd) = std::fs::read_dir(dir) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "toml")
+                && let Some(stem) = p.file_stem().and_then(|s| s.to_str())
+                && !names.iter().any(|n| n == stem)
+            {
+                names.push(stem.to_string());
+            }
+        }
+    }
+    names
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -98,6 +98,11 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_policy(&self, id: &str, policy: &str) -> Result<()> {
+        self.conn.execute("UPDATE sessions SET policy = ?2 WHERE id = ?1", params![id, policy])?;
+        Ok(())
+    }
+
     pub fn set_desktop(&self, id: &str, desktop: &str) -> Result<()> {
         self.conn.execute("UPDATE sessions SET desktop = ?2 WHERE id = ?1", params![id, desktop])?;
         Ok(())

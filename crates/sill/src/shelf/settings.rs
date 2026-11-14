@@ -70,9 +70,9 @@ pub fn build() -> gtk::Box {
     type Set = fn(&mut sill_core::config::Config, Option<bool>);
     let items: [(&str, bool, Get, Set, &str); 2] = [
         ("X11", pol_x11, |c| c.desktop_x11, |c, v| c.desktop_x11 = v,
-         "Give new sessions the X11 display: the agent can run and see GUI programs — and, as any X11 client, read keys and drive every window. A session's own controls row can override this."),
+         "Give new sessions the X11 display: the agent can run and see GUI programs — and, as any X11 client, read keys and drive every window. A session's own menu (its tab glyph) can override this."),
         ("D-Bus", pol_dbus, |c| c.desktop_dbus, |c, v| c.desktop_dbus = v,
-         "Give new sessions the D-Bus session bus: a full escape (systemd user units, keyring). A session's own controls row can override this."),
+         "Give new sessions the D-Bus session bus: a full escape (systemd user units, keyring). A session's own menu (its tab glyph) can override this."),
     ];
     for (name, pol, get, set, tip) in items {
         let l = gtk::Label::new(Some(name));
