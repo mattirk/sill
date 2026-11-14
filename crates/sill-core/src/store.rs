@@ -42,6 +42,8 @@ pub struct Session {
     /// Compaction (docs/memory.md §2.4): 0 = the whole transcript; 1 = thoughts, tool details and
     /// diffs dropped; 2 = the agent's text too — summary, notes, prompts and tool titles remain.
     pub compacted: i64,
+    /// A ghost session (docs/memory.md §3): chosen at creation, never changed; it leaves no row.
+    pub ghost: bool,
 }
 
 /// The agent controls as set by the person (SPEC §3.2): mode id and config option values. Kept twice:
@@ -146,6 +148,8 @@ impl Store {
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN compacted INTEGER NOT NULL DEFAULT 0", []);
         // the summary names the session (title.rs): who named it last
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN title_kind TEXT NOT NULL DEFAULT ''", []);
+        // ghost sessions (docs/memory.md §3): fixed at creation, deleted at the end
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN ghost INTEGER NOT NULL DEFAULT 0", []);
         conn.execute_batch("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")?;
         sill_memory::install(&conn).context("memory index")?;
         Ok(Self { conn })
@@ -194,7 +198,7 @@ impl Store {
 
     pub fn sessions(&self) -> Result<Vec<Session>> {
         let mut st = self.conn.prepare(
-            "SELECT id, agent, title, created_at, last_used, acp_session_id, policy, auto_allow, agent_settings, desktop, ended_at, summary, summary_kind, memory_scope, follows, compacted, title_kind FROM sessions ORDER BY last_used DESC",
+            "SELECT id, agent, title, created_at, last_used, acp_session_id, policy, auto_allow, agent_settings, desktop, ended_at, summary, summary_kind, memory_scope, follows, compacted, title_kind, ghost FROM sessions ORDER BY last_used DESC",
         )?;
         let rows = st.query_map([], |r| {
             Ok(Session {
@@ -215,12 +219,18 @@ impl Store {
                 follows: r.get(14)?,
                 compacted: r.get(15)?,
                 title_kind: r.get(16)?,
+                ghost: r.get::<_, i32>(17)? != 0,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     pub fn create(&self, agent: &str, policy: &str) -> Result<Session> {
+        self.create_with(agent, policy, false)
+    }
+
+    /// A new session; `ghost` is fixed from here on (docs/memory.md §3.1).
+    pub fn create_with(&self, agent: &str, policy: &str, ghost: bool) -> Result<Session> {
         let s = Session {
             id: new_id(),
             agent: agent.to_string(),
@@ -239,10 +249,11 @@ impl Store {
             memory_scope: String::new(),
             follows: String::new(),
             compacted: 0,
+            ghost,
         };
         self.conn.execute(
-            "INSERT INTO sessions (id, agent, title, created_at, last_used, acp_session_id, policy, agent_settings) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7)",
-            params![s.id, s.agent, s.title, s.created_at, s.last_used, s.policy, serde_json::to_string(&s.agent_settings)?],
+            "INSERT INTO sessions (id, agent, title, created_at, last_used, acp_session_id, policy, agent_settings, ghost) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8)",
+            params![s.id, s.agent, s.title, s.created_at, s.last_used, s.policy, serde_json::to_string(&s.agent_settings)?, ghost as i32],
         )?;
         Ok(s)
     }

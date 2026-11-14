@@ -70,7 +70,7 @@ pub fn binds_of(s: &store::Session, policy: &sill_core::policy::Policy, home: &s
     let Some(agent) = registry.get(&s.agent) else { return vec![] };
     let Ok(sdir) = state_dir(uid(), &s.id) else { return vec![] };
     let pins = store.pins(&s.id).unwrap_or_default();
-    sill_core::session::binds_for(agent, policy, &sdir, home, &pins).unwrap_or_default()
+    sill_core::session::binds_for(agent, policy, &sdir, home, &pins, s.ghost).unwrap_or_default()
 }
 
 /// Revert a path inside a running session's jail.

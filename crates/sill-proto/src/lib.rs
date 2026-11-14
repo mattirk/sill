@@ -121,6 +121,9 @@ pub struct Session {
     pub pins: Vec<PathBuf>,
     /// Its jail is up.
     pub running: bool,
+    /// A ghost session (docs/memory.md §3).
+    #[serde(default)]
+    pub ghost: bool,
 }
 
 /// `_sill/sessions.get`, `_sill/memory.show`: an id, its first characters, or the exact title.
@@ -234,6 +237,10 @@ pub struct NewSession {
     pub follows: String,
     #[serde(default)]
     pub remember_pins: bool,
+    /// A ghost session (docs/memory.md §3): no pins (refused when given), no memory written, the
+    /// row and every trace deleted at its end.
+    #[serde(default)]
+    pub ghost: bool,
 }
 
 /// `_sill/sessions.set`: `set` is a `sill_core::wire::SessionSet` as JSON.

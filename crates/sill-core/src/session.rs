@@ -26,6 +26,9 @@ pub struct StartOptions {
     /// Desktop access overriding the policy's `[jail] x11` / `dbus` (`None` = policy), SPEC §4.2.
     pub x11: Option<bool>,
     pub dbus: Option<bool>,
+    /// A ghost session (docs/memory.md §3): `sill launch --ghost` tightens the policy
+    /// (`Policy::ghostly`) and leaves the memory snapshot out unless Settings say otherwise.
+    pub ghost: bool,
 }
 
 /// The binds a session needs beyond the policy's mounts: the agent's sill-owned home paths and the
@@ -40,6 +43,52 @@ pub fn agent_home(home: &Path, agent_id: &str) -> PathBuf {
         .join("sill")
         .join("agents")
         .join(agent_id)
+}
+
+/// Where a ghost session's copy of its agent's home lives (docs/memory.md §3.2): in the session's
+/// state dir, so it goes with the session's other state.
+pub fn ghost_agent_home(state_dir: &Path, agent_id: &str) -> PathBuf {
+    state_dir.join("agent-home").join(agent_id)
+}
+
+/// Entries at the top of an agent's home that a ghost's copy leaves out: the agent's own record of
+/// earlier sessions (transcripts, history, its memory), logs, telemetry and caches. What is left is
+/// the login, the settings, plugins and skills — what the agent needs to start as itself.
+const GHOST_SKIP: &[&str] = &[
+    "projects", "sessions", "session-env", "shell-snapshots", "telemetry", "backups", "history.jsonl", "todos",
+    "file-history", "paste-cache", "debug", "statsig", "cache", "tmp", "thread-writer-locks", "session_index.jsonl",
+    "memories", "GEMINI.md",
+];
+/// Name prefixes left out the same way (Codex keeps its history in versioned SQLite files).
+const GHOST_SKIP_PREFIX: &[&str] = &["logs_", "memories_", "thread_history_", "goals_", "queue_", "state_"];
+
+fn ghost_skips(name: &str) -> bool {
+    GHOST_SKIP.contains(&name) || GHOST_SKIP_PREFIX.iter().any(|p| name.starts_with(p))
+}
+
+/// Seed a ghost's agent home from the agent's sill-owned home: each top-level entry copied unless
+/// [`ghost_skips`] says it is history. A missing source leaves the copy empty (the usual seeding
+/// from the host then runs in [`binds_for`]).
+fn seed_ghost_home(from: &Path, to: &Path) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(to)?;
+    let Ok(rd) = std::fs::read_dir(from) else { return Ok(()) };
+    for top in rd.filter_map(Result::ok) {
+        let src = top.path();
+        let dst = to.join(top.file_name());
+        if src.is_dir() {
+            std::fs::DirBuilder::new().mode(0o700).create(&dst)?;
+            for e in std::fs::read_dir(&src)?.filter_map(Result::ok) {
+                if !ghost_skips(&e.file_name().to_string_lossy()) {
+                    copy_tree(&e.path(), &dst.join(e.file_name()))?;
+                }
+            }
+        } else {
+            copy_tree(&src, &dst)?;
+            let _ = std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+    Ok(())
 }
 
 /// Parents under `~` that many programs share: an agent's entry below them is adopted one level
@@ -203,20 +252,35 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+/// `ghost` (docs/memory.md §3.2): the agent home is a copy in the session's state dir
+/// ([`ghost_agent_home`], seeded once by [`seed_ghost_home`]), adopted state is not bound (writes
+/// there go to the overlay like any other) and pins are ignored — a ghost has none.
 pub fn binds_for(
     agent: &crate::agents::Agent,
     policy: &Policy,
     state_dir: &Path,
     home: &Path,
     pins: &[PathBuf],
+    ghost: bool,
 ) -> Result<Vec<(PathBuf, PathBuf)>> {
     use crate::paths::{expand_home, expand_pattern, layer_name};
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
     let mut out = Vec::new();
     // agent home: ~/.local/state/sill/agents/<id>/<basename of the path>. The agents' homes hold
     // credentials: 0700 from the `agents/` directory down, whatever the umask, on every start (a
-    // home made before this was 0755/0664, SPEC §4.11 #8).
-    let agents_base = agent_home(home, &agent.id);
+    // home made before this was 0755/0664, SPEC §4.11 #8). A ghost's is a copy of it.
+    let agents_base = if ghost {
+        let copy = ghost_agent_home(state_dir, &agent.id);
+        if !copy.exists() {
+            let t0 = std::time::Instant::now();
+            seed_ghost_home(&agent_home(home, &agent.id), &copy)?;
+            eprintln!("sill: ghost agent home for {} copied in {} ms", agent.id, t0.elapsed().as_millis());
+        }
+        copy
+    } else {
+        agent_home(home, &agent.id)
+    };
+    let pins: &[PathBuf] = if ghost { &[] } else { pins };
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&agents_base)?;
     for d in [agents_base.as_path()].into_iter().chain(agents_base.parent()) {
         std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))?;
@@ -252,7 +316,7 @@ pub fn binds_for(
         out.push((owned, inside));
     }
     // adopted agent state (see `adopted_binds`): the agent's own files that landed in its home
-    for (owned, inside) in adopted_binds(agent, home) {
+    for (owned, inside) in if ghost { vec![] } else { adopted_binds(agent, home) } {
         if !out.iter().any(|(_, i)| *i == inside) {
             out.push((owned, inside));
         }
@@ -509,6 +573,9 @@ fn launch_args(opts: &StartOptions) -> Vec<std::ffi::OsString> {
         a.push("--agent".into());
         a.push(ag.clone().into());
     }
+    if opts.ghost {
+        a.push("--ghost".into());
+    }
     for (host, inside) in &opts.binds {
         a.push("--bind".into());
         a.push(format!("{}={}", host.display(), inside.display()).into());
@@ -636,6 +703,42 @@ pub fn stop(session: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A ghost's agent home: the login, settings, plugins and skills, not the agent's history.
+    #[test]
+    fn ghost_home_leaves_history_out() {
+        let dir = std::env::temp_dir().join(format!("sill-ghost-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let from = dir.join("from");
+        for d in [".claude/projects/-home-me/memory", ".claude/telemetry", ".claude/plugins/p", ".codex/sessions"] {
+            std::fs::create_dir_all(from.join(d)).unwrap();
+        }
+        for (f, t) in [
+            (".claude/.credentials.json", "login"),
+            (".claude/settings.json", "{}"),
+            (".claude/history.jsonl", "old prompts"),
+            (".claude/projects/-home-me/memory/MEMORY.md", "remembered"),
+            (".claude/plugins/p/x", "plugin"),
+            (".claude.json", "{\"a\":1}"),
+            (".codex/auth.json", "codex login"),
+            (".codex/state_5.sqlite", "state"),
+            (".codex/config.toml", "model = 'x'"),
+        ] {
+            std::fs::write(from.join(f), t).unwrap();
+        }
+        let to = dir.join("to");
+        seed_ghost_home(&from, &to).unwrap();
+        for kept in [".claude/.credentials.json", ".claude/settings.json", ".claude/plugins/p/x", ".claude.json", ".codex/auth.json", ".codex/config.toml"] {
+            assert!(to.join(kept).exists(), "{kept} copied");
+        }
+        for gone in [".claude/history.jsonl", ".claude/projects", ".claude/telemetry", ".codex/sessions", ".codex/state_5.sqlite"] {
+            assert!(!to.join(gone).exists(), "{gone} left out");
+        }
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&to).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(std::fs::metadata(to.join(".claude.json")).unwrap().permissions().mode() & 0o777, 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn ids_at_the_sinks() {

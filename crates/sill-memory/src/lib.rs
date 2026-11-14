@@ -114,6 +114,19 @@ pub fn write_snapshot(src: &Path, dir: &Path, kept: &[(String, PathBuf, String)]
              INSERT INTO entries SELECT session_id, seq, ts, kind, text FROM src.entries WHERE kind IN ('user', 'agent', 'tool');
              INSERT INTO memory_text (session_id, kind, ref, text) SELECT session_id, kind, ref, text FROM src.memory_text;",
         )?;
+        // ghost sessions (docs/memory.md §3) are nobody's memory, not even while they run
+        let has_ghost = tx.prepare("PRAGMA src.table_info(sessions)")?.query_map([], |r| r.get::<_, String>(1))?.filter_map(|r| r.ok()).any(|c| c == "ghost");
+        if has_ghost {
+            tx.execute_batch(
+                "CREATE TEMP TABLE ghosts AS SELECT id FROM src.sessions WHERE ghost <> 0;
+                 DELETE FROM memory_text WHERE session_id IN (SELECT id FROM ghosts);
+                 DELETE FROM entries WHERE session_id IN (SELECT id FROM ghosts);
+                 DELETE FROM memories WHERE session_id IN (SELECT id FROM ghosts);
+                 DELETE FROM session_pins WHERE session_id IN (SELECT id FROM ghosts);
+                 DELETE FROM sessions WHERE id IN (SELECT id FROM ghosts);
+                 DROP TABLE ghosts;",
+            )?;
+        }
         {
             let mut st = tx.prepare("INSERT INTO kept VALUES (?1, ?2, ?3)")?;
             for (id, path, what) in kept {
@@ -807,6 +820,45 @@ pub fn cli(args: &[String], conn: &Connection, home: &Path, now: i64, kept: impl
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A ghost session is in nobody's memory, not even the jail's snapshot while it runs.
+    #[test]
+    fn the_snapshot_leaves_ghosts_out() {
+        let dir = std::env::temp_dir().join(format!("sill-memory-ghost-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("sill.db");
+        let src = Connection::open(&db).unwrap();
+        src.execute_batch(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, agent TEXT NOT NULL, title TEXT NOT NULL, created_at INTEGER NOT NULL,
+                 last_used INTEGER NOT NULL, acp_session_id TEXT, ended_at INTEGER, summary TEXT NOT NULL DEFAULT '', summary_kind TEXT NOT NULL DEFAULT '',
+                 ghost INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE session_pins (session_id TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (session_id, path));
+             CREATE TABLE entries (session_id TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL,
+                 extra TEXT NOT NULL DEFAULT '', PRIMARY KEY (session_id, seq));
+             CREATE TABLE memories (session_id TEXT NOT NULL, ts INTEGER NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL);",
+        )
+        .unwrap();
+        install(&src).unwrap();
+        src.execute_batch(
+            "INSERT INTO sessions (id, agent, title, created_at, last_used, ghost) VALUES ('norm0001', 'claude', 'normal one', 1, 1, 0);
+             INSERT INTO sessions (id, agent, title, created_at, last_used, ghost) VALUES ('ghst0001', 'claude', 'ghost one', 2, 2, 1);
+             INSERT INTO entries VALUES ('norm0001', 1, 1, 'user', 'visible prompt', '');
+             INSERT INTO entries VALUES ('ghst0001', 1, 2, 'user', 'phantom prompt', '');",
+        )
+        .unwrap();
+        let snapdir = dir.join("memory");
+        write_snapshot(&db, &snapdir, &[]).unwrap();
+        let snap = open_snapshot(&snapdir).unwrap().unwrap();
+        let ids: Vec<String> = snap.prepare("SELECT id FROM sessions").unwrap().query_map([], |r| r.get(0)).unwrap().flatten().collect();
+        assert_eq!(ids, ["norm0001"]);
+        let texts: Vec<String> = snap.prepare("SELECT text FROM memory_text").unwrap().query_map([], |r| r.get(0)).unwrap().flatten().collect();
+        assert!(texts.iter().any(|t| t == "visible prompt"), "{texts:?}");
+        assert!(!texts.iter().any(|t| t.contains("phantom") || t.contains("ghost one")), "{texts:?}");
+        let n: i64 = snap.query_row("SELECT COUNT(*) FROM entries WHERE session_id = 'ghst0001'", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn brief_keeps_whole_paragraphs() {

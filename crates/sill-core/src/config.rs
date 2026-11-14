@@ -49,6 +49,9 @@ pub struct Config {
     /// How many earlier sessions a new agent is told about (docs/memory.md §2.3); unset = 3, 0 =
     /// none (search still works).
     pub memory_recall: Option<u32>,
+    /// Ghost sessions read memory (docs/memory.md §3.2): the recall block and the jail's read-only
+    /// snapshot, as an unpinned session gets them. They never write it either way. Unset = off.
+    pub ghost_memory: Option<bool>,
     /// Compaction (docs/memory.md §2.4): this long after a session ended, its transcript loses the
     /// agent's thoughts, tool details and diffs (`30d`, `12h`, `2y`; unset = 30d, `0` = never).
     pub compact_after: Option<String>,
@@ -153,6 +156,11 @@ impl Config {
     pub fn delete_after(&self) -> i64 {
         age(self.delete_after.as_deref(), 0)
     }
+    /// Ghost sessions see memory (read-only) only when turned on; never when memory is off.
+    pub fn ghost_memory(&self) -> bool {
+        self.memory() && self.ghost_memory.unwrap_or(false)
+    }
+
     pub fn memory_recall(&self) -> usize {
         self.memory_recall.unwrap_or(3).min(20) as usize
     }

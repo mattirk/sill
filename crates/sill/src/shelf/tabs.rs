@@ -224,6 +224,17 @@ impl TabStrip {
         }
     }
 
+    /// A CSS class on the tab's root (a ghost session's dim look).
+    pub fn set_class(&self, id: &str, class: &str, on: bool) {
+        if let Some(t) = self.tabs.borrow().iter().find(|t| t.id == id) {
+            if on {
+                t.root.add_css_class(class);
+            } else {
+                t.root.remove_css_class(class);
+            }
+        }
+    }
+
     /// Mark a tab as busy (its agent is in a turn): the agent glyph pulses, the title does not.
     pub fn set_busy(&self, id: &str, busy: bool) {
         if let Some(t) = self.tabs.borrow().iter().find(|t| t.id == id) {

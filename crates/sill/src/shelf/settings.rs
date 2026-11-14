@@ -286,6 +286,15 @@ pub fn build() -> gtk::Widget {
     recall_dd.set_tooltip_text(Some("How many earlier sessions a new agent is told about when it starts: the ones in the same folders, nearest first, else the latest anywhere. Each session can narrow this in its session menu. None: the agent is only told how to search."));
     row(&card, "Recall", Some("Earlier sessions a new agent is told about"), &recall_dd);
 
+    // ghost sessions read memory or not (docs/memory.md §3.2); they never write it
+    let ghost_mem = switch(sill_core::config::load().ghost_memory.unwrap_or(false));
+    ghost_mem.set_tooltip_text(Some("A ghost session gets the recall block and can search memory read-only, like a session without pins. It never writes memory either way: nothing of a ghost is remembered. Off: a ghost starts blank."));
+    ghost_mem.connect_state_set(|_, on| {
+        let _ = sill_core::config::update(|c| c.ghost_memory = Some(on));
+        glib::Propagation::Proceed
+    });
+    row(&card, "Ghosts see memory", Some("Ghost sessions read earlier sessions (never write)"), &ghost_mem);
+
     // compaction and retention (docs/memory.md §2.4): three durations, each off at 0
     let durations: [(&str, &str); 7] = [("0", "never"), ("7d", "a week"), ("30d", "a month"), ("90d", "3 months"), ("180d", "6 months"), ("1y", "a year"), ("2y", "two years")];
     let dur_labels: Vec<&str> = durations.iter().map(|(_, l)| *l).collect();

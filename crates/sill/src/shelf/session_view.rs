@@ -2221,19 +2221,33 @@ impl SessionView {
             self.conv.add_note("session is not running");
             return false;
         };
-        // sill's facts about this jail come from the session's policy (none if it can't be read)
+        // sill's facts about this jail come from the session's policy (none if it can't be read); a
+        // ghost's are of the tightened policy, with the one line it is told (docs/memory.md §3.2)
+        let ghost = self.session.borrow().ghost;
         let facts = session::home()
             .ok()
-            .and_then(|h| sill_core::policy::Policy::load(&self.session.borrow().policy, &h).ok().map(|p| sill_core::instructions::facts_block(&p, &h)))
+            .and_then(|h| {
+                let mut p = sill_core::policy::Policy::load(&self.session.borrow().policy, &h).ok()?;
+                if ghost {
+                    p.ghostly(&h);
+                }
+                let mut f = sill_core::instructions::facts_block(&p, &h);
+                if ghost {
+                    f.push_str(sill_core::instructions::GHOST_NOTICE);
+                }
+                Some(f)
+            })
             .unwrap_or_default();
         // what earlier sessions in these folders did (docs/memory.md §2.3): changes only when one
-        // in scope ends or the scope changes, so the block stays the same across prompts
+        // in scope ends or the scope changes, so the block stays the same across prompts. A ghost
+        // gets it only when Settings say ghosts see memory.
         let memory = match session::home() {
+            Err(_) => String::new(),
+            Ok(_) if ghost && !sill_core::config::load().ghost_memory() => String::new(),
             Ok(h) => {
                 let pins = self.store.pins(&self.id()).unwrap_or_default();
                 sill_core::memory::recall(&self.store, &self.session.borrow(), &pins, &h, sill_core::config::load().memory_recall())
             }
-            Err(_) => String::new(),
         };
         let standing = sill_core::instructions::standing_block(&facts, &memory, &sill_core::instructions::load_global());
         let standing_due = self.sent_standing.borrow().as_deref() != Some(standing.as_str());

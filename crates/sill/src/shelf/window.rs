@@ -501,7 +501,7 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
         match sessions.into_iter().find(|s| s.ended_at.is_none()) {
             Some(s) => shelf.open_session(s),
             None => {
-                if let Ok(s) = create_session(&store, "claude", "default") {
+                if let Ok(s) = create_session(&store, "claude", "default", false) {
                     shelf.open_session(s);
                 }
             }
@@ -764,12 +764,12 @@ impl Shelf {
 
     /// A new session with the selected session's agent (Ctrl+Shift+T); claude when none is selected.
     fn new_session_like_selected(self: &Rc<Self>) {
-        let agent = self
+        let (agent, ghost) = self
             .tabs
             .selected()
-            .and_then(|id| self.views.borrow().get(&id).map(|v| v.session.borrow().agent.clone()))
-            .unwrap_or_else(|| "claude".into());
-        match create_session(&self.store, &agent, "default") {
+            .and_then(|id| self.views.borrow().get(&id).map(|v| (v.session.borrow().agent.clone(), v.session.borrow().ghost)))
+            .unwrap_or_else(|| ("claude".into(), false));
+        match create_session(&self.store, &agent, "default", ghost) {
             Ok(s) => self.open_session(s),
             Err(e) => self.set_status(&format!("new session: {e:#}")),
         }
@@ -926,6 +926,11 @@ impl Shelf {
     fn refresh_tab(&self, s: &Session) {
         let (x11, dbus) = effective_desktop(s);
         self.tabs.set_icon(&s.id, &self.tab_icon(&s.agent, x11 || dbus, self.busy.borrow().contains(&s.id)));
+        self.tabs.set_class(&s.id, "sill-ghost", s.ghost);
+        if s.ghost {
+            self.tabs.set_tooltip(&s.id, Some(GHOST_TIP));
+            return;
+        }
         let tip = match (x11, dbus) {
             (true, true) => "X11 + D-Bus: the agent can see and drive the desktop and reach the session bus",
             (true, false) => "X11: the agent can run GUI programs — and, as any X11 client, read keys and drive every window",
@@ -1051,6 +1056,10 @@ impl Shelf {
                 });
             });
         }
+        if s.ghost {
+            desk.set_sensitive(false);
+            desk.set_tooltip_text(Some("A ghost session has no X11 and no D-Bus, whatever is chosen"));
+        }
         grid.attach(&key("Desktop"), 0, 3, 1, 1);
         grid.attach(&desk, 1, 3, 1, 1);
         // recall scope (docs/memory.md §2.3): which earlier sessions the agent is told about at
@@ -1064,7 +1073,10 @@ impl Shelf {
         let mem = gtk::DropDown::from_strings(&labels.iter().map(String::as_str).collect::<Vec<_>>());
         let current = Scope::resolve(&s.memory_scope, pinned);
         mem.set_selected(all.iter().position(|sc| *sc == current).unwrap_or(0) as u32);
-        if sill_core::config::load().memory() {
+        if s.ghost && !sill_core::config::load().ghost_memory() {
+            mem.set_sensitive(false);
+            mem.set_tooltip_text(Some("A ghost session starts blank: Settings → Ghosts see memory turns recall on for ghosts"));
+        } else if sill_core::config::load().memory() {
             mem.set_tooltip_text(Some("Earlier sessions quoted to the agent when it starts. It can always search all sessions with sill-memory."));
         } else {
             mem.set_sensitive(false);
@@ -1114,6 +1126,10 @@ impl Shelf {
                 p.popdown();
                 shelf.open_session_page(&sid);
             });
+        }
+        if s.ghost {
+            page_btn.set_sensitive(false);
+            page_btn.set_tooltip_text(Some("A ghost session is not remembered: no summary, no notes"));
         }
         grid.attach(&key("Page"), 0, 5, 1, 1);
         grid.attach(&page_btn, 1, 5, 1, 1);
@@ -1509,6 +1525,10 @@ impl Shelf {
             b.set_child(Some(&h));
             b
         };
+        // a ghost (docs/memory.md §3.1): chosen here, before the agent, and fixed from then on
+        let ghost = gtk::CheckButton::with_label("ghost — leaves no session behind");
+        ghost.add_css_class("sill-menu-item");
+        ghost.set_tooltip_text(Some(GHOST_TIP));
         // only agents that can actually start here: enabled, and their command exists (a built-in
         // whose package was removed on the Agents page drops out until it is installed again)
         for (id, agent) in registry.iter().filter(|(_, a)| a.enabled && sill_core::registry::available(a, &home).is_some()) {
@@ -1516,20 +1536,23 @@ impl Shelf {
             let s = self.clone();
             let pop = pop.clone();
             let id = id.clone();
+            let ghost = ghost.clone();
             b.connect_clicked(move |_| {
                 pop.popdown();
-                if let Ok(sess) = create_session(&s.store, &id, "default") {
-                    s.open_session(sess);
+                match create_session(&s.store, &id, "default", ghost.is_active()) {
+                    Ok(sess) => s.open_session(sess),
+                    Err(e) => s.set_status(&format!("new session: {e:#}")),
                 }
             });
             menu.append(&b);
         }
+        menu.append(&ghost);
         let stored: Vec<Session> = self
             .store
             .sessions()
             .unwrap_or_default()
             .into_iter()
-            .filter(|s| !self.tabs.has(&s.id))
+            .filter(|s| !self.tabs.has(&s.id) && !(s.ghost && s.ended_at.is_some()))
             .collect();
         if !stored.is_empty() {
             let sep = gtk::Separator::new(gtk::Orientation::Horizontal);
@@ -1571,7 +1594,11 @@ impl Shelf {
             for (n, sess) in stored.into_iter().enumerate() {
                 let line = gtk::Box::new(gtk::Orientation::Horizontal, 0);
                 line.set_visible(n < SHOWN);
-                let sub = sess.ended_at.filter(|_| !sess.summary.is_empty()).map(|t| format!("{} · {}", sill_core::memory::date(t), sill_core::memory::first_line(&sess.summary)));
+                let sub = if sess.ghost {
+                    Some("ghost · still running".to_string())
+                } else {
+                    sess.ended_at.filter(|_| !sess.summary.is_empty()).map(|t| format!("{} · {}", sill_core::memory::date(t), sill_core::memory::first_line(&sess.summary)))
+                };
                 let b = row(registry.get(&sess.agent), &sess.title, sub.as_deref());
                 if !sess.summary.is_empty() {
                     // the opening paragraphs only: a whole summary as a tooltip covers the menu
@@ -1602,7 +1629,7 @@ impl Shelf {
                             return;
                         }
                         pop.popdown();
-                        delete_then(&id, move || refresh_memory());
+                        delete_then(&id, refresh_memory);
                     });
                 }
                 line.append(&b);
@@ -1703,6 +1730,7 @@ impl Shelf {
             memory_scope: from.memory_scope.clone(),
             follows: from.id.clone(),
             remember_pins: false,
+            ghost: false,
         };
         let id = match super::client::new_session(new) {
             Ok(id) => id,
@@ -1720,11 +1748,12 @@ impl Shelf {
 /// A new session, with the pins of the latest session that had any when Settings → Remember pins
 /// is on (the sessions come newest first) — the same workspace without pinning it again. *New
 /// here* copies its own source's pins and does not come this way.
-fn create_session(store: &Store, agent: &str, policy: &str) -> anyhow::Result<Session> {
+fn create_session(store: &Store, agent: &str, policy: &str, ghost: bool) -> anyhow::Result<Session> {
     let new = sill_proto::NewSession {
         agent: agent.to_string(),
         policy: policy.to_string(),
-        remember_pins: sill_core::config::load().remember_pins(),
+        remember_pins: !ghost && sill_core::config::load().remember_pins(),
+        ghost,
         ..Default::default()
     };
     let id = super::client::new_session(new)?;
@@ -1796,6 +1825,9 @@ fn delete_then(id: &str, then: impl FnOnce() + 'static) {
     });
 }
 
+/// What a ghost session's tab says (decision 9: "leaves no session behind", not "private").
+const GHOST_TIP: &str = "Ghost — leaves no session behind: no pins, no memory written; writes outside sill revert; the session, its transcript and its overlay are deleted when it closes. Keep is the one way anything survives.";
+
 /// The tray's Quit: end every session with its summary, then exit (`Shelf::quit_all`); with no
 /// shelf built yet, exit at once.
 pub fn quit_with_summaries(app: &gtk::Application) {
@@ -1827,6 +1859,9 @@ pub fn toggle(w: &gtk::Window, time: u32) {
 /// What a session's jail gets, (x11, dbus): the session's own choice, else `sill.toml`, else its
 /// policy's `[jail]` (SPEC §4.2).
 fn effective_desktop(s: &Session) -> (bool, bool) {
+    if s.ghost {
+        return (false, false); // docs/memory.md §3.2: off regardless
+    }
     let home = session::home().unwrap_or_default();
     let (x11, dbus) = sill_core::config::desktop_grants(&s.desktop, &sill_core::config::load());
     let (px, pd) = sill_core::policy::Policy::load(&s.policy, &home).map(|p| (p.jail.x11, p.jail.dbus)).unwrap_or((false, false));

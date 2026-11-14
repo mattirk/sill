@@ -76,6 +76,7 @@ impl Hub {
             started_at: Mutex::new(HashMap::new()),
         };
         hub.adopt_running();
+        hub.sweep_dead_ghosts();
         Ok(hub)
     }
 
@@ -147,7 +148,10 @@ impl Hub {
             if runner.as_ref().is_some_and(|r| r.busy()) {
                 continue;
             }
-            let Ok(policy) = Policy::load(&s.policy, &self.home) else { continue };
+            let Ok(mut policy) = Policy::load(&s.policy, &self.home) else { continue };
+            if s.ghost {
+                policy.ghostly(&self.home); // at most an hour (docs/memory.md §3.2)
+            }
             let limit = policy.limits.idle_timeout_minutes as i64 * 60;
             if limit <= 0 {
                 continue;
@@ -228,12 +232,18 @@ impl Hub {
             }
             method::SESSIONS_PIN | method::SESSIONS_UNPIN => {
                 let p: Pin = args(params)?;
+                if m == method::SESSIONS_PIN && self.is_ghost(&p.key) {
+                    return Err(Error::failed(GHOST_NO_PINS));
+                }
                 self.with_session(&p.key, |s, id| if m == method::SESSIONS_PIN { s.pin(id, &p.path) } else { s.unpin(id, &p.path) })
                     .map_err(|e| Error::failed(format!("{e:#}")))?;
                 Ok(json!({}))
             }
             method::MEMORY_NOTE_ADD => {
                 let n: Note = args(params)?;
+                if self.is_ghost(&n.key) {
+                    return Err(Error::failed("a ghost session is not remembered: it takes no notes"));
+                }
                 self.with_session(&n.key, |s, id| s.add_memory(id, "note", &n.text)).map_err(|e| Error::failed(format!("{e:#}")))?;
                 refresh_memory();
                 Ok(json!({}))
@@ -321,9 +331,12 @@ impl Hub {
             }
             method::MEMORY_LIST => {
                 let store = self.store.lock().unwrap();
+                // a ghost between its end and its deletion is nobody's memory
+                let ghosts: Vec<String> = store.sessions().map_err(Error::failed)?.into_iter().filter(|s| s.ghost).map(|s| s.id).collect();
                 let mut ended: Vec<MemorySession> = sill_memory::sessions(store.conn())
                     .map_err(Error::failed)?
                     .into_iter()
+                    .filter(|s| !ghosts.contains(&s.id))
                     .filter_map(|s| {
                         Some(MemorySession { id: s.id, agent: s.agent, title: s.title, ended_at: s.ended_at?, summary: sill_memory::first_line(&s.summary).to_string() })
                     })
@@ -415,6 +428,7 @@ impl Hub {
                     memory_scope: s.memory_scope,
                     pins,
                     running,
+                    ghost: s.ghost,
                 })
             })
             .collect()
@@ -488,9 +502,14 @@ impl Hub {
 
     /// A new session row (what `Store::create` and the shelf's `create_session` / `new_here` did).
     fn new_session(&self, n: NewSession) -> Result<String> {
+        if n.ghost && !n.pins.is_empty() {
+            bail!("{GHOST_NO_PINS}");
+        }
         let store = self.store.lock().unwrap();
-        let s = store.create(&n.agent, &n.policy)?;
-        let pins = if n.pins.is_empty() && n.remember_pins {
+        let s = store.create_with(&n.agent, &n.policy, n.ghost)?;
+        let pins = if n.ghost {
+            vec![]
+        } else if n.pins.is_empty() && n.remember_pins {
             // the pins of the latest session that had any (the sessions come newest first)
             store.sessions()?.into_iter().filter(|x| x.id != s.id).find_map(|x| store.pins(&x.id).ok().filter(|p| !p.is_empty())).unwrap_or_default()
         } else {
@@ -513,6 +532,9 @@ impl Hub {
 
     fn set_session(&self, id: &str, set: sill_core::wire::SessionSet) -> Result<()> {
         use sill_core::wire::SessionSet as S;
+        if matches!(set, S::Summary { .. }) && self.is_ghost(id) {
+            bail!("a ghost session is not remembered: it has no summary");
+        }
         let summary = matches!(set, S::Summary { .. } | S::Title { .. });
         self.with_session(id, |s, id| match set {
             S::Title { title, kind } => s.set_title(id, &title, &kind),
@@ -555,6 +577,30 @@ impl Hub {
         Ok(())
     }
 
+    /// The row says ghost (a missing row: no).
+    fn is_ghost(&self, id: &str) -> bool {
+        self.with_store(|s| s.sessions()).ok().and_then(|v| v.into_iter().find(|s| s.id == id)).is_some_and(|s| s.ghost)
+    }
+
+    /// At start, after adoption (docs/memory.md §3.3, docs/daemon.md §3.6): a ghost whose jail is
+    /// not running ended with a crash or a logout, and one whose end was recorded but not finished
+    /// (the last daemon left during the deletion) — both are deleted now, jail and all, as their end
+    /// would have. A ghost still running and never ended was adopted and stays.
+    fn sweep_dead_ghosts(&self) {
+        let ghosts: Vec<(String, bool)> =
+            self.with_store(|s| s.sessions()).unwrap_or_default().into_iter().filter(|s| s.ghost).map(|s| (s.id, s.ended_at.is_some())).collect();
+        for (id, ended) in ghosts {
+            let running = self.children.lock().unwrap().contains_key(&id) || sill_core::session::is_running(&id);
+            if running && !ended {
+                continue;
+            }
+            eprintln!("sill daemon: ghost session {id} {}: deleting it", if ended { "ended before its deletion was done" } else { "has no jail any more" });
+            if let Err(e) = self.delete_session(&id) {
+                eprintln!("sill daemon: deleting ghost {id}: {e:#}");
+            }
+        }
+    }
+
     /// The session's conversation is over as far as the daemon is concerned: no more events out.
     fn retire_runner(&self, id: &str) {
         if let Some(r) = self.runners.lock().unwrap().remove(id) {
@@ -588,6 +634,12 @@ impl Hub {
                 }
                 None => {}
             }
+        }
+        // a ghost leaves nothing (docs/memory.md §3.2): no summary turn, the row and its state go
+        if self.is_ghost(id) {
+            eprintln!("sill daemon: ghost session {id} ends ({reason}): deleting it");
+            self.finish_end(id, None, true, reason);
+            return Ok(Ending { pending: false, deleted: true });
         }
         let mut ctx = self.end_ctx(id)?;
         ctx.reason = reason.to_string();
@@ -636,6 +688,9 @@ impl Hub {
     /// *Summarize now* (docs/memory.md §2.5): the summary turn, the session going on; the answer
     /// is stored and comes to the attached frontends as `Summarized`.
     fn checkpoint(self: &Arc<Self>, id: &str) -> Result<()> {
+        if self.is_ghost(id) {
+            bail!("a ghost session is not remembered: there is nothing to summarize for");
+        }
         let r = self.runner(id).map_err(|e| anyhow::anyhow!("{}", e.message))?;
         let ctx = self.end_ctx(id)?;
         let prompt = sill_core::memory::checkpoint_prompt(&ctx.facts, &self.home);
@@ -683,6 +738,12 @@ impl Hub {
     /// Record the end — the row written from `ctx` and the agent's `answer`, or deleted — tell
     /// the attached frontends, and stop the jail on a thread of its own (a stop can take seconds).
     fn finish_end(self: &Arc<Self>, id: &str, ctx: Option<(EndCtx, Option<String>)>, delete: bool, reason: &str) {
+        // a deletion takes seconds (the jail's stop) and this daemon may be gone before it is done
+        // (`sill restart`): the end is on the row at once, and the next daemon's start finishes it
+        // for a ghost (`sweep_dead_ghosts`) as the nightly sweep does for an unprompted session
+        if delete {
+            self.with_store(|s| s.end_only(id)).ok();
+        }
         if !delete && let Some((ctx, answer)) = ctx {
             self.with_store(|s| match answer {
                 _ if !ctx.memory || ctx.keep_old => s.end_only(id),
@@ -736,7 +797,7 @@ impl Hub {
         let uid = rustix::process::getuid().as_raw();
         let sdir = sill_core::session::state_dir(uid, id)?;
         let policy = Policy::load(&s.policy, &self.home)?;
-        let binds = sill_core::session::binds_for(agent, &policy, &sdir, &self.home, &pins)?;
+        let binds = sill_core::session::binds_for(agent, &policy, &sdir, &self.home, &pins, s.ghost)?;
         let cfg = sill_core::config::load();
         let (x11, dbus) = sill_core::config::desktop_grants(&s.desktop, &cfg);
         let opts = StartOptions {
@@ -752,6 +813,7 @@ impl Hub {
             binds,
             x11,
             dbus,
+            ghost: s.ghost,
         };
         let started = sill_core::session::ensure_started(&opts, &self.home, &self.exe).context("starting the jail")?;
         let fresh = started.child.is_some();
@@ -821,6 +883,9 @@ fn agent_process_up(id: &str) -> bool {
     let Ok(sock) = sill_core::session::socket_path(id) else { return false };
     sill_core::shim::Control::connect(&sock).and_then(|mut c| c.status()).map(|s| s.running).unwrap_or(false)
 }
+
+/// What a pin on a ghost session gets (decision 8: a live folder is an unrecorded host write).
+const GHOST_NO_PINS: &str = "a ghost session has no pins: a live folder would write the host unrecorded, and a ghost's writes all revert";
 
 /// The jail's read-only memory snapshot follows the store (docs/memory.md §2.3).
 fn refresh_memory() {

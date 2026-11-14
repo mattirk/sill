@@ -318,6 +318,10 @@ struct JailArgs {
     x11: Option<String>,
     #[arg(long)]
     dbus: Option<String>,
+    /// a ghost session (docs/memory.md §3): the policy tightened — `direct` as `ro`, no X11 or
+    /// D-Bus, `all` network as the default allow-list — and no memory unless Settings allow it
+    #[arg(long)]
+    ghost: bool,
 }
 
 #[derive(Args, Clone)]
@@ -748,6 +752,7 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
     if use_proxy {
         command.extend(["--forward".into(), format!("127.0.0.1:{}={}", jail::PROXY_PORT, jail::PROXY_SOCKET).into()]);
     }
+    let ghost = jail.ghost;
     let mut spec = build_spec(jail, command)?;
     // the other agents' homes and login files stay out of this jail (SPEC §4.11 #8)
     spec.masks = sill_core::session::other_agents_paths(&sill_core::agents::load(&spec.home), agent, &spec.home);
@@ -758,7 +763,8 @@ fn launch(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>, agent: Optio
     // memory (docs/memory.md §2.3): the snapshot's directory read-only, and the shim as
     // `sill-memory` to read it; made here if the shelf has not written one yet, so the first
     // snapshot shows up in jails already running
-    if sill_core::config::load().memory() {
+    let cfg = sill_core::config::load();
+    if if ghost { cfg.ghost_memory() } else { cfg.memory() } {
         let dir = sill_core::memory::snapshot_dir();
         if std::fs::create_dir_all(&dir).is_ok() {
             use std::os::unix::fs::PermissionsExt;
@@ -917,6 +923,7 @@ fn start_session(session: &str, jail: JailArgs, shim_bin: Option<PathBuf>) -> Re
         agent: None,
         x11: jail.x11.as_deref().map(|v| v == "on"),
         dbus: jail.dbus.as_deref().map(|v| v == "on"),
+        ghost: jail.ghost,
         binds: jail
             .binds
             .iter()
@@ -1007,6 +1014,10 @@ fn build_spec(a: JailArgs, command: Vec<OsString>) -> Result<JailSpec> {
     }
     if let Some(v) = &a.dbus {
         policy.jail.dbus = v == "on";
+    }
+    // after the overrides: a ghost's desktop access is off whatever the session asked for
+    if a.ghost {
+        policy.ghostly(&home);
     }
     let state_dir = match a.state_dir {
         Some(d) => d,

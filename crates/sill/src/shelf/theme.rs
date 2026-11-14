@@ -288,6 +288,8 @@ pub fn stylesheet(t: &Theme) -> String {
     {
         s.push_str(&format!(
             "\n.sill-tab {{ background: {surface}; }}\n\
+             .sill-tab.sill-ghost {{ opacity: 0.7; }}\n\
+             .sill-tab.sill-ghost label {{ font-style: italic; }}\n\
              .sill-tab.selected {{ background: {bg}; }}\n\
              .sill-prompt-box {{ background: {surface}; border-top-color: {border}; }}\n\
              .dim-label {{ color: {dim}; }}\n\

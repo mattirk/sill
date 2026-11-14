@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 
 pub const BUILTIN_DEFAULT: &str = include_str!("../../../policies/default.toml");
 
+/// A ghost session ends itself after this long without a prompt (docs/memory.md §3.2), and its
+/// writes revert this long after the last one.
+pub const GHOST_IDLE_MINUTES: u32 = 60;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
@@ -199,6 +203,29 @@ impl Policy {
         Self::parse(BUILTIN_DEFAULT).expect("built-in default policy must parse")
     }
 
+    /// What a ghost session makes of this policy (docs/memory.md §3.2): it only tightens. `direct`
+    /// paths become `ro` (nothing unrecorded reaches the host), X11 and D-Bus are off, a network of
+    /// `all` becomes the allow-list of the `default` policy (a ghost does not get a wider world than
+    /// a normal session), and the idle timeout is at most an hour (0 = never becomes an hour).
+    pub fn ghostly(&mut self, home: &Path) {
+        let direct = std::mem::take(&mut self.paths.direct);
+        for d in direct {
+            if !self.paths.ro.contains(&d) {
+                self.paths.ro.push(d);
+            }
+        }
+        self.jail.x11 = false;
+        self.jail.dbus = false;
+        if self.network.mode == NetMode::All {
+            let default = Self::load("default", home).unwrap_or_else(|_| Self::builtin_default());
+            self.network.mode = NetMode::Allow;
+            self.network.allow = default.network.allow;
+            self.network.allow_local = default.network.allow_local;
+        }
+        let idle = self.limits.idle_timeout_minutes;
+        self.limits.idle_timeout_minutes = if idle == 0 { GHOST_IDLE_MINUTES } else { idle.min(GHOST_IDLE_MINUTES) };
+    }
+
     /// Resolve a policy by name (search paths) or by path (contains `/` or ends in `.toml`).
     /// The file a policy name resolves to (None for the built-in default).
     pub fn resolve_path(name_or_path: &str, home: &Path) -> Option<PathBuf> {
@@ -255,6 +282,37 @@ pub fn available(home: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A ghost only tightens (docs/memory.md §3.2): direct becomes ro, no desktop, `all` becomes the
+    /// default allow-list, the idle timeout at most an hour.
+    #[test]
+    fn ghostly_only_tightens() {
+        let home = Path::new("/nonexistent-home");
+        let mut p = Policy::builtin_default();
+        p.paths.direct = vec!["~/shared".into()];
+        p.jail.x11 = true;
+        p.jail.dbus = true;
+        p.network.mode = NetMode::All;
+        p.network.allow.clear();
+        p.limits.idle_timeout_minutes = 0;
+        p.ghostly(home);
+        assert!(p.paths.direct.is_empty());
+        assert!(p.paths.ro.contains(&"~/shared".to_string()));
+        assert!(!p.jail.x11 && !p.jail.dbus);
+        assert_eq!(p.network.mode, NetMode::Allow);
+        assert_eq!(p.network.allow, Policy::builtin_default().network.allow);
+        assert_eq!(p.limits.idle_timeout_minutes, GHOST_IDLE_MINUTES);
+        let mut q = Policy::builtin_default();
+        q.limits.idle_timeout_minutes = 30;
+        q.network.mode = NetMode::None;
+        q.ghostly(home);
+        assert_eq!(q.limits.idle_timeout_minutes, 30, "a shorter timeout stays");
+        assert_eq!(q.network.mode, NetMode::None, "no network stays none");
+        let mut r = Policy::builtin_default();
+        r.limits.idle_timeout_minutes = 120;
+        r.ghostly(home);
+        assert_eq!(r.limits.idle_timeout_minutes, 60);
+    }
 
     #[test]
     fn builtin_default_parses() {
