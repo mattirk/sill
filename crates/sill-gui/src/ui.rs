@@ -469,7 +469,9 @@ impl App {
                         .on_press(Message::Choose(tab.id.clone()))
                         .on_double_click(Message::Name(crate::names::Event::Begin(tab.id.clone()))),
                 )
-                .padding([4, 12])
+                // narrow: the agent glyph and the close button bring padding of their own
+                // (the person, 2026-11-09)
+                .padding([4, 6])
                 .style(style::quiet),
                 Message::Choose(tab.id.clone()),
             )
