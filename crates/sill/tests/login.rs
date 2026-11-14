@@ -36,6 +36,9 @@ enum Ask {
     AtOpen,
     /// The session opens; every prompt fails until it is logged in (Claude Code).
     AtPrompt,
+    /// `session/new` gets no answer until it is logged in: the agent waits for a browser login it
+    /// started itself (Antigravity).
+    HangsAtOpen,
 }
 
 /// An agent's login behavior. It is logged in exactly while `credential` exists: `authenticate`
@@ -79,6 +82,10 @@ fn serve(stream: UnixStream, script: Script, credential: PathBuf, observed: mpsc
     while let Some(message) = read(&mut reader) {
         let (Some(id), Some(method)) = (message.get("id").cloned(), message["method"].as_str()) else { continue };
         let logged_in = credential.exists();
+        if method == "session/new" && script.asks == Ask::HangsAtOpen && !logged_in {
+            let _ = observed.send("session/new unanswered".into());
+            continue;
+        }
         let reply = match method {
             "initialize" => Ok(json!({"protocolVersion": 1, "agentCapabilities": {"loadSession": false, "promptCapabilities": {"image": false}}, "authMethods": script.methods})),
             "session/new" if script.asks == Ask::AtOpen && !logged_in => Err(auth_required.clone()),
@@ -141,7 +148,10 @@ impl Fixture {
         command
     }
 
-    fn new(script: Script) -> Self {
+    fn new(script: Script) -> Self { Self::with_relay_env(script, &[]) }
+
+    /// `env`: for the relay, where the agent loop runs (`SILL_SESSION_OPEN_TIMEOUT_MS`).
+    fn with_relay_env(script: Script, env: &[(&str, &str)]) -> Self {
         let dir = scratch("login");
         for sub in ["run/sill", "state/sill", "config/sill", "home"] {
             std::fs::create_dir_all(dir.join(sub)).unwrap();
@@ -174,7 +184,7 @@ impl Fixture {
                 }
             })
         };
-        let relay = Self::environment(&dir).args(["daemon", "relay", "--session", &session, "--socket"])
+        let relay = Self::environment(&dir).envs(env.iter().copied()).args(["daemon", "relay", "--session", &session, "--socket"])
             .arg(runtime.join("relay.sock")).arg("--agent-socket").arg(runtime.join("shim.sock"))
             .arg("--cwd").arg(dir.join("home")).stderr(std::fs::File::create(dir.join("relay.log")).unwrap()).spawn().unwrap();
         let mut waited = Instant::now();
@@ -405,6 +415,24 @@ fn a_terminal_login_that_did_not_take_asks_again() {
     frontend.submit("PROMPT-THREE");
     frontend.control(json!({"type": "retry_session"}));
     frontend.answer(&fixture, "PROMPT-THREE");
+}
+
+/// Antigravity: with no login, `session/new` hangs while the agent waits for a browser login it
+/// started itself. After the open timeout the card shows; a login lets the session open.
+#[test]
+fn an_agent_that_hangs_at_open_gets_the_login_card_after_the_timeout() {
+    let fixture = Fixture::with_relay_env(script(Ask::HangsAtOpen, json!([agent_method()])), &[("SILL_SESSION_OPEN_TIMEOUT_MS", "300")]);
+    fixture.expect("session/new unanswered");
+    let mut frontend = Frontend::attach(&fixture);
+    let (reason, methods) = frontend.login_card(&fixture);
+    assert!(reason.contains("did not open a session within 300 ms"), "{reason}");
+    assert_eq!(methods, ["browser"]);
+    frontend.control(json!({"type": "authenticate", "method_id": "browser"}));
+    fixture.expect("authenticate");
+    fixture.expect("session/new");
+    frontend.login_card_closes(&fixture);
+    frontend.submit("PROMPT-ONE");
+    frontend.answer(&fixture, "PROMPT-ONE");
 }
 
 // --- host-side logins: the real `sill login` against a scripted adapter --------------------------

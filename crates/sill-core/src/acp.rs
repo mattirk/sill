@@ -558,6 +558,11 @@ pub fn run_session(
 /// the request until the callback arrives — which never happens inside the jail).
 const SESSION_OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// [`SESSION_OPEN_TIMEOUT`], or `SILL_SESSION_OPEN_TIMEOUT_MS` (tests: tests/login.rs).
+fn session_open_timeout() -> std::time::Duration {
+    std::env::var("SILL_SESSION_OPEN_TIMEOUT_MS").ok().and_then(|v| v.parse().ok()).map(std::time::Duration::from_millis).unwrap_or(SESSION_OPEN_TIMEOUT)
+}
+
 /// `session/new` and then the session loop; a request that doesn't come back in time turns into
 /// `auth_required`, so the person gets the login choices instead of a silent hang.
 async fn open_fresh(
@@ -576,15 +581,14 @@ async fn open_fresh(
         })
     };
     let stall = async {
-        async_io::Timer::after(SESSION_OPEN_TIMEOUT).await;
+        let timeout = session_open_timeout();
+        async_io::Timer::after(timeout).await;
         if opened.get() {
             std::future::pending::<()>().await;
         }
         let mut e = agent_client_protocol::Error::auth_required();
-        e.message = format!(
-            "the agent did not open a session within {} s — it is probably waiting for a login it started itself",
-            SESSION_OPEN_TIMEOUT.as_secs()
-        );
+        let within = if timeout.subsec_millis() == 0 { format!("{} s", timeout.as_secs()) } else { format!("{} ms", timeout.as_millis()) };
+        e.message = format!("the agent did not open a session within {within} — it is probably waiting for a login it started itself");
         Err(e)
     };
     match futures::future::select(Box::pin(session), Box::pin(stall)).await {
