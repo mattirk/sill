@@ -157,28 +157,10 @@ fn kill_old_shelves() {
     kill_old_shelves_with(rustix::process::Signal::TERM);
 }
 
-/// `sill restart`: with the `sill-shelf` user service installed this is `systemctl --user restart`
-/// (the installed binary); `--dev` instead stops the service and runs *this* executable detached, for
-/// trying a build without installing it.
-pub fn restart(hidden: bool, dev: bool) -> Result<()> {
-    let unit_known = std::process::Command::new("systemctl")
-        .args(["--user", "cat", "sill-shelf.service"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if unit_known && !dev {
-        let st = std::process::Command::new("systemctl").args(["--user", "restart", "sill-shelf.service"]).status()?;
-        if !st.success() {
-            bail!("systemctl --user restart sill-shelf failed");
-        }
-        println!("sill-shelf.service restarted (journalctl --user -u sill-shelf)");
-        return Ok(());
-    }
-    if unit_known {
-        let _ = std::process::Command::new("systemctl").args(["--user", "stop", "sill-shelf.service"]).status();
-    }
+/// Make sure no shelf holds the application id, whoever started it (the unit, `--dev`, a hand-run
+/// `sill shelf`): ask it to quit over D-Bus, escalate to signals. Returns with the id free — every
+/// `gio::Application` made here is dropped, so the next shelf to start becomes the primary one.
+fn quit_running_shelf() -> Result<()> {
     // Ask the running shelf to quit over D-Bus. A shelf whose main loop is wedged owns the name
     // but answers nothing: registering against it times out, so that too means "kill it".
     let app = gio::Application::new(Some(APP_ID), gio::ApplicationFlags::empty());
@@ -215,6 +197,34 @@ pub fn restart(hidden: bool, dev: bool) -> Result<()> {
         }
     }
     drop(app);
+    Ok(())
+}
+
+/// `sill restart`: with the `sill-shelf` user service installed this stops the unit, quits any other
+/// shelf (a `--dev` one, a hand-started one — the unit's new instance would only hand off to it and
+/// exit, leaving the old build on screen) and starts the unit again (the installed binary); `--dev`
+/// instead stops the service and runs *this* executable detached, for trying a build without
+/// installing it.
+pub fn restart(hidden: bool, dev: bool) -> Result<()> {
+    let unit_known = std::process::Command::new("systemctl")
+        .args(["--user", "cat", "sill-shelf.service"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if unit_known {
+        let _ = std::process::Command::new("systemctl").args(["--user", "stop", "sill-shelf.service"]).status();
+    }
+    quit_running_shelf()?;
+    if unit_known && !dev {
+        let st = std::process::Command::new("systemctl").args(["--user", "start", "sill-shelf.service"]).status()?;
+        if !st.success() {
+            bail!("systemctl --user start sill-shelf failed");
+        }
+        println!("sill-shelf.service restarted (journalctl --user -u sill-shelf)");
+        return Ok(());
+    }
     // --dev means the debug build of the checkout this binary was built from, whichever copy of
     // `sill` ran this command (the installed one included); without it, this binary itself
     let mut exe = std::env::current_exe()?;

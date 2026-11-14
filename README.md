@@ -90,6 +90,7 @@ proxy (testing only).
 sill init --user                           # once: the shelf starts with the session (user service, or
                                            # ~/.config/autostart/sill.desktop without systemd)
 systemctl --user restart sill-shelf        # after an update (same as `sill restart`)
+packaging/deploy.sh                        # from source, in a host terminal: build, sudo sill init, restart, verify
 journalctl --user -u sill-shelf -f         # its log
 sill toggle                                # show/hide — bind to Alt+Space (Cinnamon custom shortcut)
 sill restart --dev                         # run the build in target/ instead of the installed one
