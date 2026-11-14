@@ -371,11 +371,22 @@ fn configuration(config: &Config) -> Result<Retained<VZVirtualMachineConfigurati
         };
         boot.setVariableStore(Some(&store));
 
+        // "cached", not the framework's default "automatic": with "automatic", Linux guests on
+        // Apple silicon get corrupted data from their virtio disks (2026-11-12: programs in the
+        // guest crashed with illegal instructions while the files on disk were intact; Lima and
+        // UTM met the same and chose "cached"). `SILL_VM_DISK_CACHE` overrides it for tests.
+        let caching = match std::env::var("SILL_VM_DISK_CACHE").as_deref() {
+            Ok("automatic") => VZDiskImageCachingMode::Automatic,
+            Ok("uncached") => VZDiskImageCachingMode::Uncached,
+            _ => VZDiskImageCachingMode::Cached,
+        };
         let disk = |path: &PathBuf, read_only: bool, id: Option<&str>| {
-            let attachment = VZDiskImageStorageDeviceAttachment::initWithURL_readOnly_error(
+            let attachment = VZDiskImageStorageDeviceAttachment::initWithURL_readOnly_cachingMode_synchronizationMode_error(
                 VZDiskImageStorageDeviceAttachment::alloc(),
                 &url(path),
                 read_only,
+                caching,
+                VZDiskImageSynchronizationMode::Full,
             )
             .map_err(|e| anyhow!("{}: {}", path.display(), said(&e)))?;
             let device = VZVirtioBlockDeviceConfiguration::initWithAttachment(
