@@ -59,6 +59,9 @@ pub fn apply_gitignore(changes: &mut [Change]) {
     use std::io::Write;
     let mut by_repo: BTreeMap<PathBuf, Vec<usize>> = BTreeMap::new();
     for (i, c) in changes.iter().enumerate() {
+        if c.ignored {
+            continue; // the pattern list already decided; build output needn't go through git
+        }
         if let Some(r) = repo_root(&c.path) {
             by_repo.entry(r).or_default().push(i);
         }
@@ -76,16 +79,21 @@ pub fn apply_gitignore(changes: &mut [Change]) {
             Ok(c) => c,
             Err(_) => return,
         };
-        {
-            let mut stdin = child.stdin.take().unwrap();
-            for &i in &idxs {
-                if let Ok(rel) = changes[i].path.strip_prefix(&repo) {
-                    let _ = stdin.write_all(rel.as_os_str().as_encoded_bytes());
-                    let _ = stdin.write_all(b"\0");
-                }
+        // feed stdin from its own thread: past 64 KiB of matches git blocks on stdout, and a writer
+        // that hasn't started reading yet would then block on stdin forever
+        let mut input = Vec::new();
+        for &i in &idxs {
+            if let Ok(rel) = changes[i].path.strip_prefix(&repo) {
+                input.extend_from_slice(rel.as_os_str().as_encoded_bytes());
+                input.push(0);
             }
         }
+        let mut stdin = child.stdin.take().unwrap();
+        let feeder = std::thread::spawn(move || {
+            let _ = stdin.write_all(&input);
+        });
         let Ok(out) = child.wait_with_output() else { continue };
+        let _ = feeder.join();
         let ignored: std::collections::HashSet<Vec<u8>> =
             out.stdout.split(|b| *b == 0).filter(|s| !s.is_empty()).map(|s| s.to_vec()).collect();
         for &i in &idxs {
@@ -195,4 +203,37 @@ pub fn unified_diff(c: &Change) -> Result<String> {
 
 pub fn home() -> Result<PathBuf> {
     Ok(PathBuf::from(std::env::var("HOME").context("HOME not set")?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ledger::{FileType, Kind};
+
+    /// Thousands of matches overflow the pipe to git; the call must still return.
+    #[test]
+    fn check_ignore_survives_many_matches() {
+        let dir = std::env::temp_dir().join(format!("sill-ci-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ok = std::process::Command::new("git").arg("-C").arg(&dir).args(["init", "-q"]).status().map(|s| s.success()).unwrap_or(false);
+        if !ok {
+            return; // no git here
+        }
+        std::fs::write(dir.join(".gitignore"), "big/\n").unwrap();
+        let mut changes: Vec<Change> = (0..5000)
+            .map(|i| Change {
+                path: dir.join(format!("big/some/deeper/directory/with/a/long/name/file-{i:05}.o")),
+                upper: PathBuf::new(),
+                kind: Kind::Added,
+                file_type: FileType::File,
+                size: 0,
+                conflict: false,
+                ignored: false,
+            })
+            .collect();
+        apply_gitignore(&mut changes);
+        assert!(changes.iter().all(|c| c.ignored));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

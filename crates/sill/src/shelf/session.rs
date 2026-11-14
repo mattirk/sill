@@ -43,7 +43,7 @@ pub fn start(s: &store::Session, store: &store::Store) -> Result<Driver> {
         shim_bin: None,
         binds,
     };
-    let sock = ensure_started(&opts, &home, &std::env::current_exe()?)?;
+    let sock = ensure_started(&opts, &home, &sill_core::session::staged_exe()?)?;
     let mut control = shim::Control::connect(&sock)?;
     if !control.status()?.running {
         let mut env = agent.env.clone();
@@ -59,9 +59,8 @@ pub fn start(s: &store::Session, store: &store::Store) -> Result<Driver> {
         resume: if agent.supports_load { s.acp_session_id.clone() } else { None },
     };
     std::thread::Builder::new().name(format!("sill-acp-{}", s.id)).spawn(move || {
-        if let Err(e) = acp::run_session(stream, sopts, cmd_rx, ev_tx.clone()) {
-            let _ = ev_tx.send_blocking(Event::Ended(Some(format!("{e:#}"))));
-        }
+        // run_session sends Event::Ended itself, error included
+        let _ = acp::run_session(stream, sopts, cmd_rx, ev_tx);
     })?;
     Ok(Driver { commands: cmd_tx, events: ev_rx })
 }

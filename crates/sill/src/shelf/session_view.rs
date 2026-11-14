@@ -675,7 +675,7 @@ impl SessionView {
     }
 
     /// Send a prompt; false if the agent is busy or the session is down.
-    pub fn send(&self, text: &str) -> bool {
+    pub fn send(self: &Rc<Self>, text: &str) -> bool {
         let trace = std::env::var_os("SILL_TRACE").is_some();
         let t0 = std::time::Instant::now();
         let lap = |what: &str| {
@@ -683,6 +683,9 @@ impl SessionView {
                 eprintln!("{} send: {what} at {} ms", super::trace_ts(), t0.elapsed().as_millis());
             }
         };
+        if self.driver.borrow().is_none() {
+            self.connect(); // after Ended: the shim respawns the agent and session/load resumes
+        }
         let Some(d) = self.driver.borrow().as_ref().map(|d| d.commands.clone()) else {
             self.conv.add_note("session is not running");
             return false;
@@ -808,6 +811,17 @@ impl SessionView {
                 let id = self.id();
                 let v = self.clone();
                 glib::idle_add_local_once(move || v.after_turn(&id));
+            }
+            Event::Ended(_) => {
+                // the agent or its stream is gone (crash, OOM, kill): the turn is over whether or not
+                // Stopped arrived, and the next send reconnects instead of waiting for it
+                let was_busy = self.busy.get();
+                self.set_busy(false);
+                if was_busy && let Some(cb) = self.on_busy.borrow().as_ref() {
+                    cb(&self.id(), false);
+                }
+                self.flush_agent();
+                *self.driver.borrow_mut() = None;
             }
             _ => {}
         }

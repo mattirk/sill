@@ -151,7 +151,12 @@ fn main() -> Result<()> {
         [flag, fd] if flag == "--control-fd" => {
             let fd: i32 = fd.parse().context("--control-fd expects a number")?;
             // SAFETY: the launcher put a listening Unix socket on this fd before exec.
-            unsafe { UnixListener::from_raw_fd(fd) }
+            let l = unsafe { UnixListener::from_raw_fd(fd) };
+            // the launcher cleared close-on-exec so the fd would survive *our* exec; from here on it
+            // must not survive anyone else's: the agent or a shell could accept() the shelf's
+            // connections and answer as the shim (SPEC §4.11 #2)
+            rustix::io::fcntl_setfd(&l, rustix::io::FdFlags::CLOEXEC).context("control fd cloexec")?;
+            l
         }
         [flag, path] if flag == "--listen" => {
             let _ = std::fs::remove_file(path);

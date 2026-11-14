@@ -140,6 +140,57 @@ pub fn is_running(session: &str) -> bool {
 }
 
 /// Start the session unit with the policy's limits, unless it is already reachable.
+/// A sill-owned copy of this binary and its `sill-shim`, taken once per process, for everything the
+/// host later executes on a session's behalf (`<exe> launch` in the unit, the shim bound into the jail).
+/// `current_exe()` may sit in a pinned folder (developing sill in sill): the agent can write there, and
+/// the unit would re-read the file from disk at every session start (SPEC §4.11 #1). The copy is taken
+/// when the person started the shelf, which is the moment they chose to run this build.
+pub fn staged_exe() -> Result<PathBuf> {
+    static STAGED: std::sync::OnceLock<std::result::Result<PathBuf, String>> = std::sync::OnceLock::new();
+    STAGED
+        .get_or_init(|| stage_exe().map_err(|e| format!("{e:#}")))
+        .clone()
+        .map_err(|e| anyhow::anyhow!("staging the launcher: {e}"))
+}
+
+fn stage_exe() -> Result<PathBuf> {
+    let src = std::env::current_exe()?;
+    let base = std::env::var("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/state"))
+        .join("sill")
+        .join("bin");
+    std::fs::create_dir_all(&base)?;
+    // one directory per shelf process: units started by an earlier shelf keep running their copy;
+    // directories of shelves that are gone are removed here
+    let me = std::process::id();
+    if let Ok(rd) = std::fs::read_dir(&base) {
+        for e in rd.flatten() {
+            let name = e.file_name();
+            let Some(pid) = name.to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
+            if pid != me && !Path::new("/proc").join(name).exists() {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    }
+    let dir = base.join(me.to_string());
+    std::fs::create_dir_all(&dir)?;
+    let dst = dir.join("sill");
+    std::fs::copy(&src, &dst).with_context(|| format!("copy {} to {}", src.display(), dst.display()))?;
+    let shim = src.with_file_name("sill-shim");
+    if shim.is_file() {
+        std::fs::copy(&shim, dir.join("sill-shim"))?;
+    }
+    Ok(dst)
+}
+
+/// Whether `path` is inside one of `roots` (after resolving symlinks), for warning when the binary
+/// about to run on the host sits in a folder some session's agent can write.
+pub fn inside_any(path: &Path, roots: &[PathBuf]) -> Option<PathBuf> {
+    let p = path.canonicalize().ok()?;
+    roots.iter().find(|r| r.canonicalize().map(|r| p.starts_with(r)).unwrap_or(false)).cloned()
+}
+
 pub fn ensure_started(opts: &StartOptions, home: &Path, exe: &Path) -> Result<PathBuf> {
     let sock = socket_path(&opts.session)?;
     if shim::Control::connect(&sock).is_ok() {

@@ -210,6 +210,15 @@ pub fn restart(hidden: bool, dev: bool) -> Result<()> {
             exe = c;
         }
     }
+    // running a build from a pinned folder is running what the agent could have written there
+    if let Ok(store) = sill_core::store::Store::open_default()
+        && let Ok(sessions) = store.sessions()
+    {
+        let pins: Vec<PathBuf> = sessions.iter().flat_map(|s| store.pins(&s.id).unwrap_or_default()).collect();
+        if let Some(p) = sill_core::session::inside_any(&exe, &pins) {
+            eprintln!("warning: {} is inside the pinned folder {} — the agent can write there", exe.display(), p.display());
+        }
+    }
     println!("starting {}", exe.display());
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("shelf");
