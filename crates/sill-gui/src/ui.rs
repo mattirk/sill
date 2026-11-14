@@ -35,8 +35,8 @@ const THUMBNAIL_SHARE: f32 = 0.3;
 /// The height of a session tab's hover boxes: its glyph, title and close button alike.
 const TAB_HOVER: f32 = 28.0;
 
-/// How far above the window's bottom the shield's dropdown sits: over the composer's bar.
-const SHIELD_DROPDOWN_LIFT: f32 = 58.0;
+/// Bottom padding + button height + a 4 px gap above the shield.
+const SHIELD_DROPDOWN_LIFT: f32 = 6.0 + BAR_BUTTON + 4.0;
 
 impl App {
     pub(crate) fn view(&self) -> Element<'_, Message> {
