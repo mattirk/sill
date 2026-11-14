@@ -24,6 +24,23 @@ const STROKES: &[(&str, &str)] = &[
     ("sill-sessions", "M3 5h.01M3 12h.01M3 19h.01M8 5h13M8 12h13M8 19h13"),
     ("sill-changes", "M12 3v14M5 10h14M5 21h14"),
     ("sill-files", "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"),
+    // the tree's folders: closed is `sill-files`, open is lucide's folder-open
+    ("sill-folder-open", "m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"),
+    // the glyphs that used to come from the desktop's icon theme (2026-11-01): close, refresh,
+    // delete, the Changes page's folds, the ✓ of a choice, and the tree's file kinds
+    ("sill-x", "M18 6 6 18m6 6 12 12"),
+    ("sill-refresh", "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8M21 3v5h-5M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16M8 16H3v5"),
+    ("sill-trash", "M10 11v6M14 11v6M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"),
+    ("sill-chevron-right", "m9 18 6-6-6-6"),
+    ("sill-chevron-down", "m6 9 6 6 6-6"),
+    ("sill-check", "M20 6 9 17l-5-5"),
+    ("sill-file", "M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2zM14 2v5a1 1 0 0 0 1 1h5"),
+    ("sill-file-text", "M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2zM14 2v5a1 1 0 0 0 1 1h5M10 9H8M16 13H8M16 17H8"),
+    ("sill-image", "M3 3h18v18h-18zM7 9a2 2 0 1 0 4 0a2 2 0 1 0 -4 0m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"),
+    ("sill-file-archive", "M13.659 22H18a2 2 0 0 0 2-2V8a2.4 2.4 0 0 0-.706-1.706l-3.588-3.588A2.4 2.4 0 0 0 14 2H6a2 2 0 0 0-2 2v11.5M14 2v5a1 1 0 0 0 1 1h5M8 12v-1M8 18v-2M8 7V6M6 20a2 2 0 1 0 4 0a2 2 0 1 0 -4 0"),
+    ("sill-file-code", "M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2zM14 2v5a1 1 0 0 0 1 1h5M10 12.5 8 15l2 2.5m14 12.5 2 2.5-2 2.5"),
+    ("sill-file-cog", "M15 8a1 1 0 0 1-1-1V2a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8zM20 8v12a2 2 0 0 1-2 2h-4.182m3.305 19.53.923-.382M4 10.592V4a2 2 0 0 1 2-2h8m4.228 16.852-.924-.383m5.852 15.228-.383-.923m5.852 20.772-.383.924m8.148 15.228.383-.923m8.53 21.696-.382-.924m9.773 16.852.922-.383m9.773 19.148.922.383M4 18a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"),
+    ("sill-file-terminal", "M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2zM14 2v5a1 1 0 0 0 1 1h5m8 16 2-2-2-2M12 18h4"),
     ("sill-settings", "M10 5H3M12 19H3M14 3v4M16 17v4M21 12h-9M21 19h-5M21 5h-7M8 10v4M8 12H3"),
     // a prompt: chevron and underscore, no window chrome
     ("sill-terminal", "M3 19l7-7-7-7M12 20h9"),
@@ -66,8 +83,53 @@ fn scaled(px: i32) -> i32 {
 fn texture(svg: String) -> gtk::Image {
     match gdk::Texture::from_bytes(&glib::Bytes::from_owned(svg.into_bytes())) {
         Ok(t) => gtk::Image::from_paintable(Some(&t)),
-        Err(_) => gtk::Image::from_icon_name("image-missing-symbolic"),
+        Err(_) => gtk::Image::new(),
     }
+}
+
+thread_local! {
+    /// Every glyph image made by [`glyph_image`] with its glyph name: repainted in the new
+    /// foreground on a theme change, dropped from the list once the widget is gone.
+    static LIVE: std::cell::RefCell<Vec<(glib::WeakRef<gtk::Image>, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static LISTENING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Draw glyph `name` into `image` in the foreground of where it sits.
+pub fn set_glyph(image: &gtk::Image, name: &str) {
+    let fg = fg_for(image, &super::theme::current());
+    let tex = stroke_texture(name, fg).or_else(|| stroke_texture(PLACEHOLDER, fg));
+    image.set_paintable(tex.as_ref());
+}
+
+/// A sill glyph as an image that follows the theme: drawn now in the current foreground, drawn
+/// again on every theme change (a texture can't be recoloured by CSS the way a themed icon is).
+/// Sized by CSS `-gtk-icon-size` like [`scalable`].
+pub fn glyph_image(name: &str) -> gtk::Image {
+    let image = gtk::Image::new();
+    image.set_halign(gtk::Align::Center);
+    image.set_valign(gtk::Align::Center);
+    set_glyph(&image, name);
+    LIVE.with(|l| l.borrow_mut().push((image.downgrade(), name.to_string())));
+    if !LISTENING.replace(true) {
+        super::theme::on_change(|_| {
+            LIVE.with(|l| {
+                l.borrow_mut().retain(|(w, _)| w.upgrade().is_some());
+                for (w, name) in l.borrow().iter() {
+                    if let Some(i) = w.upgrade() {
+                        set_glyph(&i, name);
+                    }
+                }
+            });
+        });
+    }
+    image
+}
+
+/// A flat button showing glyph `name` ([`glyph_image`]).
+pub fn glyph_button(name: &str) -> gtk::Button {
+    let b = gtk::Button::new();
+    b.set_child(Some(&glyph_image(name)));
+    b
 }
 
 fn texture_image(svg: String, px: i32) -> gtk::Image {
@@ -107,11 +169,28 @@ pub fn scalable(name: &str, color: gdk::RGBA) -> gtk::Image {
     } else if let Some((_, d)) = FILLED.iter().find(|(n, _)| *n == name) {
         texture(fill_svg(d, color, SIZE))
     } else {
-        gtk::Image::from_icon_name(name)
+        // never the desktop's icon theme: an unknown name shows the placeholder
+        texture(fill_svg(glyph(PLACEHOLDER).unwrap_or(""), color, SIZE))
     };
     image.set_halign(gtk::Align::Center);
     image.set_valign(gtk::Align::Center);
     image
+}
+
+/// A sill line glyph as a texture in colour `color`, made once per glyph and colour (the tree's
+/// folder rows rebind constantly); `None` for an unknown name. Sized by the image's CSS icon size.
+pub fn stroke_texture(name: &str, color: gdk::RGBA) -> Option<gdk::Texture> {
+    thread_local! {
+        static CACHE: std::cell::RefCell<std::collections::HashMap<String, gdk::Texture>> = Default::default();
+    }
+    let key = format!("{name} {}", hex(color));
+    if let Some(t) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        return Some(t);
+    }
+    let (_, d) = STROKES.iter().find(|(n, _)| *n == name)?;
+    let t = gdk::Texture::from_bytes(&glib::Bytes::from_owned(stroke_svg(d, color, 96).into_bytes())).ok()?;
+    CACHE.with(|c| c.borrow_mut().insert(key, t.clone()));
+    Some(t)
 }
 
 /// A programming language's logo in colour `color`, made once per language and colour and shared
@@ -134,7 +213,7 @@ pub fn language_texture(name: &str, color: gdk::RGBA) -> Option<gdk::Texture> {
 /// A sill line glyph (`sill-sessions`, `sill-files`, …) in colour `color`.
 pub fn named(name: &str, color: gdk::RGBA, px: i32) -> gtk::Image {
     let Some((_, d)) = STROKES.iter().find(|(n, _)| *n == name) else {
-        return gtk::Image::from_icon_name(name);
+        return texture_image(fill_svg(glyph(PLACEHOLDER).unwrap_or(""), color, px * 4), px);
     };
     texture_image(stroke_svg(d, color, px * 4), px)
 }
@@ -151,14 +230,7 @@ pub fn image(agent: Option<&sill_core::agents::Agent>, color: gdk::RGBA, px: i32
     if name.starts_with('/') {
         return from_file(std::path::Path::new(&name), color, px);
     }
-    if glyph(&name).is_none() {
-        let known = gdk::Display::default().map(|d| gtk::IconTheme::for_display(&d).has_icon(&name)).unwrap_or(false);
-        if known {
-            let i = gtk::Image::from_icon_name(&name);
-            i.set_pixel_size(scaled(px));
-            return i;
-        }
-    }
+    // a name sill has no glyph for is the placeholder, never a lookup in the desktop's icon theme
     let d = glyph(&name).or_else(|| glyph(PLACEHOLDER)).unwrap_or("");
     // rendered at 4× for crisp edges on any scale factor, shown at `px`
     let size = px * 4;
@@ -259,4 +331,24 @@ fn strip_attr(head: &str, attr: &str) -> String {
         h.replace_range(i..vstart + vlen + 1, "");
     }
     h
+}
+
+#[cfg(test)]
+mod tests {
+    /// Every icon is sill's own: nothing in the shelf asks the desktop's icon theme for one.
+    #[test]
+    fn no_icon_theme_lookups() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/shelf");
+        let forbidden = ["from_icon_name(", "set_icon_name(", "ThemedIcon", "content_type_get_symbolic_icon", "IconTheme"];
+        for e in std::fs::read_dir(&dir).unwrap().flatten() {
+            let text = std::fs::read_to_string(e.path()).unwrap_or_default();
+            let code_only = text.split("#[cfg(test)]").next().unwrap_or(""); // not this list itself
+            for (n, line) in code_only.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or("");
+                for f in forbidden {
+                    assert!(!code.contains(f), "{}:{}: {f} — use icons::glyph_image / glyph_button", e.path().display(), n + 1);
+                }
+            }
+        }
+    }
 }

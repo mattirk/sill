@@ -77,7 +77,7 @@ impl TabStrip {
         stack.add_named(&label, Some("label"));
         stack.add_named(&entry, Some("entry"));
         stack.set_visible_child_name("label");
-        let close = gtk::Button::from_icon_name("window-close-symbolic");
+        let close = super::icons::glyph_button("sill-x");
         close.add_css_class("flat");
         close.add_css_class("sill-tab-close");
         root.append(&stack);

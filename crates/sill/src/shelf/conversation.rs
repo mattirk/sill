@@ -1032,8 +1032,9 @@ button.sill-install:hover { background: alpha(@accent_bg_color, 0.45); }
 .sill-files treeexpander { padding: 0; }
 /* the row's own height comes from its content, so the indents (and their lines) run edge to edge */
 .sill-tree-row { padding: 2px 0; }
-/* one faint guide line per level, under the parent's icon (20 px per level, the line 7 px in) */
-.sill-files treeexpander > indent { min-width: 13px; min-height: 0; margin-left: 7px; border-left: 1px solid alpha(@view_fg_color, 0.14); }
+/* one faint guide line per level: 12 px per level with the line 4 px in, so the gaps panel edge →
+   first line → … → last line → icon come out about the same (8 / 12 / 8 px) */
+.sill-files treeexpander > indent { -gtk-icon-size: 8px; min-width: 8px; min-height: 0; margin-left: 4px; border-left: 1px solid alpha(@view_fg_color, 0.14); }
 .sill-file-icon { opacity: 0.7; -gtk-icon-size: 0.95em; }
 .sill-badge-logo { -gtk-icon-size: 0.85em; margin-left: 2px; }
 .sill-changed { color: @warning_color; }

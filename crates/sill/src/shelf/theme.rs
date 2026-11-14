@@ -1,7 +1,10 @@
 //! Colour themes (SPEC §3.1 Settings). A theme is a small palette; everything else derives from it:
 //! libadwaita's named colours are overridden so stock widgets follow, and sill's own CSS and the
-//! Markdown text tags use the same values. Built-in: Adwaita (system), Dracula, Solarized Dark,
-//! Solarized Light, Nord. Chosen theme is saved in `~/.config/sill/sill.toml`.
+//! Markdown text tags use the same values. Every theme is complete — "Adwaita" is sill's copy of
+//! that palette, not the desktop's — so a shelf looks the same on every machine whatever the GTK
+//! theme, icon theme or dark/light preference there (2026-11-01). Built-in: Adwaita Dark, Adwaita
+//! Light, Dracula, Solarized Dark, Solarized Light, Nord. Chosen theme is saved in
+//! `~/.config/sill/sill.toml`.
 //!
 //! The text scale (`text_scale` in the same file) is applied here too: one `font-size` rule on the
 //! toplevels, so every relative size in the stylesheet, the Markdown tags and the editor follow;
@@ -36,10 +39,18 @@ pub struct Theme {
 
 pub fn builtin() -> Vec<Theme> {
     vec![
+        // libadwaita 1.4's palettes, fixed here so they don't move with the machine's libadwaita
         Theme {
-            id: "adwaita", name: "Adwaita (system)", dark: true,
-            bg: "", surface: "", code_bg: "rgba(0,0,0,0.22)", fg: "", fg_dim: "",
-            accent: "", warning: "", success: "", error: "", link: "#3584e4", border: "",
+            id: "adwaita", name: "Adwaita Dark", dark: true,
+            bg: "#242424", surface: "#303030", code_bg: "#1e1e1e", fg: "#ffffff", fg_dim: "#9d9d9d",
+            accent: "#78aeed", warning: "#ffa348", success: "#8ff0a4", error: "#ff7b63", link: "#78aeed",
+            border: "#3d3d3d",
+        },
+        Theme {
+            id: "adwaita-light", name: "Adwaita Light", dark: false,
+            bg: "#fafafa", surface: "#ebebeb", code_bg: "#f0f0f0", fg: "#323232", fg_dim: "#8b8b8b",
+            accent: "#1c71d8", warning: "#9c6e03", success: "#1b8553", error: "#c01c28", link: "#1c71d8",
+            border: "#d8d8d8",
         },
         Theme {
             id: "dracula", name: "Dracula", dark: true,
@@ -86,13 +97,9 @@ pub fn on_change(f: impl Fn(&Theme) + 'static) {
 }
 
 /// GtkSourceView style scheme id for the theme: a generated `sill-<id>` scheme built from the palette
-/// (see [`write_source_schemes`]); Adwaita keeps the stock schemes.
+/// (see [`write_source_schemes`]).
 pub fn source_scheme(t: &Theme) -> String {
-    if t.bg.is_empty() {
-        if adw::StyleManager::default().is_dark() { "Adwaita-dark".into() } else { "Adwaita".into() }
-    } else {
-        format!("sill-{}", t.id)
-    }
+    format!("sill-{}", t.id)
 }
 
 /// Write one GtkSourceView style scheme per palette theme into the user's state dir and return the
@@ -103,7 +110,7 @@ pub fn write_source_schemes() -> Option<std::path::PathBuf> {
         .unwrap_or_else(|_| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/state"));
     let dir = base.join("sill").join("styles");
     std::fs::create_dir_all(&dir).ok()?;
-    for t in builtin().into_iter().filter(|t| !t.bg.is_empty()) {
+    for t in builtin() {
         let xml = format!(
             r##"<?xml version="1.0" encoding="UTF-8"?>
 <style-scheme id="sill-{id}" name="sill {name}" version="1.0">
@@ -159,11 +166,8 @@ pub fn current() -> Theme {
     CURRENT.with(|c| c.borrow().clone())
 }
 
-/// libadwaita named-colour overrides for a palette theme (none for Adwaita itself).
+/// libadwaita's named colours, every one from the palette: stock widgets follow the theme.
 fn named_colors(t: &Theme) -> String {
-    if t.bg.is_empty() {
-        return String::new();
-    }
     let mut s = String::new();
     for (name, value) in [
         ("window_bg_color", t.bg),
@@ -230,7 +234,7 @@ pub fn stylesheet(t: &Theme) -> String {
     s.push_str(super::conversation::CSS);
     s.push('\n');
     s.push_str(super::tabs::CSS);
-    if !t.bg.is_empty() {
+    {
         s.push_str(&format!(
             "\n.sill-tab {{ background: {surface}; }}\n\
              .sill-tab.selected {{ background: {bg}; }}\n\
@@ -260,13 +264,8 @@ pub fn apply(t: &Theme) {
         gtk::style_context_add_provider_for_display(&display, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
         *p.borrow_mut() = Some(css);
     });
-    adw::StyleManager::default().set_color_scheme(if t.bg.is_empty() {
-        adw::ColorScheme::Default
-    } else if t.dark {
-        adw::ColorScheme::ForceDark
-    } else {
-        adw::ColorScheme::ForceLight
-    });
+    // the theme decides dark or light; the desktop's preference never does
+    adw::StyleManager::default().set_color_scheme(if t.dark { adw::ColorScheme::ForceDark } else { adw::ColorScheme::ForceLight });
     CURRENT.with(|c| *c.borrow_mut() = t.clone());
     super::markdown::retheme();
     LISTENERS.with(|l| {
@@ -280,8 +279,8 @@ pub fn apply(t: &Theme) {
 pub struct TagColors {
     pub code_bg: String,
     pub link: String,
-    /// Dimmed text (quotes); none for Adwaita, which keeps the stock colour.
-    pub dim: Option<String>,
+    /// Dimmed text (quotes).
+    pub dim: String,
     /// Hairlines (rules, table header underline).
     pub rule: String,
     /// Paragraph background of a block that differs from git HEAD (the viewer's Markdown preview).
@@ -293,8 +292,8 @@ pub fn tag_colors() -> TagColors {
     TagColors {
         code_bg: t.code_bg.to_string(),
         link: t.link.to_string(),
-        dim: if t.fg_dim.is_empty() { None } else { Some(t.fg_dim.to_string()) },
-        rule: if t.border.is_empty() { "rgba(128,128,128,0.4)".to_string() } else { t.border.to_string() },
+        dim: t.fg_dim.to_string(),
+        rule: t.border.to_string(),
         changed: with_alpha(t.success, 0.18).unwrap_or_else(|| "rgba(46,194,126,0.18)".to_string()),
     }
 }

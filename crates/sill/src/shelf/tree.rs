@@ -35,14 +35,22 @@ fn path_of(row: &gtk::TreeListRow) -> Option<PathBuf> {
     row.item().and_downcast::<gtk::StringObject>().map(|s| PathBuf::from(s.string().as_str()))
 }
 
-/// Icon for a tree row: folder (open/closed) or the file's MIME symbolic icon.
-fn file_icon(path: &Path, is_dir: bool, expanded: bool) -> gio::Icon {
+/// The glyph for a tree row: folder (open/closed), else the file's kind by its extension — sill's
+/// own glyphs, so every machine shows the same tree (no icon theme, no MIME database).
+fn row_glyph(path: &Path, is_dir: bool, expanded: bool) -> &'static str {
     if is_dir {
-        return gio::ThemedIcon::new(if expanded { "folder-open-symbolic" } else { "folder-symbolic" }).upcast();
+        return if expanded { "sill-folder-open" } else { "sill-files" };
     }
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let (ctype, _) = gio::content_type_guess(Some(name.as_str()), None);
-    gio::content_type_get_symbolic_icon(&ctype)
+    let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+    match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico" | "avif" | "tiff" => "sill-image",
+        "zip" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "zst" | "7z" | "rar" | "deb" | "rpm" | "jar" => "sill-file-archive",
+        "toml" | "yaml" | "yml" | "json" | "ini" | "cfg" | "conf" | "lock" | "env" | "properties" => "sill-file-cog",
+        "sh" | "bash" | "zsh" | "fish" | "ps1" | "bat" => "sill-file-terminal",
+        "md" | "txt" | "rst" | "org" | "adoc" | "log" | "csv" => "sill-file-text",
+        _ if changes::file_language(path).is_some() || matches!(ext.as_str(), "xml" | "sql" | "proto" | "cmake" | "mk" | "nix") => "sill-file-code",
+        _ => "sill-file",
+    }
 }
 
 /// A directory's entries as full paths: directories first, dot files last, case-insensitive.
@@ -209,7 +217,7 @@ impl FolderTree {
         all.add_css_class("sill-viewer-btn");
         all.set_tooltip_text(Some("Show everything: home, pinned folders, touched repositories"));
         all.set_visible(false);
-        let close = gtk::Button::from_icon_name("window-close-symbolic");
+        let close = super::icons::glyph_button("sill-x");
         close.add_css_class("flat");
         close.add_css_class("sill-viewer-btn");
         close.set_tooltip_text(Some("Close the tree (Ctrl+Shift+F)"));
@@ -312,7 +320,10 @@ impl FolderTree {
                     return;
                 };
                 let is_dir = path.is_dir();
-                icon.set_from_gicon(&file_icon(&path, is_dir, row.is_expanded()));
+                // every row's icon is a sill glyph in the foreground colour (rows are rebound on a
+                // theme change, so they follow it)
+                let fg = super::icons::fg_for(&icon, &theme::current());
+                icon.set_paintable(super::icons::stroke_texture(row_glyph(&path, is_dir, row.is_expanded()), fg).as_ref());
                 let fname = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 for c in ["sill-changed", "sill-pending", "sill-below", "sill-dim", "sill-pinned", "sill-new"] {
                     name.remove_css_class(c);

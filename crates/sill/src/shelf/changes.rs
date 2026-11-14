@@ -67,7 +67,7 @@ impl ChangesPage {
         summary.set_xalign(0.0);
         summary.set_hexpand(true);
         summary.add_css_class("dim-label");
-        let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
+        let refresh = super::icons::glyph_button("sill-refresh");
         refresh.add_css_class("flat");
         refresh.set_tooltip_text(Some("Rescan"));
         bar.append(&summary);
@@ -428,7 +428,7 @@ impl ChangesPage {
                 let mut toggle: Option<gtk::ToggleButton> = None;
                 if collapsed {
                     let t = gtk::ToggleButton::new();
-                    t.set_icon_name("pan-end-symbolic");
+                    t.set_child(Some(&super::icons::glyph_image("sill-chevron-right")));
                     t.add_css_class("flat");
                     t.set_tooltip_text(Some("Show the agent's own files"));
                     actions.insert(0, t.clone().upcast());
@@ -510,7 +510,7 @@ impl ChangesPage {
                 }
                 if let Some(t) = toggle {
                     t.connect_toggled(move |t| {
-                        t.set_icon_name(if t.is_active() { "pan-down-symbolic" } else { "pan-end-symbolic" });
+                        t.set_child(Some(&super::icons::glyph_image(if t.is_active() { "sill-chevron-down" } else { "sill-chevron-right" })));
                         for r in &group_rows {
                             r.set_visible(t.is_active());
                         }
@@ -537,7 +537,7 @@ impl ChangesPage {
                     });
                 }
                 let t = gtk::ToggleButton::new();
-                t.set_icon_name("pan-end-symbolic");
+                t.set_child(Some(&super::icons::glyph_image("sill-chevron-right")));
                 t.add_css_class("flat");
                 t.set_tooltip_text(Some("Show what was kept"));
                 let title = format!("{} · kept ({})", s.title, g.kept.len());
@@ -578,7 +578,7 @@ impl ChangesPage {
                     group_rows.push(row);
                 }
                 t.connect_toggled(move |t| {
-                    t.set_icon_name(if t.is_active() { "pan-down-symbolic" } else { "pan-end-symbolic" });
+                    t.set_child(Some(&super::icons::glyph_image(if t.is_active() { "sill-chevron-down" } else { "sill-chevron-right" })));
                     for r in &group_rows {
                         r.set_visible(t.is_active());
                     }

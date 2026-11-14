@@ -150,7 +150,7 @@ pub fn install_tags(buffer: &gtk::TextBuffer) {
         let t = tag("quote");
         t.set_left_margin(scale(14.0));
         t.set_style(gtk::pango::Style::Italic);
-        t.set_foreground(colors.dim.as_deref());
+        t.set_foreground(Some(colors.dim.as_str()));
     }
     {
         let t = tag("link");
@@ -178,7 +178,7 @@ pub fn install_tags(buffer: &gtk::TextBuffer) {
         let t = tag("table-field");
         t.set_left_margin(scale(16.0));
         let t = tag("table-key");
-        t.set_foreground(colors.dim.as_deref());
+        t.set_foreground(Some(colors.dim.as_str()));
     }
     {
         let t = tag("cell");

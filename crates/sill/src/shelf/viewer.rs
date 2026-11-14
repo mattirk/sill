@@ -81,7 +81,7 @@ impl Viewer {
         edit.add_css_class("flat");
         edit.add_css_class("sill-viewer-btn");
         edit.set_tooltip_text(Some("Edit the file in place (Ctrl+S saves to the host)"));
-        let close = gtk::Button::from_icon_name("window-close-symbolic");
+        let close = super::icons::glyph_button("sill-x");
         close.add_css_class("flat");
         close.add_css_class("sill-viewer-btn");
         close.set_tooltip_text(Some("Close (Escape steps back)"));

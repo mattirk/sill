@@ -95,7 +95,7 @@ impl AgentsPage {
         more.add_css_class("flat");
         more.set_tooltip_text(Some("Also list agents nobody has tried inside sill yet"));
         bar.append(&more);
-        let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
+        let refresh = super::icons::glyph_button("sill-refresh");
         refresh.add_css_class("flat");
         refresh.set_tooltip_text(Some("Fetch the registry again"));
         bar.append(&refresh);
@@ -367,7 +367,7 @@ impl AgentsPage {
                 if update {
                     state_box.append(&self.action_button(e, &format!("Update to v{}", e.version), "sill-install"));
                 }
-                let rm = gtk::Button::from_icon_name("user-trash-symbolic");
+                let rm = super::icons::glyph_button("sill-trash");
                 rm.add_css_class("flat");
                 rm.add_css_class("sill-menu-trash");
                 rm.set_tooltip_text(Some("Remove this install"));

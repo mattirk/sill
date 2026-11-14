@@ -99,7 +99,7 @@ enum Cmd {
         #[arg(long, hide = true)]
         detached: bool,
     },
-    /// Switch the shelf's colour theme: adwaita | dracula | solarized-dark | solarized-light | nord
+    /// Switch the shelf's colour theme: adwaita | adwaita-light | dracula | solarized-dark | solarized-light | nord
     Theme { name: String },
     /// Set the show/hide key, GTK accelerator syntax: "<Alt>space", "<Super>grave", "F12"
     Hotkey { spec: String },

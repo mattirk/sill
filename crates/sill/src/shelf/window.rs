@@ -131,7 +131,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
     pages.set_vexpand(true);
 
     let plus = gtk::MenuButton::new();
-    plus.set_icon_name("list-add-symbolic");
+    plus.set_child(Some(&super::icons::glyph_image("sill-plus")));
     plus.add_css_class("flat");
     plus.set_tooltip_text(Some("New session"));
     let plus_pop = gtk::Popover::new();
@@ -142,7 +142,7 @@ pub fn build(app: &adw::Application, _cwd: PathBuf) -> gtk::Window {
     plus.set_popover(Some(&plus_pop));
     bar.append(&plus);
 
-    let files_btn = gtk::Button::from_icon_name("folder-symbolic");
+    let files_btn = super::icons::glyph_button("sill-files");
     files_btn.add_css_class("flat");
     files_btn.set_tooltip_text(Some("Files"));
     bar.append(&files_btn);
@@ -1223,7 +1223,7 @@ impl Shelf {
                 let line = gtk::Box::new(gtk::Orientation::Horizontal, 0);
                 let b = row(registry.get(&sess.agent), &sess.title);
                 b.set_hexpand(true);
-                let del = gtk::Button::from_icon_name("user-trash-symbolic");
+                let del = super::icons::glyph_button("sill-trash");
                 del.add_css_class("flat");
                 del.add_css_class("sill-menu-trash");
                 del.set_tooltip_text(Some("Delete session and its recorded changes"));

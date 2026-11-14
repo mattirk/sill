@@ -513,10 +513,6 @@ impl SessionView {
     fn apply_terminal_theme(&self, t: &theme::Theme) {
         for term in [&self.terminal, &self.host_term] {
             term.set_font_scale(theme::text_scale());
-            if t.bg.is_empty() {
-                term.set_default_colors();
-                continue; // Adwaita: VTE's defaults follow the GTK theme
-            }
             let parse = |c: &str| gtk::gdk::RGBA::parse(c).ok();
             let (Some(fg), Some(bg)) = (parse(t.fg), parse(t.bg)) else { continue };
             let slots = [
@@ -1343,7 +1339,7 @@ impl SessionView {
                     }
                 });
             }
-            let x = gtk::Button::from_icon_name("window-close-symbolic");
+            let x = super::icons::glyph_button("sill-x");
             x.add_css_class("flat");
             x.add_css_class("sill-tab-close");
             let v = self.clone();
@@ -1586,7 +1582,8 @@ impl SessionView {
             let l = gtk::Label::new(Some(&a.name));
             l.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
             l.set_max_width_chars(32);
-            let x = gtk::Button::from_icon_name("window-close-symbolic");
+            let x = super::icons::glyph_button("sill-x");
+            x.add_css_class("flat");
             x.set_tooltip_text(Some("Remove"));
             let v = self.clone();
             x.connect_clicked(move |_| {
@@ -2079,7 +2076,7 @@ fn compact_dropdown(d: &gtk::DropDown) {
         let l = gtk::Label::new(None);
         l.set_xalign(0.0);
         l.set_hexpand(true);
-        let check = gtk::Image::from_icon_name("object-select-symbolic");
+        let check = super::icons::glyph_image("sill-check");
         row.append(&l);
         row.append(&check);
         item.set_child(Some(&row));
