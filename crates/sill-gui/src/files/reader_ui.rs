@@ -40,8 +40,8 @@ impl App {
         .align_y(Alignment::Center);
         if !is_diff {
             heading = heading
-                .push(action("Back", Action::Back(false)))
-                .push(action("Forward", Action::Back(true)));
+                .push(glyph_action("arrow-left", "Back", Action::Back(false)))
+                .push(glyph_action("arrow-right", "Forward", Action::Back(true)));
         }
         if is_diff {
             heading = heading.push(action(
@@ -52,8 +52,9 @@ impl App {
                 },
             ));
         } else if !state.pinned(&file.path) {
-            heading = heading.push(action(
-                "+ Pin",
+            heading = heading.push(glyph_action(
+                "pin",
+                "Pin",
                 Action::Pin {
                     path: file.path.clone(),
                     on: true,
@@ -61,10 +62,11 @@ impl App {
             ));
         }
         if file.renderable() {
-            heading = heading.push(action(
-                if file.source { "Preview" } else { "Source" },
-                Action::Source,
-            ));
+            heading = heading.push(if file.source {
+                glyph_action("eye", "Preview", Action::Source)
+            } else {
+                glyph_action("code", "Source", Action::Source)
+            });
         }
         if rendering.dirty {
             heading = heading.push(text("Unsaved").size(style::SMALL).color(P.warning));
