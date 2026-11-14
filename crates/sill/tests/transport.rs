@@ -71,7 +71,7 @@ fn selected_box_uses_a_pipe_and_does_not_start_a_local_daemon() {
     let local = remote.dir.join("frontend");
     for sub in ["home", "state", "config/sill", "run", "bin"] { std::fs::create_dir_all(local.join(sub)).unwrap(); }
     let ssh = local.join("bin/ssh");
-    std::fs::write(&ssh, "#!/bin/sh\nexport HOME=\"$SILL_TEST_REMOTE_ROOT/home\" XDG_RUNTIME_DIR=\"$SILL_TEST_REMOTE_ROOT/run\" XDG_STATE_HOME=\"$SILL_TEST_REMOTE_ROOT/state\" XDG_CONFIG_HOME=\"$SILL_TEST_REMOTE_ROOT/config\"\nunset SILL_BOX SILL_SESSION\nexec \"$SILL_TEST_BINARY\" daemon --stdio\n").unwrap();
+    std::fs::write(&ssh, "#!/bin/sh\ncase \" $* \" in *\" -O \"*) exit 0;; esac\nexport HOME=\"$SILL_TEST_REMOTE_ROOT/home\" XDG_RUNTIME_DIR=\"$SILL_TEST_REMOTE_ROOT/run\" XDG_STATE_HOME=\"$SILL_TEST_REMOTE_ROOT/state\" XDG_CONFIG_HOME=\"$SILL_TEST_REMOTE_ROOT/config\"\nunset SILL_BOX SILL_SESSION\nexec \"$SILL_TEST_BINARY\" daemon --stdio\n").unwrap();
     std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::write(local.join("config/sill/boxes.json"), serde_json::to_vec(&json!({"test":{"host":"test-host","binary":"sill"}})).unwrap()).unwrap();
     let output = command(&local).args(["--box", "test", "daemon", "status"])
@@ -100,7 +100,7 @@ fn box_bootstrap_installs_daemon_and_shim_before_saving_connection() {
     for sub in ["home", "state", "config/sill", "run", "bin", "source"] { std::fs::create_dir_all(local.join(sub)).unwrap(); }
     let ssh = local.join("bin/ssh");
     // Execute precisely the remote command selected by OpenSSH, while keeping this test local.
-    std::fs::write(&ssh, "#!/bin/sh\nfor sill_arg do :; done\nexport HOME=\"$SILL_TEST_REMOTE_ROOT/home\" XDG_RUNTIME_DIR=\"$SILL_TEST_REMOTE_ROOT/run\" XDG_STATE_HOME=\"$SILL_TEST_REMOTE_ROOT/state\" XDG_CONFIG_HOME=\"$SILL_TEST_REMOTE_ROOT/config\"\nunset SILL_BOX SILL_SESSION\nexec /bin/sh -c \"$sill_arg\"\n").unwrap();
+    std::fs::write(&ssh, "#!/bin/sh\ncase \" $* \" in *\" -O \"*) exit 0;; esac\nfor sill_arg do :; done\nexport HOME=\"$SILL_TEST_REMOTE_ROOT/home\" XDG_RUNTIME_DIR=\"$SILL_TEST_REMOTE_ROOT/run\" XDG_STATE_HOME=\"$SILL_TEST_REMOTE_ROOT/state\" XDG_CONFIG_HOME=\"$SILL_TEST_REMOTE_ROOT/config\"\nunset SILL_BOX SILL_SESSION\nexec /bin/sh -c \"$sill_arg\"\n").unwrap();
     std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::copy(env!("CARGO_BIN_EXE_sill"), local.join("source/sill")).unwrap();
     std::fs::write(local.join("source/sill-shim"), b"shim bootstrap fixture\n").unwrap();

@@ -256,6 +256,8 @@ enum BoxCmd {
     Remove { name: String },
     /// Open sill-gui on a saved box.
     Connect { name: String },
+    /// Close the shared SSH connection to a saved box: the next connection signs in again.
+    Disconnect { name: String },
 }
 
 #[derive(Subcommand)]
@@ -1830,11 +1832,11 @@ fn box_cmd(cmd: BoxCmd) -> Result<()> {
         BoxCmd::Add { host, name, mut binary, install } => {
             let name = name.unwrap_or_else(|| host.rsplit('@').next().unwrap_or(&host).to_string());
             transport::validate_name(&name)?;
-            // Authenticate separately: human prompts must not consume SFP's short timeout.
-            // GUI and background connections remain noninteractive.
+            // Sign in separately, on this terminal: human prompts must not consume SFP's short
+            // timeout. Background connections ride the shared connection this leaves.
             use std::io::IsTerminal;
             if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
-                transport::authenticate(&host)?;
+                sill_proto::boxlink::sign_in(&host, None)?;
             }
             if let Some(source) = install {
                 transport::install(&host, &source)?;
@@ -1843,8 +1845,15 @@ fn box_cmd(cmd: BoxCmd) -> Result<()> {
             let c = sill_proto::Client::ssh(&host, &binary)
                 .context("checking the box over SSH; verify SSH access and the remote sill binary path")?;
             let status: sill_proto::DaemonStatus = c.call(sill_proto::method::DAEMON_STATUS, sill_proto::Empty::default())?;
-            transport::save(&name, BoxTarget { host, binary })?;
+            transport::save(&name, BoxTarget { host: host.clone(), binary })?;
             println!("{name}: sill {}, protocol {}, {} sessions", status.version, status.protocol, status.sessions);
+            if !sill_proto::boxlink::unattended(&host).unwrap_or(true) {
+                println!("{name}: SSH cannot log in to {host} without asking (no agent or unencrypted key accepts it). Sill keeps one shared connection open; after a sleep, a reboot of the box or a longer network loss the window shows Sign in to reconnect.");
+            }
+        }
+        BoxCmd::Disconnect { name } => {
+            let target = transport::list()?.remove(&name).with_context(|| format!("unknown sill box {name:?}"))?;
+            sill_proto::boxlink::disconnect(&target.host)?;
         }
         BoxCmd::Connect { name } => {
             let all = transport::list()?;

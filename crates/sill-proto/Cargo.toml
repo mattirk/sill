@@ -13,3 +13,7 @@ serde_json.workspace = true
 rustix.workspace = true
 schemars = "1"
 base64 = "0.23"
+
+[[test]]
+name = "boxlink"
+harness = false

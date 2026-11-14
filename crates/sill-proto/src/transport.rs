@@ -71,7 +71,7 @@ pub fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_host(host: &str) -> Result<()> {
+pub(crate) fn validate_host(host: &str) -> Result<()> {
     if host.is_empty() || host.starts_with('-') || host.chars().any(|c| c.is_control() || c.is_whitespace()) { bail!("invalid SSH destination"); }
     Ok(())
 }
@@ -91,34 +91,14 @@ pub fn binary_command(binary: &str) -> Result<String> {
     })
 }
 
+/// An `ssh` that rides the box's shared connection (`boxlink`) and never becomes one: it cannot
+/// prompt, and it gives up on a dead network within a minute.
 pub fn ssh_base(host: &str) -> Result<Command> {
-    ssh_base_mode(host, false)
-}
-
-fn ssh_base_mode(host: &str, interactive: bool) -> Result<Command> {
     validate_host(host)?;
-    let dir = crate::runtime_dir()?.join("ssh");
-    std::fs::create_dir_all(&dir)?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
     let mut command = Command::new("ssh");
-    command.args(["-T", "-o", if interactive { "BatchMode=no" } else { "BatchMode=yes" }, "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "ControlMaster=auto", "-o", "ControlPersist=60"])
-        .arg("-o").arg(format!("ControlPath={}/%C", dir.display())).arg("--").arg(host);
+    command.args(["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "ControlMaster=no"])
+        .arg("-o").arg(crate::boxlink::control_path()?).arg("--").arg(host);
     Ok(command)
-}
-
-/// Authenticate before starting the protocol timeout. OpenSSH prompts on /dev/tty,
-/// and ControlPersist keeps the authenticated connection available to protocol clients.
-pub fn authenticate(host: &str) -> Result<()> {
-    let status = ssh_base_mode(host, true)?.arg("true")
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status().context("starting SSH authentication")?;
-    if !status.success() {
-        bail!("SSH authentication/connection to {host} failed ({status}); see SSH's message above. Check the login, host key and network; no Sill protocol connection was made");
-    }
-    Ok(())
 }
 
 pub fn ssh_command(host: &str, binary: &str) -> Result<Command> {
@@ -135,6 +115,7 @@ pub fn install(host: &str, source: &Path) -> Result<()> {
     let shim = source.with_file_name("sill-shim");
     let daemon_file = std::fs::File::open(source).with_context(|| format!("open {}", source.display()))?;
     let shim_file = std::fs::File::open(&shim).with_context(|| format!("{} must be beside the headless sill binary", shim.display()))?;
+    crate::boxlink::ensure(host)?;
     for (file, name) in [(shim_file, "sill-shim"), (daemon_file, "sill")] {
         let script = format!("set -eu; mkdir -p \"$HOME/.local/bin\"; sill_tmp=$(mktemp \"$HOME/.local/bin/.{name}.XXXXXX\"); trap 'rm -f \"$sill_tmp\"' EXIT; cat > \"$sill_tmp\"; chmod 755 \"$sill_tmp\"; mv -f \"$sill_tmp\" \"$HOME/.local/bin/{name}\"");
         let status = ssh_base(host)?.arg(script).stdin(file).status().context("copying sill to the box over ssh")?;
@@ -147,17 +128,12 @@ pub fn install(host: &str, source: &Path) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
-    fn interactive_authentication_reuses_batch_connection_path() {
-        let interactive = ssh_base_mode("example.test", true).unwrap();
-        let batch = ssh_base("example.test").unwrap();
-        let args = |cmd: &Command| cmd.get_args().map(|s| s.to_string_lossy().into_owned()).collect::<Vec<_>>();
-        let interactive = args(&interactive);
-        let batch = args(&batch);
-        assert!(interactive.contains(&"BatchMode=no".into()));
-        assert!(batch.contains(&"BatchMode=yes".into()));
-        assert_eq!(interactive.iter().find(|a| a.starts_with("ControlPath=")),
-                   batch.iter().find(|a| a.starts_with("ControlPath=")));
-        assert!(batch.contains(&"ControlPersist=60".into()));
+    fn session_connections_ride_the_shared_connection_and_never_prompt() {
+        let args = ssh_base("example.test").unwrap().get_args().map(|s| s.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        assert!(args.contains(&"BatchMode=yes".into()));
+        assert!(args.contains(&"ControlMaster=no".into()), "only boxlink starts a master");
+        assert!(args.contains(&"ConnectTimeout=10".into()));
+        assert_eq!(args.iter().find(|a| a.starts_with("ControlPath=")), Some(&crate::boxlink::control_path().unwrap()));
     }
 
     #[test]
@@ -213,6 +189,7 @@ pub fn open_stream(token: &str) -> Result<RawStream> {
     if token.is_empty() || token.chars().any(char::is_control) { bail!("invalid stream token"); }
     let handshake = serde_json::to_vec(&serde_json::json!({"_sill_stream":token}))?;
     let mut stream = if let Some(target) = selected()? {
+        crate::boxlink::ensure(&target.host)?;
         let mut child = ssh_command(&target.host, &target.binary)?.stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::inherit()).spawn().context("opening SSH stream")?;
         let reader = child.stdout.take().context("ssh stdout")?;

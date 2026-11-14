@@ -233,7 +233,7 @@ sill memory …                              # see Memory above
 sill policy show | preview | snapshot | check | import
 sill permissions show | set | development | restore | save-host
 sill host-control activate | revoke | keep | state
-sill registry … · sill login <agent> · sill box add | list | remove | connect · sill attach
+sill registry … · sill login <agent> · sill box add | list | remove | connect | disconnect · sill attach
 journalctl --user -u sill-gui -f           # sill-gui's log
 ```
 

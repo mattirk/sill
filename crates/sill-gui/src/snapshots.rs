@@ -817,3 +817,45 @@ fn render_changes_workspaces() {
     let _ = app.update(Message::ToggleChanges);
     render_size(&app, "16-changes-reopened", (720.0, 1000.0));
 }
+
+/// The box band: waiting for a sign-in, SSH's question during one, and offline with a retry.
+#[test]
+#[ignore = "writes PNGs to target/sill-gui-snapshots"]
+fn render_box_link() {
+    use sill_proto::boxlink::{Problem, Prompt, PromptKind, Status};
+    let (mut app, _) = App::new(true, None);
+    for _ in 0..demo::CHUNKS.len() {
+        let _ = app.demo_tick();
+    }
+    let status = |problem, detail: &str, retry_in| Status {
+        host: "10.0.0.140".into(),
+        problem,
+        detail: detail.into(),
+        retry_in,
+        signing_in: false,
+    };
+    app.box_link.fake_status = Some(status(
+        Problem::SignIn,
+        "pat@10.0.0.140: Permission denied (publickey,password).",
+        None,
+    ));
+    render(&app, "box-sign-in");
+    let (reply, _answer) = std::sync::mpsc::channel();
+    let _ = app.box_event(crate::box_ui::Event::Asked(crate::box_ui::Ask {
+        prompt: Prompt {
+            host: "10.0.0.140".into(),
+            text: "Enter passphrase for key '/home/pat/.ssh/id_ed25519': ".into(),
+            kind: PromptKind::Secret,
+        },
+        reply,
+    }));
+    let _ = app.box_event(crate::box_ui::Event::Input("open sesame".into()));
+    render(&app, "box-question");
+    let _ = app.box_event(crate::box_ui::Event::Cancel);
+    app.box_link.fake_status = Some(status(
+        Problem::Offline,
+        "ssh: connect to host 10.0.0.140 port 22: No route to host",
+        Some(std::time::Duration::from_secs(14)),
+    ));
+    render(&app, "box-offline");
+}

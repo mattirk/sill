@@ -3,6 +3,7 @@ mod annotation;
 mod annotation_state;
 #[cfg(test)]
 mod annotation_tests;
+mod box_ui;
 mod changes_ui;
 mod control;
 mod daemon_ui;
@@ -97,6 +98,10 @@ static CONTROL: std::sync::Mutex<Option<async_channel::Receiver<control::Command
 static HIDDEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn main() -> iced::Result {
+    // ssh started this executable to ask the person something during a sign-in (`box_ui`)
+    if sill_proto::boxlink::is_askpass() {
+        sill_proto::boxlink::askpass_main();
+    }
     prefer_low_power_gpu();
     prefer_vulkan();
     let options = Options::parse();
@@ -280,6 +285,8 @@ pub enum Message {
     /// The session's Permissions panel (`permissions.rs`).
     Perms(permissions::Event),
     HostControl(host_control::Event),
+    /// The box's shared connection: sign-in, retry and SSH's questions.
+    Box(box_ui::Event),
     /// The live view of a session's test desktop (`desktop_view.rs`).
     Desktop(desktop_view::Event),
     NetworkRead(String, Result<sill_proto::admin::NetworkDenied, String>),
@@ -662,6 +669,8 @@ pub struct App {
     desktop_serial: u64,
     pub demo: bool,
     daemon: daemon_ui::State,
+    /// The box's shared SSH connection: sign-in state and SSH's questions (`box_ui`).
+    box_link: box_ui::State,
     connect: Option<Connector>,
     actions: Option<Arc<Actions>>,
     /// Where every lane reports, tagged with its session and epoch.
@@ -807,6 +816,7 @@ impl App {
         let (drawer, file_task) = files::Drawer::new(connect.clone());
         let mut app = Self {
             daemon: daemon_ui::State::default(),
+            box_link: box_ui::State::default(),
             network: network::State::default(),
             process_serial: 0,
             permission_serial: 0,
@@ -929,6 +939,15 @@ impl App {
                 rx.recv().await.ok().map(|asked| (asked, rx))
             });
             desktop_tasks.push(Task::run(asked, Message::Tray));
+        }
+        if !demo {
+            // SSH's questions during a sign-in to the box
+            let (tx, rx) = async_channel::unbounded();
+            app.box_link.asker = Some(tx);
+            let asks = iced::futures::stream::unfold(rx, |rx| async move {
+                rx.recv().await.ok().map(|ask| (ask, rx))
+            });
+            desktop_tasks.push(Task::run(asks, |ask| Message::Box(box_ui::Event::Asked(ask))));
         }
         let (tx, rx) = async_channel::bounded(256);
         app.lanes = Some(tx);
@@ -1574,6 +1593,7 @@ impl App {
             Message::Procs(event) => return self.processes_event(event),
             Message::Perms(event) => return self.permissions_event(event),
             Message::HostControl(event) => return self.host_control_event(event),
+            Message::Box(event) => return self.box_event(event),
             Message::Desktop(event) => return self.desktop_event(event),
             Message::NetworkRead(id, result) => self.network.read(id, result),
             Message::NetworkAnswer(id, host, allow, quiet) => return self.answer_network(id, host, allow, quiet),

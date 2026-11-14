@@ -99,7 +99,7 @@ with tempfile.TemporaryDirectory(prefix="sill-sfp-ssh-") as directory:
         tools = root / "bin"
         tools.mkdir()
         ssh = tools / "ssh"
-        ssh.write_text(f"#!/bin/sh\nexec {shlex.quote(shutil.which('ssh'))} -F {shlex.quote(str(ssh_config))} -o ControlMaster=no -o ControlPersist=no \"$@\"\n")
+        ssh.write_text(f"#!/bin/sh\nexec {shlex.quote(shutil.which('ssh'))} -F {shlex.quote(str(ssh_config))} \"$@\"\n")
         ssh.chmod(0o700)
         (root / "config/sill").mkdir(exist_ok=True)
         (root / "config/sill/boxes.json").write_text(json.dumps({"test": {"host": "sfp-fixture", "binary": str(wrapper)}}))
@@ -107,12 +107,24 @@ with tempfile.TemporaryDirectory(prefix="sill-sfp-ssh-") as directory:
         result = subprocess.run([binary, "--box", "test", "daemon", "status"], env=frontend_env, capture_output=True, text=True, timeout=15)
         assert result.returncode == 0, result.stderr
         assert f"pid {daemon.pid}" in result.stdout
+        # the command left the box's shared connection behind; a second one rides it
+        sockets = [p for p in (Path(env["XDG_RUNTIME_DIR"]) / "sill/ssh").iterdir() if p.is_socket()]
+        assert len(sockets) == 1, sockets
+        result = subprocess.run([binary, "--box", "test", "daemon", "status"], env=frontend_env, capture_output=True, text=True, timeout=15)
+        assert result.returncode == 0, result.stderr
+        result = subprocess.run([binary, "box", "disconnect", "test"], env=frontend_env, capture_output=True, text=True, timeout=15)
+        assert result.returncode == 0, result.stderr
+        assert not sockets[0].exists(), "disconnect closes the shared connection"
         print("real SSH: public schema/control, terminal replay/reattach/resize, and selected-box transport passed")
     except Exception:
         for log in root.glob("*.log"):
             print(log.name, log.read_text(), file=sys.stderr)
         raise
     finally:
+        # a shared connection left behind would outlive this script by its ControlPersist time
+        for master in (root / "run/sill/ssh").glob("*"):
+            if master.is_socket():
+                subprocess.run(["ssh", "-o", f"ControlPath={master}", "-O", "exit", "sfp-fixture"], capture_output=True, timeout=5)
         for process in reversed(processes):
             if process.poll() is None:
                 process.terminate()

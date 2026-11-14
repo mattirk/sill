@@ -41,6 +41,9 @@ fn lost<T>(message: impl Into<String>) -> Result<T> {
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// For `daemon.status` and `shutdown`: answered at once by a daemon that answers at all.
 pub const QUICK_TIMEOUT: Duration = Duration::from_secs(5);
+/// For initialization over SSH: the box starts `sill daemon --stdio` first, on a machine that
+/// may be busy. The shared connection is already there, so no network or login time is in it.
+const SSH_INIT_TIMEOUT: Duration = Duration::from_secs(15);
 /// A bare daemon's `daemon.log` is rotated to `.1` past this when the next one starts.
 const LOG_KEEP: u64 = 8 * 1024 * 1024;
 
@@ -69,6 +72,8 @@ pub struct Client {
     pub notifications: Mutex<Receiver<(String, Value)>>,
     /// The capabilities the daemon answered at initialization: what this connection may use.
     capabilities: Mutex<std::collections::BTreeMap<String, u32>>,
+    /// The daemon is on a box: advice about restarting it is about that machine.
+    remote: bool,
 }
 
 impl Client {
@@ -209,6 +214,10 @@ impl Client {
 
     /// Initialize a raw control connection. `connect*` and `ssh` do this automatically.
     pub fn initialize(&self) -> Result<crate::initialize::Initialized> {
+        self.initialize_within(QUICK_TIMEOUT)
+    }
+
+    fn initialize_within(&self, timeout: Duration) -> Result<crate::initialize::Initialized> {
         let result: crate::initialize::Initialized = self.call_within(
             crate::initialize::METHOD,
             crate::initialize::Initialize {
@@ -219,7 +228,7 @@ impl Client {
                 capabilities: crate::initialize::CAPABILITIES.iter()
                     .filter(|c| !crate::initialize::FRONTEND_DECLARED.contains(&c.name) || DECLARED.lock().unwrap().contains(c.name))
                     .map(|c| (c.name.to_string(), c.version)).collect(),
-            }, QUICK_TIMEOUT,
+            }, timeout,
         ).context("SFP initialization failed")?;
         if result.protocol != crate::initialize::PROTOCOL_ID {
             bail!("daemon selected unsupported protocol {}; explicitly update/restart it", result.protocol);
@@ -308,24 +317,36 @@ impl Client {
             i3();
             fail_pending(&p3, "writing to the daemon: connection closed");
         })?;
-        Ok(Client { writer: wtx, interrupt, closed, next_id: AtomicU64::new(1), pending, notifications: Mutex::new(nrx), capabilities: Mutex::default() })
+        Ok(Client { writer: wtx, interrupt, closed, next_id: AtomicU64::new(1), pending, notifications: Mutex::new(nrx), capabilities: Mutex::default(), remote: false })
     }
 
     /// Connect over the system SSH client. It owns authentication, host verification, proxies
     /// and hardware keys; a protocol mismatch never stops or replaces the server's daemon.
+    /// The connection rides the box's shared one (`boxlink`), which is there before this starts:
+    /// the initialization deadline covers the remote daemon only, not the network or a login.
     pub fn ssh(host: &str, binary: &str) -> Result<Client> {
+        crate::boxlink::ensure(host)?;
         let mut cmd = crate::transport::ssh_command(host, binary)?;
-        let mut child = cmd.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::inherit()).spawn().context("starting ssh to the sill box")?;
+        let mut child = cmd.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().context("starting ssh to the sill box")?;
         let reader = child.stdout.take().context("ssh stdout")?;
         let writer = child.stdin.take().context("ssh stdin")?;
+        let said = crate::boxlink::capture(child.stderr.take().context("ssh stderr")?);
         let child = Arc::new(Mutex::new(child));
         let stop = child.clone();
-        let client = Self::over_io(reader, writer, move || {
+        let mut client = Self::over_io(reader, writer, move || {
             if let Ok(mut c) = stop.lock() { let _ = c.kill(); let _ = c.wait(); }
         })?;
-        client.initialize().with_context(|| format!(
-            "SSH connection to {host} did not initialize Sill. Check SSH's messages above and the remote executable {binary}. Background connections cannot prompt: unlock the key with ssh-add or run sill box add in a terminal to authenticate again"
-        ))?;
+        client.remote = true;
+        if let Err(error) = client.initialize_within(SSH_INIT_TIMEOUT) {
+            drop(client);
+            // the stderr reader ends with the child; give its last lines a moment to arrive
+            std::thread::sleep(Duration::from_millis(50));
+            let said = said.lock().unwrap().clone();
+            crate::boxlink::session_failed(host, &said);
+            let said = said.lines().map(str::trim).rfind(|l| !l.is_empty()).map(|l| format!("SSH said: {l}"))
+                .unwrap_or_else(|| format!("SSH said nothing; check the remote executable {binary} and the daemon on the box"));
+            return Err(error).with_context(|| format!("box {host} did not start a Sill connection. {said}"));
+        }
         Ok(client)
     }
 
@@ -378,6 +399,9 @@ impl Client {
         self.closed.store(true, Ordering::Release);
         (self.interrupt)();
         fail_pending(&self.pending, "the daemon closed the connection after a call timed out");
+        if self.remote {
+            return lost(format!("the box's daemon did not answer {method} in {} s; if it stays that way, `sill restart` on the box starts a fresh one, sessions survive it", timeout.as_secs_f64()));
+        }
         lost(format!("the daemon did not answer {method} in {} s: it is stuck; `sill restart` (or `systemctl --user restart sill`) starts a fresh one, sessions survive it", timeout.as_secs_f64()))
     }
 

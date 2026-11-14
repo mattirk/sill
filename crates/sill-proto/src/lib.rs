@@ -22,6 +22,7 @@ pub mod workspaces;
 pub mod admin;
 pub mod memory;
 pub mod transport;
+pub mod boxlink;
 
 pub use client::Client;
 

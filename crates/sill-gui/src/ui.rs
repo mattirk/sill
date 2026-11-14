@@ -151,6 +151,10 @@ impl App {
         if let Some(band) = crate::host_control::band(self) {
             window = window.push(band);
         }
+        // the box's shared connection, when it needs attention: one line for every session
+        if let Some(band) = crate::box_ui::band(self) {
+            window = window.push(band);
+        }
         let window = window.push(content);
         // Keep the conversation at the same tree position when the menu opens/closes.
         // Wrapping it in a stack only while open discards its scroll and selection state.
