@@ -4179,5 +4179,5 @@ fn acp_controls_distinguish_loading_restoring_empty_and_failed() {
     }
     let controls = app.views.get_mut("demo").unwrap().conversation.session.as_mut().unwrap().controls.as_mut().unwrap();
     controls.status = "failed".into(); controls.error = Some("Agent did not confirm effort".into());
-    simulator(&app, (1200.0, 860.0)).find("Settings warning").unwrap();
+    assert!(simulator(&app, (1200.0, 860.0)).find("Settings warning").is_err());
 }

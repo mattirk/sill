@@ -2218,9 +2218,6 @@ fn controls(view: &SessionView) -> Vec<Element<'_, Message>> {
         out.push(text("Refreshing controls…").size(CONTROL_TEXT).color(P.fg_dim).into());
         return out;
     }
-    if let Some(error) = &controls.error {
-        out.push(bar_tip(container(text("Settings warning").size(CONTROL_TEXT).color(P.warning)), error.clone()));
-    }
     if !controls.modes.is_empty() {
         let picks: Vec<Pick> = controls
             .modes
