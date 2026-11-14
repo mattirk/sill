@@ -20,7 +20,7 @@ fn list(store: &Store, a: api::List) -> Result<api::Page> {
     Ok(api::Page { pins: pins.iter().map(|p| HostPath::from_path(p)).collect(), next })
 }
 impl Hub {
-    pub(in crate::daemon) fn public_pins(&self, method: &str, params: Value) -> Option<Result<Value, Error>> {
+    pub(in crate::daemon) fn public_pins(self: &Arc<Self>, method: &str, params: Value) -> Option<Result<Value, Error>> {
         let result = || -> Result<Value> {
             match method {
                 "_sill/pins.list" => self.with_store(|store| Ok(json!(list(store, args(params)?)?))),
@@ -40,12 +40,14 @@ impl Hub {
                         if held.len() >= 128 { return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Capacity, Some(128), "at most 128 global pins").into()); }
                         store.global_pin(&path)
                     })?;
+                    self.pins_changed(None);
                     Ok(json!(api::Pinned { path: HostPath::from_path(&path) }))
                 }
                 "_sill/pins.remove" => {
                     let a: api::GlobalPin = args(params)?;
                     let path = pin_path(&a.path)?;
                     self.with_store(|store| store.global_unpin(&path))?;
+                    self.pins_changed(None);
                     Ok(json!({}))
                 }
                 "_sill/sessions.pin" | "_sill/sessions.unpin" => {
@@ -59,8 +61,10 @@ impl Hub {
                             if held.len() >= 128 && !held.contains(&path) { return Err(sill_proto::rpc::Error::limit(sill_proto::rpc::LimitScope::Capacity, Some(128), "at most 128 session pins").into()); }
                             store.pin(&a.session_id, &path)?;
                         } else { store.unpin(&a.session_id, &path)?; }
-                        Ok(json!({}))
-                    })
+                        Ok(())
+                    })?;
+                    self.pins_changed(Some(&a.session_id));
+                    Ok(json!({}))
                 }
                 _ => unreachable!(),
             }

@@ -609,9 +609,19 @@ impl Store {
         Ok(out)
     }
 
-    /// A workspace session's repositories for its jail (§12): each clone at its repository's path.
+    /// A workspace session's repositories for its jail (§12): each open clone at its repository's
+    /// path.
     pub fn workspace_mask(&self, session_id: &str) -> Result<Vec<crate::agent_storage::WorkspaceBind>> {
-        Ok(crate::workspace::records::session_layout(&self.conn, session_id)?
+        Self::binds(crate::workspace::records::session_mounts(&self.conn, session_id)?)
+    }
+
+    /// Every clone of the session, results too: what the rebase helper binds.
+    pub fn workspace_mask_all(&self, session_id: &str) -> Result<Vec<crate::agent_storage::WorkspaceBind>> {
+        Self::binds(crate::workspace::records::session_layout(&self.conn, session_id)?)
+    }
+
+    fn binds(layout: Vec<crate::workspace::records::Layout>) -> Result<Vec<crate::agent_storage::WorkspaceBind>> {
+        Ok(layout
             .into_iter()
             .map(|l| crate::agent_storage::WorkspaceBind {
                 source: sill_proto::sessions::HostPath::from_path(&l.source),

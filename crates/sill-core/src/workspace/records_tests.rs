@@ -380,3 +380,69 @@ fn a_store_gives_the_jail_its_workspaces_and_keeps_policy_pins() {
     assert_eq!(binds[0].clone.to_path().unwrap(), clone_of(&w));
     assert!(store.workspace_mask("other").unwrap().is_empty());
 }
+
+/// The person changes a running workspace session's pins: the next start matches them. A new
+/// pin gets its workspace; a removed one leaves the jail — freed to the spare with nothing left,
+/// a result on Changes with work waiting — and opens again when pinned again.
+#[test]
+fn a_start_after_a_pin_change_matches_the_workspaces_to_the_pins() {
+    let f = fixture("repin");
+    let other = f.dir.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    git(&other, &["init", "-q"]);
+    write(&other.join("o.txt"), "other\n");
+    git(&other, &["add", "."]);
+    git(&other, &["commit", "-qm", "other"]);
+    let set_pins = |pins: Vec<PathBuf>| {
+        f.host.pins.lock().unwrap().insert("s1".into(), pins);
+    };
+    let mounted = || f.host.db(|c| session_mounts(c, "s1")).unwrap().into_iter().map(|l| l.source).collect::<Vec<_>>();
+    let w = session(&f, "s1");
+    assert_eq!(mounted(), [f.source.clone()]);
+
+    // nothing done in it: unpinned, it becomes the spare and the new pin gets its own
+    set_pins(vec![other.clone()]);
+    let layout = ensure_for_session(&f.host, "s1").unwrap();
+    assert_eq!(layout.iter().map(|l| l.source.clone()).collect::<Vec<_>>(), [other.clone()]);
+    assert_eq!(mounted(), [other.clone()]);
+    assert!(f.host.db(|c| load(c, &w.workspace_id)).unwrap().is_none(), "freed");
+    assert!(spare(&f.host, &f.source).exists(), "kept warm as the spare");
+
+    // pinned again with work left in it, then unpinned: a result, not mounted, still offered
+    set_pins(vec![f.source.clone(), other.clone()]);
+    ensure_for_session(&f.host, "s1").unwrap();
+    let again = session_view(&f.host, "s1").unwrap().workspaces.into_iter().find(|x| x.source.to_path().unwrap() == f.source).unwrap();
+    write(&clone_of(&again).join("f1.txt"), "work\n");
+    set_pins(vec![other.clone()]);
+    ensure_for_session(&f.host, "s1").unwrap();
+    assert_eq!(mounted(), [other.clone()], "the unpinned workspace is out of the jail");
+    let kept = f.host.db(|c| load(c, &again.workspace_id)).unwrap().unwrap();
+    assert_eq!(kept.state, "result");
+    assert_eq!(read(&kept.path.join("f1.txt")), "work\n", "its work is kept");
+    assert!(f.host.db(|c| session_layout(c, "s1")).unwrap().iter().any(|l| l.source == f.source), "the rebase helper still binds it");
+    assert!(get(&f.host, &again.workspace_id).unwrap().summary.files == 1, "offered for Apply");
+
+    // pinned once more: the same workspace opens again, its work in it
+    set_pins(vec![f.source.clone(), other.clone()]);
+    ensure_for_session(&f.host, "s1").unwrap();
+    assert_eq!(f.host.db(|c| load(c, &again.workspace_id)).unwrap().unwrap().state, "open");
+    let mut both = mounted();
+    both.sort();
+    let mut want = vec![f.source.clone(), other.clone()];
+    want.sort();
+    assert_eq!(both, want);
+}
+
+/// The window's live diff and revert accept sill's own clones, as they accept pinned
+/// repositories: a workspace session's drawer reads the clone (royal-horse, 2026-11-09: "… is not
+/// a pinned repository" for a file the agent changed).
+#[test]
+fn every_clone_there_is_known_and_a_freed_one_is_not() {
+    let f = fixture("clones");
+    assert!(f.host.db(|c| all_clones(c)).unwrap().is_empty());
+    let w = session(&f, "s1");
+    assert_eq!(f.host.db(|c| all_clones(c)).unwrap(), [clone_of(&w)]);
+    f.host.pins.lock().unwrap().insert("s1".into(), vec![]);
+    ensure_for_session(&f.host, "s1").unwrap();
+    assert!(f.host.db(|c| all_clones(c)).unwrap().is_empty(), "freed to the spare: no longer a clone of anyone's");
+}

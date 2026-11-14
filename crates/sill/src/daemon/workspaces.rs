@@ -51,7 +51,7 @@ impl Host for Daemon<'_> {
         let hub = self.0;
         let (row, pins, binds) = hub.with_store(|s| {
             let row = s.session_exact(session)?.ok_or_else(|| anyhow::anyhow!("no session {session}"))?;
-            Ok((row, s.jail_pins(session)?, s.workspace_mask(session)?))
+            Ok((row, s.jail_pins(session)?, s.workspace_mask_all(session)?))
         })?;
         let resolved = sill_core::session::next_build(&row, &hub.home, &pins, &[], &binds)?;
         if let Some(plan) = &resolved.filesystem {
@@ -114,6 +114,19 @@ impl Hub {
             }
         }
         Ok(())
+    }
+
+    /// After a session's workspaces were matched to its pins: every one of them, those left as
+    /// results too, is news to the shelf and Changes.
+    pub(super) fn workspaces_settled(&self, session: &str) {
+        match records::session_view(&Daemon(self), session) {
+            Ok(view) => {
+                for w in view.workspaces {
+                    self.workspaces_changed(&w.workspace_id);
+                }
+            }
+            Err(e) => eprintln!("sill daemon: session {session}: workspaces: {e:#}"),
+        }
     }
 
     fn workspaces_changed(&self, workspace_id: &str) {

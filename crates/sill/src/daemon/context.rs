@@ -165,9 +165,6 @@ fn pin_prefix(pins: &[PathBuf]) -> String {
             out.push_str(&format!("[{label}: {}]\n", paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")));
         }
     }
-    if !pins.is_empty() {
-        out.push_str("[Pin changes take effect when the jail restarts. A folder pinned during this run may still use the session overlay; verify its mount before assuming writes reach the host.]\n");
-    }
     out
 }
 

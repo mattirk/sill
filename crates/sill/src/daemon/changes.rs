@@ -269,7 +269,9 @@ impl Hub {
         }
     }
 
-    /// Active (not ended) sessions' pinned folders, and the global ones, that are git repositories.
+    /// Active (not ended) sessions' pinned folders, and the global ones, that are git
+    /// repositories; and the workspaces' clones, which a workspace session's drawer reads in the
+    /// repositories' place (docs/parallel-coding.md §12).
     fn pinned_repos(&self) -> Result<Vec<PathBuf>> {
         self.with_store(|st| {
             let mut out = Vec::new();
@@ -277,6 +279,7 @@ impl Hub {
                 out.extend(st.pins(&s.id)?.into_iter().filter(|p| p.join(".git").exists()));
             }
             out.extend(st.global_pins()?.into_iter().filter(|p| p.join(".git").exists()));
+            out.extend(sill_core::workspace::records::all_clones(st.conn())?);
             Ok(out)
         })
     }

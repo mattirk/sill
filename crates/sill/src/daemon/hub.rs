@@ -89,6 +89,43 @@ pub struct Hub {
     /// sweep — idle ends, ghost reverts, the stray reaper, the nightly run — still runs. It holds
     /// no lock while it works, so a step that hangs was invisible to the lock probe.
     swept: Mutex<std::time::Instant>,
+    /// Jails being rebuilt for a pin change, one at a time per session.
+    rebuilds: Rebuilds,
+}
+
+/// Rebuilds of a session's jail after its pins changed: at most one runs per session, and a pin
+/// change while one runs asks for a single one more, which reads the pins as they are by then.
+/// However many changes come, the last rebuild sees the last pins.
+#[derive(Default)]
+pub(super) struct Rebuilds(Mutex<HashMap<String, bool>>);
+
+impl Rebuilds {
+    /// A rebuild of `id` is wanted. True: the caller runs it; false: one runs and will go again.
+    pub(super) fn begin(&self, id: &str) -> bool {
+        let mut m = self.0.lock().unwrap();
+        match m.get_mut(id) {
+            Some(again) => {
+                *again = true;
+                false
+            }
+            None => {
+                m.insert(id.into(), false);
+                true
+            }
+        }
+    }
+
+    /// A rebuild of `id` ended. True: the pins changed while it ran, so run it once more.
+    pub(super) fn again(&self, id: &str) -> bool {
+        let mut m = self.0.lock().unwrap();
+        if m.get(id) == Some(&true) {
+            m.insert(id.into(), false);
+            true
+        } else {
+            m.remove(id);
+            false
+        }
+    }
 }
 
 /// Debug builds only: the next sweep hangs (tests/daemon.rs, the watchdog's sweep check).
@@ -142,6 +179,7 @@ impl Hub {
             started_at: Mutex::new(HashMap::new()),
             conns: Mutex::new(Vec::new()),
             swept: Mutex::new(std::time::Instant::now()),
+            rebuilds: Rebuilds::default(),
         };
         hub.adopt_running();
         hub.sweep_dead_ghosts();
@@ -890,6 +928,72 @@ impl Hub {
         sill_core::session::stop(id)
     }
 
+    /// A session's pins changed (`None`: the global pins, every session's): each running jail
+    /// they reach is stopped and started again at once, so its mounts and workspaces match the
+    /// pins (docs/pins.md, docs/parallel-coding.md §12). Everything in the jail stops — a turn in
+    /// progress as Stop does, `sill-proc` processes, Host control — and the conversation goes on
+    /// at the next prompt; a notice says what stopped. A session whose jail is not running needs
+    /// nothing: its next start reads the pins.
+    pub(super) fn pins_changed(self: &Arc<Self>, session: Option<&str>) {
+        let ids: Vec<String> = match session {
+            Some(id) => vec![id.to_string()],
+            None => self.children.lock().unwrap().keys().cloned().collect(),
+        };
+        for id in ids {
+            if self.is_ghost(&id) || !sill_core::session::is_running(&id) || !self.rebuilds.begin(&id) {
+                continue;
+            }
+            let hub = self.clone();
+            let spawned = std::thread::Builder::new().name(format!("sill-rebuild-{id}")).spawn({
+                let id = id.clone();
+                move || loop {
+                    hub.rebuild(&id);
+                    if !hub.rebuilds.again(&id) {
+                        break;
+                    }
+                }
+            });
+            if let Err(e) = spawned {
+                eprintln!("sill daemon: session {id}: rebuilding for the pin change: {e:#}");
+                self.rebuilds.again(&id);
+            }
+        }
+    }
+
+    fn rebuild(self: &Arc<Self>, id: &str) {
+        let open = self.with_store(|s| Ok(s.session_exact(id)?.is_some_and(|s| s.ended_at.is_none()))).unwrap_or(false);
+        if !open || !sill_core::session::is_running(id) {
+            return;
+        }
+        let busy = self.runners.lock().unwrap().get(id).is_some_and(|r| r.alive() && r.busy());
+        let procs: Vec<String> = sill_core::shim::runtime_dir(id)
+            .and_then(|d| sill_core::shim::Control::connect(&d.join("shim.sock")))
+            .and_then(|mut c| c.proc_list())
+            .map(|ps| ps.into_iter().filter(|p| p.running()).map(|p| p.name).collect())
+            .unwrap_or_default();
+        super::host_control::session_ended(self, id, "the jail was rebuilt for a pin change");
+        if let Err(e) = self.stop_session(id) {
+            eprintln!("sill daemon: session {id}: stopping the jail for the pin change: {e:#}");
+            return;
+        }
+        let started = self.ensure_runner(id, false);
+        let mut said = vec!["The jail was rebuilt for the pin change.".to_string()];
+        if busy {
+            said.push("The turn in progress was stopped.".into());
+        }
+        if !procs.is_empty() {
+            said.push(format!("Stopped: {}.", procs.join(", ")));
+        }
+        if let Err(e) = &started {
+            eprintln!("sill daemon: session {id}: starting the jail after the pin change: {e:#}");
+            said.push(format!("It did not start again: {e:#}. It starts at the next prompt."));
+        }
+        super::host_control::note(self, id, said.join(" "));
+        // a workspace unpinned is a result now, or gone: the shelf and Changes look again
+        self.workspaces_settled(id);
+        self.changes_changed();
+    }
+
     /// Stop each running session of `agent` as `sessions.stop` does; their ids.
     pub(super) fn stop_sessions_of(&self, agent: &str) -> Vec<String> {
         let rows = self.store.lock().unwrap().sessions().unwrap_or_default();
@@ -1298,4 +1402,23 @@ fn args<T: DeserializeOwned>(v: Value) -> Result<T, Error> {
 
 fn to_value<T: serde::Serialize>(t: T) -> Result<Value, Error> {
     serde_json::to_value(t).map_err(|e| Error::new(Error::INTERNAL, e.to_string()))
+}
+
+#[cfg(test)]
+mod rebuild_tests {
+    use super::Rebuilds;
+
+    #[test]
+    fn one_rebuild_at_a_time_and_one_more_for_changes_during_it() {
+        let r = Rebuilds::default();
+        assert!(r.begin("s1"), "the first change starts a rebuild");
+        assert!(!r.begin("s1"), "a change while it runs does not start a second");
+        assert!(!r.begin("s1"), "nor does a third");
+        assert!(r.begin("s2"), "another session's is its own");
+        assert!(r.again("s1"), "the changes during it ask for exactly one more");
+        assert!(!r.again("s1"), "and then it is done");
+        assert!(!r.again("s2"));
+        assert!(r.begin("s1"), "a later change starts afresh");
+        assert!(!r.again("s1"));
+    }
 }

@@ -382,6 +382,17 @@ fn settle_session<H: Host>(h: &H, mut r: Row) -> Result<Option<Row>> {
     Ok(Some(r))
 }
 
+/// A workspace whose pin was removed: freed when nothing is left to apply, else a result.
+fn settle_unpinned<H: Host>(h: &H, mut r: Row) -> Result<()> {
+    settle_applied(&r)?;
+    if r.path.exists() && !rebasing(&r.path) && !flow::unapplied(&r.path)? {
+        return free(h, &r);
+    }
+    r.state = "result".into();
+    r.updated_at = h.now();
+    h.db(|c| save(c, &r))
+}
+
 /// After an Apply or Discard of a result: nothing left, so it is done with.
 fn settle_result<H: Host>(h: &H, r: Row) -> Result<Option<Row>> {
     settle_applied(&r)?;
@@ -406,32 +417,70 @@ pub struct Layout {
     pub objects: PathBuf,
 }
 
-/// The workspaces `session`'s jail binds (from the store alone: what was made at its last start).
+/// Every workspace folder there is, of any session: sill's own clones, where the window's live
+/// diff and revert work as in a pinned repository (the drawer of a workspace session reads its
+/// clone, gap 1).
+pub fn all_clones(conn: &Connection) -> Result<Vec<PathBuf>> {
+    if !has_tables(conn)? {
+        return Ok(vec![]);
+    }
+    let mut stmt = conn.prepare(&format!("SELECT {COLUMNS} FROM workspaces"))?;
+    let rows = stmt.query_map([], row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows.into_iter().map(|r| r.path).filter(|p| p.exists()).collect())
+}
+
+/// Every workspace of `session` whose folder is there, open or a result waiting for the person:
+/// what the rebase helper binds, since a result's rebase runs in its clone too.
 pub fn session_layout(conn: &Connection, session: &str) -> Result<Vec<Layout>> {
+    layout_where(conn, session, |_| true)
+}
+
+/// The workspaces `session`'s jail binds: the open ones, those of its pinned repositories at its
+/// last start. A workspace whose pin was removed is a result and is not mounted.
+pub fn session_mounts(conn: &Connection, session: &str) -> Result<Vec<Layout>> {
+    layout_where(conn, session, |r| r.state == "open")
+}
+
+fn layout_where(conn: &Connection, session: &str, keep: impl Fn(&Row) -> bool) -> Result<Vec<Layout>> {
     if !has_tables(conn)? {
         return Ok(vec![]);
     }
     Ok(of_session(conn, session)?
         .into_iter()
-        .filter(|r| r.path.exists())
+        .filter(|r| r.path.exists() && keep(r))
         .map(|r| Layout { objects: r.source.join(".git/objects"), source: r.source, clone: r.path })
         .collect())
 }
 
-/// At the start of `session`'s jail (§12): a workspace for each session-pinned repository, made
-/// fresh or from the repository's spare, or kept from the session's last start. A repository
-/// that cannot have one stays live, its reason recorded. Nothing for a live session.
+/// At the start of `session`'s jail (§12), the workspaces made to match its pins: one for each
+/// session-pinned repository, made fresh or from the repository's spare, or kept from the
+/// session's last start. A repository that cannot have one stays live, its reason recorded. A
+/// workspace whose repository is no longer pinned leaves the jail and settles as at the session's
+/// end: with nothing left to apply it becomes the spare, with work waiting a result on Changes
+/// (pinned again, it opens again). Nothing for a live session.
 pub fn ensure_for_session<H: Host>(h: &H, session: &str) -> Result<Vec<Layout>> {
     if !h.db(|c| mode(c, session))? {
         return Ok(vec![]);
     }
     let _g = lock();
     let mut layout = Vec::new();
-    for pin in h.session_pins(session)? {
-        if !repository_top(&pin) {
-            continue;
+    let pins = h.session_pins(session)?;
+    let pinned: Vec<PathBuf> = pins.iter().filter(|p| repository_top(p)).filter_map(|p| p.canonicalize().ok()).collect();
+    for r in h.db(|c| of_session(c, session))? {
+        if r.state == "open" && !pinned.contains(&r.source) {
+            settle_unpinned(h, r)?;
         }
-        let Ok(source) = pin.canonicalize() else { continue };
+    }
+    // a refused repository unpinned: its reason goes with it
+    h.db(|c| {
+        let mut stmt = c.prepare("SELECT source FROM session_live_repositories WHERE session_id=?1")?;
+        let live = stmt.query_map([session], |r| r.get::<_, Vec<u8>>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        for source in live.into_iter().filter(|s| !pinned.iter().any(|p| bytes(p) == *s)) {
+            c.execute("DELETE FROM session_live_repositories WHERE session_id=?1 AND source=?2", params![session, source])?;
+        }
+        Ok(())
+    })?;
+    for source in pinned {
         let existing = h.db(|c| {
             Ok(c.query_row(&format!("SELECT {COLUMNS} FROM workspaces WHERE session_id=?1 AND source=?2"), params![session, bytes(&source)], row).optional()?)
         })?;

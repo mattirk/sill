@@ -95,7 +95,6 @@ pub enum Change {
     SaveHost(String),
     AutoAllow(bool),
     Restart,
-    RestartPins,
 }
 
 /// A session's permission state in this window.
@@ -481,7 +480,6 @@ impl App {
                     Change::AutoAllow(true) => "Auto-allow on.".into(),
                     Change::AutoAllow(false) => "Auto-allow off.".into(),
                     Change::Restart => "Restarted with the new permissions.".into(),
-                    Change::RestartPins => "Restarted with the new pins.".into(),
                 },
                 false,
             ),
@@ -491,7 +489,7 @@ impl App {
         if let Some(view) = self.views.get_mut(&id) {
             view.permissions.note(serial, said, failed);
         }
-        if matches!(change, Change::Restart | Change::RestartPins) && outcome.is_done() {
+        if matches!(change, Change::Restart) && outcome.is_done() {
             self.reattach(&id);
         }
         // the shield menu's development choice goes straight on to the restart it needs
