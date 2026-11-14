@@ -118,13 +118,17 @@ impl<'a> Journal<'a> {
             session.commands.clear();
             let mut events=vec![Event::SessionUpdated { session }];
             let (_,records)=self.snapshot(session_id)?;
+            let mut interrupted=false;
+            let mut held=false;
             for record in records {
                 match record {
                     Record::Submission { mut submission } if submission.outcome=="pending" => {
                         if submission.delivery=="queued" && submission.insertion=="pending" {
+                            held=true;
                             submission.held=true;
                             submission.hold_reason=Some(Reason { code:"agent_replaced".into(),message:"Resume explicitly to deliver to the replacement agent".into() });
                         } else {
+                            interrupted=true;
                             if submission.insertion=="pending" { submission.insertion="unknown".into(); }
                             submission.outcome="unknown".into();
                             submission.reason=Some(Reason { code:"agent_replaced".into(),message:"Delivery or outcome could not be established before agent replacement".into() });
@@ -141,6 +145,7 @@ impl<'a> Journal<'a> {
                         }
                     }
                     Record::Turn { mut turn } if turn.outcome=="pending" => {
+                        interrupted=true;
                         turn.activity="unknown".into(); turn.outcome="unknown".into();
                         turn.reason=Some(Reason { code:"agent_replaced".into(),message:"Agent replacement interrupted activity".into() });
                         events.push(Event::TurnUpdated { turn });
@@ -148,9 +153,15 @@ impl<'a> Journal<'a> {
                     _=>{}
                 }
             }
+            let mut notice=if interrupted {
+                "Agent restarted. Previous work may be incomplete and wasn’t resent.".to_string()
+            } else {
+                "Started a new agent conversation.".to_string()
+            };
+            if held { notice.push_str(" Queued messages are paused. Resume to send them."); }
             events.push(Event::ItemCreated { item:Item { item_id:new_id(), created_seq:String::new(),
                 turn_id:None, submission_id:None, agent_generation_id:generation_id.into(), kind:"note".into(),
-                content:vec![Content::text("Agent conversation replaced; earlier uncertain work was not resent.")],tool:None } });
+                content:vec![Content::text(notice)],tool:None } });
             self.append(session_id,None,&events)
         })
     }
@@ -563,6 +574,22 @@ mod tests {
         assert!(!resumed.held); assert_eq!(resumed.agent_generation_id,"g2"); assert_eq!(resumed.accepted_seq,queued.accepted_seq);
         assert_eq!(j.question(&f.id,"q").unwrap().state,"cancelled");
         assert_eq!(code(j.resume(&SubmissionKey {session_id:f.id.clone(),submission_id:"sent".into()}).unwrap_err()),"invalid_state");
+    }
+    #[test]
+    fn replacement_notice_distinguishes_idle_queued_and_interrupted_work() {
+        for (delivery, expected) in [
+            (None, "Started a new agent conversation."),
+            (Some("queued"), "Started a new agent conversation. Queued messages are paused. Resume to send them."),
+            (Some("direct"), "Agent restarted. Previous work may be incomplete and wasn’t resent."),
+        ] {
+            let f=Fixture::new();let j=f.journal();
+            if let Some(delivery)=delivery { j.accept(&f.submit("input"),delivery).unwrap(); }
+            j.replace_generation(&f.id,"g2").unwrap();
+            let (_,records)=j.snapshot(&f.id).unwrap();
+            assert!(records.iter().any(|record| matches!(record, Record::Item {item}
+                if item.kind=="note" && item.content.iter().any(|block| block.text.as_deref()==Some(expected)))));
+            assert!(j.replace_generation(&f.id,"g2").unwrap().is_empty());
+        }
     }
     #[test]
     fn removed_block_and_item_identities_cannot_be_reused() {

@@ -1076,7 +1076,7 @@ impl Hub {
         {
             let prompt = sill_core::memory::summary_prompt(&ctx.facts, &self.home);
             self.remember_end(id, ctx)?;
-            match r.ask_summary(self, &prompt, "the session ends: the agent writes its summary for memory", SummaryKind::End) {
+            match r.ask_summary(self, &prompt, "Summarizing session..", SummaryKind::End) {
                 Ok(()) => {
                     eprintln!("sill daemon: session {id} ends ({reason}): the agent writes its summary");
                     return Ok(Ending { pending: true, deleted: false });
@@ -1107,7 +1107,7 @@ impl Hub {
         let r = self.runner(id).map_err(|e| anyhow::anyhow!("{}", e.message))?;
         let ctx = self.end_ctx(id)?;
         let prompt = sill_core::memory::checkpoint_prompt(&ctx.facts, &self.home);
-        r.ask_summary(self, &prompt, "summarize now: the agent writes a checkpoint summary for memory", SummaryKind::Checkpoint)
+        r.ask_summary(self, &prompt, "Summarizing session..", SummaryKind::Checkpoint)
     }
 
     /// A summary turn is over (the runner's lock is not held): the end completes, or the

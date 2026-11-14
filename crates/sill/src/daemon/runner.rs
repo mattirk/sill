@@ -404,9 +404,18 @@ impl Runner {
             st.summary = Some((kind, String::new(), st.summary_gen));
             Self::queue(&mut st, relay::Command::Prompt { text: prompt.into(), attachments: vec![] });
             store.append(&self.id, "note", note, "")?;
+            let journal = sill_core::sfp::Journal::new(store)?;
+            let events = journal.append(&self.id, None, &[sill_proto::sfp::Event::ItemCreated {
+                item: sill_proto::sfp::Item {
+                    item_id: super::sfp::id(), created_seq: String::new(),
+                    turn_id: None, submission_id: None,
+                    agent_generation_id: st.generation_id.clone(), kind: "note".into(),
+                    content: vec![sill_proto::sfp::Content::text(note)], tool: None,
+                },
+            }])?;
             self.save(store, &st)?;
             tx.commit()?;
-            broadcast(&self.id, &mut st.subs, &wire::Event::Note(note.into()));
+            hub.sfp_publish(&self.id, &events);
             self.drain(store, &mut st)?;
             Ok(())
         })?;

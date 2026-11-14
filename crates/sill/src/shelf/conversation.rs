@@ -1225,7 +1225,11 @@ impl Conversation {
     pub fn add_note(&self, text: &str) {
         self.finish_current();
         let l = gtk::Label::new(Some(text));
-        l.add_css_class("dim-label");
+        if text.starts_with("Summarizing session") {
+            l.add_css_class("sill-summary-note");
+        } else {
+            l.add_css_class("dim-label");
+        }
         l.set_xalign(0.0);
         l.set_wrap(true);
         l.set_wrap_mode(gtk::pango::WrapMode::WordChar);
@@ -1463,6 +1467,15 @@ popover.sill-session-menu > contents { padding: 10px 12px; min-width: 260px; }
 .sill-menu-more { font-size: 80%; padding: 2px 10px; min-height: 0; opacity: 0.5; background: transparent; border: none; box-shadow: none; }
 .sill-menu-more:hover { opacity: 1; }
 .sill-menu-more label { padding: 0; }
+.sill-summary-note {
+    font-weight: 600;
+    color: @accent_color;
+    background: alpha(@accent_color, 0.08);
+    border-left: 3px solid @accent_color;
+    padding: 10px 12px;
+    margin-top: 8px;
+    margin-bottom: 4px;
+}
 /* top-bar status: a small dot at rest, a spinner while working; the text lives in the tooltip */
 .sill-status-slot { padding: 6px 8px; }
 .sill-status { min-width: 8px; min-height: 8px; border-radius: 4px; background: alpha(@view_fg_color, 0.3); }
