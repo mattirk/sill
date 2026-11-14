@@ -226,6 +226,7 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     // the window's minimum height is the shown page's, not the tallest page's: with a terminal pane
     // under the pages, the Settings page's rows would otherwise push the window past the screen
     stack.set_vhomogeneous(false);
+    stack.set_hhomogeneous(false);
     stack.add_named(&pages, Some("sessions"));
     let changes = ChangesPage::new(store.clone());
     let tree = FolderTree::new(store.clone());
@@ -261,15 +262,6 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     // a paned, not a box: the separator (invisible, see the stylesheet) is the drawer's drag handle.
     // The main pane's width is the invariant (resize end, not start): the split is set to the main
     // pane's width and the drawer gets whatever the window's new width leaves once it arrives.
-    let drawer_handle = super::icons::glyph_button("sill-chevron-right");
-    drawer_handle.add_css_class("flat");
-    drawer_handle.set_opacity(0.5);
-    drawer_handle.add_css_class("sill-viewer-btn");
-    drawer_handle.set_tooltip_text(Some("Open drawer (Ctrl+Shift+F)"));
-    drawer_handle.set_halign(gtk::Align::End);
-    drawer_handle.set_valign(gtk::Align::Start);
-    drawer_handle.set_visible(false);
-    main.add_overlay(&drawer_handle);
     let body = gtk::Paned::new(gtk::Orientation::Horizontal);
     body.set_start_child(Some(&main));
     body.set_end_child(Some(&tree.root));
@@ -297,12 +289,26 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
             header.set_position(if tree.is_visible() { body.position() } else { i32::MAX });
         });
     }
-    tree.root.bind_property("visible", &drawer_handle, "visible")
-        .invert_boolean().sync_create().build();
     column.append(&header);
     column.append(&body);
     column.append(&pane_host);
-    window.set_child(Some(&column));
+    let expand = super::icons::glyph_button("sill-chevron-right");
+    expand.add_css_class("flat");
+    expand.add_css_class("sill-drawer-close");
+    expand.set_halign(gtk::Align::End);
+    expand.set_valign(gtk::Align::End);
+    expand.set_margin_end(4);
+    expand.set_margin_bottom(10);
+    if let Some(image) = expand.child() {
+        image.set_opacity(0.55);
+    }
+    let surface = gtk::Overlay::new();
+    surface.set_child(Some(&column));
+    surface.add_overlay(&expand);
+    // A corner control must not contribute another row or change the configured shelf width.
+    surface.set_measure_overlay(&expand, false);
+    tree.root.bind_property("visible", &expand, "visible").sync_create().build();
+    window.set_child(Some(&surface));
 
     let shelf = Rc::new(Shelf {
         window: window.clone(),
@@ -405,8 +411,12 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
     }
 
     {
-        let s = shelf.clone();
-        drawer_handle.connect_clicked(move |_| s.toggle_drawer());
+        let weak = Rc::downgrade(&shelf);
+        expand.connect_clicked(move |_| {
+            if let Some(s) = weak.upgrade() {
+                s.set_expanded(!s.expanded.get());
+            }
+        });
     }
     {
         let s = shelf.clone();
@@ -420,13 +430,13 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
         let s = shelf.clone();
         *tree.on_open.borrow_mut() = Some(Box::new(move |p| s.open_file(p)));
         let s = shelf.clone();
+        *tree.on_close.borrow_mut() = Some(Box::new(move || s.close_tree()));
+        let s = shelf.clone();
         tree.on_open_diff(move |repo, rel| {
             s.viewer.open_git_diff(repo, rel);
             s.viewer.root.set_visible(true);
             s.viewer.focus();
         });
-        let s = shelf.clone();
-        *tree.on_close.borrow_mut() = Some(Box::new(move || s.close_tree()));
         let s = shelf.clone();
         *viewer.on_close.borrow_mut() = Some(Box::new(move || {
             s.viewer.root.set_visible(false);
@@ -487,10 +497,7 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
             s.pages.set_visible_child_name(id);
             s.sync_pane();
             *s.tree.pin_target.borrow_mut() = Some(id.to_string());
-            if s.tree.root.is_visible() {
-                s.tree.refresh(); // pinned-here badges follow the selected session (and the first
-                // refresh homes the drawer on its pinned folder, FolderTree::refresh)
-            }
+            s.tree.follow_session(id);
             s.sync_status();
             s.focus_prompt();
         }));
@@ -519,6 +526,12 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
         let s = shelf.clone();
         let f2 = gtk::EventControllerKey::new();
         f2.connect_key_pressed(move |_, key, _, state| {
+            // Restore the split before a focused child or the page-level Escape handler
+            // handles the key. A subsequent Escape resumes normal viewer/backend navigation.
+            if key == gdk::Key::Escape && s.expanded.get() {
+                s.set_expanded(false);
+                return glib::Propagation::Stop;
+            }
             if key == gdk::Key::F2 {
                 s.tabs.edit_selected();
                 return glib::Propagation::Stop;
@@ -611,7 +624,7 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
         });
     }
 
-    // Escape does what the "sill" button does: sessions ⇄ backend (hiding is the hotkey's job)
+    // After expanded mode has been handled in capture, Escape navigates viewer/backend pages.
     let esc = gtk::EventControllerKey::new();
     {
         let s = shelf.clone();
@@ -645,6 +658,13 @@ pub fn build(app: &gtk::Application, _cwd: PathBuf) -> gtk::Window {
                 return;
             }
             let total = p.width();
+            let w: gtk::Window = s.window.clone().upcast();
+            let expected = s.placement(&w).map(|area| area.width as i32 / x11::scale_of(&w));
+            // Ignore layout negotiation at an obsolete or minimum-forced window size.
+            // Only a divider adjustment within the configured shelf width is remembered.
+            if expected != Some(total) {
+                return;
+            }
             let drawer = total - p.position();
             if drawer < x11::DRAWER_MIN || drawer == x11::drawer_width(total) {
                 return;
@@ -771,7 +791,7 @@ impl Shelf {
         self.paned.set_position((total - x11::drawer_width(total)).max(x11::MAIN_MIN));
     }
 
-    /// Show the tree — scoped to one folder (a chip) or global (`None`: the Files button) — or close
+    /// Show the tree — scoped to one folder (a chip) or global (`None`) — or close
     /// it when the chip of the folder it already shows is clicked again.
     fn toggle_tree(&self, scope: Option<PathBuf>) {
         self.set_expanded(false);
@@ -978,12 +998,43 @@ impl Shelf {
             c.reset_settle();
         }
         let frames = std::cell::Cell::new(0u32);
+        let expected = self.placement(w).map(|area| area.width as i32 / x11::scale_of(w));
+        let paned = self.paned.clone();
+        let drawer = self.tree.root.clone();
         w.add_tick_callback(move |w, _| {
             frames.set(frames.get() + 1);
             let settled = conv.as_ref().map(|c| c.settled()).unwrap_or(true);
             let late = start.elapsed() > std::time::Duration::from_millis(300);
             if settled || late {
                 x11::set_opacity(&w.clone().upcast(), 1.0);
+                if let Some(expected) = expected {
+                    let horizontal = gtk::Orientation::Horizontal;
+                    eprintln!("sill width: requested={expected} actual={} minimum={} drawer-visible={} split={} scale={}",
+                        w.width(), w.measure(horizontal, -1).0, drawer.is_visible(), paned.position(), w.scale_factor());
+                    // Follow the largest minimum-width child to locate the constraint without
+                    // logging conversation text, filenames or widget contents.
+                    let mut node: gtk::Widget = w.clone().upcast();
+                    for _ in 0..16 {
+                        eprintln!("sill width: {} css={:?} allocated={} minimum={}",
+                            node.type_().name(), node.css_classes(), node.width(), node.measure(horizontal, -1).0);
+                        let mut child = node.first_child();
+                        let mut widest = None;
+                        let mut minimum = -1;
+                        while let Some(current) = child {
+                            child = current.next_sibling();
+                            if !current.is_visible() || !current.is_child_visible() { continue; }
+                            let size = current.measure(horizontal, -1).0;
+                            if size > minimum { minimum = size; widest = Some(current); }
+                        }
+                        let Some(next) = widest else { break };
+                        node = next;
+                    }
+                    for (name, child) in [("main", paned.start_child()), ("drawer", paned.end_child())] {
+                        if let Some(child) = child {
+                            eprintln!("sill width: {name} allocated={} minimum={}", child.width(), child.measure(horizontal, -1).0);
+                        }
+                    }
+                }
                 if std::env::var_os("SILL_TRACE").is_some() {
                     eprintln!(
                         "{} reveal: after {} ms, {} frames ({})",
@@ -1795,9 +1846,7 @@ impl Shelf {
             Some(next) => self.tree.follow_session(&next),
             None => {
                 *self.tree.pin_target.borrow_mut() = None;
-                if self.tree.root.is_visible() && self.tree.scope().is_some() {
-                    self.tree.set_scope(None);
-                }
+                self.tree.set_scope(None);
             }
         }
     }

@@ -41,6 +41,7 @@ const STROKES: &[(&str, &str)] = &[
     // a ghost session (docs/memory.md §3): lucide's ghost, eyes and a wavy hem
     ("sill-ghost", "M9 10h.01M15 10h.01M12 2a8 8 0 0 0-8 8v12l3-3 2.5 2.5L12 19l2.5 2.5L17 19l3 3V10a8 8 0 0 0-8-8z"),
     ("sill-chevron-right", "m9 18 6-6-6-6"),
+    ("sill-chevron-left", "m15 18-6-6 6-6"),
     ("sill-chevron-down", "m6 9 6 6 6-6"),
     ("sill-check", "M20 6 9 17l-5-5"),
     // the copy button over a code block, a command, a prompt (lucide copy)

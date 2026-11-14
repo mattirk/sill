@@ -116,6 +116,8 @@ shelves=$(packaging/local-shelves.sh)
 n=$(printf '%s\n' "$shelves" | grep -c . || true)
 if [ "$n" -eq 1 ]; then pass "one local shelf process"; else fail "one local shelf process (found $n)"; fi
 printf '%s\n' "$shelves" | log
+say "## shelf width diagnostics (logical pixels, latest shelf startup)"
+journalctl --user -u sill-shelf.service -n 400 --no-pager -o cat 2>/dev/null | grep '^sill width:' | tail -n 22 | log
 say ""
 
 # --- a jail of our own: what a session sees ------------------------------------------------------

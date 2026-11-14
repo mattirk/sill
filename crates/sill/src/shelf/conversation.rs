@@ -1509,9 +1509,11 @@ button.sill-md-image:hover { opacity: 0.85; }
 .sill-viewer-bar { padding: 3px 6px 3px 12px; border-bottom: 1px solid alpha(@view_fg_color, 0.12); }
 .sill-viewer-btn { padding: 2px 8px; min-height: 0; min-width: 0; font-size: 90%; }
 .sill-viewer-bar.sill-drawer-bar { padding-left: 4px; padding-right: 4px; }
-.sill-drawer-controls > button { padding: 4px; min-width: 1em; min-height: 1em; }
-.sill-drawer-controls > button > image { -gtk-icon-size: 1em; }
-.sill-drawer-controls > button.sill-global-files > image { -gtk-icon-size: 0.95em; }
+.sill-drawer-indicator { -gtk-icon-size: 1em; }
+button.sill-drawer-mode { font-size: 100%; padding: 5px; min-width: 0; min-height: 0; background: transparent; }
+button.sill-drawer-mode:hover { background: alpha(@view_fg_color, 0.14); }
+button.sill-drawer-close { font-size: 90%; padding: 2px; min-width: 0; min-height: 0; }
+button.sill-drawer-close > image { -gtk-icon-size: 1em; }
 /* a session's page in the viewer (docs/memory.md §2.5): summary, notes, the facts */
 .sill-page { padding: 10px 16px 16px 16px; }
 .sill-page-title { font-size: 120%; font-weight: bold; }
@@ -1529,8 +1531,8 @@ button.sill-md-image:hover { opacity: 0.85; }
 /* every search entry's glyphs are sill's own (icons::adopt_search_entry), one size everywhere */
 searchentry > image { -gtk-icon-size: 1.1em; }
 .sill-tree-search > image { opacity: 0.6; }
-/* Keep the focused inset at rest too; separate typed text from the search glyph. */
-.sill-drawer-bar > .sill-tree-search > image:first-child { margin-left: 0; margin-right: 6px; }
+/* The drawer hides its magnifier; the adjacent chevron closes it instead. */
+.sill-drawer-bar > .sill-tree-search > image:first-child { margin: 0; }
 .sill-tree-panel .sill-pin { opacity: 0; }
 .sill-tree-panel row:hover .sill-pin { opacity: 0.6; }
 .sill-tree-panel row:hover .sill-pin:hover { opacity: 1; }

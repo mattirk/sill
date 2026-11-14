@@ -27,6 +27,7 @@ mod tabs;
 mod theme;
 mod tray;
 mod tree;
+mod drawer_view;
 mod viewer;
 mod window;
 mod x11;

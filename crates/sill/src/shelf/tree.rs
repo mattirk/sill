@@ -1,6 +1,6 @@
 //! The file tree (SPEC §3.1): a drawer beside the main pane, taking its share of the shelf's width (`x11::drawer_width`: 30 % until the handle between the panes is dragged, then the dragged width, remembered)
-//! while it is open and narrows again when it closes. Global (the home directory, the selected
-//! session's pinned folders first, plus every repository a session touched) or scoped to one pinned
+//! while it is open and narrows again when it closes. Files (global browsing), Tree (this session's
+//! folders and files), or Diff; the tree can also be scoped to one pinned
 //! folder from its chip, two levels open (dot folders and build output listed but closed, dimmed).
 //! Change badges come from the combined ledger of all sessions and from git status; the pin button on
 //! a folder row makes a live mount (the jail is rebuilt), on a file row a chip only. A click on a file
@@ -20,9 +20,7 @@ use sill_core::ledger::Change;
 use super::remote_store::Store;
 
 use super::{session, theme};
-
-const DIFF_TIP: &str = "Show what differs from HEAD (git diff --stat) in the shown folder's repository, else in this session's pinned ones";
-const TREE_TIP: &str = "Back to the file tree";
+use super::drawer_view::{DrawerView, SECTION, root_rows};
 
 /// The repository "Drawer follows changes" watches, as one scan saw it.
 struct Followed {
@@ -72,10 +70,6 @@ fn find_files(bases: &[PathBuf], q: &str, cap: usize, visits: usize) -> (Vec<Pat
 fn is_noise(name: &str) -> bool {
     name.starts_with('.') || matches!(name, "target" | "node_modules" | "__pycache__" | "build" | "dist")
 }
-
-/// The global view's rows are grouped under captions (Pinned here · Repositories with changes ·
-/// Home): a caption is a root item whose string starts with this (no path starts with it).
-const SECTION: &str = "\u{1}";
 
 /// A row's path — `None` for a section caption.
 fn path_of(row: &gtk::TreeListRow) -> Option<PathBuf> {
@@ -254,16 +248,15 @@ pub struct FolderTree {
     query: RefCell<String>,
     /// Each search bumps this; a walk that finishes for an older query is dropped.
     search_seq: std::cell::Cell<u32>,
-    /// Switches between the tree and `git diff --stat` of the repositories in view; its glyph is
-    /// the view it switches to.
-    switch: gtk::Button,
-    diff_mode: std::cell::Cell<bool>,
-    rendered_scope: RefCell<Option<Option<PathBuf>>>,
-    global_return: RefCell<Option<(Option<PathBuf>, bool)>>,
-    files: gtk::Button,
+    /// The current mode's icon, inside the single cycling button.
+    indicator: gtk::Image,
+    drawer_view: std::cell::Cell<DrawerView>,
+    rendered_view: RefCell<Option<(DrawerView, Option<PathBuf>)>>,
+    search_roots: RefCell<Vec<PathBuf>>,
     /// "Drawer follows changes": the followed repository's state when the view was last set by it
     /// (status and totals); a different one switches the view again.
     follow_seen: RefCell<Option<String>>,
+    manual_view_pending: std::cell::Cell<bool>,
     panes: gtk::Stack,
     stat: Rc<super::diffstat::DiffStat>,
     view: gtk::ListView,
@@ -288,7 +281,7 @@ pub struct FolderTree {
     hint: gtk::Label,
     /// Session that receives pins (the selected tab), set by the window.
     pub pin_target: RefCell<Option<String>>,
-    /// Set by the first `set_scope` (a chip, the Files button widening it, or the homing below): until then the drawer is
+    /// Set by the first scope or mode choice (or the homing below): until then the drawer is
     /// at its default, and the first refresh that finds the selected session's pinned folder scopes
     /// to it — the drawer opens on the work, not on the global view with that folder collapsed.
     homed: std::cell::Cell<bool>,
@@ -322,31 +315,29 @@ impl FolderTree {
         search.set_hexpand(true);
         search.add_css_class("sill-tree-search");
         super::icons::adopt_search_entry(&search);
-        let files = super::icons::glyph_button("sill-files");
-        files.add_css_class("flat");
-        files.add_css_class("sill-viewer-btn");
-        files.add_css_class("sill-global-files");
-        files.set_tooltip_text(Some("Global files / return to tree or diff"));
-        let switch = super::icons::glyph_button("sill-git-compare");
-        switch.add_css_class("flat");
-        switch.add_css_class("sill-viewer-btn");
-        switch.set_tooltip_text(Some(DIFF_TIP));
-        let close = super::icons::glyph_button("sill-x");
-        close.add_css_class("flat");
-        close.add_css_class("sill-viewer-btn");
-        close.set_tooltip_text(Some("Close drawer (Ctrl+Shift+F)"));
-        bar.append(&search);
-        // Equal button slots and symmetric padding keep all three glyphs centered.
-        let ends = gtk::Box::new(gtk::Orientation::Horizontal, 2);
-        ends.set_homogeneous(true);
-        ends.add_css_class("sill-drawer-controls");
-        for button in [&files, &switch, &close] {
-            button.set_valign(gtk::Align::Center);
+        if let Some(magnifier) = search.first_child().and_downcast::<gtk::Image>() {
+            magnifier.set_visible(false);
         }
-        ends.append(&files);
-        ends.append(&switch);
-        ends.append(&close);
-        bar.append(&ends);
+        let close = super::icons::glyph_button("sill-chevron-left");
+        close.add_css_class("flat");
+        close.add_css_class("sill-drawer-close");
+        close.set_valign(gtk::Align::Center);
+        if let Some(image) = close.child() {
+            image.set_opacity(0.55);
+        }
+        let indicator = gtk::Image::new();
+        indicator.set_halign(gtk::Align::Center);
+        indicator.set_valign(gtk::Align::Center);
+        indicator.set_opacity(0.95);
+        indicator.add_css_class("sill-drawer-indicator");
+        let control = gtk::Button::new();
+        control.set_child(Some(&indicator));
+        control.add_css_class("sill-drawer-mode");
+        control.set_cursor_from_name(Some("pointer"));
+        control.set_valign(gtk::Align::Center);
+        bar.append(&close);
+        bar.append(&search);
+        bar.append(&control);
         root.append(&bar);
 
         let badges: Rc<RefCell<BTreeMap<PathBuf, Badge>>> = Rc::new(RefCell::new(BTreeMap::new()));
@@ -654,12 +645,12 @@ impl FolderTree {
             search: search.clone(),
             query: RefCell::new(String::new()),
             search_seq: std::cell::Cell::new(0),
-            switch: switch.clone(),
-            diff_mode: std::cell::Cell::new(false),
-            rendered_scope: RefCell::new(None),
-            global_return: RefCell::new(None),
-            files: files.clone(),
+            indicator,
+            drawer_view: std::cell::Cell::new(DrawerView::Files),
+            rendered_view: RefCell::new(None),
+            search_roots: RefCell::new(Vec::new()),
             follow_seen: RefCell::new(None),
+            manual_view_pending: std::cell::Cell::new(false),
             panes,
             stat,
             view,
@@ -691,6 +682,16 @@ impl FolderTree {
         });
         *tree_rc.borrow_mut() = Some(Rc::downgrade(&t));
         {
+            let weak = Rc::downgrade(&t);
+            close.connect_clicked(move |_| {
+                if let Some(t) = weak.upgrade()
+                    && let Some(cb) = t.on_close.borrow().as_ref()
+                {
+                    cb();
+                }
+            });
+        }
+        {
             // typing searches (the entry debounces); Escape clears and the tree is back
             let weak = Rc::downgrade(&t);
             search.connect_search_changed(move |e| {
@@ -716,48 +717,39 @@ impl FolderTree {
         }
         {
             let weak = Rc::downgrade(&t);
-            close.connect_clicked(move |_| {
-                if let Some(t) = weak.upgrade()
-                    && let Some(cb) = t.on_close.borrow().as_ref()
-                {
-                    cb();
-                }
-            });
-        }
-        {
-            let weak = Rc::downgrade(&t);
-            switch.connect_clicked(move |_| {
+            control.connect_clicked(move |_| {
                 if let Some(t) = weak.upgrade() {
-                    t.leave_global();
-                    t.set_diff_mode(!t.diff_mode.get());
-                }
-            });
-        }
-        {
-            let weak = Rc::downgrade(&t);
-            files.connect_clicked(move |_| {
-                if let Some(t) = weak.upgrade() {
-                    if t.global_return.borrow().is_some() {
-                        t.leave_global();
-                    } else {
-                        *t.global_return.borrow_mut() = Some((t.scope(), t.diff_mode.get()));
-                        t.files.add_css_class("suggested-action");
-                        t.set_scope_inner(None);
-                        t.set_diff_mode(false);
+                    let view = t.drawer_view.get().next();
+                    if view != DrawerView::Diff {
+                        *t.scope.borrow_mut() = None;
                     }
+                    t.homed.set(true);
+                    t.manual_view_pending.set(true);
+                    t.set_view(view);
                 }
             });
         }
+        {
+            let weak = Rc::downgrade(&t);
+            theme::on_change(move |_| {
+                if let Some(t) = weak.upgrade() {
+                    t.update_indicator();
+                }
+            });
+        }
+        t.update_indicator();
         t
     }
 
-    fn leave_global(self: &Rc<Self>) {
-        let previous = self.global_return.borrow_mut().take();
-        if let Some((scope, diff)) = previous {
-            self.files.remove_css_class("suggested-action");
-            self.set_scope_inner(scope);
-            self.set_diff_mode(diff);
-        }
+    fn update_indicator(&self) {
+        let view = self.drawer_view.get();
+        let palette = theme::current();
+        let dim = super::icons::fg_for(&self.indicator, &palette);
+        let grey = (dim.red() + dim.green() + dim.blue()) / 3.0;
+        let color = gtk::gdk::RGBA::new(grey, grey, grey, 1.0);
+        // Use a dedicated texture: row glyphs cache their own foreground/opacity variants.
+        self.indicator.set_paintable(super::icons::scalable(view.glyph(), color).paintable().as_ref());
+        self.indicator.set_tooltip_text(Some(view.name()));
     }
 
     /// The directory of the selected row (a file's parent): where "a terminal here" opens.
@@ -776,27 +768,24 @@ impl FolderTree {
         *self.stat.on_open.borrow_mut() = Some(Box::new(f));
     }
 
-    /// Tree or `git diff --stat`: the search box filters whichever is shown.
-    fn set_diff_mode(self: &Rc<Self>, on: bool) {
-        self.search.set_text("");
+    /// Change the displayed view, discarding searches from the previous one immediately.
+    fn set_view(self: &Rc<Self>, view: DrawerView) {
+        self.search_seq.set(self.search_seq.get().wrapping_add(1));
         self.query.borrow_mut().clear();
+        self.search.set_text("");
         self.stat.set_filter("");
         self.say("");
-        self.diff_mode.set(on);
-        // Keep the previous pane until the new scope's rows have been built.
-        if on {
+        self.drawer_view.set(view);
+        self.update_indicator();
+        // Keep the previous pane until this view's rows have been built.
+        if view == DrawerView::Diff {
             self.panes.set_visible_child_name("diff");
-        } else if self.rendered_scope.borrow().as_ref() == Some(&self.scope()) {
-            self.panes.set_visible_child_name("tree");
-        }
-        self.switch.set_child(Some(&super::icons::glyph_image(if on { "sill-list-tree" } else { "sill-git-compare" })));
-        self.switch.set_tooltip_text(Some(if on { TREE_TIP } else { DIFF_TIP }));
-        if on {
             self.hint.set_visible(false);
             self.refresh_stat(true);
-        } else {
-            self.refresh();
+        } else if self.rendered_view.borrow().as_ref() == Some(&(view, self.scope())) {
+            self.panes.set_visible_child_name("tree");
         }
+        self.refresh();
     }
 
     /// The repositories the diff view shows: the scoped folder's, else the current session's pinned
@@ -804,7 +793,8 @@ impl FolderTree {
     fn stat_repos(&self) -> Vec<PathBuf> {
         let dirs: Vec<PathBuf> = match self.scope.borrow().clone() {
             Some(s) => vec![s],
-            None => self.pinned.borrow().clone(),
+            None => self.pin_target.borrow().as_ref()
+                .and_then(|id| self.store.pins(id).ok()).unwrap_or_default(),
         };
         let mut repos: Vec<PathBuf> = Vec::new();
         for d in dirs {
@@ -818,38 +808,50 @@ impl FolderTree {
     }
 
     fn refresh_stat(self: &Rc<Self>, force: bool) {
-        if self.diff_mode.get() {
+        if self.drawer_view.get() == DrawerView::Diff {
             let repos = self.stat_repos();
             self.stat.refresh(repos, force);
         }
     }
 
-    /// A session just opened in a tab (new, or resumed): the tree shows its first pinned folder,
-    /// or everything when it has none — a fresh agent starts at Files, a resumed one at its work.
-    /// Nothing happens while the drawer is closed; opening it later decides for itself.
+    /// Follow a new session while retaining an explicitly selected unscoped mode.
+    /// A scoped tree follows the new session's first pinned folder instead.
+    /// Invalidate old searches even while closed, and defer the scan until the drawer opens.
     pub fn follow_session(self: &Rc<Self>, id: &str) {
-        self.leave_global();
+        self.search_seq.set(self.search_seq.get().wrapping_add(1));
+        self.query.borrow_mut().clear();
+        self.search.set_text("");
+        self.stat.set_filter("");
+        *self.rendered_view.borrow_mut() = None;
+        self.search_roots.borrow_mut().clear();
+        self.manual_view_pending.set(true);
+        if self.scope().is_some() {
+            let first = self.store.pins(id).unwrap_or_default().into_iter().find(|p| super::remote::is_dir(&p));
+            if first.is_none() {
+                self.drawer_view.set(DrawerView::Files);
+            }
+            *self.scope.borrow_mut() = first;
+        }
+        self.update_indicator();
         if !self.root.is_visible() {
             return;
         }
-        let first = self.store.pins(id).unwrap_or_default().into_iter().find(|p| super::remote::is_dir(&p));
-        if first != self.scope() {
-            self.set_scope(first);
-        }
+        self.set_view(self.drawer_view.get());
     }
 
     /// Limit the tree to one folder (from a pin chip), or show everything again.
     pub fn set_scope(self: &Rc<Self>, path: Option<PathBuf>) {
-        self.leave_global();
-        self.set_scope_inner(path);
-    }
-
-    fn set_scope_inner(self: &Rc<Self>, path: Option<PathBuf>) {
-        // a new scope ends a search: the box is cleared, which refreshes by itself when it held text
-        self.search.set_text("");
+        let view = if self.drawer_view.get() == DrawerView::Diff && path.is_some() {
+            DrawerView::Diff
+        } else if path.is_some() {
+            DrawerView::Tree
+        } else {
+            DrawerView::Files
+        };
+        *self.rendered_view.borrow_mut() = None;
         *self.scope.borrow_mut() = path;
         self.homed.set(true);
-        self.refresh();
+        self.set_view(view);
     }
 
     /// Search below the shown roots (the scope, or every root of the global view) for `text`:
@@ -858,7 +860,7 @@ impl FolderTree {
     /// text puts the tree back.
     fn search(self: &Rc<Self>, text: &str) {
         let q = text.trim().to_lowercase();
-        if self.diff_mode.get() {
+        if self.drawer_view.get() == DrawerView::Diff {
             self.stat.set_filter(&q);
             return;
         }
@@ -873,13 +875,12 @@ impl FolderTree {
             }
             return;
         }
-        let bases: Vec<PathBuf> = match self.scope.borrow().clone() {
-            Some(s) => vec![s],
-            None => (0..self.roots.n_items())
-                .filter_map(|i| self.roots.item(i).and_downcast::<gtk::StringObject>())
-                .filter_map(|o| (!o.string().starts_with(SECTION)).then(|| PathBuf::from(o.string().as_str())))
-                .collect(),
-        };
+        if self.rendered_view.borrow().as_ref() != Some(&(self.drawer_view.get(), self.scope())) {
+            // Wait for this view's roots rather than searching those left on screen by the last view.
+            self.refresh();
+            return;
+        }
+        let bases = self.search_roots.borrow().clone();
         let (tx, rx) = async_channel::bounded::<(Vec<PathBuf>, bool)>(1);
         std::thread::spawn(move || {
             let _ = tx.send_blocking(find_files(&bases, &q, SEARCH_CAP, SEARCH_VISITS));
@@ -932,17 +933,21 @@ impl FolderTree {
     /// seen, the view follows it — diff while it has changes, tree when clean. A switch by hand
     /// holds until the next change; with the setting off (`None`), the next time on starts afresh.
     fn follow(self: &Rc<Self>, followed: Option<Followed>) {
-        if self.global_return.borrow().is_some() { return; }
         let Some(Followed { state, dirty }) = followed else {
+            self.manual_view_pending.set(false);
             *self.follow_seen.borrow_mut() = None;
             return;
         };
+        if self.manual_view_pending.replace(false) || self.drawer_view.get() == DrawerView::Files {
+            *self.follow_seen.borrow_mut() = Some(state);
+            return;
+        }
         if self.follow_seen.borrow().as_deref() == Some(state.as_str()) {
             return;
         }
         *self.follow_seen.borrow_mut() = Some(state);
-        if dirty != self.diff_mode.get() {
-            self.set_diff_mode(dirty);
+        if dirty != (self.drawer_view.get() == DrawerView::Diff) {
+            self.set_view(if dirty { DrawerView::Diff } else { DrawerView::Tree });
         }
     }
 
@@ -1003,6 +1008,7 @@ impl FolderTree {
         drop(sessions);
         let scan_scope = scope.clone();
         let scan_target = target.clone();
+        let scan_view = self.drawer_view.get();
         std::thread::spawn(move || {
             // every session's overlay changes, as the daemon scans them (docs/daemon.md §7 M2)
             let mut pairs: Vec<(String, Change)> = Vec::new();
@@ -1043,7 +1049,9 @@ impl FolderTree {
         let t = self.clone();
         glib::spawn_future_local(async move {
             if let Ok((all, owners, statuses, followed)) = rx.recv().await {
-                if t.scope() == scan_scope && *t.pin_target.borrow() == scan_target {
+                if t.scope() == scan_scope && *t.pin_target.borrow() == scan_target
+                    && t.drawer_view.get() == scan_view
+                {
                     t.apply(all, owners, statuses);
                     t.follow(followed);
                 } else {
@@ -1081,12 +1089,13 @@ impl FolderTree {
                 }
             }
         }
-        // folders only as roots: a pinned file is a chip, not a tree. Pinned here is the selected
-        // session's own pins (`pinned`, set by refresh); other sessions' pins are scanned for git
-        // status but show only as repositories with changes
+        let view = self.drawer_view.get();
+        // Files groups directories; Tree also includes individually pinned files.
         let mut roots: Vec<PathBuf> = match &scope {
             Some(s) => vec![s.clone()],
-            None => self.pinned.borrow().iter().filter(|p| super::remote::is_dir(&p)).cloned().collect(),
+            None => self.pinned.borrow().iter()
+                .filter(|p| view != DrawerView::Files || super::remote::is_dir(p))
+                .cloned().collect(),
         };
         let global: Vec<PathBuf> = self.global.borrow().iter().filter(|p| super::remote::is_dir(&p)).cloned().collect();
         // the global view's third group: every repository a session changed that isn't pinned
@@ -1110,31 +1119,17 @@ impl FolderTree {
             }
         }
         roots.dedup();
-        // the global view with nothing but home: say how to get a folder into it
-        self.hint.set_visible(!self.diff_mode.get() && scope.is_none() && roots.is_empty() && global.is_empty() && touched.is_empty());
-        // the rows to show: the scoped folder alone, or the global view's groups under their
-        // captions (a group that is empty has no caption)
-        let text = |p: &PathBuf| p.to_string_lossy().into_owned();
-        let wanted: Vec<String> = match &scope {
-            Some(_) => roots.iter().map(text).collect(),
-            None => {
-                let mut w: Vec<String> = Vec::new();
-                let mut section = |caption: &str, paths: &[PathBuf]| {
-                    if !paths.is_empty() {
-                        w.push(format!("{SECTION}{caption}"));
-                        w.extend(paths.iter().map(text));
-                    }
-                };
-                section("Pinned here", &roots);
-                section("Global pins", &global);
-                section("Repositories with changes", &touched);
-                // home is its own caption: the row reads "Home" and opens on click (decorate)
-                if !roots.contains(&home) && !global.contains(&home) && !touched.contains(&home) {
-                    w.push(text(&home));
-                }
-                w
-            }
-        };
+        let empty = scope.is_none() && roots.is_empty();
+        self.hint.set_visible(view != DrawerView::Diff && empty
+            && (view == DrawerView::Tree || (global.is_empty() && touched.is_empty())));
+        self.hint.set_text(if view == DrawerView::Tree {
+            "Nothing pinned to this session — switch to Files to browse and pin a folder or file."
+        } else {
+            "Nothing pinned to this session — pin a folder with + on its row, or open one from Home."
+        });
+        let wanted = root_rows(view, scope.as_deref(), &roots, &global, &touched, &home);
+        *self.search_roots.borrow_mut() = wanted.iter()
+            .filter(|row| !row.starts_with(SECTION)).map(PathBuf::from).collect();
         // the search box says, on hover, what it searches and when the badges were last read
         let when = glib::DateTime::now_local().ok().and_then(|d| d.format("%H:%M:%S").ok()).map(|s| s.to_string()).unwrap_or_default();
         let from_sessions = all.iter().filter(|c| !c.ignored).count();
@@ -1152,28 +1147,48 @@ impl FolderTree {
             let g = ghosts(&self.badges.borrow(), &dir);
             sync_children(&dir, &store, &g);
         }
+        let view_changed = self.rendered_view.borrow().as_ref() != Some(&(view, scope.clone()));
         // keep the tree if the roots didn't change (expansion state survives); search results stay
         // what they are — the badges on them are fresh, which is what the refresh was for
         let current: Vec<String> = (0..self.roots.n_items())
             .filter_map(|i| self.roots.item(i).and_downcast::<gtk::StringObject>().map(|o| o.string().to_string()))
             .collect();
-        if current != wanted && self.query.borrow().is_empty() {
+        let rebuild_roots = current != wanted && (self.query.borrow().is_empty() || view_changed);
+        if rebuild_roots {
             self.roots.remove_all();
             for r in &wanted {
                 self.roots.append(&gtk::StringObject::new(r));
             }
             self.selection.set_selected(gtk::INVALID_LIST_POSITION);
+        }
+        if self.query.borrow().is_empty() && (rebuild_roots || view_changed) {
             if scope.is_some() {
                 self.open_levels();
+            } else if view == DrawerView::Tree {
+                // Expand the first folder, skipping individually pinned files. Ordinary
+                // refreshes preserve any folders the person subsequently closed or opened.
+                for i in 0..self.tree.n_items() {
+                    if let Some(row) = self.tree.row(i)
+                        && row.depth() == 0
+                        && path_of(&row).is_some_and(|p| super::remote::is_dir(&p))
+                    {
+                        row.set_expanded(true);
+                        break;
+                    }
+                }
             }
         }
         // every row on screen shows its badge as it is now
         for item in self.bound.borrow().clone() {
             (self.decorate)(&item);
         }
-        *self.rendered_scope.borrow_mut() = Some(scope.clone());
-        if !self.diff_mode.get() {
+        *self.rendered_view.borrow_mut() = Some((self.drawer_view.get(), scope.clone()));
+        if self.drawer_view.get() != DrawerView::Diff {
             self.panes.set_visible_child_name("tree");
+        }
+        if view_changed && !self.query.borrow().is_empty() {
+            let query = self.query.borrow().clone();
+            self.search(&query);
         }
         self.refresh_stat(false);
         self.view.queue_draw();

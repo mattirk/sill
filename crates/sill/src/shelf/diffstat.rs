@@ -6,6 +6,8 @@
 //! Counts come from `_sill/repos.summary` per file, off the GTK thread; a rescan that finds the same
 //! status and totals as the last one stops there, so the 2 s poll of a shown drawer costs two calls
 //! per repository while nothing changes.
+//! Header totals use that same repository summary as pin chips: tracked lines versus HEAD
+//! and a separate untracked-file count, independent of per-row counting limits.
 
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -20,7 +22,7 @@ const COUNT_CAP: usize = 150;
 /// An untracked file's lines are counted only below this size.
 const NEW_FILE_MAX: u64 = 1_000_000;
 
-type Statuses = Vec<(PathBuf, Vec<(PathBuf, String)>)>;
+type Statuses = Vec<(PathBuf, Vec<(PathBuf, String)>, Option<(u64, u64, u64)>)>;
 /// Per list row: the file's (repository, path below it); None for captions and notes.
 type Rows = Rc<RefCell<Vec<Option<(PathBuf, PathBuf)>>>>;
 type OpenDiff = Rc<RefCell<Option<Box<dyn Fn(&Path, &Path)>>>>;
@@ -37,6 +39,8 @@ struct Entry {
 struct Repo {
     root: PathBuf,
     entries: Vec<Entry>,
+    /// Same tracked-line totals and untracked-file count used by pin chips, without row caps.
+    summary: Option<(u64, u64, u64)>,
 }
 
 /// One scan: the repositories' status and totals (what decides whether counting is needed again).
@@ -47,7 +51,7 @@ fn signature(repos: &[PathBuf]) -> (String, Statuses) {
         let status = super::remote::git_status(r).unwrap_or_default();
         let totals = super::remote::git_summary(r);
         sig.push_str(&format!("{r:?}{status:?}{totals:?};"));
-        out.push((r.clone(), status));
+        out.push((r.clone(), status, totals));
     }
     (sig, out)
 }
@@ -143,7 +147,7 @@ impl DiffStat {
             }
             let shown = statuses
                 .into_iter()
-                .map(|(root, status)| {
+                .map(|(root, status, summary)| {
                     let entries = status
                         .into_iter()
                         .enumerate()
@@ -152,7 +156,7 @@ impl DiffStat {
                             Entry { rel, status: st, counts }
                         })
                         .collect();
-                    Repo { root, entries }
+                    Repo { root, entries, summary }
                 })
                 .collect();
             let _ = tx.send_blocking(Some((sig, shown)));
@@ -181,10 +185,7 @@ impl DiffStat {
             rows.push(None);
         }
         for repo in repos {
-            let (files, add, del) = repo.entries.iter().fold((0, 0, 0), |(f, a, d), e| {
-                let (ea, ed) = e.counts.unwrap_or((0, 0));
-                (f + 1, a + ea, d + ed)
-            });
+            let files = repo.entries.len();
             let head = super::remote::head(&repo.root).map(|(h, _)| format!("  git {h}")).unwrap_or_default();
             // the repository's folder name; the whole path is the tooltip
             let name = repo.root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| repo.root.display().to_string());
@@ -194,18 +195,9 @@ impl DiffStat {
             caption.set_ellipsize(gtk::pango::EllipsizeMode::End);
             caption.add_css_class("sill-tree-section");
             caption.set_tooltip_text(Some(&repo.root.display().to_string()));
-            let total = gtk::Label::new(Some(&if files == 0 {
-                "clean".to_string()
-            } else {
-                format!("{files} file{} · +{add} −{del}", if files == 1 { "" } else { "s" })
-            }));
+            let total = gtk::Label::new(Some(&summary_label(files, repo.summary)));
             total.add_css_class("sill-tree-section");
-            total.set_tooltip_text(Some(&format!(
-                "{files} file{} changed, {add} insertion{}(+), {del} deletion{}(−) against HEAD (untracked files count as insertions)",
-                if files == 1 { "" } else { "s" },
-                if add == 1 { "" } else { "s" },
-                if del == 1 { "" } else { "s" },
-            )));
+            total.set_tooltip_text(Some("Same totals as the repository's pin chip: +tracked insertions −tracked deletions against HEAD, ?untracked files. Untracked row line counts are separate; per-row count limits do not affect these totals."));
             let hb = gtk::Box::new(gtk::Orientation::Horizontal, 6);
             hb.append(&caption);
             hb.append(&total);
@@ -232,6 +224,41 @@ impl DiffStat {
             }
         }
         *self.rows.borrow_mut() = rows;
+    }
+}
+
+fn summary_label(files: usize, summary: Option<(u64, u64, u64)>) -> String {
+    let Some((add, del, untracked)) = summary else {
+        return format!("{files} files · counts unavailable");
+    };
+    if files == 0 && add == 0 && del == 0 && untracked == 0 {
+        return "clean".into();
+    }
+    let mut text = format!("{files} file{} · +{add} −{del}", if files == 1 { "" } else { "s" });
+    if untracked > 0 {
+        text.push_str(&format!(" ?{untracked}"));
+    }
+    text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn header_uses_repository_totals_even_when_row_counts_are_missing_or_untracked() {
+        let repo = Repo {
+            root: PathBuf::from("/repo"),
+            entries: vec![
+                Entry { rel: "tracked".into(), status: "M".into(), counts: None },
+                Entry { rel: "new".into(), status: "?".into(), counts: Some((900, 0)) },
+            ],
+            summary: Some((42, 7, 1)),
+        };
+        assert_eq!(summary_label(repo.entries.len(), repo.summary), "2 files · +42 −7 ?1");
+        assert_eq!(summary_label(200, Some((600, 80, 0))), "200 files · +600 −80");
+        assert_eq!(summary_label(0, Some((0, 0, 0))), "clean");
+        assert!(summary_label(2, None).contains("unavailable"));
     }
 }
 

@@ -82,9 +82,23 @@ pub(super) fn head_label(repo: &Path) -> Option<(String, bool)> {
 
 pub(super) fn find_files(bases: &[std::path::PathBuf], q: &str, cap: usize, visits: usize) -> (Vec<std::path::PathBuf>, bool) {
     let mut found = Vec::new();
+    let mut matched = std::collections::HashSet::new();
     let mut seen = 0;
     let mut cut = false;
     'bases: for base in bases {
+        let Ok(metadata) = std::fs::symlink_metadata(base) else { continue };
+        if metadata.is_file() {
+            seen += 1;
+            if seen > visits || found.len() >= cap { cut = true; break }
+            let hay = if q.contains('/') {
+                base.to_string_lossy().to_lowercase()
+            } else {
+                base.file_name().unwrap_or_default().to_string_lossy().to_lowercase()
+            };
+            if hay.contains(q) && matched.insert(base.clone()) { found.push(base.clone()); }
+            continue;
+        }
+        if !metadata.is_dir() { continue }
         let mut queue = std::collections::VecDeque::from([base.clone()]);
         while let Some(dir) = queue.pop_front() {
             let Ok(rd) = std::fs::read_dir(dir) else { continue };
@@ -94,7 +108,7 @@ pub(super) fn find_files(bases: &[std::path::PathBuf], q: &str, cap: usize, visi
                 let name = e.file_name().to_string_lossy().into_owned();
                 let path = e.path();
                 let hay = if q.contains('/') { path.strip_prefix(base).map(|p| p.to_string_lossy().to_lowercase()).unwrap_or_default() } else { name.to_lowercase() };
-                if hay.contains(q) { found.push(path.clone()); }
+                if hay.contains(q) && matched.insert(path.clone()) { found.push(path.clone()); }
                 if e.file_type().is_ok_and(|t| t.is_dir()) && !name.starts_with('.') && !matches!(name.as_str(), "target" | "node_modules" | "__pycache__" | "build" | "dist") { queue.push_back(path); }
             }
         }
@@ -125,6 +139,37 @@ mod tests {
         let (found, cut) = find_files(&[d.clone()], "", 2, 10_000);
         assert_eq!(found.len(), 2);
         assert!(cut);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn find_files_includes_explicit_file_bases() {
+        let d = std::env::temp_dir().join(format!("sill-find-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("notes")).unwrap();
+        let file = d.join("notes/Plan.md");
+        std::fs::write(&file, "").unwrap();
+        for q in ["plan", "notes/plan"] {
+            assert_eq!(find_files(&[file.clone()], q, 100, 10_000), (vec![file.clone()], false));
+        }
+        assert_eq!(find_files(&[file.clone()], "absent", 100, 10_000), (vec![], false));
+        assert_eq!(find_files(&[d.clone(), file.clone()], "plan", 100, 10_000), (vec![file], false));
+        let link = d.join("Plan-link.md");
+        std::os::unix::fs::symlink("notes/Plan.md", &link).unwrap();
+        assert_eq!(find_files(&[link], "plan", 100, 10_000), (vec![], false));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn find_files_explicit_files_respect_limits() {
+        let d = std::env::temp_dir().join(format!("sill-find-file-limits-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let file = d.join("Plan.md");
+        std::fs::write(&file, "").unwrap();
+        assert_eq!(find_files(&[file.clone()], "plan", 0, 100), (vec![], true));
+        assert_eq!(find_files(&[file.clone()], "plan", 100, 0), (vec![], true));
+        assert_eq!(find_files(&[file.clone()], "plan", 1, 1), (vec![file], false));
         std::fs::remove_dir_all(&d).unwrap();
     }
 
