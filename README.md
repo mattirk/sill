@@ -17,7 +17,8 @@ the whole machine, but what it may change, reach and keep is up to you.
 
 Sill reduces what an agent can do to your machine; it does not guarantee security. The jail shares the
 host's kernel unless you use the VM, pinned folders are written directly, and the code has not had an
-independent audit.
+independent audit. See [SECURITY.md](SECURITY.md) for the known limits and how to report a
+problem.
 
 Sill is developed with AI coding agents, run inside sill itself. The design, the direction and the
 review of what is merged are the author's. Review the code yourself before relying on it.

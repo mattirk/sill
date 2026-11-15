@@ -12,6 +12,7 @@
 > - The comparison with other tools is from their documentation as read on 2026-11-02 and may be
 >   out of date.
 > - Sill has had no independent audit.
+> - The current security statement and how to report a problem are in [SECURITY.md](../SECURITY.md).
 
 Third pass after SPEC §4.10 and §4.11 (both 2026-10-28). Four code reviews in parallel (jail escape
 surface; network egress and agent installs; host-side consumers of agent data; root install and host
