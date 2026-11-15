@@ -22,8 +22,9 @@ impl Entry {
     pub fn needs_setup(&self) -> bool {
         self.installed.is_some() && self.definition.as_ref().is_some_and(|d| d.home_paths.is_none())
     }
+    /// The daemon's word (`sill_core::registry::TESTED`); no list is kept here.
     pub fn tested(&self) -> bool {
-        ["claude-acp", "codex-acp", "antigravity-acp"].contains(&self.registry.entry_id.as_str())
+        self.registry.tested
     }
     pub fn selector(&self) -> api::EntryKey {
         api::EntryKey {

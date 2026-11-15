@@ -79,7 +79,7 @@ fn source(entry: &sill_core::registry::Entry) -> &'static str {
 fn summary(entry: &sill_core::registry::Entry) -> api::RegistryEntry {
     api::RegistryEntry { entry_id: entry.id.clone(), name: entry.name.clone(), version: entry.version.clone(), source: source(entry).into(), installable: entry.how().is_some(),
         description:entry.description.clone(),repository:entry.repository.clone(),website:entry.website.clone(),
-        install_kind:entry.how().map(str::to_owned),install_spec:entry.install_spec(),package_name:entry.package_name(),has_icon:entry.icon.is_some(),builtin_agent_id:sill_core::registry::builtin_for(entry).map(str::to_owned),
+        install_kind:entry.how().map(str::to_owned),install_spec:entry.install_spec(),package_name:entry.package_name(),has_icon:entry.icon.is_some(),builtin_agent_id:sill_core::registry::builtin_for(entry).map(str::to_owned),tested:sill_core::registry::is_tested(&entry.id),
         newer: entry.newer.as_ref().map(|e| Box::new(summary(e))) }
 }
 fn select(home: &Path, a: &api::RegistryInstall) -> Result<sill_core::registry::Entry> {

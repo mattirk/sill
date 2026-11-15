@@ -95,7 +95,7 @@ mod tests {
     #[test]
     fn registry_presentation_retains_daemon_platform_and_trust() {
         let wire=sill_proto::host::RegistryEntry {entry_id:"test".into(),name:"Test".into(),version:"1".into(),source:"snapshot".into(),installable:true,
-            description:"Details".into(),repository:Some("https://example.com/source".into()),website:None,install_kind:Some("binary".into()),install_spec:"daemon-platform.tar.gz".into(),package_name:None,has_icon:false,builtin_agent_id:Some("codex".into()),newer:None};
+            description:"Details".into(),repository:Some("https://example.com/source".into()),website:None,install_kind:Some("binary".into()),install_spec:"daemon-platform.tar.gz".into(),package_name:None,has_icon:false,builtin_agent_id:Some("codex".into()),tested:false,newer:None};
         let entry=RegistryEntry::try_from(wire.clone()).unwrap();
         assert_eq!(entry.trust,crate::registry::Trust::Snapshot);
         assert_eq!(entry.how(),Some("binary"));

@@ -84,6 +84,10 @@ pub struct RegistryEntry {
     pub package_name: Option<String>,
     pub has_icon: bool,
     pub builtin_agent_id: Option<String>,
+    /// Known to work inside sill's jail end to end (install, login, a prompt). The daemon's list
+    /// is the only one; a frontend shows the other entries on request.
+    #[serde(default)]
+    pub tested: bool,
     pub newer: Option<Box<RegistryEntry>>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

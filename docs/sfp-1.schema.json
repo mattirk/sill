@@ -5747,6 +5747,11 @@
         "source": {
           "type": "string"
         },
+        "tested": {
+          "default": false,
+          "description": "Known to work inside sill's jail end to end (install, login, a prompt). The daemon's list\nis the only one; a frontend shows the other entries on request.",
+          "type": "boolean"
+        },
         "version": {
           "type": "string"
         },
