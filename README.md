@@ -1,6 +1,6 @@
 # sill
 
-**A shelf for AI coding agents.** Sill runs Claude Code, Codex, Kimi Code or any
+**A shelf for AI coding agents.** Sill runs Claude Code, OpenCode, Kimi Code or any
 [ACP](https://agentclientprotocol.com) agent in a jail on your own machine or remote box. The agent sees
 the whole machine, but what it may change, reach and keep is up to you.
 
@@ -22,7 +22,17 @@ independent audit.
 Sill is developed with AI coding agents, run inside sill itself. The design, the direction and the
 review of what is merged are the author's. Review the code yourself before relying on it.
 
-## Run
+## Install
+
+On Linux (x86_64) or an Apple Silicon Mac, paste this in a terminal. The script asks what to install
+before it changes anything and verifies the download; the packages themselves are on the
+[download page](https://mattirk.github.io/sill/).
+
+```bash
+curl -fsSL https://mattirk.github.io/sill/install.sh | sh
+```
+
+## Build from source
 
 **Linux desktop** — bubblewrap, cgroup v2, kernel ≥ 6.2, Rust ≥ 1.90:
 

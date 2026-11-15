@@ -22,6 +22,20 @@ The workflow can also be dispatched against an existing version tag. Branch refs
 and mismatched versions are rejected. Release jobs do not run in the private repo.
 Tagging does not publish a release immediately: the final publish is a human step.
 
+## Download page and installer
+
+`site/` is the download page, served by GitHub Pages at <https://mattirk.github.io/sill/>.
+The public `pages` workflow deploys it on pushes to `main` that change `site/`, and on
+manual dispatch. It needs Settings → Pages → Source set to **GitHub Actions** once.
+
+`site/install.sh` is what the page tells people to paste (`curl … | sh`). It follows
+`releases/latest` to the newest **published** release, so a draft is never offered, and it
+expects the package names the release workflow produces (`sill-VERSION-x86_64.tar.gz`,
+`sill_VERSION_amd64.deb`, `sill-VERSION-macos-arm64.dmg`, `SHA256SUMS`). Rename them in both
+places. `python3 packaging/test_release.py InstallTests` runs it against a pretend release.
+After publishing a release, run the command on a Linux machine and a Mac: the tests do not
+download from GitHub.
+
 ## Mac image and packaging
 
 The local Apple Silicon build remains:

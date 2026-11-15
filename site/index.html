@@ -1,0 +1,73 @@
+<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>sill — a shelf for AI coding agents</title>
+<meta name=description content="Sill runs AI coding agents in a jail on your own machine. Install it on Linux or an Apple Silicon Mac.">
+<link rel=icon href="icon.svg">
+<style>
+:root{--bg:#1d1f23;--fg:#e6e6e6;--dim:#8d929b;--line:#33373e;--code:#25282e;--accent:#78aeed}
+@media(prefers-color-scheme:light){:root{--bg:#fafafa;--fg:#1e1e1e;--dim:#6b6f76;--line:#dcdcdc;--code:#f0f0f0;--accent:#1c71d8}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:44rem;margin:0 auto;padding:5rem 1.5rem 4rem}
+header{display:flex;align-items:center;gap:.8rem;margin-bottom:3rem}header img{width:40px}
+header b{font-size:1.2rem}header nav{margin-left:auto;display:flex;gap:1.4rem;font-size:.9rem}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+h1{font-size:2.3rem;line-height:1.15;margin:0 0 1rem;font-weight:600;letter-spacing:-.02em}
+.lead{color:var(--dim);font-size:1.1rem;max-width:36rem;margin:0 0 2.5rem}
+.cmd{display:flex;align-items:center;background:var(--code);border-left:2px solid var(--accent);padding:.9rem 1rem;gap:1rem}
+.cmd code{flex:1;font:14.5px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-x:auto;white-space:nowrap}
+button{font:inherit;font-size:.85rem;color:var(--fg);background:none;border:1px solid var(--line);padding:.3rem .8rem;cursor:pointer}
+button:hover{border-color:var(--accent);color:var(--accent)}
+.note{color:var(--dim);font-size:.88rem;margin:.7rem 0 0}
+h2{font-size:.78rem;text-transform:uppercase;letter-spacing:.09em;color:var(--dim);font-weight:600;margin:3.2rem 0 .4rem}
+.rows{border-top:1px solid var(--line)}
+.row{display:flex;align-items:baseline;gap:1rem;padding:.8rem 0;border-bottom:1px solid var(--line)}
+.row span{color:var(--dim);font-size:.9rem;flex:1}.row b{font-weight:500;min-width:11rem}
+ol{padding-left:1.2rem;color:var(--dim);font-size:.95rem}ol li{margin:.3rem 0}
+footer{margin-top:4rem;padding-top:1.2rem;border-top:1px solid var(--line);color:var(--dim);font-size:.85rem}
+</style>
+<main>
+<header><img src="icon.svg" alt=""><b>sill</b>
+<nav><a href="https://github.com/mattirk/sill">GitHub</a><a href="https://github.com/mattirk/sill/blob/main/docs/security.md">Security</a><a href="https://github.com/mattirk/sill/releases/latest">Releases</a></nav></header>
+
+<h1>A shelf for AI coding agents.</h1>
+<p class=lead>Sill runs Claude Code, OpenCode, Kimi Code or any ACP agent in a jail on your own machine. The agent sees the whole machine; what it may change, reach and keep is up to you.</p>
+
+<div class=cmd><code id=cmd>curl -fsSL https://mattirk.github.io/sill/install.sh | sh</code><button data-copy="#cmd">Copy</button></div>
+<p class=note>Paste in a terminal on Linux or an Apple Silicon Mac. The script asks before it changes anything — <a href="install.sh">read it first</a>.</p>
+
+<h2>What the script does</h2>
+<ol>
+<li>Finds the latest release for your system and architecture.</li>
+<li>Asks what to install: the Mac app, the Debian package, or the tarball — or only show the plan.</li>
+<li>Verifies the download against the release's SHA256SUMS.</li>
+<li>Installs, asks <code>sudo</code> when needed.</li>
+</ol>
+
+<h2>Or download directly · <span data-version>latest</span></h2>
+<div class=rows>
+<div class=row><b>Mac</b><span>Apple Silicon · Sill.app with its Linux VM</span><a data-asset="macos-arm64\.dmg$" href="https://github.com/mattirk/sill/releases/latest">Sill.dmg</a></div>
+<div class=row><b>Debian / Ubuntu</b><span>x86_64 · <code>sudo apt install ./sill_*.deb</code></span><a data-asset="amd64\.deb$" href="https://github.com/mattirk/sill/releases/latest">.deb</a></div>
+<div class=row><b>Other Linux</b><span>x86_64 · unpack, <code>sudo ./sill init</code></span><a data-asset="x86_64\.tar\.gz$" href="https://github.com/mattirk/sill/releases/latest">.tar.gz</a></div>
+<div class=row><b>Checksums</b><span>one file covering every package</span><a data-asset="^SHA256SUMS$" href="https://github.com/mattirk/sill/releases/latest">SHA256SUMS</a></div>
+</div>
+<p class=note>Linux needs bubblewrap, cgroup v2 and a kernel ≥ 6.2. The Mac app is not notarized yet: on first open use System Settings → Privacy &amp; Security → Open Anyway.</p>
+
+<footer>Sill reduces what an agent can do to your machine; it does not guarantee security. Apache-2.0.</footer>
+</main>
+<script>
+const REPO = 'mattirk/sill';
+document.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', async () => {
+  const text = document.querySelector(b.dataset.copy).textContent.trim();
+  try { await navigator.clipboard.writeText(text); }
+  catch { const r = document.createRange(); r.selectNodeContents(document.querySelector(b.dataset.copy));
+          getSelection().removeAllRanges(); getSelection().addRange(r); document.execCommand('copy'); }
+  const old = b.textContent; b.textContent = 'Copied'; setTimeout(() => b.textContent = old, 1500);
+}));
+fetch(`https://api.github.com/repos/${REPO}/releases/latest`).then(r => r.ok ? r.json() : null).then(rel => {
+  if (!rel) return;
+  document.querySelectorAll('[data-version]').forEach(e => e.textContent = rel.tag_name);
+  document.querySelectorAll('a[data-asset]').forEach(a => {
+    const hit = rel.assets.find(x => new RegExp(a.dataset.asset).test(x.name));
+    if (hit) a.href = hit.browser_download_url;
+  });
+}).catch(() => {});
+</script></html>

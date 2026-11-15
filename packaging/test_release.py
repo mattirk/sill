@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Portable release contract tests; no Apple tools, credentials or VM required."""
 import gzip
+import hashlib
+import io
 import os
 from pathlib import Path
+import pty
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 
@@ -125,6 +129,146 @@ class ReleaseTests(unittest.TestCase):
         self.assertNotEqual(check("refs/heads/main"), 0)
         lock.write_text('[[package]]\nname = "demo"\nversion = "0.0.1"\n')
         self.assertNotEqual(check("refs/tags/v0.1.0"), 0)
+
+
+class InstallTests(unittest.TestCase):
+    """site/install.sh against a pretend release: curl, sudo, apt-get and uname are stand-ins on PATH,
+    the answers are typed on a pseudo-terminal because the script asks on /dev/tty."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        (self.root / "bin").mkdir()
+        self.release = self.root / "release"
+        self.release.mkdir()
+        self.log = self.root / "log"
+        self.log.write_text("")
+        self.env = dict(os.environ, PATH=str(self.root / "bin") + ":" + os.environ["PATH"],
+                        LOG=str(self.log), RELEASE=str(self.release), HOME=str(self.root))
+        self.env.pop("SILL_VERSION", None)
+        self.env.pop("SILL_DRY_RUN", None)
+        self.system("Linux", "x86_64")
+        self.latest("https://github.com/mattirk/sill/releases/tag/v0.1.0")
+        self.command("sudo", 'echo "sudo $*" >> "$LOG"; exec "$@"')
+        self.command("apt-get", 'echo "apt-get $*" >> "$LOG"')
+        self.command("sill", 'echo "sill $*" >> "$LOG"')
+        (self.release / "sill_0.1.0_amd64.deb").write_bytes(b"a package")
+        script = b'#!/bin/sh\necho "unpacked sill $*" >> "$LOG"\n'
+        with tarfile.open(self.release / "sill-0.1.0-x86_64.tar.gz", "w:gz") as tar:
+            info = tarfile.TarInfo("sill-0.1.0-x86_64/sill")
+            info.size, info.mode = len(script), 0o755
+            tar.addfile(info, io.BytesIO(script))
+        self.sums()
+
+    def command(self, name, body):
+        p = self.root / "bin" / name
+        p.write_text("#!/bin/sh\nset -eu\n" + body + "\n")
+        p.chmod(0o755)
+
+    def system(self, kernel, machine):
+        self.command("uname", f'case "$1" in -s) echo {kernel};; -m) echo {machine};; esac')
+
+    def latest(self, url):
+        # `curl … -I … URL/latest` answers where the redirect ends; `curl … -o FILE URL` copies a release file
+        self.command("curl", f"""out=; head=; for a in "$@"; do
+  if [ "$out" = next ]; then out=$a; fi
+  case "$a" in -o) out=next;; -*I*) head=1;; esac; url=$a
+done
+if [ -n "$head" ]; then printf %s '{url}'; exit 0; fi
+echo "curl $url" >> "$LOG"
+cp "$RELEASE/${{url##*/}}" "$out" """)
+
+    def sums(self):
+        lines = [f"{hashlib.sha256(f.read_bytes()).hexdigest()}  {f.name}\n"
+                 for f in sorted(self.release.iterdir()) if f.name != "SHA256SUMS"]
+        (self.release / "SHA256SUMS").write_text("".join(lines))
+
+    def install(self, answers, **env):
+        """Runs the script with `answers` typed on its terminal: (exit status, what it printed)."""
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.execvpe("sh", ["sh", str(ROOT / "site/install.sh")], dict(self.env, **env))
+        os.write(fd, answers.encode())
+        out = b""
+        while True:
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            out += chunk
+        os.close(fd)
+        return os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]), out.decode(errors="replace")
+
+    def test_debian_package_is_verified_and_installed(self):
+        status, out = self.install("1\ny\n")
+        self.assertEqual(status, 0, out)
+        self.assertIn("checksum ok", out)
+        log = self.log.read_text()
+        self.assertIn("releases/download/v0.1.0/sill_0.1.0_amd64.deb", log)
+        self.assertRegex(log, r"sudo apt-get install -y \S+/sill_0\.1\.0_amd64\.deb")
+        self.assertIn("sill init --user", log)
+
+    def test_tarball_runs_its_own_init_and_user_start_can_be_declined(self):
+        status, out = self.install("2\nn\n")
+        self.assertEqual(status, 0, out)
+        log = self.log.read_text()
+        self.assertIn("unpacked sill init", log)
+        self.assertNotIn("sill init --user", log)
+
+    def test_wrong_checksum_installs_nothing(self):
+        (self.release / "sill_0.1.0_amd64.deb").write_bytes(b"another package")
+        status, out = self.install("1\ny\n")
+        self.assertNotEqual(status, 0)
+        self.assertIn("checksum mismatch", out)
+        self.assertNotIn("sudo", self.log.read_text())
+
+    def test_cancel_plan_and_unknown_answers_change_nothing(self):
+        for answers in ["4\n", "\n", "nonsense\n", "9\n", "3\ny\n"]:
+            status, out = self.install(answers)
+            self.assertEqual(status, 0, out)
+            self.assertEqual(self.log.read_text(), "", answers)
+        self.assertIn("would run: sudo", out)
+
+    def test_without_a_terminal_it_stops_before_anything(self):
+        r = subprocess.run(["sh", str(ROOT / "site/install.sh")], env=self.env, stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, start_new_session=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no terminal", r.stderr)
+        self.assertEqual(self.log.read_text(), "")
+
+    def test_mac_plan(self):
+        self.system("Darwin", "arm64")
+        status, out = self.install("1\n", SILL_DRY_RUN="1")
+        self.assertEqual(status, 0, out)
+        self.assertIn("releases/download/v0.1.0/sill-0.1.0-macos-arm64.dmg", out)
+        self.assertIn("would run: cp -R", out)
+        self.assertEqual(self.log.read_text(), "")
+        self.system("Darwin", "x86_64")
+        status, out = self.install("1\n", SILL_DRY_RUN="1")
+        self.assertNotEqual(status, 0)
+        self.assertIn("Apple Silicon", out)
+
+    def test_systems_without_a_package_and_a_missing_release_are_named(self):
+        self.system("Linux", "aarch64")
+        status, out = self.install("1\n")
+        self.assertNotEqual(status, 0)
+        self.assertIn("no Linux package for aarch64", out)
+        self.system("Linux", "x86_64")
+        self.latest("https://github.com/mattirk/sill/releases")
+        status, out = self.install("1\n")
+        self.assertNotEqual(status, 0)
+        self.assertIn("no published release", out)
+
+    def test_page_offers_the_script_it_ships_and_the_names_the_release_builds(self):
+        page = (ROOT / "site/index.html").read_text()
+        self.assertIn("curl -fsSL https://mattirk.github.io/sill/install.sh | sh", page)
+        self.assertIn('href="install.sh"', page)
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        self.assertIn("macos-arm64.dmg", workflow)
+        self.assertIn("macos-arm64", page)
 
 
 if __name__ == "__main__":

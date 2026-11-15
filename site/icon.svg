@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- sill's tray icon: the herring resting on its sill. Single colour on the plate, scales from 16 px
+       up. While an agent works the trays draw it moving (the sill ripples, the fish rides it). The
+       application icon (panels, menus) is sill.svg, the herring in a jar. -->
+  <!-- keep this note inside <svg>: gdk-pixbuf (Cinnamon's icons) tells an SVG by
+       the opening tag in the file's first bytes -->
+  <rect x="4" y="4" width="56" height="56" rx="12" fill="#2b2f36"/>
+  <rect x="10" y="43" width="44" height="4" rx="1.5" fill="#e8e8e8"/>
+  <g transform="translate(10.4 8.8) scale(1.8)"><path fill="#e8e8e8" d="M1.5 12C4.5 6.5 12 5 17.5 10.5L22.5 6.5 20.5 12 22.5 17.5 17.5 13.5C12 19 4.5 17.5 1.5 12ZM4.7 11a1.3 1.3 0 1 0 2.6 0a1.3 1.3 0 1 0-2.6 0"/></g>
+</svg>
