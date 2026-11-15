@@ -2027,7 +2027,10 @@ impl App {
         if let Some(shelf) = self.workspace_shelf(view) {
             column = column.push(rule::horizontal(1).style(style::rule_style(P.border))).push(shelf);
         }
-        column
+        // Keep the shelf in one stable slot: inserting its rows beside the composer
+        // would replace the editor's widget state and lose focus when a turn ends.
+        Column::new()
+            .push(column)
             .push(rule::horizontal(1).style(style::rule_style(P.border)))
             .push(container(composer).width(Fill).style(style::fill(P.surface)))
         .into()

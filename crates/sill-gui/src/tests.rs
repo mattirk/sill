@@ -3059,6 +3059,34 @@ fn cancelled_queued_prompts_disappear_from_the_composer() {
 }
 
 #[test]
+fn workspace_shelf_preserves_prompt_focus_between_turns() {
+    let (mut app, _) = App::new(true, None);
+    let detail = page_workspace("w1", "demo", &["file.rs"]);
+    app.current_mut().unwrap().workspaces.loaded = Some(sill_client::workspaces::Loaded {
+        view: serde_json::from_value(json!({
+            "workspaces_mode": true, "workspaces": [detail.workspace.clone()], "live": []
+        })).unwrap(),
+        details: vec![detail],
+    });
+    type_text(&mut app, "next prompt");
+    let mut live = Live::new((720.0, 860.0));
+    live.operations.push(Box::new(
+        iced::advanced::widget::operation::focusable::focus(iced::widget::Id::new("prompt")),
+    ));
+    live.frame(&app, |_| {});
+    for activity in ["idle", "working", "idle"] {
+        app.current_mut().unwrap().conversation.session.as_mut().unwrap().activity = activity.into();
+        assert_eq!(app.workspace_shelf(app.current().unwrap()).is_some(), activity == "idle");
+        let messages = live.frame(&app, |ui| {
+            ui.send(vec![key(iced::keyboard::key::Named::Enter)])
+        });
+        assert!(messages.iter().any(|m| matches!(m,
+            Message::Session(_, session::Event::Send)
+        )), "prompt lost focus with activity {activity}: {messages:?}");
+    }
+}
+
+#[test]
 fn sending_restores_keyboard_focus_to_the_prompt() {
     let (mut app, _) = App::new(true, None);
     let mut live = Live::new((720.0, 860.0));
