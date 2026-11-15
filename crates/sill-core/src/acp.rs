@@ -425,6 +425,10 @@ pub enum AutoPermission {
 #[derive(Debug, Clone)]
 pub struct SessionOptions {
     pub cwd: std::path::PathBuf,
+    /// The session's pinned folders, sent as ACP `additionalDirectories` to an agent that
+    /// advertises them: `cwd` is always home, and an agent that confines its tools to its
+    /// workspace roots (Antigravity) refuses the pins without this.
+    pub roots: Vec<std::path::PathBuf>,
     pub auto: AutoPermission,
     /// Resume this agent session with `session/load` if the agent supports it.
     pub resume: Option<String>,
@@ -533,6 +537,7 @@ pub fn run_session(
                     .block_task()
                     .await?;
                 let can_load = init.agent_capabilities.load_session;
+                let roots = if init.agent_capabilities.session_capabilities.additional_directories.is_some() { opts.roots.clone() } else { vec![] };
                 let _ = events_loop.send(Event::Capabilities { images: init.agent_capabilities.prompt_capabilities.image }).await;
                 let auth_methods: Vec<AuthMethodInfo> = init.auth_methods.iter().map(auth_method_info).collect();
 
@@ -543,7 +548,7 @@ pub fn run_session(
                 loop {
                     let resume = opts.resume.clone().filter(|_| can_load);
                     let attempt: Result<(), agent_client_protocol::Error> = match resume {
-                        Some(id) => match cx.load_session(id, &opts.cwd).block_task().start_session().await {
+                        Some(id) => match cx.load_session_from(agent_client_protocol::schema::v1::LoadSessionRequest::new(id, opts.cwd.as_path()).additional_directories(roots.clone())).block_task().start_session().await {
                             Ok(restored) => {
                                 let mut session = restored.into_session();
                                 drive(&mut session, true, &auth_methods, &commands, &events_loop).await
@@ -551,10 +556,10 @@ pub fn run_session(
                             Err(e) if e.code == ErrorCode::AuthRequired => Err(e),
                             Err(e) => {
                                 tracing::warn!("session/load failed, starting fresh: {e}");
-                                open_fresh(&cx, &opts.cwd, &auth_methods, &commands, &events_loop).await
+                                open_fresh(&cx, &opts.cwd, &roots, &auth_methods, &commands, &events_loop).await
                             }
                         },
-                        None => open_fresh(&cx, &opts.cwd, &auth_methods, &commands, &events_loop).await,
+                        None => open_fresh(&cx, &opts.cwd, &roots, &auth_methods, &commands, &events_loop).await,
                     };
                     match attempt {
                         Ok(()) => return Ok(()),
@@ -621,6 +626,7 @@ fn session_open_timeout() -> std::time::Duration {
 async fn open_fresh(
     cx: &agent_client_protocol::ConnectionTo<Agent>,
     cwd: &Path,
+    roots: &[std::path::PathBuf],
     auth_methods: &[AuthMethodInfo],
     commands: &async_channel::Receiver<Command>,
     events_loop: &async_channel::Sender<Event>,
@@ -628,7 +634,7 @@ async fn open_fresh(
     let opened = std::rc::Rc::new(std::cell::Cell::new(false));
     let session = {
         let opened = opened.clone();
-        cx.build_session(cwd).block_task().run_until(async move |mut s| {
+        cx.build_session_from(agent_client_protocol::schema::v1::NewSessionRequest::new(cwd).additional_directories(roots.to_vec())).block_task().run_until(async move |mut s| {
             opened.set(true);
             drive(&mut s, false, auth_methods, commands, events_loop).await
         })
@@ -914,7 +920,7 @@ pub fn run_prompt(
     let (cmd_tx, cmd_rx) = async_channel::bounded(2);
     let (ev_tx, ev_rx) = async_channel::unbounded();
     cmd_tx.send_blocking(Command::Prompt(prompt.to_string(), vec![]))?;
-    let opts = SessionOptions { cwd: cwd.to_path_buf(), auto, resume: None };
+    let opts = SessionOptions { cwd: cwd.to_path_buf(), roots: vec![], auto, resume: None };
     let worker = std::thread::spawn(move || run_session(stream, opts, cmd_rx, ev_tx));
     while let Ok(ev) = ev_rx.recv_blocking() {
         // a login request ends the one-shot too: nobody is here to answer it

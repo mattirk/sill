@@ -278,6 +278,8 @@ enum DaemonCmd {
         #[arg(long)] socket: PathBuf,
         #[arg(long)] agent_socket: PathBuf,
         #[arg(long)] cwd: PathBuf,
+        /// A pinned folder of the session (repeatable): an ACP additional workspace root.
+        #[arg(long)] root: Vec<PathBuf>,
         #[arg(long)] resume: Option<String>,
         #[arg(long)] experimental_acp_v2: bool,
     },
@@ -1642,7 +1644,7 @@ fn session_cmd(cmd: SessionCmd) -> Result<()> {
 
 fn daemon_cmd(cmd: Option<DaemonCmd>) -> Result<()> {
     match cmd {
-        Some(DaemonCmd::Relay { session, socket, agent_socket, cwd, resume, experimental_acp_v2 }) => daemon::relay::run(&session, &socket, &agent_socket, &cwd, resume, experimental_acp_v2),
+        Some(DaemonCmd::Relay { session, socket, agent_socket, cwd, root, resume, experimental_acp_v2 }) => daemon::relay::run(&session, &socket, &agent_socket, &cwd, root, resume, experimental_acp_v2),
         None => daemon::run(),
         Some(DaemonCmd::Autostart { value }) => init::autostart(value.as_deref()),
         Some(DaemonCmd::Restart) => restart_daemon_only(),

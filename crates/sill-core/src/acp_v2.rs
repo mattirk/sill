@@ -261,16 +261,22 @@ pub fn run_session(
                     .cwd
                     .to_str()
                     .ok_or_else(|| Error::invalid_params().data("ACP cwd requires UTF-8"))?;
+                // the pinned folders, for an agent that advertises `additionalDirectories`
+                let roots: Vec<&str> = if init.capabilities.session.as_ref().is_some_and(|s| s.additional_directories.is_some()) {
+                    opts.roots.iter().filter_map(|p| p.to_str()).collect()
+                } else {
+                    vec![]
+                };
                 let (session_id, resumed, config) = loop {
                     let opened = if let Some(id) = &opts.resume {
                         let req: v2::ResumeSessionRequest =
-                            protocol(json!({"sessionId":id,"cwd":cwd}))?;
+                            protocol(json!({"sessionId":id,"cwd":cwd,"additionalDirectories":roots}))?;
                         cx.send_request(req)
                             .block_task()
                             .await
                             .and_then(|r| Ok((id.clone(), true, json(r)?)))
                     } else {
-                        let req: v2::NewSessionRequest = protocol(json!({"cwd":cwd}))?;
+                        let req: v2::NewSessionRequest = protocol(json!({"cwd":cwd,"additionalDirectories":roots}))?;
                         cx.send_request(req)
                             .block_task()
                             .await
@@ -682,6 +688,7 @@ mod tests {
                 ours,
                 SessionOptions {
                     cwd: "/tmp".into(),
+                    roots: vec![],
                     auto: crate::acp::AutoPermission::Ask,
                     resume: resume.then(|| "native".into()),
                 },

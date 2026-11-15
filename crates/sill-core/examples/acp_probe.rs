@@ -37,7 +37,7 @@ fn main() {
     let (ev_tx, ev_rx) = async_channel::unbounded();
     let home = std::path::PathBuf::from(std::env::var("HOME").unwrap());
     let t = std::thread::spawn(move || {
-        let _ = sill_core::acp::run_session(ours, SessionOptions { cwd: home, auto: AutoPermission::Ask, resume: None }, cmd_rx, ev_tx);
+        let _ = sill_core::acp::run_session(ours, SessionOptions { cwd: home, roots: vec![], auto: AutoPermission::Ask, resume: None }, cmd_rx, ev_tx);
     });
     let started = std::time::Instant::now();
     while let Ok(ev) = ev_rx.recv_blocking() {

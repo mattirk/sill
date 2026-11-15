@@ -356,14 +356,14 @@ impl Shared {
 
 /// Run the worker against the session's shim. Its lifetime is the ACP conversation plus delivery
 /// of its final Ended event; dropping the daemon connection never closes the agent connection.
-pub(crate) fn run(session: &str, socket: &Path, agent_socket: &Path, cwd: &Path, resume: Option<String>, experimental_acp_v2: bool) -> Result<()> {
+pub(crate) fn run(session: &str, socket: &Path, agent_socket: &Path, cwd: &Path, roots: Vec<PathBuf>, resume: Option<String>, experimental_acp_v2: bool) -> Result<()> {
     super::exit_on_panic();
-    run_with(session, socket, cwd, resume, experimental_acp_v2, ORPHAN_GRACE, || sill_core::shim::agent_stream(agent_socket))
+    run_with(session, socket, cwd, roots, resume, experimental_acp_v2, ORPHAN_GRACE, || sill_core::shim::agent_stream(agent_socket))
 }
 
 #[cfg(test)]
 fn run_stream(session: &str, socket: &Path, stream: UnixStream, cwd: &Path, resume: Option<String>) -> Result<()> {
-    run_with(session, socket, cwd, resume, false, ORPHAN_GRACE, || Ok(stream))
+    run_with(session, socket, cwd, vec![], resume, false, ORPHAN_GRACE, || Ok(stream))
 }
 
 /// The socket file's identity (device, inode), so the relay can tell its own listener from a
@@ -373,7 +373,7 @@ fn socket_identity(socket: &Path) -> Option<(u64, u64)> {
     std::fs::symlink_metadata(socket).ok().map(|m| (m.dev(), m.ino()))
 }
 
-fn run_with(session: &str, socket: &Path, cwd: &Path, resume: Option<String>, experimental_acp_v2: bool, orphan_grace: Duration, open: impl FnOnce() -> Result<UnixStream>) -> Result<()> {
+fn run_with(session: &str, socket: &Path, cwd: &Path, roots: Vec<PathBuf>, resume: Option<String>, experimental_acp_v2: bool, orphan_grace: Duration, open: impl FnOnce() -> Result<UnixStream>) -> Result<()> {
     if let Some(dir) = socket.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -399,7 +399,7 @@ fn run_with(session: &str, socket: &Path, cwd: &Path, resume: Option<String>, ex
     // Backpressure the SDK too: an absent daemon cannot grow an unbounded second queue.
     let (events, event_rx) = async_channel::bounded(256);
     let shared = Arc::new(Shared { state: Mutex::new(State::default()), changed: Condvar::new(), commands });
-    let opts = acp::SessionOptions { cwd: cwd.to_path_buf(), auto: acp::AutoPermission::Ask, resume };
+    let opts = acp::SessionOptions { cwd: cwd.to_path_buf(), roots, auto: acp::AutoPermission::Ask, resume };
     let worker = std::thread::Builder::new().name(format!("sill-relay-acp-{session}")).spawn(move || {
         let _ = if experimental_acp_v2 { sill_core::acp_v2::run_session(stream, opts, command_rx, events) } else { acp::run_session(stream, opts, command_rx, events) };
     })?;
@@ -892,7 +892,7 @@ mod tests {
             assert_eq!(reader.read_line(&mut extra).unwrap(), 0, "failed prompt was replayed");
         });
         let path = socket.clone();
-        let worker = std::thread::spawn(move || run_with("test", &path, Path::new("/tmp"), None, false, ORPHAN_GRACE, || Ok(worker_stream)));
+        let worker = std::thread::spawn(move || run_with("test", &path, Path::new("/tmp"), vec![], None, false, ORPHAN_GRACE, || Ok(worker_stream)));
         let (client, events) = loop {
             match connect(&socket, 0) {
                 Ok(c) => break c,
@@ -908,6 +908,50 @@ mod tests {
         fake.join().unwrap();
         wait_stopped(&socket).unwrap();
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The pinned folders reach an agent that advertises `additionalDirectories` as its extra
+    /// workspace roots (Antigravity confines its tools to them); any other agent gets only `cwd`.
+    #[test]
+    fn pinned_folders_are_additional_directories_for_an_agent_that_takes_them() {
+        for (n, (capabilities, expected)) in [(json!({"sessionCapabilities":{"additionalDirectories":{}}}), json!(["/pins/a", "/pins/b"])), (json!({}), json!(null))].into_iter().enumerate() {
+            let dir = std::env::temp_dir().join(format!("sill-relay-roots-{}-{n}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let socket = dir.join("relay.sock");
+            let (agent, worker_stream) = UnixStream::pair().unwrap();
+            let fake = std::thread::spawn(move || {
+                agent.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut reader = BufReader::new(agent.try_clone().unwrap());
+                let mut writer = agent;
+                let init = read(&mut reader);
+                message(&mut writer, json!({"jsonrpc":"2.0","id":init["id"],"result":{"protocolVersion":1,"agentCapabilities":capabilities,"authMethods":[]}}));
+                let new = read(&mut reader);
+                assert_eq!(new["method"], "session/new");
+                assert_eq!(new["params"]["cwd"], "/tmp");
+                assert_eq!(new["params"]["additionalDirectories"], expected);
+                message(&mut writer, json!({"jsonrpc":"2.0","id":new["id"],"result":{"sessionId":"fake"}}));
+                let prompt = read(&mut reader);
+                message(&mut writer, json!({"jsonrpc":"2.0","id":prompt["id"],"error":{"code":-32603,"message":"Incoming transport closed","data":{"reason":"incoming_transport_closed","method":"session/prompt"}}}));
+            });
+            let path = socket.clone();
+            let roots = vec![PathBuf::from("/pins/a"), PathBuf::from("/pins/b")];
+            let worker = std::thread::spawn(move || run_with("test", &path, Path::new("/tmp"), roots, None, false, ORPHAN_GRACE, || Ok(worker_stream)));
+            let (client, events) = loop {
+                match connect(&socket, 0) {
+                    Ok(c) => break c,
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            };
+            let mut cursor = 0;
+            until(&events, &client, &mut cursor, |e| matches!(e, Event::Ready { .. }));
+            client.command(1, Command::Prompt { text: "hello".into(), attachments: vec![] }).unwrap();
+            until(&events, &client, &mut cursor, |e| matches!(e, Event::Ended(Some(_))));
+            assert!(finishes(&worker, Duration::from_secs(5)));
+            worker.join().unwrap().unwrap();
+            fake.join().unwrap();
+            wait_stopped(&socket).unwrap();
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[test]
@@ -1057,7 +1101,7 @@ mod tests {
         let socket = dir.join("relay.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let opened = AtomicBool::new(false);
-        let result = run_with("test", &socket, Path::new("/tmp"), None, false, ORPHAN_GRACE, || {
+        let result = run_with("test", &socket, Path::new("/tmp"), vec![], None, false, ORPHAN_GRACE, || {
             opened.store(true, Ordering::Relaxed);
             bail!("must not open the agent stream")
         });
@@ -1127,7 +1171,7 @@ mod tests {
         let (agent, worker_stream) = UnixStream::pair().unwrap();
         let fake = idle_agent(agent);
         let path = socket.clone();
-        let worker = std::thread::spawn(move || run_with("test", &path, Path::new("/tmp"), None, false, ORPHAN_GRACE, || Ok(worker_stream)));
+        let worker = std::thread::spawn(move || run_with("test", &path, Path::new("/tmp"), vec![], None, false, ORPHAN_GRACE, || Ok(worker_stream)));
         let (client, events) = loop {
             match connect(&socket, 0) {
                 Ok(connection) => break connection,
@@ -1152,7 +1196,7 @@ mod tests {
         let socket = dir.join("relay.sock");
         let (agent, worker_stream) = UnixStream::pair().unwrap();
         let path = socket.clone();
-        let worker = std::thread::spawn(move || run_with("test", &path, Path::new("/tmp"), None, false, Duration::from_millis(300), || Ok(worker_stream)));
+        let worker = std::thread::spawn(move || run_with("test", &path, Path::new("/tmp"), vec![], None, false, Duration::from_millis(300), || Ok(worker_stream)));
         // the agent goes at once, as with a jail that died: the worker journals Ended
         drop(agent);
         assert!(finishes(&worker, Duration::from_secs(5)), "a relay with an ended, unclaimed conversation stayed");
@@ -1169,7 +1213,7 @@ mod tests {
         let (agent, worker_stream) = UnixStream::pair().unwrap();
         let fake = idle_agent(agent);
         let path = socket.clone();
-        let worker = std::thread::spawn(move || run_with("test", &path, Path::new("/tmp"), None, false, Duration::from_millis(100), || Ok(worker_stream)));
+        let worker = std::thread::spawn(move || run_with("test", &path, Path::new("/tmp"), vec![], None, false, Duration::from_millis(100), || Ok(worker_stream)));
         std::thread::sleep(Duration::from_millis(800));
         assert!(!worker.is_finished(), "a relay with a live conversation left for want of a daemon");
         let (client, events) = connect(&socket, 0).unwrap();

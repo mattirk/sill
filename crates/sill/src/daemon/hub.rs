@@ -587,11 +587,13 @@ impl Hub {
                     bail!("session {id} has ended");
                 }
                 let started = self.start_session(id)?;
-                let (s, agent) = self.with_store(|store| {
+                let (s, agent, roots) = self.with_store(|store| {
                     let s = store.sessions()?.into_iter().find(|s| s.id == id).context("session missing")?;
                     let agent = sill_core::agents::load(&self.home)?.get(&s.agent).cloned().context("unknown agent")?;
                     agent.ready(&self.home)?;
-                    Ok((s, agent))
+                    // the pinned folders as they are now: the agent's workspace roots beside home
+                    let roots: Vec<PathBuf> = store.pins(id)?.into_iter().filter(|p| p.is_absolute() && p.is_dir()).collect();
+                    Ok((s, agent, roots))
                 })?;
                 let mut control = sill_core::shim::Control::connect(&started.socket)?;
                 // Without a usable relay, a surviving agent may still hold the
@@ -616,6 +618,7 @@ impl Hub {
                     .arg("--agent-socket").arg(&started.socket).arg("--cwd").arg(&self.home)
                     .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(log)
                     .env_remove("SILL_SESSION").env_remove("NOTIFY_SOCKET").env_remove("LISTEN_PID").env_remove("LISTEN_FDS");
+                for root in &roots { cmd.arg("--root").arg(root); }
                 if agent.experimental_acp_v2 { cmd.arg("--experimental-acp-v2"); }
                 if (agent.supports_load || agent.experimental_acp_v2) && let Some(resume) = s.acp_session_id { cmd.arg("--resume").arg(resume); }
                 use std::os::unix::process::CommandExt;
