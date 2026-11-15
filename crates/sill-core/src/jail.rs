@@ -27,16 +27,30 @@ use crate::paths::{expand_pattern, is_under, layer_name};
 use crate::policy::{NetMode, Policy};
 
 /// Every mount of the host view read-only, after the last mask and bind laid in it (`laid` is
-/// the argv from the host view on): its overlays and tmpfs directories are writable until then.
-/// A mask laid on one of them is what the remount finds there instead. One below a mask is out
-/// of reach and has no path left to remount.
+/// the argv from the host view on): its overlays, its tmpfs directories and the tmpfs masks laid
+/// over them are writable until then, and the shim's Revert copies from here, so a file an agent
+/// could put in a mask would be restored as the host's. A mount below a later one is out of
+/// reach and has no path left to remount; one under a later mount at the same path is that mount.
 fn seal_host_view(a: &mut Vec<OsString>, laid: usize, layers: &[Layer], expanded: &[PathBuf]) {
-    let covers: Vec<PathBuf> = a[laid..].iter().map(PathBuf::from).filter(|p| p.starts_with(HOST_VIEW)).collect();
+    // (position, path, a tmpfs) of what was laid in the view after its own layout
+    let later: Vec<(usize, PathBuf, bool)> = (laid..a.len())
+        .filter(|&i| Path::new(&a[i]).starts_with(HOST_VIEW) && i > 0)
+        .map(|i| (i, PathBuf::from(&a[i]), a[i - 1] == "--tmpfs"))
+        .collect();
+    let mut seal: Vec<PathBuf> = Vec::new();
     for d in expanded.iter().chain(layers.iter().map(|l| &l.host)) {
         let at = host_view(d);
-        if !covers.iter().any(|c| *c != at && at.starts_with(c)) {
-            push(a, &[&"--remount-ro", &at]);
+        if !later.iter().any(|(_, c, _)| *c != at && at.starts_with(c)) {
+            seal.push(at);
         }
+    }
+    for (i, at, tmpfs) in &later {
+        if *tmpfs && !later.iter().any(|(j, c, _)| j > i && c != at && at.starts_with(c)) && !seal.contains(at) {
+            seal.push(at.clone());
+        }
+    }
+    for at in seal {
+        push(a, &[&"--remount-ro", &at]);
     }
 }
 
@@ -1536,6 +1550,26 @@ git -C "$S" fsck --full
         seal_host_view(&mut a, 0, &layers, &expanded);
         let r = render(&a[4..]);
         assert_eq!(r, "--remount-ro /.sill/host/home/me --remount-ro /.sill/host/etc");
+    }
+
+    /// The masks of the host view are tmpfs: writable, and Revert copies from there.
+    #[test]
+    fn every_mask_of_the_host_view_is_read_only() {
+        let mut a: Vec<OsString> = ["--tmpfs", "/.sill/host/home/me/.ssh", "--ro-bind", "/dev/null", "/.sill/host/home/me/.netrc", "--tmpfs", "/.sill/host/home/me/.config/x", "--tmpfs", "/.sill/host/home/me/.config"]
+            .iter().map(OsString::from).collect();
+        let n = a.len();
+        seal_host_view(&mut a, 0, &[layer_for(Path::new("/s"), Path::new("/home"))], &[]);
+        assert_eq!(render(&a[n..]), "--remount-ro /.sill/host/home --remount-ro /.sill/host/home/me/.ssh --remount-ro /.sill/host/home/me/.config");
+        // a real plan: every tmpfs laid in the view is sealed after the last mount, or lies under a later one
+        let plan = spec().plan().unwrap();
+        let a: Vec<String> = plan.argv.iter().map(|s| s.to_string_lossy().into_owned()).collect();
+        let masks: Vec<(usize, &String)> = a.windows(2).enumerate().filter(|(_, w)| w[0] == "--tmpfs" && w[1].starts_with(HOST_VIEW)).map(|(i, w)| (i + 1, &w[1])).collect();
+        assert!(!masks.is_empty());
+        for (i, at) in masks {
+            let sealed = a.windows(2).any(|w| w[0] == "--remount-ro" && w[1] == *at);
+            let covered = a.iter().enumerate().any(|(j, c)| j > i && c != at && c.starts_with(HOST_VIEW) && Path::new(at).starts_with(c) && a[j - 1] != "--remount-ro");
+            assert!(sealed || covered, "{at} stays writable");
+        }
     }
 
     #[test]
