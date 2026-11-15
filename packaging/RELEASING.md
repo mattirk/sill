@@ -91,8 +91,11 @@ would additionally require a CI keychain import and notarization/stapling steps;
 these are not configured yet.
 
 For downloaded Mac releases, drag Sill into Applications and try opening it.
-If macOS blocks the unidentified developer, use System Settings → Privacy &
-Security → Open Anyway for Sill. Organization-managed Macs may prevent exceptions.
+macOS refuses the first open of a browser download, on every Mac, because the app
+is not notarized: use System Settings → Privacy & Security → Open Anyway for Sill,
+once per installed version. Confirmed with the 0.0.3 release from GitHub
+(2026-11-15): it opens and runs after that. Organization-managed Macs may prevent
+exceptions.
 
 Hosted CI cannot exercise Apple's VM framework, so the Linux/QEMU-generated image
 is not boot-tested there.
