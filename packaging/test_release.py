@@ -105,6 +105,7 @@ class ReleaseTests(unittest.TestCase):
         for disk in ["sill-system", "sill-home", "sill-state"]:
             self.assertIn("serial=" + disk, qemu)
         self.assertIn("virtconsole,chardev=console", qemu)
+        self.assertIn("virtio-net-pci,netdev=net,romfile=", qemu)
         ssh = (self.root / "ssh-args").read_text()
         self.assertIn("sill@127.0.0.1", ssh)
         self.assertIn("23456", ssh)

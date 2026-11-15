@@ -6,6 +6,7 @@ qemu_vars=${SILL_QEMU_VARS:-/usr/share/AAVMF/AAVMF_VARS.fd}
 qemu_port=${SILL_IMAGE_SSH_PORT:-22222}
 [ -r "$qemu_firmware" ] && [ -r "$qemu_vars" ] || { echo 'Install qemu-efi-aarch64.' >&2; exit 1; }
 cp "$qemu_vars" "$work/efi-vars.raw"
+# Boot from the system disk; omit the optional PXE ROM (not installed by minimal CI packages).
 boot() {
     qemu-system-aarch64 -machine virt -cpu max -accel tcg,thread=multi -smp 4 -m 4096 \
         -display none -monitor none -serial "file:$work/serial.log" \
@@ -23,7 +24,7 @@ boot() {
         -chardev "file,id=console,path=$work/console.log,append=on" \
         -device virtconsole,chardev=console \
         -netdev "user,id=net,hostfwd=tcp:127.0.0.1:$qemu_port-:22" \
-        -device virtio-net-pci,netdev=net >> "$work/vm.log" 2>&1 &
+        -device virtio-net-pci,netdev=net,romfile= >> "$work/vm.log" 2>&1 &
     vm=$!
 }
 guest() {
