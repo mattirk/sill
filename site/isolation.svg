@@ -1,11 +1,34 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="760" height="510" viewBox="0 50 760 510" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="760" viewBox="0 -200 760 760" role="img" aria-labelledby="title desc">
 <title id="title">Sill isolation at a glance</title>
-<desc id="desc">The sandboxed agent reads the host filesystem with your user's permissions, except masked paths. You review and keep file changes or apply workspace commits. Network access passes through an allow-list. Live pins allow direct writes and explicit grants enable host controls.</desc>
-<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M1 1L9 5L1 9" fill="none" stroke="#8ab6a5" stroke-width="1.6"/></marker></defs>
+<desc id="desc">On Linux, in a Linux VM on Mac, or on remote Linux over SSH, the same session sandbox is used. The sandboxed agent reads the host filesystem with your user's permissions, except masked paths. You review and keep file changes or apply workspace commits. Network access passes through an allow-list. Live pins allow direct writes and explicit grants enable host controls.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M1 1L9 5L1 9" fill="none" stroke="#8ab6a5" stroke-width="1.6"/></marker><marker id="deployment-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M1 1L9 5L1 9" fill="none" stroke="#56606b" stroke-width="1.6"/></marker></defs>
 <style>
 text{font-family:Inter,'DejaVu Sans',sans-serif;fill:#e6e6e6}.title{font-size:26px;font-weight:700}.label{font-size:12px;letter-spacing:1.4px;font-weight:700;fill:#a7b9b2}.head{font-size:19px;font-weight:600}.body{font-size:15px;fill:#b7c3be}.flow{font-size:15px;text-anchor:middle;fill:#b7d8c9}.edge{fill:none;stroke:#8ab6a5;stroke-width:2;marker-end:url(#arrow)}
 </style>
-<rect width="760" height="560" rx="16" fill="#1d1f23"/>
+<rect y="-200" width="760" height="760" rx="16" fill="#1d1f23"/>
+<!-- Deployment alternatives: the same sandbox, with the VM explicitly nested inside the Mac. -->
+<g stroke="#56606b" fill="#25282e">
+<rect x="28" y="-172" width="224" height="202" rx="12"/>
+<rect x="268" y="-172" width="224" height="202" rx="12"/>
+<rect x="508" y="-172" width="224" height="202" rx="12"/>
+</g>
+<text x="48" y="-141" class="head">Linux</text>
+<text x="288" y="-141" class="head">Host</text>
+<text x="528" y="-141" class="head">Remote Linux</text>
+<text x="528" y="-116" class="label">SSH</text>
+<rect x="284" y="-123" width="192" height="137" rx="9" fill="#28313d" stroke="#789ec9"/>
+<text x="300" y="-96" class="body" style="fill:#aecbed">Linux VM</text>
+<g fill="#253630" stroke="#608b78">
+<rect x="44" y="-74" width="192" height="72" rx="8"/>
+<rect x="300" y="-74" width="160" height="72" rx="8"/>
+<rect x="524" y="-74" width="192" height="72" rx="8"/>
+</g>
+<text x="140" y="-32" class="flow">Sandbox</text>
+<text x="380" y="-32" class="flow">Sandbox</text>
+<text x="620" y="-32" class="flow">Sandbox</text>
+<path d="M140 30V54H620V30M380 30V54" fill="none" stroke="#56606b" stroke-width="1.5"/>
+<path d="M140 54V76" fill="none" stroke="#56606b" stroke-width="1.5" marker-end="url(#deployment-arrow)"/>
+
 <rect x="28" y="78" width="234" height="298" rx="12" fill="#253630" stroke="#608b78"/>
 <text x="48" y="109" class="label">SESSION SANDBOX</text>
 <text x="48" y="170" class="head">Filesystem</text>
