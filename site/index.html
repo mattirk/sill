@@ -12,7 +12,7 @@ header b{font-size:1.2rem}header nav{margin-left:auto;display:flex;gap:1.4rem;fo
 a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
 h1{font-size:2.3rem;line-height:1.15;margin:0 0 1rem;font-weight:600;letter-spacing:-.02em}
 .lead{color:var(--dim);font-size:1.1rem;max-width:36rem;margin:0 0 2.5rem}
-.isolation{display:block;margin:0 0 2.5rem}.isolation img{display:block;width:100%;height:auto;border-radius:16px}
+.isolation{display:block;margin:2.5rem 0 0}.isolation img{display:block;width:100%;height:auto;border-radius:16px}
 .cmd{display:flex;align-items:center;background:var(--code);border-left:2px solid var(--accent);padding:.9rem 1rem;gap:1rem}
 .cmd code{flex:1;font:14.5px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-x:auto;white-space:nowrap}
 button{font:inherit;font-size:.85rem;color:var(--fg);background:none;border:1px solid var(--line);padding:.3rem .8rem;cursor:pointer}
@@ -32,8 +32,6 @@ footer{margin-top:4rem;padding-top:1.2rem;border-top:1px solid var(--line);color
 <h1>A shelf for AI coding agents.</h1>
 <p class=lead>Sill runs Claude Code, OpenCode, Kimi Code or any ACP agent in a jail on your own machine. The agent sees the whole machine; what it may change, reach and keep is up to you.</p>
 
-<a class=isolation href="https://github.com/mattirk/sill/blob/main/SECURITY.md" aria-label="Read the security documentation"><img src="isolation.svg" width="760" height="760" alt="Sill sandboxes run on Linux, in a Linux VM, or on remote Linux over SSH. Agents read unmasked files as your user; you review and keep or apply changes. Network access uses an allow-list. Live pins and explicit grants expand access."></a>
-
 <div class=cmd><code id=cmd>curl -fsSL https://mattirk.github.io/sill/install.sh | sh</code><button data-copy="#cmd">Copy</button></div>
 <p class=note>Paste in a terminal on Linux or an Apple Silicon Mac. The script asks before it changes anything — <a href="install.sh">read it first</a>.</p>
 
@@ -44,6 +42,8 @@ footer{margin-top:4rem;padding-top:1.2rem;border-top:1px solid var(--line);color
 <li>Verifies the download against the release's SHA256SUMS.</li>
 <li>Installs, asks <code>sudo</code> when needed.</li>
 </ol>
+
+<a class=isolation href="https://github.com/mattirk/sill/blob/main/SECURITY.md" aria-label="Read the security documentation"><img src="isolation.svg" width="760" height="760" alt="Sill sandboxes run on Linux, in a Linux VM, or on remote Linux over SSH. Agents read unmasked files as your user; you review and keep or apply changes. Network access uses an allow-list. Live pins and explicit grants expand access."></a>
 
 <h2>Or download directly · <span data-version>latest</span></h2>
 <div class=rows>
