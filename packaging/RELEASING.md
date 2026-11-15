@@ -5,11 +5,12 @@ The public repository runs `build` for pushes to `main`, pull requests targeting
 Download the binary archives from the workflow's artifacts. The Mac build archive
 is a developer binary, not a complete app: it does not include the Linux VM image.
 
-The Linux tests start real jails, so they need bubblewrap to be able to create user
-namespaces. Ubuntu 24.04 denies that through AppArmor; both workflows switch it off
-on the runner first (`sysctl kernel.apparmor_restrict_unprivileged_userns=0`) and
-check that `bwrap` starts. Where it cannot start, the jailed login tests in
-`crates/sill/tests/daemon.rs` fail.
+Ubuntu 24.04 denies unprivileged user namespaces through AppArmor, so both workflows
+switch that off on the runner first
+(`sysctl kernel.apparmor_restrict_unprivileged_userns=0`) and check that `bwrap`
+starts. The daemon's login tests (`crates/sill/tests/daemon.rs`) do not need it:
+they put a stand-in for `bwrap` on the daemon's PATH. Tests of the real jail are
+ignored by default (`requires working bubblewrap on a host`).
 
 ## Release a version
 
@@ -18,14 +19,14 @@ check that `bwrap` starts. Where it cannot start, the jailed login tests in
 2. Commit and push private master, then run its publication workflow
    (`gh workflow run publish`).
 
-That is all. A push to public `main` that changes Cargo.toml starts the `release`
-workflow. If the workspace version has no `vVERSION` tag yet, it runs the tests,
+That is all. Every push to public `main` starts the `release` workflow. If the
+workspace version has no `vVERSION` tag yet, it runs the tests,
 builds the Linux tar/deb packages and the Apple Silicon DMG, and publishes the
 release with generated notes and one SHA256SUMS; publishing creates the tag at the
 built commit. It then runs `site/install.sh` against the new release on a Linux and
 a Mac runner. A version that is already tagged does nothing, so only a version bump
-releases. A failed run can be dispatched again on `main`; nothing is published
-unless every package was built.
+releases. Nothing is published unless every package was built; after a failed run,
+the next push to `main` tries again.
 
 Not covered by CI: the Linux VM image is never booted under Apple's Virtualization
 framework, and the unsigned-app prompt is not exercised. Open a released DMG on an

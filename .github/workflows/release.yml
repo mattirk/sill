@@ -1,10 +1,9 @@
-# A new workspace version arriving on public main is released: tests, packages, the published
+# A workspace version on public main that has no tag yet is released: tests, packages, the published
 # release with its tag, then the installer run against it. A version whose tag exists does nothing.
 name: release
 on:
   push:
     branches: [main]
-    paths: [Cargo.toml]
   workflow_dispatch:
 permissions:
   contents: read
