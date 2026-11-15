@@ -1,6 +1,6 @@
 //! Session-owned drafts, image fetches and clipboard/file attachment input.
 use crate::{App, Message, settings_ui::quiet_button, style};
-use iced::widget::{button, column, container, image, stack, text};
+use iced::widget::{button, column, container, hover, image, text};
 use iced::{Element, Task};
 use sill_proto::{
     admin,
@@ -253,29 +253,31 @@ pub fn is_image(a: &Attachment) -> bool {
 
 pub fn picture<'a>(cache: &Cache, session: &str, key: &str) -> Element<'a, Message> {
     match cache.get(key) {
-        Some(Some(Ok(pic))) => container(stack![
-            iced::widget::mouse_area(image(pic.handle.clone())
+        Some(Some(Ok(pic))) => {
+            let action = |label: &'static str, event: Event| {
+                crate::keys::press(
+                    button(text(label).size(style::SMALL))
+                        .padding([3, 6])
+                        .style(|theme, status| iced::widget::button::Style {
+                            background: Some(style::P.code_bg.into()),
+                            ..style::quiet(theme, status)
+                        }),
+                    Message::Media(event),
+                )
+            };
+            let preview = iced::widget::mouse_area(image(pic.handle.clone())
                 .width(iced::Fill)
                 .height(240)
                 .content_fit(iced::ContentFit::Contain))
-                .on_press(Message::Media(Event::Open(session.into(), key.into()))),
-            container(iced::widget::row![
-                quiet_button("Expand", Some(Message::Media(Event::Open(session.into(), key.into())))),
-                quiet_button("Refresh", Some(Message::Media(Event::Reload(session.into(), key.into())))),
-                crate::keys::press(
-                button(text("Copy image").size(style::SMALL))
-                    .padding([3, 6])
-                    .style(|theme, status| iced::widget::button::Style {
-                        background: Some(style::P.code_bg.into()),
-                        ..style::quiet(theme, status)
-                    }),
-                Message::Media(Event::Copy(session.into(), key.into())),
-            )].spacing(4))
-            .padding(6)
-            .align_right(iced::Fill),
-        ])
-        .max_width(640)
-        .into(),
+                .on_press(Message::Media(Event::Open(session.into(), key.into())));
+            let controls = container(iced::widget::row![
+                action("Expand", Event::Open(session.into(), key.into())),
+                action("Copy", Event::Copy(session.into(), key.into())),
+            ].spacing(4))
+                .padding(6)
+                .align_right(iced::Fill);
+            container(hover(preview, controls)).max_width(640).into()
+        }
         Some(Some(Err(why))) => column![
             text(format!("Image unavailable: {why}")).size(style::SMALL),
             quiet_button(

@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="510" viewBox="0 50 760 510" role="img" aria-labelledby="title desc">
+<title id="title">Sill isolation at a glance</title>
+<desc id="desc">The sandboxed agent reads the host filesystem with your user's permissions, except masked paths. You review and keep file changes or apply workspace commits. Network access passes through an allow-list. Live pins allow direct writes and explicit grants enable host controls.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M1 1L9 5L1 9" fill="none" stroke="#8ab6a5" stroke-width="1.6"/></marker></defs>
+<style>
+text{font-family:Inter,'DejaVu Sans',sans-serif;fill:#e6e6e6}.title{font-size:26px;font-weight:700}.label{font-size:12px;letter-spacing:1.4px;font-weight:700;fill:#a7b9b2}.head{font-size:19px;font-weight:600}.body{font-size:15px;fill:#b7c3be}.flow{font-size:15px;text-anchor:middle;fill:#b7d8c9}.edge{fill:none;stroke:#8ab6a5;stroke-width:2;marker-end:url(#arrow)}
+</style>
+<rect width="760" height="560" rx="16" fill="#1d1f23"/>
+<rect x="28" y="78" width="234" height="298" rx="12" fill="#253630" stroke="#608b78"/>
+<text x="48" y="109" class="label">SESSION SANDBOX</text>
+<text x="48" y="170" class="head">Filesystem</text>
+<text x="48" y="195" class="body">Masked paths hidden</text>
+<text x="388" y="145" class="flow">Read as your user</text>
+<path d="M510 172H278" class="edge"/>
+<text x="534" y="170" class="head">Host / VM files</text>
+<text x="534" y="195" class="body">Your existing environment</text>
+<text x="48" y="250" class="head">Changes</text>
+<text x="48" y="275" class="body">Overlay / workspace copy</text>
+<path d="M278 252H510" class="edge"/>
+<text x="388" y="234" class="flow">You review + keep / apply</text>
+<text x="534" y="250" class="head">Your files</text>
+<text x="534" y="275" class="body">Changes you choose</text>
+<text x="48" y="333" class="head">Network requests</text>
+<path d="M278 335H510" class="edge"/>
+<text x="388" y="317" class="flow">Allow-list proxy</text>
+<text x="534" y="333" class="head">Allowed hosts</text>
+<rect x="28" y="400" width="704" height="90" rx="10" fill="#373128"/>
+<text x="48" y="429" class="label" style="fill:#e4c38c">ACCESS YOU CAN OPEN</text>
+<text x="48" y="460" class="body">Live pins → direct writes</text>
+<text x="370" y="460" class="body">Explicit grants → host controls</text>
+<text x="28" y="525" class="body">Reduces access. Does not guarantee security.</text>
+</svg>

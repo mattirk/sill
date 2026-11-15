@@ -15,7 +15,7 @@ text{font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;fi
 <text x="84" y="216" class="eyebrow">SESSION SANDBOX · BUBBLEWRAP</text>
 <text x="84" y="251" class="head">Agent + tools + child processes</text>
 <text x="84" y="279" class="small">Namespaces · no Linux capabilities</text>
-<text x="84" y="321" class="head">Filesystem read view</text>
+<text x="84" y="321" class="head">Filesystem</text>
 <text x="84" y="347" class="body">Masked paths excluded</text>
 <path d="M894 323H472" class="edge"/>
 <text x="676" y="306" class="gate">Read as your user</text>
@@ -24,7 +24,7 @@ text{font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;fi
 <text x="674" y="216" class="eyebrow" text-anchor="middle">ACCESS CONTROL</text>
 <text x="914" y="216" class="eyebrow">OUTSIDE THE SANDBOX</text>
 
-<text x="84" y="387" class="head">Writes stay in an overlay</text><text x="84" y="413" class="body">Other ordinary file writes</text>
+<text x="84" y="387" class="head">Writes stay in an overlay</text><text x="84" y="413" class="body">Writes outside git / workspace</text>
 <path d="M440 389H566" class="edge"/><rect x="574" y="367" width="204" height="44" rx="22" fill="#ffffff" stroke="#8aafa0"/><text x="676" y="395" class="gate">You Keep</text><path d="M786 389H894" class="edge"/>
 <text x="914" y="387" class="head">Host files</text><text x="914" y="413" class="small">Selected changes copied back</text>
 <text x="84" y="475" class="head">Workspace copy</text><text x="84" y="501" class="body">Edits + commits on its own branch</text>
