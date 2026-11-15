@@ -8108,7 +8108,7 @@
           "type": "string"
         },
         "kind": {
-          "description": "`apply`, `rebase`, `carry` (work from before the pin, docs/parallel-coding.md §12).",
+          "description": "`apply`, `rebase`, `carry` (work from before the pin, docs/parallel-coding.md §12), `read`\n(the workspace cannot be read, e.g. its repository was replaced: `interrupted`, on the record\nalone).",
           "type": "string"
         },
         "state": {

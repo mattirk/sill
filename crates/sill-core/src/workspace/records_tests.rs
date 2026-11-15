@@ -574,6 +574,41 @@ fn the_session_view_and_the_list_carry_each_workspaces_detail() {
     assert!(get(&f.host, &w.workspace_id).is_err());
 }
 
+/// The repository replaced by another at the same path (a fresh clone of something else): the
+/// workspace borrows its history from there and can no longer be read. It says so on its record
+/// and is kept; the listing, the other workspaces and the session's next start go on.
+#[test]
+fn a_workspace_whose_repository_was_replaced_does_not_fail_the_listing() {
+    let f = fixture("replaced");
+    let w = session(&f, "s1");
+    write(&clone_of(&w).join("f1.txt"), "work\n");
+    std::fs::rename(&f.source, f.dir.join("elsewhere")).unwrap();
+    std::fs::create_dir(&f.source).unwrap();
+    git(&f.source, &["init", "-q"]);
+    write(&f.source.join("other.txt"), "another repository\n");
+    git(&f.source, &["add", "."]);
+    git(&f.source, &["commit", "-qm", "another history"]);
+    let all = api::List { session_id: None, after: None, limit: None };
+    let listed = list(&f.host, &all).unwrap();
+    assert!(listed.details.is_empty());
+    let op = listed.workspaces[0].operation.clone().unwrap();
+    assert_eq!((op.kind.as_str(), op.state.as_str()), ("read", "interrupted"));
+    assert!(op.detail.contains(&f.source.display().to_string()), "{}", op.detail);
+    assert_eq!(session_view(&f.host, "s1").unwrap().workspaces.len(), 1);
+    assert!(format!("{:#}", get(&f.host, &w.workspace_id).unwrap_err()).contains("cannot be read"));
+    // its session ended: kept as a result, the folder with the work still there
+    f.host.lives.lock().unwrap().insert("s1".into(), Life::Ended);
+    let listed = list(&f.host, &all).unwrap();
+    assert_eq!(listed.workspaces[0].state, api::WorkspaceState::Result);
+    assert_eq!(read(&clone_of(&w).join("f1.txt")), "work\n");
+    // unpinned at a later start: the start goes on
+    f.host.lives.lock().unwrap().insert("s1".into(), Life::Alive);
+    f.host.db(|c| { c.execute("UPDATE workspaces SET state='open'", [])?; Ok(()) }).unwrap();
+    f.host.pins.lock().unwrap().insert("s1".into(), vec![]);
+    assert!(ensure_for_session(&f.host, "s1").unwrap().is_empty());
+    assert!(clone_of(&w).exists());
+}
+
 /// A workspace starts from HEAD (§5): the person's own uncommitted work in the checkout is not in
 /// it, and that is said — counted in the detail, named to the agent. The agent's applied work,
 /// dirty in the checkout too, is not the person's.

@@ -57,6 +57,15 @@ impl Listing {
         }
     }
 
+    /// The workspaces that cannot be read, each with why: a note, not an error over the page.
+    pub fn unread_workspaces(&self) -> impl Iterator<Item = (&api::Workspace, &str)> {
+        let listed = match &self.workspaces {
+            Some(Ok((listed, _))) => listed.workspaces.as_slice(),
+            _ => &[],
+        };
+        listed.iter().filter_map(|w| w.operation.as_ref().filter(|o| o.kind == "read").map(|o| (w, o.detail.as_str())))
+    }
+
     pub fn discarded(&self) -> &[api::Discarded] {
         match &self.workspaces {
             Some(Ok((listed, _))) => &listed.discarded,
@@ -382,6 +391,18 @@ impl App {
                             ))
                             .size(style::TINY)
                             .color(P.fg_dim),
+                        ]
+                        .spacing(2),
+                    )
+                    .padding([4, 4]),
+                );
+            }
+            for (w, why) in listing.unread_workspaces() {
+                body = body.push(
+                    container(
+                        column![
+                            text(format!("{}: a workspace that cannot be read", w.name)).size(style::SMALL).color(P.fg),
+                            text(why.to_string()).size(style::TINY).color(P.fg_dim),
                         ]
                         .spacing(2),
                     )

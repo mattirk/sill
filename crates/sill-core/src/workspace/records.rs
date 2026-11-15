@@ -551,7 +551,8 @@ fn settle_ended<H: Host>(h: &H, mut r: Row, l: &Option<flow::Mirror>) -> Result<
 
 /// A workspace whose pin was removed: freed when nothing is left to apply, else a result.
 fn settle_unpinned<H: Host>(h: &H, mut r: Row) -> Result<()> {
-    if !keeps_work(&r, &look(&r)?) {
+    // unreadable is kept, as a folder that is gone is: it never keeps the session from starting
+    if !keeps_work(&r, &look(&r).unwrap_or(None)) {
         return free(h, &r);
     }
     r.state = api::WorkspaceState::Result;
@@ -892,7 +893,12 @@ enum Settled {
 /// The workspace's record, revision and what an Apply would bring, from one look that also
 /// settles an ended session's workspace and a stopped rebase that has since finished.
 fn detail<H: Host>(h: &H, r: Row) -> Result<Settled> {
-    let l = look(&r)?;
+    // a workspace that cannot be read (its repository replaced by another at the same path, its
+    // history gone from there) is kept and says so on its record: the others are still listed
+    let (l, mut unread) = match look(&r) {
+        Ok(l) => (l, None),
+        Err(e) => (None, Some(e)),
+    };
     let r = if ending(h, &r) {
         match settle_ended(h, r, &l)? {
             Some(r) => r,
@@ -904,11 +910,29 @@ fn detail<H: Host>(h: &H, r: Row) -> Result<Settled> {
     // a stopped rebase the agent or the person finished in the workspace is no longer one: the
     // shelf offers Apply again, not Resolve and Abort for a rebase that is over
     clear_conflict(h, &r)?;
-    let workspace = h.db(|c| record(c, &r))?;
-    let Some(m) = l else { return Ok(Settled::Record(workspace)) };
-    let (revision, needs_rebase) = revision_now(&r)?;
-    let (summary, files) = summary(&r, &m)?;
-    Ok(Settled::Full(api::Detail { workspace, revision, summary, needs_rebase, checkout_only: m.checkout_only.len() as u32, state_tree: m.now.clone(), files }))
+    let mut workspace = h.db(|c| record(c, &r))?;
+    if let Some(m) = l {
+        let full = revision_now(&r).and_then(|(revision, needs_rebase)| Ok((revision, needs_rebase, summary(&r, &m)?)));
+        match full {
+            Ok((revision, needs_rebase, (summary, files))) => {
+                return Ok(Settled::Full(api::Detail { workspace, revision, summary, needs_rebase, checkout_only: m.checkout_only.len() as u32, state_tree: m.now.clone(), files }));
+            }
+            Err(e) => unread = Some(e),
+        }
+    }
+    if let Some(e) = unread {
+        eprintln!("sill: workspace {} at {} cannot be read: {e:#}", r.id, r.path.display());
+        workspace.operation.get_or_insert_with(|| api::WorkspaceOperation {
+            kind: "read".into(),
+            state: "interrupted".into(),
+            detail: format!(
+                "This workspace of {} cannot be read ({e:#}): the repository there may have been replaced by another. Its folder is kept at {}.",
+                r.source.display(),
+                r.path.display()
+            ),
+        });
+    }
+    Ok(Settled::Record(workspace))
 }
 
 fn changed<H: Host>(h: &H, r: Option<&Row>, operation: Option<&str>, discarded: Option<api::Discarded>) -> Result<api::Changed> {
@@ -977,7 +1001,10 @@ pub fn get<H: Host>(h: &H, id: &str) -> Result<api::Detail> {
     match detail(h, get_row(h, id)?)? {
         Settled::Full(d) => Ok(d),
         Settled::Freed => Err(not_found("workspace")),
-        Settled::Record(w) => bail!("{}: the workspace's folder or its repository is gone", w.name),
+        Settled::Record(w) => match w.operation.filter(|o| o.kind == "read") {
+            Some(o) => bail!("{}", o.detail),
+            None => bail!("{}: the workspace's folder or its repository is gone", w.name),
+        },
     }
 }
 
