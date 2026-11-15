@@ -89,6 +89,8 @@ pub struct ChangesPage {
     /// Open rows' diffs by entry key ([`workspace_key`] for a workspace's file); `None` while
     /// reading.
     pub open: BTreeMap<String, Option<Result<String, String>>>,
+    /// Whether the discarded workspaces section is open.
+    pub discarded_open: bool,
     /// A revert pressed once.
     pub armed: Armed<Reverting>,
     /// What the last action did.
@@ -123,6 +125,7 @@ pub enum Event {
     History(bool),
     HistoryLoaded(Result<sill_proto::changes::HistoryPage, String>, bool),
     MoreHistory,
+    ToggleDiscarded,
     Diff(String),
     /// A workspace's file: what an Apply would bring of it.
     WorkspaceDiff(String, HostPath),
@@ -692,17 +695,48 @@ impl App {
         body
     }
 
-    /// Discarded workspaces, undoable while they are kept.
+    /// Discarded workspaces, undoable while they are kept; collapsed by default.
     fn discarded_rows<'a>(
         &'a self,
         page: &'a ChangesPage,
         mut body: Column<'a, Message>,
         discarded: &'a [api::Discarded],
     ) -> Column<'a, Message> {
-        body = section_head(
-            body,
-            row![text("Discarded workspaces").size(style::TEXT).color(P.fg_dim)],
+        let toggle = keys::press(
+            button(
+                row![
+                    crate::icons::glyph(
+                        if page.discarded_open {
+                            "chevron-down"
+                        } else {
+                            "chevron-right"
+                        },
+                        13.0,
+                        P.fg_dim,
+                    ),
+                    text("Discarded workspaces").size(style::TEXT).color(P.fg_dim),
+                    text(discarded.len().to_string()).size(style::SMALL).color(P.fg_dim),
+                    space().width(Fill),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            )
+            .padding([4, 4])
+            .width(Fill)
+            .style(style::row_button),
+            event(Event::ToggleDiscarded),
         );
+        body = body
+            .push(container(toggle).padding(Padding {
+                top: 10.0,
+                right: 0.0,
+                bottom: 0.0,
+                left: 0.0,
+            }))
+            .push(rule::horizontal(1).style(style::rule_style(P.border)));
+        if !page.discarded_open {
+            return body;
+        }
         for d in discarded {
             let line = row![
                 crate::icons::glyph("git-branch", 13.0, alpha(P.fg, 0.4)),

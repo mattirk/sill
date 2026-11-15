@@ -128,6 +128,9 @@ impl App {
                 page.history_loading = true;
                 return self.history_load(before);
             }
+            Event::ToggleDiscarded => {
+                page.discarded_open = !page.discarded_open;
+            }
             Event::Diff(key) => {
                 if page.open.remove(&key).is_some() {
                     return Task::none();

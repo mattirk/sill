@@ -2865,6 +2865,38 @@ fn the_changes_page_is_by_session_with_each_workspaces_files() {
     assert!(!app.changes.as_ref().unwrap().open.contains_key(&key), "its diff went with it");
 }
 
+#[test]
+fn discarded_workspaces_are_collapsed_by_default() {
+    use crate::workspaces::Event as W;
+    let (mut app, _) = App::new(true, None);
+    let task = app.update(Message::ToggleChanges);
+    settle_task(&mut app, task);
+    let host = sill_proto::sessions::HostPath::from_path(std::path::Path::new("/home/demo/project"));
+    let listed = serde_json::from_value(json!({
+        "workspaces": [],
+        "discarded": [{"discard_id": "d1", "workspace_id": "ws-old", "name": "project", "source": host, "until": "2026-11-22T10:00:00Z", "created_at": "t"}],
+        "next": null,
+    }))
+    .unwrap();
+    let _ = app.update(Message::Workspaces(W::PageLoaded(Ok((listed, vec![])))));
+    let mut ui = simulator(&app, (720.0, 860.0));
+    ui.find("Discarded workspaces").unwrap();
+    assert!(ui.find("kept until 2026-11-22").is_err(), "collapsed by default");
+    ui.click("Discarded workspaces").unwrap();
+    for message in ui.into_messages().collect::<Vec<_>>() {
+        let task = app.update(message);
+        settle_task(&mut app, task);
+    }
+    let mut ui = simulator(&app, (720.0, 860.0));
+    ui.find("kept until 2026-11-22").unwrap();
+    ui.click("Discarded workspaces").unwrap();
+    for message in ui.into_messages().collect::<Vec<_>>() {
+        let task = app.update(message);
+        settle_task(&mut app, task);
+    }
+    assert!(simulator(&app, (720.0, 860.0)).find("kept until 2026-11-22").is_err());
+}
+
 /// The listing is the window's: closing the page keeps it, and opening it again shows it at once
 /// while the new one is read — without its actions, which wait for what is there now. A listing
 /// that arrives after the page closed is kept for the next opening.
