@@ -512,6 +512,37 @@ pub fn page(ids: &[&'static str], down: bool) -> Task<Message> {
     })
 }
 
+/// New text arrived while `id` followed its tail: scroll it to its end, unless it has been
+/// scrolled up from `from` (the offset the view last knew) while this was on its way. The
+/// person's scroll away from the tail then stands, and is not pulled back.
+pub fn follow_end(id: &'static str, from: f32) -> Task<Message> {
+    struct Follow {
+        id: Id,
+        from: f32,
+    }
+    impl Operation for Follow {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+        fn scrollable(
+            &mut self,
+            id: Option<&Id>,
+            _bounds: Rectangle,
+            _content_bounds: Rectangle,
+            translation: Vector,
+            state: &mut dyn Scrollable,
+        ) {
+            if id == Some(&self.id) && translation.y >= self.from - 1.0 {
+                state.snap_to(scroll::RelativeOffset { x: None, y: Some(1.0) });
+            }
+        }
+    }
+    effect(Follow {
+        id: Id::new(id),
+        from,
+    })
+}
+
 /// Window shortcuts shared by the root, editors and shell; word-selection keys stay local.
 #[cfg(test)]
 fn window_message(key: &Key, modifiers: Modifiers) -> Option<Message> {

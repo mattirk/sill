@@ -1859,6 +1859,7 @@ impl App {
         let began_summary = !was_summarizing && view.summarizing();
         let ended_now = !was_ended && view.ended();
         let snap = grew && selected && view.follow_tail && view.conversation_shown() && !selecting;
+        let followed_from = view.scroll_offset;
         let mut tasks: Vec<Task<Message>> = checks
             .into_iter()
             .map(|(id, key)| {
@@ -1894,7 +1895,7 @@ impl App {
             tasks.push(self.list());
         }
         if snap {
-            tasks.push(operation::snap_to_end("conversation"));
+            tasks.push(keys::follow_end("conversation", followed_from));
         }
         // last: the view goes with the tab
         if ended_now {
@@ -2309,7 +2310,7 @@ impl App {
             }
         }
         if view.follow_tail && view.conversation_shown() && !self.selecting {
-            operation::snap_to_end("conversation")
+            keys::follow_end("conversation", view.scroll_offset)
         } else {
             Task::none()
         }

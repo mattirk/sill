@@ -1971,6 +1971,79 @@ fn streamed_text_keeps_a_selection_in_earlier_messages() {
     }
 }
 
+/// Letting go of the tail is a matter of pixels, not of a share of the conversation: any move up
+/// from the end stops following, however long the conversation is; new text below and a move
+/// that is not towards the end change nothing; scrolling down to near the end takes it up again.
+#[test]
+fn a_small_scroll_up_lets_go_of_the_tail() {
+    use crate::session::follows;
+    // 12 px up from the end of a conversation of any length
+    assert!(!follows(true, 50_000.0, 49_988.0, 12.0));
+    // new text below: the offset stands, the end moved away
+    assert!(follows(true, 500.0, 500.0, 300.0));
+    assert!(!follows(false, 500.0, 500.0, 300.0));
+    // shorter content keeps the view at its end
+    assert!(follows(true, 500.0, 420.0, 0.0));
+    // scrolling in the middle
+    assert!(!follows(false, 500.0, 560.0, 200.0));
+    // back down to near the end, and to the end itself
+    assert!(follows(false, 500.0, 560.0, 20.0));
+    assert!(follows(false, 500.0, 580.0, 0.0));
+}
+
+/// Text that arrives just as the person scrolls up does not pull the conversation back: the
+/// scroll to the end it asked for finds the conversation moved and leaves it.
+#[test]
+fn new_text_does_not_undo_a_scroll_away_from_the_tail() {
+    let mut app = streamed();
+    let _ = app.update(Message::DemoTick);
+    let mut live = Live::new((720.0, 400.0));
+    live.apply(&mut app, Message::Latest);
+    let redraw = || iced::Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now()));
+    // the conversation reports where its end is
+    for message in live.frame(&app, |ui| ui.send(vec![redraw()])) {
+        live.apply(&mut app, message);
+    }
+    assert!(demo_view(&app).follow_tail);
+    let mut at_end = None;
+    let scrolled_up = live.frame(&app, |ui| {
+        at_end = scrolled(ui, "conversation");
+        ui.aim(iced::Point::new(360.0, 200.0));
+        ui.send(vec![iced::Event::Mouse(iced::mouse::Event::WheelScrolled {
+            delta: iced::mouse::ScrollDelta::Pixels { x: 0.0, y: 12.0 },
+        })]);
+    });
+    // new text is handled before the scroll's own message
+    let seq = demo_view(&app).conversation.seq + 1;
+    let event = sill_client::lane::Update::Event(Box::new(demo::append(seq, " More.")));
+    live.apply(&mut app, Message::Lane("demo".into(), 0, event));
+    for message in scrolled_up {
+        live.apply(&mut app, message);
+    }
+    assert!(!demo_view(&app).follow_tail, "12 px up lets go of the tail");
+    let mut now = None;
+    live.frame(&app, |ui| now = scrolled(ui, "conversation"));
+    let (at_end, now) = (at_end.unwrap(), now.unwrap());
+    assert!(at_end > 100.0, "the conversation is longer than the window");
+    assert!((at_end - 12.0 - now).abs() < 1.0, "left where it was scrolled to: {now} of {at_end}");
+    // and following still works: back at the end, new text scrolls
+    live.apply(&mut app, Message::Latest);
+    for message in live.frame(&app, |ui| ui.send(vec![redraw()])) {
+        live.apply(&mut app, message);
+    }
+    let seq = demo_view(&app).conversation.seq + 1;
+    let more = "\n\nAnother paragraph.\n\nAnd one more.\n\nAnd a last one.";
+    let event = sill_client::lane::Update::Event(Box::new(demo::append(seq, more)));
+    live.apply(&mut app, Message::Lane("demo".into(), 0, event));
+    let mut later = None;
+    for message in live.frame(&app, |ui| ui.send(vec![redraw()])) {
+        live.apply(&mut app, message);
+    }
+    live.frame(&app, |ui| later = scrolled(ui, "conversation"));
+    assert!(demo_view(&app).follow_tail);
+    assert!(later.unwrap() > at_end + 20.0, "the tail was followed: {later:?} after {at_end}");
+}
+
 /// Scrolling up from the tail turns following off and puts "↓ Latest" over the conversation;
 /// the conversation stays where it was scrolled to (it used to start again at its top).
 #[test]
@@ -1979,6 +2052,11 @@ fn scrolling_up_from_the_tail_keeps_the_place() {
     let _ = app.update(Message::DemoTick);
     let mut live = Live::new((720.0, 400.0));
     live.apply(&mut app, Message::Latest);
+    // the conversation reports where its end is, as it does when the window draws it
+    let redraw = iced::Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now()));
+    for message in live.frame(&app, |ui| ui.send(vec![redraw])) {
+        live.apply(&mut app, message);
+    }
     let mut at_end = None;
     let scrolled_up = live.frame(&app, |ui| {
         at_end = scrolled(ui, "conversation");

@@ -1091,7 +1091,7 @@ impl App {
                 session::message(
                     &view.id,
                     session::Event::Scrolled(
-                        viewport.relative_offset().y >= 0.99,
+                        viewport.absolute_offset_reversed().y,
                         viewport.absolute_offset().y,
                         viewport.bounds().height,
                     ),

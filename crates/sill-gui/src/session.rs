@@ -17,8 +17,8 @@ use crate::{Act, App, Message, Pick, blocking, demo, editor, forms, keys, lists,
 
 #[derive(Debug, Clone)]
 pub enum Event {
-    /// The conversation scrolled: at its end, its offset, and the height in view.
-    Scrolled(bool, f32, f32),
+    /// The conversation scrolled: how far it is from its end, its offset, and the height in view.
+    Scrolled(f32, f32, f32),
     Latest,
     Prompt(text_editor::Action),
     PromptHistory(bool),
@@ -62,6 +62,25 @@ pub enum Event {
     ReopenTerminal,
 }
 
+/// Scrolling down to within this of the conversation's end takes up its tail again.
+const NEAR_END: f32 = 24.0;
+
+/// Whether the conversation follows its tail after a scroll from `before` to `offset`, which
+/// leaves it `from_end` short of its end. Distances are in pixels, whatever the conversation's
+/// length: any move up from the end lets go of the tail, a move down to near the end takes it up
+/// again, and anything else (new text below, a resize) changes nothing.
+pub fn follows(following: bool, before: f32, offset: f32, from_end: f32) -> bool {
+    if from_end <= 1.0 {
+        true
+    } else if offset < before - 0.5 {
+        false
+    } else if offset > before + 0.5 && from_end <= NEAR_END {
+        true
+    } else {
+        following
+    }
+}
+
 /// `event` as the message `session`'s view sends.
 pub fn message(session: &str, event: Event) -> Message {
     Message::Session(session.to_string(), event)
@@ -72,9 +91,9 @@ impl App {
     /// view has gone.
     pub fn session_event(&mut self, id: String, event: Event) -> Task<Message> {
         match event {
-            Event::Scrolled(at_bottom, offset, viewport) => {
+            Event::Scrolled(from_end, offset, viewport) => {
                 if let Some(view) = self.views.get_mut(&id) {
-                    view.follow_tail = at_bottom;
+                    view.follow_tail = follows(view.follow_tail, view.scroll_offset, offset, from_end);
                     view.scroll_offset = offset;
                     view.viewport = viewport;
                 }
