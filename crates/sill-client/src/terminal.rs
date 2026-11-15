@@ -409,6 +409,12 @@ mod tests {
             Event::Opened
         );
         remote.write_all(b"hello").unwrap();
+        // the output must be on the screen before the drop: detaching discards what is unread
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !seen.lock().unwrap().starts_with(b"hello") {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let replies = link.replies();
         link.input(b"ls\r".to_vec());
         let mut typed = [0u8; 3];
@@ -421,12 +427,8 @@ mod tests {
             rx.recv_timeout(Duration::from_secs(5)).unwrap(),
             Event::Ended
         );
+        // a reply after the link is gone goes nowhere, without harm
         replies.send(b"late".to_vec());
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !seen.lock().unwrap().starts_with(b"hello") {
-            assert!(std::time::Instant::now() < deadline);
-            std::thread::sleep(Duration::from_millis(10));
-        }
     }
 
     /// A pane dropped while its shell is still being found never attaches it.
