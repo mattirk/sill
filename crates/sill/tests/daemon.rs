@@ -623,7 +623,21 @@ case "$*" in
 esac
 exit 23
 "#).unwrap();
-    std::fs::write(bin.join("bwrap"), "#!/bin/sh\nexit 1\n").unwrap();
+    // Every login runs under bwrap. These tests are about the daemon's side of a login, so a
+    // stand-in takes the jail's place: it applies the environment and directory bwrap was asked
+    // for and runs the command, and works where bubblewrap cannot start. The jail itself is
+    // tested in sill-core and in tests/login.rs.
+    std::fs::write(bin.join("bwrap"), r#"#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --setenv) export "$2=$3"; shift 3 ;;
+    --chdir) cd "$2"; shift 2 ;;
+    --) shift; exec "$@" ;;
+    *) shift ;;
+  esac
+done
+exit 1
+"#).unwrap();
     std::fs::set_permissions(bin.join("bwrap"), std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::set_permissions(bin.join("npm"), std::fs::Permissions::from_mode(0o755)).unwrap();
     let registry = dir.join("state/sill/registry");
