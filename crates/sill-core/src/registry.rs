@@ -843,9 +843,8 @@ const LOGIN_ENV: &[&str] = &[
     "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
 ];
 
-/// The jail a login runs in when its program is not one of sill's own definitions (audit
-/// 2026-11-15 A1): a package from the registry or a command the person named is code sill does
-/// not vouch for, and a login needs none of the person's files. The home is hidden; `scratch`
+/// The jail used for every login, regardless of agent or installation source. The person's
+/// home is hidden; `scratch`
 /// (the login's private home, where its credential lands) and the file `urls` (where the browser
 /// helper hands over the page to open) are the only writable places, each at its own path, so
 /// `env` reads as it does on the host. The network is the host's: the login reaches its provider
