@@ -4159,7 +4159,7 @@ dependencies = [
 
 [[package]]
 name = "sill"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -4179,7 +4179,7 @@ dependencies = [
 
 [[package]]
 name = "sill-client"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "serde",
@@ -4190,7 +4190,7 @@ dependencies = [
 
 [[package]]
 name = "sill-core"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -4216,7 +4216,7 @@ dependencies = [
 
 [[package]]
 name = "sill-gui"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -4249,7 +4249,7 @@ dependencies = [
 
 [[package]]
 name = "sill-memory"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "rusqlite",
@@ -4258,7 +4258,7 @@ dependencies = [
 
 [[package]]
 name = "sill-proto"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -4270,7 +4270,7 @@ dependencies = [
 
 [[package]]
 name = "sill-shim"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "rusqlite",
@@ -4283,7 +4283,7 @@ dependencies = [
 
 [[package]]
 name = "sill-vm"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
