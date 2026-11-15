@@ -212,7 +212,7 @@ fn platform_key() -> &'static str {
 
 /// Registry ids known to work inside sill's jail end to end (install, login, a prompt). Everything
 /// else is still installable but hidden by default on the Agents page until someone tests it.
-pub const TESTED: &[&str] = &["claude-acp", "codex-acp", "antigravity-acp", "kimi-code", "mistral-vibe"];
+pub const TESTED: &[&str] = &["claude-acp", "codex-acp", "antigravity-acp", "kimi-code", "mistral-vibe", "opencode"];
 
 pub fn is_tested(id: &str) -> bool {
     TESTED.contains(&id)
