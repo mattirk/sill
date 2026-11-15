@@ -282,12 +282,26 @@ pub fn layout(policy: &Policy, home: &Path, state_dir: &Path, mounts: &[Mount], 
             }
         }
     }
+    let mut hidden: Vec<PathBuf> = policy.paths.hidden_mounts.iter().map(|h| crate::paths::expand_home(h, home)).collect();
+    let mut warnings = Vec::new();
+    // The state filesystem at another mount point is the state filesystem: hidden like it. One
+    // that holds the home or the root cannot be hidden; the launch says so instead.
+    for alias in mounts::state_aliases(mounts, Path::new(STATE_FS)) {
+        if alias == Path::new("/") || is_under(home, &alias) {
+            warnings.push(format!(
+                "the sill state filesystem is also mounted at {}, which holds your files and cannot be hidden: every session's files are readable in this jail. Give sill a state filesystem of its own.",
+                alias.display()
+            ));
+        } else {
+            hidden.push(alias);
+        }
+    }
     let mut walk = Walk {
         mounts,
         real: mounts::real_mounts(mounts),
-        hidden: policy.paths.hidden_mounts.iter().map(|h| crate::paths::expand_home(h, home)).collect(),
+        hidden,
         state_dir,
-        out: Layout::default(),
+        out: Layout { warnings, ..Layout::default() },
     };
     for e in root_entries {
         let path = PathBuf::from("/").join(&e.name);
@@ -970,7 +984,7 @@ mod tests {
         let mut s = spec();
         // A temporary mount's children are expanded exactly as a host /mnt tree is.
         s.root_entries = vec![RootEntry { name: dir.strip_prefix("/").unwrap().as_os_str().to_os_string(), symlink: None, is_dir: true, readable: true }];
-        s.mounts = vec![Mount {mount_point:dir.join("a/b"),fstype:"ext4".into(),source:"test".into()}];
+        s.mounts = vec![Mount {mount_point:dir.join("a/b"),fstype:"ext4".into(),source:"test".into(),device:String::new(),root:"/".into()}];
         assert!(s.plan().unwrap_err().to_string().contains("overlay state name collision"));
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1484,7 +1498,8 @@ git -C "$S" fsck --full
         // (/mnt/data would be a layer on a machine where that directory exists; the test host has none)
         assert!(!hosts.contains(&"/var".to_string()));
         // the state fs itself, not any path with "sill" in its name: /mnt is read from the real
-        // machine, and inside Sill's VM it has a real /mnt/sill-state that is rightly a layer
+        // machine, and inside Sill's VM it has a real /mnt/sill-state, which this fake mount table
+        // does not name as the state disk
         assert!(!hosts.iter().any(|h| Path::new(h).starts_with("/var/lib/sill")), "{hosts:?}");
         assert!(plan.expanded.contains(&PathBuf::from("/var")) && plan.expanded.contains(&PathBuf::from("/mnt")));
         let s = render(&plan.argv);
@@ -1496,6 +1511,45 @@ git -C "$S" fsck --full
         assert!(!s.contains("--share-net"));
         assert!(s.contains("--ro-bind /sys /sys"));
         assert!(s.ends_with("--chdir /home/me -- true"));
+    }
+
+    #[test]
+    fn the_state_filesystem_is_hidden_at_every_mount_point_it_has() {
+        // Sill.app's VM: the state disk at /mnt/sill-state, bound to /var/lib/sill
+        let mut s = spec();
+        s.mounts = mounts::parse_mountinfo(
+            "25 1 8:2 / / rw - ext4 /dev/sda2 rw\n\
+             60 25 254:32 / /mnt/sill-state rw - ext4 /dev/vdc rw\n\
+             61 25 8:16 / /mnt/data rw - ext4 /dev/sdb1 rw\n\
+             70 25 254:32 / /var/lib/sill rw - ext4 /dev/vdc rw\n",
+        );
+        let plan = s.plan().unwrap();
+        assert!(!plan.layers.iter().any(|l| l.host.starts_with("/mnt/sill-state")), "the state disk is never a layer");
+        let r = render(&plan.argv);
+        assert!(!r.contains("--overlay-src /mnt/sill-state"), "{r}");
+        assert!(r.contains("--tmpfs /.sill/host/mnt/sill-state"), "{r}");
+        assert!(r.contains("--tmpfs /.sill/host/var/lib/sill"), "{r}");
+        assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+        // another filesystem on another device is not taken for it
+        assert_eq!(mounts::state_aliases(&s.mounts, Path::new(STATE_FS)), [PathBuf::from("/mnt/sill-state")]);
+
+        // a state filesystem that is also the home's cannot be hidden: the launch says so
+        s.mounts = mounts::parse_mountinfo(
+            "25 1 8:2 / / rw - ext4 /dev/sda2 rw\n\
+             60 25 8:5 / /home rw - ext4 /dev/sda5 rw\n\
+             70 25 8:5 / /var/lib/sill rw - ext4 /dev/sda5 rw\n",
+        );
+        let plan = s.plan().unwrap();
+        assert!(plan.warnings.iter().any(|w| w.contains("also mounted at /home")), "{:?}", plan.warnings);
+        assert!(plan.layers.iter().any(|l| l.host == Path::new("/home")));
+
+        // a bind of a subdirectory shows another tree: not an alias
+        let mounts = mounts::parse_mountinfo(
+            "25 1 8:2 / / rw - ext4 /dev/sda2 rw\n\
+             60 25 8:5 / /data rw - ext4 /dev/sda5 rw\n\
+             70 25 8:5 /sill /var/lib/sill rw - ext4 /dev/sda5 rw\n",
+        );
+        assert!(mounts::state_aliases(&mounts, Path::new(STATE_FS)).is_empty());
     }
 
     #[test]

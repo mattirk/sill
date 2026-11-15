@@ -245,6 +245,7 @@ cp "$RELEASE/${{url##*/}}" "$out" """)
         self.assertEqual(status, 0, out)
         self.assertIn("releases/download/v0.1.0/sill-0.1.0-macos-arm64.dmg", out)
         self.assertIn("would run: cp -R", out)
+        self.assertLess(out.index("Sill.app.new"), out.index("rm -rf /Applications/Sill.app\r"), "the copy comes before the removal")
         self.assertEqual(self.log.read_text(), "")
         self.system("Darwin", "x86_64")
         status, out = self.install("1\n", SILL_DRY_RUN="1")
@@ -261,6 +262,13 @@ cp "$RELEASE/${{url##*/}}" "$out" """)
         status, out = self.install("1\n")
         self.assertNotEqual(status, 0)
         self.assertIn("no published release", out)
+
+    def test_a_version_is_only_version_characters(self):
+        for version in ["../../x", "0.1.0/..", "0.1.0 x", "$(id)"]:
+            status, out = self.install("1\n", SILL_VERSION=version)
+            self.assertNotEqual(status, 0, version)
+            self.assertIn("not a version", out)
+            self.assertEqual(self.log.read_text(), "")
 
     def test_page_offers_the_script_it_ships_and_the_names_the_release_builds(self):
         page = (ROOT / "site/index.html").read_text()

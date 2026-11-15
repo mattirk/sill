@@ -371,6 +371,22 @@ pub fn keepable(entry: &Entry) -> bool {
     )
 }
 
+/// Goes with "Keep all": a plain file the session wrote or changed, checked against the content
+/// that was listed, or a folder it created (so the files in it have their place). Deletions,
+/// links, type changes, replaced folders and special files are kept one at a time, each looked at
+/// (security.md S10, audit 2026-11-15 A5).
+pub fn keeps_in_bulk(entry: &Entry) -> bool {
+    keepable(entry)
+        && match entry {
+            Entry::Overlay { kind, file_type, hash, .. } => match (kind.as_str(), file_type.as_str()) {
+                ("added" | "modified", "file") => hash.is_some(),
+                ("added", "dir") => true,
+                _ => false,
+            },
+            _ => false,
+        }
+}
+
 /// Every pending entry, page by page. The daemon computes a listing once and its pages read that
 /// one; when it no longer holds it (`snapshot_expired`: many listings were begun meanwhile) the
 /// listing is read again from its start, once.
@@ -528,6 +544,41 @@ mod tests {
             "repo": null, "hash":"h1", "protected": null
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn keep_all_takes_plain_file_writes_and_new_folders_only() {
+        let with = |kind: &str, file_type: &str, hash: Option<&str>| {
+            let mut e = overlay("s1", "/home/x/f", false, 0);
+            if let Entry::Overlay { kind: k, file_type: t, hash: h, .. } = &mut e {
+                *k = kind.into();
+                *t = file_type.into();
+                *h = hash.map(str::to_string);
+            }
+            e
+        };
+        assert!(keeps_in_bulk(&with("added", "file", Some("h"))));
+        assert!(keeps_in_bulk(&with("modified", "file", Some("h"))));
+        assert!(keeps_in_bulk(&with("added", "dir", None)));
+        for (kind, file_type, hash) in [
+            ("deleted", "file", None),
+            ("deleted", "dir", None),
+            ("added", "symlink", None),
+            ("modified", "symlink", None),
+            ("type_changed", "file", Some("h")),
+            ("replaced", "dir", None),
+            ("added", "other", None),
+            ("added", "file", None), // nothing to check its content against
+        ] {
+            let e = with(kind, file_type, hash);
+            assert!(keepable(&e), "{kind} {file_type} can still be kept on its own");
+            assert!(!keeps_in_bulk(&e), "{kind} {file_type} does not go with Keep all");
+        }
+        let mut conflict = with("modified", "file", Some("h"));
+        if let Entry::Overlay { conflict: c, .. } = &mut conflict {
+            *c = true;
+        }
+        assert!(!keeps_in_bulk(&conflict));
     }
 
     #[test]

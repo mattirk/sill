@@ -591,7 +591,7 @@ impl App {
         let keepable: Vec<String> = group
             .entries
             .iter()
-            .filter(|e| changes::keepable(e))
+            .filter(|e| changes::keeps_in_bulk(e))
             .map(changes::entry_key)
             .collect();
         let armed = page.armed.get().is_some_and(|a| matches!(a, Reverting::All(keys) if *keys == all));

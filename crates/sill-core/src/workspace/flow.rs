@@ -844,8 +844,14 @@ pub fn reset_to_snapshot(clone: &Path, workspace_branch: &str, snap: &str) -> Re
 /// Undo): the files as in `state`, its differences from `at` uncommitted, other untracked files
 /// gone, ignored files kept.
 pub fn reset_to(clone: &Path, workspace_branch: &str, state: &str, at: &str) -> Result<()> {
-    let gitdir = clone.join(".git");
-    std::fs::write(gitdir.join("HEAD"), format!("ref: refs/heads/{workspace_branch}\n"))?;
+    // The agent can write the clone's `.git`: HEAD is written beneath the clone with no link
+    // followed on the way or at the end, and only a name that is one line of a ref
+    // (audit 2026-11-15 A4).
+    if workspace_branch.is_empty() || workspace_branch.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        bail!("{workspace_branch:?} is not a branch name");
+    }
+    crate::safe_fs::write_file_beneath(clone, Path::new(".git/HEAD"), format!("ref: refs/heads/{workspace_branch}\n").as_bytes(), 0o644)
+        .context("point the workspace at its branch")?;
     let git = Git::open(clone)?;
     let mut c = git.cmd_write();
     c.args(["update-ref", "-m", "sill: reset"]).arg(format!("refs/heads/{workspace_branch}")).arg(at);

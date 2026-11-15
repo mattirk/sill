@@ -25,6 +25,8 @@ main() {
     ver=${SILL_VERSION:-$(latest)}
     [ -n "$ver" ] || die "no published release found; see $RELEASES"
     ver=${ver#v}
+    # only what a version is made of goes into file names and paths
+    case "$ver" in *[!0-9A-Za-z.+-]*) die "not a version: $ver" ;; esac
     base="$RELEASES/download/v$ver"
     say "sill $ver for $os $arch"
 
@@ -38,9 +40,15 @@ main() {
         case "$choice" in
             1) fetch
                run hdiutil attach -nobrowse -readonly -quiet -mountpoint "$tmp/mnt" "$tmp/$file"
+               mounted=$tmp/mnt
+               [ -n "${SILL_DRY_RUN:-}" ] || [ -d "$tmp/mnt/Sill.app" ] || die "$file holds no Sill.app; nothing installed"
+               # the new app is whole beside the old one before the old one goes
+               run rm -rf /Applications/Sill.app.new
+               run cp -R "$tmp/mnt/Sill.app" /Applications/Sill.app.new
                run rm -rf /Applications/Sill.app
-               run cp -R "$tmp/mnt/Sill.app" /Applications/
+               run mv /Applications/Sill.app.new /Applications/Sill.app
                run hdiutil detach -quiet "$tmp/mnt"
+               mounted=
                say "Installed: open Sill from Applications."
                say "The app is not notarized. If macOS refuses to open it, allow it under"
                say "System Settings → Privacy & Security → Open Anyway." ;;
@@ -87,7 +95,7 @@ run() {
 
 # The latest published release, from where github.com sends /releases/latest (…/releases/tag/vX.Y.Z).
 latest() {
-    url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$RELEASES/latest") || return 0
+    url=$(curl -fsSLI --proto '=https' --proto-redir '=https' -o /dev/null -w '%{url_effective}' "$RELEASES/latest") || return 0
     case "$url" in */releases/tag/v*) printf '%s\n' "${url##*/releases/tag/v}" ;; esac
 }
 
@@ -116,11 +124,13 @@ ask() {
 # fetch: $base/$file into $tmp, verified against the release's SHA256SUMS.
 fetch() {
     tmp=$(mktemp -d)
-    trap 'rm -rf "$tmp"' EXIT
+    mounted=
+    # a mounted image is let go before its folder is removed
+    trap '[ -z "$mounted" ] || hdiutil detach -quiet "$mounted" 2>/dev/null || true; rm -rf "$tmp"' EXIT
     if [ -n "${SILL_DRY_RUN:-}" ]; then say "  would download and verify: $base/$file"; return 0; fi
     say "  downloading $base/$file"
-    curl -fL --progress-bar -o "$tmp/$file" "$base/$file" || die "download failed: $base/$file"
-    curl -fsSL -o "$tmp/SHA256SUMS" "$base/SHA256SUMS" || die "download failed: $base/SHA256SUMS"
+    curl -fL --proto '=https' --proto-redir '=https' --progress-bar -o "$tmp/$file" "$base/$file" || die "download failed: $base/$file"
+    curl -fsSL --proto '=https' --proto-redir '=https' -o "$tmp/SHA256SUMS" "$base/SHA256SUMS" || die "download failed: $base/SHA256SUMS"
     want=$(awk -v f="$file" '$2 == f || $2 == "*" f { print $1 }' "$tmp/SHA256SUMS")
     if command -v sha256sum >/dev/null 2>&1; then
         got=$(sha256sum "$tmp/$file" | awk '{ print $1 }')

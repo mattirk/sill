@@ -678,6 +678,13 @@ fn copy_and_paste_keys_follow_the_platform() {
 
 /// Open `url` in the person's browser, off the GUI thread; a failure is said on stderr.
 pub fn open_link(url: String) {
+    // Whoever names the address (terminal output, a message, the daemon of a box or of the VM):
+    // only a web address goes to the system's opener, never a file, another scheme or an option
+    // (audit 2026-11-15 A8).
+    let Some(url) = web(&url).filter(|u| !u.chars().any(|c| c.is_control() || c.is_whitespace())) else {
+        eprintln!("sill: not opening {url:?}: not a web address");
+        return;
+    };
     #[cfg(target_os = "macos")]
     let mut command = std::process::Command::new("open");
     #[cfg(target_os = "windows")]

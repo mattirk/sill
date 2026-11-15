@@ -11,6 +11,27 @@ pub struct Mount {
     pub mount_point: PathBuf,
     pub fstype: String,
     pub source: String,
+    /// The filesystem's device as mountinfo gives it (`major:minor`); empty when unknown.
+    pub device: String,
+    /// The directory of that filesystem this mount shows (`/` for the whole of it).
+    pub root: String,
+}
+
+/// Other places where the filesystem mounted at `state_fs` shows the same tree: a second mount
+/// point of the state disk (Sill.app's VM mounts it at `/mnt/sill-state` and binds it;
+/// `sill init --state-dir DIR` leaves DIR itself). Every session's upper trees are readable there,
+/// so a jail must not see them (audit 2026-11-15 A2). The mount at `state_fs` is found by path;
+/// its other views by device and root, which a bind mount shares.
+pub fn state_aliases(mounts: &[Mount], state_fs: &Path) -> Vec<PathBuf> {
+    let Some(state) = mounts.iter().rev().find(|m| m.mount_point == state_fs && !m.device.is_empty()) else { return vec![] };
+    let mut out: Vec<PathBuf> = mounts
+        .iter()
+        .filter(|m| m.device == state.device && m.root == state.root && m.mount_point != state_fs)
+        .map(|m| m.mount_point.clone())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Filesystem types that hold persistent data worth overlaying. Pseudo filesystems, tmpfs, FUSE
@@ -49,6 +70,8 @@ fn parse_mountinfo_bytes(text: &[u8]) -> Vec<Mount> {
             mount_point: std::ffi::OsString::from_vec(unescape_bytes(pre[4])).into(),
             fstype: String::from_utf8_lossy(post[0]).into_owned(),
             source: String::from_utf8_lossy(&unescape_bytes(post[1])).into_owned(),
+            device: String::from_utf8_lossy(pre[2]).into_owned(),
+            root: String::from_utf8_lossy(&unescape_bytes(pre[3])).into_owned(),
         });
     }
     out

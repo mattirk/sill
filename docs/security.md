@@ -98,6 +98,13 @@ fstab/image items.
 fstab line closed — the comparison below's items 1 and 2 but for S12. Open: S12, S13, S17, S19's
 image mode, S18's systemd/Landlock remainder, S10's pause.
 
+2026-11-15, correction: what S18's row and the note above say about `NoNewPrivileges` is wrong for
+the code as it is. It is not set on session units: a session is a `systemd-run --user --scope`,
+which cannot carry it, and the string is nowhere in the code. bubblewrap sets `no_new_privs` on the
+jail itself, so the agent has it; the launcher, the proxy and the daemon outside the jail do not.
+The seccomp filter is x86_64 only, as the row says: on arm64, which includes the Linux VM inside
+Sill.app, a jail starts without one.
+
 ## Data at rest
 
 The question came up (2026-11-01): nothing sill stores is encrypted — transcripts, summaries, the

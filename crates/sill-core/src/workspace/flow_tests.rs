@@ -768,3 +768,24 @@ fn equivalent_later_patch_does_not_hide_an_unmatched_prefix() {
     assert!(unapplied(&s, &c.path, &c.branch).unwrap());
     assert_eq!(pending(&s, &c), ["f1.txt", "f2.txt"]);
 }
+
+#[test]
+fn a_reset_never_writes_head_through_a_link_or_takes_a_name_that_is_not_one() {
+    let d = tmp("headlink");
+    let (_s, _src, c) = setup(&d);
+    let at = git(&c.path, &["rev-parse", "HEAD"]);
+    let victim = d.0.join("victim");
+    write(&victim, "the person's file\n");
+    let head = c.path.join(".git/HEAD");
+    let real = read(&head);
+    std::fs::remove_file(&head).unwrap();
+    std::os::unix::fs::symlink(&victim, &head).unwrap();
+    assert!(reset_to(&c.path, &c.branch, &at, &at).is_err(), "a link at HEAD is refused");
+    assert_eq!(read(&victim), "the person's file\n");
+    std::fs::remove_file(&head).unwrap();
+    write(&head, &real);
+    assert!(reset_to(&c.path, "x\nref: refs/heads/other", &at, &at).is_err());
+    assert_eq!(read(&head), real);
+    reset_to(&c.path, &c.branch, &at, &at).unwrap();
+    assert_eq!(read(&head), format!("ref: refs/heads/{}\n", c.branch));
+}

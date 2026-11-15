@@ -311,8 +311,9 @@ pub fn fetch(home: &Path) -> Result<Registry> {
     std::fs::create_dir_all(p.parent().unwrap())?;
     let tmp = p.with_extension("json.part");
     let out = Command::new("curl")
-        .args(["-fsSL", "--max-time", "30", "-o"])
+        .args(["-fsSL", "--proto", "=https", "--proto-redir", "=https", "--max-filesize", "67108864", "--max-time", "30", "-o"])
         .arg(&tmp)
+        .arg("--")
         .arg(URL)
         .output()
         .context("run curl")?;
@@ -326,6 +327,14 @@ pub fn fetch(home: &Path) -> Result<Registry> {
     Ok(reg)
 }
 
+/// An address the index may send curl to: `https://`, no blanks or control characters, so it is
+/// one argument that is never an option, a file or a local protocol.
+fn https_url(url: &str) -> bool {
+    url.len() <= 2048
+        && url.get(..8).is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
+        && !url.chars().any(|c| c.is_control() || c.is_whitespace())
+}
+
 /// Fetch an entry's icon into the icon cache; the path if it is there afterwards.
 pub fn fetch_icon(home: &Path, entry: &Entry) -> Option<PathBuf> {
     let url = entry.icon.as_deref()?;
@@ -335,10 +344,16 @@ pub fn fetch_icon(home: &Path, entry: &Entry) -> Option<PathBuf> {
     if p.is_file() {
         return Some(p);
     }
+    // the index names this address: only a web address, only https, a small file
+    // (audit 2026-11-15 A7)
+    if !https_url(url) {
+        return None;
+    }
     let tmp = p.with_extension("svg.part");
     let ok = Command::new("curl")
-        .args(["-fsSL", "--max-time", "20", "-o"])
+        .args(["-fsSL", "--proto", "=https", "--proto-redir", "=https", "--max-filesize", "1048576", "--max-time", "20", "-o"])
         .arg(&tmp)
+        .arg("--")
         .arg(url)
         .status()
         .map(|s| s.success())
@@ -657,10 +672,18 @@ fn install_uv(dir: &Path, d: &PackageDist, log: &mut dyn FnMut(String)) -> Resul
 
 fn install_binary(dir: &Path, d: &BinaryDist, log: &mut dyn FnMut(String)) -> Result<(Vec<String>, BTreeMap<String, String>)> {
     let url = &d.archive;
+    if !https_url(url) {
+        bail!("the registry names {url:?} as the download: not an https address");
+    }
+    // The command is a path inside the install directory, nothing above or outside it: a raw
+    // download is renamed to it and it is made executable (audit 2026-11-15 A6).
+    let cmd_rel = crate::agents::relative_path(d.cmd.trim_start_matches("./"))
+        .with_context(|| format!("the registry names {:?} as the command", d.cmd))?;
     let file = url.rsplit('/').next().unwrap_or("archive").split('?').next().unwrap_or("archive").to_string();
+    let file = if file.is_empty() || file == "." || file == ".." { "archive".to_string() } else { file };
     let archive = dir.join(&file);
     let mut cmd = Command::new("curl");
-    cmd.args(["-fSL", "--max-time", "600", "-o"]).arg(&archive).arg(url);
+    cmd.args(["-fSL", "--proto", "=https", "--proto-redir", "=https", "--max-time", "600", "-o"]).arg(&archive).arg("--").arg(url);
     run_logged(&mut cmd, log).context("download")?;
     // a download without a checksum is whatever the CDN served: not installed (security.md S3)
     let Some(want) = &d.sha256 else {
@@ -677,7 +700,6 @@ fn install_binary(dir: &Path, d: &BinaryDist, log: &mut dyn FnMut(String)) -> Re
         log("checksum ok".into());
     }
     let lower = file.to_lowercase();
-    let cmd_rel = d.cmd.trim_start_matches("./");
     if lower.ends_with(".zip") {
         let mut c = Command::new("unzip");
         c.args(["-oq"]).arg(&archive).arg("-d").arg(dir);
@@ -688,13 +710,14 @@ fn install_binary(dir: &Path, d: &BinaryDist, log: &mut dyn FnMut(String)) -> Re
         run_logged(&mut c, log).context("tar")?;
     } else {
         // a raw executable
-        let target = dir.join(cmd_rel);
+        let target = dir.join(&cmd_rel);
         if target != archive {
             std::fs::rename(&archive, &target)?;
         }
     }
-    let exe = dir.join(cmd_rel);
-    if !exe.is_file() {
+    let exe = dir.join(&cmd_rel);
+    // a regular file of the package itself, not a link out of it
+    if !exe.symlink_metadata().is_ok_and(|m| m.is_file()) {
         bail!("executable {} not found after extraction", exe.display());
     }
     use std::os::unix::fs::PermissionsExt;
@@ -737,12 +760,48 @@ fn probe_load_session(command: &[String], env: &BTreeMap<String, String>, home: 
 /// mountpoints, so they are not the agent's own writes.
 fn throwaway_jail(command: &[String], env: &BTreeMap<String, String>, home: &Path, scratch: Option<&Path>) -> Result<(Command, Vec<PathBuf>, Option<std::os::fd::OwnedFd>)> {
     let Some(first) = command.first() else { bail!("no command") };
-    let prog = resolve_program(first, home).with_context(|| format!("{first}: not found"))?;
+    let Base { mut b, bound, seccomp, prog, path } = jail_base(first, home, scratch, false)?;
+    b.arg("--setenv").arg("HOME").arg(home).arg("--setenv").arg("PATH").arg(path).arg("--chdir").arg(home);
+    for (k, v) in env {
+        b.arg("--setenv").arg(k).arg(v);
+    }
+    b.arg("--").arg(&prog).args(&command[1..]);
+    Ok((b, bound, seccomp))
+}
+
+/// What [`throwaway_jail`] and [`login_jail`] share: the bwrap command up to its mounts.
+struct Base {
+    b: Command,
+    bound: Vec<PathBuf>,
+    /// Kept alive by the caller until the spawn.
+    seccomp: Option<std::os::fd::OwnedFd>,
+    /// The program, resolved on the host.
+    prog: PathBuf,
+    /// `PATH` inside: the system's directories and the runtime the command needs.
+    path: std::ffi::OsString,
+}
+
+/// A jail with nothing of the person's in it: no capabilities, the system read-only, `/tmp` and
+/// `/run` fresh, the state filesystem hidden, the home an empty tmpfs (or `scratch` in its place)
+/// but for the tools dir and the runtime the command needs. Its own network namespace, unless
+/// `share_net`.
+fn jail_base(program: &str, home: &Path, scratch: Option<&Path>, share_net: bool) -> Result<Base> {
+    let prog = resolve_program(program, home).with_context(|| format!("{program}: not found"))?;
     let tools = tools_dir(home);
     let mut b = Command::new("bwrap");
-    b.args(["--unshare-all", "--unshare-user", "--disable-userns", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--clearenv"]);
+    b.arg("--unshare-all");
+    if share_net {
+        b.arg("--share-net");
+    }
+    b.args(["--unshare-user", "--disable-userns", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--clearenv"]);
     b.args(["--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/run"]);
     b.arg("--tmpfs").arg(crate::jail::STATE_FS); // other sessions' upper trees
+    // … and the same filesystem wherever else it is mounted (audit 2026-11-15 A2)
+    for alias in crate::mounts::state_aliases(&crate::mounts::host_mounts().unwrap_or_default(), Path::new(crate::jail::STATE_FS)) {
+        if alias != Path::new("/") && !home.starts_with(&alias) {
+            b.arg("--tmpfs").arg(alias);
+        }
+    }
     let seccomp = crate::seccomp::memfd(false)?; // the caller keeps it alive until the spawn
     if let Some(f) = &seccomp {
         b.arg("--seccomp").arg(std::os::fd::AsRawFd::as_raw_fd(f).to_string());
@@ -774,12 +833,57 @@ fn throwaway_jail(command: &[String], env: &BTreeMap<String, String>, home: &Pat
         }
     }
     let path = std::env::join_paths(path_dirs).context("PATH")?;
-    b.arg("--setenv").arg("HOME").arg(home).arg("--setenv").arg("PATH").arg(path).arg("--chdir").arg(home);
-    for (k, v) in env {
+    Ok(Base { b, bound, seccomp, prog, path })
+}
+
+/// What a jailed login keeps of the daemon's environment: the language, and how to reach the
+/// network. Everything else of it stays out.
+const LOGIN_ENV: &[&str] = &[
+    "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TERM", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy",
+    "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+];
+
+/// The jail a login runs in when its program is not one of sill's own definitions (audit
+/// 2026-11-15 A1): a package from the registry or a command the person named is code sill does
+/// not vouch for, and a login needs none of the person's files. The home is hidden; `scratch`
+/// (the login's private home, where its credential lands) and the file `urls` (where the browser
+/// helper hands over the page to open) are the only writable places, each at its own path, so
+/// `env` reads as it does on the host. The network is the host's: the login reaches its provider
+/// and the browser reaches the callback port the agent listens on. `env` is the login's own
+/// (`HOME`, the XDG directories, the helper's variables); its `PATH` is replaced by `front`
+/// (the browser helper's directory) before the jail's own.
+pub fn login_jail(
+    program: &str,
+    args: &[String],
+    env: &BTreeMap<String, String>,
+    home: &Path,
+    scratch: &Path,
+    urls: &Path,
+    front: &Path,
+) -> Result<(Command, Option<std::os::fd::OwnedFd>)> {
+    let Base { mut b, seccomp, prog, path, .. } = jail_base(program, home, None, true)?;
+    // the helper appends to this file; a bind needs it to exist
+    std::fs::OpenOptions::new().create(true).append(true).open(urls).with_context(|| format!("create {}", urls.display()))?;
+    b.arg("--bind").arg(scratch).arg(scratch).arg("--bind").arg(urls).arg(urls);
+    // name resolution: the system's resolv.conf is often a link into /run, which is fresh here
+    if let Ok(resolv) = std::fs::canonicalize("/etc/resolv.conf")
+        && resolv.starts_with("/run")
+    {
+        b.arg("--ro-bind").arg(&resolv).arg(&resolv);
+    }
+    for name in LOGIN_ENV {
+        if let Some(value) = std::env::var_os(name) {
+            b.arg("--setenv").arg(name).arg(value);
+        }
+    }
+    for (k, v) in env.iter().filter(|(k, _)| k.as_str() != "PATH") {
         b.arg("--setenv").arg(k).arg(v);
     }
-    b.arg("--").arg(&prog).args(&command[1..]);
-    Ok((b, bound, seccomp))
+    let mut dirs = vec![front.to_path_buf()];
+    dirs.extend(std::env::split_paths(&path));
+    b.arg("--setenv").arg("PATH").arg(std::env::join_paths(dirs).context("PATH")?);
+    b.arg("--chdir").arg(scratch).arg("--").arg(&prog).args(args);
+    Ok((b, seccomp))
 }
 
 /// `initialize` the agent over its stdio (20 s); with `open_session`, also `session/new` in the
@@ -1050,6 +1154,28 @@ pub fn credential_candidates(scratch: &Path, proposals: &[Proposal]) -> Vec<Stri
 
 #[cfg(test)]
 mod discovery_tests {
+    #[test]
+    fn the_index_sends_curl_only_to_https_and_installs_only_inside_the_agents_folder() {
+        assert!(super::https_url("https://example.org/a/icon.svg"));
+        assert!(super::https_url("HTTPS://example.org/x"));
+        for bad in ["http://example.org/x", "file:///etc/passwd", "gopher://127.0.0.1/", "-K/tmp/x", "icon.svg", "https://a/b c", "https://a/\n-o/x", ""] {
+            assert!(!super::https_url(bad), "{bad:?}");
+        }
+        let dir = std::env::temp_dir().join(format!("sill-registry-cmd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dist = |cmd: &str, archive: &str| super::BinaryDist { archive: archive.into(), cmd: cmd.into(), sha256: Some("00".into()), args: vec![], env: Default::default() };
+        // refused before anything is downloaded
+        for cmd in ["../../../.bashrc", "/etc/cron.d/x", "a/../../b", ""] {
+            let err = super::install_binary(&dir, &dist(cmd, "https://example.invalid/agent"), &mut |_| {}).unwrap_err();
+            assert!(format!("{err:#}").contains("as the command"), "{cmd:?}: {err:#}");
+        }
+        let err = super::install_binary(&dir, &dist("./agent", "file:///etc/passwd"), &mut |_| {}).unwrap_err();
+        assert!(format!("{err:#}").contains("not an https address"), "{err:#}");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "nothing was written");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
     use std::fs;
 

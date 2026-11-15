@@ -207,13 +207,9 @@ fn login_watched(agent: &Agent, home: &Path, scratch: &Path, paths: &[crate::age
     }
     unset.push("DBUS_SESSION_BUS_ADDRESS");
     env.insert("PYTHON_KEYRING_BACKEND".into(), "keyring.backends.fail.Keyring".into());
-    let mut cmd = Command::new(prog);
     // Some agents refuse browser helpers beneath their working directory. The
     // private login home is separate from tools/.browser-shim under the real home.
-    cmd.args(&agent.command[1..]).envs(&env).current_dir(scratch);
-    for v in &unset {
-        cmd.env_remove(v);
-    }
+    let (mut cmd, _seccomp) = login_command(agent, home, prog, &agent.command[1..], &env, &unset, report)?;
     let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -281,6 +277,46 @@ fn login_watched(agent: &Agent, home: &Path, scratch: &Path, paths: &[crate::age
     result
 }
 
+/// May `agent`'s login run on the host, outside a jail? Yes for a program the person put on this
+/// machine themselves (sill installed nothing: it is theirs to run), and for an agent sill itself
+/// defines when its install is from the reviewed snapshot. No for what sill downloaded on the
+/// registry's word alone: an entry without a definition of sill's, or any install from the live
+/// index. A login must not hand the person's account to that (audit 2026-11-15 A1).
+fn vouched(agent: &Agent, home: &Path) -> bool {
+    match crate::registry::installed(home, &agent.id) {
+        None => true,
+        Some(installed) => installed.trust == crate::registry::Trust::Snapshot && crate::agents::builtin().iter().any(|b| b.id == agent.id),
+    }
+}
+
+/// The command a login runs: `program` with `args` and the login's `env` (its private home is
+/// `env`'s `HOME`). For an agent sill vouches for, on the host with the daemon's environment less
+/// `unset`, as before. For any other, in [`crate::registry::login_jail`]: the person's home
+/// hidden, the system read-only, the host's network. The second value keeps the jail's seccomp
+/// filter alive until the spawn.
+fn login_command(
+    agent: &Agent,
+    home: &Path,
+    program: &str,
+    args: &[String],
+    env: &std::collections::BTreeMap<String, String>,
+    unset: &[&str],
+    report: &mut impl FnMut(Line),
+) -> Result<(Command, Option<std::os::fd::OwnedFd>)> {
+    let scratch = PathBuf::from(env.get("HOME").context("private login home")?);
+    if vouched(agent, home) {
+        let mut command = Command::new(program);
+        command.args(args).envs(env).current_dir(&scratch);
+        for name in unset {
+            command.env_remove(name);
+        }
+        return Ok((command, None));
+    }
+    let urls = PathBuf::from(env.get(URLS_ENV).context("login URL file")?);
+    report(Line::Status("sill installed this agent from the registry: its login runs in a jail, without your files".into()));
+    crate::registry::login_jail(program, args, env, home, &scratch, &urls, &browser_shim(home)?)
+}
+
 /// Terminal auth runs the advertised login command rather than the ACP authenticate check.
 /// Device flows print their URL/code to the registry's progress pane; no stdin is forwarded.
 fn terminal_login(
@@ -299,26 +335,21 @@ fn terminal_login(
     let extra_env: std::collections::BTreeMap<String, String> =
         serde_json::from_value(method.get("env").cloned().unwrap_or(json!({})))
             .context("terminal login environment")?;
-    let mut command = if legacy {
+    let (program, mut all_args) = if legacy {
         let program = method
             .get("command")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .context("terminal login command is missing")?;
-        Command::new(program)
+        (program.to_string(), Vec::new())
     } else {
-        let mut command = Command::new(&agent.command[0]);
-        command.args(&agent.command[1..]);
-        command
+        (agent.command[0].clone(), agent.command[1..].to_vec())
     };
-    command
-        .args(args)
-        .envs(extra_env)
-        .envs(env)
-        .current_dir(env.get("HOME").context("private login home")?);
-    for name in unset {
-        command.env_remove(name);
-    }
+    all_args.extend(args);
+    // the login's own variables win over the ones the method asks for
+    let mut all_env = extra_env;
+    all_env.extend(env.iter().map(|(k, v)| (k.clone(), v.clone())));
+    let (mut command, _seccomp) = login_command(agent, home, &program, &all_args, &all_env, unset, report)?;
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -551,6 +582,54 @@ fn browser_shim(home: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod login_copy_tests {
     use super::*;
+
+    #[test]
+    fn only_sills_own_reviewed_agents_log_in_outside_a_jail() {
+        let home = dir("vouched");
+        let builtin = crate::agents::builtin().into_iter().find(|a| !a.host_login.is_empty()).unwrap();
+        let mut third = builtin.clone();
+        third.id = "someones-agent".into();
+        assert!(vouched(&builtin, &home) && vouched(&third, &home), "programs the person installed themselves");
+        let installed = |id: &str, trust: &str| {
+            let tools = crate::registry::tools_dir(&home).join(id);
+            std::fs::create_dir_all(&tools).unwrap();
+            std::fs::write(tools.join("installed.json"), format!(r#"{{"version":"1","kind":"npx","command":["x"],"trust":"{trust}"}}"#)).unwrap();
+        };
+        installed(&builtin.id, "snapshot");
+        assert!(vouched(&builtin, &home), "sill's own definition, installed from the reviewed snapshot");
+        installed(&builtin.id, "live");
+        assert!(!vouched(&builtin, &home), "a built-in replaced from the live index");
+        installed(&third.id, "snapshot");
+        assert!(!vouched(&third, &home), "a registry entry without a definition of sill's");
+        installed(&third.id, "live");
+        assert!(!vouched(&third, &home));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_jailed_login_has_the_network_and_its_own_home_and_nothing_of_the_persons() {
+        let home = dir("jail");
+        let scratch = home.join(".local/state/sill/login/x");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let urls = scratch.with_extension("urls");
+        let front = home.join("front");
+        let env: std::collections::BTreeMap<String, String> =
+            [("HOME", scratch.to_str().unwrap()), ("PATH", "/person/bin"), (URLS_ENV, urls.to_str().unwrap())].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let (command, _seccomp) = crate::registry::login_jail("/bin/sh", &["-c".into(), "true".into()], &env, &home, &scratch, &urls, &front).unwrap();
+        assert_eq!(command.get_program(), "bwrap");
+        let argv: Vec<String> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let r = argv.join(" ");
+        let h = home.display();
+        assert!(r.starts_with("--unshare-all --share-net --unshare-user --disable-userns --die-with-parent --new-session --cap-drop ALL --clearenv "), "{r}");
+        assert!(r.contains(&format!("--tmpfs {h} ")), "the home is hidden: {r}");
+        assert!(r.contains(&format!("--bind {s} {s} --bind {u} {u}", s = scratch.display(), u = urls.display())), "{r}");
+        assert!(r.contains(&format!("--setenv HOME {}", scratch.display())), "{r}");
+        assert!(r.contains(&format!("--setenv PATH {}:/usr/local/bin:/usr/bin:/bin", front.display())), "{r}");
+        assert!(!r.contains("/person/bin"), "the host's PATH stays out: {r}");
+        assert!(r.ends_with(&format!("--chdir {} -- /bin/sh -c true", scratch.display())), "{r}");
+        assert!(urls.is_file(), "the helper's file exists before it is bound");
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     fn dir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("sill-login-{tag}-{}", std::process::id()));
