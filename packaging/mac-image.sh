@@ -1,7 +1,8 @@
 #!/bin/sh
 # Build the Mac app's Linux system image: Debian 13 arm64 with sill's daemon, shim and jail
-# runtime, booted with Apple's Virtualization framework (crates/sill-vm). Run on an Apple Silicon
-# Mac from a clone; it builds the committed HEAD, inside the VM itself, with the server deployment
+# runtime. On Apple Silicon, boot with Apple's Virtualization framework (crates/sill-vm).
+# On ARM64 Linux, boot with QEMU (no nested virtualization required); CI supplies native-built
+# binaries via SILL_IMAGE_BINARIES. Both paths install committed HEAD with the server deployment
 # (packaging/deploy-server.sh). Output: dist/mac-image/system.raw, a sparse raw disk.
 #
 # Only the system is in the image. The account's home and sill's state go on data disks of their
@@ -11,7 +12,11 @@
 # machine id).
 set -eu
 cd "$(dirname "$0")/.."
-[ "$(uname -s)-$(uname -m)" = Darwin-arm64 ] || { echo 'Run on an Apple Silicon Mac.' >&2; exit 1; }
+case "$(uname -s)-$(uname -m)" in
+    Darwin-arm64) image_backend=apple ;;
+    Linux-aarch64|Linux-arm64) image_backend=qemu ;;
+    *) echo 'Run on an Apple Silicon Mac or an ARM64 Linux host.' >&2; exit 1 ;;
+esac
 command -v cargo >/dev/null || PATH="$HOME/.cargo/bin:$PATH"
 command -v cargo >/dev/null || { echo 'Missing cargo (rustup).' >&2; exit 1; }
 
@@ -86,10 +91,13 @@ runcmd:
   - [sh, -c, 'echo sill-image-ready > /dev/hvc0']
 EOF
 printf 'instance-id: sill-image-build-%s\nlocal-hostname: sill-box\n' "$(date +%s)" > "$work/seed/meta-data"
-hdiutil makehybrid -quiet -iso -joliet -default-volume-name cidata -o "$work/seed.iso" "$work/seed"
-
-cargo build -q -p sill-vm
-codesign --force --sign - --entitlements packaging/mac/sill-vm.entitlements target/debug/sill-vm 2>/dev/null
+if [ "$image_backend" = apple ]; then
+    hdiutil makehybrid -quiet -iso -joliet -default-volume-name cidata -o "$work/seed.iso" "$work/seed"
+    cargo build --locked -q -p sill-vm
+    codesign --force --sign - --entitlements packaging/mac/sill-vm.entitlements target/debug/sill-vm 2>/dev/null
+else
+    cloud-localds "$work/seed.iso" "$work/seed/user-data" "$work/seed/meta-data"
+fi
 # Boot the guest, held until `go` exists; the build never reboots it from inside, it powers it
 # off and boots it again from here, as the app does
 vm=
@@ -112,7 +120,6 @@ power_off() {
 }
 trap 'touch "$work/go"; [ -z "$vm" ] || wait $vm 2>/dev/null || true' EXIT
 : > "$work/vm.log"
-boot
 guest() {
     # never a password prompt: until cloud-init has put the key in place, a login just fails
     # over the VM's host–guest socket (sill-vm's ssh.sock), never the guest's network
@@ -120,6 +127,12 @@ guest() {
         -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
         -o ProxyCommand="nc -U $PWD/$work/ssh.sock" sill@sill-box "$@"
 }
+
+# Override only transport/lifecycle on Linux; all image provisioning below is shared.
+if [ "$image_backend" = qemu ]; then
+    . ./packaging/mac/image-qemu.sh
+fi
+boot
 
 # SSH answers before cloud-init has made the account; OpenSSH holds failed logins against
 # the source for a while, so try at a gentle pace
@@ -140,6 +153,7 @@ echo 'Waiting for the first boot (packages; console: target/mac-image/console.lo
 tries=0
 until grep -q sill-image-ready "$work/console.log" 2>/dev/null; do
     tries=$((tries + 1))
+    kill -0 "$vm" 2>/dev/null || { cat "$work/vm.log" >&2; exit 1; }
     [ $tries -lt 180 ] || { echo 'The first boot did not finish in 30 minutes.' >&2; exit 1; }
     sleep 10
 done
@@ -208,10 +222,19 @@ echo 'Building and installing sill in the guest'
 git archive --format=tar HEAD | guest 'rm -rf src && mkdir src && tar -x -C src'
 # Rust is only used for the image build and removed below. Leave shell profiles untouched;
 # deployment sources cargo/env explicitly, so fresh installs need no Rust initialization.
-guest 'curl -fsSL https://sh.rustup.rs | sh -s -- -y -q --profile minimal --no-modify-path >/dev/null'
-# a fresh SSH login gives the deployment its user manager (docs/server.md); the state
-# filesystem is the state disk's
-guest '. ~/.cargo/env && cd src && SILL_STATE_DIR=/mnt/sill-state ./packaging/deploy-server.sh'
+if [ -n "${SILL_IMAGE_BINARIES:-}" ]; then
+    [ "$(cat "$SILL_IMAGE_BINARIES/commit")" = "$(git rev-parse HEAD)" ] || {
+        echo 'Prebuilt binaries do not match this commit.' >&2; exit 1;
+    }
+    for binary in sill sill-shim; do
+        guest "mkdir -p src/target/release && cat > src/target/release/$binary && chmod 755 src/target/release/$binary" < "$SILL_IMAGE_BINARIES/$binary"
+    done
+    guest 'cd src && SILL_STATE_DIR=/mnt/sill-state ./packaging/deploy-server.sh --no-build'
+else
+    guest 'curl -fsSL https://sh.rustup.rs | sh -s -- -y -q --profile minimal --no-modify-path >/dev/null'
+    # A fresh SSH login gives deployment its user manager; the state is the data disk's.
+    guest '. ~/.cargo/env && cd src && SILL_STATE_DIR=/mnt/sill-state ./packaging/deploy-server.sh'
+fi
 
 # a disk that failed under the guest loses writes quietly: refuse such an image
 if guest 'sudo dmesg | grep -qiE "I/O error|EXT4-fs error|Oops|Internal error"'; then
@@ -246,13 +269,17 @@ left=$(guest 'sudo sh -c "fstrim -a >/dev/null 2>&1
     rm -f /etc/sudoers.d/90-cloud-init-users
     if runuser -u sill -- sudo -n true 2>/dev/null; then echo sill-still-root; fi
     test -x /usr/local/lib/sill/sill-mac-folders || echo sill-no-mounter
+    echo sill-image-clean
     systemctl poweroff"' 2>&1) || true
 touch "$work/go"
-wait $vm || true
-vm=
+if [ "$image_backend" = qemu ]; then wait_off; else wait $vm || true; vm=; fi
 case "$left" in
     *sill-still-root*) echo 'The account still has sudo; not keeping this image.' >&2; exit 1 ;;
     *sill-no-mounter*) echo 'The folder mounter is not in the image; not keeping it.' >&2; exit 1 ;;
+esac
+case "$left" in
+    *sill-image-clean*) ;;
+    *) echo 'Guest did not confirm final cleanup; not keeping this image.' >&2; exit 1 ;;
 esac
 trap - EXIT
 

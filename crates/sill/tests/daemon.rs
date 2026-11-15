@@ -1461,7 +1461,8 @@ fn session_permission_choices_restore_defaults_and_frontend_gate() {
     // (the GPU has no backend; the test desktop's and the private bus's depend on what is installed)
     let blocked = set(&mut modes, &web, "gpu", json!(true));
     assert_eq!(blocked["error"]["data"]["code"], "permission_denied", "{blocked}");
-    assert!(blocked["error"]["message"].as_str().unwrap().contains("backend"), "{blocked}");
+    let reason = blocked["error"]["message"].as_str().unwrap();
+    assert!(reason.contains("backend") || reason.contains("no accessible Intel/AMD GPU render node"), "{blocked}");
     assert_eq!(set(&mut modes, &web, "host_control", json!(true))["error"]["data"]["code"], "permission_denied");
     assert_eq!(set(&mut modes, &web, "unknown", json!(true))["error"]["code"], -32602);
     assert!(set(&mut modes, &web, "test_desktop", json!(false)).get("error").is_none());

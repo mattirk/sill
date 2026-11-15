@@ -1,0 +1,60 @@
+# Public build checks. Full installers are produced by the tagged release workflow.
+name: build
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux-x86_64
+            packages: --workspace
+          - runner: macos-15
+            platform: macos-arm64
+            packages: -p sill-gui -p sill-vm -p sill-client -p sill-proto
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends bubblewrap pkg-config libwayland-dev libxkbcommon-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 packaging/test_release.py
+      - name: Test
+        run: cargo test --locked ${{ matrix.packages }} -- --test-threads=1
+      - name: Build
+        run: cargo build --locked --release ${{ matrix.packages }}
+      - name: Archive build binaries
+        shell: bash
+        run: |
+          mkdir -p dist/build
+          cp target/release/sill-gui README.md LICENSE dist/build/
+          if [ "$RUNNER_OS" = Linux ]; then
+            cp target/release/sill target/release/sill-shim dist/build/
+          else
+            codesign --force --sign - --entitlements packaging/mac/sill-vm.entitlements dist/build/sill-gui
+          fi
+          tar -czf dist/sill-${{ matrix.platform }}-build.tar.gz -C dist/build .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sill-${{ matrix.platform }}-build
+          path: dist/*-build.tar.gz
+          if-no-files-found: error
+          retention-days: 14

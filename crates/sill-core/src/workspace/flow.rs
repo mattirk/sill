@@ -428,6 +428,13 @@ fn equivalent_prefix(ws: &Git, dest: &str, tip: &str, mut upstream: String) -> R
     if upstream == tip || super::descends_in(ws, dest, tip)? {
         return Ok(upstream);
     }
+    // A read can precede the next workspace fetch. Keep the base chosen by mirror
+    // until the checkout's newer commit is available for patch comparison here.
+    let mut known = ws.cmd();
+    known.args(["cat-file", "-e", &format!("{dest}^{{commit}}")]);
+    if !run(known)?.status.success() {
+        return Ok(upstream);
+    }
     let mut c = ws.cmd();
     c.args(["cherry", dest, tip, &upstream]);
     let cherry = ok(c, "compare rebased workspace patches")?;

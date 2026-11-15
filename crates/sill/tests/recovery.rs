@@ -625,6 +625,8 @@ fn exercise_recovery(adopt_checkpoint: bool, lose_worker: bool) {
     }
     let count: i64 = fixture.database().query_row("SELECT count(*) FROM entries WHERE session_id=?1 AND kind='agent'", [&fixture.session], |row| row.get(0)).unwrap();
     assert_eq!(count, if lose_worker { 1 } else { 2 }, "neither turn nor summary may be appended twice");
+    // The session row is finalized before the public state update is published.
+    fixture.wait("closing summary public state finalized", || summarizing(&fixture).is_null());
     assert_eq!(summarizing(&fixture), Value::Null, "the summary turn is over, also after the restart");
     // From the closing summary's start to the end, the session never says it is open and not
     // summarizing: the stopped summary stays `end` until the end clears it in the same update.

@@ -13,7 +13,7 @@ cd "$(dirname "$0")/../.."
 [ "$(uname -s)-$(uname -m)" = Darwin-arm64 ] || { echo 'Run on an Apple Silicon Mac.' >&2; exit 1; }
 command -v cargo >/dev/null || PATH="$HOME/.cargo/bin:$PATH"
 image=dist/mac-image
-[ -f "$image/system.raw" ] && [ -f "$image/commit" ] || {
+[ -f "$image/commit" ] && { [ -f "$image/system.raw" ] || [ -f "$image/system.raw.gz" ]; } || {
     echo 'No system image: build it first with packaging/mac-image.sh' >&2; exit 1;
 }
 
@@ -22,9 +22,10 @@ build=$(git rev-list --count HEAD)
 commit=$(git rev-parse --short HEAD)
 echo "Sill $version ($build, $commit); image $(cut -c1-7 "$image/commit")"
 
-cargo build -q --release -p sill-gui
+cargo build --locked -q --release -p sill-gui
 # the image compressed once per image build, kept beside it
 if [ ! -f "$image/system.raw.gz" ] || [ "$(cat "$image/system.raw.gz.commit" 2>/dev/null)" != "$(cat "$image/commit")" ]; then
+    [ -f "$image/system.raw" ] || { echo 'Compressed image has stale or missing commit metadata.' >&2; exit 1; }
     echo 'Compressing the system image (about a minute)'
     gzip -6 -c "$image/system.raw" > "$image/system.raw.gz.new"
     mv "$image/system.raw.gz.new" "$image/system.raw.gz"
@@ -32,12 +33,17 @@ if [ ! -f "$image/system.raw.gz" ] || [ "$(cat "$image/system.raw.gz.commit" 2>/
     stat -f %z "$image/system.raw" > "$image/system.raw.gz.size"
     cp "$image/commit" "$image/system.raw.gz.commit"
 fi
-cargo run -q -p sill-gui --example mac_icon -- packaging/icons/sill-tray.svg target/Sill.iconset
+[ -s "$image/system.raw.gz.size" ] || { echo 'Missing uncompressed image size.' >&2; exit 1; }
+[ -z "${SILL_IMAGE_EXPECT_COMMIT:-}" ] || [ "$(cat "$image/commit")" = "$SILL_IMAGE_EXPECT_COMMIT" ] || {
+    echo 'System image is from another commit; rebuild it before packaging.' >&2; exit 1;
+}
+cargo run --locked -q -p sill-gui --example mac_icon -- packaging/icons/sill-tray.svg target/Sill.iconset
 
 app=dist/Sill.app
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/vm"
 cp target/release/sill-gui "$app/Contents/MacOS/sill-gui"
+cp LICENSE "$app/Contents/Resources/LICENSE"
 iconutil -c icns -o "$app/Contents/Resources/Sill.icns" target/Sill.iconset
 cp -c "$image/system.raw.gz" "$app/Contents/Resources/vm/system.raw.gz"
 cp "$image/system.raw.gz.size" "$app/Contents/Resources/vm/system.raw.gz.size"
@@ -63,10 +69,13 @@ cat > "$app/Contents/Info.plist" <<EOF
 </plist>
 EOF
 # the local signing identity keeps macOS's consents across builds; ad hoc loses them each time
-identity=-
-if security find-identity -v -p codesigning 2>/dev/null | grep -q '"Sill local development"'; then
+identity=${SILL_SIGNING_IDENTITY:-}
+if [ -n "$identity" ]; then
+    : # Explicit CI identity, or "-" for free ad-hoc signing.
+elif security find-identity -v -p codesigning 2>/dev/null | grep -q '"Sill local development"'; then
     identity="Sill local development"
 else
+    identity=-
     echo 'Signing ad hoc: macOS will forget its consents for this build (packaging/mac/signing-identity.sh fixes it).'
 fi
 codesign --force --options runtime --entitlements packaging/mac/sill-vm.entitlements \

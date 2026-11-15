@@ -50,6 +50,14 @@ packaging/deploy-server.sh
 
 Then add it in Settings → Remote boxes on your desktop. The connection is SSH; no port is opened.
 
+## Builds and releases
+
+Public CI checks Linux x86_64 and Apple Silicon macOS on pushes and pull requests.
+Workflow artifacts contain development binaries; tagged releases build Linux
+packages and a complete Mac DMG for review as a draft release.
+See [the release instructions](packaging/RELEASING.md) for versioning, tagging,
+Mac signing and the local/CI image build paths.
+
 ## Architecture
 
 A daemon owns the sessions; each session is a jail with a supervisor inside it; the window is a client
