@@ -57,6 +57,7 @@ mod settings;
 mod settings_page;
 mod settings_ui;
 mod shell;
+mod start_ui;
 mod shortcuts;
 #[cfg(test)]
 mod snapshots;
@@ -418,6 +419,8 @@ pub enum Message {
     Crosscheck(crosscheck::Event),
     /// The herring's pages: one shown in the conversation's place.
     ShowPage(Page),
+    /// The agents a session can start with, read for the window with no open session.
+    StartAgents(Result<Vec<sill_proto::agent_admin::Definition>, String>),
     Settings(settings_ui::Event),
     /// The Settings page's Virtual machine section (`vm_ui.rs`).
     Vm(vm_ui::Event),
@@ -737,6 +740,10 @@ pub struct App {
     /// Registry agents' icons (SVG bytes) by agent id, for tabs and the + menu; built-ins have
     /// their own glyphs.
     pub agent_icons: BTreeMap<String, Vec<u8>>,
+    /// The agents a session can start with, for the window with no open session; `None` until
+    /// read.
+    pub start_agents: Option<Result<Vec<sill_proto::agent_admin::Definition>, String>>,
+    start_agents_pending: bool,
     agent_icons_queued: BTreeSet<String>,
     /// The herring's page last shown: what it opens next.
     pub last_page: Page,
@@ -889,6 +896,8 @@ impl App {
             settings_page: None,
             agents_page: agents_ui::AgentsPage::default(),
             agent_icons: BTreeMap::new(),
+            start_agents: None,
+            start_agents_pending: false,
             agent_icons_queued: BTreeSet::new(),
             last_page: Page::Changes,
             changes_listing: changes_ui::Listing::default(),
@@ -1641,7 +1650,18 @@ impl App {
                 return self.show_page(self.last_page);
             }
             Message::ShowPage(page) => return self.show_page(page),
-            Message::Agents(event) => return self.agents_event(event),
+            Message::StartAgents(agents) => {
+                self.start_agents_pending = false;
+                let ids = agents.as_ref().map(|a| a.iter().map(|d| d.id.clone()).collect()).unwrap_or_default();
+                self.start_agents = Some(agents);
+                return self.agent_icons_load(ids);
+            }
+            Message::Agents(event) => {
+                // what is installed or enabled may have changed: the empty window offers it
+                let changed = matches!(event, agents_ui::Event::Loaded(_)) && self.tabs.is_empty() && !self.demo;
+                let task = self.agents_event(event);
+                return if changed { Task::batch([task, self.start_agents_load()]) } else { task };
+            }
             Message::AgentIcon(id, bytes) => {
                 if let Some(bytes) = bytes {
                     self.agent_icons.insert(id, bytes);
@@ -1985,6 +2005,21 @@ impl App {
         )
     }
 
+    /// Read the agents a session can start with, for the window with no open session.
+    pub(crate) fn start_agents_load(&mut self) -> Task<Message> {
+        let Some(actions) = self.actions.clone() else {
+            self.start_agents = Some(Ok(menu_page::demo_agents()));
+            return Task::none();
+        };
+        if std::mem::replace(&mut self.start_agents_pending, true) {
+            return Task::none();
+        }
+        blocking(
+            move || actions.reading(sill_client::sessions::startable).map_err(|e| format!("{e:#}")),
+            Message::StartAgents,
+        )
+    }
+
     fn listed(&mut self, result: Result<Vec<Session>, String>) -> Task<Message> {
         self.list_pending = false;
         if std::mem::take(&mut self.list_again) {
@@ -2048,6 +2083,13 @@ impl App {
                 .then_with(|| a.id.cmp(&b.id))
         });
         self.prune_closed();
+        // the window with no open session offers the agents: read them as it empties, and again
+        // after a failed read
+        let start = if self.tabs.is_empty() && (!positions.is_empty() || !matches!(self.start_agents, Some(Ok(_)))) {
+            self.start_agents_load()
+        } else {
+            Task::none()
+        };
         // A stopped jail has no live processes or exposed ports, even while its tab (or an
         // externally ended session's unsaved source) remains open. Invalidate in-flight polls.
         for (id, view) in &mut self.views {
@@ -2073,7 +2115,7 @@ impl App {
         for id in watch {
             self.open_lane(&id, lane::Mode::Watch);
         }
-        let mut tasks = vec![];
+        let mut tasks = vec![start];
         if let Some(key) = self.initial.take() {
             let found: Vec<&Session> = sessions
                 .iter()

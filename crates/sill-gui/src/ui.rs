@@ -279,6 +279,14 @@ impl App {
             .height(Fill)
             .into();
         }
+        if self.list_error.is_none() && self.listed && self.tabs.is_empty() {
+            match &self.start_agents {
+                Some(Ok(agents)) => return self.start_view(agents),
+                // nothing to say while the agents are read
+                None => return container(space()).height(Fill).into(),
+                Some(Err(_)) => {}
+            }
+        }
         let hint = if let Some(error) = &self.list_error {
             format!("The daemon cannot be reached: {error}")
         } else if !self.listed {

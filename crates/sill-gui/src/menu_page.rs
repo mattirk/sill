@@ -26,17 +26,7 @@ impl App {
                 self.menu = Some(menu::Menu::default());
                 let Some(actions) = self.actions.clone() else {
                     // the demo has two agents and nothing to reopen
-                    let demo = ["claude", "codex"]
-                        .iter()
-                        .map(|id| {
-                            serde_json::from_value(json!({
-                                "id": id, "name": if *id == "claude" { "Claude Code" } else { "Codex" },
-                                "command": [], "home_paths": [{"path": format!("~/.{id}"), "kind": "directory"}]
-                            }))
-                            .expect("a demo agent")
-                        })
-                        .collect();
-                    self.menu.as_mut().unwrap().agents = Some(Ok(demo));
+                    self.menu.as_mut().unwrap().agents = Some(Ok(demo_agents()));
                     return Task::none();
                 };
                 let settings = actions.clone();
@@ -67,6 +57,10 @@ impl App {
             }
             Event::Agents(agents) => {
                 let ids: Vec<String> = agents.as_ref().map(|a| a.iter().map(|d| d.id.clone()).collect()).unwrap_or_default();
+                // the window with no open session offers the same agents
+                if agents.is_ok() {
+                    self.start_agents = Some(agents.clone());
+                }
                 if let Some(menu) = &mut self.menu {
                     menu.agents = Some(agents);
                 }
@@ -141,4 +135,18 @@ impl App {
         }
         Task::none()
     }
+}
+
+/// The demo has two agents.
+pub(crate) fn demo_agents() -> Vec<sill_proto::agent_admin::Definition> {
+    ["claude", "codex"]
+        .iter()
+        .map(|id| {
+            serde_json::from_value(json!({
+                "id": id, "name": if *id == "claude" { "Claude Code" } else { "Codex" },
+                "command": [], "home_paths": [{"path": format!("~/.{id}"), "kind": "directory"}]
+            }))
+            .expect("a demo agent")
+        })
+        .collect()
 }
